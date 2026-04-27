@@ -61,8 +61,16 @@ async function launchLocalSpotify(): Promise<{ ok: boolean; method: string; erro
  * Poll getDevices() until we see at least one device or timeout. Used after
  * launching Spotify locally — the app needs a moment to register with
  * Spotify Connect before its device shows up in the API response.
+ *
+ * Cold-start budget: a Spotify app being launched from scratch (especially
+ * after a Mac reboot or system update) can legitimately take 15-25 seconds
+ * to: spawn the process, init the UI, authenticate to Spotify cloud,
+ * register with Connect, and become visible to the Web API. We give it 30s
+ * before declaring failure to avoid false negatives — the user reported
+ * seeing the Spotify icon bounce while we wrongly reported "auto-launch
+ * timed out". Polling is cheap (one HTTP GET per interval).
  */
-async function waitForDevice(maxWaitMs = 12_000, intervalMs = 1500): Promise<SpotifyDevice[]> {
+async function waitForDevice(maxWaitMs = 30_000, intervalMs = 1500): Promise<SpotifyDevice[]> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const result = await getDevices();
