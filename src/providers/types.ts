@@ -296,6 +296,13 @@ export type ProviderResponse = {
    */
   reasoningContent?: string;
   /**
+   * Raw content block array from Anthropic responses (used when extended
+   * thinking is enabled). Carries `thinking` blocks with signatures that
+   * must be replayed bit-for-bit on the next request for tool_use loops.
+   * Only set by the Anthropic Messages provider.
+   */
+  rawContentBlocks?: any[];
+  /**
    * True when `text` was emitted incrementally via the stream callback during
    * the call (real SSE). False or undefined means the caller is responsible
    * for emitting `text` if it wants users to see it. This distinction matters

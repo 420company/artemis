@@ -1267,6 +1267,9 @@ export async function think(
                     // Preserve reasoning chain so it can be echoed back on the
                     // next turn — DeepSeek-R1 requires this or returns HTTP 400.
                     reasoningContent: completion.reasoningContent,
+                    // Preserve Anthropic raw content blocks (thinking + signatures)
+                    // for extended-thinking + tool_use round-trip.
+                    rawContentBlocks: completion.rawContentBlocks,
                 },
             );
             const nextProviderMessages: SessionMessage[] = [...providerConversationMessages, assistantMessage];
@@ -1399,6 +1402,7 @@ export async function think(
         }
         const assistantReplyMessage = makeSessionMessage('assistant', reply, {
             reasoningContent: finalResult?.reasoningContent,
+            rawContentBlocks: finalResult?.rawContentBlocks,
         });
         providerConversationMessages = [...providerConversationMessages, assistantReplyMessage];
         rawMessages = [...rawMessages, assistantReplyMessage];

@@ -19,6 +19,19 @@ export type SessionMessage = {
    * returns HTTP 400 if it is absent from the message history.
    */
   reasoningContent?: string;
+  /**
+   * Anthropic Extended Thinking + tool_use round-trip. When Claude responds
+   * with thinking blocks (e.g. `[{type:'thinking',thinking,signature},
+   * {type:'text',text}, {type:'tool_use',...}]`), the entire content array
+   * MUST be passed back unmodified on the next turn — including the
+   * signature — or Anthropic returns 400 for tool_use loops.
+   *
+   * Only populated by the Anthropic Messages provider. Other providers
+   * ignore this field. Keeping it as `any[]` (raw block shape) is intentional
+   * — the API requires bit-for-bit preservation, so we don't want to
+   * normalize.
+   */
+  rawContentBlocks?: any[];
 };
 
 export type VerificationCommandRecord = {
