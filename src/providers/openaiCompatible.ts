@@ -160,35 +160,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Detect whether a model is a thinking/reasoning variant that *requires*
- * reasoning_content to be echoed back on every assistant message.
+ * Per-model rules for the `reasoning_content` field on assistant messages
+ * sent in multi-turn conversations. The three reasoning model families have
+ * INCOMPATIBLE requirements — getting this wrong returns HTTP 400 either way.
  *
- * If any prior assistant message in the request lacks reasoning_content,
- * DeepSeek (and similar) returns HTTP 400 in thinking mode. Our
- * SessionMessage stores reasoningContent as optional — restored sessions,
- * switched models, or empty-reasoning rounds may leave it undefined.
- * For these models we force-include with an empty string fallback.
+ * Verified against official docs (2026-04-28):
+ *
+ *   - DeepSeek-Reasoner / R1 (api-docs.deepseek.com/guides/reasoning_model):
+ *     "if the `reasoning_content` field is included in the sequence of input
+ *      messages, the API will return a 400 error."
+ *     → MUST STRIP reasoning_content from inputs.
+ *
+ *   - DeepSeek-V4 (newer, e.g. deepseek-v4-pro / deepseek-v4-flash):
+ *     400 error message says: "The `reasoning_content` in the thinking mode
+ *     must be passed back to the API."
+ *     → MUST FORCE reasoning_content (with empty fallback) on every assistant
+ *     message including those without original reasoning.
+ *
+ *   - Everything else (default): preserve when present, omit when absent.
+ *     Includes OpenAI o-series (reasoning is internal, no echo needed),
+ *     Z.AI GLM, Qwen reasoning variants, etc. Conservative middle ground —
+ *     matches behavior most providers expect.
+ *
+ * Note: order matters. We check `deepseek-v4` before `reasoner` because the
+ * former wants force, the latter wants strip.
  */
-function isThinkingModel(model: string | undefined): boolean {
+type ReasoningContentMode = 'strip' | 'force' | 'preserve';
+
+function getReasoningContentMode(model: string | undefined): ReasoningContentMode {
   const m = (model ?? '').toLowerCase();
-  return (
-    m.includes('reasoner') ||      // deepseek-reasoner
-    m.includes('deepseek-r1') ||
-    m.includes('-r1') ||
-    m.includes('deepseek-v4') ||   // deepseek-v4-pro etc.
-    m.includes('thinking') ||
-    /\bo[134]\b/.test(m) ||        // OpenAI o1/o3/o4 reasoning family
-    m.includes('-think')
-  );
+  // DeepSeek V4 thinking family — REQUIRES reasoning_content
+  if (m.includes('deepseek-v4') || (m.includes('deepseek') && m.includes('-v4'))) return 'force';
+  // DeepSeek Reasoner / R1 family — REJECTS reasoning_content in inputs
+  if (m.includes('deepseek-reasoner') || m.includes('deepseek-r1') || m.endsWith('-r1') || m.includes('/deepseek-r1')) return 'strip';
+  // Default: preserve if present, omit if not
+  return 'preserve';
 }
 
 interface MapMessageOptions {
-  /** Force-include reasoning_content (empty fallback) on assistant messages. */
-  forceReasoningContent?: boolean;
+  /** Per-model handling of reasoning_content in assistant messages. */
+  reasoningMode?: ReasoningContentMode;
 }
 
 function mapMessage(message: SessionMessage, opts: MapMessageOptions = {}): Record<string, unknown> {
-  const force = opts.forceReasoningContent === true;
+  const mode = opts.reasoningMode ?? 'preserve';
 
   // Tool result: use OpenAI's native tool message format when toolUseId is present
   if (message.role === 'tool') {
@@ -198,18 +213,21 @@ function mapMessage(message: SessionMessage, opts: MapMessageOptions = {}): Reco
     // Fallback: inject as user message for providers that don't support tool role
     return { role: 'user', content: `[tool:${message.name ?? 'unknown'}]\n${message.content}` };
   }
+  // Build the reasoning_content fragment based on per-model mode. Pulled out
+  // so both assistant branches share the same logic.
+  const reasoningField = (() => {
+    if (mode === 'strip') return {}; // deepseek-reasoner: NEVER include
+    if (mode === 'force') return { reasoning_content: message.reasoningContent ?? '' }; // deepseek-v4: ALWAYS include
+    // 'preserve': keep if present, omit if absent
+    return message.reasoningContent ? { reasoning_content: message.reasoningContent } : {};
+  })();
+
   // Assistant with OpenAI-style tool_calls
   if (message.role === 'assistant' && message.toolCalls?.length) {
     return {
       role: 'assistant',
       content: message.content || null,
-      // DeepSeek-R1/V4 require reasoning_content on assistant messages with
-      // tool_calls — omitting causes HTTP 400. For thinking models we force
-      // include with empty fallback even if the original has no reasoning
-      // (restored from disk, switched models, empty-reasoning round, etc.).
-      ...(force
-        ? { reasoning_content: message.reasoningContent ?? '' }
-        : (message.reasoningContent ? { reasoning_content: message.reasoningContent } : {})),
+      ...reasoningField,
       tool_calls: message.toolCalls.map((tc) => ({
         id: tc.id,
         type: 'function',
@@ -217,15 +235,12 @@ function mapMessage(message: SessionMessage, opts: MapMessageOptions = {}): Reco
       })),
     };
   }
-  // Plain assistant message — pass reasoning_content back when present so
-  // multi-turn thinking conversations stay coherent.
+  // Plain assistant message
   if (message.role === 'assistant') {
     return {
       role: 'assistant',
       content: message.content,
-      ...(force
-        ? { reasoning_content: message.reasoningContent ?? '' }
-        : (message.reasoningContent ? { reasoning_content: message.reasoningContent } : {})),
+      ...reasoningField,
     };
   }
   return { role: message.role, content: message.content };
@@ -403,8 +418,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
     options?: ProviderRequestOptions,
   ): Promise<ProviderResponse> {
     const startedAt = Date.now()
-    const forceReasoningContent = isThinkingModel(this.config.model)
-    const mapped = messages.map((m) => mapMessage(m, { forceReasoningContent })) as Array<{ role: string; content: OpenAIMessageContent }>
+    const reasoningMode = getReasoningContentMode(this.config.model)
+    const mapped = messages.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
     if (options?.imageAttachments?.length) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.config)
     }
@@ -675,8 +690,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
     options?: ProviderRequestOptions,
   ): Promise<ProviderResponse> {
     const startedAt = Date.now();
-    const forceReasoningContent = isThinkingModel(this.config.model);
-    const mapped = messages.map((m) => mapMessage(m, { forceReasoningContent }));
+    const reasoningMode = getReasoningContentMode(this.config.model);
+    const mapped = messages.map((m) => mapMessage(m, { reasoningMode }));
     if (options?.imageAttachments?.length) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.config)
     }
