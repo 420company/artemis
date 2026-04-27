@@ -67,15 +67,22 @@ export async function buildProjectInstructionSuffix(cwd: string): Promise<string
 
 /**
  * Build the full system prompt suffix:
- * ARTEMIS.md project instructions + user profile (user.md).
+ * ARTEMIS.md project instructions + user profile (user.md) + MCP awareness.
+ *
+ * The MCP awareness section tells the brain which third-party integrations
+ * are configured/enabled, so it can refuse gracefully ("no Spotify MCP, can't
+ * play Liked Songs via AppleScript hacks") instead of looping into the
+ * 24-round limit on impossible tasks.
  */
 export async function buildFullSystemSuffix(cwd: string): Promise<string> {
-  const [projectSuffix, userProfile, soul] = await Promise.all([
+  const { buildMcpAwarenessHint } = await import('../core/mcpAwareness.js')
+  const [projectSuffix, userProfile, soul, mcpHint] = await Promise.all([
     buildProjectInstructionSuffix(cwd),
     loadUserProfile(),
     loadSoul(),
+    buildMcpAwarenessHint(cwd),
   ])
   const profileSection = formatProfileForPrompt(userProfile)
   const soulSection    = formatSoulForPrompt(soul)
-  return [projectSuffix, profileSection, soulSection].filter(Boolean).join('')
+  return [projectSuffix, profileSection, soulSection, mcpHint].filter(Boolean).join('')
 }

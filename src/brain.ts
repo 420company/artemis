@@ -1233,7 +1233,14 @@ export async function think(
         if (nativeCalls.length > 0) {
             if (round >= maxNativeToolRounds) {
                 throw new Error(
-                    'Provider exceeded the maximum native tool rounds without producing a final reply.',
+                    [
+                        `工具循环达到上限（${maxNativeToolRounds} 轮）仍未产生最终回复。`,
+                        '常见原因：',
+                        '  • 任务需要的外部服务没有配置 MCP（试试 /mcp suggest <任务描述>）',
+                        '  • 任务超出当前可用工具能力，brain 在反复尝试无法成功的 hack',
+                        '  • 任务范围过大，建议拆成多个小任务',
+                        '建议：缩小任务范围，或先 /mcp suggest 找对应集成，或用 /design /niko 等专项工作流。',
+                    ].join('\n'),
                 );
             }
             if (providerConfigVal?.protocol === 'responses' && !completion.responseId) {
