@@ -494,6 +494,7 @@ async function buildRuntimeSystemMessages(
 async function buildProviderConversationMessages(
     conversationMessages: SessionMessage[],
     model?: string,
+    onInfo?: (message: string) => void,
 ): Promise<SessionMessage[]> {
     if (!model) {
         return conversationMessages;
@@ -503,6 +504,7 @@ async function buildProviderConversationMessages(
         tokenLimit: estimateContextLimit(model),
         previousSummary: _lastSummaryText,
         threshold: _compressionThresholdOverride,
+        onInfo,
     });
     if (compression.summaryText) {
         _lastSummaryText = compression.summaryText;
@@ -1183,6 +1185,10 @@ export async function think(
     let providerConversationMessages = await buildProviderConversationMessages(
         rawMessages,
         providerConfigVal?.model,
+        // Surface compression activity to the user via the tool-log channel
+        // (was previously silent — long sessions had no visibility into
+        // when/why the compressor fired or whether it succeeded).
+        onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
     );
 
     const latestUserText = getLatestUserText(rawMessages);

@@ -218,6 +218,12 @@ export interface CompressionOptions {
   protectTailTokens?: number
   /** Previous structured summary text — will be updated, not replaced */
   previousSummary?: string
+  /**
+   * Optional progress callback. Invoked when compression triggers, when
+   * phases complete, and when summarization fails. Lets the CLI surface
+   * compression activity to the user (was previously silent).
+   */
+  onInfo?: (message: string) => void
 }
 
 export interface CompressResult {
@@ -243,12 +249,18 @@ export async function compressMessages(
   // can reclaim more space during multi-agent workflows.
   const protectTailTok   = opts.protectTailTokens ?? 12_000
   const previousSummary  = opts.previousSummary
+  const onInfo           = opts.onInfo
 
   const tokensBefore = estimateMsgListTokens(messages)
 
   if (tokensBefore < tokenLimit * threshold) {
     return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore }
   }
+
+  // Compression triggered — surface to user. Without this, the previous
+  // silent operation made it look like long sessions never compressed.
+  const triggerPct = Math.round((tokensBefore / tokenLimit) * 100)
+  onInfo?.(`[压缩] 上下文 ${Math.round(tokensBefore / 1000)}K (${triggerPct}% 限制)，开始压缩…`)
 
   // ── Phase 2: determine boundaries ────────────────────────────────────────
   let headEnd = Math.min(protectHead, messages.length)
@@ -278,26 +290,37 @@ export async function compressMessages(
   if (middle.length === 0) {
     // Not enough middle to compress — Phase 1 only (prune tool results)
     const pruned = pruneToolResults(messages, headEnd)
-    return { messages: pruned, compressed: true, tokensBefore, tokensAfter: estimateMsgListTokens(pruned) }
+    const tokensAfter = estimateMsgListTokens(pruned)
+    onInfo?.(`[压缩] 中段不足，仅修剪工具结果：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
+    return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
   }
 
   // ── Phase 1 on middle: prune tool results ─────────────────────────────────
   let prunedMiddle = pruneToolResults(middle, 0)
+  onInfo?.(`[压缩] Phase 1: 修剪 ${middle.length} 条中段消息的工具结果`)
 
   // ── Phase 5: Semantic-Aware Importance Filtering ──────────────────────────
   // If the middle is still huge after pruning tool results, drop low-importance messages.
   if (estimateMsgListTokens(prunedMiddle) > tokenLimit * 0.15) {
+    const beforeFilter = prunedMiddle.length
     prunedMiddle = filterSemanticImportance(prunedMiddle, 0.4) // Drop 40% of low-value messages
+    onInfo?.(`[压缩] Phase 5: 按语义重要性过滤 ${beforeFilter} → ${prunedMiddle.length} 条`)
   }
 
   // ── Phase 3: LLM summarize ────────────────────────────────────────────────
   let summaryText: string
   try {
+    onInfo?.(`[压缩] Phase 3: 调用 worker 模型生成结构化摘要…`)
     summaryText = await buildStructuredSummary(prunedMiddle, previousSummary, summarize)
-  } catch {
-    // If summarization fails, fall back to Phase 1 only
+  } catch (err) {
+    // If summarization fails, fall back to Phase 1 only — surface why so
+    // user can debug (was silent before, often masking provider auth errors).
+    const msg = err instanceof Error ? err.message : String(err)
+    onInfo?.(`[压缩] Phase 3 失败 → 退回 Phase 1: ${msg}`)
     const pruned = pruneToolResults(messages, headEnd)
-    return { messages: pruned, compressed: true, tokensBefore, tokensAfter: estimateMsgListTokens(pruned) }
+    const tokensAfter = estimateMsgListTokens(pruned)
+    onInfo?.(`[压缩] 结果（仅修剪）：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
+    return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
   }
 
   // ── Phase 4: assemble ─────────────────────────────────────────────────────
@@ -309,11 +332,14 @@ export async function compressMessages(
   }
 
   const result = [...head, summaryMsg, ...tail]
+  const tokensAfter = estimateMsgListTokens(result)
+  const reductionPct = Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 100)
+  onInfo?.(`[压缩] ✓ 完成：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K (省 ${reductionPct}%)`)
   return {
     messages: result,
     compressed: true,
     summaryText,
     tokensBefore,
-    tokensAfter: estimateMsgListTokens(result),
+    tokensAfter,
   }
 }
