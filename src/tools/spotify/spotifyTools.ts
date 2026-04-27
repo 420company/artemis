@@ -30,9 +30,57 @@ import {
   getMyPlaylists,
   transferPlayback,
   getDevices,
+  type SpotifyApiResult,
 } from './client.js';
 import { pickDevice, formatDeviceList } from './devices.js';
 import { loadSpotifyConfig } from './store.js';
+
+/**
+ * "No active device found" pattern from Spotify Web API. Distinct from
+ * other 4xx errors — signals a recoverable state where we can wake up the
+ * local Spotify app and retry. Matches multiple known phrasings.
+ */
+function isNoActiveDeviceError(error: string | undefined): boolean {
+  if (!error) return false;
+  return /no active device|player command failed|NO_ACTIVE_DEVICE/i.test(error);
+}
+
+/**
+ * Run a control action (skip/pause/volume) with an automatic recovery path
+ * when Spotify reports "No active device". Strategy:
+ *   1. Try the action with no device hint (use whatever's active).
+ *   2. If "no active device" → call pickDevice() which wakes local Spotify
+ *      if needed, then retry the action with the picked device id.
+ *   3. If `startPlaybackOnWake` is true, also call play() before retrying so
+ *      skip-style operations have something to operate on (otherwise skip
+ *      on a fresh-launched Spotify still errors — there's no track yet).
+ *
+ * Returns the final result. Caller maps to ToolResult.
+ */
+async function withDeviceFallback(
+  attempt: (deviceId?: string) => Promise<SpotifyApiResult<null>>,
+  options: { startPlaybackOnWake?: boolean } = {},
+): Promise<SpotifyApiResult<null>> {
+  const first = await attempt();
+  if (first.ok) return first;
+  if (!isNoActiveDeviceError(first.error)) return first;
+
+  // Recoverable path — wake local Spotify if needed, then retry
+  const dev = await pickDevice(undefined, true);
+  if (!dev.ok) {
+    return { ok: false, error: dev.error };
+  }
+
+  if (options.startPlaybackOnWake) {
+    // Resume / start playback so subsequent control has something to act on.
+    // Best-effort — don't fail the outer action if this returns 404/204.
+    await play({ deviceId: dev.device.id }).catch(() => undefined);
+    // Spotify needs a beat to register the new playback state
+    await new Promise((r) => setTimeout(r, 600));
+  }
+
+  return attempt(dev.device.id);
+}
 
 export interface ToolResult {
   ok: boolean;
@@ -265,8 +313,18 @@ export async function executeSpotifyPause(
   if (authErr) return authErr;
 
   const result = await pause();
-  if (!result.ok) return spotifyApiError(result.error);
-  return { ok: true, output: '⏸ 已暂停' };
+  if (result.ok) {
+    return { ok: true, output: '⏸ 已暂停' };
+  }
+  // Pause specifically: don't auto-wake — pausing a not-running app would be
+  // silly. Just return a friendlier message in that case.
+  if (isNoActiveDeviceError(result.error)) {
+    return {
+      ok: true,
+      output: '当前没有正在播放的音乐，无需暂停。',
+    };
+  }
+  return spotifyApiError(result.error);
 }
 
 // ── spotify_skip_next ──────────────────────────────────────────────────
@@ -281,7 +339,12 @@ export async function executeSpotifySkipNext(
   const authErr = await ensureAuthenticated();
   if (authErr) return authErr;
 
-  const result = await skipNext();
+  // Skip needs an active device with playback context. If neither exists,
+  // wake local Spotify + start playback so skip has something to advance.
+  const result = await withDeviceFallback(
+    (deviceId) => skipNext(deviceId),
+    { startPlaybackOnWake: true },
+  );
   if (!result.ok) return spotifyApiError(result.error);
   return { ok: true, output: '⏭ 下一首' };
 }
@@ -298,7 +361,10 @@ export async function executeSpotifySkipPrevious(
   const authErr = await ensureAuthenticated();
   if (authErr) return authErr;
 
-  const result = await skipPrevious();
+  const result = await withDeviceFallback(
+    (deviceId) => skipPrevious(deviceId),
+    { startPlaybackOnWake: true },
+  );
   if (!result.ok) return spotifyApiError(result.error);
   return { ok: true, output: '⏮ 上一首' };
 }
@@ -316,7 +382,12 @@ export async function executeSpotifySetVolume(
   const authErr = await ensureAuthenticated();
   if (authErr) return authErr;
 
-  const result = await setVolume(action.volume);
+  // Volume can be set on a device that's online but not actively playing —
+  // wake the device but don't force playback start.
+  const result = await withDeviceFallback(
+    (deviceId) => setVolume(action.volume, deviceId),
+    { startPlaybackOnWake: false },
+  );
   if (!result.ok) return spotifyApiError(result.error);
   return { ok: true, output: `🔊 音量调到 ${Math.max(0, Math.min(100, Math.round(action.volume)))}%` };
 }
