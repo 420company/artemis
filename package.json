@@ -28,6 +28,8 @@
     "run": "node --no-warnings --disable-warning=DEP0005 node_modules/tsx/dist/cli.mjs src/cli.ts",
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.build.json",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "lint": "node node_modules/eslint/bin/eslint.js 'src/**/*.ts'",
+    "lint:fix": "node node_modules/eslint/bin/eslint.js 'src/**/*.ts' --fix",
     "test:system": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/systemSmoke.ts",
     "test:prompt": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/promptSmoke.ts",
     "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts",
@@ -69,6 +71,9 @@
     "@types/node": "^24.12.2",
     "@types/pg": "^8.11.6",
     "@types/redis": "^4.0.11",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
+    "eslint": "^8.57.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },
