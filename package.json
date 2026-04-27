@@ -1,5 +1,5 @@
 {
-  "name": "mylaude",
+  "name": "artemis",
   "version": "0.6.33",
   "description": "Artemis — AI assistant CLI by www.420.company",
   "main": "./dist/index.js",

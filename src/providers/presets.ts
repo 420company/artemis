@@ -295,8 +295,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     suggestedModels: ['gpt-5.2-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex', 'gpt-5-codex'],
     notes: {
-      zh: ['Hermes 通过 Codex OAuth 认证。', '当前 MyLaude 先保存为 provider 配置；OAuth 自动登录需后续接入。'],
-      en: ['Hermes authenticates this through Codex OAuth.', 'MyLaude stores this as a provider profile first; OAuth automation can be added later.'],
+      zh: ['Hermes 通过 Codex OAuth 认证。', '当前 Artemis 先保存为 provider 配置；OAuth 自动登录需后续接入。'],
+      en: ['Hermes authenticates this through Codex OAuth.', 'Artemis stores this as a provider profile first; OAuth automation can be added later.'],
     },
     runtimeReady: false,
   },

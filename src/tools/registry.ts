@@ -825,45 +825,11 @@ const capabilityToolDefs: ToolDefinition[] = [
       return errors;
     },
   },
-  {
-    type: 'todo',
-    description: '管理待办事项列表，支持创建、查看、更新和删除任务',
-    kind: 'function',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.action, 'action', errors);
-      return errors;
-    },
-  },
-  {
-    type: 'mcp',
-    description: 'MCP (Model Context Protocol) 协议集成工具，用于管理和连接外部工具服务器',
-    kind: 'function',
-    permissionCategory: 'agent',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.action, 'action', errors);
-      return errors;
-    },
-  },
-  {
-    type: 'notebook_worktree',
-    description: '笔记本编辑和工作树管理工具，用于创建、管理和组织笔记内容，支持层次结构',
-    kind: 'function',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.action, 'action', errors);
-      return errors;
-    },
-  },
+  // NOTE: removed 3 stub tools (`todo`, `mcp`, `notebook_worktree`) that were
+  // declared with executionMode='blocking' but had no `execute` function.
+  // They were never callable from the brain (would throw at runtime). The
+  // /mcp slash command lives in interactive.ts; TodoTool exists as a class
+  // in src/tools/TodoTool/ but isn't currently wired through the agent loop.
 ];
 
 export const toolDefs: ToolDefinition[] = [

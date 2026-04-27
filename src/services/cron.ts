@@ -99,8 +99,13 @@ ${diffText.slice(0, 16000)}
 \`\`\``
 
       const { summarizeOnce } = await import('../brain.js')
-      // Fallback silently if AI summary fails, so cron doesn't stall purely due to API drops
-      const reply = await summarizeOnce(prompt).catch((err) => `[系统传声筒] 过去24小时内系统代码有变化，但摘要分析暂不可用：${err instanceof Error ? err.message : String(err)}`)
+      // Fallback if AI summary fails, so cron doesn't stall purely due to API
+      // drops. Log to stderr so the failure is visible in cron logs.
+      const reply = await summarizeOnce(prompt).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[cron] summarizeOnce failed in code-changes job: ${msg}`)
+        return `[系统传声筒] 过去24小时内系统代码有变化，但摘要分析暂不可用：${msg}`
+      })
 
       return reply
     } catch (err) {
@@ -138,12 +143,14 @@ ${diffText.slice(0, 16000)}
         const reportContent = `# ${job.name} - ${now.toISOString()}\n\n${report}`
         await writeFile(reportPath, reportContent, 'utf8')
 
-        // Send outbound notification to Bragi bridges
+        // Send outbound notification to Bragi bridges. Log failure so user
+        // can spot misconfigured channels in cron logs (was silent before).
         try {
           const { sendBragiBroadcast } = await import('../bragi/outbound.js')
           await sendBragiBroadcast(this.cwd, `[系统自动化报表]\n${job.name}\n\n${report}`)
         } catch (err) {
-          // If Bragi fails, silently gracefully write file continue
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error(`[cron] Bragi broadcast failed for "${job.name}": ${msg}`)
         }
       }
     }

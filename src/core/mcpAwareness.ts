@@ -12,8 +12,6 @@
 
 import { McpServerStore } from '../mcp/store.js';
 import os from 'node:os';
-import path from 'node:path';
-import fsp from 'node:fs/promises';
 
 interface McpEntry {
   id: string;
@@ -27,7 +25,9 @@ async function loadAllMcpServers(cwd: string): Promise<McpEntry[]> {
   const seen = new Set<string>();
   const result: McpEntry[] = [];
 
-  // Load both local and global stores
+  // Load both local and global stores. Differentiate ENOENT (file doesn't
+  // exist — silent) from JSON parse / IO errors (log so user can repair a
+  // corrupt config rather than silently see "no MCP configured").
   for (const root of [cwd, os.homedir()]) {
     try {
       const store = new McpServerStore(root);
@@ -43,8 +43,14 @@ async function loadAllMcpServers(cwd: string): Promise<McpEntry[]> {
           serverName: s.surface?.serverName,
         });
       }
-    } catch {
-      /* missing or unreadable — skip */
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'ENOENT') {
+        // No config at this scope — expected, skip silently
+        continue;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[mcpAwareness] failed to load MCP store at ${root}: ${msg}`);
     }
   }
   return result;

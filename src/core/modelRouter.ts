@@ -1,7 +1,7 @@
 /**
  * Model router — semantic API for picking the right model for a task.
  *
- * MyLaude has two configurable provider profiles:
+ * Artemis has two configurable provider profiles:
  *   - Lead (defaultMainProfile)   : premium, used for main brain decisions
  *   - Worker (specialistProfile)  : cheap/fast, used for bulk/digest work
  *

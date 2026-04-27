@@ -437,7 +437,7 @@ async function configureModelProvider(options: { cwd: string; locale: UiLocale; 
   if (!quick) {
     const wantSecondary = await askYesNo(
       locale,
-      tr(locale, '是否配置副模型 Provider（保留 MyLaude 双模型能力）？', 'Configure a secondary provider (keep MyLaude dual-model support)?'),
+      tr(locale, '是否配置副模型 Provider（保留 Artemis 双模型能力）？', 'Configure a secondary provider (keep Artemis dual-model support)?'),
       false,
     )
     if (wantSecondary) {
@@ -476,7 +476,7 @@ async function configureAgentSettings(options: { cwd: string; locale: UiLocale }
 async function configureGateway(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
   sectionTitle('Messaging Platforms', [
-    tr(locale, '保留 MyLaude 原有 3 个通讯配置：Telegram、Discord、WeChat。', 'Keeps the original MyLaude messaging setup: Telegram, Discord, WeChat.'),
+    tr(locale, '保留 Artemis 原有 3 个通讯配置：Telegram、Discord、WeChat。', 'Keeps the original Artemis messaging setup: Telegram, Discord, WeChat.'),
     tr(locale, '这里没有超时自动选择；必须手动确认。', 'No timeout-based auto-selection here; user confirmation is required.'),
   ])
 
