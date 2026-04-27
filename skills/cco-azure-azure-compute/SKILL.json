@@ -1,0 +1,26 @@
+{
+  "id": "cco-azure-azure-compute",
+  "name": "azure-compute",
+  "description": "Azure VM and VMSS router for recommendations, pricing, autoscale, orchestration, connectivity troubleshooting, and capacity reservations. WHEN: Azure VM, VMSS, scale set, recommend, compare, server, website, burstable, lightweight, VM family, workload, GPU, learning, simulation, dev/test, backend, autoscale, load balancer, Flexible orchestration, Uniform orchestration, cost estimate, connect, refused, Linux, black screen, reset password, reach VM, port 3389, NSG, troubleshoot, capacity reservation, CRG, reserve VMs, guarantee capacity, pre-provision capacity, CRG association, CRG disassociation.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "azure"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

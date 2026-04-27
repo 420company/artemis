@@ -1,0 +1,26 @@
+{
+  "id": "cco-versori-skills-coding-versori-sdk",
+  "name": "coding-versori-sdk",
+  "description": "Use this skill whenever the user wants to create, debug, or modify data integration workflows using the versori-run SDK. Triggers include requests to build ETL processes, API integrations, data transformation pipelines, database synchronization, webhooks, file processing, real-time data streaming, or any data integration service. Use when the user mentions Versori, versori-run, or needs help with TypeScript-based integration code.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "versori-skills"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

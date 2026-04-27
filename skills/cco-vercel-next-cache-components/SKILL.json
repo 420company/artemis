@@ -1,0 +1,26 @@
+{
+  "id": "cco-vercel-next-cache-components",
+  "name": "next-cache-components",
+  "description": "Next.js 16 Cache Components guidance — PPR, use cache directive, cacheLife, cacheTag, updateTag, and migration from unstable_cache. Use when implementing partial prerendering, caching strategies, or migrating from older Next.js cache patterns.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "vercel"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

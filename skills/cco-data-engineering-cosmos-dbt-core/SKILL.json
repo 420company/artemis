@@ -1,0 +1,26 @@
+{
+  "id": "cco-data-engineering-cosmos-dbt-core",
+  "name": "cosmos-dbt-core",
+  "description": "Use when turning a dbt Core project into an Airflow DAG/TaskGroup using Astronomer Cosmos. Does not cover dbt Fusion. Before implementing, verify dbt engine, warehouse, Airflow version, execution environment, DAG vs TaskGroup, and manifest availability.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "data-engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

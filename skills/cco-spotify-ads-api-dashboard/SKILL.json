@@ -1,0 +1,26 @@
+{
+  "id": "cco-spotify-ads-api-dashboard",
+  "name": "dashboard",
+  "description": "Quick performance overview of all active Spotify ad campaigns — impressions, spend, reach, clicks, and pacing at a glance.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "spotify-ads-api"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

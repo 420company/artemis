@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "baseUrl": "./",
+    "paths": {
+      "providers/*": ["src/providers/*"],
+      "tools/*": ["src/tools/*"],
+      "core/*": ["src/core/*"],
+      "security/*": ["src/security/*"],
+      "utils/*": ["src/utils/*"]
+    },
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "downlevelIteration": true,
+    "jsx": "preserve"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "scripts/**/*", "test-*.ts"]
+}

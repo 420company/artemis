@@ -1,0 +1,34 @@
+{
+  "id": "marketing-strategy-pmm",
+  "name": "marketing-strategy-pmm",
+  "description": "Product marketing skill for positioning, GTM strategy, competitive intelligence, and product launches. Use when the user asks about product positioning, go-to-market planning, competitive analysis, target audience definition, ICP definition, market research, launch plans, or sales enablement. Covers April Dunford positioning, ICP definition, competitive battlecards, launch playbooks, and international market entry. Produces deliverables including positioning statements, battlecard documents, launch plans, and go-to-market strategies.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "marketing",
+    "product marketing",
+    "PMM",
+    "positioning",
+    "GTM strategy",
+    "go-to-market",
+    "competitive analysis",
+    "battlecard",
+    "product launch",
+    "market entry",
+    "sales enablement",
+    "win loss analysis"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "marketing",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

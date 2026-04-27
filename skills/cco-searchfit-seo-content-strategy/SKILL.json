@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-content-strategy",
+  "name": "content-strategy",
+  "description": "Develop a content strategy for SEO and organic growth. Use when the user asks to \"plan content\", \"content strategy\", \"content calendar\", \"what should I write about\", \"content gap analysis\", \"topic research\", \"editorial plan\", or wants to plan what content to create for their website.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

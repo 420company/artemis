@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-model-evaluation",
+  "name": "model-evaluation",
+  "description": "Generates python code that evaluates SageMaker models. Supports two evaluation types: LLM-as-Judge and Custom Scorer. Use when the user says \"evaluate my model\", \"test model performance\", \"how did my model perform\", \"compare models\", or other similar requests.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

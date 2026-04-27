@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "id": "logo-designer",
+      "name": "Logo Designer",
+      "description": "Artemis / 420.COMPANY logo design skill. Use it when the user asks for a logo, icon, mark, brand symbol, SVG logo system, or final logo showcase.",
+      "tags": ["logo", "design", "branding", "svg", "visual"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-04-22T20:36:00Z"
+    },
+    {
+      "id": "kaleidoscope",
+      "name": "Kaleidoscope",
+      "description": "Generate kaleidoscope patterns and fractal images with customizable parameters.",
+      "tags": ["kaleidoscope", "fractal", "pattern", "visual", "art"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-04-22T20:36:00Z"
+    },
+    {
+      "id": "shit-poster",
+      "name": "Shit Poster",
+      "description": "Generate shitpost-style images with humorous and satirical content.",
+      "tags": ["shitpost", "humor", "satire", "meme", "visual"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-04-22T20:40:00Z"
+    },
+    {
+      "id": "dirty-prompt",
+      "name": "Dirty Prompt",
+      "description": "Generate creative and unconventional prompts for AI image generation.",
+      "tags": ["prompt", "creative", "unconventional", "ai", "image"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-04-22T20:36:00Z"
+    },
+    {
+      "id": "color-master",
+      "name": "Color Master",
+      "description": "Optimize and enhance colors in images with professional color grading.",
+      "tags": ["color", "grading", "enhancement", "image", "visual"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-04-22T20:37:00Z"
+    },
+    {
+      "id": "web-spider",
+      "name": "Web Spider",
+      "description": "Crawl and extract data from websites with customizable parameters.",
+      "tags": ["web", "crawler", "scraper", "data", "extract"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-04-22T20:37:00Z"
+    }
+  ]
+}

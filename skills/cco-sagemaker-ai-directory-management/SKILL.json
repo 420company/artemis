@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-directory-management",
+  "name": "directory-management",
+  "description": "Manages project directory setup and artifact organization. Use when starting a new project, resuming an existing one, or when a PLAN.md needs to be associated with a project directory. Creates the project folder structure (specs/, scripts/, notebooks/) and resolves project naming.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-signals",
+  "name": "signals",
+  "description": "How to query the document_embeddings table for signals data using HogQL. Read when you need to perform semantic search over signals, fetch signals for a report or list signal types.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

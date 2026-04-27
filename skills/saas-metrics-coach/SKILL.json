@@ -1,0 +1,23 @@
+{
+  "id": "saas-metrics-coach",
+  "name": "saas-metrics-coach",
+  "description": "SaaS financial health advisor. Use when a user shares revenue or customer numbers, or mentions ARR, MRR, churn, LTV, CAC, NRR, or asks how their SaaS business is doing.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "finance"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "finance",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

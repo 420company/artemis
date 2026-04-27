@@ -1,0 +1,88 @@
+{
+  "name": "mylaude",
+  "version": "0.6.33",
+  "description": "Artemis — AI assistant CLI by www.420.company",
+  "main": "./dist/index.js",
+  "type": "module",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "skills/*/SKILL.json",
+    "skills/*/SKILL.md",
+    "skills/*/references/**",
+    "skills/*/assets/**",
+    "skills/*/templates/**",
+    "skills/*/scripts/**",
+    "skills/*/vendor/**",
+    "skills/*/examples/**",
+    "skills/*/requirements.txt",
+    "skills/registry.json",
+    "README.md",
+    "LICENSE",
+    "bin/"
+  ],
+  "bin": {
+    "artemis": "dist/cli.js"
+  },
+  "scripts": {
+    "run": "node --no-warnings --disable-warning=DEP0005 node_modules/tsx/dist/cli.mjs src/cli.ts",
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.build.json",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "test:system": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/systemSmoke.ts",
+    "test:prompt": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/promptSmoke.ts",
+    "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts",
+    "test:queryEngine": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/queryEngineSmoke.ts",
+    "test:features": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/featureSmoke.ts",
+    "test:all": "npm run test:system && npm run test:prompt && npm run test:runtime && npm run test:queryEngine && npm run test:features",
+    "test": "npm run test:system",
+    "deploy": "./deploy.sh",
+    "docker:up": "./docker.sh start",
+    "docker:down": "./docker.sh stop",
+    "docker:build": "./docker.sh build",
+    "docker:logs": "./docker.sh logs",
+    "docker:status": "./docker.sh status"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@types/uuid": "^10.0.0",
+    "axios": "^1.15.1",
+    "blessed": "^0.1.81",
+    "cheerio": "^1.2.0",
+    "commander": "^14.0.3",
+    "emoji-regex": "^10.6.0",
+    "fast-json-stringify": "^5.0.0",
+    "get-east-asian-width": "^1.5.0",
+    "lru-cache": "^10.4.3",
+    "openai": "^6.34.0",
+    "pg": "^8.13.1",
+    "playwright": "^1.59.1",
+    "prom-client": "^15.1.3",
+    "redis": "^4.7.0",
+    "strip-ansi": "^7.2.0",
+    "systeminformation": "^5.23.5",
+    "uuid": "^14.0.0",
+    "wrap-ansi": "^10.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^24.12.2",
+    "@types/pg": "^8.11.6",
+    "@types/redis": "^4.0.11",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "artemis"
+  ],
+  "author": "www.420.company",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

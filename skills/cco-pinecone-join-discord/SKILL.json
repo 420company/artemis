@@ -1,0 +1,26 @@
+{
+  "id": "cco-pinecone-join-discord",
+  "name": "join-discord",
+  "description": "Opens a link to join the Pinecone Discord, allowing users to learn from each other, contact the Pinecone team, and get help in our dedicated help channel.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "pinecone"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

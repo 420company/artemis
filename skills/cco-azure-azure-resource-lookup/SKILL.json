@@ -1,0 +1,26 @@
+{
+  "id": "cco-azure-azure-resource-lookup",
+  "name": "azure-resource-lookup",
+  "description": "List, find, and show Azure resources across subscriptions or resource groups. Handles prompts like \\\"list websites\\\", \\\"list virtual machines\\\", \\\"list my VMs\\\", \\\"show storage accounts\\\", \\\"find container apps\\\", and \\\"what resources do I have\\\". USE FOR: resource inventory, find resources by tag, tag analysis, orphaned resource discovery (not for cost analysis), unattached disks, count resources by type, cross-subscription lookup, and Azure Resource Graph queries. DO NOT USE FOR: deploying/changing resources (use azure-deploy), cost optimization (use azure-cost), or non-Azure clouds.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "azure"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

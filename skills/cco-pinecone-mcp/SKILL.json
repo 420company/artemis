@@ -1,0 +1,26 @@
+{
+  "id": "cco-pinecone-mcp",
+  "name": "pinecone:mcp",
+  "description": "Reference for the Pinecone MCP server tools. Documents all available tools - list-indexes, describe-index, describe-index-stats, create-index-for-model, upsert-records, search-records, cascading-search, and rerank-documents. Use when an agent needs to understand what Pinecone MCP tools are available, how to use them, or what parameters they accept.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "pinecone"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-bigdata-com-financial-research-analyst",
+  "name": "bigdata-financial-research-analyst",
+  "description": "Guide for creating financial workflows with the Bigdata MCP. Use when users need assistance to create company briefs, earnings previews, earnings digests, risk assessments, startup profiles, funding analysis, founder research, sector overviews, sector comparisons, country economic profiles, regional analysis, G7/G20 comparisons, economic calendar analysis, thematic macro research, sector rotation signals, or cross-asset implications",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "bigdata-com"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

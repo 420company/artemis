@@ -1,0 +1,27 @@
+{
+  "id": "cco-feature-dev-feature-dev",
+  "name": "feature-dev",
+  "description": "Guided feature development with codebase understanding and architecture focus",
+  "version": "1.0.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "command",
+    "feature-dev",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

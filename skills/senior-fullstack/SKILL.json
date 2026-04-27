@@ -1,0 +1,23 @@
+{
+  "id": "senior-fullstack",
+  "name": "senior-fullstack",
+  "description": "Fullstack development toolkit with project scaffolding for Next.js, FastAPI, MERN, and Django stacks, code quality analysis with security and complexity scoring, and stack selection guidance. Use when the user asks to \"scaffold a new project\", \"create a Next.js app\", \"set up FastAPI with React\", \"analyze code quality\", \"audit my codebase\", \"what stack should I use\", \"generate project boilerplate\", or mentions fullstack development, project setup, or tech stack comparison.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "sql-database-assistant",
+  "name": "sql-database-assistant",
+  "description": "Use when the user asks to write SQL queries, optimize database performance, generate migrations, explore database schemas, or work with ORMs like Prisma, Drizzle, TypeORM, or SQLAlchemy.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

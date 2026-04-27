@@ -1,0 +1,23 @@
+{
+  "id": "aws-solution-architect",
+  "name": "aws-solution-architect",
+  "description": "Design AWS architectures for startups using serverless patterns and IaC templates. Use when asked to design serverless architecture, create CloudFormation templates, optimize AWS costs, set up CI/CD pipelines, or migrate to AWS. Covers Lambda, API Gateway, DynamoDB, ECS, Aurora, and cost optimization.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

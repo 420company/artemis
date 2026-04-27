@@ -1,0 +1,23 @@
+{
+  "id": "azure-cloud-architect",
+  "name": "azure-cloud-architect",
+  "description": "Design Azure architectures for startups and enterprises. Use when asked to design Azure infrastructure, create Bicep/ARM templates, optimize Azure costs, set up Azure DevOps pipelines, or migrate to Azure. Covers AKS, App Service, Azure Functions, Cosmos DB, and cost optimization.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

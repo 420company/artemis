@@ -1,0 +1,26 @@
+{
+  "id": "cco-data-agent-kit-starter-pack-gcp-composer-troubleshooting",
+  "name": "gcp-composer-troubleshooting",
+  "description": "Provides expert guidance for troubleshooting Cloud Composer (Apache",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "data-agent-kit-starter-pack"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

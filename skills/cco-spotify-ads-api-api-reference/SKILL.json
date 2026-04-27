@@ -1,0 +1,26 @@
+{
+  "id": "cco-spotify-ads-api-api-reference",
+  "name": "Spotify Ads API Reference",
+  "description": "This skill should be used when the user asks to \"call the Spotify Ads API\", \"create a Spotify ad campaign\", \"manage Spotify ads\", \"pull Spotify ad reports\", \"set up ad sets or ads\", \"upload ad assets\", \"target audiences on Spotify\", \"check campaign status\", \"get ad account info\", \"look up API schema or fields\", \"check what targeting options exist\", or asks about Spotify advertising endpoints, request/response formats, enum values, or authentication.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "spotify-ads-api"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

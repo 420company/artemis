@@ -1,0 +1,26 @@
+{
+  "id": "cco-pinecone-docs",
+  "name": "pinecone:docs",
+  "description": "Curated documentation reference for developers building with Pinecone. Contains links to official docs organized by topic and data format references. Use when writing Pinecone code, looking up API parameters, or needing the correct format for vectors or records.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "pinecone"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

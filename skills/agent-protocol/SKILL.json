@@ -1,0 +1,23 @@
+{
+  "id": "agent-protocol",
+  "name": "agent-protocol",
+  "description": "Inter-agent communication protocol for C-suite agent teams. Defines invocation syntax, loop prevention, isolation rules, and response formats. Use when C-suite agents need to query each other, coordinate cross-functional analysis, or run board meetings with multiple agent roles.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "executive"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "executive",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

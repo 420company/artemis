@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-creating-experiments",
+  "name": "creating-experiments",
+  "description": "Guides agents through the 3-step experiment creation flow: defining the hypothesis, configuring rollout, and setting up analytics. Delegates rollout decisions to configuring-experiment-rollout and metric setup to configuring-experiment-analytics.\\nTRIGGER when: user asks to create a new experiment or A/B test, OR when you are about to call experiment-create.\\nDO NOT TRIGGER when: user is updating an existing experiment, managing lifecycle, or only browsing experiments.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

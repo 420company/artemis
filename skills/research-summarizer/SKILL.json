@@ -1,0 +1,23 @@
+{
+  "id": "research-summarizer",
+  "name": "research-summarizer",
+  "description": "Structured research summarization agent skill for non-dev users. Handles academic papers, web articles, reports, and documentation. Extracts key findings, generates comparative analyses, and produces properly formatted citations. Use when: user wants to summarize a research paper, compare multiple sources, extract citations from documents, or create structured research briefs. Plugin for Claude Code, Codex, Gemini CLI, and OpenClaw.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "product"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "product",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

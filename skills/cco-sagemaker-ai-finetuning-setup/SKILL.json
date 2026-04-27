@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-finetuning-setup",
+  "name": "finetuning-setup",
+  "description": "Selects a base model and fine-tuning technique (SFT, DPO, or RLVR) for the user's use case by querying SageMaker Hub. Use when the user asks which model or technique to use, wants to start fine-tuning, or mentions a model name or family (e.g., \"Llama\", \"Mistral\") — always activate even for known model names because the exact Hub model ID must be resolved. Queries available models, validates technique compatibility, and confirms selections.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

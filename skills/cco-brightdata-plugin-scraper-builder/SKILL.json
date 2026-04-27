@@ -1,0 +1,26 @@
+{
+  "id": "cco-brightdata-plugin-scraper-builder",
+  "name": "scraper-builder",
+  "description": "Build production-ready web scrapers for any website using Bright Data infrastructure. Guides you through site analysis, API selection, selector extraction, pagination handling, and complete scraper implementation. Use this skill whenever the user wants to build a scraper, create a crawler, extract data from a website, scrape product pages, handle pagination, build a data pipeline from a web source, or automate data collection from any site — even if they don't explicitly say 'scraper'. Triggers on phrases like 'build a scraper for', 'scrape data from', 'extract products from', 'crawl pages on', 'get data from [website]', or 'I need to pull data from'.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "brightdata-plugin"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

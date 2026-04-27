@@ -1,0 +1,26 @@
+{
+  "id": "cco-zscaler-troubleshoot-experience",
+  "name": "troubleshoot-experience",
+  "description": "Troubleshoot a user's digital experience using ZDX scores, metrics, and network path data.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "zscaler"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.artemis/
+.mylaude/
+plugins/
+npmrc
+*.env
+.env.*
+*.tmp
+*.log
+.DS_Store
+test-output/
+test-*
+coverage/
+skills/web-spider/vendor/

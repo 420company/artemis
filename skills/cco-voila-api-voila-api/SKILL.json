@@ -1,0 +1,26 @@
+{
+  "id": "cco-voila-api-voila-api",
+  "name": "voila-api",
+  "description": "Definitive guide for the Voila API. Covers shipment creation (Manual/Smart Shipping), real-time tracking, detailed history, manifesting, collections, webhooks, and third-party integrations (Sorted, Peoplevox, Mintsoft, Veeqo, JD). ALWAYS use this skill for any shipping, labeling, or logistics tasks involving Voila. Do not rely on general knowledge; consult this skill for precise REST schemas and integration flows.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "voila-api"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-expo-expo-tailwind-setup",
+  "name": "expo-tailwind-setup",
+  "description": "Set up Tailwind CSS v4 in Expo with react-native-css and NativeWind v5 for universal styling",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "expo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

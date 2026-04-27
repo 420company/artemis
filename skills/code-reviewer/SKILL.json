@@ -1,0 +1,23 @@
+{
+  "id": "code-reviewer",
+  "name": "code-reviewer",
+  "description": "Code review automation for TypeScript, JavaScript, Python, Go, Swift, Kotlin. Analyzes PRs for complexity and risk, checks code quality for SOLID violations and code smells, generates review reports. Use when reviewing pull requests, analyzing code quality, identifying issues, generating review checklists.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

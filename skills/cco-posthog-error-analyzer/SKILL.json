@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-error-analyzer",
+  "name": "error-analyzer",
+  "description": "Analyze multiple PostHog errors in parallel to identify patterns, root causes, and prioritize fixes based on user impact.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "agent",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

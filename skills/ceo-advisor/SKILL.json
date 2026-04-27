@@ -1,0 +1,23 @@
+{
+  "id": "ceo-advisor",
+  "name": "ceo-advisor",
+  "description": "Executive leadership guidance for strategic decision-making, organizational development, and stakeholder management. Use when planning strategy, preparing board presentations, managing investors, developing organizational culture, making executive decisions, fundraising, or when user mentions CEO, strategic planning, board meetings, investor updates, organizational leadership, or executive strategy.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "executive"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "executive",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-model-deployment",
+  "name": "model-deployment",
+  "description": "Generates a Jupyter notebook that deploys fine-tuned models from SageMaker Serverless Model Customization to SageMaker endpoints or Bedrock. Use when the user says \"deploy my model\", \"create an endpoint\", \"make it available\", or asks about deployment options. Identifies the correct deployment pathway (Nova vs OSS), generates deployment code, and handles endpoint configuration.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

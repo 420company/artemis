@@ -1,0 +1,140 @@
+import { homedir } from 'node:os';
+import { ProviderStore } from '../providers/store.js';
+import type { VisualModelConfig } from '../providers/types.js';
+
+export type VisualAssetKind = 'image' | 'video';
+
+export type ConfiguredVisualProvider = {
+  config: VisualModelConfig;
+  assetKind: VisualAssetKind;
+  provider: string;
+  model: string;
+  source: string;
+};
+
+export type VisualGenerationNeed = {
+  image: boolean;
+  video: boolean;
+};
+
+const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+
+export function defaultVisualModelForProvider(
+  provider: string,
+  assetKind: VisualAssetKind,
+): string {
+  switch (provider.toLowerCase()) {
+    case 'openai':
+      return assetKind === 'image' ? 'gpt-image-2' : 'sora-2';
+    case 'byteplus':
+      return assetKind === 'image'
+        ? 'seedream-5-0-260128'
+        : 'seedance-1-5-pro-251215';
+    case 'stable-diffusion':
+      return assetKind === 'image'
+        ? 'stable-diffusion-xl'
+        : 'stable-video-diffusion';
+    case 'gemini':
+      return assetKind === 'image' ? 'gemini-2.5-flash-image' : 'none';
+    case 'grok':
+      return assetKind === 'image' ? 'grok-v1' : 'grok-video';
+    case 'mock':
+      return assetKind === 'image' ? 'mock-image' : 'mock-video';
+    default:
+      return assetKind === 'image' ? 'custom-image' : 'custom-video';
+  }
+}
+
+export function defaultVisualBaseUrlForProvider(provider: string): string {
+  switch (provider.toLowerCase()) {
+    case 'openai':
+      return OPENAI_BASE_URL;
+    case 'byteplus':
+      return 'https://ark.ap-southeast.bytepluses.com/api/v3';
+    default:
+      return '';
+  }
+}
+
+export function describeVisualProvider(config: VisualModelConfig, assetKind: VisualAssetKind): string {
+  const slot = assetKind === 'image' ? config.image : config.video;
+  const model = slot.model || defaultVisualModelForProvider(slot.provider, assetKind);
+  return `${slot.provider}/${model}`;
+}
+
+export function detectVisualGenerationNeed(input: string): VisualGenerationNeed {
+  const text = input.toLowerCase();
+  const image = [
+    /\b(generate|create|make|draw|render|produce|design)\b[\s\S]{0,80}\b(image|picture|photo|illustration|visual|asset|product shot)\b/i,
+    /\b(image|picture|photo|illustration|visual|asset|product shot)\b[\s\S]{0,80}\b(generate|create|make|draw|render|produce|design)\b/i,
+    /(?:生成|创建|制作|绘制|设计|渲染|产出|需要|用到|配)[\s\S]{0,80}(?:图片|图像|照片|插图|视觉|素材|配图|商品图|产品图)/i,
+    /(?:图片|图像|照片|插图|视觉|素材|配图|商品图|产品图)[\s\S]{0,80}(?:生成|创建|制作|绘制|设计|渲染|产出|需要|用到)/i,
+    /(?:商品配图|产品配图|产品摄影|商品摄影|产品拍摄|商品拍摄|海报|封面|banner|hero image)/i,
+  ].some((pattern) => pattern.test(text));
+
+  const video = [
+    /\b(generate|create|make|render|produce|design)\b[\s\S]{0,80}\b(video|movie|clip|animation|motion)\b/i,
+    /\b(video|movie|clip|animation|motion)\b[\s\S]{0,80}\b(generate|create|make|render|produce|design)\b/i,
+    /(?:生成|创建|制作|设计|渲染|产出|需要|用到)[\s\S]{0,80}(?:视频|短片|动画|动效|片段)/i,
+    /(?:视频|短片|动画|动效|片段)[\s\S]{0,80}(?:生成|创建|制作|设计|渲染|产出|需要|用到)/i,
+  ].some((pattern) => pattern.test(text));
+
+  return { image, video };
+}
+
+export function hasExplicitLocalVisualConsent(input: string): boolean {
+  return [
+    /(?:本地生成|本地生图|本地图片生成|本地视频生成|本地视觉|调用.*(?:生图|图片|视频).*api|api.*(?:生图|图片|视频)|使用.*(?:本地|配置).*视觉|尽量本地|尽量.*本地)/i,
+    /\b(local|configured)\b[\s\S]{0,40}\b(image|video|visual|generation|api)\b/i,
+    /\b(image|video|visual|generation|api)\b[\s\S]{0,40}\b(local|configured)\b/i,
+  ].some((pattern) => pattern.test(input));
+}
+
+export function hasExplicitRemoteVisualFallback(input: string): boolean {
+  return [
+    /(?:不要.*本地|不用.*本地|禁用.*本地|网上搜索|网络搜索|搜索图片|搜索素材|用网上|线上素材|web\s*search|online\s+(image|asset))/i,
+  ].some((pattern) => pattern.test(input));
+}
+
+export async function resolveConfiguredVisualProvider(
+  cwd: string,
+  assetKind: VisualAssetKind,
+): Promise<ConfiguredVisualProvider | null> {
+  const stores: Array<{ store: ProviderStore; source: string }> = [
+    { store: new ProviderStore(cwd), source: 'workspace' },
+  ];
+  if (cwd !== homedir()) {
+    stores.push({ store: new ProviderStore(homedir()), source: 'home' });
+  }
+
+  for (const { store, source } of stores) {
+    let data;
+    try {
+      data = await store.load();
+    } catch {
+      continue;
+    }
+    const visualProfile = data.visualProfile;
+    if (!visualProfile?.enabled) {
+      continue;
+    }
+
+    const slot = assetKind === 'image' ? visualProfile.image : visualProfile.video;
+    if (assetKind === 'video' && !visualProfile.video.enabled) {
+      continue;
+    }
+    if (!slot?.apiKey?.trim()) {
+      continue;
+    }
+
+    return {
+      config: visualProfile,
+      assetKind,
+      provider: slot.provider,
+      model: slot.model || defaultVisualModelForProvider(slot.provider, assetKind),
+      source,
+    };
+  }
+
+  return null;
+}

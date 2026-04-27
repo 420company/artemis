@@ -1,0 +1,26 @@
+{
+  "id": "cco-postman-agent-ready-apis",
+  "name": "agent-ready-apis",
+  "description": "Knowledge about AI agent API compatibility. Use when user asks about API readiness, agent compatibility, or wants to improve their API for AI consumption.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "postman"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

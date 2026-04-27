@@ -1,0 +1,23 @@
+{
+  "id": "video-content-strategist",
+  "name": "video-content-strategist",
+  "description": "Use when planning video content strategy, writing video scripts, optimizing YouTube channels, building short-form video pipelines (Reels, TikTok, Shorts), or repurposing long-form content into video. Triggers: 'start a YouTube channel', 'video content strategy', 'write a video script', 'repurpose into video', 'YouTube SEO', 'short-form video'. NOT for written blog content (use content-production). NOT for social captions without video (use social-media-manager).",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "marketing"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "marketing",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

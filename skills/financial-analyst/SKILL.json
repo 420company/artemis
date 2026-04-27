@@ -1,0 +1,23 @@
+{
+  "id": "financial-analyst",
+  "name": "financial-analyst",
+  "description": "Performs financial ratio analysis, DCF valuation, budget variance analysis, and rolling forecast construction for strategic decision-making. Use when analyzing financial statements, building valuation models, assessing budget variances, or constructing financial projections and forecasts. Also applicable when users mention financial modeling, cash flow analysis, company valuation, financial projections, or spreadsheet analysis.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "finance"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "finance",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

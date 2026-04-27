@@ -1,0 +1,23 @@
+{
+  "id": "coo-advisor",
+  "name": "coo-advisor",
+  "description": "Operations leadership for scaling companies. Process design, OKR execution, operational cadence, and scaling playbooks. Use when designing operations, setting up OKRs, building processes, scaling teams, analyzing bottlenecks, planning operational cadence, or when user mentions COO, operations, process improvement, OKRs, scaling, operational efficiency, or execution.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "executive"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "executive",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

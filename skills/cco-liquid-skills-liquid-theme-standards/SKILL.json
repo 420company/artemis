@@ -1,0 +1,26 @@
+{
+  "id": "cco-liquid-skills-liquid-theme-standards",
+  "name": "liquid-theme-standards",
+  "description": "CSS, JavaScript, and HTML coding standards for Shopify Liquid themes. Covers BEM naming inside stylesheet tags, design tokens, CSS custom properties, Web Components for themes, defensive CSS, and progressive enhancement. Use when writing CSS/JS/HTML in .liquid files or theme asset files.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "liquid-skills"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-finding-experiments",
+  "name": "finding-experiments",
+  "description": "Resolves experiment references from natural language to concrete experiment IDs. Handles name lookups, fuzzy descriptions ('the signup experiment', 'my latest experiment'), status filtering, and disambiguation when multiple experiments match.\\nTRIGGER when: user refers to an experiment by name, description, or relative reference ('latest', 'most recent', 'the one I created yesterday') and you don't already have the experiment ID.\\nDO NOT TRIGGER when: user provides an experiment ID directly, or you already resolved the experiment earlier in the conversation.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

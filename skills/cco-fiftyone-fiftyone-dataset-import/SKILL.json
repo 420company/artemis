@@ -1,0 +1,26 @@
+{
+  "id": "cco-fiftyone-fiftyone-dataset-import",
+  "name": "fiftyone-dataset-import",
+  "description": "Imports datasets into FiftyOne with automatic format detection. Supports all media types (images, videos, point clouds), label formats (COCO, YOLO, VOC, KITTI), multimodal grouped datasets, and Hugging Face Hub datasets. Use when importing datasets from local files or Hugging Face, loading autonomous driving data, or creating grouped datasets.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "fiftyone"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

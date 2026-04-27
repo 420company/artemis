@@ -1,0 +1,26 @@
+{
+  "id": "cco-wordpress.com-design-site",
+  "name": "design-site",
+  "description": "Design a WordPress site, starting with a clear design direction and style tokens, then intial page layouts, followed by a full custom theme build with content pages deployed to a local Studio site",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "wordpress.com"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

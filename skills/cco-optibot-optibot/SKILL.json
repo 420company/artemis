@@ -1,0 +1,26 @@
+{
+  "id": "cco-optibot-optibot",
+  "name": "optibot",
+  "description": "Run AI code reviews with Optibot. Use when the user wants to review code changes, compare branches, review diffs, manage Optibot authentication or API keys, or set up CI/CD integration.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "optibot"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

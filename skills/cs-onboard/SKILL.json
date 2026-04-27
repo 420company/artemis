@@ -1,0 +1,23 @@
+{
+  "id": "cs-onboard",
+  "name": "cs-onboard",
+  "description": "Founder onboarding interview that captures company context across 7 dimensions. Invoke with /cs:setup for initial interview or /cs:update for quarterly refresh. Generates ~/.claude/company-context.md used by all C-suite advisor skills.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "executive"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "executive",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

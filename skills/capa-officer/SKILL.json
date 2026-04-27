@@ -1,0 +1,35 @@
+{
+  "id": "capa-officer",
+  "name": "capa-officer",
+  "description": "CAPA system management for medical device QMS. Covers root cause analysis, corrective action planning, effectiveness verification, and CAPA metrics. Use for CAPA investigations, 5-Why analysis, fishbone diagrams, root cause determination, corrective action tracking, effectiveness verification, or CAPA program optimization.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "quality",
+    "CAPA investigation",
+    "root cause analysis",
+    "5 Why analysis",
+    "fishbone diagram",
+    "corrective action",
+    "preventive action",
+    "effectiveness verification",
+    "CAPA metrics",
+    "nonconformance investigation",
+    "quality issue investigation",
+    "CAPA tracking",
+    "audit finding CAPA"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "quality",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

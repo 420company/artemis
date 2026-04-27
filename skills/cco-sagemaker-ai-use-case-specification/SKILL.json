@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-use-case-specification",
+  "name": "use-case-specification",
+  "description": "Creates a reusable use case specification file that defines the business problem, stakeholders, and measurable success criteria for model customization, as recommended by the AWS Responsible AI Lens. Use as the default first step in any model customization plan. Skip only if the user explicitly declines or already has a use case specification to reuse. Captures problem statement, primary users, and LLM-as-a-Judge success tenets.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

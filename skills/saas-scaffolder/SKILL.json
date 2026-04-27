@@ -1,0 +1,23 @@
+{
+  "id": "saas-scaffolder",
+  "name": "saas-scaffolder",
+  "description": "Generates complete, production-ready SaaS project boilerplate including authentication, database schemas, billing integration, API routes, and a working dashboard using Next.js 14+ App Router, TypeScript, Tailwind CSS, shadcn/ui, Drizzle ORM, and Stripe. Use when the user wants to create a new SaaS app, start a subscription-based web project, scaffold a Next.js application, or mentions terms like starter template, boilerplate, new project, or wiring up auth and payments.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "product"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "product",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

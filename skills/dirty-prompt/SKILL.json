@@ -1,0 +1,27 @@
+{
+  "id": "dirty-prompt",
+  "name": "Dirty Prompt",
+  "description": "Creates layered design, visual asset, and motion prompts with style anchors, composition, material, color, negative prompts, and verification gates.",
+  "version": "1.1.0",
+  "author": "Artemis",
+  "tags": ["prompt", "design", "visual", "motion", "enhancement"],
+  "entryPoint": "javascript",
+  "category": "design",
+  "difficulty": "intermediate",
+  "code": "async function enhancePrompt(inputs, context) {\n  const { basePrompt } = inputs;\n  const enhancedPrompt = [\n    `概念：${basePrompt}`,\n    '输出：明确交付物、画幅/视口、文件或媒介',\n    '风格：最多 1-2 个主风格，必要时写明 70/30 融合比例',\n    '构图：主焦点、层级、网格、第一屏或画面边界',\n    '光线/相机/空间：仅在相关时指定镜头、景深、光源与空间关系',\n    '材质/细节：2-4 个服务主题的微观细节',\n    '色彩/物理：色彩绑定情绪，材料遵守光照、反射、受力或运动规则',\n    '禁止：无文字错误、无水印、无重叠、无低清晰度、无脱离需求的模板化输出',\n    '验证：检查可读性、响应式、真实资产、链接/交互和最终文件'\n  ].join('\\n');\n  return { enhancedPrompt };\n}",
+  "inputs": [
+    {
+      "name": "basePrompt",
+      "type": "string",
+      "description": "The base prompt to enhance",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "enhancedPrompt",
+      "type": "string",
+      "description": "Enhanced prompt for image generation"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-postman-postman-cli",
+  "name": "postman-cli",
+  "description": "Postman CLI reference and git sync file structure knowledge - provides context for CLI-based commands (send-request, generate-spec, run-collection)",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "postman"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,27 @@
+{
+  "id": "cco-feature-dev-code-architect",
+  "name": "code-architect",
+  "description": "Designs feature architectures by analyzing existing codebase patterns and conventions, then providing comprehensive implementation blueprints with specific files to create/modify, component designs, data flows, and build sequences",
+  "version": "1.0.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "agent",
+    "feature-dev",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

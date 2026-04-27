@@ -1,0 +1,26 @@
+{
+  "id": "cco-databases-on-aws-dsql",
+  "name": "dsql",
+  "description": "Build with Aurora DSQL — manage schemas, execute queries, handle migrations, diagnose query plans, and develop applications with a serverless, distributed SQL database. Covers IAM auth, multi-tenant patterns, MySQL-to-DSQL migration, DDL operations, and query plan explainability. Triggers on phrases like: DSQL, Aurora DSQL, create DSQL table, DSQL schema, migrate to DSQL, distributed SQL database, serverless PostgreSQL-compatible database, DSQL query plan, DSQL EXPLAIN ANALYZE, why is my DSQL query slow.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "databases-on-aws"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

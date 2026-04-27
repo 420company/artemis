@@ -1,0 +1,26 @@
+{
+  "id": "cco-aws-amplify-amplify-workflow",
+  "name": "amplify-workflow",
+  "description": "Orchestrates AWS Amplify Gen 2 workflows for building full-stack apps with React, Next.js, Vue, Angular, React Native, Flutter, Swift, or Android. Use when user wants to BUILD, CREATE, or DEPLOY Amplify projects, add authentication, data models, storage, GraphQL APIs, Lambda functions, or deploy to sandbox/production. Do NOT invoke for conceptual questions, comparisons, or troubleshooting unrelated to active development.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "aws-amplify"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

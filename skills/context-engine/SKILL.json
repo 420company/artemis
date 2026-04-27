@@ -1,0 +1,23 @@
+{
+  "id": "context-engine",
+  "name": "context-engine",
+  "description": "Loads and manages company context for all C-suite advisor skills. Reads ~/.claude/company-context.md, detects stale context (>90 days), enriches context during conversations, and enforces privacy/anonymization rules before external API calls.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "executive"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "executive",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

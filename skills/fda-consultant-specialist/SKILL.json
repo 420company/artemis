@@ -1,0 +1,23 @@
+{
+  "id": "fda-consultant-specialist",
+  "name": "fda-consultant-specialist",
+  "description": "FDA regulatory consultant for medical device companies. Provides 510(k)/PMA/De Novo pathway guidance, QSR (21 CFR 820) compliance, HIPAA assessments, and device cybersecurity. Use when user mentions FDA submission, 510(k), PMA, De Novo, QSR, premarket, predicate device, substantial equivalence, HIPAA medical device, or FDA cybersecurity.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "quality"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "quality",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

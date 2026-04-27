@@ -1,0 +1,23 @@
+{
+  "id": "spec-to-repo",
+  "name": "spec-to-repo",
+  "description": "Use when the user says 'build me an app', 'create a project from this spec', 'scaffold a new repo', 'generate a starter', 'turn this idea into code', 'bootstrap a project', 'I have requirements and need a codebase', or provides a natural-language project specification and expects a complete, runnable repository. Stack-agnostic: Next.js, FastAPI, Rails, Go, Rust, Flutter, and more.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "product"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "product",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

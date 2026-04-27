@@ -1,0 +1,27 @@
+{
+  "id": "cco-frontend-design-frontend-design",
+  "name": "frontend-design",
+  "description": "Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components, pages, or applications. Generates creative, polished code that avoids generic AI aesthetics.",
+  "version": "1.0.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "skill",
+    "frontend-design",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

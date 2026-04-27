@@ -1,0 +1,35 @@
+{
+  "id": "senior-security",
+  "name": "senior-security",
+  "description": "Security engineering toolkit for threat modeling, vulnerability analysis, secure architecture, and penetration testing. Includes STRIDE analysis, OWASP guidance, cryptography patterns, and security scanning tools. Use when the user asks about security reviews, threat analysis, vulnerability assessments, secure coding practices, security audits, attack surface analysis, CVE remediation, or security best practices.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering",
+    "security architecture",
+    "threat modeling",
+    "STRIDE analysis",
+    "penetration testing",
+    "vulnerability assessment",
+    "secure coding",
+    "OWASP",
+    "application security",
+    "cryptography implementation",
+    "secret scanning",
+    "security audit",
+    "zero trust"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

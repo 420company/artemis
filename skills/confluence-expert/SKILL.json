@@ -1,0 +1,23 @@
+{
+  "id": "confluence-expert",
+  "name": "confluence-expert",
+  "description": "Atlassian Confluence expert for creating and managing spaces, knowledge bases, and documentation. Configures space permissions and hierarchies, creates page templates with macros, sets up documentation taxonomies, designs page layouts, and manages content governance. Use when users need to build or restructure a Confluence space, design page hierarchies with permission structures, author or standardise documentation templates, embed Jira reports in pages, run knowledge base audits, or establish documentation standards and collaborative workflows.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "project-management"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "project-management",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

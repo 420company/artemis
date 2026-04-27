@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-generate-schema",
+  "name": "generate-schema",
+  "description": "Generate JSON-LD structured data / schema markup for a page. Outputs ready-to-paste schema based on the page content.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

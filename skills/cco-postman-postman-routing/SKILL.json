@@ -1,0 +1,26 @@
+{
+  "id": "cco-postman-postman-routing",
+  "name": "postman-routing",
+  "description": "Automatically routes Postman and API-related requests to the correct command. Use when user mentions APIs, collections, specs, testing, mocks, docs, security, or Postman.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "postman"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

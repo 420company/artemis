@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-finetuning",
+  "name": "finetuning",
+  "description": "Generates a Jupyter notebook that fine-tunes a base model using SageMaker serverless training jobs. Use when the user says \"start training\", \"fine-tune my model\", \"I'm ready to train\", or when the plan reaches the finetuning step. Supports SFT, DPO, and RLVR trainers, including RLVR Lambda reward function creation.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

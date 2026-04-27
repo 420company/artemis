@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-create-topic",
+  "name": "create-topic",
+  "description": "Research and generate a complete topic plan with keyword mapping, content angle, audience targeting, and competitive positioning. Use before writing content to ensure you're targeting the right topic the right way.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

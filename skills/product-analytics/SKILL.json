@@ -1,0 +1,23 @@
+{
+  "id": "product-analytics",
+  "name": "product-analytics",
+  "description": "Use when defining product KPIs, building metric dashboards, running cohort or retention analysis, or interpreting feature adoption trends across product stages.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "product"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "product",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

@@ -1,0 +1,27 @@
+{
+  "id": "cco-claude-md-management-claude-md-improver",
+  "name": "claude-md-improver",
+  "description": "Audit and improve CLAUDE.md files in repositories. Use when user asks to check, audit, update, improve, or fix CLAUDE.md files. Scans for all CLAUDE.md files, evaluates quality against templates, outputs quality report, then makes targeted updates. Also use when the user mentions \"CLAUDE.md maintenance\" or \"project memory optimization\".",
+  "version": "1.0.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "skill",
+    "claude-md-management",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

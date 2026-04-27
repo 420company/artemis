@@ -1,0 +1,23 @@
+{
+  "id": "marketing-ideas",
+  "name": "marketing-ideas",
+  "description": "When the user needs marketing ideas, inspiration, or strategies for their SaaS or software product. Also use when the user asks for 'marketing ideas,' 'growth ideas,' 'how to market,' 'marketing strategies,' 'marketing tactics,' 'ways to promote,' or 'ideas to grow.' This skill provides 139 proven marketing approaches organized by category.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "marketing"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "marketing",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

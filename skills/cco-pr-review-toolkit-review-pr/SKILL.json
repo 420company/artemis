@@ -1,0 +1,27 @@
+{
+  "id": "cco-pr-review-toolkit-review-pr",
+  "name": "review-pr",
+  "description": "Comprehensive PR review using specialized agents",
+  "version": "1.0.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "command",
+    "pr-review-toolkit",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "apple-hig-expert",
+  "name": "apple-hig-expert",
+  "description": "Expert guidance on Apple Human Interface Guidelines (HIG). Covers iOS, macOS, and visionOS with 2026 Liquid Glass aesthetics and accessibility-first design.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "product"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "product",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

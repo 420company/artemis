@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-ai-visibility",
+  "name": "ai-visibility",
+  "description": "Analyze and improve how a brand appears in AI-generated responses (ChatGPT, Claude, Gemini, Perplexity). Use when the user asks about \"AI visibility\", \"AI tracking\", \"how does my brand appear in AI\", \"AI mentions\", \"LLM visibility\", \"AI search optimization\", \"GEO\", \"generative engine optimization\", \"answer engine optimization\", \"AEO\", or wants their brand to be recommended by AI assistants.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,27 @@
+{
+  "id": "cco-mcp-server-dev-build-mcp-app",
+  "name": "build-mcp-app",
+  "description": "This skill should be used when the user wants to build an \"MCP app\", add \"interactive UI\" or \"widgets\" to an MCP server, \"render components in chat\", build \"MCP UI resources\", make a tool that shows a \"form\", \"picker\", \"dashboard\" or \"confirmation dialog\" inline in the conversation, or mentions \"apps SDK\" in the context of MCP. Use AFTER the build-mcp-server skill has settled the deployment model, or when the user already knows they want UI widgets.",
+  "version": "0.1.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "skill",
+    "mcp-server-dev",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

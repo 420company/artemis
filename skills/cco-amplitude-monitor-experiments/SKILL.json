@@ -1,0 +1,26 @@
+{
+  "id": "cco-amplitude-monitor-experiments",
+  "name": "monitor-experiments",
+  "description": "Monitors all active and recently completed experiments across Amplitude projects, triages them by importance, then runs deep analysis and reporting on the most impactful ones. Use when the user asks to \"check on experiments\", \"experiment status\", \"experiment review\", \"what experiments are running\", or wants a periodic experiment health report.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "amplitude"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

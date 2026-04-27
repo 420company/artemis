@@ -1,0 +1,26 @@
+{
+  "id": "cco-pinecone-cli",
+  "name": "pinecone:cli",
+  "description": "Guide for using the Pinecone CLI (pc) to manage Pinecone resources from the terminal. The CLI supports ALL index types (standard, integrated, sparse) and all vector operations — unlike the MCP which only supports integrated indexes. Use for batch operations, vector management, backups, namespaces, CI/CD automation, and full control over Pinecone resources.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "pinecone"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

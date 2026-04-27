@@ -1,0 +1,26 @@
+{
+  "id": "cco-auth0-auth0-aspnetcore-api",
+  "name": "auth0-aspnetcore-api",
+  "description": "Use when securing ASP.NET Core Web API endpoints with JWT Bearer token validation, scope/permission checks, or stateless auth - integrates Auth0.AspNetCore.Authentication.Api for REST APIs receiving access tokens from frontends or mobile apps. Also handles DPoP proof-of-possession token binding. Triggers on: AddAuth0ApiAuthentication, .NET Web API auth, JWT validation, UseAuthentication, UseAuthorization.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "auth0"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

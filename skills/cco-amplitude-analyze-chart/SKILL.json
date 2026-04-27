@@ -1,0 +1,26 @@
+{
+  "id": "cco-amplitude-analyze-chart",
+  "name": "analyze-chart",
+  "description": "Performs deep analysis of a specific Amplitude chart to explain trends, anomalies, and likely drivers. Use when a metric looks unusual, investigating a spike or drop, or understanding the \"why\" behind numbers.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "amplitude"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

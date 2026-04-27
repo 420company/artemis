@@ -1,0 +1,26 @@
+{
+  "id": "cco-brightdata-plugin-design-mirror",
+  "name": "design-mirror",
+  "description": "Replicate the visual style of any website and apply it to your existing codebase. Use this skill whenever the user wants to match a site's design, mirror a UI aesthetic, make their app look like another site, or replicate a specific visual style from a URL. Trigger on phrases like 'make it look like', 'match the design of', 'copy the style from', 'I want my app to look like X', 'mirror this design', 'inspired by [url]', or any time the user points at a website and says they want their frontend to match it.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "brightdata-plugin"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

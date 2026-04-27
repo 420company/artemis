@@ -1,0 +1,26 @@
+{
+  "id": "cco-vercel-performance-optimizer",
+  "name": "performance-optimizer",
+  "description": "Specializes in optimizing Vercel application performance — Core Web Vitals, rendering strategies, caching, image optimization, font loading, edge computing, and bundle size. Use when investigating slow pages, improving Lighthouse scores, or optimizing loading performance.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "agent",
+    "vercel"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

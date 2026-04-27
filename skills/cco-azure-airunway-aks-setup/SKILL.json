@@ -1,0 +1,26 @@
+{
+  "id": "cco-azure-airunway-aks-setup",
+  "name": "airunway-aks-setup",
+  "description": "Set up AI Runway on AKS — from bare cluster to running model. Covers cluster verification, controller install, GPU assessment, provider setup, and first deployment. WHEN: \\\"setup AI Runway\\\", \\\"onboard AKS cluster\\\", \\\"install AI Runway\\\", \\\"airunway setup\\\", \\\"deploy model to AKS\\\", \\\"GPU inference on AKS\\\", \\\"KAITO setup on AKS\\\", \\\"run LLM on AKS\\\", \\\"vLLM on AKS\\\", \\\"set up model serving on AKS\\\", \\\"AI Runway controller\\\".",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "azure"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

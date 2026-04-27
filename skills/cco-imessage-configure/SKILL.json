@@ -1,0 +1,27 @@
+{
+  "id": "cco-imessage-configure",
+  "name": "configure",
+  "description": "Check iMessage channel setup and review access policy. Use when the user asks to configure iMessage, asks \"how do I set this up\" or \"who can reach me,\" or wants to know why texts aren't reaching the assistant.",
+  "version": "1.0.0",
+  "author": "Anthropic/3p",
+  "tags": [
+    "official",
+    "claude-code",
+    "skill",
+    "imessage",
+    "official-3p"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

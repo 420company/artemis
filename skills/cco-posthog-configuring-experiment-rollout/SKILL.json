@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-configuring-experiment-rollout",
+  "name": "configuring-experiment-rollout",
+  "description": "Guides rollout configuration for experiments: variant splits, overall rollout percentage, and the critical disambiguation when a user mentions a specific percentage. Covers both initial setup and mid-experiment changes.\\nTRIGGER when: user mentions a rollout percentage, asks about variant splits, wants to change distribution on a running experiment, or asks 'who sees what variant?'\\nDO NOT TRIGGER when: user is asking about metrics, analytics, or experiment results.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

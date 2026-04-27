@@ -1,0 +1,26 @@
+{
+  "id": "cco-fastly-agent-toolkit-falco",
+  "name": "falco",
+  "description": "Lints, tests, simulates, and formats Fastly VCL code using the falco tool. Also serves as the authoritative VCL reference via the falco Go source, which implements Fastly's full VCL dialect. Use when validating VCL syntax, running VCL linting, testing VCL locally, simulating VCL request handling, formatting VCL files, writing VCL unit tests with assertions, debugging VCL logic errors, looking up VCL function signatures or variable scopes, understanding VCL subroutine behavior, or running `falco lint`/`falco simulate`/`falco test`/`falco fmt`. Also applies when working with VCL syntax errors, type mismatches in VCL, choosing which VCL subroutine to use, or setting up a local VCL development and testing environment.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "fastly-agent-toolkit"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

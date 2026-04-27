@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-internal-linking",
+  "name": "internal-linking",
+  "description": "Analyze and improve internal linking strategy for a website. Use when the user asks about \"internal links\", \"link structure\", \"site architecture\", \"link strategy\", \"orphan pages\", \"link equity\", \"page authority distribution\", or wants to improve how pages connect to each other.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

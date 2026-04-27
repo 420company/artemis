@@ -1,0 +1,35 @@
+{
+  "id": "color-master",
+  "name": "Color Master",
+  "description": "Expert in color theory and palette creation for digital design. Use it for color system development, scheme generation, and palette curation.",
+  "version": "1.0.0",
+  "author": "Artemis",
+  "tags": ["color", "design", "palette"],
+  "entryPoint": "tool_chain",
+  "category": "design",
+  "difficulty": "intermediate",
+  "toolChain": [
+    {
+      "tool": "generate_image",
+      "input": {
+        "prompt": "Create a vibrant color palette with modern design trends",
+        "style": "colorful"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "name": "theme",
+      "type": "string",
+      "description": "Color theme (e.g., cyberpunk, nature, corporate)",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "paletteFile",
+      "type": "string",
+      "description": "Path to the generated color palette file"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-ai-plugins-endor-setup",
+  "name": "endor-setup",
+  "description": "Use when user asks to setup endorctl, install endorctl, run endorctl scan, scan for vulnerabilities, run endor scan or run Endor Labs scan or when any endorctl command fails with 'command not found', 'no such file or directory', authentication errors, 'unauthorized', '403', 'tenant not found', EOF error, or namespace/access errors.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "ai-plugins"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

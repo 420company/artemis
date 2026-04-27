@@ -1,0 +1,23 @@
+{
+  "id": "marketing-ops",
+  "name": "marketing-ops",
+  "description": "Central router for the marketing skill ecosystem. Use when unsure which marketing skill to use, when orchestrating a multi-skill campaign, or when coordinating across content, SEO, CRO, channels, and analytics. Also use when the user mentions 'marketing help,' 'campaign plan,' 'what should I do next,' 'marketing priorities,' or 'coordinate marketing.'",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "marketing"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "marketing",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

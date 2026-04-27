@@ -1,0 +1,27 @@
+{
+  "id": "cco-math-olympiad-math-olympiad",
+  "name": "math-olympiad",
+  "description": "Solve competition math problems (IMO, Putnam, USAMO, AIME) with adversarial",
+  "version": "0.1.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "skill",
+    "math-olympiad",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

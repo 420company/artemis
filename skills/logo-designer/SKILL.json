@@ -1,0 +1,35 @@
+{
+  "id": "logo-designer",
+  "name": "Logo Designer",
+  "description": "Artemis / 420.COMPANY logo design skill. Use it when the user asks for a logo, icon, mark, brand symbol, SVG logo system, or final logo showcase.",
+  "version": "1.0.0",
+  "author": "Artemis",
+  "tags": ["logo", "design", "svg"],
+  "entryPoint": "tool_chain",
+  "category": "design",
+  "difficulty": "intermediate",
+  "toolChain": [
+    {
+      "tool": "generate_image",
+      "input": {
+        "prompt": "Create a modern, futuristic logo for Artemis AI system with cyberpunk design elements",
+        "style": "cyberpunk"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "name": "prompt",
+      "type": "string",
+      "description": "The logo design prompt",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logoFile",
+      "type": "string",
+      "description": "Path to the generated logo file"
+    }
+  ]
+}

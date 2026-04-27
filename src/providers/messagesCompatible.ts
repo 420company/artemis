@@ -1,0 +1,247 @@
+import type { SessionMessage } from '../core/types.js';
+import type {
+  ChatProvider,
+  ProviderConfig,
+  ProviderRequestOptions,
+  ProviderResponse,
+} from './types.js';
+
+function buildProviderErrorMessage(
+  response: Response,
+  body: string,
+  config: ProviderConfig,
+): string {
+  const lines = [
+    `Provider request failed: ${response.status} ${response.statusText}`,
+  ];
+
+  const trimmedBody = body.trim();
+  if (trimmedBody) {
+    lines.push(trimmedBody);
+  }
+
+  if (response.status === 404) {
+    lines.push(
+      [
+        'Hint: this client uses the Messages-compatible protocol and appends /v1/messages.',
+        `Check that the base URL (${config.baseUrl}) is the Messages-compatible root for this provider.`,
+      ].join(' '),
+    );
+  }
+
+  if (response.status === 401) {
+    lines.push(
+      [
+        'Hint: the API key was rejected.',
+        'Check that ARTEMIS_API_KEY is correct for this provider and still allowed to access the selected model.',
+      ].join(' '),
+    );
+  }
+
+  if (response.status === 400) {
+    lines.push(
+      [
+        `Hint: verify the selected model (${config.model}) matches this Messages-compatible base URL (${config.baseUrl}).`,
+        'A protocol or model mismatch commonly returns 400-level request errors.',
+      ].join(' '),
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function buildProviderTransportErrorMessage(
+  error: unknown,
+  config: ProviderConfig,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    `Provider request failed before an HTTP response was received: ${message}`,
+    `Requested URL root: ${config.baseUrl}`,
+    `Requested model: ${config.model}`,
+    'Hint: check the base URL, local network access, and any proxy or gateway settings.',
+  ].join('\n');
+}
+
+type AnthropicMessageContent = string | Array<{ type: string; [key: string]: unknown }>;
+
+function mapMessage(message: SessionMessage): { role: 'user' | 'assistant'; content: AnthropicMessageContent } {
+  // Tool result → Anthropic tool_result content block
+  if (message.role === 'tool' && message.toolUseId) {
+    return {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: message.toolUseId, content: message.content ?? '' }],
+    };
+  }
+  if (message.role === 'tool') {
+    // Fallback: plain user message
+    return { role: 'user', content: `[tool:${message.name ?? 'unknown'}]\n${message.content}` };
+  }
+  // Assistant with OpenAI-style toolCalls → convert to Anthropic tool_use blocks
+  if (message.role === 'assistant' && message.toolCalls?.length) {
+    const blocks: Array<{ type: string; [key: string]: unknown }> = [];
+    if (message.content) {
+      blocks.push({ type: 'text', text: message.content });
+    }
+    for (const tc of message.toolCalls) {
+      let input: unknown = {};
+      try { input = JSON.parse(tc.arguments); } catch { input = {}; }
+      blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input });
+    }
+    return { role: 'assistant', content: blocks };
+  }
+  if (message.role === 'assistant') {
+    return { role: 'assistant', content: message.content };
+  }
+  return { role: 'user', content: message.content };
+}
+
+function injectImagesIntoMessages(
+  mapped: Array<{ role: 'user' | 'assistant'; content: AnthropicMessageContent }>,
+  attachments: import('./types.ts').ImageAttachment[],
+): void {
+  let lastUserIdx = -1;
+  for (let i = mapped.length - 1; i >= 0; i -= 1) {
+    if (mapped[i]!.role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0 || attachments.length === 0) return;
+
+  const existingText = mapped[lastUserIdx]!.content;
+  const textStr = typeof existingText === 'string' ? existingText : '';
+  const imageBlocks = attachments.map((img) => ({
+    type: 'image',
+    source: { type: 'base64', media_type: img.mediaType, data: img.data },
+    ...(img.label ? { _label: img.label } : {}),
+  }));
+  mapped[lastUserIdx] = {
+    role: 'user',
+    content: [...imageBlocks, { type: 'text', text: textStr }],
+  };
+}
+
+function extractText(
+  content: Array<{ type?: string; text?: string }> | undefined,
+): string {
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .map((entry) => (entry?.type === 'text' && typeof entry.text === 'string' ? entry.text : ''))
+    .filter(Boolean)
+    .join('\n');
+}
+
+export class MessagesCompatibleProvider implements ChatProvider {
+  readonly supportsImages = true;
+  readonly supportsNativeToolCalls = true;
+  private readonly config: ProviderConfig;
+
+  constructor(config: ProviderConfig) {
+    this.config = config;
+  }
+
+  async complete(
+    messages: SessionMessage[],
+    options?: ProviderRequestOptions,
+  ): Promise<ProviderResponse> {
+    const startedAt = Date.now();
+    const system = messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.content.trim())
+      .filter(Boolean)
+      .join('\n\n');
+    const messagesApiMessages = messages
+      .filter((message) => message.role !== 'system')
+      .map(mapMessage);
+
+    if (options?.imageAttachments?.length) {
+      injectImagesIntoMessages(messagesApiMessages, options.imageAttachments);
+    }
+
+    // Build tools in Anthropic Messages API format (input_schema, not parameters)
+    const anthropicTools = options?.nativeFunctionTools?.map((t) => ({
+      name: t.name,
+      description: t.description ?? '',
+      input_schema: t.parameters,
+    }));
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.config.baseUrl.replace(/\/$/, '')}/v1/messages`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': this.config.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: this.config.model,
+            max_tokens: 8096,
+            ...(system ? { system } : {}),
+            messages: messagesApiMessages,
+            ...(anthropicTools?.length ? { tools: anthropicTools } : {}),
+          }),
+        },
+      );
+    } catch (error) {
+      throw new Error(buildProviderTransportErrorMessage(error, this.config));
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(buildProviderErrorMessage(response, body, this.config));
+    }
+
+    type AnthropicContentBlock = { type?: string; text?: string; id?: string; name?: string; input?: unknown };
+    const json = (await response.json()) as {
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+      content?: AnthropicContentBlock[];
+    };
+
+    const text = extractText(json.content);
+
+    // Parse tool_use blocks from the response
+    const toolUseBlocks = (json.content ?? []).filter((b) => b.type === 'tool_use');
+    const nativeToolCalls = toolUseBlocks.length
+      ? toolUseBlocks.map((b) => ({
+          name: b.name ?? '',
+          arguments: JSON.stringify(b.input ?? {}),
+          callId: b.id ?? '',
+        }))
+      : undefined;
+
+    if (!text && !nativeToolCalls?.length) {
+      throw new Error('Provider returned an empty completion payload.');
+    }
+
+    const promptTokens = json.usage?.input_tokens;
+    const completionTokens = json.usage?.output_tokens;
+
+    return {
+      text,
+      raw: json,
+      model: typeof json.model === 'string' ? json.model : this.config.model,
+      nativeToolCalls,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens:
+          typeof promptTokens === 'number' && typeof completionTokens === 'number'
+            ? promptTokens + completionTokens
+            : undefined,
+        durationMs: Math.max(Date.now() - startedAt, 0),
+        firstResponseMs: Math.max(Date.now() - startedAt, 0),
+      },
+    };
+  }
+}

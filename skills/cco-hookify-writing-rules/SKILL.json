@@ -1,0 +1,27 @@
+{
+  "id": "cco-hookify-writing-rules",
+  "name": "writing-hookify-rules",
+  "description": "This skill should be used when the user asks to \"create a hookify rule\", \"write a hook rule\", \"configure hookify\", \"add a hookify rule\", or needs guidance on hookify rule syntax and patterns.",
+  "version": "0.1.0",
+  "author": "Anthropic",
+  "tags": [
+    "official",
+    "claude-code",
+    "skill",
+    "hookify",
+    "anthropic"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:02:50.783802+00:00",
+  "updatedAt": "2026-04-27T03:02:50.783802+00:00"
+}

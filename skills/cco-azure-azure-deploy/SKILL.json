@@ -1,0 +1,26 @@
+{
+  "id": "cco-azure-azure-deploy",
+  "name": "azure-deploy",
+  "description": "Execute Azure deployments for ALREADY-PREPARED applications that have existing .azure/deployment-plan.md and infrastructure files. DO NOT use this skill when the user asks to CREATE a new application — use azure-prepare instead. This skill runs azd up, azd deploy, terraform apply, and az deployment commands with built-in error recovery. Requires .azure/deployment-plan.md from azure-prepare and validated status from azure-validate. WHEN: \\\"run azd up\\\", \\\"run azd deploy\\\", \\\"execute deployment\\\", \\\"push to production\\\", \\\"push to cloud\\\", \\\"go live\\\", \\\"ship it\\\", \\\"bicep deploy\\\", \\\"terraform apply\\\", \\\"publish to Azure\\\", \\\"launch on Azure\\\". DO NOT USE WHEN: \\\"create and deploy\\\", \\\"build and deploy\\\", \\\"create a new app\\\", \\\"set up infrastructure\\\", \\\"create and deploy to Azure using Terraform\\\" — use azure-prepare for these.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "azure"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

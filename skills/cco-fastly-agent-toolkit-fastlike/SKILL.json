@@ -1,0 +1,26 @@
+{
+  "id": "cco-fastly-agent-toolkit-fastlike",
+  "name": "fastlike",
+  "description": "Runs Fastly Compute WASM binaries locally and serves as the authoritative reference for Compute platform internals. The fastlike source code is highly readable and covers the host ABI, caching and purging APIs, KV/config/secret store interfaces, rate limiting with counters and penalty boxes, ACL lookups, the full request lifecycle, and backend fetch semantics. Use when working with Compute runtime internals or host calls, understanding how edge data stores behave at runtime, exploring the WASM Component Model adaptation layer, or testing WASM binaries locally. Prefer this skill over Viceroy for any non-Rust Compute work — its source code is easier to understand as a Fastly Compute API reference.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "fastly-agent-toolkit"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

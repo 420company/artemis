@@ -1,0 +1,26 @@
+{
+  "id": "cco-sentry-sentry-cloudflare-sdk",
+  "name": "sentry-cloudflare-sdk",
+  "description": "Full Sentry SDK setup for Cloudflare Workers and Pages. Use when asked to \"add Sentry to Cloudflare Workers\", \"install @sentry/cloudflare\", or configure error monitoring, tracing, logging, crons, or AI monitoring for Cloudflare Workers, Pages, Durable Objects, Queues, Workflows, or Hono on Cloudflare.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sentry"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

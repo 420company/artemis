@@ -1,0 +1,26 @@
+{
+  "id": "cco-auth0-auth0-react-native",
+  "name": "auth0-react-native",
+  "description": "Use when adding authentication to React Native or Expo mobile apps (iOS/Android) with biometric support - integrates react-native-auth0 SDK with native deep linking",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "auth0"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

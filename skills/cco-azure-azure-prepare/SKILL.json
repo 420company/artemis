@@ -1,0 +1,26 @@
+{
+  "id": "cco-azure-azure-prepare",
+  "name": "azure-prepare",
+  "description": "Prepare Azure apps for deployment (infra Bicep/Terraform, azure.yaml, Dockerfiles). Use for create/modernize or create+deploy; not cross-cloud migration (use azure-cloud-migrate). WHEN: \\\"create app\\\", \\\"build web app\\\", \\\"create API\\\", \\\"create serverless HTTP API\\\", \\\"create frontend\\\", \\\"create back end\\\", \\\"build a service\\\", \\\"modernize application\\\", \\\"update application\\\", \\\"add authentication\\\", \\\"add caching\\\", \\\"host on Azure\\\", \\\"create and deploy\\\", \\\"deploy to Azure\\\", \\\"deploy to Azure using Terraform\\\", \\\"deploy to Azure App Service\\\", \\\"deploy to Azure App Service using Terraform\\\", \\\"deploy to Azure Container Apps\\\", \\\"deploy to Azure Container Apps using Terraform\\\", \\\"generate Terraform\\\", \\\"generate Bicep\\\", \\\"function app\\\", \\\"timer trigger\\\", \\\"service bus trigger\\\", \\\"event-driven function\\\", \\\"containerized Node.js app\\\", \\\"social media app\\\", \\\"static portfolio website\\\", \\\"todo list with frontend and API\\\", \\\"prepare my Azure application to use Key Vault\\\", \\\"managed identity\\\".",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "azure"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

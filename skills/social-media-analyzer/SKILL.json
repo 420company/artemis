@@ -1,0 +1,33 @@
+{
+  "id": "social-media-analyzer",
+  "name": "social-media-analyzer",
+  "description": "Social media campaign analysis and performance tracking. Calculates engagement rates, ROI, and benchmarks across platforms. Use for analyzing social media performance, calculating engagement rate, measuring campaign ROI, comparing platform metrics, or benchmarking against industry standards.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "marketing",
+    "analyze social media",
+    "calculate engagement rate",
+    "social media ROI",
+    "campaign performance",
+    "compare platforms",
+    "benchmark engagement",
+    "Instagram analytics",
+    "Facebook metrics",
+    "TikTok performance",
+    "LinkedIn engagement"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "marketing",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-sagemaker-ai-hyperpod-version-checker",
+  "name": "hyperpod-version-checker",
+  "description": "Check and compare software component versions on SageMaker HyperPod cluster nodes - NVIDIA drivers, CUDA toolkit, cuDNN, NCCL, EFA, AWS OFI NCCL, GDRCopy, MPI, Neuron SDK (Trainium/Inferentia), Python, and PyTorch. Use when checking component versions, verifying CUDA/driver compatibility, detecting version mismatches across nodes, planning upgrades, documenting cluster configuration, or troubleshooting version-related issues on HyperPod. Triggers on requests about versions, compatibility, component checks, or upgrade planning for HyperPod clusters.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sagemaker-ai"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

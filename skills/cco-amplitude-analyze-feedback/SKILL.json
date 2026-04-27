@@ -1,0 +1,26 @@
+{
+  "id": "cco-amplitude-analyze-feedback",
+  "name": "analyze-feedback",
+  "description": "Synthesizes customer feedback into actionable themes including feature requests, bugs, pain points, and praise. Use when planning product roadmap, understanding user sentiment, investigating specific issues, or preparing voice-of-customer reports.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "amplitude"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

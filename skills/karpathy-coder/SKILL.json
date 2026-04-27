@@ -1,0 +1,23 @@
+{
+  "id": "karpathy-coder",
+  "name": "karpathy-coder",
+  "description": "Use when writing, reviewing, or committing code to enforce Karpathy's 4 coding principles — surface assumptions before coding, keep it simple, make surgical changes, define verifiable goals. Triggers on \"review my diff\", \"check complexity\", \"am I overcomplicating this\", \"karpathy check\", \"before I commit\", or any code quality concern where the LLM might be overcoding.",
+  "version": "2.3.0",
+  "author": "claude-code-skills",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

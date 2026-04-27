@@ -1,0 +1,26 @@
+{
+  "id": "cco-legalzoom-attorney-assist",
+  "name": "attorney-assist",
+  "description": "Connects the user with a LegalZoom attorney for legal consultation. Use when a user asks about attorneys, lawyers, or legal help, or when contract review reveals high risks or low-confidence findings.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "legalzoom"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-aikido-setup",
+  "name": "setup",
+  "description": "Configures the Aikido plugin by setting up the API key and verifying the MCP server. Accepts an optional API key argument to configure automatically. Use when the user wants to set up or verify the Aikido plugin, after installing it, or when aikido_full_scan fails or is unavailable.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "aikido"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

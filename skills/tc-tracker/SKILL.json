@@ -1,0 +1,23 @@
+{
+  "id": "tc-tracker",
+  "name": "tc-tracker",
+  "description": "Use when the user asks to track technical changes, create change records, manage TC lifecycles, or hand off work between AI sessions. Covers init/create/update/status/resume/close/export workflows for structured code change documentation.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

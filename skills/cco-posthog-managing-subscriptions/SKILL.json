@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-managing-subscriptions",
+  "name": "managing-subscriptions",
+  "description": "Manage PostHog subscriptions — scheduled email, Slack, or webhook deliveries of insight or dashboard snapshots. Use when the user wants to subscribe to an insight or dashboard, check existing subscriptions, change delivery frequency, add or remove recipients, or stop receiving updates.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

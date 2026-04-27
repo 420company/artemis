@@ -1,0 +1,26 @@
+{
+  "id": "cco-ai-firstify-ai-firstify",
+  "name": "ai-firstify",
+  "description": "Analyze, re-engineer, or bootstrap projects to align with AI-first design principles. Use when asked to review, audit, improve, 'ai-firstify', or start a new project. Performs deep analysis across 7 dimensions, actively restructures existing projects, or guides new project setup through discovery questions. Based on the 9 design principles and 7 design patterns from the TechWolf AI-First Bootcamp.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "ai-firstify"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

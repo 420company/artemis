@@ -1,0 +1,26 @@
+{
+  "id": "cco-goodmem-python",
+  "name": "goodmem:python",
+  "description": "Use when the user wants to write Python code that interacts with GoodMem — creating embedders, spaces, memories, retrieval, managing API keys, etc. Provides the complete SDK reference for the goodmem Python package.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "goodmem"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

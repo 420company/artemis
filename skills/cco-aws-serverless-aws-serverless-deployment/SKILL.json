@@ -1,0 +1,26 @@
+{
+  "id": "cco-aws-serverless-aws-serverless-deployment",
+  "name": "aws-serverless-deployment",
+  "description": "AWS SAM and AWS CDK deployment for serverless applications. Triggers on phrases like: use SAM, SAM template, SAM init, SAM deploy, CDK serverless, CDK Lambda construct, NodejsFunction, PythonFunction, SAM and CDK together, serverless CI/CD pipeline. For general app deployment with service selection, use deploy-on-aws plugin instead.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "aws-serverless"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

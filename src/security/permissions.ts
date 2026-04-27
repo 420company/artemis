@@ -1,0 +1,223 @@
+import type { AgentAction, PermissionMode } from '../core/types.js';
+import { getToolPermissionCategory } from '../tools/registry.js';
+import type { ToolPermissionCategory } from '../tools/types.js';
+import { chooseInteractiveOption } from '../cli/prompt.js';
+import { isReadOnlyCommand } from './commandPolicy.js';
+
+export type PermissionCategory = ToolPermissionCategory;
+
+export function getPermissionCategoryForActionType(
+  type: AgentAction['type'],
+): PermissionCategory {
+  return getToolPermissionCategory(type);
+}
+
+function getCategory(action: AgentAction): PermissionCategory {
+  if (action.type === 'run_command' && isReadOnlyCommand(action.command)) {
+    return 'read';
+  }
+
+  if (action.type === 'mcp_call_tool' && action.readOnly === true) {
+    return 'read';
+  }
+
+  return getPermissionCategoryForActionType(action.type);
+}
+
+function describeAction(action: AgentAction): string {
+  switch (action.type) {
+    case 'list_files':
+      return action.pattern
+        ? `list files matching ${action.pattern}`
+        : 'list files';
+    case 'read_file':
+      return `read file ${action.path}${
+        action.startLine || action.endLine
+          ? ` lines ${action.startLine ?? 1}-${action.endLine ?? 'end'}`
+          : ''
+      }`;
+    case 'search_files':
+      return `search files${action.pattern ? ` pattern=${action.pattern}` : ''}${action.query ? ` query=${action.query}` : ''}`;
+    case 'lookup_docs':
+      return `look up docs for ${action.query}${action.library ? ` library=${action.library}` : ''}${action.version ? ` version=${action.version}` : ''}`;
+    case 'deep_research':
+      return `run Gemini Deep Research for ${action.query}`;
+    case 'mcp_call_tool':
+      return `call MCP tool ${action.toolName} on server ${action.serverId}`;
+    case 'mcp_read_resource':
+      return `read MCP resource ${action.uri} on server ${action.serverId}`;
+    case 'mcp_get_prompt':
+      return `get MCP prompt ${action.promptName} on server ${action.serverId}`;
+    case 'write_file':
+      return `write file ${action.path}`;
+    case 'insert_in_file':
+      return `insert content in file ${action.path}`;
+    case 'replace_in_file':
+      return `replace text in file ${action.path}`;
+    case 'apply_patch':
+      return 'apply a structured patch';
+    case 'run_command':
+      return `${
+        isReadOnlyCommand(action.command) ? 'run read-only command' : 'run command'
+      } ${action.command}`;
+    case 'delegate_task':
+      return `delegate task to ${action.role}`;
+    case 'approve_builder_execution':
+      return `approve builder execution for session ${action.sessionId}`;
+    case 'odin_search_skills':
+      return `search skills for ${action.query}`;
+    case 'odin_execute_task':
+      return `execute task with skill: ${action.task}`;
+    case 'odin_fix_skill':
+      return `fix skill ${action.skillId}`;
+    case 'odin_upload_skill':
+      return `upload skill ${action.skillId}`;
+    case 'odin_import_cloud_skills':
+      return `import cloud skills${action.query ? ` matching "${action.query}"` : ''}`;
+    case 'generate_image':
+      return `generate image via BytePlus Seedream (${action.model ?? 'seedream-5-0-260128'})`;
+    case 'generate_video':
+      return `generate video via BytePlus Seedance (${action.model ?? 'seedance-1-5-pro-251215'})`;
+    case 'spawn_background_workflow':
+      return `spawn a detached background workflow for ${action.command}`;
+    case 'request_freya_visual_asset':
+      return `request Freya visual asset (${action.assetType})`;
+    case 'agent':
+      const permissionSummary = `agent action=${action.action}`;
+      if (action.id) {
+        return `${permissionSummary} id=${action.id}`;
+      }
+      if (action.name) {
+        return `${permissionSummary} name=${action.name}`;
+      }
+      return permissionSummary;
+    case 'search_web':
+      const searchPermissionSummary = `search web for ${action.query}`;
+      if (action.backend && action.backend !== 'auto') {
+        return `${searchPermissionSummary} using ${action.backend}`;
+      }
+      if (action.limit && action.limit !== 5) {
+        return `${searchPermissionSummary} (${action.limit} results)`;
+      }
+      return searchPermissionSummary;
+    default: {
+      const exhaustive: never = action;
+      return exhaustive;
+    }
+  }
+}
+
+type SessionGrantState = Record<Exclude<PermissionCategory, 'read'>, boolean>;
+
+export class PermissionManager {
+  private mode: PermissionMode;
+  private readonly interactive: boolean;
+  private readonly sessionGrants: SessionGrantState = {
+    none: false,
+    write: false,
+    execute: false,
+    sensitive: false,
+    admin: false,
+    agent: false,
+  };
+
+  constructor(mode: PermissionMode, interactive: boolean) {
+    this.mode = mode;
+    this.interactive = interactive;
+  }
+
+  getMode(): PermissionMode {
+    return this.mode;
+  }
+
+  getInteractive(): boolean {
+    return this.interactive;
+  }
+
+  setMode(mode: PermissionMode): void {
+    this.mode = mode;
+  }
+
+  fork(mode: PermissionMode = this.mode): PermissionManager {
+    const next = new PermissionManager(mode, this.interactive);
+    next.sessionGrants.write = this.sessionGrants.write;
+    next.sessionGrants.execute = this.sessionGrants.execute;
+    next.sessionGrants.sensitive = this.sessionGrants.sensitive;
+    next.sessionGrants.admin = this.sessionGrants.admin;
+    return next;
+  }
+
+  async authorize(action: AgentAction): Promise<{ allowed: boolean; reason: string }> {
+    const category = getCategory(action);
+
+    if (category === 'read') {
+      return { allowed: true, reason: 'read access allowed' };
+    }
+
+    if (this.mode === 'read-only') {
+      return { allowed: false, reason: `${category} blocked by read-only mode` };
+    }
+
+    if (this.mode === 'accept-all') {
+      return { allowed: true, reason: 'allowed by accept-all mode' };
+    }
+
+    if (this.mode === 'accept-edits') {
+      if (category === 'write') {
+        return { allowed: true, reason: 'allowed by accept-edits mode' };
+      }
+      return this.prompt(action, category);
+    }
+
+    if (this.sessionGrants[category]) {
+      return { allowed: true, reason: `allowed by session ${category} grant` };
+    }
+
+    return this.prompt(action, category);
+  }
+
+  private async prompt(
+    action: AgentAction,
+    category: Exclude<PermissionCategory, 'read'>,
+  ): Promise<{ allowed: boolean; reason: string }> {
+    if (!this.interactive) {
+      return {
+        allowed: false,
+        reason: `${category} denied because prompt mode is non-interactive`,
+      };
+    }
+
+    const decision = await chooseInteractiveOption({
+      title: `Permission required to ${describeAction(action)}.`,
+      choices: [
+        {
+          label: 'Allow once',
+          value: 'once' as const,
+          description: 'Approve only this action.',
+        },
+        {
+          label: `Allow ${category} for this session`,
+          value: 'session' as const,
+          description: `Approve future ${category} actions for this session.`,
+        },
+        {
+          label: 'Deny',
+          value: 'deny' as const,
+          description: 'Block this action.',
+        },
+      ],
+      initialIndex: 2,
+    });
+
+    if (decision === 'session') {
+      this.sessionGrants[category] = true;
+      return { allowed: true, reason: `allowed ${category} for this session` };
+    }
+
+    if (decision === 'once') {
+      return { allowed: true, reason: 'allowed once by user' };
+    }
+
+    return { allowed: false, reason: 'denied by user' };
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "atlassian-templates",
+  "name": "atlassian-templates",
+  "description": "Atlassian Template and Files Creator/Modifier expert for creating, modifying, and managing Jira and Confluence templates, blueprints, custom layouts, reusable components, and standardized content structures. Use when building org-wide templates, custom blueprints, page layouts, and automated content generation.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "project-management"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "project-management",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

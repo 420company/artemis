@@ -1,0 +1,23 @@
+{
+  "id": "jira-expert",
+  "name": "jira-expert",
+  "description": "Atlassian Jira expert for creating and managing projects, planning, product discovery, JQL queries, workflows, custom fields, automation, reporting, and all Jira features. Use for Jira project setup, configuration, advanced search, dashboard creation, workflow design, and technical Jira operations.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "project-management"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "project-management",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

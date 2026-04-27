@@ -1,0 +1,26 @@
+{
+  "id": "cco-zscaler-audit-ssl",
+  "name": "audit-ssl",
+  "description": "Audit ZIA SSL inspection rules -- list rules by action (INSPECT, DO_NOT_INSPECT, DO_NOT_DECRYPT, BLOCK), identify bypasses, and assess risk.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "zscaler"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

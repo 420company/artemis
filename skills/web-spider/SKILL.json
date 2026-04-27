@@ -1,0 +1,38 @@
+{
+  "id": "web-spider",
+  "name": "Web Spider",
+  "description": "Specializes in web scraping and data extraction. Use it for gathering data from websites, analyzing content, and creating reports.",
+  "version": "1.0.0",
+  "author": "Artemis",
+  "tags": ["scraping", "data", "web"],
+  "entryPoint": "tool_chain",
+  "category": "utility",
+  "difficulty": "advanced",
+  "toolChain": [
+    {
+      "tool": "run_command",
+      "input": {
+        "command": "python3",
+        "args": [
+          "scripts/web_scraper.py",
+          "https://example.com"
+        ]
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "name": "url",
+      "type": "string",
+      "description": "URL of the website to scrape",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "scrapedData",
+      "type": "object",
+      "description": "Data scraped from the website"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "cco-brightdata-plugin-brd-browser-debug",
+  "name": "brd-browser-debug",
+  "description": "Debug Bright Data Scraping Browser sessions using the Browser Sessions API. Use this skill when the user encounters a Bright Data browser session error, puppeteer stack trace, failed scraper run, or asks about session bandwidth, duration, captchas, or connection issues. Also use when a Bright Data scraper produces unexpected results such as empty data, 0 items found, missing products, or fewer results than expected — session data can reveal whether the issue is network/proxy-side (blocks, captchas, redirects, timeouts) or client-side (selectors, extraction logic). Triggers on phrases like 'why did my session fail', 'debug my bright data session', 'check my scraping browser sessions', 'how much bandwidth did my scraper use', 'got 0 results', 'found 0', 'scraper returned empty', 'scraper not working', 'script didn't work', or when a Bright Data error code or brd.superproxy.io stack trace appears in the conversation. Requires BRIGHTDATA_API_KEY environment variable.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "brightdata-plugin"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

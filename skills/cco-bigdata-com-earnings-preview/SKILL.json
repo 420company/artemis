@@ -1,0 +1,26 @@
+{
+  "id": "cco-bigdata-com-earnings-preview",
+  "name": "earnings-preview",
+  "description": "Create a forward-looking pre-earnings analysis with recent developments, industry trends, bull/bear cases, and key metrics to watch.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "command",
+    "bigdata-com"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "sales-engineer",
+  "name": "sales-engineer",
+  "description": "Analyzes RFP/RFI responses for coverage gaps, builds competitive feature comparison matrices, and plans proof-of-concept (POC) engagements for pre-sales engineering. Use when responding to RFPs, bids, or proposal requests; comparing product features against competitors; planning or scoring a customer POC or sales demo; preparing a technical proposal; or performing win/loss competitor analysis. Handles tasks described as 'RFP response', 'bid response', 'proposal response', 'competitor comparison', 'feature matrix', 'POC planning', 'sales demo prep', or 'pre-sales engineering'.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "business"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "business",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

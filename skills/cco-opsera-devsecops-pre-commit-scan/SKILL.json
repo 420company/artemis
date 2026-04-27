@@ -1,0 +1,26 @@
+{
+  "id": "cco-opsera-devsecops-pre-commit-scan",
+  "name": "pre-commit-scan",
+  "description": "Automatic security scan triggered before git commits. Runs the Opsera security scan tool against the entire repo, categorizes findings into new (staged) vs existing, and blocks commits only if staged changes have critical/high issues.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "opsera-devsecops"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

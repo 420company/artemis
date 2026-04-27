@@ -1,0 +1,26 @@
+{
+  "id": "cco-goodmem-mcp",
+  "name": "goodmem:mcp",
+  "description": "Workflow guide for GoodMem MCP server tools. Use when an agent needs to understand what GoodMem MCP tools are available and how to use them. Parameter signatures are provided by the MCP protocol itself — do not hardcode them here.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "goodmem"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

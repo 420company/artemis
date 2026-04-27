@@ -1,0 +1,23 @@
+{
+  "id": "revenue-operations",
+  "name": "revenue-operations",
+  "description": "Analyzes sales pipeline health, revenue forecasting accuracy, and go-to-market efficiency metrics for SaaS revenue optimization. Use when analyzing sales pipeline coverage, forecasting revenue, evaluating go-to-market performance, reviewing sales metrics, assessing pipeline analysis, tracking forecast accuracy with MAPE, calculating GTM efficiency, or measuring sales efficiency and unit economics for SaaS teams.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "business"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "business",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

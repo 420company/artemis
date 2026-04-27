@@ -1,0 +1,23 @@
+{
+  "id": "team-communications",
+  "name": "team-communications",
+  "description": "Write internal company communications — 3P updates (Progress/Plans/Problems), company-wide newsletters, FAQ roundups, incident reports, leadership updates, status reports, project updates, and general internal comms. Use this skill any time the user asks to draft, edit, or format something meant for internal audiences. Trigger on keywords like \"3P\", \"weekly update\", \"newsletter\", \"FAQ\", \"internal comms\", \"status report\", \"company update\", \"team update\", \"incident report\", or any request to summarize work for leadership, teammates, or the broader company. Even casual requests like \"write my update\" or \"summarize what my team did this week\" should trigger this skill.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "project-management"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "project-management",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

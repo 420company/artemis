@@ -1,0 +1,26 @@
+{
+  "id": "cco-brightdata-plugin-data-feeds",
+  "name": "data-feeds",
+  "description": "Extract structured data from 40+ supported platforms (Amazon, LinkedIn, Instagram, TikTok, Facebook, YouTube, Reddit, and more) via the Bright Data CLI (`bdata pipelines`). Use when the user wants clean JSON from a known platform URL rather than raw HTML. Hands off to `scrape` for unsupported URLs and to `search` when target URLs must be discovered first. Requires the Bright Data CLI; proactively guides install + login if missing.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "brightdata-plugin"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

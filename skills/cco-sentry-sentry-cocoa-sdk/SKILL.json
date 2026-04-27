@@ -1,0 +1,26 @@
+{
+  "id": "cco-sentry-sentry-cocoa-sdk",
+  "name": "sentry-cocoa-sdk",
+  "description": "Full Sentry SDK setup for Apple platforms (iOS, macOS, tvOS, watchOS, visionOS). Use when asked to \"add Sentry to iOS\", \"add Sentry to Swift\", \"install sentry-cocoa\", or configure error monitoring, tracing, profiling, session replay, or logging for Apple applications. Supports SwiftUI and UIKit.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sentry"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "pr-review-expert",
+  "name": "pr-review-expert",
+  "description": "Use when the user asks to review pull requests, analyze code changes, check for security issues in PRs, or assess code quality of diffs.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "engineering"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "engineering",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

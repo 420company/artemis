@@ -1,0 +1,26 @@
+{
+  "id": "cco-posthog-managing-experiment-lifecycle",
+  "name": "managing-experiment-lifecycle",
+  "description": "Guides experiment state transitions: launching, pausing, resuming, ending, shipping variants, archiving, resetting, and duplicating. Covers preconditions, implications for variant assignment and analysis, and the decision framework for when to use each action.\\nTRIGGER when: user asks to launch, pause, resume, end, ship, archive, reset, or duplicate an experiment.\\nDO NOT TRIGGER when: user is creating an experiment (use creating-experiments), configuring rollout (use configuring-experiment-rollout), or setting up metrics (use configuring-experiment-analytics).",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "posthog"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

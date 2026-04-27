@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-broken-links",
+  "name": "broken-links",
+  "description": "Find and fix broken links on a website or in a codebase. Use when the user asks to \"check broken links\", \"find dead links\", \"fix 404s\", \"link checker\", \"broken link audit\", \"find dead URLs\", or wants to identify and repair links that lead to non-existent pages.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

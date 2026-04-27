@@ -1,0 +1,26 @@
+{
+  "id": "cco-fastly-agent-toolkit-fastly",
+  "name": "fastly",
+  "description": "Configures, manages, and debugs the Fastly CDN platform — covering service and backend setup, caching and VCL, security features like DDoS/WAF/NGWAF/rate limiting/bot management, TLS certificates and cache purging, the Compute platform, and the REST API. Use when working with Fastly services or domains, setting up edge caching or origin shielding, configuring security features, making Fastly API calls, enabling products, or looking up Fastly documentation. Also applies when troubleshooting 503 errors or SSL/TLS certificate mismatches on Fastly, and for configuring logging endpoints, load balancing, ACLs, or edge dictionaries.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "fastly-agent-toolkit"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

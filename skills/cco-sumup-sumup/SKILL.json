@@ -1,0 +1,26 @@
+{
+  "id": "cco-sumup-sumup",
+  "name": "sumup",
+  "description": "Guide for building SumUp payment integrations that cover both terminal (card-present) and online (card-not-present) checkout flows using SumUp SDKs and APIs. Use when implementing or debugging SumUp checkout creation, payment processing, reader pairing, Card Widget integrations, Cloud API reader checkouts, or authorization setup with API keys/OAuth and Affiliate Keys.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sumup"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

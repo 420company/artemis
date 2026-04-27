@@ -1,0 +1,23 @@
+{
+  "id": "popup-cro",
+  "name": "popup-cro",
+  "description": "When the user wants to create or optimize popups, modals, overlays, slide-ins, or banners for conversion purposes. Also use when the user mentions \"exit intent,\" \"popup conversions,\" \"modal optimization,\" \"lead capture popup,\" \"email popup,\" \"announcement banner,\" or \"overlay.\" For forms outside of popups, see form-cro. For general page conversion optimization, see page-cro.",
+  "version": "1.0.0",
+  "author": "alirezarezvani",
+  "tags": [
+    "marketing"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "marketing",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T00:40:32.546740Z",
+  "updatedAt": "2026-04-27T00:40:32.546740Z"
+}

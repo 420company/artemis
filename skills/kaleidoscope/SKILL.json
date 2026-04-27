@@ -1,0 +1,35 @@
+{
+  "id": "kaleidoscope",
+  "name": "Kaleidoscope",
+  "description": "Specializes in creating complex geometric patterns and kaleidoscopic designs. Use it for creating patterns, textures, and visual effects.",
+  "version": "1.0.0",
+  "author": "Artemis",
+  "tags": ["pattern", "geometric", "visual"],
+  "entryPoint": "tool_chain",
+  "category": "design",
+  "difficulty": "advanced",
+  "toolChain": [
+    {
+      "tool": "generate_image",
+      "input": {
+        "prompt": "Create a complex geometric kaleidoscope pattern with vibrant colors",
+        "style": "abstract"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "name": "patternType",
+      "type": "string",
+      "description": "Type of pattern (e.g., geometric, floral, abstract)",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "patternFile",
+      "type": "string",
+      "description": "Path to the generated pattern file"
+    }
+  ]
+}

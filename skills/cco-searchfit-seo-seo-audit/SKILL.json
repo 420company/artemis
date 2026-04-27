@@ -1,0 +1,26 @@
+{
+  "id": "cco-searchfit-seo-seo-audit",
+  "name": "seo-audit",
+  "description": "Run a comprehensive SEO audit on a website or codebase. Use when the user asks to \"audit SEO\", \"check my site's SEO\", \"find SEO issues\", \"SEO health check\", \"technical SEO review\", \"site audit\", or wants to identify SEO problems on their website.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "searchfit-seo"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

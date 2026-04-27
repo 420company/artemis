@@ -1,0 +1,26 @@
+{
+  "id": "cco-sentry-sentry-react-router-framework-sdk",
+  "name": "sentry-react-router-framework-sdk",
+  "description": "Full Sentry SDK setup for React Router Framework mode. Use when asked to \"add Sentry to React Router Framework\", \"install @sentry/react-router\", or configure error monitoring, tracing, profiling, session replay, logs, or user feedback for a React Router v7 framework app.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "skill",
+    "sentry"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}

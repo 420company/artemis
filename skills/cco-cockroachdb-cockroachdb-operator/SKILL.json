@@ -1,0 +1,26 @@
+{
+  "id": "cco-cockroachdb-cockroachdb-operator",
+  "name": "cockroachdb-operator",
+  "description": "CockroachDB operator and SRE agent. Use when managing cluster operations, monitoring, alerting, incident response, backup/restore, scaling, version upgrades, node maintenance, changefeed management, or troubleshooting performance and availability issues. Based on the official CockroachDB runbook template.",
+  "version": "1.0.0",
+  "author": "Anthropic Marketplace 3p",
+  "tags": [
+    "official-marketplace",
+    "claude-code",
+    "agent",
+    "cockroachdb"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "official",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ],
+  "createdAt": "2026-04-27T03:04:45.385648+00:00",
+  "updatedAt": "2026-04-27T03:04:45.385648+00:00"
+}
