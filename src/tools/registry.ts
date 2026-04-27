@@ -830,6 +830,158 @@ const capabilityToolDefs: ToolDefinition[] = [
   // They were never callable from the brain (would throw at runtime). The
   // /mcp slash command lives in interactive.ts; TodoTool exists as a class
   // in src/tools/TodoTool/ but isn't currently wired through the agent loop.
+
+  // ── Spotify integration ────────────────────────────────────────────────
+  // brain-callable tools that drive Spotify Web API. Authentication via
+  // /spotify login (OAuth PKCE flow). See src/tools/spotify/ for impl.
+  {
+    type: 'spotify_play_liked',
+    description: '播放用户的 Liked Songs（点赞歌曲）。可选 shuffle 模式 + 指定设备。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeSpotifyPlayLiked } = await import('./spotify/spotifyTools.js');
+      return executeSpotifyPlayLiked(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_search_and_play',
+    description: '搜索并播放（曲目或歌单）。query 必填。kind 默认 auto。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.query, 'query', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeSpotifySearchAndPlay } = await import('./spotify/spotifyTools.js');
+      return executeSpotifySearchAndPlay(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_play_playlist',
+    description: '按名字播放用户/公开歌单。name 必填，优先匹配用户自己的歌单。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.name, 'name', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeSpotifyPlayPlaylist } = await import('./spotify/spotifyTools.js');
+      return executeSpotifyPlayPlaylist(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_resume',
+    description: '恢复当前的 Spotify 播放（从暂停状态继续）。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeSpotifyResume } = await import('./spotify/spotifyTools.js');
+      return executeSpotifyResume(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_pause',
+    description: '暂停 Spotify 播放。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeSpotifyPause } = await import('./spotify/spotifyTools.js');
+      return executeSpotifyPause(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_skip_next',
+    description: '跳到下一首。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeSpotifySkipNext } = await import('./spotify/spotifyTools.js');
+      return executeSpotifySkipNext(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_skip_previous',
+    description: '跳到上一首（或重播当前）。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeSpotifySkipPrevious } = await import('./spotify/spotifyTools.js');
+      return executeSpotifySkipPrevious(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_set_volume',
+    description: '设置音量 0-100。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      if (typeof action?.volume !== 'number') {
+        errors.push('volume must be a number 0-100');
+      }
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeSpotifySetVolume } = await import('./spotify/spotifyTools.js');
+      return executeSpotifySetVolume(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_now_playing',
+    description: '查询 Spotify 当前播放状态（歌名 / 歌手 / 设备 / 是否播放）。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeSpotifyNowPlaying } = await import('./spotify/spotifyTools.js');
+      return executeSpotifyNowPlaying(action);
+    }) as any,
+  },
+  {
+    type: 'spotify_set_device',
+    description: '将播放转移到指定设备（Spotify Connect 跨设备控制）。deviceHint 必填。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.deviceHint, 'deviceHint', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeSpotifySetDevice } = await import('./spotify/spotifyTools.js');
+      return executeSpotifySetDevice(action);
+    }) as any,
+  },
 ];
 
 export const toolDefs: ToolDefinition[] = [

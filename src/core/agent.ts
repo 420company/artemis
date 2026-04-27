@@ -1439,6 +1439,27 @@ function summarizeActionForWorkflow(action: AgentAction): string {
         return `${searchSummary} limit=${action.limit}`;
       }
       return searchSummary;
+    // ── Spotify integration ──────────────────────────────────────────────
+    case 'spotify_play_liked':
+      return `spotify_play_liked${action.shuffle === false ? '' : ' shuffle=true'}${action.deviceHint ? ` device=${action.deviceHint}` : ''}`;
+    case 'spotify_search_and_play':
+      return `spotify_search_and_play query=${truncate(action.query, 80)}${action.kind ? ` kind=${action.kind}` : ''}`;
+    case 'spotify_play_playlist':
+      return `spotify_play_playlist name=${truncate(action.name, 80)}`;
+    case 'spotify_resume':
+      return `spotify_resume${action.deviceHint ? ` device=${action.deviceHint}` : ''}`;
+    case 'spotify_pause':
+      return 'spotify_pause';
+    case 'spotify_skip_next':
+      return 'spotify_skip_next';
+    case 'spotify_skip_previous':
+      return 'spotify_skip_previous';
+    case 'spotify_set_volume':
+      return `spotify_set_volume volume=${action.volume}`;
+    case 'spotify_now_playing':
+      return 'spotify_now_playing';
+    case 'spotify_set_device':
+      return `spotify_set_device device=${truncate(action.deviceHint, 80)}${action.startPlaying ? ' start=true' : ''}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);

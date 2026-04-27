@@ -100,6 +100,27 @@ function describeAction(action: AgentAction): string {
         return `${searchPermissionSummary} (${action.limit} results)`;
       }
       return searchPermissionSummary;
+    // ── Spotify integration ──────────────────────────────────────────────
+    case 'spotify_play_liked':
+      return `spotify: play liked songs${action.shuffle === false ? '' : ' (shuffle)'}`;
+    case 'spotify_search_and_play':
+      return `spotify: search and play "${action.query}"`;
+    case 'spotify_play_playlist':
+      return `spotify: play playlist "${action.name}"`;
+    case 'spotify_resume':
+      return `spotify: resume playback`;
+    case 'spotify_pause':
+      return `spotify: pause`;
+    case 'spotify_skip_next':
+      return `spotify: skip to next track`;
+    case 'spotify_skip_previous':
+      return `spotify: skip to previous track`;
+    case 'spotify_set_volume':
+      return `spotify: set volume to ${action.volume}%`;
+    case 'spotify_now_playing':
+      return `spotify: get currently playing`;
+    case 'spotify_set_device':
+      return `spotify: transfer playback to "${action.deviceHint}"`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

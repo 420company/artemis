@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artemis — The Void Answers</title>
+  <meta name="description" content="Artemis — A sharper terminal for agentic coding. Built for those who stand alone at the peak.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23000000'/><circle cx='16' cy='16' r='8' fill='none' stroke='%234af0ff' stroke-width='1.5' stroke-dasharray='3 5' opacity='0.8'/></svg>">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="bg-image-layer"></div>
+<canvas id="bg-canvas"></canvas>
+
+<main class="main-shell">
+
+  <!-- TOP NAV — minimal floating -->
+  <nav class="top-nav">
+    <a href="index.html" class="nav-link active">hall</a>
+    <a href="statement.html" class="nav-link">statement</a>
+    <a href="install.html" class="nav-link">install</a>
+    <a href="workflows.html" class="nav-link">workflows</a>
+    <a href="operations.html" class="nav-link">operations</a>
+    <a href="sponsor.html" class="nav-link">sponsor</a>
+  </nav>
+
+  <!-- HERO ZONE -->
+  <section class="hero-zone animate-in">
+    <div class="hero-art">
+      <img src="images/hero-mandala.png" alt="Broken mandala — corrupted sacred geometry">
+    </div>
+    <div class="hero-title-block">
+      <pre class="hero-ascii">    _    ____  _____ ______  __  __  ___  _____ 
+   / \  |  _ \|_   _|  ____||  \/  ||_ _|/ ____|
+  / _ \ | |_) | | | | |__   | \  / | | || (___  
+ / ___ \|  _ <  | | |  __|  | |\/| | | | \___ \ 
+/_/   \_\_| \_\ |_| |____| |_|  |_||___|____/ |</pre>
+      <p class="hero-tagline">A sharper terminal. No long decorative scrolls.<br>Built for those who stand alone at the peak.</p>
+    </div>
+  </section>
+
+  <hr class="void-divider">
+
+  <!-- STATEMENT + INSTALL — asymmetric pair -->
+  <div class="card-grid card-grid-asym" style="margin-bottom:1.5rem;">
+
+    <!-- STATEMENT -->
+    <a href="statement.html" style="text-decoration:none;color:inherit;display:block;">
+      <article class="card card-rose" style="height:100%;">
+        <div class="card-corner card-corner-tl"></div>
+        <div class="card-corner card-corner-br"></div>
+        <img src="images/hero-cosmic-void.png" alt="" class="card-image" style="aspect-ratio:16/10;" loading="lazy">
+        <div class="card-label" style="color:var(--rose);">statement</div>
+        <h2 class="card-heading">why it exists</h2>
+        <p class="card-text">Artemis is an independent coding CLI built to make agentic software work more legible, more disciplined, and more welcoming to newcomers. Our architecture evolved through extensive study of industry-leading models — extracting their strongest logic to shape a clean, intuitive system.</p>
+        <p class="card-text">The goal is a cleaner runtime, clearer workflows, and a friendlier path for people entering this field with curiosity instead of ceremony.</p>
+      </article>
+    </a>
+
+    <!-- INSTALL -->
+    <a href="install.html" style="text-decoration:none;color:inherit;display:block;">
+      <article class="card card-gold" style="height:100%;">
+        <div class="card-corner card-corner-tl"></div>
+        <div class="card-corner card-corner-br"></div>
+        <img src="images/section-install.png" alt="" class="card-image" style="aspect-ratio:16/10;" loading="lazy">
+        <div class="card-label" style="color:var(--gold);">install</div>
+        <h2 class="card-heading">entry sequence</h2>
+        <p class="card-text">macOS and Windows do not share the same path. The fast command block below gets you moving — the full room breaks every step for each system.</p>
+        <div class="code-block">
+          <pre class="code-box"><code>npm install -g @rtemis
+artemis --version
+artemis</code></pre>
+        </div>
+        <p style="font-family:var(--font-mono);font-size:0.55rem;text-transform:uppercase;letter-spacing:0.28em;color:rgba(255,184,46,0.6);margin-top:0.5rem;">open for the detailed macOS and Windows flow</p>
+      </article>
+    </a>
+  </div>
+
+  <!-- WORKFLOWS + OPERATIONS -->
+  <div class="card-grid card-grid-2" style="margin-bottom:1.5rem;">
+    <a href="workflows.html" style="text-decoration:none;color:inherit;display:block;">
+      <article class="card card-cyan">
+        <div class="card-corner card-corner-tl"></div>
+        <div class="card-label" style="color:var(--cyan);">workflows</div>
+        <h2 class="card-heading">how it moves</h2>
+        <p class="card-text">Artemis is a local-first agentic coding CLI for people who want a sharper terminal workflow for coding, research, review, and multi-agent execution.</p>
+      </article>
+    </a>
+    <a href="operations.html" style="text-decoration:none;color:inherit;display:block;">
+      <article class="card card-rose">
+        <div class="card-corner card-corner-br"></div>
+        <div class="card-label" style="color:var(--rose);">operations</div>
+        <h2 class="card-heading">commands + maintenance</h2>
+        <p class="card-text">Diagnostics, slash commands, safety modes, and build maintenance live here.</p>
+      </article>
+    </a>
+  </div>
+
+  <!-- SIGNAL -->
+  <section class="card card-gold" style="margin-bottom:1.5rem;">
+    <div class="card-corner card-corner-tl"></div>
+    <div class="card-label" style="color:var(--gold);">signal</div>
+    <div style="display:grid;gap:1rem;font-size:0.85rem;color:rgba(255,255,255,0.5);">
+      <div>
+        <p class="version-tag">version 0.4.20</p>
+        <p style="margin-top:0.25rem;">Local-first CLI pulse. Public npm install.</p>
+      </div>
+      <div style="border-top:1px solid rgba(255,255,255,0.04);padding-top:1rem;">
+        <p class="signal-glow">--whosyourdaddy</p>
+        <p style="margin-top:0.25rem;">Give you agent. More freedom.</p>
+        <div class="signal-contact" style="margin-top:0.75rem;display:inline-flex;">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square">
+            <path d="M3 6h18v12H3z"></path><path d="m4 7 8 6 8-6"></path>
+          </svg>
+          <span>GOAT@420.COMPANY</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SPONSOR -->
+  <section class="card card-rose">
+    <div class="card-corner card-corner-br"></div>
+    <img src="images/section-sponsor.png" alt="" class="card-image" loading="lazy">
+    <div class="card-label" style="color:var(--rose);">sponsor</div>
+    <div class="sponsor-text">
+      <p>Forget 'Founder Goals': Artemis was created by a token-burning zealot who sacrificed a massive pile of tokens to refine this otherwise pointless game into something sharper and more usable. No funnels, no pitches, just pure, expensive obsession. To keep the AI churning out more high-end digital garbage, the maniac needs more fuel.</p>
+      <p>It exists for people just entering vibe coding, especially the cyber-weirdos who want a tool that is sharper, friendlier, and easier to live with than the usual ritual machinery.</p>
+      <p class="sponsor-muted">If the tool does not earn a durable place in your workflow, let it fuck off. Support should follow utility, not ceremony.</p>
+    </div>
+    <div class="sponsor-actions">
+      <button class="btn btn-rose btn-sponsor" style="width:100%;">sponsor artemis</button>
+      <div class="sponsor-badge">compute only / no hype treasury</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- Sponsor Modal -->
+<div class="modal-overlay" id="sponsor-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span>sponsor artemis</span>
+      <button class="modal-close" id="modal-close">✕</button>
+    </div>
+    <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);margin-bottom:0.75rem;">Send ETH / ERC-20 to:</p>
+    <div class="modal-address" id="wallet-address">0x42000000168Db60962EBe3923c581Df71b8745c8</div>
+    <button class="btn btn-rose" style="width:100%;" onclick="navigator.clipboard.writeText(document.getElementById('wallet-address').textContent).then(()=>showToast('address copied'))">
+      copy address
+    </button>
+  </div>
+</div>
+
+<script src="js/main.js"></script>
+</body>
+</html>

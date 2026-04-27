@@ -1093,6 +1093,73 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    // ── Spotify integration ──────────────────────────────────────────────
+    case 'spotify_play_liked':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          shuffle: { type: 'boolean', description: 'Whether to shuffle the queue. Default: true.' },
+          deviceHint: optionalStringSchema('Optional device name substring (e.g. "MacBook" or "HomePod"). Default: smart pick.'),
+        },
+      };
+    case 'spotify_search_and_play':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query'],
+        properties: {
+          query: nonEmptyStringSchema('Search query (artist, song, mood, genre, etc.).'),
+          kind: { type: 'string', enum: ['track', 'playlist', 'auto'], description: 'What to prefer. auto = playlist first then track. Default: auto.' },
+          deviceHint: optionalStringSchema('Optional device name substring. Default: smart pick.'),
+        },
+      };
+    case 'spotify_play_playlist':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name'],
+        properties: {
+          name: nonEmptyStringSchema('Playlist name (matches user own first, then public).'),
+          deviceHint: optionalStringSchema('Optional device name substring.'),
+        },
+      };
+    case 'spotify_resume':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          deviceHint: optionalStringSchema('Optional device name substring.'),
+        },
+      };
+    case 'spotify_pause':
+    case 'spotify_skip_next':
+    case 'spotify_skip_previous':
+    case 'spotify_now_playing':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {},
+      };
+    case 'spotify_set_volume':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['volume'],
+        properties: {
+          volume: { type: 'integer', minimum: 0, maximum: 100, description: 'Volume percent (0-100).' },
+        },
+      };
+    case 'spotify_set_device':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['deviceHint'],
+        properties: {
+          deviceHint: nonEmptyStringSchema('Device name substring (e.g. "HomePod", "MacBook Pro").'),
+          startPlaying: { type: 'boolean', description: 'Whether to start playback after transfer. Default: false.' },
+        },
+      };
   default:
     return { type: 'object', properties: {}, additionalProperties: true };
   }

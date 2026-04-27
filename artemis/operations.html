@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artemis / Operations — Commands & Maintenance</title>
+  <meta name="description" content="Artemis operations — diagnostics, slash commands, safety, build.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23000000'/><circle cx='16' cy='16' r='8' fill='none' stroke='%23ff3366' stroke-width='1.5' stroke-dasharray='3 5' opacity='0.8'/></svg>">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="bg-image-layer"></div>
+<canvas id="bg-canvas"></canvas>
+
+<main class="main-shell">
+
+  <nav class="top-nav">
+    <a href="index.html" class="nav-link">hall</a>
+    <a href="statement.html" class="nav-link">statement</a>
+    <a href="install.html" class="nav-link">install</a>
+    <a href="workflows.html" class="nav-link">workflows</a>
+    <a href="operations.html" class="nav-link active">operations</a>
+    <a href="sponsor.html" class="nav-link">sponsor</a>
+  </nav>
+
+  <section class="hero-zone animate-in">
+    <div class="hero-art" style="max-width:380px;">
+      <img src="images/hero-cosmic-void.png" alt="Void figure — operations">
+    </div>
+    <div class="hero-title-block">
+      <h1 style="font-weight:900;font-size:clamp(2rem,5vw,3rem);text-transform:uppercase;letter-spacing:-0.02em;color:rgba(255,255,255,0.92);margin-bottom:0.75rem;">commands and maintenance</h1>
+      <p class="hero-tagline">Running the instrument: diagnostics, slash commands, safety modes, and internal release maintenance.</p>
+    </div>
+  </section>
+
+  <hr class="void-divider">
+
+  <div class="content-body">
+    <aside class="sidebar">
+      <div class="card card-rose">
+        <div class="card-corner card-corner-br"></div>
+        <div class="card-label" style="color:var(--rose);">ops</div>
+        <div class="sidebar-link">diagnostics</div>
+        <div class="sidebar-link">slash commands</div>
+        <div class="sidebar-link">safety</div>
+        <div class="sidebar-link">build</div>
+      </div>
+    </aside>
+
+    <div class="content-stack">
+
+      <!-- Diagnostics + Slash Commands -->
+      <div style="display:grid;gap:1.5rem;grid-template-columns:1fr 1.2fr;">
+        <section class="card card-rose">
+          <div class="card-corner card-corner-br"></div>
+          <div class="card-label" style="color:var(--rose);">diagnostics</div>
+          <div class="code-block">
+            <div class="code-label-row"><span class="code-label">terminal</span><button class="copy-btn">copy</button></div>
+            <pre class="code-box"><code>artemis doctor
+artemis doctor --test-providers
+artemis providers
+artemis sessions
+artemis evidence
+artemis conflicts
+artemis verify</code></pre>
+          </div>
+        </section>
+
+        <section class="card card-rose">
+          <div class="card-corner card-corner-br"></div>
+          <div class="card-label" style="color:var(--rose);">interactive slash commands</div>
+          <ul style="padding-left:1.25rem;font-size:0.8rem;line-height:2.1;color:rgba(255,255,255,0.5);">
+            <li><span class="code-inline">/athena &lt;task&gt;</span></li>
+            <li><span class="code-inline">/design &lt;task&gt;</span></li>
+            <li><span class="code-inline">/niko &lt;task&gt;</span></li>
+            <li><span class="code-inline">/contest &lt;task&gt;</span></li>
+            <li><span class="code-inline">/docs &lt;query&gt;</span></li>
+            <li><span class="code-inline">/search-engine [bing|google]</span></li>
+            <li><span class="code-inline">/research-engine [builtin|gemini-deep-research]</span></li>
+            <li><span class="code-inline">/deep-research &lt;query&gt;</span></li>
+            <li><span class="code-inline">/deep-research-config</span></li>
+            <li><span class="code-inline">/doublekill</span></li>
+            <li><span class="code-inline">/wordup</span></li>
+            <li><span class="code-inline">/wordupnow</span></li>
+            <li><span class="code-inline">/artemis-md</span></li>
+            <li><span class="code-inline">/revise-artemis-md [--apply]</span></li>
+            <li><span class="code-inline">/doctor [test|--test-providers]</span></li>
+            <li><span class="code-inline">/sponsor</span></li>
+            <li><span class="code-inline">/mode &lt;prompt|read-only|accept-edits|accept-all&gt;</span></li>
+          </ul>
+        </section>
+      </div>
+
+      <!-- Safety + Build -->
+      <div class="card-grid card-grid-2">
+        <section class="card card-rose">
+          <div class="card-corner card-corner-br"></div>
+          <div class="card-label" style="color:var(--rose);">safety model</div>
+          <p style="font-size:0.875rem;line-height:1.8;color:rgba(255,255,255,0.55);">Artemis keeps permission modes explicit:</p>
+          <ul style="list-style:none;padding:0;font-size:0.85rem;line-height:2;color:rgba(255,255,255,0.5);margin-top:0.5rem;">
+            <li><span class="code-inline">prompt</span></li>
+            <li><span class="code-inline">read-only</span></li>
+            <li><span class="code-inline">accept-edits</span></li>
+            <li><span class="code-inline">accept-all</span></li>
+          </ul>
+          <p style="font-size:0.8rem;color:rgba(255,255,255,0.45);margin-top:0.75rem;"><span class="code-inline">--whosyourdaddy</span> maps directly to <span class="code-inline">accept-all</span>.</p>
+        </section>
+
+        <section class="card card-rose">
+          <div class="card-corner card-corner-br"></div>
+          <div class="card-label" style="color:var(--rose);">build + release</div>
+          <div class="code-block">
+            <div class="code-label-row"><span class="code-label">terminal</span><button class="copy-btn">copy</button></div>
+            <pre class="code-box"><code>npm run build
+npm run typecheck
+npm run test:smoke</code></pre>
+          </div>
+          <p style="font-size:0.8rem;color:rgba(255,255,255,0.4);margin-top:0.75rem;">Internal release packaging excludes local session state, local provider secrets, and workspace-specific data.</p>
+        </section>
+      </div>
+
+    </div>
+  </div>
+
+</main>
+
+<script src="js/main.js"></script>
+</body>
+</html>

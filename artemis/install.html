@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artemis / Install — Entry Sequence</title>
+  <meta name="description" content="Artemis CLI installation — macOS and Windows step-by-step.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23000000'/><circle cx='16' cy='16' r='8' fill='none' stroke='%23ffb82e' stroke-width='1.5' stroke-dasharray='3 5' opacity='0.8'/></svg>">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="bg-image-layer"></div>
+<canvas id="bg-canvas"></canvas>
+
+<main class="main-shell">
+
+  <nav class="top-nav">
+    <a href="index.html" class="nav-link">hall</a>
+    <a href="statement.html" class="nav-link">statement</a>
+    <a href="install.html" class="nav-link active">install</a>
+    <a href="workflows.html" class="nav-link">workflows</a>
+    <a href="operations.html" class="nav-link">operations</a>
+    <a href="sponsor.html" class="nav-link">sponsor</a>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero-zone animate-in">
+    <div class="hero-art" style="max-width:380px;">
+      <img src="images/section-install.png" alt="Abstract golden strokes — entry">
+    </div>
+    <div class="hero-title-block">
+      <h1 style="font-weight:900;font-size:clamp(2rem,5vw,3rem);text-transform:uppercase;letter-spacing:-0.02em;color:rgba(255,255,255,0.92);margin-bottom:0.75rem;">entry sequence</h1>
+      <p class="hero-tagline">A smaller room for first-time users: what to install, what to type, what to expect, and how to remove it cleanly if you decide it is not for you.</p>
+    </div>
+  </section>
+
+  <hr class="void-divider">
+
+  <div class="content-body">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="card card-gold">
+        <div class="card-corner card-corner-tl"></div>
+        <div class="card-label" style="color:var(--gold);">lanes</div>
+        <div class="sidebar-link">what you need</div>
+        <div class="sidebar-link">macOS install</div>
+        <div class="sidebar-link">windows install</div>
+        <div class="sidebar-link">first launch</div>
+        <div class="sidebar-link">full uninstall</div>
+      </div>
+    </aside>
+
+    <div class="content-stack">
+
+      <!-- What You Need -->
+      <section class="card card-gold">
+        <div class="card-corner card-corner-tl"></div>
+        <div class="card-label" style="color:var(--gold);">what you need</div>
+        <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-top:1rem;">
+          <div class="info-card">
+            <div class="info-label">system</div>
+            <div class="info-text">Install <strong style="color:rgba(255,255,255,0.9);">Node.js LTS</strong>. If you already have Node and npm, you are ready for Artemis.</div>
+          </div>
+          <div class="info-card">
+            <div class="info-label">check first</div>
+            <div class="info-text">Run <span class="code-inline">node --version</span> and <span class="code-inline">npm --version</span>. Version numbers mean you can skip the system install step.</div>
+          </div>
+          <div class="info-card">
+            <div class="info-label" style="color:var(--gold);">use this window</div>
+            <div class="info-text">macOS: <strong style="color:rgba(255,255,255,0.9);">Terminal</strong>. Windows: <strong style="color:rgba(255,255,255,0.9);">PowerShell</strong>.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- macOS + Windows -->
+      <div style="display:grid;gap:1.5rem;grid-template-columns:1fr;">
+        <div class="card-grid card-grid-2">
+
+          <!-- macOS -->
+          <section class="card card-gold">
+            <div class="card-corner card-corner-tl"></div>
+            <div class="card-label" style="color:var(--gold);">macOS install</div>
+            <p style="font-size:0.85rem;color:rgba(255,255,255,0.5);margin-bottom:1rem;">The simplest path for a Mac user who wants the CLI working without extra setup.</p>
+
+            <div class="step-section">
+              <div class="step-num">step 01</div>
+              <h3 class="step-heading">open terminal</h3>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);">Go to <strong style="color:rgba(255,255,255,0.9);">Applications → Utilities → Terminal</strong>. Keep the same window open while you install.</p>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 02</div>
+              <h3 class="step-heading">check node and npm</h3>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);margin-bottom:0.5rem;">If both commands return a version number, skip straight to install Artemis.</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">macos terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>node --version
+npm --version</code></pre>
+              </div>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 03</div>
+              <h3 class="step-heading">install node if missing</h3>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);">The easiest route is the <strong style="color:rgba(255,255,255,0.9);">Node.js LTS</strong> installer from <strong style="color:rgba(255,255,255,0.9);">nodejs.org</strong>. Or via Homebrew:</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">macos terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>brew install node</code></pre>
+              </div>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 04</div>
+              <h3 class="step-heading">install artemis</h3>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">macos terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>npm install -g @rtemis</code></pre>
+              </div>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 05</div>
+              <h3 class="step-heading">verify and open</h3>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">macos terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>artemis --version
+artemis</code></pre>
+              </div>
+            </div>
+          </section>
+
+          <!-- Windows -->
+          <section class="card card-gold">
+            <div class="card-corner card-corner-br"></div>
+            <div class="card-label" style="color:var(--gold);">windows install</div>
+            <p style="font-size:0.85rem;color:rgba(255,255,255,0.5);margin-bottom:1rem;">For a normal Windows machine using PowerShell, not an advanced terminal setup.</p>
+
+            <div class="step-section">
+              <div class="step-num">step 01</div>
+              <h3 class="step-heading">open powershell</h3>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);">Press <strong style="color:rgba(255,255,255,0.9);">Start</strong>, type <strong style="color:rgba(255,255,255,0.9);">PowerShell</strong>, open as normal user.</p>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 02</div>
+              <h3 class="step-heading">check node and npm</h3>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);margin-bottom:0.5rem;">If both commands answer with versions, Node is already installed.</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">windows powershell</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>node --version
+npm --version</code></pre>
+              </div>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 03</div>
+              <h3 class="step-heading">install node if missing</h3>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);">Use the <strong style="color:rgba(255,255,255,0.9);">Node.js LTS</strong> installer from <strong style="color:rgba(255,255,255,0.9);">nodejs.org</strong>. Or via winget:</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">windows powershell</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>winget install OpenJS.NodeJS.LTS</code></pre>
+              </div>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 04</div>
+              <h3 class="step-heading">install artemis</h3>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">windows powershell</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>npm install -g @rtemis</code></pre>
+              </div>
+            </div>
+            <div class="step-section">
+              <div class="step-num">step 05</div>
+              <h3 class="step-heading">verify and open</h3>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">windows powershell</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>artemis --version
+artemis</code></pre>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- First Launch + Uninstall -->
+      <div class="card-grid card-grid-2">
+
+        <!-- First Launch -->
+        <section class="card card-gold">
+          <div class="card-corner card-corner-tl"></div>
+          <div class="card-label" style="color:var(--gold);">first launch</div>
+          <div style="display:flex;flex-direction:column;gap:1rem;">
+
+            <div class="info-card">
+              <div style="display:flex;align-items:center;gap:0.75rem;border-bottom:1px solid rgba(255,255,255,0.04);padding-bottom:0.5rem;margin-bottom:0.5rem;">
+                <span class="step-num">01</span><h3 class="step-heading" style="margin:0;">boot the cli</h3>
+              </div>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);margin-bottom:0.5rem;">Open one terminal window, confirm the version, let the first interactive run start.</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>artemis --version
+artemis</code></pre>
+              </div>
+            </div>
+
+            <div class="info-card">
+              <div style="display:flex;align-items:center;gap:0.75rem;border-bottom:1px solid rgba(255,255,255,0.04);padding-bottom:0.5rem;margin-bottom:0.5rem;">
+                <span class="step-num">02</span><h3 class="step-heading" style="margin:0;">set the runtime</h3>
+              </div>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);">Enter API URL, model, API key, provider alias, and docs fallback first. Leave Telegram and doublekill for later.</p>
+            </div>
+
+            <div class="info-card">
+              <div style="display:flex;align-items:center;gap:0.75rem;border-bottom:1px solid rgba(255,255,255,0.04);padding-bottom:0.5rem;margin-bottom:0.5rem;">
+                <span class="step-num">03</span><h3 class="step-heading" style="margin:0;">run a health pass</h3>
+              </div>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);margin-bottom:0.5rem;">Check health, providers, and sessions before pointing Artemis at a real repo.</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>artemis doctor
+artemis providers
+artemis sessions</code></pre>
+              </div>
+            </div>
+
+            <div class="info-card">
+              <div style="display:flex;align-items:center;gap:0.75rem;border-bottom:1px solid rgba(255,255,255,0.04);padding-bottom:0.5rem;margin-bottom:0.5rem;">
+                <span class="step-num">04</span><h3 class="step-heading" style="margin:0;">start with a small task</h3>
+              </div>
+              <p style="font-size:0.8rem;color:rgba(255,255,255,0.5);margin-bottom:0.5rem;">Start with one short prompt. Add memory with <span class="code-inline">artemis artemis-md</span> and checkpoints with <span class="code-inline">wordup</span>.</p>
+              <div class="code-block">
+                <div class="code-label-row"><span class="code-label">terminal</span><button class="copy-btn">copy</button></div>
+                <pre class="code-box"><code>artemis run "make this repo easier to understand"
+artemis niko "plan the next improvement"</code></pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Full Uninstall -->
+        <section class="card card-gold">
+          <div class="card-corner card-corner-br"></div>
+          <div class="card-label" style="color:var(--gold);">full uninstall</div>
+          <p style="font-size:0.8rem;color:rgba(255,255,255,0.4);margin-bottom:1rem;">Pick the platform wipe that matches your machine, then confirm the command is gone.</p>
+
+          <div class="info-card" style="margin-bottom:0.75rem;">
+            <p style="font-size:0.75rem;color:rgba(255,255,255,0.5);margin-bottom:0.5rem;">Remove the global package first, then confirm <span class="code-inline">artemis --version</span> fails (macOS) or <span class="code-inline">Get-Command artemis</span> returns nothing (Windows).</p>
+            <div class="code-block">
+              <div class="code-label-row"><span class="code-label">terminal</span><button class="copy-btn">copy</button></div>
+              <pre class="code-box"><code>npm uninstall -g @rtemis</code></pre>
+            </div>
+          </div>
+
+          <div class="step-section">
+            <div class="step-num">macOS</div>
+            <h3 class="step-heading">full wipe — default macOS locations</h3>
+            <p style="font-size:0.75rem;color:rgba(255,255,255,0.4);margin-bottom:0.5rem;">Run from each project root where you used Artemis.</p>
+            <div class="code-block">
+              <div class="code-label-row"><span class="code-label">macos terminal</span><button class="copy-btn">copy</button></div>
+              <pre class="code-box"><code>npm uninstall -g @rtemis
+npm cache clean --force
+rm -rf "$(npm config get cache)/_npx"
+
+rm -rf "$HOME/.artemis" \
+"$HOME/.config/artemis" \
+"$HOME/.cache/artemis" \
+"$HOME/.local/share/artemis" \
+"$HOME/.local/state/artemis" \
+"$HOME/Library/Application Support/Artemis" \
+"$HOME/Library/Caches/Artemis" \
+"$HOME/Library/Logs/Artemis"
+
+find . -type f \( -name 'Artemis.MD' -o -name 'WordUP*.md' \) -delete
+hash -r</code></pre>
+            </div>
+          </div>
+
+          <div class="step-section">
+            <div class="step-num">windows</div>
+            <h3 class="step-heading">full wipe — default windows locations</h3>
+            <p style="font-size:0.75rem;color:rgba(255,255,255,0.4);margin-bottom:0.5rem;">Run from each project root where you used Artemis.</p>
+            <div class="code-block">
+              <div class="code-label-row"><span class="code-label">windows powershell</span><button class="copy-btn">copy</button></div>
+              <pre class="code-box"><code>npm uninstall -g @rtemis
+npm cache clean --force
+$npmCache = npm config get cache
+Remove-Item -Path (Join-Path $npmCache "_npx") -Recurse -Force -ErrorAction SilentlyContinue
+
+@(
+"$env:USERPROFILE\.artemis"
+"$env:APPDATA\artemis"
+"$env:LOCALAPPDATA\artemis"
+"$env:APPDATA\Artemis"
+"$env:LOCALAPPDATA\Artemis"
+) | ForEach-Object {
+Remove-Item -Path $_ -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Get-ChildItem -Path . -Recurse -Force -Include "Artemis.MD","WordUP*.md" |
+Remove-Item -Force -ErrorAction SilentlyContinue</code></pre>
+            </div>
+          </div>
+        </section>
+      </div>
+
+    </div>
+  </div>
+
+</main>
+
+<script src="js/main.js"></script>
+</body>
+</html>

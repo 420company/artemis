@@ -2083,6 +2083,122 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
+    // ── /spotify login | logout | status ──────────────────────────────────
+    // Spotify OAuth (PKCE) flow. After /spotify login, brain has 10
+    // spotify_* tools available for use from CLI or via bridges (Telegram /
+    // Discord / WeChat).
+    if (trimmed === '/spotify' || trimmed.startsWith('/spotify ')) {
+      const sub = trimmed.slice('/spotify'.length).trim()
+      const { loadSpotifyConfig, saveSpotifyConfig, clearSpotifyAuth } = await import('../tools/spotify/store.js')
+
+      if (sub === 'login') {
+        // Step 1: get Client ID from existing config or prompt user
+        const cfg = await loadSpotifyConfig()
+        let clientId = cfg.clientId
+        if (!clientId) {
+          appendSystemPanel(
+            t('Spotify 首次配置', 'Spotify First-Time Setup'),
+            [
+              t(
+                '需要你在 Spotify 开发者后台注册一个应用（一次性，~3 分钟）：',
+                'Register a Spotify app at the developer dashboard (one-time, ~3 min):',
+              ),
+              '',
+              '  1. ' + t('打开 https://developer.spotify.com/dashboard', 'Open https://developer.spotify.com/dashboard'),
+              '  2. ' + t('Create app → 任意名字（如 Artemis Home）', 'Create app → any name (e.g. Artemis Home)'),
+              '  3. ' + t('Redirect URI 填: http://127.0.0.1:8888/callback', 'Set Redirect URI to: http://127.0.0.1:8888/callback'),
+              '  4. ' + t('勾选 "Web API"', 'Check "Web API" capability'),
+              '  5. ' + t('在 Settings 复制 Client ID（不需要 Secret）', 'Copy Client ID from Settings (Secret not needed)'),
+              '',
+              t('完成后，把 Client ID 粘到下一行：', 'Paste your Client ID below:'),
+            ],
+          )
+          const idInput = await prompt.releaseTerminal(async () => {
+            const readline = await import('node:readline/promises')
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+            try {
+              return (await rl.question(t('Spotify Client ID: ', 'Spotify Client ID: '))).trim()
+            } finally {
+              rl.close()
+            }
+          })
+          prompt.forceRedraw()
+          const trimmedId = (typeof idInput === 'string' ? idInput : '').trim()
+          if (!trimmedId || trimmedId.length < 20) {
+            appendSystemPanel(t('已取消', 'Cancelled'), [t('未输入有效的 Client ID。', 'No valid Client ID provided.')])
+            continue
+          }
+          clientId = trimmedId
+          await saveSpotifyConfig({ ...cfg, clientId })
+        }
+
+        // Step 2: run OAuth flow
+        appendSystemPanel(
+          t('Spotify 授权中', 'Spotify authorization in progress'),
+          [t('浏览器即将打开，请登录 Spotify 并授权 Artemis...', 'Browser will open. Log in to Spotify and authorize Artemis...')],
+        )
+        const { loginSpotify } = await import('../tools/spotify/oauth.js')
+        const result = await loginSpotify(clientId)
+        if (!result.ok) {
+          appendSystemPanel(t('Spotify 登录失败', 'Spotify Login Failed'), [result.error])
+        } else {
+          const userLine = result.config.user?.displayName
+            ? `${result.config.user.displayName} <${result.config.user.email ?? ''}>`
+            : (result.config.user?.email ?? '(unknown user)')
+          appendSystemPanel(
+            t('Spotify 已连接 ✓', 'Spotify connected ✓'),
+            [
+              t(`账户：${userLine}`, `Account: ${userLine}`),
+              t('Brain 现在有 10 个 spotify_* 工具可用。', 'Brain now has 10 spotify_* tools available.'),
+              t('试试：/skills (找 spotify 相关) 或直接说 "放点音乐"', 'Try: /skills spotify or just say "play some music"'),
+            ],
+          )
+          // Refresh system prompt suffix so brain immediately sees Spotify hint
+          const refreshed = await buildFullSystemSuffix(workspaceRoot)
+          if (refreshed) setSystemPromptSuffix(refreshed)
+        }
+      } else if (sub === 'logout') {
+        await clearSpotifyAuth()
+        appendSystemPanel(
+          t('Spotify 已注销', 'Spotify Logged Out'),
+          [t('access_token + refresh_token 已清除。Client ID 保留以便下次 /spotify login 不需重输。', 'Tokens cleared. Client ID kept for next /spotify login.')],
+        )
+        const refreshed = await buildFullSystemSuffix(workspaceRoot)
+        if (refreshed) setSystemPromptSuffix(refreshed)
+      } else if (sub === '' || sub === 'status') {
+        const cfg = await loadSpotifyConfig()
+        const lines: string[] = []
+        if (!cfg.clientId) {
+          lines.push(t('未配置。运行 /spotify login 开始。', 'Not configured. Run /spotify login to start.'))
+        } else if (!cfg.auth) {
+          lines.push(t(`Client ID 已存（${cfg.clientId.slice(0, 8)}...），但未授权。运行 /spotify login。`, `Client ID configured (${cfg.clientId.slice(0, 8)}...). Not authorized. Run /spotify login.`))
+        } else {
+          const expiresIn = Math.max(0, Math.round((cfg.auth.expiresAt - Date.now()) / 1000))
+          lines.push(t(`✓ 已登录`, `✓ Logged in`))
+          if (cfg.user) lines.push(t(`账户：${cfg.user.displayName ?? cfg.user.email ?? cfg.user.id}`, `Account: ${cfg.user.displayName ?? cfg.user.email ?? cfg.user.id}`))
+          lines.push(t(`Token 还有 ${expiresIn} 秒有效（自动刷新）`, `Token valid for ${expiresIn}s (auto-refreshes)`))
+          if (cfg.preferredDevice) {
+            lines.push(t(`默认设备：${cfg.preferredDevice.name}`, `Preferred device: ${cfg.preferredDevice.name}`))
+          }
+          lines.push('')
+          lines.push(t('用法：', 'Usage:'))
+          lines.push('  /spotify logout          ' + t('注销', 'log out'))
+          lines.push('  /spotify status          ' + t('查看状态', 'show status'))
+        }
+        appendSystemPanel(t('Spotify 状态', 'Spotify Status'), lines)
+      } else {
+        appendSystemPanel(
+          t('Spotify 用法', 'Spotify Usage'),
+          [
+            '/spotify          ' + t('或 /spotify status — 查看状态', 'or /spotify status — show status'),
+            '/spotify login    ' + t('OAuth 登录（首次需要 Client ID）', 'OAuth login (Client ID needed first time)'),
+            '/spotify logout   ' + t('注销', 'log out'),
+          ],
+        )
+      }
+      continue
+    }
+
     if (trimmed === '/newborn') {
       const localDataRoot = resolveDataRootDir(cwd)
       const globalDataRoot = path.join(HOME_DIR, '.artemis')

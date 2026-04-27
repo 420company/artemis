@@ -17,6 +17,17 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'run_command',
   'generate_image',
   'generate_video',
+  // ── Spotify integration ──────────────────────────────────────────────
+  'spotify_play_liked',
+  'spotify_search_and_play',
+  'spotify_play_playlist',
+  'spotify_resume',
+  'spotify_pause',
+  'spotify_skip_next',
+  'spotify_skip_previous',
+  'spotify_set_volume',
+  'spotify_now_playing',
+  'spotify_set_device',
 ];
 
 export const BUILTIN_DIRECT_TOOL_TYPES: readonly AgentActionType[] =

@@ -395,7 +395,18 @@ export type AgentAction =
       timeout?: number;
       maxIterations?: number;
       priority?: 'low' | 'medium' | 'high';
-    };
+    }
+  // ── Spotify integration ─────────────────────────────────────────────────
+  | { type: 'spotify_play_liked'; shuffle?: boolean; deviceHint?: string }
+  | { type: 'spotify_search_and_play'; query: string; kind?: 'track' | 'playlist' | 'auto'; deviceHint?: string }
+  | { type: 'spotify_play_playlist'; name: string; deviceHint?: string }
+  | { type: 'spotify_resume'; deviceHint?: string }
+  | { type: 'spotify_pause' }
+  | { type: 'spotify_skip_next' }
+  | { type: 'spotify_skip_previous' }
+  | { type: 'spotify_set_volume'; volume: number }
+  | { type: 'spotify_now_playing' }
+  | { type: 'spotify_set_device'; deviceHint: string; startPlaying?: boolean };
 
 export type AgentActionType = AgentAction['type'];
 
@@ -426,6 +437,17 @@ export const ALL_AGENT_ACTION_TYPES = [
   'generate_video',
   'request_freya_visual_asset',
   'agent',
+  // ── Spotify integration ────────────────────────────────────────────────
+  'spotify_play_liked',
+  'spotify_search_and_play',
+  'spotify_play_playlist',
+  'spotify_resume',
+  'spotify_pause',
+  'spotify_skip_next',
+  'spotify_skip_previous',
+  'spotify_set_volume',
+  'spotify_now_playing',
+  'spotify_set_device',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
