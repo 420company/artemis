@@ -121,6 +121,33 @@ function describeAction(action: AgentAction): string {
       return `spotify: get currently playing`;
     case 'spotify_set_device':
       return `spotify: transfer playback to "${action.deviceHint}"`;
+    // ── Ambient agent integrations ──────────────────────────────────────
+    case 'weather_current':
+      return `weather: current at ${action.location}`;
+    case 'weather_forecast':
+      return `weather: ${action.days ?? 3}-day forecast at ${action.location}`;
+    case 'world_clock':
+      return `world_clock: ${action.cities.join(', ')}`;
+    case 'time_diff':
+      return `time_diff: ${action.fromCity} → ${action.toCity}`;
+    case 'currency_convert':
+      return `currency: ${action.amount} ${action.from} → ${action.to}`;
+    case 'currency_rates':
+      return `currency: rates for ${action.base}`;
+    case 'flight_lookup':
+      return `flight: lookup ${action.callsign}`;
+    case 'calendar_list_today':
+      return `calendar: list today`;
+    case 'calendar_list_upcoming':
+      return `calendar: list next ${action.daysAhead ?? 7} days`;
+    case 'calendar_add_event':
+      return `calendar: add "${action.title}" at ${action.startISO}`;
+    case 'reminders_list':
+      return `reminders: list${action.list ? ` (${action.list})` : ''}`;
+    case 'reminders_add':
+      return `reminders: add "${action.title}"`;
+    case 'reminders_complete':
+      return `reminders: complete "${action.title}"`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

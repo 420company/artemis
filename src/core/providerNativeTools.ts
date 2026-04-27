@@ -1160,6 +1160,149 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           startPlaying: { type: 'boolean', description: 'Whether to start playback after transfer. Default: false.' },
         },
       };
+
+    // ── Ambient agent: weather ───────────────────────────────────────
+    case 'weather_current':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['location'],
+        properties: {
+          location: nonEmptyStringSchema('City name (Chinese or English) or "lat,lng".'),
+        },
+      };
+    case 'weather_forecast':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['location'],
+        properties: {
+          location: nonEmptyStringSchema('City name or "lat,lng".'),
+          days: { type: 'integer', minimum: 1, maximum: 3, description: 'Number of days (1-3). Default: 3.' },
+        },
+      };
+
+    // ── Ambient agent: world clock ───────────────────────────────────
+    case 'world_clock':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['cities'],
+        properties: {
+          cities: {
+            type: 'array',
+            description: 'List of city names or IANA timezones (e.g. ["Bangkok", "Asia/Tokyo", "纽约"]).',
+            items: { type: 'string' },
+            minItems: 1,
+          },
+        },
+      };
+    case 'time_diff':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['fromCity', 'toCity'],
+        properties: {
+          fromCity: nonEmptyStringSchema('Source city or timezone.'),
+          toCity: nonEmptyStringSchema('Target city or timezone.'),
+        },
+      };
+
+    // ── Ambient agent: currency ──────────────────────────────────────
+    case 'currency_convert':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['amount', 'from', 'to'],
+        properties: {
+          amount: { type: 'number', description: 'Amount to convert.' },
+          from: nonEmptyStringSchema('Source ISO 4217 currency code (USD, CNY, THB, EUR...).'),
+          to: nonEmptyStringSchema('Target ISO 4217 currency code.'),
+        },
+      };
+    case 'currency_rates':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['base'],
+        properties: {
+          base: nonEmptyStringSchema('Base ISO 4217 currency code.'),
+          targets: {
+            type: 'array',
+            description: 'Optional list of target currencies. Defaults to common ones.',
+            items: { type: 'string' },
+          },
+        },
+      };
+
+    // ── Ambient agent: flight tracking ───────────────────────────────
+    case 'flight_lookup':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['callsign'],
+        properties: {
+          callsign: nonEmptyStringSchema('Flight number / callsign (e.g. "TG681", "BA12", "CA988").'),
+        },
+      };
+
+    // ── Apple Calendar (macOS) ───────────────────────────────────────
+    case 'calendar_list_today':
+      return { type: 'object', additionalProperties: false, properties: {} };
+    case 'calendar_list_upcoming':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          daysAhead: { type: 'integer', minimum: 1, maximum: 30, description: 'How many days ahead to look. Default: 7.' },
+        },
+      };
+    case 'calendar_add_event':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'startISO'],
+        properties: {
+          title: nonEmptyStringSchema('Event title.'),
+          startISO: nonEmptyStringSchema('Start time in ISO 8601 (e.g. "2026-04-29T19:00:00").'),
+          endISO: optionalStringSchema('Optional end time ISO 8601. Defaults to start + 1 hour.'),
+          notes: optionalStringSchema('Optional event notes / description.'),
+          calendarName: optionalStringSchema('Optional calendar name. Defaults to first writable calendar.'),
+        },
+      };
+
+    // ── Apple Reminders (macOS) ──────────────────────────────────────
+    case 'reminders_list':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          list: optionalStringSchema('Optional reminder list name. Default: all lists.'),
+          includeCompleted: { type: 'boolean', description: 'Include completed reminders. Default: false.' },
+        },
+      };
+    case 'reminders_add':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title'],
+        properties: {
+          title: nonEmptyStringSchema('Reminder title.'),
+          list: optionalStringSchema('Optional list name. Default: default list.'),
+          dueISO: optionalStringSchema('Optional due date in ISO 8601.'),
+          notes: optionalStringSchema('Optional notes.'),
+        },
+      };
+    case 'reminders_complete':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title'],
+        properties: {
+          title: nonEmptyStringSchema('Reminder title to mark completed (exact match preferred, then substring).'),
+          list: optionalStringSchema('Optional list name to scope the search.'),
+        },
+      };
   default:
     return { type: 'object', properties: {}, additionalProperties: true };
   }

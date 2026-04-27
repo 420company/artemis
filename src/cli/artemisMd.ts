@@ -79,6 +79,7 @@ export async function buildProjectInstructionSuffix(cwd: string): Promise<string
 export async function buildFullSystemSuffix(cwd: string): Promise<string> {
   const { buildMcpAwarenessHint } = await import('../core/mcpAwareness.js')
   const { buildSpotifyHint }      = await import('../tools/spotify/triggers.js')
+  const { buildAmbientToolsHint } = await import('../tools/ambientHint.js')
   const [projectSuffix, userProfile, soul, mcpHint, spotifyHint] = await Promise.all([
     buildProjectInstructionSuffix(cwd),
     loadUserProfile(),
@@ -86,7 +87,8 @@ export async function buildFullSystemSuffix(cwd: string): Promise<string> {
     buildMcpAwarenessHint(cwd),
     buildSpotifyHint(),
   ])
+  const ambientHint    = buildAmbientToolsHint()
   const profileSection = formatProfileForPrompt(userProfile)
   const soulSection    = formatSoulForPrompt(soul)
-  return [projectSuffix, profileSection, soulSection, mcpHint, spotifyHint].filter(Boolean).join('')
+  return [projectSuffix, profileSection, soulSection, mcpHint, spotifyHint, ambientHint].filter(Boolean).join('')
 }

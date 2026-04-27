@@ -982,6 +982,233 @@ const capabilityToolDefs: ToolDefinition[] = [
       return executeSpotifySetDevice(action);
     }) as any,
   },
+
+  // ── Weather ────────────────────────────────────────────────────────────
+  {
+    type: 'weather_current',
+    description: '查询指定城市的当前天气（温度、湿度、风速、天气描述）。城市名支持中英文。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.location, 'location', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeWeatherCurrent } = await import('./weather/weatherTools.js');
+      return executeWeatherCurrent(action);
+    }) as any,
+  },
+  {
+    type: 'weather_forecast',
+    description: '查询指定城市的多日天气预报（最多 3 天）。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.location, 'location', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeWeatherForecast } = await import('./weather/weatherTools.js');
+      return executeWeatherForecast(action);
+    }) as any,
+  },
+
+  // ── World clock / time diff ────────────────────────────────────────────
+  {
+    type: 'world_clock',
+    description: '同时显示多个城市的当前时间。cities 数组接受城市名（中英文）或 IANA 时区。',
+    kind: 'function',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      if (!Array.isArray(action?.cities) || action.cities.length === 0) {
+        errors.push('cities must be a non-empty array');
+      }
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeWorldClock } = await import('./worldClock/worldClockTools.js');
+      return executeWorldClock(action);
+    }) as any,
+  },
+  {
+    type: 'time_diff',
+    description: '计算两个城市的时差（"我在曼谷给上海家人打电话现在合适吗"）。',
+    kind: 'function',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.fromCity, 'fromCity', errors);
+      validateRequiredNonEmptyString(action?.toCity, 'toCity', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeTimeDiff } = await import('./worldClock/worldClockTools.js');
+      return executeTimeDiff(action);
+    }) as any,
+  },
+
+  // ── Currency ───────────────────────────────────────────────────────────
+  {
+    type: 'currency_convert',
+    description: '货币换算（如 5000 THB 换成 USD）。from / to 用 ISO 4217 代码（USD/CNY/THB/EUR 等），中文名也接受。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      if (typeof action?.amount !== 'number') errors.push('amount must be a number');
+      validateRequiredNonEmptyString(action?.from, 'from', errors);
+      validateRequiredNonEmptyString(action?.to, 'to', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeCurrencyConvert } = await import('./currency/currencyTools.js');
+      return executeCurrencyConvert(action);
+    }) as any,
+  },
+  {
+    type: 'currency_rates',
+    description: '查询某基础货币对常见货币的当前汇率。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.base, 'base', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeCurrencyRates } = await import('./currency/currencyTools.js');
+      return executeCurrencyRates(action);
+    }) as any,
+  },
+
+  // ── Flight tracking ────────────────────────────────────────────────────
+  {
+    type: 'flight_lookup',
+    description: '查询航班信息（航司、机型、起降城市）+ 实时位置（在飞行时）。callsign 为航班号如 "TG681"、"BA12"。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.callsign, 'callsign', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeFlightLookup } = await import('./flightTrack/flightTrackTools.js');
+      return executeFlightLookup(action);
+    }) as any,
+  },
+
+  // ── Apple Calendar (macOS native via osascript) ────────────────────────
+  {
+    type: 'calendar_list_today',
+    description: '列出今日的 Apple Calendar 事件（macOS 限定，需授权日历访问）。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeCalendarList } = await import('./appleCalendar/appleCalendarTools.js');
+      return executeCalendarList(action);
+    }) as any,
+  },
+  {
+    type: 'calendar_list_upcoming',
+    description: '列出未来 N 天的 Apple Calendar 事件，N 默认 7。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeCalendarList } = await import('./appleCalendar/appleCalendarTools.js');
+      return executeCalendarList(action);
+    }) as any,
+  },
+  {
+    type: 'calendar_add_event',
+    description: '添加 Apple Calendar 事件。startISO 必填（ISO 8601 格式如 "2026-04-29T19:00:00"）。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.title, 'title', errors);
+      validateRequiredNonEmptyString(action?.startISO, 'startISO', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeCalendarAddEvent } = await import('./appleCalendar/appleCalendarTools.js');
+      return executeCalendarAddEvent(action);
+    }) as any,
+  },
+
+  // ── Apple Reminders (macOS native) ─────────────────────────────────────
+  {
+    type: 'reminders_list',
+    description: '列出 Apple Reminders 待办事项。可指定 list 名，默认列所有未完成。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (action: any) => {
+      const { executeRemindersList } = await import('./appleReminders/appleRemindersTools.js');
+      return executeRemindersList(action);
+    }) as any,
+  },
+  {
+    type: 'reminders_add',
+    description: '添加 Apple Reminders 待办。可选 list / dueISO / notes。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.title, 'title', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeRemindersAdd } = await import('./appleReminders/appleRemindersTools.js');
+      return executeRemindersAdd(action);
+    }) as any,
+  },
+  {
+    type: 'reminders_complete',
+    description: '把指定标题的待办标记为完成（先尝试精确匹配，否则模糊匹配第一条）。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (action: any) => {
+      const errors: string[] = [];
+      validateRequiredNonEmptyString(action?.title, 'title', errors);
+      return errors;
+    },
+    execute: (async (action: any) => {
+      const { executeRemindersComplete } = await import('./appleReminders/appleRemindersTools.js');
+      return executeRemindersComplete(action);
+    }) as any,
+  },
 ];
 
 export const toolDefs: ToolDefinition[] = [

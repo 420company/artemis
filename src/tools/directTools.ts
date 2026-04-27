@@ -28,6 +28,20 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'spotify_set_volume',
   'spotify_now_playing',
   'spotify_set_device',
+  // ── Ambient agent integrations ──────────────────────────────────────
+  'weather_current',
+  'weather_forecast',
+  'world_clock',
+  'time_diff',
+  'currency_convert',
+  'currency_rates',
+  'flight_lookup',
+  'calendar_list_today',
+  'calendar_list_upcoming',
+  'calendar_add_event',
+  'reminders_list',
+  'reminders_add',
+  'reminders_complete',
 ];
 
 export const BUILTIN_DIRECT_TOOL_TYPES: readonly AgentActionType[] =

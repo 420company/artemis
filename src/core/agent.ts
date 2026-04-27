@@ -1460,6 +1460,33 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return 'spotify_now_playing';
     case 'spotify_set_device':
       return `spotify_set_device device=${truncate(action.deviceHint, 80)}${action.startPlaying ? ' start=true' : ''}`;
+    // ── Ambient agent integrations ──────────────────────────────────────
+    case 'weather_current':
+      return `weather_current location=${truncate(action.location, 60)}`;
+    case 'weather_forecast':
+      return `weather_forecast location=${truncate(action.location, 60)} days=${action.days ?? 3}`;
+    case 'world_clock':
+      return `world_clock cities=[${action.cities.slice(0, 5).join(',')}]`;
+    case 'time_diff':
+      return `time_diff ${action.fromCity}→${action.toCity}`;
+    case 'currency_convert':
+      return `currency_convert ${action.amount} ${action.from}→${action.to}`;
+    case 'currency_rates':
+      return `currency_rates base=${action.base}`;
+    case 'flight_lookup':
+      return `flight_lookup callsign=${action.callsign}`;
+    case 'calendar_list_today':
+      return 'calendar_list_today';
+    case 'calendar_list_upcoming':
+      return `calendar_list_upcoming days=${action.daysAhead ?? 7}`;
+    case 'calendar_add_event':
+      return `calendar_add_event "${truncate(action.title, 60)}" at ${action.startISO}`;
+    case 'reminders_list':
+      return `reminders_list${action.list ? ` list=${action.list}` : ''}`;
+    case 'reminders_add':
+      return `reminders_add "${truncate(action.title, 60)}"`;
+    case 'reminders_complete':
+      return `reminders_complete "${truncate(action.title, 60)}"`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);

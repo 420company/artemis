@@ -419,7 +419,22 @@ export type AgentAction =
   | { type: 'spotify_skip_previous' }
   | { type: 'spotify_set_volume'; volume: number }
   | { type: 'spotify_now_playing' }
-  | { type: 'spotify_set_device'; deviceHint: string; startPlaying?: boolean };
+  | { type: 'spotify_set_device'; deviceHint: string; startPlaying?: boolean }
+  // ── Ambient agent: weather / time / currency / flight ──────────────────
+  | { type: 'weather_current'; location: string }
+  | { type: 'weather_forecast'; location: string; days?: number }
+  | { type: 'world_clock'; cities: string[] }
+  | { type: 'time_diff'; fromCity: string; toCity: string }
+  | { type: 'currency_convert'; amount: number; from: string; to: string }
+  | { type: 'currency_rates'; base: string; targets?: string[] }
+  | { type: 'flight_lookup'; callsign: string }
+  // ── Apple-native (macOS only): Calendar / Reminders ────────────────────
+  | { type: 'calendar_list_today' }
+  | { type: 'calendar_list_upcoming'; daysAhead?: number }
+  | { type: 'calendar_add_event'; title: string; startISO: string; endISO?: string; notes?: string; calendarName?: string }
+  | { type: 'reminders_list'; list?: string; includeCompleted?: boolean }
+  | { type: 'reminders_add'; title: string; list?: string; dueISO?: string; notes?: string }
+  | { type: 'reminders_complete'; title: string; list?: string };
 
 export type AgentActionType = AgentAction['type'];
 
@@ -461,6 +476,20 @@ export const ALL_AGENT_ACTION_TYPES = [
   'spotify_set_volume',
   'spotify_now_playing',
   'spotify_set_device',
+  // ── Ambient agent integrations ─────────────────────────────────────────
+  'weather_current',
+  'weather_forecast',
+  'world_clock',
+  'time_diff',
+  'currency_convert',
+  'currency_rates',
+  'flight_lookup',
+  'calendar_list_today',
+  'calendar_list_upcoming',
+  'calendar_add_event',
+  'reminders_list',
+  'reminders_add',
+  'reminders_complete',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
