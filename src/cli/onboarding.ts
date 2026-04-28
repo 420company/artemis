@@ -341,22 +341,28 @@ async function configureVisualModel(
     )
   }
 
-  // 
+  //
   console.log(c('  ' + t('图片生成配置', 'Image generation configuration'), A.cyan))
-  const imageProvider = await chooseInteractiveOption<string>({
+  const imageProviderChoice = await chooseInteractiveOption<string>({
     title: t('选择图片生成提供商', 'Choose image generation provider'),
     hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
     choices: [
       { label: 'BytePlus', value: 'byteplus' },
-      { label: 'OpenAI GPT Image 1.5', value: 'openai' },
+      { label: 'OpenAI GPT Image 2 (gpt-image-2)', value: 'openai:gpt-image-2' },
+      { label: 'OpenAI GPT Image 1.5 (gpt-image-1.5)', value: 'openai:gpt-image-1.5' },
       { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
       { label: t('取消', 'Cancel'), value: '__cancel__' },
     ],
   })
 
-  if (imageProvider === '__cancel__') {
+  if (imageProviderChoice === '__cancel__') {
     return null
   }
+
+  // Split provider:model hint (e.g. 'openai:gpt-image-2' → provider='openai', preselectedModel='gpt-image-2')
+  const [imageProvider, preselectedImageModel] = imageProviderChoice.includes(':')
+    ? imageProviderChoice.split(':') as [string, string]
+    : [imageProviderChoice, undefined]
 
   printVisualProviderSupportNote(imageProvider, zh)
 
@@ -366,7 +372,7 @@ async function configureVisualModel(
   }
 
   const imageDefaultBaseUrl = defaultVisualBaseUrlForProvider(imageProvider)
-  const imageDefaultModel = defaultVisualModelForProvider(imageProvider, 'image')
+  const imageDefaultModel = preselectedImageModel ?? defaultVisualModelForProvider(imageProvider, 'image')
   const imageBaseUrl = await askVisualBaseUrl(imageProvider, t('图片', 'Image'))
   if (imageBaseUrl === null) {
     return null
