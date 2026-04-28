@@ -1732,7 +1732,13 @@ export function createInteractivePromptIO(_options?: { rl?: Interface }): Prompt
           
           process.stdout.write(prompt)
           let buf = ''
-          
+
+          const maskDisplay = (s: string): string => {
+            if (s.length === 0) return ''
+            if (s.length <= 8) return '*'.repeat(s.length)
+            return s.slice(0, 4) + '*'.repeat(s.length - 8) + s.slice(-4)
+          }
+
           const onData = (ch: string) => {
             if (ch === '\r' || ch === '\n') {
               process.stdin.setRawMode(false)
@@ -1748,27 +1754,22 @@ export function createInteractivePromptIO(_options?: { rl?: Interface }): Prompt
               resolve('')
             } else if (ch === '\u007f' || ch === '\b') {
               if (buf.length > 0) {
+                const prevMasked = maskDisplay(buf)
                 buf = buf.slice(0, -1)
-                process.stdout.write('\b \b')
+                const newMasked = maskDisplay(buf)
+                process.stdout.write(
+                  '\b'.repeat(prevMasked.length) +
+                  newMasked +
+                  ' '.repeat(Math.max(0, prevMasked.length - newMasked.length)) +
+                  '\b'.repeat(Math.max(0, prevMasked.length - newMasked.length))
+                )
               }
             } else if (ch >= ' ') {
-              const graphemes = [...ch]
+              const prevMasked = maskDisplay(buf)
               buf += ch
-              
-              // Display masked version: first 4 and last 4 chars, rest as *
-              const masked = buf.length <= 8 
-                ? '*'.repeat(buf.length)
-                : buf.slice(0, 4) + '*'.repeat(buf.length - 8) + buf.slice(-4)
-              
-              if (buf.length > graphemes.length) {
-                process.stdout.write('\b'.repeat(
-                  (buf.length - graphemes.length <= 8 
-                    ? '*'.repeat(buf.length - graphemes.length)
-                    : buf.slice(0, 4) + '*'.repeat((buf.length - graphemes.length) - 8) + buf.slice(-4)
-                  ).length
-                ))
-              }
-              process.stdout.write(masked.slice(-graphemes.length))
+              const newMasked = maskDisplay(buf)
+              if (prevMasked.length > 0) process.stdout.write('\b'.repeat(prevMasked.length))
+              process.stdout.write(newMasked)
             }
           }
           

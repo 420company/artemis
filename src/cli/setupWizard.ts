@@ -572,7 +572,7 @@ async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise
 async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
   sectionTitle('Quick Setup', [
-    tr(locale, '配置主/副 Provider、Agent 默认值，并可选配置通讯平台。', 'Configure primary/secondary providers, runtime agent defaults, and optionally messaging.'),
+    tr(locale, '配置主/副 Provider、视觉模型、Agent 默认值，并可选配置通讯平台。', 'Configure primary/secondary providers, visual model, agent defaults, and optionally messaging.'),
   ])
 
   await configureModelProvider({ cwd, locale, quick: true })
@@ -588,6 +588,15 @@ async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }
       },
     },
   }))
+
+  const setupVisual = await askYesNo(
+    locale,
+    tr(locale, '现在配置视觉模型（图片/视频生成）？', 'Configure visual model (image/video generation) now?'),
+    false,
+  )
+  if (setupVisual) {
+    await runVisualModelSetup(locale, cwd)
+  }
 
   const setupMessaging = await askYesNo(
     locale,
