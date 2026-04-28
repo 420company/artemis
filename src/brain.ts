@@ -61,6 +61,7 @@ const BASE_SYSTEM_PROMPT = `\
 let provider: any = null;
 let providerConfig: any = null;
 let providerTelemetryContext: any = null;
+let providerCwd: string | null = null;
 let session: any = null;
 let systemPromptSuffix: string = '';
 // Runtime overrides from CLI flags (--model, --api-key, --base-url)
@@ -79,6 +80,7 @@ let _compressionThresholdOverride: number | undefined;
 // the lead provider, so callers can use it unconditionally.
 let workerProvider: any = null;
 let workerProviderConfig: any = null;
+let workerProviderCwd: string | null = null;
 
 /** Read last recorded prompt token count (for HUD / compression decisions). */
 export function getLastPromptTokens() { return _lastPromptTokens; }
@@ -89,14 +91,17 @@ export function applyProviderOverrides(opts: any) {
     _apiKeyOverride = opts.apiKey || _apiKeyOverride;
     _baseUrlOverride = opts.baseUrl || _baseUrlOverride;
     provider = null; // force re-create with new settings
+    providerCwd = null;
     workerProvider = null; // worker may need to re-resolve too
     workerProviderConfig = null;
+    workerProviderCwd = null;
 }
 
 /** Switch model mid-session (e.g. from /model slash command). */
 export function switchModel(model: any) {
     _modelOverride = model;
     provider = null;
+    providerCwd = null;
     // Worker provider stays — switching the lead doesn't invalidate the specialist.
 }
 
@@ -123,11 +128,12 @@ function buildSystemPromptText() {
 }
 
 // ── provider ──────────────────────────────────────────────────────────────────
-async function loadProvider() {
-    if (provider)
+async function loadProvider(cwd: string = process.cwd()) {
+    const requestedCwd = path.resolve(cwd);
+    if (provider && providerCwd === requestedCwd)
         return provider;
     // 1. Try cwd-local .artemis/providers.json
-    const currentCwd = process.cwd();
+    const currentCwd = requestedCwd;
     const store = new ProviderStore(currentCwd);
     const data = await store.load();
     let config = store.getDefaultMainProfile(data);
@@ -180,6 +186,7 @@ async function loadProvider() {
     provider = createTrackedProviderFromConfig(finalConfig, {
         ...(providerTelemetryContext ?? {}),
     });
+    providerCwd = currentCwd;
     return provider;
 }
 
@@ -198,16 +205,17 @@ function getProviderConfigSync() {
  *   2. global ~/.artemis/providers.json
  *   3. fallback to lead provider
  */
-async function loadWorkerProvider(): Promise<{ provider: any; config: any }> {
-    if (workerProvider && workerProviderConfig) {
+async function loadWorkerProvider(cwd: string = providerCwd ?? process.cwd()): Promise<{ provider: any; config: any }> {
+    const requestedCwd = path.resolve(cwd);
+    if (workerProvider && workerProviderConfig && workerProviderCwd === requestedCwd) {
         return { provider: workerProvider, config: workerProviderConfig };
     }
 
     // Make sure the lead is loaded so we can fall back to it
-    await loadProvider();
+    await loadProvider(requestedCwd);
 
     // Try cwd-local
-    const currentCwd = process.cwd();
+    const currentCwd = requestedCwd;
     const localStore = new ProviderStore(currentCwd);
     const localData = await localStore.load();
     let workerCfg = localStore.getProfile(localData, localData.specialistProfileId);
@@ -227,6 +235,7 @@ async function loadWorkerProvider(): Promise<{ provider: any; config: any }> {
         // re-reading providers.json on every call.
         workerProviderConfig = providerConfig;
         workerProvider = provider;
+        workerProviderCwd = requestedCwd;
         return { provider, config: providerConfig };
     }
 
@@ -239,6 +248,7 @@ async function loadWorkerProvider(): Promise<{ provider: any; config: any }> {
                 ? (workerCfg as { label: string }).label
                 : ('id' in workerCfg && typeof workerCfg.id === 'string' ? workerCfg.id : 'worker'),
     });
+    workerProviderCwd = requestedCwd;
 
     return { provider: workerProvider, config: workerProviderConfig };
 }
@@ -247,6 +257,7 @@ async function loadWorkerProvider(): Promise<{ provider: any; config: any }> {
 export function resetWorkerProvider() {
     workerProvider = null;
     workerProviderConfig = null;
+    workerProviderCwd = null;
 }
 
 /** True if a distinct specialist profile is configured (different from main). */
@@ -271,7 +282,7 @@ export async function getWorkerProvider() {
  * This is the inverse of getWorkerProvider().
  */
 export async function getLeadProvider(): Promise<{ provider: any; config: any }> {
-    const p = await loadProvider();
+    const p = await loadProvider(providerCwd ?? process.cwd());
     return { provider: p, config: providerConfig };
 }
 
@@ -318,8 +329,8 @@ export async function summarizeViaWorker(prompt: string): Promise<string> {
 }
 
 // ── session ───────────────────────────────────────────────────────────────────
-function getSession() {
-    if (!session) session = new Session(buildSystemPromptText(), process.cwd());
+function getSession(cwd: string = process.cwd()) {
+    if (!session) session = new Session(buildSystemPromptText(), cwd);
     return session;
 }
 
@@ -1170,10 +1181,10 @@ export async function think(
         onWorkspaceSwitchRequest,
         maxNativeToolRounds: rawMaxNativeToolRounds,
     } = options;
-    const tSession = getSession();
+    const tSession = getSession(cwd);
     tSession.addUser(input);
 
-    const p = await loadProvider();
+    const p = await loadProvider(cwd);
     let currentCwd = cwd;
     const providerConfigVal = getProviderConfigSync();
     let rawMessages = tSession.getMessages();

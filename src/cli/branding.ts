@@ -307,16 +307,23 @@ function buildSystemInfo(opts: SystemInfoOpts): string {
   const tCount = toolCount ?? DEFAULT_DIRECT_TOOL_COUNT
   const sCount = skillCount ?? 0
   const mCount = mcpCount  ?? 0
+  const toolLabels = [`${tCount} tools`, `${sCount} skills`, `${mCount} MCP`]
+  const bridgeLabels = bridges ?? []
+  const metricColumnWidths = toolLabels.map((label, index) =>
+    Math.max(stringWidth(label), stringWidth(bridgeLabels[index] ?? '')),
+  )
   const caps = [
-    val(`${tCount} tools`, 137, 180, 250),
-    sCount > 0 ? val(`${sCount} skills`, 203, 166, 247) : dim('0 skills'),
-    mCount > 0 ? val(`${mCount} MCP`,    148, 226, 213) : dim('0 MCP'),
+    padVisibleEnd(val(toolLabels[0]!, 137, 180, 250), metricColumnWidths[0]!),
+    padVisibleEnd(sCount > 0 ? val(toolLabels[1]!, 203, 166, 247) : dim(toolLabels[1]!), metricColumnWidths[1]!),
+    padVisibleEnd(mCount > 0 ? val(toolLabels[2]!, 148, 226, 213) : dim(toolLabels[2]!), metricColumnWidths[2]!),
   ].join(dim('  ·  '))
   rows.push(`${dot}${padVisibleEnd(dim(t('工具', 'tools')), labelWidth)}  ${caps}`)
 
   // Bridges row — only shown when at least one bridge is active
   if (bridges && bridges.length > 0) {
-    const bridgeParts = bridges.map(name => val(name, 148, 226, 213))
+    const bridgeParts = bridges.map((name, index) =>
+      padVisibleEnd(val(name, 148, 226, 213), metricColumnWidths[index] ?? stringWidth(name)),
+    )
     rows.push(`${dot}${padVisibleEnd(dim(t('桥接', 'bridges')), labelWidth)}  ${bridgeParts.join(dim('  ·  '))}`)
   }
 

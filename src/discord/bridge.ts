@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
+import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
 import type { BridgeTerminalEvent } from '../cli/bridgeNotify.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { CliSettingsStore } from '../cli/settings.js'
@@ -133,10 +134,11 @@ export async function setupDiscordBridge(options: {
 
   // Ask about auto-start
   const autoStartRaw = await readLine(t(
-    '  启动 artemis 时自动连接 Discord bridge？(y/N) ',
-    '  Auto-start Discord bridge when artemis launches? (y/N) '
+    '  启动 artemis 时自动连接 Discord bridge？(Y/n) ',
+    '  Auto-start Discord bridge when artemis launches? (Y/n) '
   ))
-  const autoStart = autoStartRaw.toLowerCase() === 'y'
+  const autoStartAnswer = autoStartRaw.trim().toLowerCase()
+  const autoStart = autoStartAnswer === '' || autoStartAnswer === 'y' || autoStartAnswer === 'yes'
 
   const existingData = await bragiStore.load()
   const existing = existingData.platforms.discord
@@ -259,7 +261,20 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
         const existing = discordStore.getTarget(data, message.targetId)
 
         if (existing) {
-          const session = await options.sessionStore.load(existing.sessionId)
+          const loaded = await loadSessionOrCreate({
+            sessionStore: options.sessionStore,
+            sessionId: existing.sessionId,
+            title: buildDiscordSessionTitle(message.targetLabel, options.cwd),
+            onRecovered: async (next) => {
+              options.onInfo?.(`[discord] recovered missing session ${existing.sessionId} -> ${next.id}`)
+              await discordStore.upsertTarget({ targetId: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
+              await bragiStore.upsertSession({ platform: 'discord', scope: message.targetId, targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
+            },
+          })
+          const session = loaded.session
+          if (loaded.recovered) {
+            return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: true }
+          }
           if (session && session.messages.length < DISCORD_SESSION_ROLLOVER_MSG_COUNT) {
             return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
           }
@@ -267,6 +282,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
           next.title = buildDiscordSessionTitle(message.targetLabel, options.cwd)
           await options.sessionStore.save(next)
           await discordStore.upsertTarget({ targetId: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
+          await bragiStore.upsertSession({ platform: 'discord', scope: message.targetId, targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
           return { storedSession: next, permissionMode: existing.permissionMode, rolledOver: true }
         }
 

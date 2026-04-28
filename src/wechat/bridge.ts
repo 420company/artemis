@@ -10,6 +10,7 @@
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
+import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
 import type { BridgeTerminalEvent } from '../cli/bridgeNotify.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { CliSettingsStore } from '../cli/settings.js'
@@ -45,9 +46,10 @@ async function askWeChatCredentials(
   store: WeChatStore,
   locale: UiLocale,
   onInfo?: (message: string) => void,
+  options?: { forceRefresh?: boolean },
 ): Promise<{ gatewayUrl: string; gatewayToken: string }> {
   const data = await store.load()
-  if (data.gatewayUrl && data.gatewayToken) {
+  if (!options?.forceRefresh && data.gatewayUrl && data.gatewayToken) {
     onInfo?.(`[wechat] loaded credentials (gateway: ${data.gatewayUrl})`)
     return { gatewayUrl: data.gatewayUrl, gatewayToken: data.gatewayToken }
   }
@@ -124,18 +126,24 @@ export async function setupWeChatBridge(options: {
   const locale = (await new CliSettingsStore(options.cwd).load()).uiLocale
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
-  const { gatewayUrl, gatewayToken } = await askWeChatCredentials(wechatStore, locale, options.onInfo)
+  const { gatewayUrl, gatewayToken } = await askWeChatCredentials(
+    wechatStore,
+    locale,
+    options.onInfo,
+    { forceRefresh: true },
+  )
 
   // Ask about auto-start
   const raw = await new Promise<string>(res => {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     rl.question(t(
-      '  启动 artemis 时自动连接 WeChat bridge？(y/N) ',
-      '  Auto-start WeChat bridge when artemis launches? (y/N) ',
+      '  启动 artemis 时自动连接 WeChat bridge？(Y/n) ',
+      '  Auto-start WeChat bridge when artemis launches? (Y/n) ',
     ), answer => { rl.close(); res(answer.trim()) })
     rl.once('close', () => res(''))
   })
-  const autoStart = raw.toLowerCase() === 'y'
+  const autoStartAnswer = raw.toLowerCase()
+  const autoStart = autoStartAnswer === '' || autoStartAnswer === 'y' || autoStartAnswer === 'yes'
 
   // Persist auto-start flag to both WeChatStore and BragiStore
   await wechatStore.setAutoStartOnLaunch(autoStart)
@@ -246,7 +254,20 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
       const d = await wechatStore.load()
       const existing = wechatStore.getContact(d, message.targetId)
       if (existing) {
-        const session = await options.sessionStore.load(existing.sessionId)
+        const loaded = await loadSessionOrCreate({
+          sessionStore: options.sessionStore,
+          sessionId: existing.sessionId,
+          title: buildSessionTitle(message.targetId),
+          onRecovered: async (next) => {
+            options.onInfo?.(`[wechat] recovered missing session ${existing.sessionId} -> ${next.id}`)
+            await wechatStore.upsertContact({ fromUser: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
+            await bragiStore.upsertSession({ platform: 'wechat', scope: 'p2p', targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
+          },
+        })
+        const session = loaded.session
+        if (loaded.recovered) {
+          return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: true }
+        }
         if (session && session.messages.length < WECHAT_SESSION_ROLLOVER_MSG_COUNT) {
           return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
         }

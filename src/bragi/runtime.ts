@@ -18,6 +18,7 @@ import type { UiLocale } from '../cli/locale.js'
 import { pickLocale } from '../cli/locale.js'
 import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js'
 import { truncate } from '../utils/fs.js'
+import stripAnsi from 'strip-ansi'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -61,6 +62,26 @@ function summarizeToolOutput(output: unknown): string {
   if (typeof output !== 'string') return ''
   const compact = output.replace(/\s+/g, ' ').trim()
   return compact ? ` · ${truncate(compact, 160)}` : ''
+}
+
+function formatMobileReply(text: string): string {
+  let out = stripAnsi(text).replace(/\r\n?/g, '\n').trim()
+  if (!out) return ''
+
+  out = out
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)')
+    .replace(/^```[a-zA-Z0-9_-]*\n?/gm, '')
+    .replace(/```/g, '')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+
+  return out.trim()
 }
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -127,6 +148,7 @@ export async function runRemoteCommand(
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
+  const commandCwd = binding.storedSession.cwd || cwd
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
   // restore session history into brain
@@ -195,8 +217,8 @@ export async function runRemoteCommand(
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
         }
         const startedText = t(
-          '已收到，正在启动模型和工具执行。后续会持续回传关键进度。',
-          'Received. Starting the model and tools now; key progress will be sent here.',
+          '已收到，正在后台处理；完成后会把结果发回聊天。',
+          'Received. Working in the background; the final result will be sent back here.',
         )
         await opts.onProgress?.(startedText, 'info')
         let lastReasoningNoticeAt = 0
@@ -209,7 +231,7 @@ export async function runRemoteCommand(
         //                line as the only reply.
         //   accept-*   → enable tools so remote coding via IM works.
         const result = await think(command.body, {
-          cwd,
+          cwd: commandCwd,
           permissionMode: binding.permissionMode,
           disableNativeTools: binding.permissionMode === 'read-only',
           imageAttachments: command.images,
@@ -377,13 +399,6 @@ export async function runBragiMessagePump<TCheckpoint>(
               text: cleanText,
               level,
             })
-            await options.sendMessage(message.targetId, cleanText).catch((sendErr: unknown) => {
-              options.onInfo?.(
-                `[${options.channelLabel.toLowerCase()}] failed to send progress reply: ${
-                  sendErr instanceof Error ? sendErr.message : String(sendErr)
-                }`,
-              )
-            })
           }
 
           options.onInfo?.(buildPanel(
@@ -420,17 +435,33 @@ export async function runBragiMessagePump<TCheckpoint>(
 
           for (const reply of result.replies) {
             if (!reply.trim()) continue
-            await options.sendMessage(message.targetId, reply)
+            const mobileReply = formatMobileReply(reply)
+            if (!mobileReply) continue
+            try {
+              await options.sendMessage(message.targetId, mobileReply)
+            } catch (sendErr: unknown) {
+              const sendFailure = sendErr instanceof Error ? sendErr.message : String(sendErr)
+              const detail = `[${options.channelLabel.toLowerCase()}] failed to send final reply to ${compactTargetLabel} (${mobileReply.length} chars): ${truncate(sendFailure, 500)}`
+              options.onInfo?.(detail)
+              options.onNotify?.({
+                kind: 'bridge-status',
+                platform,
+                targetLabel: compactTargetLabel,
+                text: detail,
+                level: 'error',
+              })
+              continue
+            }
             options.onInfo?.(buildPanel(
               `${options.channelLabel} outbound`,
-              [`[${options.channelLabel.toLowerCase()}] Artemis → ${truncate(reply.replace(/\s+/g, ' '), 240)}`]
+              [`[${options.channelLabel.toLowerCase()}] Artemis → ${truncate(mobileReply.replace(/\s+/g, ' '), 240)}`]
             ))
             options.onNotify?.({
               kind: 'bridge-message',
               platform,
               direction: 'outbound',
               targetLabel: compactTargetLabel,
-              text: truncate(reply.replace(/\s+/g, ' '), 1200),
+              text: truncate(mobileReply.replace(/\s+/g, ' '), 1200),
             })
           }
 
@@ -448,20 +479,32 @@ export async function runBragiMessagePump<TCheckpoint>(
           }
         } catch (err: unknown) {
           const failure = err instanceof Error ? err.message : String(err)
-          // Wrap sendMessage so a send failure doesn't crash the pump loop
-          try {
-            await options.sendMessage(message.targetId, `${options.channelLabel} error: ${truncate(failure, 500)}`)
-          } catch (sendErr: unknown) {
-            options.onInfo?.(`[${options.channelLabel.toLowerCase()}] failed to send error reply: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`)
+          const sendFailure = /sendMessage failed|failed to send/i.test(failure)
+          if (!sendFailure) {
+            try {
+              await options.sendMessage(message.targetId, `${options.channelLabel} error: ${truncate(failure, 500)}`)
+            } catch (sendErr: unknown) {
+              options.onInfo?.(`[${options.channelLabel.toLowerCase()}] failed to send error reply: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`)
+            }
           }
           // Also notify CLI window about the error
-          options.onNotify?.({
-            kind: 'bridge-message',
-            platform: options.channelLabel.toLowerCase() as 'telegram' | 'discord' | 'wechat',
-            direction: 'outbound',
-            targetLabel: compactLabel(message.targetLabel),
-            text: `${options.channelLabel} error: ${truncate(failure, 1200)}`,
-          })
+          if (sendFailure) {
+            options.onNotify?.({
+              kind: 'bridge-status',
+              platform: options.channelLabel.toLowerCase() as 'telegram' | 'discord' | 'wechat',
+              targetLabel: compactLabel(message.targetLabel),
+              text: `${options.channelLabel} error: ${truncate(failure, 1200)}`,
+              level: 'error',
+            })
+          } else {
+            options.onNotify?.({
+              kind: 'bridge-message',
+              platform: options.channelLabel.toLowerCase() as 'telegram' | 'discord' | 'wechat',
+              direction: 'outbound',
+              targetLabel: compactLabel(message.targetLabel),
+              text: `${options.channelLabel} error: ${truncate(failure, 1200)}`,
+            })
+          }
         } finally {
           activeTargets.delete(message.targetId)
         }

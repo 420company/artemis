@@ -1,6 +1,6 @@
 {
   "name": "artemis-code",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Artemis — AI assistant CLI by www.420.company",
   "main": "./dist/index.js",
   "type": "module",
@@ -13,7 +13,6 @@
     "skills/*/assets/**",
     "skills/*/templates/**",
     "skills/*/scripts/**",
-    "skills/*/vendor/**",
     "skills/*/examples/**",
     "skills/*/requirements.txt",
     "skills/registry.json",

@@ -435,8 +435,8 @@ function buildPendingAssistantLines(options: {
   const elapsedMs = options.startedAtMs ? Math.max(0, Date.now() - options.startedAtMs) : 0
   const elapsed = Math.floor(elapsedMs / 1000)
   const frame = PENDING_SPINNER_FRAMES[Math.floor(Date.now() / 100) % PENDING_SPINNER_FRAMES.length]!
-  const phraseZh = options.phase === 'thinking' ? '深度思考中' : 'AI 正在思考'
-  const phraseEn = options.phase === 'thinking' ? 'Thinking deeply' : 'Thinking'
+  const phraseZh = options.phase === 'thinking' ? '模型推理中' : 'AI 正在思考'
+  const phraseEn = options.phase === 'thinking' ? 'Reasoning' : 'Thinking'
   const phrase = `${phraseZh} · ${phraseEn}`
   const liveTokens = Math.max(0, options.liveTokens ?? 0)
   const liveTokenNote = `${fmtTok(liveTokens)} tok`
@@ -453,17 +453,17 @@ function buildPendingAssistantLines(options: {
   if (options.phase === 'thinking') {
     if (elapsed >= 60) {
       lines.push(
-        `       ${tint('· 思考链模型正在生成隐藏推理 (reasoning_content)，最终答案输出前不会显示文字。', TL.meta)}`,
+        `       ${tint('· 当前模型正在生成隐藏推理 (reasoning_content)，最终答案输出前可能暂时没有文字。', TL.meta)}`,
       )
       lines.push(
         `       ${tint(`· 已用 ${elapsed}s · 累计 ${liveTokenNote} —— token 仍在增长说明模型正常工作；若卡死不动 60s+ 请按 Esc 中断。`, TL.meta)}`,
       )
       lines.push(
-        `       ${tint('· 普通对话建议改用非思考模型（/config 切到 deepseek-chat / gpt / kimi 等）。', TL.meta)}`,
+        `       ${tint('· 如果普通聊天也经常这样，建议 /config 切到非 reasoning 主模型。', TL.meta)}`,
       )
     } else if (elapsed >= 15) {
       lines.push(
-        `       ${tint('· 思考链模型不会在 reasoning 阶段输出文字，请耐心等待 30–300s。', TL.meta)}`,
+        `       ${tint('· 当前模型仍在推理阶段；可以等待，或按 Esc 中断后换用更快的主模型。', TL.meta)}`,
       )
       // 
       const catFrames = [

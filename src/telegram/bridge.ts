@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
+import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
 import type { BridgeTerminalEvent } from '../cli/bridgeNotify.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { CliSettingsStore } from '../cli/settings.js'
@@ -224,13 +225,14 @@ async function maybePromptAutoStart(
   console.log()
   const ans = await new Promise<string>(res => {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
-    rl.question(pickLocale(locale, { zh: '  自动启动？ [y/N] ', en: '  Auto-start? [y/N] ' }), answer => {
+    rl.question(pickLocale(locale, { zh: '  自动启动？ [Y/n] ', en: '  Auto-start? [Y/n] ' }), answer => {
       rl.close()
       res(answer.trim())
     })
     rl.once('close', () => res(''))
   })
-  const enabled = ans.toLowerCase() === 'y'
+  const normalized = ans.toLowerCase()
+  const enabled = normalized === '' || normalized === 'y' || normalized === 'yes'
   await telegramStore.setAutoStartOnLaunch(enabled)
   onInfo?.(`[telegram] auto-start on launch ${enabled ? 'enabled' : 'disabled'}`)
   return enabled
@@ -352,7 +354,20 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
       const existing = telegramStore.getChat(data, message.targetId)
 
       if (existing) {
-        const session = await options.sessionStore.load(existing.sessionId)
+        const loaded = await loadSessionOrCreate({
+          sessionStore: options.sessionStore,
+          sessionId: existing.sessionId,
+          title: buildTelegramSessionTitle(message.targetLabel, options.cwd),
+          onRecovered: async (next) => {
+            options.onInfo?.(`[telegram] recovered missing session ${existing.sessionId} -> ${next.id}`)
+            await telegramStore.upsertChat({ chatId: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
+            await bragiStore.upsertSession({ platform: 'telegram', scope: message.targetId, targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
+          },
+        })
+        const session = loaded.session
+        if (loaded.recovered) {
+          return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: true }
+        }
         if (session && session.messages.length < TELEGRAM_SESSION_ROLLOVER_MSG_COUNT) {
           return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
         }

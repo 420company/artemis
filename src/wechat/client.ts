@@ -231,7 +231,8 @@ export class WeChatGatewayClient {
       )
     }
 
-    for (const chunk of splitMessage(text)) {
+    const chunks = splitMessage(text)
+    for (const [index, chunk] of chunks.entries()) {
       const response = await this.post<WeChatSendMessageResponse>(
         'ilink/bot/sendmessage',
         {
@@ -253,7 +254,7 @@ export class WeChatGatewayClient {
 
       if ((response.ret ?? 0) !== 0) {
         throw new Error(
-          `WeChat sendMessage failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)}`,
+          `WeChat sendMessage failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)} chunk=${index + 1}/${chunks.length} chars=${chunk.length} raw=${truncate(JSON.stringify(response), 240)}`,
         )
       }
     }

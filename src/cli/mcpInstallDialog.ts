@@ -1,6 +1,6 @@
 import { emitKeypressEvents } from 'node:readline'
 import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -115,7 +115,7 @@ const COPY = {
     installing: '◆ 正在安装 MCP 依赖 ◆',
     wait:     '请稍候，安装完成后自动继续…',
     preparing: '连接中…',
-    pkgCount: (d: number, t: number) => `已安装 ${d} / ${t} 个包`,
+    pkgCount: (d: number, t?: number) => t ? `已安装 ${d} / ${t} 个包` : `已安装 ${d} 个包`,
     doneOk:   '✓ 所有 MCP 依赖安装完成！',
     doneFail: '⚠ 部分包安装失败，可用 /mcp install 重试',
     anyKey:   '按任意键继续…',
@@ -134,7 +134,7 @@ const COPY = {
     installing: '◆ Installing MCP Dependencies ◆',
     wait:     'Please wait, auto-continues when done…',
     preparing: 'Connecting…',
-    pkgCount: (d: number, t: number) => `${d} / ${t} packages installed`,
+    pkgCount: (d: number, t?: number) => t ? `${d} / ${t} packages installed` : `${d} packages installed`,
     doneOk:   '✓ All MCP dependencies installed!',
     doneFail: '⚠ Some packages failed — run /mcp install to retry',
     anyKey:   'Press any key to continue…',
@@ -252,9 +252,11 @@ function choiceBody(fi: number, sel: number, locale: UiLocale, layout: Layout): 
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-function progressBody(fi: number, done: number, total: number, current: string, locale: UiLocale, layout: Layout): string[] {
+function progressBody(fi: number, done: number, total: number | undefined, current: string, locale: UiLocale, layout: Layout): string[] {
   const t    = COPY[locale] ?? COPY['en']
-  const pct  = total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0
+  const pct  = typeof total === 'number' && total > 0
+    ? Math.min(100, Math.floor((done / total) * 100))
+    : 0
   const barW = Math.max(20, layout.innerWidth - 14)
   const fill = Math.round((pct / 100) * barW)
   const bar  = rgb('█'.repeat(fill), 166, 227, 161) + dim('░'.repeat(barW - fill))
@@ -268,7 +270,7 @@ function progressBody(fi: number, done: number, total: number, current: string, 
     layout.blank,
     row(`${cyan(spin)}  ${dim(current.slice(0, layout.innerWidth - 6))}`, layout),
     layout.blank,
-    row(dim(t.pkgCount(done, total)), layout),
+    row(dim(t.pkgCount(done)), layout),
     layout.blank,
     layout.blank,
     row(dim(t.wait), layout),
@@ -291,6 +293,38 @@ function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount
     layout.blank,
     row(dim(t.anyKey), layout),
   ]
+}
+
+function countNodeModulesEntries(dir: string): number {
+  try {
+    return readdirSync(dir).filter(d => !d.startsWith('.')).length
+  } catch {
+    return 0
+  }
+}
+
+function countExpectedVisiblePackageEntries(lockPath: string): number | undefined {
+  if (!existsSync(lockPath)) return undefined
+  try {
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
+      packages?: Record<string, { optional?: boolean; peer?: boolean }>
+    }
+    const packages = lock.packages && typeof lock.packages === 'object'
+      ? lock.packages
+      : undefined
+    if (!packages) return undefined
+
+    const visibleDirs = new Set<string>()
+    for (const packagePath of Object.keys(packages)) {
+      if (!packagePath.startsWith('node_modules/')) continue
+      const rest = packagePath.slice('node_modules/'.length)
+      if (!rest || rest.includes('/node_modules/')) continue
+      visibleDirs.add(rest.startsWith('@') ? rest.split('/')[0]! : rest.split('/')[0]!)
+    }
+    return visibleDirs.size > 0 ? visibleDirs.size : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // ─── public API ────────────────────────────────────────────────────────────────
@@ -352,21 +386,22 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
   ensureMcpInstallDir()
   // Count installed packages by watching node_modules directory
   const nmDir = path.join(MCP_INSTALL_DIR, 'node_modules')
-  const countInstalled = (): number => {
-    try {
-      return readdirSync(nmDir).filter(d => !d.startsWith('.')).length
-    } catch { return 0 }
+  const countInstalled = (): number => countNodeModulesEntries(nmDir)
+  const getEstimatedTotal = (): number | undefined => {
+    const lockTotal =
+      countExpectedVisiblePackageEntries(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
+      countExpectedVisiblePackageEntries(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
+    return lockTotal && lockTotal >= done ? lockTotal : undefined
   }
-  const TOTAL_PKGS = 360 // ~339 transitive packages across 12 direct deps (slight buffer)
 
   const renderProgress = () => {
     layout = buildLayout(locale)
-    updateBody(progressBody(pfi, done, TOTAL_PKGS, current, locale, layout), layout)
+    updateBody(progressBody(pfi, done, getEstimatedTotal(), current, locale, layout), layout)
   }
 
   const onResizeProgress = () => {
     layout = buildLayout(locale)
-    rebuildScreen(progressBody(pfi, done, TOTAL_PKGS, current, locale, layout), layout)
+    rebuildScreen(progressBody(pfi, done, getEstimatedTotal(), current, locale, layout), layout)
   }
   process.stdout.on('resize', onResizeProgress)
 
