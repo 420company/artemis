@@ -1,6 +1,6 @@
-import type { VisualModelConfig } from '../../../providers/types'
-import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface'
-import { normalizeBytePlusMediaBaseUrl } from '../../byteplusMedia'
+import type { VisualModelConfig } from '../../../providers/types.js'
+import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
+import { normalizeBytePlusMediaBaseUrl } from '../../byteplusMedia.js'
 
 export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'

@@ -8,13 +8,13 @@
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { homedir } from 'node:os'
-import type { VisualModelConfig } from '../../../providers/types'
+import type { VisualModelConfig } from '../../../providers/types.js'
 import type {
   GenerationResult,
   VideoGenerationParams,
   VisualGenerationParams,
   VisualProvider,
-} from './interface'
+} from './interface.js'
 
 const GOOGLE_API_BASE = 'https://generativelanguage.googleapis.com/v1beta'
 
@@ -177,4 +177,3 @@ export class GoogleProvider implements VisualProvider {
     }
   }
 }
-

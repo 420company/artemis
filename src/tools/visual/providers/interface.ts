@@ -1,4 +1,4 @@
-import type { VisualModelConfig } from '../../../providers/types'
+import type { VisualModelConfig } from '../../../providers/types.js'
 
 // ─── ASSET GENERATION INTERFACE ───────────────────────────────────────────────
 
@@ -53,42 +53,42 @@ export async function createVisualProvider(config: VisualModelConfig, assetType:
   
   switch (providerName) {
     case 'byteplus': {
-      const byteplusModule = await import('./byteplusProvider')
+      const byteplusModule = await import('./byteplusProvider.js')
       return new byteplusModule.BytePlusProvider(config, assetType)
     }
     
     case 'openai': {
-      const openaiModule = await import('./openaiProvider')
+      const openaiModule = await import('./openaiProvider.js')
       return new openaiModule.OpenAIProvider(config)
     }
     
     case 'stable-diffusion': {
-      const stableDiffusionModule = await import('./stableDiffusionProvider')
+      const stableDiffusionModule = await import('./stableDiffusionProvider.js')
       return new stableDiffusionModule.StableDiffusionProvider(config, assetType)
     }
     
     case 'gemini': {
-      const geminiModule = await import('./geminiProvider')
+      const geminiModule = await import('./geminiProvider.js')
       return new geminiModule.GeminiProvider(config, assetType)
     }
 
     case 'google': {
-      const googleModule = await import('./googleProvider')
+      const googleModule = await import('./googleProvider.js')
       return new googleModule.GoogleProvider(config, assetType)
     }
     
     case 'grok': {
-      const grokModule = await import('./grokProvider')
+      const grokModule = await import('./grokProvider.js')
       return new grokModule.GrokProvider(config, assetType)
     }
     
     case 'custom': {
-      const customModule = await import('./customProvider')
+      const customModule = await import('./customProvider.js')
       return new customModule.CustomProvider(config)
     }
     
     case 'mock': {
-      const mockModule = await import('./mockProvider')
+      const mockModule = await import('./mockProvider.js')
       return new mockModule.MockProvider(config, assetType)
     }
     

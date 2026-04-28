@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 import { toolError, toolLog, toolWarn } from '../../utils/log.js';
-import type { SearchResult } from './freyaSearch';
+import type { SearchResult } from './freyaSearch.js';
 
 export class BrowserImageSearch {
   // Bing 图片搜索页面

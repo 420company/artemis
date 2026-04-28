@@ -1,5 +1,5 @@
-import type { VisualModelConfig } from '../../../providers/types'
-import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface'
+import type { VisualModelConfig } from '../../../providers/types.js'
+import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
 
 export class MockProvider implements VisualProvider {
   readonly name = 'mock'

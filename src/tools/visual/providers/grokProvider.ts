@@ -1,11 +1,11 @@
-import type { VisualModelConfig } from '../../../providers/types'
+import type { VisualModelConfig } from '../../../providers/types.js'
 import {
   buildPlaceholderVisualProviderError,
   type GenerationResult,
   type VideoGenerationParams,
   type VisualGenerationParams,
   type VisualProvider,
-} from './interface'
+} from './interface.js'
 
 export class GrokProvider implements VisualProvider {
   readonly name = 'grok'
