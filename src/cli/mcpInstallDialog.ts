@@ -68,7 +68,7 @@ const CAT_FRAMES = [
     // bright — inhale
     haloTop:  ' ✦  🌙  ·  ✦  ·  ✦  ·  ✦  · ',
     innerTop: '  ·    ✦     ·    ✦  ·   ✦   ',
-    scene:    '                𓃠  ✦  ·  ✦   ',
+    scene:    '          𓃠  ✦  ·  ✦  ·      ',
     innerBot: '  ✦  ·    ✦     ·   ✦    ·   ',
     haloBot:  ' ·  ✦  ·   ✦  ·  ✦  ·   ✦  ·',
     offset: 0,
@@ -77,7 +77,7 @@ const CAT_FRAMES = [
     // medium
     haloTop:  ' ·   🌙  ✦  ·  ✦  ·  ✦  ·  ✦ ',
     innerTop: '  ✦    ·     ✦    ·  ✦   ·    ',
-    scene:    '                𓃠  ·  ✦  ·    ',
+    scene:    '          𓃠  ·  ✦  ·  ✦      ',
     innerBot: '  ·  ✦    ·     ✦   ·    ✦   ',
     haloBot:  ' ✦  ·  ✦   ·  ✦  ·  ✦  ·   ✦',
     offset: 3,
@@ -86,7 +86,7 @@ const CAT_FRAMES = [
     // soft — exhale
     haloTop:  ' ˚   🌙  ·  ˚  ·  ˚  ·  ˚  · ',
     innerTop: '  ·    ˚     ·    ˚  ·   ˚    ',
-    scene:    '                𓃠  ˚  ·  ˚    ',
+    scene:    '          𓃠  ˚  ·  ˚  ·      ',
     innerBot: '  ˚  ·    ˚     ·   ˚    ·    ',
     haloBot:  ' ·  ˚  ·   ˚  ·  ˚  ·   ˚  · ',
     offset: 6,
