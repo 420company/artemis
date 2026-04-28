@@ -333,8 +333,8 @@ async function configureVisualModel(
       c(
         '  ' +
           t(
-            `API 地址（留空使用默认 ${defaultBaseUrl || 'provider default'}）: `,
-            `API URL (blank = ${defaultBaseUrl || 'provider default'}): `,
+            `API 地址（可选，留空使用默认）: `,
+            `API URL (optional, blank = default): `,
           ),
         A.bold + A.yellow,
       ),
