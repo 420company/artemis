@@ -8,6 +8,7 @@
  *   shouldAutoStartTelegram() — check autoStartOnLaunch flag
  */
 
+import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
@@ -18,7 +19,6 @@ import type { SecretStore } from '../security/secretStore.js'
 import type { UiLocale } from '../cli/locale.js'
 import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
-import { createPrompt } from '../cli/prompt.js'
 import { SessionStore } from '../storage/sessions.js'
 import { TelegramBotClient, extractTelegramTextMessages } from './client.js'
 import { TelegramStore } from './store.js'
@@ -44,8 +44,54 @@ const TELEGRAM_SESSION_ROLLOVER_MSG_COUNT = 80
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function maskToken(token: string): string {
-  if (token.length <= 8) return `${token.slice(0, 2)}****`
-  return `${token.slice(0, 4)}****${token.slice(-4)}`
+  if (token.length <= 8) return `${token.slice(0, 2)}${'*'.repeat(token.length - 2)}`
+  return `${token.slice(0, 4)}${'*'.repeat(token.length - 8)}${token.slice(-4)}`
+}
+
+/** Prompt for a secret token with masking: shows first 4 + last 4 chars, middle as *. */
+function readMaskedToken(question: string): Promise<string | null> {
+  return new Promise(resolve => {
+    if (!process.stdin.isTTY) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout })
+      rl.question(question, answer => { resolve(answer.trim() || null); rl.close() })
+      rl.once('close', () => resolve(null))
+      return
+    }
+    process.stdout.write(question)
+    let buf = ''
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding('utf8')
+    const onData = (ch: string) => {
+      if (ch === '\r' || ch === '\n') {
+        process.stdin.setRawMode(false)
+        process.stdin.pause()
+        process.stdin.removeListener('data', onData)
+        process.stdout.write('\n')
+        resolve(buf || null)
+      } else if (ch === '') {
+        process.stdin.setRawMode(false)
+        process.stdin.pause()
+        process.stdin.removeListener('data', onData)
+        process.stdout.write('\n')
+        resolve(null)
+      } else if (ch === '' || ch === '\b') {
+        if (buf.length > 0) {
+          const prev = maskToken(buf)
+          buf = buf.slice(0, -1)
+          const next = buf.length > 0 ? maskToken(buf) : ''
+          process.stdout.write('\b'.repeat(prev.length) + next + ' '.repeat(prev.length - next.length) + '\b'.repeat(prev.length - next.length))
+        }
+      } else if (ch >= ' ') {
+        const prevMasked = buf.length > 0 ? maskToken(buf) : ''
+        buf += ch
+        const newMasked = maskToken(buf)
+        if (prevMasked.length > 0) process.stdout.write('\b'.repeat(prevMasked.length))
+        process.stdout.write(newMasked)
+      }
+    }
+    process.stdin.on('data', onData)
+  })
 }
 
 function parseCommaSeparatedIds(input: string): string[] {
@@ -84,8 +130,6 @@ async function askTelegramToken(
   }
 
   // Interactive wizard
-  const prompt = createPrompt({ prefix: '  > ' })
-
   console.log()
   console.log(buildPanel(
     pickLocale(locale, { zh: 'Artemis Telegram 设置', en: 'Artemis Telegram setup' }),
@@ -99,8 +143,9 @@ async function askTelegramToken(
 
   let token = ''
   while (!token) {
-    process.stdout.write(pickLocale(locale, { zh: 'Telegram bot token: ', en: 'Telegram bot token: ' }))
-    const input = await prompt.read()
+    const input = await readMaskedToken(
+      pickLocale(locale, { zh: '  Telegram bot token: ', en: '  Telegram bot token: ' })
+    )
     if (input === null || !input.trim()) {
       throw new Error(pickLocale(locale, { zh: '已取消 Telegram token 设置。', en: 'Telegram token setup cancelled.' }))
     }
@@ -130,7 +175,7 @@ async function askTelegramToken(
     }
   }
 
-  // Prompt for allowed chat IDs
+  // Prompt for allowed chat IDs (plain readline — not a secret)
   console.log()
   console.log(buildPanel(
     pickLocale(locale, { zh: 'Telegram 控制权限', en: 'Telegram control access' }),
@@ -140,11 +185,14 @@ async function askTelegramToken(
     ]
   ))
   console.log()
-  process.stdout.write(pickLocale(locale, {
-    zh: '允许的 chat ID [可选]: ',
-    en: 'Allowed chat IDs [optional]: ',
-  }))
-  const allowedRaw = (await prompt.read()) ?? ''
+  const allowedRaw = await new Promise<string>(res => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(pickLocale(locale, { zh: '  允许的 chat ID [可选]: ', en: '  Allowed chat IDs [optional]: ' }), answer => {
+      rl.close()
+      res(answer.trim())
+    })
+    rl.once('close', () => res(''))
+  })
   const data = await telegramStore.setBotToken(token)
   data.allowedChatIds = parseCommaSeparatedIds(allowedRaw)
   await telegramStore.save(data)
@@ -166,7 +214,6 @@ async function maybePromptAutoStart(
     return data.autoStartOnLaunch
   }
 
-  const prompt = createPrompt({ prefix: '  > ' })
   console.log()
   console.log(buildPanel(
     pickLocale(locale, { zh: 'Telegram 启动偏好', en: 'Telegram startup preference' }),
@@ -175,9 +222,15 @@ async function maybePromptAutoStart(
     ]
   ))
   console.log()
-  process.stdout.write(pickLocale(locale, { zh: '自动启动？ [y/N] ', en: 'Auto-start? [y/N] ' }))
-  const ans = await prompt.read()
-  const enabled = ans?.trim().toLowerCase() === 'y'
+  const ans = await new Promise<string>(res => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(pickLocale(locale, { zh: '  自动启动？ [y/N] ', en: '  Auto-start? [y/N] ' }), answer => {
+      rl.close()
+      res(answer.trim())
+    })
+    rl.once('close', () => res(''))
+  })
+  const enabled = ans.toLowerCase() === 'y'
   await telegramStore.setAutoStartOnLaunch(enabled)
   onInfo?.(`[telegram] auto-start on launch ${enabled ? 'enabled' : 'disabled'}`)
   return enabled

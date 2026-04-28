@@ -5,6 +5,7 @@
  * Config: credentials stored in BragiStore under platform "discord".
  */
 
+import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
@@ -13,7 +14,6 @@ import type { PermissionMode } from '../cli/parseArgs.js'
 import { CliSettingsStore } from '../cli/settings.js'
 import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
-import { createPrompt } from '../cli/prompt.js'
 import type { SecretStore } from '../security/secretStore.js'
 import { SessionStore } from '../storage/sessions.js'
 import { DiscordBotClient, DiscordGatewayBridge } from './client.js'
@@ -22,8 +22,61 @@ import { DiscordStore } from './store.js'
 // ─── setup wizard ─────────────────────────────────────────────────────────────
 
 function maskToken(token: string): string {
-  if (token.length <= 8) return '***'
-  return token.slice(0, 4) + '…' + token.slice(-4)
+  if (token.length <= 8) return `${'*'.repeat(token.length)}`
+  return `${token.slice(0, 4)}${'*'.repeat(token.length - 8)}${token.slice(-4)}`
+}
+
+function readMaskedToken(question: string): Promise<string | null> {
+  return new Promise(resolve => {
+    if (!process.stdin.isTTY) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout })
+      rl.question(question, answer => { resolve(answer.trim() || null); rl.close() })
+      rl.once('close', () => resolve(null))
+      return
+    }
+    process.stdout.write(question)
+    let buf = ''
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding('utf8')
+    const onData = (ch: string) => {
+      if (ch === '\r' || ch === '\n') {
+        process.stdin.setRawMode(false)
+        process.stdin.pause()
+        process.stdin.removeListener('data', onData)
+        process.stdout.write('\n')
+        resolve(buf || null)
+      } else if (ch === '') {
+        process.stdin.setRawMode(false)
+        process.stdin.pause()
+        process.stdin.removeListener('data', onData)
+        process.stdout.write('\n')
+        resolve(null)
+      } else if (ch === '' || ch === '\b') {
+        if (buf.length > 0) {
+          const prev = maskToken(buf)
+          buf = buf.slice(0, -1)
+          const next = buf.length > 0 ? maskToken(buf) : ''
+          process.stdout.write('\b'.repeat(prev.length) + next + ' '.repeat(prev.length - next.length) + '\b'.repeat(prev.length - next.length))
+        }
+      } else if (ch >= ' ') {
+        const prevMasked = buf.length > 0 ? maskToken(buf) : ''
+        buf += ch
+        const newMasked = maskToken(buf)
+        if (prevMasked.length > 0) process.stdout.write('\b'.repeat(prevMasked.length))
+        process.stdout.write(newMasked)
+      }
+    }
+    process.stdin.on('data', onData)
+  })
+}
+
+function readLine(question: string): Promise<string> {
+  return new Promise(resolve => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(question, answer => { rl.close(); resolve(answer.trim()) })
+    rl.once('close', () => resolve(''))
+  })
 }
 
 export async function setupDiscordBridge(options: {
@@ -47,13 +100,11 @@ export async function setupDiscordBridge(options: {
   ))
   console.log()
 
-  const prompt = createPrompt({ prefix: '  > ' })
   let token = ''
   let botName = ''
 
   while (!token) {
-    process.stdout.write(t('Discord bot token: ', 'Discord bot token: '))
-    const input = await prompt.read()
+    const input = await readMaskedToken(t('  Discord bot token: ', '  Discord bot token: '))
     if (input === null || !input.trim()) {
       throw new Error(t('已取消 Discord token 设置。', 'Discord token setup cancelled.'))
     }
@@ -81,12 +132,11 @@ export async function setupDiscordBridge(options: {
   }
 
   // Ask about auto-start
-  process.stdout.write(t(
-    '启动 artemis 时自动连接 Discord bridge？(y/N) ',
-    'Auto-start Discord bridge when artemis launches? (y/N) '
+  const autoStartRaw = await readLine(t(
+    '  启动 artemis 时自动连接 Discord bridge？(y/N) ',
+    '  Auto-start Discord bridge when artemis launches? (y/N) '
   ))
-  const autoStartRaw = (await prompt.read()) ?? ''
-  const autoStart = autoStartRaw.trim().toLowerCase() === 'y'
+  const autoStart = autoStartRaw.toLowerCase() === 'y'
 
   const existingData = await bragiStore.load()
   const existing = existingData.platforms.discord

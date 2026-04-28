@@ -17,7 +17,7 @@ import type { SecretStore } from '../security/secretStore.js'
 import type { UiLocale } from '../cli/locale.js'
 import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
-import { createPrompt } from '../cli/prompt.js'
+import { createInterface } from 'node:readline'
 import { SessionStore } from '../storage/sessions.js'
 import { WeChatGatewayClient } from './client.js'
 import { WeChatStore } from './store.js'
@@ -126,14 +126,16 @@ export async function setupWeChatBridge(options: {
 
   const { gatewayUrl, gatewayToken } = await askWeChatCredentials(wechatStore, locale, options.onInfo)
 
-  // Ask about auto-start (same pattern as Discord and Telegram setup)
-  const setupPrompt = createPrompt({ prefix: '  > ' })
-  process.stdout.write(t(
-    '启动 artemis 时自动连接 WeChat bridge？(y/N) ',
-    'Auto-start WeChat bridge when artemis launches? (y/N) ',
-  ))
-  const raw = await setupPrompt.read()
-  const autoStart = (raw ?? '').trim().toLowerCase() === 'y'
+  // Ask about auto-start
+  const raw = await new Promise<string>(res => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question(t(
+      '  启动 artemis 时自动连接 WeChat bridge？(y/N) ',
+      '  Auto-start WeChat bridge when artemis launches? (y/N) ',
+    ), answer => { rl.close(); res(answer.trim()) })
+    rl.once('close', () => res(''))
+  })
+  const autoStart = raw.toLowerCase() === 'y'
 
   // Persist auto-start flag to both WeChatStore and BragiStore
   await wechatStore.setAutoStartOnLaunch(autoStart)
