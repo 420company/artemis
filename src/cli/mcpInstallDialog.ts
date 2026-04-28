@@ -282,16 +282,21 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
 
   const choice = await new Promise<'yes' | 'no'>((resolve) => {
     const onKey = (_: string, key: { name?: string; ctrl?: boolean }) => {
-      if ((key.ctrl && key.name === 'c') || key.name === 'escape') { resolve('no'); return }
+      if ((key.ctrl && key.name === 'c') || key.name === 'escape') {
+        process.stdin.off('keypress', onKey); resolve('no'); return
+      }
       if (key.name === 'left'  || key.name === 'up')   { sel = 0; renderChoice(); return }
       if (key.name === 'right' || key.name === 'down')  { sel = 1; renderChoice(); return }
-      if (key.name === 'return' || key.name === 'enter') resolve(sel === 0 ? 'yes' : 'no')
+      if (key.name === 'return' || key.name === 'enter') {
+        process.stdin.off('keypress', onKey); resolve(sel === 0 ? 'yes' : 'no')
+      }
     }
     process.stdin.on('keypress', onKey)
   })
 
   clearInterval(timer)
   process.stdout.off('resize', onResize)
+  process.stdin.removeAllListeners('keypress')
 
   if (choice === 'no') {
     process.stdin.setRawMode(false)
@@ -353,6 +358,7 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
   })
 
   process.stdout.off('resize', onResizeDone)
+  process.stdin.removeAllListeners('keypress')
   process.stdin.setRawMode(false)
   process.stdin.pause()
   process.stdout.write(`${SHOW}${ALT_OFF}`)
