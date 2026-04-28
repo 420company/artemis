@@ -1,0 +1,20 @@
+{
+  "name": "artemis-mcp-packages",
+  "version": "1.0.0",
+  "description": "Pre-installed MCP server packages bundled with Artemis CLI",
+  "private": true,
+  "dependencies": {
+    "@aikidosec/mcp": "latest",
+    "@azure/mcp": "latest",
+    "@cap-js/mcp-server": "latest",
+    "@pinecone-database/mcp": "latest",
+    "@pairsystems/goodmem-mcp": "latest",
+    "@shopify/dev-mcp": "latest",
+    "@toolbox-sdk/server": ">=1.1.0",
+    "@upstash/context7-mcp": "latest",
+    "@wix/mcp-remote": "latest",
+    "chrome-devtools-mcp": "latest",
+    "helius-mcp": "latest",
+    "prisma": "latest"
+  }
+}

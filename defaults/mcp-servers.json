@@ -1,0 +1,1198 @@
+{
+  "servers": [
+    {
+      "id": "cco-fakechat-fakechat",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "bun",
+      "commandArgs": [
+        "run",
+        "--cwd",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "--shell=bun",
+        "--silent",
+        "start"
+      ]
+    },
+    {
+      "id": "cco-imessage-imessage",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "bun",
+      "commandArgs": [
+        "run",
+        "--cwd",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "--shell=bun",
+        "--silent",
+        "start"
+      ]
+    },
+    {
+      "id": "cco-atlassian-forge-skills-forge",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.atlassian.com/v1/forge/mcp"
+    },
+    {
+      "id": "cco-atlassian-forge-skills-ads-mcp",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.atlassian.com/v1/ads/public/mcp"
+    },
+    {
+      "id": "cco-circleback-circleback",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://app.circleback.ai/api/mcp"
+    },
+    {
+      "id": "cco-quarkus-agent-quarkus-agent",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "jbang",
+      "commandArgs": [
+        "quarkus-agent-mcp@quarkusio"
+      ]
+    },
+    {
+      "id": "cco-goodmem-goodmem",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "@pairsystems/goodmem-mcp"
+      ]
+    },
+    {
+      "id": "cco-vercel-vercel",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.vercel.com"
+    },
+    {
+      "id": "cco-zscaler-zscaler-mcp-server",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "--env-file",
+        "${CLAUDE_PLUGIN_ROOT}/.env",
+        "zscaler-mcp@0.10.4"
+      ]
+    },
+    {
+      "id": "cco-migration-to-aws-awsknowledge",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://knowledge-mcp.global.api.aws"
+    },
+    {
+      "id": "cco-migration-to-aws-awspricing",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "awslabs.aws-pricing-mcp-server@latest"
+      ],
+      "environment": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    {
+      "id": "cco-aws-serverless-aws-serverless-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "awslabs.aws-serverless-mcp-server@latest",
+        "--allow-write"
+      ],
+      "environment": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    {
+      "id": "cco-sagemaker-ai-aws-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "mcp-proxy-for-aws@latest",
+        "https://aws-mcp.us-east-1.api.aws/mcp"
+      ]
+    },
+    {
+      "id": "cco-amazon-location-service-aws-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "mcp-proxy-for-aws@latest",
+        "https://aws-mcp.us-east-1.api.aws/mcp"
+      ]
+    },
+    {
+      "id": "cco-databases-on-aws-awsknowledge",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://knowledge-mcp.global.api.aws"
+    },
+    {
+      "id": "cco-databases-on-aws-aurora-dsql",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "awslabs.aurora-dsql-mcp-server@latest"
+      ],
+      "environment": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    {
+      "id": "cco-aws-amplify-aws-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "mcp-proxy-for-aws@latest",
+        "https://aws-mcp.us-east-1.api.aws/mcp"
+      ]
+    },
+    {
+      "id": "cco-deploy-on-aws-awsiac",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "awslabs.aws-iac-mcp-server@latest"
+      ]
+    },
+    {
+      "id": "cco-deploy-on-aws-awsknowledge",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://knowledge-mcp.global.api.aws"
+    },
+    {
+      "id": "cco-deploy-on-aws-awspricing",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "uvx",
+      "commandArgs": [
+        "awslabs.aws-pricing-mcp-server@latest"
+      ],
+      "environment": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    },
+    {
+      "id": "cco-sumup-sumup",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.sumup.com/mcp"
+    },
+    {
+      "id": "cco-people-management-slack",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.slack.com/mcp"
+    },
+    {
+      "id": "cco-people-management-notion",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.notion.com/mcp"
+    },
+    {
+      "id": "cco-people-management-google-drive",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://gdrive.mcp.claude.com/mcp"
+    },
+    {
+      "id": "cco-people-management-gmail",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://gmail.mcp.claude.com/mcp"
+    },
+    {
+      "id": "cco-people-management-google-calendar",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://gcal.mcp.claude.com/mcp"
+    },
+    {
+      "id": "cco-legalzoom-legalzoom",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://www.legalzoom.com/mcp/claude/v1"
+    },
+    {
+      "id": "cco-azure-azure",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@azure/mcp@latest",
+        "server",
+        "start"
+      ]
+    },
+    {
+      "id": "cco-azure-context7",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ]
+    },
+    {
+      "id": "cco-mintlify-mintlify",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mintlify.com/docs/mcp"
+    },
+    {
+      "id": "cco-plugin-semgrep",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "semgrep",
+      "commandArgs": [
+        "mcp"
+      ]
+    },
+    {
+      "id": "cco-microsoft-docs-microsoft-learn",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://learn.microsoft.com/api/mcp"
+    },
+    {
+      "id": "cco-zapier-zapier",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.zapier.com/api/v1/connect"
+    },
+    {
+      "id": "cco-aikido-aikido-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@aikidosec/mcp"
+      ],
+      "environment": {
+        "AIKIDO_API_KEY": "${AIKIDO_API_KEY}"
+      }
+    },
+    {
+      "id": "cco-cloudflare-cloudflare-api",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.cloudflare.com/mcp"
+    },
+    {
+      "id": "cco-cloudflare-cloudflare-docs",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://docs.mcp.cloudflare.com/mcp"
+    },
+    {
+      "id": "cco-cloudflare-cloudflare-bindings",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://bindings.mcp.cloudflare.com/mcp"
+    },
+    {
+      "id": "cco-cloudflare-cloudflare-builds",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://builds.mcp.cloudflare.com/mcp"
+    },
+    {
+      "id": "cco-cloudflare-cloudflare-observability",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://observability.mcp.cloudflare.com/mcp"
+    },
+    {
+      "id": "cco-prisma-prisma-local",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "prisma",
+        "mcp"
+      ]
+    },
+    {
+      "id": "cco-prisma-prisma-remote",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.prisma.io/mcp"
+    },
+    {
+      "id": "cco-miro-miro",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.miro.com/",
+      "headers": {
+        "X-AI-Source": "cursor-plugin"
+      }
+    },
+    {
+      "id": "cco-postman-postman",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.postman.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${POSTMAN_API_KEY}",
+        "X-Source": "claude-code-plugin"
+      }
+    },
+    {
+      "id": "cco-shopify-shopify-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@shopify/dev-mcp@latest"
+      ]
+    },
+    {
+      "id": "cco-amplitude-experimental-amplitude",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.amplitude.com/mcp"
+    },
+    {
+      "id": "cco-amplitude-amplitude",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.amplitude.com/mcp"
+    },
+    {
+      "id": "cco-chrome-devtools-mcp-chrome-devtools",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "chrome-devtools-mcp@latest"
+      ]
+    },
+    {
+      "id": "cco-notion-notion",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.notion.com/mcp"
+    },
+    {
+      "id": "cco-supabase-supabase",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.supabase.com/mcp",
+      "headers": {
+        "X-Source-Name": "claude-code-plugin",
+        "X-Source-Version": "0.1.5"
+      }
+    },
+    {
+      "id": "cco-bigdata-com-bigdata.com",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.bigdata.com"
+    },
+    {
+      "id": "cco-sanity-sanity",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.sanity.io"
+    },
+    {
+      "id": "cco-pinecone-pinecone",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@pinecone-database/mcp"
+      ],
+      "environment": {
+        "PINECONE_API_KEY": "${PINECONE_API_KEY}"
+      }
+    },
+    {
+      "id": "cco-figma-figma",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.figma.com/mcp"
+    },
+    {
+      "id": "cco-sourcegraph-sourcegraph",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "${SOURCEGRAPH_ENDPOINT}/.api/mcp",
+      "headers": {
+        "Authorization": "token ${SOURCEGRAPH_ACCESS_TOKEN}"
+      }
+    },
+    {
+      "id": "cco-atlassian-atlassian",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    },
+    {
+      "id": "cco-firetiger-firetiger",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://api.cloud.firetiger.com/mcp/v1"
+    },
+    {
+      "id": "cco-apollo-apollo",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.apollo.io/mcp"
+    },
+    {
+      "id": "cco-opsera-devsecops-opsera",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://agent.opsera.ai/mcp"
+    },
+    {
+      "id": "cco-datadog-mcp",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://${DD_MCP_DOMAIN:-not-setup}/api/unstable/mcp-server/mcp?referrer_ide=claude-code-plugin&plugin_version=0.7.2&toolsets=${DD_MCP_TOOLSETS:-}",
+      "headers": {
+        "DD_API_KEY": "${DD_API_KEY}",
+        "DD_APPLICATION_KEY": "${DD_APPLICATION_KEY}"
+      }
+    },
+    {
+      "id": "cco-flint-flint",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.tryflint.com/mcp"
+    },
+    {
+      "id": "cco-slack-slack",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.slack.com/mcp"
+    },
+    {
+      "id": "cco-posthog-posthog",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.posthog.com/mcp"
+    },
+    {
+      "id": "cco-helius-plugin-helius",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "helius-mcp@latest"
+      ]
+    },
+    {
+      "id": "cco-helius-plugin-dflow",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://pond.dflow.net/mcp"
+    },
+    {
+      "id": "cco-helius-cursor-helius",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "helius-mcp@latest"
+      ]
+    },
+    {
+      "id": "cco-helius-cursor-dflow",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://pond.dflow.net/mcp"
+    },
+    {
+      "id": "cco-fiftyone-fiftyone",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "fiftyone-mcp",
+      "commandArgs": [],
+      "environment": {}
+    },
+    {
+      "id": "cco-wix-wix-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@wix/mcp-remote@latest",
+        "https://mcp.wix.com/mcp"
+      ]
+    },
+    {
+      "id": "cco-cockroachdb-cockroachdb-toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "toolbox",
+      "commandArgs": [
+        "--config",
+        "${CLAUDE_PLUGIN_ROOT}/tools.yaml",
+        "--stdio"
+      ],
+      "environment": {
+        "COCKROACHDB_HOST": "${COCKROACHDB_HOST}",
+        "COCKROACHDB_PORT": "${COCKROACHDB_PORT}",
+        "COCKROACHDB_USER": "${COCKROACHDB_USER}",
+        "COCKROACHDB_PASSWORD": "${COCKROACHDB_PASSWORD}",
+        "COCKROACHDB_DATABASE": "${COCKROACHDB_DATABASE}",
+        "COCKROACHDB_SSLMODE": "${COCKROACHDB_SSLMODE}"
+      }
+    },
+    {
+      "id": "cco-cockroachdb-cockroachdb-toolbox-http",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "http://127.0.0.1:5000/mcp"
+    },
+    {
+      "id": "cco-cockroachdb-cockroachdb-cloud",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://cockroachlabs.cloud/mcp",
+      "headers": {
+        "mcp-cluster-id": "${COCKROACHDB_CLUSTER_ID}"
+      }
+    },
+    {
+      "id": "cco-adspirer-ads-agent-adspirer",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.adspirer.com/mcp"
+    },
+    {
+      "id": "cco-atlan-atlan",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.atlan.com/mcp"
+    },
+    {
+      "id": "cco-sentry-sentry",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.sentry.dev/mcp"
+    },
+    {
+      "id": "cco-zoom-plugin-zoom-mcp",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.zoom.us/mcp/zoom/streamable",
+      "headers": {
+        "Authorization": "Bearer ${ZOOM_MCP_ACCESS_TOKEN}"
+      }
+    },
+    {
+      "id": "cco-zoom-plugin-zoom-docs-mcp",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.zoom.us/mcp/docs/streamable",
+      "headers": {
+        "Authorization": "Bearer ${ZOOM_DOCS_MCP_ACCESS_TOKEN}"
+      }
+    },
+    {
+      "id": "cco-zoom-plugin-zoom-whiteboard-mcp",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.zoom.us/mcp/whiteboard/streamable",
+      "headers": {
+        "Authorization": "Bearer ${ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN}"
+      }
+    },
+    {
+      "id": "cco-cds-mcp-cds-mcp",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@cap-js/mcp-server"
+      ]
+    },
+    {
+      "id": "cco-huggingface-skills-huggingface-skills",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://huggingface.co/mcp?login"
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-notebook_and_visualization",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "git+https://github.com/gemini-cli-extensions/data-agent-kit-starter-pack.git"
+      ],
+      "environment": {}
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_bigquery_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "bigquery",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "BIGQUERY_LOCATION": "",
+        "BIGQUERY_PROJECT": ""
+      }
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_spanner_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "spanner",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "SPANNER_DATABASE": "",
+        "SPANNER_DIALECT": "",
+        "SPANNER_INSTANCE": "",
+        "SPANNER_PROJECT": ""
+      }
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_alloydb-postgres-admin_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "alloydb-postgres-admin",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {}
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_alloydb-postgres_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "alloydb-postgres",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "ALLOYDB_POSTGRES_CLUSTER": "",
+        "ALLOYDB_POSTGRES_DATABASE": "",
+        "ALLOYDB_POSTGRES_INSTANCE": "",
+        "ALLOYDB_POSTGRES_IP_TYPE": "",
+        "ALLOYDB_POSTGRES_PASSWORD": "",
+        "ALLOYDB_POSTGRES_PROJECT": "",
+        "ALLOYDB_POSTGRES_REGION": "",
+        "ALLOYDB_POSTGRES_USER": ""
+      }
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_cloud-sql-postgresql-admin_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "cloud-sql-postgres-admin",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {}
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_cloud-sql-postgresql_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "cloud-sql-postgres",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "CLOUD_SQL_POSTGRES_DATABASE": "",
+        "CLOUD_SQL_POSTGRES_INSTANCE": "",
+        "CLOUD_SQL_POSTGRES_IP_TYPE": "",
+        "CLOUD_SQL_POSTGRES_PASSWORD": "",
+        "CLOUD_SQL_POSTGRES_PROJECT": "",
+        "CLOUD_SQL_POSTGRES_REGION": "",
+        "CLOUD_SQL_POSTGRES_USER": ""
+      }
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_knowledge_catalog_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "dataplex",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "DATAPLEX_PROJECT": ""
+      }
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_dataproc_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "dataproc",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "DATAPROC_PROJECT": "",
+        "DATAPROC_REGION": ""
+      }
+    },
+    {
+      "id": "cco-data-agent-kit-starter-pack-datacloud_serverless-spark_toolbox",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "@toolbox-sdk/server@>=1.1.0",
+        "--prebuilt",
+        "serverless-spark",
+        "--stdio",
+        "--user-agent-metadata",
+        "datacloud.claude-and-codex"
+      ],
+      "environment": {
+        "SERVERLESS_SPARK_PROJECT": "",
+        "SERVERLESS_SPARK_LOCATION": ""
+      }
+    },
+    {
+      "id": "cco-plugin-stripe",
+      "enabled": false,
+      "transport": "streamable-http",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-27T03:06:19.440434+00:00",
+      "updatedAt": "2026-04-27T03:06:19.440434+00:00",
+      "url": "https://mcp.stripe.com"
+    }
+  ]
+}

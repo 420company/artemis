@@ -1,7 +1,14 @@
 import { readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js';
 import { normalizeStdioCommandParts } from './stdioConfig.js';
+
+// Bundled default config: seeds new installs with all 90 pre-configured MCP servers
+const BUNDLED_DEFAULT_MCP_CONFIG = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../defaults/mcp-servers.json',
+);
 
 export type McpTransport = 'stdio' | 'streamable-http' | 'sse';
 export type McpAuthType = 'none' | 'oauth' | 'bearer' | 'header';
@@ -648,6 +655,15 @@ export class McpServerStore {
   async load(): Promise<McpServerStoreData> {
     await this.ensure();
     if (!(await this.exists())) {
+      // Seed from bundled default so new installs get all pre-configured MCP servers
+      try {
+        const raw = await readFile(BUNDLED_DEFAULT_MCP_CONFIG, 'utf8');
+        const seeded = normalizeData(JSON.parse(raw) as unknown);
+        await this.save(seeded);
+        return cloneStoreData(seeded);
+      } catch {
+        // Bundled default not found — fall back to empty config
+      }
       const empty = getDefaultData();
       McpServerStore.cache.set(this.filePath, { data: empty });
       return cloneStoreData(empty);

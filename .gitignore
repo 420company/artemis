@@ -1,15 +1,42 @@
+# Dependencies
 node_modules/
+mcp-packages/node_modules/
+
+# Build output
 dist/
+
+# User data dirs (contain API keys, tokens, session data)
 .artemis/
 .mylaude/
-plugins/
-npmrc
-*.env
+
+# Plugin source bundled separately — included via npm files field
+# plugins/ intentionally NOT ignored (bundled with CLI)
+
+# Secrets & environment
+.env
 .env.*
-*.tmp
+*.env
+npmrc
+.npmrc
+
+# Logs & temp
 *.log
+*.tmp
+*.bak
+*.backup
+*.orig
 .DS_Store
+Thumbs.db
+
+# Test artifacts
 test-output/
-test-*
+test-*/
 coverage/
+
+# Skill vendor dirs
 skills/web-spider/vendor/
+
+# Dev scripts used during setup (not for end users)
+/tmp/
+scripts/install_*.py
+scripts/fetch_*.py

@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { APP_NAME, APP_VERSION } from '../appMeta.js';
 import type { SessionMessage } from '../core/types.js';
 import type {
@@ -15,6 +17,24 @@ import {
   ensureMcpOAuthAccessToken,
   persistMcpServerUpdate,
 } from './oauth.js';
+import {
+  type McpDependencyInfo,
+  buildDependencyInfo,
+  detectDependencyRequirement,
+  isMissingExecutableError,
+} from './installer.js';
+
+export class McpDependencyError extends Error {
+  readonly server: McpServerConfig;
+  readonly dependencyInfo: McpDependencyInfo;
+
+  constructor(server: McpServerConfig, info: McpDependencyInfo) {
+    super(`MCP plugin "${server.id}" requires a missing dependency: ${info.installInstructions}`);
+    this.name = 'McpDependencyError';
+    this.server = server;
+    this.dependencyInfo = info;
+  }
+}
 
 type JsonRecord = Record<string, unknown>;
 type SseFrame = {
@@ -89,6 +109,11 @@ type RpcTransport = {
     sampledHeaders?: string[];
   };
 };
+
+// CLI root: src/mcp/client.ts compiles to dist/mcp/client.js, so ../../ = project root
+const CLI_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const CLI_PLUGINS_DIR = path.join(CLI_ROOT, 'plugins');
+const CLI_MCP_PACKAGES_DIR = path.join(CLI_ROOT, 'mcp-packages');
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const CLIENT_PROTOCOL_VERSION = '2024-11-05';
@@ -1564,12 +1589,31 @@ class StdioRpcTransport implements RpcTransport {
     this.timeoutMs = timeoutMs;
   }
 
+  private resolveArg(value: string): string {
+    if (value.includes('${CLAUDE_PLUGIN_ROOT}')) {
+      const pluginRoot = path.join(CLI_PLUGINS_DIR, this.server.id);
+      value = value.split('${CLAUDE_PLUGIN_ROOT}').join(pluginRoot);
+    }
+    if (value.includes('${ARTEMIS_MCP_PACKAGES}')) {
+      value = value.split('${ARTEMIS_MCP_PACKAGES}').join(CLI_MCP_PACKAGES_DIR);
+    }
+    return value;
+  }
+
   private ensureProcess(): void {
     if (this.child) {
       return;
     }
 
-    const child = spawn(this.server.command ?? '', this.server.commandArgs ?? [], {
+    const resolvedCommand = this.resolveArg(this.server.command ?? '');
+    let resolvedArgs = (this.server.commandArgs ?? []).map((a) => this.resolveArg(a));
+
+    // Auto-inject --prefix so npx uses locally bundled packages when available
+    if (path.basename(resolvedCommand) === 'npx' && !resolvedArgs.includes('--prefix')) {
+      resolvedArgs = ['--prefix', CLI_MCP_PACKAGES_DIR, ...resolvedArgs];
+    }
+
+    const child = spawn(resolvedCommand, resolvedArgs, {
       cwd: this.server.workingDirectory ?? this.cwd,
       shell: false,
       windowsHide: true,
@@ -2049,6 +2093,16 @@ export async function callMcpServerTool(options: {
       await invalidateManagedClient(options.server, options.cwd);
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
+      }
+      // Detect missing runtime/executable — do not retry, surface to user
+      if (isMissingExecutableError(error)) {
+        const req = detectDependencyRequirement(options.server);
+        if (req) {
+          throw new McpDependencyError(
+            options.server,
+            buildDependencyInfo(options.server, req),
+          );
+        }
       }
       throw new Error(
         error instanceof Error ? error.message : String(error),

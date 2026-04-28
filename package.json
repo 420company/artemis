@@ -1,6 +1,6 @@
 {
-  "name": "artemis",
-  "version": "0.6.33",
+  "name": "artemis-code",
+  "version": "0.0.1",
   "description": "Artemis — AI assistant CLI by www.420.company",
   "main": "./dist/index.js",
   "type": "module",
@@ -17,6 +17,9 @@
     "skills/*/examples/**",
     "skills/*/requirements.txt",
     "skills/registry.json",
+    "plugins/**",
+    "mcp-packages/package.json",
+    "defaults/mcp-servers.json",
     "README.md",
     "LICENSE",
     "bin/"
@@ -26,6 +29,7 @@
   },
   "scripts": {
     "run": "node --no-warnings --disable-warning=DEP0005 node_modules/tsx/dist/cli.mjs src/cli.ts",
+    "postinstall": "npm install --prefix mcp-packages --no-audit --no-fund --silent 2>/dev/null || true",
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.build.json",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "lint": "node node_modules/eslint/bin/eslint.js 'src/**/*.ts'",

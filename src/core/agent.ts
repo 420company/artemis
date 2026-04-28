@@ -67,11 +67,13 @@ import {
   resolveOdinSkillContext,
 } from '../odin/runtime.js';
 import {
+  McpDependencyError,
   callMcpServerTool,
   getMcpServerPrompt,
   getSuggestedMcpAuthState,
   readMcpServerResource,
 } from '../mcp/client.js';
+import { formatDependencyPrompt, installNpmMcpPackage } from '../mcp/installer.js';
 import { McpServerStore, type McpServerConfig } from '../mcp/store.js';
 import {
   applyMcpRuntimeFailure,
@@ -3652,6 +3654,45 @@ async function executeMcpToolAction(
       output: result.output,
     };
   } catch (error) {
+    // Dependency missing: stop immediately, surface install prompt to user
+    if (error instanceof McpDependencyError) {
+      const info = error.dependencyInfo;
+      const prompt = formatDependencyPrompt(info, 'zh');
+
+      // Auto-install npm packages silently if canAutoInstall
+      if (info.canAutoInstall && info.requirement.kind === 'npm') {
+        try {
+          options.onInfo?.(`[mcp] installing ${info.requirement.package}...`);
+          await installNpmMcpPackage(info.requirement.package);
+          options.onInfo?.(`[mcp] ${info.requirement.package} installed, retrying...`);
+          // Retry once after successful install
+          const result = await callMcpServerTool({
+            server,
+            cwd: options.cwd,
+            toolName: action.toolName,
+            args: action.args,
+            timeoutMs: action.timeoutMs,
+          });
+          return { ok: true, output: result.output };
+        } catch {
+          // Install failed — fall through to prompt
+        }
+      }
+
+      return {
+        ok: false,
+        output: prompt,
+        error: buildToolError('mcp_dependency_missing', prompt, {
+          retryable: false,
+          details: {
+            serverId: info.serverId,
+            requirementKind: info.requirement.kind,
+            canAutoInstall: info.canAutoInstall,
+          },
+        }),
+      };
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =

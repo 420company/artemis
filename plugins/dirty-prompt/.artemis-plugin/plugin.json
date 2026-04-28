@@ -1,0 +1,15 @@
+{
+  "name": "dirty-prompt",
+  "version": "1.0.0",
+  "description": "Artemis / 420.COMPANY opt-in layered design and motion prompt enhancer.",
+  "enabled": true,
+  "capabilities": ["design-guidance"],
+  "instructionsFile": "PLUGIN.md",
+  "policy": {
+    "read": false,
+    "write": false,
+    "shell": false,
+    "delegate": false,
+    "commandPrefixes": []
+  }
+}

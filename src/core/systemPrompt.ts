@@ -103,6 +103,7 @@ export function buildSystemPrompt(
         '- Provider-native function tools are available in this session. Prefer calling those native tools directly instead of emitting the same step again in textual actions.',
         '- Discovered MCP tools, prompts, and resources may also appear as schema-aware native functions. MCP tools use names like mcp__<server>__<tool>, prompts use mcp_prompt__<server>__<prompt>, and resources use mcp_resource__<server>__<resource>.',
         '- Dedicated projected MCP native functions are prioritized by alwaysLoad, previously-loaded sticky MCP functions, and current-request relevance. If a discovered MCP surface is not projected as a dedicated native function in this round, fall back to the generic runtime-managed mcp_call_tool, mcp_get_prompt, or mcp_read_resource actions.',
+        '- If a tool result contains error code "mcp_dependency_missing", the plugin is missing a required runtime or package. Do NOT retry the same tool. Instead, relay the install instructions to the user exactly as provided and ask if they want to proceed. Only retry the tool after the user confirms installation is complete.',
         '- After native tool results return, continue reasoning and still produce the final reply using the JSON response contract below.',
       ]
       : []),
