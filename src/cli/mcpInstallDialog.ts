@@ -59,31 +59,35 @@ function rainbow(text: string, offset: number): string {
     .join('')
 }
 
-// ─── cat frames (🌙 upper-left, 𓃠 lower-right — cat gazing up at moon) ────────
+// ─── cat frames: 🌙 upper-left closer to 𓃠, breathing starfield ──────────────
+// Three frames cycle bright → medium → soft for a slow breathing feel.
 
 const CAT_FRAMES = [
   {
-    haloTop:  '  🌙  ✦        ˚    ·  ',
-    innerTop: '       ·               ',
-    scene:    '              𓃠        ',
-    innerBot: '    ˚              ·   ',
-    haloBot:  '  ·       ✦       ✦   ',
+    // bright — inhale
+    haloTop:  ' ✦  ·  ✦  🌙 ✦  ·  ✦  ·  ✦ ',
+    innerTop: ' ·  ✦     ·    ✦  ·     ✦   ',
+    scene:    '           𓃠  ·   ✦  ·       ',
+    innerBot: ' ✦     ·    ✦    ·   ✦    ·  ',
+    haloBot:  ' ·  ✦  ·  ✦   ·  ✦  ·  ✦   ',
     offset: 0,
   },
   {
-    haloTop:  '  🌙  ˚        ·    ✦  ',
-    innerTop: '       ✦               ',
-    scene:    '              𓃠        ',
-    innerBot: '    ·              ˚   ',
-    haloBot:  '  ✦       ˚       ·   ',
+    // medium
+    haloTop:  ' ·  ✦  ·  🌙 ·  ✦  ·  ✦  ·  ',
+    innerTop: ' ✦  ·     ✦    ·  ✦     ·    ',
+    scene:    '           𓃠  ✦   ·  ✦       ',
+    innerBot: ' ·     ✦    ·    ✦   ·    ✦  ',
+    haloBot:  ' ✦  ·  ✦  ·   ✦  ·  ✦  ·    ',
     offset: 3,
   },
   {
-    haloTop:  '  🌙  ·        ✦    ˚  ',
-    innerTop: '       ˚               ',
-    scene:    '              𓃠        ',
-    innerBot: '    ✦              ·   ',
-    haloBot:  '  ˚       ·       ✦   ',
+    // soft — exhale
+    haloTop:  ' ˚  ·  ˚  🌙 ·  ˚  ·  ˚  ·  ',
+    innerTop: ' ·  ˚     ·    ˚  ·     ˚    ',
+    scene:    '           𓃠  ·   ˚  ·       ',
+    innerBot: ' ˚     ·    ˚    ·   ˚    ·  ',
+    haloBot:  ' ·  ˚  ·  ˚   ·  ˚  ·  ˚    ',
     offset: 6,
   },
 ]
@@ -144,6 +148,7 @@ function buildLayout(locale: UiLocale): Layout {
     t.desc2,
     t.desc3,
     CAT_FRAMES[0]!.haloTop,
+    CAT_FRAMES[0]!.haloBot,
     CAT_FRAMES[0]!.scene,
     ` ${t.yes}    /    ${t.no} `,
     t.footer,
@@ -297,7 +302,7 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
   const renderChoice = () => renderScreen(buildChoiceLines(fi, sel, locale, layout), layout)
 
   renderChoice()
-  const timer = setInterval(() => { fi++; renderChoice() }, 200)
+  const timer = setInterval(() => { fi++; renderChoice() }, 350)
 
   // Re-render cleanly on terminal resize — prevents ghosting
   const onResize = () => { layout = buildLayout(locale); renderChoice() }
