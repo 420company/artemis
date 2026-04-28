@@ -713,6 +713,27 @@ async function runWithProgress<T>(
     en: 'Note: slow networks or cold-start edge models can take a while — keep the window open.',
   });
 
+  const isTTY = process.stdout.isTTY ?? false;
+  let panelLineCount = 0;
+
+  const writePanel = (panel: string, isFirst: boolean) => {
+    if (!isTTY || isFirst) {
+      promptIO.write(panel + '\n');
+      panelLineCount = panel.split('\n').length + 1;
+    } else {
+      // Move cursor up to start of previous panel and overwrite each line in place
+      const lines = panel.split('\n');
+      const up = `\x1b[${panelLineCount}A`;
+      const overwrite = lines.map(l => `\r\x1b[2K${l}`).join('\n');
+      // Pad with blank cleared lines if new panel is shorter than previous
+      const pad = panelLineCount - lines.length - 1;
+      const clearRemainder = pad > 0 ? '\n' + Array.from({ length: pad }, () => '\r\x1b[2K').join('\n') : '';
+      promptIO.write(up + overwrite + clearRemainder + '\n');
+      panelLineCount = Math.max(panelLineCount, lines.length + 1);
+    }
+  };
+
+  let isFirst = true;
   const render = () => {
     if (done) return;
     const elapsed = Date.now() - start;
@@ -721,13 +742,14 @@ async function runWithProgress<T>(
     const filled = Math.round(BAR_TOTAL * pct);
     const bar = '█'.repeat(filled) + '░'.repeat(BAR_TOTAL - filled);
     const seconds = (elapsed / 1000).toFixed(1);
-    promptIO.write(buildPanel(title, [
+    writePanel(buildPanel(title, [
       `${spin}  ${message}`,
       '',
       `    ${bar}   ${seconds}s`,
       '',
       hint,
-    ]));
+    ]), isFirst);
+    isFirst = false;
     tick += 1;
   };
 
@@ -737,11 +759,10 @@ async function runWithProgress<T>(
     const result = await task();
     done = true;
     clearInterval(timer);
-    // Final "100% complete" frame so the user sees a visible commit.
     const elapsedFinal = ((Date.now() - start) / 1000).toFixed(1);
-    promptIO.write(buildPanel(title, [
+    writePanel(buildPanel(title, [
       `✓  ${pickLocale(locale, { zh: '验证完成', en: 'Verification complete' })}  (${elapsedFinal}s)`,
-    ]));
+    ]), false);
     return result;
   } catch (err) {
     done = true;

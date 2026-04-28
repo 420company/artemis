@@ -420,7 +420,7 @@ async function configureProviderProfile(options: {
 }
 
 async function configureModelProvider(options: { cwd: string; locale: UiLocale; quick?: boolean }): Promise<void> {
-  const { cwd, locale, quick = false } = options
+  const { cwd, locale } = options
   sectionTitle('Inference Provider', [
     tr(locale, '只显示当前运行时真正支持的 Provider 配置路径。', 'Only shows provider paths that the current runtime can actually execute.'),
   ])
@@ -434,17 +434,15 @@ async function configureModelProvider(options: { cwd: string; locale: UiLocale; 
   console.log(`  ✓ ${tr(locale, '主模型', 'Primary')}: ${primary.model} (${primary.label ?? primary.id})`)
   console.log()
 
-  if (!quick) {
-    const wantSecondary = await askYesNo(
-      locale,
-      tr(locale, '是否配置副模型 Provider（保留 Artemis 双模型能力）？', 'Configure a secondary provider (keep Artemis dual-model support)?'),
-      false,
-    )
-    if (wantSecondary) {
-      const secondary = await configureProviderProfile({ cwd, locale, role: 'secondary' })
-      if (secondary) {
-        console.log(`  ✓ ${tr(locale, '副模型', 'Secondary')}: ${secondary.model} (${secondary.label ?? secondary.id})`)
-      }
+  const wantSecondary = await askYesNo(
+    locale,
+    tr(locale, '是否配置副模型 Provider？', 'Configure a secondary model provider?'),
+    false,
+  )
+  if (wantSecondary) {
+    const secondary = await configureProviderProfile({ cwd, locale, role: 'secondary' })
+    if (secondary) {
+      console.log(`  ✓ ${tr(locale, '副模型', 'Secondary')}: ${secondary.model} (${secondary.label ?? secondary.id})`)
     }
   }
 }
@@ -574,7 +572,7 @@ async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise
 async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
   sectionTitle('Quick Setup', [
-    tr(locale, '只配置主 provider / model、Agent 默认值，并可选配置通讯平台。', 'Configure only the main provider/model, runtime agent defaults, and optionally messaging.'),
+    tr(locale, '配置主/副 Provider、Agent 默认值，并可选配置通讯平台。', 'Configure primary/secondary providers, runtime agent defaults, and optionally messaging.'),
   ])
 
   await configureModelProvider({ cwd, locale, quick: true })
