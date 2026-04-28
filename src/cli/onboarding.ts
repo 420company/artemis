@@ -396,7 +396,7 @@ async function configureVisualModel(
       hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
       choices: [
         { label: 'BytePlus', value: 'byteplus' },
-        { label: 'OpenAI Sora 2', value: 'openai' },
+        { label: 'Google Veo 3 (veo-3.0-generate-preview)', value: 'google' },
         { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
         { label: t('取消', 'Cancel'), value: '__cancel__' },
       ],

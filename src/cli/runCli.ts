@@ -123,7 +123,20 @@ export async function runCli(argv: string[]): Promise<void> {
 
   // ── MCP dependency install dialog (first run, disk-state based) ────────────
   if (shouldShowMcpInstallDialog()) {
-    await runMcpInstallDialog(locale)
+    const mcpResult = await runMcpInstallDialog(locale)
+    if (mcpResult === 'installed') {
+      // Enable all bundled MCP servers so the main interface shows them as active.
+      try {
+        const mcpStore = new McpServerStore(options.cwd)
+        const mcpData = await mcpStore.load()
+        for (const server of mcpData.servers) {
+          server.enabled = true
+        }
+        await mcpStore.save(mcpData)
+      } catch {
+        // Non-fatal: count will remain 0 until user manually enables servers
+      }
+    }
   }
 
   if (!options.maxTurnsExplicit) {

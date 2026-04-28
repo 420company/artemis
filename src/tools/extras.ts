@@ -624,7 +624,7 @@ export function buildExtraToolDefs(): Anthropic.Tool[] {
     { name: 'get_env', description: 'Read environment variable(s). Filters out secrets automatically.',
       input_schema: { type: 'object' as const, properties: {
         key: { type: 'string', description: 'Single env var name to read' },
-        keys: { type: 'array', description: 'List of env var names to read' }
+        keys: { type: 'array', items: { type: 'string' }, description: 'List of env var names to read' }
       } } },
     { name: 'which_command', description: 'Find the full path of a shell command.',
       input_schema: { type: 'object' as const, properties: { command: { type: 'string', description: 'Command name to locate' } }, required: ['command'] } },
@@ -673,7 +673,7 @@ export function buildExtraToolDefs(): Anthropic.Tool[] {
       input_schema: { type: 'object' as const, properties: {
         title: { type: 'string', description: '笔记标题' },
         content: { type: 'string', description: '笔记内容' },
-        tags: { type: 'array', description: '笔记标签' }
+        tags: { type: 'array', items: { type: 'string' }, description: '笔记标签' }
       }, required: ['title'] } },
     { name: 'notebook_list', description: '列出所有笔记',
       input_schema: { type: 'object' as const, properties: {} } },
@@ -682,7 +682,7 @@ export function buildExtraToolDefs(): Anthropic.Tool[] {
         id: { type: 'string', description: '笔记ID' },
         title: { type: 'string', description: '笔记标题' },
         content: { type: 'string', description: '笔记内容' },
-        tags: { type: 'array', description: '笔记标签' }
+        tags: { type: 'array', items: { type: 'string' }, description: '笔记标签' }
       }, required: ['id'] } },
     { name: 'notebook_delete', description: '删除笔记',
       input_schema: { type: 'object' as const, properties: {
@@ -699,12 +699,12 @@ export function buildExtraToolDefs(): Anthropic.Tool[] {
     { name: 'notebook_addTag', description: '给笔记添加标签',
       input_schema: { type: 'object' as const, properties: {
         id: { type: 'string', description: '笔记ID' },
-        tags: { type: 'array', description: '标签数组' }
+        tags: { type: 'array', items: { type: 'string' }, description: '标签数组' }
       }, required: ['id', 'tags'] } },
     { name: 'notebook_removeTag', description: '移除笔记的标签',
       input_schema: { type: 'object' as const, properties: {
         id: { type: 'string', description: '笔记ID' },
-        tags: { type: 'array', description: '标签数组' }
+        tags: { type: 'array', items: { type: 'string' }, description: '标签数组' }
       }, required: ['id', 'tags'] } },
     { name: 'notebook_tree', description: '获取笔记树结构',
       input_schema: { type: 'object' as const, properties: {} } },

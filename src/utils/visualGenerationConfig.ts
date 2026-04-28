@@ -36,6 +36,10 @@ export function defaultVisualModelForProvider(
         : 'stable-video-diffusion';
     case 'gemini':
       return assetKind === 'image' ? 'gemini-2.5-flash-image' : 'none';
+    case 'google':
+      return assetKind === 'image'
+        ? 'gemini-2.5-flash-image'
+        : 'veo-3.0-generate-preview';
     case 'grok':
       return assetKind === 'image' ? 'grok-v1' : 'grok-video';
     case 'mock':
@@ -51,6 +55,9 @@ export function defaultVisualBaseUrlForProvider(provider: string): string {
       return OPENAI_BASE_URL;
     case 'byteplus':
       return 'https://ark.ap-southeast.bytepluses.com/api/v3';
+    case 'google':
+    case 'gemini':
+      return 'https://generativelanguage.googleapis.com/v1beta';
     default:
       return '';
   }

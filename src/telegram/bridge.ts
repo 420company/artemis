@@ -252,6 +252,17 @@ export async function setupTelegramBridge(options: {
   const me = await client.getMe()
   const label = '@' + (me.username ?? me.first_name)
 
+  // Register platform in BragiStore so the main interface shows Telegram as an active bridge
+  const bragiStore = new BragiStore(options.cwd, options.secretStore)
+  const existingData = await bragiStore.load()
+  const existing = existingData.platforms.telegram
+  await bragiStore.upsertPlatform('telegram', {
+    enabled: true,
+    autoStartOnLaunch: autoStart,
+    credentials: { botToken: token },
+    allowedTargets: existing?.allowedTargets ?? [],
+  })
+
   return buildPanel(
     pickLocale(locale, { zh: 'Telegram 设置完成', en: 'Telegram setup complete' }),
     [

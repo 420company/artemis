@@ -144,6 +144,18 @@ export const VISUAL_PROVIDERS = [
     }
   },
   {
+    name: 'google',
+    label: 'Google Veo + Gemini Image',
+    description: '占位适配器：Google Veo 视频与 Gemini 图片生成 API（待接入）',
+    status: 'placeholder' as const,
+    supportsImages: true,
+    supportsVideos: true,
+    defaultModel: {
+      image: 'gemini-2.5-flash-image',
+      video: 'veo-3.0-generate-preview'
+    }
+  },
+  {
     name: 'grok',
     label: 'xAI Grok',
     description: '占位适配器：当前未接入真实 Grok 图像/视频 API',
@@ -206,6 +218,7 @@ export function getVisualProviderSupportNote(
   switch (name.toLowerCase()) {
     case 'stable-diffusion':
     case 'gemini':
+    case 'google':
     case 'grok':
       return locale === 'zh'
         ? '当前仓库里该视觉 provider 仍是占位实现，尚未接入真实 API。若目标服务是完全私有协议，需要单独编写 provider 适配器。'
