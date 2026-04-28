@@ -434,7 +434,20 @@ export type AgentAction =
   | { type: 'calendar_add_event'; title: string; startISO: string; endISO?: string; notes?: string; calendarName?: string }
   | { type: 'reminders_list'; list?: string; includeCompleted?: boolean }
   | { type: 'reminders_add'; title: string; list?: string; dueISO?: string; notes?: string }
-  | { type: 'reminders_complete'; title: string; list?: string };
+  | { type: 'reminders_complete'; title: string; list?: string }
+  // ── Browser automation (Playwright headed Chromium) ─────────────────────
+  | { type: 'browser_navigate'; url: string; waitFor?: 'load' | 'domcontentloaded' | 'networkidle'; extractText?: boolean }
+  | { type: 'browser_screenshot'; fullPage?: boolean }
+  | { type: 'browser_extract_text'; selector?: string }
+  | { type: 'browser_click'; selector?: string; text?: string }
+  | { type: 'browser_type'; selector: string; text: string; pressEnter?: boolean }
+  | { type: 'browser_wait_for'; selector?: string; text?: string; timeoutMs?: number }
+  | { type: 'browser_close' }
+  // ── MCP self-management ────────────────────────────────────────────────
+  | { type: 'mcp_list'; filter?: string; status?: 'all' | 'enabled' | 'disabled' }
+  | { type: 'mcp_enable'; id: string }
+  | { type: 'mcp_disable'; id: string }
+  | { type: 'mcp_suggest'; intent: string };
 
 export type AgentActionType = AgentAction['type'];
 
@@ -490,6 +503,19 @@ export const ALL_AGENT_ACTION_TYPES = [
   'reminders_list',
   'reminders_add',
   'reminders_complete',
+  // ── Browser automation ─────────────────────────────────────────────────
+  'browser_navigate',
+  'browser_screenshot',
+  'browser_extract_text',
+  'browser_click',
+  'browser_type',
+  'browser_wait_for',
+  'browser_close',
+  // ── MCP self-management ────────────────────────────────────────────────
+  'mcp_list',
+  'mcp_enable',
+  'mcp_disable',
+  'mcp_suggest',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [

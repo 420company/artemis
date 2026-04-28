@@ -1209,6 +1209,180 @@ const capabilityToolDefs: ToolDefinition[] = [
       return executeRemindersComplete(action);
     }) as any,
   },
+
+  // ── Browser automation (Playwright headed Chromium) ────────────────────
+  {
+    type: 'browser_navigate',
+    description: '在本机 Chromium 浏览器中打开 URL。url 必填。当 http_request 被反爬阻挡时，切换到这条工具。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.url, 'url', errs);
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserNavigate } = await import('./browser/browserTools.js');
+      return executeBrowserNavigate(a);
+    }) as any,
+  },
+  {
+    type: 'browser_screenshot',
+    description: '对当前浏览器页面截图。fullPage 控制是否截全页（默认仅可视区）。返回截图路径。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (a: any) => {
+      const { executeBrowserScreenshot } = await import('./browser/browserTools.js');
+      return executeBrowserScreenshot(a);
+    }) as any,
+  },
+  {
+    type: 'browser_extract_text',
+    description: '提取当前页面（或指定 selector 的元素）可见文本。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (a: any) => {
+      const { executeBrowserExtract } = await import('./browser/browserTools.js');
+      return executeBrowserExtract(a);
+    }) as any,
+  },
+  {
+    type: 'browser_click',
+    description: '点击当前页面元素。提供 selector（CSS）或 text（按可见文字匹配）至少一个。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      if (!a?.selector && !a?.text) return ['need selector or text'];
+      return [];
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserClick } = await import('./browser/browserTools.js');
+      return executeBrowserClick(a);
+    }) as any,
+  },
+  {
+    type: 'browser_type',
+    description: '在表单输入框中输入文字。selector + text 必填，可选 pressEnter。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.selector, 'selector', errs);
+      if (typeof a?.text !== 'string') errs.push('text required');
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserType } = await import('./browser/browserTools.js');
+      return executeBrowserType(a);
+    }) as any,
+  },
+  {
+    type: 'browser_wait_for',
+    description: '等待元素出现（页面加载完成时使用）。selector 或 text 之一必填。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      if (!a?.selector && !a?.text) return ['need selector or text'];
+      return [];
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserWait } = await import('./browser/browserTools.js');
+      return executeBrowserWait(a);
+    }) as any,
+  },
+  {
+    type: 'browser_close',
+    description: '关闭当前浏览器标签（保留 context 以便下次保留 cookie / 登录态）。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: () => [],
+    execute: (async (a: any) => {
+      const { executeBrowserClose } = await import('./browser/browserTools.js');
+      return executeBrowserClose(a);
+    }) as any,
+  },
+
+  // ── MCP self-management ────────────────────────────────────────────────
+  {
+    type: 'mcp_list',
+    description: '列出当前 ~/.artemis/mcp-servers.json 中所有 MCP server 状态。可按 filter 子串过滤、status 过滤启用/禁用。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (a: any) => {
+      const { executeMcpList } = await import('./mcpManage/mcpManageTools.js');
+      return executeMcpList(a);
+    }) as any,
+  },
+  {
+    type: 'mcp_enable',
+    description: '启用指定 MCP server。id 必填，需要精确匹配（先用 mcp_list 或 mcp_suggest 找正确 id）。注意启用后首次调用前可能要在 mcp-servers.json 补 API key/OAuth。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.id, 'id', errs);
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeMcpEnable } = await import('./mcpManage/mcpManageTools.js');
+      return executeMcpEnable(a);
+    }) as any,
+  },
+  {
+    type: 'mcp_disable',
+    description: '禁用指定 MCP server。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.id, 'id', errs);
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeMcpDisable } = await import('./mcpManage/mcpManageTools.js');
+      return executeMcpDisable(a);
+    }) as any,
+  },
+  {
+    type: 'mcp_suggest',
+    description: '基于 intent 描述推荐相关 MCP server。intent 必填（如 "机票查询"、"git 操作"）。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.intent, 'intent', errs);
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeMcpSuggest } = await import('./mcpManage/mcpManageTools.js');
+      return executeMcpSuggest(a);
+    }) as any,
+  },
 ];
 
 export const toolDefs: ToolDefinition[] = [

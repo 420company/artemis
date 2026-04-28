@@ -1303,6 +1303,105 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           list: optionalStringSchema('Optional list name to scope the search.'),
         },
       };
+
+    // ── Browser automation ─────────────────────────────────────────────
+    case 'browser_navigate':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['url'],
+        properties: {
+          url: nonEmptyStringSchema('URL to navigate to (must include scheme).'),
+          waitFor: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle'], description: 'Page lifecycle event to wait for. Default: domcontentloaded.' },
+          extractText: { type: 'boolean', description: 'Whether to also extract visible body text in the response. Default: true.' },
+        },
+      };
+    case 'browser_screenshot':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          fullPage: { type: 'boolean', description: 'Capture full scrollable page. Default: false (viewport only).' },
+        },
+      };
+    case 'browser_extract_text':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          selector: optionalStringSchema('Optional CSS selector. Default: extract entire body innerText.'),
+        },
+      };
+    case 'browser_click':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          selector: optionalStringSchema('CSS selector for the target element.'),
+          text: optionalStringSchema('Alternatively, visible text content of the clickable element.'),
+        },
+      };
+    case 'browser_type':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['selector', 'text'],
+        properties: {
+          selector: nonEmptyStringSchema('CSS selector for the input field.'),
+          text: { type: 'string', description: 'Text to type.' },
+          pressEnter: { type: 'boolean', description: 'Press Enter after typing. Default: false.' },
+        },
+      };
+    case 'browser_wait_for':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          selector: optionalStringSchema('CSS selector to wait for.'),
+          text: optionalStringSchema('Visible text to wait for.'),
+          timeoutMs: { type: 'integer', minimum: 1000, maximum: 60000, description: 'Timeout in milliseconds. Default: 15000.' },
+        },
+      };
+    case 'browser_close':
+      return { type: 'object', additionalProperties: false, properties: {} };
+
+    // ── MCP self-management ────────────────────────────────────────────
+    case 'mcp_list':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          filter: optionalStringSchema('Optional substring filter (matches id or surface name).'),
+          status: { type: 'string', enum: ['all', 'enabled', 'disabled'], description: 'Filter by status. Default: all.' },
+        },
+      };
+    case 'mcp_enable':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: {
+          id: nonEmptyStringSchema('MCP server id (use mcp_list / mcp_suggest to find).'),
+        },
+      };
+    case 'mcp_disable':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: {
+          id: nonEmptyStringSchema('MCP server id.'),
+        },
+      };
+    case 'mcp_suggest':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['intent'],
+        properties: {
+          intent: nonEmptyStringSchema('Natural-language description of what you want to do (e.g. "flight search", "git operations").'),
+        },
+      };
   default:
     return { type: 'object', properties: {}, additionalProperties: true };
   }

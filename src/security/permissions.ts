@@ -148,6 +148,30 @@ function describeAction(action: AgentAction): string {
       return `reminders: add "${action.title}"`;
     case 'reminders_complete':
       return `reminders: complete "${action.title}"`;
+    // ── Browser automation ──────────────────────────────────────────────
+    case 'browser_navigate':
+      return `browser: navigate to ${action.url}`;
+    case 'browser_screenshot':
+      return `browser: screenshot${action.fullPage ? ' (full page)' : ''}`;
+    case 'browser_extract_text':
+      return `browser: extract text${action.selector ? ` from ${action.selector}` : ''}`;
+    case 'browser_click':
+      return `browser: click ${action.selector ?? action.text ?? '?'}`;
+    case 'browser_type':
+      return `browser: type into ${action.selector}`;
+    case 'browser_wait_for':
+      return `browser: wait for ${action.selector ?? action.text ?? '?'}`;
+    case 'browser_close':
+      return 'browser: close';
+    // ── MCP self-management ─────────────────────────────────────────────
+    case 'mcp_list':
+      return `mcp: list${action.filter ? ` (filter: ${action.filter})` : ''}`;
+    case 'mcp_enable':
+      return `mcp: enable ${action.id}`;
+    case 'mcp_disable':
+      return `mcp: disable ${action.id}`;
+    case 'mcp_suggest':
+      return `mcp: suggest for "${action.intent}"`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

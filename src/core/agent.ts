@@ -1487,6 +1487,30 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `reminders_add "${truncate(action.title, 60)}"`;
     case 'reminders_complete':
       return `reminders_complete "${truncate(action.title, 60)}"`;
+    // ── Browser automation ──────────────────────────────────────────────
+    case 'browser_navigate':
+      return `browser_navigate ${truncate(action.url, 100)}`;
+    case 'browser_screenshot':
+      return `browser_screenshot${action.fullPage ? ' fullPage=true' : ''}`;
+    case 'browser_extract_text':
+      return `browser_extract_text${action.selector ? ` selector=${truncate(action.selector, 60)}` : ''}`;
+    case 'browser_click':
+      return `browser_click ${action.selector ? `selector=${truncate(action.selector, 60)}` : `text=${truncate(action.text ?? '', 60)}`}`;
+    case 'browser_type':
+      return `browser_type into=${truncate(action.selector, 50)} text=${truncate(action.text, 50)}`;
+    case 'browser_wait_for':
+      return `browser_wait_for ${action.selector ?? action.text ?? '?'}`;
+    case 'browser_close':
+      return 'browser_close';
+    // ── MCP self-management ─────────────────────────────────────────────
+    case 'mcp_list':
+      return `mcp_list${action.filter ? ` filter=${action.filter}` : ''}${action.status ? ` status=${action.status}` : ''}`;
+    case 'mcp_enable':
+      return `mcp_enable ${action.id}`;
+    case 'mcp_disable':
+      return `mcp_disable ${action.id}`;
+    case 'mcp_suggest':
+      return `mcp_suggest "${truncate(action.intent, 80)}"`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);

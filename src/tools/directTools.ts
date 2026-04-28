@@ -42,6 +42,19 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'reminders_list',
   'reminders_add',
   'reminders_complete',
+  // ── Browser automation ──────────────────────────────────────────────
+  'browser_navigate',
+  'browser_screenshot',
+  'browser_extract_text',
+  'browser_click',
+  'browser_type',
+  'browser_wait_for',
+  'browser_close',
+  // ── MCP self-management ─────────────────────────────────────────────
+  'mcp_list',
+  'mcp_enable',
+  'mcp_disable',
+  'mcp_suggest',
 ];
 
 export const BUILTIN_DIRECT_TOOL_TYPES: readonly AgentActionType[] =
