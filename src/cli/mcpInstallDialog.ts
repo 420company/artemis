@@ -59,12 +59,33 @@ function rainbow(text: string, offset: number): string {
     .join('')
 }
 
-// ─── cat frames (𓃠 with shifting sparkles) ────────────────────────────────────
+// ─── cat frames (🌙 upper-left, 𓃠 lower-right — cat gazing up at moon) ────────
 
 const CAT_FRAMES = [
-  { starsTop: '  ✦    ·    ✦  ', cat: '   𓃠   ', starsBottom: '  ·    ✦    ·  ', offset: 0 },
-  { starsTop: '  ·    ✦    ·  ', cat: '   𓃠   ', starsBottom: '  ✦    ·    ✦  ', offset: 3 },
-  { starsTop: '   ✦   ·   ✦   ', cat: '   𓃠   ', starsBottom: '   ·   ✦   ·   ', offset: 6 },
+  {
+    haloTop:  '  🌙  ✦        ˚    ·  ',
+    innerTop: '       ·               ',
+    scene:    '              𓃠        ',
+    innerBot: '    ˚              ·   ',
+    haloBot:  '  ·       ✦       ✦   ',
+    offset: 0,
+  },
+  {
+    haloTop:  '  🌙  ˚        ·    ✦  ',
+    innerTop: '       ✦               ',
+    scene:    '              𓃠        ',
+    innerBot: '    ·              ˚   ',
+    haloBot:  '  ✦       ˚       ·   ',
+    offset: 3,
+  },
+  {
+    haloTop:  '  🌙  ·        ✦    ˚  ',
+    innerTop: '       ˚               ',
+    scene:    '              𓃠        ',
+    innerBot: '    ✦              ·   ',
+    haloBot:  '  ˚       ·       ✦   ',
+    offset: 6,
+  },
 ]
 
 // ─── copy ──────────────────────────────────────────────────────────────────────
@@ -122,8 +143,8 @@ function buildLayout(locale: UiLocale): Layout {
     t.desc1,
     t.desc2,
     t.desc3,
-    CAT_FRAMES[0]!.starsTop,
-    CAT_FRAMES[0]!.cat,
+    CAT_FRAMES[0]!.haloTop,
+    CAT_FRAMES[0]!.scene,
     ` ${t.yes}    /    ${t.no} `,
     t.footer,
     t.brand,
@@ -172,9 +193,11 @@ function buildChoiceLines(fi: number, sel: number, locale: UiLocale, layout: Lay
     row(aurora(t.title, fi * 3), layout),
     row(dim(t.subtitle), layout),
     blank(layout),
-    row(dim(fr.starsTop), layout),
-    row(rgb(fr.cat, cr, cg, cb, true), layout),
-    row(dim(fr.starsBottom), layout),
+    row(dim(fr.haloTop), layout),
+    row(dim(fr.innerTop), layout),
+    row(rgb(fr.scene, cr, cg, cb, true), layout),
+    row(dim(fr.innerBot), layout),
+    row(dim(fr.haloBot), layout),
     blank(layout),
     row(rgb(t.desc1, 137, 180, 250), layout),
     row(rgb(t.desc2, 249, 226, 175, true), layout),
