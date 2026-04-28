@@ -282,7 +282,8 @@ export async function runCli(argv: string[]): Promise<void> {
     activeConfig = globalStore.getDefaultMainProfile(globalData)
   }
   const hasEnvKey = Boolean(process.env.ANTHROPIC_API_KEY)
-  if (!isUsableProviderConfig(activeConfig) && !hasEnvKey) {
+  const needsOnboarding = !settings.onboardingCompleted || (!isUsableProviderConfig(activeConfig) && !hasEnvKey)
+  if (needsOnboarding) {
     await runSetupWizard({ locale, cwd: options.cwd, forceFirstTime: true })
     suppressInitialNewbornOnce = true
   }

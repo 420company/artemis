@@ -91,7 +91,7 @@ const COPY = {
     title:    '✦ MCP 插件依赖安装 ✦',
     subtitle: 'Artemis 内置 90 个 MCP 服务插件',
     desc1:    '其中 22 个插件需要安装 npm 依赖包',
-    desc2:    '安装后约 1.4 GB，需要 2-5 分钟',
+    desc2:    '约 360 个包，安装后约 1.4 GB，需要 2-5 分钟',
     desc3:    '请确保网络通畅，也可以跳过稍后再安装',
     yes:      '✦ 立即安装全部依赖',
     no:       '跳过，稍后再说 ✦',
@@ -110,7 +110,7 @@ const COPY = {
     title:    '✦ MCP Plugin Setup ✦',
     subtitle: 'Artemis ships with 90 MCP plugin servers',
     desc1:    '22 of them require npm package dependencies',
-    desc2:    '~1.4 GB installed, takes 2–5 minutes',
+    desc2:    '~360 packages, ~1.4 GB installed, takes 2–5 minutes',
     desc3:    'You can skip and install later when needed',
     yes:      '✦ Install all now',
     no:       'Skip for now ✦',
@@ -262,13 +262,15 @@ function progressBody(fi: number, done: number, total: number, current: string, 
 
 // ─── done screen body ──────────────────────────────────────────────────────────
 
-function doneBody(success: boolean, locale: UiLocale, layout: Layout): string[] {
+function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount?: number): string[] {
   const t = COPY[locale] ?? COPY['en']
+  const countLine = finalCount != null ? dim(t.pkgCount(finalCount, finalCount)) : ''
   return [
     layout.blank,
     layout.blank,
     row(success ? rgb(bold(t.doneOk), 166, 227, 161) : rgb(bold(t.doneFail), 255, 120, 155), layout),
     layout.blank,
+    ...(countLine ? [row(countLine, layout), layout.blank] : []),
     row(dim(success ? t.mcpHint : t.doneFail), layout),
     layout.blank,
     layout.blank,
@@ -339,7 +341,7 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
       return readdirSync(nmDir).filter(d => !d.startsWith('.')).length
     } catch { return 0 }
   }
-  const TOTAL_PKGS = 850 // approximate total including transitive deps
+  const TOTAL_PKGS = 360 // ~339 transitive packages across 12 direct deps (slight buffer)
 
   const renderProgress = () => {
     layout = buildLayout(locale)
@@ -377,14 +379,15 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
 
   clearInterval(progressTimer)
   process.stdout.off('resize', onResizeProgress)
+  const finalCount = countInstalled()
 
   // ── done screen ───────────────────────────────────────────────────────────────
   layout = buildLayout(locale)
-  updateBody(doneBody(success, locale, layout), layout)
+  updateBody(doneBody(success, locale, layout, finalCount), layout)
 
   const onResizeDone = () => {
     layout = buildLayout(locale)
-    rebuildScreen(doneBody(success, locale, layout), layout)
+    rebuildScreen(doneBody(success, locale, layout, finalCount), layout)
   }
   process.stdout.on('resize', onResizeDone)
 
