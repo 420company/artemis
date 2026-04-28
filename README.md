@@ -45,7 +45,7 @@ The same agent pipeline runs whether you type in the terminal or message from yo
 
 ```bash
 # Install globally
-npm install -g artemis
+npm install -g artemis-code
 
 # Launch
 artemis
@@ -63,7 +63,7 @@ artemis
 - npm ≥ 8
 
 ```bash
-npm install -g artemis
+npm install -g artemis-code
 ```
 
 The `postinstall` script automatically fetches npm-based MCP plugin dependencies into an isolated `mcp-packages/` directory inside the CLI install — your global `node_modules` is not polluted.

@@ -25,7 +25,7 @@ npm unlink artemis
 ### 全局安装
 
 ```bash
-npm install -g artemis
+npm install -g artemis-code
 artemis --help
 ```
 
