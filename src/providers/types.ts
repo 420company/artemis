@@ -1,12 +1,14 @@
 import type { AgentRole, SessionMessage } from '../core/types.js';
 
 export type ProviderProtocol = 'openai' | 'messages' | 'responses';
+export type ProviderApiKeyHeader = 'authorization' | 'api-key' | 'x-api-key';
 
 export type ProviderConfig = {
   protocol: ProviderProtocol;
   baseUrl: string;
   apiKey: string;
   model: string;
+  apiKeyHeader?: ProviderApiKeyHeader;
 };
 
 export type ProviderProfileTelemetry = {
@@ -107,6 +109,7 @@ export type CustomProviderConfig = {
   protocol: ProviderProtocol;
   baseUrl: string;
   apiKey?: string;
+  apiKeyHeader?: ProviderApiKeyHeader;
   model: string;
   contextLength?: number;
 };

@@ -1,6 +1,7 @@
 import type { SessionMessage } from '../core/types.js';
 import type {
   ChatProvider,
+  ProviderApiKeyHeader,
   ProviderConfig,
   ProviderRequestOptions,
   ProviderResponse,
@@ -124,6 +125,17 @@ function buildProviderTransportErrorMessage(
 }
 
 type OpenAIMessageContent = string | Array<{ type: string; [key: string]: unknown }>;
+
+export function buildApiKeyHeaders(
+  apiKey: string,
+  header: ProviderApiKeyHeader = 'authorization',
+): Record<string, string> {
+  const trimmed = apiKey.trim();
+  if (!trimmed) return {};
+  if (header === 'api-key') return { 'api-key': trimmed };
+  if (header === 'x-api-key') return { 'x-api-key': trimmed };
+  return { authorization: `Bearer ${trimmed}` };
+}
 
 const UNSUPPORTED_SCHEMA_META_KEYS = new Set([
   '$schema',
@@ -449,7 +461,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'authorization': `Bearer ${this.config.apiKey}`,
+            ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
           },
           body: JSON.stringify(body),
         },
@@ -721,7 +733,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            authorization: `Bearer ${this.config.apiKey}`,
+            ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
           },
           body: JSON.stringify(body),
         },

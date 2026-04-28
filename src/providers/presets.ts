@@ -1,5 +1,5 @@
 import { pickLocale, type UiLocale } from '../cli/locale.js'
-import type { ProviderProtocol } from './types.js'
+import type { ProviderApiKeyHeader, ProviderProtocol } from './types.js'
 
 export type ProviderPresetId = string
 
@@ -12,6 +12,8 @@ export type ProviderPreset = {
   protocol?: ProviderProtocol
   /** baseUrl is appended with /chat/completions, /responses, or /v1/messages by the runtime. */
   baseUrl?: string
+  /** Defaults to Authorization: Bearer. Some OpenAI-compatible APIs document api-key instead. */
+  apiKeyHeader?: ProviderApiKeyHeader
   suggestedModels: string[]
   notes: { zh: string[]; en: string[] }
 }
@@ -364,14 +366,25 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   // ── Direct and OpenAI-compatible providers from Hermes ───────────────────
   {
     id: 'xiaomi',
-    label:        { zh: 'Xiaomi MiMo', en: 'Xiaomi MiMo' },
+    label:        { zh: 'XiaoMi MiMo', en: 'XiaoMi MiMo' },
     defaultAlias: { zh: 'MiMo 模型', en: 'MiMo model' },
     protocol: 'openai',
-    baseUrl: 'https://api.xiaomimimo.com/v1',
-    suggestedModels: ['mimo-v2.5-pro', 'mimo-v2.5', 'mimo-v2-pro', 'mimo-v2-omni', 'mimo-v2-flash'],
+    baseUrl: 'https://api.mimo-v2.com/v1',
+    apiKeyHeader: 'api-key',
+    suggestedModels: [
+      'mimo-v2.5-pro',
+      'mimo-v2-pro',
+      'mimo-v2.5',
+      'mimo-v2-omni',
+      'mimo-v2.5-tts',
+      'mimo-v2.5-tts-voicedesign',
+      'mimo-v2.5-tts-voiceclone',
+      'mimo-v2-tts',
+      'mimo-v2-flash',
+    ],
     notes: {
-      zh: ['MiMo-V2 模型，OpenAI-compatible。'],
-      en: ['MiMo-V2 models, OpenAI-compatible.'],
+      zh: ['MiMo-V2 / V2.5 模型，OpenAI-compatible。', '官方 Quick Start 使用 https://api.mimo-v2.com/v1 和 api-key 请求头。'],
+      en: ['MiMo-V2 / V2.5 models, OpenAI-compatible.', 'The official Quick Start uses https://api.mimo-v2.com/v1 and the api-key header.'],
     },
   },
   {

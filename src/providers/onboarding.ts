@@ -6,6 +6,7 @@ import { choosePromptOption } from '../cli/prompt.js';
 import { buildPanel } from '../cli/ui.js';
 import { formatProviderProtocolLabel } from './factory.js';
 import { formatProviderProfileTelemetry } from './telemetry.js';
+import { buildApiKeyHeaders } from './openaiCompatible.js';
 import {
   inspectInlineProviderConfig,
   probeProviderConfig,
@@ -20,6 +21,7 @@ import {
 import { ProviderStore } from './store.js';
 import type {
   PromptIO,
+  ProviderApiKeyHeader,
   ProviderConfig,
   ProviderProfile,
   ProviderProtocol,
@@ -54,6 +56,7 @@ type ResolvedPreset = {
   notes: string[];
   defaultProtocol?: ProviderProtocol;
   baseUrls?: Partial<Record<ProviderProtocol, string[]>>;
+  apiKeyHeader?: ProviderApiKeyHeader;
 };
 
 type BytePlusFamily =
@@ -263,15 +266,17 @@ function buildModelsUrl(baseUrl: string): string | undefined {
   }
 }
 
-async function probeOpenAiModelIds(baseUrl: string, apiKey: string): Promise<string[]> {
+async function probeOpenAiModelIds(
+  baseUrl: string,
+  apiKey: string,
+  apiKeyHeader?: ProviderApiKeyHeader,
+): Promise<string[]> {
   const url = buildModelsUrl(baseUrl);
   if (!url) return [];
   const headers: Record<string, string> = {
     accept: 'application/json',
+    ...buildApiKeyHeaders(apiKey, apiKeyHeader),
   };
-  if (apiKey.trim()) {
-    headers.authorization = `Bearer ${apiKey.trim()}`;
-  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -331,6 +336,7 @@ async function resolvePreset(
       notes: preset.notes[locale === 'zh-CN' ? 'zh' : 'en'],
       defaultProtocol: preset.protocol,
       baseUrls: preset.protocol && preset.baseUrl ? { [preset.protocol]: [preset.baseUrl] } : undefined,
+      apiKeyHeader: preset.apiKeyHeader,
     };
   }
 
@@ -592,7 +598,7 @@ export async function promptForProviderProfile(
           pickLocale(locale, { zh: '正在尝试读取 /models 列表。失败也可以手动输入模型名。', en: 'Trying to read /models. If it fails, you can still type a model name.' }),
         ]),
       );
-      probedModels = await probeOpenAiModelIds(finalBaseUrl, apiKey);
+      probedModels = await probeOpenAiModelIds(finalBaseUrl, apiKey, resolved.apiKeyHeader);
       promptIO?.write(
         buildPanel(options.heading, [
           `Provider: ${resolved.providerLabel}`,
@@ -681,6 +687,7 @@ export async function promptForProviderProfile(
         baseUrl: finalBaseUrl,
         model: finalModel,
         apiKey,
+        apiKeyHeader: resolved.apiKeyHeader,
         contextLength,
       },
       autoDetectProtocol: protocolChoice === 'auto',
