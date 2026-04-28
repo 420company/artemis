@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -7,7 +9,11 @@ import type { McpServerConfig } from './store.js';
 const execFileAsync = promisify(execFile);
 
 const CLI_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const CLI_MCP_PACKAGES_DIR = path.join(CLI_ROOT, 'mcp-packages');
+const USER_MCP_PACKAGES_DIR = path.join(os.homedir(), '.artemis', 'mcp-packages');
+const BUNDLED_MCP_PACKAGES_DIR = path.join(CLI_ROOT, 'mcp-packages');
+const CLI_MCP_PACKAGES_DIR = existsSync(path.join(USER_MCP_PACKAGES_DIR, 'node_modules'))
+  ? USER_MCP_PACKAGES_DIR
+  : BUNDLED_MCP_PACKAGES_DIR;
 
 export type McpRuntimeRequirement =
   | { kind: 'npm'; package: string }

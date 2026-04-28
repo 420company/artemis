@@ -71,6 +71,11 @@ export async function createVisualProvider(config: VisualModelConfig, assetType:
       const geminiModule = await import('./geminiProvider')
       return new geminiModule.GeminiProvider(config, assetType)
     }
+
+    case 'google': {
+      const googleModule = await import('./googleProvider')
+      return new googleModule.GoogleProvider(config, assetType)
+    }
     
     case 'grok': {
       const grokModule = await import('./grokProvider')
@@ -146,8 +151,8 @@ export const VISUAL_PROVIDERS = [
   {
     name: 'google',
     label: 'Google Veo + Gemini Image',
-    description: '占位适配器：Google Veo 视频与 Gemini 图片生成 API（待接入）',
-    status: 'placeholder' as const,
+    description: 'Google Generative AI: Veo 3 视频生成 + Gemini 2.5 Flash Image 图片生成',
+    status: 'stable' as const,
     supportsImages: true,
     supportsVideos: true,
     defaultModel: {
@@ -218,11 +223,14 @@ export function getVisualProviderSupportNote(
   switch (name.toLowerCase()) {
     case 'stable-diffusion':
     case 'gemini':
-    case 'google':
     case 'grok':
       return locale === 'zh'
         ? '当前仓库里该视觉 provider 仍是占位实现，尚未接入真实 API。若目标服务是完全私有协议，需要单独编写 provider 适配器。'
         : 'This visual provider is still a placeholder in this build and does not call a real API yet. Fully private protocols still need a dedicated provider adapter.'
+    case 'google':
+      return locale === 'zh'
+        ? 'Google Veo 视频生成是 Long-running operation：调用后会轮询状态（通常需要 1-3 分钟），完成后视频会保存到桌面。需要 Google AI Studio API key。'
+        : 'Google Veo video uses a long-running operation API and polls for completion (typically 1-3 minutes). The video is saved to your Desktop. Requires a Google AI Studio API key.'
     case 'custom':
       return locale === 'zh'
         ? 'custom 仅支持 OpenAI-compatible 图片/视频接口。若你的服务不是这套协议，仍需单独编写 provider 适配器。'

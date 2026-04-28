@@ -1,6 +1,7 @@
 import { emitKeypressEvents } from 'node:readline'
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stringWidth } from '../input/stringWidth.js'
@@ -12,8 +13,22 @@ const ALT_OFF = `${ESC}[?1049l`
 const HIDE    = `${ESC}[?25l`
 const SHOW    = `${ESC}[?25h`
 
-const CLI_ROOT     = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const MCP_PACKAGES = path.join(CLI_ROOT, 'mcp-packages')
+const CLI_ROOT          = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+const BUNDLED_MCP_DIR   = path.join(CLI_ROOT, 'mcp-packages')
+// Install MCP deps into a user-data directory so they survive `npm install -g` reinstalls
+// of artemis-code (which would otherwise wipe out the bundled mcp-packages/node_modules).
+export const MCP_INSTALL_DIR = path.join(homedir(), '.artemis', 'mcp-packages')
+
+function ensureMcpInstallDir(): void {
+  if (!existsSync(MCP_INSTALL_DIR)) {
+    mkdirSync(MCP_INSTALL_DIR, { recursive: true })
+  }
+  const targetPkg = path.join(MCP_INSTALL_DIR, 'package.json')
+  const sourcePkg = path.join(BUNDLED_MCP_DIR, 'package.json')
+  if (!existsSync(targetPkg) && existsSync(sourcePkg)) {
+    copyFileSync(sourcePkg, targetPkg)
+  }
+}
 
 // ─── colour helpers ────────────────────────────────────────────────────────────
 
@@ -281,7 +296,7 @@ function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount
 // ─── public API ────────────────────────────────────────────────────────────────
 
 export function shouldShowMcpInstallDialog(): boolean {
-  return !existsSync(path.join(MCP_PACKAGES, 'node_modules'))
+  return !existsSync(path.join(MCP_INSTALL_DIR, 'node_modules'))
 }
 
 export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed' | 'skipped'> {
@@ -334,8 +349,9 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
   let current = (COPY[locale] ?? COPY['en']).preparing
   let pfi     = 0
 
+  ensureMcpInstallDir()
   // Count installed packages by watching node_modules directory
-  const nmDir = path.join(MCP_PACKAGES, 'node_modules')
+  const nmDir = path.join(MCP_INSTALL_DIR, 'node_modules')
   const countInstalled = (): number => {
     try {
       return readdirSync(nmDir).filter(d => !d.startsWith('.')).length
@@ -362,7 +378,7 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
   }, 300)
 
   const success = await new Promise<boolean>((resolve) => {
-    const child = spawn('npm', ['install', '--prefix', MCP_PACKAGES, '--no-audit', '--no-fund'], {
+    const child = spawn('npm', ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const onData = (chunk: Buffer) => {

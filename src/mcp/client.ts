@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_NAME, APP_VERSION } from '../appMeta.js';
@@ -113,7 +115,13 @@ type RpcTransport = {
 // CLI root: src/mcp/client.ts compiles to dist/mcp/client.js, so ../../ = project root
 const CLI_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI_PLUGINS_DIR = path.join(CLI_ROOT, 'plugins');
-const CLI_MCP_PACKAGES_DIR = path.join(CLI_ROOT, 'mcp-packages');
+// Prefer the user-data install (~/.artemis/mcp-packages) so MCP node_modules survives
+// `npm install -g artemis-code` reinstalls. Falls back to the bundled dir otherwise.
+const USER_MCP_PACKAGES_DIR = path.join(os.homedir(), '.artemis', 'mcp-packages');
+const BUNDLED_MCP_PACKAGES_DIR = path.join(CLI_ROOT, 'mcp-packages');
+const CLI_MCP_PACKAGES_DIR = existsSync(path.join(USER_MCP_PACKAGES_DIR, 'node_modules'))
+  ? USER_MCP_PACKAGES_DIR
+  : BUNDLED_MCP_PACKAGES_DIR;
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const CLIENT_PROTOCOL_VERSION = '2024-11-05';
