@@ -24,6 +24,7 @@ import { runSetupWizard } from './setupWizard.js'
 import { runMemoryEnhancementSetup } from './memorySetup.js'
 import { runFirstRunWelcome } from './firstRunWelcome.js'
 import { runWorkspaceTrustDialog } from './workspaceTrust.js'
+import { runMcpInstallDialog, shouldShowMcpInstallDialog } from './mcpInstallDialog.js'
 import { runWordup, loadResumeSession } from './wordup.js'
 import { runTelegramBridge, setupTelegramBridge, shouldAutoStartTelegram } from '../telegram/bridge.js'
 import { runDiscordBridge, setupDiscordBridge, shouldAutoStartDiscordBridge } from '../discord/bridge.js'
@@ -118,6 +119,11 @@ export async function runCli(argv: string[]): Promise<void> {
       await trustSettingsStore.rememberTrustedWorkspace(options.cwd)
     }
     suppressInitialNewbornOnce = true
+  }
+
+  // ── MCP dependency install dialog (first run, disk-state based) ────────────
+  if (shouldShowMcpInstallDialog()) {
+    await runMcpInstallDialog(locale)
   }
 
   if (!options.maxTurnsExplicit) {
