@@ -59,35 +59,36 @@ function rainbow(text: string, offset: number): string {
     .join('')
 }
 
-// ─── cat frames: 🌙 upper-left closer to 𓃠, breathing starfield ──────────────
-// Three frames cycle bright → medium → soft for a slow breathing feel.
+// ─── cat frames: 🌙 upper-left, 𓃠 lower-right — diagonal gaze ─────────────────
+// Moon at col ~3, cat at col ~17 → clear diagonal slope.
+// Three frames: bright(✦) → medium(·✦) → soft(˚) for breathing rhythm.
 
 const CAT_FRAMES = [
   {
     // bright — inhale
-    haloTop:  ' ✦  ·  ✦  🌙 ✦  ·  ✦  ·  ✦ ',
-    innerTop: ' ·  ✦     ·    ✦  ·     ✦   ',
-    scene:    '           𓃠  ·   ✦  ·       ',
-    innerBot: ' ✦     ·    ✦    ·   ✦    ·  ',
-    haloBot:  ' ·  ✦  ·  ✦   ·  ✦  ·  ✦   ',
+    haloTop:  ' ✦  🌙  ·  ✦  ·  ✦  ·  ✦  · ',
+    innerTop: '  ·    ✦     ·    ✦  ·   ✦   ',
+    scene:    '                𓃠  ✦  ·  ✦   ',
+    innerBot: '  ✦  ·    ✦     ·   ✦    ·   ',
+    haloBot:  ' ·  ✦  ·   ✦  ·  ✦  ·   ✦  ·',
     offset: 0,
   },
   {
     // medium
-    haloTop:  ' ·  ✦  ·  🌙 ·  ✦  ·  ✦  ·  ',
-    innerTop: ' ✦  ·     ✦    ·  ✦     ·    ',
-    scene:    '           𓃠  ✦   ·  ✦       ',
-    innerBot: ' ·     ✦    ·    ✦   ·    ✦  ',
-    haloBot:  ' ✦  ·  ✦  ·   ✦  ·  ✦  ·    ',
+    haloTop:  ' ·   🌙  ✦  ·  ✦  ·  ✦  ·  ✦ ',
+    innerTop: '  ✦    ·     ✦    ·  ✦   ·    ',
+    scene:    '                𓃠  ·  ✦  ·    ',
+    innerBot: '  ·  ✦    ·     ✦   ·    ✦   ',
+    haloBot:  ' ✦  ·  ✦   ·  ✦  ·  ✦  ·   ✦',
     offset: 3,
   },
   {
     // soft — exhale
-    haloTop:  ' ˚  ·  ˚  🌙 ·  ˚  ·  ˚  ·  ',
-    innerTop: ' ·  ˚     ·    ˚  ·     ˚    ',
-    scene:    '           𓃠  ·   ˚  ·       ',
-    innerBot: ' ˚     ·    ˚    ·   ˚    ·  ',
-    haloBot:  ' ·  ˚  ·  ˚   ·  ˚  ·  ˚    ',
+    haloTop:  ' ˚   🌙  ·  ˚  ·  ˚  ·  ˚  · ',
+    innerTop: '  ·    ˚     ·    ˚  ·   ˚    ',
+    scene:    '                𓃠  ˚  ·  ˚    ',
+    innerBot: '  ˚  ·    ˚     ·   ˚    ·    ',
+    haloBot:  ' ·  ˚  ·   ˚  ·  ˚  ·   ˚  · ',
     offset: 6,
   },
 ]
