@@ -1,5 +1,6 @@
 import type { RunAgentOptions } from './agent.js';
 import { runAgent } from './agent.js';
+import { runNidhoggWorkflow } from './nidhogg.js';
 import { buildWorkflowHint } from './workflowHints.js';
 import {
   recordOdinWorkflowFailure,
@@ -40,7 +41,7 @@ export function getWorkflowDisplayName(
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
-export function isReadOnlyWorkflow(mode: WorkflowModeLabel): boolean {
+export function isReadOnlyWorkflow(_mode: WorkflowModeLabel): boolean {
   return false;
 }
 
@@ -173,25 +174,40 @@ export async function runWorkflowMode(
       );
     }
 
-    // All workflow modes (niko/contest/athena/design/nidhogg/direct) now
-    // route through `runAgent` with a mode-specific system-prompt hint.
-    // The old phase-based pipelines (plan→critic→judge→execute) have been
-    // replaced with this Claude Code style flow: hint injects domain bias
-    // into the agent's context, then the agent's normal tool loop handles
-    // execution end-to-end.
-    const hint = mode === 'direct'
-      ? ''
-      : buildWorkflowHint(mode, { cwd: options.cwd, userPrompt });
-    const hintedPrompt = hint
-      ? `${hint}\n\n--- USER REQUEST ---\n\n${userPrompt}`
-      : userPrompt;
-
-    const result: RunResult = await runAgent(session, hintedPrompt, {
-      ...options,
-      heimdallThreadState,
-      profile: 'main',
-      completionContract: 'requires_execution_evidence',
-    });
+    const result: RunResult =
+      mode === 'nidhogg'
+        ? await runNidhoggWorkflow(
+            session,
+            userPrompt,
+            {
+              ...options,
+              heimdallThreadState,
+              profile: 'main',
+              completionContract: 'requires_execution_evidence',
+            },
+            {
+              images: options.nidhoggImages,
+              videos: options.nidhoggVideos,
+            },
+          )
+        : await runAgent(
+            session,
+            (() => {
+              const hint =
+                mode === 'direct'
+                  ? ''
+                  : buildWorkflowHint(mode, { cwd: options.cwd, userPrompt });
+              return hint
+                ? `${hint}\n\n--- USER REQUEST ---\n\n${userPrompt}`
+                : userPrompt;
+            })(),
+            {
+              ...options,
+              heimdallThreadState,
+              profile: 'main',
+              completionContract: 'requires_execution_evidence',
+            },
+          );
 
     updateTaskRuntime(session, rootRuntime.id, {
       status: 'completed',

@@ -39,12 +39,14 @@ function dim(text: string): string   { return isTTY() ? `${ESC}[2m${text}${R}` :
 
 function centerPad(text: string, width: number): string {
   // text may contain ANSI codes — strip them to measure visual length
+  // eslint-disable-next-line no-control-regex
   const visLen = text.replace(/\x1b\[[0-9;]*m/g, '').length
   const pad    = Math.max(0, Math.floor((width - visLen) / 2))
   return ' '.repeat(pad) + text
 }
 
 function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;]*m/g, '')
 }
 

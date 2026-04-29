@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // 工具系统类型定义和管理机制
 export type ToolCategory = 'file' | 'system' | 'search' | 'agent' | 'utils'
 

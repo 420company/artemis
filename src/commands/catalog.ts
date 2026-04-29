@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { DUAL_MODEL_COMMAND, WHOSYOURDADDY_FLAG } from '../cli/branding.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {

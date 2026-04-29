@@ -57,7 +57,7 @@ function canonicalizeComparablePath(inputPath: string): string {
   const resolved = path.resolve(inputPath)
   let current = resolved
 
-  while (true) {
+  for (;;) {
     try {
       const realCurrent = path.resolve(realpathSync.native(current))
       if (current === resolved) {
@@ -89,7 +89,7 @@ export async function findNearestExistingWorkspaceRoot(
   const requestedPath = path.resolve(candidatePath)
   let current = requestedPath
 
-  while (true) {
+  for (;;) {
     try {
       const st = await stat(current)
       if (st.isDirectory()) {

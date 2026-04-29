@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pickLocale, type UiLocale } from '../cli/locale.js';

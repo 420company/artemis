@@ -15,13 +15,14 @@ import path from 'node:path'
 import { walkFiles, pathExists } from '../utils/fs.js'
 import { loadUserProfile, formatProfileForPrompt } from '../memory/userProfile.js'
 import { loadSoul, formatSoulForPrompt } from '../memory/soul.js'
+import { PROJECT_INSTRUCTION_FILENAMES } from '../core/instructionFile.js'
 
-const INSTRUCTION_FILENAMES = ['ARTEMIS.md', 'artemis.md', 'Artemis.md', '.artemis.md']
+const INSTRUCTION_FILENAMES = PROJECT_INSTRUCTION_FILENAMES
 const MAX_INSTRUCTION_BYTES = 64_000
 
 /** Find all ARTEMIS.md files under `cwd`, sorted by path. */
 export async function findInstructionFiles(cwd: string): Promise<string[]> {
-  const names = new Set(INSTRUCTION_FILENAMES)
+  const names: Set<string> = new Set(INSTRUCTION_FILENAMES)
   let files: string[]
   try {
     files = await walkFiles(cwd)

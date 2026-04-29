@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * MCP self-management tools — give brain agency over the MCP server roster.
  *

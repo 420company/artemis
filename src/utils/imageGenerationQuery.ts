@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { ChatProvider } from '../providers/types.js';
 
 export async function testModelImageGenerationSupport(provider: ChatProvider): Promise<boolean> {

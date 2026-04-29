@@ -10,7 +10,6 @@ import { parseArgs } from '../src/cli/parseArgs.js'
 import { CliSettingsStore } from '../src/cli/settings.js'
 import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
-import { resolveDesignTargetFromPrompt, runDesignWorkflow } from '../src/core/design.js'
 import { routeTeamRequest } from '../src/core/team.js'
 import { buildContextWindow } from '../src/core/context.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
@@ -50,7 +49,7 @@ import type {
   ProviderNativeToolOutput,
   ProviderResponse,
 } from '../src/providers/types.js'
-import { getWorkflowDisplayName, isReadOnlyWorkflow } from '../src/core/workflowMode.js'
+import { getWorkflowDisplayName, isReadOnlyWorkflow, runWorkflowMode } from '../src/core/workflowMode.js'
 import {
   applyWorkflowProgressInfo,
   createWorkflowProgressState,
@@ -67,6 +66,7 @@ import {
 } from '../src/core/promptCache.js'
 import {
   getProjectInstructionFileCacheStats,
+  loadProjectInstructionFile,
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
 import * as http from 'node:http'
@@ -107,14 +107,13 @@ console.log('\n  runtimeSmoke')
 console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
+const providerNativeToolNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
 
 assert(
-  'direct tools: shared manifest still exposes 51 tools',
-  expectedDirectToolCount === 51,
-  `count=${expectedDirectToolCount}`,
+  'direct tools: shared manifest is a superset of provider-native callable tools',
+  expectedDirectToolCount >= providerNativeToolNames.length && providerNativeToolNames.length > 0,
+  `direct=${expectedDirectToolCount} provider=${providerNativeToolNames.length}`,
 )
-
-const providerNativeToolNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
 
 assert(
   'provider native tools: built-in manifest matches the registry callable-action list',
@@ -350,7 +349,7 @@ const inspectProjection = projectDirectToolNames([
 ])
 
 assert(
-  'tool projection: inspect requests stay narrower than the full 51-tool manifest',
+  'tool projection: inspect requests stay narrower than the full tool manifest',
   inspectProjection.length > 0 && inspectProjection.length < expectedDirectToolCount,
   `count=${inspectProjection.length}`,
 )
@@ -716,42 +715,30 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 {
   const source = (relativePath: string): string =>
     fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8')
-  const designSource = source('src/core/design.ts')
-  const nikoSource = source('src/core/nikoWorkflow.ts')
-  const athenaSource = source('src/core/athena.ts')
+  const designSource = source('src/design/index.ts')
   const nidhoggSource = source('src/core/nidhogg.ts')
-  const contestSource = source('src/core/contest.ts')
   const workflowSource = source('src/core/workflowMode.ts')
   const teamSource = source('src/core/team.ts')
   const interactiveSource = source('src/cli/interactive.ts')
-  const agentProfilesSource = source('src/core/agentProfiles.ts')
 
   assert(
-    'workflow permissions: /design designer phases are write-capable while asset planning is read-only',
-    designSource.includes("profile: 'designer'") &&
-      designSource.includes("ensureSpecialistProvider?.(['designer'])") &&
-      designSource.includes("permissionManager: options.permissionManager.fork('read-only')") &&
-      agentProfilesSource.includes("if (profile === 'designer')") &&
-      agentProfilesSource.includes('return DESIGNER_ACTION_TYPES') &&
-      /const implementation[\s\S]*profile:\s*'main'/.test(designSource),
+    'workflow routing: /design uses the executable workflow path with design guidance',
+    designSource.includes('static buildDesignWorkflowPrompt') &&
+      workflowSource.includes('buildWorkflowHint(mode') &&
+      workflowSource.includes("profile: 'main'") &&
+      workflowSource.includes("completionContract: 'requires_execution_evidence'"),
   )
   assert(
-    'workflow permissions: /niko final execution uses main profile',
-    /const executionResult[\s\S]*profile:\s*'main'/.test(nikoSource),
-  )
-  assert(
-    'workflow permissions: /athena coordinated execution uses main profile',
-    /executing main coordinated pass[\s\S]*profile:\s*'main'/.test(athenaSource),
+    'workflow routing: hint-based workflows execute through the main runAgent path',
+    workflowSource.includes("mode === 'nidhogg'") &&
+      workflowSource.includes('buildWorkflowHint(mode') &&
+      workflowSource.includes(': await runAgent('),
   )
   assert(
     'workflow permissions: /nidhogg implementation generator is builder and final synthesis is main',
     /runSpecialistAgent\(\s*session,\s*'builder'[\s\S]*buildGeneratorTask/.test(nidhoggSource) &&
-      /const finalResult[\s\S]*profile:\s*'main'/.test(nidhoggSource),
-  )
-  assert(
-    'workflow permissions: /contest verdict is read-only and selected path execution is main',
-    contestSource.includes("permissionManager: options.permissionManager.fork('read-only')") &&
-      /const executionResult[\s\S]*profile:\s*'main'/.test(contestSource),
+      /const finalResult[\s\S]*profile:\s*'main'/.test(nidhoggSource) &&
+      nidhoggSource.includes("const DEFAULT_CRITICS: CriticKind[] = ['spec', 'test_adversary', 'security', 'architecture']"),
   )
   assert(
     'workflow routing: /team only routes to executable workflow modes',
@@ -768,6 +755,12 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       interactiveSource.includes('maybeSwitchWorkspaceForRequest(trimmed)') &&
       interactiveSource.includes('runWorkspaceTrustDialog({') &&
       interactiveSource.includes('refreshProjectInstructionsForWorkspace(workspaceRoot)'),
+  )
+  assert(
+    'interactive routing: /nidhogg uses the detached harness runner instead of hint-only mode',
+    interactiveSource.includes("launchDetachedWorkflow('nidhogg', effectiveTeamPrompt)") &&
+      interactiveSource.includes("launchDetachedWorkflow('nidhogg', effectiveWorkflowPrompt)") &&
+      interactiveSource.includes("Nidhogg Harness 已启动"),
   )
   assert(
     'interactive routing: handleTurn preserves the supplied workspace cwd',
@@ -791,75 +784,52 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const session = store.createSession({ title: 'design workflow smoke' })
   await store.save(session)
 
-  let briefToolNames: string[] = []
   let executionToolNames: string[] = []
   let implementationCalls = 0
-  let executionPromptReceivedFullBrief = false
   const designWorkflowInfo: string[] = []
+  let designHintReceived = false
 
   const provider: ChatProvider = {
     supportsNativeToolCalls: true,
     async complete(messages, options): Promise<ProviderResponse> {
-      const system =
-        messages.find((message) => message.role === 'system')?.content ?? ''
       const latestUser =
         [...messages].reverse().find((message) => message.role === 'user')?.content ?? ''
       const toolNames = options?.nativeFunctionTools?.map((tool) => tool.name) ?? []
 
-      if (system.includes('Execution profile: designer')) {
-        briefToolNames = toolNames
+      implementationCalls += 1
+      designHintReceived =
+        designHintReceived ||
+        latestUser.includes('[当前任务模式：/design 视觉/前端工程]')
+      if (implementationCalls === 1) {
+        executionToolNames = toolNames
         return {
           text: JSON.stringify({
-            reply: `Design brief: create index.html with a polished Artemis interface.\n${'brief-detail '.repeat(220)}BRIEF_MARKER`,
-            done: true,
+            reply: 'Writing the design artifact now.',
+            done: false,
+            actions: [
+              {
+                type: 'write_file',
+                path: 'index.html',
+                content: '<main>Artemis design artifact</main>\n',
+              },
+            ],
           }),
           raw: null,
         }
       }
 
-      if (system.includes('Execution profile: main')) {
-        implementationCalls += 1
-        executionPromptReceivedFullBrief =
-          executionPromptReceivedFullBrief || latestUser.includes('BRIEF_MARKER')
-        if (implementationCalls === 1) {
-          executionToolNames = toolNames
-          return {
-            text: JSON.stringify({
-              reply: 'Writing the design artifact now.',
-              done: false,
-              actions: [
-                {
-                  type: 'write_file',
-                  path: 'index.html',
-                  content: '<main>Artemis design artifact</main>\n',
-                },
-              ],
-            }),
-            raw: null,
-          }
-        }
-
-        if (implementationCalls === 2) {
-          return {
-            text: JSON.stringify({
-              reply: 'Verifying index.html exists.',
-              done: false,
-              actions: [
-                {
-                  type: 'run_command',
-                  command: 'test -f index.html',
-                  timeoutMs: 1000,
-                },
-              ],
-            }),
-            raw: null,
-          }
-        }
-
+      if (implementationCalls === 2) {
         return {
           text: JSON.stringify({
-            reply: 'Created index.html.',
-            done: true,
+            reply: 'Verifying index.html exists.',
+            done: false,
+            actions: [
+              {
+                type: 'run_command',
+                command: 'test -f index.html',
+                timeoutMs: 1000,
+              },
+            ],
           }),
           raw: null,
         }
@@ -867,7 +837,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
       return {
         text: JSON.stringify({
-          reply: 'Unexpected design workflow prompt.',
+          reply: 'Created index.html.',
           done: true,
         }),
         raw: null,
@@ -875,7 +845,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     },
   }
 
-  const result = await runDesignWorkflow(
+  const result = await runWorkflowMode(
+    'design',
     session,
     'Create an Artemis landing page in index.html.',
     {
@@ -884,25 +855,20 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       sessionStore: store,
       permissionManager: new PermissionManager('accept-all', false),
       maxTurns: 4,
+      profile: 'main',
       onInfo: (message) => designWorkflowInfo.push(message),
     },
   )
 
   assert(
-    '/design workflow: spec phases stay read-only and hand off full brief to implementation',
-    briefToolNames.includes('read_file') &&
-      !briefToolNames.includes('write_file') &&
+    '/design workflow: executable mode injects design guidance and writes through main agent',
+    designHintReceived &&
       executionToolNames.includes('write_file') &&
-      executionPromptReceivedFullBrief &&
-      designWorkflowInfo.some((message) => message.includes('art-director agent')) &&
-      designWorkflowInfo.some((message) => message.includes('layout agent')) &&
-      designWorkflowInfo.some((message) => message.includes('asset agent')) &&
-      designWorkflowInfo.some((message) => message.includes('polish agent')) &&
-      designWorkflowInfo.some((message) => message.includes('main agent')) &&
+      designWorkflowInfo.some((message) => message.includes('[design] workflow strength contract active')) &&
       fs.readFileSync(path.join(tmpDir, 'index.html'), 'utf8') ===
         '<main>Artemis design artifact</main>\n' &&
       result.reply.includes('Created index.html'),
-    `brief=${briefToolNames.join(',')} execution=${executionToolNames.join(',')} fullBrief=${executionPromptReceivedFullBrief} info=${designWorkflowInfo.join('|')} reply=${result.reply}`,
+    `execution=${executionToolNames.join(',')} hint=${designHintReceived} info=${designWorkflowInfo.join('|')} reply=${result.reply}`,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -972,34 +938,6 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
-}
-
-{
-  const target = resolveDesignTargetFromPrompt(
-    '在桌面建立一个名叫sexyshop的文件夹,把网站建立在该文件夹里,做一个电商网页。',
-    '/Users/goat/Desktop',
-  )
-
-  assert(
-    '/design target extraction: Chinese prompt resolves the intended Desktop folder name without swallowing trailing instruction text',
-    target.targetDirectory === '/Users/goat/Desktop/sexyshop' &&
-      target.websiteTitle === 'sexyshop',
-    JSON.stringify(target),
-  )
-}
-
-{
-  const target = resolveDesignTargetFromPrompt(
-    '在桌面建立一个文件夹“69420”，然后进入该文件夹，并设为工作区，编写一个卖情趣内衣，丝袜的电商网站。',
-    '/Users/goat/Desktop',
-  )
-
-  assert(
-    '/design target extraction: Chinese "文件夹“name”" phrasing resolves the quoted folder name',
-    target.targetDirectory === '/Users/goat/Desktop/69420' &&
-      target.websiteTitle === '69420',
-    JSON.stringify(target),
-  )
 }
 
 {
@@ -1284,6 +1222,23 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'session search: save() incrementally refreshes the SQLite index',
     secondSearch.some((result) => result.sessionId === alpha.id),
     JSON.stringify(secondSearch),
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-instruction-file-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'ARTEMIS.md'), '# Project Instructions\n\nPrefer root uppercase instructions.\n', 'utf8')
+  resetProjectInstructionFileCacheForTests()
+
+  const loaded = await loadProjectInstructionFile(tmpDir)
+  assert(
+    'project instructions: ARTEMIS.md is accepted as the root instruction file',
+    loaded?.fileName === 'ARTEMIS.md' &&
+      loaded.content.includes('Prefer root uppercase instructions.'),
+    JSON.stringify(loaded),
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })

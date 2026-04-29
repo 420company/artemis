@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { SearchToolManager } from '../core/searchToolManager.js';
 import type { AgentAction } from '../core/types.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';

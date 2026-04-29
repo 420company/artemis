@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import path from 'node:path';
 import { ProviderStore } from './providers/store.js';

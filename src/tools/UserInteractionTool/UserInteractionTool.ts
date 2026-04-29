@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires */
 import type { ToolDefinition } from "../../core/toolDef.js";
 import type { ToolExecutionContext } from "../types.js";
 

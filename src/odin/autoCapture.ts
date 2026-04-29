@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * odin/autoCapture.ts — automatic skill capture after agentic tool loops
  *

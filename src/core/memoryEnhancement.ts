@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { MemoryEnhancementConfig } from '../providers/types.js';
 import { homedir } from 'node:os';
 import { ProviderStore } from '../providers/store.js';

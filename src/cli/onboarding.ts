@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars, no-control-regex */
 /**
  * cli/onboarding.ts — first-run onboarding wizard
  *
@@ -139,7 +140,7 @@ async function askRequiredOptional(
   question: string,
   t: (zh: string, en: string) => string,
 ): Promise<string | null> {
-  while (true) {
+  for (;;) {
     const value = await askOptional(question)
     if (value.trim()) {
       return value.trim()

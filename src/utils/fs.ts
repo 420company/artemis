@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { access, mkdir, readdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, basename, resolve, relative, sep, extname, isAbsolute } from 'node:path'

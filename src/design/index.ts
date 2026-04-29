@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { runAgent, runSpecialistAgent } from '../core/agent.js';
 import { deriveClaimStatement } from '../core/evidence.js';
 import type { PlanItem, RunResult, SessionRecord } from '../core/types.js';

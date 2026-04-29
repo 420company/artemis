@@ -41,7 +41,10 @@ function dim(t: string)    { return process.stdout.isTTY ? `${ESC}[2m${t}${ESC}[
 function invert(t: string) { return process.stdout.isTTY ? `${ESC}[7m${t}${ESC}[0m`  : t }
 function bold(t: string)   { return process.stdout.isTTY ? `${ESC}[1m${t}${ESC}[0m`  : t }
 
-function stripAnsi(t: string) { return t.replace(/\x1b\[[0-9;]*m/g, '') }
+function stripAnsi(t: string) {
+  // eslint-disable-next-line no-control-regex
+  return t.replace(/\x1b\[[0-9;]*m/g, '')
+}
 function visLen(t: string)    { return stringWidth(stripAnsi(t)) }
 function padAnsiEnd(t: string, w: number): string {
   const gap = w - visLen(t)

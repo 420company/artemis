@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { VisualModelConfig } from '../providers/types.js'
 import { FreyaAssetType } from '../tools/visual/registry.js'
 import { createVisualProvider } from '../tools/visual/providers/interface.js'

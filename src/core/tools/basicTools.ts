@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * 基础工具实现 - 提供常用工具的具体实现
  */

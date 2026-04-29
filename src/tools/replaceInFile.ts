@@ -19,7 +19,7 @@ function countMatches(content: string, needle: string): number {
   let count = 0;
   let cursor = 0;
 
-  while (true) {
+  for (;;) {
     const index = content.indexOf(needle, cursor);
     if (index < 0) {
       return count;

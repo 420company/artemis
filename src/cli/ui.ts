@@ -36,6 +36,7 @@ export function color(text: string, code: string): string {
 }
 
 export function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
   return text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
 }
 

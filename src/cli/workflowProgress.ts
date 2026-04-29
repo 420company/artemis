@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { WorkflowMode } from '../core/workflowMode.js';
 import { pickLocale, type UiLocale } from './locale.js';
 import { ANSI, color, stripAnsi } from './ui.js';

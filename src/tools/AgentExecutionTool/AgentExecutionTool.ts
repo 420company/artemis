@@ -1,9 +1,8 @@
+/* eslint-disable no-case-declarations */
 import type { ToolExecutionContext } from "../types.js";
 import type { ToolDefinition } from "../../core/toolDef.js";
 import type { ToolKind, ToolPermissionCategory, ToolExecutionMode } from "../../core/toolDef.js";
 import type { AgentAction } from "../../core/types.js";
-import { z } from "zod";
-import { spawn } from 'child_process';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -33,7 +32,7 @@ export class AgentExecutionTool {
         }
         return errors;
       },
-      execute: async (action: AgentAction, context: ToolExecutionContext) => {
+      execute: async (action: AgentAction, _context: ToolExecutionContext) => {
         // 类型守卫：确保我们只在处理 'agent' 类型的 AgentAction
         if (action.type !== 'agent') {
           return {

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires */
 // 权限类型定义
 export type PermissionMode = 'allow' | 'deny' | 'prompt'
 

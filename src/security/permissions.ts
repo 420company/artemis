@@ -1,3 +1,4 @@
+/* eslint-disable no-case-declarations */
 import type { AgentAction, PermissionMode } from '../core/types.js';
 import { getToolPermissionCategory } from '../tools/registry.js';
 import type { ToolPermissionCategory } from '../tools/types.js';

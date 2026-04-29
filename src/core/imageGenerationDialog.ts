@@ -1,3 +1,4 @@
+/* eslint-disable no-case-declarations */
 import { chooseInteractiveOption } from '../cli/prompt.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { testModelImageGenerationSupport } from './imageGenerationUtils.js';

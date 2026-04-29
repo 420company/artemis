@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { ToolDefinition } from "../../core/toolDef.js";
 import type { ToolExecutionContext } from "../types.js";
 import { z } from "zod";

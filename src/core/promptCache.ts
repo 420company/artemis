@@ -4,7 +4,10 @@ import path from 'node:path';
 import type { PermissionManager } from '../security/permissions.js';
 import { buildMcpRuntimeSections } from '../mcp/runtime.js';
 import { resolveDataRootDir } from '../utils/fs.js';
-import { buildProjectInstructionFileSection } from './instructionFile.js';
+import {
+  PROJECT_INSTRUCTION_FILENAMES,
+  buildProjectInstructionFileSection,
+} from './instructionFile.js';
 import { buildSystemPrompt } from './systemPrompt.js';
 import type {
   AgentRole,
@@ -31,7 +34,7 @@ type PromptRuntimeCacheStats = {
   size: number;
 };
 
-const PROMPT_CACHE_SCHEMA_VERSION = 1;
+const PROMPT_CACHE_SCHEMA_VERSION = 2;
 const stableProviderSystemCache = new Map<string, StableProviderSystemCacheEntry>();
 const promptRuntimeCacheStats: PromptRuntimeCacheStats = {
   hits: 0,
@@ -60,8 +63,13 @@ async function buildStablePromptCacheKey(
   options: StableProviderSystemSectionsOptions,
 ): Promise<string> {
   const instructionMaxChars = getInstructionMaxChars(options.profile);
-  const [projectInstructionSignature, mcpConfigSignature] = await Promise.all([
-    getFileSignature(path.join(options.cwd, 'Artemis.MD')),
+  const [projectInstructionSignatures, mcpConfigSignature] = await Promise.all([
+    Promise.all(
+      PROJECT_INSTRUCTION_FILENAMES.map(async (fileName) => [
+        fileName,
+        await getFileSignature(path.join(options.cwd, fileName)),
+      ] as const),
+    ),
     getFileSignature(path.join(resolveDataRootDir(options.cwd), 'mcp-servers.json')),
   ]);
 
@@ -74,7 +82,7 @@ async function buildStablePromptCacheKey(
       autonomyMode: options.autonomyMode,
       nativeToolRuntime: options.nativeToolRuntime,
       instructionMaxChars,
-      projectInstructionSignature,
+      projectInstructionSignatures,
       mcpConfigSignature,
     }),
   );

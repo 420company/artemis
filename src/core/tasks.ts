@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires */
 import type { SessionRecord, TaskItem, TaskStatus } from './types.js';
 
 const VERIFICATION_TASK_PATTERN =

@@ -531,7 +531,7 @@ export class RuntimeDirectoryService {
     const pollIntervalMs = Math.max(250, options?.pollIntervalMs ?? 1_500);
     const deadline = Date.now() + timeoutMs;
 
-    while (true) {
+    for (;;) {
       await this.reconcileActiveRuntimes();
       const ownership = await this.findRuntime(runtimeId);
       if (!ownership) {

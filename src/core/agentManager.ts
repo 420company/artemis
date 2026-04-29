@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires */
 import type { ToolDefinition } from './toolDef.js';
 import type { AgentAction } from './types.js';
 import { getToolDefinition, toolDefs } from '../tools/registry.js';

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { choosePromptOption } from '../cli/prompt.js'
 import { pickLocale, type UiLocale } from '../cli/locale.js'
 import type { PromptIO } from '../providers/types.js'

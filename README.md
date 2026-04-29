@@ -364,7 +364,7 @@ Workflows
   /niko              Explore → Build
   /design            Design first → Implement
   /athena            Multi-agent research + execution
-  /nidhogg           Adversarial hardening
+  /nidhogg           Harness engineering loop: build, verify, critique, judge
   /contest           Path debate and selection
 
 Thread Control
@@ -460,7 +460,7 @@ Artemis stores all configuration in `~/.artemis/`:
   skills/              Learned Odin skills
 ```
 
-Project-level instructions: place an `ARTEMIS.md` at the root of any repository. Artemis reads it on startup and applies it to all interactions within that workspace.
+Project-level instructions: place an `ARTEMIS.md` at the root of any repository. Artemis reads it on startup and applies it to all interactions within that workspace. Legacy `Artemis.MD`, `Artemis.md`, `artemis.md`, and `.artemis.md` files are still accepted for compatibility.
 
 ---
 

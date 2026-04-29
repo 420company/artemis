@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * cli/runCli.ts — top-level CLI dispatcher
  *

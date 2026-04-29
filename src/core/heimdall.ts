@@ -727,7 +727,7 @@ export async function waitForHeimdallEvents(options: {
   const deadline = Date.now() + timeoutMs;
   let currentInterval = pollIntervalBaseMs;
 
-  while (true) {
+  for (;;) {
     const window = await readHeimdallEventWindow(options);
     if (window.events.length > 0) {
       return {

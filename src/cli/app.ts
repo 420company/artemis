@@ -12,7 +12,7 @@ export class ArtemisCLI {
   
   private sessionId: string
   
-  constructor(options: any = {}) {
+  constructor(_options: any = {}) {
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,

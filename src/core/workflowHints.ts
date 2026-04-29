@@ -67,7 +67,7 @@ const COMMON_AGENT_PROTOCOL = `\
 5. 写代码时优先 replace_in_file 做局部改动；新建文件或整文件重写才用 write_file
 6. 修改后必须运行验证（编译/测试/启服务），看不到工具结果不得声称完成
 7. 子任务可以让 deep_research 工具去做并行调研（它在 worker 模型上跑，便宜快速），不要把简单的 read 任务也往那扔
-8. 工作流名（/niko /athena /nidhogg /design /contest）只是任务风格的指示——绝不要走"分阶段 critic/judge/polish 再 execute"的旧流水线，全程都是你自己一个循环里调工具完成
+8. 在提示注入路径里，/niko /athena /design /contest 是任务风格指示；/nidhogg 的正式入口是后台 harness runner。若这里收到 nidhogg，只做自审和验证，不要伪造未运行的 critic/judge 结果
 9. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案`;
 
 const DESIGN_HINT = `\
@@ -120,15 +120,18 @@ const ATHENA_HINT = `\
 🚫 禁止：先生成"提案"等用户审批；先开 planner/builder/reviewer/arbiter 多 phase——你一个循环里全包了`;
 
 const NIDHOGG_HINT = `\
-[当前任务模式：/nidhogg 高质量交付]
+[当前任务模式：/nidhogg Harness Engineering 高质量交付]
 偏向"做出来的东西必须正确、健壮、能上生产"。本模式下你应该：
 
+• 把仓库内 ARTEMIS.md、README、docs、测试、schema、现有实现当作事实来源；不要把长提示当百科全书
+• 先设计任务 harness：哪些静态检查、单测/集成测试、运行时 smoke、日志/指标、截图/视觉证据能真正证明没坏
 • todo 必须包含验证步骤（不能只列实现项）
 • 实现完成后做一轮"自我审查"：用 read 重读自己写的关键文件，找逻辑漏洞、边界情况、错误处理缺口
-• 必要时 spawn 一个 read-only 子代理做独立 review（让它返回"问题清单 JSON"，不要让它改代码）
+• 必要时 spawn 一个 read-only 子代理做独立 review（让它返回"问题清单 JSON"，不要让它改代码、不要污染主上下文）
+• 用确定性约束优先：现有脚本、lint、类型检查、权限限制、架构边界和测试输出，比"看起来没问题"更可信
 • 写测试覆盖关键路径——不要只写 happy path
 • 生产相关代码：错误处理、超时、重试、日志要齐
-• 任务结束的报告要诚实：哪些已验证、哪些没验证、有什么已知风险
+• 任务结束的报告要诚实：改了什么、跑了什么 harness、哪些已验证、哪些没验证、有什么已知风险
 
 🚫 禁止：先开 critic/judge 子代理评审一个还不存在的方案；先研究后写设计文档再实现；read-only 子代理被要求"输出完整代码"`;
 

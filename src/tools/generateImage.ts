@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';

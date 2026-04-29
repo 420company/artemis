@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * core/contextCompressor.ts — Hermes-style 4-phase context compression
  *

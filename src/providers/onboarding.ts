@@ -538,7 +538,7 @@ export async function promptForProviderProfile(
   options: PromptProfileOptions,
   locale: UiLocale = 'en',
 ): Promise<PromptedProviderProfileResult | undefined> {
-  while (true) {
+  for (;;) {
     const preset = await askProviderPreset(promptIO, locale);
     if (preset === BACK) return undefined;
 
@@ -612,7 +612,7 @@ export async function promptForProviderProfile(
 
     let finalModel: string | undefined;
     let contextLength: number | undefined;
-    while (true) {
+    for (;;) {
       const model = await askModel(
         promptIO,
         locale,
@@ -785,7 +785,7 @@ export async function promptForVerifiedProviderProfile(
   locale: UiLocale = 'en',
 ): Promise<ProviderProfile | undefined> {
   let promptOptions = options;
-  while (true) {
+  for (;;) {
     const prompted = await promptForProviderProfile(promptIO, data, promptOptions, locale);
     if (!prompted) return undefined;
 

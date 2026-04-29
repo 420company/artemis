@@ -2,13 +2,22 @@ import path from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import { pathExists, truncate } from '../utils/fs.js';
 
+export const PROJECT_INSTRUCTION_FILENAMES = [
+  'ARTEMIS.md',
+  'artemis.md',
+  'Artemis.md',
+  'Artemis.MD',
+  '.artemis.md',
+] as const;
+
+export type ProjectInstructionFileName = typeof PROJECT_INSTRUCTION_FILENAMES[number];
+
 export type ProjectInstructionFile = {
-  fileName: 'Artemis.MD';
+  fileName: ProjectInstructionFileName;
   path: string;
   content: string;
 };
 
-const PROJECT_INSTRUCTION_FILE = 'Artemis.MD' as const;
 const MISSING_INSTRUCTION_FILE_TTL_MS = 4_000;
 
 type InstructionFileCacheEntry = {
@@ -49,8 +58,8 @@ function clipInstructionContent(content: string, maxChars: number): string {
 export async function loadProjectInstructionFile(
   cwd: string,
 ): Promise<ProjectInstructionFile | null> {
-  const filePath = path.join(cwd, PROJECT_INSTRUCTION_FILE);
-  const cached = instructionFileCache.get(filePath);
+  const cacheKey = path.resolve(cwd);
+  const cached = instructionFileCache.get(cacheKey);
   const now = Date.now();
 
   if (
@@ -61,8 +70,17 @@ export async function loadProjectInstructionFile(
     return null;
   }
 
-  if (!(await pathExists(filePath))) {
-    instructionFileCache.set(filePath, {
+  let selected: { fileName: ProjectInstructionFileName; path: string } | null = null;
+  for (const fileName of PROJECT_INSTRUCTION_FILENAMES) {
+    const filePath = path.join(cwd, fileName);
+    if (await pathExists(filePath)) {
+      selected = { fileName, path: filePath };
+      break;
+    }
+  }
+
+  if (!selected) {
+    instructionFileCache.set(cacheKey, {
       checkedAt: now,
       file: null,
     });
@@ -70,10 +88,11 @@ export async function loadProjectInstructionFile(
   }
 
   instructionFileCacheStats.statCalls += 1;
-  const info = await stat(filePath);
+  const info = await stat(selected.path);
   if (
     cached &&
     cached.file &&
+    cached.file.path === selected.path &&
     cached.mtimeMs === info.mtimeMs &&
     cached.size === info.size
   ) {
@@ -81,9 +100,9 @@ export async function loadProjectInstructionFile(
   }
 
   instructionFileCacheStats.readCalls += 1;
-  const content = (await readFile(filePath, 'utf8')).trim();
+  const content = (await readFile(selected.path, 'utf8')).trim();
   if (!content) {
-    instructionFileCache.set(filePath, {
+    instructionFileCache.set(cacheKey, {
       checkedAt: now,
       file: null,
       mtimeMs: info.mtimeMs,
@@ -93,11 +112,11 @@ export async function loadProjectInstructionFile(
   }
 
   const file = {
-    fileName: PROJECT_INSTRUCTION_FILE,
-    path: filePath,
+    fileName: selected.fileName,
+    path: selected.path,
     content,
   };
-  instructionFileCache.set(filePath, {
+  instructionFileCache.set(cacheKey, {
     checkedAt: now,
     file,
     mtimeMs: info.mtimeMs,

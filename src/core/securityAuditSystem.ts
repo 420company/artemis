@@ -1,3 +1,4 @@
+/* eslint-disable no-case-declarations */
 import type { ToolDefinition } from '../core/toolDef.js';
 import type { AgentAction } from '../core/types.js';
 import { getToolDefinition } from '../tools/registry.js';
@@ -488,7 +489,7 @@ export const securityAuditToolDef: ToolDefinition = {
     }
     return errors;
   },
-  execute: async (action: any, context: any): Promise<{ ok: boolean; output: string }> => {
+  execute: async (action: any, _context: any): Promise<{ ok: boolean; output: string }> => {
     try {
       const auditSystem = new SecurityAuditSystem();
       

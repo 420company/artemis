@@ -28,7 +28,7 @@ Choices (pick exactly one):
 - niko:       User intent is open-ended, exploratory, or "build me something X" without specific requirements. Direction must be explored before building.
 - design:     UI / visual / frontend layout work. Anything where look-and-feel or component design must be planned before implementation.
 - athena:     Large-scale change spanning multiple modules / files / subsystems. Needs slice research and coordinated execution. Examples: refactor whole subsystem, add a feature touching backend + frontend + tests.
-- nidhogg:    Correctness-critical or highest-quality requirement. Examples: security-sensitive code, complex algorithm needing iterative review, anything where bugs are very costly. Slow but most reliable (GAN-style adversarial loop).
+- nidhogg:    Correctness-critical or highest-quality requirement. Examples: harness engineering, security-sensitive code, complex algorithm needing iterative review, production hardening, anything where bugs are very costly. Slow but most reliable (adversarial harness loop).
 - contest:    Decision-making with competing options. Examples: comparing approaches, trade-off analysis, risk evaluation, choosing between design alternatives. Proposes, critiques, and judges multiple solutions.
 
 Output exactly one line of JSON, nothing else:
@@ -105,7 +105,29 @@ export async function routeTeamRequest(
     const designKeywords = ['设计', '网页', '网站', '界面', 'UI', 'UX', '前端', '样式', 'SVG', 'logo', '创建文件夹', '创建文件'];
     const nikoKeywords = ['开发', '代码', '编程', '功能', '系统', 'API', '后端', '数据库', '服务器'];
     const athenaKeywords = ['研究', '分析', '调查', '探索', '文档', '资料', '学习'];
-    const nidhoggKeywords = ['优化', '改进', '重构', '修复', '调试', '性能'];
+    const nidhoggKeywords = [
+      'harness',
+      'harness engineering',
+      'production',
+      'hardening',
+      'reliability',
+      'correctness',
+      'quality gate',
+      '质量门禁',
+      '生产级',
+      '可靠',
+      '正确性',
+      '验证',
+      '高质量',
+      '无回归',
+      '安全',
+      '优化',
+      '改进',
+      '重构',
+      '修复',
+      '调试',
+      '性能',
+    ];
     const contestKeywords = ['对比', '方案', '评估', '选择', '决策', '评审'];
 
     const lowerPrompt = prompt.toLowerCase();
@@ -113,6 +135,12 @@ export async function routeTeamRequest(
     for (const keyword of designKeywords) {
       if (lowerPrompt.includes(keyword.toLowerCase())) {
         return 'design';
+      }
+    }
+    
+    for (const keyword of nidhoggKeywords) {
+      if (lowerPrompt.includes(keyword.toLowerCase())) {
+        return 'nidhogg';
       }
     }
     
@@ -125,12 +153,6 @@ export async function routeTeamRequest(
     for (const keyword of athenaKeywords) {
       if (lowerPrompt.includes(keyword.toLowerCase())) {
         return 'athena';
-      }
-    }
-    
-    for (const keyword of nidhoggKeywords) {
-      if (lowerPrompt.includes(keyword.toLowerCase())) {
-        return 'nidhogg';
       }
     }
     

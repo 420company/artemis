@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // 查询解析结果
 export interface QueryParsingResult {
   query: string
@@ -254,7 +255,7 @@ export class NLPProcessor {
    */
   private identifyTopics(messages: any[]): string[] {
     const topics: string[] = []
-    const filePattern = /\b[\w\/\\]+\.\w+\b/g
+    const filePattern = /\b[\w/\\]+\.\w+\b/g
     const conceptPattern = /\b(\w+)\s*(\w+)?\b/g
 
     messages.forEach(msg => {

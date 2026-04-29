@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { randomUUID } from 'crypto'
 import stripAnsi from 'strip-ansi'
 import type { ToolDefinition } from './Tool.js'

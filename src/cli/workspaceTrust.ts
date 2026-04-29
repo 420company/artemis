@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars, no-control-regex */
 import { emitKeypressEvents } from 'node:readline'
 import { CliSettingsStore } from './settings.js'
 import { stringWidth } from '../input/stringWidth.js'

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires */
 /**
  * Artemis UI 组件库
  * 提供基础的 CLI 和 Web UI 组件

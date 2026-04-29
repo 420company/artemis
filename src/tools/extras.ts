@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * tools/extras.ts — 39 additional inline tools (no TOOL_REGISTRY required)
  *

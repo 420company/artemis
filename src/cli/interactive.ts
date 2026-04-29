@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars, prefer-const */
 /**
  * cli/interactive.ts — interactive REPL loop
  */
@@ -1769,13 +1770,48 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     return nextLine
   }
 
+  const launchDetachedWorkflow = async (
+    command: 'run' | 'nidhogg',
+    effectivePrompt: string,
+  ): Promise<void> => {
+    try {
+      if (!(await ensureExecutionProviderForWorkflow(workspaceRoot))) {
+        return
+      }
+      const provConfig = await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })
+      const result = await spawnDetachedWorkflow({
+        cwd: workspaceRoot,
+        sessionStore,
+        prompt: effectivePrompt,
+        command,
+        maxTurns: opts.maxTurns,
+        permissionMode: permissionMode as 'prompt' | 'read-only' | 'accept-edits' | 'accept-all',
+        permissionModeExplicit: false,
+        providerConfig: provConfig,
+      })
+      appendSystemPanel(
+        command === 'nidhogg'
+          ? t('Nidhogg Harness 已启动', 'Nidhogg Harness launched')
+          : t('后台任务已启动', 'Background task launched'),
+        [
+          `Session: ${result.sessionId.slice(0, 8)}`,
+          `Runtime: ${result.runtimeId.slice(0, 8)}`,
+          `Log: ${result.logPath}`,
+        ],
+      )
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      appendSystemPanel(t('启动失败', 'Launch failed'), [msg])
+    }
+  }
+
   // nextLineOverride: when the user types during AI generation, prompt.read()
   // completes concurrently. We stash the result here so the next iteration
   // uses it directly instead of calling prompt.read() again.
   let nextLineOverride: string | null | undefined = undefined
   let suppressInitialNewbornOnce = opts.suppressInitialNewbornOnce === true
 
-  while (true) {
+  for (;;) {
     const line: string | null = nextLineOverride !== undefined ? nextLineOverride : await prompt.read()
     nextLineOverride = undefined
 
@@ -2821,7 +2857,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           }
           await saveBoth(bfData)
           appendSystemPanel(t('即将配置思考模型', 'About to configure brain model'),
-            [t('思考模型是负责规划 / 研究 / 评审的\"思考\"模型。按 Esc 可随时取消。',
+            [t('思考模型是负责规划 / 研究 / 评审的"思考"模型。按 Esc 可随时取消。',
                'Brain model handles planning/research/review. Esc cancels at any point.')])
         } else if (action === 'reconfig-main' && curMain) {
           bfData.profiles = bfData.profiles.filter(p => p.id !== curMain.id)
@@ -3157,6 +3193,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         trimmed = teamPrompt
       } else {
         const effectiveTeamPrompt = await maybeApplyVisualGenerationPolicy(teamPrompt)
+        if (route.choice === 'nidhogg') {
+          const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
+            launchDetachedWorkflow('nidhogg', effectiveTeamPrompt),
+          )
+          nextLineOverride = nextLineFromWorkflow
+          continue
+        }
         const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
           runHintedWorkflowTurn(
             route.choice,
@@ -3214,34 +3257,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       appendScrollBlock({ kind: 'user', text: trimmed, timestamp: timeStampLabel() })
       const effectiveWorkflowPrompt = await maybeApplyVisualGenerationPolicy(workflowPrompt)
 
-      if (mode === 'run') {
+      if (mode === 'run' || mode === 'nidhogg') {
         // Background detached workflow
-        const nextLineFromWorkflow = await waitForRunnerOrInterrupt((async () => {
-            try {
-              if (!(await ensureExecutionProviderForWorkflow(workspaceRoot))) {
-                return
-              }
-              const provConfig = await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })
-              const result = await spawnDetachedWorkflow({
-              cwd: workspaceRoot,
-              sessionStore,
-                prompt: effectiveWorkflowPrompt,
-              command: 'run',
-                maxTurns: opts.maxTurns,
-                permissionMode: permissionMode as 'prompt' | 'read-only' | 'accept-edits' | 'accept-all',
-                permissionModeExplicit: false,
-                providerConfig: provConfig,
-              })
-              appendSystemPanel(t('后台任务已启动', 'Background task launched'), [
-                `Session: ${result.sessionId.slice(0, 8)}`,
-                `Runtime: ${result.runtimeId.slice(0, 8)}`,
-                `Log: ${result.logPath}`,
-              ])
-            } catch (err: unknown) {
-              const msg = err instanceof Error ? err.message : String(err)
-              appendSystemPanel(t('启动失败', 'Launch failed'), [msg])
-            }
-          })())
+        const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
+          mode === 'nidhogg'
+            ? launchDetachedWorkflow('nidhogg', effectiveWorkflowPrompt)
+            : launchDetachedWorkflow('run', effectiveWorkflowPrompt),
+        )
         nextLineOverride = nextLineFromWorkflow
       } else {
         // Inline workflow — Claude Code style: inject domain hint into brain's

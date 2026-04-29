@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars, prefer-const */
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { pickLocale, type UiLocale } from './locale.js'
@@ -87,7 +88,7 @@ async function askNumber(prompt: string, defaultValue: number, options: {
   max?: number
   integer?: boolean
 } = {}): Promise<number> {
-  while (true) {
+  for (;;) {
     const raw = await askText(prompt, String(defaultValue))
     const parsed = Number(raw)
     if (
@@ -478,7 +479,7 @@ async function configureGateway(options: { cwd: string; locale: UiLocale }): Pro
     tr(locale, '这里没有超时自动选择；必须手动确认。', 'No timeout-based auto-selection here; user confirmation is required.'),
   ])
 
-  while (true) {
+  for (;;) {
     const platform = await chooseInteractiveOption<'telegram' | 'discord' | 'wechat' | 'done'>({
       title: tr(locale, '选择要配置的通讯平台', 'Choose a messaging platform to configure'),
       choices: [

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
 import type {
   ChatProvider,
@@ -526,7 +527,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       }
     }
 
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read()
       if (done) break
 

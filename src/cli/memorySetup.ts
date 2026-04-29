@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { formatProviderProtocolLabel } from '../providers/factory.js';
 import { ProviderStore } from '../providers/store.js';
 import type { MemoryEnhancementConfig } from '../providers/types.js';

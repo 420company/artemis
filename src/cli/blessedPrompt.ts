@@ -692,6 +692,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     }
     const seq = key.sequence ?? ''
     if (!seq) return ''
+    // eslint-disable-next-line no-control-regex
     if (/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(seq)) return ''
     return seq
   }
@@ -755,6 +756,7 @@ class TerminalPrompt implements BlessedPromptHandle {
   }
 
   private handlePastedText(text: string): void {
+    // eslint-disable-next-line no-control-regex
     const sanitised = text.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '')
     const normalised = sanitised.replace(/\r\n?/g, '\n')
     if (!normalised) return

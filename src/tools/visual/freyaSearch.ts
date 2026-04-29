@@ -106,32 +106,27 @@ export class FreyaSearch {
     const dirPath = path.dirname(destPath)
     await fs.mkdir(dirPath, { recursive: true })
 
-    try {
-      // Use Node.js fetch API to download the image
-      const response = await fetch(url)
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error: ${response.status}`)
-      }
+    // Use Node.js fetch API to download the image
+    const response = await fetch(url)
 
-      const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
-      if (contentType && !contentType.startsWith('image/')) {
-        throw new Error(`downloaded asset is not an image: ${contentType}`)
-      }
-
-      const arrayBuffer = await response.arrayBuffer()
-      const buffer = Buffer.from(arrayBuffer)
-      if (!looksLikeImage(buffer)) {
-        throw new Error('downloaded asset does not have a supported image signature')
-      }
-      
-      await fs.writeFile(destPath, buffer)
-      
-      return destPath
-
-    } catch (error) {
-      throw error
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status}`)
     }
+
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+    if (contentType && !contentType.startsWith('image/')) {
+      throw new Error(`downloaded asset is not an image: ${contentType}`)
+    }
+
+    const arrayBuffer = await response.arrayBuffer()
+    const buffer = Buffer.from(arrayBuffer)
+    if (!looksLikeImage(buffer)) {
+      throw new Error('downloaded asset does not have a supported image signature')
+    }
+
+    await fs.writeFile(destPath, buffer)
+
+    return destPath
   }
 
   /**

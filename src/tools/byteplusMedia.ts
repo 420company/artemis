@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { homedir } from 'node:os';
 import { ProviderStore } from '../providers/store.js';
 import type { ProviderProfile, ProviderStoreData } from '../providers/types.js';

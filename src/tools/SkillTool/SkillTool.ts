@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SkillDefinition, SkillExecutionResult } from '../../core/skillManager.js';
 import { ToolDefinition } from '../../core/toolDef';
 

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars, @typescript-eslint/no-var-requires, prefer-const */
 import { readdir, readFile } from 'node:fs/promises';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -74,7 +75,7 @@ export abstract class BaseSkillAdapter implements SkillAdapter {
 
 // Claude Code 技能适配器
 export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
-  format: 'claude' = 'claude';
+  format = 'claude' as const;
   
   async hasSkillFile(directory: string): Promise<boolean> {
     // Claude 官方技能通常包含 SKILL.md 文件
@@ -549,7 +550,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
 
 // OpenClaw 技能适配器
 export class OpenClawSkillAdapter extends BaseSkillAdapter {
-  format: 'openclaw' = 'openclaw';
+  format = 'openclaw' as const;
   
   async hasSkillFile(directory: string): Promise<boolean> {
     // 真实的 OpenClaw 技能包含以下文件中的任意一个

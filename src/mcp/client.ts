@@ -630,7 +630,7 @@ function parseSseFrames(buffer: string): {
   const frames: SseFrame[] = [];
   let remaining = buffer;
 
-  while (true) {
+  for (;;) {
     const match = remaining.match(/\r\n\r\n|\n\n|\r\r/u);
     if (!match || match.index === undefined) {
       break;
@@ -707,7 +707,7 @@ async function readJsonRpcResponseFromSse(options: {
   let buffer = '';
 
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) {
         break;
@@ -1227,7 +1227,7 @@ class SseRpcTransport implements RpcTransport {
     const streamReaderPromise = (async () => {
       let buffer = '';
       try {
-        while (true) {
+        for (;;) {
           const { done, value } = await reader.read();
           if (done) {
             break;

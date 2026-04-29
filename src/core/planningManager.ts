@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage, SessionRecord } from './types.js';
 import type { SkillDefinition } from './skillManager.js';
 import { SkillManager } from './skillManager.js';

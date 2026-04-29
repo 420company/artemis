@@ -1,7 +1,6 @@
+/* eslint-disable no-case-declarations */
 import type { ToolDefinition } from "../../core/toolDef.js";
 import type { ToolExecutionContext } from "../types.js";
-import { z } from "zod";
-import { spawn } from 'child_process';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -33,7 +32,7 @@ export class MCPTool {
         }
         return errors;
       },
-      execute: async (args: any, context: ToolExecutionContext) => {
+      execute: async (args: any, _context: ToolExecutionContext) => {
         try {
           // 确保目录存在
           await fs.mkdir(path.dirname(MCPTool.configFile), { recursive: true });
@@ -378,7 +377,7 @@ export class MCPTool {
       }
 
       return await response.json();
-    } catch (error: any) {
+    } catch {
       // 如果无法获取详细信息，至少返回基本连接信息
       return {
         available: true,

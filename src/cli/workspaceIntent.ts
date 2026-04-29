@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars, prefer-const */
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { resolveWorkspaceCandidatePath, findNearestExistingWorkspaceRoot } from '../utils/workspaceRoots.js'

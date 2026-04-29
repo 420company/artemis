@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { walkFiles } from '../utils/fs.js';
+import { PROJECT_INSTRUCTION_FILENAMES } from './instructionFile.js';
 
 type RepoScopeSummary = {
   scope: string;
@@ -15,8 +16,10 @@ function normalizePath(input: string): string {
 }
 
 function isProjectInstructionFile(relativePath: string): boolean {
-  const normalized = normalizePath(relativePath).toLowerCase();
-  return normalized === 'artemis.md';
+  const normalized = path.basename(normalizePath(relativePath)).toLowerCase();
+  return PROJECT_INSTRUCTION_FILENAMES.some(
+    (fileName) => fileName.toLowerCase() === normalized,
+  );
 }
 
 function tokenizePrompt(prompt: string): string[] {

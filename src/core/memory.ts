@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionRecord } from './types.js'
 import { summarizeOnce } from '../brain.js'
 import { MemoryStore } from '../storage/memoryStore.js'

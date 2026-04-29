@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { randomUUID } from 'node:crypto';

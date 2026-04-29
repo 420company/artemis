@@ -1,6 +1,6 @@
+/* eslint-disable no-case-declarations */
 import type { ToolDefinition } from "../../core/toolDef.js";
 import type { ToolExecutionContext } from "../types.js";
-import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 
@@ -50,7 +50,7 @@ export class TodoTool {
         }
         return errors;
       },
-      execute: async (args: any, context: ToolExecutionContext) => {
+      execute: async (args: any, _context: ToolExecutionContext) => {
         try {
           // 确保目录存在
           const dir = path.dirname(TodoTool.todoFile);

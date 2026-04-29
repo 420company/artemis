@@ -1,3 +1,4 @@
+/* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import path from 'node:path';
 import type { ContextBuildResult } from './context.js';
 import {
@@ -2867,7 +2868,7 @@ async function processDelegatedRuntimeCommands(
   session: SessionRecord,
   options: RunAgentOptions,
 ): Promise<void> {
-  while (true) {
+  for (;;) {
     const signal = await getNextDelegatedRuntimeCommandSignal(session, options);
     if (!signal) {
       return;

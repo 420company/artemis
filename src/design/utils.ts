@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // 设计系统工具
 // 包含通用工具函数和辅助方法
 

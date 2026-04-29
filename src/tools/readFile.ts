@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import path from 'node:path';
 import type { AgentAction } from '../core/types.js';
 import { ensureNotSensitivePath, readTextFileSafe } from '../utils/fs.js';

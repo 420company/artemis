@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { getMemoryProfile, saveMemoryProfile, MemoryEnhancementFactory } from '../core/memoryEnhancement.js';
 import type { MemoryEnhancementConfig } from '../providers/types.js';
 import { chooseInteractiveOption } from './prompt.js';

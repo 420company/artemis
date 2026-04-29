@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { buildPanel } from '../cli/ui.js';
 import type { SessionRecord } from '../core/types.js';

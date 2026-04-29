@@ -343,7 +343,10 @@ function hasWorkflowSurfaceChanges(changedFiles: string[]): boolean {
       filePath.startsWith('src/core/verification') ||
       filePath.startsWith('src/core/athena') ||
       filePath.startsWith('src/core/design') ||
+      filePath.startsWith('src/core/nidhogg') ||
       filePath.startsWith('src/core/workflow') ||
+      filePath.startsWith('src/core/instructionFile') ||
+      filePath.startsWith('src/core/promptCache') ||
       filePath.startsWith('src/storage/sessions') ||
       filePath.startsWith('src/channels/runtime') ||
       filePath.startsWith('src/cli/interactive') ||
@@ -384,7 +387,7 @@ function shouldSuggestTypecheck(changedFiles: string[]): boolean {
   }
 
   return changedFiles.some((filePath) =>
-    /(?:^|\/)(?:tsconfig(?:\.[^.\/]+)?|package\.json|package-lock\.json|eslint\.config\.(?:js|mjs|cjs)|\.eslintrc(?:\.[^.\/]+)?)$/i.test(
+    /(?:^|\/)(?:tsconfig(?:\.[^./]+)?|package\.json|package-lock\.json|eslint\.config\.(?:js|mjs|cjs)|\.eslintrc(?:\.[^./]+)?)$/i.test(
       filePath,
     ) || /\.(?:ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i.test(filePath),
   );
