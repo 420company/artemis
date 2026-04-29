@@ -91,18 +91,97 @@ export async function executeBrowserNavigate(action: BrowserNavigateAction): Pro
 export interface BrowserScreenshotAction {
   type: 'browser_screenshot';
   fullPage?: boolean;
+  width?: number;
+  height?: number;
+}
+
+function normalizeViewportDimension(value: unknown, min: number, max: number): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const rounded = Math.round(value);
+  if (rounded < min || rounded > max) return undefined;
+  return rounded;
+}
+
+async function collectLayoutAudit(page: Awaited<ReturnType<typeof getActivePage>>): Promise<string> {
+  try {
+    const audit = await page.evaluate(() => {
+      const root = document.documentElement;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const visibleElements = Array.from(document.body?.querySelectorAll('*') ?? [])
+        .filter((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 0 &&
+            rect.height > 0 &&
+            style.visibility !== 'hidden' &&
+            style.display !== 'none' &&
+            rect.bottom >= 0 &&
+            rect.top <= viewportHeight;
+        });
+      const overflowingElements = visibleElements
+        .filter((el) => {
+          const rect = el.getBoundingClientRect();
+          return rect.left < -1 || rect.right > viewportWidth + 1;
+        })
+        .slice(0, 5)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            tag: el.tagName.toLowerCase(),
+            id: el.id,
+            className: String((el as HTMLElement).className ?? '').slice(0, 80),
+            left: Math.round(rect.left),
+            right: Math.round(rect.right),
+            width: Math.round(rect.width),
+          };
+        });
+      const clippedTextCount = visibleElements.filter((el) => {
+        const node = el as HTMLElement;
+        if (!node.innerText || node.innerText.trim().length < 8) return false;
+        return node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1;
+      }).length;
+
+      return {
+        viewportWidth,
+        viewportHeight,
+        documentWidth: root.scrollWidth,
+        documentHeight: root.scrollHeight,
+        horizontalOverflow: root.scrollWidth > viewportWidth + 1,
+        overflowingElements,
+        clippedTextCount,
+      };
+    });
+
+    const overflow = audit.horizontalOverflow ? 'yes' : 'no';
+    const offenders = audit.overflowingElements.length > 0
+      ? ` offenders=${audit.overflowingElements.map((el) =>
+          `${el.tag}${el.id ? `#${el.id}` : ''}${el.className ? `.${el.className.replace(/\s+/g, '.')}` : ''}[${el.left},${el.right}]`,
+        ).join('; ')}`
+      : '';
+    return `layout audit: viewport=${audit.viewportWidth}x${audit.viewportHeight} document=${audit.documentWidth}x${audit.documentHeight} horizontalOverflow=${overflow} clippedTextElements=${audit.clippedTextCount}${offenders}`;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return `layout audit unavailable: ${message}`;
+  }
 }
 
 export async function executeBrowserScreenshot(action: BrowserScreenshotAction): Promise<ToolResult> {
   try {
     const page = await getActivePage();
+    const width = normalizeViewportDimension(action.width, 240, 4096);
+    const height = normalizeViewportDimension(action.height, 240, 4096);
+    if (width && height) {
+      await page.setViewportSize({ width, height });
+    }
     await fsp.mkdir(SCREENSHOT_DIR, { recursive: true });
     const filename = `screenshot-${Date.now()}.png`;
     const filepath = path.join(SCREENSHOT_DIR, filename);
     await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
+    const audit = await collectLayoutAudit(page);
     return {
       ok: true,
-      output: `📸 已截图：${filepath}\n   URL: ${page.url()}`,
+      output: `📸 已截图：${filepath}\n   URL: ${page.url()}\n   ${audit}`,
     };
   } catch (err) {
     return pwError(err);

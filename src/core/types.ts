@@ -437,7 +437,7 @@ export type AgentAction =
   | { type: 'reminders_complete'; title: string; list?: string }
   // ── Browser automation (Playwright headed Chromium) ─────────────────────
   | { type: 'browser_navigate'; url: string; waitFor?: 'load' | 'domcontentloaded' | 'networkidle'; extractText?: boolean }
-  | { type: 'browser_screenshot'; fullPage?: boolean }
+  | { type: 'browser_screenshot'; fullPage?: boolean; width?: number; height?: number }
   | { type: 'browser_extract_text'; selector?: string }
   | { type: 'browser_click'; selector?: string; text?: string }
   | { type: 'browser_type'; selector: string; text: string; pressEnter?: boolean }

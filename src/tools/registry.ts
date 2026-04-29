@@ -1230,7 +1230,7 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'browser_screenshot',
-    description: '对当前浏览器页面截图。fullPage 控制是否截全页（默认仅可视区）。返回截图路径。',
+    description: '对当前浏览器页面截图。fullPage 控制是否截全页；width/height 可切换桌面或手机视口。返回截图路径和基础布局审计。',
     kind: 'code',
     permissionCategory: 'read',
     executionMode: 'blocking',

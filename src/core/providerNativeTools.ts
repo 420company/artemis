@@ -1322,6 +1322,8 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         properties: {
           fullPage: { type: 'boolean', description: 'Capture full scrollable page. Default: false (viewport only).' },
+          width: { type: 'number', description: 'Optional viewport width before capture, e.g. 1440 for desktop or 390 for mobile.' },
+          height: { type: 'number', description: 'Optional viewport height before capture, e.g. 900 for desktop or 844 for mobile.' },
         },
       };
     case 'browser_extract_text':

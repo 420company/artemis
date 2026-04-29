@@ -66,7 +66,7 @@ export function buildAmbientToolsHint(): string {
     '- `browser_click(selector | text)` — 点击元素',
     '- `browser_type(selector, text, pressEnter?)` — 输入到表单',
     '- `browser_wait_for(selector | text, timeoutMs?)` — 等元素出现',
-    '- `browser_screenshot(fullPage?)` — 截图（返回路径，brain 看不到图但用户能看）',
+    '- `browser_screenshot(fullPage?, width?, height?)` — 截图，可切换桌面/手机视口，并返回基础布局审计（截图路径用户可见）',
     '- `browser_close()` — 关闭当前标签（保留 cookie / 登录态）',
     '',
     '触发场景：',

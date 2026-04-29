@@ -17,14 +17,22 @@
 
 import os from 'node:os';
 import path from 'node:path';
-import type { BrowserContext, Page } from 'playwright';
+import fsp from 'node:fs/promises';
+import type { Browser, BrowserContext, Page } from 'playwright';
 
 const PROFILE_DIR = path.join(os.homedir(), '.artemis', 'browser-data');
+const TEMP_PROFILE_PREFIX = path.join(os.tmpdir(), 'artemis-browser-');
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 let _context: BrowserContext | null = null;
 let _activePage: Page | null = null;
 let _initPromise: Promise<BrowserContext> | null = null;
+let _ephemeralBrowser: Browser | null = null;
+
+function isPersistentProfileLockError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ProcessSingleton|profile directory|SingletonLock|already in use|user data directory is already in use/i.test(msg);
+}
 
 async function initContext(): Promise<BrowserContext> {
   if (_context) return _context;
@@ -33,24 +41,63 @@ async function initContext(): Promise<BrowserContext> {
   _initPromise = (async () => {
     const { chromium } = await import('playwright');
     const headless = process.env.ARTEMIS_BROWSER_HEADLESS === '1';
-
-    // launchPersistentContext gives us cookies + localStorage + login state
-    // surviving across Artemis restarts. Persistent profile = single browser
-    // connection, no separate Browser instance.
-    const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-      headless,
+    const contextOptions = {
       viewport: { width: 1280, height: 800 },
       locale: 'zh-CN',
       timezoneId: 'Asia/Bangkok',
-      // Realistic UA — avoids some bot fingerprinting
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-      args: ['--disable-blink-features=AutomationControlled'],
+    } as const;
+    const launchArgs = ['--disable-blink-features=AutomationControlled'];
+
+    const launch = (profileDir: string): Promise<BrowserContext> => chromium.launchPersistentContext(profileDir, {
+      headless,
+      ...contextOptions,
+      // Realistic UA — avoids some bot fingerprinting
+      args: launchArgs,
     });
+
+    const launchEphemeral = async (): Promise<BrowserContext> => {
+      const browser = await chromium.launch({
+        headless,
+        args: launchArgs,
+      });
+      _ephemeralBrowser = browser;
+      return browser.newContext(contextOptions);
+    };
+
+    let ctx: BrowserContext;
+    try {
+      // launchPersistentContext gives us cookies + localStorage + login state
+      // surviving across Artemis restarts. Persistent profile = single browser
+      // connection, no separate Browser instance.
+      ctx = await launch(PROFILE_DIR);
+    } catch (err) {
+      if (!isPersistentProfileLockError(err)) {
+        try {
+          ctx = await launchEphemeral();
+        } catch {
+          throw err;
+        }
+      } else {
+        // A stale or concurrently open Chromium profile should not make visual QA
+        // fall back to "HTTP 200 only". Use an isolated temporary profile for this
+        // Artemis process; it won't preserve logins, but screenshots still work.
+        const tempProfileDir = await fsp.mkdtemp(TEMP_PROFILE_PREFIX);
+        try {
+          ctx = await launch(tempProfileDir);
+        } catch {
+          ctx = await launchEphemeral();
+        }
+      }
+    }
     ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
     _context = ctx;
     return ctx;
-  })();
+  })().catch((err) => {
+    _initPromise = null;
+    throw err;
+  });
 
   return _initPromise;
 }
@@ -100,6 +147,10 @@ export async function closeBrowser(): Promise<void> {
     _activePage = null;
     _initPromise = null;
   }
+  if (_ephemeralBrowser) {
+    await _ephemeralBrowser.close().catch(() => undefined);
+    _ephemeralBrowser = null;
+  }
 }
 
 /**
@@ -114,6 +165,13 @@ export function describePlaywrightError(err: unknown): string {
       '在 Artemis 项目目录跑一次：',
       '  npx playwright install chromium',
       '装完（~300MB）就能用了。',
+    ].join('\n');
+  }
+  if (isPersistentProfileLockError(err)) {
+    return [
+      'Playwright Chromium profile 被其他进程占用。',
+      'Artemis 已尝试自动切换临时 profile；如果仍看到这条错误，请关闭旧 Chromium/Artemis 浏览器进程后重试。',
+      msg,
     ].join('\n');
   }
   return msg;

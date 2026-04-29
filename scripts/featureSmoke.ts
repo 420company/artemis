@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { DesignSystem } from '../src/design/index.js';
 import { DEFAULT_CONFIG } from '../src/design/config.js';
 import { DESIGN_STYLES } from '../src/design/styles/index.js';
+import { buildWorkflowHint } from '../src/core/workflowHints.js';
 
 function test(name: string, fn: () => void): void {
   fn();
@@ -22,6 +23,25 @@ test('/design prompt forbids empty links and fake controls', () => {
   const prompt = DesignSystem.buildDesignWorkflowPrompt('做一个网站');
   assert.match(prompt, /href="#"/);
   assert.match(prompt, /假按钮/);
+});
+
+test('/design workflow hint blocks generic fake brand-site output', () => {
+  const hint = buildWorkflowHint('design', {
+    cwd: '/tmp/artemis-design-smoke',
+    userPrompt: '做一个 420.COMPANY 网站，单独介绍 Artemis CLI',
+  });
+  assert.match(hint, /禁止虚构/);
+  assert.match(hint, /Nyx\/Styx\/Aether/);
+  assert.match(hint, /HTTP 200、文件存在、curl 成功都不是视觉验收/);
+  assert.match(hint, /browser_screenshot/);
+  assert.match(hint, /浏览器失败/);
+});
+
+test('/design optimized prompt rejects fake facts and HTTP-only validation', () => {
+  const prompt = DesignSystem.buildDesignWorkflowPrompt('做一个 Artemis CLI 官网');
+  assert.match(prompt, /严禁虚构产品、指标、命令、安装 URL、版本号/);
+  assert.match(prompt, /不要编造 Nyx Engine、Styx Mesh、Aether SDK/);
+  assert.match(prompt, /HTTP 200、文件存在、curl 成功不能单独算完成/);
 });
 
 test('/design style catalog exposes all 30 requested styles', () => {
