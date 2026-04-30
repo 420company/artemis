@@ -559,18 +559,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     // Coding Plan endpoint: https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions
     baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
     suggestedModels: [
-      'dola-seed-2.0-pro',
-      'dola-seed-2.0-lite',
-      'dola-seed-2.0-code',
+      'seed-2-0-pro-260328',
+      'seed-2-0-lite-260228',
+      'seed-2-0-mini-260215',
       'bytedance-seed-code',
       'glm-5.1',
       'glm-4.7',
       'kimi-k2.5',
       'gpt-oss-120b',
       'ark-code-latest',
-      'seed-2-0-pro-260328',
-      'seed-2-0-lite-260228',
-      'seed-2-0-mini-260215',
       'seed-2-0-code-preview-260328',
       'seed-1-8-251228',
       'seed-1-6-250915',
@@ -582,13 +579,13 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     notes: {
       zh: [
         'BytePlus，OpenAI-compatible。',
-        'Coding Plan 需将 baseUrl 改为 /api/coding/v3；官方 Quick Start 明确列出 dola-seed-2.0-pro / dola-seed-2.0-lite / bytedance-seed-code / glm-4.7 / kimi-k2.5 / gpt-oss-120b。',
+        'Coding Plan 需将 baseUrl 改为 /api/coding/v3；Seed 2.0 模型使用真实模型名 seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215。',
         '图像 / 视频生成请单独配置 visualProfile；不再默认复用主/副模型 API key。',
         '自定义部署填 Endpoint ID（ep- 开头）。',
       ],
       en: [
         'BytePlus, OpenAI-compatible.',
-        'Coding Plan: switch baseUrl to /api/coding/v3; the current Quick Start explicitly lists dola-seed-2.0-pro / dola-seed-2.0-lite / bytedance-seed-code / glm-4.7 / kimi-k2.5 / gpt-oss-120b.',
+        'Coding Plan: switch baseUrl to /api/coding/v3; Seed 2.0 entries use the real model names seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215.',
         'Configure image/video generation separately in visualProfile; main/secondary provider keys are no longer reused automatically.',
         'Custom deployments: use a deployed Endpoint ID (ep-...).',
       ],

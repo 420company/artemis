@@ -148,6 +148,7 @@ const COPY = {
     modelReady: '本地 Whisper 模型已就绪：ggml-base.bin',
     modelProgress: (mb: number, pct?: number) => pct == null ? `下载 ggml-base.bin：${mb} MB` : `下载 ggml-base.bin：${mb} MB / ${pct}%`,
     pkgCount: (d: number, t?: number) => t ? `已安装 ${d} / ${t} 个包` : `已安装 ${d} 个包`,
+    depsReady: 'MCP npm 依赖已就绪',
     doneOk:   '✓ MCP 依赖和本地 Whisper 模型安装完成！',
     doneFail: '⚠ 部分依赖安装失败，可用 /mcp install 重试',
     anyKey:   '按任意键继续…',
@@ -170,6 +171,7 @@ const COPY = {
     modelReady: 'Local Whisper model ready: ggml-base.bin',
     modelProgress: (mb: number, pct?: number) => pct == null ? `Downloading ggml-base.bin: ${mb} MB` : `Downloading ggml-base.bin: ${mb} MB / ${pct}%`,
     pkgCount: (d: number, t?: number) => t ? `${d} / ${t} packages installed` : `${d} packages installed`,
+    depsReady: 'MCP npm dependencies ready',
     doneOk:   '✓ MCP dependencies and local Whisper model installed!',
     doneFail: '⚠ Some dependencies failed — run /mcp install to retry',
     anyKey:   'Press any key to continue…',
@@ -287,7 +289,15 @@ function choiceBody(fi: number, sel: number, locale: UiLocale, layout: Layout): 
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-function progressBody(fi: number, done: number, total: number | undefined, current: string, locale: UiLocale, layout: Layout): string[] {
+function progressBody(
+  fi: number,
+  done: number,
+  total: number | undefined,
+  current: string,
+  locale: UiLocale,
+  layout: Layout,
+  detailLine?: string,
+): string[] {
   const t    = COPY[locale] ?? COPY['en']
   const pct  = typeof total === 'number' && total > 0
     ? Math.min(100, Math.floor((done / total) * 100))
@@ -305,7 +315,7 @@ function progressBody(fi: number, done: number, total: number | undefined, curre
     layout.blank,
     row(`${cyan(spin)}  ${dim(current.slice(0, layout.innerWidth - 6))}`, layout),
     layout.blank,
-    row(dim(t.pkgCount(done)), layout),
+    row(dim(detailLine ?? t.pkgCount(done, total)), layout),
     layout.blank,
     layout.blank,
     row(dim(t.wait), layout),
@@ -330,15 +340,48 @@ function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount
   ]
 }
 
-function countNodeModulesEntries(dir: string): number {
+function listInstalledPackageDirs(dir: string): Set<string> {
+  const installed = new Set<string>()
   try {
-    return readdirSync(dir).filter(d => !d.startsWith('.')).length
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith('.')) continue
+      const fullPath = path.join(dir, name)
+      try {
+        if (!statSync(fullPath).isDirectory()) continue
+      } catch {
+        continue
+      }
+      if (name.startsWith('@')) {
+        try {
+          for (const scopedName of readdirSync(fullPath)) {
+            if (scopedName.startsWith('.')) continue
+            const scopedPath = path.join(fullPath, scopedName)
+            try {
+              if (statSync(scopedPath).isDirectory()) {
+                installed.add(`${name}/${scopedName}`)
+              }
+            } catch {
+              // Ignore transient entries while npm is linking packages.
+            }
+          }
+        } catch {
+          // Ignore transient scoped dirs while npm is linking packages.
+        }
+      } else {
+        installed.add(name)
+      }
+    }
   } catch {
-    return 0
+    // Missing node_modules is a valid pre-install state.
   }
+  return installed
 }
 
-function countExpectedVisiblePackageEntries(lockPath: string): number | undefined {
+function countInstalledPackageDirs(dir: string): number {
+  return listInstalledPackageDirs(dir).size
+}
+
+function listExpectedPackageDirs(lockPath: string): Set<string> | undefined {
   if (!existsSync(lockPath)) return undefined
   try {
     const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
@@ -349,24 +392,58 @@ function countExpectedVisiblePackageEntries(lockPath: string): number | undefine
       : undefined
     if (!packages) return undefined
 
-    const visibleDirs = new Set<string>()
-    for (const packagePath of Object.keys(packages)) {
+    const expected = new Set<string>()
+    for (const [packagePath, meta] of Object.entries(packages)) {
+      if (meta?.optional) continue
       if (!packagePath.startsWith('node_modules/')) continue
       const rest = packagePath.slice('node_modules/'.length)
       if (!rest || rest.includes('/node_modules/')) continue
-      visibleDirs.add(rest.startsWith('@') ? rest.split('/')[0]! : rest.split('/')[0]!)
+      const parts = rest.split('/')
+      expected.add(rest.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!)
     }
-    return visibleDirs.size > 0 ? visibleDirs.size : undefined
+    return expected.size > 0 ? expected : undefined
   } catch {
     return undefined
   }
 }
 
-async function downloadWhisperModel(cwd: string, onStatus: (line: string) => void, locale: UiLocale): Promise<void> {
+function countExpectedPackageDirs(lockPath: string): number | undefined {
+  return listExpectedPackageDirs(lockPath)?.size
+}
+
+function countInstalledExpectedPackageDirs(dir: string, expected: Set<string>): number {
+  const installed = listInstalledPackageDirs(dir)
+  let count = 0
+  for (const packageDir of expected) {
+    if (installed.has(packageDir)) count++
+  }
+  return count
+}
+
+function hasCompleteMcpPackageInstall(): boolean {
+  const expected =
+    listExpectedPackageDirs(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
+    listExpectedPackageDirs(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
+  if (!expected || expected.size === 0) {
+    return existsSync(path.join(MCP_INSTALL_DIR, 'node_modules'))
+  }
+
+  const installed = listInstalledPackageDirs(path.join(MCP_INSTALL_DIR, 'node_modules'))
+  for (const packageDir of expected) {
+    if (!installed.has(packageDir)) return false
+  }
+  return true
+}
+
+async function downloadWhisperModel(
+  cwd: string,
+  onStatus: (line: string, progress?: { done: number; total: number; detail?: string }) => void,
+  locale: UiLocale,
+): Promise<void> {
   const t = COPY[locale] ?? COPY['en']
   const target = whisperModelPath(cwd)
   if (hasUsableWhisperModel(cwd)) {
-    onStatus(t.modelReady)
+    onStatus(t.modelReady, { done: 100, total: 100, detail: t.modelReady })
     return
   }
 
@@ -378,7 +455,7 @@ async function downloadWhisperModel(cwd: string, onStatus: (line: string) => voi
     // Best effort cleanup before retrying the download.
   }
 
-  onStatus(t.modelPreparing)
+  onStatus(t.modelPreparing, { done: 0, total: 100, detail: t.modelPreparing })
 
   const fetchToDisk = async (url: string, redirects = 0): Promise<void> => {
     if (redirects > 5) throw new Error('Too many redirects while downloading ggml-base.bin')
@@ -417,7 +494,11 @@ async function downloadWhisperModel(cwd: string, onStatus: (line: string) => voi
             if (pct !== lastPct || mb - lastMb >= 5) {
               lastPct = pct ?? -1
               lastMb = mb
-              onStatus(t.modelProgress(mb, pct))
+              onStatus(t.modelProgress(mb, pct), {
+                done: pct ?? mb,
+                total: pct == null ? Math.max(mb + 1, 100) : 100,
+                detail: t.modelProgress(mb, pct),
+              })
             }
           })
 
@@ -426,7 +507,7 @@ async function downloadWhisperModel(cwd: string, onStatus: (line: string) => voi
           if (!hasUsableWhisperModel(cwd)) {
             throw new Error('Downloaded ggml-base.bin is incomplete')
           }
-          onStatus(t.modelReady)
+          onStatus(t.modelReady, { done: 100, total: 100, detail: t.modelReady })
           resolve()
         } catch (error) {
           reject(error)
@@ -454,7 +535,7 @@ async function downloadWhisperModel(cwd: string, onStatus: (line: string) => voi
 // ─── public API ────────────────────────────────────────────────────────────────
 
 export function shouldShowMcpInstallDialog(cwd = process.cwd()): boolean {
-  return !existsSync(path.join(MCP_INSTALL_DIR, 'node_modules')) || !hasUsableWhisperModel(cwd)
+  return !hasCompleteMcpPackageInstall() || !hasUsableWhisperModel(cwd)
 }
 
 export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: string } = {}): Promise<'installed' | 'skipped'> {
@@ -504,7 +585,7 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   }
 
   // ── install phase ─────────────────────────────────────────────────────────────
-  // The bar's `done` is sourced from disk reality (top-level dirs in
+  // The bar's `done` is sourced from disk reality (package dirs in
   // node_modules) — that's the only signal that strictly never overcounts.
   // The "current" line shows the last package npm fetched, parsed from
   // `npm http fetch` output via --loglevel=http. Result: bar climbs as
@@ -513,16 +594,25 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   let done    = 0
   let fetchedPkgs = 0
   let current = (COPY[locale] ?? COPY['en']).preparing
+  let detailLine: string | undefined
   let pfi     = 0
+  let npmFinished = false
+  let modelProgress: { done: number; total: number; detail?: string } | undefined
 
   ensureMcpInstallDir()
   const nmDir = path.join(MCP_INSTALL_DIR, 'node_modules')
-  const countInstalled = (): number => countNodeModulesEntries(nmDir)
+  const expectedPackageDirs =
+    listExpectedPackageDirs(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
+    listExpectedPackageDirs(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
+  const countRequiredInstalled = (): number => expectedPackageDirs
+    ? countInstalledExpectedPackageDirs(nmDir, expectedPackageDirs)
+    : countInstalledPackageDirs(nmDir)
+  const countAllInstalled = (): number => countInstalledPackageDirs(nmDir)
   const cachedTotal: { value: number | undefined } = { value: undefined }
   const refreshCachedTotal = (): void => {
-    const lockTotal =
-      countExpectedVisiblePackageEntries(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
-      countExpectedVisiblePackageEntries(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
+    const lockTotal = expectedPackageDirs?.size ??
+      countExpectedPackageDirs(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
+      countExpectedPackageDirs(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
     if (lockTotal && lockTotal > 0) cachedTotal.value = lockTotal
   }
   refreshCachedTotal()
@@ -541,109 +631,153 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
     // While npm is still fetching and node_modules is empty, the bar
     // would otherwise sit at 0%. Use fetchedPkgs as a transient floor so
     // the bar starts moving immediately based on real download events.
-    const effectiveDone = Math.max(done, Math.min(fetchedPkgs, total ?? Number.POSITIVE_INFINITY))
-    updateBody(progressBody(pfi, effectiveDone, total, current, locale, layout), layout)
+    const maxBeforeFinish = total === undefined ? Number.POSITIVE_INFINITY : Math.max(0, total - 1)
+    const fetchFloor = npmFinished ? fetchedPkgs : Math.min(fetchedPkgs, maxBeforeFinish)
+    const effectiveDone = Math.max(done, Math.min(fetchFloor, total ?? Number.POSITIVE_INFINITY))
+    updateBody(progressBody(pfi, effectiveDone, total, current, locale, layout, detailLine), layout)
   }
 
   const onResizeProgress = () => {
     layout = buildLayout(locale)
     const total = getEstimatedTotal()
-    const effectiveDone = Math.max(done, Math.min(fetchedPkgs, total ?? Number.POSITIVE_INFINITY))
-    rebuildScreen(progressBody(pfi, effectiveDone, total, current, locale, layout), layout)
+    const maxBeforeFinish = total === undefined ? Number.POSITIVE_INFINITY : Math.max(0, total - 1)
+    const fetchFloor = npmFinished ? fetchedPkgs : Math.min(fetchedPkgs, maxBeforeFinish)
+    const effectiveDone = Math.max(done, Math.min(fetchFloor, total ?? Number.POSITIVE_INFINITY))
+    rebuildScreen(progressBody(pfi, effectiveDone, total, current, locale, layout, detailLine), layout)
   }
   process.stdout.on('resize', onResizeProgress)
 
   renderProgress()
   // Tick at 200ms so the spinner + elapsed feel snappy and the on-disk
   // package counter is sampled often enough that no individual extract
-  // step looks frozen for >200ms. Cheap enough — countNodeModulesEntries
-  // is one readdir.
+  // step looks frozen for >200ms. The package-dir scan is cheap at this scale.
   const progressTimer = setInterval(() => {
     pfi++
-    done = countInstalled()
-    // Re-read total in case npm just wrote a fresh lockfile
-    if (cachedTotal.value === undefined) refreshCachedTotal()
+    if (modelProgress) {
+      done = modelProgress.done
+      cachedTotal.value = modelProgress.total
+      detailLine = modelProgress.detail
+    } else {
+      done = countRequiredInstalled()
+      detailLine = undefined
+      // Re-read total in case npm just wrote a fresh lockfile
+      if (cachedTotal.value === undefined) refreshCachedTotal()
+    }
     renderProgress()
   }, 200)
 
-  const npmSuccess = await new Promise<boolean>((resolve) => {
-    // --loglevel=http makes npm emit one `npm http fetch GET 200 <url>`
-    // line per tarball download. We use that as the "current package"
-    // signal so the dialog shows real activity during the otherwise
-    // silent resolve+download phase.
-    const child = spawn(
-      'npm',
-      ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund', '--loglevel=http'],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+  const npmNeeded = !hasCompleteMcpPackageInstall()
+  let npmSuccess = true
 
-    let stderrBuf = ''
-    let stdoutBuf = ''
+  if (!npmNeeded) {
+    npmFinished = true
+    done = countRequiredInstalled()
+    fetchedPkgs = done
+    current = (COPY[locale] ?? COPY['en']).depsReady
+    detailLine = (COPY[locale] ?? COPY['en']).pkgCount(done, getEstimatedTotal())
+    renderProgress()
+  } else {
+    npmSuccess = await new Promise<boolean>((resolve) => {
+      // --loglevel=http makes npm emit one `npm http fetch GET 200 <url>`
+      // line per tarball download. We use that as the "current package"
+      // signal so the dialog shows real activity during the otherwise
+      // silent resolve+download phase.
+      const child = spawn(
+        'npm',
+        ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund', '--loglevel=http'],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      )
 
-    const handleLine = (line: string): void => {
-      const trimmed = line.trim()
-      if (!trimmed) return
+      let stderrBuf = ''
+      let stdoutBuf = ''
 
-      // npm http fetch GET 200 https://registry.npmjs.org/<pkg>/-/<pkg>-1.2.3.tgz 234ms
-      const fetchMatch = trimmed.match(/npm http fetch GET (?:\d+\s+)?https:\/\/[^\s/]+\/([^\s]+)/)
-      if (fetchMatch?.[1]) {
-        const url = fetchMatch[1]
-        // Strip .../-/<tarball>.tgz suffix if present, and decode any %xx
-        const pkgPath = url.split('/-/')[0] ?? url
-        try {
-          current = decodeURIComponent(pkgPath)
-        } catch {
-          current = pkgPath
+      const handleLine = (line: string): void => {
+        const trimmed = line.trim()
+        if (!trimmed) return
+
+        // npm http fetch GET 200 https://registry.npmjs.org/<pkg>/-/<pkg>-1.2.3.tgz 234ms
+        const fetchMatch = trimmed.match(/npm http fetch GET (?:\d+\s+)?https:\/\/[^\s/]+\/([^\s]+)/)
+        if (fetchMatch?.[1]) {
+          const url = fetchMatch[1]
+          // Strip .../-/<tarball>.tgz suffix if present, and decode any %xx
+          const pkgPath = url.split('/-/')[0] ?? url
+          try {
+            current = decodeURIComponent(pkgPath)
+          } catch {
+            current = pkgPath
+          }
+          fetchedPkgs += 1
+          return
         }
-        fetchedPkgs += 1
-        return
-      }
 
-      // Final summary: "added 690 packages in 47s"
-      const addedMatch = trimmed.match(/added\s+(\d+)\s+packages?/)
-      if (addedMatch?.[1]) {
-        const n = parseInt(addedMatch[1], 10)
-        if (Number.isFinite(n) && n > 0) {
-          // Tighten cachedTotal to npm's reported figure if it's higher
-          if (!cachedTotal.value || cachedTotal.value < n) cachedTotal.value = n
-          current = `linked ${n} packages`
+        // Final summary: "added 690 packages in 47s"
+        const addedMatch = trimmed.match(/added\s+(\d+)\s+packages?/)
+        if (addedMatch?.[1]) {
+          const n = parseInt(addedMatch[1], 10)
+          if (Number.isFinite(n) && n > 0) {
+            if (!expectedPackageDirs && (!cachedTotal.value || cachedTotal.value < n)) {
+              cachedTotal.value = n
+            }
+            current = `linked ${n} packages`
+          }
+          return
         }
-        return
+
+        // Show short notable lines verbatim (warnings, "removed N packages", etc.)
+        // but skip the verbose `npm http fetch` cruft that didn't match above.
+        if (trimmed.length < 80 && !trimmed.startsWith('npm http')) {
+          current = trimmed
+        }
       }
 
-      // Show short notable lines verbatim (warnings, "removed N packages", etc.)
-      // but skip the verbose `npm http fetch` cruft that didn't match above.
-      if (trimmed.length < 80 && !trimmed.startsWith('npm http')) {
-        current = trimmed
+      const consume = (buf: Buffer, which: 'stdout' | 'stderr'): void => {
+        const text = buf.toString()
+        const accumulated = (which === 'stdout' ? stdoutBuf : stderrBuf) + text
+        const lines = accumulated.split('\n')
+        // Keep the final partial line (no trailing newline) for next chunk
+        const leftover = lines.pop() ?? ''
+        if (which === 'stdout') stdoutBuf = leftover
+        else stderrBuf = leftover
+        for (const line of lines) handleLine(line)
       }
-    }
 
-    const consume = (buf: Buffer, which: 'stdout' | 'stderr'): void => {
-      const text = buf.toString()
-      const accumulated = (which === 'stdout' ? stdoutBuf : stderrBuf) + text
-      const lines = accumulated.split('\n')
-      // Keep the final partial line (no trailing newline) for next chunk
-      const leftover = lines.pop() ?? ''
-      if (which === 'stdout') stdoutBuf = leftover
-      else stderrBuf = leftover
-      for (const line of lines) handleLine(line)
-    }
-
-    child.stdout?.on('data', (b: Buffer) => consume(b, 'stdout'))
-    child.stderr?.on('data', (b: Buffer) => consume(b, 'stderr'))
-    child.on('close', (code) => {
-      // Flush trailing partial line on close
-      if (stdoutBuf) handleLine(stdoutBuf)
-      if (stderrBuf) handleLine(stderrBuf)
-      resolve(code === 0)
+      child.stdout?.on('data', (b: Buffer) => consume(b, 'stdout'))
+      child.stderr?.on('data', (b: Buffer) => consume(b, 'stderr'))
+      child.on('close', (code) => {
+        // Flush trailing partial line on close
+        if (stdoutBuf) handleLine(stdoutBuf)
+        if (stderrBuf) handleLine(stderrBuf)
+        npmFinished = true
+        done = countRequiredInstalled()
+        fetchedPkgs = done
+        if (cachedTotal.value === undefined || done > cachedTotal.value) cachedTotal.value = done
+        if (code === 0 && expectedPackageDirs) {
+          cachedTotal.value = expectedPackageDirs.size
+          done = countRequiredInstalled()
+          fetchedPkgs = done
+        }
+        resolve(code === 0)
+      })
+      child.on('error', () => resolve(false))
     })
-    child.on('error', () => resolve(false))
-  })
+  }
 
   let success = npmSuccess
   if (npmSuccess) {
     try {
-      await downloadWhisperModel(cwd, (line) => { current = line }, locale)
+      modelProgress = { done: 0, total: 100, detail: (COPY[locale] ?? COPY['en']).modelPreparing }
+      cachedTotal.value = 100
+      done = 0
+      fetchedPkgs = 0
+      await downloadWhisperModel(cwd, (line, progress) => {
+        current = line
+        if (progress) {
+          modelProgress = progress
+          cachedTotal.value = progress.total
+          done = progress.done
+          detailLine = progress.detail
+        }
+      }, locale)
       success = true
     } catch (error) {
       current = error instanceof Error ? error.message : String(error)
@@ -653,7 +787,7 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
 
   clearInterval(progressTimer)
   process.stdout.off('resize', onResizeProgress)
-  const finalCount = countInstalled()
+  const finalCount = countAllInstalled()
 
   // ── done screen ───────────────────────────────────────────────────────────────
   layout = buildLayout(locale)
