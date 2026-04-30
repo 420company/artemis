@@ -19,6 +19,8 @@ import { ProviderStore } from '../providers/store.js'
 import { createProviderFromConfig } from '../providers/factory.js'
 import { probeProviderConfig, probeProviderNativeToolCalls } from '../providers/health.js'
 import { formatProviderProfileTelemetry } from '../providers/telemetry.js'
+import { createVisualProvider } from '../tools/visual/providers/interface.js'
+import { describeVisualProvider, resolveConfiguredVisualProvider } from '../utils/visualGenerationConfig.js'
 import { runInteractive } from './interactive.js'
 import { runOnboarding, runVisualModelSetup } from './onboarding.js'
 import { runSetupWizard } from './setupWizard.js'
@@ -1496,6 +1498,12 @@ async function runDoctor(options: {
         const msg = err instanceof Error ? err.message : String(err)
         lines.push(`❌ Provider error: ${msg}`)
       }
+
+      const visualProbe = await probeConfiguredVisualImageProvider(options.cwd, options.locale)
+      if (visualProbe) {
+        lines.push('')
+        lines.push(...visualProbe)
+      }
     }
   } else {
     lines.push('Provider: ❌ not configured')
@@ -1528,6 +1536,69 @@ async function runDoctor(options: {
     lines
   ))
   console.log()
+}
+
+async function probeConfiguredVisualImageProvider(
+  cwd: string,
+  locale: UiLocale,
+): Promise<string[] | null> {
+  const configured = await resolveConfiguredVisualProvider(cwd, 'image')
+  if (!configured) {
+    return null
+  }
+
+  const lines = [
+    locale === 'zh-CN'
+      ? `Testing visual image generation (${describeVisualProvider(configured.config, 'image')})...`
+      : `Testing visual image generation (${describeVisualProvider(configured.config, 'image')})...`,
+  ]
+
+  try {
+    const provider = await createVisualProvider(configured.config, 'image')
+    if (!provider.supportsImages) {
+      lines.push(`❌ Visual image error: provider does not support images: ${configured.provider}`)
+      return lines
+    }
+
+    const imageConfig = configured.config.image
+    let timer: NodeJS.Timeout | undefined
+    const result = await Promise.race([
+      provider.generateImage({
+        prompt: 'A simple visual API health check image: abstract geometric shapes, neutral background, no text.',
+        model: imageConfig.model || configured.model,
+        size: imageConfig.defaultParams.size,
+        quality: 'low',
+        outputFormat: imageConfig.defaultParams.outputFormat,
+        background: imageConfig.defaultParams.background,
+        watermark: false,
+        count: 1,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('Visual image probe timed out after 90s.'))
+        }, 90_000)
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer)
+    })
+
+    if (!result.success || !result.assetPath) {
+      lines.push(`❌ Visual image error: ${result.error ?? 'unknown error'}`)
+      return lines
+    }
+
+    lines.push(`✅ Visual image OK — generated test image via ${result.modelInfo?.provider ?? provider.name}/${result.modelInfo?.model ?? configured.model}`)
+    try {
+      fs.unlinkSync(result.assetPath)
+    } catch {
+      lines.push(`  Test image left at: ${result.assetPath}`)
+    }
+    return lines
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    lines.push(`❌ Visual image error: ${msg}`)
+    return lines
+  }
 }
 
 // ─── heimdall subcommand ──────────────────────────────────────────────────────

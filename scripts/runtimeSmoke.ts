@@ -36,6 +36,7 @@ import { resolveBytePlusCredentials } from '../src/tools/byteplusMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
 import { BytePlusProvider } from '../src/tools/visual/providers/byteplusProvider.js'
+import { OpenAIProvider } from '../src/tools/visual/providers/openaiProvider.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
   mergeTrustedWorkspaceRoots,
@@ -1164,6 +1165,130 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       'BytePlus visual provider: normalizes full image endpoint base URL before appending the API path',
       requestedUrls[0] === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations',
       `url=${requestedUrls[0]}`,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  const originalFetch = globalThis.fetch
+  const requestedUrls: string[] = []
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+    requestedUrls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
+    return new Response('{"error":{"message":"Upstream request failed","type":"upstream_error"}}', { status: 502 })
+  }) as typeof fetch
+
+  try {
+    const provider = new OpenAIProvider({
+      enabled: true,
+      image: {
+        provider: 'openai',
+        apiKey: 'test-key',
+        baseUrl: 'http://relay.local/v1/images/generations',
+        model: 'gpt-image-2',
+        defaultParams: {
+          size: '1024x1024',
+          quality: 'medium',
+          style: 'realistic',
+          watermark: false,
+          outputFormat: 'png',
+          background: 'auto',
+        },
+      },
+      video: {
+        enabled: false,
+        provider: 'openai',
+        apiKey: '',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'sora-2',
+        defaultParams: {
+          duration: '10s',
+          resolution: '1080p',
+          quality: 'standard',
+          style: 'realistic',
+          format: 'mp4',
+          framerate: '30fps',
+          watermark: false,
+        },
+      },
+    })
+
+    const result = await provider.generateImage({ prompt: 'luxury game preview concept art', model: 'gpt-image-2' })
+
+    assert(
+      'OpenAI visual provider: diagnoses relay upstream 502',
+      result.success === false &&
+        requestedUrls[0] === 'http://relay.local/v1/images/generations' &&
+        String(result.error).includes('OpenAI-compatible relay') &&
+        String(result.error).includes('organization verified'),
+      `url=${requestedUrls[0]} error=${result.error}`,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  const originalFetch = globalThis.fetch
+  const requestedBodies: Array<Record<string, unknown>> = []
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    requestedBodies.push(body)
+    if (Object.keys(body).some((key) => key !== 'model' && key !== 'prompt')) {
+      return new Response('{"error":{"message":"Upstream request failed","type":"upstream_error"}}', { status: 502 })
+    }
+    return new Response(
+      '{"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="}]}',
+      { status: 200 },
+    )
+  }) as typeof fetch
+
+  try {
+    const provider = new OpenAIProvider({
+      enabled: true,
+      image: {
+        provider: 'openai',
+        apiKey: 'test-key',
+        baseUrl: 'http://relay.local/v1',
+        model: 'gpt-image-2',
+        defaultParams: {
+          size: '1024x1024',
+          quality: 'medium',
+          style: 'realistic',
+          watermark: false,
+          outputFormat: 'png',
+          background: 'auto',
+        },
+      },
+      video: {
+        enabled: false,
+        provider: 'openai',
+        apiKey: '',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'sora-2',
+        defaultParams: {
+          duration: '10s',
+          resolution: '1080p',
+          quality: 'standard',
+          style: 'realistic',
+          format: 'mp4',
+          framerate: '30fps',
+          watermark: false,
+        },
+      },
+    })
+
+    const result = await provider.generateImage({ prompt: 'visual health check', model: 'gpt-image-2' })
+    if (result.assetPath) fs.rmSync(result.assetPath, { force: true })
+
+    assert(
+      'OpenAI visual provider: retries relay upstream 502 with minimal image request',
+      result.success === true &&
+        requestedBodies.length === 2 &&
+        requestedBodies[0].size === '1024x1024' &&
+        Object.keys(requestedBodies[1]).sort().join(',') === 'model,prompt',
+      `success=${result.success} requests=${JSON.stringify(requestedBodies)} error=${result.error}`,
     )
   } finally {
     globalThis.fetch = originalFetch

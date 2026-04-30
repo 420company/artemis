@@ -79,6 +79,7 @@ const DESIGN_HINT = `\
 • 开始前先列"内容事实清单"：用户明确给了什么、代码库/README 里能确认什么、哪些未知。未知内容不得补成事实
 • **禁止虚构**：不要编产品名、指标、命令、安装地址、版本号、团队规模、社交链接、年份和路线图。用户只给 Artemis CLI 时，不要捏造 Nyx/Styx/Aether 这类产品；可以做"产品/项目待补充"或只介绍 Artemis
 • **生图与代码并行**：先写任务专属资产 manifest（画幅、用途、主体、风格、验证），再调 generate_image，同时写 HTML/CSS/JS
+• **视觉 prompt 必须动态生成**：每次从用户原文和项目事实中提取本轮主体、用途、受众、风格、构图、材质、光线、画幅、禁止项，再组成 generate_image/generate_video 的 prompt；不要套用固定题材词表、固定业务关键词或历史任务关键词
 • 配图要求默认 ≥3 张本地生成（hero、section background、细节素材）；若 generate_image 失败，必须明确降级，并且最终不能写"配图就绪/全部验证通过"
 • HTML 用语义化标签；CSS 用现代特性（grid/flex/clamp/aspect-ratio/container query 可用则用）；JS 只处理真实交互，不堆装饰脚本
 • 不允许写出空 styles.css 或仅有 reset 的 CSS；每个 section 都要有真正的视觉处理、明确层级和响应式状态

@@ -387,39 +387,75 @@ function renderTimelinePanel(title: string, bodyLines: string[]): string {
   return output.join('\n')
 }
 
-function buildThinkingCatLines(statusText = '· Meow to the Moon! 🚀'): string[] {
-  const catFrameIndex = Math.floor(Date.now() / 500) % 3
-  const animatedCatFrames = [
-    [
-      `       ${tint('    /\\_/\\   ', TL.note)}`,
-      `       ${tint('   ( ^.^ )  ', TL.note)}`,
-      `       ${tint('    > = <   ', TL.note)}`,
-      `       ${tint('   /     \\  ', TL.note)}`,
+const THINKING_CAT_FRAMES = [
+  {
+    starsTop: '   ·    ✦    ·    ',
+    starsBottom: '    ✦    ·    ✦   ',
+    accent: TL.note,
+    cat: [
+      '    /\\_/\\   ',
+      '   ( ^.^ )  ',
+      '    > = <   ',
+      '   /     \\  ',
     ],
-    [
-      `       ${tint('    /\\_/\\   ', TL.note)}`,
-      `       ${tint('   ( -.- )  ', TL.note)}`,
-      `       ${tint('    > = <   ', TL.note)}`,
-      `       ${tint('   /     \\  ', TL.note)}`,
+  },
+  {
+    starsTop: '  ✦    ·    ✦    ·',
+    starsBottom: '  ·    ✦    ·    ✦',
+    accent: TL.tagBlue,
+    cat: [
+      '    /\\_/\\   ',
+      '   ( -.- )  ',
+      '   < = <    ',
+      '   /     \\  ',
     ],
-    [
-      `       ${tint('    /\\_/\\   ', TL.note)}`,
-      `       ${tint('   ( o.o )  ', TL.note)}`,
-      `       ${tint('    > ~ <   ', TL.note)}`,
-      `       ${tint('   /     \\  ', TL.note)}`,
+  },
+  {
+    starsTop: '    ✦    ·    ✦   ',
+    starsBottom: ' ·    ✦    ·    · ',
+    accent: TL.tagPurple,
+    cat: [
+      '    /\\_/\\   ',
+      '   ( o.o )  ',
+      '    > ~ <   ',
+      '   /  |  \\  ',
     ],
-  ]
-  const animationFrames = [
-    `       ${tint(statusText, TL.note)}`,
-    `       ${tint(statusText, TL.tagBlue)}`,
-    `       ${tint(statusText, TL.tagPurple)}`,
-    `       ${tint(statusText, TL.tagGold)}`,
-    `       ${tint(statusText, TL.tagGreen)}`,
-  ]
-  const textFrameIndex = Math.floor(Date.now() / 200) % animationFrames.length
+  },
+  {
+    starsTop: ' ·   ✦    ·    ✦  ',
+    starsBottom: '   ✦    ·   ✦    ',
+    accent: TL.tagGold,
+    cat: [
+      '    /\\_/\\   ',
+      '   ( ^o^ )  ',
+      '    > = >   ',
+      '   /     \\  ',
+    ],
+  },
+] as const
+
+function buildThinkingCatLines(statusText = '· Meow to the Moon! 🚀', frameIndex?: number): string[] {
+  const frame = THINKING_CAT_FRAMES[
+    typeof frameIndex === 'number'
+      ? Math.abs(Math.floor(frameIndex)) % THINKING_CAT_FRAMES.length
+      : Math.floor(Date.now() / 250) % THINKING_CAT_FRAMES.length
+  ]!
+  const textAccent = [
+    TL.note,
+    TL.tagBlue,
+    TL.tagPurple,
+    TL.tagGold,
+    TL.tagGreen,
+  ][
+    typeof frameIndex === 'number'
+      ? Math.abs(Math.floor(frameIndex)) % 5
+      : Math.floor(Date.now() / 200) % 5
+  ]!
   return [
-    ...animatedCatFrames[catFrameIndex]!,
-    animationFrames[textFrameIndex]!,
+    `       ${tint(frame.starsTop, TL.meta)}`,
+    ...frame.cat.map((line) => `       ${tint(line, frame.accent)}`),
+    `       ${tint(frame.starsBottom, TL.meta)}`,
+    `       ${tint(statusText, textAccent)}`,
   ]
 }
 
@@ -488,6 +524,7 @@ function buildPendingAssistantLines(options: {
   // verify the call hasn't actually died, (c) how to switch to a faster
   // model. Tier escalates with elapsed time so quick thinks stay quiet.
   if (options.phase === 'thinking') {
+    lines.push(...buildThinkingCatLines(undefined, Math.floor(elapsedMs / 250)))
     if (elapsed >= 60) {
       lines.push(
         `       ${tint('· 当前模型正在生成隐藏推理 (reasoning_content)，最终答案输出前可能暂时没有文字。', TL.meta)}`,
@@ -502,7 +539,6 @@ function buildPendingAssistantLines(options: {
       lines.push(
         `       ${tint('· 当前模型仍在推理阶段；可以等待，或按 Esc 中断后换用更快的主模型。', TL.meta)}`,
       )
-      lines.push(...buildThinkingCatLines())
     }
   }
   return lines
@@ -518,7 +554,7 @@ type ScrollBlock =
   | { kind: 'tool'; text: string; preserveAnsi?: boolean }
   | { kind: 'bridge'; role: ConversationRole; platform: BridgePlatform; targetLabel: string; text: string; timestamp?: string }
   | { kind: 'workflow'; label: string; text: string; pending?: boolean; pendingStartMs?: number }
-  | { kind: 'system'; text: string; preserveAnsi?: boolean; rawLines?: boolean }
+  | { kind: 'system'; text: string; preserveAnsi?: boolean; rawLines?: boolean; pending?: boolean }
 
 type ScrollViewportController = {
   /** Append a block to the end of the timeline. Returns its index. */
@@ -1017,7 +1053,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // at the bottom under the input) and commit into scrollback only once
     // they finalize. This keeps scrollback append-only and avoids duplicate
     // transcript replays when a pending block changes shape mid-turn.
-    if ((block.kind === 'workflow' || block.kind === 'assistant') && block.pending) {
+    if (
+      ((block.kind === 'workflow' || block.kind === 'assistant') && block.pending) ||
+      (block.kind === 'system' && block.pending)
+    ) {
       transientBlocks = [block]
       if (!landingCommitted) landingCommitted = true
       syncViewportFromState()
@@ -1158,11 +1197,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     options: { animation?: 'spinner' | 'cat' } = {},
   ): { stop: (finalTitle: string, finalLines: string[]) => void } => {
     const startedMs = Date.now()
+    let frameIndex = 0
     const render = (): string => {
       const elapsedSec = Math.floor((Date.now() - startedMs) / 1000)
       const spinnerFrame = SPINNER_FRAMES[Math.floor(Date.now() / 100) % SPINNER_FRAMES.length]!
       const animationLines = options.animation === 'cat'
-        ? buildThinkingCatLines(t('· 正在润色刚才输入的文字，请稍候…', '· Polishing your last input. Please wait…'))
+        ? buildThinkingCatLines(t('· 正在润色刚才输入的文字，请稍候…', '· Polishing your last input. Please wait…'), frameIndex)
         : []
       return renderPlainPanel(title, [
         ...animationLines,
@@ -1170,9 +1210,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         `${spinnerFrame} ${t('处理中…', 'Working…')}  (${elapsedSec}s)`,
       ])
     }
-    const blockIndex = appendScrollBlock({ kind: 'system', text: render(), preserveAnsi: true })
+    const blockIndex = appendScrollBlock({ kind: 'system', text: render(), preserveAnsi: true, pending: true })
     const tick = setInterval(() => {
-      updateScrollBlock(blockIndex, { kind: 'system', text: render(), preserveAnsi: true })
+      frameIndex = (frameIndex + 1) % THINKING_CAT_FRAMES.length
+      updateScrollBlock(blockIndex, { kind: 'system', text: render(), preserveAnsi: true, pending: true })
     }, 100)
     return {
       stop: (finalTitle: string, finalLines: string[]) => {
@@ -1181,6 +1222,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           kind: 'system',
           text: renderPlainPanel(finalTitle, finalLines),
           preserveAnsi: true,
+          pending: false,
         })
       },
     }
@@ -1661,7 +1703,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // (rendered under the input). Dispatch by kind rather than just the
     // index, since both indexing schemes can hold value 0 simultaneously.
     if (
-      (block.kind === 'workflow' || block.kind === 'assistant') &&
+      ((block.kind === 'workflow' || block.kind === 'assistant') ||
+        block.kind === 'system') &&
       transientBlocks &&
       index >= 0 &&
       index < transientBlocks.length

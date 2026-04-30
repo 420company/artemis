@@ -235,8 +235,8 @@ function buildSystemInfo(opts: SystemInfoOpts): string {
 
   const rows: string[] = []
   const labels = [
-    t('思维模型', 'brain'),
     t('执行模型', 'exec'),
+    t('思维模型', 'brain'),
     t('工作区', 'workspace'),
     t('权限模式', 'permission'),
     t('工具', 'tools'),
@@ -284,8 +284,8 @@ function buildSystemInfo(opts: SystemInfoOpts): string {
   // Always show both brain / exec slots
   const hasBrain = brainModel && brainModel !== executionModel
   if (hasBrain) {
-    rows.push(infoRow(t('思维模型', 'brain'), brainModel!, [203, 166, 247], t('思维层', 'planning')))
     rows.push(infoRow(t('执行模型', 'exec'), executionModel, [137, 180, 250], t('执行层', 'execution')))
+    rows.push(infoRow(t('思维模型', 'brain'), brainModel!, [203, 166, 247], t('思维层', 'planning')))
   } else {
     rows.push(infoRow(t('执行模型', 'exec model'), executionModel, [137, 180, 250]))
     rows.push(

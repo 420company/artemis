@@ -18,7 +18,7 @@ type OpenAIImageResponse = {
     url?: string;
     revised_prompt?: string;
   }>;
-  error?: { message?: string };
+  error?: { message?: string; type?: string; code?: string; param?: string };
 };
 
 type OpenAIVideoJob = {
@@ -79,17 +79,27 @@ export class OpenAIProvider implements VisualProvider {
         body.background = background;
       }
 
-      const res = await fetch(`${normalizeBaseUrl(imageConfig.baseUrl, 'openai')}/images/generations`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-      });
-      const raw = await res.text();
+      const endpoint = `${normalizeBaseUrl(imageConfig.baseUrl, 'openai')}/images/generations`;
+      let effectiveBody = body;
+      let res = await postOpenAIImageGeneration(endpoint, apiKey, effectiveBody);
+      let raw = await res.text();
+      if (!res.ok && shouldRetryOpenAIImageMinimalRequest({
+        status: res.status,
+        raw,
+        baseUrl: imageConfig.baseUrl,
+        body: effectiveBody,
+      })) {
+        effectiveBody = { model, prompt: params.prompt };
+        res = await postOpenAIImageGeneration(endpoint, apiKey, effectiveBody);
+        raw = await res.text();
+      }
       if (!res.ok) {
-        throw new Error(`OpenAI image generation failed (HTTP ${res.status}): ${raw.slice(0, 800)}`);
+        throw new Error(buildOpenAIImageError({
+          status: res.status,
+          raw,
+          baseUrl: imageConfig.baseUrl,
+          model,
+        }));
       }
 
       let payload: OpenAIImageResponse;
@@ -124,12 +134,12 @@ export class OpenAIProvider implements VisualProvider {
           provider: this.name,
           model,
           params: {
-            size: body.size,
-            quality,
-            outputFormat,
-            outputCompression,
-            background,
-            count: body.n,
+            size: effectiveBody.size,
+            quality: effectiveBody.quality,
+            outputFormat: effectiveBody.output_format,
+            outputCompression: effectiveBody.output_compression,
+            background: effectiveBody.background,
+            count: effectiveBody.n,
             revisedPrompt: item.revised_prompt,
           },
         },
@@ -259,7 +269,13 @@ export class OpenAIProvider implements VisualProvider {
 function normalizeBaseUrl(raw: string | undefined, provider: string): string {
   const fallback = defaultVisualBaseUrlForProvider(provider);
   const base = raw?.trim() || fallback;
-  return base.replace(/\/+$/, '');
+  const normalized = base.replace(/\/+$/, '');
+  if (provider.toLowerCase() === 'openai') {
+    return normalized
+      .replace(/\/images\/generations$/i, '')
+      .replace(/\/videos$/i, '');
+  }
+  return normalized;
 }
 
 async function downloadUrl(url: string): Promise<Buffer> {
@@ -268,6 +284,21 @@ async function downloadUrl(url: string): Promise<Buffer> {
     throw new Error(`download failed: HTTP ${res.status}`);
   }
   return Buffer.from(await res.arrayBuffer());
+}
+
+async function postOpenAIImageGeneration(
+  endpoint: string,
+  apiKey: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 async function writeFileEnsured(dir: string, fileName: string, buffer: Buffer): Promise<void> {
@@ -338,6 +369,82 @@ function mapOpenAIImageBackground(model: string, background: string | undefined)
     throw new Error('gpt-image-2 does not support background: "transparent". Use background: "auto" or "opaque".');
   }
   return normalized;
+}
+
+function buildOpenAIImageError(options: {
+  status: number;
+  raw: string;
+  baseUrl: string | undefined;
+  model: string;
+}): string {
+  const payload = parseOpenAIErrorPayload(options.raw);
+  const error = payload?.error;
+  const parts = [`OpenAI image generation failed (HTTP ${options.status})`];
+  if (error?.message) {
+    parts.push(error.message);
+  } else if (options.raw.trim()) {
+    parts.push(options.raw.slice(0, 800));
+  }
+  if (error?.type) {
+    parts.push(`type=${error.type}`);
+  }
+  if (error?.code) {
+    parts.push(`code=${error.code}`);
+  }
+  if (error?.param) {
+    parts.push(`param=${error.param}`);
+  }
+
+  const baseUrl = normalizeBaseUrl(options.baseUrl, 'openai');
+  if (options.status === 502 && error?.type === 'upstream_error') {
+    if (isOfficialOpenAIBaseUrl(baseUrl)) {
+      parts.push('OpenAI returned a temporary upstream 502; retry later, or test a neutral prompt to separate service availability from prompt/content issues');
+    } else {
+      parts.push(`The configured image base URL is an OpenAI-compatible relay (${describeBaseUrl(baseUrl)}), not api.openai.com; the relay returned upstream_error before exposing the real upstream failure`);
+      parts.push(`Verify the relay supports POST /v1/images/generations for ${options.model}, can reach OpenAI, and uses an organization verified for GPT Image models`);
+    }
+  }
+
+  return parts.join('. ');
+}
+
+function shouldRetryOpenAIImageMinimalRequest(options: {
+  status: number;
+  raw: string;
+  baseUrl: string | undefined;
+  body: Record<string, unknown>;
+}): boolean {
+  const payload = parseOpenAIErrorPayload(options.raw);
+  const baseUrl = normalizeBaseUrl(options.baseUrl, 'openai');
+  return options.status === 502 &&
+    payload?.error?.type === 'upstream_error' &&
+    !isOfficialOpenAIBaseUrl(baseUrl) &&
+    Object.keys(options.body).some((key) => key !== 'model' && key !== 'prompt');
+}
+
+function parseOpenAIErrorPayload(raw: string): OpenAIImageResponse | null {
+  try {
+    return JSON.parse(raw) as OpenAIImageResponse;
+  } catch {
+    return null;
+  }
+}
+
+function isOfficialOpenAIBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname === 'api.openai.com';
+  } catch {
+    return false;
+  }
+}
+
+function describeBaseUrl(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return baseUrl;
+  }
 }
 
 function extensionForOpenAIOutputFormat(format: 'png' | 'jpeg' | 'webp' | undefined): string {
