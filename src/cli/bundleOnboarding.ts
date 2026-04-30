@@ -18,15 +18,20 @@ export async function runBundleOnboarding(options: {
   locale: UiLocale
   settingsStore: CliSettingsStore
   printPanel: (title: string, lines: string[]) => void
+  hasSecondaryModel?: boolean
 }): Promise<void> {
   const { locale, settingsStore, printPanel } = options
+  const hasSecondaryModel = options.hasSecondaryModel ?? true
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
 
   const enable = await chooseInteractiveOption<boolean | '__cancel__'>({
     title: t('◆ Bundle 润色增强 — 要开启吗？',
              '◆ Bundle Prompt Polisher — enable?'),
-    hint:  t('把自然语言需求自动改写成结构化技术提示词，可以用主模型或副模型做润色',
-             'Rewrites natural-language requests into structured technical prompts (main or brain model)'),
+    hint:  hasSecondaryModel
+      ? t('把自然语言需求自动改写成结构化技术提示词，可以用主模型或副模型做润色',
+          'Rewrites natural-language requests into structured technical prompts (main or brain model)')
+      : t('把自然语言需求自动改写成结构化技术提示词；当前会使用主模型做润色',
+          'Rewrites natural-language requests into structured technical prompts using the main model'),
     escapeValue: '__cancel__',
     initialIndex: 0,
     choices: [
@@ -49,7 +54,7 @@ export async function runBundleOnboarding(options: {
     await settingsStore.setBundleConfig({
       enabled: false,
       mode: 'auto',
-      modelChoice: 'brain',
+      modelChoice: hasSecondaryModel ? 'brain' : 'main',
     })
     printPanel(
       t('Bundle 未启用', 'Bundle disabled'),
@@ -77,24 +82,32 @@ export async function runBundleOnboarding(options: {
     ],
   })
 
-  const modelChoice = await chooseInteractiveOption<BundleModelChoice>({
-    title: t('润色模型使用哪一个？', 'Which model should polish?'),
-    hint:  t('主模型 = 执行 API；副模型 = 思维 API',
-             'Main = Execution API; Brain = Raven API'),
-    initialIndex: 1,
-    choices: [
-      {
-        label:       t('副模型（Brain / Raven）— 推荐', 'Brain (Raven) — recommended'),
-        value:       'brain',
-        description: t('通常成本低、速度快，适合做润色', 'Usually cheaper and faster, ideal for rewrites'),
-      },
-      {
-        label:       t('主模型（Main）', 'Main model'),
-        value:       'main',
-        description: t('跟实际执行用同一个模型', 'Same model that executes the prompt'),
-      },
-    ],
-  })
+  let modelChoice: BundleModelChoice = 'main'
+  if (hasSecondaryModel) {
+    modelChoice = await chooseInteractiveOption<BundleModelChoice>({
+      title: t('润色模型使用哪一个？', 'Which model should polish?'),
+      hint:  t('主模型 = 执行 API；副模型 = 思维 API',
+               'Main = Execution API; Brain = Raven API'),
+      initialIndex: 1,
+      choices: [
+        {
+          label:       t('副模型（Brain / Raven）— 推荐', 'Brain (Raven) — recommended'),
+          value:       'brain',
+          description: t('通常成本低、速度快，适合做润色', 'Usually cheaper and faster, ideal for rewrites'),
+        },
+        {
+          label:       t('主模型（Main）', 'Main model'),
+          value:       'main',
+          description: t('跟实际执行用同一个模型', 'Same model that executes the prompt'),
+        },
+      ],
+    })
+  } else {
+    printPanel(
+      t('润色模型', 'Polisher model'),
+      [t('当前未配置副模型，文字润色将使用主模型。', 'No secondary model is configured, so prompt polishing will use the main model.')],
+    )
+  }
 
   await settingsStore.setBundleConfig({
     enabled: true,

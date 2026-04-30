@@ -21,6 +21,37 @@ export interface CronJob {
   task: (cwd: string) => Promise<string>
 }
 
+export interface CronSchedulerSettings {
+  enabled: boolean
+  lastRun: Record<string, string>
+}
+
+function normalizeCronSettings(raw: unknown): CronSchedulerSettings {
+  if (raw && typeof raw === 'object') {
+    const record = raw as Record<string, unknown>
+    if ('lastRun' in record) {
+      return {
+        enabled: record.enabled !== false,
+        lastRun: record.lastRun && typeof record.lastRun === 'object'
+          ? record.lastRun as Record<string, string>
+          : {},
+      }
+    }
+
+    // Backward compatibility with the old file shape:
+    // { "repo-audit": "2026-..." }
+    const lastRun: Record<string, string> = {}
+    for (const [key, value] of Object.entries(record)) {
+      if (typeof value === 'string') {
+        lastRun[key] = value
+      }
+    }
+    return { enabled: true, lastRun }
+  }
+
+  return { enabled: true, lastRun: {} }
+}
+
 /**
  * Artemis Cron Scheduler — Surpassing Hermes with engineering-focused automation.
  */
@@ -42,6 +73,32 @@ export class CronScheduler {
         task: async (cwd) => this.runRepoAudit(cwd)
       }
     ]
+  }
+
+  async getSettings(): Promise<CronSchedulerSettings> {
+    await ensureDir(path.dirname(this.configPath))
+    if (!(await pathExists(this.configPath))) {
+      return { enabled: true, lastRun: {} }
+    }
+    try {
+      return normalizeCronSettings(JSON.parse(await readFile(this.configPath, 'utf8')))
+    } catch {
+      return { enabled: true, lastRun: {} }
+    }
+  }
+
+  async setEnabled(enabled: boolean): Promise<void> {
+    const settings = await this.getSettings()
+    await ensureDir(path.dirname(this.configPath))
+    await writeFile(
+      this.configPath,
+      JSON.stringify({ ...settings, enabled }, null, 2),
+      'utf8',
+    )
+  }
+
+  getJobs(): CronJob[] {
+    return [...this.jobs]
   }
 
   private async runRepoAudit(cwd: string): Promise<string> {
@@ -115,11 +172,9 @@ ${diffText.slice(0, 16000)}
   }
 
   async checkAndRun(): Promise<boolean> {
-    await ensureDir(path.dirname(this.configPath))
-    let state: Record<string, string> = {}
-    if (await pathExists(this.configPath)) {
-      try { state = JSON.parse(await readFile(this.configPath, 'utf8')) } catch { state = {} }
-    }
+    const settings = await this.getSettings()
+    if (!settings.enabled) return false
+    const state = { ...settings.lastRun }
 
     const now = new Date()
     let changed = false
@@ -157,7 +212,7 @@ ${diffText.slice(0, 16000)}
     }
 
     if (changed) {
-      await writeFile(this.configPath, JSON.stringify(state, null, 2), 'utf8')
+      await writeFile(this.configPath, JSON.stringify({ ...settings, lastRun: state }, null, 2), 'utf8')
     }
     return changed
   }

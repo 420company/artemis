@@ -125,7 +125,10 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 
   // ── MCP dependency install dialog (first run, disk-state based) ────────────
-  if (shouldShowMcpInstallDialog(options.cwd)) {
+  const isExplicitMcpInstall =
+    options.command === 'mcp' &&
+    ['install', 'setup-deps', 'deps'].includes(options.prompt?.trim().split(/\s+/)[0]?.toLowerCase() ?? '')
+  if (!isExplicitMcpInstall && shouldShowMcpInstallDialog(options.cwd)) {
     const mcpResult = await runMcpInstallDialog(locale, { cwd: options.cwd })
     if (mcpResult === 'installed') {
       // Enable all bundled MCP servers so the main interface shows them as active.
@@ -1124,8 +1127,8 @@ async function runConfig(options: { cwd: string; locale: UiLocale }): Promise<vo
   ))
   console.log()
   console.log(t(
-    '  运行 artemis setup 打开完整向导；artemis setup model/visual/gateway/agent/memory/terminal/tts/tools/session 可单独配置模块。',
-    '  Run artemis setup for the full wizard; artemis setup model/visual/gateway/agent/memory/terminal/tts/tools/session configures a section.'
+    '  运行 artemis setup 打开完整向导；artemis setup model/bundle/skills/visual/gateway/memory/cron/terminal/tts/session 可单独配置模块。',
+    '  Run artemis setup for the full wizard; artemis setup model/bundle/skills/visual/gateway/memory/cron/terminal/tts/session configures a section.'
   ))
   console.log()
 }
@@ -1253,6 +1256,18 @@ async function runMcpCommand(options: { cwd: string; locale: UiLocale; args: str
   const sub = args[0]?.toLowerCase()
   const mcpStore = new McpServerStore(cwd)
 
+  if (sub === 'install' || sub === 'setup-deps' || sub === 'deps') {
+    const result = await runMcpInstallDialog(locale, { cwd })
+    if (result === 'installed') {
+      const data = await mcpStore.load()
+      for (const server of data.servers) {
+        server.enabled = true
+      }
+      await mcpStore.save(data)
+    }
+    return
+  }
+
   if (!sub || sub === 'list' || sub === 'ls') {
     const data = await mcpStore.load()
     if (data.servers.length === 0) {
@@ -1360,6 +1375,7 @@ async function runMcpCommand(options: { cwd: string; locale: UiLocale; args: str
   console.log()
   console.log(buildPanel(t('MCP 命令', 'MCP commands'), [
     '  artemis mcp list              ' + t('列出所有服务器', 'List all servers'),
+    '  artemis mcp install           ' + t('安装/修复 MCP npm 依赖和本地 Whisper 模型', 'Install/repair MCP npm deps and local Whisper model'),
     '  artemis mcp add [--stdio] <cmd>  ' + t('添加 stdio 服务器', 'Add stdio server'),
     '  artemis mcp add --http <url>  ' + t('添加 HTTP 服务器', 'Add HTTP server'),
     '  artemis mcp remove <id>       ' + t('移除服务器', 'Remove server'),

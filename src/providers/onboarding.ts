@@ -109,11 +109,11 @@ function maskApiKey(apiKey: string): string {
 function detectBytePlusFamily(model: string): BytePlusFamily {
   const lower = model.trim().toLowerCase();
   if (!lower) return 'unknown';
-  if (/seed-2-0-(lite|pro|mini)-|seed-2-0-code-preview-/i.test(lower)) return 'responses';
+  if (/seed-2-0-code-preview-/i.test(lower)) return 'responses';
   if (/seedream-/i.test(lower)) return 'image';
   if (/seedance-/i.test(lower)) return 'video';
   if (/skylark-embedding-/i.test(lower)) return 'embedding';
-  if (/ark-code-latest|dola-seed-2\.0-(pro|lite|code)$|bytedance-seed-code|kimi-k2\.5$|kimi-k2-thinking$|glm-5\.1$|glm-4\.7$|gpt-oss-120b(?:-[0-9]+)?$/i.test(lower)) return 'coding';
+  if (/ark-code-latest|seed-2-0-(pro|lite|mini)-|bytedance-seed-code|kimi-k2\.5$|kimi-k2-thinking$|glm-5\.1$|glm-4\.7$|gpt-oss-120b(?:-[0-9]+)?$/i.test(lower)) return 'coding';
   if (/deepseek-|kimi-k2-thinking-|gpt-oss-120b-|skylark-pro-|seed-1-8-|seed-1-6-|seed-1-6-flash-|glm-4-7-/i.test(lower)) return 'chat';
   return 'unknown';
 }
@@ -384,9 +384,9 @@ async function resolvePreset(
       defaultAlias: pickLocale(locale, { zh: 'BytePlus Coding 模型', en: 'BytePlus Coding model' }),
       suggestedModels: [
         'ark-code-latest',
-        'dola-seed-2.0-pro',
-        'dola-seed-2.0-lite',
-        'dola-seed-2.0-code',
+        'seed-2-0-pro-260328',
+        'seed-2-0-lite-260228',
+        'seed-2-0-mini-260215',
         'bytedance-seed-code',
         'glm-5.1',
         'glm-4.7',
@@ -395,8 +395,8 @@ async function resolvePreset(
       ],
       notes: [
         pickLocale(locale, {
-          zh: '默认使用 Coding 接口（/api/coding/v3）；官方 Quick Start 明确列出 dola-seed-2.0-pro / dola-seed-2.0-lite / bytedance-seed-code / glm-4.7 / kimi-k2.5 / gpt-oss-120b，这里额外保留你提供的海外端点可见模型 dola-seed-2.0-code / glm-5.1 作为补充。',
-          en: 'Uses the Coding endpoint (/api/coding/v3) by default. The official Quick Start explicitly lists dola-seed-2.0-pro / dola-seed-2.0-lite / bytedance-seed-code / glm-4.7 / kimi-k2.5 / gpt-oss-120b; this picker also keeps dola-seed-2.0-code / glm-5.1 because they appeared in the international endpoint inventory you provided.',
+          zh: '默认使用 Coding 接口（/api/coding/v3）；Seed 2.0 模型使用真实模型名 seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215，并直接提供 bytedance-seed-code / glm-5.1 / glm-4.7 / kimi-k2.5 / gpt-oss-120b。',
+          en: 'Uses the Coding endpoint (/api/coding/v3) by default. Seed 2.0 entries use the real model names seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215, with bytedance-seed-code / glm-5.1 / glm-4.7 / kimi-k2.5 / gpt-oss-120b available directly.',
         }),
       ],
       defaultProtocol: 'openai',
@@ -435,9 +435,6 @@ async function resolvePreset(
     providerLabel: 'BytePlus Responses',
     defaultAlias: pickLocale(locale, { zh: 'BytePlus Responses 模型', en: 'BytePlus Responses model' }),
     suggestedModels: [
-      'seed-2-0-pro-260328',
-      'seed-2-0-lite-260228',
-      'seed-2-0-mini-260215',
       'seed-2-0-code-preview-260328',
     ],
     notes: [

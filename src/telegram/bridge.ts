@@ -314,6 +314,7 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
           targetId: m.chatId,
           targetLabel: m.chatLabel,
           text: m.text,
+          sourceMessageId: String(m.updateId),
           images: m.images,
         }))
       )
