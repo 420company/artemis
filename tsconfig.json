@@ -11,18 +11,41 @@
     "rootDir": "src",
     "baseUrl": "./",
     "paths": {
-      "providers/*": ["src/providers/*"],
-      "tools/*": ["src/tools/*"],
-      "core/*": ["src/core/*"],
-      "security/*": ["src/security/*"],
-      "utils/*": ["src/utils/*"]
+      "providers/*": [
+        "src/providers/*"
+      ],
+      "tools/*": [
+        "src/tools/*"
+      ],
+      "core/*": [
+        "src/core/*"
+      ],
+      "security/*": [
+        "src/security/*"
+      ],
+      "utils/*": [
+        "src/utils/*"
+      ]
     },
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["node"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node"
+    ],
     "resolveJsonModule": true,
     "downlevelIteration": true,
     "jsx": "preserve"
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "scripts/**/*", "test-*.ts"]
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "scripts/**/*",
+    "test-*.ts"
+  ]
 }

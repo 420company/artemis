@@ -1,6 +1,7 @@
 # Artemis — AI Engineering CLI
 
 > Built by [420.COMPANY](https://www.420.company) · [npm](https://www.npmjs.com/package/artemis-code) · [GitHub](https://github.com/420company/artemis)
+> Created by 420.COMPANY with collaborative engineering support from OpenAI Codex and Anthropic Claude.
 
 [![npm version](https://img.shields.io/npm/v/artemis-code)](https://www.npmjs.com/package/artemis-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
