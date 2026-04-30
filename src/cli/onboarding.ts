@@ -23,6 +23,7 @@ import { WeChatStore } from '../wechat/store.js'
 import { runWeixinQRLogin } from '../wechat/setup.js'
 import { DiscordBotClient } from '../discord/client.js'
 import { promptForVerifiedProviderProfile } from '../providers/onboarding.js'
+import { detectModelContextLength } from '../providers/modelContext.js'
 import type { ProviderProfile, VisualModelConfig } from '../providers/types.js'
 import type { BragiPlatformId } from '../bragi/types.js'
 import {
@@ -175,6 +176,51 @@ function sectionHeader(step: string, title: string, subtitle: string): void {
   console.log(c(`  ${step}  ${title}`, A.bold + A.cyan))
   console.log(c(`       ${subtitle}`, A.dim))
   console.log()
+}
+
+async function enrichProviderContextLengths(
+  profiles: ProviderProfile[],
+  t: (zh: string, en: string) => string,
+): Promise<ProviderProfile[]> {
+  const missing = profiles.filter((profile) => !profile.contextLength)
+  if (missing.length === 0) return profiles
+
+  console.log()
+  const shouldDetect = await askYesNo(
+    t,
+    t(
+      'API 已配置完成。为了让 HUD 上下文进度更准确，是否现在自动检测模型上下文长度？',
+      'API setup is complete. Detect model context lengths now so the HUD context meter is accurate?',
+    ),
+    true,
+  )
+  console.log()
+  if (!shouldDetect) return profiles
+
+  const nextProfiles = [...profiles]
+  for (const profile of missing) {
+    console.log(c(`  ${t('正在检测', 'Detecting')}: ${profile.label ?? profile.id} (${profile.model})`, A.dim))
+    const detected = await detectModelContextLength(profile)
+    if (!detected.contextLength) {
+      console.log(c(`  ${t('未能自动识别上下文长度，将继续使用运行时估算', 'Could not detect context length; runtime fallback will be used')}: ${profile.model}`, A.yellow))
+      continue
+    }
+
+    const index = nextProfiles.findIndex((entry) => entry.id === profile.id)
+    if (index >= 0) {
+      nextProfiles[index] = {
+        ...nextProfiles[index]!,
+        contextLength: detected.contextLength,
+      }
+    }
+    const sourceLabel = detected.source === 'models-api'
+      ? '/models'
+      : t('内置模型规则', 'known-model rules')
+    console.log(c(`  ✓ ${profile.model}: ${detected.contextLength.toLocaleString()} tokens (${sourceLabel})`, A.green))
+  }
+  console.log()
+
+  return nextProfiles
 }
 
 // ─── provider wizard ──────────────────────────────────────────────────────────
@@ -956,7 +1002,21 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
   // ─────────────────────────────────────────────────────────────────
   //  Save all config
   // ─────────────────────────────────────────────────────────────────
+  let savedPrimary = primary
+  let savedSecondary = secondary
+
   try {
+    const enrichedProfiles = await enrichProviderContextLengths(
+      [primary, secondary].filter(Boolean) as ProviderProfile[],
+      t,
+    )
+    const enrichedPrimary = enrichedProfiles.find((profile) => profile.id === primary.id) ?? primary
+    const enrichedSecondary = secondary
+      ? enrichedProfiles.find((profile) => profile.id === secondary?.id) ?? secondary
+      : null
+    savedPrimary = enrichedPrimary
+    savedSecondary = enrichedSecondary
+
     // Provider profiles
     const targets: ProviderStore[] = []
     if (cwd) targets.push(new ProviderStore(cwd))
@@ -965,12 +1025,12 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
     for (const store of targets) {
       const data = await store.load()
       // Remove old profiles with same ids before inserting
-      const idsToReplace = [primary.id, secondary?.id].filter(Boolean) as string[]
+      const idsToReplace = [enrichedPrimary.id, enrichedSecondary?.id].filter(Boolean) as string[]
       data.profiles = data.profiles.filter(p => !idsToReplace.includes(p.id))
-      data.profiles.push(primary)
-      if (secondary) data.profiles.push(secondary)
-      data.defaultMainProfileId = primary.id
-      if (secondary) data.specialistProfileId = secondary.id
+      data.profiles.push(enrichedPrimary)
+      if (enrichedSecondary) data.profiles.push(enrichedSecondary)
+      data.defaultMainProfileId = enrichedPrimary.id
+      if (enrichedSecondary) data.specialistProfileId = enrichedSecondary.id
       await store.save(data)
     }
 
@@ -1036,7 +1096,7 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
   // ─────────────────────────────────────────────────────────────────
   //  Phase 3.5: Bundle polisher (only when dual-model is configured)
   // ─────────────────────────────────────────────────────────────────
-  if (secondary) {
+  if (savedSecondary) {
     sectionHeader(
       t('▸ Bundle 润色增强（可选）', '▸ Bundle polisher (optional)'),
       t('提示词自动改写', 'Auto-rewrite prompts'),
@@ -1088,7 +1148,7 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
   // ─────────────────────────────────────────────────────────────────
   //  Phase 4: Summary HUD
   // ─────────────────────────────────────────────────────────────────
-  renderOnboardingSummary(t, primary, secondary, visualProfile, configuredBridges)
+  renderOnboardingSummary(t, savedPrimary, savedSecondary, visualProfile, configuredBridges)
 
   // Brief pause so the user can read the summary, then show a clear
   // launch indicator before the screen transitions to the REPL splash.
@@ -1098,5 +1158,5 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
   process.stdout.write('\r' + c('  ✓ ' + t('准备就绪，加载对话界面...', 'Ready — loading chat interface...'), A.green))
   await new Promise(r => setTimeout(r, 300))
   process.stdout.write('\n')
-  return { configured: true, apiKey: primary.apiKey, model: primary.model }
+  return { configured: true, apiKey: savedPrimary.apiKey, model: savedPrimary.model }
 }

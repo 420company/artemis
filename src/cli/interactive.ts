@@ -979,6 +979,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
   const brainConfig = activeStore.getProfile(activeData, activeData.specialistProfileId)
   let modelLabel = opts.model ?? config?.model ?? (process.env.ANTHROPIC_API_KEY ? 'claude-sonnet-4-20250514' : '?')
+  let modelContextLimit: number | undefined = opts.model ? undefined : config?.contextLength
   let brainLabel: string | undefined = brainConfig?.model
 
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
@@ -1349,9 +1350,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     const nextBrain = nextStore.getProfile(nextData, nextData.specialistProfileId)
     modelLabel = opts.model ?? nextConfig?.model ?? (process.env.ANTHROPIC_API_KEY ? 'claude-sonnet-4-20250514' : '?')
+    modelContextLimit = opts.model ? undefined : nextConfig?.contextLength
     brainLabel = nextBrain?.model
     hud.defaultModel = modelLabel
     hud.lastModel = modelLabel
+    hud.contextLimit = modelContextLimit
     hud.brainModel = brainLabel
   }
 
@@ -1471,7 +1474,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   }
 
   // ── HUD state ───────────────────────────────────────────────────────────────
-  const hud = createHudState(modelLabel)
+  const hud = createHudState(modelLabel, modelContextLimit)
   hud.permissionMode = permissionMode
   hud.brainModel = brainLabel
 
@@ -1950,8 +1953,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           if (reloadConfig?.model) {
             switchModel(reloadConfig.model)
             modelLabel = reloadConfig.model
+            modelContextLimit = reloadConfig.contextLength
             hud.defaultModel = modelLabel
             hud.lastModel    = modelLabel
+            hud.contextLimit = modelContextLimit
           }
           brainLabel = reloadBrain?.model
           hud.brainModel = brainLabel
@@ -2292,6 +2297,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         try {
           const reloadStore2 = new ProviderStore(cwd)
           const reloadData2  = await reloadStore2.load()
+          modelContextLimit = reloadStore2.getDefaultMainProfile(reloadData2)?.contextLength
+          hud.contextLimit = modelContextLimit
           brainLabel = reloadStore2.getProfile(reloadData2, reloadData2.specialistProfileId)?.model
           const mcpStore  = new McpServerStore(cwd)
           const mcpData   = await mcpStore.load()
@@ -2345,8 +2352,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         await askAndSaveSession('/model')
         switchModel(arg)
         modelLabel = arg
+        modelContextLimit = undefined
         hud.defaultModel = arg
         hud.lastModel = arg
+        hud.contextLimit = modelContextLimit
         appendSystemPanel(t('模型已切换', 'Model switched'), [`→ ${arg}`])
       }
       continue
@@ -2417,9 +2426,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       const brain = activeStore.getProfile(data, data.specialistProfileId)
       
       modelLabel = main?.model ?? '?'
+       modelContextLimit = main?.contextLength
        brainLabel = brain?.model
        hud.defaultModel = modelLabel
        hud.lastModel = modelLabel
+       hud.contextLimit = modelContextLimit
        hud.brainModel = brainLabel
 
       appendSystemPanel(t('模型已互换', 'Models swapped'), [
@@ -2829,7 +2840,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           bfData.defaultMainProfileId = curBrain.id
           bfData.specialistProfileId = curMain.id
           await saveBoth(bfData)
+          modelLabel = curBrain.model
+          modelContextLimit = curBrain.contextLength
           brainLabel = curMain.model
+          hud.defaultModel = modelLabel
+          hud.lastModel = modelLabel
+          hud.contextLimit = modelContextLimit
           hud.brainModel = brainLabel
           rebuildScrollBlocksFromMessages()
           appendSystemPanel(t('Bifrost — 主/副模型互换完成', 'Bifrost — Main/Secondary model swap complete'), [
@@ -2903,6 +2919,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         }
         const newMain = bfStore.getDefaultMainProfile(bfData)
         const newBrain = bfStore.getProfile(bfData, bfData.specialistProfileId)
+        if (newMain?.model) {
+          modelLabel = newMain.model
+          modelContextLimit = newMain.contextLength
+          hud.defaultModel = modelLabel
+          hud.lastModel = modelLabel
+          hud.contextLimit = modelContextLimit
+        }
         brainLabel = newBrain?.model
         hud.brainModel = brainLabel
         rebuildScrollBlocksFromMessages()
@@ -3697,7 +3720,7 @@ async function handleTurn(
       if (pt > 0) {
         const { estimateContextLimit: ecl, fmtTok: ft } = await import('./hud.js')
         const model = hud.lastModel // 从 hud 中获取模型信息，因为 tokenStats 中没有 model 属性
-        const limit = ecl(model)
+        const limit = ecl(model, hud.contextLimit)
         const pct = pt / limit
         if (pct >= 0.88) {
           viewport?.appendScrollBlock({

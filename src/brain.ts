@@ -5,7 +5,7 @@ import { ProviderStore } from './providers/store.js';
 import { annotateProviderResponse, createTrackedProviderFromConfig, recordProviderProfileTelemetry, } from './providers/telemetry.js';
 import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
-import { estimateContextLimit, fmtTok } from './cli/hud.js';
+import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { compressMessages } from './core/contextCompressor.js';
 import { getToolDefinition } from './tools/registry.js';
 import { resolveExtensionRuntime } from './extensions/runtime.js';
@@ -453,10 +453,14 @@ export function providerInfo() {
 // ── Context budget awareness ──────────────────────────────────────────────────
 const BUDGET_WARN_PCT = 0.70; // inject warning at 70%
 const BUDGET_ALERT_PCT = 0.88; // inject stronger warning at 88%
-function buildBudgetNote(promptTokens: any, model: any) {
+function getConfiguredContextLimit(model: string | undefined, contextLength?: number): number {
+    return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength));
+}
+
+function buildBudgetNote(promptTokens: any, model: any, contextLength?: number) {
     if (promptTokens <= 0)
         return '';
-    const limit = estimateContextLimit(model);
+    const limit = getConfiguredContextLimit(model, contextLength);
     const pct = promptTokens / limit;
     if (pct < BUDGET_WARN_PCT)
         return '';
@@ -477,6 +481,7 @@ async function buildRuntimeSystemMessages(
     systemPrompt: string,
     conversationMessages: SessionMessage[],
     model?: string,
+    contextLength?: number,
 ): Promise<SessionMessage[]> {
     const runtimeMessages = [makeSessionMessage('system', systemPrompt)];
     if (!model) {
@@ -496,7 +501,7 @@ async function buildRuntimeSystemMessages(
     }
 
     const estimatedTokens = Math.round(estimateConversationTokens(conversationMessages));
-    const budgetNote = buildBudgetNote(estimatedTokens, model).trim();
+    const budgetNote = buildBudgetNote(estimatedTokens, model, contextLength).trim();
     if (budgetNote) {
         runtimeMessages.push(makeSessionMessage('system', budgetNote));
     }
@@ -506,14 +511,18 @@ async function buildRuntimeSystemMessages(
 async function buildProviderConversationMessages(
     conversationMessages: SessionMessage[],
     model?: string,
+    contextLength?: number,
+    reservedTokens = 0,
     onInfo?: (message: string) => void,
 ): Promise<SessionMessage[]> {
     if (!model) {
         return conversationMessages;
     }
 
+    const fullLimit = getConfiguredContextLimit(model, contextLength);
+    const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
     const compression = await compressMessages(conversationMessages, summarizeOnce, {
-        tokenLimit: estimateContextLimit(model),
+        tokenLimit: availableLimit,
         previousSummary: _lastSummaryText,
         threshold: _compressionThresholdOverride,
         onInfo,
@@ -1110,6 +1119,7 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
     const usage = result.usage ?? {};
     _lastPromptTokens = usage.promptTokens ?? _lastPromptTokens;
     return {
+        contextLimit: normalizeContextLimit(providerConfig?.contextLength) ?? estimateContextLimit(result.model ?? providerConfig?.model ?? ''),
         promptTokens: usage.promptTokens ?? 0,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
@@ -1193,10 +1203,14 @@ export async function think(
         tSession.getSystemPrompt(),
         rawMessages,
         providerConfigVal?.model,
+        providerConfigVal?.contextLength,
     );
+    const reservedSystemTokens = Math.round(estimateConversationTokens(systemMessages));
     let providerConversationMessages = await buildProviderConversationMessages(
         rawMessages,
         providerConfigVal?.model,
+        providerConfigVal?.contextLength,
+        reservedSystemTokens,
         // Surface compression activity to the user via the tool-log channel
         // (was previously silent — long sessions had no visibility into
         // when/why the compressor fired or whether it succeeded).

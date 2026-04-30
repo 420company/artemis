@@ -54,10 +54,22 @@ function truncatePlainText(text: string, maxWidth: number): string {
 
 // ─── context limit estimation ─────────────────────────────────────────────────
 
-export function estimateContextLimit(model: string): number {
+export function normalizeContextLimit(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  const rounded = Math.round(value)
+  return rounded > 0 ? rounded : undefined
+}
+
+export function estimateContextLimit(model: string, configuredLimit?: number): number {
+  const explicit = normalizeContextLimit(configuredLimit)
+  if (explicit) return explicit
+
   const m = model.toLowerCase()
   if (m.includes('claude-opus-4') || m.includes('claude-sonnet-4') || m.includes('claude-haiku-4')) return 200_000
   if (m.includes('claude')) return 200_000
+  if (m.includes('gpt-5.5')) return 1_000_000
+  if (m.includes('gpt-5')) return 400_000
+  if (m.includes('gpt-4.1')) return 1_000_000
   if (m.includes('gemini-1.5') || m.includes('gemini-2')) return 1_000_000
   if (m.includes('gemini')) return 1_000_000
   if (m.includes('gpt-4o') || m.includes('gpt-4-turbo')) return 128_000
@@ -82,6 +94,7 @@ export function fmtTok(n: number): string {
 export interface HudState {
   defaultModel: string
   lastModel: string
+  contextLimit?: number
   brainModel?: string   // specialist/brain model when dual-model is active
   lastProfileLabel?: string
   permissionMode: string
@@ -105,6 +118,7 @@ export interface HudState {
 
 export interface HudUsage {
   model?: string
+  contextLimit?: number
   promptTokens?: number
   completionTokens?: number
   totalTokens?: number
@@ -113,10 +127,11 @@ export interface HudUsage {
   profileLabel?: string
 }
 
-export function createHudState(defaultModel: string): HudState {
+export function createHudState(defaultModel: string, contextLimit?: number): HudState {
   return {
     defaultModel,
     lastModel: defaultModel,
+    contextLimit: normalizeContextLimit(contextLimit),
     permissionMode: 'accept-all',
     sessionMessageCount: 0,
     changedFilesCount: 0,
@@ -139,6 +154,7 @@ export function updateHudState(state: HudState, usage: HudUsage): void {
   const model = usage.model?.trim() || state.defaultModel
   const total = usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0))
   state.lastModel = model
+  state.contextLimit = normalizeContextLimit(usage.contextLimit) ?? state.contextLimit
   state.lastProfileLabel = usage.profileLabel?.trim() || state.lastProfileLabel
   state.lastPromptTokens = usage.promptTokens ?? 0
   state.lastCompletionTokens = usage.completionTokens ?? 0
@@ -178,7 +194,7 @@ export function renderHud(state: HudState): string {
   const model  = state.lastModel || state.defaultModel
   const brain  = state.brainModel && state.brainModel !== model ? state.brainModel : undefined
   const ctx    = state.lastPromptTokens  // current context window usage
-  const limit  = estimateContextLimit(model)
+  const limit  = estimateContextLimit(model, state.contextLimit)
   const pct    = ctx > 0 ? Math.min(100, Math.round(ctx / limit * 100)) : 0
   const firstLatency = formatLatencyCompact(state.lastFirstResponseMs)
   const totalLatency = formatLatencyCompact(state.lastDurationMs)

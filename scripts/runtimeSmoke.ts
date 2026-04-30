@@ -633,6 +633,37 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     JSON.stringify(nearest),
   )
 
+  const bodyPath = await resolveWorkspaceIntent(
+    `请修改 ${desktopDir}/index.html 的标题`,
+    tmpDir,
+    tmpDir,
+  )
+  assert(
+    'workspace intent: absolute paths in normal request bodies do not switch workspace before tool access checks',
+    bodyPath === null,
+    JSON.stringify(bodyPath),
+  )
+
+  const leadingPath = await resolveWorkspaceIntent(
+    `${desktopDir} 继续修改 index.html`,
+    tmpDir,
+    tmpDir,
+  )
+  assert(
+    'workspace intent: leading absolute paths still switch workspace',
+    leadingPath?.workspacePath === desktopDir && leadingPath.source === 'explicit-path',
+    JSON.stringify(leadingPath),
+  )
+
+  for (const text of ['BKK / 420 / OPEN CULTURE', '这是 slash / 420 正文，不是命令']) {
+    const noisySlash = await resolveWorkspaceIntent(text, tmpDir, tmpDir)
+    assert(
+      'workspace intent: noisy slash text does not switch workspace',
+      noisySlash === null,
+      JSON.stringify({ text, noisySlash }),
+    )
+  }
+
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 

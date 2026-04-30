@@ -43,6 +43,7 @@ function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): s
     .trim()
 
   if (!candidate) return null
+  if (/^\/\s/.test(candidate)) return null
 
   return resolveWorkspaceCandidatePath(candidate, currentCwd, homeDir)
 }
@@ -53,7 +54,7 @@ function extractQuotedPath(input: string): string | null {
 }
 
 function extractPrefixedPath(input: string): string | null {
-  const zhStops = '并|然后|之后|再|接着|创建|建立|新建|制作|做|写|修改|更新|运行|执行|设为|作为'
+  const zhStops = '继续|并|然后|之后|再|接着|创建|建立|新建|制作|做|写|修改|更新|运行|执行|设为|作为'
   const enStops = 'and|then|create|build|make|write|edit|run'
   for (const prefix of PATH_INTENT_PREFIXES) {
     const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -63,14 +64,23 @@ function extractPrefixedPath(input: string): string | null {
     )
     const match = input.match(pattern)
     if (match?.[1]?.trim()) {
-      return match[1].trim()
+      const candidate = match[1].trim()
+      if (/^\/\s/.test(candidate)) return null
+      return candidate
     }
   }
   return null
 }
 
-function extractAnyAbsolutePath(input: string): string | null {
-  const match = input.match(/(?:^|[\s(["'“‘])((?:~|\/)[^\r\n，。；;,]+?)(?=$|[\s)"'”’`，。；;,])/)
+function extractLeadingPath(input: string): string | null {
+  const zhStops = '继续|并|然后|之后|再|接着|创建|建立|新建|制作|做|写|修改|更新|运行|执行|设为|作为'
+  const enStops = 'and|then|continue|create|build|make|write|edit|run'
+  const match = input.trimStart().match(
+    new RegExp(
+      `^((?:~|/)[\\s\\S]+?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
+      'i',
+    ),
+  )
   return match?.[1]?.trim() ?? null
 }
 
@@ -118,7 +128,7 @@ export async function resolveWorkspaceIntent(
   const rawPath =
     extractQuotedPath(input) ??
     extractPrefixedPath(input) ??
-    extractAnyAbsolutePath(input)
+    extractLeadingPath(input)
   if (!rawPath) return null
 
   const requestedPath = normalizeCandidate(rawPath, currentCwd, homeDir)
