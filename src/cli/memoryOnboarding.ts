@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { getMemoryProfile, saveMemoryProfile, MemoryEnhancementFactory } from '../core/memoryEnhancement.js';
 import type { MemoryEnhancementConfig } from '../providers/types.js';
-import { chooseInteractiveOption } from './prompt.js';
+import { chooseInteractiveOption, createInteractivePromptIO } from './prompt.js';
 import { formatProviderProtocolLabel } from '../providers/factory.js';
 
 export async function promptMemoryEnhancementConfig(t: (key: string) => string, zh: boolean): Promise<MemoryEnhancementConfig | undefined> {
@@ -99,10 +99,31 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
           config.config!.model = customModel;
         }
       }
-      
-      const customBaseUrl = await askForInput(t('自定义 API 地址'), false);
-      if (customBaseUrl) {
-        config.config!.baseUrl = customBaseUrl;
+
+      // API URL: present the default and let user keep it or override.
+      // Avoids forcing every user to type the full BytePlus endpoint when
+      // they're using the default skylark-embedding-vision model anyway.
+      const baseUrlChoice = await chooseInteractiveOption<'default' | 'custom'>({
+        title: t('选择 API 地址'),
+        hint: t('↑↓ 移动  Enter 确认'),
+        choices: [
+          {
+            label: t('使用默认地址（推荐）'),
+            value: 'default',
+            description: config.config!.baseUrl
+          },
+          {
+            label: t('自定义 API 地址'),
+            value: 'custom',
+            description: t('如果你部署了 BytePlus 私有网关或使用代理，选这个')
+          }
+        ]
+      });
+      if (baseUrlChoice === 'custom') {
+        const customBaseUrl = await askForInput(t('自定义 API 地址'), false);
+        if (customBaseUrl) {
+          config.config!.baseUrl = customBaseUrl;
+        }
       }
     }
   } else {
@@ -112,7 +133,7 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
   }
 
   console.log('\n' + t('记忆增强配置完成') + '\n');
-  console.log(t('已启用记忆增强功能，使用方案：') + t(providerChoice === 'byteplus' ? '智能云' : '本地'));
+  console.log(t('已启用记忆增强功能，使用方案：') + t(config.provider === 'byteplus' ? '智能云' : '本地'));
   
   if (config.config) {
     if (config.provider === 'byteplus') {
@@ -133,6 +154,11 @@ function maskApiKey(apiKey: string): string {
 }
 
 async function askForInput(prompt: string, masked = false): Promise<string> {
+  const io = createInteractivePromptIO();
+  if (io.available) {
+    return (await io.ask(prompt + ': ', masked)).trim();
+  }
+
   const readline = await import('readline');
   const rl = readline.createInterface({
     input: process.stdin,

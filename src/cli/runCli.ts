@@ -125,8 +125,8 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 
   // ── MCP dependency install dialog (first run, disk-state based) ────────────
-  if (shouldShowMcpInstallDialog()) {
-    const mcpResult = await runMcpInstallDialog(locale)
+  if (shouldShowMcpInstallDialog(options.cwd)) {
+    const mcpResult = await runMcpInstallDialog(locale, { cwd: options.cwd })
     if (mcpResult === 'installed') {
       // Enable all bundled MCP servers so the main interface shows them as active.
       try {
@@ -158,7 +158,22 @@ export async function runCli(argv: string[]): Promise<void> {
   // ── config ──────────────────────────────────────────────────────────────────
   if (options.command === 'config') {
     const configSubcommand = options.prompt?.trim().toLowerCase()
-    const setupSections = new Set(['model', 'provider', 'providers', 'visual', 'vision', 'gateway', 'messaging', 'bragi', 'agent', 'memory'])
+    const setupSections = new Set([
+      'model',
+      'provider',
+      'providers',
+      'visual',
+      'vision',
+      'gateway',
+      'messaging',
+      'bragi',
+      'agent',
+      'memory',
+      'terminal',
+      'tts',
+      'tools',
+      'session',
+    ])
     if (options.setup || (configSubcommand && setupSections.has(configSubcommand))) {
       await runSetupWizard({ locale, cwd: options.cwd, section: options.setup ? undefined : configSubcommand })
     } else if (configSubcommand === 'visual' || configSubcommand === 'vision') {

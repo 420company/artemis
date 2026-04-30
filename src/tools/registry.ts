@@ -21,6 +21,8 @@ import { executeApplyPatch } from './applyPatch.js';
 import { executeDeepResearch } from './deepResearch.js';
 import { executeGenerateImage } from './generateImage.js';
 import { executeGenerateVideo } from './generateVideo.js';
+import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
+import { executeTranscribeAudio } from './transcribeAudio.js';
 import { executeInsertInFile } from './insertInFile.js';
 import { executeListFiles } from './listFiles.js';
 import { executeLookupDocs } from './lookupDocs.js';
@@ -451,6 +453,33 @@ function validateGenerateVideoAction(action: any): string[] {
   return errors;
 }
 
+function validateSynthesizeSpeechAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.text, 'text', errors);
+  validateOptionalNonEmptyString(action?.voice, 'voice', errors);
+  validateOptionalNonEmptyString(action?.language, 'language', errors);
+  validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
+  validateBooleanValue(action?.playAudio, 'playAudio', errors);
+  if (action?.rate !== undefined && (!Number.isFinite(action.rate) || action.rate < 0.5 || action.rate > 2)) {
+    errors.push('rate must be a number between 0.5 and 2.');
+  }
+  if (action?.pitch !== undefined && (!Number.isFinite(action.pitch) || action.pitch < 0.5 || action.pitch > 2)) {
+    errors.push('pitch must be a number between 0.5 and 2.');
+  }
+  return errors;
+}
+
+function validateTranscribeAudioAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.inputPath, 'inputPath', errors);
+  validateOptionalNonEmptyString(action?.language, 'language', errors);
+  validateEnumString(action?.model, 'model', ['tiny', 'base', 'small', 'medium', 'large-v3'] as const, errors);
+  validateOptionalNonEmptyString(action?.modelPath, 'modelPath', errors);
+  validateEnumString(action?.engine, 'engine', ['auto', 'whisper.cpp', 'openai-whisper'] as const, errors);
+  validateOptionalNonEmptyString(action?.command, 'command', errors);
+  return errors;
+}
+
 function validateFreyaVisualAssetAction(action: any): string[] {
   const errors: string[] = [];
   validateEnumString(
@@ -741,6 +770,26 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateGenerateVideoAction,
     execute: executeGenerateVideo as any,
+  },
+  {
+    type: 'synthesize_speech',
+    description: '使用已配置的 TTS provider 将文本合成为音频文件。内置免费 Microsoft Edge TTS，无需 API key。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateSynthesizeSpeechAction,
+    execute: executeSynthesizeSpeech as any,
+  },
+  {
+    type: 'transcribe_audio',
+    description: '使用免费的本地 Whisper 引擎转写音频文件。优先 whisper.cpp，其次 Python whisper；不需要 API key。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateTranscribeAudioAction,
+    execute: executeTranscribeAudio as any,
   },
   {
     type: 'request_freya_visual_asset',

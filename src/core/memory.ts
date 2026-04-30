@@ -2,6 +2,7 @@
 import type { SessionRecord } from './types.js'
 import { summarizeOnce } from '../brain.js'
 import { MemoryStore } from '../storage/memoryStore.js'
+import { getMemoryProfile, MemoryEnhancementFactory } from './memoryEnhancement.js'
 
 /**
  * Background routine that compresses a terminated session into permanent insights.
@@ -61,6 +62,18 @@ ${transcript.slice(-24000)}
     // 4. Flush to Global Memory Store
     const store = new MemoryStore(cwd)
     await store.addInsights(validInsights)
+
+    const profile = await getMemoryProfile(cwd)
+    if (profile.enabled) {
+      const memory = await MemoryEnhancementFactory.create(profile, cwd)
+      await memory.initialize()
+      for (const insight of validInsights) {
+        await memory.addMemory(insight.content, {
+          category: insight.category,
+          source: 'trajectory-compressor',
+        })
+      }
+    }
 
   } catch (err) {
     // We swallow errors because Trajectory Compression is a passive background routine 

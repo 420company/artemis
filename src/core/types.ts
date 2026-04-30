@@ -394,6 +394,25 @@ export type AgentAction =
       runInBackground?: boolean;
     }
   | {
+      type: 'synthesize_speech';
+      text: string;
+      voice?: string;
+      language?: string;
+      outputPath?: string;
+      playAudio?: boolean;
+      rate?: number;
+      pitch?: number;
+    }
+  | {
+      type: 'transcribe_audio';
+      inputPath: string;
+      language?: string;
+      model?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3';
+      modelPath?: string;
+      engine?: 'auto' | 'whisper.cpp' | 'openai-whisper';
+      command?: string;
+    }
+  | {
       type: 'request_freya_visual_asset';
       assetType: 'image' | 'video' | 'icon';
       contextDescription: string;
@@ -479,6 +498,8 @@ export const ALL_AGENT_ACTION_TYPES = [
   'odin_import_cloud_skills',
   'generate_image',
   'generate_video',
+  'synthesize_speech',
+  'transcribe_audio',
   'request_freya_visual_asset',
   'agent',
   // ── Spotify integration ────────────────────────────────────────────────

@@ -103,14 +103,34 @@ async function askNumber(prompt: string, defaultValue: number, options: {
   }
 }
 
-async function askYesNo(locale: UiLocale, title: string, defaultValue: boolean): Promise<boolean> {
+async function askYesNo(
+  locale: UiLocale,
+  title: string,
+  defaultValue: boolean,
+  description?: string,
+): Promise<boolean> {
+  const yesDescription = description
+    ? `${description} ${tr(locale, defaultValue ? '默认启用。' : '仅在你明确需要时启用，默认关闭。', defaultValue ? 'Enabled by default.' : 'Enable only when you explicitly need it; off by default.')}`
+    : undefined
+  const noDescription = defaultValue
+    ? tr(locale, '关闭后这个能力不会提供给 AI；只有你不希望它使用时才选这里。', 'Disables this capability for the AI; choose this only if you do not want it used.')
+    : tr(locale, '保持关闭；以后可以在 Full Setup 或对应配置页重新启用。', 'Keep it off; you can enable it later from Full Setup or the related settings page.')
+
   return chooseInteractiveOption<boolean>({
     title,
     initialIndex: defaultValue ? 0 : 1,
     hint: tr(locale, '↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
     choices: [
-      { label: tr(locale, '是', 'Yes'), value: true },
-      { label: tr(locale, '否', 'No'), value: false },
+      {
+        label: tr(locale, '是（启用）', 'Yes (enable)'),
+        value: true,
+        description: yesDescription,
+      },
+      {
+        label: tr(locale, '否（关闭）', 'No (disable)'),
+        value: false,
+        description: noDescription,
+      },
     ],
   })
 }
@@ -147,91 +167,219 @@ async function configureTerminalSettings(options: { cwd: string; locale: UiLocal
 }
 
 async function configureTTSSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
-  try {
-    const { cwd, locale } = options
-    sectionTitle('Text-to-Speech', [
-      tr(locale, '配置语音输出，支持多个提供商。', 'Configure speech output with multiple providers.'),
-    ])
-    
-    const provider = await chooseInteractiveOption<'edge' | 'elevenlabs' | 'openai' | 'xai' | 'minimax' | 'mistral' | 'gemini' | 'kittentts'>({
-      title: tr(locale, '选择 TTS 提供商', 'Select TTS provider'),
+  const { cwd, locale } = options
+  sectionTitle('Voice Input / Output', [
+    tr(
+      locale,
+      '配置真实语音输出。当前内置 Microsoft Edge TTS 免费线路，不需要 API key。',
+      'Configure real speech output. The built-in Microsoft Edge TTS path is free and requires no API key.',
+    ),
+    tr(
+      locale,
+      '语音输入/STT 使用本地 Whisper（whisper.cpp 或 Python whisper），免费且不需要 API key。',
+      'Speech input/STT uses local Whisper (whisper.cpp or Python whisper), free and API-keyless.',
+    ),
+  ])
+
+  const ttsEnabled = await askYesNo(
+    locale,
+    tr(locale, '启用 Microsoft Edge TTS（免费）？', 'Enable Microsoft Edge TTS (free)?'),
+    true,
+    tr(locale, '用于通讯桥接、通知播报、把文本合成为 MP3。', 'Useful for messaging bridges, notification readout, and text-to-MP3 synthesis.'),
+  )
+
+  let voice = 'en-US-AriaNeural'
+  if (ttsEnabled) {
+    voice = await chooseInteractiveOption<string>({
+      title: tr(locale, '选择默认声音', 'Choose default voice'),
       initialIndex: 0,
       choices: [
-        { label: 'Microsoft Edge TTS (free)', value: 'edge' },
-        { label: 'ElevenLabs (premium)', value: 'elevenlabs' },
-        { label: 'OpenAI TTS', value: 'openai' },
-        { label: 'xAI TTS', value: 'xai' },
-        { label: 'MiniMax TTS', value: 'minimax' },
-        { label: 'Mistral Voxtral', value: 'mistral' },
-        { label: 'Google Gemini TTS', value: 'gemini' },
-        { label: 'KittenTTS (local)', value: 'kittentts' },
+        { label: 'en-US-AriaNeural', value: 'en-US-AriaNeural', description: tr(locale, '英文女声，通用默认', 'English female, general default') },
+        { label: 'en-US-GuyNeural', value: 'en-US-GuyNeural', description: tr(locale, '英文男声', 'English male') },
+        { label: 'zh-CN-XiaoxiaoNeural', value: 'zh-CN-XiaoxiaoNeural', description: tr(locale, '中文女声', 'Chinese female') },
+        { label: 'zh-CN-YunxiNeural', value: 'zh-CN-YunxiNeural', description: tr(locale, '中文男声，偏自然', 'Chinese male, natural') },
+        { label: 'zh-CN-YunjianNeural', value: 'zh-CN-YunjianNeural', description: tr(locale, '中文男声，偏播报', 'Chinese male, narration') },
       ],
     })
-    
-    let config: any = { provider }
-    if (provider !== 'edge' && provider !== 'kittentts') {
-      const apiKey = await askText(tr(locale, 'API key', 'API key'), '', true)
-      config.apiKey = apiKey
-    }
-    
-    await new ProviderStore(cwd).updateSetupConfig((setup) => ({
-      ...setup,
-      voice: {
-        ...setup.voice,
-        tts: {
-          ...setup.voice.tts,
-          ...config,
-        },
-      },
-      tools: {
-        ...setup.tools,
-        providers: {
-          ...setup.tools.providers,
-          tts: provider,
-        },
-      },
-    }))
-    
-    console.log(`  ✓ TTS provider set to: ${provider}`)
-  } catch (error) {
-    console.error(`  ❌ Failed to configure TTS settings: ${error instanceof Error ? error.message : String(error)}`)
-    throw error
   }
+
+  const sttEnabled = await askYesNo(
+    locale,
+    tr(locale, '启用本地 Whisper STT（免费 / 无 API key）？', 'Enable local Whisper STT (free / no API key)?'),
+    true,
+    tr(locale, '用于把本地音频文件转成文字；WeChat 这类桥接若已提供 voice_item.text 会直接使用桥接文本。', 'Transcribes local audio files; bridges such as WeChat use voice_item.text directly when the bridge already supplies text.'),
+  )
+
+  let sttModel: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3' = 'base'
+  let sttEngine: 'auto' | 'whisper.cpp' | 'openai-whisper' = 'auto'
+  if (sttEnabled) {
+    sttEngine = await chooseInteractiveOption<'auto' | 'whisper.cpp' | 'openai-whisper'>({
+      title: tr(locale, '选择本地 STT 引擎', 'Choose local STT engine'),
+      initialIndex: 0,
+      choices: [
+        { label: 'Auto - whisper.cpp first, then Python whisper', value: 'auto' },
+        { label: 'whisper.cpp / whisper-cli', value: 'whisper.cpp' },
+        { label: 'Python openai-whisper CLI', value: 'openai-whisper' },
+      ],
+    })
+    sttModel = await chooseInteractiveOption<'tiny' | 'base' | 'small' | 'medium' | 'large-v3'>({
+      title: tr(locale, '选择默认 Whisper 模型', 'Choose default Whisper model'),
+      initialIndex: 1,
+      choices: [
+        { label: 'tiny - fastest, lowest accuracy', value: 'tiny' },
+        { label: 'base - balanced default', value: 'base' },
+        { label: 'small - better accuracy', value: 'small' },
+        { label: 'medium - slower, stronger', value: 'medium' },
+        { label: 'large-v3 - strongest, slowest', value: 'large-v3' },
+      ],
+    })
+  }
+
+  await new ProviderStore(cwd).updateSetupConfig((setup) => ({
+    ...setup,
+    voice: {
+      ...setup.voice,
+      tts: {
+        ...setup.voice.tts,
+        provider: 'edge',
+        voice,
+      },
+      stt: {
+        ...setup.voice.stt,
+        enabled: sttEnabled,
+        provider: 'local',
+        engine: sttEngine,
+        localModel: sttModel,
+      },
+      voice: {
+        ...setup.voice.voice,
+        autoTts: false,
+      },
+    },
+    tools: {
+      ...setup.tools,
+      enabled: {
+        ...setup.tools.enabled,
+        tts: ttsEnabled,
+        stt: sttEnabled,
+      },
+      providers: {
+        ...setup.tools.providers,
+        tts: 'edge',
+        stt: 'local',
+      },
+    },
+  }))
+
+  console.log(tr(
+    locale,
+    ttsEnabled
+      ? `  ✓ 已启用 Microsoft Edge TTS，默认声音：${voice}`
+      : '  ✓ 已关闭 TTS。',
+    ttsEnabled
+      ? `  ✓ Microsoft Edge TTS enabled with default voice: ${voice}`
+      : '  ✓ TTS disabled.',
+  ))
+  console.log(tr(
+    locale,
+    sttEnabled
+      ? `  ✓ 已启用本地 Whisper STT：${sttEngine} / ${sttModel}。若未安装引擎，transcribe_audio 会给出安装提示。`
+      : '  ✓ 已关闭 STT。',
+    sttEnabled
+      ? `  ✓ Local Whisper STT enabled: ${sttEngine} / ${sttModel}. If no engine is installed, transcribe_audio will return install guidance.`
+      : '  ✓ STT disabled.',
+  ))
 }
 
 async function configureToolSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
   try {
     const { cwd, locale } = options
     sectionTitle('Tool Configuration', [
-      tr(locale, '启用或禁用工具，需要 API key 的工具将在启用时配置。', 'Enable or disable tools, tools needing API keys will be configured when enabled.'),
+      tr(locale, '启用或禁用已经接入运行时的工具组。', 'Enable or disable tool groups that are wired into the runtime.'),
+      tr(
+        locale,
+        '关闭后，这组工具不会再出现在模型可调用工具列表里；即使模型手写调用也会被运行时拒绝。',
+        'When disabled, the group is removed from model-callable tools and runtime calls are rejected.',
+      ),
+      tr(
+        locale,
+        '不确定就保留默认值（光标已经停在推荐选项上），按 Enter 即可。',
+        'If unsure, keep the default — the cursor is already on the recommended option, just press Enter.',
+      ),
     ])
-    
-    const availableTools = [
-      { id: 'web', label: '🔍 Web Search & Scraping', enabled: true },
-      { id: 'browser', label: '🌐 Browser Automation', enabled: true },
-      { id: 'terminal', label: '💻 Terminal & Processes', enabled: true },
-      { id: 'file', label: '📁 File Operations', enabled: true },
-      { id: 'code_execution', label: '⚡ Code Execution', enabled: true },
-      { id: 'vision', label: '👁️  Vision / Image Analysis', enabled: true },
-      { id: 'image_gen', label: '🎨 Image Generation', enabled: false },
-      { id: 'moa', label: '🧠 Mixture of Agents', enabled: false },
-      { id: 'tts', label: '🔊 Text-to-Speech', enabled: true },
-      { id: 'stt', label: '🎙️ Speech-to-Text', enabled: true },
-      { id: 'skills', label: '📚 Skills', enabled: true },
-      { id: 'todo', label: '📋 Task Planning', enabled: true },
-      { id: 'memory', label: '💾 Memory', enabled: true },
-      { id: 'session_search', label: '🔎 Session Search', enabled: true },
-      { id: 'clarify', label: '❓ Clarifying Questions', enabled: true },
-      { id: 'delegation', label: '👥 Task Delegation', enabled: true },
-      { id: 'cronjob', label: '⏰ Cron Jobs', enabled: true },
-      { id: 'messaging', label: '📨 Cross-Platform Messaging', enabled: true },
-      { id: 'rl', label: '🧪 RL Training', enabled: false },
-      { id: 'homeassistant', label: '🏠 Home Assistant', enabled: false },
+
+    const availableTools: Array<{ id: string; label: string; enabled: boolean; description: { zh: string; en: string } }> = [
+      {
+        id: 'web', label: '🔍 Web / Network Tools', enabled: true,
+        description: {
+          zh: '控制 search_web、deep_research、HTTP 请求、URL/DNS 检查、天气/汇率/航班等联网工具。',
+          en: 'Controls search_web, deep_research, HTTP requests, URL/DNS checks, weather, currency, and flight tools.',
+        },
+      },
+      {
+        id: 'browser', label: '🌐 Browser Automation', enabled: true,
+        description: {
+          zh: '驱动 Chrome 完成自动化操作（登录、点击、表单）。需要本机有 Chromium，慢一点。',
+          en: 'Drives Chrome to automate logins/clicks/forms. Requires Chromium locally, somewhat slow.',
+        },
+      },
+      {
+        id: 'terminal', label: '💻 Terminal & Processes', enabled: true,
+        description: {
+          zh: '控制 run_command、git、npm_run、系统信息等会触碰本机进程的工具。',
+          en: 'Controls run_command, git, npm_run, and system/process inspection tools.',
+        },
+      },
+      {
+        id: 'file', label: '📁 File Operations', enabled: true,
+        description: {
+          zh: '读写本地文件。任何要改代码、写文档的任务都需要。',
+          en: 'Read & write local files. Required for any code or doc editing task.',
+        },
+      },
+      {
+        id: 'code_execution', label: '⚡ Code Execution', enabled: true,
+        description: {
+          zh: '控制计算、JSON/文本处理、编码、hash、格式化等本地数据处理工具。',
+          en: 'Controls calculation, JSON/text processing, encoding, hashing, and formatting utilities.',
+        },
+      },
+      {
+        id: 'vision', label: '👁️  Vision / Image Analysis', enabled: true,
+        description: {
+          zh: '让 AI 看图（截图、设计稿）。前端 UI 验收、OCR 等常用。',
+          en: 'Let AI read images (screenshots, mockups). Used for frontend QA, OCR, etc.',
+        },
+      },
+      {
+        id: 'image_gen', label: '🎨 Image Generation', enabled: false,
+        description: {
+          zh: '控制 generate_image / generate_video。需要先通过 /visual 配置真实视觉 provider。',
+          en: 'Controls generate_image / generate_video. Requires a real visual provider configured via /visual.',
+        },
+      },
+      {
+        id: 'tts', label: '🔊 Text-to-Speech', enabled: true,
+        description: {
+          zh: '控制 synthesize_speech，把文本通过 Microsoft Edge TTS 免费合成为 MP3。',
+          en: 'Controls synthesize_speech, converting text to MP3 through free Microsoft Edge TTS.',
+        },
+      },
+      {
+        id: 'stt', label: '🎙️ Speech-to-Text', enabled: true,
+        description: {
+          zh: '控制 transcribe_audio，使用本地 Whisper 免费转写音频文件，不需要 API key。',
+          en: 'Controls transcribe_audio, using local Whisper to transcribe audio files for free without an API key.',
+        },
+      },
     ]
-    
+
+    const existing = (await new ProviderStore(cwd).load()).setup?.tools.enabled ?? {}
     const enabledConfig: Record<string, boolean> = {}
     for (const tool of availableTools) {
-      const shouldEnable = await askYesNo(locale, `${tool.label}`, tool.enabled)
+      const desc = tr(locale, tool.description.zh, tool.description.en)
+      const current = existing[tool.id] ?? tool.enabled
+      const shouldEnable = await askYesNo(locale, tool.label, current, desc)
       enabledConfig[tool.id] = shouldEnable
     }
     
@@ -513,7 +661,9 @@ function buildAvailabilitySummary(data: Awaited<ReturnType<ProviderStore['load']
   lines.push(`${visual?.video.enabled ? '✓' : '✗'} Video generation${visual?.video.enabled ? `: ${visual.video.provider}/${visual.video.model}` : ': disabled'}`)
   lines.push(`✓ Agent max iterations: ${setup?.agent.maxIterations ?? 90}`)
   lines.push(`✓ Compression threshold: ${setup?.agent.compression.threshold ?? 0.5}`)
-  lines.push(`✓ Memory enhancement: ${data.memoryProfile?.enabled ? `${data.memoryProfile.provider}` : 'disabled'}`)
+  lines.push(`${data.memoryProfile?.enabled ? '✓' : '✗'} Memory enhancement${data.memoryProfile?.enabled ? `: ${data.memoryProfile.provider}` : ': disabled'}`)
+  lines.push(`${setup?.tools.enabled.tts ? '✓' : '✗'} Text-to-speech${setup?.tools.enabled.tts ? `: ${setup.voice.tts.provider}/${setup.voice.tts.voice ?? 'default'}` : ': disabled'}`)
+  lines.push(`${setup?.tools.enabled.stt ? '✓' : '✗'} Speech-to-text${setup?.tools.enabled.stt ? `: ${setup.voice.stt.provider}/${setup.voice.stt.engine ?? 'auto'}/${setup.voice.stt.localModel ?? 'base'}` : ': disabled'}`)
   return lines
 }
 

@@ -1,5 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+import { execFile } from 'node:child_process'
 import { EventEmitter } from 'events'
+import { promisify } from 'node:util'
+import { synthesizeEdgeTts } from './edgeTts.js'
+
+const execFileAsync = promisify(execFile)
 
 // Voice Configuration
 export interface VoiceConfig {
@@ -40,6 +45,9 @@ export interface TextToSpeechOptions {
   text: string
   voice?: string
   language?: string
+  provider?: 'edge'
+  outputPath?: string
+  playAudio?: boolean
   rate?: number
   pitch?: number
   volume?: number
@@ -424,12 +432,28 @@ export class VoiceManager extends EventEmitter {
   }
 
   private async synthesizeSpeech(options: TextToSpeechOptions): Promise<void> {
-    // Simulate text-to-speech synthesis
-    const duration = Math.max(500, options.text.length * 100)
-    await new Promise(resolve => setTimeout(resolve, duration))
-    
+    const startedAt = Date.now()
+    const provider = options.provider ?? 'edge'
+    if (provider !== 'edge') {
+      throw new Error(`Unsupported TTS provider: ${provider}`)
+    }
+
+    const result = await synthesizeEdgeTts({
+      text: options.text,
+      voice: options.voice,
+      language: options.language,
+      outputPath: options.outputPath,
+      rate: options.rate,
+      pitch: options.pitch,
+    })
+
+    if (options.playAudio !== false && process.platform === 'darwin') {
+      await execFileAsync('afplay', [result.outputPath])
+    }
+
+    const duration = Date.now() - startedAt
     this.metrics.speakingTime += duration
-    this.emit('debug', `Speech synthesized in ${duration}ms`)
+    this.emit('debug', `Speech synthesized with Edge TTS in ${duration}ms: ${result.outputPath}`)
   }
 
   private createRandomRecognitionResult(): SpeechRecognitionResult {
@@ -515,7 +539,17 @@ export class VoiceManager extends EventEmitter {
    * Helper Methods
    */
   getAvailableVoices(): string[] {
-    return ['default', 'male', 'female', 'robot', 'british', 'american']
+    return [
+      'en-US-AriaNeural',
+      'en-US-JennyNeural',
+      'en-US-GuyNeural',
+      'en-GB-SoniaNeural',
+      'zh-CN-XiaoxiaoNeural',
+      'zh-CN-YunxiNeural',
+      'zh-CN-YunjianNeural',
+      'ja-JP-NanamiNeural',
+      'ko-KR-SunHiNeural',
+    ]
   }
 
   getLanguageCodes(): string[] {

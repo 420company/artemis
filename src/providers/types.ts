@@ -181,6 +181,9 @@ export type VoiceSetupConfig = {
   stt: {
     enabled: boolean;
     provider: 'local' | 'openai' | 'mistral';
+    engine?: 'auto' | 'whisper.cpp' | 'openai-whisper';
+    command?: string;
+    modelPath?: string;
     localModel?: 'tiny' | 'base' | 'small' | 'medium' | 'large-v3';
     language?: string;
     openaiModel?: 'whisper-1' | 'gpt-4o-mini-transcribe' | 'gpt-4o-transcribe';

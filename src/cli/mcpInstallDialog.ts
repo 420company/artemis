@@ -1,9 +1,11 @@
 import { emitKeypressEvents } from 'node:readline'
 import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { createWriteStream, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import * as https from 'node:https'
+import { pipeline } from 'node:stream/promises'
 import { stringWidth } from '../input/stringWidth.js'
 import type { UiLocale } from './locale.js'
 
@@ -15,9 +17,24 @@ const SHOW    = `${ESC}[?25h`
 
 const CLI_ROOT          = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const BUNDLED_MCP_DIR   = path.join(CLI_ROOT, 'mcp-packages')
+const WHISPER_MODEL_NAME = 'ggml-base.bin'
+const WHISPER_MODEL_URL  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin'
+const WHISPER_MODEL_MIN_BYTES = 100 * 1024 * 1024
 // Install MCP deps into a user-data directory so they survive `npm install -g` reinstalls
 // of artemis-code (which would otherwise wipe out the bundled mcp-packages/node_modules).
 export const MCP_INSTALL_DIR = path.join(homedir(), '.artemis', 'mcp-packages')
+
+function whisperModelPath(cwd: string): string {
+  return path.join(cwd, '.artemis', 'models', WHISPER_MODEL_NAME)
+}
+
+function hasUsableWhisperModel(cwd: string): boolean {
+  try {
+    return statSync(whisperModelPath(cwd)).size >= WHISPER_MODEL_MIN_BYTES
+  } catch {
+    return false
+  }
+}
 
 function ensureMcpInstallDir(): void {
   if (!existsSync(MCP_INSTALL_DIR)) {
@@ -27,6 +44,15 @@ function ensureMcpInstallDir(): void {
   const sourcePkg = path.join(BUNDLED_MCP_DIR, 'package.json')
   if (!existsSync(targetPkg) && existsSync(sourcePkg)) {
     copyFileSync(sourcePkg, targetPkg)
+  }
+  // Seed the bundled lockfile so the progress bar can show a real total
+  // count from the very first frame (npm doesn't emit a usable lockfile
+  // until well into the install). Only seeded if the user doesn't already
+  // have one — preserves any locally-customised state.
+  const targetLock = path.join(MCP_INSTALL_DIR, 'package-lock.json')
+  const sourceLock = path.join(BUNDLED_MCP_DIR, 'package-lock.json')
+  if (!existsSync(targetLock) && existsSync(sourceLock)) {
+    copyFileSync(sourceLock, targetLock)
   }
 }
 
@@ -109,18 +135,21 @@ const COPY = {
     title:    '✦ MCP 插件依赖安装 ✦',
     subtitle: 'Artemis 内置 91 个 MCP 服务插件',
     desc1:    '其中 23 个插件需要安装 npm 依赖包',
-    desc2:    '约 360 个包，安装后约 1.4 GB，需要 2-5 分钟',
+    desc2:    '同时安装本地 Whisper 免费模型 ggml-base.bin（约 141 MB）',
     desc3:    '请确保网络通畅，也可以跳过稍后再安装',
     yes:      '✦ 立即安装全部依赖',
     no:       '跳过，稍后再说 ✦',
     footer:   '← → 选择   Enter 确认',
     brand:    'www.420.company',
-    installing: '◆ 正在安装 MCP 依赖 ◆',
+    installing: '◆ 正在安装 MCP / 本地语音依赖 ◆',
     wait:     '请稍候，安装完成后自动继续…',
     preparing: '连接中…',
+    modelPreparing: '准备本地 Whisper 模型…',
+    modelReady: '本地 Whisper 模型已就绪：ggml-base.bin',
+    modelProgress: (mb: number, pct?: number) => pct == null ? `下载 ggml-base.bin：${mb} MB` : `下载 ggml-base.bin：${mb} MB / ${pct}%`,
     pkgCount: (d: number, t?: number) => t ? `已安装 ${d} / ${t} 个包` : `已安装 ${d} 个包`,
-    doneOk:   '✓ 所有 MCP 依赖安装完成！',
-    doneFail: '⚠ 部分包安装失败，可用 /mcp install 重试',
+    doneOk:   '✓ MCP 依赖和本地 Whisper 模型安装完成！',
+    doneFail: '⚠ 部分依赖安装失败，可用 /mcp install 重试',
     anyKey:   '按任意键继续…',
     mcpHint:  '使用 /mcp enable <id> 启用任意插件',
   },
@@ -128,18 +157,21 @@ const COPY = {
     title:    '✦ MCP Plugin Setup ✦',
     subtitle: 'Artemis ships with 91 MCP plugin servers',
     desc1:    '23 of them require npm package dependencies',
-    desc2:    '~360 packages, ~1.4 GB installed, takes 2–5 minutes',
+    desc2:    'Also installs the free local Whisper model ggml-base.bin (~141 MB)',
     desc3:    'You can skip and install later when needed',
     yes:      '✦ Install all now',
     no:       'Skip for now ✦',
     footer:   '← → select   Enter confirm',
     brand:    'www.420.company',
-    installing: '◆ Installing MCP Dependencies ◆',
+    installing: '◆ Installing MCP / Local Voice Dependencies ◆',
     wait:     'Please wait, auto-continues when done…',
     preparing: 'Connecting…',
+    modelPreparing: 'Preparing local Whisper model…',
+    modelReady: 'Local Whisper model ready: ggml-base.bin',
+    modelProgress: (mb: number, pct?: number) => pct == null ? `Downloading ggml-base.bin: ${mb} MB` : `Downloading ggml-base.bin: ${mb} MB / ${pct}%`,
     pkgCount: (d: number, t?: number) => t ? `${d} / ${t} packages installed` : `${d} packages installed`,
-    doneOk:   '✓ All MCP dependencies installed!',
-    doneFail: '⚠ Some packages failed — run /mcp install to retry',
+    doneOk:   '✓ MCP dependencies and local Whisper model installed!',
+    doneFail: '⚠ Some dependencies failed — run /mcp install to retry',
     anyKey:   'Press any key to continue…',
     mcpHint:  'Use /mcp enable <id> to activate any plugin',
   },
@@ -330,14 +362,104 @@ function countExpectedVisiblePackageEntries(lockPath: string): number | undefine
   }
 }
 
-// ─── public API ────────────────────────────────────────────────────────────────
+async function downloadWhisperModel(cwd: string, onStatus: (line: string) => void, locale: UiLocale): Promise<void> {
+  const t = COPY[locale] ?? COPY['en']
+  const target = whisperModelPath(cwd)
+  if (hasUsableWhisperModel(cwd)) {
+    onStatus(t.modelReady)
+    return
+  }
 
-export function shouldShowMcpInstallDialog(): boolean {
-  return !existsSync(path.join(MCP_INSTALL_DIR, 'node_modules'))
+  mkdirSync(path.dirname(target), { recursive: true })
+  const tmp = `${target}.download`
+  try {
+    if (existsSync(tmp)) unlinkSync(tmp)
+  } catch {
+    // Best effort cleanup before retrying the download.
+  }
+
+  onStatus(t.modelPreparing)
+
+  const fetchToDisk = async (url: string, redirects = 0): Promise<void> => {
+    if (redirects > 5) throw new Error('Too many redirects while downloading ggml-base.bin')
+
+    await new Promise<void>((resolve, reject) => {
+      const req = https.get(url, async (res) => {
+        try {
+          const status = res.statusCode ?? 0
+          const location = res.headers.location
+          if (status >= 300 && status < 400 && location) {
+            res.resume()
+            const nextUrl = new URL(location, url).toString()
+            try {
+              await fetchToDisk(nextUrl, redirects + 1)
+              resolve()
+            } catch (error) {
+              reject(error)
+            }
+            return
+          }
+
+          if (status !== 200) {
+            res.resume()
+            reject(new Error(`Model download failed with HTTP ${status}`))
+            return
+          }
+
+          const total = Number(res.headers['content-length'] ?? 0)
+          let received = 0
+          let lastPct = -1
+          let lastMb = -1
+          res.on('data', (chunk: Buffer) => {
+            received += chunk.length
+            const mb = Math.floor(received / (1024 * 1024))
+            const pct = total > 0 ? Math.min(100, Math.floor((received / total) * 100)) : undefined
+            if (pct !== lastPct || mb - lastMb >= 5) {
+              lastPct = pct ?? -1
+              lastMb = mb
+              onStatus(t.modelProgress(mb, pct))
+            }
+          })
+
+          await pipeline(res, createWriteStream(tmp))
+          renameSync(tmp, target)
+          if (!hasUsableWhisperModel(cwd)) {
+            throw new Error('Downloaded ggml-base.bin is incomplete')
+          }
+          onStatus(t.modelReady)
+          resolve()
+        } catch (error) {
+          reject(error)
+        }
+      })
+      req.on('error', reject)
+      req.setTimeout(10 * 60 * 1000, () => {
+        req.destroy(new Error('Timed out downloading ggml-base.bin'))
+      })
+    })
+  }
+
+  try {
+    await fetchToDisk(WHISPER_MODEL_URL)
+  } catch (error) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp)
+    } catch {
+      // Ignore cleanup errors; the original download failure is more useful.
+    }
+    throw error
+  }
 }
 
-export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed' | 'skipped'> {
+// ─── public API ────────────────────────────────────────────────────────────────
+
+export function shouldShowMcpInstallDialog(cwd = process.cwd()): boolean {
+  return !existsSync(path.join(MCP_INSTALL_DIR, 'node_modules')) || !hasUsableWhisperModel(cwd)
+}
+
+export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: string } = {}): Promise<'installed' | 'skipped'> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return 'skipped'
+  const cwd = options.cwd ?? process.cwd()
 
   emitKeypressEvents(process.stdin)
   process.stdin.setRawMode(true)
@@ -382,54 +504,152 @@ export async function runMcpInstallDialog(locale: UiLocale): Promise<'installed'
   }
 
   // ── install phase ─────────────────────────────────────────────────────────────
+  // The bar's `done` is sourced from disk reality (top-level dirs in
+  // node_modules) — that's the only signal that strictly never overcounts.
+  // The "current" line shows the last package npm fetched, parsed from
+  // `npm http fetch` output via --loglevel=http. Result: bar climbs as
+  // packages are linked, while the spinner line shows live download
+  // activity even before anything lands on disk.
   let done    = 0
+  let fetchedPkgs = 0
   let current = (COPY[locale] ?? COPY['en']).preparing
   let pfi     = 0
 
   ensureMcpInstallDir()
-  // Count installed packages by watching node_modules directory
   const nmDir = path.join(MCP_INSTALL_DIR, 'node_modules')
   const countInstalled = (): number => countNodeModulesEntries(nmDir)
-  const getEstimatedTotal = (): number | undefined => {
+  const cachedTotal: { value: number | undefined } = { value: undefined }
+  const refreshCachedTotal = (): void => {
     const lockTotal =
       countExpectedVisiblePackageEntries(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
       countExpectedVisiblePackageEntries(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
-    return lockTotal && lockTotal >= done ? lockTotal : undefined
+    if (lockTotal && lockTotal > 0) cachedTotal.value = lockTotal
+  }
+  refreshCachedTotal()
+  const getEstimatedTotal = (): number | undefined => {
+    if (cachedTotal.value === undefined) return undefined
+    // Guard: if the on-disk count somehow exceeds the cached lock total
+    // (npm regenerated lockfile late, etc.), bump the cached total so the
+    // bar can still hit 100%.
+    if (done > cachedTotal.value) cachedTotal.value = done
+    return cachedTotal.value
   }
 
   const renderProgress = () => {
     layout = buildLayout(locale)
-    updateBody(progressBody(pfi, done, getEstimatedTotal(), current, locale, layout), layout)
+    const total = getEstimatedTotal()
+    // While npm is still fetching and node_modules is empty, the bar
+    // would otherwise sit at 0%. Use fetchedPkgs as a transient floor so
+    // the bar starts moving immediately based on real download events.
+    const effectiveDone = Math.max(done, Math.min(fetchedPkgs, total ?? Number.POSITIVE_INFINITY))
+    updateBody(progressBody(pfi, effectiveDone, total, current, locale, layout), layout)
   }
 
   const onResizeProgress = () => {
     layout = buildLayout(locale)
-    rebuildScreen(progressBody(pfi, done, getEstimatedTotal(), current, locale, layout), layout)
+    const total = getEstimatedTotal()
+    const effectiveDone = Math.max(done, Math.min(fetchedPkgs, total ?? Number.POSITIVE_INFINITY))
+    rebuildScreen(progressBody(pfi, effectiveDone, total, current, locale, layout), layout)
   }
   process.stdout.on('resize', onResizeProgress)
 
   renderProgress()
+  // Tick at 200ms so the spinner + elapsed feel snappy and the on-disk
+  // package counter is sampled often enough that no individual extract
+  // step looks frozen for >200ms. Cheap enough — countNodeModulesEntries
+  // is one readdir.
   const progressTimer = setInterval(() => {
     pfi++
     done = countInstalled()
+    // Re-read total in case npm just wrote a fresh lockfile
+    if (cachedTotal.value === undefined) refreshCachedTotal()
     renderProgress()
-  }, 300)
+  }, 200)
 
-  const success = await new Promise<boolean>((resolve) => {
-    const child = spawn('npm', ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    const onData = (chunk: Buffer) => {
-      const line = chunk.toString().trim()
-      if (!line || line.length < 3) return
-      const pkgMatch = line.match(/added (.+?)@\d/)
-      if (pkgMatch?.[1]) { current = pkgMatch[1]; return }
-      if (line.length < 50) current = line
+  const npmSuccess = await new Promise<boolean>((resolve) => {
+    // --loglevel=http makes npm emit one `npm http fetch GET 200 <url>`
+    // line per tarball download. We use that as the "current package"
+    // signal so the dialog shows real activity during the otherwise
+    // silent resolve+download phase.
+    const child = spawn(
+      'npm',
+      ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund', '--loglevel=http'],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+
+    let stderrBuf = ''
+    let stdoutBuf = ''
+
+    const handleLine = (line: string): void => {
+      const trimmed = line.trim()
+      if (!trimmed) return
+
+      // npm http fetch GET 200 https://registry.npmjs.org/<pkg>/-/<pkg>-1.2.3.tgz 234ms
+      const fetchMatch = trimmed.match(/npm http fetch GET (?:\d+\s+)?https:\/\/[^\s/]+\/([^\s]+)/)
+      if (fetchMatch?.[1]) {
+        const url = fetchMatch[1]
+        // Strip .../-/<tarball>.tgz suffix if present, and decode any %xx
+        const pkgPath = url.split('/-/')[0] ?? url
+        try {
+          current = decodeURIComponent(pkgPath)
+        } catch {
+          current = pkgPath
+        }
+        fetchedPkgs += 1
+        return
+      }
+
+      // Final summary: "added 690 packages in 47s"
+      const addedMatch = trimmed.match(/added\s+(\d+)\s+packages?/)
+      if (addedMatch?.[1]) {
+        const n = parseInt(addedMatch[1], 10)
+        if (Number.isFinite(n) && n > 0) {
+          // Tighten cachedTotal to npm's reported figure if it's higher
+          if (!cachedTotal.value || cachedTotal.value < n) cachedTotal.value = n
+          current = `linked ${n} packages`
+        }
+        return
+      }
+
+      // Show short notable lines verbatim (warnings, "removed N packages", etc.)
+      // but skip the verbose `npm http fetch` cruft that didn't match above.
+      if (trimmed.length < 80 && !trimmed.startsWith('npm http')) {
+        current = trimmed
+      }
     }
-    child.stdout?.on('data', onData)
-    child.stderr?.on('data', onData)
-    child.on('close', (code) => resolve(code === 0))
+
+    const consume = (buf: Buffer, which: 'stdout' | 'stderr'): void => {
+      const text = buf.toString()
+      const accumulated = (which === 'stdout' ? stdoutBuf : stderrBuf) + text
+      const lines = accumulated.split('\n')
+      // Keep the final partial line (no trailing newline) for next chunk
+      const leftover = lines.pop() ?? ''
+      if (which === 'stdout') stdoutBuf = leftover
+      else stderrBuf = leftover
+      for (const line of lines) handleLine(line)
+    }
+
+    child.stdout?.on('data', (b: Buffer) => consume(b, 'stdout'))
+    child.stderr?.on('data', (b: Buffer) => consume(b, 'stderr'))
+    child.on('close', (code) => {
+      // Flush trailing partial line on close
+      if (stdoutBuf) handleLine(stdoutBuf)
+      if (stderrBuf) handleLine(stderrBuf)
+      resolve(code === 0)
+    })
+    child.on('error', () => resolve(false))
   })
+
+  let success = npmSuccess
+  if (npmSuccess) {
+    try {
+      await downloadWhisperModel(cwd, (line) => { current = line }, locale)
+      success = true
+    } catch (error) {
+      current = error instanceof Error ? error.message : String(error)
+      success = false
+    }
+  }
 
   clearInterval(progressTimer)
   process.stdout.off('resize', onResizeProgress)

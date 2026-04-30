@@ -1056,6 +1056,56 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    case 'synthesize_speech':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text'],
+        properties: {
+          text: nonEmptyStringSchema('Text to synthesize into speech.'),
+          voice: optionalStringSchema('Optional Microsoft Edge voice name, e.g. en-US-AriaNeural or zh-CN-XiaoxiaoNeural. Defaults to setup configuration.'),
+          language: optionalStringSchema('Optional BCP-47 language code, e.g. en-US or zh-CN.'),
+          outputPath: optionalStringSchema('Optional local MP3 output path. Defaults to .artemis/tts/{timestamp}.mp3 relative to cwd.'),
+          playAudio: {
+            type: 'boolean',
+            description: 'On macOS, play the generated MP3 after synthesis. Default: false for tool calls.',
+          },
+          rate: {
+            type: 'number',
+            minimum: 0.5,
+            maximum: 2,
+            description: 'Speech rate multiplier. 1 is normal.',
+          },
+          pitch: {
+            type: 'number',
+            minimum: 0.5,
+            maximum: 2,
+            description: 'Speech pitch multiplier. 1 is normal.',
+          },
+        },
+      };
+    case 'transcribe_audio':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['inputPath'],
+        properties: {
+          inputPath: nonEmptyStringSchema('Local audio file path to transcribe. Supports formats accepted by the installed local Whisper engine.'),
+          language: optionalStringSchema('Optional language hint, e.g. en, zh, ja. Empty lets Whisper auto-detect.'),
+          model: {
+            type: 'string',
+            enum: ['tiny', 'base', 'small', 'medium', 'large-v3'],
+            description: 'Local Whisper model size. Defaults to setup configuration or base.',
+          },
+          modelPath: optionalStringSchema('Optional whisper.cpp ggml model path, e.g. /path/to/ggml-base.bin.'),
+          engine: {
+            type: 'string',
+            enum: ['auto', 'whisper.cpp', 'openai-whisper'],
+            description: 'Local engine selection. auto tries whisper.cpp first, then Python whisper.',
+          },
+          command: optionalStringSchema('Optional executable path/name override, e.g. whisper-cli or whisper.'),
+        },
+      };
     case 'request_freya_visual_asset':
       return {
         type: 'object',

@@ -108,6 +108,8 @@ console.log('\n  runtimeSmoke')
 console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
+const voiceToolNames = ['synthesize_speech', 'transcribe_audio']
+const expectedCodingToolCount = expectedDirectToolCount - voiceToolNames.length
 const providerNativeToolNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
 
 assert(
@@ -4181,8 +4183,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       `requests=${requests.length}`,
     )
     assert(
-      'native tool loop: coding requests start with the full direct tool manifest',
-      firstToolNames.length === expectedDirectToolCount,
+      'native tool loop: coding requests start with the coding direct tool manifest',
+      firstToolNames.length === expectedCodingToolCount,
       `tools=${firstToolNames.length}`,
     )
     assert(

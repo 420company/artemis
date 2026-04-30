@@ -10,6 +10,8 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'read_file',
   'search_files',
   'lookup_docs',
+  'search_web',
+  'deep_research',
   'write_file',
   'insert_in_file',
   'replace_in_file',
@@ -17,6 +19,8 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'run_command',
   'generate_image',
   'generate_video',
+  'synthesize_speech',
+  'transcribe_audio',
   // ── Spotify integration ──────────────────────────────────────────────
   'spotify_play_liked',
   'spotify_search_and_play',

@@ -87,6 +87,13 @@ let _compressionThresholdOverride: number | undefined;
 let workerProvider: any = null;
 let workerProviderConfig: any = null;
 let workerProviderCwd: string | null = null;
+let setupToolCache:
+    | {
+        cwd: string;
+        loadedAt: number;
+        enabled: Record<string, boolean>;
+    }
+    | null = null;
 
 /** Read last recorded prompt token count (for HUD / compression decisions). */
 export function getLastPromptTokens() { return _lastPromptTokens; }
@@ -131,6 +138,149 @@ function buildSystemPromptText() {
     return systemPromptSuffix
         ? `${BASE_SYSTEM_PROMPT}\n${systemPromptSuffix}`
         : BASE_SYSTEM_PROMPT;
+}
+
+const SETUP_TOOL_NAME_GROUPS: Record<string, readonly string[]> = {
+    web: [
+        'search_web',
+        'deep_research',
+        'http_request',
+        'check_url',
+        'download_file',
+        'dns_lookup',
+        'parse_url',
+        'weather_current',
+        'weather_forecast',
+        'world_clock',
+        'time_diff',
+        'currency_convert',
+        'currency_rates',
+        'flight_lookup',
+    ],
+    browser: [
+        'browser_navigate',
+        'browser_screenshot',
+        'browser_extract_text',
+        'browser_click',
+        'browser_type',
+        'browser_wait_for',
+        'browser_close',
+    ],
+    terminal: [
+        'run_command',
+        'git_status',
+        'git_diff',
+        'git_log',
+        'git_add',
+        'git_commit',
+        'git_branch',
+        'npm_run',
+        'which_command',
+        'get_system_info',
+        'date_now',
+    ],
+    file: [
+        'list_files',
+        'read_file',
+        'search_files',
+        'write_file',
+        'insert_in_file',
+        'replace_in_file',
+        'apply_patch',
+        'delete_file',
+        'move_file',
+        'copy_file',
+        'create_directory',
+        'delete_directory',
+        'file_info',
+        'list_directory',
+        'count_lines',
+        'hash_file',
+        'path_info',
+        'get_imports',
+        'notebook_create',
+        'notebook_list',
+        'notebook_update',
+        'notebook_delete',
+        'notebook_view',
+        'notebook_search',
+        'notebook_addTag',
+        'notebook_removeTag',
+        'notebook_tree',
+    ],
+    code_execution: [
+        'calculate',
+        'regex_match',
+        'json_query',
+        'format_json',
+        'diff_text',
+        'sort_lines',
+        'dedupe_lines',
+        'base64_encode',
+        'base64_decode',
+        'hash_text',
+        'generate_uuid',
+        'format_code',
+        'url_encode',
+    ],
+    image_gen: [
+        'generate_image',
+        'generate_video',
+    ],
+};
+
+const SETUP_TOOL_GROUP_BY_NAME = new Map<string, string>(
+    Object.entries(SETUP_TOOL_NAME_GROUPS).flatMap(([group, names]) =>
+        names.map((name) => [name, group] as const),
+    ),
+);
+
+async function loadSetupToolEnabled(cwd: string): Promise<Record<string, boolean>> {
+    const resolvedCwd = path.resolve(cwd);
+    if (
+        setupToolCache &&
+        setupToolCache.cwd === resolvedCwd &&
+        Date.now() - setupToolCache.loadedAt < 1000
+    ) {
+        return setupToolCache.enabled;
+    }
+
+    const store = new ProviderStore(resolvedCwd);
+    const data = await store.load();
+    setupToolCache = {
+        cwd: resolvedCwd,
+        loadedAt: Date.now(),
+        enabled: data.setup?.tools.enabled ?? {},
+    };
+    return setupToolCache.enabled;
+}
+
+function isSetupToolEnabled(
+    enabled: Record<string, boolean>,
+    group: string,
+): boolean {
+    return enabled[group] !== false;
+}
+
+function filterDirectToolsBySetup(
+    toolNames: readonly string[],
+    enabled: Record<string, boolean>,
+): string[] {
+    return toolNames.filter((name) => {
+        const group = SETUP_TOOL_GROUP_BY_NAME.get(name);
+        return group ? isSetupToolEnabled(enabled, group) : true;
+    });
+}
+
+function getDisabledToolGroup(
+    toolName: string,
+    enabled: Record<string, boolean>,
+): string | undefined {
+    const group = SETUP_TOOL_GROUP_BY_NAME.get(toolName);
+    if (!group || isSetupToolEnabled(enabled, group)) {
+        return undefined;
+    }
+    return group;
 }
 
 // ── provider ──────────────────────────────────────────────────────────────────
@@ -881,6 +1031,15 @@ async function executeTool(name: any, input: any, opts: any) {
 async function executeToolInner(name: any, input: any, opts: any) {
     const { cwd, permissionMode, onPermissionRequest, updateCwd, onWorkspaceSwitchRequest } = opts;
     const argsRecord = (input && typeof input === 'object') ? input : {};
+    const enabledTools = await loadSetupToolEnabled(cwd);
+    const disabledGroup = getDisabledToolGroup(String(name), enabledTools);
+    if (disabledGroup) {
+        return buildDirectToolFailure(
+            'tool_disabled_by_setup',
+            `Tool "${name}" is disabled by Full Setup group "${disabledGroup}". Re-enable it with "artemis setup tools".`,
+            { retryable: false },
+        );
+    }
     // ── Extra tools (file ops, git, text, crypto, network, dev) ──────────────
     if (EXTRA_TOOL_NAMES.has(name)) {
         // Determine permission category for gate.
@@ -1329,11 +1488,13 @@ export async function think(
     );
 
     const latestUserText = getLatestUserText(rawMessages);
+    const enabledTools = await loadSetupToolEnabled(cwd);
     const supportsNativeTools = p.supportsNativeToolCalls === true && !disableNativeTools;
     const plainChat = isPlainChatRequest(latestUserText);
     const projectedToolNames = supportsNativeTools && !plainChat
-        ? listDirectToolNames()
+        ? filterDirectToolsBySetup(listDirectToolNames(), enabledTools)
         : [];
+    const visionEnabled = isSetupToolEnabled(enabledTools, 'vision');
     let finalResult: ProviderResponse | null = null;
     let emittedFinalText = false;
     let unresolvedDirectToolFailure: DirectToolFailureState | null = null;
@@ -1365,7 +1526,7 @@ export async function think(
             {
                 ...responseContinuation,
                 nativeFunctionTools,
-                imageAttachments: round === 1 ? imageAttachments : undefined,
+                imageAttachments: round === 1 && visionEnabled ? imageAttachments : undefined,
                 onReasoning,
                 guardStreamingText: supportsNativeTools && !plainChat,
             },

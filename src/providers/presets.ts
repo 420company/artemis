@@ -48,6 +48,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     // Endpoint: https://api.openai.com/v1/chat/completions
     baseUrl: 'https://api.openai.com/v1',
     suggestedModels: [
+      'gpt-5.5',
+      'gpt-5.5-mini',
+      'gpt-5.5-nano',
       'gpt-5.4',
       'gpt-5.4-mini',
       'gpt-5.4-nano',
@@ -72,8 +75,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'o4-mini',
     ],
     notes: {
-      zh: ['OpenAI 官方接口。', '标准 API 文档当前列出 gpt-5.4 / 5.2 / 5.1 / 5 系列、gpt-5-codex 系列，以及 gpt-4.1 / o3 / o4-mini。'],
-      en: ['Official OpenAI API.', 'The current standard API docs list the GPT-5.4 / 5.2 / 5.1 / 5 line, GPT-5-Codex variants, plus GPT-4.1 / o3 / o4-mini.'],
+      zh: ['OpenAI 官方接口。', '标准 API 文档当前列出 gpt-5.5 / 5.4 / 5.2 / 5.1 / 5 系列、gpt-5-codex 系列，以及 gpt-4.1 / o3 / o4-mini。'],
+      en: ['Official OpenAI API.', 'The current standard API docs list the GPT-5.5 / 5.4 / 5.2 / 5.1 / 5 line, GPT-5-Codex variants, plus GPT-4.1 / o3 / o4-mini.'],
     },
   },
 

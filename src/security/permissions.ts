@@ -79,6 +79,10 @@ function describeAction(action: AgentAction): string {
       return `generate image via BytePlus Seedream (${action.model ?? 'seedream-5-0-260128'})`;
     case 'generate_video':
       return `generate video via BytePlus Seedance (${action.model ?? 'seedance-1-5-pro-251215'})`;
+    case 'synthesize_speech':
+      return `synthesize speech with configured TTS${action.outputPath ? ` to ${action.outputPath}` : ''}`;
+    case 'transcribe_audio':
+      return `transcribe audio locally from ${action.inputPath}`;
     case 'spawn_background_workflow':
       return `spawn a detached background workflow for ${action.command}`;
     case 'request_freya_visual_asset':

@@ -231,6 +231,26 @@ function getLooseIntegerArg(
   return undefined;
 }
 
+function getLooseNumberArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    const value = getLooseArgValue(args, key);
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseFloat(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function getLooseBooleanArg(
   args: Record<string, unknown>,
   ...keys: string[]
@@ -455,6 +475,39 @@ function buildActionFromLooseArgs(
         generateAudio: getLooseBooleanArg(args, 'generateAudio', 'generate_audio', 'audio'),
         watermark: getLooseBooleanArg(args, 'watermark'),
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
+      };
+    }
+    case 'synthesize_speech':
+    case 'tts':
+    case 'text_to_speech': {
+      const text = getLooseStringArg(args, 'text', 'prompt', 'message');
+      if (!text?.trim()) return null;
+      return {
+        type: 'synthesize_speech',
+        text,
+        voice: getLooseStringArg(args, 'voice'),
+        language: getLooseStringArg(args, 'language', 'lang'),
+        outputPath: getLooseStringArg(args, 'outputPath', 'output_path', 'path', 'file'),
+        playAudio: getLooseBooleanArg(args, 'playAudio', 'play_audio'),
+        rate: getLooseNumberArg(args, 'rate'),
+        pitch: getLooseNumberArg(args, 'pitch'),
+      };
+    }
+    case 'transcribe_audio':
+    case 'stt':
+    case 'speech_to_text': {
+      const inputPath = getLooseStringArg(args, 'inputPath', 'input_path', 'path', 'file', 'audio');
+      if (!inputPath?.trim()) return null;
+      const model = getLooseStringArg(args, 'model') as Extract<AgentAction, { type: 'transcribe_audio' }>['model'];
+      const engine = getLooseStringArg(args, 'engine') as Extract<AgentAction, { type: 'transcribe_audio' }>['engine'];
+      return {
+        type: 'transcribe_audio',
+        inputPath,
+        language: getLooseStringArg(args, 'language', 'lang'),
+        model,
+        modelPath: getLooseStringArg(args, 'modelPath', 'model_path'),
+        engine,
+        command: getLooseStringArg(args, 'command', 'cmd'),
       };
     }
     default:
@@ -1033,6 +1086,8 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'apply_patch':
     case 'generate_image':
     case 'generate_video':
+    case 'synthesize_speech':
+    case 'transcribe_audio':
       return true;
     case 'run_command':
       return !runCommandLooksReadOnlyForExecutionEvidence(action.command);
@@ -1372,6 +1427,12 @@ function buildToolUiPayload(
         payload.prompt = action.prompt;
       }
       break;
+    case 'synthesize_speech':
+      payload.text = action.text;
+      break;
+    case 'transcribe_audio':
+      payload.path = action.inputPath;
+      break;
     default:
       break;
   }
@@ -1427,6 +1488,10 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `generate_image model=${action.model ?? 'seedream-5-0-260128'} prompt=${truncate(action.prompt, 120)}`;
     case 'generate_video':
       return `generate_video model=${action.model ?? 'seedance-1-5-pro-251215'} duration=${action.duration ?? 5}s prompt=${truncate(action.prompt, 120)}`;
+    case 'synthesize_speech':
+      return `synthesize_speech voice=${action.voice ?? 'configured'} text=${truncate(action.text, 120)}`;
+    case 'transcribe_audio':
+      return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
     case 'request_freya_visual_asset':
@@ -2455,6 +2520,28 @@ async function buildProviderMessages(
     systemSections.push('🧠 [Project Mnemosyne: Learned User Preferences]');
     systemSections.push(...globalInsights.map((i: any) => `- ${i.content}`));
     systemSections.push('');
+  }
+
+  try {
+    const latestUserMessage = [...context.messages]
+      .reverse()
+      .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
+    if (latestUserMessage) {
+      const { getMemoryProfile, MemoryEnhancementFactory } = await import('./memoryEnhancement.js');
+      const memoryProfile = await getMemoryProfile(cwd);
+      if (memoryProfile.enabled) {
+        const memory = await MemoryEnhancementFactory.create(memoryProfile, cwd);
+        await memory.initialize();
+        const memories = await memory.searchMemories(latestUserMessage, 5);
+        if (memories.length > 0) {
+          systemSections.push('🧠 [Enhanced Memory: Relevant Retrieved Context]');
+          systemSections.push(...memories.map((entry) => `- ${entry.text}`));
+          systemSections.push('');
+        }
+      }
+    }
+  } catch {
+    // Enhanced memory is opportunistic context; retrieval failures must not block the turn.
   }
 
   if (extensionSections.length > 0) {

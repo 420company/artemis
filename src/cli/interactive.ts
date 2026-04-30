@@ -215,7 +215,7 @@ import {
   readStoredVercelAuth,
   clearStoredVercelAuth,
 } from './vercelAuth.js'
-import { runMemoryEnhancementSetup } from './memorySetup.js'
+import { runSetupWizard } from './setupWizard.js'
 import { runFirstRunWelcome } from './firstRunWelcome.js'
 import { runWorkspaceTrustDialog } from './workspaceTrust.js'
 import { resolveWorkspaceIntent } from './workspaceIntent.js'
@@ -2078,7 +2078,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         prompt.clearBuffer()
         suppressInitialNewbornOnce = true
       } else if (configSubcommand === 'memory') {
-        await prompt.releaseTerminal(() => runMemoryEnhancementSetup(locale, cwd))
+        await prompt.releaseTerminal(() => runSetupWizard({ locale, cwd, section: 'memory' }))
         prompt.clearBuffer()
         suppressInitialNewbornOnce = true
       } else {

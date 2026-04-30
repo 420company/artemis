@@ -35,6 +35,7 @@ function getDefaultSetupConfig(): ArtemisSetupConfig {
       stt: {
         enabled: true,
         provider: 'local',
+        engine: 'auto',
         localModel: 'base',
         language: '',
       },
@@ -59,7 +60,7 @@ function getDefaultSetupConfig(): ArtemisSetupConfig {
         file: true,
         code_execution: true,
         vision: true,
-        image_gen: true,
+        image_gen: false,
         moa: false,
         tts: true,
         stt: true,
