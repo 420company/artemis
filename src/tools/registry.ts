@@ -340,6 +340,7 @@ function validateDelegateTaskAction(action: any): string[] {
   validateAgentRoleValue(action?.role, errors);
   validateRequiredNonEmptyString(action?.task, 'task', errors);
   validatePositiveInteger(action?.maxTurns, 'maxTurns', errors);
+  validateBooleanValue(action?.runInBackground, 'runInBackground', errors);
   return errors;
 }
 
@@ -426,6 +427,7 @@ function validateGenerateImageAction(action: any): string[] {
   validatePositiveInteger(action?.count, 'count', errors);
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateBooleanValue(action?.watermark, 'watermark', errors);
+  validateBooleanValue(action?.runInBackground, 'runInBackground', errors);
   return errors;
 }
 
@@ -445,6 +447,7 @@ function validateGenerateVideoAction(action: any): string[] {
   validateBooleanValue(action?.watermark, 'watermark', errors);
   validatePositiveInteger(action?.maxPolls, 'maxPolls', errors);
   validatePositiveInteger(action?.pollIntervalMs, 'pollIntervalMs', errors);
+  validateBooleanValue(action?.runInBackground, 'runInBackground', errors);
   return errors;
 }
 

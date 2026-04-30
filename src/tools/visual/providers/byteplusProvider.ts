@@ -1,6 +1,12 @@
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
 import { normalizeBytePlusMediaBaseUrl } from '../../byteplusMedia.js'
+import {
+  IMAGE_GENERATION_TIMEOUT_MS,
+  VIDEO_CREATE_TIMEOUT_MS,
+  VIDEO_POLL_TIMEOUT_MS,
+  ASSET_DOWNLOAD_TIMEOUT_MS,
+} from './timeouts.js'
 
 export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'
@@ -61,6 +67,7 @@ export class BytePlusProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
       })
 
       const raw = await res.text()
@@ -79,7 +86,7 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error('Response contained no downloadable URLs.')
       }
 
-      const imageRes = await fetch(item.url)
+      const imageRes = await fetch(item.url, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
       if (!imageRes.ok) {
         throw new Error(`Image download failed: HTTP ${imageRes.status}`)
       }
@@ -162,6 +169,7 @@ export class BytePlusProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(createBody),
+        signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
       })
 
       const createRaw = await createRes.text()
@@ -187,6 +195,7 @@ export class BytePlusProvider implements VisualProvider {
         
         const pollRes = await fetch(statusEndpoint, {
           headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS),
         })
         
         const pollRaw = await pollRes.text()
@@ -222,7 +231,7 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error(`Task ${taskId} did not finish within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const videoRes = await fetch(videoUrl)
+      const videoRes = await fetch(videoUrl, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
       if (!videoRes.ok) {
         throw new Error(`Video download failed: HTTP ${videoRes.status}`)
       }

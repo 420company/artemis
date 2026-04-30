@@ -7,6 +7,12 @@ import type {
   VisualGenerationParams,
   VisualProvider,
 } from './interface.js'
+import {
+  IMAGE_GENERATION_TIMEOUT_MS,
+  VIDEO_CREATE_TIMEOUT_MS,
+  VIDEO_POLL_TIMEOUT_MS,
+  ASSET_DOWNLOAD_TIMEOUT_MS,
+} from './timeouts.js'
 
 type CustomImageResponse = {
   data?: Array<{
@@ -71,6 +77,7 @@ export class CustomProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
       })
       const raw = await res.text()
       if (!res.ok) {
@@ -156,6 +163,7 @@ export class CustomProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body,
+        signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
       })
       const createRaw = await createRes.text()
       if (!createRes.ok) {
@@ -189,6 +197,7 @@ export class CustomProvider implements VisualProvider {
         await sleep(pollIntervalMs)
         const pollRes = await fetch(`${baseUrl}/videos/${encodeURIComponent(videoId)}`, {
           headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS),
         })
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
@@ -204,6 +213,7 @@ export class CustomProvider implements VisualProvider {
 
       const downloadRes = await fetch(`${baseUrl}/videos/${encodeURIComponent(videoId)}/content`, {
         headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
       })
       if (!downloadRes.ok) {
         const detail = await downloadRes.text().catch(() => '')
@@ -248,7 +258,7 @@ function normalizeRequiredBaseUrl(raw: string | undefined, assetKind: 'image' | 
 }
 
 async function downloadUrl(url: string): Promise<Buffer> {
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
   if (!res.ok) {
     throw new Error(`download failed: HTTP ${res.status}`)
   }

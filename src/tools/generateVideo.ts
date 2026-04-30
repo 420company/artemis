@@ -12,6 +12,11 @@ import {
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js';
 import { toolLog, toolWarn } from '../utils/log.js';
+import {
+  ASSET_DOWNLOAD_TIMEOUT_MS,
+  VIDEO_CREATE_TIMEOUT_MS,
+  VIDEO_POLL_TIMEOUT_MS,
+} from './visual/providers/timeouts.js';
 
 const DEFAULT_MODEL = 'seedance-1-5-pro-251215';
 const DEFAULT_RATIO = '16:9';
@@ -53,7 +58,9 @@ function sanitizeDuration(raw: number | undefined): number {
 }
 
 async function downloadUrl(url: string): Promise<Buffer> {
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
   const ab = await res.arrayBuffer();
   return Buffer.from(ab);
@@ -131,6 +138,7 @@ export async function executeGenerateVideo(
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(createBody),
+      signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
     });
 
     const createRaw = await createRes.text();
@@ -170,6 +178,7 @@ export async function executeGenerateVideo(
       await sleep(pollIntervalMs);
       const pollRes = await fetch(statusEndpoint, {
         headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS),
       });
       const pollRaw = await pollRes.text();
       if (!pollRes.ok) {

@@ -13,6 +13,10 @@ import {
     describeVisualProvider,
     resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js';
+import {
+    ASSET_DOWNLOAD_TIMEOUT_MS,
+    IMAGE_GENERATION_TIMEOUT_MS,
+} from './visual/providers/timeouts.js';
 
 const DEFAULT_MODEL = 'seedream-5-0-260128';
 const DEFAULT_SIZE = '2K';
@@ -40,7 +44,9 @@ function buildDefaultOutputPath(cwd: string, index: number, total: number, exten
 }
 
 async function downloadUrl(url: string): Promise<Buffer> {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+        signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
+    });
     if (!res.ok)
         throw new Error(`download failed: HTTP ${res.status}`);
     const ab = await res.arrayBuffer();
@@ -86,6 +92,7 @@ export async function executeGenerateImage(action: any, context: any) {
                 Authorization: `Bearer ${apiKey}`,
             },
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
         });
 
         const raw = await res.text();

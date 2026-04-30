@@ -103,6 +103,21 @@
       "url": "https://mcp.vercel.com"
     },
     {
+      "id": "cco-firebase-firebase",
+      "enabled": false,
+      "transport": "stdio",
+      "authType": "none",
+      "authState": "unknown",
+      "createdAt": "2026-04-30T00:00:00.000000+00:00",
+      "updatedAt": "2026-04-30T00:00:00.000000+00:00",
+      "command": "npx",
+      "commandArgs": [
+        "-y",
+        "firebase-tools@latest",
+        "mcp"
+      ]
+    },
+    {
       "id": "cco-zscaler-zscaler-mcp-server",
       "enabled": false,
       "transport": "stdio",

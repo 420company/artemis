@@ -8,10 +8,14 @@ import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } fr
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { compressMessages } from './core/contextCompressor.js';
 import { getToolDefinition } from './tools/registry.js';
+import {
+    getBackgroundTaskRegistry,
+    type BackgroundTaskKind,
+} from './core/backgroundTasks.js';
 import { resolveExtensionRuntime } from './extensions/runtime.js';
 import { EXTRA_TOOL_NAMES, executeExtraTool } from './tools/extras.js';
 import { buildDirectNativeFunctionTools, listDirectToolNames } from './tools/directTools.js';
-import type { WorkspaceSwitchRequest } from './tools/types.js';
+import type { ToolExecutionResult, WorkspaceSwitchRequest } from './tools/types.js';
 import { withRuntimeLogSink, type RuntimeLogLevel } from './utils/log.js';
 import {
     isPathInsideWorkspace,
@@ -36,6 +40,7 @@ const BASE_SYSTEM_PROMPT = `\
 - 收到任务先用一句话说要做什么，然后直接调工具动手——不要先讨论再行动
 - 复杂任务（≥3 步）开局先输出 markdown 任务清单：\`- [ ] xxx\` / \`- [-] 进行中\` / \`- [x] 完成\`，每完成一步立即更新清单
 - 没有依赖的工具调用一律并行（同一回合发多个工具调用），有依赖才串行
+- generate_image/generate_video 支持 runInBackground:true；只有当你能在没有生成文件路径的情况下继续做其它工作时才使用。当前答案或下一步工具依赖图片/视频结果时不要后台化，要等待真实工具结果。
 - 工具返回是唯一依据；未看到工具结果不得声称完成、修好、运行成功
 - 严禁伪造命令、工具结果、日志或文件内容
 
@@ -964,6 +969,9 @@ async function executeToolInner(name: any, input: any, opts: any) {
     const errors = tool.validate?.(action) ?? [];
     if (errors.length > 0)
         return buildDirectToolValidationFailure(name, errors);
+    if (isDirectBackgroundAction(action as AgentAction)) {
+        return startDirectBackgroundTool(action as Extract<AgentAction, { type: 'generate_image' | 'generate_video' }>, tool, opts);
+    }
     try {
         const result = await tool.execute(action, {
             cwd,
@@ -1050,6 +1058,109 @@ function makeSessionMessage(
         content,
         createdAt: new Date().toISOString(),
         ...extra,
+    };
+}
+
+function truncateForBackground(text: string, maxLength: number): string {
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function isDirectBackgroundAction(action: AgentAction): action is Extract<AgentAction, { type: 'generate_image' | 'generate_video' }> {
+    return (
+        (action as { runInBackground?: unknown }).runInBackground === true &&
+        (action.type === 'generate_image' || action.type === 'generate_video')
+    );
+}
+
+function describeDirectBackgroundTask(action: Extract<AgentAction, { type: 'generate_image' | 'generate_video' }>): string {
+    const noun = action.type === 'generate_image' ? 'image' : 'video';
+    return `${noun}: ${truncateForBackground(action.prompt, 60)}`;
+}
+
+function appendBackgroundSystemMessage(cwd: string, message: string): void {
+    try {
+        const active = getSession(cwd);
+        active.restore([
+            ...active.getMessages(),
+            makeSessionMessage('system', message),
+        ]);
+    } catch {
+        /* best-effort */
+    }
+}
+
+function startDirectBackgroundTool(
+    action: Extract<AgentAction, { type: 'generate_image' | 'generate_video' }>,
+    tool: NonNullable<ReturnType<typeof getToolDefinition>>,
+    opts: any,
+): ToolExecutionResult {
+    const registry = getBackgroundTaskRegistry();
+    const kind = action.type as BackgroundTaskKind;
+    const label = describeDirectBackgroundTask(action);
+    const taskId = registry.start<ToolExecutionResult>({
+        kind,
+        label,
+        runner: async () => {
+            const result = await tool.execute!(action, {
+                cwd: opts.cwd,
+                updateCwd: opts.updateCwd,
+                requestWorkspaceSwitch: opts.onWorkspaceSwitchRequest,
+            });
+            return {
+                action,
+                ok: result.ok,
+                output: result.output,
+                error: result.error,
+            };
+        },
+        isFailureResult: (result) => result.ok !== true,
+        onComplete: async (result, record) => {
+            const elapsedSec = Math.max(
+                1,
+                Math.floor(((record.completedAtMs ?? Date.now()) - record.startedAtMs) / 1000),
+            );
+            const tag = result.ok ? '完成' : '失败';
+            const output = truncateForBackground(result.output ?? '', 800);
+            appendBackgroundSystemMessage(
+                opts.cwd,
+                `[background_task ${record.id}] ${kind} ${tag}（耗时 ${elapsedSec}s）\n${output}`,
+            );
+            opts.onToolLog?.(
+                `[background] ${kind} ${record.id} ${result.ok ? 'ok' : 'failed'} in ${elapsedSec}s`,
+                result.ok ? 'info' : 'warn',
+            );
+        },
+        onError: async (error, record) => {
+            const elapsedSec = Math.max(
+                1,
+                Math.floor(((record.completedAtMs ?? Date.now()) - record.startedAtMs) / 1000),
+            );
+            appendBackgroundSystemMessage(
+                opts.cwd,
+                `[background_task ${record.id}] ${kind} 异常（耗时 ${elapsedSec}s）\n${truncateForBackground(error.message, 800)}`,
+            );
+            opts.onToolLog?.(
+                `[background] ${kind} ${record.id} threw: ${error.message}`,
+                'error',
+            );
+        },
+    });
+
+    opts.onToolLog?.(`[background] ${kind} ${taskId} started: ${label}`, 'info');
+
+    return {
+        action,
+        ok: true,
+        output: [
+            'Background task started.',
+            `task_id: ${taskId}`,
+            `kind: ${kind}`,
+            `label: ${label}`,
+            '',
+            'The tool is running asynchronously. Continue only with work that does not need this result.',
+            `A later turn will receive [background_task ${taskId}] with the generated file path or failure details.`,
+        ].join('\n'),
     };
 }
 

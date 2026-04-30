@@ -892,6 +892,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
           task: nonEmptyStringSchema('Focused delegated subtask.'),
           maxTurns: integerSchema('Optional max turns for the delegated specialist.'),
+          runInBackground: {
+            type: 'boolean',
+            description: 'Run asynchronously only when the main thread can continue without this result until a later turn. Omit or false when the next step depends on the delegated answer.',
+          },
         },
       };
     case 'spawn_background_workflow':
@@ -1014,6 +1018,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             type: 'boolean',
             description: 'Request a provider watermark when supported. Default: configured visual profile setting.',
           },
+          runInBackground: {
+            type: 'boolean',
+            description: 'Run asynchronously only when the generated file path is not needed before the next user turn. Omit or false when the current answer/workflow needs the image result.',
+          },
         },
       };
     case 'generate_video':
@@ -1042,6 +1050,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
           maxPolls: integerSchema('Optional max poll attempts.'),
           pollIntervalMs: integerSchema('Optional poll interval in milliseconds.'),
+          runInBackground: {
+            type: 'boolean',
+            description: 'Run asynchronously only when the generated file path is not needed before the next user turn. Omit or false when the current answer/workflow needs the video result.',
+          },
         },
       };
     case 'request_freya_visual_asset':

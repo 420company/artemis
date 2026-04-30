@@ -325,6 +325,7 @@ export type AgentAction =
       role: AgentRole;
       task: string;
       maxTurns?: number;
+      runInBackground?: boolean;
     }
   | {
       type: 'spawn_background_workflow';
@@ -376,6 +377,7 @@ export type AgentAction =
       count?: number;
       outputPath?: string;
       watermark?: boolean;
+      runInBackground?: boolean;
     }
   | {
       type: 'generate_video';
@@ -389,6 +391,7 @@ export type AgentAction =
       watermark?: boolean;
       maxPolls?: number;
       pollIntervalMs?: number;
+      runInBackground?: boolean;
     }
   | {
       type: 'request_freya_visual_asset';

@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
+import { readFileSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
 import type { AgentAction } from '../core/types.js';
 import { invalidateWalkFilesCache, truncate } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
@@ -9,6 +11,49 @@ import {
   resolveWorkspaceCandidatePath,
   resolveWorkspaceForTargetPath,
 } from '../utils/workspaceRoots.js';
+
+// Detect whether the user's command actually invokes the vercel CLI binary
+// (vs. just mentions "vercel" as an argument like `npm install vercel`).
+// Two cases qualify:
+//   (a) bare `vercel` at the start of a shell-command segment, or
+//   (b) `vercel` immediately after a known wrapper (npx / bunx / pnpm dlx / etc.).
+const VERCEL_BARE_AT_SEGMENT_START = /(^|[;&|]\s*)\s*vercel\b/;
+const VERCEL_AFTER_WRAPPER = /\b(?:npx|bunx|pnpm\s+(?:dlx|exec)|yarn(?:\s+dlx)?)\s+vercel\b/;
+const VERCEL_BUN_X = /\bbun\s+x\s+vercel\b/;
+function isVercelInvocation(command: string): boolean {
+  return (
+    VERCEL_BARE_AT_SEGMENT_START.test(command) ||
+    VERCEL_AFTER_WRAPPER.test(command) ||
+    VERCEL_BUN_X.test(command)
+  );
+}
+
+function readSavedVercelToken(): string | null {
+  try {
+    const storePath = joinPath(homedir(), '.artemis', 'vercel.json');
+    const raw = readFileSync(storePath, 'utf8');
+    const parsed = JSON.parse(raw) as { token?: unknown };
+    return typeof parsed?.token === 'string' && parsed.token.length > 0
+      ? parsed.token
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build the env passed to spawn(). Starts from process.env and adds an
+ * auto-injected VERCEL_TOKEN only when (1) the command uses the vercel CLI
+ * and (2) the user hasn't set VERCEL_TOKEN themselves. Read fresh on every
+ * spawn so `/vercel logout` takes effect immediately without restart.
+ */
+function buildSpawnEnv(command: string): NodeJS.ProcessEnv {
+  if (process.env.VERCEL_TOKEN) return process.env;
+  if (!isVercelInvocation(command)) return process.env;
+  const token = readSavedVercelToken();
+  if (!token) return process.env;
+  return { ...process.env, VERCEL_TOKEN: token };
+}
 
 // ── sensitive command guard ───────────────────────────────────────────────────
 // Any of these in the command string (after $VAR and ~ expansion and quote
@@ -235,12 +280,19 @@ export async function executeRunCommand(
     `exit $__artemis_rc' EXIT`;
   const wrappedCommand = [trapLine, action.command].join('\n');
 
+  // Auto-inject saved Vercel token when the user's command involves the
+  // vercel CLI. This lets `/vercel` set up auth once and have every later
+  // `vercel ...` / `npx vercel ...` invocation pick it up without manual
+  // env-var juggling. Only injected when no VERCEL_TOKEN already in env, so
+  // explicit user-set values still win.
+  const spawnEnv = buildSpawnEnv(action.command);
+
   return new Promise<ToolExecutionResult>((resolve) => {
     const child = spawn(wrappedCommand, {
       cwd: context.cwd,
       shell: true,
       windowsHide: true,
-      env: process.env,
+      env: spawnEnv,
     });
 
     let stdout = '';

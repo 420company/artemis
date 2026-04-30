@@ -14,6 +14,7 @@
     "@upstash/context7-mcp": "latest",
     "@wix/mcp-remote": "latest",
     "chrome-devtools-mcp": "latest",
+    "firebase-tools": "latest",
     "helius-mcp": "latest",
     "prisma": "latest"
   }

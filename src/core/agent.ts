@@ -88,6 +88,10 @@ import {
 } from './evidence.js';
 import { recordHeimdallEvent } from './heimdall.js';
 import {
+  getBackgroundTaskRegistry,
+  type BackgroundTaskKind,
+} from './backgroundTasks.js';
+import {
   finalizeHeimdallThreadState,
   persistHeimdallActionArtifact,
   prepareHeimdallThreadState,
@@ -386,6 +390,7 @@ function buildActionFromLooseArgs(
         role,
         task,
         maxTurns: getLooseIntegerArg(args, 'maxTurns', 'max_turns'),
+        runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
       };
     }
     case 'approve_builder_execution': {
@@ -422,6 +427,7 @@ function buildActionFromLooseArgs(
           'file_path',
         ),
         watermark: getLooseBooleanArg(args, 'watermark'),
+        runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
       };
     }
     case 'generate_video':
@@ -448,6 +454,7 @@ function buildActionFromLooseArgs(
         ),
         generateAudio: getLooseBooleanArg(args, 'generateAudio', 'generate_audio', 'audio'),
         watermark: getLooseBooleanArg(args, 'watermark'),
+        runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
       };
     }
     default:
@@ -4510,6 +4517,163 @@ function buildGuardrailFailureOutcome(
   };
 }
 
+/**
+ * Decide whether an action should run in the background (fire-and-forget),
+ * letting the agent loop continue with other work while the slow tool
+ * progresses asynchronously. Completion is delivered as a `system` message in
+ * a later turn.
+ *
+ * Conservative whitelist — only tools that:
+ *   (a) routinely take >10s to complete,
+ *   (b) produce a self-contained artifact (file path / text result), and
+ *   (c) the model is unlikely to need to gate the *current* turn on,
+ * are eligible. Adding more types here is a deliberate decision per tool.
+ */
+function isBackgroundEligibleAction(action: AgentAction): boolean {
+  if ((action as { runInBackground?: unknown }).runInBackground !== true) {
+    return false;
+  }
+  if (action.type === 'generate_image' || action.type === 'generate_video') {
+    return true;
+  }
+  if (action.type === 'delegate_task') {
+    const tool = getToolDefinition(action.type);
+    return tool?.parallelSafe === true;
+  }
+  return false;
+}
+
+function describeBackgroundTaskLabel(action: AgentAction): string {
+  if (action.type === 'generate_image' || action.type === 'generate_video') {
+    const promptText =
+      typeof (action as { prompt?: unknown }).prompt === 'string'
+        ? truncate((action as { prompt: string }).prompt, 60)
+        : '(no prompt)';
+    const noun = action.type === 'generate_image' ? 'image' : 'video';
+    return `${noun}: ${promptText}`;
+  }
+  if (action.type === 'delegate_task') {
+    const role = typeof action.role === 'string' ? action.role : 'agent';
+    const taskText =
+      typeof action.task === 'string' ? truncate(action.task, 60) : 'task';
+    return `delegate(${role}): ${taskText}`;
+  }
+  return action.type;
+}
+
+/**
+ * Fork a background-eligible action into the registry and synthesize an
+ * immediate "started" outcome so the agent loop can proceed. The real result
+ * is appended to the session as a `system` message when the runner resolves.
+ */
+function startBackgroundAction(
+  session: SessionRecord,
+  hydratedAction: AgentAction,
+  options: RunAgentOptions,
+): ActionOutcome {
+  const registry = getBackgroundTaskRegistry();
+  const kind = hydratedAction.type as BackgroundTaskKind;
+  const label = describeBackgroundTaskLabel(hydratedAction);
+
+  const taskId = registry.start({
+    kind,
+    label,
+    runner: () => executeAgentAction(session, hydratedAction, options),
+    isFailureResult: (result) => result.ok !== true,
+    onComplete: async (result, record) => {
+      const elapsedSec = Math.max(
+        1,
+        Math.floor(
+          ((record.completedAtMs ?? Date.now()) - record.startedAtMs) / 1000,
+        ),
+      );
+      const outputExcerpt = truncate(result.output ?? '', 600);
+      const tag = result.ok ? '完成' : '失败';
+      const message =
+        `[background_task ${record.id}] ${kind} ${tag}（耗时 ${elapsedSec}s）\n` +
+        outputExcerpt;
+      try {
+        options.sessionStore.appendMessage(session, 'system', message);
+        await options.sessionStore.save(session);
+      } catch {
+        /* best-effort */
+      }
+      options.onInfo?.(
+        `[background] ${kind} ${record.id} ${result.ok ? 'ok' : 'failed'} in ${elapsedSec}s`,
+      );
+      try {
+        await recordHeimdallActionEvent(
+          session,
+          options,
+          result.ok ? 'action_completed' : 'action_failed',
+          hydratedAction,
+          {
+            background_task_id: record.id,
+            elapsed_sec: String(elapsedSec),
+            result_ok: String(result.ok),
+            output_excerpt: truncate(result.output ?? '', 160),
+          },
+        );
+      } catch {
+        /* heimdall failures must never break the foreground flow */
+      }
+    },
+    onError: async (error, record) => {
+      const elapsedSec = Math.max(
+        1,
+        Math.floor(
+          ((record.completedAtMs ?? Date.now()) - record.startedAtMs) / 1000,
+        ),
+      );
+      const message =
+        `[background_task ${record.id}] ${kind} 异常（耗时 ${elapsedSec}s）\n` +
+        truncate(error.message, 600);
+      try {
+        options.sessionStore.appendMessage(session, 'system', message);
+        await options.sessionStore.save(session);
+      } catch {
+        /* best-effort */
+      }
+      options.onInfo?.(
+        `[background] ${kind} ${record.id} threw: ${error.message}`,
+      );
+      try {
+        await recordHeimdallActionEvent(
+          session,
+          options,
+          'action_failed',
+          hydratedAction,
+          {
+            background_task_id: record.id,
+            elapsed_sec: String(elapsedSec),
+            error: truncate(error.message, 160),
+          },
+        );
+      } catch {
+        /* swallow */
+      }
+    },
+  });
+
+  options.onInfo?.(
+    `[background] ${kind} ${taskId} started: ${label}`,
+  );
+
+  const startedNotice =
+    `Background task started.\n` +
+    `task_id: ${taskId}\n` +
+    `kind: ${kind}\n` +
+    `label: ${label}\n\n` +
+    `这个工具已经在后台启动；你不需要等它完成。请继续做其它工作（例如调用其它工具、规划下一步、或者答复用户）。\n` +
+    `任务完成后，结果会以一条独立的 [background_task ${taskId}] system 消息出现在后续 turn 的上下文里。届时再读取并使用结果。`;
+
+  return {
+    action: hydratedAction,
+    ok: true,
+    output: startedNotice,
+  };
+}
+
 async function executeAuthorizedAction(
   session: SessionRecord,
   action: AgentAction,
@@ -4590,6 +4754,14 @@ async function executeAuthorizedAction(
         pre_authorized: String(preAuthorized),
       },
     );
+
+    // Background dispatch for slow, self-contained tools — see
+    // isBackgroundEligibleAction. The real runner is detached; we return
+    // immediately so the foreground turn can proceed in parallel.
+    if (isBackgroundEligibleAction(hydratedAction)) {
+      return startBackgroundAction(session, hydratedAction, options);
+    }
+
     const result = await executeAgentAction(session, hydratedAction, options);
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;

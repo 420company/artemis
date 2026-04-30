@@ -185,6 +185,7 @@ Ninety MCP servers ship with Artemis, pre-configured and ready to enable. Zero m
 |--------|---------|-----------------|
 | `cco-github-github` | GitHub | Repos, PRs, Issues, Actions |
 | `cco-vercel-vercel` | Vercel | Deploy, logs, domains |
+| `cco-firebase-firebase` | Firebase | Projects, Firestore, Hosting, Auth |
 | `cco-prisma-prisma-local` | Prisma | Schema management, migrations |
 | `cco-notion-notion` | Notion | Databases, documents |
 | `cco-slack-slack` | Slack | Channels, messages, users |
@@ -197,7 +198,7 @@ Ninety MCP servers ship with Artemis, pre-configured and ready to enable. Zero m
 | `cco-azure-azure` | Azure | Resource management |
 | `cco-sourcegraph-sourcegraph` | Sourcegraph | Deep codebase search |
 
-Transport types: 53 streamable HTTP (zero setup), 22 npm/npx, 9 Python/uvx, 4 binary.
+Transport types: 53 streamable HTTP (zero setup), 23 npm/npx, 9 Python/uvx, 4 binary.
 
 ---
 
@@ -476,9 +477,10 @@ npm run typecheck  # must pass with zero errors
 npm run lint       # ESLint
 npm run test:all   # run all smoke tests
 npm run build      # compile to dist/
+npm run release:check  # validate release readiness
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [docs/RELEASE.md](docs/RELEASE.md) for the GitHub/npm release flow.
 
 ---
 
@@ -643,9 +645,10 @@ npm install
 npm run run        # 从源码运行
 npm run typecheck  # 必须零错误
 npm run build      # 编译至 dist/
+npm run release:check  # 发布前完整检查
 ```
 
-详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub/npm 发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ---
 

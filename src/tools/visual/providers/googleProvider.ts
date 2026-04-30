@@ -15,6 +15,12 @@ import type {
   VisualGenerationParams,
   VisualProvider,
 } from './interface.js'
+import {
+  IMAGE_GENERATION_TIMEOUT_MS,
+  VIDEO_CREATE_TIMEOUT_MS,
+  VIDEO_POLL_TIMEOUT_MS,
+  ASSET_DOWNLOAD_TIMEOUT_MS,
+} from './timeouts.js'
 
 const GOOGLE_API_BASE = 'https://generativelanguage.googleapis.com/v1beta'
 
@@ -58,6 +64,7 @@ export class GoogleProvider implements VisualProvider {
           contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
           generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
         }),
+        signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
       })
 
       if (!response.ok) {
@@ -113,6 +120,7 @@ export class GoogleProvider implements VisualProvider {
           instances: [{ prompt: params.prompt }],
           parameters: { aspectRatio, durationSeconds, personGeneration: 'allow_all' },
         }),
+        signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
       })
       if (!startResponse.ok) {
         const body = await startResponse.text().catch(() => '')
@@ -130,7 +138,7 @@ export class GoogleProvider implements VisualProvider {
       let videoUri: string | undefined
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
-        const pollResponse = await fetch(pollEndpoint)
+        const pollResponse = await fetch(pollEndpoint, { signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS) })
         if (!pollResponse.ok) {
           const body = await pollResponse.text().catch(() => '')
           throw new Error(`Google Veo poll ${pollResponse.status}: ${body.slice(0, 400)}`)
@@ -151,7 +159,7 @@ export class GoogleProvider implements VisualProvider {
       if (!videoUri) throw new Error('Google Veo did not return a video within the timeout.')
 
       const downloadUrl = videoUri.includes('?') ? `${videoUri}&key=${encodeURIComponent(apiKey)}` : `${videoUri}?key=${encodeURIComponent(apiKey)}`
-      const downloadResponse = await fetch(downloadUrl)
+      const downloadResponse = await fetch(downloadUrl, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
       if (!downloadResponse.ok) {
         throw new Error(`Failed to download Veo video: ${downloadResponse.status}`)
       }

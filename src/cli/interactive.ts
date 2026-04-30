@@ -179,6 +179,10 @@ import type { ThinkOptions } from '../brain.js'
 import { chooseInteractiveOption, type SlashMenuItem } from './prompt.js'
 import { createBlessedPrompt, type BlessedPromptHandle } from './blessedPrompt.js'
 import { runBundle, shouldAutoBundle } from '../core/bundle.js'
+import {
+  getBackgroundTaskRegistry,
+  formatBackgroundTaskLine,
+} from '../core/backgroundTasks.js'
 import { runBundleDialog } from './bundleDialog.js'
 import { runBundleOnboarding } from './bundleOnboarding.js'
 import { formatToolDone, formatToolPermission, formatToolResultPreview } from './toolRender.js'
@@ -206,6 +210,11 @@ import { OdinStore } from '../odin/store.js'
 import { CronScheduler } from '../services/cron.js'
 import { BragiStore } from '../bragi/store.js'
 import { runOnboarding, runVisualModelSetup } from './onboarding.js'
+import {
+  runVercelAuthWizard,
+  readStoredVercelAuth,
+  clearStoredVercelAuth,
+} from './vercelAuth.js'
 import { runMemoryEnhancementSetup } from './memorySetup.js'
 import { runFirstRunWelcome } from './firstRunWelcome.js'
 import { runWorkspaceTrustDialog } from './workspaceTrust.js'
@@ -749,8 +758,8 @@ function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): stri
             `       ${tint('    > = <   ', TL.note)}`,
             `       ${tint('   /     \\  ', TL.note)}`,
           ]
-          // 
-          const catFrameIndex = Math.floor(Date.now() / 500) % 3
+          // 1200ms per face (gentle breathing rhythm — was 500ms which felt too flashy)
+          const catFrameIndex = Math.floor(Date.now() / 1200) % 3
           const animatedCatFrames = [
             [
               `       ${tint('    /\\_/\\   ', TL.note)}`,
@@ -780,7 +789,8 @@ function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): stri
         `       ${tint('· Meow to the Moon! 🚀 ', TL.tagGold)}`,
         `       ${tint('· Meow to the Moon! 🚀 ', TL.tagGreen)}`,
       ]
-      const textFrameIndex = Math.floor(Date.now() / 200) % animationFrames.length
+      // 800ms per color (was 200ms which strobed unpleasantly)
+      const textFrameIndex = Math.floor(Date.now() / 800) % animationFrames.length
       lines.push(animationFrames[textFrameIndex])
         }
       }
@@ -1228,6 +1238,90 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
   }
 
+  // ── Background-task visibility panel ────────────────────────────────────
+  // Renders a live block listing all currently-running background tools
+  // (image gen, video gen, parallel-safe delegate_task) so the user can SEE
+  // multi-agent activity unfolding instead of staring at a single spinner.
+  // Backed by the BackgroundTaskRegistry singleton.
+  const bgRegistry = getBackgroundTaskRegistry()
+  let bgPanelIndex: number | null = null
+
+  const renderBgPanel = (): string => {
+    const all = bgRegistry.listAll()
+    const active = all.filter(r => r.status === 'running')
+    const recentlyDone = all.filter(
+      r => r.status !== 'running' &&
+        r.completedAtMs !== undefined &&
+        Date.now() - r.completedAtMs < 5000,
+    )
+    const lines: string[] = []
+    if (active.length > 0) {
+      lines.push(t(
+        `${active.length} 个后台 agent 正在工作（不会阻塞主对话）：`,
+        `${active.length} background agent(s) running (main turn not blocked):`,
+      ))
+      for (const r of active) {
+        lines.push('  ' + formatBackgroundTaskLine(r))
+      }
+    }
+    if (recentlyDone.length > 0) {
+      if (active.length > 0) lines.push('')
+      lines.push(t('刚刚完成：', 'Recently finished:'))
+      for (const r of recentlyDone) {
+        lines.push('  ' + formatBackgroundTaskLine(r))
+      }
+    }
+    return renderPlainPanel(
+      t('🌀 多 Agent 并行', '🌀 Multi-agent parallel'),
+      lines,
+    )
+  }
+
+  const updateBgPanel = (): void => {
+    const all = bgRegistry.listAll()
+    const hasActive = all.some(r => r.status === 'running')
+    const hasRecentlyDone = all.some(
+      r => r.status !== 'running' &&
+        r.completedAtMs !== undefined &&
+        Date.now() - r.completedAtMs < 5000,
+    )
+    const shouldShow = hasActive || hasRecentlyDone
+
+    if (!shouldShow) {
+      // No active or recently-finished tasks. Drop the panel index so the
+      // next task creates a fresh block rather than appending to a stale
+      // one. Pruning keeps the registry from growing unbounded.
+      if (bgPanelIndex !== null) {
+        removeScrollBlock(bgPanelIndex)
+      }
+      bgPanelIndex = null
+      bgRegistry.pruneFinished(5000)
+      return
+    }
+
+    const text = renderBgPanel()
+    if (bgPanelIndex === null) {
+      bgPanelIndex = appendScrollBlock({
+        kind: 'system',
+        text,
+        preserveAnsi: true,
+      })
+    } else {
+      updateScrollBlock(bgPanelIndex, {
+        kind: 'system',
+        text,
+        preserveAnsi: true,
+      })
+    }
+  }
+
+  bgRegistry.on('change', updateBgPanel)
+  // Tick once per second so elapsed-time counters refresh smoothly even
+  // while no registry changes fire (a long-running image gen has no events
+  // until completion).
+  const bgPanelTick = setInterval(updateBgPanel, 1000)
+  bgPanelTick.unref?.()
+
   const sensitiveWorkspaceRoots = [
     path.join(HOME_DIR, '.ssh'),
     path.join(HOME_DIR, '.gnupg'),
@@ -1667,6 +1761,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/locale',     hint: t('切换界面语言',               'Switch UI language') },
     { value: '/config',     hint: t('重新配置 AI 提供商',         'Reconfigure AI provider') },
     { value: '/config visual', hint: t('单独配置视觉模型',        'Configure visual model only') },
+    { value: '/visual',     hint: t('快捷修改视觉 API 配置',     'Quick-edit visual API config') },
+    { value: '/vercel',     hint: t('配置 Vercel 部署 token',    'Configure Vercel deployment token') },
     { value: '/config memory', hint: t('配置记忆增强',           'Configure memory enhancement') },
     { value: '/newborn',    hint: t('重置全部配置',               'Wipe config & re-run setup') },
     // ── 其他 ──
@@ -2015,6 +2111,49 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             hud.pluginCount  = Object.values(bragiData.platforms).filter(p => p?.enabled).length
           } catch { /* ignore */ }
         }
+      }
+      continue
+    }
+
+    // ── /visual — Reconfigure visual (image/video) model only ───────────────
+    if (trimmed === '/visual' || trimmed === '/vision') {
+      await askAndSaveSession(trimmed)
+      prompt.clearBuffer()
+      await prompt.releaseTerminal(() => runVisualModelSetup(locale, cwd))
+      prompt.clearBuffer()
+      suppressInitialNewbornOnce = true
+      continue
+    }
+
+    // ── /vercel — Configure Vercel deployment token in-CLI ───────────────────
+    if (trimmed === '/vercel' || trimmed.startsWith('/vercel ')) {
+      const sub = trimmed.slice('/vercel'.length).trim().toLowerCase()
+      await askAndSaveSession(trimmed)
+      prompt.clearBuffer()
+      if (sub === 'logout' || sub === 'clear') {
+        const had = await clearStoredVercelAuth()
+        appendSystemPanel(
+          t('Vercel 授权', 'Vercel auth'),
+          had
+            ? [t('已清除已保存的 token。', 'Cleared saved token.')]
+            : [t('当前没有保存的 token。', 'No saved token to clear.')],
+        )
+      } else if (sub === 'status') {
+        const rec = await readStoredVercelAuth()
+        appendSystemPanel(
+          t('Vercel 授权状态', 'Vercel auth status'),
+          rec
+            ? [
+                `${t('已配置', 'Configured')} (${rec.userEmail ?? rec.username ?? rec.userName ?? '?'})`,
+                `${t('保存于', 'Saved at')} ${rec.savedAt}`,
+                t('运行 /vercel 可重新授权或更换 token。', 'Run /vercel to reconfigure or replace the token.'),
+              ]
+            : [t('未配置。运行 /vercel 完成首次授权。', 'Not configured. Run /vercel to complete first-time auth.')],
+        )
+      } else {
+        await prompt.releaseTerminal(() => runVercelAuthWizard(locale))
+        prompt.clearBuffer()
+        suppressInitialNewbornOnce = true
       }
       continue
     }
@@ -3961,6 +4100,10 @@ function renderHelp(locale: UiLocale): string {
     `/permission [mode] ${t('切换权限模式', 'Show / switch permission mode')}`,
     `/config            ${t('重新配置提供商', 'Reconfigure AI provider')}`,
     `/config visual     ${t('单独配置视觉模型', 'Configure visual model only')}`,
+    `/visual            ${t('快捷修改视觉 API 配置', 'Quick-edit visual API config')}`,
+    `/vercel            ${t('配置 Vercel 部署 token', 'Configure Vercel deployment token')}`,
+    `/vercel status     ${t('查看 Vercel 授权状态', 'Show Vercel auth status')}`,
+    `/vercel logout     ${t('清除已保存的 Vercel token', 'Clear saved Vercel token')}`,
     `/config memory     ${t('配置记忆增强', 'Configure memory enhancement')}`,
     `/newborn           ${t('清空配置并重新引导', 'Wipe config and re-run setup')}`,
     `/exit              ${t('退出程序', 'Exit')}`,

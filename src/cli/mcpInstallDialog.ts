@@ -107,8 +107,8 @@ const CAT_SCENE = '✦  ·   ✦   𓃠   ✦   ·  ✦  ·  '
 const COPY = {
   'zh-CN': {
     title:    '✦ MCP 插件依赖安装 ✦',
-    subtitle: 'Artemis 内置 90 个 MCP 服务插件',
-    desc1:    '其中 22 个插件需要安装 npm 依赖包',
+    subtitle: 'Artemis 内置 91 个 MCP 服务插件',
+    desc1:    '其中 23 个插件需要安装 npm 依赖包',
     desc2:    '约 360 个包，安装后约 1.4 GB，需要 2-5 分钟',
     desc3:    '请确保网络通畅，也可以跳过稍后再安装',
     yes:      '✦ 立即安装全部依赖',
@@ -126,8 +126,8 @@ const COPY = {
   },
   'en': {
     title:    '✦ MCP Plugin Setup ✦',
-    subtitle: 'Artemis ships with 90 MCP plugin servers',
-    desc1:    '22 of them require npm package dependencies',
+    subtitle: 'Artemis ships with 91 MCP plugin servers',
+    desc1:    '23 of them require npm package dependencies',
     desc2:    '~360 packages, ~1.4 GB installed, takes 2–5 minutes',
     desc3:    'You can skip and install later when needed',
     yes:      '✦ Install all now',
