@@ -232,6 +232,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
             targetId: m.targetId,
             targetLabel: `${m.targetLabel} · ${m.authorLabel}`,
             text: m.text,
+            sourceMessageId: m.messageId,
           })),
         }
       },

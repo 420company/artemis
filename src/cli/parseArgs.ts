@@ -92,7 +92,7 @@ ${t('用法', 'Usage')}:
 
 ${t('命令', 'Commands')}:
   chat              ${t('交互式对话（默认）', 'Interactive chat (default)')}
-  setup [section]   ${t('完整配置向导；section 可为 model/visual/gateway/agent/memory/terminal/tts/tools/session', 'Setup wizard; section can be model/visual/gateway/agent/memory/terminal/tts/tools/session')}
+  setup [section]   ${t('完整配置向导；section 可为 model/bundle/skills/visual/gateway/memory/cron/terminal/tts/session', 'Setup wizard; section can be model/bundle/skills/visual/gateway/memory/cron/terminal/tts/session')}
   config [section]  ${t('查看配置；或用 --setup / section 进入配置向导', 'View config; use --setup or a section to enter setup')}
   doctor            ${t('检查环境健康状况', 'Check environment health')}
   resume [id]       ${t('恢复会话', 'Resume a session')}

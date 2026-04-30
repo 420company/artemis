@@ -143,6 +143,10 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
       console.log(t('使用本地嵌入算法，无需网络连接'));
     }
   }
+  console.log('');
+  console.log(t('怎么使用：进入主界面后不需要手动启动；每次会话结束时，系统会自动提炼长期偏好/项目事实并写入增强记忆。'));
+  console.log(t('下次提出相似问题时，相关记忆会自动检索并注入上下文。'));
+  console.log(t('你可以之后运行 artemis setup memory 重新配置，或查看 .artemis/enhanced-memory.json 确认本地索引是否生成。'));
 
   return config;
 }

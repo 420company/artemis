@@ -1127,8 +1127,8 @@ async function runConfig(options: { cwd: string; locale: UiLocale }): Promise<vo
   ))
   console.log()
   console.log(t(
-    '  运行 artemis setup 打开完整向导；artemis setup model/visual/gateway/agent/memory/terminal/tts/tools/session 可单独配置模块。',
-    '  Run artemis setup for the full wizard; artemis setup model/visual/gateway/agent/memory/terminal/tts/tools/session configures a section.'
+    '  运行 artemis setup 打开完整向导；artemis setup model/bundle/skills/visual/gateway/memory/cron/terminal/tts/session 可单独配置模块。',
+    '  Run artemis setup for the full wizard; artemis setup model/bundle/skills/visual/gateway/memory/cron/terminal/tts/session configures a section.'
   ))
   console.log()
 }

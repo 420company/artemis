@@ -10,6 +10,9 @@
  */
 
 import { think, resetSession, getMessages, restoreSession } from '../brain.js'
+import { open, readFile, unlink } from 'node:fs/promises'
+import { hostname } from 'node:os'
+import path from 'node:path'
 import { SessionStore } from '../storage/sessions.js'
 import type { SessionRecord } from '../core/types.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
@@ -17,7 +20,7 @@ import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
 import { pickLocale } from '../cli/locale.js'
 import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js'
-import { truncate } from '../utils/fs.js'
+import { ensureDir, resolveDataRootDir, truncate } from '../utils/fs.js'
 import stripAnsi from 'strip-ansi'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
@@ -90,6 +93,7 @@ export type BragiInboundMessage = {
   targetId: string
   targetLabel: string
   text: string
+  sourceMessageId?: string
   scope?: string
   images?: import('../providers/types.ts').ImageAttachment[]
 }
@@ -323,10 +327,108 @@ function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+type BridgeLockInfo = {
+  pid: number
+  hostname: string
+  platform: BridgePlatform
+  startedAt: string
+}
+
+function bridgeLockPath(cwd: string, platform: BridgePlatform): string {
+  return path.join(resolveDataRootDir(cwd), `bridge-lock-${platform}.json`)
+}
+
+function isProcessRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    const code =
+      err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+        ? err.code
+        : undefined
+    return code === 'EPERM'
+  }
+}
+
+async function readBridgeLock(cwd: string, platform: BridgePlatform): Promise<BridgeLockInfo | undefined> {
+  try {
+    const raw = await readFile(bridgeLockPath(cwd, platform), 'utf8')
+    const parsed = JSON.parse(raw) as Partial<BridgeLockInfo>
+    if (
+      typeof parsed.pid === 'number' &&
+      typeof parsed.hostname === 'string' &&
+      parsed.platform === platform &&
+      typeof parsed.startedAt === 'string'
+    ) {
+      return parsed as BridgeLockInfo
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+async function tryAcquireBridgeLock(
+  cwd: string,
+  platform: BridgePlatform,
+  onInfo?: (message: string) => void,
+): Promise<(() => Promise<void>) | undefined> {
+  const p = bridgeLockPath(cwd, platform)
+  await ensureDir(path.dirname(p))
+
+  const writeLock = async (): Promise<() => Promise<void>> => {
+    const info: BridgeLockInfo = {
+      pid: process.pid,
+      hostname: hostname(),
+      platform,
+      startedAt: new Date().toISOString(),
+    }
+    const handle = await open(p, 'wx')
+    try {
+      await handle.writeFile(JSON.stringify(info, null, 2), 'utf8')
+    } finally {
+      await handle.close()
+    }
+
+    return async () => {
+      const current = await readBridgeLock(cwd, platform)
+      if (current?.pid !== process.pid) return
+      await unlink(p).catch(() => {})
+    }
+  }
+
+  try {
+    return await writeLock()
+  } catch (err) {
+    const code =
+      err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+        ? err.code
+        : undefined
+    if (code !== 'EEXIST') throw err
+  }
+
+  const existing = await readBridgeLock(cwd, platform)
+  if (!existing || !isProcessRunning(existing.pid)) {
+    await unlink(p).catch(() => {})
+    return writeLock()
+  }
+
+  onInfo?.(`[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages.`)
+  return undefined
+}
+
 export async function runBragiMessagePump<TCheckpoint>(
   options: RunBragiMessagePumpOptions<TCheckpoint>
 ): Promise<void> {
+  const bridgePlatform = bridgePlatformFromLabel(options.channelLabel)
+  const releaseBridgeLock = await tryAcquireBridgeLock(options.cwd, bridgePlatform, options.onInfo)
+  if (!releaseBridgeLock) return
+
   const activeTargets = new Set<string>()
+  const recentlyProcessed = new Set<string>()
+  const recentlyProcessedOrder: string[] = []
   let firstInboundConfirmed = false
   let stopped = false
 
@@ -358,6 +460,19 @@ export async function runBragiMessagePump<TCheckpoint>(
       }
 
       for (const message of batch.messages) {
+        const dedupeKey = message.sourceMessageId
+          ? `${message.targetId}:${message.sourceMessageId}`
+          : undefined
+        if (dedupeKey) {
+          if (recentlyProcessed.has(dedupeKey)) continue
+          recentlyProcessed.add(dedupeKey)
+          recentlyProcessedOrder.push(dedupeKey)
+          while (recentlyProcessedOrder.length > 500) {
+            const old = recentlyProcessedOrder.shift()
+            if (old) recentlyProcessed.delete(old)
+          }
+        }
+
         const parsed = parseRemoteCommand(message.text, {
           commandSuffixPattern: options.commandSuffixPattern,
           images: message.images,
@@ -384,7 +499,6 @@ export async function runBragiMessagePump<TCheckpoint>(
 
         activeTargets.add(message.targetId)
         try {
-          const platform = bridgePlatformFromLabel(options.channelLabel)
           const compactTargetLabel = compactLabel(message.targetLabel)
           const sendProgress = async (
             text: string,
@@ -394,7 +508,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             if (!cleanText.trim()) return
             options.onNotify?.({
               kind: 'bridge-status',
-              platform,
+              platform: bridgePlatform,
               targetLabel: compactTargetLabel,
               text: cleanText,
               level,
@@ -407,7 +521,7 @@ export async function runBragiMessagePump<TCheckpoint>(
           ))
           options.onNotify?.({
             kind: 'bridge-message',
-            platform,
+            platform: bridgePlatform,
             direction: 'inbound',
             targetLabel: compactTargetLabel,
             text: truncate(message.text, 1200),
@@ -445,7 +559,7 @@ export async function runBragiMessagePump<TCheckpoint>(
               options.onInfo?.(detail)
               options.onNotify?.({
                 kind: 'bridge-status',
-                platform,
+                platform: bridgePlatform,
                 targetLabel: compactTargetLabel,
                 text: detail,
                 level: 'error',
@@ -458,7 +572,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             ))
             options.onNotify?.({
               kind: 'bridge-message',
-              platform,
+              platform: bridgePlatform,
               direction: 'outbound',
               targetLabel: compactTargetLabel,
               text: truncate(mobileReply.replace(/\s+/g, ' '), 1200),
@@ -515,5 +629,6 @@ export async function runBragiMessagePump<TCheckpoint>(
     process.removeListener('SIGINT', stop)
     process.removeListener('SIGTERM', stop)
     options.signal?.removeEventListener('abort', onAbort)
+    await releaseBridgeLock()
   }
 }

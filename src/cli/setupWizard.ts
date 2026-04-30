@@ -23,17 +23,23 @@ import { setupTelegramBridge } from '../telegram/bridge.js'
 import { setupDiscordBridge } from '../discord/bridge.js'
 import { setupWeChatBridge } from '../wechat/bridge.js'
 import { resolveDataRootDir } from '../utils/fs.js'
+import { runBundleOnboarding } from './bundleOnboarding.js'
+import { SkillManager } from '../core/skillManager.js'
+import { CronScheduler } from '../services/cron.js'
 
 // 扩展配置 sections
 type SetupSection =
   | 'model'          // 模型提供商
   | 'visual'         // 视觉生成
   | 'gateway'        // 通讯平台
-  | 'agent'          // 代理设置
+  | 'bundle'         // 文字润色
+  | 'skills'         // Skills Catalog
+  | 'agent'          // Legacy direct-only agent settings
   | 'memory'         // 记忆增强
+  | 'automation'     // 自动化 / Cron
   | 'terminal'       // 终端后端
   | 'tts'            // 语音输出
-  | 'tools'          // 工具配置
+  | 'tools'          // Legacy direct-only tool gates
   | 'session'        // 会话管理
 
 type SetupWizardOptions = {
@@ -70,7 +76,10 @@ function normalizeSection(value: string | undefined): SetupSection | undefined {
   if (v === 'provider' || v === 'providers') return 'model'
   if (v === 'vision') return 'visual'
   if (v === 'messaging' || v === 'bragi' || v === 'gateway') return 'gateway'
-  if (['model', 'visual', 'gateway', 'agent', 'memory', 'terminal', 'tts', 'tools', 'session'].includes(v)) {
+  if (v === 'polish' || v === 'polisher' || v === 'rewrite' || v === 'bundle') return 'bundle'
+  if (v === 'skill' || v === 'skills' || v === 'catalog') return 'skills'
+  if (v === 'cron' || v === 'automation' || v === 'automations') return 'automation'
+  if (['model', 'visual', 'gateway', 'bundle', 'skills', 'agent', 'memory', 'automation', 'terminal', 'tts', 'tools', 'session'].includes(v)) {
     return v as SetupSection
   }
   return undefined
@@ -649,6 +658,135 @@ async function configureGateway(options: { cwd: string; locale: UiLocale }): Pro
   }
 }
 
+async function configureBundleSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { cwd, locale } = options
+  const providerStore = new ProviderStore(cwd)
+  const data = await providerStore.load()
+  const main = providerStore.getDefaultMainProfile(data)
+  const secondary = providerStore.getProfile(data, data.specialistProfileId)
+
+  sectionTitle(tr(locale, '文字润色 / Bundle', 'Prompt Polishing / Bundle'), [
+    tr(
+      locale,
+      '把较长的自然语言需求润色成结构化技术提示词，发送前会展示“原版 vs 增强版”供你确认。',
+      'Rewrites longer natural-language requests into structured technical prompts and shows original vs enhanced before sending.',
+    ),
+    tr(
+      locale,
+      '也可以随时用 /bundle <文字> 手动润色，或用 /bundle config 重新配置。',
+      'You can also run /bundle <text> manually, or /bundle config to reconfigure.',
+    ),
+  ])
+
+  if (!main) {
+    console.log(tr(
+      locale,
+      '  ⚠ 还没有主模型 Provider，文字润色需要至少一个可用模型。请先完成 Model & Provider 配置。',
+      '  ⚠ No primary model provider is configured yet. Prompt polishing needs at least one usable model. Configure Model & Provider first.',
+    ))
+    return
+  }
+
+  await runBundleOnboarding({
+    locale,
+    settingsStore: new CliSettingsStore(cwd),
+    hasSecondaryModel: Boolean(secondary),
+    printPanel: (title, lines) => {
+      console.log()
+      console.log(buildPanel(title, lines))
+      console.log()
+    },
+  })
+}
+
+function summarizeSkillCategories(skills: Array<{ category?: string }>, limit = 8): string {
+  const counts = new Map<string, number>()
+  for (const skill of skills) {
+    const category = (skill.category ?? 'general').trim().toLowerCase() || 'general'
+    counts.set(category, (counts.get(category) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([category, count]) => `${category}(${count})`)
+    .join(', ')
+}
+
+async function configureSkillsCatalog(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { locale } = options
+  sectionTitle('Skills Catalog', [
+    tr(
+      locale,
+      'Skills 已作为内置能力加载，不在安装时逐个选择，避免 999+ 个技能变成低效清单。',
+      'Skills are loaded as built-in capabilities; setup does not ask you to select hundreds of skills one by one.',
+    ),
+    tr(
+      locale,
+      '使用 /skills 查看分类，或 /skills <关键词> 搜索需要的技能。',
+      'Use /skills to view categories, or /skills <keyword> to search.',
+    ),
+  ])
+
+  const skillManager = new SkillManager()
+  await skillManager.ready()
+  const skills = skillManager.getAllSkillDefinitions()
+  console.log(tr(
+    locale,
+    `  ✓ 已加载 ${skills.length} 个 skills。`,
+    `  ✓ Loaded ${skills.length} skills.`,
+  ))
+  const categories = summarizeSkillCategories(skills)
+  if (categories) {
+    console.log(tr(locale, `  ✓ 分类概览：${categories}`, `  ✓ Categories: ${categories}`))
+  }
+  console.log(tr(
+    locale,
+    '  用法：/skills、/skills code、/skills design、/skills 文案',
+    '  Usage: /skills, /skills code, /skills design, /skills copywriting',
+  ))
+}
+
+async function configureAutomationCron(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { cwd, locale } = options
+  const cron = new CronScheduler(cwd)
+  const settings = await cron.getSettings()
+  const jobs = cron.getJobs()
+  const repoAudit = jobs.find((job) => job.id === 'repo-audit')
+
+  sectionTitle('Automation / Cron', [
+    tr(
+      locale,
+      '这里只配置当前真实接通的自动化任务，不展示尚未接入运行时的空壳选项。',
+      'Only runtime-backed automation is configurable here; placeholder jobs are not shown.',
+    ),
+    tr(
+      locale,
+      '当前可用：Daily Repository Audit，每 24 小时总结仓库变更并通过已配置的消息桥广播。',
+      'Available now: Daily Repository Audit, which summarizes repository changes every 24 hours and broadcasts through configured messaging bridges.',
+    ),
+  ])
+
+  const enabled = await askYesNo(
+    locale,
+    tr(locale, '启用 Daily Repository Audit？', 'Enable Daily Repository Audit?'),
+    settings.enabled,
+    repoAudit
+      ? tr(locale, `${repoAudit.name} 是当前唯一真实接通的 Cron 任务。`, `${repoAudit.name} is the only currently wired cron job.`)
+      : undefined,
+  )
+
+  await cron.setEnabled(enabled)
+  console.log(tr(
+    locale,
+    enabled
+      ? '  ✓ 已启用 Daily Repository Audit。'
+      : '  ✓ 已关闭 Daily Repository Audit。',
+    enabled
+      ? '  ✓ Daily Repository Audit enabled.'
+      : '  ✓ Daily Repository Audit disabled.',
+  ))
+}
+
 function buildAvailabilitySummary(data: Awaited<ReturnType<ProviderStore['load']>>): string[] {
   const main = data.profiles.find((profile) => profile.id === data.defaultMainProfileId) ?? data.profiles[0]
   const secondary = data.profiles.find((profile) => profile.id === data.specialistProfileId)
@@ -659,8 +797,6 @@ function buildAvailabilitySummary(data: Awaited<ReturnType<ProviderStore['load']
   lines.push(`${secondary ? '✓' : '✗'} Secondary provider${secondary ? `: ${secondary.model}` : ': not configured'}`)
   lines.push(`${visual?.enabled ? '✓' : '✗'} Image generation${visual?.enabled ? `: ${visual.image.provider}/${visual.image.model}` : ': disabled'}`)
   lines.push(`${visual?.video.enabled ? '✓' : '✗'} Video generation${visual?.video.enabled ? `: ${visual.video.provider}/${visual.video.model}` : ': disabled'}`)
-  lines.push(`✓ Agent max iterations: ${setup?.agent.maxIterations ?? 90}`)
-  lines.push(`✓ Compression threshold: ${setup?.agent.compression.threshold ?? 0.5}`)
   lines.push(`${data.memoryProfile?.enabled ? '✓' : '✗'} Memory enhancement${data.memoryProfile?.enabled ? `: ${data.memoryProfile.provider}` : ': disabled'}`)
   lines.push(`${setup?.tools.enabled.tts ? '✓' : '✗'} Text-to-speech${setup?.tools.enabled.tts ? `: ${setup.voice.tts.provider}/${setup.voice.tts.voice ?? 'default'}` : ': disabled'}`)
   lines.push(`${setup?.tools.enabled.stt ? '✓' : '✗'} Speech-to-text${setup?.tools.enabled.stt ? `: ${setup.voice.stt.provider}/${setup.voice.stt.engine ?? 'auto'}/${setup.voice.stt.localModel ?? 'base'}` : ': disabled'}`)
@@ -681,8 +817,14 @@ async function printConfigurationLocation(cwd: string): Promise<void> {
 
 async function printSetupSummary(cwd: string, locale: UiLocale): Promise<void> {
   const data = await new ProviderStore(cwd).load()
+  const settings = await new CliSettingsStore(cwd).load()
+  const cronSettings = await new CronScheduler(cwd).getSettings()
+  const lines = buildAvailabilitySummary(data)
+  lines.push(`${settings.bundleEnabled ? '✓' : '✗'} Prompt polishing${settings.bundleConfigured ? `: ${settings.bundleMode}/${settings.bundleModelChoice}` : ': not configured'}`)
+  lines.push(`✓ Skills catalog: use /skills or /skills <keyword>`)
+  lines.push(`${cronSettings.enabled ? '✓' : '✗'} Daily Repository Audit${cronSettings.lastRun['repo-audit'] ? `: last run ${cronSettings.lastRun['repo-audit']}` : ': not run yet'}`)
   console.log()
-  console.log(buildPanel('Setup Summary', buildAvailabilitySummary(data)))
+  console.log(buildPanel('Setup Summary', lines))
   console.log()
   console.log(buildPanel(
     tr(locale, '下一步', 'Next steps'),
@@ -691,11 +833,12 @@ async function printSetupSummary(cwd: string, locale: UiLocale): Promise<void> {
       'artemis setup model    Change model/provider',
       'artemis setup visual   Configure image/video generation',
       'artemis setup gateway  Configure Telegram/Discord/WeChat',
-      'artemis setup agent    Configure max iterations/compression',
+      'artemis setup bundle   Configure prompt polishing',
+      'artemis setup skills   View skills catalog summary',
       'artemis setup memory   Configure memory enhancement',
+      'artemis setup cron     Configure automation/cron',
       'artemis setup terminal Configure terminal backend',
       'artemis setup tts      Configure text-to-speech',
-      'artemis setup tools    Configure tool settings',
       'artemis setup session  Configure session management',
       'artemis config         View current settings',
       'artemis doctor         Check for issues',
@@ -708,13 +851,14 @@ async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise
   const { cwd, locale } = options
   await printConfigurationLocation(cwd)
   await configureModelProvider({ cwd, locale })
+  await configureBundleSettings({ cwd, locale })
+  await configureSkillsCatalog({ cwd, locale })
   await runVisualModelSetup(locale, cwd)
-  await configureAgentSettings({ cwd, locale })
   await configureGateway({ cwd, locale })
   await runMemoryEnhancementSetup(locale, cwd)
+  await configureAutomationCron({ cwd, locale })
   await configureTerminalSettings({ cwd, locale })
   await configureTTSSettings({ cwd, locale })
-  await configureToolSettings({ cwd, locale })
   await configureSessionSettings({ cwd, locale })
   await new CliSettingsStore(cwd).update({ onboardingCompleted: true }).catch(() => {})
   await printSetupSummary(cwd, locale)
@@ -723,22 +867,10 @@ async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise
 async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
   sectionTitle('Quick Setup', [
-    tr(locale, '配置主/副 Provider、视觉模型、Agent 默认值，并可选配置通讯平台。', 'Configure primary/secondary providers, visual model, agent defaults, and optionally messaging.'),
+    tr(locale, '配置主/副 Provider、视觉模型，并可选配置通讯平台。', 'Configure primary/secondary providers, visual model, and optionally messaging.'),
   ])
 
   await configureModelProvider({ cwd, locale, quick: true })
-  await new ProviderStore(cwd).updateSetupConfig((setup) => ({
-    ...setup,
-    agent: {
-      ...setup.agent,
-      maxIterations: 90,
-      compression: {
-        ...setup.agent.compression,
-        enabled: true,
-        threshold: 0.5,
-      },
-    },
-  }))
 
   const setupVisual = await askYesNo(
     locale,
@@ -788,8 +920,11 @@ async function runSection(section: SetupSection, options: { cwd: string; locale:
   if (section === 'model') await configureModelProvider({ cwd, locale })
   else if (section === 'visual') await runVisualModelSetup(locale, cwd)
   else if (section === 'gateway') await configureGateway({ cwd, locale })
+  else if (section === 'bundle') await configureBundleSettings({ cwd, locale })
+  else if (section === 'skills') await configureSkillsCatalog({ cwd, locale })
   else if (section === 'agent') await configureAgentSettings({ cwd, locale })
   else if (section === 'memory') await runMemoryEnhancementSetup(locale, cwd)
+  else if (section === 'automation') await configureAutomationCron({ cwd, locale })
   else if (section === 'terminal') await configureTerminalSettings({ cwd, locale })
   else if (section === 'tts') await configureTTSSettings({ cwd, locale })
   else if (section === 'tools') await configureToolSettings({ cwd, locale })
@@ -808,7 +943,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
   const section = normalizeSection(options.section)
   if (options.section && !section) {
     console.log(`Unknown setup section: ${options.section}`)
-    console.log('Available: model, visual, gateway, agent, memory, terminal, tts, tools, session')
+    console.log('Available: model, bundle, skills, visual, gateway, memory, cron, terminal, tts, session')
     return
   }
   if (section) {
@@ -847,13 +982,14 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
       { label: 'Quick Setup - configure missing items only', value: 'quick' },
       { label: 'Full Setup - reconfigure everything', value: 'full' },
       { label: 'Model & Provider', value: 'model' },
+      { label: 'Prompt Polishing / Bundle', value: 'bundle' },
+      { label: 'Skills Catalog', value: 'skills' },
       { label: 'Visual / Image & Video', value: 'visual' },
       { label: 'Messaging Platforms', value: 'gateway' },
-      { label: 'Agent Settings', value: 'agent' },
       { label: 'Memory Enhancement', value: 'memory' },
+      { label: 'Automation / Cron', value: 'automation' },
       { label: 'Terminal Backend', value: 'terminal' },
-      { label: 'Text-to-Speech', value: 'tts' },
-      { label: 'Tool Configuration', value: 'tools' },
+      { label: 'Voice Input / Output', value: 'tts' },
       { label: 'Session Management', value: 'session' },
       { label: 'Exit', value: 'exit' },
     ],

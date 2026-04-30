@@ -45,10 +45,9 @@ function ensureMcpInstallDir(): void {
   if (!existsSync(targetPkg) && existsSync(sourcePkg)) {
     copyFileSync(sourcePkg, targetPkg)
   }
-  // Seed the bundled lockfile so the progress bar can show a real total
-  // count from the very first frame (npm doesn't emit a usable lockfile
-  // until well into the install). Only seeded if the user doesn't already
-  // have one — preserves any locally-customised state.
+  // Seed the bundled lockfile so dependency completeness checks can compare
+  // against the expected package set. The progress UI deliberately does not
+  // treat this expected set as current-install progress.
   const targetLock = path.join(MCP_INSTALL_DIR, 'package-lock.json')
   const sourceLock = path.join(BUNDLED_MCP_DIR, 'package-lock.json')
   if (!existsSync(targetLock) && existsSync(sourceLock)) {
@@ -135,7 +134,7 @@ const COPY = {
     title:    '✦ MCP 插件依赖安装 ✦',
     subtitle: 'Artemis 内置 91 个 MCP 服务插件',
     desc1:    '其中 23 个插件需要安装 npm 依赖包',
-    desc2:    '同时安装本地 Whisper 免费模型 ggml-base.bin（约 141 MB）',
+    desc2:    '同时安装本地 Whisper 免费模型',
     desc3:    '请确保网络通畅，也可以跳过稍后再安装',
     yes:      '✦ 立即安装全部依赖',
     no:       '跳过，稍后再说 ✦',
@@ -158,7 +157,7 @@ const COPY = {
     title:    '✦ MCP Plugin Setup ✦',
     subtitle: 'Artemis ships with 91 MCP plugin servers',
     desc1:    '23 of them require npm package dependencies',
-    desc2:    'Also installs the free local Whisper model ggml-base.bin (~141 MB)',
+    desc2:    'Also installs the free local Whisper model',
     desc3:    'You can skip and install later when needed',
     yes:      '✦ Install all now',
     no:       'Skip for now ✦',
@@ -299,19 +298,21 @@ function progressBody(
   detailLine?: string,
 ): string[] {
   const t    = COPY[locale] ?? COPY['en']
-  const pct  = typeof total === 'number' && total > 0
+  const hasTotal = typeof total === 'number' && total > 0
+  const pct  = hasTotal
     ? Math.min(100, Math.floor((done / total) * 100))
     : 0
   const barW = Math.max(20, layout.innerWidth - 14)
-  const fill = Math.round((pct / 100) * barW)
+  const fill = hasTotal ? Math.round((pct / 100) * barW) : 0
   const bar  = rgb('█'.repeat(fill), 166, 227, 161) + dim('░'.repeat(barW - fill))
+  const pctText = hasTotal ? String(pct) + '%' : '--%'
   const spin = SPINNER[fi % SPINNER.length]!
 
   return [
     layout.blank,
     row(aurora(t.installing, fi * 3), layout),
     layout.blank,
-    row(`${bar}  ${rgb(String(pct) + '%', 249, 226, 175, true)}`, layout),
+    row(`${bar}  ${rgb(pctText, 249, 226, 175, true)}`, layout),
     layout.blank,
     row(`${cyan(spin)}  ${dim(current.slice(0, layout.innerWidth - 6))}`, layout),
     layout.blank,
@@ -338,6 +339,20 @@ function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount
     layout.blank,
     row(dim(t.anyKey), layout),
   ]
+}
+
+function npmCheckingLine(locale: UiLocale): string {
+  return locale === 'zh-CN' ? '正在校验 npm 依赖…' : 'Verifying npm dependencies…'
+}
+
+function npmFetchedLine(locale: UiLocale, count: number): string {
+  return locale === 'zh-CN' ? `本次已获取 ${count} 个包` : `${count} packages fetched in this run`
+}
+
+function npmRepairedLine(locale: UiLocale, done: number, total: number): string {
+  return locale === 'zh-CN'
+    ? `本次已补齐 ${done} / ${total} 个缺失包`
+    : `${done} / ${total} missing packages repaired in this run`
 }
 
 function listInstalledPackageDirs(dir: string): Set<string> {
@@ -585,8 +600,9 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   }
 
   // ── install phase ─────────────────────────────────────────────────────────────
-  // The bar's `done` is sourced from disk reality (package dirs in
-  // node_modules) — that's the only signal that strictly never overcounts.
+  // During npm repair, the bar shows packages actually repaired in this run.
+  // If npm is only validating an already-populated install, the percentage is
+  // intentionally unknown instead of reusing historical node_modules counts.
   // The "current" line shows the last package npm fetched, parsed from
   // `npm http fetch` output via --loglevel=http. Result: bar climbs as
   // packages are linked, while the spinner line shows live download
@@ -596,7 +612,6 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   let current = (COPY[locale] ?? COPY['en']).preparing
   let detailLine: string | undefined
   let pfi     = 0
-  let npmFinished = false
   let modelProgress: { done: number; total: number; detail?: string } | undefined
 
   ensureMcpInstallDir()
@@ -607,9 +622,19 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   const countRequiredInstalled = (): number => expectedPackageDirs
     ? countInstalledExpectedPackageDirs(nmDir, expectedPackageDirs)
     : countInstalledPackageDirs(nmDir)
-  const countAllInstalled = (): number => countInstalledPackageDirs(nmDir)
+  const npmNeeded = !hasCompleteMcpPackageInstall()
+  const initialRequiredInstalled = countRequiredInstalled()
+  const missingPackageTotal = expectedPackageDirs
+    ? Math.max(0, expectedPackageDirs.size - initialRequiredInstalled)
+    : undefined
   const cachedTotal: { value: number | undefined } = { value: undefined }
   const refreshCachedTotal = (): void => {
+    if (npmNeeded) {
+      cachedTotal.value = missingPackageTotal && missingPackageTotal > 0
+        ? missingPackageTotal
+        : undefined
+      return
+    }
     const lockTotal = expectedPackageDirs?.size ??
       countExpectedPackageDirs(path.join(MCP_INSTALL_DIR, 'package-lock.json')) ??
       countExpectedPackageDirs(path.join(BUNDLED_MCP_DIR, 'package-lock.json'))
@@ -618,35 +643,28 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   refreshCachedTotal()
   const getEstimatedTotal = (): number | undefined => {
     if (cachedTotal.value === undefined) return undefined
-    // Guard: if the on-disk count somehow exceeds the cached lock total
-    // (npm regenerated lockfile late, etc.), bump the cached total so the
-    // bar can still hit 100%.
-    if (done > cachedTotal.value) cachedTotal.value = done
+    if (!npmNeeded && done > cachedTotal.value) cachedTotal.value = done
     return cachedTotal.value
   }
 
   const renderProgress = () => {
     layout = buildLayout(locale)
     const total = getEstimatedTotal()
-    // While npm is still fetching and node_modules is empty, the bar
-    // would otherwise sit at 0%. Use fetchedPkgs as a transient floor so
-    // the bar starts moving immediately based on real download events.
-    const maxBeforeFinish = total === undefined ? Number.POSITIVE_INFINITY : Math.max(0, total - 1)
-    const fetchFloor = npmFinished ? fetchedPkgs : Math.min(fetchedPkgs, maxBeforeFinish)
-    const effectiveDone = Math.max(done, Math.min(fetchFloor, total ?? Number.POSITIVE_INFINITY))
-    updateBody(progressBody(pfi, effectiveDone, total, current, locale, layout, detailLine), layout)
+    updateBody(progressBody(pfi, done, total, current, locale, layout, detailLine), layout)
   }
 
   const onResizeProgress = () => {
     layout = buildLayout(locale)
     const total = getEstimatedTotal()
-    const maxBeforeFinish = total === undefined ? Number.POSITIVE_INFINITY : Math.max(0, total - 1)
-    const fetchFloor = npmFinished ? fetchedPkgs : Math.min(fetchedPkgs, maxBeforeFinish)
-    const effectiveDone = Math.max(done, Math.min(fetchFloor, total ?? Number.POSITIVE_INFINITY))
-    rebuildScreen(progressBody(pfi, effectiveDone, total, current, locale, layout, detailLine), layout)
+    rebuildScreen(progressBody(pfi, done, total, current, locale, layout, detailLine), layout)
   }
   process.stdout.on('resize', onResizeProgress)
 
+  detailLine = npmNeeded
+    ? (missingPackageTotal && missingPackageTotal > 0
+        ? npmRepairedLine(locale, 0, missingPackageTotal)
+        : npmCheckingLine(locale))
+    : (COPY[locale] ?? COPY['en']).depsReady
   renderProgress()
   // Tick at 200ms so the spinner + elapsed feel snappy and the on-disk
   // package counter is sampled often enough that no individual extract
@@ -658,23 +676,34 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
       cachedTotal.value = modelProgress.total
       detailLine = modelProgress.detail
     } else {
-      done = countRequiredInstalled()
-      detailLine = undefined
-      // Re-read total in case npm just wrote a fresh lockfile
-      if (cachedTotal.value === undefined) refreshCachedTotal()
+      if (npmNeeded) {
+        const repaired = Math.max(0, countRequiredInstalled() - initialRequiredInstalled)
+        if (missingPackageTotal && missingPackageTotal > 0) {
+          done = Math.min(repaired, missingPackageTotal)
+          cachedTotal.value = missingPackageTotal
+          detailLine = npmRepairedLine(locale, done, missingPackageTotal)
+        } else {
+          done = 0
+          cachedTotal.value = undefined
+          detailLine = fetchedPkgs > 0 ? npmFetchedLine(locale, fetchedPkgs) : npmCheckingLine(locale)
+        }
+      } else {
+        done = 0
+        cachedTotal.value = undefined
+        detailLine = (COPY[locale] ?? COPY['en']).depsReady
+      }
     }
     renderProgress()
   }, 200)
 
-  const npmNeeded = !hasCompleteMcpPackageInstall()
   let npmSuccess = true
 
   if (!npmNeeded) {
-    npmFinished = true
-    done = countRequiredInstalled()
-    fetchedPkgs = done
+    done = 0
+    cachedTotal.value = undefined
+    fetchedPkgs = 0
     current = (COPY[locale] ?? COPY['en']).depsReady
-    detailLine = (COPY[locale] ?? COPY['en']).pkgCount(done, getEstimatedTotal())
+    detailLine = (COPY[locale] ?? COPY['en']).depsReady
     renderProgress()
   } else {
     npmSuccess = await new Promise<boolean>((resolve) => {
@@ -747,14 +776,19 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
         // Flush trailing partial line on close
         if (stdoutBuf) handleLine(stdoutBuf)
         if (stderrBuf) handleLine(stderrBuf)
-        npmFinished = true
-        done = countRequiredInstalled()
-        fetchedPkgs = done
-        if (cachedTotal.value === undefined || done > cachedTotal.value) cachedTotal.value = done
-        if (code === 0 && expectedPackageDirs) {
-          cachedTotal.value = expectedPackageDirs.size
-          done = countRequiredInstalled()
-          fetchedPkgs = done
+        const repaired = Math.max(0, countRequiredInstalled() - initialRequiredInstalled)
+        if (missingPackageTotal && missingPackageTotal > 0) {
+          done = Math.min(repaired, missingPackageTotal)
+          cachedTotal.value = missingPackageTotal
+          detailLine = npmRepairedLine(locale, done, missingPackageTotal)
+        } else {
+          done = 0
+          cachedTotal.value = undefined
+          detailLine = fetchedPkgs > 0 ? npmFetchedLine(locale, fetchedPkgs) : npmCheckingLine(locale)
+        }
+        if (code === 0) {
+          current = (COPY[locale] ?? COPY['en']).depsReady
+          detailLine = (COPY[locale] ?? COPY['en']).depsReady
         }
         resolve(code === 0)
       })
@@ -787,15 +821,14 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
 
   clearInterval(progressTimer)
   process.stdout.off('resize', onResizeProgress)
-  const finalCount = countAllInstalled()
 
   // ── done screen ───────────────────────────────────────────────────────────────
   layout = buildLayout(locale)
-  updateBody(doneBody(success, locale, layout, finalCount), layout)
+  updateBody(doneBody(success, locale, layout), layout)
 
   const onResizeDone = () => {
     layout = buildLayout(locale)
-    rebuildScreen(doneBody(success, locale, layout, finalCount), layout)
+    rebuildScreen(doneBody(success, locale, layout), layout)
   }
   process.stdout.on('resize', onResizeDone)
 
