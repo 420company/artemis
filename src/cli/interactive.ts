@@ -387,6 +387,42 @@ function renderTimelinePanel(title: string, bodyLines: string[]): string {
   return output.join('\n')
 }
 
+function buildThinkingCatLines(statusText = '· Meow to the Moon! 🚀'): string[] {
+  const catFrameIndex = Math.floor(Date.now() / 500) % 3
+  const animatedCatFrames = [
+    [
+      `       ${tint('    /\\_/\\   ', TL.note)}`,
+      `       ${tint('   ( ^.^ )  ', TL.note)}`,
+      `       ${tint('    > = <   ', TL.note)}`,
+      `       ${tint('   /     \\  ', TL.note)}`,
+    ],
+    [
+      `       ${tint('    /\\_/\\   ', TL.note)}`,
+      `       ${tint('   ( -.- )  ', TL.note)}`,
+      `       ${tint('    > = <   ', TL.note)}`,
+      `       ${tint('   /     \\  ', TL.note)}`,
+    ],
+    [
+      `       ${tint('    /\\_/\\   ', TL.note)}`,
+      `       ${tint('   ( o.o )  ', TL.note)}`,
+      `       ${tint('    > ~ <   ', TL.note)}`,
+      `       ${tint('   /     \\  ', TL.note)}`,
+    ],
+  ]
+  const animationFrames = [
+    `       ${tint(statusText, TL.note)}`,
+    `       ${tint(statusText, TL.tagBlue)}`,
+    `       ${tint(statusText, TL.tagPurple)}`,
+    `       ${tint(statusText, TL.tagGold)}`,
+    `       ${tint(statusText, TL.tagGreen)}`,
+  ]
+  const textFrameIndex = Math.floor(Date.now() / 200) % animationFrames.length
+  return [
+    ...animatedCatFrames[catFrameIndex]!,
+    animationFrames[textFrameIndex]!,
+  ]
+}
+
 function styleTimelineLogLine(text: string): string {
   if (!process.stdout.isTTY) return text
 
@@ -466,46 +502,7 @@ function buildPendingAssistantLines(options: {
       lines.push(
         `       ${tint('· 当前模型仍在推理阶段；可以等待，或按 Esc 中断后换用更快的主模型。', TL.meta)}`,
       )
-      // 
-      const catFrames = [
-        `       ${tint('    /\\_/\\   ', TL.note)}`,
-        `       ${tint('   ( ^.^ )  ', TL.note)}`,
-        `       ${tint('    > = <   ', TL.note)}`,
-        `       ${tint('   /     \\  ', TL.note)}`,
-      ]
-      // 
-      const catFrameIndex = Math.floor(Date.now() / 500) % 3
-      const animatedCatFrames = [
-        [
-          `       ${tint('    /\\_/\\   ', TL.note)}`,
-          `       ${tint('   ( ^.^ )  ', TL.note)}`,
-          `       ${tint('    > = <   ', TL.note)}`,
-          `       ${tint('   /     \\  ', TL.note)}`,
-        ],
-        [
-          `       ${tint('    /\\_/\\   ', TL.note)}`,
-          `       ${tint('   ( -.- )  ', TL.note)}`,
-          `       ${tint('    > = <   ', TL.note)}`,
-          `       ${tint('   /     \\  ', TL.note)}`,
-        ],
-        [
-          `       ${tint('    /\\_/\\   ', TL.note)}`,
-          `       ${tint('   ( o.o )  ', TL.note)}`,
-          `       ${tint('    > ~ <   ', TL.note)}`,
-          `       ${tint('   /     \\  ', TL.note)}`,
-        ],
-      ]
-      lines.push(...animatedCatFrames[catFrameIndex])
-      // 
-      const animationFrames = [
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.note)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagBlue)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagPurple)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagGold)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagGreen)}`,
-      ]
-      const textFrameIndex = Math.floor(Date.now() / 200) % animationFrames.length
-      lines.push(animationFrames[textFrameIndex])
+      lines.push(...buildThinkingCatLines())
     }
   }
   return lines
@@ -1150,7 +1147,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   }
 
   // Animated "waiting" panel: appends a system block that ticks a Braille
-  // spinner + elapsed seconds every 100ms while a long-running operation runs.
+  // spinner or the same thinking cat used by reasoning waits.
   // Call .stop(finalTitle, finalLines) to clear the tick and replace the
   // panel in-place with the final result. Use this for any operation that may
   // exceed ~1s of user-visible wait (LLM calls, large IO, etc.).
@@ -1158,14 +1155,19 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const startWaitingPanel = (
     title: string,
     bodyLines: string[],
+    options: { animation?: 'spinner' | 'cat' } = {},
   ): { stop: (finalTitle: string, finalLines: string[]) => void } => {
     const startedMs = Date.now()
     const render = (): string => {
       const elapsedSec = Math.floor((Date.now() - startedMs) / 1000)
-      const frame = SPINNER_FRAMES[Math.floor(Date.now() / 100) % SPINNER_FRAMES.length]!
+      const spinnerFrame = SPINNER_FRAMES[Math.floor(Date.now() / 100) % SPINNER_FRAMES.length]!
+      const animationLines = options.animation === 'cat'
+        ? buildThinkingCatLines(t('· 正在润色刚才输入的文字，请稍候…', '· Polishing your last input. Please wait…'))
+        : []
       return renderPlainPanel(title, [
+        ...animationLines,
         ...bodyLines,
-        `${frame} ${t('处理中…', 'Working…')}  (${elapsedSec}s)`,
+        `${spinnerFrame} ${t('处理中…', 'Working…')}  (${elapsedSec}s)`,
       ])
     }
     const blockIndex = appendScrollBlock({ kind: 'system', text: render(), preserveAnsi: true })
@@ -3006,9 +3008,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           continue
         }
         const polishWaiter = startWaitingPanel(t('Bundle 润色中...', 'Bundle polishing...'), [
-          arg,
-          t('调用模型重写中，请稍候…', 'Calling model to rewrite…'),
-        ])
+          t('刚才输入的文字正在润色，请稍候…', 'Your last input is being polished. Please wait…'),
+          truncatePlainToWidth(arg.replace(/\s+/g, ' '), 120),
+        ], { animation: 'cat' })
         try {
           const result = await runBundle({
             text: arg,
@@ -3341,12 +3343,17 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       mode:      bundleCur.bundleMode,
       minLength: bundleCur.bundleMinLength,
     })) {
+      let bundleWaiter: ReturnType<typeof startWaitingPanel> | undefined
       try {
         const provStore = new ProviderStore(cwd)
         const provData  = await provStore.load()
         const mainCfg   = provStore.getDefaultMainProfile(provData)
         const brainCfg  = provStore.getProfile(provData, provData.specialistProfileId)
         if (mainCfg || brainCfg) {
+          bundleWaiter = startWaitingPanel(t('Bundle 润色中...', 'Bundle polishing...'), [
+            t('刚才输入的文字正在润色，请稍候…', 'Your last input is being polished. Please wait…'),
+            truncatePlainToWidth(trimmed.replace(/\s+/g, ' '), 120),
+          ], { animation: 'cat' })
           const bundleResult = await runBundle({
             text: trimmed,
             locale,
@@ -3354,6 +3361,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             brainConfig: brainCfg,
             modelChoice: bundleCur.bundleModelChoice,
           })
+          bundleWaiter.stop(t('Bundle 润色完成', 'Bundle polish complete'), [
+            `${t('模型', 'Model')}: ${bundleResult.model}`,
+          ])
+          bundleWaiter = undefined
           const pick = await prompt.releaseTerminal(() => runBundleDialog({
             original: trimmed,
             enhanced: bundleResult.enhanced,
@@ -3364,6 +3375,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           if (pick === 'enhanced') dispatchText = bundleResult.enhanced
         }
       } catch (err) {
+        bundleWaiter?.stop(t('Bundle 润色失败', 'Bundle polish failed'), [
+          err instanceof Error ? err.message : String(err),
+        ])
         appendSystemPanel(t('Bundle 润色失败，使用原版', 'Bundle polish failed, sending original'),
           [err instanceof Error ? err.message : String(err)])
       }
