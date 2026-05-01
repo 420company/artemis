@@ -172,13 +172,35 @@ function commandLooksLongRunning(command: string): boolean {
 
 function extractShellDirectoryChanges(command: string): string[] {
   const matches: string[] = [];
-  const pattern = /(?:^|[\n;]|&&|\|\|)\s*(?:builtin\s+)?(?:cd|pushd)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
+
+  // POSIX + Windows cd / pushd. Windows cmd allows `cd /d <path>` to also
+  // switch the drive, so we tolerate optional flag arguments before the
+  // actual path. We also treat `cd /D` (uppercase) the same way.
+  const pattern = /(?:^|[\n;&|]|&&|\|\|)\s*(?:builtin\s+)?(?:cd|pushd|chdir)\s+((?:\/[Dd]\s+)?(?:"[^"]+"|'[^']+'|[^\s;&|]+))/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(command)) !== null) {
-    const candidate = match[1] ?? match[2] ?? match[3];
+    let candidate = (match[1] ?? '').trim();
+    // Strip optional Windows `/d ` flag prefix
+    candidate = candidate.replace(/^\/[Dd]\s+/, '');
+    // Strip surrounding quotes
+    if ((candidate.startsWith('"') && candidate.endsWith('"')) ||
+        (candidate.startsWith("'") && candidate.endsWith("'"))) {
+      candidate = candidate.slice(1, -1);
+    }
     if (!candidate || candidate === '-' || candidate === '--') continue;
     matches.push(candidate);
   }
+
+  // Windows bare drive-letter switch: `D:` on its own line means "switch
+  // to D's last working directory". We treat it as a workspace switch to
+  // the drive root so the trust check fires consistently.
+  const driveSwitchPattern = /(?:^|[\n;&|]|&&|\|\|)\s*([A-Za-z]:)(?=\s*(?:$|[\n;&|]|&&|\|\|))/g;
+  let driveMatch: RegExpExecArray | null;
+  while ((driveMatch = driveSwitchPattern.exec(command)) !== null) {
+    const drive = driveMatch[1]!;
+    matches.push(`${drive}\\`);
+  }
+
   return matches;
 }
 
@@ -273,12 +295,28 @@ export async function executeRunCommand(
   const nonce = randomBytes(8).toString('hex');
   const CWD_MARKER = `__ARTEMIS_CWD_${nonce}__`;
   const EXIT_MARKER = `__ARTEMIS_EXIT_${nonce}__`;
-  const trapLine =
-    `trap '__artemis_rc=$?; ` +
-    `printf "\\n%s:%s\\n" "${CWD_MARKER}" "$PWD"; ` +
-    `printf "%s:%s\\n" "${EXIT_MARKER}" "$__artemis_rc"; ` +
-    `exit $__artemis_rc' EXIT`;
-  const wrappedCommand = [trapLine, action.command].join('\n');
+  const isWindows = process.platform === 'win32';
+  // Build the command wrapper. On POSIX we use a bash EXIT trap so the
+  // markers fire even on `set -e` / explicit `exit N`. On Windows cmd.exe
+  // we chain with `&` so the marker echos run regardless of the user
+  // command's exit status — `trap`/`printf`/`$PWD` are bash-only and would
+  // otherwise produce "'trap' is not recognized" on every Windows run.
+  const wrappedCommand = isWindows
+    ? [
+        `(${action.command})`,
+        `set ARTEMIS_RC=%ERRORLEVEL%`,
+        `echo.`,
+        `echo ${CWD_MARKER}:%CD%`,
+        `echo ${EXIT_MARKER}:%ARTEMIS_RC%`,
+        `exit /b %ARTEMIS_RC%`,
+      ].join(' & ')
+    : [
+        `trap '__artemis_rc=$?; ` +
+        `printf "\\n%s:%s\\n" "${CWD_MARKER}" "$PWD"; ` +
+        `printf "%s:%s\\n" "${EXIT_MARKER}" "$__artemis_rc"; ` +
+        `exit $__artemis_rc' EXIT`,
+        action.command,
+      ].join('\n');
 
   // Auto-inject saved Vercel token when the user's command involves the
   // vercel CLI. This lets `/vercel` set up auth once and have every later
@@ -305,13 +343,15 @@ export async function executeRunCommand(
       // come after any content the user's command printed, so even if the
       // command echoed the same nonce-tagged line (impossible without reading
       // the wrapper at runtime, but still — defense in depth), the trap wins.
-      const cwdRe = new RegExp(`\\n?${CWD_MARKER}:([^\\n]*)\\n`, 'g');
-      const exitRe = new RegExp(`\\n?${EXIT_MARKER}:\\d+\\n?`, 'g');
+      // Also tolerate CRLF line endings — Windows cmd.exe emits \r\n, and
+      // the captured cwd value would otherwise end with a stray \r.
+      const cwdRe = new RegExp(`\\n?${CWD_MARKER}:([^\\r\\n]*)\\r?\\n`, 'g');
+      const exitRe = new RegExp(`\\n?${EXIT_MARKER}:\\d+\\r?\\n?`, 'g');
       const cwdMatches = [...raw.matchAll(cwdRe)];
       const lastCwd = cwdMatches[cwdMatches.length - 1];
       let cleaned = raw.replace(cwdRe, '').replace(exitRe, '');
       // Trim the trailing blank line that the wrapper prepends before the cwd marker.
-      if (lastCwd && cleaned.endsWith('\n')) cleaned = cleaned.replace(/\n$/, '');
+      if (lastCwd && /\r?\n$/.test(cleaned)) cleaned = cleaned.replace(/\r?\n$/, '');
       return {
         cleaned,
         newCwd: lastCwd ? lastCwd[1]!.trim() : null,
