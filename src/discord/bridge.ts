@@ -238,6 +238,11 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
       },
 
       async authorizeMessage(message, parsed) {
+        // Primary auth: check discord.json targets (source of truth for sessions)
+        const discordData = await discordStore.load()
+        if (discordStore.getTarget(discordData, message.targetId)) return { allowed: true }
+
+        // Fallback: check bragi.json allowedTargets for backward compat
         const liveData = await bragiStore.load()
         const allowed = liveData.platforms.discord?.allowedTargets ?? []
         if (allowed.includes(message.targetId)) return { allowed: true }
@@ -245,12 +250,10 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
         // Any channel or DM can claim access by sending /start
         if (parsed.type === 'start') {
           const config = liveData.platforms.discord
-          if (config) {
-            await bragiStore.upsertPlatform('discord', {
-              ...config,
-              allowedTargets: [...allowed, message.targetId],
-            })
-          }
+          await bragiStore.upsertPlatform('discord', {
+            ...(config ?? { enabled: true, autoStartOnLaunch: false, credentials: {} }),
+            allowedTargets: [...allowed, message.targetId],
+          })
           return { allowed: true, preReplies: [`Artemis connected to ${message.targetLabel}.`] }
         }
 
