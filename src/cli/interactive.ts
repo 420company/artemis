@@ -1201,18 +1201,23 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   // panel in-place with the final result. Use this for any operation that may
   // exceed ~1s of user-visible wait (LLM calls, large IO, etc.).
   const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const
+  // Cat-frame cadence is decoupled from the render tick so the Braille spinner
+  // can stay smooth at 100ms while the cat changes only every 600ms — fast
+  // enough to feel alive, slow enough not to flicker uncomfortably.
+  const CAT_FRAME_INTERVAL_MS = 600
   const startWaitingPanel = (
     title: string,
     bodyLines: string[],
     options: { animation?: 'spinner' | 'cat' } = {},
   ): { stop: (finalTitle: string, finalLines: string[]) => void } => {
     const startedMs = Date.now()
-    let frameIndex = 0
     const render = (): string => {
-      const elapsedSec = Math.floor((Date.now() - startedMs) / 1000)
+      const elapsedMs = Date.now() - startedMs
+      const elapsedSec = Math.floor(elapsedMs / 1000)
       const spinnerFrame = SPINNER_FRAMES[Math.floor(Date.now() / 100) % SPINNER_FRAMES.length]!
+      const catFrameIndex = Math.floor(elapsedMs / CAT_FRAME_INTERVAL_MS)
       const animationLines = options.animation === 'cat'
-        ? buildThinkingCatLines(t('· 正在润色刚才输入的文字，请稍候…', '· Polishing your last input. Please wait…'), frameIndex)
+        ? buildThinkingCatLines(t('· 正在润色刚才输入的文字，请稍候…', '· Polishing your last input. Please wait…'), catFrameIndex)
         : []
       return renderPlainPanel(title, [
         ...animationLines,
@@ -1222,7 +1227,6 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
     const blockIndex = appendScrollBlock({ kind: 'system', text: render(), preserveAnsi: true, pending: true })
     const tick = setInterval(() => {
-      frameIndex = (frameIndex + 1) % THINKING_CAT_FRAMES.length
       updateScrollBlock(blockIndex, { kind: 'system', text: render(), preserveAnsi: true, pending: true })
     }, 100)
     return {
