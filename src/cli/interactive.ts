@@ -1143,7 +1143,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         t('检测到用户已明确同意使用本地视觉生成。', 'Detected explicit consent for local visual generation.'),
         `${t('将优先使用: ', 'Will prefer: ')}${configuredText}`,
       ])
-      return `${requestText}\n\n[Visual generation policy]\nThe user explicitly approved local visual generation. Prefer generate_image/generate_video with the configured visual API. If local generation fails, report the failure explicitly; do not silently fall back to web-search.`
+      return `${requestText}\n\n[Visual generation policy]\nThe user explicitly approved local visual generation. You MUST call the generate_image (and generate_video when appropriate) tool directly for every required visual asset. Do NOT write a node/python/shell script that emits SVG, canvas, or procedural geometry as a substitute — that is a violation. If local generation returns an error, report it explicitly to the user and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders.`
     }
 
     let choice: 'local' | 'search' | 'skip'
@@ -1179,7 +1179,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
         `${t('用户确认启用本地视觉 API: ', 'User confirmed local visual API: ')}${configuredText}`,
       ])
-      return `${requestText}\n\n[Visual generation policy]\nThe user confirmed local visual generation. Prefer generate_image/generate_video with the configured visual API. If local generation fails, report the failure explicitly; do not silently fall back to web-search.`
+      return `${requestText}\n\n[Visual generation policy]\nThe user confirmed local visual generation. You MUST call the generate_image (and generate_video when appropriate) tool directly for every required visual asset. Do NOT write a node/python/shell script that emits SVG, canvas, or procedural geometry as a substitute — that is a violation. If local generation returns an error, report it explicitly to the user and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders.`
     }
 
     if (choice === 'search') {

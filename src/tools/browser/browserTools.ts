@@ -38,6 +38,26 @@ function pwError(err: unknown): ToolResult {
   };
 }
 
+function isContextClosedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Target page, context or browser has been closed|Target closed|Connection closed|Browser closed/i.test(msg);
+}
+
+/**
+ * Run a page operation; if it fails because the context/page closed between
+ * acquiring the page and calling the op (a known Playwright race in long-lived
+ * sessions), close the dead page and retry once with a fresh page.
+ */
+async function withPageRetry<T>(op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (err) {
+    if (!isContextClosedError(err)) throw err;
+    await closeActivePage().catch(() => undefined);
+    return await op();
+  }
+}
+
 function truncate(s: string, max = MAX_TEXT_OUTPUT): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max)}\n\n...[truncated ${s.length - max} chars]`;
@@ -61,26 +81,27 @@ export async function executeBrowserNavigate(action: BrowserNavigateAction): Pro
     };
   }
   try {
-    const page = await getActivePage();
-    const waitUntil = action.waitFor ?? 'domcontentloaded';
-    await page.goto(action.url, { waitUntil, timeout: 30_000 });
-    const title = await page.title();
-    const finalUrl = page.url();
+    return await withPageRetry(async () => {
+      const page = await getActivePage();
+      const waitUntil = action.waitFor ?? 'domcontentloaded';
+      await page.goto(action.url, { waitUntil, timeout: 30_000 });
+      const title = await page.title();
+      const finalUrl = page.url();
 
-    let extracted = '';
-    if (action.extractText !== false) {
-      // Use innerText to get only visible text (skip script/style)
-      try {
-        extracted = await page.evaluate(() => document.body?.innerText ?? '');
-      } catch {
-        /* page might be closed or weird state */
+      let extracted = '';
+      if (action.extractText !== false) {
+        try {
+          extracted = await page.evaluate(() => document.body?.innerText ?? '');
+        } catch {
+          /* page might be closed or weird state */
+        }
       }
-    }
-    const head = `🌐 ${title}\n   ${finalUrl}`;
-    const body = extracted.trim().length > 0
-      ? `\n\n--- page text ---\n${truncate(extracted.trim())}`
-      : '';
-    return { ok: true, output: head + body };
+      const head = `🌐 ${title}\n   ${finalUrl}`;
+      const body = extracted.trim().length > 0
+        ? `\n\n--- page text ---\n${truncate(extracted.trim())}`
+        : '';
+      return { ok: true, output: head + body };
+    });
   } catch (err) {
     return pwError(err);
   }
@@ -168,21 +189,23 @@ async function collectLayoutAudit(page: Awaited<ReturnType<typeof getActivePage>
 
 export async function executeBrowserScreenshot(action: BrowserScreenshotAction): Promise<ToolResult> {
   try {
-    const page = await getActivePage();
-    const width = normalizeViewportDimension(action.width, 240, 4096);
-    const height = normalizeViewportDimension(action.height, 240, 4096);
-    if (width && height) {
-      await page.setViewportSize({ width, height });
-    }
-    await fsp.mkdir(SCREENSHOT_DIR, { recursive: true });
-    const filename = `screenshot-${Date.now()}.png`;
-    const filepath = path.join(SCREENSHOT_DIR, filename);
-    await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
-    const audit = await collectLayoutAudit(page);
-    return {
-      ok: true,
-      output: `📸 已截图：${filepath}\n   URL: ${page.url()}\n   ${audit}`,
-    };
+    return await withPageRetry(async () => {
+      const page = await getActivePage();
+      const width = normalizeViewportDimension(action.width, 240, 4096);
+      const height = normalizeViewportDimension(action.height, 240, 4096);
+      if (width && height) {
+        await page.setViewportSize({ width, height });
+      }
+      await fsp.mkdir(SCREENSHOT_DIR, { recursive: true });
+      const filename = `screenshot-${Date.now()}.png`;
+      const filepath = path.join(SCREENSHOT_DIR, filename);
+      await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
+      const audit = await collectLayoutAudit(page);
+      return {
+        ok: true,
+        output: `📸 已截图：${filepath}\n   URL: ${page.url()}\n   ${audit}`,
+      };
+    });
   } catch (err) {
     return pwError(err);
   }
@@ -197,18 +220,20 @@ export interface BrowserExtractAction {
 
 export async function executeBrowserExtract(action: BrowserExtractAction): Promise<ToolResult> {
   try {
-    const page = await getActivePage();
-    let text: string;
-    if (action.selector && action.selector.trim().length > 0) {
-      const el = page.locator(action.selector).first();
-      text = await el.innerText({ timeout: 10_000 });
-    } else {
-      text = await page.evaluate(() => document.body?.innerText ?? '');
-    }
-    return {
-      ok: true,
-      output: truncate(text.trim() || '(empty)'),
-    };
+    return await withPageRetry(async () => {
+      const page = await getActivePage();
+      let text: string;
+      if (action.selector && action.selector.trim().length > 0) {
+        const el = page.locator(action.selector).first();
+        text = await el.innerText({ timeout: 10_000 });
+      } else {
+        text = await page.evaluate(() => document.body?.innerText ?? '');
+      }
+      return {
+        ok: true,
+        output: truncate(text.trim() || '(empty)'),
+      };
+    });
   } catch (err) {
     return pwError(err);
   }

@@ -34,8 +34,27 @@ function isPersistentProfileLockError(err: unknown): boolean {
   return /ProcessSingleton|profile directory|SingletonLock|already in use|user data directory is already in use/i.test(msg);
 }
 
+function isContextAlive(ctx: BrowserContext | null): ctx is BrowserContext {
+  if (!ctx) return false;
+  // Playwright doesn't expose isClosed() on BrowserContext in all versions,
+  // but the underlying browser does. A closed context has no browser.
+  try {
+    const browser = ctx.browser();
+    if (browser && !browser.isConnected()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function initContext(): Promise<BrowserContext> {
-  if (_context) return _context;
+  if (isContextAlive(_context)) return _context;
+  // Stale context — clear so we relaunch
+  if (_context) {
+    _context = null;
+    _activePage = null;
+    _initPromise = null;
+  }
   if (_initPromise) return _initPromise;
 
   _initPromise = (async () => {
@@ -111,10 +130,21 @@ export async function getBrowserContext(): Promise<BrowserContext> {
  * brain runs multi-step browser actions like navigate → click → extract.
  */
 export async function getActivePage(): Promise<Page> {
-  const ctx = await initContext();
-  if (_activePage && !_activePage.isClosed()) return _activePage;
-  // Reuse an existing page in the context if any
-  const pages = ctx.pages();
+  let ctx = await initContext();
+
+  if (_activePage && !_activePage.isClosed() && isContextAlive(ctx)) {
+    return _activePage;
+  }
+  _activePage = null;
+
+  // If context died between calls, relaunch and try again once.
+  if (!isContextAlive(ctx)) {
+    _context = null;
+    _initPromise = null;
+    ctx = await initContext();
+  }
+
+  const pages = ctx.pages().filter(p => !p.isClosed());
   if (pages.length > 0) {
     _activePage = pages[pages.length - 1]!;
     return _activePage;

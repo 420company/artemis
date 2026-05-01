@@ -9,7 +9,7 @@
  * Only one concurrent task per target ID is allowed.
  */
 
-import { think, resetSession, getMessages, restoreSession } from '../brain.js'
+import { think, resetSession, getMessages, restoreSession, getSystemPromptSuffix, setSystemPromptSuffix } from '../brain.js'
 import { open, readFile, unlink } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
@@ -22,6 +22,13 @@ import { pickLocale } from '../cli/locale.js'
 import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js'
 import { ensureDir, resolveDataRootDir, truncate } from '../utils/fs.js'
 import stripAnsi from 'strip-ansi'
+import {
+  detectWorkflowSlashCommand,
+  resolveWorkflow,
+  type WorkflowResolution,
+} from '../core/workflowDispatcher.js'
+import { resolveMainProviderConfig } from '../providers/onboarding.js'
+import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -149,6 +156,12 @@ export async function runRemoteCommand(
     cwd?: string
     maxTurns?: number
     onProgress?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void>
+    /**
+     * Send an intermediate message to the originating chat. Used by workflow
+     * commands to surface routing decisions before the main reply. Differs
+     * from onProgress (which only updates CLI display).
+     */
+    sendChatUpdate?: (text: string) => void | Promise<void>
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
@@ -216,10 +229,78 @@ export async function runRemoteCommand(
 
     case 'chat': {
       let reply = ''
+      const previousSuffix = getSystemPromptSuffix()
+      let suffixApplied = false
       try {
         const emitProgress = (message: string, level: 'info' | 'warn' | 'error' = 'info'): void => {
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
         }
+
+        // Workflow slash dispatch: detect /team /niko /design /athena /nidhogg /contest /run
+        // and apply visual generation policy. Falls back to direct chat when no command.
+        const slashMatch = detectWorkflowSlashCommand(command.body)
+        let workflowResolution: WorkflowResolution | undefined
+        if (slashMatch.command) {
+          let provider
+          if (slashMatch.command === '/team') {
+            // /team needs a provider for routing — use the workspace's default main provider.
+            try {
+              const provConfig = await resolveMainProviderConfig({ cwd: commandCwd ?? process.cwd(), config: {} })
+              const trackedProfileId =
+                typeof (provConfig as unknown as { id?: unknown }).id === 'string'
+                  ? (provConfig as unknown as { id: string }).id
+                  : undefined
+              const trackedProfileLabel =
+                typeof (provConfig as unknown as { label?: unknown }).label === 'string'
+                  ? (provConfig as unknown as { label: string }).label
+                  : trackedProfileId
+              provider = createTrackedProviderFromConfig(provConfig, {
+                cwd: commandCwd ?? process.cwd(),
+                profileId: trackedProfileId,
+                profileLabel: trackedProfileLabel,
+              })
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              await opts.onProgress?.(t(
+                `Team 路由不可用（无 provider 配置），按 direct 处理：${truncate(msg, 200)}`,
+                `Team router unavailable (no provider configured), falling back to direct: ${truncate(msg, 200)}`,
+              ), 'warn')
+            }
+          }
+
+          try {
+            workflowResolution = await resolveWorkflow(slashMatch, {
+              cwd: commandCwd ?? process.cwd(),
+              locale,
+              provider,
+              nonInteractive: true,
+              onProgress: opts.onProgress,
+            })
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            await opts.onProgress?.(t(
+              `工作流分发失败：${msg}`,
+              `Workflow dispatch failed: ${msg}`,
+            ), 'warn')
+          }
+
+          if (workflowResolution && workflowResolution.summary.length > 0) {
+            // Send to chat so user sees the routing decision; also mirror to CLI.
+            const summaryText = workflowResolution.summary.join('\n')
+            await opts.onProgress?.(summaryText, 'info')
+            await opts.sendChatUpdate?.(summaryText)
+          }
+
+          if (workflowResolution && workflowResolution.hint) {
+            const merged = previousSuffix
+              ? `${previousSuffix}\n\n${workflowResolution.hint}`
+              : workflowResolution.hint
+            setSystemPromptSuffix(merged)
+            suffixApplied = true
+          }
+        }
+
+        const effectiveBody = workflowResolution?.effectivePrompt ?? command.body
         const startedText = t(
           '已收到，正在后台处理；完成后会把结果发回聊天。',
           'Received. Working in the background; the final result will be sent back here.',
@@ -234,7 +315,7 @@ export async function runRemoteCommand(
         //                denied, leaving the IM user with a dangling intent
         //                line as the only reply.
         //   accept-*   → enable tools so remote coding via IM works.
-        const result = await think(command.body, {
+        const result = await think(effectiveBody, {
           cwd: commandCwd,
           permissionMode: binding.permissionMode,
           disableNativeTools: binding.permissionMode === 'read-only',
@@ -287,6 +368,9 @@ export async function runRemoteCommand(
           storedSession: binding.storedSession,
           permissionMode: binding.permissionMode,
         }
+      } finally {
+        // Restore previous system prompt suffix so subsequent turns aren't tainted.
+        if (suffixApplied) setSystemPromptSuffix(previousSuffix)
       }
     }
   }
@@ -543,6 +627,15 @@ export async function runBragiMessagePump<TCheckpoint>(
             cwd: options.cwd,
             maxTurns: options.maxTurns,
             onProgress: sendProgress,
+            sendChatUpdate: async (text) => {
+              const trimmed = text.trim()
+              if (!trimmed) return
+              try {
+                await options.sendMessage(message.targetId, trimmed)
+              } catch (err) {
+                options.onInfo?.(`[${options.channelLabel.toLowerCase()}] sendChatUpdate failed: ${err instanceof Error ? err.message : String(err)}`)
+              }
+            },
           })
 
           await options.persistRuntimeResult(message, result)
