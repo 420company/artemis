@@ -11,8 +11,15 @@ import {
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 
-function countDefined(values: Array<unknown>): number {
-  return values.filter((value) => value !== undefined).length;
+function hasUsableAnchor(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+  return Number.isInteger(value) && Number(value) > 0;
+}
+
+function countUsableAnchors(values: Array<unknown>): number {
+  return values.filter(hasUsableAnchor).length;
 }
 
 function insertByLine(content: string, atLine: number, insertion: string): string {
@@ -48,7 +55,7 @@ export async function executeInsertInFile(
   action: Extract<AgentAction, { type: 'insert_in_file' }>,
   context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
-  const anchorCount = countDefined([action.after, action.before, action.atLine]);
+  const anchorCount = countUsableAnchors([action.after, action.before, action.atLine]);
 
   if (anchorCount !== 1) {
     throw new Error(
@@ -66,11 +73,12 @@ export async function executeInsertInFile(
 
   let nextContent: string;
 
-  if (typeof action.atLine === 'number') {
-    nextContent = insertByLine(content, action.atLine, action.content);
-  } else if (typeof action.after === 'string') {
+  const atLine = action.atLine;
+  if (typeof atLine === 'number' && Number.isInteger(atLine) && atLine > 0) {
+    nextContent = insertByLine(content, atLine, action.content);
+  } else if (typeof action.after === 'string' && action.after.trim().length > 0) {
     nextContent = insertByAnchor(content, action.after, action.content, 'after');
-  } else if (typeof action.before === 'string') {
+  } else if (typeof action.before === 'string' && action.before.trim().length > 0) {
     nextContent = insertByAnchor(content, action.before, action.content, 'before');
   } else {
     throw new Error('insert_in_file could not resolve an insertion anchor.');

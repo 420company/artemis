@@ -386,7 +386,7 @@ export async function runRemoteCommand(
             permissionMode: binding.permissionMode,
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
-            maxNativeToolRounds: Math.max(16, (opts.maxTurns ?? 8) * 2),
+            maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? 8) * 3),
             onToolCall: (name, args) => {
               emitProgress(t(
                 `🔧 正在运行工具：${String(name)}${summarizeToolArgs(args)}`,
@@ -425,7 +425,12 @@ export async function runRemoteCommand(
         reply = result.text
         // update session
         const messages = getMessages()
-        const updated = { ...binding.storedSession, messages, updatedAt: new Date().toISOString() }
+        const updated = {
+          ...binding.storedSession,
+          cwd: result.cwd ?? binding.storedSession.cwd,
+          messages,
+          updatedAt: new Date().toISOString(),
+        }
         await store.save(updated)
         return { replies: [reply], storedSession: updated, permissionMode: binding.permissionMode }
       } catch (err: unknown) {

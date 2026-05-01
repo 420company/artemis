@@ -1368,6 +1368,22 @@ function buildRuntimeGuardMessage(reply: string): SessionMessage {
     );
 }
 
+function buildNativeToolLimitFinalizerMessage(maxRounds: number, latestUserText: string): SessionMessage {
+    return makeSessionMessage(
+        'user',
+        [
+            '[tool:runtime_guard]',
+            `The runtime has reached the native tool round budget (${maxRounds} rounds).`,
+            'Do not call any more tools. Produce the best possible final reply now.',
+            'Summarize what was completed, mention any known verification failures or blockers, and give the next concrete step if work is incomplete.',
+            'Do not expose internal tool-loop terminology to the user.',
+            '',
+            'Original user request:',
+            latestUserText.slice(0, 1200),
+        ].join('\n'),
+    );
+}
+
 function normalizeThinkArgs(
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
     maybeOptions?: ThinkOptions,
@@ -1536,16 +1552,48 @@ export async function think(
         const nativeCalls = completion.nativeToolCalls ?? [];
         if (nativeCalls.length > 0) {
             if (round >= maxNativeToolRounds) {
-                throw new Error(
-                    [
-                        `工具循环达到上限（${maxNativeToolRounds} 轮）仍未产生最终回复。`,
-                        '常见原因：',
-                        '  • 任务需要的外部服务没有配置 MCP（试试 /mcp suggest <任务描述>）',
-                        '  • 任务超出当前可用工具能力，brain 在反复尝试无法成功的 hack',
-                        '  • 任务范围过大，建议拆成多个小任务',
-                        '建议：缩小任务范围，或先 /mcp suggest 找对应集成，或用 /design /niko 等专项工作流。',
-                    ].join('\n'),
+                onToolLog?.(
+                    `Native tool round budget reached (${maxNativeToolRounds}); requesting a no-tool final reply.`,
+                    'warn',
                 );
+                const finalizerMessage = buildNativeToolLimitFinalizerMessage(
+                    maxNativeToolRounds,
+                    latestUserText,
+                );
+                const forcedCompletion = await completeWithOptionalStream(
+                    p,
+                    [...providerMessages, finalizerMessage],
+                    onDelta,
+                    {
+                        onReasoning,
+                        guardStreamingText: false,
+                    },
+                );
+                const forcedReply = (forcedCompletion.text ?? '').trim() || [
+                    '我已经停止继续调用工具。',
+                    '目前还没有足够的最终文本可返回；请发送“继续”让我基于当前上下文接着处理，或把任务拆成更小的一步。',
+                ].join('\n');
+                finalResult = {
+                    ...forcedCompletion,
+                    text: forcedReply,
+                    nativeToolCalls: [],
+                };
+                if (forcedReply && forcedCompletion.streamed !== true && onDelta) {
+                    onDelta(forcedReply);
+                    emittedFinalText = true;
+                }
+                const assistantReplyMessage = makeSessionMessage('assistant', forcedReply, {
+                    reasoningContent: finalResult.reasoningContent,
+                    rawContentBlocks: finalResult.rawContentBlocks,
+                });
+                providerConversationMessages = [
+                    ...providerConversationMessages,
+                    finalizerMessage,
+                    assistantReplyMessage,
+                ];
+                rawMessages = [...rawMessages, finalizerMessage, assistantReplyMessage];
+                tSession.restore(rawMessages);
+                break;
             }
             if (providerConfigVal?.protocol === 'responses' && !completion.responseId) {
                 throw new Error(
@@ -1717,6 +1765,7 @@ export async function think(
     return {
         reply,
         text: reply,
+        cwd: currentCwd,
         usage: finalResult.usage,
         tokenStats,
         toolCalls: finalResult.nativeToolCalls ?? [],

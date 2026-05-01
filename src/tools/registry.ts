@@ -297,13 +297,19 @@ function validateInsertInFileAction(action: any): string[] {
   if (typeof action?.content !== 'string') {
     errors.push('content is required.');
   }
-  validateOptionalNonEmptyString(action?.after, 'after', errors);
-  validateOptionalNonEmptyString(action?.before, 'before', errors);
+  if (action?.after !== undefined && typeof action.after !== 'string') {
+    errors.push('after must be a string.');
+  }
+  if (action?.before !== undefined && typeof action.before !== 'string') {
+    errors.push('before must be a string.');
+  }
   validatePositiveInteger(action?.atLine, 'atLine', errors);
 
-  const anchorCount = [action?.after, action?.before, action?.atLine].filter(
-    (value) => value !== undefined,
-  ).length;
+  const anchorCount = [
+    typeof action?.after === 'string' && action.after.trim().length > 0,
+    typeof action?.before === 'string' && action.before.trim().length > 0,
+    Number.isInteger(action?.atLine) && Number(action.atLine) > 0,
+  ].filter(Boolean).length;
   if (anchorCount !== 1) {
     errors.push(
       'insert_in_file requires exactly one anchor: after, before, or atLine.',

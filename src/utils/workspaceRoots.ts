@@ -14,6 +14,13 @@ export function expandHomePath(input: string, homeDir = homedir()): string {
   if (input.startsWith('~/') || input.startsWith('~\\')) {
     return path.join(homeDir, input.slice(2))
   }
+  if (input === '$HOME' || input === '${HOME}') return homeDir
+  if (input.startsWith('$HOME/') || input.startsWith('$HOME\\')) {
+    return path.join(homeDir, input.slice(6))
+  }
+  if (input.startsWith('${HOME}/') || input.startsWith('${HOME}\\')) {
+    return path.join(homeDir, input.slice(8))
+  }
   return input
 }
 

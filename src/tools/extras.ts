@@ -40,6 +40,15 @@ function guardPath(cwd: string, inputPath: string): { ok: true; absolute: string
   }
 }
 
+async function isGitRepository(cwd: string): Promise<boolean> {
+  try {
+    const { stdout } = await execAsync('git rev-parse --is-inside-work-tree', { cwd, timeout: 5_000 })
+    return stdout.trim() === 'true'
+  } catch {
+    return false
+  }
+}
+
 async function gitRun(args: string, cwd: string): Promise<TR> {
   try {
     const { stdout, stderr } = await execAsync(`git ${args}`, { cwd, timeout: 15_000 })
@@ -122,32 +131,50 @@ export async function execListDirectory(inp: Record<string, unknown>, cwd: strin
 // ── Git ───────────────────────────────────────────────────────────────────────
 
 export async function execGitStatus(_inp: Record<string, unknown>, cwd: string): Promise<TR> {
+  if (!(await isGitRepository(cwd))) {
+    return { ok: true, output: `Not a git repository: ${cwd}\nGit status is unavailable for this workspace.` }
+  }
   return gitRun('status --short --branch', cwd)
 }
 
 export async function execGitDiff(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+  if (!(await isGitRepository(cwd))) {
+    return { ok: true, output: `Not a git repository: ${cwd}\nGit diff is unavailable; inspect files directly or use diff_text with known before/after content.` }
+  }
   const staged = inp.staged === true ? '--staged' : ''
   const path   = inp.path   ? String(inp.path) : ''
   return gitRun(`diff ${staged} ${path}`.trim(), cwd)
 }
 
 export async function execGitLog(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+  if (!(await isGitRepository(cwd))) {
+    return { ok: true, output: `Not a git repository: ${cwd}\nGit log is unavailable for this workspace.` }
+  }
   const limit = Number(inp.limit ?? 10)
   return gitRun(`log --oneline -${limit}`, cwd)
 }
 
 export async function execGitAdd(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+  if (!(await isGitRepository(cwd))) {
+    return { ok: false, output: `Not a git repository: ${cwd}\nCannot stage files without a git repository.` }
+  }
   const paths = Array.isArray(inp.paths) ? inp.paths.map(String).join(' ') : String(inp.paths ?? '.')
   return gitRun(`add ${paths}`, cwd)
 }
 
 export async function execGitCommit(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+  if (!(await isGitRepository(cwd))) {
+    return { ok: false, output: `Not a git repository: ${cwd}\nCannot create a commit without a git repository.` }
+  }
   const msg = String(inp.message ?? 'chore: update')
     .replace(/"/g, '\\"')
   return gitRun(`commit -m "${msg}"`, cwd)
 }
 
 export async function execGitBranch(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+  if (!(await isGitRepository(cwd))) {
+    return { ok: false, output: `Not a git repository: ${cwd}\nCannot manage branches without a git repository.` }
+  }
   if (inp.create) return gitRun(`checkout -b ${inp.create}`, cwd)
   if (inp.checkout) return gitRun(`checkout ${inp.checkout}`, cwd)
   return gitRun('branch -a', cwd)

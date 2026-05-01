@@ -827,18 +827,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             type: 'string',
             description: 'Content to insert.',
           },
-          after: {
-            type: 'string',
-            description: 'Insert after this exact anchor string.',
-          },
-          before: {
-            type: 'string',
-            description: 'Insert before this exact anchor string.',
-          },
-          atLine: {
-            type: 'integer',
-            description: 'Insert at this exact 1-based line number.',
-          },
+          after: nonEmptyStringSchema('Use exactly one anchor. Insert after this exact non-empty anchor string.'),
+          before: nonEmptyStringSchema('Use exactly one anchor. Insert before this exact non-empty anchor string.'),
+          atLine: integerSchema('Use exactly one anchor. Insert at this exact 1-based line number.'),
         },
       };
     case 'replace_in_file':

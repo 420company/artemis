@@ -4399,6 +4399,125 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
 {
   const originalCwd = process.cwd()
+  const tmpDir = path.join(os.tmpdir(), `artemis-native-tool-limit-finalizer-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+
+  const requests: Array<Record<string, unknown>> = []
+  let requestCount = 0
+
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+      requests.push(body)
+      requestCount += 1
+
+      if (req.url !== '/chat/completions') {
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not found' }))
+        return
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' })
+
+      if (requestCount === 1) {
+        res.end(JSON.stringify({
+          model: 'mock-openai-compatible',
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'call_list_files_limit_1',
+                type: 'function',
+                function: {
+                  name: 'list_files',
+                  arguments: '{}',
+                },
+              }],
+            },
+          }],
+        }))
+        return
+      }
+
+      res.end(JSON.stringify({
+        model: 'mock-openai-compatible',
+        choices: [{
+          message: {
+            content: '已停止继续调用工具，并总结当前进展。',
+          },
+        }],
+      }))
+    })
+  })
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('Mock provider server failed to bind to a TCP port.')
+    }
+
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-openai',
+      profiles: [{
+        id: 'mock-openai',
+        label: 'Mock OpenAI-compatible',
+        protocol: 'openai',
+        apiKey: 'test-key',
+        model: 'mock-openai-compatible',
+        baseUrl: `http://127.0.0.1:${address.port}`,
+      }],
+    }, null, 2), 'utf8')
+
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+
+    const result = await think('一直检查直到完成', {
+      cwd: tmpDir,
+      permissionMode: 'accept-all',
+      maxNativeToolRounds: 1,
+    })
+
+    const secondRequest = requests[1] ?? {}
+    const secondTools = secondRequest.tools as unknown[] | undefined
+    const secondMessages = (secondRequest.messages as Array<Record<string, unknown>> | undefined) ?? []
+    const finalizerMessage = secondMessages.find(
+      (message) =>
+        message.role === 'user' &&
+        typeof message.content === 'string' &&
+        message.content.includes('Do not call any more tools.'),
+    )
+
+    assert(
+      'native tool loop: exhausted tool budget requests a no-tool final reply',
+      requests.length === 2 &&
+        (!Array.isArray(secondTools) || secondTools.length === 0) &&
+        result.reply === '已停止继续调用工具，并总结当前进展。',
+      `requests=${requests.length} tools=${JSON.stringify(secondTools)} reply=${result.reply}`,
+    )
+    assert(
+      'native tool loop: no-tool finalizer includes runtime guard instruction',
+      Boolean(finalizerMessage),
+      JSON.stringify(secondMessages),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  const originalCwd = process.cwd()
   const tmpDir = path.join(os.tmpdir(), `artemis-native-tool-failure-payload-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
