@@ -711,10 +711,15 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
       // line per tarball download. We use that as the "current package"
       // signal so the dialog shows real activity during the otherwise
       // silent resolve+download phase.
+      // Windows: `npm` is `npm.cmd`. Node's spawn() can't directly execute
+      // .cmd / .bat files without shell: true, so the install would fail with
+      // ENOENT and surface as "部分依赖安装失败 → /mcp install".
+      const isWindows = process.platform === 'win32'
+      const npmCommand = isWindows ? 'npm.cmd' : 'npm'
       const child = spawn(
-        'npm',
+        npmCommand,
         ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund', '--loglevel=http'],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
+        { stdio: ['ignore', 'pipe', 'pipe'], shell: isWindows, windowsHide: true },
       )
 
       let stderrBuf = ''

@@ -1621,9 +1621,17 @@ class StdioRpcTransport implements RpcTransport {
       resolvedArgs = ['--prefix', CLI_MCP_PACKAGES_DIR, ...resolvedArgs];
     }
 
-    const child = spawn(resolvedCommand, resolvedArgs, {
+    // Windows: npm/npx/yarn/pnpm are `.cmd` shims; spawn() cannot execute
+    // them directly without shell: true. Add the .cmd extension for the
+    // common shims and enable shell so cmd.exe resolves PATHEXT correctly.
+    const isWindows = process.platform === 'win32';
+    const baseName = path.basename(resolvedCommand);
+    const finalCommand = isWindows && /^(npm|npx|yarn|pnpm)$/i.test(baseName) && !resolvedCommand.toLowerCase().endsWith('.cmd')
+      ? `${resolvedCommand}.cmd`
+      : resolvedCommand;
+    const child = spawn(finalCommand, resolvedArgs, {
       cwd: this.server.workingDirectory ?? this.cwd,
-      shell: false,
+      shell: isWindows,
       windowsHide: true,
       stdio: 'pipe',
       env: {

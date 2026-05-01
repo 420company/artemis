@@ -725,9 +725,16 @@ async function probeStdioServer(
   const checkedAt = now();
 
   return new Promise<McpProbeResult>((resolve) => {
-    const child = spawn(server.command ?? '', server.commandArgs ?? [], {
+    // Windows: many MCP servers launch via `npx` / `npm` / `yarn` / `pnpm`,
+    // all of which are `.cmd` shims that Node's spawn() cannot execute
+    // directly. Append `.cmd` for these known shims and turn on shell mode
+    // so cmd.exe can resolve the file extension and PATHEXT.
+    const command = server.command ?? '';
+    const isWindows = process.platform === 'win32';
+    const resolvedCommand = isWindows && /^(npm|npx|yarn|pnpm)$/i.test(command) ? `${command}.cmd` : command;
+    const child = spawn(resolvedCommand, server.commandArgs ?? [], {
       cwd: server.workingDirectory ?? cwd,
-      shell: false,
+      shell: isWindows,
       windowsHide: true,
       env: {
         ...process.env,
