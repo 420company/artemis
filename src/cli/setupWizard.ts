@@ -304,15 +304,15 @@ async function configureToolSettings(options: { cwd: string; locale: UiLocale })
   try {
     const { cwd, locale } = options
     sectionTitle('Tool Configuration', [
-      tr(locale, '启用或禁用已经接入运行时的工具组。', 'Enable or disable tool groups that are wired into the runtime.'),
+      tr(locale, '按组开关 AI 可以使用的工具能力。', 'Toggle the tool groups available to the AI by category.'),
       tr(
         locale,
-        '关闭后，这组工具不会再出现在模型可调用工具列表里；即使模型手写调用也会被运行时拒绝。',
-        'When disabled, the group is removed from model-callable tools and runtime calls are rejected.',
+        '关闭后，AI 既看不到这组工具，也无法绕过去调用。',
+        'When disabled, the AI cannot see or call any tool in that group.',
       ),
       tr(
         locale,
-        '不确定就保留默认值（光标已经停在推荐选项上），按 Enter 即可。',
+        '不确定就保留默认值（光标已停在推荐选项上），按 Enter 即可。',
         'If unsure, keep the default — the cursor is already on the recommended option, just press Enter.',
       ),
     ])
@@ -957,8 +957,8 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
   const existing = Boolean(store.getDefaultMainProfile(data)) || settings.onboardingCompleted
 
   sectionTitle('Artemis Setup Wizard', [
-    tr(locale, '现在只显示已经真实打通到运行时的配置路径。', 'Only runtime-backed setup paths are shown now.'),
-    tr(locale, 'Press Ctrl+C at any time to exit.', 'Press Ctrl+C at any time to exit.'),
+    tr(locale, '选择要配置的项目；不确定就先选 Quick setup 跑通最小可用环境。', 'Pick what to configure, or run Quick setup for a minimal working baseline.'),
+    tr(locale, '随时按 Ctrl+C 退出。', 'Press Ctrl+C at any time to exit.'),
   ])
 
   if (!existing || options.forceFirstTime) {
