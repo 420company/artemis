@@ -107,6 +107,60 @@ function pathForAlias(source: WorkspaceIntentResolution['source'], homeDir: stri
   return homeDir
 }
 
+/**
+ * Detect a relative subpath that immediately follows an alias word like
+ * "桌面" / "desktop folder" / "documents". Used so a request such as
+ *   "进入桌面 BangkokProject/420-company-site 设为工作区"
+ * resolves to ~/Desktop/BangkokProject/420-company-site instead of just
+ * ~/Desktop (which then makes read_file fail with ENOENT for src/App.tsx
+ * because the AI doesn't realize the workspace baseline never moved).
+ */
+function extractSubpathAfterAlias(
+  input: string,
+  source: WorkspaceIntentResolution['source'],
+): string | null {
+  // The Chinese stopword list mirrors extractPrefixedPath so we don't
+  // swallow trailing imperatives like "并设为工作区".
+  const zhStops = '继续|并|然后|之后|再|接着|创建|建立|新建|制作|做|写|修改|更新|运行|执行|设为|作为|设置为|开始'
+  const enStops = 'and|then|create|build|make|write|edit|run|set|use'
+  const aliasWord =
+    source === 'desktop-alias' ? '(?:桌面(?:上|里|下)?|desktop(?:\\s+folder|\\s+directory)?)' :
+    source === 'documents-alias' ? '(?:文档(?:里|下)?|documents(?:\\s+folder|\\s+directory)?)' :
+    source === 'downloads-alias' ? '(?:下载(?:里|下)?|downloads(?:\\s+folder|\\s+directory)?)' :
+    null
+  if (!aliasWord) return null
+
+  const pattern = new RegExp(
+    // Anchor at the alias word; capture the next path-like token until a
+    // stopword or punctuation. The path may contain letters, digits, dot,
+    // dash, underscore, slash, and Unicode letters — but must NOT start
+    // with a verb stopword.
+    `${aliasWord}\\s+([\\p{L}0-9._\\-][\\p{L}0-9._\\-/]*)`,
+    'iu',
+  )
+  const match = input.match(pattern)
+  if (!match?.[1]) return null
+
+  let candidate = match[1].trim().replace(/[，。；;,]+$/g, '').trim()
+  if (!candidate) return null
+
+  // Reject when the candidate IS a stopword (e.g. "桌面 设为" should not
+  // map to ~/Desktop/设为).
+  const stopwordPattern = new RegExp(`^(?:${zhStops}|${enStops})$`, 'i')
+  if (stopwordPattern.test(candidate)) return null
+
+  // Strip any trailing stopwords that snuck in.
+  candidate = candidate.replace(new RegExp(`(?:${zhStops}|${enStops}).*$`, 'i'), '').trim()
+  candidate = candidate.replace(/\/+$/, '')
+  if (!candidate) return null
+
+  // Must look like a folder/file path (contain at least one path-like
+  // character or be all alphanumerics).
+  if (!/^[\p{L}0-9][\p{L}0-9._\-/]*$/u.test(candidate)) return null
+
+  return candidate
+}
+
 export async function resolveWorkspaceIntent(
   input: string,
   currentCwd: string,
@@ -114,7 +168,12 @@ export async function resolveWorkspaceIntent(
 ): Promise<WorkspaceIntentResolution | null> {
   const aliasSource = aliasPathFromText(input, homeDir)
   if (aliasSource) {
-    const requestedPath = pathForAlias(aliasSource, homeDir)
+    const aliasRoot = pathForAlias(aliasSource, homeDir)
+    // If the user typed a subpath right after the alias (e.g.
+    // "桌面 BangkokProject/420-company-site"), resolve to that subpath
+    // instead of the bare alias root.
+    const subpath = extractSubpathAfterAlias(input, aliasSource)
+    const requestedPath = subpath ? path.join(aliasRoot, subpath) : aliasRoot
     const existing = await findNearestExistingWorkspaceRoot(requestedPath)
     if (!existing) return null
     return {
