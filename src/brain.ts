@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import path from 'node:path';
+import { release as osRelease } from 'node:os';
 import { ProviderStore } from './providers/store.js';
 import { annotateProviderResponse, createTrackedProviderFromConfig, recordProviderProfileTelemetry, } from './providers/telemetry.js';
 import { Session } from './core/session.js';
@@ -134,10 +135,47 @@ export function setSystemPromptSuffix(suffix: any) {
     }
 }
 
+function buildHostEnvironmentBlock(): string {
+    // Prepend host platform context so the model picks the right path syntax
+    // (Windows: D:\\foo\\bar; macOS/Linux: /Users/.../foo; WSL: /mnt/d/...).
+    // Without this, requests like "进入D盘新建420COMPANY" on Windows native
+    // get a WSL-style /mnt/d/ guess that fails workspace-trust + filesystem
+    // checks because the artemis process is on Win32, not WSL.
+    const platform = (() => {
+        if (process.platform === 'win32') return 'Windows (win32)';
+        if (process.platform === 'darwin') return 'macOS (darwin)';
+        if (process.platform === 'linux') {
+            // WSL detection: WSL surfaces as platform=linux but runs Windows commands too.
+            try {
+                const release = osRelease().toLowerCase();
+                if (release.includes('microsoft') || release.includes('wsl')) return 'WSL on Windows (linux+wsl)';
+            } catch { /* ignore */ }
+            return 'Linux';
+        }
+        return process.platform;
+    })();
+    const lines = [`[Host environment]`, `- OS: ${platform}`];
+    if (process.platform === 'win32') {
+        lines.push(
+            '- Use Windows-native paths when the user names a drive: "D盘" / "D drive" → D:\\\\, NOT /mnt/d/.',
+            '- Shell defaults to cmd.exe; do NOT generate bash-only syntax (mkdir -p, &&-chained POSIX assumptions, /tmp, ~).',
+            '- Path separators in shell args usually need backslashes; in JSON / YAML / source code, forward slashes are fine.',
+        );
+    } else if (platform.startsWith('WSL')) {
+        lines.push(
+            '- Inside WSL: "D盘" / "D drive" maps to /mnt/d/. Use POSIX shell syntax. Native Windows tools may also be available via /mnt/c/Windows/...',
+        );
+    }
+    lines.push('');
+    return lines.join('\n');
+}
+
 function buildSystemPromptText() {
+    const env = buildHostEnvironmentBlock();
+    const base = `${env}${BASE_SYSTEM_PROMPT}`;
     return systemPromptSuffix
-        ? `${BASE_SYSTEM_PROMPT}\n${systemPromptSuffix}`
-        : BASE_SYSTEM_PROMPT;
+        ? `${base}\n${systemPromptSuffix}`
+        : base;
 }
 
 const SETUP_TOOL_NAME_GROUPS: Record<string, readonly string[]> = {

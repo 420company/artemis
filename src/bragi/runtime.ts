@@ -387,6 +387,19 @@ export async function runRemoteCommand(
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
             maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? 8) * 3),
+            // Bridges (Telegram/Discord/WeChat) have no interactive trust
+            // dialog — the user can't say "yes I trust this path" mid-chat.
+            // They've already opted into accept-all permissions and the path
+            // they're switching into is one they typed in the very same
+            // message, so auto-approve. Otherwise every "进入X设为工作区"
+            // request fails with "Workspace trust declined".
+            onWorkspaceSwitchRequest: async (request) => {
+              await opts.onProgress?.(t(
+                `📁 切换工作区到 ${request.workspacePath}`,
+                `📁 Switching workspace to ${request.workspacePath}`,
+              ), 'info')
+              return true
+            },
             onToolCall: (name, args) => {
               emitProgress(t(
                 `🔧 正在运行工具：${String(name)}${summarizeToolArgs(args)}`,
