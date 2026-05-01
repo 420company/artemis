@@ -250,10 +250,12 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
         // Any channel or DM can claim access by sending /start
         if (parsed.type === 'start') {
           const config = liveData.platforms.discord
-          await bragiStore.upsertPlatform('discord', {
-            ...(config ?? { enabled: true, autoStartOnLaunch: false, credentials: {} }),
-            allowedTargets: [...allowed, message.targetId],
-          })
+          if (config) {
+            await bragiStore.upsertPlatform('discord', {
+              ...config,
+              allowedTargets: [...allowed, message.targetId],
+            })
+          }
           return { allowed: true, preReplies: [`Artemis connected to ${message.targetLabel}.`] }
         }
 
