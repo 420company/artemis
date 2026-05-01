@@ -455,6 +455,146 @@ assert(
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
+async function configureMockImageProfile(cwd: string): Promise<void> {
+  const store = new ProviderStore(cwd)
+  const data = await store.load()
+  data.visualProfile = {
+    enabled: true,
+    image: {
+      provider: 'mock',
+      apiKey: 'test-key',
+      baseUrl: 'mock://local',
+      model: 'mock-image',
+      defaultParams: {
+        size: '720p',
+        quality: 'standard',
+        style: 'realistic',
+        watermark: false,
+      },
+    },
+    video: {
+      enabled: false,
+      provider: 'mock',
+      apiKey: '',
+      baseUrl: 'mock://local',
+      model: 'mock-video',
+      defaultParams: {
+        duration: '10s',
+        resolution: '1080p',
+        quality: 'standard',
+        style: 'realistic',
+        format: 'mp4',
+        framerate: '30fps',
+        watermark: false,
+      },
+    },
+  }
+  await store.save(data)
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-visual-required-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureMockImageProfile(tmpDir)
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'visual required smoke' })
+  await store.save(session)
+  const provider: ChatProvider = {
+    async complete(): Promise<ProviderResponse> {
+      return {
+        text: JSON.stringify({
+          reply: 'The product photos are ready.',
+          done: true,
+        }),
+        raw: null,
+      }
+    },
+  }
+
+  const result = await runAgent(
+    session,
+    'Create a product photo image for a catalog using local visual generation.',
+    {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 1,
+      profile: 'main',
+      completionContract: 'requires_execution_evidence',
+    },
+  )
+
+  assert(
+    'visual checklist: configured local image tasks cannot finish without generate_image',
+    result.reply.includes('Missing tool call(s): generate_image'),
+    result.reply,
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-visual-placeholder-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureMockImageProfile(tmpDir)
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'visual placeholder smoke' })
+  await store.save(session)
+  let calls = 0
+  const provider: ChatProvider = {
+    async complete(): Promise<ProviderResponse> {
+      calls += 1
+      if (calls === 1) {
+        return {
+          text: JSON.stringify({
+            reply: 'Creating placeholder visuals.',
+            done: false,
+            actions: [
+              {
+                type: 'write_file',
+                path: 'assets/product.svg',
+                content: '<svg xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%"/></svg>',
+              },
+            ],
+          }),
+          raw: null,
+        }
+      }
+      return {
+        text: JSON.stringify({
+          reply: 'Product imagery is ready.',
+          done: true,
+        }),
+        raw: null,
+      }
+    },
+  }
+
+  const result = await runAgent(
+    session,
+    'Create a product photo image for a catalog using local visual generation.',
+    {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+      completionContract: 'requires_execution_evidence',
+    },
+  )
+
+  assert(
+    'visual checklist: SVG placeholder assets are blocked when local generation is required',
+    result.reply.includes('SVG/procedural placeholder visuals') &&
+      result.reply.includes('assets/product.svg'),
+    result.reply,
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
 function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): PromptIO {
   return {
     available: true,
@@ -754,6 +894,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const workflowSource = source('src/core/workflowMode.ts')
   const teamSource = source('src/core/team.ts')
   const interactiveSource = source('src/cli/interactive.ts')
+  const bragiSource = source('src/bragi/runtime.ts')
+  const browserToolsSource = source('src/tools/browser/browserTools.ts')
 
   assert(
     'workflow routing: /design uses the executable workflow path with design guidance',
@@ -808,6 +950,22 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       interactiveSource.includes('onWorkspaceSwitchRequest,') &&
       source('src/brain.ts').includes('requestWorkspaceSwitch: onWorkspaceSwitchRequest') &&
       source('src/core/agent.ts').includes('requestWorkspaceSwitch: options.onWorkspaceSwitchRequest'),
+  )
+  assert(
+    'bridge workflow routing: slash workflows use executable runWorkflowMode instead of prompt suffix simulation',
+    bragiSource.includes('runWorkflowMode(') &&
+      bragiSource.includes('createProviderRouter({') &&
+      bragiSource.includes('new PermissionManager(binding.permissionMode, false)') &&
+      !bragiSource.includes('setSystemPromptSuffix') &&
+      bragiSource.includes('withBridgeThinkLock'),
+  )
+  assert(
+    'browser tools: context-closed retry restores current URL and covers click/type/wait',
+    browserToolsSource.includes('restoreUrlOnRetry') &&
+      browserToolsSource.includes('await page.goto(restoreUrl') &&
+      /executeBrowserClick[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource) &&
+      /executeBrowserType[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource) &&
+      /executeBrowserWait[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource),
   )
 }
 

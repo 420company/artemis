@@ -116,6 +116,7 @@ import {
 import {
   detectVisualGenerationNeed,
   describeVisualProvider,
+  hasExplicitRemoteVisualFallback,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js';
 
@@ -1094,6 +1095,69 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     default:
       return false;
   }
+}
+
+function getActionTextPayload(action: AgentAction): string {
+  switch (action.type) {
+    case 'write_file':
+    case 'insert_in_file':
+      return action.content;
+    case 'replace_in_file':
+      return action.replace;
+    case 'apply_patch':
+      return action.patch;
+    case 'run_command':
+      return action.command;
+    default:
+      return '';
+  }
+}
+
+function getActionPathPayload(action: AgentAction): string {
+  switch (action.type) {
+    case 'write_file':
+    case 'insert_in_file':
+    case 'replace_in_file':
+      return action.path;
+    default:
+      return '';
+  }
+}
+
+function summarizeVisualPlaceholderSubstitute(action: AgentAction): string | undefined {
+  const text = getActionTextPayload(action);
+  const actionPath = getActionPathPayload(action);
+  const normalizedPath = actionPath.replace(/\\/g, '/').toLowerCase();
+  const lowerText = text.toLowerCase();
+
+  if (normalizedPath.endsWith('.svg')) {
+    return `wrote SVG asset placeholder instead of calling generate_image: ${actionPath}`;
+  }
+
+  if (
+    /\bgenerate-assets\.(?:js|mjs|cjs|ts|py|sh)$/i.test(normalizedPath) &&
+    (lowerText.includes('<svg') || lowerText.includes('.svg') || lowerText.includes('createelementns'))
+  ) {
+    return `wrote procedural visual asset generator instead of calling generate_image: ${actionPath}`;
+  }
+
+  if (
+    (action.type === 'write_file' || action.type === 'insert_in_file' || action.type === 'replace_in_file') &&
+    (lowerText.includes('<svg') || lowerText.includes('data:image/svg+xml')) &&
+    /(?:asset|image|photo|product|hero|gallery|lookbook|visual|素材|图片|配图)/i.test(actionPath)
+  ) {
+    return `embedded SVG placeholder visual instead of calling generate_image: ${actionPath}`;
+  }
+
+  if (
+    action.type === 'run_command' &&
+    /\b(node|python3?|bash|sh)\b/i.test(text) &&
+    /generate-assets\.(?:js|mjs|cjs|ts|py|sh)/i.test(text)
+  ) {
+    return `ran procedural visual asset generator instead of calling generate_image: ${truncate(text, 160)}`;
+  }
+
+  return undefined;
 }
 
 function extractOriginalRequestFromExecutionPrompt(input: string): string {
@@ -2705,6 +2769,11 @@ const MAX_PARALLEL_DELEGATE_TASKS = 4;
 
 type RuntimeCompletionChecklist = {
   requiresWorkspaceMutation: boolean;
+  requiresLocalImageGeneration: boolean;
+  requiresLocalVideoGeneration: boolean;
+  imageGenerationObserved: boolean;
+  videoGenerationObserved: boolean;
+  visualPlaceholderViolation?: string;
   expectedMutationPaths: string[];
   expectedChangedFileCount?: number;
   expectedVerificationRequired: boolean;
@@ -2736,6 +2805,10 @@ function buildRuntimeCompletionChecklist(
   userInput: string,
   profile: 'main' | AgentRole,
   session: SessionRecord,
+  visualPolicy?: {
+    imageRequired: boolean;
+    videoRequired: boolean;
+  },
 ): RuntimeCompletionChecklist {
   const canOwnWorkspaceMutation =
     profile === 'main' ||
@@ -2744,6 +2817,10 @@ function buildRuntimeCompletionChecklist(
   return {
     requiresWorkspaceMutation:
       canOwnWorkspaceMutation && taskLikelyRequiresWorkspaceMutation(userInput),
+    requiresLocalImageGeneration: canOwnWorkspaceMutation && (visualPolicy?.imageRequired ?? false),
+    requiresLocalVideoGeneration: canOwnWorkspaceMutation && (visualPolicy?.videoRequired ?? false),
+    imageGenerationObserved: false,
+    videoGenerationObserved: false,
     expectedMutationPaths: canOwnWorkspaceMutation
       ? inferExpectedMutationPaths(userInput)
       : [],
@@ -5305,11 +5382,6 @@ export async function runAgent(
     reminderSent: false,
     commandEvidencePending: false,
   };
-  const completionChecklist = buildRuntimeCompletionChecklist(
-    userInput,
-    profile,
-    session,
-  );
   const completionContract = options.completionContract ?? 'standard';
   const baselineChangedFiles = new Set(
     (session.changedFiles ?? [])
@@ -5323,6 +5395,8 @@ export async function runAgent(
     completionContract === 'requires_execution_evidence' &&
     taskLikelyRequiresWorkspaceMutation(userInput);
   const visualNeed = detectVisualGenerationNeed(userInput);
+  let localImageGenerationRequired = false;
+  let localVideoGenerationRequired = false;
   if (visualNeed.image || visualNeed.video) {
     const configuredImage = visualNeed.image
       ? await resolveConfiguredVisualProvider(options.cwd, 'image')
@@ -5333,13 +5407,25 @@ export async function runAgent(
     const configured = [configuredImage, configuredVideo]
       .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
       .map((entry) => describeVisualProvider(entry.config, entry.assetKind));
+    const remoteFallbackRequested = hasExplicitRemoteVisualFallback(userInput);
+    localImageGenerationRequired = Boolean(configuredImage && !remoteFallbackRequested);
+    localVideoGenerationRequired = Boolean(configuredVideo && !remoteFallbackRequested);
 
     options.onInfo?.(
       configured.length > 0
-        ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. Prefer generate_image/generate_video unless user requested web-search assets.`
+        ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. ${remoteFallbackRequested ? 'User requested web/search fallback.' : 'Local generate_image/generate_video is required before completion.'}`
         : '[visual] task needs visual assets; no configured local visual API found. Use Freya/web-search fallback if image assets are required.',
     );
   }
+  const completionChecklist = buildRuntimeCompletionChecklist(
+    userInput,
+    profile,
+    session,
+    {
+      imageRequired: localImageGenerationRequired,
+      videoRequired: localVideoGenerationRequired,
+    },
+  );
   // Fail-fast guard for the requires_execution_evidence contract: count how many
   // *consecutive* turns the model produced only intent text without any tool
   // actions. After 2 such turns we abort instead of grinding through every
@@ -5449,6 +5535,34 @@ export async function runAgent(
       if (outcome.ok && isConcreteExecutionAction(outcome.action)) {
         concreteExecutionSignals += 1;
         completionChecklist.mutationEvidenceObserved = true;
+      }
+
+      if (outcome.ok && outcome.action.type === 'generate_image') {
+        completionChecklist.imageGenerationObserved = true;
+        if (
+          completionChecklist.unresolvedToolFailure?.actionType === 'generate_image'
+        ) {
+          completionChecklist.unresolvedToolFailure = undefined;
+        }
+      }
+
+      if (outcome.ok && outcome.action.type === 'generate_video') {
+        completionChecklist.videoGenerationObserved = true;
+        if (
+          completionChecklist.unresolvedToolFailure?.actionType === 'generate_video'
+        ) {
+          completionChecklist.unresolvedToolFailure = undefined;
+        }
+      }
+
+      if (
+        outcome.ok &&
+        (completionChecklist.requiresLocalImageGeneration || completionChecklist.requiresLocalVideoGeneration)
+      ) {
+        const violation = summarizeVisualPlaceholderSubstitute(outcome.action);
+        if (violation) {
+          completionChecklist.visualPlaceholderViolation = violation;
+        }
       }
 
       if (
@@ -5923,6 +6037,24 @@ export async function runAgent(
       envelope.done !== false &&
       !completionChecklist.mutationEvidenceObserved &&
       !completionChecklist.blockerAccepted;
+    const missingLocalVisualTools = [
+      completionChecklist.requiresLocalImageGeneration && !completionChecklist.imageGenerationObserved
+        ? 'generate_image'
+        : '',
+      completionChecklist.requiresLocalVideoGeneration && !completionChecklist.videoGenerationObserved
+        ? 'generate_video'
+        : '',
+    ].filter(Boolean);
+    const deterministicChecklistMissingLocalVisualGeneration =
+      actions.length === 0 &&
+      envelope.done !== false &&
+      missingLocalVisualTools.length > 0 &&
+      !completionChecklist.blockerAccepted;
+    const deterministicChecklistVisualPlaceholderViolation =
+      actions.length === 0 &&
+      envelope.done !== false &&
+      completionChecklist.visualPlaceholderViolation !== undefined &&
+      !completionChecklist.blockerAccepted;
     const missingConcreteExecutionEvidence =
       completionContract === 'requires_execution_evidence' &&
       actions.length === 0 &&
@@ -5955,6 +6087,75 @@ export async function runAgent(
         'runtime_guard',
       );
       await options.sessionStore.save(session);
+    }
+
+    if (
+      deterministicChecklistVisualPlaceholderViolation &&
+      completionChecklist.visualPlaceholderViolation
+    ) {
+      options.onInfo?.(
+        `[completion-checklist] visual placeholder substitute blocked: ${completionChecklist.visualPlaceholderViolation}`,
+      );
+      if (turn >= options.maxTurns) {
+        return {
+          reply: [
+            'Execution blocked by deterministic completion checklist: local visual generation was required, but the run produced SVG/procedural placeholder visuals instead of real generate_image/generate_video assets.',
+            '',
+            `Violation: ${completionChecklist.visualPlaceholderViolation}`,
+            '',
+            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+          ].join('\n'),
+          turns: turn,
+        };
+      }
+
+      options.sessionStore.appendMessage(
+        session,
+        'tool',
+        [
+          'Deterministic visual-generation checklist:',
+          `Blocked placeholder substitute: ${completionChecklist.visualPlaceholderViolation}`,
+          'The current task requires real local visual generation. You MUST call generate_image/generate_video directly for the required visual assets.',
+          'Do not write SVG files, generate-assets scripts, canvas/procedural drawings, or CSS-only placeholders as final product/editorial photography.',
+          'Continue with done=false and concrete generate_image/generate_video actions, or return a clear blocker that explicitly says the visual generation tool failed.',
+        ].join('\n'),
+        'runtime_visual_checklist',
+      );
+      completionChecklist.visualPlaceholderViolation = undefined;
+      await options.sessionStore.save(session);
+      continue;
+    }
+
+    if (deterministicChecklistMissingLocalVisualGeneration) {
+      options.onInfo?.(
+        `[completion-checklist] required visual generation missing: ${missingLocalVisualTools.join(', ')}`,
+      );
+      if (turn >= options.maxTurns) {
+        return {
+          reply: [
+            'Execution blocked by deterministic completion checklist: configured local visual generation was required, but the required visual tool was never called successfully.',
+            '',
+            `Missing tool call(s): ${missingLocalVisualTools.join(', ')}`,
+            '',
+            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+          ].join('\n'),
+          turns: turn,
+        };
+      }
+
+      options.sessionStore.appendMessage(
+        session,
+        'tool',
+        [
+          'Deterministic visual-generation checklist:',
+          `The task requires local visual generation, but these tool calls have not succeeded yet: ${missingLocalVisualTools.join(', ')}`,
+          'Continue with done=false and call the required visual tool(s) directly. Do not substitute SVG, scripted drawings, CSS art, or web-search unless the user explicitly requested that fallback.',
+          'If the visual tool fails, report that exact blocker instead of claiming the assets are ready.',
+        ].join('\n'),
+        'runtime_visual_checklist',
+      );
+      await options.sessionStore.save(session);
+      continue;
     }
 
     if (deterministicChecklistUnresolvedToolFailure && unresolvedToolFailure) {

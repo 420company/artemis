@@ -132,21 +132,28 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
     };
   }
 
-  console.log('\n' + t('记忆增强配置完成') + '\n');
-  console.log(t('已启用记忆增强功能，使用方案：') + t(config.provider === 'byteplus' ? '智能云' : '本地'));
-  
+  console.log('');
+  console.log('  ' + t('─── 记忆增强已就绪 ───'));
+  console.log('');
+  console.log('  ✓ ' + t('方案：') + t(config.provider === 'byteplus' ? '智能云（BytePlus）' : '本地嵌入'));
+
   if (config.config) {
     if (config.provider === 'byteplus') {
-      console.log(t('模型：') + config.config.model);
-      console.log(t('API 地址：') + config.config.baseUrl);
+      console.log('  ✓ ' + t('模型：') + config.config.model);
+      console.log('  ✓ ' + t('API 地址：') + config.config.baseUrl);
     } else {
-      console.log(t('使用本地嵌入算法，无需网络连接'));
+      console.log('  ✓ ' + t('离线运行，无需联网'));
     }
   }
+
   console.log('');
-  console.log(t('怎么使用：进入主界面后不需要手动启动；每次会话结束时，系统会自动提炼长期偏好/项目事实并写入增强记忆。'));
-  console.log(t('下次提出相似问题时，相关记忆会自动检索并注入上下文。'));
-  console.log(t('你可以之后运行 artemis setup memory 重新配置，或查看 .artemis/enhanced-memory.json 确认本地索引是否生成。'));
+  console.log('  ' + t('使用说明'));
+  console.log('    • ' + t('全自动运行 —— 进入主界面即生效，无需手动启动'));
+  console.log('    • ' + t('每次会话结束时，系统会自动从对话中提炼"长期偏好"和"项目事实"，写入增强记忆'));
+  console.log('    • ' + t('下次提出相关问题时，对应记忆会自动检索并注入到上下文里'));
+  console.log('    • ' + t('重新配置：') + 'artemis setup memory');
+  console.log('    • ' + t('数据位置：') + '.artemis/enhanced-memory.json');
+  console.log('');
 
   return config;
 }

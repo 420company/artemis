@@ -98,10 +98,14 @@ export async function runMemoryEnhancementSetup(localeHint: UiLocale, cwd?: stri
   
   await saveMemoryProfile(cwd || process.cwd(), newProfile);
   
-  console.log(t('记忆增强配置已保存') + '\n');
+  console.log('  ✓ ' + t('记忆增强配置已保存') + '\n');
   if (newProfile.enabled) {
-    console.log(t('使用方式：会话结束后，系统会把提炼出的长期偏好/项目事实写入增强记忆；之后相似问题会自动检索并注入上下文。') + '\n');
-    console.log(t('数据位置：.artemis/enhanced-memory.json') + '\n');
+    console.log('  ' + t('使用说明'));
+    console.log('    • ' + t('会话结束时自动提炼长期偏好与项目事实，写入增强记忆'));
+    console.log('    • ' + t('下次提出相关问题时，对应记忆会自动检索并注入上下文'));
+    console.log('    • ' + t('数据位置：') + '.artemis/enhanced-memory.json');
+    console.log('    • ' + t('重新配置：') + 'artemis setup memory');
+    console.log('');
   }
   
   return {

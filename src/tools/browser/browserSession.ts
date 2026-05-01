@@ -37,10 +37,11 @@ function isPersistentProfileLockError(err: unknown): boolean {
 function isContextAlive(ctx: BrowserContext | null): ctx is BrowserContext {
   if (!ctx) return false;
   // Playwright doesn't expose isClosed() on BrowserContext in all versions,
-  // but the underlying browser does. A closed context has no browser.
+  // so use cheap operations that throw once the context/browser is gone.
   try {
     const browser = ctx.browser();
     if (browser && !browser.isConnected()) return false;
+    ctx.pages();
     return true;
   } catch {
     return false;

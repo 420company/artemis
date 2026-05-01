@@ -19,6 +19,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
 import { getActivePage, closeActivePage, describePlaywrightError } from './browserSession.js';
+import type { Page } from 'playwright';
 
 export interface ToolResult {
   ok: boolean;
@@ -48,13 +49,33 @@ function isContextClosedError(err: unknown): boolean {
  * acquiring the page and calling the op (a known Playwright race in long-lived
  * sessions), close the dead page and retry once with a fresh page.
  */
-async function withPageRetry<T>(op: () => Promise<T>): Promise<T> {
+function restorableUrl(page: Page): string | undefined {
   try {
-    return await op();
+    const current = page.url();
+    if (!current || current === 'about:blank') return undefined;
+    return current;
+  } catch {
+    return undefined;
+  }
+}
+
+async function withPageRetry<T>(
+  op: (page: Page) => Promise<T>,
+  options?: { restoreUrlOnRetry?: boolean },
+): Promise<T> {
+  let restoreUrl: string | undefined;
+  try {
+    const page = await getActivePage();
+    if (options?.restoreUrlOnRetry) restoreUrl = restorableUrl(page);
+    return await op(page);
   } catch (err) {
     if (!isContextClosedError(err)) throw err;
     await closeActivePage().catch(() => undefined);
-    return await op();
+    const page = await getActivePage();
+    if (restoreUrl) {
+      await page.goto(restoreUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    }
+    return await op(page);
   }
 }
 
@@ -81,8 +102,7 @@ export async function executeBrowserNavigate(action: BrowserNavigateAction): Pro
     };
   }
   try {
-    return await withPageRetry(async () => {
-      const page = await getActivePage();
+    return await withPageRetry(async (page) => {
       const waitUntil = action.waitFor ?? 'domcontentloaded';
       await page.goto(action.url, { waitUntil, timeout: 30_000 });
       const title = await page.title();
@@ -189,8 +209,7 @@ async function collectLayoutAudit(page: Awaited<ReturnType<typeof getActivePage>
 
 export async function executeBrowserScreenshot(action: BrowserScreenshotAction): Promise<ToolResult> {
   try {
-    return await withPageRetry(async () => {
-      const page = await getActivePage();
+    return await withPageRetry(async (page) => {
       const width = normalizeViewportDimension(action.width, 240, 4096);
       const height = normalizeViewportDimension(action.height, 240, 4096);
       if (width && height) {
@@ -205,7 +224,7 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
         ok: true,
         output: `📸 已截图：${filepath}\n   URL: ${page.url()}\n   ${audit}`,
       };
-    });
+    }, { restoreUrlOnRetry: true });
   } catch (err) {
     return pwError(err);
   }
@@ -220,8 +239,7 @@ export interface BrowserExtractAction {
 
 export async function executeBrowserExtract(action: BrowserExtractAction): Promise<ToolResult> {
   try {
-    return await withPageRetry(async () => {
-      const page = await getActivePage();
+    return await withPageRetry(async (page) => {
       let text: string;
       if (action.selector && action.selector.trim().length > 0) {
         const el = page.locator(action.selector).first();
@@ -233,7 +251,7 @@ export async function executeBrowserExtract(action: BrowserExtractAction): Promi
         ok: true,
         output: truncate(text.trim() || '(empty)'),
       };
-    });
+    }, { restoreUrlOnRetry: true });
   } catch (err) {
     return pwError(err);
   }
@@ -256,19 +274,20 @@ export async function executeBrowserClick(action: BrowserClickAction): Promise<T
     };
   }
   try {
-    const page = await getActivePage();
-    if (action.selector) {
-      await page.locator(action.selector).first().click({ timeout: 10_000 });
-    } else if (action.text) {
-      // Match by visible text (Playwright's getByText)
-      await page.getByText(action.text, { exact: false }).first().click({ timeout: 10_000 });
-    }
-    // Wait briefly for any navigation/reaction
-    await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
-    return {
-      ok: true,
-      output: `🖱  已点击：${action.selector ?? action.text}\n   当前 URL: ${page.url()}`,
-    };
+    return await withPageRetry(async (page) => {
+      if (action.selector) {
+        await page.locator(action.selector).first().click({ timeout: 10_000 });
+      } else if (action.text) {
+        // Match by visible text (Playwright's getByText)
+        await page.getByText(action.text, { exact: false }).first().click({ timeout: 10_000 });
+      }
+      // Wait briefly for any navigation/reaction
+      await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
+      return {
+        ok: true,
+        output: `🖱  已点击：${action.selector ?? action.text}\n   当前 URL: ${page.url()}`,
+      };
+    }, { restoreUrlOnRetry: true });
   } catch (err) {
     return pwError(err);
   }
@@ -292,19 +311,20 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
     };
   }
   try {
-    const page = await getActivePage();
-    const el = page.locator(action.selector).first();
-    await el.click({ timeout: 10_000 });
-    await el.fill(''); // clear first
-    await el.fill(action.text);
-    if (action.pressEnter) {
-      await el.press('Enter');
-      await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
-    }
-    return {
-      ok: true,
-      output: `⌨  已输入到 ${action.selector}: "${action.text.slice(0, 80)}"${action.pressEnter ? ' (按 Enter)' : ''}`,
-    };
+    return await withPageRetry(async (page) => {
+      const el = page.locator(action.selector).first();
+      await el.click({ timeout: 10_000 });
+      await el.fill(''); // clear first
+      await el.fill(action.text);
+      if (action.pressEnter) {
+        await el.press('Enter');
+        await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
+      }
+      return {
+        ok: true,
+        output: `⌨  已输入到 ${action.selector}: "${action.text.slice(0, 80)}"${action.pressEnter ? ' (按 Enter)' : ''}`,
+      };
+    }, { restoreUrlOnRetry: true });
   } catch (err) {
     return pwError(err);
   }
@@ -328,17 +348,18 @@ export async function executeBrowserWait(action: BrowserWaitAction): Promise<Too
     };
   }
   try {
-    const page = await getActivePage();
-    const timeout = Math.max(1_000, Math.min(60_000, action.timeoutMs ?? 15_000));
-    if (action.selector) {
-      await page.locator(action.selector).first().waitFor({ state: 'visible', timeout });
-    } else if (action.text) {
-      await page.getByText(action.text, { exact: false }).first().waitFor({ state: 'visible', timeout });
-    }
-    return {
-      ok: true,
-      output: `✓ 已等到目标出现：${action.selector ?? action.text}`,
-    };
+    return await withPageRetry(async (page) => {
+      const timeout = Math.max(1_000, Math.min(60_000, action.timeoutMs ?? 15_000));
+      if (action.selector) {
+        await page.locator(action.selector).first().waitFor({ state: 'visible', timeout });
+      } else if (action.text) {
+        await page.getByText(action.text, { exact: false }).first().waitFor({ state: 'visible', timeout });
+      }
+      return {
+        ok: true,
+        output: `✓ 已等到目标出现：${action.selector ?? action.text}`,
+      };
+    }, { restoreUrlOnRetry: true });
   } catch (err) {
     return pwError(err);
   }

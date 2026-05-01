@@ -9,7 +9,7 @@
  * Only one concurrent task per target ID is allowed.
  */
 
-import { think, resetSession, getMessages, restoreSession, getSystemPromptSuffix, setSystemPromptSuffix } from '../brain.js'
+import { think, resetSession, getMessages, restoreSession } from '../brain.js'
 import { open, readFile, unlink } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import path from 'node:path'
@@ -29,6 +29,10 @@ import {
 } from '../core/workflowDispatcher.js'
 import { resolveMainProviderConfig } from '../providers/onboarding.js'
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
+import { createProviderRouter } from '../providers/router.js'
+import { PermissionManager } from '../security/permissions.js'
+import { runWorkflowMode } from '../core/workflowMode.js'
+import type { ChatProvider, ProviderConfig } from '../providers/types.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -92,6 +96,43 @@ function formatMobileReply(text: string): string {
     .replace(/\n{3,}/g, '\n\n')
 
   return out.trim()
+}
+
+let bridgeThinkQueue: Promise<void> = Promise.resolve()
+
+async function withBridgeThinkLock<T>(run: () => Promise<T>): Promise<T> {
+  const previous = bridgeThinkQueue
+  let release!: () => void
+  bridgeThinkQueue = new Promise<void>((resolve) => { release = resolve })
+  await previous.catch(() => undefined)
+  try {
+    return await run()
+  } finally {
+    release()
+  }
+}
+
+type BridgeProviderRuntime = {
+  config: ProviderConfig
+  provider: ChatProvider
+}
+
+async function resolveBridgeProviderRuntime(cwd: string): Promise<BridgeProviderRuntime> {
+  const config = await resolveMainProviderConfig({ cwd, config: {} })
+  const trackedProfileId =
+    typeof (config as unknown as { id?: unknown }).id === 'string'
+      ? (config as unknown as { id: string }).id
+      : undefined
+  const trackedProfileLabel =
+    typeof (config as unknown as { label?: unknown }).label === 'string'
+      ? (config as unknown as { label: string }).label
+      : trackedProfileId
+  const provider = createTrackedProviderFromConfig(config, {
+    cwd,
+    profileId: trackedProfileId,
+    profileLabel: trackedProfileLabel,
+  })
+  return { config, provider }
 }
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -168,9 +209,6 @@ export async function runRemoteCommand(
   const commandCwd = binding.storedSession.cwd || cwd
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
-  // restore session history into brain
-  restoreSession(binding.storedSession.messages)
-
   switch (command.type) {
     case 'start':
       return {
@@ -210,7 +248,9 @@ export async function runRemoteCommand(
     }
 
     case 'clear': {
-      resetSession()
+      await withBridgeThinkLock(async () => {
+        resetSession()
+      })
       const fresh = store.createSession({ title: binding.storedSession.title })
       await store.save(fresh)
       return {
@@ -225,12 +265,10 @@ export async function runRemoteCommand(
         replies: [t('Artemis bridge 停止中。', 'Artemis bridge stopping.')],
         storedSession: binding.storedSession,
         permissionMode: binding.permissionMode,
-      }
+    }
 
     case 'chat': {
       let reply = ''
-      const previousSuffix = getSystemPromptSuffix()
-      let suffixApplied = false
       try {
         const emitProgress = (message: string, level: 'info' | 'warn' | 'error' = 'info'): void => {
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
@@ -240,25 +278,12 @@ export async function runRemoteCommand(
         // and apply visual generation policy. Falls back to direct chat when no command.
         const slashMatch = detectWorkflowSlashCommand(command.body)
         let workflowResolution: WorkflowResolution | undefined
+        let providerRuntime: BridgeProviderRuntime | undefined
         if (slashMatch.command) {
-          let provider
           if (slashMatch.command === '/team') {
             // /team needs a provider for routing — use the workspace's default main provider.
             try {
-              const provConfig = await resolveMainProviderConfig({ cwd: commandCwd ?? process.cwd(), config: {} })
-              const trackedProfileId =
-                typeof (provConfig as unknown as { id?: unknown }).id === 'string'
-                  ? (provConfig as unknown as { id: string }).id
-                  : undefined
-              const trackedProfileLabel =
-                typeof (provConfig as unknown as { label?: unknown }).label === 'string'
-                  ? (provConfig as unknown as { label: string }).label
-                  : trackedProfileId
-              provider = createTrackedProviderFromConfig(provConfig, {
-                cwd: commandCwd ?? process.cwd(),
-                profileId: trackedProfileId,
-                profileLabel: trackedProfileLabel,
-              })
+              providerRuntime = await resolveBridgeProviderRuntime(commandCwd ?? process.cwd())
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               await opts.onProgress?.(t(
@@ -272,7 +297,7 @@ export async function runRemoteCommand(
             workflowResolution = await resolveWorkflow(slashMatch, {
               cwd: commandCwd ?? process.cwd(),
               locale,
-              provider,
+              provider: providerRuntime?.provider,
               nonInteractive: true,
               onProgress: opts.onProgress,
             })
@@ -291,12 +316,51 @@ export async function runRemoteCommand(
             await opts.sendChatUpdate?.(summaryText)
           }
 
-          if (workflowResolution && workflowResolution.hint) {
-            const merged = previousSuffix
-              ? `${previousSuffix}\n\n${workflowResolution.hint}`
-              : workflowResolution.hint
-            setSystemPromptSuffix(merged)
-            suffixApplied = true
+          if (workflowResolution) {
+            try {
+              providerRuntime ??= await resolveBridgeProviderRuntime(commandCwd ?? process.cwd())
+              const workflowStartedText = t(
+                `已进入 /${workflowResolution.mode} 可执行工作流；将使用真实 workflow/runtime 路径，而不是普通聊天模拟。`,
+                `Entered executable /${workflowResolution.mode} workflow; using the real workflow/runtime path, not chat simulation.`,
+              )
+              await opts.onProgress?.(workflowStartedText, 'info')
+              await opts.sendChatUpdate?.(workflowStartedText)
+
+              const permissionManager = new PermissionManager(binding.permissionMode, false)
+              const providerRouter = await createProviderRouter({
+                cwd: commandCwd ?? process.cwd(),
+                mainProvider: providerRuntime.provider,
+                onInfo: (message) => emitProgress(message, 'info'),
+              })
+              const result = await runWorkflowMode(
+                workflowResolution.mode,
+                binding.storedSession,
+                workflowResolution.effectivePrompt,
+                {
+                  cwd: commandCwd ?? process.cwd(),
+                  provider: providerRuntime.provider,
+                  sessionStore: store,
+                  permissionManager,
+                  maxTurns: opts.maxTurns ?? 8,
+                  ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
+                  resolveProvider: providerRouter.resolveProvider,
+                  imageAttachments: command.images,
+                  onInfo: (message) => emitProgress(message, 'info'),
+                },
+              )
+              return {
+                replies: [result.reply],
+                storedSession: binding.storedSession,
+                permissionMode: binding.permissionMode,
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              return {
+                replies: [t(`工作流执行失败：${truncate(msg, 800)}`, `Workflow execution failed: ${truncate(msg, 800)}`)],
+                storedSession: binding.storedSession,
+                permissionMode: binding.permissionMode,
+              }
+            }
           }
         }
 
@@ -315,45 +379,48 @@ export async function runRemoteCommand(
         //                denied, leaving the IM user with a dangling intent
         //                line as the only reply.
         //   accept-*   → enable tools so remote coding via IM works.
-        const result = await think(effectiveBody, {
-          cwd: commandCwd,
-          permissionMode: binding.permissionMode,
-          disableNativeTools: binding.permissionMode === 'read-only',
-          imageAttachments: command.images,
-          maxNativeToolRounds: Math.max(16, (opts.maxTurns ?? 8) * 2),
-          onToolCall: (name, args) => {
-            emitProgress(t(
-              `🔧 正在运行工具：${String(name)}${summarizeToolArgs(args)}`,
-              `🔧 Running tool: ${String(name)}${summarizeToolArgs(args)}`,
-            ))
-          },
-          onToolResult: (name, ok, output) => {
-            emitProgress(t(
-              `${ok ? '✅' : '⚠️'} 工具${ok ? '完成' : '失败'}：${String(name)}${summarizeToolOutput(output)}`,
-              `${ok ? '✅' : '⚠️'} Tool ${ok ? 'completed' : 'failed'}: ${String(name)}${summarizeToolOutput(output)}`,
-            ), ok ? 'info' : 'warn')
-          },
-          onToolLog: (message, level = 'info') => {
-            emitProgress(message, level)
-          },
-          onReasoning: () => {
-            const now = Date.now()
-            if (now - lastReasoningNoticeAt < 15_000) return
-            lastReasoningNoticeAt = now
-            emitProgress(t(
-              '🧠 模型正在思考，还在工作中。',
-              '🧠 The model is thinking and still working.',
-            ))
-          },
-          onStream: () => {
-            const now = Date.now()
-            if (now - lastStreamNoticeAt < 15_000) return
-            lastStreamNoticeAt = now
-            emitProgress(t(
-              '✍️ 正在生成回复。',
-              '✍️ Generating the reply.',
-            ))
-          },
+        const result = await withBridgeThinkLock(async () => {
+          restoreSession(binding.storedSession.messages)
+          return think(effectiveBody, {
+            cwd: commandCwd,
+            permissionMode: binding.permissionMode,
+            disableNativeTools: binding.permissionMode === 'read-only',
+            imageAttachments: command.images,
+            maxNativeToolRounds: Math.max(16, (opts.maxTurns ?? 8) * 2),
+            onToolCall: (name, args) => {
+              emitProgress(t(
+                `🔧 正在运行工具：${String(name)}${summarizeToolArgs(args)}`,
+                `🔧 Running tool: ${String(name)}${summarizeToolArgs(args)}`,
+              ))
+            },
+            onToolResult: (name, ok, output) => {
+              emitProgress(t(
+                `${ok ? '✅' : '⚠️'} 工具${ok ? '完成' : '失败'}：${String(name)}${summarizeToolOutput(output)}`,
+                `${ok ? '✅' : '⚠️'} Tool ${ok ? 'completed' : 'failed'}: ${String(name)}${summarizeToolOutput(output)}`,
+              ), ok ? 'info' : 'warn')
+            },
+            onToolLog: (message, level = 'info') => {
+              emitProgress(message, level)
+            },
+            onReasoning: () => {
+              const now = Date.now()
+              if (now - lastReasoningNoticeAt < 15_000) return
+              lastReasoningNoticeAt = now
+              emitProgress(t(
+                '🧠 模型正在思考，还在工作中。',
+                '🧠 The model is thinking and still working.',
+              ))
+            },
+            onStream: () => {
+              const now = Date.now()
+              if (now - lastStreamNoticeAt < 15_000) return
+              lastStreamNoticeAt = now
+              emitProgress(t(
+                '✍️ 正在生成回复。',
+                '✍️ Generating the reply.',
+              ))
+            },
+          })
         })
         reply = result.text
         // update session
@@ -368,9 +435,6 @@ export async function runRemoteCommand(
           storedSession: binding.storedSession,
           permissionMode: binding.permissionMode,
         }
-      } finally {
-        // Restore previous system prompt suffix so subsequent turns aren't tainted.
-        if (suffixApplied) setSystemPromptSuffix(previousSuffix)
       }
     }
   }

@@ -212,7 +212,7 @@ async function applyVisualPolicy(
   // Default for bridges (or explicit consent in CLI): use local generation
   if (hasExplicitLocalVisualConsent(prompt) || opts.nonInteractive) {
     return {
-      prompt: `${prompt}\n\n[Visual generation policy]\nUser allowed local visual generation. You MUST call the generate_image (and generate_video when appropriate) tool directly for every required visual asset. Do NOT write a node/python/shell script that emits SVG, canvas, or procedural geometry as a substitute — that is a violation. If local generation returns an error, report it explicitly to the user and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders.`,
+      prompt: `${prompt}\n\n[Visual generation policy]\nUser allowed local visual generation. Photographic / product / editorial / lifestyle assets MUST be produced via generate_image (or generate_video when appropriate). Icons, logos, UI controls, loaders, geometric or abstract decoration, charts, diagrams, and other vector-native graphics MAY be authored as SVG/CSS directly — these are the right tool for those jobs and are not violations. The forbidden pattern is substituting hand-authored SVG/canvas/procedural code for what should be a real photograph (e.g. writing a node/python script that draws "product images" instead of calling generate_image). If generate_image returns an error, report it to the user explicitly and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders for photographic subjects.`,
       summary: t(
         `视觉素材策略：本地视觉 API 已启用 (${configuredText})`,
         `Visual policy: local visual API enabled (${configuredText})`,
