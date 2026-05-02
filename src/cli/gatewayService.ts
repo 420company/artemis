@@ -86,7 +86,32 @@ function runWindowsCommand(args: string[]): Promise<CommandResult> {
   })
 }
 
+function resolveNpmInstalledCli(): string[] | undefined {
+  const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
+  const names = process.platform === 'win32' ? ['artemis.cmd', 'artemis.exe', 'artemis'] : ['artemis']
+  for (const dir of pathEntries) {
+    for (const name of names) {
+      const candidate = path.join(dir, name)
+      try {
+        if (!fs.existsSync(candidate)) continue
+        const real = fs.realpathSync(candidate)
+        if (!real.replace(/\\/g, '/').includes('/node_modules/artemis-code/')) continue
+        if (real.endsWith('.js')) return [process.execPath, real]
+        if (process.platform === 'win32' && (name.endsWith('.cmd') || name.endsWith('.exe'))) return [candidate]
+      } catch {
+        // keep searching PATH
+      }
+    }
+  }
+  return undefined
+}
+
 function resolveCliProgramArguments(cwd: string): string[] {
+  const npmCli = resolveNpmInstalledCli()
+  if (npmCli) {
+    return [...npmCli, 'gateway', 'daemon', '--cwd', cwd]
+  }
+
   const argvEntry = process.argv[1]
   if (argvEntry && fs.existsSync(argvEntry) && argvEntry.endsWith('.js')) {
     return [process.execPath, argvEntry, 'gateway', 'daemon', '--cwd', cwd]
@@ -199,11 +224,24 @@ async function getLaunchAgentStatus(): Promise<string[]> {
   const result = await runLaunchctl(['print', `${guiDomain()}/${LAUNCH_AGENT_LABEL}`])
   const installed = fs.existsSync(plistPath())
   const legacyInstalled = fs.existsSync(legacyPlistPath())
+  const plist = installed ? fs.readFileSync(plistPath(), 'utf8') : ''
+  const plistStrings = [...plist.matchAll(/<string>([\s\S]*?)<\/string>/g)]
+    .map(match => match[1]
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&gt;/g, '>')
+      .replace(/&lt;/g, '<')
+      .replace(/&amp;/g, '&'))
+  const argStart = plistStrings.findIndex(value => value === process.execPath || value.endsWith('/node') || value.endsWith('node.exe'))
+  const programArgs = argStart >= 0 ? plistStrings.slice(argStart, argStart + 6).join(' ') : undefined
+  const workingDirectory = plist.match(/<key>WorkingDirectory<\/key>\s*<string>([\s\S]*?)<\/string>/)?.[1]
   if (result.code !== 0) {
     return [
       `Installed: ${installed ? 'yes' : 'no'}`,
       'Loaded: no',
       `Plist: ${plistPath()}`,
+      programArgs ? `Program: ${programArgs}` : undefined,
+      workingDirectory ? `WorkingDirectory: ${workingDirectory}` : undefined,
       legacyInstalled ? `Legacy plist present: ${legacyPlistPath()}` : undefined,
     ].filter((line): line is string => Boolean(line))
   }
@@ -215,6 +253,8 @@ async function getLaunchAgentStatus(): Promise<string[]> {
     `Running: ${pid ? `yes (pid ${pid})` : 'unknown'}`,
     state ? `State: ${state}` : undefined,
     `Plist: ${plistPath()}`,
+    programArgs ? `Program: ${programArgs}` : undefined,
+    workingDirectory ? `WorkingDirectory: ${workingDirectory}` : undefined,
     legacyInstalled ? `Legacy plist present: ${legacyPlistPath()}` : undefined,
     `Log: ${path.join(dataDir(), 'gateway.log')}`,
   ].filter((line): line is string => Boolean(line))

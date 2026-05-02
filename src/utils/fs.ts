@@ -54,7 +54,9 @@ export function ensureNotSensitivePath(absolute: string, inputPath: string): voi
 }
 
 export function resolveDataRootDir(cwd: string): string {
-  return join(cwd, '.artemis')
+  const normalized = resolve(cwd)
+  if (basename(normalized) === '.artemis') return normalized
+  return join(normalized, '.artemis')
 }
 
 export function resolveInsideRoot(root: string, inputPath: string): string {
