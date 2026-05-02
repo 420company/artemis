@@ -543,6 +543,7 @@ export async function summarizeViaWorker(prompt: string): Promise<string> {
         createdAt: new Date().toISOString(),
     };
     const result = await p.complete([sysMsg, userMsg]);
+    recordBifrostAudit('worker', estimateResponseUsage(result, [sysMsg, userMsg]), [sysMsg, userMsg]);
     return result.text ?? '';
 }
 
@@ -597,6 +598,7 @@ export const summarizeOnce = async (prompt: any) => {
                 content: prompt, createdAt: new Date().toISOString(),
             };
             const result = await workerP.complete([sysMsg, userMsg]);
+            recordBifrostAudit('compression', estimateResponseUsage(result, [sysMsg, userMsg]), [sysMsg, userMsg]);
             return result.text;
         } catch (workerErr) {
             // Worker failed — fall through to legacy haiku-first path on lead
@@ -637,6 +639,7 @@ export const summarizeOnce = async (prompt: any) => {
         content: prompt, createdAt: new Date().toISOString(),
     };
     const result = await p.complete([sysMsg, userMsg]);
+    recordBifrostAudit('compression', estimateResponseUsage(result as ProviderResponse, [sysMsg as SessionMessage, userMsg as SessionMessage]), [sysMsg as SessionMessage, userMsg as SessionMessage]);
     return result.text;
 };
 
@@ -670,6 +673,88 @@ export function providerInfo() {
 // ── Context budget awareness ──────────────────────────────────────────────────
 const BUDGET_WARN_PCT = 0.70; // inject warning at 70%
 const BUDGET_ALERT_PCT = 0.88; // inject stronger warning at 88%
+const READ_FILE_HISTORY_INVALIDATING_TOOLS = new Set([
+    'write_file',
+    'insert_in_file',
+    'replace_in_file',
+    'apply_patch',
+    'delete_file',
+    'move_file',
+    'copy_file',
+    'create_directory',
+    'delete_directory',
+    'download_file',
+    'run_command',
+    'npm_run',
+    'format_code',
+    'git_add',
+    'git_commit',
+]);
+type BifrostAuditSample = {
+    at: string;
+    role: 'main' | 'worker' | 'compression';
+    model?: string;
+    profileLabel?: string;
+    messageCount: number;
+    roleBreakdown: Record<string, number>;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    source: 'provider' | 'estimated';
+};
+const bifrostAuditSamples: BifrostAuditSample[] = [];
+
+function messageRoleBreakdown(messages: SessionMessage[]): Record<string, number> {
+    return messages.reduce<Record<string, number>>((acc, msg) => {
+        acc[msg.role] = (acc[msg.role] ?? 0) + 1;
+        return acc;
+    }, {});
+}
+
+function recordBifrostAudit(role: BifrostAuditSample['role'], result: ProviderResponse, messages: SessionMessage[]) {
+    const usage = result.usage ?? {};
+    const promptTokens = Math.round(usage.promptTokens ?? estimateConversationTokens(messages));
+    const completionTokens = Math.round(usage.completionTokens ?? String(result.text ?? '').length / 4);
+    bifrostAuditSamples.push({
+        at: new Date().toISOString(),
+        role,
+        model: result.model ?? providerConfig?.model,
+        profileLabel: usage.profileLabel,
+        messageCount: messages.length,
+        roleBreakdown: messageRoleBreakdown(messages),
+        promptTokens,
+        completionTokens,
+        totalTokens: Math.round(usage.totalTokens ?? promptTokens + completionTokens),
+        source: usage.source ?? 'estimated',
+    });
+    while (bifrostAuditSamples.length > 50) bifrostAuditSamples.shift();
+}
+
+export function getBifrostContextAuditReport(): string[] {
+    if (bifrostAuditSamples.length === 0) {
+        return ['No provider calls recorded yet in this process.'];
+    }
+    const latest = bifrostAuditSamples.slice(-12);
+    const totals = bifrostAuditSamples.reduce<Record<string, { calls: number; prompt: number; total: number }>>((acc, sample) => {
+        const bucket = acc[sample.role] ?? { calls: 0, prompt: 0, total: 0 };
+        bucket.calls += 1;
+        bucket.prompt += sample.promptTokens;
+        bucket.total += sample.totalTokens;
+        acc[sample.role] = bucket;
+        return acc;
+    }, {});
+    const lines = ['Recent provider context audit:', ''];
+    for (const sample of latest) {
+        const roles = Object.entries(sample.roleBreakdown).map(([k, v]) => `${k}:${v}`).join(' ');
+        lines.push(`${sample.at.slice(11, 19)}  ${sample.role.padEnd(11)} ${sample.source === 'estimated' ? '~' : ''}${sample.promptTokens}/${sample.totalTokens} tok  msgs=${sample.messageCount} (${roles})  ${sample.model ?? 'unknown'}`);
+    }
+    lines.push('', 'Totals:');
+    for (const [role, bucket] of Object.entries(totals)) {
+        lines.push(`  ${role}: calls=${bucket.calls} prompt=${bucket.prompt} total=${bucket.total}`);
+    }
+    return lines;
+}
+
 function getConfiguredContextLimit(model: string | undefined, contextLength?: number): number {
     return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength));
 }
@@ -1091,7 +1176,7 @@ async function executeTool(name: any, input: any, opts: any) {
 }
 
 async function executeToolInner(name: any, input: any, opts: any) {
-    const { cwd, permissionMode, onPermissionRequest, updateCwd, onWorkspaceSwitchRequest } = opts;
+    const { cwd, permissionMode, onPermissionRequest, updateCwd, onWorkspaceSwitchRequest, onUserConfirmationRequest, readFileHistory } = opts;
     const argsRecord = (input && typeof input === 'object') ? input : {};
     const enabledTools = await loadSetupToolEnabled(cwd);
     const disabledGroup = getDisabledToolGroup(String(name), enabledTools);
@@ -1198,6 +1283,8 @@ async function executeToolInner(name: any, input: any, opts: any) {
             cwd,
             updateCwd,
             requestWorkspaceSwitch: onWorkspaceSwitchRequest,
+            requestUserConfirmation: onUserConfirmationRequest,
+            readFileHistory,
         });
         return attachDirectToolFailureError(name, {
             ok: result.ok,
@@ -1465,12 +1552,14 @@ function normalizeThinkArgs(
 
 function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any> {
     const usage = result.usage ?? {};
+    const hasProviderPrompt = typeof usage.promptTokens === 'number' && usage.promptTokens > 0;
     _lastPromptTokens = usage.promptTokens ?? _lastPromptTokens;
     return {
         contextLimit: normalizeContextLimit(providerConfig?.contextLength) ?? estimateContextLimit(result.model ?? providerConfig?.model ?? ''),
         promptTokens: usage.promptTokens ?? 0,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
+        tokenUsageSource: usage.source ?? (hasProviderPrompt ? 'provider' : 'estimated'),
         durationMs: usage.durationMs,
         firstResponseMs: usage.firstResponseMs,
         profileId: usage.profileId,
@@ -1480,16 +1569,55 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
     };
 }
 
+function estimateResponseUsage(
+    result: ProviderResponse,
+    messages: SessionMessage[],
+): ProviderResponse {
+    const usage = result.usage ?? {};
+    const hasProviderPrompt = typeof usage.promptTokens === 'number' && usage.promptTokens > 0;
+    const hasProviderCompletion = typeof usage.completionTokens === 'number' && usage.completionTokens >= 0;
+    if (hasProviderPrompt) {
+        return {
+            ...result,
+            usage: {
+                ...usage,
+                source: usage.source ?? 'provider',
+            },
+        };
+    }
+    const promptTokens = Math.max(1, Math.round(estimateConversationTokens(messages)));
+    const completionTokens = hasProviderCompletion
+        ? usage.completionTokens
+        : Math.max(0, Math.round(String(result.text ?? '').length / 4));
+    return {
+        ...result,
+        usage: {
+            ...usage,
+            promptTokens,
+            completionTokens,
+            totalTokens: usage.totalTokens ?? promptTokens + (completionTokens ?? 0),
+            source: 'estimated',
+        },
+    };
+}
+
 async function completeWithOptionalStream(
     provider: ChatProvider,
     messages: SessionMessage[],
     onDelta: ((delta: string) => void) | undefined,
     options: any,
 ): Promise<ProviderResponse> {
+    const auditRole = options?.auditRole === 'worker' || options?.auditRole === 'compression'
+        ? options.auditRole
+        : 'main';
+    let result: ProviderResponse;
     if (onDelta && typeof provider.completeStream === 'function') {
-        return provider.completeStream(messages, onDelta, options);
+        result = estimateResponseUsage(await provider.completeStream(messages, onDelta, options), messages);
+    } else {
+        result = estimateResponseUsage(await provider.complete(messages, options), messages);
     }
-    return provider.complete(messages, options);
+    recordBifrostAudit(auditRole, result, messages);
+    return result;
 }
 
 function buildProviderIncompatibilityMessage(): string {
@@ -1516,6 +1644,7 @@ export interface ThinkOptions {
     onReasoning?: (delta: string) => void;
     imageAttachments?: ImageAttachment[];
     onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
+    onUserConfirmationRequest?: (request: { question: string; screenshotPath?: string; timeoutMs?: number }) => Promise<boolean>;
     maxNativeToolRounds?: number;
 }
 
@@ -1546,8 +1675,10 @@ export async function think(
         disableNativeTools = false,
         imageAttachments = [],
         onWorkspaceSwitchRequest,
+        onUserConfirmationRequest,
         maxNativeToolRounds: rawMaxNativeToolRounds,
     } = options;
+    const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
     tSession.addUser(input);
 
@@ -1736,6 +1867,9 @@ export async function think(
                 }
 
                 onToolCall?.(call.name, args);
+                if (READ_FILE_HISTORY_INVALIDATING_TOOLS.has(String(call.name))) {
+                    readFileHistory.clear();
+                }
                 const toolResult = attachDirectToolFailureError(
                     call.name,
                     await executeTool(call.name, args, {
@@ -1745,6 +1879,8 @@ export async function think(
                         onToolLog,
                         updateCwd: (newCwd: string) => { currentCwd = newCwd; },
                         onWorkspaceSwitchRequest,
+                        onUserConfirmationRequest,
+                        readFileHistory,
                     }),
                 );
                 const toolOutput = formatDirectToolOutput(toolResult);

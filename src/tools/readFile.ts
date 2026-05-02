@@ -9,6 +9,10 @@ const LARGE_FILE_WARNING_LINES = 500;
 const MAX_READ_LINES = 2_000;
 const MAX_RENDER_CHARS = 16_000;
 
+function readHistoryKey(absolute: string, startLine?: number, endLine?: number): string {
+  return `${absolute}:${startLine ?? ''}:${endLine ?? ''}`;
+}
+
 function splitLines(content: string): string[] {
   const normalized = content.replace(/\r\n/g, '\n');
   const body = normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
@@ -85,6 +89,18 @@ export async function executeReadFile(
     context,
   });
   ensureNotSensitivePath(absolute, action.path);
+  const historyKey = readHistoryKey(absolute, action.startLine, action.endLine);
+  const previous = context.readFileHistory?.get(historyKey);
+  if (previous) {
+    return {
+      action,
+      ok: true,
+      output: [
+        `path: ${path.relative(effectiveCwd, absolute) || path.basename(absolute)}`,
+        'content: [same as previous read_file result in this tool turn; no writes occurred between reads]',
+      ].join('\n'),
+    };
+  }
   
   try {
     const content = await readTextFileSafe(absolute);
@@ -140,7 +156,7 @@ export async function executeReadFile(
       );
     }
 
-    return {
+    const result = {
       action,
       ok: true,
       output: [
@@ -154,6 +170,8 @@ export async function executeReadFile(
         output.rendered,
       ].join('\n'),
     };
+    context.readFileHistory?.set(historyKey, { output: result.output });
+    return result;
   } catch (error) {
     return {
       action,

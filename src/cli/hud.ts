@@ -114,6 +114,7 @@ export interface HudState {
   lastFirstResponseMs?: number
   lastDurationMs?: number
   turnsWithUsage: number
+  lastTokenUsageEstimated?: boolean
 }
 
 export interface HudUsage {
@@ -125,6 +126,7 @@ export interface HudUsage {
   firstResponseMs?: number
   durationMs?: number
   profileLabel?: string
+  tokenUsageSource?: 'provider' | 'estimated'
 }
 
 export function createHudState(defaultModel: string, contextLimit?: number): HudState {
@@ -161,6 +163,7 @@ export function updateHudState(state: HudState, usage: HudUsage): void {
   state.lastTotalTokens = total
   state.lastFirstResponseMs = usage.firstResponseMs
   state.lastDurationMs = usage.durationMs
+  state.lastTokenUsageEstimated = usage.tokenUsageSource === 'estimated'
   if (total > 0) {
     state.sessionTotalTokens += total
     state.turnsWithUsage++
@@ -209,7 +212,8 @@ export function renderHud(state: HudState): string {
   // ── non-TTY fallback ──────────────────────────────────────────────────────
   if (!useAnsi()) {
     const bar = `[${'#'.repeat(Math.round(pct / 10))}${'.'.repeat(10 - Math.round(pct / 10))}]`
-    const ctxStr = ctx > 0 ? `${fmtTok(ctx)} / ${fmtTok(limit)}` : fmtTok(limit)
+    const approx = state.lastTokenUsageEstimated ? '~' : ''
+    const ctxStr = ctx > 0 ? `${approx}${fmtTok(ctx)} / ${fmtTok(limit)}` : fmtTok(limit)
     const modelStr = brain ? `${model} ⇄ ${brain}` : model
     return `◈ ${modelStr}  ${bar} ${pct}%  ·  ${ctxStr}${latencyStr ? `  ·  ${latencyStr}` : ''}`
   }
@@ -223,8 +227,9 @@ export function renderHud(state: HudState): string {
   const bar      = c('█'.repeat(filled), barColor) + c('░'.repeat(empty), A.dim)
 
   const pctStr     = pct > 0 ? `${pct}%` : '—'
-  const ctxStr     = ctx > 0 ? `${fmtTok(ctx)} / ${fmtTok(limit)}` : fmtTok(limit)
-  const ctxCompact = ctx > 0 ? `${fmtTok(ctx)}/${fmtTok(limit)}` : fmtTok(limit)
+  const approx     = state.lastTokenUsageEstimated ? '~' : ''
+  const ctxStr     = ctx > 0 ? `${approx}${fmtTok(ctx)} / ${fmtTok(limit)}` : fmtTok(limit)
+  const ctxCompact = ctx > 0 ? `${approx}${fmtTok(ctx)}/${fmtTok(limit)}` : fmtTok(limit)
   const pctColor   = pct >= 85 ? A.red + A.bold : pct >= 60 ? A.yellow + A.bold : A.green
 
   // When dual-model, each name gets ~18% termW; single model gets ~28–40%

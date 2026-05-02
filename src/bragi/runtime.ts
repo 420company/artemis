@@ -253,6 +253,11 @@ export async function runRemoteCommand(
      * from onProgress (which only updates CLI display).
      */
     sendChatUpdate?: (text: string) => void | Promise<void>
+    /**
+     * Optional bridge-level waiter used by request_user_confirmation. Platforms
+     * can implement this by waiting for the next reply in the same chat.
+     */
+    awaitUserConfirmation?: (request: { question: string; timeoutMs: number }) => Promise<boolean>
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
@@ -483,6 +488,33 @@ export async function runRemoteCommand(
                 `📁 Switching workspace to ${request.workspacePath}`,
               ), 'info')
               return true
+            },
+            onUserConfirmationRequest: async (request) => {
+              const question = request.question.trim()
+              const timeoutMs = request.timeoutMs ?? 10 * 60_000
+              await opts.sendChatUpdate?.(t(
+                `⚠️ 需要你确认：${question}\n回复“确认/yes/y”继续；回复其他内容或超时将停止。`,
+                `⚠️ Confirmation needed: ${question}\nReply "yes/y" to continue; anything else or timeout stops.`,
+              ))
+              if (request.screenshotPath) {
+                try {
+                  const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
+                  await broadcastToBridges({
+                    text: t('请基于这张截图确认。', 'Please confirm based on this screenshot.'),
+                    imagePath: request.screenshotPath,
+                    source: 'tool:request_user_confirmation',
+                  })
+                } catch { /* best-effort */ }
+              }
+              if (!opts.awaitUserConfirmation) {
+                recordActivity(t(
+                  `确认等待未接入，已停止敏感操作：${question}`,
+                  `Confirmation waiter is not wired; stopped sensitive action: ${question}`,
+                ))
+                return false
+              }
+              recordActivity(t(`等待用户确认：${question}`, `Waiting for user confirmation: ${question}`))
+              return await opts.awaitUserConfirmation({ question, timeoutMs })
             },
             onToolCall: (name, args) => {
               const msg = t(

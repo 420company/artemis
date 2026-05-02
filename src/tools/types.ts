@@ -31,6 +31,21 @@ export type ToolExecutionContext = {
    */
   requestWorkspaceSwitch?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
   /**
+   * Runtime hook for tools that must pause before sensitive irreversible steps
+   * (booking, payment, publishing, destructive UI actions). CLI/bridge runtimes
+   * can surface the question to the user and resume with yes/no.
+   */
+  requestUserConfirmation?: (request: {
+    question: string;
+    screenshotPath?: string;
+    timeoutMs?: number;
+  }) => Promise<boolean>;
+  /**
+   * Per-turn read_file dedupe state. Safe only within one tool loop and invalidated
+   * by writes before it is consulted again.
+   */
+  readFileHistory?: Map<string, { output: string }>;
+  /**
    * Permission mode context for tool execution
    */
   permissionMode?: 'ask' | 'accept-all' | 'read' | 'write';

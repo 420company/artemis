@@ -179,6 +179,8 @@ function describeAction(action: AgentAction): string {
       return `mcp: suggest for "${action.intent}"`;
     case 'bridge_send_image':
       return `bridge: send image ${action.imagePath}${action.platform ? ` to ${action.platform}` : ''}`;
+    case 'request_user_confirmation':
+      return `confirmation: ${action.question}`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

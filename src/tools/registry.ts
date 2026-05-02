@@ -33,6 +33,7 @@ import { executeSearchFiles } from './searchFiles.js';
 import { executeSearchWeb } from './searchWeb.js';
 import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
+import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
 
 export type { ToolDefinition };
 
@@ -1458,6 +1459,22 @@ const capabilityToolDefs: ToolDefinition[] = [
       return errs;
     },
     execute: executeBridgeSendImage as any,
+  },
+  {
+    type: 'request_user_confirmation',
+    description: '暂停当前任务并向用户请求明确确认。适用于订房、付款、发布、删除、提交等敏感操作；可附带 screenshotPath。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.question, 'question', errs);
+      validateOptionalNonEmptyString(a?.screenshotPath, 'screenshotPath', errs);
+      validatePositiveInteger(a?.timeoutMs, 'timeoutMs', errs);
+      return errs;
+    },
+    execute: executeRequestUserConfirmation as any,
   },
 ];
 

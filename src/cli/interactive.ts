@@ -174,7 +174,7 @@ function renderLiveWorkflowViewport(state: LiveWorkflowRenderState): void {
 import path from 'node:path'
 import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
-import { think, resetSession, getMessages, restoreSession, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens } from '../brain.js'
+import { think, resetSession, getMessages, restoreSession, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens, getBifrostContextAuditReport } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { chooseInteractiveOption, type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
@@ -2866,6 +2866,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /bifrost — dual-model setup ───────────────────────────────────────────
+    if (trimmed === '/bifrost audit') {
+      appendSystemPanel(t('Bifrost context 审计', 'Bifrost context audit'), getBifrostContextAuditReport())
+      prompt.forceRedraw()
+      continue
+    }
+
     if (trimmed === '/bifrost') {
       try {
         prompt.clearBuffer()
@@ -3946,6 +3952,17 @@ async function handleTurn(
     onPermissionRequest: async (toolName, category, args) => {
       if (viewport?.requestPermission) {
         return viewport.requestPermission(toolName, category, args)
+      }
+      return false
+    },
+
+    onUserConfirmationRequest: async (request) => {
+      if (viewport?.requestPermission) {
+        return viewport.requestPermission('request_user_confirmation', 'execute', {
+          question: request.question,
+          screenshotPath: request.screenshotPath,
+          timeoutMs: request.timeoutMs,
+        })
       }
       return false
     },

@@ -321,6 +321,8 @@ export type ProviderResponse = {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
+    /** Whether token counts came from provider usage or local fallback estimation. */
+    source?: 'provider' | 'estimated';
     durationMs?: number;
     firstResponseMs?: number;
     profileId?: string;
