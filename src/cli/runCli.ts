@@ -354,12 +354,21 @@ export async function runCli(argv: string[]): Promise<void> {
       logWatchAbort = new AbortController()
       const { signal } = logWatchAbort
 
+      const SEPARATOR = /^─{10,}/
+      // Detects "Telegram inbound", "Discord outbound", "WeChat inbound", etc.
+      const DIRECTION_RE = /^(Telegram|Discord|WeChat)\s+(inbound|outbound|test successful)/i
+      // Detects "[telegram] BKK0420 → hi" style content lines
+      const CONTENT_RE = /^\[(\w+)\]\s+(.+?)\s*→\s*(.+)/
+      // Platform name normalization
+      const normPlatform = (s: string): 'telegram' | 'discord' | 'wechat' =>
+        s.toLowerCase() === 'discord' ? 'discord' : s.toLowerCase() === 'wechat' ? 'wechat' : 'telegram'
+
       const poll = async () => {
         if (signal.aborted) return
         try {
           const current = await fs.promises.stat(gatewayLogPath).catch(() => undefined)
           if (!current || current.size <= offset) {
-            if (current && current.size < offset) offset = 0 // file was truncated
+            if (current && current.size < offset) offset = 0
             return
           }
           const buf = Buffer.alloc(current.size - offset)
@@ -370,23 +379,92 @@ export async function runCli(argv: string[]): Promise<void> {
             await fh.close()
           }
           offset = current.size
-          const lines = buf.toString('utf8').split('\n').filter(Boolean)
-          for (const line of lines) {
-            // Show inbound/outbound bridge messages and bridge status events
-            if (/inbound|outbound|test successful|bridge connected|bot connected/i.test(line)) {
-              // Extract the content after the timestamp+name prefix
-              const content = line.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim()
-              if (content) {
-                notifyTerminal({
-                  kind: 'bridge-status',
-                  platform: 'telegram',
-                  targetLabel: 'system',
-                  text: content,
-                  level: 'info',
-                })
+
+          // Parse multi-line blocks separated by ────── lines.
+          // Format:
+          //   [timestamp] [platform] ──────────────────────
+          //   Telegram inbound
+          //
+          //   [telegram] BKK0420 → hey
+          //   ──────────────────────────────────────────────
+          const rawLines = buf.toString('utf8').split('\n')
+          let blockLines: string[] = []
+          let inBlock = false
+
+          const flushBlock = () => {
+            if (blockLines.length === 0) return
+            // Find direction header and content
+            let direction: 'inbound' | 'outbound' | undefined
+            let platform: 'telegram' | 'discord' | 'wechat' = 'telegram'
+            let isTestSuccess = false
+            const contentParts: string[] = []
+
+            for (const bl of blockLines) {
+              const trimmed = bl.trim()
+              if (!trimmed) continue
+              const dirMatch = trimmed.match(DIRECTION_RE)
+              if (dirMatch) {
+                platform = normPlatform(dirMatch[1])
+                if (dirMatch[2].toLowerCase() === 'inbound') direction = 'inbound'
+                else if (dirMatch[2].toLowerCase() === 'outbound') direction = 'outbound'
+                else isTestSuccess = true
+                continue
               }
+              // Skip separator lines and timestamp-prefixed lines
+              if (SEPARATOR.test(trimmed)) continue
+              if (/^\[\d{4}-/.test(trimmed)) continue
+              contentParts.push(trimmed)
+            }
+
+            const text = contentParts.join('\n').trim()
+            if (!text) { blockLines = []; return }
+
+            if (direction) {
+              // Extract sender → message if available
+              const contentMatch = text.match(CONTENT_RE)
+              const displayText = contentMatch
+                ? `${contentMatch[2]} → ${contentMatch[3]}`
+                : text
+              notifyTerminal({
+                kind: 'bridge-message',
+                platform,
+                direction,
+                targetLabel: contentMatch?.[2] ?? 'system',
+                text: displayText,
+              })
+            } else if (isTestSuccess) {
+              notifyTerminal({
+                kind: 'bridge-status',
+                platform,
+                targetLabel: 'system',
+                text,
+                level: 'info',
+              })
+            }
+            blockLines = []
+          }
+
+          for (const rawLine of rawLines) {
+            const line = rawLine.replace(/\r$/, '')
+            // Lines starting with [timestamp] [name] ────── open a new block
+            if (/\[\d{4}-.*\]\s*\[\w+\]\s*─{10,}/.test(line)) {
+              flushBlock()
+              inBlock = true
+              continue
+            }
+            // A standalone separator line closes the block
+            if (SEPARATOR.test(line.trim())) {
+              if (inBlock) {
+                flushBlock()
+                inBlock = false
+              }
+              continue
+            }
+            if (inBlock) {
+              blockLines.push(line)
             }
           }
+          // Don't flush incomplete blocks (they may span across poll intervals)
         } catch { /* log file may not exist yet */ }
       }
 
