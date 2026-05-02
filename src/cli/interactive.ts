@@ -1341,12 +1341,31 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     '/var/root',
     '/private/etc',
   ].map((entry) => path.resolve(entry))
+  const trustedSensitiveWorkspaceExceptions = [
+    // Dream files are user-generated md/png/json summaries, not credentials.
+    // Keep this aligned with utils/fs.ts and tools/runCommand.ts so /dream
+    // status/open and AI self-introspection can read the dream scrolls without
+    // opening the rest of ~/.artemis.
+    path.join(HOME_DIR, '.artemis', 'dreams'),
+  ].map((entry) => path.resolve(entry))
+
+  const normalizeWorkspacePathForCompare = (target: string): string => {
+    const resolved = path.resolve(target)
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  }
+
+  const isPathWithinOrEqual = (target: string, root: string): boolean => {
+    const normalizedTarget = normalizeWorkspacePathForCompare(target)
+    const normalizedRoot = normalizeWorkspacePathForCompare(root)
+    return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`)
+  }
 
   const isSensitiveWorkspaceTarget = (target: string): boolean => {
     const resolved = path.resolve(target)
-    return sensitiveWorkspaceRoots.some((root) =>
-      resolved === root || resolved.startsWith(`${root}${path.sep}`),
-    )
+    if (trustedSensitiveWorkspaceExceptions.some((root) => isPathWithinOrEqual(resolved, root))) {
+      return false
+    }
+    return sensitiveWorkspaceRoots.some((root) => isPathWithinOrEqual(resolved, root))
   }
 
   const refreshProjectInstructionsForWorkspace = async (nextWorkspaceRoot: string): Promise<void> => {
