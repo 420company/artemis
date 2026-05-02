@@ -61,8 +61,13 @@ function buildSpawnEnv(command: string): NodeJS.ProcessEnv {
 // attacker with shell access can still bypass via encoding or subshell
 // tricks, but the guard raises the effort for a single-line prompt injection.
 const SENSITIVE_PATH_PATTERNS = [
-  // User-scoped credential dirs (per-user, require $HOME expansion)
-  /\.artemis[/\\]/,
+  // User-scoped credential dirs (per-user, require $HOME expansion).
+  // .artemis/ is broadly protected EXCEPT for the dreams/ subdirectory —
+  // dreams contain only user-generated content (md notes, png renders,
+  // learned-prompt summaries). They have no tokens / secrets / session data,
+  // and the AI legitimately needs to read its own dreams to answer
+  // /dream status, reference past dreams, or self-introspect.
+  /\.artemis[/\\](?!dreams[/\\]?)/,
   /\.artemis$/,
   /\.claude[/\\]/,
   /providers\.json/,

@@ -3346,6 +3346,50 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         continue
       }
 
+      if (arg === 'status') {
+        // No AI calls — pure local introspection. Tells the user instantly:
+        // is the dream system on, what mode, when did it last fire, when can
+        // it fire again, what's accumulated. Replaces the previous ~38s
+        // session-digging that would happen when the user asked the AI.
+        const cfg = await dreamStore.loadDreamConfig()
+        const idleWatcher = await import('../services/idleWatcher.js')
+        const lastActivityAt = idleWatcher.getLastActivityAt()
+        const isComposing = idleWatcher.isComposing()
+        const idleSec = Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000))
+        const remainingSec = Math.max(0, cfg.idleThresholdSec - idleSec)
+        const list = await dreamStore.loadDreamIndex()
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000
+        const todayCount = list.filter(e => Date.parse(e.createdAt) >= cutoff).length
+        const learned = await dreamStore.loadLearnedPrompt()
+        const learnedBytes = Buffer.byteLength(learned, 'utf8')
+        const fmtDur = (sec: number): string => {
+          if (sec < 60) return `${sec}s`
+          if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60 > 0 ? ` ${sec % 60}s` : ''}`
+          return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60) > 0 ? ` ${Math.floor((sec % 3600) / 60)}m` : ''}`
+        }
+        const lines = [
+          `${t('启用', 'Enabled')}: ${cfg.enabled ? t('是', 'yes') : t('否', 'no')}`,
+          `${t('模式', 'Mode')}: ${cfg.mode}${cfg.mode === 'vision' ? t(' (文字 + 配图)', ' (text + image)') : ''}`,
+          `${t('风格演化', 'Evolve prompt')}: ${cfg.evolveSystemPrompt ? t('开启', 'on') : t('关闭', 'off')}  ·  ${t('桥接推送', 'Bridge push')}: ${cfg.pushToBridges ? t('开启', 'on') : t('关闭', 'off')}`,
+          `${t('空闲阈值', 'Idle threshold')}: ${fmtDur(cfg.idleThresholdSec)}  ·  ${t('每日上限', 'Daily cap')}: ${cfg.maxDreamsPerDay}  ·  ${t('夜间窗口', 'Night window')}: ${cfg.nightWindow.startHour}:00–${cfg.nightWindow.endHour}:00`,
+          '',
+          isComposing
+            ? t('🌙 当前正在编织梦境…', '🌙 Currently composing a dream…')
+            : remainingSec > 0
+              ? t(`下次触发：还需空闲 ${fmtDur(remainingSec)}（已空闲 ${fmtDur(idleSec)}）`, `Next trigger: needs ${fmtDur(remainingSec)} more idle (currently ${fmtDur(idleSec)})`)
+              : t(`已达触发条件，等待下一个 60s 检查窗口（已空闲 ${fmtDur(idleSec)}）`, `Trigger threshold reached, waiting for next 60s check (idle ${fmtDur(idleSec)})`),
+          `${t('今日已做', 'Today')}: ${todayCount} / ${cfg.maxDreamsPerDay}`,
+          `${t('累计学习', 'Learned style')}: ${learned ? `${learnedBytes} bytes` : t('无', 'none')}`,
+          '',
+          t('最近梦境（最多 5 条）', 'Recent dreams (up to 5)'),
+          ...(list.length > 0
+            ? list.slice(0, 5).map(e => `  ${e.id}  ${e.imagePath ? '🖼' : '📝'}  ${e.preview}`)
+            : [`  ${t('（还没有任何梦境）', '(no dreams yet)')}`]),
+        ]
+        appendSystemPanel(t('🌙 Dream System Status', '🌙 Dream System Status'), lines)
+        continue
+      }
+
       if (arg.startsWith('open ')) {
         const id = arg.slice(5).trim()
         const body = await dreamStore.readDreamBody(id)
@@ -3367,6 +3411,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       }
 
       appendSystemPanel(t('用法', 'Usage'), [
+        '/dream status           ' + t('一键查看梦境系统当前状态（推荐）', 'One-shot dream system status (recommended)'),
         '/dream                  ' + t('立即编织一个梦境', 'Compose a dream now'),
         '/dream list             ' + t('列出最近的梦境', 'List recent dreams'),
         '/dream open <id>        ' + t('打开指定梦境', 'Open a dream'),

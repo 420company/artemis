@@ -31,6 +31,11 @@ const WALK_FILES_CACHE_TTL_MS = 4_000
 export function isSensitivePath(absolute: string): boolean {
   const home = homedir()
   const normalized = absolute.replace(/\\/g, '/')
+  // Carve-out: .artemis/dreams/** is user-generated content (md notes, png
+  // renders, learned-prompt summaries). No tokens / secrets / sessions live
+  // there. The AI legitimately needs to read its own dreams to introspect
+  // and reference past dreams when /dream status / /dream open is invoked.
+  if (/\/\.artemis\/dreams(\/|$)/.test(normalized)) return false
   for (const seg of SENSITIVE_PATH_SEGMENTS) {
     if (normalized.includes(`/${seg}/`) || normalized.endsWith(`/${seg}`)) return true
     if (normalized === join(home, seg).replace(/\\/g, '/')) return true

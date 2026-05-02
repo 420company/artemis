@@ -329,6 +329,17 @@ function buildSystemInfo(opts: SystemInfoOpts): string {
     rows.push(`${dot}${padVisibleEnd(dim(t('桥接', 'bridges')), labelWidth)}  ${bridgeParts.join(dim('  ·  '))}`)
   }
 
+  // Dream system — always shown at boot so users (and their friends!) know
+  // there's an ambient subsystem reading today's activity into nightly dream
+  // notes. Without this line, users had no idea the dream system existed
+  // until they happened to read the docs or hit /dream by accident.
+  rows.push(
+    `${dot}${padVisibleEnd(dim(t('梦境系统', 'dream system')), labelWidth)}  ` +
+    val(t('已加载', 'loaded'), 245, 196, 94) +
+    dim('  ·  ') +
+    dim(t('Artemis 会从今天的工作中提炼意象，空闲时编织梦境（/dream status 查看）', 'Artemis distills today\'s work into imagery and weaves dreams when you idle (/dream status to inspect)'))
+  )
+
   return rows.join('\n')
 }
 
