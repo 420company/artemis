@@ -371,11 +371,8 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
   const defaultPermissionMode = options.permissionMode ?? 'accept-all'
   let active = 0
 
-  // The daemon starts bridges normally (non-passive) so it can acquire locks on
-  // first boot. If the user opens an interactive CLI that takes over a bridge
-  // (SIGTERM), the daemon switches to passive mode for retries so it silently
-  // yields instead of fighting the CLI. When the CLI exits and the lock is
-  // released, the daemon's retry loop will re-acquire the bridge automatically.
+  // The daemon is the sole bridge owner. The interactive CLI never kills this
+  // process; it only monitors the gateway.log file to display bridge messages.
 
   const startBridge = (name: string, fn: (signal: AbortSignal) => Promise<void>) => {
     if (started.has(name)) return
@@ -390,9 +387,6 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
         const msg = err instanceof Error ? err.message : String(err)
         if (ac.signal.aborted || msg.includes('aborted')) return
         log(name, `crash: ${msg}`)
-        // After being killed (likely by CLI takeover), switch to passive mode
-        // so retry attempts silently yield to the CLI's active lock.
-        process.env.ARTEMIS_BRIDGE_LOCK_MODE = 'passive'
         const next = Math.min(delayMs * 2, 60_000)
         log(name, `restarting in ${next / 1000}s`)
         setTimeout(() => run(next), next)

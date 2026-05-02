@@ -102,6 +102,13 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
+  // The interactive CLI must NEVER try to kill the background gateway daemon
+  // to take over bridges. Doing so triggers a mutual-kill loop:
+  //   CLI kills daemon → launchd restarts daemon → daemon kills CLI → "zsh: terminated"
+  // Instead, the daemon is the sole bridge owner and the CLI monitors its log
+  // file to display bridge messages in the terminal.
+  process.env.ARTEMIS_BRIDGE_LOCK_MODE = 'passive'
+
   if (!settings.uiLocaleConfigured) {
     locale = await runFirstRunWelcome({ settingsStore })
     suppressInitialNewbornOnce = true
@@ -334,51 +341,59 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 
   // ── prepare for interactive session ─────────────────────────────────────────
-  const bridgeSessionStore = new SessionStore(options.cwd)
-  const bridgeAborts: AbortController[] = []
-  // Bridge logs go to a file so they don't pollute the interactive terminal.
-  const bridgeLogPath = path.join(os.homedir(), '.artemis', 'bridge.log')
-  const logToBridgeFile = (name: string, msg: string) => {
-    const line = `[${new Date().toISOString()}] [${name}] ${msg}\n`
-    appendFile(bridgeLogPath, line).catch(() => {})
-  }
+  // Bridges are managed exclusively by the background gateway daemon.
+  // The CLI monitors the daemon's log file in real-time and mirrors
+  // inbound/outbound bridge messages to the terminal.
+  const gatewayLogPath = path.join(os.homedir(), '.artemis', 'gateway.log')
+  let logWatchAbort: AbortController | undefined
+  void (async () => {
+    try {
+      // Start watching from the current end of the file (only new lines)
+      const stat = await fs.promises.stat(gatewayLogPath).catch(() => undefined)
+      let offset = stat?.size ?? 0
+      logWatchAbort = new AbortController()
+      const { signal } = logWatchAbort
 
-  // Auto-restart bridge on failure with exponential back-off (max 60 s).
-  const startedBridges = new Set<string>()
-  const startBridge = (name: string, fn: (signal: AbortSignal) => Promise<void>) => {
-    if (startedBridges.has(name)) return
-    startedBridges.add(name)
-    const ac = new AbortController()
-    bridgeAborts.push(ac)
-    const run = (delayMs: number) => {
-      fn(ac.signal).catch(err => {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (msg.includes('aborted') || ac.signal.aborted) return
-        logToBridgeFile(name, `crash: ${msg}`)
-        const next = Math.min(delayMs * 2, 60_000)
-        logToBridgeFile(name, `restarting in ${next / 1000}s...`)
-        setTimeout(() => run(next), next)
-      })
-    }
-    run(2_000)
-  }
+      const poll = async () => {
+        if (signal.aborted) return
+        try {
+          const current = await fs.promises.stat(gatewayLogPath).catch(() => undefined)
+          if (!current || current.size <= offset) {
+            if (current && current.size < offset) offset = 0 // file was truncated
+            return
+          }
+          const buf = Buffer.alloc(current.size - offset)
+          const fh = await fs.promises.open(gatewayLogPath, 'r')
+          try {
+            await fh.read(buf, 0, buf.length, offset)
+          } finally {
+            await fh.close()
+          }
+          offset = current.size
+          const lines = buf.toString('utf8').split('\n').filter(Boolean)
+          for (const line of lines) {
+            // Show inbound/outbound bridge messages and bridge status events
+            if (/inbound|outbound|test successful|bridge connected|bot connected/i.test(line)) {
+              // Extract the content after the timestamp+name prefix
+              const content = line.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim()
+              if (content) {
+                notifyTerminal({
+                  kind: 'bridge-status',
+                  platform: 'telegram',
+                  targetLabel: 'system',
+                  text: content,
+                  level: 'info',
+                })
+              }
+            }
+          }
+        } catch { /* log file may not exist yet */ }
+      }
 
-  const launchBridgeByName = (platform: string) => {
-    // Bridges inherit the CLI's permission mode so /accept-all on launch also
-    // empowers Telegram/Discord/WeChat sessions to write code remotely.
-    const defaultPermissionMode = options.permissionMode
-    if (platform === 'telegram') {
-      startBridge('telegram', signal => runTelegramBridge({ cwd: options.cwd, sessionStore: bridgeSessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => logToBridgeFile('telegram', msg), onNotify: notifyTerminal }))
-      return
-    }
-    if (platform === 'discord') {
-      startBridge('discord', signal => runDiscordBridge({ cwd: options.cwd, sessionStore: bridgeSessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => logToBridgeFile('discord', msg), onNotify: notifyTerminal }))
-      return
-    }
-    if (platform === 'wechat') {
-      startBridge('wechat', signal => runWeChatBridge({ cwd: options.cwd, sessionStore: bridgeSessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => logToBridgeFile('wechat', msg), onNotify: notifyTerminal }))
-    }
-  }
+      const interval = setInterval(poll, 2_000)
+      signal.addEventListener('abort', () => clearInterval(interval))
+    } catch { /* non-essential */ }
+  })()
 
   // ── dream system: idle-triggered ambient activity ──────────────────────────
   // Starts a background timer that fires after the user has been inactive for
@@ -426,14 +441,13 @@ export async function runCli(argv: string[]): Promise<void> {
     sessionId: options.sessionId,
     resumeLast: options.resumeLast,
     suppressInitialNewbornOnce,
-    onBridgeStart: launchBridgeByName,
+    onBridgeStart: () => {},
     settingsStore,
-    // Pass the bridges that should be auto-started
-    autoStartBridges: ([] as string[])
-      .concat(await shouldAutoStartTelegram(options.cwd) ? ['telegram'] : [])
-      .concat(await shouldAutoStartDiscordBridge(options.cwd) ? ['discord'] : [])
-      .concat(await shouldAutoStartWeChatBridge(options.cwd) ? ['wechat'] : []),
+    autoStartBridges: [],
   })
+
+  // Clean up log watcher
+  logWatchAbort?.abort()
 }
 
 function splitCommandArgs(prompt: string | undefined): string[] {
