@@ -10,7 +10,7 @@ export type WorkspaceIntentResolution = {
   source: 'explicit-path' | 'desktop-alias' | 'documents-alias' | 'downloads-alias'
 }
 
-const PATH_INTENT_PREFIXES = [
+const STRONG_PATH_INTENT_PREFIXES = [
   '进入',
   '切换到',
   '切到',
@@ -19,14 +19,18 @@ const PATH_INTENT_PREFIXES = [
   '工作区切换到',
   '设为工作区',
   '作为工作区',
+  'cd to',
+  'switch to',
+  'change to',
+] as const
+
+const CONTEXT_PATH_INTENT_PREFIXES = [
+  ...STRONG_PATH_INTENT_PREFIXES,
   '在',
   '到',
   '保存到',
   '写到',
   '放到',
-  'cd to',
-  'switch to',
-  'change to',
   'use',
   'inside',
   'under',
@@ -34,6 +38,25 @@ const PATH_INTENT_PREFIXES = [
   'at',
   'to',
 ] as const
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isLikelyPastedRichText(input: string): boolean {
+  const lineCount = input.split(/\r?\n/).length
+  if (lineCount >= 3) return true
+  if (input.length >= 500) return true
+  if (/```|<\/?(?:div|p|span|pre|code|html|body)\b/i.test(input)) return true
+  return false
+}
+
+function startsWithStrongWorkspaceIntent(input: string): boolean {
+  const trimmed = input.trimStart()
+  return STRONG_PATH_INTENT_PREFIXES.some((prefix) =>
+    new RegExp(`^${escapeRegExp(prefix)}(?:\\s|[:：])`, 'i').test(trimmed),
+  )
+}
 
 function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): string | null {
   let candidate = raw
@@ -53,13 +76,13 @@ function extractQuotedPath(input: string): string | null {
   return quoted?.[1]?.trim() ?? null
 }
 
-function extractPrefixedPath(input: string): string | null {
+function extractPrefixedPath(input: string, strongOnly = false): string | null {
   const zhStops = '继续|并|然后|之后|再|接着|创建|建立|新建|制作|做|写|修改|更新|运行|执行|设为|作为'
   const enStops = 'and|then|create|build|make|write|edit|run'
-  for (const prefix of PATH_INTENT_PREFIXES) {
-    const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const prefixes = strongOnly ? STRONG_PATH_INTENT_PREFIXES : CONTEXT_PATH_INTENT_PREFIXES
+  for (const prefix of prefixes) {
     const pattern = new RegExp(
-      `${escaped}\\s+((?:~|/)[\\s\\S]+?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
+      `${escapeRegExp(prefix)}(?:\\s+|[:：]\\s*)((?:~|/)[\\s\\S]+?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
       'i',
     )
     const match = input.match(pattern)
@@ -109,11 +132,9 @@ function pathForAlias(source: WorkspaceIntentResolution['source'], homeDir: stri
 
 /**
  * Detect a relative subpath that immediately follows an alias word like
- * "桌面" / "desktop folder" / "documents". Used so a request such as
- *   "进入桌面 BangkokProject/420-company-site 设为工作区"
- * resolves to ~/Desktop/BangkokProject/420-company-site instead of just
- * ~/Desktop (which then makes read_file fail with ENOENT for src/App.tsx
- * because the AI doesn't realize the workspace baseline never moved).
+ * "desktop" / "desktop folder" / "documents". This keeps the workspace
+ * baseline aligned with the user's intended project directory instead of
+ * resolving only to the alias root.
  */
 function extractSubpathAfterAlias(
   input: string,
@@ -166,12 +187,21 @@ export async function resolveWorkspaceIntent(
   currentCwd: string,
   homeDir = homedir(),
 ): Promise<WorkspaceIntentResolution | null> {
+  const likelyPastedRichText = isLikelyPastedRichText(input)
+  const strongOnly = likelyPastedRichText && !startsWithStrongWorkspaceIntent(input)
+
+  // Long pasted logs / docs / rich text often contain incidental absolute
+  // paths such as /etc/nginx or /private/etc/hosts. Those are content, not a
+  // request to move Artemis' workspace. In that mode we only honor explicit
+  // leading workspace verbs ("进入 ...", "switch to ...") and ignore generic
+  // prose like "in /etc" or quoted path examples.
+  if (strongOnly) return null
+
   const aliasSource = aliasPathFromText(input, homeDir)
   if (aliasSource) {
     const aliasRoot = pathForAlias(aliasSource, homeDir)
-    // If the user typed a subpath right after the alias (e.g.
-    // "桌面 BangkokProject/420-company-site"), resolve to that subpath
-    // instead of the bare alias root.
+    // If the user typed a subpath right after the alias, resolve to that
+    // subpath instead of the bare alias root.
     const subpath = extractSubpathAfterAlias(input, aliasSource)
     const requestedPath = subpath ? path.join(aliasRoot, subpath) : aliasRoot
     const existing = await findNearestExistingWorkspaceRoot(requestedPath)
@@ -186,7 +216,7 @@ export async function resolveWorkspaceIntent(
 
   const rawPath =
     extractQuotedPath(input) ??
-    extractPrefixedPath(input) ??
+    extractPrefixedPath(input, strongOnly) ??
     extractLeadingPath(input)
   if (!rawPath) return null
 

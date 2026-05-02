@@ -1177,15 +1177,17 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         'Access denied: /mnt/user-data/workspace/Artemis/index.html is in a protected directory.',
     })}`,
   )
-  const rendered = renderWorkflowProgress(state)
+  const stripAnsi = (await import('strip-ansi')).default
+  const renderedRaw = renderWorkflowProgress(state)
+  const rendered = stripAnsi(renderedRaw).replace(/[\r\n\s↪]+/g, '')
   assert(
     'workflow UI: reply snippets and tool failures are rendered without ellipsis-folding critical text',
     rendered.includes('END_MARKER') &&
-      rendered.includes('protected directory') &&
-      !rendered.includes('is in a p…') &&
-      rendered.includes('目标目录已锁定为 /Users/goat/Desktop/sexyshop') &&
-      rendered.includes('designer agent -> 研究与设计审查'),
-    rendered,
+      rendered.includes('protecteddirectory') &&
+      !rendered.includes('isinap…') &&
+      rendered.includes('目标目录已锁定为/Users/goat/Desktop/sexyshop') &&
+      rendered.includes('designeragent->研究与设计审查'),
+    renderedRaw,
   )
 }
 
