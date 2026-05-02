@@ -8,7 +8,7 @@
  */
 
 import { BragiStore } from '../bragi/store.js'
-import { runBragiMessagePump } from '../bragi/runtime.js'
+import { buildBridgeIdentity, runBragiMessagePump } from '../bragi/runtime.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
 import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
@@ -203,9 +203,10 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
         try {
           const contextToken = wechatStore.getContextToken(data, targetId)
           if (!contextToken) continue
-          await client.sendText(targetId, payload.text, contextToken, options.signal)
           if (payload.imagePath) {
-            await client.sendText(targetId, `🖼 ${payload.imagePath}`, contextToken, options.signal)
+            await client.sendImage(targetId, payload.imagePath, contextToken, payload.text, options.signal)
+          } else {
+            await client.sendText(targetId, payload.text, contextToken, options.signal)
           }
         } catch (err) {
           options.onInfo?.(`[wechat] dream push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -223,6 +224,7 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
     channelLabel: 'WeChat',
     locale,
     cwd: options.cwd,
+    bridgeIdentity: buildBridgeIdentity('wechat', `${gatewayUrl}:${gatewayToken}`),
     sessionStore: options.sessionStore,
     maxTurns: options.maxTurns,
     onInfo: options.onInfo,

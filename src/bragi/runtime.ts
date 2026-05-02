@@ -11,14 +11,15 @@
 
 import { think, resetSession, getMessages, restoreSession } from '../brain.js'
 import { open, readFile, unlink } from 'node:fs/promises'
-import { hostname } from 'node:os'
+import { createHash } from 'node:crypto'
+import { hostname, homedir } from 'node:os'
 import path from 'node:path'
 import { SessionStore } from '../storage/sessions.js'
 import type { SessionRecord } from '../core/types.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
-import { pickLocale } from '../cli/locale.js'
+import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js'
 import { ensureDir, resolveDataRootDir, truncate } from '../utils/fs.js'
 import stripAnsi from 'strip-ansi'
@@ -611,6 +612,8 @@ export type RunBragiMessagePumpOptions<TCheckpoint> = {
   channelLabel: string
   locale: UiLocale
   cwd: string
+  /** Stable non-secret identity for cross-workspace bridge locking. */
+  bridgeIdentity?: string
   sessionStore: SessionStore
   maxTurns: number
   commandSuffixPattern?: RegExp
@@ -634,11 +637,25 @@ type BridgeLockInfo = {
   pid: number
   hostname: string
   platform: BridgePlatform
+  cwd?: string
+  identity?: string
   startedAt: string
 }
 
-function bridgeLockPath(cwd: string, platform: BridgePlatform): string {
+function normalizeLockToken(input: string): string {
+  return input.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 96) || 'default'
+}
+
+function bridgeLockPath(cwd: string, platform: BridgePlatform, identity?: string): string {
+  if (identity) {
+    return path.join(homedir(), '.artemis', 'bridge-locks', `bridge-lock-${platform}-${normalizeLockToken(identity)}.json`)
+  }
   return path.join(resolveDataRootDir(cwd), `bridge-lock-${platform}.json`)
+}
+
+export function buildBridgeIdentity(platform: BridgePlatform, secretOrEndpoint: string): string {
+  const digest = createHash('sha256').update(`${platform}:${secretOrEndpoint}`).digest('hex').slice(0, 16)
+  return `${platform}-${digest}`
 }
 
 function isProcessRunning(pid: number): boolean {
@@ -655,9 +672,9 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-async function readBridgeLock(cwd: string, platform: BridgePlatform): Promise<BridgeLockInfo | undefined> {
+async function readBridgeLock(cwd: string, platform: BridgePlatform, identity?: string): Promise<BridgeLockInfo | undefined> {
   try {
-    const raw = await readFile(bridgeLockPath(cwd, platform), 'utf8')
+    const raw = await readFile(bridgeLockPath(cwd, platform, identity), 'utf8')
     const parsed = JSON.parse(raw) as Partial<BridgeLockInfo>
     if (
       typeof parsed.pid === 'number' &&
@@ -676,10 +693,11 @@ async function readBridgeLock(cwd: string, platform: BridgePlatform): Promise<Br
 async function tryAcquireBridgeLock(
   cwd: string,
   platform: BridgePlatform,
+  identity?: string,
   onInfo?: (message: string) => void,
   onBlocked?: (message: string) => void,
 ): Promise<(() => Promise<void>) | undefined> {
-  const p = bridgeLockPath(cwd, platform)
+  const p = bridgeLockPath(cwd, platform, identity)
   await ensureDir(path.dirname(p))
 
   const writeLock = async (): Promise<() => Promise<void>> => {
@@ -687,6 +705,8 @@ async function tryAcquireBridgeLock(
       pid: process.pid,
       hostname: hostname(),
       platform,
+      cwd,
+      identity,
       startedAt: new Date().toISOString(),
     }
     const handle = await open(p, 'wx')
@@ -697,7 +717,7 @@ async function tryAcquireBridgeLock(
     }
 
     return async () => {
-      const current = await readBridgeLock(cwd, platform)
+      const current = await readBridgeLock(cwd, platform, identity)
       if (current?.pid !== process.pid) return
       await unlink(p).catch(() => {})
     }
@@ -713,13 +733,38 @@ async function tryAcquireBridgeLock(
     if (code !== 'EEXIST') throw err
   }
 
-  const existing = await readBridgeLock(cwd, platform)
+  const existing = await readBridgeLock(cwd, platform, identity)
   if (!existing || !isProcessRunning(existing.pid)) {
     await unlink(p).catch(() => {})
     return writeLock()
   }
 
-  const blockedMessage = `[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages.`
+  const takeoverDisabled = process.env.ARTEMIS_BRIDGE_LOCK_MODE === 'passive'
+  if (!takeoverDisabled && existing.pid !== process.pid) {
+    const repairMessage = pickLocale(DEFAULT_UI_LOCALE, {
+      zh: `[${platform}] 检测到旧 bridge 仍在运行（PID ${existing.pid}），正在自动接管通讯接口。`,
+      en: `[${platform}] Existing bridge is still running in PID ${existing.pid}; taking over the messaging interface.`,
+    })
+    onInfo?.(repairMessage)
+    try {
+      process.kill(existing.pid, 'SIGTERM')
+      for (let i = 0; i < 20; i += 1) {
+        await wait(150)
+        if (!isProcessRunning(existing.pid)) break
+      }
+      if (!isProcessRunning(existing.pid)) {
+        await unlink(p).catch(() => {})
+        return writeLock()
+      }
+    } catch {
+      // Fall through to the localized blocked message below.
+    }
+  }
+
+  const blockedMessage = pickLocale(DEFAULT_UI_LOCALE, {
+    zh: `[${platform}] 通讯 bridge 已由 PID ${existing.pid} 占用，本实例不会处理消息。可关闭旧 Artemis，或重启后由新实例自动接管；如需保留旧实例，请设置 ARTEMIS_BRIDGE_LOCK_MODE=passive。`,
+    en: `[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages. Close the old Artemis instance, or restart and let this instance take over; set ARTEMIS_BRIDGE_LOCK_MODE=passive to keep the old instance.`,
+  })
   onInfo?.(blockedMessage)
   onBlocked?.(blockedMessage)
   return undefined
@@ -732,6 +777,7 @@ export async function runBragiMessagePump<TCheckpoint>(
   const releaseBridgeLock = await tryAcquireBridgeLock(
     options.cwd,
     bridgePlatform,
+    options.bridgeIdentity,
     options.onInfo,
     (message) => options.onNotify?.({
       kind: 'bridge-status',

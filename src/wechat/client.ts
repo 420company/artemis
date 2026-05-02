@@ -9,6 +9,8 @@
  */
 
 import { randomBytes } from 'node:crypto'
+import { basename } from 'node:path'
+import { readFile } from 'node:fs/promises'
 
 // ─── internal gateway types ───────────────────────────────────────────────────
 
@@ -72,6 +74,7 @@ const WECHAT_MESSAGE_LIMIT = 3_800
 const WECHAT_SESSION_EXPIRED_ERRCODE = -14
 const WECHAT_MESSAGE_TYPE_USER = 1
 const WECHAT_MESSAGE_ITEM_TEXT = 1
+const WECHAT_MESSAGE_ITEM_IMAGE = 2
 const WECHAT_MESSAGE_ITEM_VOICE = 3
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -257,6 +260,61 @@ export class WeChatGatewayClient {
           `WeChat sendMessage failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)} chunk=${index + 1}/${chunks.length} chars=${chunk.length} raw=${truncate(JSON.stringify(response), 240)}`,
         )
       }
+    }
+  }
+
+  async sendImage(
+    peerUserId: string,
+    imagePath: string,
+    contextToken: string,
+    caption?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!contextToken.trim()) {
+      throw new Error(
+        `WeChat image reply needs a context token for ${peerUserId}. The user must send a message first.`,
+      )
+    }
+
+    if (caption?.trim()) {
+      await this.sendText(peerUserId, caption, contextToken, signal)
+    }
+
+    const image = await readFile(imagePath)
+    const imageBase64 = image.toString('base64')
+    const filename = basename(imagePath)
+    const response = await this.post<WeChatSendMessageResponse>(
+      'ilink/bot/sendmessage',
+      {
+        msg: {
+          from_user_id: '',
+          to_user_id: peerUserId,
+          client_id: randomClientId(),
+          message_type: 2,
+          message_state: 2,
+          context_token: contextToken,
+          item_list: [{
+            type: WECHAT_MESSAGE_ITEM_IMAGE,
+            image_item: {
+              filename,
+              file_name: filename,
+              image_base64: imageBase64,
+              base64: imageBase64,
+              data: imageBase64,
+            },
+          }],
+        },
+        base_info: { channel_version: 'artemis-bragi-wechat/1.0' },
+      },
+      WECHAT_SHORT_HTTP_TIMEOUT_MS,
+      'sendImage',
+      signal,
+    )
+
+    if ((response.ret ?? 0) !== 0) {
+      throw new Error(
+        `WeChat sendImage failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)} raw=${truncate(JSON.stringify(response), 240)}`,
+      )
     }
   }
 

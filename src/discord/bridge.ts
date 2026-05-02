@@ -7,7 +7,7 @@
 
 import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
-import { runBragiMessagePump } from '../bragi/runtime.js'
+import { buildBridgeIdentity, runBragiMessagePump } from '../bragi/runtime.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
 import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
@@ -251,6 +251,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
       channelLabel: 'Discord',
       locale,
       cwd: options.cwd,
+      bridgeIdentity: buildBridgeIdentity('discord', discordConfig.credentials.botToken),
       sessionStore: options.sessionStore,
       maxTurns: options.maxTurns,
       onInfo: options.onInfo,

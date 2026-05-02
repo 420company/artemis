@@ -10,7 +10,7 @@
 
 import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
-import { runBragiMessagePump } from '../bragi/runtime.js'
+import { buildBridgeIdentity, runBragiMessagePump } from '../bragi/runtime.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
 import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
@@ -330,6 +330,7 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
     channelLabel: 'Telegram',
     locale,
     cwd: options.cwd,
+    bridgeIdentity: buildBridgeIdentity('telegram', token),
     sessionStore: options.sessionStore,
     maxTurns: options.maxTurns,
     commandSuffixPattern: /@[^/\s]+$/i,
