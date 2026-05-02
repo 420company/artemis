@@ -320,18 +320,18 @@ async function installWindowsTask(cwd: string): Promise<void> {
   await writeFile(windowsWrapperPath(), buildWindowsWrapper(cwd), 'utf8')
   await writeFile(windowsVbsWrapperPath(), buildWindowsVbsWrapper(), 'utf8')
   const create = await runWindowsCommand([
-    'schtasks', '/Create', '/TN', quoteCmdArg(WINDOWS_TASK_NAME), '/TR', quoteCmdArg(`wscript.exe "${windowsVbsWrapperPath()}"`),
+    'schtasks', '/Create', '/TN', WINDOWS_TASK_NAME, '/TR', `wscript.exe "${windowsVbsWrapperPath()}"`,
     '/SC', 'ONLOGON', '/RL', 'LIMITED', '/F',
   ])
   if (create.code !== 0) {
     throw new Error((create.stderr || create.stdout || 'schtasks create failed').trim())
   }
-  await runWindowsCommand(['schtasks', '/Run', '/TN', quoteCmdArg(WINDOWS_TASK_NAME)])
+  await runWindowsCommand(['schtasks', '/Run', '/TN', WINDOWS_TASK_NAME])
 }
 
 async function uninstallWindowsTask(): Promise<void> {
-  await runWindowsCommand(['schtasks', '/End', '/TN', quoteCmdArg(WINDOWS_TASK_NAME)])
-  await runWindowsCommand(['schtasks', '/Delete', '/TN', quoteCmdArg(WINDOWS_TASK_NAME), '/F'])
+  await runWindowsCommand(['schtasks', '/End', '/TN', WINDOWS_TASK_NAME])
+  await runWindowsCommand(['schtasks', '/Delete', '/TN', WINDOWS_TASK_NAME, '/F'])
   await unlink(windowsWrapperPath()).catch(err => {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   })
@@ -345,15 +345,15 @@ async function startWindowsTask(cwd: string): Promise<void> {
     await installWindowsTask(cwd)
     return
   }
-  await runWindowsCommand(['schtasks', '/Run', '/TN', quoteCmdArg(WINDOWS_TASK_NAME)])
+  await runWindowsCommand(['schtasks', '/Run', '/TN', WINDOWS_TASK_NAME])
 }
 
 async function stopWindowsTask(): Promise<void> {
-  await runWindowsCommand(['schtasks', '/End', '/TN', quoteCmdArg(WINDOWS_TASK_NAME)])
+  await runWindowsCommand(['schtasks', '/End', '/TN', WINDOWS_TASK_NAME])
 }
 
 async function getWindowsTaskStatus(): Promise<string[]> {
-  const result = await runWindowsCommand(['schtasks', '/Query', '/TN', quoteCmdArg(WINDOWS_TASK_NAME), '/FO', 'LIST', '/V'])
+  const result = await runWindowsCommand(['schtasks', '/Query', '/TN', WINDOWS_TASK_NAME, '/FO', 'LIST', '/V'])
   const installed = result.code === 0
   return [
     `Installed: ${installed ? 'yes' : 'no'}`,
