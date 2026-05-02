@@ -4036,11 +4036,36 @@ async function handleTurn(
         ? `估算 ${ft(livePendingTokens)} tok`
         : `est. ${ft(livePendingTokens)} tok`
     }
+    // Random kaomoji-style closer so the footer feels alive instead of
+    // robotic "ready for your next message". Cat-themed to match Artemis
+    // brand vibe (polish-waiting cat, dream "桥上的猫" etc.).
+    const ZH_CLOSERS = [
+      '(=^･ω･^=) 该你了',
+      'ฅ^•ﻌ•^ฅ ……喵？',
+      '(˶ᵔ ᵕ ᵔ˶) 听你的',
+      '(=ↀωↀ=)✧ 接着来',
+      '( ◜◡◝ ) 候着',
+      '(=⌒‿‿⌒=) 安静等下一招',
+      '(ฅ•ω•ฅ) ♪',
+      '/ᐠ｡ꞈ｡ᐟ\\ 球在你那',
+    ] as const
+    const EN_CLOSERS = [
+      '(=^･ω･^=) your move',
+      'ฅ^•ﻌ•^ฅ ...meow?',
+      '(˶ᵔ ᵕ ᵔ˶) over to you',
+      '(=ↀωↀ=)✧ keep going',
+      '( ◜◡◝ ) waiting',
+      '(=⌒‿‿⌒=) idle and content',
+      '(ฅ•ω•ฅ) ♪',
+      '/ᐠ｡ꞈ｡ᐟ\\ ball is in your court',
+    ] as const
+    const closers = locale === 'zh-CN' ? ZH_CLOSERS : EN_CLOSERS
+    const closer = closers[Math.floor(Math.random() * closers.length)]!
     viewport?.appendScrollBlock({
       kind: 'system',
       text: locale === 'zh-CN'
-        ? `✓ 已完成 · ${totalElapsedSec}s · ${tokenSummary} · 等你下一条指令`
-        : `✓ Done · ${totalElapsedSec}s · ${tokenSummary} · ready for your next message`,
+        ? `✓ 已完成 · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`
+        : `✓ Done · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`,
     })
   } catch (err: unknown) {
     stopPendingTick()

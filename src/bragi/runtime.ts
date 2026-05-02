@@ -505,10 +505,29 @@ export async function runRemoteCommand(
         // back-and-forth chats clean.
         const totalSec = Math.round((Date.now() - turnStartedAtForFinish) / 1000)
         if (totalSec >= 30) {
+          // Cat-themed closers — feels less robotic than "ready for next" and
+          // matches the Artemis brand cat motif (polish-waiting cat, dream
+          // imagery, etc.). Random pick keeps it fresh across long sessions.
+          const ZH_CLOSERS = [
+            '(=^･ω･^=) 该你了',
+            'ฅ^•ﻌ•^ฅ ……喵？',
+            '(˶ᵔ ᵕ ᵔ˶) 听你的',
+            '(=ↀωↀ=)✧ 接着来',
+            '/ᐠ｡ꞈ｡ᐟ\\ 球在你那',
+          ] as const
+          const EN_CLOSERS = [
+            '(=^･ω･^=) your move',
+            'ฅ^•ﻌ•^ฅ ...meow?',
+            '(˶ᵔ ᵕ ᵔ˶) over to you',
+            '(=ↀωↀ=)✧ keep going',
+            '/ᐠ｡ꞈ｡ᐟ\\ ball is in your court',
+          ] as const
+          const closers = locale === 'zh-CN' ? ZH_CLOSERS : EN_CLOSERS
+          const closer = closers[Math.floor(Math.random() * closers.length)]!
           try {
             await opts.sendChatUpdate?.(t(
-              `✓ 已完成（用时 ${totalSec}s）`,
-              `✓ Done (took ${totalSec}s)`,
+              `✓ 已完成（用时 ${totalSec}s） · ${closer}`,
+              `✓ Done (took ${totalSec}s) · ${closer}`,
             ))
           } catch {
             /* swallow — completion notice failure should not mask the real reply path */
