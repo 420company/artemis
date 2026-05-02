@@ -92,6 +92,20 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
+  // Gateway commands must run before any interactive first-run/trust/setup
+  // dialogs. The login auto-start daemon is launched by launchd/Task Scheduler
+  // without a TTY; if it falls through into those prompts it can exit or sit in
+  // a half-started state, leaving Telegram/Discord/WeChat able to acknowledge
+  // receipt but unable to deliver the final model response after reboot.
+  if (options.command === 'gateway') {
+    await runGatewayCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
+    return
+  } else {
+    // For normal terminal chat, never forcefully kill the background gateway daemon
+    // just to take over its messaging connections. Let the daemon handle the bridge.
+    process.env.ARTEMIS_BRIDGE_LOCK_MODE = 'passive'
+  }
+
   if (!settings.uiLocaleConfigured) {
     locale = await runFirstRunWelcome({ settingsStore })
     suppressInitialNewbornOnce = true
@@ -217,12 +231,6 @@ export async function runCli(argv: string[]): Promise<void> {
   // ── bragi ───────────────────────────────────────────────────────────────────
   if (options.command === 'bragi') {
     await runBragiCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
-    return
-  }
-
-  // ── gateway background service ──────────────────────────────────────────────
-  if (options.command === 'gateway') {
-    await runGatewayCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
     return
   }
 
@@ -384,6 +392,20 @@ export async function runCli(argv: string[]): Promise<void> {
   // brain's long-term system-prompt suffix.
   void (async () => {
     try {
+      const { registerBridge } = await import('../services/bridgeNotifier.js')
+      registerBridge({
+        platform: 'cli',
+        push: async (payload) => {
+          if (process.stdout.isTTY) {
+            console.log(`\n\n🌙 \x1b[35m[Artemis Dream System]\x1b[0m`)
+            console.log(payload.text)
+            if (payload.imagePath) {
+              console.log(`🖼  \x1b[36m${payload.imagePath}\x1b[0m`)
+            }
+            console.log()
+          }
+        }
+      })
       const { startIdleWatcher } = await import('../services/idleWatcher.js')
       startIdleWatcher(options.cwd)
     } catch { /* dream system is non-essential — never block startup */ }

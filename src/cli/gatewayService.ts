@@ -39,6 +39,18 @@ function dataDir(): string {
   return path.join(os.homedir(), '.artemis')
 }
 
+function normalizeGatewayCwd(cwd: string): string {
+  const resolved = path.resolve(cwd)
+  // Some bridge setup paths are invoked from the global data directory. Binding
+  // login auto-start to ~/.artemis makes the daemon load the wrong bridge/model
+  // config after reboot, so prefer the package/workspace root when available.
+  if (resolved === dataDir()) {
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+    if (fs.existsSync(path.join(packageRoot, 'package.json'))) return packageRoot
+  }
+  return resolved
+}
+
 function plistPath(): string {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', LAUNCH_AGENT_FILE)
 }
@@ -49,6 +61,10 @@ function legacyPlistPath(): string {
 
 function windowsWrapperPath(): string {
   return path.join(dataDir(), 'gateway.cmd')
+}
+
+function windowsVbsWrapperPath(): string {
+  return path.join(dataDir(), 'gateway.vbs')
 }
 
 function guiDomain(): string {
@@ -175,9 +191,18 @@ function quoteCmdArg(value: string): string {
 }
 
 function buildWindowsWrapper(cwd: string): string {
-  const args = resolveCliProgramArguments(cwd).map(quoteCmdArg).join(' ')
+  const argsArray = resolveCliProgramArguments(cwd).map(quoteCmdArg)
+  let cmdStr = argsArray.join(' ')
+  if (argsArray[0]?.toLowerCase().endsWith('.cmd"')) {
+    cmdStr = 'call ' + cmdStr
+  }
   const log = path.join(dataDir(), 'gateway.windows.log')
-  return `@echo off\r\ncd /d ${quoteCmdArg(cwd)}\r\n${args} >> ${quoteCmdArg(log)} 2>&1\r\n`
+  const nodeDir = path.dirname(process.execPath)
+  return `@echo off\r\nset "PATH=${nodeDir};%PATH%"\r\ncd /d ${quoteCmdArg(cwd)}\r\n${cmdStr} >> ${quoteCmdArg(log)} 2>&1\r\n`
+}
+
+function buildWindowsVbsWrapper(): string {
+  return `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run chr(34) & "${windowsWrapperPath()}" & Chr(34), 0\r\nSet WshShell = Nothing\r\n`
 }
 
 async function installLaunchAgent(cwd: string): Promise<void> {
@@ -261,6 +286,7 @@ async function getLaunchAgentStatus(): Promise<string[]> {
 }
 
 export async function ensureGatewayAutoStart(cwd: string): Promise<void> {
+  cwd = normalizeGatewayCwd(cwd)
   if (process.platform === 'darwin') {
     await installLaunchAgent(cwd)
     return
@@ -292,8 +318,9 @@ async function getBridgeConfigStatus(cwd: string): Promise<string[]> {
 async function installWindowsTask(cwd: string): Promise<void> {
   await mkdir(dataDir(), { recursive: true })
   await writeFile(windowsWrapperPath(), buildWindowsWrapper(cwd), 'utf8')
+  await writeFile(windowsVbsWrapperPath(), buildWindowsVbsWrapper(), 'utf8')
   const create = await runWindowsCommand([
-    'schtasks', '/Create', '/TN', quoteCmdArg(WINDOWS_TASK_NAME), '/TR', quoteCmdArg(windowsWrapperPath()),
+    'schtasks', '/Create', '/TN', quoteCmdArg(WINDOWS_TASK_NAME), '/TR', quoteCmdArg(`wscript.exe "${windowsVbsWrapperPath()}"`),
     '/SC', 'ONLOGON', '/RL', 'LIMITED', '/F',
   ])
   if (create.code !== 0) {
@@ -306,6 +333,9 @@ async function uninstallWindowsTask(): Promise<void> {
   await runWindowsCommand(['schtasks', '/End', '/TN', quoteCmdArg(WINDOWS_TASK_NAME)])
   await runWindowsCommand(['schtasks', '/Delete', '/TN', quoteCmdArg(WINDOWS_TASK_NAME), '/F'])
   await unlink(windowsWrapperPath()).catch(err => {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  })
+  await unlink(windowsVbsWrapperPath()).catch(err => {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   })
 }
@@ -329,12 +359,13 @@ async function getWindowsTaskStatus(): Promise<string[]> {
     `Installed: ${installed ? 'yes' : 'no'}`,
     installed ? result.stdout.split(/\r?\n/).filter(line => /TaskName:|Status:|Last Run Time:|Next Run Time:/.test(line)).join('\n') : 'Loaded: no',
     `Task: ${WINDOWS_TASK_NAME}`,
-    `Wrapper: ${windowsWrapperPath()}`,
+    `Wrapper: ${windowsVbsWrapperPath()}`,
     `Log: ${path.join(dataDir(), 'gateway.windows.log')}`,
   ]
 }
 
 export async function runGatewayDaemon(options: { cwd: string; permissionMode?: PermissionMode }): Promise<void> {
+  options = { ...options, cwd: normalizeGatewayCwd(options.cwd) }
   await mkdir(dataDir(), { recursive: true })
   const sessionStore = new SessionStore(options.cwd)
   const logPath = path.join(dataDir(), 'gateway.log')
@@ -394,10 +425,20 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
     log('gateway', `heartbeat; active=${active}; cwd=${options.cwd}`)
   }, 5 * 60_000)
 
+  let stopIdle: (() => void) | undefined
+  try {
+    const { startIdleWatcher } = await import('../services/idleWatcher.js')
+    stopIdle = startIdleWatcher(options.cwd)
+    log('gateway', 'idle watcher started')
+  } catch (err) {
+    log('gateway', `failed to start idle watcher: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
   await new Promise<void>(resolve => {
     const stop = () => {
       log('gateway', 'stopping')
       clearInterval(keepAlive)
+      stopIdle?.()
       for (const ac of aborts) ac.abort()
       setTimeout(resolve, 250)
     }
@@ -407,7 +448,8 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
 }
 
 export async function runGatewayCommand(options: GatewayCommandOptions): Promise<void> {
-  const { cwd, locale, args } = options
+  const { locale, args } = options
+  const cwd = normalizeGatewayCwd(options.cwd)
   const sub = args[0]?.toLowerCase() ?? 'help'
   const platformName = process.platform === 'win32' ? 'Windows Task Scheduler' : 'macOS LaunchAgent'
 

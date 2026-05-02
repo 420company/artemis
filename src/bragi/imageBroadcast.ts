@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { BragiStore } from './store.js'
 import { broadcastToBridges, listRegisteredBridges } from '../services/bridgeNotifier.js'
+import type { BridgePlatform } from '../services/bridgeNotifier.js'
 import type { BragiPlatformId } from './types.js'
 
 export type BridgeImagePlatform = BragiPlatformId | 'all'
@@ -10,9 +11,9 @@ export type BridgeImageBroadcastResult = {
   imagePath: string
   caption: string
   live: {
-    registered: BragiPlatformId[]
+    registered: BridgePlatform[]
     sent: number
-    failed: Array<{ platform: BragiPlatformId; error: string }>
+    failed: Array<{ platform: BridgePlatform; error: string }>
   }
   configured: Array<{
     platform: BragiPlatformId
@@ -61,7 +62,7 @@ export async function sendBragiImageBroadcast(options: {
 
   const caption = options.caption?.trim() || '🖼 Artemis image'
   const platforms = normalizePlatforms(options.platform)
-  const registered = listRegisteredBridges().filter(p => platforms.includes(p))
+  const registered = listRegisteredBridges().filter(p => platforms.includes(p as BragiPlatformId))
   const live = registered.length > 0
     ? await broadcastToBridges({ text: caption, imagePath, source: options.source ?? 'bridge_send_image' })
     : { sent: 0, failed: [] }

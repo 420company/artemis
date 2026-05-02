@@ -10,7 +10,7 @@
  * bridge can't block the others.
  */
 
-export type BridgePlatform = 'telegram' | 'discord' | 'wechat'
+export type BridgePlatform = 'telegram' | 'discord' | 'wechat' | 'cli'
 
 export interface BridgePushTarget {
   platform: BridgePlatform
