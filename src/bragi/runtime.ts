@@ -915,7 +915,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             text: string,
             level: 'info' | 'warn' | 'error' = 'info',
           ): Promise<void> => {
-            const cleanText = truncate(text.replace(/\s+$/g, ''), 900)
+            const cleanText = text.replace(/\s+$/g, '')
             if (!cleanText.trim()) return
             options.onNotify?.({
               kind: 'bridge-status',
@@ -935,7 +935,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             platform: bridgePlatform,
             direction: 'inbound',
             targetLabel: compactTargetLabel,
-            text: truncate(message.text, 1200),
+            text: message.text,
           })
 
           for (const reply of auth.preReplies ?? []) {
@@ -995,7 +995,7 @@ export async function runBragiMessagePump<TCheckpoint>(
               platform: bridgePlatform,
               direction: 'outbound',
               targetLabel: compactTargetLabel,
-              text: truncate(mobileReply.replace(/\s+/g, ' '), 1200),
+              text: mobileReply,
             })
           }
 

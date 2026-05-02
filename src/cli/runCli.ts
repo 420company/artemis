@@ -11,6 +11,7 @@ import * as os from 'node:os'
 import * as fs from 'node:fs'
 import { appendFile } from 'node:fs/promises'
 import { notifyTerminal } from './bridgeNotify.js'
+import type { BridgeTerminalEvent } from './bridgeNotify.js'
 import { parseArgs, getHelpText } from './parseArgs.js'
 import { runGatewayCommand } from './gatewayService.js'
 import { getVersionText } from './branding.js'
@@ -365,6 +366,18 @@ export async function runCli(argv: string[]): Promise<void> {
       const normPlatform = (s: string): 'telegram' | 'discord' | 'wechat' =>
         s.toLowerCase() === 'discord' ? 'discord' : s.toLowerCase() === 'wechat' ? 'wechat' : 'telegram'
 
+      const isBridgeTerminalEvent = (value: unknown): value is BridgeTerminalEvent => {
+        if (!value || typeof value !== 'object') return false
+        const event = value as Partial<BridgeTerminalEvent>
+        if (event.kind === 'bridge-status') {
+          return Boolean(event.platform && event.targetLabel && typeof event.text === 'string')
+        }
+        if (event.kind === 'bridge-message') {
+          return Boolean(event.platform && event.direction && event.targetLabel && typeof event.text === 'string')
+        }
+        return false
+      }
+
       const poll = async () => {
         if (signal.aborted) return
         try {
@@ -392,6 +405,25 @@ export async function runCli(argv: string[]): Promise<void> {
           const rawLines = buf.toString('utf8').split('\n')
           let blockLines: string[] = []
           let inBlock = false
+          const legacyLines: string[] = []
+
+          for (const rawLine of rawLines) {
+            const eventMatch = rawLine.match(/^\[[^\]]+\]\s+\[bridge-event\]\s+(\{.*\})\s*$/)
+            if (!eventMatch) {
+              legacyLines.push(rawLine)
+              continue
+            }
+            try {
+              const parsed = JSON.parse(eventMatch[1] ?? '')
+              if (isBridgeTerminalEvent(parsed)) {
+                notifyTerminal(parsed)
+              }
+            } catch {
+              // Keep malformed lines visible to the old log parser instead of
+              // silently dropping potentially useful diagnostics.
+              legacyLines.push(rawLine)
+            }
+          }
 
           const flushBlock = () => {
             if (blockLines.length === 0) return
@@ -437,7 +469,7 @@ export async function runCli(argv: string[]): Promise<void> {
             blockLines = []
           }
 
-          for (const rawLine of rawLines) {
+          for (const rawLine of legacyLines) {
             const line = rawLine.replace(/\r$/, '')
             // Lines starting with [timestamp] [name] ────── open a new block
             if (/\[\d{4}-.*\]\s*\[\w+\]\s*─{10,}/.test(line)) {

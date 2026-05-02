@@ -276,9 +276,12 @@ export class WeChatGatewayClient {
       )
     }
 
-    if (caption?.trim()) {
-      await this.sendText(peerUserId, caption, contextToken, signal)
-    }
+    // iLink context tokens are tied to a reply turn. Sending a text caption
+    // first can consume the token/window, leaving the following image request
+    // accepted by the gateway but invisible on the phone. Use the token for
+    // the actual attachment; callers that need text should send it separately
+    // after a fresh inbound message provides a new context token.
+    void caption
 
     const image = await readFile(imagePath)
     const imageBase64 = image.toString('base64')

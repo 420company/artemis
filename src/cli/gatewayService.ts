@@ -14,6 +14,7 @@ import { runWeChatBridge, shouldAutoStartWeChatBridge } from '../wechat/bridge.j
 import { BragiStore } from '../bragi/store.js'
 import { TelegramStore } from '../telegram/store.js'
 import { WeChatStore } from '../wechat/store.js'
+import type { BridgeTerminalEvent } from './bridgeNotify.js'
 
 const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
@@ -392,6 +393,9 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
     const line = `[${new Date().toISOString()}] [${name}] ${message}\n`
     appendFile(logPath, line).catch(() => {})
   }
+  const notify = (payload: BridgeTerminalEvent) => {
+    log('bridge-event', JSON.stringify(payload))
+  }
 
   const aborts: AbortController[] = []
   const started = new Set<string>()
@@ -423,13 +427,13 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
   }
 
   if (await shouldAutoStartTelegram(options.cwd)) {
-    startBridge('telegram', signal => runTelegramBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('telegram', msg) }))
+    startBridge('telegram', signal => runTelegramBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('telegram', msg), onNotify: notify }))
   }
   if (await shouldAutoStartDiscordBridge(options.cwd)) {
-    startBridge('discord', signal => runDiscordBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('discord', msg) }))
+    startBridge('discord', signal => runDiscordBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('discord', msg), onNotify: notify }))
   }
   if (await shouldAutoStartWeChatBridge(options.cwd)) {
-    startBridge('wechat', signal => runWeChatBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('wechat', msg) }))
+    startBridge('wechat', signal => runWeChatBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('wechat', msg), onNotify: notify }))
   }
 
   if (active === 0) {
