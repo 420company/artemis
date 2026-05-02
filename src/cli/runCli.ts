@@ -420,17 +420,18 @@ export async function runCli(argv: string[]): Promise<void> {
             if (!text) { blockLines = []; return }
 
             if (direction) {
-              // Extract sender → message if available
+              // Extract sender and message separately.
+              // The header already displays "Platform · SenderName",
+              // so the body should only contain the message text.
               const contentMatch = text.match(CONTENT_RE)
-              const displayText = contentMatch
-                ? `${contentMatch[2]} → ${contentMatch[3]}`
-                : text
+              const senderName = contentMatch?.[2] ?? (direction === 'outbound' ? 'Artemis' : 'User')
+              const messageBody = contentMatch?.[3] ?? text
               notifyTerminal({
                 kind: 'bridge-message',
                 platform,
                 direction,
-                targetLabel: contentMatch?.[2] ?? 'system',
-                text: displayText,
+                targetLabel: senderName,
+                text: messageBody,
               })
             } else if (isTestSuccess) {
               notifyTerminal({
@@ -473,12 +474,11 @@ export async function runCli(argv: string[]): Promise<void> {
     } catch { /* non-essential */ }
   })()
 
-  // ── dream system: idle-triggered ambient activity ──────────────────────────
-  // Starts a background timer that fires after the user has been inactive for
-  // ≥ idleThresholdSec (default 1 hour). It composes a dream from recent
-  // session/memory/git activity, persists it to ~/.artemis/dreams/, optionally
-  // pushes to active bridges, and feeds distilled style lines back into the
-  // brain's long-term system-prompt suffix.
+  // ── dream system: active greeting + idle-triggered ambient activity ─────────
+  // On startup, reads the latest dream and greets the user with it in the chat.
+  // Also starts the idle watcher that composes new dreams when the user is
+  // inactive. Dream notifications push to both the CLI terminal and active
+  // messaging bridges.
   void (async () => {
     try {
       const { registerBridge } = await import('../services/bridgeNotifier.js')
@@ -486,17 +486,59 @@ export async function runCli(argv: string[]): Promise<void> {
         platform: 'cli',
         push: async (payload) => {
           if (process.stdout.isTTY) {
-            console.log(`\n\n🌙 \x1b[35m[Artemis Dream System]\x1b[0m`)
-            console.log(payload.text)
-            if (payload.imagePath) {
-              console.log(`🖼  \x1b[36m${payload.imagePath}\x1b[0m`)
-            }
-            console.log()
+            notifyTerminal({
+              kind: 'bridge-message',
+              platform: 'telegram',
+              direction: 'outbound',
+              targetLabel: 'Artemis Dream',
+              text: payload.text + (payload.imagePath ? `\n🖼  ${payload.imagePath}` : ''),
+            })
           }
         }
       })
       const { startIdleWatcher } = await import('../services/idleWatcher.js')
       startIdleWatcher(options.cwd)
+
+      // After a short delay (let the UI mount first), greet user with latest dream
+      setTimeout(async () => {
+        try {
+          const dreamIndexPath = path.join(os.homedir(), '.artemis', 'dreams', 'index.json')
+          const raw = await fs.promises.readFile(dreamIndexPath, 'utf8').catch(() => '[]')
+          const dreams = JSON.parse(raw) as Array<{
+            id: string
+            preview?: string
+            imagePath?: string
+            createdAt?: string
+          }>
+          if (dreams.length === 0) {
+            notifyTerminal({
+              kind: 'bridge-status',
+              platform: 'telegram',
+              targetLabel: 'system',
+              text: '🌙 梦境系统已启动。Artemis 还没有做过梦，空闲时会自动编织第一个梦境。',
+              level: 'info',
+            })
+            return
+          }
+
+          const latest = dreams[0]!
+          const dreamDate = latest.createdAt
+            ? new Date(latest.createdAt).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
+            : '最近'
+          const preview = latest.preview ?? '一段模糊的梦...'
+          const imageLine = latest.imagePath
+            ? `\n🖼  点击查看梦境画面: \x1b[36m\x1b[4m${latest.imagePath}\x1b[0m`
+            : ''
+
+          notifyTerminal({
+            kind: 'bridge-message',
+            platform: 'telegram',
+            direction: 'outbound',
+            targetLabel: 'Artemis Dream',
+            text: `🌙 梦境系统已醒来\n\n${dreamDate}的梦——\n${preview}${imageLine}`,
+          })
+        } catch { /* dream greeting is non-essential */ }
+      }, 3000)
     } catch { /* dream system is non-essential — never block startup */ }
   })()
 

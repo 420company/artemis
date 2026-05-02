@@ -722,17 +722,19 @@ function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): stri
           (part): part is string => Boolean(part),
         ),
       ))
-      const body = block.role === 'assistant' ? formatRichOutput(block.text) : stripAnsi(block.text)
-      for (const raw of body.split('\n')) {
-        if (!raw) {
-          lines.push('')
-          continue
+      // User messages use the standard user text color;
+      // AI (outbound) messages use cyan for clear visual separation.
+      if (block.role === 'assistant') {
+        const body = formatRichOutput(block.text)
+        for (const raw of body.split('\n')) {
+          if (!raw) { lines.push(''); continue }
+          lines.push(`  ${tint(raw, TL.assistantDot)}`)
         }
-        if (block.role === 'assistant') {
-          lines.push(`  ${raw}`)
-          continue
+      } else {
+        for (const raw of stripAnsi(block.text).split('\n')) {
+          const wrapped = wrapPlainToWidth(raw, bodyWidth)
+          for (const line of wrapped) lines.push(line ? `  ${tint(line, TL.userText)}` : '')
         }
-        for (const line of wrapPlainToWidth(raw, bodyWidth)) lines.push(`  ${tint(line, TL.userText)}`)
       }
       continue
     }
