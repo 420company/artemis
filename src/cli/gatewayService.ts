@@ -12,6 +12,8 @@ import { runTelegramBridge, shouldAutoStartTelegram } from '../telegram/bridge.j
 import { runDiscordBridge, shouldAutoStartDiscordBridge } from '../discord/bridge.js'
 import { runWeChatBridge, shouldAutoStartWeChatBridge } from '../wechat/bridge.js'
 import { BragiStore } from '../bragi/store.js'
+import { TelegramStore } from '../telegram/store.js'
+import { WeChatStore } from '../wechat/store.js'
 
 const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
@@ -291,13 +293,21 @@ export async function ensureGatewayAutoStart(cwd: string): Promise<void> {
 
 async function getBridgeConfigStatus(cwd: string): Promise<string[]> {
   const bragiData = await new BragiStore(cwd).load().catch(() => undefined)
+  const telegramData = await new TelegramStore(cwd).load().catch(() => undefined)
+  const wechatData = await new WeChatStore(cwd).load().catch(() => undefined)
   const lines = ['Bridges:']
   let runnable = 0
   for (const platform of ['telegram', 'discord', 'wechat'] as const) {
     const config = bragiData?.platforms[platform]
-    const enabled = config?.enabled !== false && Boolean(config)
-    const autoStart = config?.autoStartOnLaunch === true
-    const hasCredentials = Boolean(config?.credentials && Object.keys(config.credentials).length > 0)
+    const legacyTelegram = platform === 'telegram' ? telegramData : undefined
+    const legacyWeChat = platform === 'wechat' ? wechatData : undefined
+    const enabled = config?.enabled !== false && Boolean(config || legacyTelegram || legacyWeChat)
+    const autoStart = config?.autoStartOnLaunch === true || legacyTelegram?.autoStartOnLaunch === true || legacyWeChat?.autoStartOnLaunch === true
+    const hasCredentials = Boolean(
+      (config?.credentials && Object.keys(config.credentials).length > 0) ||
+      legacyTelegram?.botToken ||
+      (legacyWeChat?.gatewayUrl && legacyWeChat.gatewayToken),
+    )
     if (enabled && autoStart && hasCredentials) runnable += 1
     lines.push(`  ${platform}: configured=${hasCredentials ? 'yes' : 'no'}, enabled=${enabled ? 'yes' : 'no'}, autoStart=${autoStart ? 'yes' : 'no'}`)
   }
@@ -338,10 +348,11 @@ async function uninstallWindowsTask(): Promise<void> {
 }
 
 async function startWindowsTask(cwd: string): Promise<void> {
-  if (!fs.existsSync(windowsWrapperPath())) {
-    await installWindowsTask(cwd)
-    return
-  }
+  // Always refresh the wrapper/task before starting. Windows Task Scheduler can
+  // keep an old ArtemisGateway task around with a stale cwd or npm shim path;
+  // merely running it would make configured bridges look enabled while the
+  // daemon reads the wrong workspace config and never replies.
+  await installWindowsTask(cwd)
   await runWindowsCommand(['schtasks', '/Run', '/TN', WINDOWS_TASK_NAME])
 }
 

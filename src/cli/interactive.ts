@@ -1831,6 +1831,18 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     syncViewportFromState()
   }
 
+  const commitLandingForBackgroundNotification = (): void => {
+    if (landingCommitted) return
+    if (scrollBlocks.length > 0 || (transientBlocks && transientBlocks.length > 0)) return
+    scrollBlocks.push({
+      kind: 'system',
+      text: buildLandingLines().join('\n'),
+      preserveAnsi: true,
+      rawLines: true,
+    })
+    landingCommitted = true
+  }
+
   prompt = createBlessedPrompt({
     history: savedHistory,
     headerFn: () => renderHud(hud),
@@ -1852,6 +1864,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
   // Register prompt so background bridges can print into the scroll region
   setBridgePrinter((payload: TerminalNotification) => {
+    // Background notifications (dream startup, IM bridge events, alerts) can
+    // arrive before the user has typed anything. Preserve the landing/welcome
+    // screen as the first scrollback block before appending the notification;
+    // otherwise the first ambient message replaces the whole startup view.
+    commitLandingForBackgroundNotification()
     if (typeof payload === 'string') {
       appendScrollBlock({ kind: 'tool', text: payload })
       return
