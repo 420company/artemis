@@ -772,7 +772,14 @@ async function tryAcquireBridgeLock(
   }
 
   const takeoverDisabled = process.env.ARTEMIS_BRIDGE_LOCK_MODE === 'passive'
-  if (!takeoverDisabled && existing.pid !== process.pid) {
+
+  // In passive mode the CLI defers to the background gateway daemon.
+  // Silently yield — no scary warnings needed; the daemon has it covered.
+  if (takeoverDisabled) {
+    return undefined
+  }
+
+  if (existing.pid !== process.pid) {
     const repairMessage = pickLocale(DEFAULT_UI_LOCALE, {
       zh: `[${platform}] 检测到旧 bridge 仍在运行（PID ${existing.pid}），正在自动接管通讯接口。`,
       en: `[${platform}] Existing bridge is still running in PID ${existing.pid}; taking over the messaging interface.`,
@@ -794,8 +801,8 @@ async function tryAcquireBridgeLock(
   }
 
   const blockedMessage = pickLocale(DEFAULT_UI_LOCALE, {
-    zh: `[${platform}] 通讯 bridge 已由 PID ${existing.pid} 占用，本实例不会处理消息。可关闭旧 Artemis，或重启后由新实例自动接管；如需保留旧实例，请设置 ARTEMIS_BRIDGE_LOCK_MODE=passive。`,
-    en: `[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages. Close the old Artemis instance, or restart and let this instance take over; set ARTEMIS_BRIDGE_LOCK_MODE=passive to keep the old instance.`,
+    zh: `[${platform}] 通讯 bridge 已由 PID ${existing.pid} 占用，本实例不会处理消息。可关闭旧 Artemis，或重启后由新实例自动接管。`,
+    en: `[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages. Close the old Artemis instance, or restart and let this instance take over.`,
   })
   onInfo?.(blockedMessage)
   onBlocked?.(blockedMessage)
