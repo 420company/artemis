@@ -106,25 +106,48 @@ function buildTelegramSessionTitle(chatLabel: string, cwd: string): string {
   return `Telegram ${chatLabel} in ${base}`
 }
 
-// ─── token setup ──────────────────────────────────────────────────────────────
-
-async function askTelegramToken(
+async function loadTelegramToken(
   telegramStore: TelegramStore,
-  locale: UiLocale,
+  bragiStore: BragiStore,
   onInfo?: (message: string) => void,
-): Promise<{ token: string; configuredNow: boolean }> {
+): Promise<{ token: string; source: 'env' | 'telegram-store' | 'bragi-store' } | undefined> {
   const envToken = process.env.ARTEMIS_TELEGRAM_BOT_TOKEN
   if (envToken) {
     await telegramStore.setBotToken(envToken)
     onInfo?.(`[telegram] loaded bot token from environment (${maskToken(envToken)})`)
-    return { token: envToken, configuredNow: false }
+    return { token: envToken, source: 'env' }
   }
 
-  const existing = await telegramStore.load()
-  if (existing.botToken) {
-    onInfo?.(`[telegram] loaded bot token from store (${maskToken(existing.botToken)})`)
-    return { token: existing.botToken, configuredNow: false }
+  const telegramData = await telegramStore.load()
+  if (telegramData.botToken) {
+    onInfo?.(`[telegram] loaded bot token from telegram store (${maskToken(telegramData.botToken)})`)
+    return { token: telegramData.botToken, source: 'telegram-store' }
   }
+
+  const bragiData = await bragiStore.load()
+  const bragiToken = bragiData.platforms.telegram?.credentials.botToken
+  if (bragiToken) {
+    // Keep the legacy runtime store hydrated because poll offsets and
+    // authorized chats still live there. This bridges new Bragi config to the
+    // older Telegram runtime path used by the background gateway.
+    await telegramStore.setBotToken(bragiToken)
+    onInfo?.(`[telegram] loaded bot token from bragi store (${maskToken(bragiToken)})`)
+    return { token: bragiToken, source: 'bragi-store' }
+  }
+
+  return undefined
+}
+
+// ─── token setup ──────────────────────────────────────────────────────────────
+
+async function askTelegramToken(
+  telegramStore: TelegramStore,
+  bragiStore: BragiStore,
+  locale: UiLocale,
+  onInfo?: (message: string) => void,
+): Promise<{ token: string; configuredNow: boolean }> {
+  const existing = await loadTelegramToken(telegramStore, bragiStore, onInfo)
+  if (existing) return { token: existing.token, configuredNow: false }
 
   if (!process.stdin.isTTY) {
     throw new Error(
@@ -249,8 +272,9 @@ export async function setupTelegramBridge(options: {
   onNotify?: (payload: BridgeTerminalEvent) => void
 }): Promise<string> {
   const telegramStore = new TelegramStore(options.cwd, options.secretStore)
+  const bragiStore = new BragiStore(options.cwd, options.secretStore)
   const locale = (await new CliSettingsStore(options.cwd).load()).uiLocale
-  const { token } = await askTelegramToken(telegramStore, locale, options.onInfo)
+  const { token } = await askTelegramToken(telegramStore, bragiStore, locale, options.onInfo)
   const autoStart = true
   await telegramStore.setAutoStartOnLaunch(true)
   options.onInfo?.('[telegram] background auto-start enabled')
@@ -259,7 +283,6 @@ export async function setupTelegramBridge(options: {
   const label = '@' + (me.username ?? me.first_name)
 
   // Register platform in BragiStore so the main interface shows Telegram as an active bridge
-  const bragiStore = new BragiStore(options.cwd, options.secretStore)
   const existingData = await bragiStore.load()
   const existing = existingData.platforms.telegram
   await bragiStore.upsertPlatform('telegram', {
@@ -285,9 +308,16 @@ export async function setupTelegramBridge(options: {
 }
 
 export async function shouldAutoStartTelegram(cwd: string): Promise<boolean> {
-  const store = new TelegramStore(cwd)
-  const data = await store.load()
-  return data.autoStartOnLaunch === true && typeof data.botToken === 'string'
+  const telegramData = await new TelegramStore(cwd).load()
+  if (telegramData.autoStartOnLaunch === true && typeof telegramData.botToken === 'string') return true
+
+  const bragiData = await new BragiStore(cwd).load()
+  const config = bragiData.platforms.telegram
+  return (
+    config?.enabled !== false &&
+    config?.autoStartOnLaunch === true &&
+    typeof config.credentials.botToken === 'string'
+  )
 }
 
 export async function runTelegramBridge(options: RunTelegramBridgeOptions): Promise<void> {
@@ -295,7 +325,7 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
   const telegramStore = new TelegramStore(options.cwd, options.secretStore)
   const locale = (await new CliSettingsStore(options.cwd).load()).uiLocale
 
-  const { token } = await askTelegramToken(telegramStore, locale, options.onInfo)
+  const { token } = await askTelegramToken(telegramStore, bragiStore, locale, options.onInfo)
   await maybePromptAutoStart(telegramStore, false, locale, options.onInfo)
 
   const client = new TelegramBotClient(token)

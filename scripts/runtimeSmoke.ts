@@ -5598,6 +5598,114 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+{
+  const originalCwd = process.cwd()
+  const tmpDir = path.join(os.tmpdir(), `artemis-native-tool-summary-command-quote-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+
+  const requests: Array<Record<string, unknown>> = []
+  let requestCount = 0
+
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+      requests.push(body)
+      requestCount += 1
+
+      if (req.url !== '/chat/completions') {
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not found' }))
+        return
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' })
+      if (requestCount === 1) {
+        res.end(JSON.stringify({
+          model: 'mock-openai-compatible',
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'call_list_files_before_summary_quote',
+                type: 'function',
+                function: {
+                  name: 'list_files',
+                  arguments: '{}',
+                },
+              }],
+            },
+          }],
+        }))
+        return
+      }
+
+      res.end(JSON.stringify({
+        model: 'mock-openai-compatible',
+        choices: [{
+          message: {
+            content: '已完成修复并验证通过：npm run typecheck、npm run build。当前工作区只有相关文件被修改。',
+          },
+        }],
+      }))
+    })
+  })
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('Mock command-quote summary server failed to bind to a TCP port.')
+    }
+
+    const providersPath = path.join(tmpDir, '.artemis', 'providers.json')
+    fs.writeFileSync(providersPath, JSON.stringify({
+      defaultMainProfileId: 'mock-openai',
+      profiles: [{
+        id: 'mock-openai',
+        label: 'Mock OpenAI-compatible',
+        protocol: 'openai',
+        apiKey: 'test-key',
+        model: 'mock-openai-compatible',
+        baseUrl: `http://127.0.0.1:${address.port}`,
+      }],
+    }, null, 2), 'utf8')
+
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+
+    const streamed: string[] = []
+    const result = await think(
+      '修复问题并汇报验证结果。',
+      (delta) => streamed.push(delta),
+      {
+        cwd: tmpDir,
+        permissionMode: 'accept-all',
+      },
+    )
+
+    assert(
+      'native tool loop: final summary may mention already-run npm validation commands without runtime_guard retry',
+      requests.length === 2 &&
+        result.reply.includes('npm run typecheck') &&
+        streamed.join('') === result.reply,
+      JSON.stringify({ requests: requests.length, reply: result.reply, streamed: streamed.join('') }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
 // ── True SSE tool-call preamble buffering ────────────────────────────────────
 
 {

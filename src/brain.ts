@@ -1496,9 +1496,13 @@ function isPseudoToolTranscript(text: string): boolean {
 
 function isToolDeflection(text: string): boolean {
     const normalized = text.replace(/\s+/g, ' ').toLowerCase();
+    const imperativeEnglish = /(?:please|try|execute|paste|copy|ask (?:you|the user) to|have (?:you|the user))\b.{0,80}\b(?:cat|ls|grep|find|npm|node|python|bash|sh|curl)\b|(?:^|[.!?;:\n]\s*)run\b.{0,80}\b(?:cat|ls|grep|find|npm|node|python|bash|sh|curl)\b/i;
+    const imperativeChinese = /(?:请|麻烦|需要你|让你|让用户|你来|用户来|自己|手动|把结果|粘贴).{0,80}(?:cat|ls|grep|find|npm|node|python|bash|sh|命令|终端|运行|执行)/i;
+    const commandThenPasteChinese = /(?:运行|执行).{0,80}(?:cat|ls|grep|find|npm|node|python|bash|sh).{0,80}(?:把结果|粘贴|发给我|告诉我)/i;
     return (
-        /(?:please|try|run|execute|paste|copy).{0,80}\b(?:cat|ls|grep|find|npm|node|python|bash|sh|curl)\b/i.test(normalized) ||
-        /(?:请|先|运行|执行|把结果|粘贴).{0,80}(?:cat|ls|grep|find|npm|node|python|bash|sh|命令|终端)/i.test(text)
+        imperativeEnglish.test(normalized) ||
+        imperativeChinese.test(text) ||
+        commandThenPasteChinese.test(text)
     );
 }
 

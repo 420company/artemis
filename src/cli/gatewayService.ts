@@ -181,7 +181,7 @@ ${argXml}
 }
 
 function quoteCmdArg(value: string): string {
-  return `"${value.replace(/"/g, '\\"')}"`
+  return `"${value.replace(/"/g, '""')}"`
 }
 
 function buildWindowsWrapper(cwd: string): string {
@@ -192,11 +192,22 @@ function buildWindowsWrapper(cwd: string): string {
   }
   const log = path.join(dataDir(), 'gateway.windows.log')
   const nodeDir = path.dirname(process.execPath)
-  return `@echo off\r\nset "PATH=${nodeDir};%PATH%"\r\ncd /d ${quoteCmdArg(cwd)}\r\n${cmdStr} >> ${quoteCmdArg(log)} 2>&1\r\n`
+  return [
+    '@echo off',
+    'setlocal',
+    `set "PATH=${nodeDir};%PATH%"`,
+    `cd /d ${quoteCmdArg(cwd)}`,
+    `echo [%DATE% %TIME%] starting Artemis gateway >> ${quoteCmdArg(log)}`,
+    `${cmdStr} >> ${quoteCmdArg(log)} 2>&1`,
+    `echo [%DATE% %TIME%] Artemis gateway exited with code %ERRORLEVEL% >> ${quoteCmdArg(log)}`,
+    'endlocal',
+    '',
+  ].join('\r\n')
 }
 
 function buildWindowsVbsWrapper(): string {
-  return `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run chr(34) & "${windowsWrapperPath()}" & Chr(34), 0\r\nSet WshShell = Nothing\r\n`
+  const wrapper = windowsWrapperPath().replace(/"/g, '""')
+  return `Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run Chr(34) & "${wrapper}" & Chr(34), 0\r\nSet WshShell = Nothing\r\n`
 }
 
 async function installLaunchAgent(cwd: string): Promise<void> {
