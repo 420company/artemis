@@ -6968,7 +6968,7 @@ components:
     CapiAuthToken:
       type: string
       description: A JSON web token to be included in CAPI event calls.
-      example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl9pZCI6IjMxNTRjMzEzLTliNmYtNDYzNS1hNjE2LTAzNTJhODI0ODBkOCJ9.QBADF2P0S-WCEB7wluhvMxRRHcIazAyiitzeFPqZ_xY
+      example: <JWT_TOKEN_PLACEHOLDER>
     CapiAuthTokenResponse:
       type: object
       properties:
