@@ -677,6 +677,7 @@ async function tryAcquireBridgeLock(
   cwd: string,
   platform: BridgePlatform,
   onInfo?: (message: string) => void,
+  onBlocked?: (message: string) => void,
 ): Promise<(() => Promise<void>) | undefined> {
   const p = bridgeLockPath(cwd, platform)
   await ensureDir(path.dirname(p))
@@ -718,7 +719,9 @@ async function tryAcquireBridgeLock(
     return writeLock()
   }
 
-  onInfo?.(`[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages.`)
+  const blockedMessage = `[${platform}] bridge already running in PID ${existing.pid}; this instance will not process messages.`
+  onInfo?.(blockedMessage)
+  onBlocked?.(blockedMessage)
   return undefined
 }
 
@@ -726,7 +729,18 @@ export async function runBragiMessagePump<TCheckpoint>(
   options: RunBragiMessagePumpOptions<TCheckpoint>
 ): Promise<void> {
   const bridgePlatform = bridgePlatformFromLabel(options.channelLabel)
-  const releaseBridgeLock = await tryAcquireBridgeLock(options.cwd, bridgePlatform, options.onInfo)
+  const releaseBridgeLock = await tryAcquireBridgeLock(
+    options.cwd,
+    bridgePlatform,
+    options.onInfo,
+    (message) => options.onNotify?.({
+      kind: 'bridge-status',
+      platform: bridgePlatform,
+      targetLabel: 'system',
+      text: message,
+      level: 'warn',
+    }),
+  )
   if (!releaseBridgeLock) return
 
   const activeTargets = new Set<string>()
