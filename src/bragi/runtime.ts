@@ -269,6 +269,10 @@ export async function runRemoteCommand(
 
     case 'chat': {
       let reply = ''
+      // Hoisted out so the catch + finally below can clear the heartbeat timer
+      // even if think() throws partway through.
+      let heartbeatTimer: NodeJS.Timeout | null = null
+      let turnStartedAtForFinish = Date.now()
       try {
         const emitProgress = (message: string, level: 'info' | 'warn' | 'error' = 'info'): void => {
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
@@ -370,6 +374,36 @@ export async function runRemoteCommand(
           'Received. Working in the background; the final result will be sent back here.',
         )
         await opts.onProgress?.(startedText, 'info')
+        // Also send the "received" notice to the chat so users on phones
+        // know the message arrived and the AI is working — without this
+        // they stare at nothing for 30+ seconds wondering if it's stuck.
+        await opts.sendChatUpdate?.(startedText)
+
+        // Heartbeat: every ~45s while the model is working, send a short
+        // chat message describing the most recent activity so the user
+        // knows the AI is alive. Cancelled in the finally block.
+        const turnStartedAt = Date.now()
+        turnStartedAtForFinish = turnStartedAt
+        let lastActivitySnapshot = t(
+          '正在思考与调用工具，请耐心等待…',
+          'Working through tools and reasoning, please hang tight…',
+        )
+        const HEARTBEAT_INTERVAL_MS = 45_000
+        heartbeatTimer = setInterval(() => {
+          const elapsedSec = Math.round((Date.now() - turnStartedAt) / 1000)
+          const heartbeatMsg = t(
+            `⏳ 仍在处理（已 ${elapsedSec}s）：${lastActivitySnapshot}`,
+            `⏳ Still working (${elapsedSec}s elapsed): ${lastActivitySnapshot}`,
+          )
+          void Promise.resolve(opts.sendChatUpdate?.(heartbeatMsg)).catch(() => {})
+        }, HEARTBEAT_INTERVAL_MS)
+        // Update the activity snapshot from any tool/reasoning event so the
+        // heartbeat reflects what's actually happening right now.
+        const recordActivity = (snapshot: string): void => {
+          const trimmed = snapshot.trim()
+          if (trimmed) lastActivitySnapshot = truncate(trimmed, 200)
+        }
+
         let lastReasoningNoticeAt = 0
         let lastStreamNoticeAt = 0
 
@@ -401,19 +435,24 @@ export async function runRemoteCommand(
               return true
             },
             onToolCall: (name, args) => {
-              emitProgress(t(
+              const msg = t(
                 `🔧 正在运行工具：${String(name)}${summarizeToolArgs(args)}`,
                 `🔧 Running tool: ${String(name)}${summarizeToolArgs(args)}`,
-              ))
+              )
+              emitProgress(msg)
+              recordActivity(msg)
             },
             onToolResult: (name, ok, output) => {
-              emitProgress(t(
+              const msg = t(
                 `${ok ? '✅' : '⚠️'} 工具${ok ? '完成' : '失败'}：${String(name)}${summarizeToolOutput(output)}`,
                 `${ok ? '✅' : '⚠️'} Tool ${ok ? 'completed' : 'failed'}: ${String(name)}${summarizeToolOutput(output)}`,
-              ), ok ? 'info' : 'warn')
+              )
+              emitProgress(msg, ok ? 'info' : 'warn')
+              recordActivity(msg)
             },
             onToolLog: (message, level = 'info') => {
               emitProgress(message, level)
+              recordActivity(message)
             },
             onReasoning: () => {
               const now = Date.now()
@@ -452,6 +491,28 @@ export async function runRemoteCommand(
           replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
           storedSession: binding.storedSession,
           permissionMode: binding.permissionMode,
+        }
+      } finally {
+        // Always stop the heartbeat — otherwise it keeps firing after the
+        // turn ended and leaks "Still working…" messages into the chat.
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer)
+          heartbeatTimer = null
+        }
+        // Suppress "noise from heartbeat warning" if the turn was so fast it
+        // never fired — only mention completion when the turn took long
+        // enough that the user might have been wondering. Keeps quick
+        // back-and-forth chats clean.
+        const totalSec = Math.round((Date.now() - turnStartedAtForFinish) / 1000)
+        if (totalSec >= 30) {
+          try {
+            await opts.sendChatUpdate?.(t(
+              `✓ 已完成（用时 ${totalSec}s）`,
+              `✓ Done (took ${totalSec}s)`,
+            ))
+          } catch {
+            /* swallow — completion notice failure should not mask the real reply path */
+          }
         }
       }
     }

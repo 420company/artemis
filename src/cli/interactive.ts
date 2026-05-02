@@ -415,7 +415,7 @@ const THINKING_CAT_FRAMES = [
     cat: [
       '    /\\_/\\   ',
       '   ( -.- )  ',
-      '   < = <    ',
+      '    < = <   ',
       '   /     \\  ',
     ],
   },
@@ -3932,6 +3932,19 @@ async function handleTurn(
         }
       }
     }
+
+    // Explicit "this turn is finished" footer so the user can tell at a glance
+    // whether the AI is still cooking or has handed control back. Without it
+    // the assistant block just stops streaming and feels indistinguishable from
+    // a stall — even with the elapsed/token tag in the block header, users
+    // wonder "is it stuck or done?".
+    const totalElapsedSec = Math.max(1, Math.round((Date.now() - pendingStartMs) / 1000))
+    viewport?.appendScrollBlock({
+      kind: 'system',
+      text: locale === 'zh-CN'
+        ? `✓ 已完成 · ${totalElapsedSec}s · 等你下一条指令`
+        : `✓ Done · ${totalElapsedSec}s · ready for your next message`,
+    })
   } catch (err: unknown) {
     stopPendingTick()
     if (scheduledAssistantFlush) clearTimeout(scheduledAssistantFlush)
