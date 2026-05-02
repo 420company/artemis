@@ -40,15 +40,7 @@ function dataDir(): string {
 }
 
 function normalizeGatewayCwd(cwd: string): string {
-  const resolved = path.resolve(cwd)
-  // Some bridge setup paths are invoked from the global data directory. Binding
-  // login auto-start to ~/.artemis makes the daemon load the wrong bridge/model
-  // config after reboot, so prefer the package/workspace root when available.
-  if (resolved === dataDir()) {
-    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-    if (fs.existsSync(path.join(packageRoot, 'package.json'))) return packageRoot
-  }
-  return resolved
+  return path.resolve(cwd)
 }
 
 function plistPath(): string {
