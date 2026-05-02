@@ -177,6 +177,7 @@ import { stat, unlink } from 'node:fs/promises'
 import { think, resetSession, getMessages, restoreSession, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { chooseInteractiveOption, type SlashMenuItem } from './prompt.js'
+import { pickKaomoji } from './kaomoji.js'
 import { createBlessedPrompt, type BlessedPromptHandle } from './blessedPrompt.js'
 import { runBundle, shouldAutoBundle } from '../core/bundle.js'
 import {
@@ -4036,31 +4037,9 @@ async function handleTurn(
         ? `估算 ${ft(livePendingTokens)} tok`
         : `est. ${ft(livePendingTokens)} tok`
     }
-    // Random kaomoji-style closer so the footer feels alive instead of
-    // robotic "ready for your next message". Cat-themed to match Artemis
-    // brand vibe (polish-waiting cat, dream "桥上的猫" etc.).
-    const ZH_CLOSERS = [
-      '(=^･ω･^=) 该你了',
-      'ฅ^•ﻌ•^ฅ ……喵？',
-      '(˶ᵔ ᵕ ᵔ˶) 听你的',
-      '(=ↀωↀ=)✧ 接着来',
-      '( ◜◡◝ ) 候着',
-      '(=⌒‿‿⌒=) 安静等下一招',
-      '(ฅ•ω•ฅ) ♪',
-      '/ᐠ｡ꞈ｡ᐟ\\ 球在你那',
-    ] as const
-    const EN_CLOSERS = [
-      '(=^･ω･^=) your move',
-      'ฅ^•ﻌ•^ฅ ...meow?',
-      '(˶ᵔ ᵕ ᵔ˶) over to you',
-      '(=ↀωↀ=)✧ keep going',
-      '( ◜◡◝ ) waiting',
-      '(=⌒‿‿⌒=) idle and content',
-      '(ฅ•ω•ฅ) ♪',
-      '/ᐠ｡ꞈ｡ᐟ\\ ball is in your court',
-    ] as const
-    const closers = locale === 'zh-CN' ? ZH_CLOSERS : EN_CLOSERS
-    const closer = closers[Math.floor(Math.random() * closers.length)]!
+    // Cat-themed kaomoji-only closer — no trailing text, just the face.
+    // Pool is intentionally large so the same one rarely repeats in a session.
+    const closer = pickKaomoji()
     viewport?.appendScrollBlock({
       kind: 'system',
       text: locale === 'zh-CN'
