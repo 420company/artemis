@@ -12,6 +12,7 @@ import * as fs from 'node:fs'
 import { appendFile } from 'node:fs/promises'
 import { notifyTerminal } from './bridgeNotify.js'
 import { parseArgs, getHelpText } from './parseArgs.js'
+import { runGatewayCommand } from './gatewayService.js'
 import { getVersionText } from './branding.js'
 import { buildPanel } from './ui.js'
 import { CliSettingsStore } from './settings.js'
@@ -216,6 +217,12 @@ export async function runCli(argv: string[]): Promise<void> {
   // ── bragi ───────────────────────────────────────────────────────────────────
   if (options.command === 'bragi') {
     await runBragiCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
+    return
+  }
+
+  // ── gateway background service ──────────────────────────────────────────────
+  if (options.command === 'gateway') {
+    await runGatewayCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
     return
   }
 
@@ -1169,6 +1176,9 @@ async function runBragiCommand(options: {
         '  artemis bragi discord setup       ' + t('配置 Discord bot token', 'Configure Discord bot token'),
         '  artemis bragi wechat              ' + t('启动 WeChat 个人版 bridge', 'Start WeChat personal bridge'),
         '  artemis bragi wechat setup        ' + t('配置 WeChat 网关', 'Configure WeChat gateway'),
+        '  artemis gateway install           ' + t('安装后台服务，系统登录后自动启动已配置 bridge', 'Install background service; auto-start configured bridges after OS login'),
+        '  artemis gateway stop              ' + t('停止本次后台服务（保留自启）', 'Stop current background service, keep auto-start'),
+        '  artemis gateway uninstall         ' + t('永久关闭后台自启', 'Permanently disable background auto-start'),
       ]
     ))
     console.log()
@@ -1183,7 +1193,7 @@ async function runBragiCommand(options: {
       const result = await setupTelegramBridge({ cwd, onInfo: msg => console.log(msg) })
       console.log()
       console.log(result)
-      console.log(buildPanel(t('下一步', 'Next step'), [t('运行 artemis 启动，Telegram bridge 将自动连接。', 'Run artemis — the Telegram bridge will connect automatically.')]))
+      console.log(buildPanel(t('下一步', 'Next step'), [t('运行 artemis gateway install 启用后台自启；之后系统登录即可通过 Telegram 使用 Artemis。', 'Run artemis gateway install to enable background auto-start; after OS login you can use Artemis via Telegram.')]))
       console.log()
       return
     }
@@ -1211,7 +1221,7 @@ async function runBragiCommand(options: {
       const result = await setupDiscordBridge({ cwd, onInfo: msg => console.log(msg) })
       console.log()
       console.log(result)
-      console.log(buildPanel(t('下一步', 'Next step'), [t('运行 artemis 启动，Discord bridge 将自动连接。', 'Run artemis — the Discord bridge will connect automatically.')]))
+      console.log(buildPanel(t('下一步', 'Next step'), [t('运行 artemis gateway install 启用后台自启；之后系统登录即可通过 Discord 使用 Artemis。', 'Run artemis gateway install to enable background auto-start; after OS login you can use Artemis via Discord.')]))
       console.log()
       return
     }
@@ -1239,7 +1249,7 @@ async function runBragiCommand(options: {
       const result = await setupWeChatBridge({ cwd, onInfo: msg => console.log(msg) })
       console.log()
       console.log(result)
-      console.log(buildPanel(t('下一步', 'Next step'), [t('若已选择自动启动，重新运行 artemis 即可；否则运行 artemis bragi wechat 手动启动。', 'If auto-start was enabled, run artemis to connect automatically; otherwise run artemis bragi wechat to start manually.')]))
+      console.log(buildPanel(t('下一步', 'Next step'), [t('若已选择自动启动，运行 artemis gateway install 启用后台自启；否则运行 artemis bragi wechat 手动启动。', 'If auto-start was enabled, run artemis gateway install to enable background auto-start; otherwise run artemis bragi wechat manually.')]))
       console.log()
       return
     }

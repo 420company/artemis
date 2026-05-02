@@ -31,6 +31,7 @@ export type CliCommand =
   | 'nidhogg'
   | 'wordup'
   | 'bragi'
+  | 'gateway'
   | 'mcp'
   | 'odin'
   | 'heimdall'
@@ -59,7 +60,7 @@ const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
   'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
-  'wordup', 'bragi', 'mcp', 'odin', 'heimdall', 'memory'
+  'wordup', 'bragi', 'gateway', 'mcp', 'odin', 'heimdall', 'memory'
 ])
 
 function isCliCommand(value: string | undefined): value is CliCommand {
@@ -108,6 +109,7 @@ ${t('命令', 'Commands')}:
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
   session           ${t('管理会话记录', 'Manage session records')}
+  gateway           ${t('管理第三方通讯后台服务/登录自启', 'Manage messaging background service / login auto-start')}
   version           ${t('显示版本', 'Show version')}
   help              ${t('显示帮助', 'Show help')}
   memory            ${t('管理长期学习认知', 'Manage long-term AI memory')}
