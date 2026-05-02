@@ -369,6 +369,19 @@ export async function runCli(argv: string[]): Promise<void> {
     }
   }
 
+  // ── dream system: idle-triggered ambient activity ──────────────────────────
+  // Starts a background timer that fires after the user has been inactive for
+  // ≥ idleThresholdSec (default 1 hour). It composes a dream from recent
+  // session/memory/git activity, persists it to ~/.artemis/dreams/, optionally
+  // pushes to active bridges, and feeds distilled style lines back into the
+  // brain's long-term system-prompt suffix.
+  void (async () => {
+    try {
+      const { startIdleWatcher } = await import('../services/idleWatcher.js')
+      startIdleWatcher(options.cwd)
+    } catch { /* dream system is non-essential — never block startup */ }
+  })()
+
   // ── chat / default ──────────────────────────────────────────────────────────
   const workflowCommands = new Set(['run', 'athena', 'design', 'niko', 'contest', 'nidhogg'])
   const initialPrompt = workflowCommands.has(options.command)

@@ -41,6 +41,7 @@ type SetupSection =
   | 'tts'            // 语音输出
   | 'tools'          // Legacy direct-only tool gates
   | 'session'        // 会话管理
+  | 'dream'          // 做梦系统
 
 type SetupWizardOptions = {
   cwd: string
@@ -79,7 +80,8 @@ function normalizeSection(value: string | undefined): SetupSection | undefined {
   if (v === 'polish' || v === 'polisher' || v === 'rewrite' || v === 'bundle') return 'bundle'
   if (v === 'skill' || v === 'skills' || v === 'catalog') return 'skills'
   if (v === 'cron' || v === 'automation' || v === 'automations') return 'automation'
-  if (['model', 'visual', 'gateway', 'bundle', 'skills', 'agent', 'memory', 'automation', 'terminal', 'tts', 'tools', 'session'].includes(v)) {
+  if (v === 'dream' || v === 'dreams') return 'dream'
+  if (['model', 'visual', 'gateway', 'bundle', 'skills', 'agent', 'memory', 'automation', 'terminal', 'tts', 'tools', 'session', 'dream'].includes(v)) {
     return v as SetupSection
   }
   return undefined
@@ -929,7 +931,64 @@ async function runSection(section: SetupSection, options: { cwd: string; locale:
   else if (section === 'tts') await configureTTSSettings({ cwd, locale })
   else if (section === 'tools') await configureToolSettings({ cwd, locale })
   else if (section === 'session') await configureSessionSettings({ cwd, locale })
+  else if (section === 'dream') await configureDreamSettings({ cwd, locale })
   await printSetupSummary(cwd, locale)
+}
+
+async function configureDreamSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { locale } = options
+  const { loadDreamConfig, saveDreamConfig } = await import('../services/dreamStore.js')
+  const current = await loadDreamConfig()
+
+  sectionTitle('Artemis Dreams', [
+    tr(locale, '空闲超过 1 小时后，Artemis 会读取今天的工作记录，写一段梦境笔记。', 'After ≥1h of inactivity, Artemis reads today\'s session activity and composes a dream note.'),
+    tr(locale, '梦境提炼出的风格/偏好可以累加到长期系统提示词，让 AI 进化出自己的风格。', 'Distilled lines from each dream can accumulate into a long-term system-prompt suffix.'),
+    tr(locale, '完成的梦境会主动推送到所有已授权的 Telegram/Discord/WeChat 聊天。', 'Each finished dream is broadcast to every authorized Telegram/Discord/WeChat chat.'),
+  ])
+
+  const mode = await chooseInteractiveOption<'text' | 'vision' | 'off'>({
+    title: tr(locale, '梦境模式', 'Dream mode'),
+    initialIndex: current.mode === 'off' ? 2 : current.mode === 'vision' ? 1 : 0,
+    choices: [
+      { label: tr(locale, '仅文字（每天 ~1 次主模型调用）', 'Text-only (~1 main-model call/day)'), value: 'text' },
+      { label: tr(locale, '文字 + 配图（额外调一次现有视觉系统）', 'Text + image (also calls your visual provider)'), value: 'vision' },
+      { label: tr(locale, '关闭', 'Off'), value: 'off' },
+    ],
+  })
+
+  let evolveSystemPrompt = current.evolveSystemPrompt
+  let pushToBridges = current.pushToBridges
+  if (mode !== 'off') {
+    const evolve = await chooseInteractiveOption<'on' | 'off'>({
+      title: tr(locale, '梦后扩展系统提示词（让 AI 进化风格）', 'Append distilled style to long-term system prompt'),
+      initialIndex: current.evolveSystemPrompt ? 0 : 1,
+      choices: [
+        { label: tr(locale, '启用（推荐）', 'Enable (recommended)'), value: 'on' },
+        { label: tr(locale, '关闭', 'Off'), value: 'off' },
+      ],
+    })
+    evolveSystemPrompt = evolve === 'on'
+
+    const push = await chooseInteractiveOption<'on' | 'off'>({
+      title: tr(locale, '主动推送到聊天桥接', 'Push dreams to active bridges'),
+      initialIndex: current.pushToBridges ? 0 : 1,
+      choices: [
+        { label: tr(locale, '启用（每个梦境发到 Telegram/Discord/WeChat）', 'Enable (send each dream to all bridges)'), value: 'on' },
+        { label: tr(locale, '关闭（只在本地保存，不打扰聊天）', 'Off (local only, do not notify chats)'), value: 'off' },
+      ],
+    })
+    pushToBridges = push === 'on'
+  }
+
+  await saveDreamConfig({
+    ...current,
+    enabled: mode !== 'off',
+    mode,
+    evolveSystemPrompt,
+    pushToBridges,
+  })
+
+  console.log(`  ✓ ${tr(locale, '梦境配置已保存', 'Dream config saved')}: mode=${mode}, evolve=${evolveSystemPrompt}, push=${pushToBridges}`)
 }
 
 export async function runSetupWizard(options: SetupWizardOptions): Promise<void> {

@@ -170,9 +170,33 @@ function buildHostEnvironmentBlock(): string {
     return lines.join('\n');
 }
 
+// Loaded once at module init from ~/.artemis/dreams/learned-prompt.md and
+// refreshed whenever a new dream gets composed. Kept separate from
+// systemPromptSuffix so per-session ARTEMIS.md content never mixes with
+// long-term style accumulated by the dream system.
+let learnedDreamSuffix = '';
+export function refreshLearnedDreamSuffix(text: string): void {
+    learnedDreamSuffix = text?.trim() ?? '';
+    if (session) {
+        session.updateSystemPrompt(buildSystemPromptText());
+    }
+}
+// Best-effort load on module init — ignore failures so an io error here
+// can't block the brain from starting.
+void (async () => {
+    try {
+        const { loadLearnedPrompt } = await import('./services/dreamStore.js');
+        const text = await loadLearnedPrompt();
+        if (text) learnedDreamSuffix = text;
+    } catch { /* ignore */ }
+})();
+
 function buildSystemPromptText() {
     const env = buildHostEnvironmentBlock();
-    const base = `${env}${BASE_SYSTEM_PROMPT}`;
+    const learned = learnedDreamSuffix
+        ? `\n\n[Long-term style accumulated from dreams]\n${learnedDreamSuffix}`
+        : '';
+    const base = `${env}${BASE_SYSTEM_PROMPT}${learned}`;
     return systemPromptSuffix
         ? `${base}\n${systemPromptSuffix}`
         : base;
@@ -1502,6 +1526,14 @@ export async function think(
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
     maybeOptions?: ThinkOptions,
 ) {
+    // Reset the dream-system idle clock — any think() invocation means the
+    // user (or a bridge user) is doing something, so don't dream now.
+    void (async () => {
+        try {
+            const { markActivity } = await import('./services/idleWatcher.js');
+            markActivity();
+        } catch { /* ignore */ }
+    })();
     const { onDelta, options } = normalizeThinkArgs(onDeltaOrOptions, maybeOptions);
     const {
         cwd = process.cwd(),

@@ -1973,6 +1973,15 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     let trimmed: string = line.trim()
     if (!trimmed) continue
 
+    // Reset the dream-system idle clock — any user input means we should
+    // not start dreaming for at least another idleThresholdSec.
+    void (async () => {
+      try {
+        const { markActivity } = await import('../services/idleWatcher.js')
+        markActivity()
+      } catch { /* ignore */ }
+    })()
+
     if (suppressInitialNewbornOnce && trimmed === '/newborn') {
       suppressInitialNewbornOnce = false
       appendSystemPanel(
@@ -3296,6 +3305,73 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       } catch (err: unknown) {
         appendSystemPanel(t('Heimdall 错误', 'Heimdall error'), [err instanceof Error ? err.message : String(err)])
       }
+      continue
+    }
+
+    // ── /dream — manually trigger or inspect the dream system ─────────────────
+    if (trimmed === '/dream' || trimmed.startsWith('/dream ')) {
+      const arg = trimmed.slice('/dream'.length).trim()
+      const dreamModule = await import('../services/dreamComposer.js')
+      const dreamStore = await import('../services/dreamStore.js')
+
+      if (!arg || arg === 'now') {
+        appendSystemPanel(t('梦境', 'Dream'), [t('开始编织梦境…', 'Composing a dream…')])
+        const result = await dreamModule.composeDream({ cwd: workspaceRoot, trigger: 'manual' })
+        if (result.ok && result.entry) {
+          appendSystemPanel(t('梦境已生成', 'Dream composed'), [
+            `${result.entry.preview}`,
+            '',
+            `${t('文件', 'File')}: ${result.entry.mdPath}`,
+            ...(result.entry.imagePath ? [`${t('配图', 'Image')}: ${result.entry.imagePath}`] : []),
+            ...(typeof result.bridgesPushed === 'number' && result.bridgesPushed > 0
+              ? [t(`已推送到 ${result.bridgesPushed} 个聊天桥接。`, `Pushed to ${result.bridgesPushed} bridge chat(s).`)]
+              : []),
+          ])
+        } else {
+          appendSystemPanel(t('梦境跳过', 'Dream skipped'), [result.reason ?? t('未知原因', 'unknown')])
+        }
+        continue
+      }
+
+      if (arg === 'list') {
+        const list = await dreamStore.loadDreamIndex()
+        if (list.length === 0) {
+          appendSystemPanel(t('梦境记录', 'Dream archive'), [t('还没有任何梦境。', 'No dreams yet.')])
+        } else {
+          appendSystemPanel(t('梦境记录', 'Dream archive'), list.slice(0, 20).map(e =>
+            `${e.id}  ${e.preview}`,
+          ))
+        }
+        continue
+      }
+
+      if (arg.startsWith('open ')) {
+        const id = arg.slice(5).trim()
+        const body = await dreamStore.readDreamBody(id)
+        appendSystemPanel(`Dream ${id}`, body ? body.split('\n') : [t('找不到这个梦境。', 'Dream not found.')])
+        continue
+      }
+
+      if (arg.startsWith('forget ')) {
+        const id = arg.slice(7).trim()
+        const removed = await dreamStore.removeDreamEntry(id)
+        appendSystemPanel(t('梦境', 'Dream'), [removed ? t(`已删除 ${id}`, `Removed ${id}`) : t('找不到', 'not found')])
+        continue
+      }
+
+      if (arg === 'forget-all') {
+        await dreamStore.clearLearnedPrompt()
+        appendSystemPanel(t('梦境学习', 'Dream learning'), [t('已清空 learned-prompt.md。', 'Cleared learned-prompt.md.')])
+        continue
+      }
+
+      appendSystemPanel(t('用法', 'Usage'), [
+        '/dream                  ' + t('立即编织一个梦境', 'Compose a dream now'),
+        '/dream list             ' + t('列出最近的梦境', 'List recent dreams'),
+        '/dream open <id>        ' + t('打开指定梦境', 'Open a dream'),
+        '/dream forget <id>      ' + t('删除单条', 'Remove one'),
+        '/dream forget-all       ' + t('清空累积的学习风格', 'Clear accumulated learned style'),
+      ])
       continue
     }
 

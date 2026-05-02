@@ -132,37 +132,39 @@ export abstract class Task extends EventEmitter {
   }
 }
 
-// Dream Task
+// Dream Task — superseded by services/dreamComposer.ts (real implementation
+// driven by idleWatcher). The Task subclass remains as a thin shim only so
+// the legacy task-registry doesn't have to be reshaped right now; it forwards
+// to the real composer when invoked, instead of returning hardcoded stubs.
 export class DreamTask extends Task {
   constructor() {
-    super('dream', 'dream-task', 'Dream Task', 'Creative thinking and brainstorming task')
+    super('dream', 'dream-task', 'Dream Task', 'Compose a dream from recent session activity')
   }
 
-  async execute(context: TaskExecutionContext, config: TaskConfig): Promise<TaskResult> {
+  async execute(context: TaskExecutionContext, _config: TaskConfig): Promise<TaskResult> {
     const startTime = Date.now()
-    
-    this.emit('progress', 0, 'Starting dream task...')
-    await new Promise(resolve => setTimeout(resolve, 2000))
-    
-    this.emit('progress', 50, 'Generating creative ideas...')
-    await new Promise(resolve => setTimeout(resolve, 3000))
-    
-    this.emit('progress', 100, 'Task completed')
-    
-    return {
-      success: true,
-      data: {
-        ideas: [
-          'Improve code refactoring suggestions',
-          'Enhance natural language understanding',
-          'Add visual code generation',
-          'Implement collaborative coding'
-        ],
-        insights: 'Focus on user-centric design and seamless integration'
-      },
-      metadata: {
-        duration: Date.now() - startTime,
-        output: 'Generated creative ideas for AI coding assistant'
+    this.emit('progress', 0, 'Triggering dream composer…')
+    try {
+      const { composeDream } = await import('../services/dreamComposer.js')
+      const cwd = (context as unknown as { cwd?: string })?.cwd ?? process.cwd()
+      const result = await composeDream({ cwd, trigger: 'manual' })
+      this.emit('progress', 100, 'Dream composer finished')
+      return {
+        success: result.ok,
+        data: result.entry ?? null,
+        metadata: {
+          duration: Date.now() - startTime,
+          output: result.ok
+            ? `Dream composed at ${result.entry?.mdPath}`
+            : `Dream skipped: ${result.reason ?? 'unknown reason'}`,
+        },
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return {
+        success: false,
+        data: null,
+        metadata: { duration: Date.now() - startTime, output: `Dream task failed: ${message}` },
       }
     }
   }

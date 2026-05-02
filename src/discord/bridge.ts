@@ -8,6 +8,7 @@
 import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
+import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
 import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
 import type { BridgeTerminalEvent } from '../cli/bridgeNotify.js'
@@ -214,6 +215,33 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
   options.onInfo?.(`[discord] bot token verified for ${me.global_name ?? me.username}`)
   await gateway.start({ signal: options.signal, onInfo: options.onInfo })
 
+  // Register with cross-bridge notifier so the dream system can push to
+  // every authorized Discord channel/DM the user has approved.
+  const unregisterBridge = registerBridge({
+    platform: 'discord',
+    push: async (payload) => {
+      const data = await discordStore.load()
+      const bragiLive = await bragiStore.load()
+      const allowedTargets = new Set([
+        ...(bragiLive.platforms.discord?.allowedTargets ?? []),
+        ...(data.targets ?? []).map(t => t.targetId),
+      ])
+      for (const targetId of allowedTargets) {
+        try {
+          await gateway.sendMessage(targetId, payload.text)
+          if (payload.imagePath) {
+            // Discord text channel: attach the image path note since uploading
+            // attachments via the gateway would require multipart form support
+            // we don't have inline. The user can open the path locally.
+            await gateway.sendMessage(targetId, `🖼 ${payload.imagePath}`)
+          }
+        } catch (err) {
+          options.onInfo?.(`[discord] dream push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+    },
+  })
+
   try {
     await runBragiMessagePump({
       channelLabel: 'Discord',
@@ -322,6 +350,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
       },
     })
   } finally {
+    unregisterBridge()
     await gateway.stop()
   }
 }

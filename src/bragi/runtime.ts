@@ -687,6 +687,15 @@ export async function runBragiMessagePump<TCheckpoint>(
       }
 
       for (const message of batch.messages) {
+        // Bridge inbound message counts as user activity → reset dream-system
+        // idle clock so we don't dream while a chat conversation is happening.
+        void (async () => {
+          try {
+            const { markActivity } = await import('../services/idleWatcher.js')
+            markActivity()
+          } catch { /* ignore */ }
+        })()
+
         const dedupeKey = message.sourceMessageId
           ? `${message.targetId}:${message.sourceMessageId}`
           : undefined

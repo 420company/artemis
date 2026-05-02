@@ -9,6 +9,7 @@
 
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
+import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
 import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
 import type { BridgeTerminalEvent } from '../cli/bridgeNotify.js'
@@ -189,6 +190,30 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
   const client = new WeChatGatewayClient({ gatewayToken, gatewayBaseUrl: gatewayUrl })
   options.onInfo?.(`[wechat] personal gateway bridge connected (${gatewayUrl})`)
 
+  // Register with cross-bridge notifier so the dream system can push to
+  // every WeChat chat that has an active context token.
+  const unregisterBridge = registerBridge({
+    platform: 'wechat',
+    push: async (payload) => {
+      const data = await wechatStore.load()
+      // WeChat push needs a contextToken; only chats that previously talked
+      // to us have one. Skip the rest silently.
+      const targets = (data.contacts ?? []).map(c => c.fromUser)
+      for (const targetId of targets) {
+        try {
+          const contextToken = wechatStore.getContextToken(data, targetId)
+          if (!contextToken) continue
+          await client.sendText(targetId, payload.text, contextToken, options.signal)
+          if (payload.imagePath) {
+            await client.sendText(targetId, `🖼 ${payload.imagePath}`, contextToken, options.signal)
+          }
+        } catch (err) {
+          options.onInfo?.(`[wechat] dream push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+    },
+  })
+
   function buildSessionTitle(fromUser: string): string {
     const base = options.cwd.split('/').pop() ?? options.cwd
     return `WeChat ${fromUser.slice(0, 8)} in ${base}`
@@ -303,4 +328,5 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
       await client.sendText(targetId, text, contextToken, options.signal)
     },
   })
+  unregisterBridge()
 }

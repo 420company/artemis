@@ -11,6 +11,7 @@
 import { createInterface } from 'node:readline'
 import { BragiStore } from '../bragi/store.js'
 import { runBragiMessagePump } from '../bragi/runtime.js'
+import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
 import { loadSessionOrCreate } from '../bragi/sessionRecovery.js'
 import type { BridgeTerminalEvent } from '../cli/bridgeNotify.js'
@@ -295,6 +296,35 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
 
   const client = new TelegramBotClient(token)
 
+  // Register with the cross-bridge notifier so the dream system (and any
+  // future ambient sender) can push messages to this bridge's authorized
+  // chats. Unregistered automatically when the pump shuts down.
+  const unregisterBridge = registerBridge({
+    platform: 'telegram',
+    push: async (payload) => {
+      const data = await telegramStore.load()
+      const targets = data.allowedChatIds ?? []
+      for (const chatId of targets) {
+        try {
+          await client.sendMessage(chatId, payload.text)
+          if (payload.imagePath) {
+            // Telegram has sendPhoto; if we don't have it wired up, fall back
+            // to a text note so the user knows where the image is on disk.
+            const sendPhoto = (client as unknown as { sendPhoto?: (id: string, p: string) => Promise<void> }).sendPhoto
+            if (typeof sendPhoto === 'function') {
+              await sendPhoto.call(client, chatId, payload.imagePath)
+            } else {
+              await client.sendMessage(chatId, `🖼 ${payload.imagePath}`)
+            }
+          }
+        } catch (err) {
+          options.onInfo?.(`[telegram] dream push to ${chatId} failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+    },
+  })
+
+  try {
   await runBragiMessagePump({
     channelLabel: 'Telegram',
     locale,
@@ -410,4 +440,7 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
       await client.sendMessage(targetId, text)
     },
   })
+  } finally {
+    unregisterBridge()
+  }
 }
