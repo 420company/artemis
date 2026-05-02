@@ -311,6 +311,11 @@ async function installWindowsTask(cwd: string): Promise<void> {
   await mkdir(dataDir(), { recursive: true })
   await writeFile(windowsWrapperPath(), buildWindowsWrapper(cwd), 'utf8')
   await writeFile(windowsVbsWrapperPath(), buildWindowsVbsWrapper(), 'utf8')
+  // Reconfiguration must replace the currently running daemon too. /Create /F
+  // updates the task definition but does not stop an already-running instance,
+  // so Windows could keep an old gateway process alive with stale cwd/code and
+  // the Telegram bridge would appear configured but neither receive nor reply.
+  await runWindowsCommand(['schtasks', '/End', '/TN', WINDOWS_TASK_NAME])
   const create = await runWindowsCommand([
     'schtasks', '/Create', '/TN', WINDOWS_TASK_NAME, '/TR', `wscript.exe "${windowsVbsWrapperPath()}"`,
     '/SC', 'ONLOGON', '/RL', 'LIMITED', '/F',

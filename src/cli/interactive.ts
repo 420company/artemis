@@ -26,7 +26,7 @@ const CC = {
 }
 
 type ConversationRole = 'user' | 'assistant'
-type BridgePlatform = 'telegram' | 'discord' | 'wechat'
+type BridgePlatform = 'telegram' | 'discord' | 'wechat' | 'cli'
 
 /** Generate a gradient ─── separator line transitioning from blue to mauve (top of user turn) */
 function convSeparator(): string {
@@ -72,6 +72,7 @@ function bridgePlatformBadge(platform: BridgePlatform): string {
     case 'telegram': return '✈️ Telegram'
     case 'discord': return '💬 Discord'
     case 'wechat': return '🟢 WeChat'
+    case 'cli': return '🌙 Artemis'
   }
 }
 
@@ -4075,10 +4076,9 @@ async function handleTurn(
     }
 
     // Explicit "this turn is finished" footer so the user can tell at a glance
-    // whether the AI is still cooking or has handed control back. Without it
-    // the assistant block just stops streaming and feels indistinguishable from
-    // a stall — even with the elapsed/token tag in the block header, users
-    // wonder "is it stuck or done?".
+    // whether the AI is still cooking or has handed control back. This is a
+    // transport/turn status, not a claim that the user's whole task is done; the
+    // wording must avoid conflicting with the visible checklist above.
     //
     // We prefer the API-reported usage from result.tokenStats over the local
     // chars/4 estimate (`livePendingTokens`) because the estimate severely
@@ -4107,8 +4107,8 @@ async function handleTurn(
     viewport?.appendScrollBlock({
       kind: 'system',
       text: locale === 'zh-CN'
-        ? `✓ 已完成 · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`
-        : `✓ Done · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`,
+        ? `✓ 本轮回复结束 · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`
+        : `✓ Turn finished · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`,
     })
   } catch (err: unknown) {
     stopPendingTick()

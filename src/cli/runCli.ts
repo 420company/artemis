@@ -355,8 +355,10 @@ export async function runCli(argv: string[]): Promise<void> {
       const { signal } = logWatchAbort
 
       const SEPARATOR = /^─{10,}/
-      // Detects "Telegram inbound", "Discord outbound", "WeChat inbound", etc.
-      const DIRECTION_RE = /^(Telegram|Discord|WeChat)\s+(inbound|outbound|test successful)/i
+      // Detects "Telegram inbound", "Discord outbound", "WeChat outbound", etc.
+      // Setup/test-success panels are internal bridge diagnostics; do not mirror
+      // them into the chat scrollback as user-visible system messages.
+      const DIRECTION_RE = /^(Telegram|Discord|WeChat)\s+(inbound|outbound)/i
       // Detects "[telegram] BKK0420 → hi" style content lines
       const CONTENT_RE = /^\[(\w+)\]\s+(.+?)\s*→\s*(.+)/
       // Platform name normalization
@@ -396,7 +398,6 @@ export async function runCli(argv: string[]): Promise<void> {
             // Find direction header and content
             let direction: 'inbound' | 'outbound' | undefined
             let platform: 'telegram' | 'discord' | 'wechat' = 'telegram'
-            let isTestSuccess = false
             const contentParts: string[] = []
 
             for (const bl of blockLines) {
@@ -407,7 +408,6 @@ export async function runCli(argv: string[]): Promise<void> {
                 platform = normPlatform(dirMatch[1])
                 if (dirMatch[2].toLowerCase() === 'inbound') direction = 'inbound'
                 else if (dirMatch[2].toLowerCase() === 'outbound') direction = 'outbound'
-                else isTestSuccess = true
                 continue
               }
               // Skip separator lines and timestamp-prefixed lines
@@ -432,14 +432,6 @@ export async function runCli(argv: string[]): Promise<void> {
                 direction,
                 targetLabel: senderName,
                 text: messageBody,
-              })
-            } else if (isTestSuccess) {
-              notifyTerminal({
-                kind: 'bridge-status',
-                platform,
-                targetLabel: 'system',
-                text,
-                level: 'info',
               })
             }
             blockLines = []
@@ -488,7 +480,7 @@ export async function runCli(argv: string[]): Promise<void> {
           if (process.stdout.isTTY) {
             notifyTerminal({
               kind: 'bridge-message',
-              platform: 'telegram',
+              platform: 'cli',
               direction: 'outbound',
               targetLabel: 'Artemis Dream',
               text: payload.text + (payload.imagePath ? `\n🖼  ${payload.imagePath}` : ''),

@@ -160,6 +160,35 @@ function styleCodeLine(line: string): string {
   return color(line, ANSI.skyblue)
 }
 
+function codeFenceLabel(lang: string): string {
+  const key = lang.trim().toLowerCase()
+  if (!key) return ' 代码 '
+  const labels: Record<string, string> = {
+    text: ' 文本 ',
+    txt: ' 文本 ',
+    ts: ' TypeScript ',
+    typescript: ' TypeScript ',
+    js: ' JavaScript ',
+    javascript: ' JavaScript ',
+    tsx: ' TypeScript / React ',
+    jsx: ' JavaScript / React ',
+    json: ' JSON 配置 ',
+    bash: ' 终端命令 ',
+    sh: ' 终端命令 ',
+    shell: ' 终端命令 ',
+    zsh: ' 终端命令 ',
+    diff: ' 代码变更 ',
+    patch: ' 代码变更 ',
+    css: ' CSS 样式 ',
+    html: ' HTML ',
+    yaml: ' YAML 配置 ',
+    yml: ' YAML 配置 ',
+    markdown: ' Markdown 文档 ',
+    md: ' Markdown 文档 ',
+  }
+  return labels[key] ?? ` ${lang.trim()} `
+}
+
 /** Apply inline Markdown styling: **bold**, *italic*, `code`, ~~strike~~ */
 function applyInlineStyles(line: string): string {
   if (!useAnsi()) return line
@@ -232,7 +261,7 @@ export function formatRichOutput(message: string): string {
         inCodeBlock = true
         codeLang    = trimmed.slice(3).trim()
         const label = codeLang === 'bud' ? ' HAVE A NICE TRIP! '
-          : codeLang ? ` ${codeLang} ` : ' code '
+          : codeFenceLabel(codeLang)
         output.push('')
         output.push(color(label, `${ANSI.bgBlue}${ANSI.white}${ANSI.bold}`))
         output.push('')
