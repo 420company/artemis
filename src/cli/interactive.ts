@@ -3938,12 +3938,33 @@ async function handleTurn(
     // the assistant block just stops streaming and feels indistinguishable from
     // a stall — even with the elapsed/token tag in the block header, users
     // wonder "is it stuck or done?".
+    //
+    // We prefer the API-reported usage from result.tokenStats over the local
+    // chars/4 estimate (`livePendingTokens`) because the estimate severely
+    // undercounts CJK text (Chinese characters are 1-3 tokens each, not 0.25)
+    // and ignores input tokens entirely. Falling back to the estimate keeps
+    // the UI sane when a provider doesn't report usage.
     const totalElapsedSec = Math.max(1, Math.round((Date.now() - pendingStartMs) / 1000))
+    const realUsage = result.tokenStats
+    const realIn = realUsage?.promptTokens ?? 0
+    const realOut = realUsage?.completionTokens ?? 0
+    let tokenSummary: string
+    if (realIn > 0 || realOut > 0) {
+      const { fmtTok: ft } = await import('./hud.js')
+      tokenSummary = locale === 'zh-CN'
+        ? `输入 ${ft(realIn)} · 输出 ${ft(realOut)} tok`
+        : `in ${ft(realIn)} · out ${ft(realOut)} tok`
+    } else {
+      const { fmtTok: ft } = await import('./hud.js')
+      tokenSummary = locale === 'zh-CN'
+        ? `估算 ${ft(livePendingTokens)} tok`
+        : `est. ${ft(livePendingTokens)} tok`
+    }
     viewport?.appendScrollBlock({
       kind: 'system',
       text: locale === 'zh-CN'
-        ? `✓ 已完成 · ${totalElapsedSec}s · 等你下一条指令`
-        : `✓ Done · ${totalElapsedSec}s · ready for your next message`,
+        ? `✓ 已完成 · ${totalElapsedSec}s · ${tokenSummary} · 等你下一条指令`
+        : `✓ Done · ${totalElapsedSec}s · ${tokenSummary} · ready for your next message`,
     })
   } catch (err: unknown) {
     stopPendingTick()
