@@ -21,6 +21,7 @@ import type { SecretStore } from '../security/secretStore.js'
 import type { UiLocale } from '../cli/locale.js'
 import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
+import { ensureGatewayAutoStart } from '../cli/gatewayService.js'
 import { SessionStore } from '../storage/sessions.js'
 import { TelegramBotClient, extractTelegramTextMessages } from './client.js'
 import { TelegramStore } from './store.js'
@@ -249,8 +250,10 @@ export async function setupTelegramBridge(options: {
 }): Promise<string> {
   const telegramStore = new TelegramStore(options.cwd, options.secretStore)
   const locale = (await new CliSettingsStore(options.cwd).load()).uiLocale
-  const { token, configuredNow } = await askTelegramToken(telegramStore, locale, options.onInfo)
-  const autoStart = await maybePromptAutoStart(telegramStore, configuredNow, locale, options.onInfo)
+  const { token } = await askTelegramToken(telegramStore, locale, options.onInfo)
+  const autoStart = true
+  await telegramStore.setAutoStartOnLaunch(true)
+  options.onInfo?.('[telegram] background auto-start enabled')
   const client = new TelegramBotClient(token)
   const me = await client.getMe()
   const label = '@' + (me.username ?? me.first_name)
@@ -265,14 +268,15 @@ export async function setupTelegramBridge(options: {
     credentials: { botToken: token },
     allowedTargets: existing?.allowedTargets ?? [],
   })
+  await ensureGatewayAutoStart(options.cwd)
 
   return buildPanel(
     pickLocale(locale, { zh: 'Telegram 设置完成', en: 'Telegram setup complete' }),
     [
       pickLocale(locale, { zh: `机器人账号: ${label}`, en: `Bot account: ${label}` }),
       pickLocale(locale, {
-        zh: autoStart ? '自动关联启动：已启用' : '自动关联启动：未启用',
-        en: autoStart ? 'Auto-start on CLI launch: enabled' : 'Auto-start on CLI launch: disabled',
+        zh: '后台自动运行：已启用（系统登录后自动连接）',
+        en: 'Background auto-start: enabled (connects after OS login)',
       }),
       '',
       pickLocale(locale, { zh: '下一步：在 Telegram 里打开你的机器人，发送 /start。', en: 'Next: Open your bot in Telegram and send /start.' }),

@@ -16,6 +16,7 @@ import type { PermissionMode } from '../cli/parseArgs.js'
 import { CliSettingsStore } from '../cli/settings.js'
 import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
+import { ensureGatewayAutoStart } from '../cli/gatewayService.js'
 import type { SecretStore } from '../security/secretStore.js'
 import { SessionStore } from '../storage/sessions.js'
 import { DiscordBotClient, DiscordGatewayBridge } from './client.js'
@@ -73,14 +74,6 @@ function readMaskedToken(question: string): Promise<string | null> {
   })
 }
 
-function readLine(question: string): Promise<string> {
-  return new Promise(resolve => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    rl.question(question, answer => { rl.close(); resolve(answer.trim()) })
-    rl.once('close', () => resolve(''))
-  })
-}
-
 export async function setupDiscordBridge(options: {
   cwd: string
   secretStore?: SecretStore
@@ -133,13 +126,7 @@ export async function setupDiscordBridge(options: {
     }
   }
 
-  // Ask about auto-start
-  const autoStartRaw = await readLine(t(
-    '  启动 artemis 时自动连接 Discord bridge？(Y/n) ',
-    '  Auto-start Discord bridge when artemis launches? (Y/n) '
-  ))
-  const autoStartAnswer = autoStartRaw.trim().toLowerCase()
-  const autoStart = autoStartAnswer === '' || autoStartAnswer === 'y' || autoStartAnswer === 'yes'
+  const autoStart = true
 
   const existingData = await bragiStore.load()
   const existing = existingData.platforms.discord
@@ -149,6 +136,7 @@ export async function setupDiscordBridge(options: {
     credentials: { botToken: token },
     allowedTargets: existing?.allowedTargets ?? [],
   })
+  await ensureGatewayAutoStart(options.cwd)
 
   options.onInfo?.(`[discord] bot token saved (${maskToken(token)}), autoStart=${autoStart}`)
 
@@ -157,8 +145,8 @@ export async function setupDiscordBridge(options: {
     [
       t(`机器人账号: ${botName}`, `Bot account: ${botName}`),
       t(
-        autoStart ? '自动连接启动：已启用' : '自动连接启动：未启用（可运行 artemis bragi discord 手动启动）',
-        autoStart ? 'Auto-start on launch: enabled' : 'Auto-start on launch: disabled (run artemis bragi discord to start manually)',
+        '后台自动运行：已启用（系统登录后自动连接）',
+        'Background auto-start: enabled (connects after OS login)',
       ),
       '',
       t('下一步：在你的 Discord 频道发送 /start 认领控制权。', 'Next: Send /start in your Discord channel to claim control.'),

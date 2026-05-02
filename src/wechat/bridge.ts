@@ -19,7 +19,7 @@ import type { SecretStore } from '../security/secretStore.js'
 import type { UiLocale } from '../cli/locale.js'
 import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
-import { createInterface } from 'node:readline'
+import { ensureGatewayAutoStart } from '../cli/gatewayService.js'
 import { SessionStore } from '../storage/sessions.js'
 import { WeChatGatewayClient } from './client.js'
 import { WeChatStore } from './store.js'
@@ -134,17 +134,7 @@ export async function setupWeChatBridge(options: {
     { forceRefresh: true },
   )
 
-  // Ask about auto-start
-  const raw = await new Promise<string>(res => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    rl.question(t(
-      '  启动 artemis 时自动连接 WeChat bridge？(Y/n) ',
-      '  Auto-start WeChat bridge when artemis launches? (Y/n) ',
-    ), answer => { rl.close(); res(answer.trim()) })
-    rl.once('close', () => res(''))
-  })
-  const autoStartAnswer = raw.toLowerCase()
-  const autoStart = autoStartAnswer === '' || autoStartAnswer === 'y' || autoStartAnswer === 'yes'
+  const autoStart = true
 
   // Persist auto-start flag to both WeChatStore and BragiStore
   await wechatStore.setAutoStartOnLaunch(autoStart)
@@ -157,6 +147,7 @@ export async function setupWeChatBridge(options: {
     credentials: { gatewayToken },
     allowedTargets: existingCfg?.allowedTargets ?? [],
   })
+  await ensureGatewayAutoStart(options.cwd)
 
   options.onInfo?.(`[wechat] setup complete, autoStart=${autoStart}`)
 
@@ -165,8 +156,8 @@ export async function setupWeChatBridge(options: {
     [
       `Gateway: ${gatewayUrl}`,
       t(
-        autoStart ? '自动连接启动：已启用' : '自动连接启动：未启用（可运行 artemis bragi wechat 手动启动）',
-        autoStart ? 'Auto-start on launch: enabled' : 'Auto-start on launch: disabled (run artemis bragi wechat to start manually)',
+        '后台自动运行：已启用（系统登录后自动连接）',
+        'Background auto-start: enabled (connects after OS login)',
       ),
       '',
       t('下一步：用微信给已登录的账号发一条消息即可开始对话。', 'Next: Send a WeChat message to the logged-in account to start chatting.'),

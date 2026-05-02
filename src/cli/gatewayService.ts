@@ -11,9 +11,12 @@ import { SessionStore } from '../storage/sessions.js'
 import { runTelegramBridge, shouldAutoStartTelegram } from '../telegram/bridge.js'
 import { runDiscordBridge, shouldAutoStartDiscordBridge } from '../discord/bridge.js'
 import { runWeChatBridge, shouldAutoStartWeChatBridge } from '../wechat/bridge.js'
+import { BragiStore } from '../bragi/store.js'
 
-const LAUNCH_AGENT_LABEL = 'company.420.artemis.gateway'
+const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
+const LEGACY_LAUNCH_AGENT_LABEL = 'company.420.artemis.gateway'
+const LEGACY_LAUNCH_AGENT_FILE = `${LEGACY_LAUNCH_AGENT_LABEL}.plist`
 const WINDOWS_TASK_NAME = 'ArtemisGateway'
 
 type GatewayCommandOptions = {
@@ -38,6 +41,10 @@ function dataDir(): string {
 
 function plistPath(): string {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', LAUNCH_AGENT_FILE)
+}
+
+function legacyPlistPath(): string {
+  return path.join(os.homedir(), 'Library', 'LaunchAgents', LEGACY_LAUNCH_AGENT_FILE)
 }
 
 function windowsWrapperPath(): string {
@@ -151,6 +158,10 @@ function buildWindowsWrapper(cwd: string): string {
 async function installLaunchAgent(cwd: string): Promise<void> {
   await mkdir(path.dirname(plistPath()), { recursive: true })
   await mkdir(dataDir(), { recursive: true })
+  await runLaunchctl(['bootout', guiDomain(), legacyPlistPath()])
+  await unlink(legacyPlistPath()).catch(err => {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  })
   await writeFile(plistPath(), buildLaunchAgentPlist(cwd), 'utf8')
   await runLaunchctl(['bootout', guiDomain(), plistPath()])
   const loaded = await runLaunchctl(['bootstrap', guiDomain(), plistPath()])
@@ -163,6 +174,10 @@ async function installLaunchAgent(cwd: string): Promise<void> {
 async function uninstallLaunchAgent(): Promise<void> {
   await runLaunchctl(['bootout', guiDomain(), plistPath()])
   await unlink(plistPath()).catch(err => {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  })
+  await runLaunchctl(['bootout', guiDomain(), legacyPlistPath()])
+  await unlink(legacyPlistPath()).catch(err => {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   })
 }
@@ -183,12 +198,14 @@ async function stopLaunchAgent(): Promise<void> {
 async function getLaunchAgentStatus(): Promise<string[]> {
   const result = await runLaunchctl(['print', `${guiDomain()}/${LAUNCH_AGENT_LABEL}`])
   const installed = fs.existsSync(plistPath())
+  const legacyInstalled = fs.existsSync(legacyPlistPath())
   if (result.code !== 0) {
     return [
       `Installed: ${installed ? 'yes' : 'no'}`,
       'Loaded: no',
       `Plist: ${plistPath()}`,
-    ]
+      legacyInstalled ? `Legacy plist present: ${legacyPlistPath()}` : undefined,
+    ].filter((line): line is string => Boolean(line))
   }
   const pid = result.stdout.match(/pid = (\d+)/)?.[1]
   const state = result.stdout.match(/state = ([^\n]+)/)?.[1]?.trim()
@@ -198,8 +215,38 @@ async function getLaunchAgentStatus(): Promise<string[]> {
     `Running: ${pid ? `yes (pid ${pid})` : 'unknown'}`,
     state ? `State: ${state}` : undefined,
     `Plist: ${plistPath()}`,
+    legacyInstalled ? `Legacy plist present: ${legacyPlistPath()}` : undefined,
     `Log: ${path.join(dataDir(), 'gateway.log')}`,
   ].filter((line): line is string => Boolean(line))
+}
+
+export async function ensureGatewayAutoStart(cwd: string): Promise<void> {
+  if (process.platform === 'darwin') {
+    await installLaunchAgent(cwd)
+    return
+  }
+  if (process.platform === 'win32') {
+    await installWindowsTask(cwd)
+    return
+  }
+}
+
+async function getBridgeConfigStatus(cwd: string): Promise<string[]> {
+  const bragiData = await new BragiStore(cwd).load().catch(() => undefined)
+  const lines = ['Bridges:']
+  let runnable = 0
+  for (const platform of ['telegram', 'discord', 'wechat'] as const) {
+    const config = bragiData?.platforms[platform]
+    const enabled = config?.enabled !== false && Boolean(config)
+    const autoStart = config?.autoStartOnLaunch === true
+    const hasCredentials = Boolean(config?.credentials && Object.keys(config.credentials).length > 0)
+    if (enabled && autoStart && hasCredentials) runnable += 1
+    lines.push(`  ${platform}: configured=${hasCredentials ? 'yes' : 'no'}, enabled=${enabled ? 'yes' : 'no'}, autoStart=${autoStart ? 'yes' : 'no'}`)
+  }
+  if (runnable === 0) {
+    lines.push('No runnable bridge yet. Configure Telegram/Discord/WeChat once; setup now enables background auto-start automatically.')
+  }
+  return lines
 }
 
 async function installWindowsTask(cwd: string): Promise<void> {
@@ -298,9 +345,19 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
     log('gateway', `started ${active} bridge(s) for ${options.cwd}`)
   }
 
+  // Keep the daemon process alive even when no bridge is configured yet, or
+  // when all bridge clients are currently waiting in promise-only polling code.
+  // A bare unresolved Promise does not keep Node's event loop alive, so launchd
+  // used to see a clean exit immediately after reboot and the phone bridges had
+  // nothing left to wake up.
+  const keepAlive = setInterval(() => {
+    log('gateway', `heartbeat; active=${active}; cwd=${options.cwd}`)
+  }, 5 * 60_000)
+
   await new Promise<void>(resolve => {
     const stop = () => {
       log('gateway', 'stopping')
+      clearInterval(keepAlive)
       for (const ac of aborts) ac.abort()
       setTimeout(resolve, 250)
     }
@@ -329,6 +386,7 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
       `Backend: ${platformName}`,
       process.platform === 'darwin' ? `Plist: ${plistPath()}` : `Task: ${WINDOWS_TASK_NAME}`,
       `CWD: ${cwd}`,
+      ...(await getBridgeConfigStatus(cwd)),
     ]))
     console.log()
     return
@@ -368,11 +426,29 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
     return
   }
 
+  if (sub === 'restart') {
+    if (process.platform === 'darwin') {
+      await stopLaunchAgent()
+      await startLaunchAgent(cwd)
+    } else if (process.platform === 'win32') {
+      await stopWindowsTask()
+      await startWindowsTask(cwd)
+    } else throw new Error('Artemis gateway auto-start currently supports macOS LaunchAgent and Windows Task Scheduler only.')
+    console.log()
+    console.log(buildPanel(t(locale, 'Gateway 已重启', 'Gateway restarted'), process.platform === 'win32' ? await getWindowsTaskStatus() : await getLaunchAgentStatus()))
+    console.log()
+    return
+  }
+
   if (sub === 'status') {
     console.log()
     console.log(buildPanel(
       t(locale, 'Gateway 状态', 'Gateway status'),
-      process.platform === 'win32' ? await getWindowsTaskStatus() : await getLaunchAgentStatus()
+      [
+        ...(process.platform === 'win32' ? await getWindowsTaskStatus() : await getLaunchAgentStatus()),
+        `CWD: ${cwd}`,
+        ...(await getBridgeConfigStatus(cwd)),
+      ]
     ))
     console.log()
     return
@@ -383,6 +459,7 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
     'artemis gateway install    ' + t(locale, '安装并启动开机/登录自启', 'Install and start login auto-start'),
     'artemis gateway start      ' + t(locale, '启动后台服务', 'Start background service'),
     'artemis gateway stop       ' + t(locale, '停止本次后台服务（保留自启）', 'Stop current service, keep auto-start'),
+    'artemis gateway restart    ' + t(locale, '重启后台服务并重新读取 bridge 配置', 'Restart background service and reload bridge config'),
     'artemis gateway uninstall  ' + t(locale, '永久关闭并移除自启', 'Disable and remove auto-start'),
     'artemis gateway status     ' + t(locale, '查看状态', 'Show status'),
   ]))
