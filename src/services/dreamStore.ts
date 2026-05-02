@@ -63,7 +63,11 @@ const LEARNED_PROMPT_MAX_BYTES = 4096
 
 const DEFAULT_CONFIG: DreamConfig = {
   enabled: true,
-  mode: 'text',
+  // Default to vision so first-time users actually see the image-mode output
+  // they likely expected when they signed up for "Artemis dreams". A configured
+  // visual provider is required; if missing, the composer silently degrades to
+  // text-only so the dream still completes.
+  mode: 'vision',
   evolveSystemPrompt: true,
   pushToBridges: true,
   idleThresholdSec: 3600,

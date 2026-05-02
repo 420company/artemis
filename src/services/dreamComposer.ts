@@ -163,13 +163,18 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
 
   // ── optional image ──────────────────────────────────────────────────────
   let imagePath: string | undefined
+  let imageNote: string | undefined
   if (config.mode === 'vision') {
     options.onStatus?.('🌙 渲染梦境图…')
     try {
       const imgPrompt = await deriveImagePrompt(provider, dreamMd, now)
-      if (imgPrompt) {
+      if (!imgPrompt) {
+        imageNote = 'image prompt derivation returned empty'
+      } else {
         const visual = await resolveConfiguredVisualProvider(options.cwd, 'image')
-        if (visual) {
+        if (!visual) {
+          imageNote = '未配置本地视觉生成 API（运行 artemis setup visual）'
+        } else {
           const imgProvider = await createVisualProvider(visual.config, 'image')
           const result = await imgProvider.generateImage({
             prompt: imgPrompt,
@@ -178,11 +183,16 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
           if (result.success && result.assetPath && existsSync(result.assetPath)) {
             await copyFile(result.assetPath, targetImagePath)
             imagePath = targetImagePath
+          } else {
+            imageNote = result.error ?? 'image generation returned no asset'
           }
         }
       }
-    } catch {
-      /* image is best-effort; failure does not abort the dream */
+    } catch (err) {
+      imageNote = err instanceof Error ? err.message : String(err)
+    }
+    if (imageNote) {
+      options.onStatus?.(`🌙 配图未生成: ${imageNote}`)
     }
   }
 
