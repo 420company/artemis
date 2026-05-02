@@ -32,6 +32,7 @@ import { executeRunCommand } from './runCommand.js';
 import { executeSearchFiles } from './searchFiles.js';
 import { executeSearchWeb } from './searchWeb.js';
 import { executeWriteFile } from './writeFile.js';
+import { executeBridgeSendImage } from './bridgeSendImage.js';
 
 export type { ToolDefinition };
 
@@ -1440,6 +1441,23 @@ const capabilityToolDefs: ToolDefinition[] = [
       const { executeMcpSuggest } = await import('./mcpManage/mcpManageTools.js');
       return executeMcpSuggest(a);
     }) as any,
+  },
+  {
+    type: 'bridge_send_image',
+    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。imagePath 必填；platform 默认 all。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.imagePath, 'imagePath', errs);
+      validateEnumString(a?.platform, 'platform', ['telegram', 'discord', 'wechat', 'all'] as const, errs);
+      validateOptionalNonEmptyString(a?.caption, 'caption', errs);
+      validateOptionalNonEmptyString(a?.targetId, 'targetId', errs);
+      return errs;
+    },
+    execute: executeBridgeSendImage as any,
   },
 ];
 

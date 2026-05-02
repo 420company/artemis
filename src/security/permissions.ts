@@ -177,6 +177,8 @@ function describeAction(action: AgentAction): string {
       return `mcp: disable ${action.id}`;
     case 'mcp_suggest':
       return `mcp: suggest for "${action.intent}"`;
+    case 'bridge_send_image':
+      return `bridge: send image ${action.imagePath}${action.platform ? ` to ${action.platform}` : ''}`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

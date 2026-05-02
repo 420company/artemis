@@ -1650,6 +1650,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `mcp_disable ${action.id}`;
     case 'mcp_suggest':
       return `mcp_suggest "${truncate(action.intent, 80)}"`;
+    case 'bridge_send_image':
+      return `bridge_send_image ${truncate(action.imagePath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);

@@ -11,6 +11,20 @@ This is the release path for publishing Artemis to GitHub and npm.
 
 ## Preflight
 
+Before building, confirm local runtime data is not tracked or packed. User data
+directories may contain API keys, bot tokens, browser state, bridge locks, MCP
+enablement state, and session data.
+
+```bash
+git ls-files .artemis .mylaude
+npm pack --dry-run --json
+```
+
+The first command must print nothing. The pack output must not contain
+workspace-local `.artemis/`, `.mylaude/`, `.env`, `.npmrc`, cookies, lock files,
+or token-bearing config. It is expected to include only the safe default MCP
+catalog at `defaults/mcp-servers.json`.
+
 Run the full local release check:
 
 ```bash

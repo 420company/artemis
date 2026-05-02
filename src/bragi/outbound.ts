@@ -5,8 +5,14 @@
  */
 
 import { BragiStore } from './store.js'
+import { sendBragiImageBroadcast } from './imageBroadcast.js'
 
-export async function sendBragiBroadcast(cwd: string, message: string): Promise<void> {
+export async function sendBragiBroadcast(cwd: string, message: string, imagePath?: string): Promise<void> {
+  if (imagePath) {
+    await sendBragiImageBroadcast({ cwd, imagePath, caption: message, source: 'bragi_outbound' })
+    return
+  }
+
   const store = new BragiStore(cwd)
   const data = await store.load()
 

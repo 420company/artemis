@@ -469,7 +469,9 @@ export type AgentAction =
   | { type: 'mcp_list'; filter?: string; status?: 'all' | 'enabled' | 'disabled' }
   | { type: 'mcp_enable'; id: string }
   | { type: 'mcp_disable'; id: string }
-  | { type: 'mcp_suggest'; intent: string };
+  | { type: 'mcp_suggest'; intent: string }
+  // ── Bragi mobile media bridge ──────────────────────────────────────────
+  | { type: 'bridge_send_image'; imagePath: string; caption?: string; platform?: 'telegram' | 'discord' | 'wechat' | 'all'; targetId?: string };
 
 export type AgentActionType = AgentAction['type'];
 
@@ -540,6 +542,8 @@ export const ALL_AGENT_ACTION_TYPES = [
   'mcp_enable',
   'mcp_disable',
   'mcp_suggest',
+  // ── Bragi mobile media bridge ──────────────────────────────────────────
+  'bridge_send_image',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [

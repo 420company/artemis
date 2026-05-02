@@ -9,6 +9,8 @@
 
 Artemis is a full-featured AI engineering CLI built for people who take their workflow seriously. Thirty-plus AI providers. Ninety pre-bundled MCP plugins. Nine hundred and ninety-nine specialized skills. A dual-model brain architecture. A live messaging bridge. And a Spotify integration so your workspace arrives ready — the moment you do.
 
+Recent Artemis releases have been optimized and upgraded end-to-end by Artemis Code itself: scanning the workspace, editing source, validating builds, hardening release boundaries, and preparing publishable versions through its own tool loop. Artemis has now reached a mature working capability for real engineering tasks. Users can trust that Artemis is actively learning from each release, strengthening its bridges, memory, MCP surface, and safety rails as it continues to evolve.
+
 ---
 
 ## Table of Contents
@@ -464,6 +466,10 @@ Artemis stores all configuration in `~/.artemis/`:
 
 Project-level instructions: place an `ARTEMIS.md` at the root of any repository. Artemis reads it on startup and applies it to all interactions within that workspace. Legacy `Artemis.MD`, `Artemis.md`, `artemis.md`, and `.artemis.md` files are still accepted for compatibility.
 
+### Privacy and local data
+
+Artemis keeps user credentials, bridge sessions, browser state, runtime MCP configuration, and local memories inside user data directories such as `~/.artemis/` or a workspace-local `.artemis/`. These paths are intentionally ignored by Git and excluded from the npm package. The published package only ships the safe default MCP catalog at `defaults/mcp-servers.json`; it does not include your enabled MCP state, API keys, bot tokens, cookies, browser login data, or private bridge lock files.
+
 ---
 
 ## Development
@@ -499,6 +505,8 @@ See [LICENSE](LICENSE) for the full text.
 > 由 [420.COMPANY](https://www.420.company) 构建
 
 Artemis 是一款面向工程师的全功能 AI 编程 CLI，专为认真对待工作流的人设计。三十余家 AI Provider、九十个预装 MCP 插件、九百九十九个专属技能包、双模型脑架构、实时消息桥接——以及一个 Spotify 集成，让你的工作区在你到达的那一刻就已就绪。
+
+最近几个版本已经由 Artemis Code 完全自主优化和升级：它会自己扫描工作区、修改源码、验证构建、加固发布边界，并通过工具闭环准备可发布版本。现在的 Artemis 已经具备成熟的真实工作能力，用户可以相信 Artemis 正在持续进化：它会在每一次发布里继续强化桥接、记忆、MCP 能力和安全护栏。
 
 我们为 vibe coder 打造了更好的 coding 氛围。得益于 Artemis 的 Spotify 集成，你可以通过 Telegram、Discord 或微信等第三方通讯软件随时控制你的 Spotify——无论身处何地，当你打开工作区时，好的 vibes 早已等候在那里。
 
@@ -584,6 +592,8 @@ artemis
 ```
 
 包含：GitHub、Vercel、Prisma、Notion、Slack、Figma、Jira/Confluence、Postman、Shopify、AWS SAM、Azure、Sourcegraph、Aikido Security 等。
+
+隐私边界：npm 包只包含安全的默认 MCP 目录模板 `defaults/mcp-servers.json`。你本机启用过哪些 MCP、API key、bot token、浏览器登录状态、桥接锁文件和会话数据都保存在 `.artemis/` 用户数据目录中；该目录被 Git 与 npm 发布流程排除，不会随包发布。
 
 ---
 
