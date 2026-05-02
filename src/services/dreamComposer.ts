@@ -34,6 +34,7 @@ import {
 } from '../utils/visualGenerationConfig.js'
 import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { broadcastToBridges } from './bridgeNotifier.js'
+import { notifyDreamFinished, notifyDreamStarted } from './dreamNotifications.js'
 
 export interface ComposeDreamOptions {
   cwd: string
@@ -99,6 +100,8 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     }
   }
 
+  await notifyDreamStarted(options.trigger).catch(() => undefined)
+
   options.onStatus?.('🌙 收集白天素材…')
 
   // ── gather context ──────────────────────────────────────────────────────
@@ -127,7 +130,9 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
       profileLabel: typeof profileLabel === 'string' ? profileLabel : undefined,
     })
   } catch (err) {
-    return { ok: false, reason: `no provider configured: ${err instanceof Error ? err.message : String(err)}` }
+    const result = { ok: false, reason: `no provider configured: ${err instanceof Error ? err.message : String(err)}` }
+    await notifyDreamFinished(result).catch(() => undefined)
+    return result
   }
 
   const now = new Date()
@@ -148,11 +153,15 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
       }
     }
   } catch (err) {
-    return { ok: false, reason: `compose failed: ${err instanceof Error ? err.message : String(err)}` }
+    const result = { ok: false, reason: `compose failed: ${err instanceof Error ? err.message : String(err)}` }
+    await notifyDreamFinished(result).catch(() => undefined)
+    return result
   }
 
   if (!dreamMd) {
-    return { ok: false, reason: 'empty dream response' }
+    const result = { ok: false, reason: 'empty dream response' }
+    await notifyDreamFinished(result).catch(() => undefined)
+    return result
   }
 
   // ── persist MD ──────────────────────────────────────────────────────────
@@ -233,7 +242,9 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     bridgesPushed = broadcast.sent
   }
 
-  return { ok: true, entry, bridgesPushed }
+  const result = { ok: true, entry, bridgesPushed }
+  await notifyDreamFinished(result).catch(() => undefined)
+  return result
 }
 
 async function deriveImagePrompt(provider: Awaited<ReturnType<typeof createTrackedProviderFromConfig>>, dreamMd: string, now: Date): Promise<string | null> {

@@ -499,44 +499,16 @@ export async function runCli(argv: string[]): Promise<void> {
       const { startIdleWatcher } = await import('../services/idleWatcher.js')
       startIdleWatcher(options.cwd)
 
-      // After a short delay (let the UI mount first), greet user with latest dream
+      // After a short delay (let the UI mount first), announce the dream system
+      // in the chat window and active bridges.
       setTimeout(async () => {
         try {
-          const dreamIndexPath = path.join(os.homedir(), '.artemis', 'dreams', 'index.json')
-          const raw = await fs.promises.readFile(dreamIndexPath, 'utf8').catch(() => '[]')
-          const dreams = JSON.parse(raw) as Array<{
-            id: string
-            preview?: string
-            imagePath?: string
-            createdAt?: string
-          }>
-          if (dreams.length === 0) {
-            notifyTerminal({
-              kind: 'bridge-status',
-              platform: 'telegram',
-              targetLabel: 'system',
-              text: '🌙 梦境系统已启动。Artemis 还没有做过梦，空闲时会自动编织第一个梦境。',
-              level: 'info',
-            })
-            return
-          }
-
-          const latest = dreams[0]!
-          const dreamDate = latest.createdAt
-            ? new Date(latest.createdAt).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
-            : '最近'
-          const preview = latest.preview ?? '一段模糊的梦...'
-          const imageLine = latest.imagePath
-            ? `\n🖼  点击查看梦境画面: \x1b[36m\x1b[4m${latest.imagePath}\x1b[0m`
-            : ''
-
-          notifyTerminal({
-            kind: 'bridge-message',
-            platform: 'telegram',
-            direction: 'outbound',
-            targetLabel: 'Artemis Dream',
-            text: `🌙 梦境系统已醒来\n\n${dreamDate}的梦——\n${preview}${imageLine}`,
-          })
+          const [{ loadDreamIndex }, { notifyDreamSystemStartup }] = await Promise.all([
+            import('../services/dreamStore.js'),
+            import('../services/dreamNotifications.js'),
+          ])
+          const dreams = await loadDreamIndex()
+          await notifyDreamSystemStartup(dreams[0] ?? null)
         } catch { /* dream greeting is non-essential */ }
       }, 3000)
     } catch { /* dream system is non-essential — never block startup */ }
