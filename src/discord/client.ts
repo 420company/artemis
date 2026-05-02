@@ -124,6 +124,39 @@ export class DiscordBotClient {
       })
     }
   }
+
+  /**
+   * Upload an attachment (typically a PNG screenshot or generated image) to a
+   * Discord channel using multipart/form-data on the regular messages
+   * endpoint. Used by the dream system and the bridge image-broadcast hook so
+   * remote users see the actual image inline instead of a path string.
+   */
+  async sendAttachment(channelId: string, filePath: string, caption?: string): Promise<void> {
+    const { readFile } = await import('node:fs/promises')
+    const { basename } = await import('node:path')
+    const buffer = await readFile(filePath)
+    const filename = basename(filePath)
+    const form = new FormData()
+    const payload: Record<string, unknown> = { allowed_mentions: { parse: [] } }
+    if (caption && caption.trim()) payload.content = caption.slice(0, 2000)
+    form.append('payload_json', JSON.stringify(payload))
+    form.append('files[0]', new Blob([new Uint8Array(buffer)]), filename)
+
+    const response = await fetch(`${DISCORD_API_BASE}/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: { authorization: `Bot ${this.token}` }, // do NOT set content-type; let fetch set the boundary
+      body: form,
+    })
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(formatDiscordApiFailure({
+        path: `/channels/${channelId}/messages (attachment)`,
+        status: response.status,
+        statusText: response.statusText,
+        body: body.slice(0, 300),
+      }))
+    }
+  }
 }
 
 export class DiscordGatewayBridge {
@@ -146,6 +179,9 @@ export class DiscordGatewayBridge {
 
   async getCurrentUser(): Promise<DiscordCurrentUser> { return this.client.getCurrentUser() }
   async sendMessage(channelId: string, text: string): Promise<void> { await this.client.sendMessage(channelId, text) }
+  async sendAttachment(channelId: string, filePath: string, caption?: string): Promise<void> {
+    await this.client.sendAttachment(channelId, filePath, caption)
+  }
 
   async start(options?: { signal?: AbortSignal; onInfo?: (msg: string) => void }): Promise<void> {
     if (this.started) return

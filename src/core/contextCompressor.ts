@@ -235,6 +235,17 @@ export interface CompressResult {
   tokensAfter: number
 }
 
+/**
+ * Hard cap on session size before compression fires, regardless of the model's
+ * context window. Without this, a 1M-context model would let the conversation
+ * grow to 400K tokens (40% of 1M) before compressing — meaning every API call
+ * burned 400K input tokens unnecessarily. We now compress at min(40% of model
+ * limit, ABSOLUTE_COMPRESS_AT_TOKENS) so users with big-context models still
+ * see compression kick in at a reasonable budget instead of paying for the
+ * full window every turn.
+ */
+const ABSOLUTE_COMPRESS_AT_TOKENS = 40_000
+
 export async function compressMessages(
   messages: SessionMessage[],
   summarize: SummarizeFn,
@@ -254,7 +265,11 @@ export async function compressMessages(
 
   const tokensBefore = estimateMsgListTokens(messages)
 
-  if (tokensBefore < tokenLimit * threshold) {
+  // Compression triggers at min(threshold% of model limit, hard absolute cap).
+  // The hard cap is the new piece — it prevents big-context models from
+  // letting conversations grow to 400K+ before any cleanup happens.
+  const triggerAt = Math.min(tokenLimit * threshold, ABSOLUTE_COMPRESS_AT_TOKENS)
+  if (tokensBefore < triggerAt) {
     return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore }
   }
 

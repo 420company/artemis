@@ -8,6 +8,17 @@ type TelegramApiResponse<T> = {
   description?: string
 }
 
+function guessMimeType(filename: string): string {
+  const lower = filename.toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.gif')) return 'image/gif'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.bmp')) return 'image/bmp'
+  if (lower.endsWith('.svg')) return 'image/svg+xml'
+  return 'application/octet-stream'
+}
+
 function formatTelegramApiFailure(options: {
   method: string
   status?: number
@@ -163,6 +174,35 @@ export class TelegramBotClient {
     const chunks = splitMessage(text)
     for (const chunk of chunks) {
       await this.call('sendMessage', { chat_id: chatId, text: chunk })
+    }
+  }
+
+  /**
+   * Upload an image file to a chat using sendPhoto. Used by the dream system
+   * and the bridge image-broadcast hook so phone users see actual screenshots
+   * inline instead of the "🖼 /Users/.../foo.png" text fallback.
+   */
+  async sendPhoto(chatId: string, imagePath: string, caption?: string): Promise<void> {
+    const { readFile } = await import('node:fs/promises')
+    const { basename } = await import('node:path')
+    const buffer = await readFile(imagePath)
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    if (caption) form.append('caption', caption.slice(0, 1024)) // Telegram caption cap
+    form.append('photo', new Blob([new Uint8Array(buffer)], { type: guessMimeType(imagePath) }), basename(imagePath))
+    const response = await fetch(`${this.baseUrl}/sendPhoto`, { method: 'POST', body: form })
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(formatTelegramApiFailure({
+        method: 'sendPhoto',
+        status: response.status,
+        statusText: response.statusText,
+        body: body.slice(0, 300),
+      }))
+    }
+    const json = await response.json() as TelegramApiResponse<unknown>
+    if (!json.ok) {
+      throw new Error(formatTelegramApiFailure({ method: 'sendPhoto', description: json.description }))
     }
   }
 

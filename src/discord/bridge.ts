@@ -226,17 +226,21 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
         ...(bragiLive.platforms.discord?.allowedTargets ?? []),
         ...(data.targets ?? []).map(t => t.targetId),
       ])
+      const { existsSync } = await import('node:fs')
       for (const targetId of allowedTargets) {
         try {
-          await gateway.sendMessage(targetId, payload.text)
-          if (payload.imagePath) {
-            // Discord text channel: attach the image path note since uploading
-            // attachments via the gateway would require multipart form support
-            // we don't have inline. The user can open the path locally.
-            await gateway.sendMessage(targetId, `🖼 ${payload.imagePath}`)
+          if (payload.imagePath && existsSync(payload.imagePath)) {
+            // Real attachment upload — phone users see the screenshot inline.
+            await gateway.sendAttachment(targetId, payload.imagePath, payload.text)
+          } else {
+            await gateway.sendMessage(targetId, payload.text)
+            if (payload.imagePath) {
+              // File missing on disk — surface path as fallback.
+              await gateway.sendMessage(targetId, `🖼 ${payload.imagePath}`)
+            }
           }
         } catch (err) {
-          options.onInfo?.(`[discord] dream push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
+          options.onInfo?.(`[discord] push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
     },

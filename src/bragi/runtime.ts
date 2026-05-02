@@ -78,6 +78,55 @@ function summarizeToolOutput(output: unknown): string {
   return compact ? ` · ${truncate(compact, 160)}` : ''
 }
 
+const IMAGE_PRODUCING_TOOLS = new Set([
+  'browser_screenshot',
+  'generate_image',
+  'generate_video', // mp4/gif first frame may be sent as preview where supported
+])
+
+const IMAGE_EXTENSION_RE = /\.(png|jpe?g|gif|webp|bmp|svg)\b/i
+
+/**
+ * Extract image file paths from a tool's output string. We only run the scan
+ * for tools known to produce images (browser_screenshot, generate_image,
+ * generate_video) so an unrelated `read_file` of a doc that happens to mention
+ * "image.png" doesn't trigger a phantom broadcast.
+ *
+ * Output shapes the helper recognizes:
+ *   - "📸 已截图：/Users/.../screenshot-123.png\n   URL: ..."
+ *   - "Generated 1 image(s) via openai/gpt-image-2: /Users/.../foo.png"
+ *   - JSON envelope { output: "...path..." }
+ *   - Plain absolute path lines
+ *
+ * Returns absolute paths, deduped, in source order. Existence is NOT checked
+ * here — the bridge push will silently skip missing files.
+ */
+function extractImagePathsFromToolOutput(toolName: string, output: unknown): string[] {
+  if (!IMAGE_PRODUCING_TOOLS.has(toolName)) return []
+  let text: string
+  if (typeof output === 'string') {
+    text = output
+  } else if (output && typeof output === 'object') {
+    try { text = JSON.stringify(output) } catch { return [] }
+  } else {
+    return []
+  }
+  const found = new Set<string>()
+  // Absolute POSIX paths or Windows drive paths ending in an image extension.
+  // The lookbehind matches start-of-string OR any character that is NOT a
+  // path component character — this catches Chinese punctuation (：，。)
+  // sitting right before the path, which a simple [\s"'] class would miss.
+  const re = /(?:^|[^A-Za-z0-9_./\\:])((?:\/|[A-Za-z]:[\\/])[^\s"'`]*?\.(?:png|jpe?g|gif|webp|bmp|svg))(?=$|[\s"'`])/gi
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) {
+    const candidate = match[1]?.trim()
+    if (candidate && IMAGE_EXTENSION_RE.test(candidate)) {
+      found.add(candidate)
+    }
+  }
+  return Array.from(found)
+}
+
 function formatMobileReply(text: string): string {
   let out = stripAnsi(text).replace(/\r\n?/g, '\n').trim()
   if (!out) return ''
@@ -449,6 +498,29 @@ export async function runRemoteCommand(
               )
               emitProgress(msg, ok ? 'info' : 'warn')
               recordActivity(msg)
+              // Auto-push generated images to every active bridge so phone
+              // users see what the AI is showing on the desktop. Without
+              // this, browser_screenshot / generate_image saved the file
+              // locally but bridge users only got a text path they can't
+              // open from their phone.
+              if (ok) {
+                const imagePaths = extractImagePathsFromToolOutput(String(name), output)
+                for (const imagePath of imagePaths) {
+                  void (async () => {
+                    try {
+                      const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
+                      await broadcastToBridges({
+                        text: t(
+                          `🖼 工具产出：${String(name)}`,
+                          `🖼 Tool output: ${String(name)}`,
+                        ),
+                        imagePath,
+                        source: `tool:${String(name)}`,
+                      })
+                    } catch { /* image push is best-effort */ }
+                  })()
+                }
+              }
             },
             onToolLog: (message, level = 'info') => {
               emitProgress(message, level)

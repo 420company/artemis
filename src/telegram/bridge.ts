@@ -304,21 +304,22 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
     push: async (payload) => {
       const data = await telegramStore.load()
       const targets = data.allowedChatIds ?? []
+      const { existsSync } = await import('node:fs')
       for (const chatId of targets) {
         try {
-          await client.sendMessage(chatId, payload.text)
-          if (payload.imagePath) {
-            // Telegram has sendPhoto; if we don't have it wired up, fall back
-            // to a text note so the user knows where the image is on disk.
-            const sendPhoto = (client as unknown as { sendPhoto?: (id: string, p: string) => Promise<void> }).sendPhoto
-            if (typeof sendPhoto === 'function') {
-              await sendPhoto.call(client, chatId, payload.imagePath)
-            } else {
+          if (payload.imagePath && existsSync(payload.imagePath)) {
+            // Use sendPhoto with caption — image + caption in one message,
+            // so phone users actually see the screenshot inline.
+            await client.sendPhoto(chatId, payload.imagePath, payload.text)
+          } else {
+            await client.sendMessage(chatId, payload.text)
+            if (payload.imagePath) {
+              // File doesn't exist (yet?) — surface the path as fallback.
               await client.sendMessage(chatId, `🖼 ${payload.imagePath}`)
             }
           }
         } catch (err) {
-          options.onInfo?.(`[telegram] dream push to ${chatId} failed: ${err instanceof Error ? err.message : String(err)}`)
+          options.onInfo?.(`[telegram] push to ${chatId} failed: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
     },
