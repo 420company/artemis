@@ -988,7 +988,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             }
             options.onInfo?.(buildPanel(
               `${options.channelLabel} outbound`,
-              [`[${options.channelLabel.toLowerCase()}] Artemis → ${truncate(mobileReply.replace(/\s+/g, ' '), 240)}`]
+              [`[${options.channelLabel.toLowerCase()}] Artemis sent final reply (${mobileReply.length} chars)`]
             ))
             options.onNotify?.({
               kind: 'bridge-message',

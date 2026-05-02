@@ -355,17 +355,6 @@ export async function runCli(argv: string[]): Promise<void> {
       logWatchAbort = new AbortController()
       const { signal } = logWatchAbort
 
-      const SEPARATOR = /^─{10,}/
-      // Detects "Telegram inbound", "Discord outbound", "WeChat outbound", etc.
-      // Setup/test-success panels are internal bridge diagnostics; do not mirror
-      // them into the chat scrollback as user-visible system messages.
-      const DIRECTION_RE = /^(Telegram|Discord|WeChat)\s+(inbound|outbound)/i
-      // Detects "[telegram] BKK0420 → hi" style content lines
-      const CONTENT_RE = /^\[(\w+)\]\s+(.+?)\s*→\s*(.+)/
-      // Platform name normalization
-      const normPlatform = (s: string): 'telegram' | 'discord' | 'wechat' =>
-        s.toLowerCase() === 'discord' ? 'discord' : s.toLowerCase() === 'wechat' ? 'wechat' : 'telegram'
-
       const isBridgeTerminalEvent = (value: unknown): value is BridgeTerminalEvent => {
         if (!value || typeof value !== 'object') return false
         const event = value as Partial<BridgeTerminalEvent>
@@ -395,101 +384,35 @@ export async function runCli(argv: string[]): Promise<void> {
           }
           offset = current.size
 
-          // Parse multi-line blocks separated by ────── lines.
-          // Format:
-          //   [timestamp] [platform] ──────────────────────
-          //   Telegram inbound
+          // Only consume structured bridge events. The daemon also writes
+          // human-readable diagnostic panels via onInfo ("Telegram inbound",
+          // "Telegram outbound", etc.). Older CLI code parsed those panels as
+          // chat messages too, which made every mobile message appear twice in
+          // the terminal. It was especially bad for outbound replies because
+          // the diagnostic panel intentionally contains only a truncated preview;
+          // parsing it as a chat message displayed a second, cut-off
+          // "Telegram · Artemis" reply.
           //
-          //   [telegram] BKK0420 → hey
-          //   ──────────────────────────────────────────────
+          // The structured [bridge-event] line carries the full message text and
+          // exact direction/target metadata for Telegram, Discord and WeChat, so
+          // it is the single source of truth for terminal mirroring.
           const rawLines = buf.toString('utf8').split('\n')
-          let blockLines: string[] = []
-          let inBlock = false
-          const legacyLines: string[] = []
 
           for (const rawLine of rawLines) {
             const eventMatch = rawLine.match(/^\[[^\]]+\]\s+\[bridge-event\]\s+(\{.*\})\s*$/)
-            if (!eventMatch) {
-              legacyLines.push(rawLine)
-              continue
-            }
+            if (!eventMatch) continue
             try {
               const parsed = JSON.parse(eventMatch[1] ?? '')
               if (isBridgeTerminalEvent(parsed)) {
                 notifyTerminal(parsed)
               }
             } catch {
-              // Keep malformed lines visible to the old log parser instead of
-              // silently dropping potentially useful diagnostics.
-              legacyLines.push(rawLine)
+              // Ignore malformed bridge-event payloads. The raw gateway log is
+              // still available on disk for diagnostics, but malformed JSON must
+              // never fall back to legacy panel parsing and risk duplicate or
+              // truncated chat output.
             }
           }
-
-          const flushBlock = () => {
-            if (blockLines.length === 0) return
-            // Find direction header and content
-            let direction: 'inbound' | 'outbound' | undefined
-            let platform: 'telegram' | 'discord' | 'wechat' = 'telegram'
-            const contentParts: string[] = []
-
-            for (const bl of blockLines) {
-              const trimmed = bl.trim()
-              if (!trimmed) continue
-              const dirMatch = trimmed.match(DIRECTION_RE)
-              if (dirMatch) {
-                platform = normPlatform(dirMatch[1])
-                if (dirMatch[2].toLowerCase() === 'inbound') direction = 'inbound'
-                else if (dirMatch[2].toLowerCase() === 'outbound') direction = 'outbound'
-                continue
-              }
-              // Skip separator lines and timestamp-prefixed lines
-              if (SEPARATOR.test(trimmed)) continue
-              if (/^\[\d{4}-/.test(trimmed)) continue
-              contentParts.push(trimmed)
-            }
-
-            const text = contentParts.join('\n').trim()
-            if (!text) { blockLines = []; return }
-
-            if (direction) {
-              // Extract sender and message separately.
-              // The header already displays "Platform · SenderName",
-              // so the body should only contain the message text.
-              const contentMatch = text.match(CONTENT_RE)
-              const senderName = contentMatch?.[2] ?? (direction === 'outbound' ? 'Artemis' : 'User')
-              const messageBody = contentMatch?.[3] ?? text
-              notifyTerminal({
-                kind: 'bridge-message',
-                platform,
-                direction,
-                targetLabel: senderName,
-                text: messageBody,
-              })
-            }
-            blockLines = []
-          }
-
-          for (const rawLine of legacyLines) {
-            const line = rawLine.replace(/\r$/, '')
-            // Lines starting with [timestamp] [name] ────── open a new block
-            if (/\[\d{4}-.*\]\s*\[\w+\]\s*─{10,}/.test(line)) {
-              flushBlock()
-              inBlock = true
-              continue
-            }
-            // A standalone separator line closes the block
-            if (SEPARATOR.test(line.trim())) {
-              if (inBlock) {
-                flushBlock()
-                inBlock = false
-              }
-              continue
-            }
-            if (inBlock) {
-              blockLines.push(line)
-            }
-          }
-          // Don't flush incomplete blocks (they may span across poll intervals)
         } catch { /* log file may not exist yet */ }
       }
 
