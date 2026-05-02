@@ -100,10 +100,6 @@ export async function runCli(argv: string[]): Promise<void> {
   if (options.command === 'gateway') {
     await runGatewayCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
     return
-  } else {
-    // For normal terminal chat, never forcefully kill the background gateway daemon
-    // just to take over its messaging connections. Let the daemon handle the bridge.
-    process.env.ARTEMIS_BRIDGE_LOCK_MODE = 'passive'
   }
 
   if (!settings.uiLocaleConfigured) {
