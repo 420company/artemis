@@ -21,6 +21,7 @@ import { BragiStore } from '../bragi/store.js'
 import { TelegramStore } from '../telegram/store.js'
 import { WeChatStore } from '../wechat/store.js'
 import { runWeixinQRLogin } from '../wechat/setup.js'
+import { ensureGatewayAutoStart } from './gatewayService.js'
 import { DiscordBotClient } from '../discord/client.js'
 import { promptForVerifiedProviderProfile } from '../providers/onboarding.js'
 import { detectModelContextLength } from '../providers/modelContext.js'
@@ -1080,6 +1081,12 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
           }
         }
       }
+
+      // First-run onboarding writes bridge credentials directly instead of
+      // calling each platform's standalone setup function. Install/start the
+      // shared Gateway here too, otherwise Windows users finish setup with
+      // configured=yes but Installed=no until they manually run gateway start.
+      await ensureGatewayAutoStart(cwd ?? HOME_DIR)
     }
 
     // Mark onboarding complete

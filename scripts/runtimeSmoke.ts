@@ -125,6 +125,17 @@ assert(
 )
 
 {
+  const onboardingSource = fs.readFileSync(path.join(process.cwd(), 'src/cli/onboarding.ts'), 'utf8')
+  const bridgeConfigIndex = onboardingSource.indexOf('if (configuredBridges.length > 0)')
+  const gatewayIndex = onboardingSource.indexOf('await ensureGatewayAutoStart(cwd ?? HOME_DIR)', bridgeConfigIndex)
+  const markCompleteIndex = onboardingSource.indexOf('await settingsStore.update({ onboardingCompleted: true })', bridgeConfigIndex)
+  assert(
+    'onboarding: configured messaging bridges install/start Gateway before completion',
+    bridgeConfigIndex >= 0 && gatewayIndex > bridgeConfigIndex && markCompleteIndex > gatewayIndex,
+  )
+}
+
+{
   const recovered = parseAssistantEnvelopeForSmoke(`
 <tool_calls>
 <call name="write_file">{"filePath":"index.html","content":"<main>ok</main>\\n"}</call>
