@@ -41,6 +41,9 @@ export type VerificationCommandRecord = {
 };
 
 export type PermissionMode =
+  | 'PRODUCER'
+  | 'GHOSTWRITER'
+  | 'WRITER'
   | 'prompt'
   | 'read-only'
   | 'accept-edits'

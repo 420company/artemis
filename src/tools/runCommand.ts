@@ -232,7 +232,7 @@ export async function executeRunCommand(
     action.timeoutMs,
   );
 
-  if (commandAccessesSensitivePath(action.command)) {
+  if (context.permissionMode !== 'accept-all' && commandAccessesSensitivePath(action.command)) {
     return Promise.resolve({
       action,
       ok: false,

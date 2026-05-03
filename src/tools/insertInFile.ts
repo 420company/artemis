@@ -68,7 +68,9 @@ export async function executeInsertInFile(
     toolName: 'insert_in_file',
     context,
   });
-  ensureNotSensitivePath(absolute, action.path);
+  if (context.permissionMode !== 'accept-all') {
+    ensureNotSensitivePath(absolute, action.path);
+  }
   const content = await readTextFileSafe(absolute);
 
   let nextContent: string;

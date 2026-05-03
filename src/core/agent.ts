@@ -4036,12 +4036,15 @@ function mapPermissionModeForToolContext(
   mode: ReturnType<PermissionManager['getMode']>,
 ): 'ask' | 'accept-all' | 'read' | 'write' {
   switch (mode) {
+    case 'PRODUCER':
     case 'accept-all':
       return 'accept-all';
+    case 'WRITER':
     case 'accept-edits':
       return 'write';
     case 'read-only':
       return 'read';
+    case 'GHOSTWRITER':
     case 'prompt':
     default:
       return 'ask';

@@ -32,7 +32,8 @@ function now(): string { return new Date().toISOString() }
 function getEmptyStore(): WeChatStoreData { return { allowedUsers: [], contacts: [] } }
 
 function isPermissionMode(v: unknown): v is PermissionMode {
-  return v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
+  return v === 'PRODUCER' || v === 'GHOSTWRITER' || v === 'WRITER' ||
+    v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
 }
 
 export class WeChatStore {

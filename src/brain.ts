@@ -1093,7 +1093,19 @@ function commonPathPrefix(paths: string[]): string | null {
         return null;
     }
 
-    const splitPaths = paths.map((entry) => path.resolve(entry).split(path.sep).filter(Boolean));
+    const windowsLike = paths.every((entry) => /^[A-Za-z]:(?:[\\/]|$)|^\\\\/.test(entry));
+    const pathApi = windowsLike ? path.win32 : path;
+    const resolvedPaths = paths.map((entry) => pathApi.resolve(entry));
+    const roots = resolvedPaths.map((entry) => pathApi.parse(entry).root);
+    const firstRoot = roots[0];
+    if (!firstRoot || roots.some((root) => root.toLowerCase() !== firstRoot.toLowerCase())) {
+        return null;
+    }
+
+    const splitPaths = resolvedPaths.map((entry, index) => {
+        const withoutRoot = entry.slice(roots[index]!.length);
+        return withoutRoot.split(pathApi.sep).filter(Boolean);
+    });
     const minLength = Math.min(...splitPaths.map((segments) => segments.length));
     const shared: string[] = [];
 
@@ -1106,10 +1118,10 @@ function commonPathPrefix(paths: string[]): string | null {
     }
 
     if (shared.length === 0) {
-        return null;
+        return firstRoot;
     }
 
-    return path.join(path.parse(path.resolve(paths[0]!)).root, ...shared);
+    return pathApi.join(firstRoot, ...shared);
 }
 
 async function maybeSwitchWorkspaceForExtraTool(
@@ -1235,7 +1247,7 @@ async function executeToolInner(name: any, input: any, opts: any) {
         }
         return attachDirectToolFailureError(
             name,
-            await executeExtraTool(name, input, workspace.cwd),
+            await executeExtraTool(name, input, workspace.cwd, mapPermissionModeForToolContext(permissionMode)),
         );
     }
     // ── http_request is handled inline (not in TOOL_REGISTRY) ────────────────
@@ -1332,10 +1344,54 @@ function isEditPermissionCategory(category: string): boolean {
     return isReadPermissionCategory(category) || category === 'write';
 }
 
+function mapPermissionModeForToolContext(permissionMode: any): 'ask' | 'accept-all' | 'read' | 'write' {
+    switch (permissionMode) {
+        case 'PRODUCER':
+        case 'accept-all':
+            return 'accept-all';
+        case 'WRITER':
+        case 'accept-edits':
+            return 'write';
+        case 'read-only':
+            return 'read';
+        case 'GHOSTWRITER':
+        case 'prompt':
+        default:
+            return 'ask';
+    }
+}
+
 async function checkPermission(toolName: any, category: any, permissionMode: any, onPermissionRequest: any, args: any) {
     const normalizedCategory = String(category ?? 'none');
     if (isReadPermissionCategory(normalizedCategory)) {
         return null;
+    }
+
+    if (permissionMode === 'PRODUCER') {
+        return null;
+    }
+
+    if (permissionMode === 'WRITER') {
+        if (isEditPermissionCategory(normalizedCategory)) {
+            return null;
+        }
+        if (onPermissionRequest) {
+            const allowed = await onPermissionRequest(toolName, category, args);
+            if (!allowed)
+                return `User denied permission for tool "${toolName}".`;
+            return null;
+        }
+        return `Permission denied: "${toolName}" requires ${category} access but WRITER mode has no permission callback.`;
+    }
+
+    if (permissionMode === 'GHOSTWRITER') {
+        if (onPermissionRequest) {
+            const allowed = await onPermissionRequest(toolName, category, args);
+            if (!allowed)
+                return `User denied permission for tool "${toolName}".`;
+            return null;
+        }
+        return `Permission denied: "${toolName}" requires ${category} access but GHOSTWRITER mode has no permission callback.`;
     }
 
     // read-only: only read/no-op categories allowed
@@ -1660,7 +1716,7 @@ function buildProviderIncompatibilityMessage(): string {
 }
 
 export interface ThinkOptions {
-    permissionMode?: 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+    permissionMode?: 'PRODUCER' | 'GHOSTWRITER' | 'WRITER' | 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
     onPermissionRequest?: (toolName: string, category: string, args: any) => Promise<boolean>;
     locale?: 'en' | 'zh';
     cwd?: string;

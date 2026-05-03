@@ -467,7 +467,7 @@ export async function runRemoteCommand(
         //                emits "let me run pwd" intent text whose call gets
         //                denied, leaving the IM user with a dangling intent
         //                line as the only reply.
-        //   accept-*   → enable tools so remote coding via IM works.
+        //   PRODUCER/GHOSTWRITER/WRITER/accept-* → enable tools so remote coding via IM works.
         const result = await withBridgeThinkLock(async () => {
           restoreSession(binding.storedSession.messages)
           return think(effectiveBody, {

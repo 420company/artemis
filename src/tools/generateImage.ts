@@ -157,7 +157,9 @@ export async function executeGenerateImage(action: any, context: any) {
                 toolName: 'generate_image',
                 context,
             });
-            ensureNotSensitivePath(absolute, targetRaw);
+            if (context.permissionMode !== 'accept-all') {
+                ensureNotSensitivePath(absolute, targetRaw);
+            }
 
             const buf = await downloadUrl(url);
             await ensureDir(path.dirname(absolute));
@@ -390,7 +392,9 @@ async function fallbackToDeepSearch(action: any, context: any, reason?: string) 
             toolName: 'generate_image',
             context,
         });
-        ensureNotSensitivePath(absolute, targetRaw);
+        if (context.permissionMode !== 'accept-all') {
+            ensureNotSensitivePath(absolute, targetRaw);
+        }
         await ensureDir(path.dirname(absolute));
         
         // 执行深度搜索

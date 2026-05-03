@@ -239,13 +239,13 @@ export class PermissionManager {
       return { allowed: false, reason: `${category} blocked by read-only mode` };
     }
 
-    if (this.mode === 'accept-all') {
-      return { allowed: true, reason: 'allowed by accept-all mode' };
+    if (this.mode === 'PRODUCER' || this.mode === 'accept-all') {
+      return { allowed: true, reason: `allowed by ${this.mode} mode` };
     }
 
-    if (this.mode === 'accept-edits') {
+    if (this.mode === 'WRITER' || this.mode === 'accept-edits') {
       if (category === 'write') {
-        return { allowed: true, reason: 'allowed by accept-edits mode' };
+        return { allowed: true, reason: `allowed by ${this.mode} mode` };
       }
       return this.prompt(action, category);
     }

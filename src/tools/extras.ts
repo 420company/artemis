@@ -29,11 +29,13 @@ type TR = { ok: boolean; output: string }
 
 /** Resolve a user-supplied path inside `cwd` AND guard against sensitive dirs.
  *  Returns a TR error instead of throwing to match the other exec* helpers. */
-function guardPath(cwd: string, inputPath: string): { ok: true; absolute: string } | { ok: false; output: string } {
+function guardPath(cwd: string, inputPath: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): { ok: true; absolute: string } | { ok: false; output: string } {
   try {
     const candidate = resolveWorkspaceCandidatePath(inputPath, cwd)
     const absolute = resolveInsideRoot(cwd, candidate)
-    ensureNotSensitivePath(absolute, inputPath)
+    if (permissionMode !== 'accept-all') {
+      ensureNotSensitivePath(absolute, inputPath)
+    }
     return { ok: true, absolute }
   } catch (e) {
     return { ok: false, output: String(e instanceof Error ? e.message : e) }
@@ -62,40 +64,40 @@ async function gitRun(args: string, cwd: string): Promise<TR> {
 
 // ── File System ───────────────────────────────────────────────────────────────
 
-export async function execDeleteFile(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''))
+export async function execDeleteFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try { await unlink(g.absolute); return { ok: true, output: `Deleted: ${g.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execMoveFile(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const gs = guardPath(cwd, String(inp.from ?? ''))
+export async function execMoveFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const gs = guardPath(cwd, String(inp.from ?? ''), permissionMode)
   if (!gs.ok) return gs
-  const gd = guardPath(cwd, String(inp.to ?? ''))
+  const gd = guardPath(cwd, String(inp.to ?? ''), permissionMode)
   if (!gd.ok) return gd
   try { await rename(gs.absolute, gd.absolute); return { ok: true, output: `Moved: ${gs.absolute} → ${gd.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execCopyFile(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const gs = guardPath(cwd, String(inp.from ?? ''))
+export async function execCopyFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const gs = guardPath(cwd, String(inp.from ?? ''), permissionMode)
   if (!gs.ok) return gs
-  const gd = guardPath(cwd, String(inp.to ?? ''))
+  const gd = guardPath(cwd, String(inp.to ?? ''), permissionMode)
   if (!gd.ok) return gd
   try { await copyFile(gs.absolute, gd.absolute); return { ok: true, output: `Copied: ${gs.absolute} → ${gd.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execCreateDirectory(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''))
+export async function execCreateDirectory(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try { await mkdir(g.absolute, { recursive: true }); return { ok: true, output: `Created directory: ${g.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execDeleteDirectory(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''))
+export async function execDeleteDirectory(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   const force = inp.force === true
   try {
@@ -104,8 +106,8 @@ export async function execDeleteDirectory(inp: Record<string, unknown>, cwd: str
   } catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execFileInfo(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''))
+export async function execFileInfo(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try {
     const s = await stat(g.absolute)
@@ -118,8 +120,8 @@ export async function execFileInfo(inp: Record<string, unknown>, cwd: string): P
   } catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execListDirectory(inp: Record<string, unknown>, cwd: string): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? '.'))
+export async function execListDirectory(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
+  const g = guardPath(cwd, String(inp.path ?? '.'), permissionMode)
   if (!g.ok) return g
   try {
     const entries = await readdir(g.absolute, { withFileTypes: true })
@@ -249,9 +251,9 @@ export async function execDedupeLines(inp: Record<string, unknown>): Promise<TR>
   return { ok: true, output: `Removed ${lines.length - unique.length} duplicates.\n${unique.join('\n')}` }
 }
 
-export async function execCountLines(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+export async function execCountLines(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
   const { readFile } = await import('node:fs/promises')
-  const g = guardPath(cwd, String(inp.path ?? ''))
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try {
     const content = await readFile(g.absolute, 'utf8')
@@ -363,9 +365,9 @@ export async function execCheckUrl(inp: Record<string, unknown>): Promise<TR> {
   } catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execDownloadFile(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+export async function execDownloadFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
   const url = String(inp.url ?? '')
-  const g = guardPath(cwd, String(inp.destination ?? basename(url.split('?')[0] ?? 'download')))
+  const g = guardPath(cwd, String(inp.destination ?? basename(url.split('?')[0] ?? 'download')), permissionMode)
   if (!g.ok) return g
   try {
     const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) })
@@ -432,9 +434,9 @@ export async function execFormatCode(inp: Record<string, unknown>, cwd: string):
   } catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execGetImports(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+export async function execGetImports(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
   const { readFile } = await import('node:fs/promises')
-  const g = guardPath(cwd, String(inp.path ?? ''))
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try {
     const content = await readFile(g.absolute, 'utf8')
@@ -443,9 +445,9 @@ export async function execGetImports(inp: Record<string, unknown>, cwd: string):
   } catch (e) { return { ok: false, output: String(e) } }
 }
 
-export async function execPathInfo(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+export async function execPathInfo(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
   const p = String(inp.path ?? cwd)
-  const g = guardPath(cwd, p)
+  const g = guardPath(cwd, p, permissionMode)
   if (!g.ok) return g
   return {
     ok: true,
@@ -463,9 +465,9 @@ export async function execUrlEncode(inp: Record<string, unknown>): Promise<TR> {
   return { ok: true, output: mode === 'decode' ? decodeURIComponent(text) : encodeURIComponent(text) }
 }
 
-export async function execHashFile(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+export async function execHashFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'accept-all' | 'read' | 'write'): Promise<TR> {
   const { readFile } = await import('node:fs/promises')
-  const g = guardPath(cwd, String(inp.path ?? ''))
+  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   const algo = String(inp.algorithm ?? 'sha256')
   try {
@@ -493,16 +495,17 @@ export async function executeExtraTool(
   name: string,
   input: Record<string, unknown>,
   cwd: string,
+  permissionMode?: 'ask' | 'accept-all' | 'read' | 'write',
 ): Promise<{ ok: boolean; output: string }> {
   switch (name) {
     // File ops
-    case 'delete_file':       return execDeleteFile(input, cwd)
-    case 'move_file':         return execMoveFile(input, cwd)
-    case 'copy_file':         return execCopyFile(input, cwd)
-    case 'create_directory':  return execCreateDirectory(input, cwd)
-    case 'delete_directory':  return execDeleteDirectory(input, cwd)
-    case 'file_info':         return execFileInfo(input, cwd)
-    case 'list_directory':    return execListDirectory(input, cwd)
+    case 'delete_file':       return execDeleteFile(input, cwd, permissionMode)
+    case 'move_file':         return execMoveFile(input, cwd, permissionMode)
+    case 'copy_file':         return execCopyFile(input, cwd, permissionMode)
+    case 'create_directory':  return execCreateDirectory(input, cwd, permissionMode)
+    case 'delete_directory':  return execDeleteDirectory(input, cwd, permissionMode)
+    case 'file_info':         return execFileInfo(input, cwd, permissionMode)
+    case 'list_directory':    return execListDirectory(input, cwd, permissionMode)
     // Git
     case 'git_status':  return execGitStatus(input, cwd)
     case 'git_diff':    return execGitDiff(input, cwd)
@@ -517,7 +520,7 @@ export async function executeExtraTool(
     case 'diff_text':    return execDiffText(input)
     case 'sort_lines':   return execSortLines(input)
     case 'dedupe_lines': return execDedupeLines(input)
-    case 'count_lines':  return execCountLines(input, cwd)
+    case 'count_lines':  return execCountLines(input, cwd, permissionMode)
     // Encoding/crypto
     case 'base64_encode': return execBase64Encode(input)
     case 'base64_decode': return execBase64Decode(input)
@@ -531,16 +534,16 @@ export async function executeExtraTool(
     case 'calculate':      return execCalculate(input)
     // Network
     case 'check_url':     return execCheckUrl(input)
-    case 'download_file': return execDownloadFile(input, cwd)
+    case 'download_file': return execDownloadFile(input, cwd, permissionMode)
     case 'dns_lookup':    return execDnsLookup(input)
     case 'parse_url':     return execParseUrl(input)
     // Dev
     case 'npm_run':     return execNpmRun(input, cwd)
     case 'format_code': return execFormatCode(input, cwd)
-    case 'get_imports': return execGetImports(input, cwd)
-    case 'path_info':   return execPathInfo(input, cwd)
+    case 'get_imports': return execGetImports(input, cwd, permissionMode)
+    case 'path_info':   return execPathInfo(input, cwd, permissionMode)
     case 'url_encode':  return execUrlEncode(input)
-    case 'hash_file':   return execHashFile(input, cwd)
+    case 'hash_file':   return execHashFile(input, cwd, permissionMode)
     // Notebook
     case 'notebook_create':    return execNotebookCreate(input, cwd)
     case 'notebook_list':      return execNotebookList(input, cwd)

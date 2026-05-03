@@ -9,6 +9,7 @@ import type {
   AgentRole,
   HeimdallEventKind,
   HeimdallUploadRecord,
+  PermissionMode,
   SessionRecord,
   TaskRuntimeStatus,
 } from './types.js';
@@ -70,7 +71,7 @@ export type HeimdallThreadState = {
     latestMediaPaths: string[];
     updatedAt: string;
   };
-  permissionMode: 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+  permissionMode: PermissionMode;
   workflowMode?: WorkflowMode;
   runtimeId?: string;
   remoteOrigin?: string;
@@ -1053,7 +1054,7 @@ export function registerHeimdallMiddleware(
 export async function prepareHeimdallThreadState(options: {
   cwd: string;
   session: SessionRecord;
-  permissionMode: 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+  permissionMode: PermissionMode;
   workflowMode?: WorkflowMode;
   runtimeId?: string;
   remoteOrigin?: string;

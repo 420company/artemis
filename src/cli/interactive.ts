@@ -1350,7 +1350,6 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     path.join(HOME_DIR, '.ssh'),
     path.join(HOME_DIR, '.gnupg'),
     path.join(HOME_DIR, '.aws'),
-    path.join(HOME_DIR, '.artemis'),
     path.join(HOME_DIR, '.claude'),
     '/etc',
     '/root',
@@ -1400,7 +1399,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     const requestedPath = options.requestedPath ? path.resolve(options.requestedPath) : nextWorkspaceRoot
     const switchNow = options.switchNow !== false
 
-    if (isSensitiveWorkspaceTarget(nextWorkspaceRoot)) {
+    if (permissionMode !== 'PRODUCER' && isSensitiveWorkspaceTarget(nextWorkspaceRoot)) {
       appendSystemPanel(
         t('拒绝：目标位于敏感目录', 'Refused: target is a sensitive directory'),
         [nextWorkspaceRoot],
@@ -1989,7 +1988,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         prompt: effectivePrompt,
         command,
         maxTurns: opts.maxTurns,
-        permissionMode: permissionMode as 'prompt' | 'read-only' | 'accept-edits' | 'accept-all',
+        permissionMode: permissionMode as 'PRODUCER' | 'GHOSTWRITER' | 'WRITER' | 'prompt' | 'read-only' | 'accept-edits' | 'accept-all',
         permissionModeExplicit: false,
         providerConfig: provConfig,
       })
@@ -2961,31 +2960,45 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     // ── /permission [mode] ────────────────────────────────────────────────────
     if (trimmed === '/permission' || trimmed.startsWith('/permission ')) {
-      const arg = trimmed.slice('/permission'.length).trim().toLowerCase()
-      const modes = ['prompt', 'read-only', 'accept-edits', 'accept-all'] as const
+      const arg = trimmed.slice('/permission'.length).trim().toUpperCase()
+      const modes = ['PRODUCER', 'GHOSTWRITER', 'WRITER'] as const
       type PermMode = typeof modes[number]
       const descriptions: Record<PermMode, [string, string]> = {
-        'prompt':       ['每个写/shell 操作前询问', 'Ask before each write/shell action'],
-        'read-only':    ['只允许读取，拒绝所有写入与命令', 'Read-only — block all writes and commands'],
-        'accept-edits': ['自动批准文件写入，shell 仍询问', 'Auto-approve file writes, still prompt on shell'],
-        'accept-all':   ['全部自动批准（风险自担）', 'Auto-approve everything (use with care)'],
+        'PRODUCER':    ['全权限，给你的 Agent 完全自由', 'Full access — give your agent complete freedom'],
+        'GHOSTWRITER': ['敏感/执行操作前询问授权', 'Ask before sensitive or execution actions'],
+        'WRITER':      ['可读敏感配置，写入或执行前谨慎询问', 'Read sensitive data; ask before writing or executing'],
+      }
+      const normalizeMode = (mode: string): PermMode | null => {
+        if ((modes as readonly string[]).includes(mode)) return mode as PermMode
+        if (mode === 'ACCEPT-ALL') return 'PRODUCER'
+        if (mode === 'PROMPT') return 'GHOSTWRITER'
+        if (mode === 'ACCEPT-EDITS' || mode === 'READ-ONLY') return 'WRITER'
+        return null
       }
       if (arg && (modes as readonly string[]).includes(arg)) {
         permissionMode = arg as PermMode
         hud.permissionMode = permissionMode
         appendSystemPanel(t('权限模式已更新', 'Permission mode updated'), [`→ ${permissionMode}`])
       } else if (arg) {
-        appendSystemPanel(t('无效模式', 'Invalid mode'), [`"${arg}" 不是有效模式。可用: ${modes.join(', ')}`])
+        const normalized = normalizeMode(arg)
+        if (normalized) {
+          permissionMode = normalized
+          hud.permissionMode = permissionMode
+          appendSystemPanel(t('权限模式已更新', 'Permission mode updated'), [`→ ${permissionMode}`])
+        } else {
+          appendSystemPanel(t('无效模式', 'Invalid mode'), [`"${arg}" 不是有效模式。可用: ${modes.join(', ')}`])
+        }
       } else {
-        const initialIndex = Math.max(0, (modes as readonly string[]).indexOf(permissionMode))
+        const currentMode = normalizeMode(permissionMode) ?? 'PRODUCER'
+        const initialIndex = Math.max(0, (modes as readonly string[]).indexOf(currentMode))
         const picked = await prompt.pickOption<PermMode>({
-          title: t(`选择权限模式  (当前: ${permissionMode})`,
-                   `Select permission mode  (current: ${permissionMode})`),
+          title: t(`选择权限模式  (当前: ${currentMode})`,
+                   `Select permission mode  (current: ${currentMode})`),
           initialIndex,
           hint: t('↑ ↓ 选择   Enter 确认   Esc 取消',
                   '↑ ↓ select   Enter confirm   Esc cancel'),
           choices: modes.map(m => ({
-            label:       m === permissionMode ? `${m}  ✓` : m,
+            label:       m === currentMode ? `${m}  ✓` : m,
             value:       m,
             description: t(descriptions[m][0], descriptions[m][1]),
           })),
@@ -4072,7 +4085,7 @@ async function handleTurn(
 
   const thinkOpts: ThinkOptions = {
     cwd: cwd ?? process.cwd(),
-    permissionMode: permissionMode as 'prompt' | 'read-only' | 'accept-edits' | 'accept-all' | undefined,
+    permissionMode: permissionMode as 'PRODUCER' | 'GHOSTWRITER' | 'WRITER' | 'prompt' | 'read-only' | 'accept-edits' | 'accept-all' | undefined,
 
     onToolCall: (name, args) => {
       // Commit any pending assistant intro text BEFORE the tool runs so the

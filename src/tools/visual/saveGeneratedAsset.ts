@@ -51,7 +51,9 @@ export async function saveGeneratedAssetToWorkspace(options: {
     toolName: options.toolName,
     context: options.context,
   });
-  ensureNotSensitivePath(absolute, targetWithExtension);
+  if (options.context.permissionMode !== 'accept-all') {
+    ensureNotSensitivePath(absolute, targetWithExtension);
+  }
 
   const buffer = await readGeneratedAsset(options.assetPath, options.context);
   await ensureDir(path.dirname(absolute));

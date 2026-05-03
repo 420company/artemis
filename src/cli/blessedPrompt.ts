@@ -208,6 +208,7 @@ class TerminalPrompt implements BlessedPromptHandle {
   private dataHandler: ((chunk: string) => void) | null = null
   private resizeHandler: (() => void) | null = null
   private resizeTimer: NodeJS.Timeout | null = null
+  private readonly cookedLineInput: boolean
   private confirmState: ConfirmState | null = null
   private pickerState: PickerState | null = null
 
@@ -220,6 +221,13 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.headerFn = options.headerFn
     this.footerHint = options.footerHint ?? ''
     this.onTextChange = options.onTextChange
+    // Windows Terminal + IME is unreliable when Node stdin is forced into raw
+    // mode and every byte is routed through our custom key tokenizer: users can
+    // see the IME candidate/composition UI move, but committed text never lands
+    // in the chat box. Prefer cooked line input on Windows so the console host
+    // owns IME composition and line editing. Power users can opt back into raw
+    // key handling with ARTEMIS_WINDOWS_RAW_INPUT=1.
+    this.cookedLineInput = process.platform === 'win32' && process.env.ARTEMIS_WINDOWS_RAW_INPUT !== '1'
   }
 
   read(): Promise<string | null> {
@@ -375,7 +383,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     if (this.started) return
     this.started = true
 
-    process.stdin.setRawMode?.(true)
+    process.stdin.setRawMode?.(!this.cookedLineInput)
     process.stdin.resume()
     process.stdin.setEncoding('utf8')
 
@@ -393,6 +401,10 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.drawnFinalisedCount = 0
 
     this.dataHandler = (chunk: string) => {
+      if (this.cookedLineInput) {
+        this.handleCookedInput(chunk)
+        return
+      }
       const [events, newState] = parseMultipleKeypresses(this.parseState, chunk)
       this.parseState = newState
       for (const event of events) this.handleEvent(event)
@@ -440,6 +452,49 @@ class TerminalPrompt implements BlessedPromptHandle {
 
     process.stdin.setRawMode?.(false)
     process.stdin.pause()
+  }
+
+  private handleCookedInput(chunk: string): void {
+    if (chunk === '\x03') {
+      this.handleCtrlC()
+      return
+    }
+
+    const normalised = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const parts = normalised.split('\n')
+    let changed = false
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] ?? ''
+      const isLineEnd = i < parts.length - 1
+
+      if (part) {
+        this.inputValue += part
+        this.inputCursor = this.inputValue.length
+        this.onTextChange?.(this.inputValue)
+        changed = true
+      }
+
+      if (isLineEnd) {
+        const submitted = this.expandPlaceholders(this.inputValue.replace(/\n+$/, ''))
+        this.inputValue = ''
+        this.inputCursor = 0
+        this.placeholderRanges = []
+        this.historyIndex = -1
+        this.historyDraft = ''
+        this.menuItems = []
+        if (submitted.trim() && this.history[0] !== submitted) {
+          this.history.unshift(submitted)
+          if (this.history.length > 200) this.history.length = 200
+        }
+        this.onTextChange?.('')
+        changed = false
+        this.render()
+        this.enqueue(submitted)
+      }
+    }
+
+    if (changed) this.render()
   }
 
   private enqueue(value: string | null): void {

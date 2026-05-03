@@ -18,6 +18,7 @@ import { PermissionManager } from '../security/permissions.js';
 import { SessionStore } from '../storage/sessions.js';
 import { appendTaskRuntime, createTaskRuntimeRecord, updateTaskRuntime } from '../core/taskRuntime.js';
 import { getWorkflowDisplayName, getWorkflowSessionTitle, isReadOnlyWorkflow, runWorkflowMode, type WorkflowMode } from '../core/workflowMode.js';
+import type { PermissionMode } from '../core/types.js';
 import { truncate, ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js';
 import { maybeUpgradeWorkflow, recordWorkflowAdvice } from '../core/workflowAdvisor.js';
 
@@ -29,7 +30,7 @@ type DetachedWorkflowWorkerArgs = {
   launchToken: string;
   launchedAt: string;
   maxTurns: number;
-  permissionMode: 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+  permissionMode: PermissionMode;
 };
 
 type DetachedWorkflowManifest = {
@@ -42,7 +43,7 @@ type DetachedWorkflowManifest = {
   launchToken: string;
   launchedAt: string;
   processId?: number;
-  permissionMode: 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+  permissionMode: PermissionMode;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
   leaseOwner?: 'worker';
   leaseHeartbeatAt?: string;
@@ -357,7 +358,7 @@ export async function spawnDetachedWorkflow(options: {
   prompt: string;
   command: 'run' | 'athena' | 'design' | 'niko' | 'contest' | 'nidhogg';
   maxTurns: number;
-  permissionMode: 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+  permissionMode: PermissionMode;
   permissionModeExplicit: boolean;
   providerConfig: ProviderConfig;
 }): Promise<DetachedWorkflowLaunchResult> {

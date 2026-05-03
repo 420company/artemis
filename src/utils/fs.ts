@@ -10,7 +10,6 @@ const DEFAULT_IGNORES = new Set([
 // Paths that must never be read or written by the AI regardless of cwd.
 // These contain credentials, API keys, SSH/GPG keys, or tool data.
 const SENSITIVE_PATH_SEGMENTS = [
-  '.artemis',
   '.claude',
   '.env',
   '.netrc',
@@ -31,18 +30,17 @@ const WALK_FILES_CACHE_TTL_MS = 4_000
 export function isSensitivePath(absolute: string): boolean {
   const home = homedir()
   const normalized = absolute.replace(/\\/g, '/')
-  // Carve-out: .artemis/dreams/** is user-generated content (md notes, png
-  // renders, learned-prompt summaries). No tokens / secrets / sessions live
-  // there. The AI legitimately needs to read its own dreams to introspect
-  // and reference past dreams when /dream status / /dream open is invoked.
-  if (/\/\.artemis\/dreams(\/|$)/.test(normalized)) return false
+  // Artemis' data root is a mixed directory: some files are credentials while
+  // others are user-visible logs/assets. Do not block the whole tree; block the
+  // known secret-bearing files below so tools can inspect benign paths without
+  // triggering a workspace-switch refusal for ~/.artemis itself.
   for (const seg of SENSITIVE_PATH_SEGMENTS) {
     if (normalized.includes(`/${seg}/`) || normalized.endsWith(`/${seg}`)) return true
     if (normalized === join(home, seg).replace(/\\/g, '/')) return true
   }
   const base = basename(absolute).toLowerCase()
   if (base === '.env' || base.startsWith('.env.') || base === '.netrc') return true
-  if (base === 'providers.json' || base === 'bragi.json') return true
+  if (base === 'providers.json' || base === 'bragi.json' || base === 'vercel.json') return true
   return false
 }
 

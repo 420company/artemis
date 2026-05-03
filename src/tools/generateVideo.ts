@@ -232,7 +232,9 @@ export async function executeGenerateVideo(
       toolName: 'generate_video',
       context,
     });
-    ensureNotSensitivePath(absolute, targetRaw);
+    if (context.permissionMode !== 'accept-all') {
+      ensureNotSensitivePath(absolute, targetRaw);
+    }
 
     const buf = await downloadUrl(videoUrl);
     await ensureDir(path.dirname(absolute));

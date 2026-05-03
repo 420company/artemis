@@ -3,7 +3,14 @@ import { WHOSYOURDADDY_FLAG, WHOSYOURDADDY_MIN_TURNS, getBrandingAttribution, ge
 import { pickLocale } from './locale.js'
 import type { UiLocale } from './locale.js'
 
-export type PermissionMode = 'prompt' | 'read-only' | 'accept-edits' | 'accept-all'
+export type PermissionMode =
+  | 'PRODUCER'
+  | 'GHOSTWRITER'
+  | 'WRITER'
+  | 'prompt'
+  | 'read-only'
+  | 'accept-edits'
+  | 'accept-all'
 
 export type CliCommand =
   | 'chat'
@@ -68,7 +75,8 @@ function isCliCommand(value: string | undefined): value is CliCommand {
 }
 
 function isPermissionMode(value: string | undefined): value is PermissionMode {
-  return value === 'prompt' || value === 'read-only' ||
+  return value === 'PRODUCER' || value === 'GHOSTWRITER' || value === 'WRITER' ||
+    value === 'prompt' || value === 'read-only' ||
     value === 'accept-edits' || value === 'accept-all'
 }
 
@@ -119,7 +127,7 @@ ${t('选项', 'Options')}:
   --base-url <url>
   --api-key <key>
   --max-turns <n>
-  --permission-mode <prompt|read-only|accept-edits|accept-all>
+  --permission-mode <PRODUCER|GHOSTWRITER|WRITER>
   --bg
   ${WHOSYOURDADDY_FLAG}    ${t('危险：强制 accept-all 并持续执行', 'Dangerous: force accept-all + keep running')}
   --cwd <path>
@@ -136,7 +144,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let apiKey: string | undefined = process.env.ARTEMIS_API_KEY
   let maxTurns = 8
   let maxTurnsExplicit = false
-  let permissionMode: PermissionMode = 'accept-all'
+  let permissionMode: PermissionMode = 'PRODUCER'
   let permissionModeExplicit = false
   let autoDrive = false
   let testProviders = false
@@ -184,14 +192,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
     if (cur === '--permission-mode') {
       const v = args.shift()
-      if (!isPermissionMode(v)) throw new Error('Invalid --permission-mode value.')
-      permissionMode = v
+      const normalized = v?.toUpperCase()
+      const mode = isPermissionMode(normalized) ? normalized : v
+      if (!isPermissionMode(mode)) throw new Error('Invalid --permission-mode value.')
+      permissionMode = mode
       permissionModeExplicit = true
-      if (v !== 'accept-all') autoDrive = false
+      if (permissionMode !== 'PRODUCER' && permissionMode !== 'accept-all') autoDrive = false
       continue
     }
     if (cur === WHOSYOURDADDY_FLAG) {
-      permissionMode = 'accept-all'
+      permissionMode = 'PRODUCER'
       permissionModeExplicit = true
       autoDrive = true
       if (!maxTurnsExplicit) maxTurns = Math.max(maxTurns, WHOSYOURDADDY_MIN_TURNS)

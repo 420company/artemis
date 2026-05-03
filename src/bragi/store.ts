@@ -51,7 +51,8 @@ function normalizePlatformConfig(value: unknown): BragiPlatformConfig | undefine
 }
 
 function isPermissionMode(v: unknown): v is PermissionMode {
-  return v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
+  return v === 'PRODUCER' || v === 'GHOSTWRITER' || v === 'WRITER' ||
+    v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
 }
 
 function isBragiPlatform(v: unknown): v is BragiPlatformId {

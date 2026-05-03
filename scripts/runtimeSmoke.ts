@@ -642,7 +642,7 @@ function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): Prom
 {
   const a = parseArgs([])
   assert('parseArgs: default command is chat', a.command === 'chat')
-  assert('parseArgs: default permissionMode is accept-all', a.permissionMode === 'accept-all')
+  assert('parseArgs: default permissionMode is PRODUCER', a.permissionMode === 'PRODUCER')
   assert('parseArgs: default maxTurns is 8', a.maxTurns === 8)
   assert('parseArgs: setup defaults false', a.setup === false)
 }
@@ -671,7 +671,7 @@ function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): Prom
 
 {
   const a = parseArgs(['--whosyourdaddy'])
-  assert('parseArgs: whosyourdaddy sets accept-all', a.permissionMode === 'accept-all')
+  assert('parseArgs: whosyourdaddy sets PRODUCER', a.permissionMode === 'PRODUCER')
   assert('parseArgs: whosyourdaddy sets autoDrive', a.autoDrive === true)
   assert('parseArgs: whosyourdaddy bumps maxTurns to 16', a.maxTurns >= 16)
 }

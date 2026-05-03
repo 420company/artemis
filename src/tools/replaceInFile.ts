@@ -42,7 +42,9 @@ export async function executeReplaceInFile(
     toolName: 'replace_in_file',
     context,
   });
-  ensureNotSensitivePath(absolute, action.path);
+  if (context.permissionMode !== 'accept-all') {
+    ensureNotSensitivePath(absolute, action.path);
+  }
   const content = await readTextFileSafe(absolute);
   const matchCount = countMatches(content, action.find);
 
