@@ -219,6 +219,18 @@ import {
 } from './vercelAuth.js'
 import { runSetupWizard } from './setupWizard.js'
 import { runFirstRunWelcome } from './firstRunWelcome.js'
+import {
+  buildDefaultSoulMarkdown,
+  buildSoulMarkdown,
+  buildSoulProfile,
+  dismissSoulOnboarding,
+  getSoulPath,
+  hasSoulFile,
+  readSoulFile,
+  saveSoulFile,
+  selectSoulQuestions,
+  type SoulMode,
+} from './soulOnboarding.js'
 import { runWorkspaceTrustDialog } from './workspaceTrust.js'
 import { resolveWorkspaceIntent } from './workspaceIntent.js'
 import { wordupNow } from './wordup.js'
@@ -2565,6 +2577,95 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
       // Return straight to the main landing splash — no trailing panel.
       rebuildScrollBlocksFromMessages()
+      continue
+    }
+
+    if (trimmed === '/soul' || trimmed.startsWith('/soul ')) {
+      const arg = trimmed.slice('/soul'.length).trim().toLowerCase()
+      const soulPath = getSoulPath()
+
+      if (!arg || arg === 'status') {
+        const exists = await hasSoulFile()
+        const body = exists ? await readSoulFile() : ''
+        appendSystemPanel(t('赋魔 / soul.md', 'Soul Forge / soul.md'), [
+          `${t('状态', 'Status')}: ${exists ? t('已存在', 'configured') : t('未配置', 'not configured')}`,
+          `${t('路径', 'Path')}: ${soulPath}`,
+          ...(exists ? ['', `${t('大小', 'Size')}: ${Buffer.byteLength(body, 'utf8')} bytes`] : [
+            '',
+            t('输入 /soul start 通过人格题建立 soul.md。', 'Run /soul start to create soul.md through personality questions.'),
+            t('输入 /soul quick 写入推荐人格。', 'Run /soul quick to write the recommended soul.'),
+          ]),
+        ])
+        continue
+      }
+
+      if (arg === 'dismiss') {
+        await dismissSoulOnboarding()
+        appendSystemPanel(t('赋魔提醒', 'Soul prompt'), [t('已关闭自动提醒。仍可随时输入 /soul start。', 'Dismissed. You can still run /soul start anytime.')])
+        continue
+      }
+
+      if (arg === 'quick') {
+        const content = buildDefaultSoulMarkdown(locale)
+        await saveSoulFile(content)
+        appendSystemPanel(t('赋魔完成', 'Soul forged'), [
+          t('已写入推荐人格：黑猫司仪。', 'Recommended soul written: Black Cat Ceremonialist.'),
+          `${t('文件', 'File')}: ${soulPath}`,
+        ])
+        continue
+      }
+
+      if (arg === 'show') {
+        const body = await readSoulFile()
+        appendSystemPanel('soul.md', body ? body.split('\n') : [t('还没有 soul.md。', 'No soul.md yet.')])
+        continue
+      }
+
+      if (arg === 'start' || arg === 'standard' || arg === 'deep') {
+        const mode: SoulMode = arg === 'deep' ? 'deep' : arg === 'standard' ? 'standard' : 'quick'
+        const questions = selectSoulQuestions(mode)
+        const answers: number[] = []
+        appendSystemPanel(t('🜏 赋魔仪式开始', '🜏 Soul Forge begins'), [
+          t(
+            '接下来不是测试，而是点火：几道钥匙般的问题，会决定 Artemis 在事实、风险、速度、温度与想象之间如何分配自己的重力。',
+            'What follows is not a test, but kindling: a few key-like questions deciding how Artemis distributes gravity among fact, risk, speed, warmth, and imagination.',
+          ),
+        ])
+
+        for (const question of questions) {
+          const choice = await prompt.releaseTerminal(() => chooseInteractiveOption<string>({
+            title: locale === 'zh-CN' ? question.zh : question.en,
+            choices: question.choices.map((choice, index) => ({
+              label: `${index + 1}. ${locale === 'zh-CN' ? choice.zh : choice.en}`,
+              value: String(index),
+            })),
+          }))
+          prompt.clearBuffer()
+          const parsed = Number.parseInt(choice, 10)
+          answers.push(Number.isFinite(parsed) ? parsed : 0)
+        }
+
+        const profile = buildSoulProfile(answers, questions)
+        const content = buildSoulMarkdown(profile, locale)
+        await saveSoulFile(content)
+        appendSystemPanel(t('🜏 赋魔完成', '🜏 Soul forged'), [
+          `${t('人格', 'Type')}: ${locale === 'zh-CN' ? profile.titleZh : profile.titleEn}`,
+          ...((locale === 'zh-CN' ? profile.traitsZh : profile.traitsEn).map(line => `- ${line}`)),
+          '',
+          `${t('文件', 'File')}: ${soulPath}`,
+        ])
+        continue
+      }
+
+      appendSystemPanel(t('赋魔用法', 'Soul usage'), [
+        '/soul status   ' + t('查看 soul.md 状态', 'show soul.md status'),
+        '/soul start    ' + t('快速赋魔题组并写入 soul.md', 'quick Soul Forge questions and write soul.md'),
+        '/soul standard ' + t('标准题组', 'standard question set'),
+        '/soul deep     ' + t('完整题组', 'full question set'),
+        '/soul quick    ' + t('直接写入推荐人格', 'write recommended soul'),
+        '/soul show     ' + t('显示当前 soul.md', 'show current soul.md'),
+        '/soul dismiss  ' + t('关闭自动提醒', 'dismiss automatic prompt'),
+      ])
       continue
     }
 

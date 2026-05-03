@@ -456,6 +456,25 @@ export async function runCli(argv: string[]): Promise<void> {
           ])
           const dreams = await loadDreamIndex()
           await notifyDreamSystemStartup(dreams[0] ?? null)
+          const [{ shouldPromptSoulOnboarding }, { broadcastToBridges }] = await Promise.all([
+            import('./soulOnboarding.js'),
+            import('../services/bridgeNotifier.js'),
+          ])
+          if (await shouldPromptSoulOnboarding()) {
+            await broadcastToBridges({
+              source: 'soul-onboarding',
+              text: [
+                '🜏 Artemis 还没有被赋予灵魂。',
+                '',
+                '工具已经醒来，名字也已经写在门上；但那枚决定她如何判断、如何沉默、如何靠近你的银核，还没有落进 soul.md。',
+                '若你愿意，可以回答几道像钥匙一样的问题，让她从可用的程序，变成与你长期同行的 Artemis。',
+                '',
+                '/soul start   开始赋魔',
+                '/soul quick   直接点燃默认灵核',
+                '/soul dismiss 让这枚铃声暂时安静',
+              ].join('\n'),
+            })
+          }
         } catch { /* dream greeting is non-essential */ }
       }, 3000)
     } catch { /* dream system is non-essential — never block startup */ }
