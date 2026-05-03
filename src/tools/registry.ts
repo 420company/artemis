@@ -1455,7 +1455,7 @@ const capabilityToolDefs: ToolDefinition[] = [
       validateRequiredNonEmptyString(a?.imagePath, 'imagePath', errs);
       validateEnumString(a?.platform, 'platform', ['telegram', 'discord', 'wechat', 'all'] as const, errs);
       validateOptionalNonEmptyString(a?.caption, 'caption', errs);
-      validateOptionalNonEmptyString(a?.targetId, 'targetId', errs);
+      if (a?.targetId !== '') validateOptionalNonEmptyString(a?.targetId, 'targetId', errs);
       return errs;
     },
     execute: executeBridgeSendImage as any,

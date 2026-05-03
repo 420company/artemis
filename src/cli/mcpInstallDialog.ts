@@ -8,6 +8,7 @@ import * as https from 'node:https'
 import { pipeline } from 'node:stream/promises'
 import { stringWidth } from '../input/stringWidth.js'
 import type { UiLocale } from './locale.js'
+import { resolveDataRootDir } from '../utils/fs.js'
 
 const ESC     = '\x1b'
 const ALT_ON  = `${ESC}[?1049h${ESC}[H${ESC}[2J`
@@ -25,15 +26,29 @@ const WHISPER_MODEL_MIN_BYTES = 100 * 1024 * 1024
 export const MCP_INSTALL_DIR = path.join(homedir(), '.artemis', 'mcp-packages')
 
 function whisperModelPath(cwd: string): string {
-  return path.join(cwd, '.artemis', 'models', WHISPER_MODEL_NAME)
+  return path.join(resolveDataRootDir(cwd), 'models', WHISPER_MODEL_NAME)
+}
+
+function globalWhisperModelPath(): string {
+  return path.join(homedir(), '.artemis', 'models', WHISPER_MODEL_NAME)
+}
+
+function candidateWhisperModelPaths(cwd: string): string[] {
+  return Array.from(new Set([
+    whisperModelPath(cwd),
+    globalWhisperModelPath(),
+  ]))
 }
 
 function hasUsableWhisperModel(cwd: string): boolean {
-  try {
-    return statSync(whisperModelPath(cwd)).size >= WHISPER_MODEL_MIN_BYTES
-  } catch {
-    return false
+  for (const candidate of candidateWhisperModelPaths(cwd)) {
+    try {
+      if (statSync(candidate).size >= WHISPER_MODEL_MIN_BYTES) return true
+    } catch {
+      // Try the next model location.
+    }
   }
+  return false
 }
 
 function ensureMcpInstallDir(): void {
@@ -150,6 +165,7 @@ const COPY = {
     depsReady: 'MCP npm 依赖已就绪',
     doneOk:   '✓ MCP 依赖和本地 Whisper 模型安装完成！',
     doneFail: '⚠ 部分依赖安装失败，可用 /mcp install 重试',
+    retryHint: '稍后可运行 /mcp install 重试',
     anyKey:   '按任意键继续…',
     mcpHint:  '使用 /mcp enable <id> 启用任意插件',
   },
@@ -173,6 +189,7 @@ const COPY = {
     depsReady: 'MCP npm dependencies ready',
     doneOk:   '✓ MCP dependencies and local Whisper model installed!',
     doneFail: '⚠ Some dependencies failed — run /mcp install to retry',
+    retryHint: 'Run /mcp install later to retry',
     anyKey:   'Press any key to continue…',
     mcpHint:  'Use /mcp enable <id> to activate any plugin',
   },
@@ -188,7 +205,8 @@ function buildLayout(locale: UiLocale): Layout {
     t.title, t.subtitle, t.desc1, t.desc2, t.desc3,
     CAT_FRAMES[0]!.haloTop, CAT_FRAMES[0]!.haloBot, CAT_SCENE,
     ` ${t.yes}    /    ${t.no} `,
-    t.footer, t.brand,
+    t.footer, t.brand, t.installing, t.wait, t.preparing, t.modelPreparing,
+    t.modelReady, t.depsReady, t.doneOk, t.doneFail, t.retryHint, t.anyKey, t.mcpHint,
   ]
   const innerWidth = probeLines.reduce((m, l) => Math.max(m, stringWidth(l)), 0) + 6
   const cols    = process.stdout.columns ?? 80
@@ -334,7 +352,7 @@ function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount
     row(success ? rgb(bold(t.doneOk), 166, 227, 161) : rgb(bold(t.doneFail), 255, 120, 155), layout),
     layout.blank,
     ...(countLine ? [row(countLine, layout), layout.blank] : []),
-    row(dim(success ? t.mcpHint : t.doneFail), layout),
+    row(dim(success ? t.mcpHint : t.retryHint), layout),
     layout.blank,
     layout.blank,
     row(dim(t.anyKey), layout),

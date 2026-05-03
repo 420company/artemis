@@ -8,9 +8,9 @@
  * Auth: Authorization: Bearer <gatewayToken> + AuthorizationType: ilink_bot_token
  */
 
-import { randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { basename } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 
 // ─── internal gateway types ───────────────────────────────────────────────────
 
@@ -21,11 +21,28 @@ type WeChatTextItem = {
 type WeChatMessageItem = {
   type?: number
   text_item?: WeChatTextItem
+  image_item?: Record<string, unknown>
+  file_item?: Record<string, unknown>
+  video_item?: Record<string, unknown>
   voice_item?: { text?: string }
   ref_msg?: {
     title?: string
     message_item?: WeChatMessageItem
   }
+}
+
+type WeChatImageItem = {
+  aeskey?: string
+  media?: {
+    full_url?: string
+    aes_key?: string
+    encrypt_query_param?: string
+  }
+  mid_size?: number
+  thumb_size?: number
+  thumb_height?: number
+  thumb_width?: number
+  hd_size?: number
 }
 
 type WeChatGatewayMessage = {
@@ -53,6 +70,15 @@ type WeChatSendMessageResponse = {
   errmsg?: string
 }
 
+type WeChatGetUploadUrlResponse = {
+  ret?: number
+  errcode?: number
+  errmsg?: string
+  upload_param?: string
+  thumb_upload_param?: string
+  upload_full_url?: string
+}
+
 // ─── public types ─────────────────────────────────────────────────────────────
 
 export type WeChatTextMessage = {
@@ -65,9 +91,26 @@ export type WeChatTextMessage = {
   messageId: string
 }
 
+export type WeChatMediaDownload = {
+  kind: 'image'
+  path: string
+  bytes: number
+  contentType?: string
+}
+
+export type WeChatMediaDebugRecord = {
+  timestamp: string
+  targetId: string
+  peerUserId?: string
+  messageType?: number
+  messageId?: number
+  items: unknown
+}
+
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const WECHAT_DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com'
+const WECHAT_DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
 const WECHAT_DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000
 const WECHAT_SHORT_HTTP_TIMEOUT_MS = 15_000
 const WECHAT_MESSAGE_LIMIT = 3_800
@@ -76,6 +119,10 @@ const WECHAT_MESSAGE_TYPE_USER = 1
 const WECHAT_MESSAGE_ITEM_TEXT = 1
 const WECHAT_MESSAGE_ITEM_IMAGE = 2
 const WECHAT_MESSAGE_ITEM_VOICE = 3
+const WECHAT_UPLOAD_MEDIA_IMAGE = 1
+const WECHAT_CDN_UPLOAD_MAX_RETRIES = 3
+const WECHAT_SEND_MEDIA_MAX_RETRIES = 3
+const WECHAT_SEND_MEDIA_RETRY_DELAY_MS = 500
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,7 +152,95 @@ function randomMessageId(): string {
 }
 
 function randomWeChatUin(): string {
-  return Buffer.from(randomBytes(4)).toString('base64')
+  const bytes = randomBytes(4)
+  const value = (
+    (bytes[0] << 24) >>> 0 |
+    (bytes[1] << 16) |
+    (bytes[2] << 8) |
+    bytes[3]
+  ) >>> 0
+  return Buffer.from(String(value), 'utf8').toString('base64')
+}
+
+function isRetMinusTwoError(err: unknown): boolean {
+  return err instanceof Error && /ret=-2\b/.test(err.message)
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms)
+    if (!signal) return
+    if (signal.aborted) {
+      clearTimeout(timer)
+      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+      return
+    }
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer)
+      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }, { once: true })
+  })
+}
+
+function imageTypeFromBytes(bytes: Buffer): { ext: string; contentType: string } | undefined {
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
+    return { ext: '.jpg', contentType: 'image/jpeg' }
+  }
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { ext: '.png', contentType: 'image/png' }
+  }
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { ext: '.webp', contentType: 'image/webp' }
+  }
+  if (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a') {
+    return { ext: '.gif', contentType: 'image/gif' }
+  }
+  return undefined
+}
+
+function trimTrailingJpegBytes(bytes: Buffer): Buffer {
+  let end = -1
+  for (let i = bytes.length - 2; i >= 0; i -= 1) {
+    if (bytes[i] === 0xff && bytes[i + 1] === 0xd9) {
+      end = i + 2
+      break
+    }
+  }
+  return end > 0 ? bytes.subarray(0, end) : bytes
+}
+
+function aesEcbPaddedSize(plaintextLength: number): number {
+  if (plaintextLength < 0) return 0
+  return Math.floor((plaintextLength + 16) / 16) * 16
+}
+
+function encryptOutboundMedia(bytes: Buffer, aesKey: Buffer): Buffer {
+  if (aesKey.length !== 16) throw new Error(`WeChat CDN AES key must be 16 bytes, got ${aesKey.length}`)
+  const cipher = createCipheriv('aes-128-ecb', aesKey, null)
+  // Node enables PKCS#7-compatible auto padding for block ciphers by default.
+  return Buffer.concat([cipher.update(bytes), cipher.final()])
+}
+
+function formatOutboundAesKey(aesKey: Buffer): string {
+  // iLink sendMessage expects base64(hex_string), not base64(raw 16 bytes).
+  return Buffer.from(aesKey.toString('hex'), 'utf8').toString('base64')
+}
+
+function buildCdnUploadUrl(cdnBaseUrl: string, uploadParam: string, filekey: string): string {
+  const base = cdnBaseUrl.replace(/\/+$/, '')
+  return `${base}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`
+}
+
+function decryptInboundImage(bytes: Buffer, image: WeChatImageItem): Buffer {
+  const aeskey = image.aeskey?.trim()
+  if (!aeskey || !/^[a-f0-9]{32}$/i.test(aeskey)) return bytes
+
+  const decipher = createDecipheriv('aes-128-ecb', Buffer.from(aeskey, 'hex'), null)
+  // iLink image CDN payloads are AES-ECB encrypted and are not always padded
+  // with PKCS#7. Disable auto padding and trim JPEG EOI below when present.
+  decipher.setAutoPadding(false)
+  const decrypted = Buffer.concat([decipher.update(bytes), decipher.final()])
+  return imageTypeFromBytes(decrypted)?.ext === '.jpg' ? trimTrailingJpegBytes(decrypted) : decrypted
 }
 
 function normalizeBaseUrl(baseUrl: string | undefined): string {
@@ -135,6 +270,48 @@ function bodyFromItemList(items: WeChatMessageItem[] | undefined): string | unde
   return undefined
 }
 
+function mediaBodyFromItemList(items: WeChatMessageItem[] | undefined): string | undefined {
+  if (!Array.isArray(items) || items.length === 0) return undefined
+  const kinds: string[] = []
+  for (const item of items) {
+    if (item.type === WECHAT_MESSAGE_ITEM_IMAGE || item.image_item) kinds.push('图片')
+    else if (item.file_item) kinds.push('文件')
+    else if (item.video_item) kinds.push('视频')
+    else if (item.voice_item) kinds.push('语音')
+    else if (item.type !== WECHAT_MESSAGE_ITEM_TEXT) kinds.push(`非文本消息(type=${item.type ?? '?'})`)
+  }
+  if (kinds.length === 0) return undefined
+  return `[微信收到${Array.from(new Set(kinds)).join('/')}消息；正在尝试下载附件内容，并已记录原始 iLink item schema 用于调试。]`
+}
+
+function imageItemsFromMessage(message: WeChatGatewayMessage): WeChatImageItem[] {
+  const items = message.item_list ?? []
+  return items
+    .filter(item => item.type === WECHAT_MESSAGE_ITEM_IMAGE || item.image_item)
+    .map(item => item.image_item)
+    .filter((item): item is WeChatImageItem => Boolean(item) && typeof item === 'object')
+}
+
+function redactLargeMediaFields(value: unknown, depth = 0): unknown {
+  if (depth > 6) return '[depth-limit]'
+  if (typeof value === 'string') {
+    if (value.length > 180) return `[string:${value.length}] ${value.slice(0, 80)}...`
+    return value
+  }
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(v => redactLargeMediaFields(v, depth + 1))
+  const out: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    const lower = key.toLowerCase()
+    if (lower.includes('base64') || lower === 'data' || lower.includes('buffer')) {
+      out[key] = typeof item === 'string' ? `[redacted:${item.length}]` : '[redacted]'
+      continue
+    }
+    out[key] = redactLargeMediaFields(item, depth + 1)
+  }
+  return out
+}
+
 function toWeChatTextMessage(message: WeChatGatewayMessage): WeChatTextMessage | undefined {
   if (
     message.message_type !== undefined &&
@@ -146,7 +323,7 @@ function toWeChatTextMessage(message: WeChatGatewayMessage): WeChatTextMessage |
 
   const peerUserId = message.from_user_id?.trim()
   const sessionScope = message.session_id?.trim() || peerUserId
-  const text = bodyFromItemList(message.item_list)
+  const text = bodyFromItemList(message.item_list) ?? mediaBodyFromItemList(message.item_list)
 
   if (!peerUserId || !sessionScope || !text) return undefined
 
@@ -171,16 +348,19 @@ export class WeChatGatewayClient {
   private readonly gatewayToken: string
   private readonly routeTag?: string
   private readonly longPollTimeoutMs: number
+  private readonly cdnBaseUrl: string
 
   constructor(opts: {
     gatewayToken: string
     gatewayBaseUrl?: string
     routeTag?: string
     longPollTimeoutMs?: number
+    cdnBaseUrl?: string
   }) {
     this.baseUrl = normalizeBaseUrl(opts.gatewayBaseUrl)
     this.gatewayToken = opts.gatewayToken.trim()
     this.routeTag = opts.routeTag?.trim() || undefined
+    this.cdnBaseUrl = (opts.cdnBaseUrl?.trim() || WECHAT_DEFAULT_CDN_BASE_URL).replace(/\/+$/, '')
     this.longPollTimeoutMs =
       opts.longPollTimeoutMs && opts.longPollTimeoutMs > 0
         ? opts.longPollTimeoutMs
@@ -190,6 +370,9 @@ export class WeChatGatewayClient {
   async poll(
     cursor: string | undefined,
     signal?: AbortSignal,
+    onDebugMessage?: (message: string) => void,
+    onMediaDebugRecord?: (record: WeChatMediaDebugRecord) => Promise<void> | void,
+    mediaDownloadDir?: string,
   ): Promise<{ messages: WeChatTextMessage[]; checkpoint?: string }> {
     const response = await this.post<WeChatGetUpdatesResponse>(
       'ilink/bot/getupdates',
@@ -214,12 +397,83 @@ export class WeChatGatewayClient {
       )
     }
 
+    const rawMessages = response.msgs ?? []
+    for (const message of rawMessages) {
+      const items = message.item_list ?? []
+      if (items.some(item => item.type !== WECHAT_MESSAGE_ITEM_TEXT || item.image_item || item.file_item || item.video_item)) {
+        const targetId = message.session_id?.trim() || message.from_user_id?.trim() || '?'
+        const record: WeChatMediaDebugRecord = {
+          timestamp: new Date().toISOString(),
+          targetId,
+          peerUserId: message.from_user_id?.trim() || undefined,
+          messageType: message.message_type,
+          messageId: message.message_id,
+          items,
+        }
+        onDebugMessage?.(`[wechat] inbound non-text item schema target=${targetId} message_type=${message.message_type ?? '?'} items=${JSON.stringify(redactLargeMediaFields(items))}`)
+        await onMediaDebugRecord?.(record)
+      }
+    }
+
+    const messages: WeChatTextMessage[] = []
+    for (const raw of rawMessages) {
+      const message = toWeChatTextMessage(raw)
+      if (!message) continue
+      const imageItems = imageItemsFromMessage(raw)
+      if (imageItems.length > 0 && mediaDownloadDir) {
+        const downloads = await this.downloadInboundImages(imageItems, message.messageId, mediaDownloadDir, signal, onDebugMessage)
+        if (downloads.length > 0) {
+          const paths = downloads.map(d => `${d.path} (${d.bytes} bytes)`).join('\n')
+          message.text = `${message.text}\n\n已下载微信图片到本地：\n${paths}`
+        }
+      }
+      messages.push(message)
+    }
+
     return {
-      messages: (response.msgs ?? [])
-        .map(m => toWeChatTextMessage(m))
-        .filter((m): m is WeChatTextMessage => Boolean(m)),
+      messages,
       checkpoint: response.get_updates_buf,
     }
+  }
+
+  private async downloadInboundImages(
+    images: WeChatImageItem[],
+    messageId: string,
+    outputDir: string,
+    signal?: AbortSignal,
+    onDebugMessage?: (message: string) => void,
+  ): Promise<WeChatMediaDownload[]> {
+    await mkdir(outputDir, { recursive: true })
+    const downloads: WeChatMediaDownload[] = []
+    for (const [index, image] of images.entries()) {
+      const url = image.media?.full_url?.trim()
+      if (!url) continue
+      try {
+        const response = await fetch(url, { signal })
+        if (!response.ok) {
+          onDebugMessage?.(`[wechat] inbound image download failed status=${response.status} url=${truncate(url, 160)}`)
+          continue
+        }
+        const responseContentType = response.headers.get('content-type') ?? undefined
+        const encryptedBytes: Buffer = Buffer.from(await response.arrayBuffer())
+        let bytes: Buffer = encryptedBytes
+        try {
+          bytes = decryptInboundImage(encryptedBytes, image)
+        } catch (err) {
+          onDebugMessage?.(`[wechat] inbound image decrypt failed, saving raw payload: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        const detected = imageTypeFromBytes(bytes)
+        const contentType = detected?.contentType ?? responseContentType
+        const ext = detected?.ext ?? (contentType?.includes('png') ? '.png' : contentType?.includes('webp') ? '.webp' : contentType?.includes('gif') ? '.gif' : '.jpg')
+        const filePath = `${outputDir}/wechat-${messageId}-${index + 1}${ext}`
+        await writeFile(filePath, bytes)
+        downloads.push({ kind: 'image', path: filePath, bytes: bytes.length, contentType })
+        onDebugMessage?.(`[wechat] inbound image downloaded path=${filePath} bytes=${bytes.length} contentType=${contentType ?? '?'} encryptedBytes=${encryptedBytes.length}`)
+      } catch (err) {
+        onDebugMessage?.(`[wechat] inbound image download error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    return downloads
   }
 
   async sendText(
@@ -269,7 +523,7 @@ export class WeChatGatewayClient {
     contextToken: string,
     caption?: string,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<{ filename: string; bytes: number; response: WeChatSendMessageResponse; rendered: boolean; schema: string }> {
     if (!contextToken.trim()) {
       throw new Error(
         `WeChat image reply needs a context token for ${peerUserId}. The user must send a message first.`,
@@ -284,41 +538,160 @@ export class WeChatGatewayClient {
     void caption
 
     const image = await readFile(imagePath)
-    const imageBase64 = image.toString('base64')
+    if (image.length === 0) throw new Error(`WeChat image reply cannot send empty file: ${imagePath}`)
+
     const filename = basename(imagePath)
-    const response = await this.post<WeChatSendMessageResponse>(
-      'ilink/bot/sendmessage',
-      {
-        msg: {
-          from_user_id: '',
-          to_user_id: peerUserId,
-          client_id: randomClientId(),
-          message_type: 2,
-          message_state: 2,
-          context_token: contextToken,
-          item_list: [{
-            type: WECHAT_MESSAGE_ITEM_IMAGE,
-            image_item: {
-              filename,
-              file_name: filename,
-              image_base64: imageBase64,
-              base64: imageBase64,
-              data: imageBase64,
-            },
-          }],
+    const schema = 'image_item_cdn_media_v1'
+    const aesKey = randomBytes(16)
+    const filekey = randomBytes(16).toString('hex')
+    const upload = await this.getUploadUrl({
+      filekey,
+      mediaType: WECHAT_UPLOAD_MEDIA_IMAGE,
+      toUserId: peerUserId,
+      rawSize: image.length,
+      rawMd5: createHash('md5').update(image).digest('hex'),
+      cipherSize: aesEcbPaddedSize(image.length),
+      aesKeyHex: aesKey.toString('hex'),
+      signal,
+    })
+    const uploadUrl = upload.upload_full_url?.trim() || buildCdnUploadUrl(this.cdnBaseUrl, upload.upload_param?.trim() || '', filekey)
+    const encryptedQueryParam = await this.uploadEncryptedMedia(uploadUrl, image, aesKey, signal)
+
+    const item = {
+      type: WECHAT_MESSAGE_ITEM_IMAGE,
+      image_item: {
+        media: {
+          encrypt_query_param: encryptedQueryParam,
+          aes_key: formatOutboundAesKey(aesKey),
+          encrypt_type: 1,
         },
+        mid_size: aesEcbPaddedSize(image.length),
+      },
+    }
+    const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendImage', signal)
+
+    return { filename, bytes: image.length, response, rendered: true, schema }
+  }
+
+  private async sendSingleMediaItemWithRetry(
+    peerUserId: string,
+    contextToken: string,
+    item: Record<string, unknown>,
+    label: string,
+    signal?: AbortSignal,
+  ): Promise<WeChatSendMessageResponse> {
+    let lastError: Error | undefined
+    for (let attempt = 1; attempt <= WECHAT_SEND_MEDIA_MAX_RETRIES; attempt += 1) {
+      try {
+        const response = await this.post<WeChatSendMessageResponse>(
+          'ilink/bot/sendmessage',
+          {
+            msg: {
+              from_user_id: '',
+              to_user_id: peerUserId,
+              client_id: `cc-${randomBytes(4).toString('hex')}`,
+              message_type: 2,
+              message_state: 2,
+              context_token: contextToken,
+              item_list: [item],
+            },
+            base_info: { channel_version: 'artemis-bragi-wechat/1.0' },
+          },
+          WECHAT_SHORT_HTTP_TIMEOUT_MS,
+          label,
+          signal,
+        )
+
+        if ((response.ret ?? 0) === 0) return response
+        throw new Error(
+          `WeChat ${label} failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)} raw=${truncate(JSON.stringify(response), 240)}`,
+        )
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        if (!isRetMinusTwoError(lastError) || attempt >= WECHAT_SEND_MEDIA_MAX_RETRIES) break
+        await delay(WECHAT_SEND_MEDIA_RETRY_DELAY_MS, signal)
+      }
+    }
+    throw lastError ?? new Error(`WeChat ${label} failed`)
+  }
+
+  private async getUploadUrl(opts: {
+    filekey: string
+    mediaType: number
+    toUserId: string
+    rawSize: number
+    rawMd5: string
+    cipherSize: number
+    aesKeyHex: string
+    signal?: AbortSignal
+  }): Promise<WeChatGetUploadUrlResponse> {
+    const response = await this.post<WeChatGetUploadUrlResponse>(
+      'ilink/bot/getuploadurl',
+      {
+        filekey: opts.filekey,
+        media_type: opts.mediaType,
+        to_user_id: opts.toUserId,
+        rawsize: opts.rawSize,
+        rawfilemd5: opts.rawMd5,
+        filesize: opts.cipherSize,
+        no_need_thumb: true,
+        aeskey: opts.aesKeyHex,
         base_info: { channel_version: 'artemis-bragi-wechat/1.0' },
       },
       WECHAT_SHORT_HTTP_TIMEOUT_MS,
-      'sendImage',
-      signal,
+      'getUploadUrl',
+      opts.signal,
     )
 
     if ((response.ret ?? 0) !== 0) {
       throw new Error(
-        `WeChat sendImage failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)} raw=${truncate(JSON.stringify(response), 240)}`,
+        `WeChat getUploadUrl failed: ret=${response.ret ?? '?'} errcode=${response.errcode ?? '?'} errmsg=${truncate(response.errmsg ?? 'unknown', 180)} raw=${truncate(JSON.stringify(response), 240)}`,
       )
     }
+    if (!response.upload_full_url?.trim() && !response.upload_param?.trim()) {
+      throw new Error(`WeChat getUploadUrl returned no upload URL/param: ${truncate(JSON.stringify(response), 240)}`)
+    }
+    return response
+  }
+
+  private async uploadEncryptedMedia(
+    uploadUrl: string,
+    plaintext: Buffer,
+    aesKey: Buffer,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const ciphertext = encryptOutboundMedia(plaintext, aesKey)
+    let lastError: Error | undefined
+    for (let attempt = 1; attempt <= WECHAT_CDN_UPLOAD_MAX_RETRIES; attempt += 1) {
+      try {
+        const response = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream' },
+          body: new Uint8Array(ciphertext),
+          signal: signal
+            ? AbortSignal.any([AbortSignal.timeout(WECHAT_SHORT_HTTP_TIMEOUT_MS), signal])
+            : AbortSignal.timeout(WECHAT_SHORT_HTTP_TIMEOUT_MS),
+        })
+        const encryptedParam = response.headers.get('x-encrypted-param')?.trim()
+        if (response.status >= 400 && response.status < 500) {
+          const errorMessage = response.headers.get('x-error-message') || await response.text().catch(() => response.statusText)
+          throw new Error(`WeChat CDN upload client error HTTP ${response.status}: ${truncate(errorMessage || response.statusText, 180)}`)
+        }
+        if (!response.ok) {
+          const errorMessage = response.headers.get('x-error-message') || response.statusText
+          lastError = new Error(`WeChat CDN upload server error HTTP ${response.status}: ${truncate(errorMessage, 180)}`)
+          continue
+        }
+        if (!encryptedParam) {
+          lastError = new Error('WeChat CDN upload response missing x-encrypted-param')
+          continue
+        }
+        return encryptedParam
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+      }
+    }
+    throw new Error(`WeChat CDN upload failed after ${WECHAT_CDN_UPLOAD_MAX_RETRIES} attempts: ${lastError?.message ?? 'unknown error'}`)
   }
 
   private async post<T>(

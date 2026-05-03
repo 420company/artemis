@@ -8,6 +8,8 @@
  */
 
 import { BragiStore } from '../bragi/store.js'
+import { appendFile, mkdir } from 'node:fs/promises'
+import path from 'node:path'
 import { buildBridgeIdentity, runBragiMessagePump } from '../bragi/runtime.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
@@ -24,6 +26,27 @@ import { SessionStore } from '../storage/sessions.js'
 import { WeChatGatewayClient } from './client.js'
 import { WeChatStore } from './store.js'
 import { runWeixinQRLogin } from './setup.js'
+
+const WECHAT_MEDIA_DEBUG_DIR = '/Users/goat/AntiClaude/MyLaude Code Update/debug'
+const WECHAT_MEDIA_DEBUG_FILE = path.join(WECHAT_MEDIA_DEBUG_DIR, 'wechat-media-items.ndjson')
+const WECHAT_MEDIA_DOWNLOAD_DIR = path.join(WECHAT_MEDIA_DEBUG_DIR, 'wechat-media')
+
+function uniqStrings(values: Array<string | undefined>): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const trimmed = value?.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out
+}
+
+async function appendWeChatMediaDebugRecord(record: unknown): Promise<void> {
+  await mkdir(WECHAT_MEDIA_DEBUG_DIR, { recursive: true })
+  await appendFile(WECHAT_MEDIA_DEBUG_FILE, `${JSON.stringify(record)}\n`, 'utf8')
+}
 
 export type RunWeChatBridgeOptions = {
   cwd: string
@@ -187,22 +210,43 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
     platform: 'wechat',
     push: async (payload) => {
       const data = await wechatStore.load()
-      // WeChat push needs a contextToken; only chats that previously talked
-      // to us have one. Skip the rest silently.
-      const targets = (data.contacts ?? []).map(c => c.fromUser)
+      // WeChat push needs a contextToken. Newer iLink replies are keyed by
+      // message.targetId/session_id while older stores kept contacts by
+      // peerUserId, so fan out across both maps for backward compatibility.
+      const targets = payload.targetId
+        ? uniqStrings([payload.targetId])
+        : uniqStrings([
+            ...(data.contacts ?? []).map(c => c.fromUser),
+            ...Object.keys(data.contextTokens ?? {}),
+          ])
+      let sent = 0
+      let missingContext = 0
       for (const targetId of targets) {
         try {
           const contextToken = wechatStore.getContextToken(data, targetId)
-          if (!contextToken) continue
+          if (!contextToken) {
+            missingContext += 1
+            options.onInfo?.(`[wechat] image push skipped target=${targetId}: no context token`)
+            continue
+          }
           if (payload.imagePath) {
-            await client.sendImage(targetId, payload.imagePath, contextToken, payload.text, options.signal)
+            const sentImage = await client.sendImage(targetId, payload.imagePath, contextToken, payload.text, options.signal)
+            options.onInfo?.(`[wechat] image push accepted target=${targetId} file=${sentImage.filename} bytes=${sentImage.bytes} schema=${sentImage.schema} rendered=${sentImage.rendered} response=${JSON.stringify(sentImage.response)}`)
+            if (!sentImage.rendered) {
+              throw new Error(`WeChat iLink accepted image payload but mobile rendering is unconfirmed/known invisible for schema=${sentImage.schema}; response=${JSON.stringify(sentImage.response)}`)
+            }
           } else {
             await client.sendText(targetId, payload.text, contextToken, options.signal)
           }
+          sent += 1
         } catch (err) {
           options.onInfo?.(`[wechat] dream push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
+      if (sent === 0 && missingContext > 0) {
+        throw new Error(`WeChat image push skipped ${missingContext} target(s): no context token. Ask from WeChat again so Artemis can capture a fresh iLink context_token.`)
+      }
+      return { sent }
     },
   })
 
@@ -224,18 +268,29 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
 
     async poll() {
       const storeData = await wechatStore.load()
-      const batch = await client.poll(storeData.checkpoint, options.signal)
+      const batch = await client.poll(
+        storeData.checkpoint,
+        options.signal,
+        options.onInfo,
+        async record => {
+          await appendWeChatMediaDebugRecord(record)
+          options.onInfo?.(`[wechat] inbound media schema saved to ${WECHAT_MEDIA_DEBUG_FILE}`)
+        },
+        WECHAT_MEDIA_DOWNLOAD_DIR,
+      )
 
-      // Capture contextToken for each sender before anything else
+      // Capture contextToken by the real reply target (sessionScope). For
+      // p2p chats this equals peerUserId; for group/session messages iLink
+      // requires session_id, not from_user_id, when replying.
       for (const m of batch.messages) {
         if (m.contextToken) {
-          await wechatStore.setContextToken(m.peerUserId, m.contextToken)
+          await wechatStore.setContextToken(m.targetId, m.contextToken)
         }
       }
 
       return {
         messages: batch.messages.map(m => ({
-          targetId:    m.peerUserId,
+          targetId:    m.targetId,
           targetLabel: m.targetLabel,
           text:        m.text,
         })),

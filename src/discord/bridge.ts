@@ -214,8 +214,10 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
         ...(bragiLive.platforms.discord?.allowedTargets ?? []),
         ...(data.targets ?? []).map(t => t.targetId),
       ])
+      const targets = payload.targetId ? [payload.targetId] : Array.from(allowedTargets)
       const { existsSync } = await import('node:fs')
-      for (const targetId of allowedTargets) {
+      let sent = 0
+      for (const targetId of targets) {
         try {
           if (payload.imagePath && existsSync(payload.imagePath)) {
             // Real attachment upload — phone users see the screenshot inline.
@@ -227,10 +229,12 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
               await gateway.sendMessage(targetId, `🖼 ${payload.imagePath}`)
             }
           }
+          sent += 1
         } catch (err) {
           options.onInfo?.(`[discord] push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
+      return { sent }
     },
   })
 

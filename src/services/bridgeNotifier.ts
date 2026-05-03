@@ -15,7 +15,7 @@ export type BridgePlatform = 'telegram' | 'discord' | 'wechat' | 'cli'
 export interface BridgePushTarget {
   platform: BridgePlatform
   /** Send a text message to one of the bridge's authorized chat targets. */
-  push: (payload: BridgeBroadcastPayload) => Promise<void>
+  push: (payload: BridgeBroadcastPayload) => Promise<void | number | { sent: number }>
 }
 
 export interface BridgeBroadcastPayload {
@@ -24,6 +24,9 @@ export interface BridgeBroadcastPayload {
   /** Optional local image path to attach (PNG/JPG). Bridges that can't
    *  attach images should fall back to a "image saved locally" note. */
   imagePath?: string
+  /** Optional platform target id/chat id/channel id. When omitted, bridges
+   *  fan out to their currently authorized/live targets. */
+  targetId?: string
   /** Free-form tag for log/debug; bridges may include it in the log line. */
   source: string
 }
@@ -55,8 +58,14 @@ export async function broadcastToBridges(payload: BridgeBroadcastPayload): Promi
   await Promise.all(
     list.map(async (t) => {
       try {
-        await t.push(payload)
-        sent += 1
+        const result = await t.push(payload)
+        if (typeof result === 'number') {
+          sent += result
+        } else if (result && typeof result === 'object' && typeof result.sent === 'number') {
+          sent += result.sent
+        } else {
+          sent += 1
+        }
       } catch (err) {
         failed.push({
           platform: t.platform,

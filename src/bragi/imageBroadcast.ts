@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, resolve } from 'node:path'
 import { BragiStore } from './store.js'
 import { broadcastToBridges, listRegisteredBridges } from '../services/bridgeNotifier.js'
 import type { BridgePlatform } from '../services/bridgeNotifier.js'
 import type { BragiPlatformId } from './types.js'
+import { resolveDataRootDir } from '../utils/fs.js'
 
 export type BridgeImagePlatform = BragiPlatformId | 'all'
 
@@ -39,6 +41,47 @@ function isConfiguredPlatform(platform: string): platform is BragiPlatformId {
   return platform === 'telegram' || platform === 'discord' || platform === 'wechat'
 }
 
+function normalizeOptionalTargetId(targetId: string | undefined): string | undefined {
+  const trimmed = targetId?.trim()
+  return trimmed || undefined
+}
+
+function resolveImagePath(inputPath: string, cwd: string): string {
+  const trimmed = inputPath.trim()
+  if (!trimmed) throw new Error('image path is empty')
+
+  const candidates = isAbsolute(trimmed)
+    ? [trimmed]
+    : uniq([
+        resolve(cwd, trimmed),
+        resolve(resolveDataRootDir(cwd), trimmed),
+        resolve(homedir(), '.artemis', trimmed),
+        resolve(process.cwd(), trimmed),
+      ])
+
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found) return found
+  throw new Error(`image file not found: ${candidates.join(' | ')}`)
+}
+
+async function loadWechatStoreCandidates(cwd: string) {
+  const { WeChatStore } = await import('../wechat/store.js')
+  const cwdStore = new WeChatStore(cwd)
+  const candidates = [{ store: cwdStore, data: await cwdStore.load() }]
+
+  // The background gateway daemon commonly runs with cwd=$HOME/.artemis, while
+  // native tools run with the active workspace cwd. Try the daemon/global store
+  // as a fallback so bridge_send_image can reuse the live WeChat credentials and
+  // context tokens without requiring duplicated per-workspace setup.
+  const globalCwd = resolve(homedir(), '.artemis')
+  if (resolve(cwd) !== globalCwd) {
+    const globalStore = new WeChatStore(globalCwd)
+    candidates.push({ store: globalStore, data: await globalStore.load() })
+  }
+
+  return candidates
+}
+
 /**
  * Send a local image as a real mobile attachment through the active Bragi
  * bridges first, then fall back to configured REST clients for Telegram and
@@ -55,17 +98,16 @@ export async function sendBragiImageBroadcast(options: {
   targetId?: string
   source?: string
 }): Promise<BridgeImageBroadcastResult> {
-  const imagePath = resolve(options.imagePath)
-  if (!existsSync(imagePath)) {
-    throw new Error(`image file not found: ${imagePath}`)
-  }
+  const imagePath = resolveImagePath(options.imagePath, options.cwd)
 
   const caption = options.caption?.trim() || '🖼 Artemis image'
   const platforms = normalizePlatforms(options.platform)
+  const targetId = normalizeOptionalTargetId(options.targetId)
   const registered = listRegisteredBridges().filter(p => platforms.includes(p as BragiPlatformId))
   const live = registered.length > 0
-    ? await broadcastToBridges({ text: caption, imagePath, source: options.source ?? 'bridge_send_image' })
+    ? await broadcastToBridges({ text: caption, imagePath, targetId, source: options.source ?? 'bridge_send_image' })
     : { sent: 0, failed: [] }
+  const shouldUseConfiguredFallback = live.sent === 0
 
   const store = new BragiStore(options.cwd)
   const data = await store.load()
@@ -73,16 +115,31 @@ export async function sendBragiImageBroadcast(options: {
   const skipped: string[] = []
 
   for (const platform of platforms) {
-    if (registered.includes(platform)) continue
+    if (registered.includes(platform) && !shouldUseConfiguredFallback) continue
     const config = data.platforms[platform]
-    if (!config?.enabled) {
+    if (!config?.enabled && platform !== 'wechat') {
       skipped.push(`${platform}: not enabled`)
       continue
     }
 
-    const targets = options.targetId
-      ? [options.targetId]
-      : uniq(config.allowedTargets ?? [])
+    let targets = targetId
+      ? [targetId]
+      : uniq(config?.allowedTargets ?? [])
+
+    if (platform === 'wechat' && targets.length === 0) {
+      try {
+        const wechatCandidates = await loadWechatStoreCandidates(options.cwd)
+        targets = uniq([
+          ...wechatCandidates.flatMap(({ data: wechatData }) => [
+            ...Object.keys(wechatData.contextTokens ?? {}),
+            ...(wechatData.contacts ?? []).map(c => c.fromUser),
+          ]),
+        ])
+      } catch {
+        // Keep the normal no-target error below; detailed credential errors are
+        // produced in the WeChat send branch.
+      }
+    }
 
     if (targets.length === 0) {
       skipped.push(`${platform}: no allowed targets`)
@@ -92,6 +149,11 @@ export async function sendBragiImageBroadcast(options: {
     const record = { platform, attempted: targets.length, sent: 0, failed: [] as Array<{ target: string; error: string }> }
 
     if (platform === 'telegram') {
+      if (!config) {
+        record.failed.push(...targets.map(target => ({ target, error: 'telegram not configured' })))
+        configured.push(record)
+        continue
+      }
       const botToken = config.credentials.botToken
       if (!botToken) {
         record.failed.push(...targets.map(target => ({ target, error: 'missing botToken' })))
@@ -108,6 +170,11 @@ export async function sendBragiImageBroadcast(options: {
         }
       }
     } else if (platform === 'discord') {
+      if (!config) {
+        record.failed.push(...targets.map(target => ({ target, error: 'discord not configured' })))
+        configured.push(record)
+        continue
+      }
       const botToken = config.credentials.botToken
       if (!botToken) {
         record.failed.push(...targets.map(target => ({ target, error: 'missing botToken' })))
@@ -124,10 +191,41 @@ export async function sendBragiImageBroadcast(options: {
         }
       }
     } else if (platform === 'wechat') {
-      record.failed.push(...targets.map(target => ({
-        target,
-        error: 'WeChat image sending requires the running WeChat bridge because iLink needs a live context_token from the chat. Ask the user to send one message first and keep `artemis bragi wechat` running.',
-      })))
+      try {
+        const { WeChatGatewayClient } = await import('../wechat/client.js')
+        const wechatCandidates = await loadWechatStoreCandidates(options.cwd)
+        const usable = wechatCandidates.find(({ data: wechatData }) => wechatData.gatewayUrl && wechatData.gatewayToken)
+        if (!usable) {
+          record.failed.push(...targets.map(target => ({ target, error: 'missing WeChat gatewayUrl/gatewayToken' })))
+        } else {
+          const { store: wechatStore, data: wechatData } = usable
+          const gatewayBaseUrl = wechatData.gatewayUrl
+          const gatewayToken = wechatData.gatewayToken
+          if (!gatewayBaseUrl || !gatewayToken) {
+            record.failed.push(...targets.map(target => ({ target, error: 'missing WeChat gatewayUrl/gatewayToken' })))
+            configured.push(record)
+            continue
+          }
+          const client = new WeChatGatewayClient({ gatewayBaseUrl, gatewayToken })
+          for (const target of targets) {
+            try {
+              const contextToken = wechatStore.getContextToken(wechatData, target)
+              if (!contextToken) {
+                throw new Error('missing WeChat context_token for target; send a fresh WeChat message to Artemis first')
+              }
+              const sentImage = await client.sendImage(target, imagePath, contextToken, caption)
+              if (!sentImage.rendered) {
+                throw new Error(`WeChat iLink accepted image payload but mobile rendering is unconfirmed/known invisible for schema=${sentImage.schema}; response=${JSON.stringify(sentImage.response)}`)
+              }
+              record.sent += 1
+            } catch (err) {
+              record.failed.push({ target, error: err instanceof Error ? err.message : String(err) })
+            }
+          }
+        }
+      } catch (err) {
+        record.failed.push(...targets.map(target => ({ target, error: err instanceof Error ? err.message : String(err) })))
+      }
     } else if (!isConfiguredPlatform(platform)) {
       skipped.push(`${platform}: unsupported platform`)
     }

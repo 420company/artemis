@@ -1457,6 +1457,22 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           intent: nonEmptyStringSchema('Natural-language description of what you want to do (e.g. "flight search", "git operations").'),
         },
       };
+    case 'bridge_send_image':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['imagePath'],
+        properties: {
+          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment.'),
+          caption: optionalStringSchema('Optional caption shown with the image.'),
+          platform: {
+            type: 'string',
+            enum: ['telegram', 'discord', 'wechat', 'all'],
+            description: 'Target platform. Defaults to all.',
+          },
+          targetId: optionalStringSchema('Optional platform target id/chat id/channel id. Defaults to configured or live bridge targets.'),
+        },
+      };
   default:
     return { type: 'object', properties: {}, additionalProperties: true };
   }
