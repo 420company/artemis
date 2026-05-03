@@ -207,6 +207,7 @@ class TerminalPrompt implements BlessedPromptHandle {
   private parseState: KeyParseState = INITIAL_STATE
   private dataHandler: ((chunk: string) => void) | null = null
   private resizeHandler: (() => void) | null = null
+  private resizeTimer: NodeJS.Timeout | null = null
   private confirmState: ConfirmState | null = null
   private pickerState: PickerState | null = null
 
@@ -397,14 +398,24 @@ class TerminalPrompt implements BlessedPromptHandle {
       for (const event of events) this.handleEvent(event)
     }
     this.resizeHandler = () => {
-      // Old wrap is wrong at the new width and the terminal may have re-flowed
-      // unpredictably. Clear visible + reset bookkeeping; render() reflows
-      // finalised content into scrollback at the new width.
-      process.stdout.write(`${CSI}2J${CSI}H`)
-      this.bottomZoneHeight = 0
-      this.cursorOffsetFromZoneTop = 0
-      this.drawnFinalisedCount = 0
-      this.render()
+      // Windows Terminal emits a burst of resize events while the user drags the
+      // window and reflows the backing buffer between events. Rendering on every
+      // intermediate size can interleave stale bottom-zone frames / spinners with
+      // the newly wrapped finalised output. Debounce until the dimensions settle,
+      // then rebuild the screen from our canonical line arrays.
+      if (this.resizeTimer) clearTimeout(this.resizeTimer)
+      this.resizeTimer = setTimeout(() => {
+        this.resizeTimer = null
+        // Old wrap is wrong at the new width and the terminal may have re-flowed
+        // unpredictably. On Windows, also clear scrollback (3J) because visible
+        // clear alone can leave pre-resize reflow artifacts in the viewport.
+        const hardClear = process.platform === 'win32' ? `${CSI}3J${CSI}2J${CSI}H` : `${CSI}2J${CSI}H`
+        process.stdout.write(`${CSI}0m${HIDE_CURSOR}${hardClear}`)
+        this.bottomZoneHeight = 0
+        this.cursorOffsetFromZoneTop = 0
+        this.drawnFinalisedCount = 0
+        this.render()
+      }, process.platform === 'win32' ? 90 : 40)
     }
 
     process.stdin.on('data', this.dataHandler)
@@ -417,8 +428,10 @@ class TerminalPrompt implements BlessedPromptHandle {
 
     if (this.dataHandler) process.stdin.removeListener('data', this.dataHandler)
     if (this.resizeHandler) process.stdout.removeListener('resize', this.resizeHandler)
+    if (this.resizeTimer) clearTimeout(this.resizeTimer)
     this.dataHandler = null
     this.resizeHandler = null
+    this.resizeTimer = null
     this.parseState = INITIAL_STATE
 
     process.stdout.write(DISABLE_BRACKETED_PASTE)

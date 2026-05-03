@@ -187,6 +187,7 @@ export class Prompt {
   // at the start of the next read().
   private typeaheadBuf = ''
   private typeaheadHandler: ((c: string) => void) | null = null
+  private resizeTimer: NodeJS.Timeout | null = null
 
   // Confirm-dialog input: when confirm() is called outside an active read()
   // (e.g. from a slash-command handler like /newborn), typeahead alone just
@@ -367,19 +368,25 @@ export class Prompt {
       // in the alt-screen buffer at newly revealed rows when the terminal grows.
       const onResize = () => {
         if (!this.active) return
-        if (this.fixedZoneLines) {
-          this.fullViewportRedraw()
-        } else {
-          const linesToClear = Math.max(this.lastRenderedLines + 2, 4)
-          process.stdout.write('\r\x1b[' + linesToClear + 'A\x1b[J')
-          this.lastRenderedLines = 1
-          this.draw()
-        }
+        if (this.resizeTimer) clearTimeout(this.resizeTimer)
+        this.resizeTimer = setTimeout(() => {
+          this.resizeTimer = null
+          if (this.fixedZoneLines) {
+            this.fullViewportRedraw()
+          } else {
+            const linesToClear = Math.max(this.lastRenderedLines + 2, 4)
+            process.stdout.write('\r\x1b[' + linesToClear + 'A\x1b[J')
+            this.lastRenderedLines = 1
+            this.draw()
+          }
+        }, process.platform === 'win32' ? 90 : 40)
       }
 
       const cleanup = () => {
         stdin.removeListener('data', onData)
         process.stdout.removeListener('resize', onResize)
+        if (this.resizeTimer) clearTimeout(this.resizeTimer)
+        this.resizeTimer = null
         // Disable bracketed paste mode before switching to typeahead mode
         process.stdout.write('\x1b[?2004l')
         this.active = false
@@ -1040,6 +1047,11 @@ export class Prompt {
     const out = process.stdout
     const rows = out.rows ?? 24
     out.write(hideCursor())
+    if (process.platform === 'win32') {
+      // Windows Terminal reflows the backing buffer while resizing. Resetting
+      // scroll margins alone can leave old wrapped fixed-zone frames in view.
+      out.write('\x1b[0m\x1b[3J\x1b[2J\x1b[H')
+    }
     // In native mode: just reset scroll region without clearing display
     out.write('\x1b[r')           // Reset margins to full screen
     out.write(`\x1b[1;${rows}r`)  // Set new margins
