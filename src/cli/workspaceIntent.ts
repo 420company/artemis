@@ -1,7 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unused-vars, prefer-const */
 import path from 'node:path'
 import { homedir } from 'node:os'
-import { resolveWorkspaceCandidatePath, findNearestExistingWorkspaceRoot } from '../utils/workspaceRoots.js'
+import {
+  findNearestExistingWorkspaceRoot,
+  resolveWorkspaceCandidatePath,
+} from '../utils/workspaceRoots.js'
 
 export type WorkspaceIntentResolution = {
   requestedPath: string
@@ -58,6 +61,8 @@ function startsWithStrongWorkspaceIntent(input: string): boolean {
   )
 }
 
+const ABSOLUTE_PATH_START = String.raw`(?:~|/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)`
+
 function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): string | null {
   let candidate = raw
     .trim()
@@ -68,11 +73,19 @@ function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): s
   if (!candidate) return null
   if (/^\/\s/.test(candidate)) return null
 
+  // On native Windows, a leading POSIX-style slash such as `/foo` is not a
+  // user workspace path. Node resolves it against the current drive
+  // (`C:\foo`), and if that child is missing our nearest-parent fallback can
+  // escalate all the way to `C:\`, triggering the trust dialog from an
+  // ordinary unknown slash command typed in the chat box. Windows absolute
+  // paths should be `C:\foo`, `C:/foo`, `\\server\share`, or relative paths.
+  if (process.platform === 'win32' && /^\/(?!\/)/.test(candidate)) return null
+
   return resolveWorkspaceCandidatePath(candidate, currentCwd, homeDir)
 }
 
 function extractQuotedPath(input: string): string | null {
-  const quoted = input.match(/["“'‘`]((?:~|\/)[^"”'’`\r\n]+)["”'’`]/)
+  const quoted = input.match(new RegExp(`["“'‘\`](${ABSOLUTE_PATH_START}[^"”'’\`\\r\\n]*)["”'’\`]`))
   return quoted?.[1]?.trim() ?? null
 }
 
@@ -82,7 +95,7 @@ function extractPrefixedPath(input: string, strongOnly = false): string | null {
   const prefixes = strongOnly ? STRONG_PATH_INTENT_PREFIXES : CONTEXT_PATH_INTENT_PREFIXES
   for (const prefix of prefixes) {
     const pattern = new RegExp(
-      `${escapeRegExp(prefix)}(?:\\s+|[:：]\\s*)((?:~|/)[\\s\\S]+?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
+      `${escapeRegExp(prefix)}(?:\\s+|[:：]\\s*)(${ABSOLUTE_PATH_START}[\\s\\S]*?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
       'i',
     )
     const match = input.match(pattern)
@@ -100,7 +113,7 @@ function extractLeadingPath(input: string): string | null {
   const enStops = 'and|then|continue|create|build|make|write|edit|run'
   const match = input.trimStart().match(
     new RegExp(
-      `^((?:~|/)[\\s\\S]+?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
+      `^(${ABSOLUTE_PATH_START}[\\s\\S]*?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
       'i',
     ),
   )

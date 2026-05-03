@@ -363,7 +363,7 @@ async function configureToolSettings(options: { cwd: string; locale: UiLocale })
         },
       },
       {
-        id: 'image_gen', label: '🎨 Image Generation', enabled: false,
+        id: 'image_gen', label: '🎨 Image Generation', enabled: true,
         description: {
           zh: '控制 generate_image / generate_video。需要先通过 /visual 配置真实视觉 provider。',
           en: 'Controls generate_image / generate_video. Requires a real visual provider configured via /visual.',

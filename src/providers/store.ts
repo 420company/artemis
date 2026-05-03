@@ -60,7 +60,7 @@ function getDefaultSetupConfig(): ArtemisSetupConfig {
         file: true,
         code_execution: true,
         vision: true,
-        image_gen: false,
+        image_gen: true,
         moa: false,
         tts: true,
         stt: true,
@@ -82,7 +82,80 @@ function getDefaultSetupConfig(): ArtemisSetupConfig {
       },
     },
     providerRotation: {},
+    migrations: {
+      imageGenDefaultEnabled: true,
+    },
   };
+}
+
+function mergeSetupConfigWithDefaults(rawSetup: Partial<ArtemisSetupConfig>): ArtemisSetupConfig {
+  const defaults = getDefaultSetupConfig();
+  const merged: ArtemisSetupConfig = {
+    agent: {
+      ...defaults.agent,
+      ...(rawSetup.agent ?? {}),
+      compression: {
+        ...defaults.agent.compression,
+        ...(rawSetup.agent?.compression ?? {}),
+      },
+      sessionReset: {
+        ...defaults.agent.sessionReset,
+        ...(rawSetup.agent?.sessionReset ?? {}),
+      },
+    },
+    terminal: {
+      ...defaults.terminal,
+      ...(rawSetup.terminal ?? {}),
+      ssh: {
+        ...(rawSetup.terminal?.ssh ?? {}),
+      },
+      resources: {
+        ...(rawSetup.terminal?.resources ?? {}),
+      },
+    },
+    voice: {
+      stt: {
+        ...defaults.voice.stt,
+        ...(rawSetup.voice?.stt ?? {}),
+      },
+      tts: {
+        ...defaults.voice.tts,
+        ...(rawSetup.voice?.tts ?? {}),
+      },
+      voice: {
+        ...defaults.voice.voice,
+        ...(rawSetup.voice?.voice ?? {}),
+      },
+    },
+    tools: {
+      enabled: {
+        ...defaults.tools.enabled,
+        ...(rawSetup.tools?.enabled ?? {}),
+      },
+      providers: {
+        ...defaults.tools.providers,
+        ...(rawSetup.tools?.providers ?? {}),
+      },
+    },
+    providerRotation: rawSetup.providerRotation ?? {},
+    migrations: {
+      ...(rawSetup.migrations ?? {}),
+    },
+  };
+
+  // Artemis 0.1.71 originally shipped Full Setup with image generation disabled,
+  // which hid generate_image/generate_video from Windows npm installs. Upgrade
+  // that legacy default once so existing users get the corrected tool surface;
+  // subsequent manual disables in newer builds are preserved by the migration flag.
+  if (merged.migrations?.imageGenDefaultEnabled !== true) {
+    merged.tools.enabled.image_gen = true;
+    merged.migrations = {
+      ...(merged.migrations ?? {}),
+      imageGenDefaultEnabled: true,
+    };
+  }
+
+  return merged;
 }
 
 function getEmptyStore(): ProviderStoreData {
@@ -125,6 +198,81 @@ function getEmptyStore(): ProviderStoreData {
   };
 }
 
+function findCompleteJsonValueEnd(raw: string): number | undefined {
+  const start = raw.search(/\S/);
+  if (start < 0) return undefined;
+
+  const first = raw[start];
+  if (first !== '{' && first !== '[') return undefined;
+
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+
+  for (let index = start; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (char === '\\') {
+        escaping = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{' || char === '[') {
+      depth += 1;
+    } else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+      if (depth < 0) return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function ensureProviderStoreObject(value: unknown, filePath: string): Partial<ProviderStoreData> {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    return value as Partial<ProviderStoreData>;
+  }
+  throw new Error(`Invalid provider store JSON at ${filePath}: expected a JSON object`);
+}
+
+function parseProviderStoreJson(raw: string, filePath: string): {
+  data: Partial<ProviderStoreData>;
+  repairedTrailingJunk: boolean;
+} {
+  try {
+    return {
+      data: ensureProviderStoreObject(JSON.parse(raw), filePath),
+      repairedTrailingJunk: false,
+    };
+  } catch (error) {
+    const end = findCompleteJsonValueEnd(raw);
+    const trailing = end === undefined ? '' : raw.slice(end);
+
+    if (end !== undefined && trailing.trim().length > 0) {
+      try {
+        return {
+          data: ensureProviderStoreObject(JSON.parse(raw.slice(0, end)), filePath),
+          repairedTrailingJunk: true,
+        };
+      } catch {
+        // Fall through to the original parse error below.
+      }
+    }
+
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid provider store JSON at ${filePath}: ${detail}`);
+  }
+}
+
 export class ProviderStore {
   private readonly rootDir: string;
   private readonly filePath: string;
@@ -146,13 +294,8 @@ export class ProviderStore {
     }
 
     const raw = await readFile(this.filePath, 'utf8');
-    let parsed: Partial<ProviderStoreData>;
-    try {
-      parsed = JSON.parse(raw) as Partial<ProviderStoreData>;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid provider store JSON at ${this.filePath}: ${detail}`);
-    }
+    const loaded = parseProviderStoreJson(raw, this.filePath);
+    const parsed = loaded.data;
 
     const empty = getEmptyStore();
     const customProviders = Array.isArray(parsed.customProviders)
@@ -170,9 +313,9 @@ export class ProviderStore {
     const rawSetup = typeof parsed.setup === 'object' && parsed.setup !== null
       ? parsed.setup as Partial<ArtemisSetupConfig>
       : {};
-    const defaults = getDefaultSetupConfig();
+    const setup = mergeSetupConfigWithDefaults(rawSetup);
 
-    return {
+    const data: ProviderStoreData = {
       profiles: Array.isArray(parsed.profiles)
         ? parsed.profiles
             .filter((entry): entry is ProviderProfile => typeof entry?.id === 'string')
@@ -192,57 +335,13 @@ export class ProviderStore {
       memoryProfile: parsed.memoryProfile,
       customProviders,
       auxiliaryModels,
-      setup: {
-        agent: {
-          ...defaults.agent,
-          ...(rawSetup.agent ?? {}),
-          compression: {
-            ...defaults.agent.compression,
-            ...(rawSetup.agent?.compression ?? {}),
-          },
-          sessionReset: {
-            ...defaults.agent.sessionReset,
-            ...(rawSetup.agent?.sessionReset ?? {}),
-          },
-        },
-        terminal: {
-          ...defaults.terminal,
-          ...(rawSetup.terminal ?? {}),
-          ssh: {
-            ...(rawSetup.terminal?.ssh ?? {}),
-          },
-          resources: {
-            ...(rawSetup.terminal?.resources ?? {}),
-          },
-        },
-        voice: {
-          stt: {
-            ...defaults.voice.stt,
-            ...(rawSetup.voice?.stt ?? {}),
-          },
-          tts: {
-            ...defaults.voice.tts,
-            ...(rawSetup.voice?.tts ?? {}),
-          },
-          voice: {
-            ...defaults.voice.voice,
-            ...(rawSetup.voice?.voice ?? {}),
-          },
-        },
-        tools: {
-          enabled: {
-            ...defaults.tools.enabled,
-            ...(rawSetup.tools?.enabled ?? {}),
-          },
-          providers: {
-            ...defaults.tools.providers,
-            ...(rawSetup.tools?.providers ?? {}),
-          },
-        },
-        providerRotation: rawSetup.providerRotation ?? {},
-      },
+      setup,
       visualProfile: parsed.visualProfile || empty.visualProfile,
     };
+    if (loaded.repairedTrailingJunk) {
+      await this.save(data);
+    }
+    return data;
   }
 
   async save(data: ProviderStoreData): Promise<void> {

@@ -2136,6 +2136,24 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
+    // Unknown slash-prefixed input is almost certainly an attempted command or
+    // menu search, not a free-form AI request. Letting it fall through to the
+    // regular turn path is dangerous on Windows: `/foo` can be interpreted by
+    // workspace-intent detection as a POSIX absolute path, which Node resolves
+    // on the current drive (for example `C:\\foo`) and can trigger a trust
+    // prompt for the drive root. Keep the prompt alive and show a local error
+    // instead of submitting anything to the model/system.
+    const knownSlashCommand = SLASH_MENU_ITEMS.some((item) =>
+      trimmed === item.value || trimmed.startsWith(`${item.value} `),
+    )
+    if (trimmed.startsWith('/') && !knownSlashCommand) {
+      appendSystemPanel(t('未知命令', 'Unknown command'), [
+        `${trimmed.split(/\s+/, 1)[0]} — ${t('运行 /help 查看可用命令。', 'Run /help to see available commands.')}`,
+      ])
+      prompt.forceRedraw()
+      continue
+    }
+
     // ── /config ──────────────────────────────────────────────────────────────
     const configMatch = trimmed.match(/^\/config(?:\s+(.+))?$/)
     if (configMatch) {

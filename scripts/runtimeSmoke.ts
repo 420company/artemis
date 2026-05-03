@@ -39,8 +39,10 @@ import { BytePlusProvider } from '../src/tools/visual/providers/byteplusProvider
 import { OpenAIProvider } from '../src/tools/visual/providers/openaiProvider.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
+  isPathInsideWorkspace,
   mergeTrustedWorkspaceRoots,
   normalizeTrustedWorkspaceRoots,
+  resolveWorkspaceCandidatePath,
   resolveWorkspaceForTargetPath,
 } from '../src/utils/workspaceRoots.js'
 import { projectDirectToolNames } from '../src/core/directToolProjection.js'
@@ -108,8 +110,6 @@ console.log('\n  runtimeSmoke')
 console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
-const voiceToolNames = ['synthesize_speech', 'transcribe_audio']
-const expectedCodingToolCount = expectedDirectToolCount - voiceToolNames.length
 const providerNativeToolNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
 
 assert(
@@ -819,6 +819,35 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     )
   }
 
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    const windowsSlashCommand = await resolveWorkspaceIntent('/not-a-command', tmpDir, tmpDir)
+    assert(
+      'workspace intent: native Windows must not treat unknown slash commands as C-drive absolute paths',
+      windowsSlashCommand === null,
+      JSON.stringify(windowsSlashCommand),
+    )
+  } finally {
+    if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform)
+  }
+
+  const windowsDriveCandidate = resolveWorkspaceCandidatePath('E:\\420COMPANY', 'E:\\')
+  assert(
+    'workspace paths: Windows drive paths stay absolute instead of becoming E:\\E:\\...',
+    windowsDriveCandidate === 'E:\\420COMPANY',
+    windowsDriveCandidate,
+  )
+  assert(
+    'workspace paths: Windows drive containment uses win32 semantics cross-platform',
+    isPathInsideWorkspace('E:\\420COMPANY', 'E:\\420COMPANY\\index.html') === true &&
+      isPathInsideWorkspace('E:\\420COMPANY', 'E:\\Other\\index.html') === false,
+    JSON.stringify({
+      inside: isPathInsideWorkspace('E:\\420COMPANY', 'E:\\420COMPANY\\index.html'),
+      sibling: isPathInsideWorkspace('E:\\420COMPANY', 'E:\\Other\\index.html'),
+    }),
+  )
+
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
@@ -1237,6 +1266,85 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const data = await store.load()
   assert('LegacyProviderStore: returns a config object', data !== undefined)
   assert('LegacyProviderStore: kind is a known value', Array.isArray(data.profiles))
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-provider-migration-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const store = new ProviderStore(tmpDir)
+  await store.save({
+    profiles: [],
+    setup: {
+      agent: {
+        maxIterations: 90,
+        toolProgress: 'all',
+        compression: { enabled: true, threshold: 0.5 },
+        sessionReset: { mode: 'both', idleMinutes: 1440, dailyHour: 4 },
+      },
+      terminal: { backend: 'local' },
+      voice: {
+        stt: { enabled: true, provider: 'local', engine: 'auto', localModel: 'base', language: '' },
+        tts: { provider: 'edge', voice: 'en-US-AriaNeural' },
+        voice: {
+          recordKey: 'ctrl+b',
+          maxRecordingSeconds: 120,
+          autoTts: false,
+          beepEnabled: true,
+          silenceThreshold: 200,
+          silenceDuration: 3,
+        },
+      },
+      tools: {
+        enabled: { image_gen: false },
+        providers: {},
+      },
+      providerRotation: {},
+    },
+  })
+  const migrated = await store.load()
+  assert(
+    'ProviderStore migration: legacy image_gen false is upgraded to expose visual generation tools',
+    migrated.setup?.tools.enabled.image_gen === true &&
+      migrated.setup?.migrations?.imageGenDefaultEnabled === true,
+    JSON.stringify(migrated.setup?.tools.enabled),
+  )
+  const manualOff = await store.updateSetupConfig((setup) => ({
+    ...setup,
+    tools: {
+      ...setup.tools,
+      enabled: {
+        ...setup.tools.enabled,
+        image_gen: false,
+      },
+    },
+  }))
+  const reloaded = await store.load()
+  assert(
+    'ProviderStore migration: manual image_gen disables are preserved after migration flag is present',
+    manualOff.setup?.tools.enabled.image_gen === false && reloaded.setup?.tools.enabled.image_gen === false,
+    JSON.stringify(reloaded.setup?.tools.enabled),
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-provider-repair-${Date.now()}`)
+  const storeDir = path.join(tmpDir, '.artemis')
+  const providersPath = path.join(storeDir, 'providers.json')
+  fs.mkdirSync(storeDir, { recursive: true })
+  fs.writeFileSync(providersPath, `${JSON.stringify({ profiles: [{ id: 'p1', protocol: 'openai' }] }, null, 2)}\n}`, 'utf8')
+
+  const store = new ProviderStore(tmpDir)
+  const repaired = await store.load()
+  const rawAfterRepair = fs.readFileSync(providersPath, 'utf8')
+  assert(
+    'ProviderStore repair: trailing junk after valid JSON is removed without losing profiles',
+    repaired.profiles.length === 1 &&
+      repaired.profiles[0]?.id === 'p1' &&
+      JSON.parse(rawAfterRepair).profiles[0].id === 'p1',
+    rawAfterRepair,
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
 // ── BytePlus preset / media routing ─────────────────────────────────────────
@@ -4361,7 +4469,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     )
     assert(
       'native tool loop: coding requests start with the coding direct tool manifest',
-      firstToolNames.length === expectedCodingToolCount,
+      firstToolNames.length === expectedDirectToolCount,
       `tools=${firstToolNames.length}`,
     )
     assert(
@@ -4369,7 +4477,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       firstToolNames.includes('list_files') &&
         firstToolNames.includes('read_file') &&
         firstToolNames.includes('search_files') &&
-        firstToolNames.includes('format_json'),
+        firstToolNames.includes('format_json') &&
+        firstToolNames.includes('generate_image') &&
+        firstToolNames.includes('generate_video'),
       firstToolNames.join(', '),
     )
     assert(

@@ -221,6 +221,9 @@ export type ArtemisSetupConfig = {
   voice: VoiceSetupConfig;
   tools: ToolSetupConfig;
   providerRotation?: Partial<Record<string, ProviderRotationConfig>>;
+  migrations?: {
+    imageGenDefaultEnabled?: boolean;
+  };
 };
 
 export type MemoryEnhancementConfig = {

@@ -24,18 +24,41 @@ export function expandHomePath(input: string, homeDir = homedir()): string {
   return input
 }
 
+export function isWindowsAbsolutePath(inputPath: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(inputPath) || /^\\\\[^\\]+\\[^\\]+/.test(inputPath)
+}
+
+function isWindowsLikePath(inputPath: string): boolean {
+  return /^[A-Za-z]:(?:[\\/]|$)/.test(inputPath) || /^\\\\/.test(inputPath)
+}
+
 export function resolveWorkspaceCandidatePath(
   inputPath: string,
   currentCwd: string,
   homeDir = homedir(),
 ): string {
   const expanded = expandHomePath(inputPath, homeDir)
+  if (isWindowsAbsolutePath(expanded)) {
+    return path.win32.normalize(expanded)
+  }
+  if (isWindowsLikePath(currentCwd)) {
+    return path.win32.resolve(currentCwd, expanded)
+  }
   return path.isAbsolute(expanded)
     ? path.resolve(expanded)
     : path.resolve(currentCwd, expanded)
 }
 
 export function isPathInsideWorkspace(root: string, target: string): boolean {
+  if (isWindowsLikePath(root) && isWindowsLikePath(target)) {
+    const normalizedRoot = path.win32.resolve(root).toLowerCase()
+    const normalizedTarget = path.win32.resolve(target).toLowerCase()
+    const relativePath = path.win32.relative(normalizedRoot, normalizedTarget)
+    return (
+      relativePath === '' ||
+      (!relativePath.startsWith(`..${path.win32.sep}`) && relativePath !== '..' && !path.win32.isAbsolute(relativePath))
+    )
+  }
   const normalizedRoot = canonicalizeComparablePath(root)
   const normalizedTarget = canonicalizeComparablePath(target)
   const relativePath = path.relative(normalizedRoot, normalizedTarget)
