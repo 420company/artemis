@@ -34,6 +34,7 @@ import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
 import { runWorkflowMode } from '../core/workflowMode.js'
 import type { ChatProvider, ProviderConfig } from '../providers/types.js'
+import { resolveWorkspaceIntent } from '../cli/workspaceIntent.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -77,6 +78,17 @@ function summarizeToolOutput(output: unknown): string {
   if (typeof output !== 'string') return ''
   const compact = output.replace(/\s+/g, ' ').trim()
   return compact ? ` · ${truncate(compact, 160)}` : ''
+}
+
+function normalizeBridgeWorkspacePath(value: string | undefined): string | null {
+  if (!value) return null
+  return path.resolve(value).replace(/[\\/]+$/g, '').toLowerCase()
+}
+
+function sameBridgeWorkspacePath(a: string | undefined, b: string | undefined): boolean {
+  const left = normalizeBridgeWorkspacePath(a)
+  const right = normalizeBridgeWorkspacePath(b)
+  return Boolean(left && right && left === right)
 }
 
 const IMAGE_PRODUCING_TOOLS = new Set([
@@ -261,7 +273,8 @@ export async function runRemoteCommand(
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
-  const commandCwd = binding.storedSession.cwd || cwd
+  const fallbackCwd = binding.storedSession.cwd || cwd || process.cwd()
+  let commandCwd = fallbackCwd
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
   switch (command.type) {
@@ -328,6 +341,20 @@ export async function runRemoteCommand(
       // even if think() throws partway through.
       let heartbeatTimer: NodeJS.Timeout | null = null
       let turnStartedAtForFinish = Date.now()
+      const explicitWorkspace = await resolveWorkspaceIntent(command.body, fallbackCwd, homedir())
+      if (explicitWorkspace) {
+        commandCwd = explicitWorkspace.workspacePath
+        binding.storedSession.cwd = commandCwd
+        await store.save({
+          ...binding.storedSession,
+          cwd: commandCwd,
+          updatedAt: new Date().toISOString(),
+        })
+        await opts.onProgress?.(t(
+          `📁 已将本轮工作区固定为 ${commandCwd}`,
+          `📁 Pinned this turn to workspace ${commandCwd}`,
+        ), 'info')
+      }
       try {
         const emitProgress = (message: string, level: 'info' | 'warn' | 'error' = 'info'): void => {
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
@@ -342,7 +369,7 @@ export async function runRemoteCommand(
           if (slashMatch.command === '/team') {
             // /team needs a provider for routing — use the workspace's default main provider.
             try {
-              providerRuntime = await resolveBridgeProviderRuntime(commandCwd ?? process.cwd())
+              providerRuntime = await resolveBridgeProviderRuntime(commandCwd)
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               await opts.onProgress?.(t(
@@ -354,7 +381,7 @@ export async function runRemoteCommand(
 
           try {
             workflowResolution = await resolveWorkflow(slashMatch, {
-              cwd: commandCwd ?? process.cwd(),
+              cwd: commandCwd,
               locale,
               provider: providerRuntime?.provider,
               nonInteractive: true,
@@ -377,7 +404,7 @@ export async function runRemoteCommand(
 
           if (workflowResolution) {
             try {
-              providerRuntime ??= await resolveBridgeProviderRuntime(commandCwd ?? process.cwd())
+              providerRuntime ??= await resolveBridgeProviderRuntime(commandCwd)
               const workflowStartedText = t(
                 `已进入 /${workflowResolution.mode} 可执行工作流；将使用真实 workflow/runtime 路径，而不是普通聊天模拟。`,
                 `Entered executable /${workflowResolution.mode} workflow; using the real workflow/runtime path, not chat simulation.`,
@@ -387,7 +414,7 @@ export async function runRemoteCommand(
 
               const permissionManager = new PermissionManager(binding.permissionMode, false)
               const providerRouter = await createProviderRouter({
-                cwd: commandCwd ?? process.cwd(),
+                cwd: commandCwd,
                 mainProvider: providerRuntime.provider,
                 onInfo: (message) => emitProgress(message, 'info'),
               })
@@ -396,7 +423,7 @@ export async function runRemoteCommand(
                 binding.storedSession,
                 workflowResolution.effectivePrompt,
                 {
-                  cwd: commandCwd ?? process.cwd(),
+                  cwd: commandCwd,
                   provider: providerRuntime.provider,
                   sessionStore: store,
                   permissionManager,
@@ -476,18 +503,57 @@ export async function runRemoteCommand(
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
             maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? 8) * 3),
-            // Bridges (Telegram/Discord/WeChat) have no interactive trust
-            // dialog — the user can't say "yes I trust this path" mid-chat.
-            // They've already opted into accept-all permissions and the path
-            // they're switching into is one they typed in the very same
-            // message, so auto-approve. Otherwise every "进入X设为工作区"
-            // request fails with "Workspace trust declined".
+            // Auto-approve only when this message explicitly named the same
+            // workspace. For any other workspace switch, ask the bridge user
+            // for confirmation; continuing without consent can make a stale
+            // session/model guess edit the wrong project.
             onWorkspaceSwitchRequest: async (request) => {
+              const explicitlyAllowed = Boolean(
+                explicitWorkspace &&
+                  (sameBridgeWorkspacePath(request.workspacePath, explicitWorkspace.workspacePath) ||
+                    sameBridgeWorkspacePath(request.requestedPath, explicitWorkspace.requestedPath)),
+              )
+              if (explicitlyAllowed) {
+                await opts.onProgress?.(t(
+                  `📁 切换工作区到 ${request.workspacePath}`,
+                  `📁 Switching workspace to ${request.workspacePath}`,
+                ), 'info')
+                return true
+              }
+
+              const question = t(
+                `Artemis 想切换信任工作区到：${request.workspacePath}\n来源：${request.source}${request.toolName ? ` / 工具：${request.toolName}` : ''}${request.originalPath ? `\n原始路径：${request.originalPath}` : ''}\n确认继续吗？`,
+                `Artemis wants to switch the trusted workspace to: ${request.workspacePath}\nSource: ${request.source}${request.toolName ? ` / tool: ${request.toolName}` : ''}${request.originalPath ? `\nOriginal path: ${request.originalPath}` : ''}\nContinue?`,
+              )
               await opts.onProgress?.(t(
-                `📁 切换工作区到 ${request.workspacePath}`,
-                `📁 Switching workspace to ${request.workspacePath}`,
-              ), 'info')
-              return true
+                `⚠️ 等待确认工作区切换：${request.workspacePath}`,
+                `⚠️ Waiting for workspace-switch confirmation: ${request.workspacePath}`,
+              ), 'warn')
+              await opts.sendChatUpdate?.(t(
+                `${question}\n回复“确认/yes/y”继续；回复其他内容或超时将暂停这次切换。`,
+                `${question}\nReply "yes/y" to continue; anything else or timeout pauses this switch.`,
+              ))
+              if (!opts.awaitUserConfirmation) {
+                recordActivity(t(
+                  `确认等待未接入，已暂停工作区切换：${request.workspacePath}`,
+                  `Confirmation waiter is not wired; paused workspace switch: ${request.workspacePath}`,
+                ))
+                return false
+              }
+              recordActivity(t(
+                `等待用户确认工作区切换：${request.workspacePath}`,
+                `Waiting for workspace-switch confirmation: ${request.workspacePath}`,
+              ))
+              const allowed = await opts.awaitUserConfirmation({ question, timeoutMs: 10 * 60_000 })
+              await opts.onProgress?.(t(
+                allowed
+                  ? `📁 切换工作区到 ${request.workspacePath}`
+                  : `⚠️ 用户拒绝/超时，已暂停工作区切换：${request.workspacePath}`,
+                allowed
+                  ? `📁 Switching workspace to ${request.workspacePath}`
+                  : `⚠️ User declined/timed out; paused workspace switch: ${request.workspacePath}`,
+              ), allowed ? 'info' : 'warn')
+              return allowed
             },
             onUserConfirmationRequest: async (request) => {
               const question = request.question.trim()
@@ -661,6 +727,11 @@ export type RunBragiMessagePumpOptions<TCheckpoint> = {
   sendMessage(targetId: string, text: string): Promise<void>
 }
 
+function isBridgeConfirmationReply(text: string): boolean {
+  const normalized = text.trim().toLowerCase()
+  return ['确认', '同意', '继续', '是', 'yes', 'y', 'ok', 'okay', 'continue'].includes(normalized)
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -829,6 +900,10 @@ export async function runBragiMessagePump<TCheckpoint>(
   if (!releaseBridgeLock) return
 
   const activeTargets = new Set<string>()
+  const confirmationWaiters = new Map<string, {
+    resolve: (allowed: boolean) => void
+    timer: NodeJS.Timeout
+  }>()
   const recentlyProcessed = new Set<string>()
   const recentlyProcessedOrder: string[] = []
   let firstInboundConfirmed = false
@@ -888,6 +963,14 @@ export async function runBragiMessagePump<TCheckpoint>(
           commandSuffixPattern: options.commandSuffixPattern,
           images: message.images,
         })
+
+        const pendingConfirmation = confirmationWaiters.get(message.targetId)
+        if (pendingConfirmation) {
+          clearTimeout(pendingConfirmation.timer)
+          confirmationWaiters.delete(message.targetId)
+          pendingConfirmation.resolve(isBridgeConfirmationReply(message.text))
+          continue
+        }
 
         if (activeTargets.has(message.targetId)) {
           await options.sendMessage(
@@ -962,6 +1045,20 @@ export async function runBragiMessagePump<TCheckpoint>(
               } catch (err) {
                 options.onInfo?.(`[${options.channelLabel.toLowerCase()}] sendChatUpdate failed: ${err instanceof Error ? err.message : String(err)}`)
               }
+            },
+            awaitUserConfirmation: async ({ timeoutMs }) => {
+              const existing = confirmationWaiters.get(message.targetId)
+              if (existing) {
+                clearTimeout(existing.timer)
+                existing.resolve(false)
+              }
+              return await new Promise<boolean>((resolve) => {
+                const timer = setTimeout(() => {
+                  confirmationWaiters.delete(message.targetId)
+                  resolve(false)
+                }, timeoutMs)
+                confirmationWaiters.set(message.targetId, { resolve, timer })
+              })
             },
           })
 
@@ -1046,6 +1143,11 @@ export async function runBragiMessagePump<TCheckpoint>(
 
     }
   } finally {
+    for (const waiter of confirmationWaiters.values()) {
+      clearTimeout(waiter.timer)
+      waiter.resolve(false)
+    }
+    confirmationWaiters.clear()
     process.removeListener('SIGINT', stop)
     process.removeListener('SIGTERM', stop)
     options.signal?.removeEventListener('abort', onAbort)
