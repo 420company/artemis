@@ -177,7 +177,7 @@ import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
 import { think, resetSession, getMessages, restoreSession, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens, getBifrostContextAuditReport } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
-import { chooseInteractiveOption, type SlashMenuItem } from './prompt.js'
+import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
 import { createBlessedPrompt, type BlessedPromptHandle } from './blessedPrompt.js'
 import { runBundle, shouldAutoBundle } from '../core/bundle.js'
@@ -1168,7 +1168,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     let choice: 'local' | 'search' | 'skip'
     try {
-      choice = await prompt!.releaseTerminal(() => chooseInteractiveOption<'local' | 'search' | 'skip'>({
+      choice = await prompt!.pickOption<'local' | 'search' | 'skip'>({
         title: t('检测到任务需要视觉素材', 'Visual assets needed'),
         hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
         choices: [
@@ -1189,7 +1189,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           },
         ],
         initialIndex: 0,
-      }))
+      }) ?? 'local'
       prompt!.forceRedraw()
     } catch {
       choice = 'local'
@@ -2143,7 +2143,14 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
       if (configSubcommand === 'visual' || configSubcommand === 'vision') {
-        await prompt.releaseTerminal(() => runVisualModelSetup(locale, cwd))
+        await runVisualModelSetup(locale, cwd, {
+          choose: async (options) => {
+            const picked = await prompt.pickOption(options)
+            if (picked === null && options.escapeValue !== undefined) return options.escapeValue
+            if (picked === null) throw new Error('Selection cancelled.')
+            return picked
+          },
+        })
         prompt.clearBuffer()
         suppressInitialNewbornOnce = true
       } else if (configSubcommand === 'memory') {
@@ -2188,7 +2195,14 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     if (trimmed === '/visual' || trimmed === '/vision') {
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
-      await prompt.releaseTerminal(() => runVisualModelSetup(locale, cwd))
+      await runVisualModelSetup(locale, cwd, {
+        choose: async (options) => {
+          const picked = await prompt.pickOption(options)
+          if (picked === null && options.escapeValue !== undefined) return options.escapeValue
+          if (picked === null) throw new Error('Selection cancelled.')
+          return picked
+        },
+      })
       prompt.clearBuffer()
       suppressInitialNewbornOnce = true
       continue
@@ -2637,13 +2651,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         ])
 
         for (const question of questions) {
-          const choice = await prompt.releaseTerminal(() => chooseInteractiveOption<string>({
+          const choice = await prompt.pickOption<string>({
             title: locale === 'zh-CN' ? question.zh : question.en,
             choices: question.choices.map((choice, index) => ({
               label: `${index + 1}. ${locale === 'zh-CN' ? choice.zh : choice.en}`,
               value: String(index),
             })),
-          }))
+          }) ?? '0'
           prompt.clearBuffer()
           const parsed = Number.parseInt(choice, 10)
           answers.push(Number.isFinite(parsed) ? parsed : 0)
@@ -2984,21 +2998,19 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       } else {
         const initialIndex = Math.max(0, engines.indexOf(cur.docsSearchEngine))
         try {
-          const picked = await prompt.releaseTerminal(() =>
-            chooseInteractiveOption<DocsSearchEngine | '__cancel__'>({
+          const picked = await prompt.pickOption<DocsSearchEngine>({
               title: t('选择文档搜索引擎  (当前: ' + cur.docsSearchEngine + ')',
                        'Select docs search engine  (current: ' + cur.docsSearchEngine + ')'),
               initialIndex,
               hint: t('↑ ↓ 选择   Enter 确认   Esc 取消',
                       '↑ ↓ select   Enter confirm   Esc cancel'),
-              escapeValue: '__cancel__',
               choices: engines.map(e => ({
                 label:       e === cur.docsSearchEngine ? `${e}  ✓` : e,
                 value:       e,
                 description: t(descriptions[e][0], descriptions[e][1]),
               })),
-            }))
-          if (picked !== '__cancel__') {
+            })
+          if (picked) {
             await opts.settingsStore.setDocsSearchEngine(picked)
             appendSystemPanel(t('文档搜索引擎已更新', 'Docs search engine updated'), [`→ ${picked}`])
           }
@@ -3056,10 +3068,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         let action: BifrostAction
 
         if (curMain && curBrain) {
-          const picked = await prompt.releaseTerminal(() =>
-            chooseInteractiveOption<BifrostAction>({
+          const picked = await prompt.pickOption<BifrostAction>({
               title: t('选择 Bifrost 操作', 'Choose Bifrost action'),
-              escapeValue: 'cancel',
               hint: t('↑ ↓ 选择   Enter 确认   Esc 取消',
                       '↑ ↓ select   Enter confirm   Esc cancel'),
               choices: [
@@ -3087,7 +3097,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
                 { value: 'cancel',
                   label: t('✕ 取消', '✕ Cancel') },
               ],
-            }))
+            })
           action = picked ?? 'cancel'
           prompt.forceRedraw()
         } else {

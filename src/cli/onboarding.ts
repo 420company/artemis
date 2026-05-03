@@ -11,7 +11,7 @@
 
 import * as os from 'node:os'
 import { createInterface } from 'node:readline'
-import { chooseInteractiveOption, createInteractivePromptIO } from './prompt.js'
+import { chooseInteractiveOption, createInteractivePromptIO, type PromptMenuOptions } from './prompt.js'
 import type { UiLocale } from './locale.js'
 import { pickLocale, isChineseLocale } from './locale.js'
 import { stringWidth } from '../input/stringWidth.js'
@@ -283,6 +283,7 @@ async function configureProvider(
 
 type VisualConfigWizardOptions = {
   skipEnablePrompt?: boolean
+  ui?: VisualModelSetupUi
 }
 
 function buildVisualProviderChoiceLabel(
@@ -336,6 +337,89 @@ async function persistVisualProfile(
     const store = new ProviderStore(target)
     await store.setVisualProfile(visualProfile)
   }
+}
+
+export async function repairVisualModelSetup(
+  localeHint: UiLocale,
+  cwd?: string,
+): Promise<VisualModelSetupResult> {
+  const locale = localeHint
+  const zh = isChineseLocale(locale)
+  const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
+  const targets = cwd && cwd !== HOME_DIR ? [cwd, HOME_DIR] : [cwd ?? HOME_DIR]
+  let repaired: VisualModelConfig | null = null
+  let changed = false
+
+  sectionHeader(
+    t('▸ 视觉模型快捷修复', '▸ Visual model quick repair'),
+    t('自动启用已保存的视觉配置', 'Automatically enable saved visual config'),
+    t('不要求重新输入 API Key；只修复 enabled / video.enabled / 默认值结构', 'No API key re-entry; repairs enabled flags and default fields only'),
+  )
+
+  for (const target of targets) {
+    const store = new ProviderStore(target)
+    const data = await store.load()
+    const current = store.getVisualProfile(data)
+    const hasImageApi = Boolean(current.image?.apiKey?.trim())
+    const hasVideoApi = Boolean(current.video?.apiKey?.trim())
+    if (!hasImageApi && !hasVideoApi) continue
+
+    const next: VisualModelConfig = {
+      enabled: hasImageApi || hasVideoApi,
+      image: {
+        ...current.image,
+        provider: current.image.provider || 'byteplus',
+        baseUrl: current.image.baseUrl || defaultVisualBaseUrlForProvider(current.image.provider || 'byteplus'),
+        model: current.image.model || defaultVisualModelForProvider(current.image.provider || 'byteplus', 'image'),
+        defaultParams: {
+          size: current.image.defaultParams?.size || '2K',
+          quality: current.image.defaultParams?.quality || 'standard',
+          style: current.image.defaultParams?.style || 'realistic',
+          watermark: current.image.defaultParams?.watermark ?? false,
+          outputFormat: current.image.defaultParams?.outputFormat,
+          outputCompression: current.image.defaultParams?.outputCompression,
+          background: current.image.defaultParams?.background,
+        },
+      },
+      video: {
+        ...current.video,
+        enabled: hasVideoApi,
+        provider: current.video.provider || 'byteplus',
+        baseUrl: current.video.baseUrl || defaultVisualBaseUrlForProvider(current.video.provider || 'byteplus'),
+        model: current.video.model || defaultVisualModelForProvider(current.video.provider || 'byteplus', 'video'),
+        defaultParams: {
+          duration: current.video.defaultParams?.duration || '10s',
+          resolution: current.video.defaultParams?.resolution || '1080p',
+          quality: current.video.defaultParams?.quality || 'standard',
+          style: current.video.defaultParams?.style || 'realistic',
+          format: current.video.defaultParams?.format || 'mp4',
+          framerate: current.video.defaultParams?.framerate || '30fps',
+          watermark: current.video.defaultParams?.watermark ?? false,
+        },
+      },
+    }
+
+    await store.setVisualProfile(next)
+    repaired = next
+    changed = true
+    console.log(c(`  ✓ ${t('已修复', 'Repaired')}: ${target}`, A.green))
+  }
+
+  if (!repaired) {
+    console.log(c('  ' + t('未找到已保存的视觉 API Key。', 'No saved visual API key was found.'), A.yellow))
+    console.log(c('  ' + t('请运行：artemis setup visual', 'Run: artemis setup visual'), A.dim))
+    console.log()
+    return { configured: false, changed: false, visualProfile: null }
+  }
+
+  await awakenDreamSystemForVisualProfile(repaired)
+  console.log(c('  ' + t('当前视觉配置', 'Current visual configuration'), A.bold))
+  for (const line of buildVisualProfileSummaryLines(repaired, t)) {
+    console.log(c(`    ${line}`, A.dim))
+  }
+  console.log(c('  ✓ ' + t('快捷修复完成。请重新发送图片/视频生成任务。', 'Quick repair complete. Retry the image/video generation request.'), A.green))
+  console.log()
+  return { configured: true, changed, visualProfile: repaired }
 }
 
 async function awakenDreamSystemForVisualProfile(visualProfile: VisualModelConfig): Promise<void> {
@@ -403,7 +487,7 @@ async function configureVisualModel(
 
   //
   console.log(c('  ' + t('图片生成配置', 'Image generation configuration'), A.cyan))
-  const imageProviderChoice = await chooseInteractiveOption<string>({
+  const imageProviderChoice = await chooseVisualSetupOption<string>({
     title: t('选择图片生成提供商', 'Choose image generation provider'),
     hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
     choices: [
@@ -413,7 +497,7 @@ async function configureVisualModel(
       { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
       { label: t('取消', 'Cancel'), value: '__cancel__' },
     ],
-  })
+  }, options.ui)
 
   if (imageProviderChoice === '__cancel__') {
     return null
@@ -451,7 +535,7 @@ async function configureVisualModel(
   let videoConfig: VisualModelConfig['video'] | null = null
   if (wantVideo) {
     console.log(c('  ' + t('视频生成配置', 'Video generation configuration'), A.cyan))
-    const videoProvider = await chooseInteractiveOption<string>({
+    const videoProvider = await chooseVisualSetupOption<string>({
       title: t('选择视频生成提供商', 'Choose video generation provider'),
       hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
       choices: [
@@ -460,7 +544,7 @@ async function configureVisualModel(
         { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
         { label: t('取消', 'Cancel'), value: '__cancel__' },
       ],
-    })
+    }, options.ui)
 
     if (videoProvider === '__cancel__') {
       return null
@@ -750,9 +834,22 @@ export interface VisualModelSetupResult {
   visualProfile?: VisualModelConfig | null
 }
 
+export interface VisualModelSetupUi {
+  choose?<T>(options: PromptMenuOptions<T>): Promise<T>
+}
+
+async function chooseVisualSetupOption<T>(
+  options: PromptMenuOptions<T>,
+  ui?: VisualModelSetupUi,
+): Promise<T> {
+  if (ui?.choose) return ui.choose(options)
+  return chooseInteractiveOption(options)
+}
+
 export async function runVisualModelSetup(
   localeHint: UiLocale,
   cwd?: string,
+  ui?: VisualModelSetupUi,
 ): Promise<VisualModelSetupResult> {
   const isTTY = process.stdin.isTTY && process.stdout.isTTY
 
@@ -782,7 +879,7 @@ export async function runVisualModelSetup(
     }
     console.log()
 
-    const action = await chooseInteractiveOption<'reconfigure' | 'disable' | 'cancel'>({
+    const action = await chooseVisualSetupOption<'reconfigure' | 'disable' | 'cancel'>({
       title: t('选择操作', 'Choose action'),
       hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
       choices: [
@@ -790,7 +887,7 @@ export async function runVisualModelSetup(
         { label: t('禁用视觉生成', 'Disable visual generation'), value: 'disable' },
         { label: t('取消并保留现状', 'Cancel and keep current config'), value: 'cancel' },
       ],
-    })
+    }, ui)
 
     console.log()
 
@@ -816,7 +913,7 @@ export async function runVisualModelSetup(
     }
   }
 
-  const visualProfile = await configureVisualModel(t, zh, { skipEnablePrompt: true })
+  const visualProfile = await configureVisualModel(t, zh, { skipEnablePrompt: true, ui })
   if (!visualProfile) {
     console.log(c('  ' + t('已取消视觉模型配置。', 'Visual model setup cancelled.'), A.dim))
     console.log()

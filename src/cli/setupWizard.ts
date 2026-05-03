@@ -805,6 +805,23 @@ function buildAvailabilitySummary(data: Awaited<ReturnType<ProviderStore['load']
   return lines
 }
 
+function isEnabledFlag(value: unknown): boolean {
+  if (value === true) return true
+  if (typeof value === 'string') return value.trim().toLowerCase() === 'true'
+  return false
+}
+
+function hasVisualImageConfig(data: Awaited<ReturnType<ProviderStore['load']>>): boolean {
+  const visual = data.visualProfile
+  return Boolean(
+    visual &&
+    (isEnabledFlag(visual.enabled) || visual.image?.apiKey?.trim()) &&
+    visual.image?.provider?.trim() &&
+    visual.image?.apiKey?.trim() &&
+    visual.image?.model?.trim(),
+  )
+}
+
 async function printConfigurationLocation(cwd: string): Promise<void> {
   const root = resolveDataRootDir(cwd)
   sectionTitle('Configuration Location', [
@@ -905,6 +922,7 @@ async function runMissingOnlySetup(options: { cwd: string; locale: UiLocale }): 
   const missing: string[] = []
   const main = store.getDefaultMainProfile(data)
   if (!main?.apiKey || !main.baseUrl || !main.model) missing.push('main provider')
+  if (!hasVisualImageConfig(data)) missing.push('visual model')
 
   if (missing.length === 0) {
     console.log('  ✓ Everything essential is configured.')
@@ -914,6 +932,14 @@ async function runMissingOnlySetup(options: { cwd: string; locale: UiLocale }): 
 
   console.log(`  Missing: ${missing.join(', ')}`)
   if (missing.includes('main provider')) await configureModelProvider({ cwd, locale, quick: true })
+  if (missing.includes('visual model')) {
+    const setupVisual = await askYesNo(
+      locale,
+      tr(locale, '检测到视觉模型未配置。现在配置图片/视频生成 API 吗？', 'Visual model is not configured. Configure image/video generation API now?'),
+      true,
+    )
+    if (setupVisual) await runVisualModelSetup(locale, cwd)
+  }
   await printSetupSummary(cwd, locale)
 }
 

@@ -459,7 +459,8 @@ assert(
   assert(
     'generate_image: configured placeholder provider fails closed without silent web fallback',
     result.ok === false &&
-      String(result.output).includes('Web-search fallback is disabled'),
+      String(result.output).includes('configured visual API failed') &&
+      !String(result.output).includes('Deep search fallback'),
     String(result.output),
   )
 
@@ -1280,11 +1281,16 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     ],
     defaultMainProfileId: 'byteplus-coding',
   })
-  const creds = await resolveBytePlusCredentials(tmpDir, 'image')
+  let errorMessage = ''
+  try {
+    await resolveBytePlusCredentials(tmpDir, 'image')
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error)
+  }
   assert(
-    'BytePlus media credentials: coding profile reuses the key but normalizes the media base URL',
-    creds.apiKey === 'bp-key' && creds.baseUrl === 'https://ark.ap-southeast.bytepluses.com/api/v3',
-    `apiKey=${creds.apiKey} baseUrl=${creds.baseUrl}`,
+    'BytePlus media credentials: coding profile does not authorize visual media calls',
+    errorMessage.includes('ARTEMIS_VISUAL_SETUP_REQUIRED'),
+    errorMessage,
   )
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }

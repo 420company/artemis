@@ -983,16 +983,27 @@ class TerminalPrompt implements BlessedPromptHandle {
     })
     const footer = truncateToWidth(this.footerHint, cols)
 
-    // Wrap transient (assistant streaming may exceed cols), then keep the
-    // tail that fits. Older transient lines are intentionally clipped — the
-    // full message lives in finalised once it commits.
+    // Wrap transient (assistant/system streaming may exceed cols), then keep a
+    // stable head with an explicit truncation marker. Keeping the tail made
+    // system/status panels look like their title/top rows were randomly eaten,
+    // especially on Windows after resize. The full content still commits to
+    // finalised scrollback when the block completes.
     const wrappedTransientAll: string[] = []
     for (const line of this.transientLines) {
       for (const sub of this.wrapForCols(line, cols)) wrappedTransientAll.push(sub)
     }
     const fixedZoneHeight = overlayLines.length + hudLines.length + 1 + inputLines.length + 1 + 1
     const maxTransient = Math.max(0, rows - fixedZoneHeight)
-    const transientForDisplay = wrappedTransientAll.slice(-maxTransient)
+    const transientForDisplay = wrappedTransientAll.length <= maxTransient
+      ? wrappedTransientAll
+      : maxTransient <= 0
+        ? []
+        : maxTransient === 1
+          ? [truncateToWidth('…', cols)]
+          : [
+              ...wrappedTransientAll.slice(0, maxTransient - 1),
+              truncateToWidth(`… ${wrappedTransientAll.length - (maxTransient - 1)} more line(s)`, cols),
+            ]
 
     const zoneLines: string[] = [
       ...transientForDisplay,

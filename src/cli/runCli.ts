@@ -24,7 +24,7 @@ import { formatProviderProfileTelemetry } from '../providers/telemetry.js'
 import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { describeVisualProvider, resolveConfiguredVisualProvider } from '../utils/visualGenerationConfig.js'
 import { runInteractive } from './interactive.js'
-import { runOnboarding, runVisualModelSetup } from './onboarding.js'
+import { repairVisualModelSetup, runOnboarding, runVisualModelSetup } from './onboarding.js'
 import { runSetupWizard } from './setupWizard.js'
 import { runMemoryEnhancementSetup } from './memorySetup.js'
 import { runFirstRunWelcome } from './firstRunWelcome.js'
@@ -180,6 +180,10 @@ export async function runCli(argv: string[]): Promise<void> {
   // ── config ──────────────────────────────────────────────────────────────────
   if (options.command === 'config') {
     const configSubcommand = options.prompt?.trim().toLowerCase()
+    if (configSubcommand === 'visual --repair' || configSubcommand === 'vision --repair') {
+      await repairVisualModelSetup(locale, options.cwd)
+      return
+    }
     const setupSections = new Set([
       'model',
       'provider',
@@ -210,6 +214,11 @@ export async function runCli(argv: string[]): Promise<void> {
 
   // ── setup ───────────────────────────────────────────────────────────────────
   if (options.command === 'setup') {
+    const setupSubcommand = options.prompt?.trim().toLowerCase()
+    if (setupSubcommand === 'visual --repair' || setupSubcommand === 'vision --repair') {
+      await repairVisualModelSetup(locale, options.cwd)
+      return
+    }
     await runSetupWizard({ locale, cwd: options.cwd, section: options.prompt })
     return
   }

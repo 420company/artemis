@@ -10,8 +10,11 @@ import { toolLog, toolWarn } from '../utils/log.js';
 import { createVisualProvider } from './visual/providers/interface.js';
 import { saveGeneratedAssetToWorkspace } from './visual/saveGeneratedAsset.js';
 import {
+    buildVisualSetupRequiredMessage,
     describeVisualProvider,
+    isVisualSetupRequiredError,
     resolveConfiguredVisualProvider,
+    resolveMainSecondaryVisualFallbackCandidates,
 } from '../utils/visualGenerationConfig.js';
 import {
     ASSET_DOWNLOAD_TIMEOUT_MS,
@@ -65,7 +68,12 @@ export async function executeGenerateImage(action: any, context: any) {
             return configuredResult;
         }
 
-        // 尝试使用 BytePlus 服务，就像 mb 版本那样
+        const fallbackProviderResult = await tryGenerateWithMainSecondaryFallbackProviders(action, context);
+        if (fallbackProviderResult) {
+            return fallbackProviderResult;
+        }
+
+        // Legacy BytePlus env/config fallback after visualProfile and main/secondary tests.
         const { apiKey, baseUrl } = await resolveBytePlusCredentials(context.cwd, 'image');
         const model = action.model?.trim() || DEFAULT_MODEL;
         const size = action.size?.trim() || DEFAULT_SIZE;
@@ -179,6 +187,13 @@ export async function executeGenerateImage(action: any, context: any) {
             toolLog('ℹ️ BytePlus API unavailable, falling back to deep search...');
             return await fallbackToDeepSearch(action, context, message);
         }
+        if (isVisualSetupRequiredError(error)) {
+            return {
+                action,
+                ok: false,
+                output: buildVisualSetupRequiredMessage('image'),
+            };
+        }
         return {
             action,
             ok: false,
@@ -193,7 +208,6 @@ async function tryGenerateWithConfiguredVisualProvider(action: any, context: any
         return null;
     }
 
-    const count = sanitizeCount(action.count);
     const provider = await createVisualProvider(configured.config, 'image');
     if (!provider.supportsImages) {
         toolWarn(`⚠️ 已配置的视觉提供商不支持图片生成: ${configured.provider}`);
@@ -204,32 +218,76 @@ async function tryGenerateWithConfiguredVisualProvider(action: any, context: any
         };
     }
 
-        const imageConfig = configured.config.image;
-        const savedEntries: Array<{ path: string; provider: string; model: string }> = [];
-        for (let i = 0; i < count; i += 1) {
-            const model = action.model?.trim() || imageConfig.model || configured.model;
-            const outputFormat = normalizeImageOutputFormat(action.outputFormat) || imageConfig.defaultParams.outputFormat;
-            toolLog(`🎨 使用本地视觉 API 生成图片: ${describeVisualProvider(configured.config, 'image')}`);
-            const result = await provider.generateImage({
-                prompt: action.prompt,
-                model,
-                size: action.size?.trim() || imageConfig.defaultParams.size,
-                quality: action.quality?.trim?.() || imageConfig.defaultParams.quality,
-                style: imageConfig.defaultParams.style,
-                outputFormat,
-                outputCompression: normalizeOutputCompression(action.outputCompression) ?? imageConfig.defaultParams.outputCompression,
-                background: action.background?.trim?.() || imageConfig.defaultParams.background,
-                watermark: action.watermark ?? imageConfig.defaultParams.watermark,
-                count: 1,
-            });
+    return generateImageWithVisualProvider(action, context, configured.config, provider, configured.model, 'configured visual API');
+}
+
+async function tryGenerateWithMainSecondaryFallbackProviders(action: any, context: any) {
+    const candidates = await resolveMainSecondaryVisualFallbackCandidates(context.cwd, 'image');
+    if (!candidates.length) return null;
+
+    const failures: string[] = [];
+    for (const candidate of candidates) {
+        try {
+            toolLog(`🧪 测试主/副模型图片生成能力: ${candidate.label} (${candidate.provider}/${candidate.model})`);
+            const provider = await createVisualProvider(candidate.config, 'image');
+            if (!provider.supportsImages) {
+                failures.push(`${candidate.label}: provider does not support images`);
+                continue;
+            }
+
+            const result = await generateImageWithVisualProvider(action, context, candidate.config, provider, candidate.model, 'main/secondary fallback');
+            if (result.ok) return result;
+            failures.push(`${candidate.label}: ${result.output}`);
+        } catch (error) {
+            failures.push(`${candidate.label}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    if (allowWebFallback(action)) {
+        return await fallbackToDeepSearch(action, context, `Configured visual API missing/unusable; main/secondary visual tests failed: ${failures.join(' | ')}`);
+    }
+    return {
+        action,
+        ok: false,
+        output: `${buildVisualSetupRequiredMessage('image')}\n\nMain/secondary provider test results:\n${failures.map((line) => `  - ${line}`).join('\n')}`,
+    };
+}
+
+async function generateImageWithVisualProvider(
+    action: any,
+    context: any,
+    config: any,
+    provider: any,
+    configuredModel: string,
+    sourceLabel: string,
+) {
+    const count = sanitizeCount(action.count);
+    const imageConfig = config.image;
+    const savedEntries: Array<{ path: string; provider: string; model: string }> = [];
+    for (let i = 0; i < count; i += 1) {
+        const model = action.model?.trim() || imageConfig.model || configuredModel;
+        const outputFormat = normalizeImageOutputFormat(action.outputFormat) || imageConfig.defaultParams.outputFormat;
+        toolLog(`🎨 使用${sourceLabel}生成图片: ${describeVisualProvider(config, 'image')}`);
+        const result = await provider.generateImage({
+            prompt: action.prompt,
+            model,
+            size: action.size?.trim() || imageConfig.defaultParams.size,
+            quality: action.quality?.trim?.() || imageConfig.defaultParams.quality,
+            style: imageConfig.defaultParams.style,
+            outputFormat,
+            outputCompression: normalizeOutputCompression(action.outputCompression) ?? imageConfig.defaultParams.outputCompression,
+            background: action.background?.trim?.() || imageConfig.defaultParams.background,
+            watermark: action.watermark ?? imageConfig.defaultParams.watermark,
+            count: 1,
+        });
 
         if (!result.success || !result.assetPath) {
             const message = result.error ?? 'unknown error';
-            toolWarn(`⚠️ 本地视觉 API 生成失败: ${message}`);
+            toolWarn(`⚠️ ${sourceLabel}图片生成失败: ${message}`);
             return {
                 action,
                 ok: false,
-                output: `generate_image failed: configured visual provider failed: ${message}. Web-search fallback is disabled.`,
+                output: `generate_image failed: ${sourceLabel} failed: ${message}.`,
             };
         }
 
@@ -254,7 +312,7 @@ async function tryGenerateWithConfiguredVisualProvider(action: any, context: any
         action,
         ok: true,
         output: [
-            `Generated ${savedEntries.length} image(s) via configured visual API:`,
+            `Generated ${savedEntries.length} image(s) via ${sourceLabel}:`,
             ...savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.provider}/${entry.model}: ${entry.path}`),
         ].join('\n'),
     };

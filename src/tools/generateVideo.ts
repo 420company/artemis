@@ -8,8 +8,11 @@ import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { createVisualProvider } from './visual/providers/interface.js';
 import { saveGeneratedAssetToWorkspace } from './visual/saveGeneratedAsset.js';
 import {
+  buildVisualSetupRequiredMessage,
   describeVisualProvider,
+  isVisualSetupRequiredError,
   resolveConfiguredVisualProvider,
+  resolveMainSecondaryVisualFallbackCandidates,
 } from '../utils/visualGenerationConfig.js';
 import { toolLog, toolWarn } from '../utils/log.js';
 import {
@@ -93,6 +96,12 @@ export async function executeGenerateVideo(
       return configuredResult;
     }
 
+    const fallbackProviderResult = await tryGenerateWithMainSecondaryFallbackProviders(action, context);
+    if (fallbackProviderResult) {
+      return fallbackProviderResult;
+    }
+
+    // Legacy BytePlus env/config fallback after visualProfile and main/secondary tests.
     const { apiKey, baseUrl } = await resolveBytePlusCredentials(context.cwd, 'video');
     const model = action.model?.trim() || DEFAULT_MODEL;
     const ratio = action.ratio?.trim() || DEFAULT_RATIO;
@@ -236,6 +245,9 @@ export async function executeGenerateVideo(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (isVisualSetupRequiredError(error)) {
+      return { action, ok: false, output: buildVisualSetupRequiredMessage('video') };
+    }
     return { action, ok: false, output: `generate_video error: ${message}` };
   }
 }
@@ -258,9 +270,51 @@ async function tryGenerateWithConfiguredVisualProvider(
     };
   }
 
-  const videoConfig = configured.config.video;
-  const model = action.model?.trim() || videoConfig.model || configured.model;
-  toolLog(`🎬 使用本地视觉 API 生成视频: ${describeVisualProvider(configured.config, 'video')}`);
+  const model = action.model?.trim() || configured.config.video.model || configured.model;
+  return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API');
+}
+
+async function tryGenerateWithMainSecondaryFallbackProviders(
+  action: GenerateVideoAction,
+  context: ToolExecutionContext,
+): Promise<ToolExecutionResult | null> {
+  const candidates = await resolveMainSecondaryVisualFallbackCandidates(context.cwd, 'video');
+  if (!candidates.length) return null;
+
+  const failures: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      toolLog(`🧪 测试主/副模型视频生成能力: ${candidate.label} (${candidate.provider}/${candidate.model})`);
+      const provider = await createVisualProvider(candidate.config, 'video');
+      if (!provider.supportsVideos || !provider.generateVideo) {
+        failures.push(`${candidate.label}: provider does not support videos`);
+        continue;
+      }
+      const result = await generateVideoWithVisualProvider(action, context, candidate.config, provider, candidate.model, 'main/secondary fallback');
+      if (result.ok) return result;
+      failures.push(`${candidate.label}: ${result.output}`);
+    } catch (error) {
+      failures.push(`${candidate.label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return {
+    action,
+    ok: false,
+    output: `${buildVisualSetupRequiredMessage('video')}\n\nMain/secondary provider test results:\n${failures.map((line) => `  - ${line}`).join('\n')}`,
+  };
+}
+
+async function generateVideoWithVisualProvider(
+  action: GenerateVideoAction,
+  context: ToolExecutionContext,
+  config: any,
+  provider: any,
+  model: string,
+  sourceLabel: string,
+): Promise<ToolExecutionResult> {
+  const videoConfig = config.video;
+  toolLog(`🎬 使用${sourceLabel}生成视频: ${describeVisualProvider(config, 'video')}`);
   const result = await provider.generateVideo({
     prompt: action.prompt,
     model,
@@ -279,7 +333,7 @@ async function tryGenerateWithConfiguredVisualProvider(
     return {
       action,
       ok: false,
-      output: `generate_video: configured visual provider failed: ${message}`,
+      output: `generate_video: ${sourceLabel} failed: ${message}`,
     };
   }
 
@@ -295,6 +349,6 @@ async function tryGenerateWithConfiguredVisualProvider(
   return {
     action,
     ok: true,
-    output: `Generated video via configured visual API ${result.modelInfo?.provider ?? provider.name}/${result.modelInfo?.model ?? model} saved to ${savedPath}`,
+    output: `Generated video via ${sourceLabel} ${result.modelInfo?.provider ?? provider.name}/${result.modelInfo?.model ?? model} saved to ${savedPath}`,
   };
 }

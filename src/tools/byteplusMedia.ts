@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { homedir } from 'node:os';
 import { ProviderStore } from '../providers/store.js';
-import type { ProviderProfile, ProviderStoreData } from '../providers/types.js';
+import type { ProviderStoreData } from '../providers/types.js';
+import { VISUAL_SETUP_REQUIRED_ERROR } from '../utils/visualGenerationConfig.js';
 
 export type BytePlusMediaCredentials = {
   apiKey: string;
@@ -13,8 +14,10 @@ export type BytePlusMediaAssetKind = 'image' | 'video';
 const BYTEPLUS_DEFAULT_BASE_URL = 'https://ark.ap-southeast.bytepluses.com/api/v3';
 const BYTEPLUS_HOST_FRAGMENT = 'bytepluses.com';
 
-function isBytePlusProfile(profile: ProviderProfile | undefined): profile is ProviderProfile {
-  return Boolean(profile?.baseUrl?.includes(BYTEPLUS_HOST_FRAGMENT));
+function isEnabledFlag(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') return value.trim().toLowerCase() === 'true';
+  return false;
 }
 
 export function normalizeBytePlusMediaBaseUrl(baseUrl: string | undefined): string {
@@ -64,9 +67,11 @@ export async function resolveBytePlusCredentials(
     }
     
     const visualProfile = data.visualProfile;
-    if (visualProfile?.enabled) {
-      const slot = assetKind === 'image' ? visualProfile.image : visualProfile.video;
-      if (assetKind === 'video' && !visualProfile.video?.enabled) {
+    const slot = assetKind === 'image' ? visualProfile?.image : visualProfile?.video;
+    const profileEnabled = isEnabledFlag(visualProfile?.enabled) || Boolean(slot?.apiKey?.trim());
+    if (visualProfile && profileEnabled) {
+      const videoEnabled = isEnabledFlag(visualProfile.video?.enabled) || Boolean(visualProfile.video?.apiKey?.trim());
+      if (assetKind === 'video' && !videoEnabled) {
         continue;
       }
 
@@ -82,20 +87,12 @@ export async function resolveBytePlusCredentials(
         };
       }
     }
-    
-    // 如果没有找到视觉配置，尝试从主配置文件获取（向后兼容）
-    if (data.defaultMainProfileId) {
-      const mainProfile = data.profiles.find(p => p.id === data.defaultMainProfileId);
-      if (mainProfile && mainProfile.protocol === 'openai' && mainProfile.baseUrl.includes('byteplus')) {
-        return {
-          apiKey: mainProfile.apiKey,
-          baseUrl: normalizeBytePlusMediaBaseUrl(mainProfile.baseUrl.replace('/api/coding/v3', '/api/v3')),
-        };
-      }
-    }
+
+    // Do not fall back to the main chat provider. Chat API credentials and
+    // visual-generation credentials are intentionally configured separately.
   }
   
   throw new Error(
-    `BytePlus ${assetKind} credentials not found. Set ARK_API_KEY explicitly, or configure a BytePlus visual ${assetKind} profile in the current workspace or home directory.`,
+    `${VISUAL_SETUP_REQUIRED_ERROR}: BytePlus ${assetKind} credentials not found. Configure an enabled visual ${assetKind} profile in the current workspace or home directory.`,
   );
 }
