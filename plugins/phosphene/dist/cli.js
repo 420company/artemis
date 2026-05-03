@@ -44,7 +44,7 @@ import { fetchFinancialLiveContext, renderFinancialLiveContext, renderFinancialL
 import { generateDesignTokens, suggestDesignSystem, } from './design-color-lexicon.js';
 import { fetchMarketSnapshot, formatPrice, formatPct, } from './market-data.js';
 import { analyzeTechnicals } from './technical-analysis.js';
-import { generateDream, saveDreamSnapshot, loadDreams, loadLatestDream, loadDreamFile, renderDream, describeDream, generateDreamImages, refreshDreamVisuals, resolveDreamsDir, isManagedDreamFile, dreamNeedsVisualRefresh, saveDreamGallery, } from './dreams.js';
+import { generateDream, saveDreamSnapshot, loadDreams, loadLatestDream, loadDreamFile, renderDream, describeDream, generateDreamImages, generateDreamImageFromMarkdown, refreshDreamVisuals, resolveDreamsDir, isManagedDreamFile, dreamNeedsVisualRefresh, saveDreamGallery, } from './dreams.js';
 import { PRESETS } from './presets.js';
 import { composeRitualProposal } from './ritual.js';
 import { buildKnowledgeBrief, listKnowledgeDomains, } from './knowledge-atlas.js';
@@ -438,13 +438,9 @@ async function cmdDreamGenerate(args) {
             console.log(`  Image dir: ${imageOptions.imageOutputDir ?? resolve(dreamsDir, 'images')}`);
         }
         if (assetSummary.remote > 0 && assetSummary.local === 0) {
-            console.log('  Mode: remote fallback (local download unavailable or disabled)');
-        }
-        else if (normalizeDreamImageConfig(imageOptions).provider === 'pollinations' && normalizeDreamImageConfig(imageOptions).download !== false) {
-            console.log('  Mode: local-first download');
         }
         else {
-            console.log('  Mode: explicit remote URL attachment');
+            console.log('  Mode: Artemis visual model · daily limit 1 image');
         }
     }
     console.log(`  Gallery: ${galleryPath}`);
@@ -460,11 +456,13 @@ async function cmdDreamImages(args) {
             return;
         }
         console.log('\n  No dream markdown found.\n');
-        console.log('  Usage: phosphene dream images [path/to/dream.md] [--provider pollinations|hf|openai|local] [--out dir]\n');
+        console.log('  Usage: phosphene dream images [path/to/dream.md] [--out dir]\n');
         return;
     }
     const options = parseDreamImageOptions(args);
-    const updated = await generateDreamImages(dream, normalizeDreamImageConfig(options), dreamsDir);
+    const updated = filepath
+        ? await generateDreamImageFromMarkdown(filepath, normalizeDreamImageConfig(options))
+        : await generateDreamImages(dream, normalizeDreamImageConfig(options), dreamsDir);
     const galleryPath = saveDreamGallery(dreamsDir);
     const count = Object.keys(updated.imagePaths).length;
     const normalized = normalizeDreamImageConfig(options);
@@ -476,12 +474,7 @@ async function cmdDreamImages(args) {
     if (assetSummary.local > 0) {
         console.log(`  Output: ${options.imageOutputDir ?? resolve(dreamsDir, 'images')}`);
     }
-    if (normalized.provider === 'pollinations' && normalized.download !== false) {
-        console.log('  Mode:   local-first download');
-    }
-    else {
-        console.log('  Mode:   remote URL attachment');
-    }
+    console.log('  Mode:   Artemis visual model · daily limit 1 image');
     console.log(`  Gallery: ${galleryPath}`);
     if (count === 0) {
         console.log('  Result: no images were attached. Check provider, network, or local backend availability.\n');
@@ -518,7 +511,7 @@ async function cmdDreamRefresh(args) {
             return;
         }
         console.log('\n  No dream markdown found to refresh.\n');
-        console.log('  Usage: phosphene dream refresh [file] [--all|--stale] [--images] [--provider pollinations|hf|openai|local]\n');
+        console.log('  Usage: phosphene dream refresh [file] [--all|--stale] [--images]\n');
         return;
     }
     let refreshedCount = 0;
@@ -545,12 +538,7 @@ async function cmdDreamRefresh(args) {
     if (shouldGenerateImages) {
         console.log(`  Images attached: ${imageCount}`);
         console.log(`  Assets: ${localAssets} local | ${remoteAssets} remote`);
-        if (normalized.provider === 'pollinations' && normalized.download !== false) {
-            console.log('  Mode: local-first refresh');
-        }
-        else {
-            console.log('  Mode: remote URL refresh');
-        }
+        console.log('  Mode: Artemis visual model · daily limit 1 image');
     }
     if (galleryPath) {
         console.log(`  Gallery: ${galleryPath}`);
@@ -648,8 +636,8 @@ function parseDreamImageOptions(args) {
 function normalizeDreamImageConfig(options) {
     return {
         ...options,
-        provider: options.provider ?? 'artemis',
-        download: options.provider === 'pollinations' ? (options.download ?? true) : options.download,
+        provider: options.provider === 'none' ? 'none' : 'artemis',
+        download: undefined,
     };
 }
 function summarizeDreamAssets(dream) {
@@ -1072,9 +1060,7 @@ function cmdHelp() {
     --stale                        Refresh only stale dreams in the archive
     --images                       Re-attach images after refreshing prompts
     --images                       Generate local images immediately after writing the dream
-    --provider <name>              pollinations | hf | openai | local | none
-    --download                     For pollinations, force local file download
-    --no-download                  For pollinations, keep remote URLs only
+    --provider <name>              artemis | none
     --out <dir>                    Write images to a specific directory
   phosphene dream images [file]    Generate local images for latest or specified dream markdown
   phosphene market <symbol> [int]  Live market data + Fibonacci + 缠论 analysis

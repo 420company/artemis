@@ -35,6 +35,7 @@ import {
   defaultVisualBaseUrlForProvider,
   defaultVisualModelForProvider,
 } from '../utils/visualGenerationConfig.js'
+import { loadDreamConfig, saveDreamConfig } from '../services/dreamStore.js'
 
 // ─── ANSI ────────────────────────────────────────────────────────────────────
 
@@ -335,6 +336,17 @@ async function persistVisualProfile(
     const store = new ProviderStore(target)
     await store.setVisualProfile(visualProfile)
   }
+}
+
+async function awakenDreamSystemForVisualProfile(visualProfile: VisualModelConfig): Promise<void> {
+  if (!visualProfile.enabled || !visualProfile.image.apiKey.trim()) return
+  const config = await loadDreamConfig()
+  if (config.enabled && config.mode === 'vision') return
+  await saveDreamConfig({
+    ...config,
+    enabled: true,
+    mode: 'vision',
+  })
 }
 
 async function configureVisualModel(
@@ -816,12 +828,14 @@ export async function runVisualModelSetup(
   }
 
   await persistVisualProfile(cwd, visualProfile)
+  await awakenDreamSystemForVisualProfile(visualProfile)
 
   console.log(c('  ' + t('当前已保存的视觉配置', 'Saved visual configuration'), A.bold))
   for (const line of buildVisualProfileSummaryLines(visualProfile, t)) {
     console.log(c(`    ${line}`, A.dim))
   }
   console.log(c('  ✓ ' + t('已同步到工作区与全局 providers.json。', 'Synced to workspace and global providers.json.'), A.green))
+  console.log(c('  ✓ ' + t('梦境系统已切换为视觉模式。', 'Dream system switched to vision mode.'), A.green))
   console.log()
 
   return { configured: true, changed: true, visualProfile }

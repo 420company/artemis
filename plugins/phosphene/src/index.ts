@@ -287,8 +287,9 @@ export {
   loadDreams,
   loadLatestDream,
   generateDreamImages,
+  generateDreamImageFromMarkdown,
+  chooseDreamImageFragment,
   refreshDreamVisuals,
-  attachPollinationsUrls,
   renderDreamGallery,
   saveDreamGallery,
   describeDream,
@@ -297,7 +298,6 @@ export { parseDreamMarkdownForViz } from './dream-viz-parser.js';
 
 export type { GeneratedImage } from './image-gen.js';
 export {
-  pollinationsUrl,
   coverImageUrl,
   generateDreamImage,
   generateDreamVideo,

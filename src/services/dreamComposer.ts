@@ -39,6 +39,8 @@ import { notifyDreamFinished, notifyDreamStarted } from './dreamNotifications.js
 export interface ComposeDreamOptions {
   cwd: string
   trigger: 'idle-auto' | 'manual' | 'scheduled'
+  /** Optional canonical seed text for the very first dream. */
+  firstDreamSeed?: string
   /** Override config (mainly for /dream test runs). */
   configOverride?: Partial<DreamConfig>
   /** Status callback for CLI HUD ticks ("🌙 dreaming..."). */
@@ -55,6 +57,8 @@ export interface ComposeDreamResult {
 const DREAM_SYSTEM_PROMPT = `你是 Artemis 的潜意识，专门为它做"白日梦"。
 
 你的任务：把用户今天的工作素材（session 摘要、近期记忆、git 活动等）织成一段 300-500 字的中文梦境随笔。
+
+如果用户素材中包含“初梦固定种子”，那是 Artemis 第一场梦的原始神话文本：你必须以它为核心意象和语气来源，自由优化、压缩、重组，而不是另起炉灶；其它素材只能作为微光融入其中。
 
 要求：
 - 文体：散文诗或意识流，允许超现实跳转、隐喻、感官意象
@@ -86,6 +90,23 @@ const DREAM_IMAGE_PROMPT_SYSTEM = `根据下面这段中文梦境，写一段适
 
 梦境：`
 
+const DREAM_TEXT_TIMEOUT_MS = 90_000
+const DREAM_IMAGE_PROMPT_TIMEOUT_MS = 45_000
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export async function composeDream(options: ComposeDreamOptions): Promise<ComposeDreamResult> {
   const config: DreamConfig = { ...(await loadDreamConfig()), ...(options.configOverride ?? {}) }
 
@@ -110,6 +131,9 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   const gitDigest = await gatherGitDigest(options.cwd)
 
   const contextLines: string[] = []
+  if (options.firstDreamSeed?.trim()) {
+    contextLines.push('# 初梦固定种子', options.firstDreamSeed.trim(), '')
+  }
   if (sessionDigest.length > 0) contextLines.push('# 今日 session 摘要', ...sessionDigest, '')
   if (memoryDigest.length > 0) contextLines.push('# 增强记忆条目', ...memoryDigest, '')
   if (gitDigest.length > 0) contextLines.push('# Git 活动', ...gitDigest, '')
@@ -144,7 +168,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   let dreamMd: string
   let tokenCost = { input: 0, output: 0 }
   try {
-    const response = await provider.complete(composeMessages)
+    const response = await withTimeout(provider.complete(composeMessages), DREAM_TEXT_TIMEOUT_MS, 'dream composition')
     dreamMd = (response.text ?? '').trim()
     if (response.usage) {
       tokenCost = {
@@ -253,7 +277,7 @@ async function deriveImagePrompt(provider: Awaited<ReturnType<typeof createTrack
       { id: 'imgp-sys', role: 'system' as const, content: DREAM_IMAGE_PROMPT_SYSTEM + dreamMd, createdAt: now.toISOString() },
       { id: 'imgp-usr', role: 'user' as const, content: '请直接输出 image prompt。', createdAt: now.toISOString() },
     ]
-    const response = await provider.complete(messages)
+    const response = await withTimeout(provider.complete(messages), DREAM_IMAGE_PROMPT_TIMEOUT_MS, 'dream image prompt derivation')
     const text = (response.text ?? '').trim()
     return text || null
   } catch {

@@ -1,4 +1,4 @@
-import type { DreamRecord, DreamImageConfig, EvolutionState, PhospheneContext } from './types.js';
+import type { DreamRecord, DreamFragment, DreamImageConfig, EvolutionState, PhospheneContext } from './types.js';
 export declare function resolveDreamsDir(): string;
 export declare function isManagedDreamFile(filepath: string, dreamsDir?: string): boolean;
 /**
@@ -48,15 +48,11 @@ export declare function loadLatestDream(dreamsDir?: string): DreamRecord | null;
  * Image prompts are always generated regardless of this function being called.
  */
 export declare function generateDreamImages(dream: DreamRecord, config?: DreamImageConfig, dreamsDir?: string): Promise<DreamRecord>;
+export declare function generateDreamImageFromMarkdown(filepath: string, config?: DreamImageConfig): Promise<DreamRecord>;
+export declare function chooseDreamImageFragment(dream: DreamRecord): DreamFragment | null;
 export declare function refreshDreamVisuals(dream: DreamRecord, options?: {
     preserveAssets?: boolean;
 }): DreamRecord;
-/**
- * Generate Pollinations URLs for all fragments without downloading.
- * Zero-config, works for everyone — returns the dream with URLs in imagePaths.
- * These URLs can be used as <img src="..."> in any browser or HTML file.
- */
-export declare function attachPollinationsUrls(dream: DreamRecord): DreamRecord;
 export declare function renderDreamGallery(dreams: DreamRecord[], dreamsDir?: string): string;
 export declare function saveDreamGallery(dreamsDir?: string): string;
 export declare function dreamNeedsVisualRefresh(dream: DreamRecord): boolean;

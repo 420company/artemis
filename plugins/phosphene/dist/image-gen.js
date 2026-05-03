@@ -41,20 +41,6 @@ function extractGeneratedPath(stdout, fallback) {
     const matches = [...stdout.matchAll(/:\s*(\/[^\n]+)$/gm)];
     return matches.at(-1)?.[1]?.trim() ?? fallback;
 }
-// Legacy URL builder kept for markdown/gallery compatibility and explicit URL-only helpers.
-export function pollinationsUrl(prompt, style, config = {}, seed) {
-    const full = style ? `${prompt}, ${style}` : prompt;
-    const params = {
-        width: String(config.width ?? 1024),
-        height: String(config.height ?? 768),
-        model: config.model ?? 'flux',
-        nologo: '1',
-        enhance: 'false',
-    };
-    if (seed != null)
-        params.seed = String(seed);
-    return `https://image.pollinations.ai/prompt/${encodeURIComponent(full)}?${new URLSearchParams(params).toString()}`;
-}
 /**
  * Generate a single dream image through Artemis CLI's configured visual API.
  *
@@ -68,20 +54,10 @@ export async function generateDreamImage(prompt, style, config = { provider: 'ar
     if (backend === 'none') {
         throw new Error('Image generation is disabled (provider: "none")');
     }
-    if (backend === 'artemis') {
-        assertArtemisVisualConfig();
+    if (backend !== 'artemis') {
+        throw new Error(`Unsupported dream image provider "${backend}". Phosphene dream images must use Artemis' configured visual model.`);
     }
-    // Explicit legacy URL attachment remains available for old gallery workflows,
-    // but real generation must use Artemis.
-    if (backend === 'pollinations' && config.download === false) {
-        return {
-            path: pollinationsUrl(prompt, style, config, seed),
-            backend: 'pollinations',
-            prompt: fullPrompt,
-            width: config.width ?? 1024,
-            height: config.height ?? 768,
-        };
-    }
+    assertArtemisVisualConfig();
     const out = outputPath ?? join(homedir(), 'phosphene-generated', `phosphene-dream-${Date.now()}.png`);
     mkdirSync(join(out, '..'), { recursive: true });
     const stdout = await runArtemisTool('generate_image', {
@@ -121,7 +97,10 @@ export async function generateDreamVideo(prompt, style, config = { provider: 'ar
     };
 }
 export function coverImageUrl(insights, imageStyle, config = {}, seed) {
-    const core = insights.slice(0, 2).join('. ');
-    return pollinationsUrl(core || 'abstract dream landscape', imageStyle, config, seed);
+    void insights;
+    void imageStyle;
+    void config;
+    void seed;
+    throw new Error('Remote cover-image URLs are disabled. Use generateDreamImage() so Artemis generate_image creates a real local asset.');
 }
 //# sourceMappingURL=image-gen.js.map

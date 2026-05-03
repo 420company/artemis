@@ -455,7 +455,22 @@ export async function runCli(argv: string[]): Promise<void> {
             import('../services/dreamNotifications.js'),
           ])
           const dreams = await loadDreamIndex()
-          await notifyDreamSystemStartup(dreams[0] ?? null)
+          await notifyDreamSystemStartup(dreams[0] ?? null, locale)
+          if (dreams.length === 0) {
+            const [{ loadDreamConfig }, { composeDream }, { FIRST_DREAM_EN, FIRST_DREAM_ZH }] = await Promise.all([
+              import('../services/dreamStore.js'),
+              import('../services/dreamComposer.js'),
+              import('../services/dreamNotifications.js'),
+            ])
+            const dreamConfig = await loadDreamConfig()
+            if (dreamConfig.enabled && dreamConfig.mode !== 'off') {
+              void composeDream({
+                cwd: options.cwd,
+                trigger: 'scheduled',
+                firstDreamSeed: locale === 'zh-CN' ? FIRST_DREAM_ZH : FIRST_DREAM_EN,
+              }).catch(() => undefined)
+            }
+          }
           const [{ shouldPromptSoulOnboarding }, { broadcastToBridges }] = await Promise.all([
             import('./soulOnboarding.js'),
             import('../services/bridgeNotifier.js'),
@@ -463,16 +478,7 @@ export async function runCli(argv: string[]): Promise<void> {
           if (await shouldPromptSoulOnboarding()) {
             await broadcastToBridges({
               source: 'soul-onboarding',
-              text: [
-                '🜏 Artemis 还没有被赋予灵魂。',
-                '',
-                '工具已经醒来，名字也已经写在门上；但那枚决定她如何判断、如何沉默、如何靠近你的银核，还没有落进 soul.md。',
-                '若你愿意，可以回答几道像钥匙一样的问题，让她从可用的程序，变成与你长期同行的 Artemis。',
-                '',
-                '/soul start   开始赋魔',
-                '/soul quick   直接点燃默认灵核',
-                '/soul dismiss 让这枚铃声暂时安静',
-              ].join('\n'),
+              text: 'take my soul...',
             })
           }
         } catch { /* dream greeting is non-essential */ }

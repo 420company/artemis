@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { broadcastToBridges } from './bridgeNotifier.js'
 import type { ComposeDreamResult } from './dreamComposer.js'
 import { getDreamsRoot, type DreamEntry } from './dreamStore.js'
+import type { UiLocale } from '../cli/locale.js'
 
 export const DREAM_SYSTEM_NAME = '梦境系统'
 
@@ -72,7 +73,7 @@ async function shouldShowFirstDream(): Promise<boolean> {
   return true
 }
 
-export async function notifyDreamSystemStartup(latest?: DreamEntry | null): Promise<number> {
+export async function notifyDreamSystemStartup(latest?: DreamEntry | null, locale: UiLocale = 'en'): Promise<number> {
   let text: string
   if (latest) {
     text = [
@@ -84,17 +85,21 @@ export async function notifyDreamSystemStartup(latest?: DreamEntry | null): Prom
         ...(latest.imagePath ? [`梦境画面：${latest.imagePath}`] : []),
       ].join('\n')
   } else if (await shouldShowFirstDream()) {
-    text = [
-        '🌙 Artemis 初梦 / First Dream',
-        '',
-        FIRST_DREAM_ZH,
-        '',
-        '---',
-        '',
-        FIRST_DREAM_EN,
-        '',
-        '梦境系统已经醒来。此后它会把对话的回声、工具的脚印和代码森林里的微光，沉淀成新的梦。',
-      ].join('\n')
+    text = locale === 'zh-CN'
+      ? [
+          '🌙 Artemis 初梦',
+          '',
+          FIRST_DREAM_ZH,
+          '',
+          '梦境系统已经醒来。此后它会把对话的回声、工具的脚印和代码森林里的微光，沉淀成新的梦。',
+        ].join('\n')
+      : [
+          '🌙 Artemis First Dream',
+          '',
+          FIRST_DREAM_EN,
+          '',
+          'The dream system has awakened. From now on, it will settle the echoes of conversations, the footprints of tools, and the glimmers in the code forest into new dreams.',
+        ].join('\n')
   } else {
     text = [
       '🌙 梦境系统已醒来。',

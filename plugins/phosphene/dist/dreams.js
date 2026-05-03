@@ -13,13 +13,14 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { join, relative, resolve as resolvePath } from 'path';
-import { detectArtemisVisualConfig, generateDreamImage, pollinationsUrl } from './image-gen.js';
+import { detectArtemisVisualConfig, generateDreamImage } from './image-gen.js';
 import { deriveBiasCandidates, detectHumanPatterns } from './contradiction-engine.js';
 import { PRESETS } from './presets.js';
 const DREAM_MARKDOWN_ORIGIN = 'phosphene-dream';
 const DREAM_SCHEMA_VERSION = 2;
 const DREAM_VISUAL_PROFILE = 'anchored-environmental-v1';
 const DREAM_PROMPT_REVISION = 3;
+const DAILY_DREAM_IMAGE_LIMIT = 1;
 // ─── Path resolution ──────────────────────────────────────────────────────────
 export function resolveDreamsDir() {
     const artemisDir = join(process.cwd(), '.artemis', 'dreams');
@@ -717,53 +718,105 @@ export async function generateDreamImages(dream, config = { provider: 'artemis' 
     if (config.provider === 'none')
         return dream;
     const provider = config.provider ?? 'artemis';
-    if (provider === 'artemis') {
-        const visualStatus = detectArtemisVisualConfig();
-        if (!visualStatus.available) {
-            console.warn(`[phosphene-dreams] Artemis visual model not configured; skipping dream image generation. ${visualStatus.reason}`);
-            return dream;
-        }
+    if (provider !== 'artemis') {
+        throw new Error(`Unsupported dream image provider "${provider}". Phosphene dream images must use Artemis' configured visual model.`);
+    }
+    const visualStatus = detectArtemisVisualConfig();
+    if (!visualStatus.available) {
+        throw new Error(`Artemis visual model not configured; cannot generate dream images. ${visualStatus.reason}`);
     }
     const dir = dreamsDir ?? resolveDreamsDir();
     const imgDir = config.imageOutputDir ?? join(dir, 'images');
-    const needsLocalFiles = provider !== 'pollinations' || config.download !== false;
-    if (needsLocalFiles) {
-        mkdirSync(imgDir, { recursive: true });
-    }
+    mkdirSync(imgDir, { recursive: true });
     const updatedDream = {
         ...dream,
         imagePaths: { ...dream.imagePaths },
         imageBackend: provider,
         imageModel: resolveDreamImageModel(config),
     };
-    for (const fragment of dream.fragments) {
-        const ext = provider === 'pollinations' && config.download !== false ? 'jpg' : 'png';
-        const filename = `${dream.id}-f${fragment.order}.${ext}`;
-        const outputPath = needsLocalFiles ? join(imgDir, filename) : undefined;
-        const fragmentSeed = createDreamImageSeed(dream.id, fragment.order);
-        try {
-            const result = await generateDreamImage(fragment.imagePrompt, dream.imageStyle, config, outputPath, fragmentSeed);
-            updatedDream.imagePaths[fragment.order] = result.path;
-            updatedDream.hasImages = true;
-        }
-        catch (err) {
-            if (provider === 'pollinations' && config.download !== false) {
-                try {
-                    const fallback = await generateDreamImage(fragment.imagePrompt, dream.imageStyle, { ...config, download: false }, undefined, fragmentSeed);
-                    updatedDream.imagePaths[fragment.order] = fallback.path;
-                    updatedDream.hasImages = true;
-                    console.warn(`[phosphene-dreams] Local download failed for fragment ${fragment.order}; attached remote Pollinations URL instead.`);
-                    continue;
-                }
-                catch (fallbackErr) {
-                    console.warn(`[phosphene-dreams] Pollinations fallback failed for fragment ${fragment.order}:`, fallbackErr);
-                }
-            }
-            console.warn(`[phosphene-dreams] Image generation failed for fragment ${fragment.order}:`, err);
-        }
+    const quota = acquireDailyDreamImageQuota(dir);
+    if (!quota.allowed) {
+        console.warn(`[phosphene-dreams] Daily image limit reached (${quota.count}/${DAILY_DREAM_IMAGE_LIMIT}) for ${quota.dayKey}; skipping image generation.`);
+        saveDream(updatedDream, dir);
+        return updatedDream;
+    }
+    const fragment = chooseDreamImageFragment(dream);
+    if (!fragment) {
+        saveDream(updatedDream, dir);
+        return updatedDream;
+    }
+    const filename = `${dream.id}-f${fragment.order}.png`;
+    const outputPath = join(imgDir, filename);
+    const fragmentSeed = createDreamImageSeed(dream.id, fragment.order);
+    try {
+        const result = await generateDreamImage(fragment.imagePrompt, dream.imageStyle, config, outputPath, fragmentSeed);
+        updatedDream.imagePaths[fragment.order] = result.path;
+        updatedDream.hasImages = true;
+        recordDailyDreamImageUse(dir, quota.dayKey, dream.id, fragment.order, result.path);
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Dream image generation failed for fragment ${fragment.order}: ${message}`);
     }
     saveDream(updatedDream, dir);
     return updatedDream;
+}
+export async function generateDreamImageFromMarkdown(filepath, config = { provider: 'artemis' }) {
+    const dream = loadDreamFile(filepath);
+    if (!dream) {
+        throw new Error('Dream image generation only accepts markdown recorded by Phosphene inside the dream archive.');
+    }
+    return generateDreamImages(dream, config, resolvePath(filepath, '..'));
+}
+export function chooseDreamImageFragment(dream) {
+    const candidates = dream.fragments.filter(fragment => !dream.imagePaths[fragment.order]);
+    if (candidates.length === 0)
+        return null;
+    const seed = createDreamImageSeed(`${dream.id}:${localDayKey()}`, candidates.length);
+    return candidates[seed % candidates.length] ?? null;
+}
+function acquireDailyDreamImageQuota(dir) {
+    const dayKey = localDayKey();
+    const usage = readDreamImageUsage(dir);
+    const today = usage[dayKey] ?? [];
+    return {
+        allowed: today.length < DAILY_DREAM_IMAGE_LIMIT,
+        dayKey,
+        count: today.length,
+    };
+}
+function recordDailyDreamImageUse(dir, dayKey, dreamId, fragmentOrder, path) {
+    const usage = readDreamImageUsage(dir);
+    usage[dayKey] = [
+        ...(usage[dayKey] ?? []),
+        {
+            at: new Date().toISOString(),
+            dreamId,
+            fragmentOrder,
+            path,
+        },
+    ];
+    writeDreamImageUsage(dir, usage);
+}
+function readDreamImageUsage(dir) {
+    const filepath = join(dir, '.image-usage.json');
+    try {
+        return JSON.parse(readFileSync(filepath, 'utf-8'));
+    }
+    catch {
+        return {};
+    }
+}
+function writeDreamImageUsage(dir, usage) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '.image-usage.json'), JSON.stringify(usage, null, 2), 'utf-8');
+}
+function localDayKey(isoString) {
+    const date = isoString ? new Date(isoString) : new Date();
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
 }
 export function refreshDreamVisuals(dream, options = {}) {
     const context = contextFromDream(dream);
@@ -785,26 +838,6 @@ export function refreshDreamVisuals(dream, options = {}) {
         imageBackend: options.preserveAssets ? dream.imageBackend : null,
         imageModel: options.preserveAssets ? dream.imageModel : null,
     };
-}
-/**
- * Generate Pollinations URLs for all fragments without downloading.
- * Zero-config, works for everyone — returns the dream with URLs in imagePaths.
- * These URLs can be used as <img src="..."> in any browser or HTML file.
- */
-export function attachPollinationsUrls(dream) {
-    const updated = {
-        ...dream,
-        imagePaths: { ...dream.imagePaths },
-        imageBackend: 'pollinations',
-        imageModel: resolveDreamImageModel({ provider: 'pollinations' }),
-    };
-    for (const fragment of dream.fragments) {
-        if (!updated.imagePaths[fragment.order]) {
-            updated.imagePaths[fragment.order] = pollinationsUrl(fragment.imagePrompt, dream.imageStyle, {}, createDreamImageSeed(dream.id, fragment.order));
-        }
-    }
-    updated.hasImages = Object.keys(updated.imagePaths).length > 0;
-    return updated;
 }
 export function renderDreamGallery(dreams, dreamsDir) {
     const dir = dreamsDir ?? resolveDreamsDir();
@@ -1076,15 +1109,15 @@ function parseDreamMarkdown(content, options = {}) {
         const origin = (fm.match(/^origin:\s+(.+)$/m)?.[1] ?? '').trim();
         const schemaVersion = Number((fm.match(/^schema_version:\s+(.+)$/m)?.[1] ?? '').trim() || '0');
         const id = (fm.match(/^id:\s+(.+)$/m)?.[1] ?? '').trim();
-        const dreamedAt = (fm.match(/^dreamed_at:\s+(.+)$/m)?.[1] ?? '').trim();
-        const stage = (fm.match(/^stage:\s+(.+)$/m)?.[1] ?? 'rem').trim();
-        const preset = (fm.match(/^preset_at_sleep:\s+(.+)$/m)?.[1] ?? 'clear').trim();
+        const dreamedAt = unquoteYaml((fm.match(/^dreamed_at:\s+(.+)$/m)?.[1] ?? fm.match(/^dreamedAt:\s+(.+)$/m)?.[1] ?? '').trim());
+        const stage = unquoteYaml((fm.match(/^stage:\s+(.+)$/m)?.[1] ?? 'rem').trim());
+        const preset = unquoteYaml((fm.match(/^preset_at_sleep:\s+(.+)$/m)?.[1] ?? fm.match(/^preset:\s+(.+)$/m)?.[1] ?? 'clear').trim());
         const intensity = parseFloat(fm.match(/^intensity:\s+(.+)$/m)?.[1] ?? '0.5');
         const sessionId = (fm.match(/^session_id:\s+(.+)$/m)?.[1] ?? 'none').trim();
         const visualProfile = (fm.match(/^visual_profile:\s+(.+)$/m)?.[1] ?? '').trim();
         const promptRevision = Number((fm.match(/^prompt_revision:\s+(.+)$/m)?.[1] ?? '').trim() || '0');
-        const hasImages = fm.match(/^has_images:\s+true/m) !== null;
-        const imageStyle = unescapeYaml((fm.match(/^image_style:\s+"(.+)"$/m)?.[1] ?? '').trim());
+        const hasImages = fm.match(/^has_images:\s+true/m) !== null || fm.match(/^hasImages:\s+true/m) !== null;
+        const imageStyle = unescapeYaml((fm.match(/^image_style:\s+"(.+)"$/m)?.[1] ?? fm.match(/^imageStyle:\s+"(.+)"$/m)?.[1] ?? '').trim());
         const imageBackend = (fm.match(/^image_backend:\s+(.+)$/m)?.[1] ?? 'none').trim();
         const imageModel = unescapeYaml((fm.match(/^image_model:\s+"(.+)"$/m)?.[1] ?? 'none').trim());
         const signed = origin === DREAM_MARKDOWN_ORIGIN && schemaVersion >= 2;
@@ -1135,6 +1168,23 @@ function parseDreamFragments(content) {
             seedIds: [],
         });
     }
+    if (fragments.length > 0) {
+        return fragments.sort((a, b) => a.order - b.order);
+    }
+    const legacyRegex = /## Fragment (\d+) — ([^\n]+)\n\n([\s\S]*?)(?=\n---\n## Fragment|\n---\n|$)/g;
+    for (const match of content.matchAll(legacyRegex)) {
+        const block = match[3].trim();
+        const prompt = block.match(/\*\*Image prompt:\*\* ([^\n]+)/)?.[1]?.trim()
+            ?? block.match(/!\[[^\]]*\]\(([^)]+)\)/)?.[1]?.trim()
+            ?? block.split('\n\n')[0].trim();
+        fragments.push({
+            order: Math.max(0, Number(match[1]) - 1),
+            logic: match[2].trim(),
+            text: block.split('\n\n')[0].trim(),
+            imagePrompt: prompt,
+            seedIds: [],
+        });
+    }
     return fragments.sort((a, b) => a.order - b.order);
 }
 function parseDreamSeeds(content) {
@@ -1154,7 +1204,9 @@ function parseDreamSeeds(content) {
 }
 function parseWakingLine(content) {
     const match = content.match(/## Waking Line\n\n\*([\s\S]*?)\*/);
-    return match?.[1]?.trim() ?? '';
+    if (match?.[1])
+        return match[1].trim();
+    return content.match(/^wakingLine:\s+"(.+)"$/m)?.[1]?.trim() ?? '';
 }
 function parseFrontmatterImagePaths(frontmatter) {
     const lineMatches = frontmatter.match(/^image_paths:\n((?:  \d+:\s+".*"\n?)*)/m)?.[1];
@@ -1168,6 +1220,9 @@ function parseFrontmatterImagePaths(frontmatter) {
         imagePaths[Number(match[1])] = unescapeYaml(match[2]);
     }
     return imagePaths;
+}
+function unquoteYaml(value) {
+    return value.replace(/^"|"$/g, '').replace(/^'|'$/g, '');
 }
 function parseInlineImagePath(content, order) {
     const pattern = new RegExp(`### Fragment ${order} \\*\\([^)]+\\)\\*[\\s\\S]*?\\n> \\*\\*Image path:\\*\\* ([^\\n]+)`);
@@ -1189,16 +1244,6 @@ function resolveDreamImageModel(config) {
     switch (provider) {
         case 'artemis':
             return config.model ?? 'configured-visual-api';
-        case 'pollinations':
-            return 'flux';
-        case 'hf':
-            return 'black-forest-labs/FLUX.1-schnell';
-        case 'openai':
-            return 'dall-e-3';
-        case 'local':
-            return 'automatic1111';
-        case 'stability':
-            return 'stability-default';
         default:
             return null;
     }

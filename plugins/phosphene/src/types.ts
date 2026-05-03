@@ -792,31 +792,21 @@ export interface DreamImageConfig {
   /**
    * The backend to use.
    *
-   * - 'pollinations' — free, zero config, no API key required (default).
-   *                    Uses Pollinations.ai with the FLUX model.
-   *                    Defaults to local-first download, but can fall back to URL attachment.
-   * - 'hf'          — HuggingFace Inference API, free tier with account token.
-   *                    Uses FLUX.1-schnell. Set apiKey = HF token.
-   * - 'openai'      — DALL-E 3. Requires OPENAI_API_KEY.
-   * - 'stability'   — Stability AI. Requires STABILITY_API_KEY.
-   * - 'local'       — Automatic1111 / ComfyUI REST API at baseUrl.
-   * - 'none'        — disable image generation.
+   * - 'artemis' — default. Calls Artemis' configured generate_image tool.
+   * - 'none'    — disable image generation.
    */
-  provider?: 'artemis' | 'pollinations' | 'hf' | 'openai' | 'stability' | 'local' | 'none';
-  /** API key — read from env if not provided directly. */
+  provider?: 'artemis' | 'none';
+  /** Legacy compatibility only. Phosphene does not read visual API keys directly. */
   apiKey?: string;
   /** Model/engine identifier. Each backend has sensible defaults. */
   model?: string;
-  /** Base URL for local backends (e.g. 'http://localhost:7860'). */
+  /** Legacy compatibility only. Local visual backends are configured by Artemis, not Phosphene. */
   baseUrl?: string;
   /** Image width in pixels (default 1024). */
   width?: number;
   /** Image height in pixels (default 768). */
   height?: number;
-  /**
-   * When true, download remote image responses to imageOutputDir and store local paths.
-   * Pollinations now treats this as the default unless `--no-download` is used.
-   */
+  /** Legacy compatibility only. Dream images are always local files when generated. */
   download?: boolean;
   /** Output directory for downloaded images. Defaults to dreams/images/. */
   imageOutputDir?: string;

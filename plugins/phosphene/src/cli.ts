@@ -82,6 +82,7 @@ import {
   renderDream,
   describeDream,
   generateDreamImages,
+  generateDreamImageFromMarkdown,
   refreshDreamVisuals,
   resolveDreamsDir,
   isManagedDreamFile,
@@ -542,11 +543,8 @@ async function cmdDreamGenerate(args: string[]): Promise<void> {
       console.log(`  Image dir: ${imageOptions.imageOutputDir ?? resolve(dreamsDir, 'images')}`);
     }
     if (assetSummary.remote > 0 && assetSummary.local === 0) {
-      console.log('  Mode: remote fallback (local download unavailable or disabled)');
-    } else if (normalizeDreamImageConfig(imageOptions).provider === 'pollinations' && normalizeDreamImageConfig(imageOptions).download !== false) {
-      console.log('  Mode: local-first download');
     } else {
-      console.log('  Mode: explicit remote URL attachment');
+      console.log('  Mode: Artemis visual model · daily limit 1 image');
     }
   }
   console.log(`  Gallery: ${galleryPath}`);
@@ -563,16 +561,14 @@ async function cmdDreamImages(args: string[]): Promise<void> {
       return;
     }
     console.log('\n  No dream markdown found.\n');
-    console.log('  Usage: phosphene dream images [path/to/dream.md] [--provider pollinations|hf|openai|local] [--out dir]\n');
+    console.log('  Usage: phosphene dream images [path/to/dream.md] [--out dir]\n');
     return;
   }
 
   const options = parseDreamImageOptions(args);
-  const updated = await generateDreamImages(
-    dream,
-    normalizeDreamImageConfig(options),
-    dreamsDir,
-  );
+  const updated = filepath
+    ? await generateDreamImageFromMarkdown(filepath, normalizeDreamImageConfig(options))
+    : await generateDreamImages(dream, normalizeDreamImageConfig(options), dreamsDir);
   const galleryPath = saveDreamGallery(dreamsDir);
   const count = Object.keys(updated.imagePaths).length;
   const normalized = normalizeDreamImageConfig(options);
@@ -585,11 +581,7 @@ async function cmdDreamImages(args: string[]): Promise<void> {
   if (assetSummary.local > 0) {
     console.log(`  Output: ${options.imageOutputDir ?? resolve(dreamsDir, 'images')}`);
   }
-  if (normalized.provider === 'pollinations' && normalized.download !== false) {
-    console.log('  Mode:   local-first download');
-  } else {
-    console.log('  Mode:   remote URL attachment');
-  }
+  console.log('  Mode:   Artemis visual model · daily limit 1 image');
   console.log(`  Gallery: ${galleryPath}`);
   if (count === 0) {
     console.log('  Result: no images were attached. Check provider, network, or local backend availability.\n');
@@ -634,7 +626,7 @@ async function cmdDreamRefresh(args: string[]): Promise<void> {
       return;
     }
     console.log('\n  No dream markdown found to refresh.\n');
-    console.log('  Usage: phosphene dream refresh [file] [--all|--stale] [--images] [--provider pollinations|hf|openai|local]\n');
+    console.log('  Usage: phosphene dream refresh [file] [--all|--stale] [--images]\n');
     return;
   }
 
@@ -670,11 +662,7 @@ async function cmdDreamRefresh(args: string[]): Promise<void> {
   if (shouldGenerateImages) {
     console.log(`  Images attached: ${imageCount}`);
     console.log(`  Assets: ${localAssets} local | ${remoteAssets} remote`);
-    if (normalized.provider === 'pollinations' && normalized.download !== false) {
-      console.log('  Mode: local-first refresh');
-    } else {
-      console.log('  Mode: remote URL refresh');
-    }
+    console.log('  Mode: Artemis visual model · daily limit 1 image');
   }
   if (galleryPath) {
     console.log(`  Gallery: ${galleryPath}`);
@@ -780,8 +768,8 @@ function parseDreamImageOptions(args: string[]): DreamImageConfig {
 function normalizeDreamImageConfig(options: DreamImageConfig): DreamImageConfig {
   return {
     ...options,
-    provider: options.provider ?? 'artemis',
-    download: options.provider === 'pollinations' ? (options.download ?? true) : options.download,
+    provider: options.provider === 'none' ? 'none' : 'artemis',
+    download: undefined,
   };
 }
 
@@ -1271,9 +1259,7 @@ function cmdHelp(): void {
     --stale                        Refresh only stale dreams in the archive
     --images                       Re-attach images after refreshing prompts
     --images                       Generate local images immediately after writing the dream
-    --provider <name>              pollinations | hf | openai | local | none
-    --download                     For pollinations, force local file download
-    --no-download                  For pollinations, keep remote URLs only
+    --provider <name>              artemis | none
     --out <dir>                    Write images to a specific directory
   phosphene dream images [file]    Generate local images for latest or specified dream markdown
   phosphene market <symbol> [int]  Live market data + Fibonacci + 缠论 analysis

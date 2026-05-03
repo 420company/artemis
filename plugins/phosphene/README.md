@@ -591,7 +591,7 @@ phosphene dream render
 phosphene dream images ~/.hermes/dreams/2026-04-15-rem.md
 ```
 
-By default, `phosphene dream images` uses `provider: artemis`, which calls Artemis' configured `generate_image` tool and writes image files into the archive. Legacy providers such as Pollinations remain available only for explicit CLI experiments; Artemis plugin dreams use the Artemis visual bridge.
+By default, `phosphene dream images` uses `provider: artemis`, which calls Artemis' configured `generate_image` tool and writes one local image into the archive. Phosphene does not keep a separate image backend or API key; dream images are limited to one per local day.
 
 ---
 

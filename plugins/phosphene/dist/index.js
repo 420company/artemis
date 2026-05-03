@@ -16,13 +16,13 @@ export { TEMPERAMENT_PRIMITIVES, BEHAVIORAL_PATTERNS, EVOLUTIONARY_BIASES, HUMAN
 export { detectHumanPatterns, deriveBiasCandidates, buildContradictionRead, } from './contradiction-engine.js';
 export { buildFieldComposition } from './field-composer.js';
 export { buildFieldMasterwork } from './field-masterwork.js';
-export {
+export { 
 // Core perception
-applyPreset, adjustLayer, addVoice, removeVoice, perceive, getContext, getPreset, listPresets, reset, describeState, applySubstanceSignature, blend, compare,
+applyPreset, adjustLayer, addVoice, removeVoice, perceive, getContext, getPreset, listPresets, reset, describeState, applySubstanceSignature, blend, compare, 
 // Evolution
-initEvolution, signal, crystallize, anchor, endSession, getEvolutionAnalysis, getEvolution, acceptProposal, describeEvolutionState, saveAsPersonalPreset, removePersonalPreset, applyPersonalPreset, listPersonalPresets, exportPersonalPresets, importPersonalPresets, confirmVoice,
+initEvolution, signal, crystallize, anchor, endSession, getEvolutionAnalysis, getEvolution, acceptProposal, describeEvolutionState, saveAsPersonalPreset, removePersonalPreset, applyPersonalPreset, listPersonalPresets, exportPersonalPresets, importPersonalPresets, confirmVoice, 
 // State stack
-pushState, popState, hasStackedState, captureRuntimeFrame, createRuntimeFrame, restoreRuntimeFrame, runInRuntimeFrame, runWithIsolatedContext,
+pushState, popState, hasStackedState, captureRuntimeFrame, createRuntimeFrame, restoreRuntimeFrame, runInRuntimeFrame, runWithIsolatedContext, 
 // Resistance mode
 toggleResistance, isResistanceActive, } from './phosphene.js';
 export { PRESETS } from './presets.js';
@@ -33,9 +33,9 @@ export { createAwakeningMessage, calibrateAwakeningResponse, completeAwakening, 
 export { composeSessionEnvelope, renderSessionEnvelope, buildSessionEnvelope, } from './ritual-envelope.js';
 export { buildWowPack, renderWowPack, } from './wow.js';
 export { DEFAULT_EVOLUTION, analyzeSignals, describeEvolution, } from './evolution.js';
-export { resolveDreamsDir, isManagedDreamFile, dreamNeedsVisualRefresh, generateDream, renderDream, saveDream, loadDreamFile, readDreamMarkdown, loadDreams, loadLatestDream, generateDreamImages, refreshDreamVisuals, attachPollinationsUrls, renderDreamGallery, saveDreamGallery, describeDream, } from './dreams.js';
+export { resolveDreamsDir, isManagedDreamFile, dreamNeedsVisualRefresh, generateDream, renderDream, saveDream, loadDreamFile, readDreamMarkdown, loadDreams, loadLatestDream, generateDreamImages, generateDreamImageFromMarkdown, chooseDreamImageFragment, refreshDreamVisuals, renderDreamGallery, saveDreamGallery, describeDream, } from './dreams.js';
 export { parseDreamMarkdownForViz } from './dream-viz-parser.js';
-export { pollinationsUrl, coverImageUrl, generateDreamImage, generateDreamVideo, } from './image-gen.js';
+export { coverImageUrl, generateDreamImage, generateDreamVideo, } from './image-gen.js';
 export { applySynesthesia } from './synesthesia.js';
 export { applyApophenia } from './apophenia.js';
 export { applyChronostasis } from './chronostasis.js';

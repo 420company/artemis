@@ -37,10 +37,10 @@ export { composeSessionEnvelope, renderSessionEnvelope, buildSessionEnvelope, } 
 export { buildWowPack, renderWowPack, } from './wow.js';
 export { DEFAULT_EVOLUTION, analyzeSignals, describeEvolution, } from './evolution.js';
 export type { DreamRecord, DreamStage, DreamFragment, DreamSeed, DreamLogic, DreamImageConfig, } from './types.js';
-export { resolveDreamsDir, isManagedDreamFile, dreamNeedsVisualRefresh, generateDream, renderDream, saveDream, loadDreamFile, readDreamMarkdown, loadDreams, loadLatestDream, generateDreamImages, refreshDreamVisuals, attachPollinationsUrls, renderDreamGallery, saveDreamGallery, describeDream, } from './dreams.js';
+export { resolveDreamsDir, isManagedDreamFile, dreamNeedsVisualRefresh, generateDream, renderDream, saveDream, loadDreamFile, readDreamMarkdown, loadDreams, loadLatestDream, generateDreamImages, generateDreamImageFromMarkdown, chooseDreamImageFragment, refreshDreamVisuals, renderDreamGallery, saveDreamGallery, describeDream, } from './dreams.js';
 export { parseDreamMarkdownForViz } from './dream-viz-parser.js';
 export type { GeneratedImage } from './image-gen.js';
-export { pollinationsUrl, coverImageUrl, generateDreamImage, generateDreamVideo, } from './image-gen.js';
+export { coverImageUrl, generateDreamImage, generateDreamVideo, } from './image-gen.js';
 export { applySynesthesia } from './synesthesia.js';
 export { applyApophenia } from './apophenia.js';
 export { applyChronostasis } from './chronostasis.js';

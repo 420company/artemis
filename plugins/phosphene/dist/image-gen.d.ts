@@ -1,7 +1,7 @@
 import type { DreamImageConfig } from './types.js';
 export { assertArtemisVisualConfig, detectArtemisVisualConfig } from './artemis-visual-config.js';
 export interface GeneratedImage {
-    /** Local file path returned by Artemis, or a legacy remote URL for explicit URL-only helpers. */
+    /** Local file path returned by Artemis. */
     path: string;
     /** The backend that produced the image. */
     backend: DreamImageConfig['provider'];
@@ -21,7 +21,6 @@ export interface GeneratedVideo {
     durationSeconds: number;
     stdout?: string;
 }
-export declare function pollinationsUrl(prompt: string, style: string, config?: DreamImageConfig, seed?: number): string;
 /**
  * Generate a single dream image through Artemis CLI's configured visual API.
  *

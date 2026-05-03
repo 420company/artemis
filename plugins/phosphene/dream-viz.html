@@ -718,16 +718,38 @@ function parseFrontmatter(text) {
   const imgMatches = [...fm.matchAll(/^\s+(\d+):\s+"(.+)"$/gm)];
   const imagePaths = {};
   for (const [, k, v] of imgMatches) imagePaths[Number(k)] = v;
+
+  for (const im of text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+    const index = Object.keys(imagePaths).length;
+    if (!Object.values(imagePaths).includes(im[1])) imagePaths[index] = im[1];
+  }
+
   const fragmentSection = text.match(/## Fragments\s+([\s\S]*?)\n---/);
-  const fragBlocks = fragmentSection
+  let fragBlocks = fragmentSection
     ? [...fragmentSection[1].matchAll(/### Fragment\s+(\d+)\s+\*\(([^)]+)\)\*\s+([\s\S]*?)(?=\n### Fragment|\n---|$)/g)]
     : [];
-  const fragments = fragBlocks.map((fm2, i) => ({
+  let fragments = fragBlocks.map((fm2) => ({
     order: Number(fm2[1]),
     logic: fm2[2],
     text: fm2[3].trim().split('\n> **Image prompt:**')[0].trim().slice(0, 200),
   }));
-  const wakingLine = (text.match(/## Waking Line\s+\*([\s\S]*?)\*/)?.[1] ?? '').trim();
+
+  if (fragments.length === 0) {
+    fragBlocks = [...text.matchAll(/## Fragment\s+(\d+)\s+—\s+([^\n]+)\n\n([\s\S]*?)(?=\n---\n## Fragment|\n---\n|$)/g)];
+    fragments = fragBlocks.map((fm2) => ({
+      order: Math.max(0, Number(fm2[1]) - 1),
+      logic: fm2[2].trim(),
+      text: fm2[3]
+        .trim()
+        .split('\n\n**Waking approach:**')[0]
+        .split('\n\n**Image prompt:**')[0]
+        .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+        .trim()
+        .slice(0, 200),
+    }));
+  }
+
+  const wakingLine = (text.match(/## Waking Line\s+\*([\s\S]*?)\*/)?.[1] ?? get('wakingLine') ?? '').trim();
   return {
     stage: get('stage') || 'rem',
     preset: get('preset_at_sleep') || get('preset') || 'deep-flux',

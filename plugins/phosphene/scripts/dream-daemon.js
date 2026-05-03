@@ -77,9 +77,10 @@ const MIN_SLEEP_HOURS = 1.0;
 // Minimum gap between dreams (hours). Prevents back-to-back dreaming.
 const MIN_DREAM_INTERVAL_HOURS = 4;
 
-// Daily cadence guardrails.
+// Daily cadence guardrails. Phosphene dreams at most once per local day.
 const DAILY_MIN_DREAMS = 1;
-const DAILY_MAX_DREAMS = 3;
+const DAILY_MAX_DREAMS = 1;
+const DAILY_MAX_DREAM_IMAGES = 1;
 
 function hoursSince(isoString) {
   if (!isoString) return Infinity;
@@ -96,6 +97,28 @@ function localDayKey(isoString) {
 
 function countDreamsForDay(dreams, dayKey) {
   return dreams.filter(dream => dream?.dreamedAt && localDayKey(dream.dreamedAt) === dayKey).length;
+}
+
+function imageUsagePath() {
+  return join(DREAMS_DIR, '.image-usage.json');
+}
+
+function readImageUsage() {
+  try { return JSON.parse(readFileSync(imageUsagePath(), 'utf8')); } catch { return {}; }
+}
+
+function imageCountForDay(dayKey = localDayKey()) {
+  return (readImageUsage()[dayKey] ?? []).length;
+}
+
+function recordImageUsage(dayKey, dreamId, fragmentOrder, path) {
+  const usage = readImageUsage();
+  usage[dayKey] = [
+    ...(usage[dayKey] ?? []),
+    { at: new Date().toISOString(), dreamId, fragmentOrder, path },
+  ];
+  mkdirSync(DREAMS_DIR, { recursive: true });
+  writeFileSync(imageUsagePath(), JSON.stringify(usage, null, 2), 'utf8');
 }
 
 function resolveSleepReference(state) {
@@ -177,8 +200,7 @@ function shouldDream(state, dreams = []) {
     };
   }
 
-  // Random probability: after the first daily dream, the system may or may not dream again.
-  // Starts modestly after one hour of inactivity and climbs as the idle window deepens.
+  // The AI chooses its own moment through probability. There is no fixed wall-clock schedule.
   const effectiveSleep = Math.max(0, sleepHours - MIN_SLEEP_HOURS);
   const probability = Math.min(0.72, 0.22 + (1 - Math.exp(-effectiveSleep / 6)) * 0.5);
 
@@ -452,27 +474,34 @@ async function generateAndDownloadImages(dream) {
   }
 
   mkdirSync(IMAGES_DIR, { recursive: true });
-  const updated = { ...dream, imagePaths: {} };
-
-  for (const fragment of dream.fragments) {
-    const prompt   = dream.imageStyle ? `${fragment.imagePrompt}, ${dream.imageStyle}` : fragment.imagePrompt;
-    const filename = `${dream.id}-f${fragment.order}.png`;
-    const destPath = join(IMAGES_DIR, filename);
-
+  const updated = { ...dream, imagePaths: { ...(dream.imagePaths ?? {}) } };
+  const dayKey = localDayKey();
+  const usedToday = imageCountForDay(dayKey);
+  if (usedToday >= DAILY_MAX_DREAM_IMAGES) {
     if (!FLAG_QUIET) {
-      process.stdout.write(`  [image] Fragment ${fragment.order} — Artemis visual model…`);
+      console.log(`  [image] Daily limit reached (${usedToday}/${DAILY_MAX_DREAM_IMAGES}) for ${dayKey}; skipping.`);
     }
-    try {
-      updated.imagePaths[fragment.order] = await runArtemisImage(prompt, destPath);
-      updated.hasImages = true;
-      if (!FLAG_QUIET) {
-        process.stdout.write(' ✓\n');
-      }
-    } catch (err) {
-      if (!FLAG_QUIET) {
-        process.stdout.write(` ✗ (${err.message})\n`);
-      }
-    }
+    return updated;
+  }
+
+  const candidates = dream.fragments.filter(fragment => !updated.imagePaths[fragment.order]);
+  if (candidates.length === 0) return updated;
+  const fragment = pickRandom(candidates);
+  const prompt   = dream.imageStyle ? `${fragment.imagePrompt}, ${dream.imageStyle}` : fragment.imagePrompt;
+  const filename = `${dream.id}-f${fragment.order}.png`;
+  const destPath = join(IMAGES_DIR, filename);
+
+  if (!FLAG_QUIET) {
+    process.stdout.write(`  [image] Fragment ${fragment.order} — Artemis visual model…`);
+  }
+
+  const imagePath = await runArtemisImage(prompt, destPath);
+  updated.imagePaths[fragment.order] = imagePath;
+  updated.hasImages = true;
+  recordImageUsage(dayKey, dream.id, fragment.order, imagePath);
+
+  if (!FLAG_QUIET) {
+    process.stdout.write(' ✓\n');
   }
 
   return updated;
