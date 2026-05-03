@@ -65,6 +65,30 @@ const BASE_SYSTEM_PROMPT = `\
 - 除非用户要求，否则不要长篇解释常识
 `;
 
+function buildLocaleInstruction(locale: 'en' | 'zh' = 'zh'): string {
+    if (locale === 'en') {
+        return [
+            '',
+            '[UI language override]',
+            '- The current UI language is English.',
+            '- Reply in English by default unless the user explicitly asks for another language.',
+            '- For complex tasks, write progress checklists in English.',
+            '- Use English checklist items such as:',
+            '  - [ ] Inspect files',
+            '  - [-] In progress',
+            '  - [✅] Done',
+            '- Final summaries, tool result summaries, and status updates should also be in English.',
+        ].join('\n');
+    }
+    return [
+        '',
+        '[界面语言覆盖]',
+        '- 当前界面语言是中文。',
+        '- 默认用中文回复，除非用户明确要求其他语言。',
+        '- 复杂任务的任务清单、进度更新、最终总结默认用中文。',
+    ].join('\n');
+}
+
 let provider: any = null;
 let providerConfig: any = null;
 let providerTelemetryContext: any = null;
@@ -191,12 +215,12 @@ void (async () => {
     } catch { /* ignore */ }
 })();
 
-function buildSystemPromptText() {
+function buildSystemPromptText(locale: 'en' | 'zh' = 'zh') {
     const env = buildHostEnvironmentBlock();
     const learned = learnedDreamSuffix
         ? `\n\n[Long-term style accumulated from dreams]\n${learnedDreamSuffix}`
         : '';
-    const base = `${env}${BASE_SYSTEM_PROMPT}${learned}`;
+    const base = `${env}${BASE_SYSTEM_PROMPT}\n${buildLocaleInstruction(locale)}${learned}`;
     return systemPromptSuffix
         ? `${base}\n${systemPromptSuffix}`
         : base;
@@ -1676,6 +1700,7 @@ export async function think(
         onToolResult,
         onToolLog,
         onReasoning,
+        locale = 'zh',
         disableNativeTools = false,
         imageAttachments = [],
         onWorkspaceSwitchRequest,
@@ -1684,6 +1709,7 @@ export async function think(
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
+    tSession.updateSystemPrompt(buildSystemPromptText(locale));
     tSession.addUser(input);
 
     const p = await loadProvider(cwd);

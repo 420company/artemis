@@ -527,6 +527,7 @@ function buildPendingAssistantLines(options: {
   phase: 'generating' | 'thinking'
   startedAtMs?: number
   liveTokens?: number
+  estimatedTokens?: number
 }): string[] {
   const elapsedMs = options.startedAtMs ? Math.max(0, Date.now() - options.startedAtMs) : 0
   const elapsed = Math.floor(elapsedMs / 1000)
@@ -534,7 +535,8 @@ function buildPendingAssistantLines(options: {
   const phraseZh = options.phase === 'thinking' ? '模型推理中' : 'AI 正在思考'
   const phraseEn = options.phase === 'thinking' ? 'Reasoning' : 'Thinking'
   const phrase = `${phraseZh} · ${phraseEn}`
-  const liveTokens = Math.max(0, options.liveTokens ?? 0)
+  const estimatedTokens = Math.max(0, options.estimatedTokens ?? Math.ceil(elapsedMs / 1000 * 8))
+  const liveTokens = Math.max(0, options.liveTokens ?? 0, estimatedTokens)
   const liveTokenNote = `${fmtTok(liveTokens)} tok`
   // Hint that the user can interrupt — Claude shows this and it reassures
   // people who think the CLI hung.
@@ -648,6 +650,7 @@ function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): stri
           phase: block.pendingPhase ?? 'generating',
           startedAtMs: block.pendingStartMs,
           liveTokens: block.pendingLiveTokens,
+          estimatedTokens: block.pendingStartMs ? Math.ceil((Date.now() - block.pendingStartMs) / 1000 * 8) : undefined,
         }))
         continue
       }
@@ -682,6 +685,7 @@ function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): stri
           phase: block.pendingPhase ?? 'generating',
           startedAtMs: block.pendingStartMs,
           liveTokens: block.pendingLiveTokens,
+          estimatedTokens: block.pendingStartMs ? Math.ceil((Date.now() - block.pendingStartMs) / 1000 * 8) : undefined,
         }))
       }
       continue
@@ -4130,6 +4134,7 @@ async function handleTurn(
 
     const result = await think(input, {
       ...thinkOpts,
+      locale: locale === 'zh-CN' ? 'zh' : 'en',
       cwd: thinkOpts.cwd,
       onReasoning: (delta: string) => {
         if (assistantBlockIndex === null) openPendingAssistantBlock()
