@@ -1,0 +1,10 @@
+name: phosphene-awakening
+description: >
+  Initializes Phosphene perceptual state on session start.
+  On first install, marks the state as unawakened so the AI
+  sends the ritual opening message before responding to anything else,
+  and bootstraps the dream archive so the dream system is live immediately.
+  On subsequent sessions, restores the last known perceptual state.
+version: "0.3.0"
+events:
+  - session:start

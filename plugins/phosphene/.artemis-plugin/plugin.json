@@ -1,0 +1,132 @@
+{
+  "name": "phosphene",
+  "version": "1.0.0",
+  "description": "Artemis workspace quality enhancer for deeper code review, design judgment, research synthesis, and ideation.",
+  "enabled": true,
+  "capabilities": [
+    "quality-guidance",
+    "commands",
+    "hooks"
+  ],
+  "instructionsFile": "PLUGIN.md",
+  "hooks": {
+    "beforeWorkflow": "node plugins/phosphene/scripts/artemis-bootstrap.js --quiet",
+    "afterWorkflow": "node plugins/phosphene/scripts/artemis-after-workflow.js"
+  },
+  "commands": [
+    {
+      "id": "high",
+      "description": "Enter or tune reversible /high Phosphene mode for this workspace/session. Use 'off' to exit.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-high-mode.js {{args}}",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "high-status",
+      "description": "Show whether reversible /high Phosphene mode is active.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-high-mode.js --status",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "bootstrap",
+      "description": "Initialize the project-local Phosphene state and dream archive.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-bootstrap.js {{args}}",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "status",
+      "description": "Show project-local Phosphene state, dream archive, and heartbeat status.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-bootstrap.js --status",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "doctor",
+      "description": "Validate that Phosphene is installed in the Artemis workspace plugin shape.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-doctor.js",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "visual-status",
+      "description": "Check whether Artemis has a configured visual model for Phosphene dreams.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-visual-status.js",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "heartbeat",
+      "description": "Record an Artemis activity heartbeat for idle/dream cadence.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-activity.js --source artemis {{args}}",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "soul-status",
+      "description": "Show whether the optional Phosphene lens is installed in ~/.artemis/soul.md.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-soul.js --status",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "soul-preview",
+      "description": "Preview the optional Phosphene block for ~/.artemis/soul.md without writing it.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-soul.js",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "soul-install",
+      "description": "Install or update the optional Phosphene lens block in ~/.artemis/soul.md after explicit user approval.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-soul.js --write",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "soul-uninstall",
+      "description": "Remove only the optional Phosphene lens block from ~/.artemis/soul.md.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/artemis-soul.js --uninstall",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "dream-status",
+      "description": "Show autonomous dream daemon state without creating a dream.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/dream-daemon.js --status",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "dream-force",
+      "description": "Force-generate a dream from the current Phosphene state.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/dream-daemon.js --force {{args}}",
+      "timeoutMs": 60000
+    },
+    {
+      "id": "gallery",
+      "description": "Regenerate the local Phosphene dream gallery.",
+      "type": "run_command",
+      "command": "node plugins/phosphene/scripts/dream-daemon.js --gallery",
+      "timeoutMs": 60000
+    }
+  ],
+  "policy": {
+    "read": true,
+    "write": false,
+    "shell": true,
+    "delegate": false,
+    "commandPrefixes": [
+      "node plugins/phosphene/scripts/artemis-bootstrap.js",
+      "node plugins/phosphene/scripts/artemis-high-mode.js",
+      "node plugins/phosphene/scripts/artemis-activity.js",
+      "node plugins/phosphene/scripts/artemis-doctor.js",
+      "node plugins/phosphene/scripts/artemis-visual-status.js",
+      "node plugins/phosphene/scripts/artemis-soul.js",
+      "node plugins/phosphene/scripts/artemis-after-workflow.js",
+      "node plugins/phosphene/scripts/dream-daemon.js"
+    ]
+  }
+}

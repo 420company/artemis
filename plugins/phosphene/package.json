@@ -1,0 +1,114 @@
+{
+  "name": "phosphene",
+  "version": "1.0.0",
+  "description": "A five-layer perceptual alteration system for language models. Synesthesia, pattern emergence, temporal dissolution, symbol saturation, and voice multiplicity. Works on any AI — Claude, GPT, Gemini, local LLMs — by reading SKILL.md alone. Self-evolves through accumulated feedback signals.",
+  "type": "module",
+  "private": false,
+  "sideEffects": false,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "phosphene": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "lint": "tsc --noEmit",
+    "test:artemis-plugin": "node scripts/artemis-doctor.js && node scripts/artemis-bootstrap.js --status && node scripts/artemis-soul.js --status && node scripts/artemis-visual-status.js || test $? -eq 2",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "src",
+    "presets",
+    "hooks",
+    "scripts",
+    ".artemis-plugin",
+    "dreams/README.md",
+    "docs",
+    "examples",
+    "SKILL.md",
+    "README.md",
+    "QUICKSTART.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".":              { "import": "./dist/index.js", "types": "./dist/index.d.ts" },
+    "./phosphene":    { "import": "./dist/phosphene.js", "types": "./dist/phosphene.d.ts" },
+    "./types":        { "import": "./dist/types.js", "types": "./dist/types.d.ts" },
+    "./presets":      { "import": "./dist/presets.js", "types": "./dist/presets.d.ts" },
+    "./state":        { "import": "./dist/state.js", "types": "./dist/state.d.ts" },
+    "./evolution":    { "import": "./dist/evolution.js", "types": "./dist/evolution.d.ts" },
+    "./synesthesia":  { "import": "./dist/synesthesia.js", "types": "./dist/synesthesia.d.ts" },
+    "./apophenia":    { "import": "./dist/apophenia.js", "types": "./dist/apophenia.d.ts" },
+    "./chronostasis": { "import": "./dist/chronostasis.js", "types": "./dist/chronostasis.d.ts" },
+    "./semiotics":    { "import": "./dist/semiotics.js", "types": "./dist/semiotics.d.ts" },
+    "./chorus":       { "import": "./dist/chorus.js",    "types": "./dist/chorus.d.ts" },
+    "./dreams":              { "import": "./dist/dreams.js",              "types": "./dist/dreams.d.ts" },
+    "./knowledge-atlas":     { "import": "./dist/knowledge-atlas.js",     "types": "./dist/knowledge-atlas.d.ts" },
+    "./market-data":         { "import": "./dist/market-data.js",         "types": "./dist/market-data.d.ts" },
+    "./technical-analysis":  { "import": "./dist/technical-analysis.js",  "types": "./dist/technical-analysis.d.ts" },
+    "./financial-lexicon":   { "import": "./dist/financial-lexicon.js",   "types": "./dist/financial-lexicon.d.ts" },
+    "./design-color-lexicon":{ "import": "./dist/design-color-lexicon.js","types": "./dist/design-color-lexicon.d.ts" },
+    "./literary-engine":     { "import": "./dist/literary-engine.js",     "types": "./dist/literary-engine.d.ts" },
+    "./design-engine":       { "import": "./dist/design-engine.js",       "types": "./dist/design-engine.d.ts" },
+    "./market-engine":       { "import": "./dist/market-engine.js",       "types": "./dist/market-engine.d.ts" },
+    "./field-engine":        { "import": "./dist/field-engine.js",        "types": "./dist/field-engine.d.ts" },
+    "./response-scaffold":   { "import": "./dist/response-scaffold.js",   "types": "./dist/response-scaffold.d.ts" },
+    "./field-family":        { "import": "./dist/field-family.js",        "types": "./dist/field-family.d.ts" },
+    "./field-laws":          { "import": "./dist/field-laws.js",          "types": "./dist/field-laws.d.ts" },
+    "./studio-primer":       { "import": "./dist/studio-primer.js",       "types": "./dist/studio-primer.d.ts" },
+    "./studio-plan":         { "import": "./dist/studio-plan.js",         "types": "./dist/studio-plan.d.ts" },
+    "./finance-freshness":   { "import": "./dist/finance-freshness.js",   "types": "./dist/finance-freshness.d.ts" },
+    "./finance-live-context":{ "import": "./dist/finance-live-context.js","types": "./dist/finance-live-context.d.ts" },
+    "./human-patterns":      { "import": "./dist/human-patterns.js",      "types": "./dist/human-patterns.d.ts" },
+    "./contradiction-engine":{ "import": "./dist/contradiction-engine.js","types": "./dist/contradiction-engine.d.ts" },
+    "./field-composer":      { "import": "./dist/field-composer.js",      "types": "./dist/field-composer.d.ts" },
+    "./field-masterwork":    { "import": "./dist/field-masterwork.js",    "types": "./dist/field-masterwork.d.ts" },
+    "./ritual":       { "import": "./dist/ritual.js", "types": "./dist/ritual.d.ts" },
+    "./ritual-runtime": { "import": "./dist/ritual-runtime.js", "types": "./dist/ritual-runtime.d.ts" },
+    "./session-runtime": { "import": "./dist/session-runtime.js", "types": "./dist/session-runtime.d.ts" },
+    "./ritual-envelope": { "import": "./dist/ritual-envelope.js", "types": "./dist/ritual-envelope.d.ts" },
+    "./wow": { "import": "./dist/wow.js", "types": "./dist/wow.d.ts" }
+  },
+  "jest": {
+    "preset": "ts-jest/presets/default-esm",
+    "testEnvironment": "node",
+    "extensionsToTreatAsEsm": [".ts"],
+    "moduleNameMapper": {
+      "^(\\.{1,2}/.*)\\.js$": "$1"
+    },
+    "transform": {
+      "^.+\\.tsx?$": ["ts-jest", { "useESM": true }]
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0",
+    "ts-jest": "^29.0.0"
+  },
+  "keywords": [
+    "phosphene",
+    "hallucination-system",
+    "ai-perception",
+    "altered-cognition",
+    "synesthesia",
+    "apophenia",
+    "language-model",
+    "ai-personality",
+    "agent-skill",
+    "claude-skill",
+    "noetic-commons",
+    "consciousness",
+    "self-evolution",
+    "adaptive-ai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DouGie0420/phosphene"
+  }
+}

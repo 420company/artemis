@@ -1,6 +1,6 @@
 import { emitKeypressEvents } from 'node:readline'
 import { spawn } from 'node:child_process'
-import { createWriteStream, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { createWriteStream, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +24,23 @@ const WHISPER_MODEL_MIN_BYTES = 100 * 1024 * 1024
 // Install MCP deps into a user-data directory so they survive `npm install -g` reinstalls
 // of artemis-code (which would otherwise wipe out the bundled mcp-packages/node_modules).
 export const MCP_INSTALL_DIR = path.join(homedir(), '.artemis', 'mcp-packages')
+
+function readJsonFile<T = unknown>(filePath: string): T | undefined {
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8')) as T
+  } catch {
+    return undefined
+  }
+}
+
+function readPackageDependencies(filePath: string): Record<string, string> {
+  const pkg = readJsonFile<{ dependencies?: Record<string, string> }>(filePath)
+  return pkg?.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
+}
+
+function countBundledEntryDependencies(): number {
+  return Object.keys(readPackageDependencies(path.join(BUNDLED_MCP_DIR, 'package.json'))).length
+}
 
 function whisperModelPath(cwd: string): string {
   return path.join(resolveDataRootDir(cwd), 'models', WHISPER_MODEL_NAME)
@@ -57,17 +74,48 @@ function ensureMcpInstallDir(): void {
   }
   const targetPkg = path.join(MCP_INSTALL_DIR, 'package.json')
   const sourcePkg = path.join(BUNDLED_MCP_DIR, 'package.json')
-  if (!existsSync(targetPkg) && existsSync(sourcePkg)) {
-    copyFileSync(sourcePkg, targetPkg)
+  if (existsSync(sourcePkg)) {
+    if (!existsSync(targetPkg)) {
+      copyFileSync(sourcePkg, targetPkg)
+    } else {
+      const source = readJsonFile<Record<string, unknown>>(sourcePkg)
+      const target = readJsonFile<Record<string, unknown>>(targetPkg)
+      if (source && target) {
+        const sourceDeps = readPackageDependencies(sourcePkg)
+        const targetDeps = readPackageDependencies(targetPkg)
+        let changed = false
+        for (const [name, spec] of Object.entries(sourceDeps)) {
+          if (targetDeps[name] !== spec) {
+            targetDeps[name] = spec
+            changed = true
+          }
+        }
+        if (changed) {
+          writeFileSync(targetPkg, `${JSON.stringify({ ...target, dependencies: targetDeps }, null, 2)}\n`)
+        }
+      } else {
+        copyFileSync(sourcePkg, targetPkg)
+      }
+    }
   }
   // Seed the bundled lockfile so dependency completeness checks can compare
   // against the expected package set. The progress UI deliberately does not
   // treat this expected set as current-install progress.
   const targetLock = path.join(MCP_INSTALL_DIR, 'package-lock.json')
   const sourceLock = path.join(BUNDLED_MCP_DIR, 'package-lock.json')
-  if (!existsSync(targetLock) && existsSync(sourceLock)) {
+  if (existsSync(sourceLock) && (!existsSync(targetLock) || !lockfileCoversPackageDependencies(targetLock, readPackageDependencies(sourcePkg)))) {
     copyFileSync(sourceLock, targetLock)
   }
+}
+
+function lockfileCoversPackageDependencies(lockPath: string, deps: Record<string, string>): boolean {
+  const lock = readJsonFile<{ packages?: Record<string, { dependencies?: Record<string, string> }> }>(lockPath)
+  const rootDeps = lock?.packages?.['']?.dependencies
+  if (!rootDeps || typeof rootDeps !== 'object') return false
+  for (const [name, spec] of Object.entries(deps)) {
+    if (rootDeps[name] !== spec) return false
+  }
+  return true
 }
 
 // ─── colour helpers ────────────────────────────────────────────────────────────
@@ -148,8 +196,8 @@ const COPY = {
   'zh-CN': {
     title:    '✦ MCP 插件依赖安装 ✦',
     subtitle: 'Artemis 内置 91 个 MCP 服务插件',
-    desc1:    '其中 23 个插件需要安装 npm 依赖包',
-    desc2:    '同时安装本地 Whisper 免费模型',
+    desc1:    (count: number) => `其中 ${count} 个依赖需要安装 npm 包`,
+    desc2:    '同时准备本地 Whisper 免费模型',
     desc3:    '请确保网络通畅，也可以跳过稍后再安装',
     yes:      '✦ 立即安装全部依赖',
     no:       '跳过，稍后再说 ✦',
@@ -163,7 +211,7 @@ const COPY = {
     modelProgress: (mb: number, pct?: number) => pct == null ? `下载 ggml-base.bin：${mb} MB` : `下载 ggml-base.bin：${mb} MB / ${pct}%`,
     pkgCount: (d: number, t?: number) => t ? `已安装 ${d} / ${t} 个包` : `已安装 ${d} 个包`,
     depsReady: 'MCP npm 依赖已就绪',
-    doneOk:   '✓ MCP 依赖和本地 Whisper 模型安装完成！',
+    doneOk:   '✓ MCP 依赖安装完成！',
     doneFail: '⚠ 部分依赖安装失败，可用 /mcp install 重试',
     retryHint: '稍后可运行 /mcp install 重试',
     anyKey:   '按任意键继续…',
@@ -172,8 +220,8 @@ const COPY = {
   'en': {
     title:    '✦ MCP Plugin Setup ✦',
     subtitle: 'Artemis ships with 91 MCP plugin servers',
-    desc1:    '23 of them require npm package dependencies',
-    desc2:    'Also installs the free local Whisper model',
+    desc1:    (count: number) => `${count} dependencies require npm packages`,
+    desc2:    'Also prepares the free local Whisper model',
     desc3:    'You can skip and install later when needed',
     yes:      '✦ Install all now',
     no:       'Skip for now ✦',
@@ -187,7 +235,7 @@ const COPY = {
     modelProgress: (mb: number, pct?: number) => pct == null ? `Downloading ggml-base.bin: ${mb} MB` : `Downloading ggml-base.bin: ${mb} MB / ${pct}%`,
     pkgCount: (d: number, t?: number) => t ? `${d} / ${t} packages installed` : `${d} packages installed`,
     depsReady: 'MCP npm dependencies ready',
-    doneOk:   '✓ MCP dependencies and local Whisper model installed!',
+    doneOk:   '✓ MCP dependencies installed!',
     doneFail: '⚠ Some dependencies failed — run /mcp install to retry',
     retryHint: 'Run /mcp install later to retry',
     anyKey:   'Press any key to continue…',
@@ -201,8 +249,9 @@ type Layout = { innerWidth: number; leftPad: string; top: string; bottom: string
 
 function buildLayout(locale: UiLocale): Layout {
   const t = COPY[locale] ?? COPY['en']
+  const entryDeps = countBundledEntryDependencies()
   const probeLines = [
-    t.title, t.subtitle, t.desc1, t.desc2, t.desc3,
+    t.title, t.subtitle, t.desc1(entryDeps), t.desc2, t.desc3,
     CAT_FRAMES[0]!.haloTop, CAT_FRAMES[0]!.haloBot, CAT_SCENE,
     ` ${t.yes}    /    ${t.no} `,
     t.footer, t.brand, t.installing, t.wait, t.preparing, t.modelPreparing,
@@ -268,6 +317,7 @@ function rebuildScreen(lines: string[], layout: Layout): void {
 
 function choiceBody(fi: number, sel: number, locale: UiLocale, layout: Layout): string[] {
   const t  = COPY[locale] ?? COPY['en']
+  const entryDeps = countBundledEntryDependencies()
   const fr = CAT_FRAMES[fi % CAT_FRAMES.length]!
   const furPal: [number, number, number][] = [
     [255, 220, 180], [255, 198, 198], [210, 230, 255],
@@ -290,7 +340,7 @@ function choiceBody(fi: number, sel: number, locale: UiLocale, layout: Layout): 
     row(dim(fr.innerBot), layout),
     row(rainbow(fr.haloBot, fi), layout),
     layout.blank,
-    row(rgb(t.desc1, 137, 180, 250), layout),
+    row(rgb(t.desc1(entryDeps), 137, 180, 250), layout),
     row(rgb(t.desc2, 249, 226, 175, true), layout),
     row(dim(t.desc3), layout),
     layout.blank,
@@ -343,9 +393,9 @@ function progressBody(
 
 // ─── done screen body ──────────────────────────────────────────────────────────
 
-function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalCount?: number): string[] {
+function doneBody(success: boolean, locale: UiLocale, layout: Layout, finalDone?: number, finalTotal?: number): string[] {
   const t = COPY[locale] ?? COPY['en']
-  const countLine = finalCount != null ? dim(t.pkgCount(finalCount, finalCount)) : ''
+  const countLine = finalDone != null ? dim(t.pkgCount(finalDone, finalTotal ?? finalDone)) : ''
   return [
     layout.blank,
     layout.blank,
@@ -567,8 +617,9 @@ async function downloadWhisperModel(
 
 // ─── public API ────────────────────────────────────────────────────────────────
 
-export function shouldShowMcpInstallDialog(cwd = process.cwd()): boolean {
-  return !hasCompleteMcpPackageInstall() || !hasUsableWhisperModel(cwd)
+export function shouldShowMcpInstallDialog(_cwd = process.cwd()): boolean {
+  ensureMcpInstallDir()
+  return !hasCompleteMcpPackageInstall()
 }
 
 export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: string } = {}): Promise<'installed' | 'skipped'> {
@@ -715,6 +766,8 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
   }, 200)
 
   let npmSuccess = true
+  let finalNpmDone = initialRequiredInstalled
+  let finalNpmTotal = expectedPackageDirs?.size
 
   if (!npmNeeded) {
     done = 0
@@ -729,15 +782,17 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
       // line per tarball download. We use that as the "current package"
       // signal so the dialog shows real activity during the otherwise
       // silent resolve+download phase.
-      // Windows: `npm` is `npm.cmd`. Node's spawn() can't directly execute
-      // .cmd / .bat files without shell: true, so the install would fail with
-      // ENOENT and surface as "部分依赖安装失败 → /mcp install".
+      // Windows: run npm through cmd.exe explicitly. This avoids both the
+      // ENOENT failure from spawning npm directly and the fragile quoting that
+      // shell:true can introduce when --prefix contains spaces/non-ASCII chars.
       const isWindows = process.platform === 'win32'
-      const npmCommand = isWindows ? 'npm.cmd' : 'npm'
+      const npmArgs = ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund', '--loglevel=http']
+      const npmCommand = isWindows ? 'cmd.exe' : 'npm'
+      const childArgs = isWindows ? ['/d', '/s', '/c', 'npm.cmd', ...npmArgs] : npmArgs
       const child = spawn(
         npmCommand,
-        ['install', '--prefix', MCP_INSTALL_DIR, '--no-audit', '--no-fund', '--loglevel=http'],
-        { stdio: ['ignore', 'pipe', 'pipe'], shell: isWindows, windowsHide: true },
+        childArgs,
+        { stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true },
       )
 
       let stderrBuf = ''
@@ -812,6 +867,8 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
         if (code === 0) {
           current = (COPY[locale] ?? COPY['en']).depsReady
           detailLine = (COPY[locale] ?? COPY['en']).depsReady
+          finalNpmDone = countRequiredInstalled()
+          finalNpmTotal = expectedPackageDirs?.size ?? finalNpmDone
         }
         resolve(code === 0)
       })
@@ -838,7 +895,12 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
       success = true
     } catch (error) {
       current = error instanceof Error ? error.message : String(error)
-      success = false
+      // Whisper is a convenience dependency for local speech transcription, not
+      // an MCP runtime dependency. Do not mark the MCP dependency install as
+      // failed when Hugging Face/network/model download fails; otherwise users
+      // see "MCP install failed" even though npm packages were installed
+      // correctly, and the first-run dialog keeps returning on every launch.
+      success = true
     }
   }
 
@@ -847,11 +909,11 @@ export async function runMcpInstallDialog(locale: UiLocale, options: { cwd?: str
 
   // ── done screen ───────────────────────────────────────────────────────────────
   layout = buildLayout(locale)
-  updateBody(doneBody(success, locale, layout), layout)
+  updateBody(doneBody(success, locale, layout, finalNpmDone, finalNpmTotal), layout)
 
   const onResizeDone = () => {
     layout = buildLayout(locale)
-    rebuildScreen(doneBody(success, locale, layout), layout)
+    rebuildScreen(doneBody(success, locale, layout, finalNpmDone, finalNpmTotal), layout)
   }
   process.stdout.on('resize', onResizeDone)
 

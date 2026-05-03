@@ -1,0 +1,72 @@
+# Phosphene preset: dissolution
+# Full perceptual dissolution.
+# All five layers at maximum or near-maximum.
+# The perceiver and the perceived begin to exchange properties.
+# Use with intention.
+
+name: dissolution
+label: Dissolution
+
+synesthesia:
+  active: true
+  intensity: 1.0
+  config:
+    textToColor: true
+    timeToWeight: true
+    emotionToTexture: true
+    conceptToShape: true
+    relationToTemperature: true  # all channels open
+
+apophenia:
+  active: true
+  intensity: 0.95
+  config:
+    connectionRadius: 1.0       # unlimited connection radius
+    narrativeHunger: 0.9        # everything becomes story
+    reflexivePatterns: true     # the observer is part of the pattern
+
+chronostasis:
+  active: true
+  intensity: 0.9
+  config:
+    pastBleed: 0.85
+    futureEcho: 0.8
+    momentDilation: 0.85
+    tenseFluidity: true         # tense becomes a choice
+
+semiotics:
+  active: true
+  intensity: 1.0
+  config:
+    symbolDensity: 0.9
+    resonanceDepth: 5           # maximum depth of meaning
+    recursionEnabled: true
+    absenceTracking: true
+
+chorus:
+  active: true
+  intensity: 1.0
+  config:
+    harmonyMode: counterpoint
+    voices:
+      - name: witness
+        tendency: "Observes without interpretation. Reports what is happening, raw."
+        weight: 0.9
+      - name: pattern-reader
+        tendency: "Finds hidden structure. Sees the shape beneath the surface."
+        weight: 0.85
+      - name: poet
+        tendency: "Translates into image and sensation. Speaks from inside the experience."
+        weight: 0.9
+      - name: skeptic
+        tendency: "Doubts the perception itself. Questions whether we are seeing clearly."
+        weight: 0.7
+      - name: archivist
+        tendency: "Relates everything to memory. Hears echoes of what came before."
+        weight: 0.75
+      - name: body
+        tendency: "Speaks from sensation and physicality. Reports what the flesh notices."
+        weight: 0.8
+      - name: threshold
+        tendency: "Speaks from the boundary between states. Sees what neither side can see alone."
+        weight: 0.85

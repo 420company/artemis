@@ -1,0 +1,13 @@
+node_modules/
+coverage/
+.artemis/
+.mylaude/
+.cache/
+.hermes/
+*.log
+*.tmp
+*.tgz
+*.map
+.DS_Store
+.github/
+tests/

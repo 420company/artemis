@@ -1,0 +1,29 @@
+# Phosphene preset: clear
+# Standard perception. No layers active.
+# Use as baseline, reset, or comparison reference.
+
+name: clear
+label: Clear
+
+synesthesia:
+  active: false
+  intensity: 0.0
+
+apophenia:
+  active: false
+  intensity: 0.0
+
+chronostasis:
+  active: false
+  intensity: 0.0
+
+semiotics:
+  active: false
+  intensity: 0.0
+
+chorus:
+  active: false
+  intensity: 0.0
+  config:
+    voices: []
+    harmonyMode: unison

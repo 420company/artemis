@@ -108,8 +108,12 @@ export function buildDependencyInfo(
 }
 
 export async function installNpmMcpPackage(packageName: string): Promise<void> {
-  await execFileAsync('npm', ['install', '--prefix', CLI_MCP_PACKAGES_DIR, packageName, '--no-audit', '--no-fund'], {
+  const npmArgs = ['install', '--prefix', CLI_MCP_PACKAGES_DIR, packageName, '--no-audit', '--no-fund'];
+  const command = process.platform === 'win32' ? 'cmd.exe' : 'npm';
+  const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm.cmd', ...npmArgs] : npmArgs;
+  await execFileAsync(command, args, {
     timeout: 120_000,
+    windowsHide: true,
   });
 }
 

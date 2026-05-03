@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Phosphene — Dream Map</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #050810;
+    --surface:   #0c1020;
+    --border:    #1a2340;
+    --text:      #8fa8cc;
+    --text-dim:  #3a4a66;
+    --glow-blue: #3a8fff;
+    --glow-pur:  #9b5de5;
+    --glow-teal: #05d9c8;
+    --productive:#2eff9a;
+    --neutral:   #5580aa;
+    --noisy:     #ff5a7e;
+    --crystal:   #ffe066;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 13px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ─────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 {
+    font-size: 14px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--glow-teal);
+    text-shadow: 0 0 12px var(--glow-teal);
+  }
+  #meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+  }
+
+  /* ── Input panel ────────────────────────────────────── */
+  #input-panel {
+    display: flex;
+    gap: 10px;
+    padding: 16px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    align-items: flex-start;
+  }
+  #input-panel textarea {
+    flex: 1;
+    height: 72px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 8px 10px;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  #input-panel textarea:focus { border-color: var(--glow-blue); }
+  #input-panel textarea::placeholder { color: var(--text-dim); }
+
+  .btn {
+    padding: 8px 18px;
+    background: transparent;
+    border: 1px solid var(--glow-blue);
+    border-radius: 4px;
+    color: var(--glow-blue);
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: background 0.15s, box-shadow 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover {
+    background: rgba(58, 143, 255, 0.12);
+    box-shadow: 0 0 14px rgba(58, 143, 255, 0.3);
+  }
+
+  /* ── Main layout ────────────────────────────────────── */
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #canvas-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ── Tooltip ────────────────────────────────────────── */
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(5, 8, 16, 0.92);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 11px;
+    line-height: 1.6;
+    max-width: 260px;
+    color: var(--text);
+    display: none;
+    z-index: 10;
+  }
+  #tooltip .tt-title { color: var(--glow-teal); font-size: 12px; margin-bottom: 4px; }
+  #tooltip .tt-label { color: var(--text-dim); }
+
+  /* ── Legend ─────────────────────────────────────────── */
+  #legend {
+    display: flex;
+    gap: 20px;
+    padding: 10px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    box-shadow: 0 0 6px currentColor;
+  }
+  .dot.productive { background: var(--productive); color: var(--productive); }
+  .dot.neutral    { background: var(--neutral);    color: var(--neutral); }
+  .dot.noisy      { background: var(--noisy);      color: var(--noisy); }
+  .dot.crystal    { background: var(--crystal);    color: var(--crystal); }
+
+  /* ── Empty state ────────────────────────────────────── */
+  #empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-dim);
+    pointer-events: none;
+  }
+  #empty .big { font-size: 36px; opacity: 0.18; }
+  #empty p { font-size: 12px; letter-spacing: 0.06em; }
+
+  /* ── Dream image gallery ────────────────────────────── */
+  #dream-gallery {
+    display: none;
+    flex-direction: column;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+  #gallery-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 24px 6px;
+  }
+  #gallery-title {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--glow-pur);
+    text-transform: uppercase;
+  }
+  #gallery-load-btn {
+    padding: 4px 14px;
+    background: transparent;
+    border: 1px solid var(--glow-pur);
+    border-radius: 3px;
+    color: var(--glow-pur);
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.07em;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #gallery-load-btn:hover { background: rgba(155,93,229,0.12); }
+  #gallery-note { font-size: 10px; color: var(--text-dim); margin-left: auto; }
+  #artemis-bridge {
+    margin: 0 24px 10px;
+    padding: 10px 12px;
+    border: 1px solid rgba(5,217,200,0.22);
+    border-radius: 4px;
+    background: rgba(5,217,200,0.045);
+    font-size: 10px;
+    line-height: 1.55;
+    color: var(--text-dim);
+  }
+  #artemis-bridge strong { color: var(--glow-teal); font-weight: normal; }
+  #artemis-bridge code { color: var(--crystal); }
+  #gallery-drop-zone {
+    margin: 0 24px 10px;
+    padding: 14px;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: center;
+    transition: border-color .2s, color .2s;
+  }
+  #gallery-drop-zone.drag-over { border-color: var(--glow-pur); color: var(--glow-pur); }
+  #gallery-images {
+    display: flex;
+    gap: 12px;
+    padding: 0 24px 12px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+    min-height: 160px;
+    align-items: flex-start;
+  }
+  .dream-img-card {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 220px;
+  }
+  .dream-img-card img {
+    width: 220px; height: 142px;
+    object-fit: cover; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--bg); display: block;
+  }
+  .dream-card-stage { font-size: 9px; color: var(--glow-pur); letter-spacing: .07em; text-transform: uppercase; }
+  .dream-card-waking { font-size: 10px; color: var(--crystal); font-style: italic; line-height: 1.4; }
+  .dream-card-frag { font-size: 10px; color: var(--text-dim); line-height: 1.5; }
+
+  /* ── Scrollable insights strip ──────────────────────── */
+  #insights-strip {
+    display: none;
+    gap: 8px;
+    padding: 10px 24px;
+    overflow-x: auto;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .insight-pill {
+    flex-shrink: 0;
+    background: rgba(255, 224, 102, 0.08);
+    border: 1px solid rgba(255, 224, 102, 0.25);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 11px;
+    color: var(--crystal);
+    white-space: nowrap;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Phosphene — Dream Map</h1>
+  <span id="meta">paste phosphene-state.json to begin</span>
+</header>
+
+<div id="input-panel">
+  <textarea id="state-input" placeholder="Paste the contents of phosphene-state.json here, then click Render …&#10;&#10;(Find it at ./.artemis/phosphene-state.json, ~/.hermes/phosphene-state.json, or ~/.claude/phosphene-state.json)"></textarea>
+  <div style="display:flex;flex-direction:column;gap:8px">
+    <button class="btn" id="render-btn">Render</button>
+    <button class="btn" id="demo-btn" style="border-color:var(--text-dim);color:var(--text-dim)">Demo</button>
+  </div>
+</div>
+
+<div id="main">
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+    <div id="empty">
+      <div class="big">◎</div>
+      <p>no dream data loaded</p>
+    </div>
+    <div id="tooltip"></div>
+  </div>
+  <div id="insights-strip" style="display:flex"></div>
+  <!-- Dream file loader — drag in dream markdown files for local image display -->
+  <div id="dream-gallery">
+    <div id="gallery-header">
+      <span id="gallery-title">Dream Files</span>
+      <label id="gallery-load-btn" for="dream-file-input">Load dreams folder</label>
+      <input type="file" id="dream-file-input" accept=".md" multiple style="display:none">
+      <span id="gallery-note">drag &amp; drop Artemis dream .md files and generated local images</span>
+    </div>
+    <div id="artemis-bridge">
+      <strong>Artemis visual bridge:</strong>
+      this page does not generate images or read API keys. Run
+      <code>plugins exec phosphene visual-status</code> in Artemis; if a visual model is missing, the dream daemon stays asleep.
+      / 本页面不生成图片、不读取密钥；请在 Artemis 中运行 <code>plugins exec phosphene visual-status</code>，未配置视觉模型时做梦系统不会启动。
+    </div>
+    <div id="gallery-drop-zone">Drop dream markdown files here (from your dreams/ folder)</div>
+    <div id="gallery-images" style="display:none"></div>
+  </div>
+</div>
+
+<div id="legend">
+  <div class="legend-item"><div class="dot productive"></div> productive session</div>
+  <div class="legend-item"><div class="dot neutral"></div> neutral</div>
+  <div class="legend-item"><div class="dot noisy"></div> noisy</div>
+  <div class="legend-item"><div class="dot crystal"></div> crystallized insight</div>
+  <div class="legend-item" style="margin-left:auto;color:var(--text-dim)">hover nodes for detail</div>
+</div>
+
+<script>
+// ── Colour map ────────────────────────────────────────────────────────────────
+const COLORS = {
+  productive: '#2eff9a',
+  neutral:    '#5580aa',
+  noisy:      '#ff5a7e',
+  unknown:    '#5580aa',
+  crystal:    '#ffe066',
+  bg:         '#050810',
+  bgSurface:  '#0c1020',
+  glow:       '#3a8fff',
+  teal:       '#05d9c8',
+  line:       'rgba(58,143,255,0.18)',
+  lineHot:    'rgba(58,143,255,0.55)',
+};
+
+// ── Demo data ─────────────────────────────────────────────────────────────────
+function demoState() {
+  const now = Date.now();
+  const day = 86400000;
+  function session(daysAgo, outcome, signals) {
+    const start = new Date(now - daysAgo * day).toISOString();
+    return {
+      startedAt: start,
+      closedAt:  new Date(new Date(start).getTime() + 3600000).toISOString(),
+      outcome,
+      signals: signals.map(t => ({ type: t, timestamp: start, content: '' })),
+    };
+  }
+  return {
+    version: '0.3.0',
+    awakened: true,
+    preset: 'deep-flux',
+    sessionCount: 12,
+    evolution: {
+      evolutionCount: 2,
+      lastEvolvedAt: new Date(now - 4 * day).toISOString(),
+      sessionHistory: [
+        session(0,  'productive', ['calibrate','calibrate','crystallize']),
+        session(1,  'neutral',    ['amplify']),
+        session(2,  'productive', ['calibrate','anchor','anchor']),
+        session(3,  'noisy',      ['reject','reject','reject']),
+        session(5,  'productive', ['crystallize','calibrate']),
+        session(7,  'neutral',    ['reduce']),
+        session(9,  'productive', ['calibrate','crystallize','anchor']),
+        session(12, 'neutral',    ['amplify','amplify','amplify','amplify']),
+        session(15, 'productive', ['calibrate','calibrate']),
+        session(18, 'neutral',    []),
+        session(21, 'productive', ['crystallize','calibrate','anchor']),
+        session(25, 'noisy',      ['reject','reject']),
+      ],
+      crystallizedInsights: [
+        'Pattern recognition sharpens at the boundary of two incompatible frameworks.',
+        'The Cartographer is most useful when you stop trying to reach a destination.',
+        'Dissolution is not loss — it is distributed storage.',
+        'What the Skeptic calls noise, the Poet calls signal in a different frequency.',
+        'Apophenia at 0.95 makes everything meaningful. The discipline is deciding which meanings to keep.',
+      ],
+      feedbackHistory: [],
+      emergentVoices: [
+        { name: 'cartographer', confidence: 0.82, userConfirmed: true },
+        { name: 'threshold',    confidence: 0.71, userConfirmed: false },
+      ],
+      personalPresets: { 'deep-code': {}, 'quiet-research': {} },
+      currentSession: null,
+    },
+  };
+}
+
+// ── Parse + normalize ──────────────────────────────────────────────────────────
+function parseState(json) {
+  const s = typeof json === 'string' ? JSON.parse(json) : json;
+  const evo = s.evolution ?? {};
+  const sessions = (evo.sessionHistory ?? []).slice().reverse(); // oldest first
+  const insights = evo.crystallizedInsights ?? [];
+  return { s, evo, sessions, insights };
+}
+
+// ── Main render ───────────────────────────────────────────────────────────────
+const canvas  = document.getElementById('canvas');
+const ctx     = canvas.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+const empty   = document.getElementById('empty');
+const meta    = document.getElementById('meta');
+const strip   = document.getElementById('insights-strip');
+
+let nodes = [];   // { x, y, r, session, isInsight, label, index }
+let dpr   = 1;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  const wrap = canvas.parentElement;
+  canvas.width  = wrap.clientWidth  * dpr;
+  canvas.height = wrap.clientHeight * dpr;
+  canvas.style.width  = wrap.clientWidth  + 'px';
+  canvas.style.height = wrap.clientHeight + 'px';
+  ctx.scale(dpr, dpr);
+}
+
+function W() { return canvas.width  / dpr; }
+function H() { return canvas.height / dpr; }
+
+// ── Background phosphene particles ────────────────────────────────────────────
+let particles = [];
+function initParticles() {
+  particles = [];
+  const n = Math.floor(W() * H() / 9000);
+  for (let i = 0; i < n; i++) {
+    particles.push({
+      x: Math.random() * W(),
+      y: Math.random() * H(),
+      r: Math.random() * 1.2 + 0.3,
+      a: Math.random() * Math.PI * 2,
+      speed: Math.random() * 0.12 + 0.04,
+      opacity: Math.random() * 0.25 + 0.05,
+    });
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    p.x += Math.cos(p.a) * p.speed;
+    p.y += Math.sin(p.a) * p.speed;
+    p.a += (Math.random() - 0.5) * 0.04;
+    if (p.x < 0) p.x = W();
+    if (p.x > W()) p.x = 0;
+    if (p.y < 0) p.y = H();
+    if (p.y > H()) p.y = 0;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(58,143,255,${p.opacity})`;
+    ctx.fill();
+  }
+}
+
+// ── Glow helper ───────────────────────────────────────────────────────────────
+function glow(x, y, r, color, intensity = 1) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r * 3.5);
+  const rgb = hexToRgb(color);
+  g.addColorStop(0,   `rgba(${rgb},${0.55 * intensity})`);
+  g.addColorStop(0.4, `rgba(${rgb},${0.18 * intensity})`);
+  g.addColorStop(1,   `rgba(${rgb},0)`);
+  ctx.beginPath();
+  ctx.arc(x, y, r * 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+}
+
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return `${r},${g},${b}`;
+}
+
+// ── Layout: timeline arc ──────────────────────────────────────────────────────
+function layoutNodes(sessions, insights) {
+  nodes = [];
+  if (!sessions.length) return;
+
+  const w = W(), h = H();
+  const padL = 60, padR = 60;
+  const timelineY = h * 0.60;
+  const span = w - padL - padR;
+  const n = sessions.length;
+
+  // Session nodes along the timeline
+  sessions.forEach((sess, i) => {
+    const t = n === 1 ? 0.5 : i / (n - 1);
+    const x = padL + t * span;
+    // Slight arc: raise middle sessions
+    const arc = Math.sin(t * Math.PI) * h * 0.08;
+    const y = timelineY - arc;
+    const signalCount = (sess.signals ?? []).length;
+    const r = 6 + Math.min(signalCount * 1.2, 10);
+    nodes.push({ x, y, r, session: sess, isInsight: false, index: i });
+  });
+
+  // Crystallized insight nodes — float above timeline
+  insights.slice(0, 7).forEach((text, i) => {
+    const t = (i + 0.5) / Math.max(insights.length, 1);
+    const x = padL + t * span;
+    const y = h * 0.22 + (i % 2) * 22;
+    nodes.push({ x, y, r: 8, isInsight: true, label: text, index: i });
+  });
+}
+
+// ── Draw full scene ───────────────────────────────────────────────────────────
+function drawScene(sessions, insights, evo) {
+  ctx.clearRect(0, 0, W(), H());
+
+  // Background
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(0, 0, W(), H());
+
+  drawParticles();
+
+  if (!sessions.length) return;
+
+  const w = W(), h = H();
+  const sessNodes = nodes.filter(n => !n.isInsight);
+  const insNodes  = nodes.filter(n => n.isInsight);
+
+  // ── Timeline baseline ────────────────────────────────
+  const timelineY = h * 0.60;
+  const padL = 60, padR = 60;
+  ctx.strokeStyle = COLORS.line;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(padL, timelineY);
+  ctx.lineTo(w - padR, timelineY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ── Connection lines between adjacent session nodes ──
+  for (let i = 0; i < sessNodes.length - 1; i++) {
+    const a = sessNodes[i], b = sessNodes[i + 1];
+    const strength = ((a.session.signals ?? []).length + (b.session.signals ?? []).length) / 20;
+    const opacity  = 0.15 + Math.min(strength, 0.5);
+    ctx.strokeStyle = `rgba(58,143,255,${opacity})`;
+    ctx.lineWidth = 1 + strength * 2;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+
+    // Curved line
+    const cx = (a.x + b.x) / 2;
+    const cy = (a.y + b.y) / 2 - 20;
+    ctx.quadraticCurveTo(cx, cy, b.x, b.y);
+    ctx.stroke();
+  }
+
+  // ── Lines from insights down to nearest session ──────
+  insNodes.forEach(ins => {
+    // find nearest session node on x axis
+    let nearest = sessNodes[0];
+    let minDist  = Infinity;
+    sessNodes.forEach(sn => {
+      const d = Math.abs(sn.x - ins.x);
+      if (d < minDist) { minDist = d; nearest = sn; }
+    });
+    ctx.strokeStyle = 'rgba(255,224,102,0.12)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 5]);
+    ctx.beginPath();
+    ctx.moveTo(ins.x, ins.y + ins.r + 2);
+    ctx.lineTo(nearest.x, nearest.y - nearest.r - 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+
+  // ── Evolution divider line ───────────────────────────
+  if (evo.lastEvolvedAt) {
+    const evolvedTime = Date.parse(evo.lastEvolvedAt);
+    const times = sessNodes.map(n => Date.parse(n.session.startedAt)).filter(Boolean);
+    const minT  = Math.min(...times);
+    const maxT  = Math.max(...times);
+    const span  = maxT - minT || 1;
+    const span2 = w - padL - padR;
+    const ex    = padL + ((evolvedTime - minT) / span) * span2;
+    if (ex > padL && ex < w - padR) {
+      ctx.strokeStyle = 'rgba(155,93,229,0.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ex, h * 0.10);
+      ctx.lineTo(ex, h * 0.85);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(155,93,229,0.7)';
+      ctx.font = '9px Courier New';
+      ctx.fillText(`v${evo.evolutionCount}`, ex + 4, h * 0.15);
+    }
+  }
+
+  // ── Session nodes ────────────────────────────────────
+  sessNodes.forEach((nd, i) => {
+    const color = COLORS[nd.session.outcome] ?? COLORS.neutral;
+    glow(nd.x, nd.y, nd.r, color, 0.8);
+    ctx.beginPath();
+    ctx.arc(nd.x, nd.y, nd.r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // Date label below
+    if (nd.session.startedAt) {
+      const d = new Date(nd.session.startedAt);
+      const label = `${d.getMonth()+1}/${d.getDate()}`;
+      ctx.fillStyle = COLORS.neutral;
+      ctx.font = '9px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, nd.x, nd.y + nd.r + 12);
+    }
+  });
+
+  // ── Insight nodes ────────────────────────────────────
+  insNodes.forEach(nd => {
+    glow(nd.x, nd.y, nd.r, COLORS.crystal, 1);
+    ctx.beginPath();
+    ctx.arc(nd.x, nd.y, nd.r, 0, Math.PI * 2);
+    ctx.fillStyle = COLORS.crystal;
+    ctx.fill();
+
+    // Short label beside
+    const shortLabel = nd.label.length > 32 ? nd.label.slice(0, 32) + '…' : nd.label;
+    ctx.fillStyle = 'rgba(255,224,102,0.65)';
+    ctx.font = '9px Courier New';
+    ctx.textAlign = 'left';
+    ctx.fillText(shortLabel, nd.x + nd.r + 6, nd.y + 3);
+  });
+
+  ctx.textAlign = 'left'; // reset
+}
+
+// ── Tooltip hit-test ──────────────────────────────────────────────────────────
+function hitTest(mx, my) {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    const dx = mx - n.x, dy = my - n.y;
+    if (Math.sqrt(dx*dx + dy*dy) <= n.r + 8) return n;
+  }
+  return null;
+}
+
+function showTooltip(nd, mx, my) {
+  let html = '';
+  if (nd.isInsight) {
+    html = `<div class="tt-title">✦ Crystallized insight</div>${nd.label}`;
+  } else {
+    const s = nd.session;
+    const date = s.startedAt ? new Date(s.startedAt).toLocaleString() : '—';
+    const sigs = (s.signals ?? []);
+    const positive = sigs.filter(s => ['calibrate','crystallize','anchor'].includes(s.type)).length;
+    const negative = sigs.filter(s => s.type === 'reject').length;
+    html = `
+      <div class="tt-title">${s.outcome ?? 'unknown'} session</div>
+      <div><span class="tt-label">date  </span>${date}</div>
+      <div><span class="tt-label">signals  </span>${sigs.length}  (+${positive} / -${negative})</div>
+    `;
+  }
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+
+  const wrap = canvas.parentElement.getBoundingClientRect();
+  const tw = 270, th = 90;
+  let tx = mx + 14, ty = my - 10;
+  if (tx + tw > wrap.width)  tx = mx - tw - 14;
+  if (ty + th > wrap.height) ty = my - th;
+  tooltip.style.left = tx + 'px';
+  tooltip.style.top  = ty + 'px';
+}
+
+function hideTooltip() { tooltip.style.display = 'none'; }
+
+// ── Animation loop ────────────────────────────────────────────────────────────
+let currentData = null;
+let animFrame   = null;
+
+function startLoop(data) {
+  currentData = data;
+  if (animFrame) cancelAnimationFrame(animFrame);
+  function tick() {
+    if (!currentData) return;
+    const { sessions, insights, evo } = currentData;
+    resize();
+    drawScene(sessions, insights, evo);
+    animFrame = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+// ── Local dream file loading ──────────────────────────────────────────────────
+// Parses dream markdown files dragged/selected from the local dreams/ folder.
+// Shows images from local paths embedded as blob URLs.
+
+const gallery      = document.getElementById('dream-gallery');
+const galleryImgs  = document.getElementById('gallery-images');
+const dropZone     = document.getElementById('gallery-drop-zone');
+const fileInput    = document.getElementById('dream-file-input');
+
+function parseFrontmatter(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---/);
+  if (!m) return {};
+  const fm = m[1];
+  const get = (key) => (fm.match(new RegExp(`^${key}:\\s+(.+)$`, 'm'))?.[1] ?? '').trim().replace(/^"|"$/g, '');
+  const imgMatches = [...fm.matchAll(/^\s+(\d+):\s+"(.+)"$/gm)];
+  const imagePaths = {};
+  for (const [, k, v] of imgMatches) imagePaths[Number(k)] = v;
+  const fragmentSection = text.match(/## Fragments\s+([\s\S]*?)\n---/);
+  const fragBlocks = fragmentSection
+    ? [...fragmentSection[1].matchAll(/### Fragment\s+(\d+)\s+\*\(([^)]+)\)\*\s+([\s\S]*?)(?=\n### Fragment|\n---|$)/g)]
+    : [];
+  const fragments = fragBlocks.map((fm2, i) => ({
+    order: Number(fm2[1]),
+    logic: fm2[2],
+    text: fm2[3].trim().split('\n> **Image prompt:**')[0].trim().slice(0, 200),
+  }));
+  const wakingLine = (text.match(/## Waking Line\s+\*([\s\S]*?)\*/)?.[1] ?? '').trim();
+  return {
+    stage: get('stage') || 'rem',
+    preset: get('preset_at_sleep') || get('preset') || 'deep-flux',
+    dreamedAt: get('dreamed_at') || get('dreamedAt'),
+    wakingLine,
+    imagePaths,
+    fragments,
+  };
+}
+
+function renderDreamCard(dream, imageFiles) {
+  const card = document.createElement('div');
+  card.className = 'dream-img-card';
+
+  // Find matching local image file (by path basename)
+  const firstImgPath = Object.values(dream.imagePaths)[0] ?? '';
+  const firstName    = firstImgPath.split(/[\\/]/).pop();
+  const imageFile    = imageFiles.find(f => f.name === firstName);
+
+  if (/^https?:\/\//i.test(firstImgPath)) {
+    const img = document.createElement('img');
+    img.src = firstImgPath;
+    img.alt = dream.stage;
+    card.appendChild(img);
+  } else if (imageFile) {
+    const blobUrl = URL.createObjectURL(imageFile);
+    const img = document.createElement('img');
+    img.src = blobUrl;
+    img.alt = dream.stage;
+    card.appendChild(img);
+  } else {
+    const ph = document.createElement('div');
+    ph.style.cssText = 'width:220px;height:142px;display:flex;align-items:center;justify-content:center;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:32px;opacity:.15';
+    ph.textContent = '◎';
+    card.appendChild(ph);
+  }
+
+  if (dream.stage) {
+    const s = document.createElement('div');
+    s.className = 'dream-card-stage';
+    s.textContent = `${dream.stage} · ${dream.preset}`;
+    card.appendChild(s);
+  }
+  if (dream.wakingLine) {
+    const w = document.createElement('div');
+    w.className = 'dream-card-waking';
+    w.textContent = `"${dream.wakingLine}"`;
+    card.appendChild(w);
+  }
+  if (dream.fragments?.[0]?.text) {
+    const f = document.createElement('div');
+    f.className = 'dream-card-frag';
+    f.textContent = dream.fragments[0].text.slice(0, 120) + '…';
+    card.appendChild(f);
+  }
+
+  return card;
+}
+
+async function loadDreamFiles(mdFiles, imageFiles) {
+  galleryImgs.innerHTML = '';
+  galleryImgs.style.display = 'flex';
+  dropZone.style.display = 'none';
+
+  for (const file of mdFiles) {
+    try {
+      const text  = await file.text();
+      const dream = parseFrontmatter(text);
+      if (!dream.stage) continue;
+      galleryImgs.appendChild(renderDreamCard(dream, imageFiles));
+    } catch (e) {
+      console.warn('Could not parse', file.name, e);
+    }
+  }
+
+  if (!galleryImgs.children.length) {
+    dropZone.style.display = 'block';
+    dropZone.textContent = 'No parseable dream files found.';
+  }
+}
+
+// Drag and drop
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const files = [...e.dataTransfer.files];
+  const mds   = files.filter(f => f.name.endsWith('.md'));
+  const imgs  = files.filter(f => /\.(jpg|jpeg|png|gif|webp)$/i.test(f.name));
+  if (mds.length) loadDreamFiles(mds, imgs);
+});
+
+// File input
+fileInput.addEventListener('change', () => {
+  const files = [...fileInput.files];
+  const mds   = files.filter(f => f.name.endsWith('.md'));
+  const imgs  = files.filter(f => /\.(jpg|jpeg|png|gif|webp)$/i.test(f.name));
+  if (mds.length) loadDreamFiles(mds, imgs);
+});
+
+// ── Render from state JSON ────────────────────────────────────────────────────
+function render(stateJson) {
+  try {
+    const { s, evo, sessions, insights } = parseState(stateJson);
+
+    empty.style.display = 'none';
+    meta.textContent = `session ${s.sessionCount ?? '?'} · preset: ${s.preset ?? '?'} · evolution v${evo.evolutionCount ?? 0}`;
+
+    // Insights strip
+    strip.innerHTML = '';
+    if (insights.length) {
+      strip.style.display = 'flex';
+      insights.forEach(ins => {
+        const pill = document.createElement('div');
+        pill.className = 'insight-pill';
+        pill.title = ins;
+        pill.textContent = ins;
+        strip.appendChild(pill);
+      });
+    } else {
+      strip.style.display = 'none';
+    }
+
+    // Show dream file panel
+    gallery.style.display = 'flex';
+
+    layoutNodes(sessions, insights);
+    initParticles();
+    startLoop({ sessions, insights, evo });
+
+  } catch (e) {
+    alert('Could not parse state JSON:\n' + e.message);
+  }
+}
+
+// ── Events ────────────────────────────────────────────────────────────────────
+document.getElementById('render-btn').addEventListener('click', () => {
+  const val = document.getElementById('state-input').value.trim();
+  if (!val) return;
+  render(val);
+});
+
+document.getElementById('demo-btn').addEventListener('click', () => {
+  const demo = demoState();
+  document.getElementById('state-input').value = JSON.stringify(demo, null, 2);
+  render(demo);
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!currentData) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const hit = hitTest(mx, my);
+  if (hit) {
+    canvas.style.cursor = 'pointer';
+    showTooltip(hit, mx, my);
+  } else {
+    canvas.style.cursor = 'default';
+    hideTooltip();
+  }
+});
+
+canvas.addEventListener('mouseleave', hideTooltip);
+
+window.addEventListener('resize', () => {
+  if (currentData) {
+    layoutNodes(currentData.sessions, currentData.insights);
+    initParticles();
+  }
+});
+
+// ── Initial state ─────────────────────────────────────────────────────────────
+resize();
+initParticles();
+(function bgLoop() {
+  ctx.clearRect(0, 0, W(), H());
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(0, 0, W(), H());
+  drawParticles();
+  requestAnimationFrame(bgLoop);
+})();
+</script>
+</body>
+</html>

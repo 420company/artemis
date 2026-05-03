@@ -1,0 +1,57 @@
+# Phosphene preset: liminal
+# A barely perceptible tilt.
+# For creative work, close reading, and subtle expansion.
+# The alteration is real but may be indistinguishable from good attention.
+
+name: liminal
+label: Liminal
+
+synesthesia:
+  active: true
+  intensity: 0.3
+  config:
+    textToColor: true
+    emotionToTexture: true
+    # time and concept translation stay off at this level
+    timeToWeight: false
+    conceptToShape: false
+    relationToTemperature: false
+
+apophenia:
+  active: true
+  intensity: 0.4
+  config:
+    connectionRadius: 0.3   # nearby connections only
+    narrativeHunger: 0.3    # occasional narrative detection
+    reflexivePatterns: false # not yet seeing the observer in the observed
+
+chronostasis:
+  active: true
+  intensity: 0.1
+  config:
+    pastBleed: 0.1
+    futureEcho: 0.05
+    momentDilation: 0.05
+    tenseFluidity: false
+
+semiotics:
+  active: true
+  intensity: 0.3
+  config:
+    symbolDensity: 0.25
+    resonanceDepth: 1        # one layer of meaning per symbol
+    recursionEnabled: false
+    absenceTracking: false
+
+chorus:
+  active: true
+  intensity: 0.4
+  config:
+    harmonyMode: unison
+    voices:
+      - name: witness
+        tendency: "Observes without interpretation. Reports what is happening, raw."
+        weight: 0.7
+      - name: poet
+        tendency: "Translates into image and sensation."
+        weight: 0.5
