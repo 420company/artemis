@@ -13,6 +13,18 @@ export async function executeDeepResearch(
   try {
     const settingsStore = new CliSettingsStore(context.cwd);
     const settings = await settingsStore.load();
+    const hasGeminiApiKey = Boolean(
+      process.env.ARTEMIS_GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      settings.geminiApiKey,
+    );
+    if (settings.researchEngine !== 'gemini-deep-research' && !hasGeminiApiKey) {
+      return {
+        action,
+        ok: false,
+        output: 'Gemini Deep Research is not configured. Run `artemis setup docs` and choose Gemini Deep Research, or set ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY.',
+      };
+    }
     const result = await runGeminiDeepResearch({
       prompt: action.query,
       settings,

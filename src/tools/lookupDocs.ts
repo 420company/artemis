@@ -13,12 +13,16 @@ export async function executeLookupDocs(
   try {
     const settingsStore = new CliSettingsStore(context.cwd);
     const settings = await settingsStore.load();
+    const searchEngine = settings.docsSearchEngine === 'google' &&
+      (!process.env.GOOGLE_CSE_ID || !process.env.GOOGLE_API_KEY)
+      ? 'bing'
+      : settings.docsSearchEngine;
     const result = await lookupDocs({
       query: action.query,
       library: action.library,
       version: action.version,
       maxResults: action.maxResults,
-      searchEngine: settings.docsSearchEngine,
+      searchEngine,
     });
     return {
       action,

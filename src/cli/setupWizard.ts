@@ -7,7 +7,12 @@ import {
   chooseInteractiveOption,
   createInteractivePromptIO,
 } from './prompt.js'
-import { CliSettingsStore } from './settings.js'
+import {
+  CliSettingsStore,
+  DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+  type DocsSearchEngine,
+  type ResearchEngine,
+} from './settings.js'
 import { ProviderStore } from '../providers/store.js'
 import { promptForVerifiedProviderProfile } from '../providers/onboarding.js'
 import type {
@@ -42,6 +47,7 @@ type SetupSection =
   | 'tools'          // Legacy direct-only tool gates
   | 'session'        // 会话管理
   | 'dream'          // 做梦系统
+  | 'docs'           // 文档搜索 / 深度研究
 
 type SetupWizardOptions = {
   cwd: string
@@ -81,7 +87,8 @@ function normalizeSection(value: string | undefined): SetupSection | undefined {
   if (v === 'skill' || v === 'skills' || v === 'catalog') return 'skills'
   if (v === 'cron' || v === 'automation' || v === 'automations') return 'automation'
   if (v === 'dream' || v === 'dreams') return 'dream'
-  if (['model', 'visual', 'gateway', 'bundle', 'skills', 'agent', 'memory', 'automation', 'terminal', 'tts', 'tools', 'session', 'dream'].includes(v)) {
+  if (v === 'doc' || v === 'docs' || v === 'search' || v === 'research' || v === 'deep-research' || v === 'deep_research') return 'docs'
+  if (['model', 'visual', 'gateway', 'bundle', 'skills', 'agent', 'memory', 'automation', 'terminal', 'tts', 'tools', 'session', 'dream', 'docs'].includes(v)) {
     return v as SetupSection
   }
   return undefined
@@ -701,6 +708,82 @@ async function configureBundleSettings(options: { cwd: string; locale: UiLocale 
   })
 }
 
+async function configureDocsAndResearchSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { cwd, locale } = options
+  const settingsStore = new CliSettingsStore(cwd)
+  const settings = await settingsStore.load()
+
+  sectionTitle(tr(locale, '文档搜索 / 深度研究', 'Docs Search / Deep Research'), [
+    tr(
+      locale,
+      '普通网页搜索与文档查询不需要 Gemini API；Gemini Deep Research 是单独的深度研究能力。',
+      'Regular web search and docs lookup do not need a Gemini API key; Gemini Deep Research is a separate research capability.',
+    ),
+    tr(
+      locale,
+      'Google 文档搜索需要 GOOGLE_CSE_ID + GOOGLE_API_KEY；缺少环境变量时会自动回退到 Bing。',
+      'Google docs search needs GOOGLE_CSE_ID + GOOGLE_API_KEY; Artemis falls back to Bing when they are missing.',
+    ),
+  ])
+
+  const docsEngine = await chooseInteractiveOption<DocsSearchEngine>({
+    title: tr(locale, 'lookup_docs 使用哪个文档搜索引擎？', 'Which docs search engine should lookup_docs use?'),
+    initialIndex: settings.docsSearchEngine === 'google' ? 1 : 0,
+    choices: [
+      { label: 'Bing', value: 'bing', description: tr(locale, '默认，免 API key。', 'Default, no API key required.') },
+      { label: 'Google', value: 'google', description: tr(locale, '质量可能更高，但需要 GOOGLE_CSE_ID + GOOGLE_API_KEY。', 'May be higher quality, but needs GOOGLE_CSE_ID + GOOGLE_API_KEY.') },
+    ],
+  })
+  await settingsStore.setDocsSearchEngine(docsEngine)
+  if (docsEngine === 'google' && (!process.env.GOOGLE_CSE_ID || !process.env.GOOGLE_API_KEY)) {
+    console.log(tr(
+      locale,
+      '  ⚠ 当前未检测到 GOOGLE_CSE_ID + GOOGLE_API_KEY；lookup_docs 会自动回退到 Bing。',
+      '  ⚠ GOOGLE_CSE_ID + GOOGLE_API_KEY were not detected; lookup_docs will fall back to Bing.',
+    ))
+  }
+
+  const researchEngine = await chooseInteractiveOption<ResearchEngine>({
+    title: tr(locale, 'deep_research 使用哪个研究后端？', 'Which research backend should deep_research use?'),
+    initialIndex: settings.researchEngine === 'gemini-deep-research' ? 1 : 0,
+    choices: [
+      { label: tr(locale, '内置提示（默认）', 'Built-in prompt (default)'), value: 'builtin', description: tr(locale, '不需要 Gemini API；适合普通使用。', 'No Gemini API required; good for regular use.') },
+      { label: 'Gemini Deep Research', value: 'gemini-deep-research', description: tr(locale, '需要 Gemini API key；用于更深入的多步调研。', 'Needs a Gemini API key; for deeper multi-step research.') },
+    ],
+  })
+  await settingsStore.setResearchEngine(researchEngine)
+
+  if (researchEngine === 'gemini-deep-research') {
+    const existingKey = process.env.ARTEMIS_GEMINI_API_KEY || process.env.GEMINI_API_KEY || settings.geminiApiKey || ''
+    const apiKey = await askText(
+      tr(locale, 'Gemini API key（可留空使用环境变量 ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY）', 'Gemini API key (leave blank to use ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY)'),
+      existingKey,
+      true,
+    )
+    const agent = await askText(
+      tr(locale, 'Gemini Deep Research agent', 'Gemini Deep Research agent'),
+      settings.geminiDeepResearchAgent || DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+    )
+    await settingsStore.update({
+      geminiApiKey: apiKey || undefined,
+      geminiDeepResearchAgent: agent || DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+      researchEngine: 'gemini-deep-research',
+      researchEngineConfigured: true,
+    })
+    if (!apiKey) {
+      console.log(tr(
+        locale,
+        '  ⚠ 未保存 Gemini API key；请在环境变量里设置 ARTEMIS_GEMINI_API_KEY 或 GEMINI_API_KEY 后再使用 deep_research。',
+        '  ⚠ No Gemini API key was saved; set ARTEMIS_GEMINI_API_KEY or GEMINI_API_KEY before using deep_research.',
+      ))
+    } else {
+      console.log(tr(locale, '  ✓ Gemini Deep Research 已配置。', '  ✓ Gemini Deep Research configured.'))
+    }
+  } else {
+    console.log(tr(locale, '  ✓ deep_research 将保持默认内置模式。', '  ✓ deep_research will stay on the built-in mode.'))
+  }
+}
+
 function summarizeSkillCategories(skills: Array<{ category?: string }>, limit = 8): string {
   const counts = new Map<string, number>()
   for (const skill of skills) {
@@ -879,6 +962,7 @@ async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise
   await configureTerminalSettings({ cwd, locale })
   await configureTTSSettings({ cwd, locale })
   await configureSessionSettings({ cwd, locale })
+  await configureDocsAndResearchSettings({ cwd, locale })
   await new CliSettingsStore(cwd).update({ onboardingCompleted: true }).catch(() => {})
   await printSetupSummary(cwd, locale)
 }
@@ -890,6 +974,16 @@ async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }
   ])
 
   await configureModelProvider({ cwd, locale, quick: true })
+
+  const setupBundle = await askYesNo(
+    locale,
+    tr(locale, '现在启用文字润色 / Bundle？', 'Enable prompt polishing / Bundle now?'),
+    true,
+    tr(locale, '它会把较长需求整理成结构化提示词，发送前展示“原版 vs 增强版”供你确认。', 'It rewrites longer requests into structured prompts and shows original vs enhanced before sending.'),
+  )
+  if (setupBundle) {
+    await configureBundleSettings({ cwd, locale })
+  }
 
   const setupVisual = await askYesNo(
     locale,
@@ -907,6 +1001,16 @@ async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }
   )
   if (setupMessaging) {
     await configureGateway({ cwd, locale })
+  }
+
+  const setupDocs = await askYesNo(
+    locale,
+    tr(locale, '现在配置文档搜索 / Gemini Deep Research？', 'Configure docs search / Gemini Deep Research now?'),
+    false,
+    tr(locale, '普通搜索不用 Gemini API；只有启用 Gemini Deep Research 才需要 Gemini API key。', 'Regular search does not need Gemini API; only Gemini Deep Research needs a Gemini API key.'),
+  )
+  if (setupDocs) {
+    await configureDocsAndResearchSettings({ cwd, locale })
   }
 
   await new CliSettingsStore(cwd).update({ onboardingCompleted: true }).catch(() => {})
@@ -958,6 +1062,7 @@ async function runSection(section: SetupSection, options: { cwd: string; locale:
   else if (section === 'tools') await configureToolSettings({ cwd, locale })
   else if (section === 'session') await configureSessionSettings({ cwd, locale })
   else if (section === 'dream') await configureDreamSettings({ cwd, locale })
+  else if (section === 'docs') await configureDocsAndResearchSettings({ cwd, locale })
   await printSetupSummary(cwd, locale)
 }
 
@@ -1028,7 +1133,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
   const section = normalizeSection(options.section)
   if (options.section && !section) {
     console.log(`Unknown setup section: ${options.section}`)
-    console.log('Available: model, bundle, skills, visual, gateway, memory, cron, terminal, tts, session')
+    console.log('Available: model, bundle, skills, visual, gateway, memory, cron, terminal, tts, session, dream, docs')
     return
   }
   if (section) {
@@ -1051,7 +1156,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
       title: tr(locale, '你想如何配置 Artemis？', 'How would you like to set up Artemis?'),
       initialIndex: 0,
       choices: [
-        { label: tr(locale, 'Quick setup — provider, model & messaging（推荐）', 'Quick setup — provider, model & messaging (recommended)'), value: 'quick' },
+        { label: tr(locale, 'Quick setup — provider, model, Bundle & messaging（推荐）', 'Quick setup — provider, model, Bundle & messaging (recommended)'), value: 'quick' },
         { label: tr(locale, 'Full setup — configure everything', 'Full setup — configure everything'), value: 'full' },
       ],
     })
@@ -1076,6 +1181,8 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
       { label: 'Terminal Backend', value: 'terminal' },
       { label: 'Voice Input / Output', value: 'tts' },
       { label: 'Session Management', value: 'session' },
+      { label: 'Docs Search / Deep Research', value: 'docs' },
+      { label: 'Dream System', value: 'dream' },
       { label: 'Exit', value: 'exit' },
     ],
   })
