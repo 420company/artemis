@@ -216,6 +216,37 @@ export async function readDreamBody(id: string): Promise<string | null> {
   }
 }
 
+export async function findLatestDreamImage(): Promise<string | null> {
+  const indexed = await loadDreamIndex()
+  for (const entry of indexed) {
+    if (entry.imagePath && existsSync(entry.imagePath)) return entry.imagePath
+  }
+
+  await ensureRoot()
+  try {
+    const files = await readdir(DREAMS_ROOT)
+    const images = await Promise.all(
+      files
+        .filter(file => /\.(png|jpe?g|webp|gif)$/i.test(file))
+        .map(async file => {
+          const fullPath = path.join(DREAMS_ROOT, file)
+          try {
+            const info = await stat(fullPath)
+            return { fullPath, mtimeMs: info.mtimeMs }
+          } catch {
+            return null
+          }
+        }),
+    )
+    const latest = images
+      .filter((item): item is { fullPath: string; mtimeMs: number } => item !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]
+    return latest?.fullPath ?? null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Best-effort: scan ~/.artemis/sessions/*.json for sessions touched in the
  * last 24h. Used by the composer to gather "what did the user work on today".

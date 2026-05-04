@@ -220,13 +220,16 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
             ...Object.keys(data.contextTokens ?? {}),
           ])
       let sent = 0
+      const failed: Array<{ target: string; error: string }> = []
       let missingContext = 0
       for (const targetId of targets) {
         try {
           const contextToken = wechatStore.getContextToken(data, targetId)
           if (!contextToken) {
             missingContext += 1
-            options.onInfo?.(`[wechat] image push skipped target=${targetId}: no context token`)
+            const error = 'no context token; ask from WeChat again so Artemis can capture a fresh iLink context_token'
+            failed.push({ target: targetId, error })
+            options.onInfo?.(`[wechat] image push skipped target=${targetId}: ${error}`)
             continue
           }
           if (payload.imagePath) {
@@ -240,13 +243,15 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
           }
           sent += 1
         } catch (err) {
-          options.onInfo?.(`[wechat] dream push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
+          const error = err instanceof Error ? err.message : String(err)
+          failed.push({ target: targetId, error })
+          options.onInfo?.(`[wechat] dream push to ${targetId} failed: ${error}`)
         }
       }
-      if (sent === 0 && missingContext > 0) {
+      if (sent === 0 && missingContext > 0 && failed.length === missingContext) {
         throw new Error(`WeChat image push skipped ${missingContext} target(s): no context token. Ask from WeChat again so Artemis can capture a fresh iLink context_token.`)
       }
-      return { sent }
+      return { sent, failed }
     },
   })
 

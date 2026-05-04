@@ -361,6 +361,7 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
       const targets = payload.targetId ? [payload.targetId] : (data.allowedChatIds ?? [])
       const { existsSync } = await import('node:fs')
       let sent = 0
+      const failed: Array<{ target: string; error: string }> = []
       for (const chatId of targets) {
         try {
           if (payload.imagePath && existsSync(payload.imagePath)) {
@@ -376,10 +377,12 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
           }
           sent += 1
         } catch (err) {
-          options.onInfo?.(`[telegram] push to ${chatId} failed: ${err instanceof Error ? err.message : String(err)}`)
+          const error = err instanceof Error ? err.message : String(err)
+          failed.push({ target: chatId, error })
+          options.onInfo?.(`[telegram] push to ${chatId} failed: ${error}`)
         }
       }
-      return { sent }
+      return { sent, failed }
     },
   })
 

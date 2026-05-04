@@ -140,7 +140,7 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     group: 'core',
     slash: '/soul',
     autocomplete: true,
-    quickValue: '/soul',
+    quickValue: '/soul start',
     desc: { zh: '启动 soul.md 人格配置引导', en: 'Start the soul.md personality setup' },
   },
   {

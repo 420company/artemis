@@ -6,8 +6,11 @@ import { broadcastToBridges, listRegisteredBridges } from '../services/bridgeNot
 import type { BridgePlatform } from '../services/bridgeNotifier.js'
 import type { BragiPlatformId } from './types.js'
 import { resolveDataRootDir } from '../utils/fs.js'
+import { findLatestDreamImage } from '../services/dreamStore.js'
 
 export type BridgeImagePlatform = BragiPlatformId | 'all'
+
+const LATEST_DREAM_IMAGE_SENTINEL = 'latest_dream'
 
 export type BridgeImageBroadcastResult = {
   imagePath: string
@@ -46,9 +49,14 @@ function normalizeOptionalTargetId(targetId: string | undefined): string | undef
   return trimmed || undefined
 }
 
-function resolveImagePath(inputPath: string, cwd: string): string {
+async function resolveImagePath(inputPath: string, cwd: string): Promise<string> {
   const trimmed = inputPath.trim()
   if (!trimmed) throw new Error('image path is empty')
+  if (trimmed === LATEST_DREAM_IMAGE_SENTINEL) {
+    const latest = await findLatestDreamImage()
+    if (latest) return latest
+    throw new Error('no dream image found in ~/.artemis/dreams')
+  }
 
   const candidates = isAbsolute(trimmed)
     ? [trimmed]
@@ -121,14 +129,14 @@ export async function sendBragiImageBroadcast(options: {
   targetId?: string
   source?: string
 }): Promise<BridgeImageBroadcastResult> {
-  const imagePath = resolveImagePath(options.imagePath, options.cwd)
+  const imagePath = await resolveImagePath(options.imagePath, options.cwd)
 
   const caption = options.caption?.trim() || '🖼 Artemis image'
   const platforms = normalizePlatforms(options.platform)
   const targetId = normalizeOptionalTargetId(options.targetId)
   const registered = listRegisteredBridges().filter(p => platforms.includes(p as BragiPlatformId))
   const live = registered.length > 0
-    ? await broadcastToBridges({ text: caption, imagePath, targetId, source: options.source ?? 'bridge_send_image' })
+    ? await broadcastToBridges({ text: caption, imagePath, targetId, platforms: registered, source: options.source ?? 'bridge_send_image' })
     : { sent: 0, failed: [] }
   const shouldUseConfiguredFallback = live.sent === 0
 

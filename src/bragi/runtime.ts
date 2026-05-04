@@ -37,6 +37,7 @@ import type { ChatProvider, ProviderConfig } from '../providers/types.js'
 import { resolveWorkspaceIntent } from '../cli/workspaceIntent.js'
 import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
 import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
+import { sendBragiImageBroadcast } from './imageBroadcast.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -58,8 +59,8 @@ export function compactLabel(label: string): string {
 
 function bridgePlatformFromLabel(label: string): BridgePlatform {
   const normalized = label.toLowerCase()
-  if (normalized === 'discord') return 'discord'
-  if (normalized === 'wechat') return 'wechat'
+  if (normalized.includes('discord')) return 'discord'
+  if (normalized.includes('wechat')) return 'wechat'
   return 'telegram'
 }
 
@@ -160,6 +161,12 @@ function formatMobileReply(text: string): string {
     .replace(/\n{3,}/g, '\n\n')
 
   return out.trim()
+}
+
+function isDreamImageRequest(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '').toLowerCase()
+  if (!/(梦境|做梦|dream)/i.test(normalized)) return false
+  return /(图片|图|image|photo|pic|看看|看一下|发我|send|show)/i.test(normalized)
 }
 
 let bridgeThinkQueue: Promise<void> = Promise.resolve()
@@ -274,6 +281,8 @@ export async function runRemoteCommand(
     awaitUserConfirmation?: (request: { question: string; timeoutMs: number }) => Promise<boolean>
     pollRunningUserMessages?: () => string[]
     onRunningUserMessageAccepted?: (text: string) => void
+    bridgePlatform?: 'telegram' | 'discord' | 'wechat'
+    targetId?: string
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
@@ -464,6 +473,34 @@ export async function runRemoteCommand(
         // know the message arrived and the AI is working — without this
         // they stare at nothing for 30+ seconds wondering if it's stuck.
         await opts.sendChatUpdate?.(startedText)
+
+        if (!workflowResolution && isDreamImageRequest(command.body)) {
+          const platform = opts.bridgePlatform
+          await opts.onProgress?.(t(
+            '🔧 正在运行工具：bridge_send_image · latest_dream',
+            '🔧 Running tool: bridge_send_image · latest_dream',
+          ), 'info')
+          const broadcast = await sendBragiImageBroadcast({
+            cwd: commandCwd,
+            imagePath: 'latest_dream',
+            caption: 'Artemis 梦境',
+            platform,
+            targetId: opts.targetId,
+            source: 'dream_image_request',
+          })
+          const failed = broadcast.live.failed.length + broadcast.configured.reduce((sum, item) => sum + item.failed.length, 0)
+          await opts.onProgress?.(t(
+            `${failed === 0 ? '✅' : '⚠️'} 工具${failed === 0 ? '完成' : '失败'}：bridge_send_image · image: ${broadcast.imagePath}; sent=${broadcast.live.sent + broadcast.configured.reduce((sum, item) => sum + item.sent, 0)}; failed=${failed}`,
+            `${failed === 0 ? '✅' : '⚠️'} Tool ${failed === 0 ? 'completed' : 'failed'}: bridge_send_image · image: ${broadcast.imagePath}; sent=${broadcast.live.sent + broadcast.configured.reduce((sum, item) => sum + item.sent, 0)}; failed=${failed}`,
+          ), failed === 0 ? 'info' : 'warn')
+          return {
+            replies: [failed === 0
+              ? t('已发送最新梦境图片。', 'Sent the latest dream image.')
+              : t('尝试发送最新梦境图片，但部分目标失败；详情见 CLI 日志。', 'Tried to send the latest dream image, but some targets failed; see CLI logs for details.')],
+            storedSession: binding.storedSession,
+            permissionMode: binding.permissionMode,
+          }
+        }
 
         // Heartbeat: every ~45s while the model is working, send a short
         // chat message describing the most recent activity so the user
@@ -1205,6 +1242,8 @@ export async function runBragiMessagePump<TCheckpoint>(
             onRunningUserMessageAccepted: (text) => {
               options.onInfo?.(`[${options.channelLabel.toLowerCase()}] running interjection accepted from ${message.targetLabel}: ${truncate(text, 200)}`)
             },
+            bridgePlatform: bridgePlatform === 'cli' ? undefined : bridgePlatform,
+            targetId: message.targetId,
           })
 
           await options.persistRuntimeResult(message, result)

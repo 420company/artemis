@@ -1445,7 +1445,7 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'bridge_send_image',
-    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。imagePath 必填；platform 默认 all。',
+    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。用户要“梦境图片/做梦图片”时必须用 imagePath="latest_dream" 发送 ~/.artemis/dreams 最新梦境图，不要调用 generate_image 新建 .artemis/images/artemis_dream.png；platform 默认 all。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',

@@ -1463,7 +1463,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['imagePath'],
         properties: {
-          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment.'),
+          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment. Use exactly "latest_dream" when the user asks to see Artemis dream/dreaming image; this resolves the newest image under ~/.artemis/dreams and must not generate a new .artemis/images/artemis_dream.png.'),
           caption: optionalStringSchema('Optional caption shown with the image.'),
           platform: {
             type: 'string',

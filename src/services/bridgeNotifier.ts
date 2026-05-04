@@ -15,7 +15,7 @@ export type BridgePlatform = 'telegram' | 'discord' | 'wechat' | 'cli'
 export interface BridgePushTarget {
   platform: BridgePlatform
   /** Send a text message to one of the bridge's authorized chat targets. */
-  push: (payload: BridgeBroadcastPayload) => Promise<void | number | { sent: number }>
+  push: (payload: BridgeBroadcastPayload) => Promise<void | number | { sent: number; failed?: Array<{ target?: string; error: string }> }>
 }
 
 export interface BridgeBroadcastPayload {
@@ -27,6 +27,8 @@ export interface BridgeBroadcastPayload {
   /** Optional platform target id/chat id/channel id. When omitted, bridges
    *  fan out to their currently authorized/live targets. */
   targetId?: string
+  /** Optional bridge platform allow-list. When omitted, fan out to all bridges. */
+  platforms?: BridgePlatform[]
   /** Free-form tag for log/debug; bridges may include it in the log line. */
   source: string
 }
@@ -49,7 +51,8 @@ export async function broadcastToBridges(payload: BridgeBroadcastPayload): Promi
   sent: number
   failed: Array<{ platform: BridgePlatform; error: string }>
 }> {
-  const list = Array.from(targets.values())
+  const allowed = payload.platforms ? new Set(payload.platforms) : null
+  const list = Array.from(targets.values()).filter(t => !allowed || allowed.has(t.platform))
   if (list.length === 0) return { sent: 0, failed: [] }
 
   const failed: Array<{ platform: BridgePlatform; error: string }> = []
@@ -63,6 +66,12 @@ export async function broadcastToBridges(payload: BridgeBroadcastPayload): Promi
           sent += result
         } else if (result && typeof result === 'object' && typeof result.sent === 'number') {
           sent += result.sent
+          for (const item of result.failed ?? []) {
+            failed.push({
+              platform: t.platform,
+              error: item.target ? `${item.target}: ${item.error}` : item.error,
+            })
+          }
         } else {
           sent += 1
         }

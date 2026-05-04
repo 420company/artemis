@@ -1812,6 +1812,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/visual',     hint: t('快捷修改视觉 API 配置',     'Quick-edit visual API config') },
     { value: '/vercel',     hint: t('配置 Vercel 部署 token',    'Configure Vercel deployment token') },
     { value: '/config memory', hint: t('配置记忆增强',           'Configure memory enhancement') },
+    { value: '/soul',       hint: t('启动 soul.md 人格配置引导',   'Start soul.md personality setup') },
     { value: '/newborn',    hint: t('重置全部配置',               'Wipe config & re-run setup') },
     // ── 其他 ──
     { value: '/help',       hint: t('查看全部命令',               'Show all commands') },

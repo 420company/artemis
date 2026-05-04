@@ -217,6 +217,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
       const targets = payload.targetId ? [payload.targetId] : Array.from(allowedTargets)
       const { existsSync } = await import('node:fs')
       let sent = 0
+      const failed: Array<{ target: string; error: string }> = []
       for (const targetId of targets) {
         try {
           if (payload.imagePath && existsSync(payload.imagePath)) {
@@ -231,10 +232,12 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
           }
           sent += 1
         } catch (err) {
-          options.onInfo?.(`[discord] push to ${targetId} failed: ${err instanceof Error ? err.message : String(err)}`)
+          const error = err instanceof Error ? err.message : String(err)
+          failed.push({ target: targetId, error })
+          options.onInfo?.(`[discord] push to ${targetId} failed: ${error}`)
         }
       }
-      return { sent }
+      return { sent, failed }
     },
   })
 
