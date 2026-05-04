@@ -7,6 +7,7 @@
  */
 
 import { parseArgs } from '../src/cli/parseArgs.js'
+import { isCliStopIntent } from '../src/cli/interactive.js'
 import { CliSettingsStore } from '../src/cli/settings.js'
 import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
@@ -459,6 +460,16 @@ assert(
   'run_command: explicit timeout still overrides the heuristic',
   resolveRunCommandTimeoutMs('npm install', 45_000) === 45_000,
   `timeout=${resolveRunCommandTimeoutMs('npm install', 45_000)}`,
+)
+
+assert(
+  'interactive prompt: stop intent recognises Chinese and English hard-stop commands',
+  isCliStopIntent('停') &&
+    isCliStopIntent('停止') &&
+    isCliStopIntent('/stop') &&
+    isCliStopIntent('cancel') &&
+    !isCliStopIntent('停止之后继续解释'),
+  'stop intent matcher regression',
 )
 
 {

@@ -164,6 +164,22 @@ type DetachedRunningMessageCapture = {
   capture: (line: string) => void
 }
 
+export function isCliStopIntent(text: string): boolean {
+  const normalized = text.trim().toLowerCase()
+  return new Set([
+    '/stop',
+    'stop',
+    '停止',
+    '停',
+    '中止',
+    '终止',
+    '打断',
+    '取消',
+    'cancel',
+    'interrupt',
+  ]).has(normalized)
+}
+
 function renderLiveAssistantViewport(state: LiveAssistantRenderState): void {
   // DISABLED: All content should be managed through redrawViewportFromState()
   // to ensure it respects DECSTBM scroll region boundaries.
@@ -258,7 +274,9 @@ import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
 import { appendDetachedWorkflowMessage, spawnDetachedWorkflow } from '../services/detachedWorkflow.js'
+import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
 import { parseHeimdallCommandBody, buildHeimdallReport, buildHeimdallThreadsReport } from '../services/heimdallControl.js'
+import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import stripAnsi from 'strip-ansi'
 import { stringWidth } from '../input/stringWidth.js'
 import { getDirectToolCount } from '../tools/directTools.js'
@@ -2001,6 +2019,20 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
   }
 
+  const interruptActiveCliRuntimes = async (): Promise<number> => {
+    const runtimeDirectory = new RuntimeDirectoryService(sessionStore)
+    let interrupted = 0
+    const sessions = await sessionStore.list().catch(() => [] as Awaited<ReturnType<SessionStore['list']>>)
+    for (const session of sessions) {
+      for (const runtime of session.taskRuntimes ?? []) {
+        if (!isTaskRuntimeActiveStatus(runtime.status)) continue
+        const result = await runtimeDirectory.interruptRuntime(runtime.id).catch(() => null)
+        if (result?.found && result.changed) interrupted += 1
+      }
+    }
+    return interrupted
+  }
+
   const waitForRunnerOrInterrupt = async (
     runnerOrCapture: Promise<void> | Promise<DetachedRunningMessageCapture | undefined>,
     onRunningMessage?: (line: string) => void,
@@ -2035,6 +2067,17 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       }
       const trimmedLine = nextLine.trim()
       if (trimmedLine && runningMessageHandler) {
+        if (isCliStopIntent(trimmedLine)) {
+          const interrupted = await interruptActiveCliRuntimes()
+          appendScrollBlock({
+            kind: 'system',
+            text: interrupted > 0
+              ? t(`已发送中断信号（${interrupted} 个运行中任务）。`, `Interrupt signal sent (${interrupted} active runtime(s)).`)
+              : t('已收到停止请求；当前任务会在下一个安全点停下。', 'Stop request received; the current task will stop at the next safe point.'),
+          })
+          prompt.forceRedraw()
+          continue
+        }
         runningMessageHandler(nextLine)
         continue
       }
@@ -2083,6 +2126,22 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         capture: (line) => {
           const cleanLine = line.trim()
           if (!cleanLine) return
+          if (isCliStopIntent(cleanLine)) {
+            void new RuntimeDirectoryService(sessionStore).interruptRuntime(result.runtimeId)
+              .then((interruptResult) => {
+                appendSystemPanel(
+                  t('已发送中断信号', 'Interrupt signal sent'),
+                  [interruptResult.message],
+                )
+                prompt.forceRedraw()
+              })
+              .catch((err: unknown) => {
+                const msg = err instanceof Error ? err.message : String(err)
+                appendSystemPanel(t('中断失败', 'Interrupt failed'), [msg])
+                prompt.forceRedraw()
+              })
+            return
+          }
           void appendDetachedWorkflowMessage(workspaceRoot, result.runtimeId, cleanLine).catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err)
             appendSystemPanel(t('新对话同步失败', 'New message sync failed'), [msg])

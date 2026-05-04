@@ -488,10 +488,12 @@ class TerminalPrompt implements BlessedPromptHandle {
     // If the input contains only one line plus a terminal newline, treat it as
     // an explicit Enter submission. If there are internal newlines, assume the
     // user pasted multi-line content and insert it instead of submitting.
-    const isSingleLineSubmit = parts.length === 2 && endsWithNewline
+    const firstPart = parts[0] ?? ''
+    const isLikelySingleLinePaste = parts.length === 2 && endsWithNewline && firstPart.length >= TerminalPrompt.LARGE_PASTE_CHARS
+    const isSingleLineSubmit = parts.length === 2 && endsWithNewline && !isLikelySingleLinePaste
 
     if (isSingleLineSubmit) {
-      const part = parts[0]
+      const part = firstPart
       if (part) {
         this.inputValue += part
         this.inputCursor = this.inputValue.length
@@ -511,6 +513,14 @@ class TerminalPrompt implements BlessedPromptHandle {
       this.onTextChange?.('')
       this.render()
       this.enqueue(submitted)
+      return
+    }
+
+    if (isLikelySingleLinePaste) {
+      this.inputValue += firstPart
+      this.inputCursor = this.inputValue.length
+      this.onTextChange?.(this.inputValue)
+      this.render()
       return
     }
 
@@ -669,6 +679,10 @@ class TerminalPrompt implements BlessedPromptHandle {
       this.render()
       return
     }
+    if (key.ctrl && key.name === 'j') {
+      this.insertAtCursor('\n')
+      return
+    }
     if (key.name === 'backspace') {
       if (this.deletePlaceholderBeforeCursor()) return
       this.deleteBeforeCursor()
@@ -689,6 +703,10 @@ class TerminalPrompt implements BlessedPromptHandle {
     }
 
     if (key.name === 'return' || key.name === 'enter') {
+      if ((key.sequence ?? '').includes('\n') && !(key.sequence ?? '').includes('\r')) {
+        this.insertAtCursor('\n')
+        return
+      }
       if (this.menuItems.length > 0 && this.inputValue.startsWith('/') && !this.inputValue.includes(' ')) {
         this.applyMenuSelection()
         return

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { runAgent, runSpecialistAgent, type RunAgentOptions } from './agent.js';
+import { processDelegatedRuntimeCommands, runAgent, runSpecialistAgent, type RunAgentOptions } from './agent.js';
 import { deriveClaimStatement } from './evidence.js';
 import { buildWorkflowStrengthContract } from './workflowStrength.js';
 import type { AgentRole, PlanItem, RunResult, SessionRecord } from './types.js';
@@ -690,7 +690,13 @@ export async function runNidhoggWorkflow(
   let previousOverallScore: number | undefined;
   let totalTurns = 0;
 
+  const checkInterrupt = async (phase: string): Promise<void> => {
+    await processDelegatedRuntimeCommands(session, options);
+    options.onInfo?.(`[nidhogg] interrupt check passed: ${phase}`);
+  };
+
   for (let round = 1; round <= resolvedConfig.maxRounds; round += 1) {
+    await checkInterrupt(`round ${round} generator start`);
     options.onInfo?.(`[nidhogg] round ${round}/${resolvedConfig.maxRounds} - generator`);
     session.plan = buildRoundPlan(round, resolvedConfig.maxRounds, 'gen');
     await options.sessionStore.save(session);
@@ -749,6 +755,7 @@ export async function runNidhoggWorkflow(
       options.onInfo?.(`[nidhogg] round ${round}/${resolvedConfig.maxRounds} - generator done`);
     }
 
+    await checkInterrupt(`round ${round} critic start`);
     options.onInfo?.(`[nidhogg] round ${round}/${resolvedConfig.maxRounds} - critic pool (${criticKinds.join(',')})`);
     session.plan = buildRoundPlan(round, resolvedConfig.maxRounds, 'critics');
     await options.sessionStore.save(session);
@@ -825,6 +832,7 @@ export async function runNidhoggWorkflow(
     }
     options.onInfo?.(`[nidhogg] round ${round}/${resolvedConfig.maxRounds} - critic pool done`);
 
+    await checkInterrupt(`round ${round} judge start`);
     options.onInfo?.(`[nidhogg] round ${round}/${resolvedConfig.maxRounds} - judge`);
     session.plan = buildRoundPlan(round, resolvedConfig.maxRounds, 'judge');
     await options.sessionStore.save(session);
@@ -899,6 +907,8 @@ export async function runNidhoggWorkflow(
       judgeVerdict,
     });
     await options.sessionStore.save(session);
+
+    await checkInterrupt(`round ${round} complete`);
 
     if (judgeVerdict.approved) {
       options.onInfo?.(

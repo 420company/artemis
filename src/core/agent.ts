@@ -3039,7 +3039,7 @@ function buildDelegatedRuntimeCommandMessage(signal: {
   }
 }
 
-async function processDelegatedRuntimeCommands(
+export async function processDelegatedRuntimeCommands(
   session: SessionRecord,
   options: RunAgentOptions,
 ): Promise<void> {
