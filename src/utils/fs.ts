@@ -54,6 +54,10 @@ export function ensureNotSensitivePath(absolute: string, inputPath: string): voi
 export function resolveDataRootDir(cwd: string): string {
   const normalized = resolve(cwd)
   if (basename(normalized) === '.artemis') return normalized
+  // If cwd is root directory, use home directory instead to avoid creating /.artemis
+  if (normalized === '/' || normalized === sep) {
+    return join(homedir(), '.artemis')
+  }
   return join(normalized, '.artemis')
 }
 

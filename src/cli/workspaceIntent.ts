@@ -73,6 +73,10 @@ function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): s
   if (!candidate) return null
   if (/^\/\s/.test(candidate)) return null
 
+  // Reject candidates that are too short or don't look like paths
+  // (e.g., "/y" from "/yes" should not be treated as a workspace path)
+  if (candidate.length < 3 || !/[/\\]/.test(candidate)) return null
+
   // On native Windows, a leading POSIX-style slash such as `/foo` is not a
   // user workspace path. Node resolves it against the current drive
   // (`C:\foo`), and if that child is missing our nearest-parent fallback can
