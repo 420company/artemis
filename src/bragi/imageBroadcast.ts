@@ -82,6 +82,29 @@ async function loadWechatStoreCandidates(cwd: string) {
   return candidates
 }
 
+async function loadTelegramFallback(cwd: string) {
+  try {
+    const { TelegramStore } = await import('../telegram/store.js')
+    const data = await new TelegramStore(cwd).load()
+    return {
+      botToken: data.botToken,
+      targets: data.allowedChatIds ?? [],
+    }
+  } catch {
+    return { targets: [] as string[] }
+  }
+}
+
+async function loadDiscordFallbackTargets(cwd: string): Promise<string[]> {
+  try {
+    const { DiscordStore } = await import('../discord/store.js')
+    const data = await new DiscordStore(cwd).load()
+    return (data.targets ?? []).map(target => target.targetId)
+  } catch {
+    return []
+  }
+}
+
 /**
  * Send a local image as a real mobile attachment through the active Bragi
  * bridges first, then fall back to configured REST clients for Telegram and
@@ -117,7 +140,7 @@ export async function sendBragiImageBroadcast(options: {
   for (const platform of platforms) {
     if (registered.includes(platform) && !shouldUseConfiguredFallback) continue
     const config = data.platforms[platform]
-    if (!config?.enabled && platform !== 'wechat') {
+    if (!config?.enabled && platform !== 'wechat' && platform !== 'telegram') {
       skipped.push(`${platform}: not enabled`)
       continue
     }
@@ -125,6 +148,16 @@ export async function sendBragiImageBroadcast(options: {
     let targets = targetId
       ? [targetId]
       : uniq(config?.allowedTargets ?? [])
+
+    let telegramFallback: Awaited<ReturnType<typeof loadTelegramFallback>> | undefined
+    if (platform === 'telegram' && targets.length === 0) {
+      telegramFallback = await loadTelegramFallback(options.cwd)
+      targets = uniq(telegramFallback.targets)
+    }
+
+    if (platform === 'discord' && targets.length === 0) {
+      targets = uniq(await loadDiscordFallbackTargets(options.cwd))
+    }
 
     if (platform === 'wechat' && targets.length === 0) {
       try {
@@ -149,12 +182,8 @@ export async function sendBragiImageBroadcast(options: {
     const record = { platform, attempted: targets.length, sent: 0, failed: [] as Array<{ target: string; error: string }> }
 
     if (platform === 'telegram') {
-      if (!config) {
-        record.failed.push(...targets.map(target => ({ target, error: 'telegram not configured' })))
-        configured.push(record)
-        continue
-      }
-      const botToken = config.credentials.botToken
+      telegramFallback ??= await loadTelegramFallback(options.cwd)
+      const botToken = config?.credentials.botToken || telegramFallback.botToken
       if (!botToken) {
         record.failed.push(...targets.map(target => ({ target, error: 'missing botToken' })))
       } else {
