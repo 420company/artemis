@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { pathToFileURL } from 'node:url'
 import { broadcastToBridges } from './bridgeNotifier.js'
 import type { ComposeDreamResult } from './dreamComposer.js'
 import { getDreamsRoot, type DreamEntry } from './dreamStore.js'
@@ -21,11 +20,6 @@ export const FIRST_DREAM_EN = [
 
 const FIRST_DREAM_MARKER_FILE = path.join(getDreamsRoot(), 'first-dream-shown.json')
 
-function terminalFileLink(label: string, filePath: string): string {
-  const url = pathToFileURL(filePath).href
-  return `\u001B]8;;${url}\u001B\\${label}\u001B]8;;\u001B\\ (${filePath})`
-}
-
 async function shouldShowFirstDream(): Promise<boolean> {
   if (existsSync(FIRST_DREAM_MARKER_FILE)) return false
   await mkdir(getDreamsRoot(), { recursive: true })
@@ -38,8 +32,8 @@ export async function notifyDreamSystemStartup(latest?: DreamEntry | null, local
   if (latest) {
     text = [
         `上一枚梦的种子：${latest.preview}`,
-        `我的日记：${terminalFileLink('打开 MD', latest.mdPath)}`,
-        ...(latest.imagePath ? [`梦境画面：${terminalFileLink('打开 PNG', latest.imagePath)}`] : []),
+        `我的日记：${latest.mdPath}`,
+        ...(latest.imagePath ? [`梦境画面：${latest.imagePath}`] : []),
       ].join('\n')
   } else if (await shouldShowFirstDream()) {
     text = locale === 'zh-CN'
@@ -94,8 +88,8 @@ export async function notifyDreamFinished(result: ComposeDreamResult): Promise<n
         '',
         '新的梦已经落进卷轴，信息素完成了一次柔软的结晶。',
         `梦境片段：${result.entry.preview}`,
-        `我的日记：${terminalFileLink('打开 MD', result.entry.mdPath)}`,
-        ...(result.entry.imagePath ? [`梦境画面：${terminalFileLink('打开 PNG', result.entry.imagePath)}`] : []),
+        `我的日记：${result.entry.mdPath}`,
+        ...(result.entry.imagePath ? [`梦境画面：${result.entry.imagePath}`] : []),
       ].join('\n')
     : [
         '🌘 梦境系统做梦结束。',
