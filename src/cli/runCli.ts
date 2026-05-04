@@ -446,7 +446,7 @@ export async function runCli(argv: string[]): Promise<void> {
               kind: 'bridge-message',
               platform: 'cli',
               direction: 'outbound',
-              targetLabel: 'Artemis Dream',
+              targetLabel: 'Dream System',
               text: payload.text + (payload.imagePath ? `\n🖼  ${payload.imagePath}` : ''),
             })
           }
@@ -480,16 +480,7 @@ export async function runCli(argv: string[]): Promise<void> {
               }).catch(() => undefined)
             }
           }
-          const [{ shouldPromptSoulOnboarding }, { broadcastToBridges }] = await Promise.all([
-            import('./soulOnboarding.js'),
-            import('../services/bridgeNotifier.js'),
-          ])
-          if (await shouldPromptSoulOnboarding()) {
-            await broadcastToBridges({
-              source: 'soul-onboarding',
-              text: 'take my soul...',
-            })
-          }
+          // Keep startup quiet: soul.md setup remains available via /soul.
         } catch { /* dream greeting is non-essential */ }
       }, 3000)
     } catch { /* dream system is non-essential — never block startup */ }
