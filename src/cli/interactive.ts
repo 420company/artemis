@@ -2259,16 +2259,15 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
       if (configSubcommand === 'visual' || configSubcommand === 'vision') {
-        await runVisualModelSetup(locale, cwd, {
-          choose: async (options) => {
-            const picked = await prompt.pickOption(options)
-            if (picked === null && options.escapeValue !== undefined) return options.escapeValue
-            if (picked === null) throw new Error('Selection cancelled.')
-            return picked
-          },
-        })
+        const result = await prompt.releaseTerminal(() => runVisualModelSetup(locale, cwd))
         prompt.clearBuffer()
         suppressInitialNewbornOnce = true
+        appendSystemPanel(
+          t('视觉模型配置', 'Visual model setup'),
+          result.changed
+            ? [t('视觉模型配置已更新，可以继续使用 Artemis。', 'Visual model settings updated. You can continue using Artemis.')]
+            : [t('已保留当前视觉模型配置。', 'Kept the current visual model settings.')],
+        )
       } else if (configSubcommand === 'memory') {
         await prompt.releaseTerminal(() => runSetupWizard({ locale, cwd, section: 'memory' }))
         prompt.clearBuffer()
@@ -2311,16 +2310,15 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     if (trimmed === '/visual' || trimmed === '/vision') {
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
-      await runVisualModelSetup(locale, cwd, {
-        choose: async (options) => {
-          const picked = await prompt.pickOption(options)
-          if (picked === null && options.escapeValue !== undefined) return options.escapeValue
-          if (picked === null) throw new Error('Selection cancelled.')
-          return picked
-        },
-      })
+      const result = await prompt.releaseTerminal(() => runVisualModelSetup(locale, cwd))
       prompt.clearBuffer()
       suppressInitialNewbornOnce = true
+      appendSystemPanel(
+        t('视觉模型配置', 'Visual model setup'),
+        result.changed
+          ? [t('视觉模型配置已更新，可以继续使用 Artemis。', 'Visual model settings updated. You can continue using Artemis.')]
+          : [t('已保留当前视觉模型配置。', 'Kept the current visual model settings.')],
+      )
       continue
     }
 

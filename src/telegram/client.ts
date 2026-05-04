@@ -55,6 +55,32 @@ function formatTelegramApiFailure(options: {
   ].join('\n')
 }
 
+export function formatTelegramNetworkFailure(method: string, err: unknown): string {
+  const error = err instanceof Error ? err : new Error(String(err))
+  const cause = (error as { cause?: unknown }).cause
+  const causeMessage = cause instanceof Error ? cause.message : (cause ? String(cause) : '')
+  const causeCode = typeof cause === 'object' && cause !== null && 'code' in cause
+    ? String((cause as { code?: unknown }).code ?? '')
+    : ''
+  const detail = [error.message, causeCode, causeMessage].filter(Boolean).join(' — ')
+
+  return [
+    `Telegram API network error while calling ${method}: ${detail || 'fetch failed'}.`,
+    'This does not prove the bot token is wrong. Telegram may be unreachable from this network, blocked, or timing out.',
+  ].join('\n')
+}
+
+export function isTelegramNetworkFailure(err: unknown): boolean {
+  const error = err instanceof Error ? err : new Error(String(err))
+  const cause = (error as { cause?: unknown }).cause
+  const causeCode = typeof cause === 'object' && cause !== null && 'code' in cause
+    ? String((cause as { code?: unknown }).code ?? '')
+    : ''
+  const text = [error.name, error.message, causeCode, cause instanceof Error ? cause.message : String(cause ?? '')]
+    .join(' ')
+  return /fetch failed|network|timeout|timed out|connect timeout|econnreset|econnrefused|enotfound|etimedout|und_err_connect_timeout/i.test(text)
+}
+
 export type TelegramUpdate = {
   update_id: number
   message?: {
@@ -139,11 +165,16 @@ export class TelegramBotClient {
   }
 
   private async call<T>(method: string, payload?: Record<string, unknown>): Promise<T> {
-    const response = await fetch(`${this.baseUrl}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: payload ? JSON.stringify(payload) : undefined,
-    })
+    let response: Response
+    try {
+      response = await fetch(`${this.baseUrl}/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload ? JSON.stringify(payload) : undefined,
+      })
+    } catch (err) {
+      throw new Error(formatTelegramNetworkFailure(method, err), { cause: err })
+    }
 
     if (!response.ok) {
       const body = await response.text()
@@ -192,7 +223,12 @@ export class TelegramBotClient {
     form.append('chat_id', chatId)
     if (caption) form.append('caption', caption.slice(0, 1024)) // Telegram caption cap
     form.append('photo', new Blob([new Uint8Array(buffer)], { type: guessMimeType(imagePath) }), basename(imagePath))
-    const response = await fetch(`${this.baseUrl}/sendPhoto`, { method: 'POST', body: form })
+    let response: Response
+    try {
+      response = await fetch(`${this.baseUrl}/sendPhoto`, { method: 'POST', body: form })
+    } catch (err) {
+      throw new Error(formatTelegramNetworkFailure('sendPhoto', err), { cause: err })
+    }
     if (!response.ok) {
       const body = await response.text().catch(() => '')
       throw new Error(formatTelegramApiFailure({
@@ -213,7 +249,12 @@ export class TelegramBotClient {
   }
 
   async downloadFile(filePath: string): Promise<ArrayBuffer> {
-    const response = await fetch(`https://api.telegram.org/file/bot${this.botToken}/${filePath}`)
+    let response: Response
+    try {
+      response = await fetch(`https://api.telegram.org/file/bot${this.botToken}/${filePath}`)
+    } catch (err) {
+      throw new Error(formatTelegramNetworkFailure('downloadFile', err), { cause: err })
+    }
     if (!response.ok) {
       throw new Error(`Failed to download file: ${response.status} ${response.statusText}`)
     }

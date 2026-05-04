@@ -1576,13 +1576,22 @@ function isPseudoToolTranscript(text: string): boolean {
 
 function isToolDeflection(text: string): boolean {
     const normalized = text.replace(/\s+/g, ' ').toLowerCase();
-    const imperativeEnglish = /(?:please|try|execute|paste|copy|ask (?:you|the user) to|have (?:you|the user))\b.{0,80}\b(?:cat|ls|grep|find|npm|node|python|bash|sh|curl)\b|(?:^|[.!?;:\n]\s*)run\b.{0,80}\b(?:cat|ls|grep|find|npm|node|python|bash|sh|curl)\b/i;
-    const imperativeChinese = /(?:请|麻烦|需要你|让你|让用户|你来|用户来|自己|手动|把结果|粘贴).{0,80}(?:cat|ls|grep|find|npm|node|python|bash|sh|命令|终端|运行|执行)/i;
-    const commandThenPasteChinese = /(?:运行|执行).{0,80}(?:cat|ls|grep|find|npm|node|python|bash|sh).{0,80}(?:把结果|粘贴|发给我|告诉我)/i;
+    const commandWords = String.raw`(?:cat|ls|grep|find|npm|node|python|bash|sh|curl)`;
+    const userDirectedEnglish = new RegExp(
+        String.raw`\b(?:please|try|execute|paste|copy|ask\s+(?:you|the\s+user)\s+to|have\s+(?:you|the\s+user)|you\s+(?:can|should|need\s+to|must)|the\s+user\s+(?:can|should|needs\s+to|must))\b.{0,120}\b` + commandWords + String.raw`\b`,
+        'i',
+    );
+    const pasteBackEnglish = new RegExp(
+        String.raw`\b(?:run|execute)\b.{0,120}\b` + commandWords + String.raw`\b.{0,120}\b(?:paste|send|tell\s+me|share)\b`,
+        'i',
+    );
+    const userDirectedChinese = /(?:请|麻烦|需要你|让你|让用户|你来|用户来|自己|手动).{0,120}(?:cat|ls|grep|find|npm|node|python|bash|sh|命令|终端|运行|执行)/i;
+    const pasteBackChinese = /(?:运行|执行).{0,120}(?:cat|ls|grep|find|npm|node|python|bash|sh|命令).{0,120}(?:把结果|粘贴|发给我|告诉我)/i;
     return (
-        imperativeEnglish.test(normalized) ||
-        imperativeChinese.test(text) ||
-        commandThenPasteChinese.test(text)
+        userDirectedEnglish.test(normalized) ||
+        pasteBackEnglish.test(normalized) ||
+        userDirectedChinese.test(text) ||
+        pasteBackChinese.test(text)
     );
 }
 

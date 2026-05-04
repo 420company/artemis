@@ -23,7 +23,7 @@ import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
 import { ensureGatewayAutoStart } from '../cli/gatewayService.js'
 import { SessionStore } from '../storage/sessions.js'
-import { TelegramBotClient, extractTelegramTextMessages } from './client.js'
+import { TelegramBotClient, extractTelegramTextMessages, isTelegramNetworkFailure } from './client.js'
 import { TelegramStore } from './store.js'
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -194,8 +194,18 @@ async function askTelegramToken(
       const msg = err instanceof Error ? err.message : String(err)
       console.log()
       console.log(buildPanel(
-        pickLocale(locale, { zh: 'Token 验证失败', en: 'Token verification failed' }),
-        [msg, pickLocale(locale, { zh: '请重新输入完整 token。', en: 'Please re-enter the full token.' })]
+        isTelegramNetworkFailure(err)
+          ? pickLocale(locale, { zh: 'Telegram 网络验证失败', en: 'Telegram network verification failed' })
+          : pickLocale(locale, { zh: 'Token 验证失败', en: 'Token verification failed' }),
+        isTelegramNetworkFailure(err)
+          ? [
+              msg,
+              pickLocale(locale, {
+                zh: '这通常是当前网络无法连接 Telegram API，不代表 token 输入错误。请检查网络/代理，或稍后重试。',
+                en: 'This usually means Telegram API is unreachable from the current network; it does not mean the token was typed wrong. Check network/proxy or retry later.',
+              }),
+            ]
+          : [msg, pickLocale(locale, { zh: '请重新输入完整 token。', en: 'Please re-enter the full token.' })]
       ))
       console.log()
     }
@@ -278,9 +288,15 @@ export async function setupTelegramBridge(options: {
   const autoStart = true
   await telegramStore.setAutoStartOnLaunch(true)
   options.onInfo?.('[telegram] background auto-start enabled')
-  const client = new TelegramBotClient(token)
-  const me = await client.getMe()
-  const label = '@' + (me.username ?? me.first_name)
+  let label = pickLocale(locale, { zh: '已验证的机器人', en: 'verified bot' })
+  try {
+    const client = new TelegramBotClient(token)
+    const me = await client.getMe()
+    label = '@' + (me.username ?? me.first_name)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    options.onInfo?.(`[telegram] post-save verification skipped: ${msg}`)
+  }
 
   // Register platform in BragiStore so the main interface shows Telegram as an active bridge
   const existingData = await bragiStore.load()
@@ -291,7 +307,12 @@ export async function setupTelegramBridge(options: {
     credentials: { botToken: token },
     allowedTargets: existing?.allowedTargets ?? [],
   })
-  await ensureGatewayAutoStart(options.cwd)
+  try {
+    await ensureGatewayAutoStart(options.cwd)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    options.onInfo?.(`[telegram] gateway auto-start setup failed (non-fatal): ${msg}`)
+  }
 
   return buildPanel(
     pickLocale(locale, { zh: 'Telegram 设置完成', en: 'Telegram setup complete' }),

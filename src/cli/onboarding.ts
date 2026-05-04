@@ -76,6 +76,7 @@ function askLine(question: string, mask = false): Promise<string | null> {
     if (mask && process.stdin.isTTY) {
       process.stdout.write(question)
       let buf = ''
+      let renderedMask = ''
       process.stdin.setRawMode(true)
       process.stdin.resume()
       process.stdin.setEncoding('utf8')
@@ -97,21 +98,22 @@ function askLine(question: string, mask = false): Promise<string | null> {
         } else if (ch === '\u007f' || ch === '\b') {
           if (buf.length > 0) {
             buf = buf.slice(0, -1)
-            // Clear the last character from display
-            process.stdout.write('\b \b')
+            const nextMask = maskApiKey(buf)
+            process.stdout.write('\b'.repeat(renderedMask.length))
+            process.stdout.write(nextMask)
+            process.stdout.write(' '.repeat(Math.max(0, renderedMask.length - nextMask.length)))
+            process.stdout.write('\b'.repeat(Math.max(0, renderedMask.length - nextMask.length)))
+            renderedMask = nextMask
           }
         } else if (ch >= ' ') {
           // ch may be a single char (typed) or a multi-char string (pasted).
-          const graphemes = [...ch]
           buf += ch
-          
+
           // Display masked version: first 4 and last 4 chars, rest as *
-          const masked = maskApiKey(buf)
-          // Clear previous masked display and show new one
-          if (buf.length > graphemes.length) {
-            process.stdout.write('\b'.repeat(maskApiKey(buf.slice(0, -graphemes.length)).length))
-          }
-          process.stdout.write(masked.slice(-graphemes.length))
+          const nextMask = maskApiKey(buf)
+          process.stdout.write('\b'.repeat(renderedMask.length))
+          process.stdout.write(nextMask)
+          renderedMask = nextMask
         }
       }
       process.stdin.on('data', onData)
