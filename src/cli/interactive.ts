@@ -160,6 +160,10 @@ type LiveWorkflowRenderState = {
 
 type RunningMessageHooks = Pick<ThinkOptions, 'pollRunningUserMessages' | 'onRunningUserMessageAccepted'>
 
+type DetachedRunningMessageCapture = {
+  capture: (line: string) => void
+}
+
 function renderLiveAssistantViewport(state: LiveAssistantRenderState): void {
   // DISABLED: All content should be managed through redrawViewportFromState()
   // to ensure it respects DECSTBM scroll region boundaries.
@@ -253,7 +257,7 @@ import { createConsolePromptIO } from '../providers/router.js'
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
-import { spawnDetachedWorkflow } from '../services/detachedWorkflow.js'
+import { appendDetachedWorkflowMessage, spawnDetachedWorkflow } from '../services/detachedWorkflow.js'
 import { parseHeimdallCommandBody, buildHeimdallReport, buildHeimdallThreadsReport } from '../services/heimdallControl.js'
 import stripAnsi from 'strip-ansi'
 import { stringWidth } from '../input/stringWidth.js'
@@ -1997,35 +2001,42 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   }
 
   const waitForRunnerOrInterrupt = async (
-    runner: Promise<void>,
+    runnerOrCapture: Promise<void> | Promise<DetachedRunningMessageCapture | undefined>,
     onRunningMessage?: (line: string) => void,
   ): Promise<string | null> => {
-    if (!onRunningMessage) {
-      const nextLine = await prompt.read()
-      if (nextLine === null) {
-        interruptAndExitNow()
-      }
-      await runner
-      return nextLine
-    }
-
     let runnerDone = false
     let runnerError: unknown = null
-    const trackedRunner = runner.then(
-      () => { runnerDone = true },
+    let runningMessageHandler = onRunningMessage
+    const trackedRunner = Promise.resolve(runnerOrCapture).then(
+      (capture) => {
+        if (!runningMessageHandler && capture && typeof capture.capture === 'function') {
+          runningMessageHandler = capture.capture
+        }
+        runnerDone = true
+      },
       (err) => { runnerDone = true; runnerError = err },
     )
 
-    while (!runnerDone) {
+    while (!runnerDone || runningMessageHandler) {
       const nextLine = await Promise.race([
         prompt.read(),
         trackedRunner.then(() => undefined),
       ])
       if (nextLine === undefined) break
-      if (nextLine === null) interruptAndExitNow()
-      if (nextLine === null) continue
+      if (nextLine === null) {
+        interruptAndExitNow()
+        continue
+      }
       const trimmedLine = nextLine.trim()
-      if (trimmedLine) onRunningMessage(nextLine)
+      if (trimmedLine && runningMessageHandler) {
+        runningMessageHandler(nextLine)
+        continue
+      }
+      if (!runningMessageHandler) {
+        await trackedRunner
+        if (runnerError) throw runnerError
+        return nextLine
+      }
     }
 
     await trackedRunner
@@ -2036,10 +2047,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const launchDetachedWorkflow = async (
     command: 'run' | 'nidhogg',
     effectivePrompt: string,
-  ): Promise<void> => {
+  ): Promise<DetachedRunningMessageCapture | undefined> => {
     try {
       if (!(await ensureExecutionProviderForWorkflow(workspaceRoot))) {
-        return
+        return undefined
       }
       const provConfig = await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })
       const result = await spawnDetachedWorkflow({
@@ -2062,9 +2073,26 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           `Log: ${result.logPath}`,
         ],
       )
+      return {
+        capture: (line) => {
+          const cleanLine = line.trim()
+          if (!cleanLine) return
+          void appendDetachedWorkflowMessage(workspaceRoot, result.runtimeId, cleanLine).catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err)
+            appendSystemPanel(t('新对话同步失败', 'New message sync failed'), [msg])
+          })
+          appendScrollBlock({
+            kind: 'user',
+            text: `${cleanLine}\n\n${t('↳ 新对话已接收：Nidhogg 会在下一个安全点重新整理当前任务。', '↳ New message received: Nidhogg will reconcile it with the current task at the next safe point.')}`,
+            timestamp: timeStampLabel(),
+          })
+          prompt.forceRedraw()
+        },
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       appendSystemPanel(t('启动失败', 'Launch failed'), [msg])
+      return undefined
     }
   }
 
@@ -2073,6 +2101,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   // uses it directly instead of calling prompt.read() again.
   let nextLineOverride: string | null | undefined = undefined
   let suppressInitialNewbornOnce = opts.suppressInitialNewbornOnce === true
+  let activeDetachedCapture: DetachedRunningMessageCapture | undefined
 
   for (;;) {
     const line: string | null = nextLineOverride !== undefined ? nextLineOverride : await prompt.read()
@@ -2087,6 +2116,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // to the regular AI turn dispatcher below.
     let trimmed: string = line.trim()
     if (!trimmed) continue
+
+    if (activeDetachedCapture && !trimmed.startsWith('/')) {
+      activeDetachedCapture.capture(line)
+      continue
+    }
 
     // Reset the dream-system idle clock — any user input means we should
     // not start dreaming for at least another idleThresholdSec.
@@ -3778,10 +3812,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       } else {
         const effectiveTeamPrompt = await maybeApplyVisualGenerationPolicy(teamPrompt)
         if (route.choice === 'nidhogg') {
-          const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
-            launchDetachedWorkflow('nidhogg', effectiveTeamPrompt),
-          )
-          nextLineOverride = nextLineFromWorkflow
+          activeDetachedCapture = await launchDetachedWorkflow('nidhogg', effectiveTeamPrompt)
           continue
         }
         const runningMessages = createRunningMessageCapture()
@@ -3846,12 +3877,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
       if (mode === 'run' || mode === 'nidhogg') {
         // Background detached workflow
-        const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
-          mode === 'nidhogg'
-            ? launchDetachedWorkflow('nidhogg', effectiveWorkflowPrompt)
-            : launchDetachedWorkflow('run', effectiveWorkflowPrompt),
+        activeDetachedCapture = await launchDetachedWorkflow(
+          mode === 'nidhogg' ? 'nidhogg' : 'run',
+          effectiveWorkflowPrompt,
         )
-        nextLineOverride = nextLineFromWorkflow
       } else {
         // Inline workflow — Claude Code style: inject domain hint into brain's
         // system prompt suffix, then run the same handleTurn loop as free-form

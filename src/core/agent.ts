@@ -3168,6 +3168,8 @@ export type RunAgentOptions = {
    */
   inputProtocol?: 'hoder' | 'standard';
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
+  pollRunningUserMessages?: () => string[];
+  onRunningUserMessageAccepted?: (text: string) => void;
 };
 
 function clampTurns(value: number): number {
@@ -5702,6 +5704,24 @@ export async function runAgent(
 
   for (let turn = 1; turn <= options.maxTurns; turn += 1) {
     await processDelegatedRuntimeCommands(session, runOptions);
+
+    const runningUserMessages = options.pollRunningUserMessages?.() ?? [];
+    for (const runningUserMessage of runningUserMessages) {
+      const cleanMessage = runningUserMessage.trim();
+      if (!cleanMessage) {
+        continue;
+      }
+      session.messages.push({
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        role: 'user',
+        content: cleanMessage,
+        createdAt: new Date().toISOString(),
+      });
+      options.onRunningUserMessageAccepted?.(cleanMessage);
+    }
+    if (runningUserMessages.length > 0) {
+      await options.sessionStore.save(session);
+    }
 
     if (turn === 1) {
       await recordHeimdallStage(

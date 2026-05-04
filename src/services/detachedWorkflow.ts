@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { spawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   readFile,
@@ -57,6 +57,13 @@ type DetachedWorkflowManifest = {
   lastError?: string;
 };
 
+type DetachedWorkflowMessage = {
+  id: string;
+  createdAt: string;
+  text: string;
+  consumedAt?: string;
+};
+
 export type DetachedWorkflowLaunchResult = {
   sessionId: string;
   runtimeId: string;
@@ -98,6 +105,10 @@ export function getDetachedWorkflowLogPath(cwd: string, runtimeId: string): stri
 
 function getDetachedWorkflowPromptPath(cwd: string, runtimeId: string): string {
   return path.join(getDetachedWorkflowDir(cwd), `${runtimeId}.prompt.txt`);
+}
+
+function getDetachedWorkflowMessagesPath(cwd: string, runtimeId: string): string {
+  return path.join(getDetachedWorkflowDir(cwd), `${runtimeId}.messages.json`);
 }
 
 export function getDetachedWorkflowManifestPath(
@@ -151,6 +162,110 @@ async function updateDetachedWorkflowManifest(
     ...patch,
     updatedAt: now(),
   });
+}
+
+async function readDetachedWorkflowMessages(
+  cwd: string,
+  runtimeId: string,
+): Promise<DetachedWorkflowMessage[]> {
+  const raw = await readFile(getDetachedWorkflowMessagesPath(cwd, runtimeId), 'utf8').catch(() => '[]');
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is DetachedWorkflowMessage => {
+      return Boolean(
+        item &&
+        typeof item === 'object' &&
+        typeof (item as DetachedWorkflowMessage).id === 'string' &&
+        typeof (item as DetachedWorkflowMessage).createdAt === 'string' &&
+        typeof (item as DetachedWorkflowMessage).text === 'string',
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function writeDetachedWorkflowMessages(
+  cwd: string,
+  runtimeId: string,
+  messages: DetachedWorkflowMessage[],
+): Promise<void> {
+  await ensureDir(getDetachedWorkflowDir(cwd));
+  await writeFile(
+    getDetachedWorkflowMessagesPath(cwd, runtimeId),
+    JSON.stringify(messages, null, 2),
+    'utf8',
+  );
+}
+
+export async function appendDetachedWorkflowMessage(
+  cwd: string,
+  runtimeId: string,
+  text: string,
+): Promise<void> {
+  const cleanText = text.trim();
+  if (!cleanText) {
+    return;
+  }
+  const messages = await readDetachedWorkflowMessages(cwd, runtimeId);
+  messages.push({
+    id: randomUUID(),
+    createdAt: now(),
+    text: cleanText,
+  });
+  await writeDetachedWorkflowMessages(cwd, runtimeId, messages);
+}
+
+function consumeDetachedWorkflowMessagesSync(
+  cwd: string,
+  runtimeId: string,
+): string[] {
+  const messagesPath = getDetachedWorkflowMessagesPath(cwd, runtimeId);
+  let messages: DetachedWorkflowMessage[] = [];
+  try {
+    const parsed = JSON.parse(readFileSync(messagesPath, 'utf8')) as unknown;
+    if (Array.isArray(parsed)) {
+      messages = parsed.filter((item): item is DetachedWorkflowMessage => {
+        return Boolean(
+          item &&
+          typeof item === 'object' &&
+          typeof (item as DetachedWorkflowMessage).id === 'string' &&
+          typeof (item as DetachedWorkflowMessage).createdAt === 'string' &&
+          typeof (item as DetachedWorkflowMessage).text === 'string',
+        );
+      });
+    }
+  } catch {
+    return [];
+  }
+
+  const pending = messages.filter((message) => !message.consumedAt);
+  if (pending.length === 0) {
+    return [];
+  }
+  const consumedAt = now();
+  const pendingIds = new Set(pending.map((message) => message.id));
+  try {
+    writeFileSync(
+      messagesPath,
+      JSON.stringify(
+        messages.map((message) =>
+          pendingIds.has(message.id)
+            ? { ...message, consumedAt }
+            : message,
+        ),
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  } catch {
+    return [];
+  }
+  return pending.map((message) => message.text);
 }
 
 export async function requestDetachedWorkflowTakeover(
@@ -679,6 +794,10 @@ export async function runDetachedWorkflowWorker(
       ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
       resolveProvider: providerRouter.resolveProvider,
       onInfo: (message) => console.error(message),
+      pollRunningUserMessages: () => consumeDetachedWorkflowMessagesSync(cwd, args.runtimeId),
+      onRunningUserMessageAccepted: (text) => {
+        console.error(`[nidhogg] new running user message synced: ${truncate(text, 120)}`);
+      },
     });
     stopHeartbeat();
     console.log(result.reply);
