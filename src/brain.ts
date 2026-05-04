@@ -1801,7 +1801,7 @@ export async function think(
     const projectedToolNames = supportsNativeTools && !plainChat
         ? filterDirectToolsBySetup(listDirectToolNames(), enabledTools)
         : [];
-    const visionEnabled = isSetupToolEnabled(enabledTools, 'vision');
+    const hasImageAttachments = imageAttachments.length > 0;
     let finalResult: ProviderResponse | null = null;
     let emittedFinalText = false;
     let unresolvedDirectToolFailure: DirectToolFailureState | null = null;
@@ -1855,7 +1855,11 @@ export async function think(
             {
                 ...responseContinuation,
                 nativeFunctionTools,
-                imageAttachments: round === 1 && visionEnabled ? imageAttachments : undefined,
+                // User-supplied images are input context, not a generated/optional
+                // tool capability. Do not drop them just because the setup "vision"
+                // tool group was disabled; providers that cannot handle images will
+                // ignore/fail explicitly in their own adapter path.
+                imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
                 onReasoning,
                 guardStreamingText: supportsNativeTools && !plainChat,
             },

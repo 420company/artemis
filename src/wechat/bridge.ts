@@ -293,6 +293,7 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
           targetId:    m.targetId,
           targetLabel: m.targetLabel,
           text:        m.text,
+          images:      m.images,
         })),
         checkpoint: batch.checkpoint,
       }

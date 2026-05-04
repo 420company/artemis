@@ -131,8 +131,10 @@ function splitMessage(text: string): string[] {
 
 export class TelegramBotClient {
   private readonly baseUrl: string
+  private readonly botToken: string
 
   constructor(botToken: string) {
+    this.botToken = botToken
     this.baseUrl = `https://api.telegram.org/bot${botToken}`
   }
 
@@ -211,7 +213,7 @@ export class TelegramBotClient {
   }
 
   async downloadFile(filePath: string): Promise<ArrayBuffer> {
-    const response = await fetch(`https://api.telegram.org/file/bot${this.baseUrl.slice(27)}/${filePath}`)
+    const response = await fetch(`https://api.telegram.org/file/bot${this.botToken}/${filePath}`)
     if (!response.ok) {
       throw new Error(`Failed to download file: ${response.status} ${response.statusText}`)
     }
@@ -269,12 +271,12 @@ export async function extractTelegramTextMessages(client: TelegramBotClient, upd
       }
     }
     
-    // 确保消息至少有文本或图片
+    // 确保消息至少有文本或图片；纯图片消息也要进入 AI，不能静默丢弃。
     if (text || images.length > 0) {
       messages.push({
         updateId: update.update_id,
         chatId: String(chat.id),
-        text: text || '',
+        text: text || '[用户发送了一张图片，请识别并分析图片内容。]',
         chatLabel,
         images: images.length > 0 ? images : undefined,
       })

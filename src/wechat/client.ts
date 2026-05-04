@@ -11,6 +11,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { basename } from 'node:path'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import type { ImageAttachment, ImageMediaType } from '../providers/types.js'
 
 // ─── internal gateway types ───────────────────────────────────────────────────
 
@@ -89,6 +90,7 @@ export type WeChatTextMessage = {
   text: string
   contextToken?: string
   messageId: string
+  images?: ImageAttachment[]
 }
 
 export type WeChatMediaDownload = {
@@ -196,6 +198,14 @@ function imageTypeFromBytes(bytes: Buffer): { ext: string; contentType: string }
     return { ext: '.gif', contentType: 'image/gif' }
   }
   return undefined
+}
+
+function toImageMediaType(contentType: string | undefined, ext: string): ImageMediaType {
+  const normalized = contentType?.toLowerCase()
+  if (normalized === 'image/png' || ext === '.png') return 'image/png'
+  if (normalized === 'image/webp' || ext === '.webp') return 'image/webp'
+  if (normalized === 'image/gif' || ext === '.gif') return 'image/gif'
+  return 'image/jpeg'
 }
 
 function trimTrailingJpegBytes(bytes: Buffer): Buffer {
@@ -425,6 +435,11 @@ export class WeChatGatewayClient {
         if (downloads.length > 0) {
           const paths = downloads.map(d => `${d.path} (${d.bytes} bytes)`).join('\n')
           message.text = `${message.text}\n\n已下载微信图片到本地：\n${paths}`
+          message.images = await Promise.all(downloads.map(async d => ({
+            data: (await readFile(d.path)).toString('base64'),
+            mediaType: toImageMediaType(d.contentType, d.path.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? '.jpg'),
+            label: `WeChat image: ${d.path}`,
+          })))
         }
       }
       messages.push(message)

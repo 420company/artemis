@@ -4,6 +4,8 @@
  * Uses Discord Gateway v10 with long-polling pattern via drainTextMessages().
  */
 
+import type { ImageAttachment, ImageMediaType } from '../providers/types.js'
+
 type DiscordApiFailureOptions = {
   path: string; status?: number; statusText?: string; body?: string
 }
@@ -35,11 +37,22 @@ type DiscordGatewayMessageAuthor = { id: string; username?: string; global_name?
 type DiscordGatewayMessagePayload = {
   id: string; channel_id: string; guild_id?: string; content?: string
   author?: DiscordGatewayMessageAuthor
+  attachments?: DiscordGatewayAttachment[]
+}
+
+type DiscordGatewayAttachment = {
+  id: string
+  filename?: string
+  content_type?: string
+  size?: number
+  url?: string
+  proxy_url?: string
 }
 
 export type DiscordTextMessage = {
   messageId: string; targetId: string; targetLabel: string; text: string
   authorId: string; authorLabel: string; guildId?: string
+  images?: ImageAttachment[]
 }
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10'
@@ -81,18 +94,58 @@ function deriveAuthorLabel(author: DiscordGatewayMessageAuthor | undefined): str
   return author?.global_name ?? author?.username ?? author?.id ?? 'unknown'
 }
 
+function toImageMediaType(contentType: string | undefined, filename: string | undefined): ImageMediaType | undefined {
+  const normalized = contentType?.toLowerCase()
+  const lowerName = filename?.toLowerCase() ?? ''
+  if (normalized === 'image/png' || lowerName.endsWith('.png')) return 'image/png'
+  if (normalized === 'image/jpeg' || normalized === 'image/jpg' || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg'
+  if (normalized === 'image/gif' || lowerName.endsWith('.gif')) return 'image/gif'
+  if (normalized === 'image/webp' || lowerName.endsWith('.webp')) return 'image/webp'
+  return undefined
+}
+
+function imageAttachmentsFromPayload(payload: DiscordGatewayMessagePayload): DiscordGatewayAttachment[] {
+  return (payload.attachments ?? []).filter((attachment) =>
+    Boolean((attachment.url || attachment.proxy_url) && toImageMediaType(attachment.content_type, attachment.filename)),
+  )
+}
+
 function toDiscordTextMessage(payload: DiscordGatewayMessagePayload): DiscordTextMessage | undefined {
   const text = payload.content?.trim()
   const authorId = payload.author?.id
-  if (!text || !authorId) return undefined
+  const imageAttachments = imageAttachmentsFromPayload(payload)
+  if ((!text && imageAttachments.length === 0) || !authorId) return undefined
   return {
     messageId: payload.id,
     targetId: payload.channel_id,
     targetLabel: payload.guild_id ? `channel:${payload.channel_id}` : `dm:${payload.channel_id}`,
-    text, authorId,
+    text: text || '[用户发送了一张图片，请识别并分析图片内容。]', authorId,
     authorLabel: deriveAuthorLabel(payload.author),
     guildId: payload.guild_id,
   }
+}
+
+async function downloadDiscordImages(payload: DiscordGatewayMessagePayload): Promise<ImageAttachment[] | undefined> {
+  const attachments = imageAttachmentsFromPayload(payload)
+  if (attachments.length === 0) return undefined
+  const images: ImageAttachment[] = []
+  for (const attachment of attachments) {
+    const url = attachment.url || attachment.proxy_url
+    const mediaType = toImageMediaType(attachment.content_type, attachment.filename)
+    if (!url || !mediaType) continue
+    try {
+      const response = await fetch(url)
+      if (!response.ok) continue
+      images.push({
+        data: Buffer.from(await response.arrayBuffer()).toString('base64'),
+        mediaType,
+        label: `Discord image: ${attachment.filename ?? attachment.id}`,
+      })
+    } catch {
+      // Keep the text message flowing even if a CDN image has expired or fails.
+    }
+  }
+  return images.length > 0 ? images : undefined
 }
 
 export class DiscordBotClient {
@@ -297,9 +350,12 @@ export class DiscordGatewayBridge {
           return
         }
         if (packet.t === 'MESSAGE_CREATE') {
-          const msg = toDiscordTextMessage(packet.d as DiscordGatewayMessagePayload)
+          const payload = packet.d as DiscordGatewayMessagePayload
+          const msg = toDiscordTextMessage(payload)
           if (!msg || msg.authorId === this.botUserId) return
-          this.enqueue(msg)
+          void downloadDiscordImages(payload)
+            .then((images) => { this.enqueue(images ? { ...msg, images } : msg) })
+            .catch(() => { this.enqueue(msg) })
         }
       }
 

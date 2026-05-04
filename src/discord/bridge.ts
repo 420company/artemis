@@ -258,6 +258,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
             targetLabel: `${m.targetLabel} · ${m.authorLabel}`,
             text: m.text,
             sourceMessageId: m.messageId,
+            images: m.images,
           })),
         }
       },

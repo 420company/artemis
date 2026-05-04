@@ -19,6 +19,7 @@ import { buildProviderNativeFunctionTools } from '../src/core/providerNativeTool
 import { probeProviderNativeToolCalls } from '../src/providers/health.js'
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
+import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
 import { getDirectToolCount } from '../src/tools/directTools.js'
 import {
   getToolDefinition,
@@ -323,6 +324,53 @@ assert(
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      requests.push(raw ? JSON.parse(raw) as Record<string, unknown> : {})
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        choices: [{ message: { content: 'saw image' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }))
+    })
+  })
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Mock image provider failed to bind.')
+  try {
+    const provider = new OpenAICompatibleProvider({
+      protocol: 'openai',
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      apiKey: 'test-key',
+      model: 'mock-vision',
+    })
+    await provider.complete(
+      [{ id: 'u-image', role: 'user', content: '这是什么图？', createdAt: new Date().toISOString() }],
+      { imageAttachments: [{ data: 'AA==', mediaType: 'image/png', label: 'smoke-image' }] },
+    )
+    const messages = requests[0]?.messages as Array<{ role?: string; content?: unknown }> | undefined
+    const userContent = messages?.find((message) => message.role === 'user')?.content
+    const hasImageBlock = Array.isArray(userContent) && userContent.some((block) =>
+      typeof block === 'object' && block !== null &&
+        (block as { type?: string; image_url?: { url?: string } }).type === 'image_url' &&
+        (block as { image_url?: { url?: string } }).image_url?.url === 'data:image/png;base64,AA==',
+    )
+    assert(
+      'inbound image attachments: provider request includes image_url content block',
+      hasImageBlock === true,
+      JSON.stringify(userContent),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
 }
 
 {

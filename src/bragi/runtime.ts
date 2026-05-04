@@ -35,6 +35,8 @@ import { PermissionManager } from '../security/permissions.js'
 import { runWorkflowMode } from '../core/workflowMode.js'
 import type { ChatProvider, ProviderConfig } from '../providers/types.js'
 import { resolveWorkspaceIntent } from '../cli/workspaceIntent.js'
+import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
+import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -270,6 +272,8 @@ export async function runRemoteCommand(
      * can implement this by waiting for the next reply in the same chat.
      */
     awaitUserConfirmation?: (request: { question: string; timeoutMs: number }) => Promise<boolean>
+    pollRunningUserMessages?: () => string[]
+    onRunningUserMessageAccepted?: (text: string) => void
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
@@ -503,6 +507,16 @@ export async function runRemoteCommand(
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
             maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? 8) * 3),
+            pollRunningUserMessages: opts.pollRunningUserMessages,
+            onRunningUserMessageAccepted: (text) => {
+              const msg = t(
+                `💬 已采纳运行中插话：${truncate(text, 160)}`,
+                `💬 Running interjection accepted: ${truncate(text, 160)}`,
+              )
+              emitProgress(msg, 'info')
+              recordActivity(msg)
+              opts.onRunningUserMessageAccepted?.(text)
+            },
             // Auto-approve only when this message explicitly named the same
             // workspace. For any other workspace switch, ask the bridge user
             // for confirmation; continuing without consent can make a stale
@@ -706,6 +720,15 @@ type AuthorizationResult = {
   preReplies?: string[]
 }
 
+type ActiveBridgeTask = {
+  targetId: string
+  targetLabel: string
+  startedAt: number
+  sessionId?: string
+  pendingUserMessages: string[]
+  promise: Promise<void>
+}
+
 export type RunBragiMessagePumpOptions<TCheckpoint> = {
   channelLabel: string
   locale: UiLocale
@@ -730,6 +753,67 @@ export type RunBragiMessagePumpOptions<TCheckpoint> = {
 function isBridgeConfirmationReply(text: string): boolean {
   const normalized = text.trim().toLowerCase()
   return ['确认', '同意', '继续', '是', 'yes', 'y', 'ok', 'okay', 'continue'].includes(normalized)
+}
+
+function isBridgeStopReply(text: string): boolean {
+  const normalized = text.trim().toLowerCase()
+  return ['/stop', 'stop', '停止', '中止', '终止', '打断', '取消', 'cancel', 'interrupt'].includes(normalized)
+}
+
+async function enqueueBridgeInterjection(options: {
+  sessionStore: SessionStore
+  targetSessionId?: string
+  message: BragiInboundMessage
+  parsed: RemoteCommand
+  platform: BridgePlatform
+  onInfo?: (message: string) => void
+}): Promise<number> {
+  const text = options.parsed.body.trim()
+  if (!text) return 0
+  const runtimeDirectory = new RuntimeDirectoryService(options.sessionStore)
+  let queued = 0
+  try {
+    const sessions = await options.sessionStore.list()
+    for (const session of sessions) {
+      if (options.targetSessionId && session.id !== options.targetSessionId) continue
+      for (const runtime of session.taskRuntimes ?? []) {
+        if (!isTaskRuntimeActiveStatus(runtime.status)) continue
+        const result = await runtimeDirectory.notifyRuntime(runtime.id, text, {
+          source: 'bridge_interjection',
+          platform: options.platform,
+          targetId: options.message.targetId,
+          sourceMessageId: options.message.sourceMessageId ?? '',
+        })
+        if (result.found && result.changed) queued += 1
+      }
+    }
+  } catch (err) {
+    options.onInfo?.(`[${options.platform}] failed to queue bridge interjection: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return queued
+}
+
+async function interruptBridgeRuntimes(options: {
+  sessionStore: SessionStore
+  targetSessionId?: string
+  onInfo?: (message: string) => void
+}): Promise<number> {
+  const runtimeDirectory = new RuntimeDirectoryService(options.sessionStore)
+  let interrupted = 0
+  try {
+    const sessions = await options.sessionStore.list()
+    for (const session of sessions) {
+      if (options.targetSessionId && session.id !== options.targetSessionId) continue
+      for (const runtime of session.taskRuntimes ?? []) {
+        if (!isTaskRuntimeActiveStatus(runtime.status)) continue
+        const result = await runtimeDirectory.interruptRuntime(runtime.id)
+        if (result.found && result.changed) interrupted += 1
+      }
+    }
+  } catch (err) {
+    options.onInfo?.(`[bridge] failed to interrupt active runtimes: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return interrupted
 }
 
 function wait(ms: number): Promise<void> {
@@ -899,7 +983,7 @@ export async function runBragiMessagePump<TCheckpoint>(
   )
   if (!releaseBridgeLock) return
 
-  const activeTargets = new Set<string>()
+  const activeTargets = new Map<string, ActiveBridgeTask>()
   const confirmationWaiters = new Map<string, {
     resolve: (allowed: boolean) => void
     timer: NodeJS.Timeout
@@ -990,13 +1074,43 @@ export async function runBragiMessagePump<TCheckpoint>(
           continue
         }
 
-        if (activeTargets.has(message.targetId)) {
+        const runningTask = activeTargets.get(message.targetId)
+        if (runningTask) {
+          if (isBridgeStopReply(message.text) || parsed.type === 'stop') {
+            const interrupted = await interruptBridgeRuntimes({
+              sessionStore: options.sessionStore,
+              targetSessionId: runningTask.sessionId,
+              onInfo: options.onInfo,
+            })
+            await options.sendMessage(
+              message.targetId,
+              pickLocale(options.locale, {
+                zh: interrupted > 0 ? `✓ 已发送中断信号（${interrupted} 个运行中任务）。` : '✓ 已收到停止请求；当前任务会尽快停下。',
+                en: interrupted > 0 ? `✓ Interrupt signal sent (${interrupted} active runtime(s)).` : '✓ Stop request received; the current task will stop as soon as possible.',
+              }),
+            )
+            continue
+          }
+
+          runningTask.pendingUserMessages.push(parsed.body)
+          const queued = await enqueueBridgeInterjection({
+            sessionStore: options.sessionStore,
+            targetSessionId: runningTask.sessionId,
+            message,
+            parsed,
+            platform: bridgePlatform,
+            onInfo: options.onInfo,
+          })
           await options.sendMessage(
             message.targetId,
             pickLocale(options.locale, {
-              zh: '这个会话已经有正在执行的任务，请等当前回复完成后再发送。',
-              en: 'This chat already has an active task. Wait for the current reply.',
-            })
+              zh: queued > 0
+                ? `✓ 已插话给当前任务（已注入当前对话；${queued} 个运行中任务也会读取）。`
+                : '✓ 已收到插话，已注入当前运行中的对话。',
+              en: queued > 0
+                ? `✓ Interjection injected into the current chat; ${queued} active runtime(s) will also read it.`
+                : '✓ Interjection received and injected into the current running chat.',
+            }),
           )
           continue
         }
@@ -1009,7 +1123,15 @@ export async function runBragiMessagePump<TCheckpoint>(
           continue
         }
 
-        activeTargets.add(message.targetId)
+        const activeTask: ActiveBridgeTask = {
+          targetId: message.targetId,
+          targetLabel: message.targetLabel,
+          startedAt: Date.now(),
+          pendingUserMessages: [],
+          promise: Promise.resolve(),
+        }
+        activeTargets.set(message.targetId, activeTask)
+        activeTask.promise = (async () => {
         try {
           const compactTargetLabel = compactLabel(message.targetLabel)
           const sendProgress = async (
@@ -1044,6 +1166,7 @@ export async function runBragiMessagePump<TCheckpoint>(
           }
 
           const binding = await options.resolveSessionBinding(message)
+          activeTask.sessionId = binding.storedSession.id
           if (binding.rolledOver) {
             options.onInfo?.(`[${options.channelLabel.toLowerCase()}] session rolled over for ${message.targetLabel}`)
           }
@@ -1077,6 +1200,10 @@ export async function runBragiMessagePump<TCheckpoint>(
                 }, timeoutMs)
                 confirmationWaiters.set(message.targetId, { resolve, timer })
               })
+            },
+            pollRunningUserMessages: () => activeTask.pendingUserMessages.splice(0),
+            onRunningUserMessageAccepted: (text) => {
+              options.onInfo?.(`[${options.channelLabel.toLowerCase()}] running interjection accepted from ${message.targetLabel}: ${truncate(text, 200)}`)
             },
           })
 
@@ -1155,8 +1282,11 @@ export async function runBragiMessagePump<TCheckpoint>(
             })
           }
         } finally {
-          activeTargets.delete(message.targetId)
+          if (activeTargets.get(message.targetId) === activeTask) {
+            activeTargets.delete(message.targetId)
+          }
         }
+        })()
       }
 
     }
