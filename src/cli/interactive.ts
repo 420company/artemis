@@ -2003,7 +2003,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const waitForRunnerOrInterrupt = async (
     runnerOrCapture: Promise<void> | Promise<DetachedRunningMessageCapture | undefined>,
     onRunningMessage?: (line: string) => void,
-  ): Promise<string | null> => {
+  ): Promise<string | null | undefined> => {
     let runnerDone = false
     let runnerError: unknown = null
     let runningMessageHandler = onRunningMessage
@@ -2022,6 +2022,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         prompt.read(),
         trackedRunner.then(() => undefined),
       ])
+      // If the runner finishes before the user submits anything, do not turn
+      // that absence of input into a null line. Returning undefined lets the
+      // caller start a fresh prompt instead of taking the normal EOF/Ctrl-D
+      // exit path. This is especially important on Windows terminals, where a
+      // completed turn was observed to fall through into the goodbye panel.
       if (nextLine === undefined) break
       if (nextLine === null) {
         interruptAndExitNow()
@@ -2041,7 +2046,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     await trackedRunner
     if (runnerError) throw runnerError
-    return null
+    return undefined
   }
 
   const launchDetachedWorkflow = async (
@@ -3875,12 +3880,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       appendScrollBlock({ kind: 'user', text: trimmed, timestamp: timeStampLabel() })
       const effectiveWorkflowPrompt = await maybeApplyVisualGenerationPolicy(workflowPrompt)
 
-      if (mode === 'run' || mode === 'nidhogg') {
+      if (mode === 'nidhogg') {
         // Background detached workflow
-        activeDetachedCapture = await launchDetachedWorkflow(
-          mode === 'nidhogg' ? 'nidhogg' : 'run',
-          effectiveWorkflowPrompt,
-        )
+        activeDetachedCapture = await launchDetachedWorkflow('nidhogg', effectiveWorkflowPrompt)
+      } else if (mode === 'run') {
+        // Background detached workflow
+        activeDetachedCapture = await launchDetachedWorkflow('run', effectiveWorkflowPrompt)
       } else {
         // Inline workflow — Claude Code style: inject domain hint into brain's
         // system prompt suffix, then run the same handleTurn loop as free-form

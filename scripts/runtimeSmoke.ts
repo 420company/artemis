@@ -986,6 +986,13 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       !interactiveSource.includes('(runInteractive as any).workspaceRoot'),
   )
   assert(
+    'interactive prompt: completed runners resume the prompt instead of exiting on EOF path',
+    interactiveSource.includes('Promise<string | null | undefined>') &&
+      interactiveSource.includes('if (nextLine === undefined) break') &&
+      interactiveSource.includes('return undefined') &&
+      interactiveSource.includes('nextLineOverride: string | null | undefined'),
+  )
+  assert(
     'workspace trust routing: direct tools and agent tools share the workspace switch hook',
     interactiveSource.includes('handleWorkspaceSwitchRequest') &&
       interactiveSource.includes('onWorkspaceSwitchRequest,') &&

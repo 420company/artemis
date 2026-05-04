@@ -670,7 +670,9 @@ export class Prompt {
 
     // SSH-coalesced Enter: original input ended in \r (stripped above) AND
     // has actual text content → insert text then submit.
-    if (input.length > 1 && input.endsWith('\r') &&
+    // On Windows, raw-mode chunks can also contain pasted text ending with CR,
+    // so avoid auto-submitting there.
+    if (process.platform !== 'win32' && input.length > 1 && input.endsWith('\r') &&
         !input.slice(0, -1).includes('\r') &&
         input[input.length - 2] !== '\\') {
       const newCursor = this.insertWithUndo(cleaned)

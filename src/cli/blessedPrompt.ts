@@ -461,40 +461,56 @@ class TerminalPrompt implements BlessedPromptHandle {
     }
 
     const normalised = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const endsWithNewline = normalised.endsWith('\n')
     const parts = normalised.split('\n')
-    let changed = false
 
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i] ?? ''
-      const isLineEnd = i < parts.length - 1
+    if (parts.length === 1) {
+      if (parts[0]) {
+        this.inputValue += parts[0]
+        this.inputCursor = this.inputValue.length
+        this.onTextChange?.(this.inputValue)
+        this.render()
+      }
+      return
+    }
 
+    // If the input contains only one line plus a terminal newline, treat it as
+    // an explicit Enter submission. If there are internal newlines, assume the
+    // user pasted multi-line content and insert it instead of submitting.
+    const isSingleLineSubmit = parts.length === 2 && endsWithNewline
+
+    if (isSingleLineSubmit) {
+      const part = parts[0]
       if (part) {
         this.inputValue += part
         this.inputCursor = this.inputValue.length
         this.onTextChange?.(this.inputValue)
-        changed = true
       }
-
-      if (isLineEnd) {
-        const submitted = this.expandPlaceholders(this.inputValue.replace(/\n+$/, ''))
-        this.inputValue = ''
-        this.inputCursor = 0
-        this.placeholderRanges = []
-        this.historyIndex = -1
-        this.historyDraft = ''
-        this.menuItems = []
-        if (submitted.trim() && this.history[0] !== submitted) {
-          this.history.unshift(submitted)
-          if (this.history.length > 200) this.history.length = 200
-        }
-        this.onTextChange?.('')
-        changed = false
-        this.render()
-        this.enqueue(submitted)
+      const submitted = this.expandPlaceholders(this.inputValue.replace(/\n+$/, ''))
+      this.inputValue = ''
+      this.inputCursor = 0
+      this.placeholderRanges = []
+      this.historyIndex = -1
+      this.historyDraft = ''
+      this.menuItems = []
+      if (submitted.trim() && this.history[0] !== submitted) {
+        this.history.unshift(submitted)
+        if (this.history.length > 200) this.history.length = 200
       }
+      this.onTextChange?.('')
+      this.render()
+      this.enqueue(submitted)
+      return
     }
 
-    if (changed) this.render()
+    const lastPart = endsWithNewline ? '' : parts.pop() ?? ''
+    this.inputValue += parts.join('\n')
+    if (lastPart) {
+      this.inputValue += lastPart
+    }
+    this.inputCursor = this.inputValue.length
+    this.onTextChange?.(this.inputValue)
+    this.render()
   }
 
   private enqueue(value: string | null): void {
