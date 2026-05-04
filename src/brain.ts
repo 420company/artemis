@@ -1730,6 +1730,8 @@ export interface ThinkOptions {
     onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
     onUserConfirmationRequest?: (request: { question: string; screenshotPath?: string; timeoutMs?: number }) => Promise<boolean>;
     maxNativeToolRounds?: number;
+    pollRunningUserMessages?: () => string[];
+    onRunningUserMessageAccepted?: (text: string) => void;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 24;
@@ -1762,6 +1764,8 @@ export async function think(
         onWorkspaceSwitchRequest,
         onUserConfirmationRequest,
         maxNativeToolRounds: rawMaxNativeToolRounds,
+        pollRunningUserMessages,
+        onRunningUserMessageAccepted,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -1804,12 +1808,34 @@ export async function think(
     let previousResponseId: string | undefined;
     let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
 
+    const absorbRunningUserMessages = (): void => {
+        const updates = pollRunningUserMessages?.() ?? [];
+        for (const raw of updates) {
+            const text = raw.trim();
+            if (!text) continue;
+            const injected = makeSessionMessage(
+                'user',
+                [
+                    '[New user message received while the previous task was still running]',
+                    text,
+                    '',
+                    'Treat this as the latest instruction/correction for the current in-progress task. If it changes the goal, pause or adjust before continuing.',
+                ].join('\n'),
+            );
+            providerConversationMessages = [...providerConversationMessages, injected];
+            rawMessages = [...rawMessages, injected];
+            tSession.restore(rawMessages);
+            onRunningUserMessageAccepted?.(text);
+        }
+    };
+
     const maxNativeToolRounds = Math.max(
         1,
         Math.floor(rawMaxNativeToolRounds ?? MAX_DIRECT_NATIVE_TOOL_ROUNDS),
     );
 
     for (let round = 1; round <= maxNativeToolRounds; round += 1) {
+        absorbRunningUserMessages();
         const nativeFunctionTools = supportsNativeTools && projectedToolNames.length > 0
             ? buildDirectNativeFunctionTools({ allowedToolNames: projectedToolNames })
             : undefined;
@@ -1910,6 +1936,7 @@ export async function think(
             const toolOutputs: ProviderNativeToolOutput[] = [];
 
             for (const call of nativeCalls) {
+                absorbRunningUserMessages();
                 let args: Record<string, unknown>;
                 try {
                     args = parseNativeToolArguments(call);

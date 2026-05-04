@@ -158,6 +158,8 @@ type LiveWorkflowRenderState = {
   content: string
 }
 
+type RunningMessageHooks = Pick<ThinkOptions, 'pollRunningUserMessages' | 'onRunningUserMessageAccepted'>
+
 function renderLiveAssistantViewport(state: LiveAssistantRenderState): void {
   // DISABLED: All content should be managed through redrawViewportFromState()
   // to ensure it respects DECSTBM scroll region boundaries.
@@ -1964,13 +1966,71 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     process.exit(130)
   }
 
-  const waitForRunnerOrInterrupt = async (runner: Promise<void>): Promise<string | null> => {
-    const nextLine = await prompt.read()
-    if (nextLine === null) {
-      interruptAndExitNow()
+  const createRunningMessageCapture = (): {
+    hooks: RunningMessageHooks
+    capture: (line: string) => void
+  } => {
+    const queue: string[] = []
+    return {
+      hooks: {
+        pollRunningUserMessages: () => queue.splice(0),
+        onRunningUserMessageAccepted: (text) => {
+          appendScrollBlock({
+            kind: 'system',
+            text: t(
+              `新对话已同步到当前任务：${text}`,
+              `New message synced into the current task: ${text}`,
+            ),
+          })
+        },
+      },
+      capture: (line) => {
+        queue.push(line)
+        appendScrollBlock({
+          kind: 'user',
+          text: `${line}\n\n${t('↳ 新对话已接收：Artemis 会在下一个安全点重新整理当前任务。', '↳ New message received: Artemis will reconcile it with the current task at the next safe point.')}`,
+          timestamp: timeStampLabel(),
+        })
+        prompt.forceRedraw()
+      },
     }
-    await runner
-    return nextLine
+  }
+
+  const waitForRunnerOrInterrupt = async (
+    runner: Promise<void>,
+    onRunningMessage?: (line: string) => void,
+  ): Promise<string | null> => {
+    if (!onRunningMessage) {
+      const nextLine = await prompt.read()
+      if (nextLine === null) {
+        interruptAndExitNow()
+      }
+      await runner
+      return nextLine
+    }
+
+    let runnerDone = false
+    let runnerError: unknown = null
+    const trackedRunner = runner.then(
+      () => { runnerDone = true },
+      (err) => { runnerDone = true; runnerError = err },
+    )
+
+    while (!runnerDone) {
+      const nextLine = await Promise.race([
+        prompt.read(),
+        trackedRunner.then(() => undefined),
+      ])
+      if (nextLine === undefined) break
+      if (nextLine === null) interruptAndExitNow()
+      if (nextLine === null) continue
+      const trimmedLine = nextLine.trim()
+      if (trimmedLine) onRunningMessage(nextLine)
+    }
+
+    await trackedRunner
+    if (runnerError) throw runnerError
+    return null
   }
 
   const launchDetachedWorkflow = async (
@@ -3724,6 +3784,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           nextLineOverride = nextLineFromWorkflow
           continue
         }
+        const runningMessages = createRunningMessageCapture()
         const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
           runHintedWorkflowTurn(
             route.choice,
@@ -3740,7 +3801,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
               requestPermission: askToolPermission,
             },
             handleWorkspaceSwitchRequest,
+            runningMessages.hooks,
           ),
+          runningMessages.capture,
         )
         hud.sessionMessageCount = getMessages().length
         prompt.forceRedraw()
@@ -3802,6 +3865,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             `Brain injected with /${wfMode} style hint, entering main conversation loop.`,
           )],
         )
+        const runningMessages = createRunningMessageCapture()
         const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
           runHintedWorkflowTurn(
             wfMode,
@@ -3818,7 +3882,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
               requestPermission: askToolPermission,
             },
             handleWorkspaceSwitchRequest,
+            runningMessages.hooks,
           ),
+          runningMessages.capture,
         )
         hud.sessionMessageCount = getMessages().length
         prompt.forceRedraw()
@@ -3887,6 +3953,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     const effectiveDispatchText = await maybeApplyVisualGenerationPolicy(dispatchText)
     appendScrollBlock({ kind: 'user', text: visibleDispatchText, timestamp: timeStampLabel() })
 
+    const runningMessages = createRunningMessageCapture()
+
     // Run AI generation and next prompt read concurrently.
     // DECSTBM scroll-region isolation keeps AI output (scroll region) and the
     // prompt (fixed zone) from interfering with each other.
@@ -3896,7 +3964,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         updateScrollBlock,
         removeScrollBlock,
         requestPermission: askToolPermission,
-      }, handleWorkspaceSwitchRequest))
+      }, handleWorkspaceSwitchRequest, runningMessages.hooks), runningMessages.capture)
 
     hud.sessionMessageCount = getMessages().length
     prompt.forceRedraw()
@@ -3940,6 +4008,7 @@ async function handleTurn(
   permissionMode?: string,
   viewport?: ScrollViewportController,
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
+  runningMessageHooks?: RunningMessageHooks,
 ): Promise<void> {
   // Per-round state. The model may emit text → tool → text → tool → text. We
   // commit the assistant text as its own block before each tool call so the
@@ -4177,6 +4246,8 @@ async function handleTurn(
       ...thinkOpts,
       locale: locale === 'zh-CN' ? 'zh' : 'en',
       cwd: thinkOpts.cwd,
+      pollRunningUserMessages: runningMessageHooks?.pollRunningUserMessages,
+      onRunningUserMessageAccepted: runningMessageHooks?.onRunningUserMessageAccepted,
       onReasoning: (delta: string) => {
         if (assistantBlockIndex === null) openPendingAssistantBlock()
         livePendingTokens += estimateStreamTokens(delta)
@@ -4337,6 +4408,7 @@ async function runHintedWorkflowTurn(
   hud: ReturnType<typeof createHudState>,
   viewport: ScrollViewportController,
   onWorkspaceSwitchRequest: (request: WorkspaceSwitchRequest) => Promise<boolean>,
+  runningMessageHooks?: RunningMessageHooks,
 ): Promise<void> {
   const previousSuffix = getSystemPromptSuffix()
   const hint = buildWorkflowHint(mode, { cwd, userPrompt })
@@ -4353,6 +4425,7 @@ async function runHintedWorkflowTurn(
       permissionMode,
       viewport,
       onWorkspaceSwitchRequest,
+      runningMessageHooks,
     )
   } finally {
     // Walk new tool messages to find files written, compute common output dir.
