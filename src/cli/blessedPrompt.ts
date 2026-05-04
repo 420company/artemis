@@ -12,6 +12,7 @@ import {
   type ParsedKey,
 } from '../input/parse-keypress.js'
 import { stringWidth } from '../input/stringWidth.js'
+import { PASTE_END, PASTE_START } from '../termio/csi.js'
 import type { SlashMenuItem } from './prompt.js'
 
 export interface BlessedPromptOptions {
@@ -221,13 +222,12 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.headerFn = options.headerFn
     this.footerHint = options.footerHint ?? ''
     this.onTextChange = options.onTextChange
-    // Windows Terminal + IME is unreliable when Node stdin is forced into raw
-    // mode and every byte is routed through our custom key tokenizer: users can
-    // see the IME candidate/composition UI move, but committed text never lands
-    // in the chat box. Prefer cooked line input on Windows so the console host
-    // owns IME composition and line editing. Power users can opt back into raw
-    // key handling with ARTEMIS_WINDOWS_RAW_INPUT=1.
-    this.cookedLineInput = process.platform === 'win32' && process.env.ARTEMIS_WINDOWS_RAW_INPUT !== '1'
+    // Keep Windows in raw input mode by default. Cooked mode only delivers data
+    // after Enter, so while Artemis is streaming/thinking our redraw loop can
+    // erase the console-host echo and make the chat box appear unusable. Raw
+    // mode keeps every keypress inside our buffer/render path. If a specific
+    // terminal needs console-host IME composition, opt in explicitly.
+    this.cookedLineInput = process.platform === 'win32' && process.env.ARTEMIS_WINDOWS_COOKED_INPUT === '1'
   }
 
   read(): Promise<string | null> {
@@ -457,6 +457,17 @@ class TerminalPrompt implements BlessedPromptHandle {
   private handleCookedInput(chunk: string): void {
     if (chunk === '\x03') {
       this.handleCtrlC()
+      return
+    }
+
+    // When cooked mode is explicitly enabled, the console host owns IME and
+    // Ctrl+V. Some terminals still emit bracketed-paste markers in cooked mode;
+    // route those through paste handling so a pasted line ending with CR/LF is
+    // inserted for review instead of being mistaken for an Enter submission.
+    if (chunk.includes(PASTE_START) || chunk.includes(PASTE_END)) {
+      const [events, newState] = parseMultipleKeypresses(this.parseState, chunk)
+      this.parseState = newState
+      for (const event of events) this.handleEvent(event)
       return
     }
 

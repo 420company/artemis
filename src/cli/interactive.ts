@@ -4113,9 +4113,10 @@ async function handleTurn(
     // below any accumulated text — without the tick, that tail freezes the
     // moment the model pauses streaming, and the user sees a static block
     // for the 5–30s the model spends planning the next chunk / tool call.
+    const intervalMs = process.platform === 'win32' ? 1000 : 250
     pendingTick = setInterval(() => {
       flushAssistantBlock(accumulated, true)
-    }, 250)
+    }, intervalMs)
   }
 
   const cancelScheduledFlush = (): void => {

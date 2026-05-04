@@ -5,6 +5,9 @@
  * Run: node --no-warnings node_modules/tsx/dist/cli.mjs scripts/promptSmoke.ts
  */
 
+import { INITIAL_STATE, parseMultipleKeypresses } from '../src/input/parse-keypress.js'
+import { PASTE_END, PASTE_START } from '../src/termio/csi.js'
+
 // ─── mini test harness ────────────────────────────────────────────────────────
 
 let passed = 0
@@ -309,6 +312,15 @@ test('emoji is one grapheme', () => {
 })
 
 // ── paste sanitisation (manual) ─────────────────────────────────────────────
+test('bracketed paste with trailing newline parses as paste, not return', () => {
+  const [events] = parseMultipleKeypresses(INITIAL_STATE, `${PASTE_START}pasted command\r${PASTE_END}`)
+  eq(events.length, 1)
+  const paste = events[0]
+  if (!paste || paste.kind !== 'key') throw new Error('expected one key event')
+  eq(paste.isPasted, true)
+  eq(paste.sequence, 'pasted command\r')
+})
+
 test('paste sanitisation: control chars stripped', () => {
   const raw = 'hello\x00world\x01\x02\x03'
   const sanitised = raw.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '')
