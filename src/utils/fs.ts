@@ -30,6 +30,15 @@ const WALK_FILES_CACHE_TTL_MS = 4_000
 export function isSensitivePath(absolute: string): boolean {
   const home = homedir()
   const normalized = absolute.replace(/\\/g, '/')
+  const normalizedHome = home.replace(/\\/g, '/')
+  if (
+    normalized === `${normalizedHome}/.artemis/gateway.log` ||
+    normalized === `${normalizedHome}/.artemis/gateway.launchd.log` ||
+    normalized === `${normalizedHome}/.artemis/gateway.launchd.err.log` ||
+    normalized.startsWith(`${normalizedHome}/.artemis/dreams/`)
+  ) {
+    return false
+  }
   // Artemis' data root is a mixed directory: some files are credentials while
   // others are user-visible logs/assets. Do not block the whole tree; block the
   // known secret-bearing files below so tools can inspect benign paths without

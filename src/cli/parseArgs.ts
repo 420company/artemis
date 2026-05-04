@@ -28,6 +28,7 @@ export type CliCommand =
   | 'analyze'
   | 'execute'
   | 'skill'
+  | 'skills'
   | 'audit'
   | 'session'
   | 'run'
@@ -65,7 +66,7 @@ export interface ParsedArgs {
 
 const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
-  'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'audit', 'session',
+  'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
   'wordup', 'bragi', 'gateway', 'mcp', 'odin', 'heimdall', 'memory'
 ])

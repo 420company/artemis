@@ -2457,51 +2457,91 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    // ── /skills [keyword] ──────────────────────────────────────────────────
-    // Show skill catalog (by category) or search by keyword.
-    // With 999+ skills installed, this is the primary discovery UX.
+    // ── /skills [command|keyword] ───────────────────────────────────────────
+    // Make 999+ skills usable even when the user does not know the exact skill name.
     if (trimmed === '/skills' || trimmed.startsWith('/skills ')) {
-      const { SkillManager: SkillMgr } = await import('../core/skillManager.js')
-      const sm = new SkillMgr()
-      await sm.ready()
-      const allSkills = sm.getAllSkillDefinitions()
-      const keyword = trimmed.slice('/skills'.length).trim()
+      const {
+        getSkillDetail,
+        groupSkillsByCategory,
+        loadSkillDiscovery,
+        recommendSkills,
+      } = await import('../core/skillDiscovery.js')
+      const argText = trimmed.slice('/skills'.length).trim()
+      const [sub = '', ...rest] = argText.split(/\s+/).filter(Boolean)
+      const subLower = sub.toLowerCase()
+      const { skills } = await loadSkillDiscovery(workspaceRoot)
 
-      if (!keyword) {
-        const byCategory = new Map<string, number>()
-        for (const s of allSkills) {
-          const cat = (s.category ?? 'general').toLowerCase()
-          byCategory.set(cat, (byCategory.get(cat) ?? 0) + 1)
-        }
-        const sorted = [...byCategory.entries()].sort((a, b) => b[1] - a[1])
+      if (!argText || subLower === 'browse' || subLower === 'categories') {
+        const grouped = groupSkillsByCategory(skills)
         const lines = [
-          t(`总技能数: ${allSkills.length}`, `Total skills: ${allSkills.length}`),
+          t(`总技能数: ${skills.length}`, `Total skills: ${skills.length}`),
+          t('这些技能默认可用，不需要逐个启用；多数是任务流程/知识包，少数是可执行自动化。', 'Skills are available by default; most are instructional workflows, a few are executable automations.'),
           '',
-          ...sorted.map(([cat, count]) => `  ${cat.padEnd(22)} ${count}`),
+          ...grouped.slice(0, 16).map(group => {
+            const examples = group.examples.map(skill => skill.id).join(', ')
+            return `  ${group.category.padEnd(22)} ${String(group.count).padStart(4)}   ${examples}`
+          }),
           '',
-          t('用法: /skills <关键词> 搜索具体技能 (匹配 name/description/tags)', 'Usage: /skills <keyword> to search by name/description/tags'),
+          t('不知道技能名时：/skills recommend <你想做什么>', 'If you do not know the skill name: /skills recommend <what you want to do>'),
+          t('查看技能说明：/skills detail <skill-id>', 'Inspect a skill: /skills detail <skill-id>'),
         ]
         appendSystemPanel(t('技能目录', 'Skill catalog'), lines)
-      } else {
-        const matches = sm.searchSkills(keyword)
-        if (matches.length === 0) {
-          appendSystemPanel(
-            t('技能搜索', 'Skill search'),
-            [t(`未找到匹配 "${keyword}" 的技能`, `No skills match "${keyword}"`)],
-          )
+      } else if (['recommend', 'suggest', 'idea', 'use'].includes(subLower)) {
+        const intent = rest.join(' ').trim()
+        if (!intent) {
+          appendSystemPanel(t('技能推荐', 'Skill recommendation'), [
+            t('用法：/skills recommend <你想完成的任务>', 'Usage: /skills recommend <what you want to accomplish>'),
+            t('例：/skills recommend 检查 Next.js 无障碍和 SEO 问题', 'Example: /skills recommend audit Next.js accessibility and SEO issues'),
+          ])
         } else {
-          const lines = matches.slice(0, 30).map((s) => {
-            const id = s.id.slice(0, 38).padEnd(38)
-            const desc = (s.description ?? '').slice(0, 60)
-            return `  ${id}  ${desc}`
-          })
-          if (matches.length > 30) {
-            lines.push(t(`  … +${matches.length - 30} 更多 (优化关键词以缩小范围)`, `  … +${matches.length - 30} more (refine keyword)`))
+          const matches = recommendSkills(skills, intent, 12)
+          const lines = matches.length === 0
+            ? [t(`没有找到适合「${intent}」的技能；可以换成更具体的任务描述。`, `No skill matched “${intent}”; try a more specific task description.`)]
+            : matches.map(skill => {
+              const badge = skill.executable ? t('可执行', 'exec') : t('流程', 'guide')
+              return `  ${skill.id.slice(0, 36).padEnd(36)} [${badge}] ${skill.description.slice(0, 70)}`
+            })
+          if (matches.length > 0) {
+            lines.push('', t('下一步：直接用自然语言说任务，或 /skills detail <skill-id> 看完整用法。', 'Next: describe the task naturally, or run /skills detail <skill-id> for full usage.'))
           }
-          appendSystemPanel(
-            t(`技能搜索 "${keyword}" — ${matches.length} 命中`, `Skills matching "${keyword}" — ${matches.length} matches`),
-            lines,
-          )
+          appendSystemPanel(t(`技能推荐：${intent}`, `Skill recommendations: ${intent}`), lines)
+        }
+      } else if (['detail', 'show', 'open', 'info'].includes(subLower)) {
+        const id = rest.join(' ').trim()
+        if (!id) {
+          appendSystemPanel(t('技能详情', 'Skill detail'), [t('用法：/skills detail <skill-id>', 'Usage: /skills detail <skill-id>')])
+        } else {
+          const detail = await getSkillDetail(workspaceRoot, id)
+          if (!detail) {
+            appendSystemPanel(t('技能详情', 'Skill detail'), [t(`未找到技能：${id}`, `Skill not found: ${id}`)])
+          } else {
+            const badge = detail.executable ? t('可执行自动化', 'executable automation') : t('流程/知识包', 'instructional workflow')
+            appendSystemPanel(t(`技能：${detail.id}`, `Skill: ${detail.id}`), [
+              `${t('类型', 'Type')}: ${badge}`,
+              `${t('分类', 'Category')}: ${detail.category}`,
+              `${t('说明', 'Description')}: ${detail.description}`,
+              detail.path ? `${t('文件', 'File')}: ${detail.path}` : '',
+              '',
+              t('可直接这样用：把你的目标用自然语言说出来，Artemis 会按该技能流程执行。', 'Use it by describing your goal naturally; Artemis will follow this skill workflow.'),
+              ...(detail.usage.length > 0 ? ['', t('文档中的示例命令：', 'Example commands from the skill:'), ...detail.usage.map(line => `  ${line}`)] : []),
+              ...(detail.preview.length > 0 ? ['', t('预览：', 'Preview:'), ...detail.preview.slice(0, 10).map(line => `  ${line.slice(0, 100)}`)] : []),
+            ].filter(Boolean))
+          }
+        }
+      } else {
+        const matches = recommendSkills(skills, argText, 30)
+        if (matches.length === 0) {
+          appendSystemPanel(t('技能搜索', 'Skill search'), [
+            t(`未找到匹配「${argText}」的技能。`, `No skills match “${argText}”.`),
+            t('试试：/skills recommend <你想完成的任务>', 'Try: /skills recommend <what you want to accomplish>'),
+          ])
+        } else {
+          const lines = matches.map(skill => {
+            const badge = skill.executable ? t('可执行', 'exec') : t('流程', 'guide')
+            return `  ${skill.id.slice(0, 36).padEnd(36)} [${badge}] ${skill.description.slice(0, 70)}`
+          })
+          lines.push('', t('查看详情：/skills detail <skill-id>', 'Show detail: /skills detail <skill-id>'))
+          appendSystemPanel(t(`技能匹配：${argText} — ${matches.length} 命中`, `Skill matches: ${argText} — ${matches.length} matches`), lines)
         }
       }
       continue
@@ -2715,10 +2755,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     if (trimmed === '/soul' || trimmed.startsWith('/soul ')) {
-      const arg = trimmed.slice('/soul'.length).trim().toLowerCase()
+      const rawArg = trimmed.slice('/soul'.length).trim().toLowerCase()
+      const arg = rawArg || 'start'
       const soulPath = getSoulPath()
 
-      if (!arg || arg === 'status') {
+      if (arg === 'status') {
         const exists = await hasSoulFile()
         const body = exists ? await readSoulFile() : ''
         appendSystemPanel(t('赋魔 / soul.md', 'Soul Forge / soul.md'), [

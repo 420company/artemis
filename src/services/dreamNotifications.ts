@@ -60,7 +60,7 @@ export async function notifyDreamSystemStartup(latest?: DreamEntry | null, local
     ].join('\n')
   }
 
-  const result = await broadcastToBridges({ text, source: 'dream-system-startup' })
+  const result = await broadcastToBridges({ text, imagePath: latest?.imagePath, source: 'dream-system-startup' })
   return result.sent
 }
 

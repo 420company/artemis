@@ -968,7 +968,25 @@ export async function runBragiMessagePump<TCheckpoint>(
         if (pendingConfirmation) {
           clearTimeout(pendingConfirmation.timer)
           confirmationWaiters.delete(message.targetId)
-          pendingConfirmation.resolve(isBridgeConfirmationReply(message.text))
+          const allowed = isBridgeConfirmationReply(message.text)
+          const confirmationAck = pickLocale(options.locale, {
+            zh: allowed ? '✓ 已收到确认，继续执行。' : '已收到回复，本次操作已暂停。',
+            en: allowed ? '✓ Confirmation received; continuing.' : 'Reply received; this operation has been paused.',
+          })
+          options.onInfo?.(`[${options.channelLabel.toLowerCase()}] confirmation ${allowed ? 'accepted' : 'declined'} from ${message.targetLabel}`)
+          options.onNotify?.({
+            kind: 'bridge-status',
+            platform: bridgePlatform,
+            targetLabel: compactLabel(message.targetLabel),
+            text: confirmationAck,
+            level: allowed ? 'info' : 'warn',
+          })
+          try {
+            await options.sendMessage(message.targetId, confirmationAck)
+          } catch (err) {
+            options.onInfo?.(`[${options.channelLabel.toLowerCase()}] failed to send confirmation ack: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          pendingConfirmation.resolve(allowed)
           continue
         }
 

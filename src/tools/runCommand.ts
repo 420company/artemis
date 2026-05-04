@@ -91,6 +91,18 @@ const SENSITIVE_PATH_PATTERNS = [
   /\bid_(rsa|ed25519|ecdsa|dsa)\b/,
 ]
 
+function commandAccessesAllowedArtemisDiagnosticPath(cmd: string): boolean {
+  const expanded = expandForInspection(cmd).replace(/\\/g, '/')
+  const home = homedir().replace(/\\/g, '/')
+  const allowed = [
+    `${home}/.artemis/dreams`,
+    `${home}/.artemis/gateway.log`,
+    `${home}/.artemis/gateway.launchd.log`,
+    `${home}/.artemis/gateway.launchd.err.log`,
+  ]
+  return allowed.some(path => expanded.includes(path))
+}
+
 // High-signal "remote payload → shell" pipelines and reverse-shell patterns.
 // Each matcher is deliberately conservative (must contain a distinguishing
 // construct) so benign commands don't trip it.
@@ -125,6 +137,7 @@ function expandForInspection(cmd: string): string {
 }
 
 function commandAccessesSensitivePath(cmd: string): boolean {
+  if (commandAccessesAllowedArtemisDiagnosticPath(cmd)) return false
   const expanded = expandForInspection(cmd)
   return SENSITIVE_PATH_PATTERNS.some(re => re.test(expanded))
 }

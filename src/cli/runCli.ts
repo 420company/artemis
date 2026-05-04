@@ -292,7 +292,7 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 
   // ── skill ──────────────────────────────────────────────────────────────────
-  if (options.command === 'skill') {
+  if (options.command === 'skill' || options.command === 'skills') {
     await runSkillCommand({ cwd: options.cwd, locale, args: commandArgs })
     return
   }
@@ -830,17 +830,67 @@ async function runSkillCommand(options: { cwd: string; locale: UiLocale; args: s
   const { cwd, locale, args } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
   const sub = args[0]?.toLowerCase()
-  const skills = await discoverLocalSkills(cwd)
 
-  if (!sub || sub === 'list' || sub === 'ls' || sub === '--list') {
-    const rows = skills.length > 0
-      ? skills.map(skill => `${skill.id.padEnd(28)} ${skill.title}`)
-      : [t('未发现本地 SKILL.md。', 'No local SKILL.md files found.')]
+  if (!sub || sub === 'list' || sub === 'ls' || sub === '--list' || sub === 'browse' || sub === 'categories') {
+    const { groupSkillsByCategory, loadSkillDiscovery } = await import('../core/skillDiscovery.js')
+    const { skills } = await loadSkillDiscovery(cwd)
+    const grouped = groupSkillsByCategory(skills)
+    const rows = [
+      t(`总技能数: ${skills.length}`, `Total skills: ${skills.length}`),
+      t('默认可用；多数是流程/知识包，少数是可执行自动化。', 'Available by default; most are instructional workflows, a few are executable automations.'),
+      '',
+      ...grouped.slice(0, 20).map(group => `${group.category.padEnd(22)} ${String(group.count).padStart(4)}  ${group.examples.map(skill => skill.id).join(', ')}`),
+      '',
+      t('推荐：artemis skill recommend <你想完成的任务>', 'Recommend: artemis skill recommend <what you want to accomplish>'),
+      t('详情：artemis skill detail <skill-id>', 'Detail: artemis skill detail <skill-id>'),
+    ]
     console.log()
-    console.log(buildPanel(t(`技能 (${skills.length})`, `Skills (${skills.length})`), rows))
+    console.log(buildPanel(t('技能目录', 'Skill catalog'), rows))
     console.log()
     return
   }
+
+  if (sub === 'recommend' || sub === 'suggest' || sub === 'idea') {
+    const intent = args.slice(1).join(' ').trim()
+    const { loadSkillDiscovery, recommendSkills } = await import('../core/skillDiscovery.js')
+    const { skills } = await loadSkillDiscovery(cwd)
+    const matches = intent ? recommendSkills(skills, intent, 15) : []
+    const rows = !intent
+      ? [t('用法：artemis skill recommend <你想完成的任务>', 'Usage: artemis skill recommend <what you want to accomplish>')]
+      : matches.length === 0
+        ? [t(`没有找到适合「${intent}」的技能。`, `No skill matched “${intent}”.`)]
+        : matches.map(skill => `${skill.id.padEnd(36)} [${skill.executable ? t('可执行', 'exec') : t('流程', 'guide')}] ${skill.description.slice(0, 90)}`)
+    console.log()
+    console.log(buildPanel(t('技能推荐', 'Skill recommendation'), rows))
+    console.log()
+    return
+  }
+
+  if (sub === 'detail' || sub === 'show' || sub === '--detail' || sub === 'info' || sub === '--info') {
+    const id = args[1]
+    const { getSkillDetail } = await import('../core/skillDiscovery.js')
+    const detail = id ? await getSkillDetail(cwd, id) : undefined
+    const rows = !id
+      ? [t('用法：artemis skill detail <skill-id>', 'Usage: artemis skill detail <skill-id>')]
+      : !detail
+        ? [t(`未找到技能：${id}`, `Skill not found: ${id}`)]
+        : [
+          `ID: ${detail.id}`,
+          `${t('类型', 'Type')}: ${detail.executable ? t('可执行自动化', 'executable automation') : t('流程/知识包', 'instructional workflow')}`,
+          `${t('分类', 'Category')}: ${detail.category}`,
+          `${t('说明', 'Description')}: ${detail.description}`,
+          detail.path ? `Path: ${detail.path}` : '',
+          '',
+          ...detail.usage.map(line => `  ${line}`),
+          ...(detail.preview.length > 0 ? ['', ...detail.preview.slice(0, 30)] : []),
+        ].filter(Boolean)
+    console.log()
+    console.log(buildPanel(t('技能详情', 'Skill detail'), rows))
+    console.log()
+    return
+  }
+
+  const skills = await discoverLocalSkills(cwd)
 
   // 执行技能功能
   if (sub === 'execute' || sub === 'run' || sub === '--execute' || sub === '--run') {

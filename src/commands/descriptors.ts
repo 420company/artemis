@@ -136,6 +136,14 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     desc: { zh: '清空所有配置并重新引导设置', en: 'Wipe all config and re-run onboarding' },
   },
   {
+    id: 'soul',
+    group: 'core',
+    slash: '/soul',
+    autocomplete: true,
+    quickValue: '/soul',
+    desc: { zh: '启动 soul.md 人格配置引导', en: 'Start the soul.md personality setup' },
+  },
+  {
     id: 'run',
     group: 'workflow',
     cli: 'run <prompt> [--bg]',
@@ -502,7 +510,7 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     remote: '/skills',
     autocomplete: true,
     quickValue: '/skills',
-    desc: { zh: 'Inspect local skills', en: 'Inspect local skills' },
+    desc: { zh: '浏览、推荐和查看内置技能', en: 'Browse, recommend, and inspect built-in skills' },
   },
   {
     id: 'odin',

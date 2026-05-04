@@ -15,6 +15,7 @@ import { BragiStore } from '../bragi/store.js'
 import { TelegramStore } from '../telegram/store.js'
 import { WeChatStore } from '../wechat/store.js'
 import type { BridgeTerminalEvent } from './bridgeNotify.js'
+import { registerBridge } from '../services/bridgeNotifier.js'
 
 const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
@@ -397,6 +398,20 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
     log('bridge-event', JSON.stringify(payload))
   }
 
+  const unregisterCliDreamBridge = registerBridge({
+    platform: 'cli',
+    push: async (payload) => {
+      notify({
+        kind: 'bridge-message',
+        platform: 'cli',
+        direction: 'outbound',
+        targetLabel: 'Dream System',
+        text: payload.text + (payload.imagePath ? `\n🖼  ${payload.imagePath}` : ''),
+      })
+      return 1
+    },
+  })
+
   const aborts: AbortController[] = []
   const started = new Set<string>()
   const defaultPermissionMode = options.permissionMode ?? 'accept-all'
@@ -463,6 +478,7 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
   await new Promise<void>(resolve => {
     const stop = () => {
       log('gateway', 'stopping')
+      unregisterCliDreamBridge()
       clearInterval(keepAlive)
       stopIdle?.()
       for (const ac of aborts) ac.abort()

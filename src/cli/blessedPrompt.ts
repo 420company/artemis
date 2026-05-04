@@ -222,12 +222,12 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.headerFn = options.headerFn
     this.footerHint = options.footerHint ?? ''
     this.onTextChange = options.onTextChange
-    // Keep Windows in raw input mode by default. Cooked mode only delivers data
-    // after Enter, so while Artemis is streaming/thinking our redraw loop can
-    // erase the console-host echo and make the chat box appear unusable. Raw
-    // mode keeps every keypress inside our buffer/render path. If a specific
-    // terminal needs console-host IME composition, opt in explicitly.
-    this.cookedLineInput = process.platform === 'win32' && process.env.ARTEMIS_WINDOWS_COOKED_INPUT === '1'
+    // Windows console hosts can drop raw-mode keypress events while still showing
+    // a blinking cursor, which makes the chat box look focused but impossible to
+    // type into. Use cooked line input on Windows by default so the console host
+    // owns text entry/IME and Artemis receives complete submitted lines. Keep a
+    // raw-mode escape hatch for terminals where per-key editing is known to work.
+    this.cookedLineInput = process.platform === 'win32' && process.env.ARTEMIS_WINDOWS_RAW_INPUT !== '1'
   }
 
   read(): Promise<string | null> {
