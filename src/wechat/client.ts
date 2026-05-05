@@ -9,8 +9,11 @@
  */
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
-import { basename } from 'node:path'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { basename, join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { promisify } from 'node:util'
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import type { ImageAttachment, ImageMediaType } from '../providers/types.js'
 
 // ─── internal gateway types ───────────────────────────────────────────────────
@@ -115,6 +118,8 @@ const WECHAT_DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com'
 const WECHAT_DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
 const WECHAT_DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000
 const WECHAT_SHORT_HTTP_TIMEOUT_MS = 15_000
+const WECHAT_CDN_UPLOAD_TIMEOUT_MS = 90_000
+const WECHAT_CDN_UPLOAD_RETRY_DELAY_MS = 1_000
 const WECHAT_MESSAGE_LIMIT = 3_800
 const WECHAT_SESSION_EXPIRED_ERRCODE = -14
 const WECHAT_MESSAGE_TYPE_USER = 1
@@ -125,6 +130,8 @@ const WECHAT_UPLOAD_MEDIA_IMAGE = 1
 const WECHAT_CDN_UPLOAD_MAX_RETRIES = 3
 const WECHAT_SEND_MEDIA_MAX_RETRIES = 3
 const WECHAT_SEND_MEDIA_RETRY_DELAY_MS = 500
+const WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES = 600_000
+const execFileAsync = promisify(execFile)
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -234,6 +241,34 @@ function encryptOutboundMedia(bytes: Buffer, aesKey: Buffer): Buffer {
 function formatOutboundAesKey(aesKey: Buffer): string {
   // iLink sendMessage expects base64(hex_string), not base64(raw 16 bytes).
   return Buffer.from(aesKey.toString('hex'), 'utf8').toString('base64')
+}
+
+async function prepareOutboundWeChatImage(imagePath: string): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const original = await readFile(imagePath)
+  const detected = imageTypeFromBytes(original)
+  if (detected?.contentType === 'image/jpeg' && original.length <= WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES) {
+    return { path: imagePath, cleanup: async () => undefined }
+  }
+
+  // The iLink CDN endpoint is less tolerant of large PNG/WebP payloads than
+  // Telegram/Discord uploads. Normalize outbound images to a bounded JPEG
+  // before encryption/upload; this is the format that reliably renders on mobile.
+  if (process.platform !== 'darwin') {
+    return { path: imagePath, cleanup: async () => undefined }
+  }
+
+  const out = join(tmpdir(), `artemis-wechat-${Date.now()}-${randomBytes(4).toString('hex')}.jpg`)
+  try {
+    await execFileAsync(
+      '/usr/bin/sips',
+      ['-s', 'format', 'jpeg', '-s', 'formatOptions', '80', '-Z', '1280', imagePath, '--out', out],
+      { timeout: 30_000 },
+    )
+    return { path: out, cleanup: async () => { await unlink(out).catch(() => undefined) } }
+  } catch {
+    await unlink(out).catch(() => undefined)
+    return { path: imagePath, cleanup: async () => undefined }
+  }
 }
 
 function buildCdnUploadUrl(cdnBaseUrl: string, uploadParam: string, filekey: string): string {
@@ -552,40 +587,45 @@ export class WeChatGatewayClient {
     // after a fresh inbound message provides a new context token.
     void caption
 
-    const image = await readFile(imagePath)
-    if (image.length === 0) throw new Error(`WeChat image reply cannot send empty file: ${imagePath}`)
+    const prepared = await prepareOutboundWeChatImage(imagePath)
+    try {
+      const image = await readFile(prepared.path)
+      if (image.length === 0) throw new Error(`WeChat image reply cannot send empty file: ${prepared.path}`)
 
-    const filename = basename(imagePath)
-    const schema = 'image_item_cdn_media_v1'
-    const aesKey = randomBytes(16)
-    const filekey = randomBytes(16).toString('hex')
-    const upload = await this.getUploadUrl({
-      filekey,
-      mediaType: WECHAT_UPLOAD_MEDIA_IMAGE,
-      toUserId: peerUserId,
-      rawSize: image.length,
-      rawMd5: createHash('md5').update(image).digest('hex'),
-      cipherSize: aesEcbPaddedSize(image.length),
-      aesKeyHex: aesKey.toString('hex'),
-      signal,
-    })
-    const uploadUrl = upload.upload_full_url?.trim() || buildCdnUploadUrl(this.cdnBaseUrl, upload.upload_param?.trim() || '', filekey)
-    const encryptedQueryParam = await this.uploadEncryptedMedia(uploadUrl, image, aesKey, signal)
+      const filename = basename(prepared.path)
+      const schema = 'image_item_cdn_media_v1'
+      const aesKey = randomBytes(16)
+      const filekey = randomBytes(16).toString('hex')
+      const upload = await this.getUploadUrl({
+        filekey,
+        mediaType: WECHAT_UPLOAD_MEDIA_IMAGE,
+        toUserId: peerUserId,
+        rawSize: image.length,
+        rawMd5: createHash('md5').update(image).digest('hex'),
+        cipherSize: aesEcbPaddedSize(image.length),
+        aesKeyHex: aesKey.toString('hex'),
+        signal,
+      })
+      const uploadUrl = upload.upload_full_url?.trim() || buildCdnUploadUrl(this.cdnBaseUrl, upload.upload_param?.trim() || '', filekey)
+      const encryptedQueryParam = await this.uploadEncryptedMedia(uploadUrl, image, aesKey, signal)
 
-    const item = {
-      type: WECHAT_MESSAGE_ITEM_IMAGE,
-      image_item: {
-        media: {
-          encrypt_query_param: encryptedQueryParam,
-          aes_key: formatOutboundAesKey(aesKey),
-          encrypt_type: 1,
+      const item = {
+        type: WECHAT_MESSAGE_ITEM_IMAGE,
+        image_item: {
+          media: {
+            encrypt_query_param: encryptedQueryParam,
+            aes_key: formatOutboundAesKey(aesKey),
+            encrypt_type: 1,
+          },
+          mid_size: aesEcbPaddedSize(image.length),
         },
-        mid_size: aesEcbPaddedSize(image.length),
-      },
-    }
-    const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendImage', signal)
+      }
+      const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendImage', signal)
 
-    return { filename, bytes: image.length, response, rendered: true, schema }
+      return { filename, bytes: image.length, response, rendered: true, schema }
+    } finally {
+      await prepared.cleanup()
+    }
   }
 
   private async sendSingleMediaItemWithRetry(
@@ -684,8 +724,8 @@ export class WeChatGatewayClient {
           headers: { 'content-type': 'application/octet-stream' },
           body: new Uint8Array(ciphertext),
           signal: signal
-            ? AbortSignal.any([AbortSignal.timeout(WECHAT_SHORT_HTTP_TIMEOUT_MS), signal])
-            : AbortSignal.timeout(WECHAT_SHORT_HTTP_TIMEOUT_MS),
+            ? AbortSignal.any([AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS), signal])
+            : AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS),
         })
         const encryptedParam = response.headers.get('x-encrypted-param')?.trim()
         if (response.status >= 400 && response.status < 500) {
@@ -704,6 +744,9 @@ export class WeChatGatewayClient {
         return encryptedParam
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
+      }
+      if (attempt < WECHAT_CDN_UPLOAD_MAX_RETRIES) {
+        await delay(WECHAT_CDN_UPLOAD_RETRY_DELAY_MS * attempt, signal)
       }
     }
     throw new Error(`WeChat CDN upload failed after ${WECHAT_CDN_UPLOAD_MAX_RETRIES} attempts: ${lastError?.message ?? 'unknown error'}`)
