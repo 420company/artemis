@@ -19,36 +19,39 @@ export async function runBundleOnboarding(options: {
   settingsStore: CliSettingsStore
   printPanel: (title: string, lines: string[]) => void
   hasSecondaryModel?: boolean
+  assumeEnabled?: boolean
 }): Promise<void> {
   const { locale, settingsStore, printPanel } = options
   const hasSecondaryModel = options.hasSecondaryModel ?? true
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
 
-  const enable = await chooseInteractiveOption<boolean | '__cancel__'>({
-    title: t('◆ Bundle 润色增强 — 要开启吗？',
-             '◆ Bundle Prompt Polisher — enable?'),
-    hint:  hasSecondaryModel
-      ? t('把自然语言需求自动改写成结构化技术提示词，可以用主模型或副模型做润色',
-          'Rewrites natural-language requests into structured technical prompts (main or brain model)')
-      : t('把自然语言需求自动改写成结构化技术提示词；当前会使用主模型做润色',
-          'Rewrites natural-language requests into structured technical prompts using the main model'),
-    escapeValue: '__cancel__',
-    initialIndex: 0,
-    choices: [
-      {
-        label:       t('开启 Bundle', 'Enable Bundle'),
-        value:       true,
-        description: t('长提问时自动弹出"原版 vs 增强版"对比',
-                       'Show original-vs-enhanced diff on long prompts'),
-      },
-      {
-        label:       t('暂不开启', 'Skip for now'),
-        value:       false,
-        description: t('之后可以用 /bundle on 随时启用',
-                       'You can run /bundle on later'),
-      },
-    ],
-  })
+  const enable = options.assumeEnabled
+    ? true
+    : await chooseInteractiveOption<boolean | '__cancel__'>({
+      title: t('◆ Bundle 润色增强 — 要开启吗？',
+               '◆ Bundle Prompt Polisher — enable?'),
+      hint:  hasSecondaryModel
+        ? t('把自然语言需求自动改写成结构化技术提示词，可以用主模型或副模型做润色',
+            'Rewrites natural-language requests into structured technical prompts (main or brain model)')
+        : t('把自然语言需求自动改写成结构化技术提示词；当前会使用主模型做润色',
+            'Rewrites natural-language requests into structured technical prompts using the main model'),
+      escapeValue: '__cancel__',
+      initialIndex: 0,
+      choices: [
+        {
+          label:       t('开启 Bundle', 'Enable Bundle'),
+          value:       true,
+          description: t('长提问时自动弹出"原版 vs 增强版"对比',
+                         'Show original-vs-enhanced diff on long prompts'),
+        },
+        {
+          label:       t('暂不开启', 'Skip for now'),
+          value:       false,
+          description: t('之后可以用 /bundle on 随时启用',
+                         'You can run /bundle on later'),
+        },
+      ],
+    })
 
   if (enable === '__cancel__' || enable === false) {
     await settingsStore.setBundleConfig({

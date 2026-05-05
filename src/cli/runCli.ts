@@ -453,7 +453,7 @@ export async function runCli(argv: string[]): Promise<void> {
         }
       })
       const { startIdleWatcher } = await import('../services/idleWatcher.js')
-      startIdleWatcher(options.cwd)
+      startIdleWatcher(options.cwd, locale)
 
       // After a short delay (let the UI mount first), announce the dream system
       // in the chat window and active bridges.
@@ -476,6 +476,7 @@ export async function runCli(argv: string[]): Promise<void> {
               void composeDream({
                 cwd: options.cwd,
                 trigger: 'scheduled',
+                locale,
                 firstDreamSeed: locale === 'zh-CN' ? FIRST_DREAM_ZH : FIRST_DREAM_EN,
               }).catch(() => undefined)
             }

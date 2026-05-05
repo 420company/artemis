@@ -667,7 +667,7 @@ async function configureGateway(options: { cwd: string; locale: UiLocale }): Pro
   }
 }
 
-async function configureBundleSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
+async function configureBundleSettings(options: { cwd: string; locale: UiLocale; assumeEnabled?: boolean }): Promise<void> {
   const { cwd, locale } = options
   const providerStore = new ProviderStore(cwd)
   const data = await providerStore.load()
@@ -700,6 +700,7 @@ async function configureBundleSettings(options: { cwd: string; locale: UiLocale 
     locale,
     settingsStore: new CliSettingsStore(cwd),
     hasSecondaryModel: Boolean(secondary),
+    assumeEnabled: options.assumeEnabled,
     printPanel: (title, lines) => {
       console.log()
       console.log(buildPanel(title, lines))
@@ -982,7 +983,7 @@ async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }
     tr(locale, '它会把较长需求整理成结构化提示词，发送前展示“原版 vs 增强版”供你确认。', 'It rewrites longer requests into structured prompts and shows original vs enhanced before sending.'),
   )
   if (setupBundle) {
-    await configureBundleSettings({ cwd, locale })
+    await configureBundleSettings({ cwd, locale, assumeEnabled: true })
   }
 
   const setupVisual = await askYesNo(

@@ -5,6 +5,7 @@ import { broadcastToBridges } from './bridgeNotifier.js'
 import type { ComposeDreamResult } from './dreamComposer.js'
 import { getDreamsRoot, type DreamEntry } from './dreamStore.js'
 import type { UiLocale } from '../cli/locale.js'
+import { pickLocale } from '../cli/locale.js'
 
 export const DREAM_SYSTEM_NAME = '梦境系统'
 
@@ -64,20 +65,32 @@ export async function notifyDreamStarted(trigger: DreamEntry['trigger']): Promis
   return result.sent
 }
 
-export async function notifyDreamFinished(result: ComposeDreamResult): Promise<number> {
+export async function notifyDreamFinished(result: ComposeDreamResult, locale: UiLocale = 'zh-CN'): Promise<number> {
   const text = result.ok && result.entry
     ? [
-        '✨ 梦境系统做梦结束。',
+        pickLocale(locale, {
+          zh: '✨ 刚刚好像发生了一些奇怪的事情…',
+          en: '✨ Something strange seems to have happened just now…',
+        }),
         '',
-        '新的梦已经落进卷轴，信息素完成了一次柔软的结晶。',
-        `梦境片段：${result.entry.preview}`,
-        `我的日记：${result.entry.mdPath}`,
-        ...(result.entry.imagePath ? [`梦境画面：${result.entry.imagePath}`] : []),
+        pickLocale(locale, {
+          zh: '新的梦已经落进卷轴，信息素完成了一次柔软的结晶。',
+          en: 'A new dream has fallen into the scroll; its faint signals have crystallized softly.',
+        }),
+        `${pickLocale(locale, { zh: '梦境片段', en: 'Dream fragment' })}：${result.entry.preview}`,
+        `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}：${result.entry.mdPath}`,
+        ...(result.entry.imagePath ? [`${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}：${result.entry.imagePath}`] : []),
       ].join('\n')
     : [
-        '🌘 梦境系统做梦结束。',
+        pickLocale(locale, {
+          zh: '🌘 刚刚好像发生了一些奇怪的事情…',
+          en: '🌘 Something strange seems to have happened just now…',
+        }),
         '',
-        `这一次梦雾没有凝成完整卷轴：${result.reason ?? '未知原因'}`,
+        pickLocale(locale, {
+          zh: `这一次梦雾没有凝成完整卷轴：${result.reason ?? '未知原因'}`,
+          en: `This time, the dream-fog did not form a complete scroll: ${result.reason ?? 'unknown reason'}`,
+        }),
       ].join('\n')
 
   const broadcast = await broadcastToBridges({

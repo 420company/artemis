@@ -35,6 +35,7 @@ import {
 import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { broadcastToBridges } from './bridgeNotifier.js'
 import { notifyDreamFinished, notifyDreamStarted } from './dreamNotifications.js'
+import type { UiLocale } from '../cli/locale.js'
 
 export interface ComposeDreamOptions {
   cwd: string
@@ -45,6 +46,8 @@ export interface ComposeDreamOptions {
   configOverride?: Partial<DreamConfig>
   /** Status callback for CLI HUD ticks ("🌙 dreaming..."). */
   onStatus?: (text: string) => void
+  /** UI language used to compose and distill the dream. */
+  locale?: UiLocale
 }
 
 export interface ComposeDreamResult {
@@ -54,7 +57,8 @@ export interface ComposeDreamResult {
   bridgesPushed?: number
 }
 
-const DREAM_SYSTEM_PROMPT = `你是 Artemis 的潜意识，专门为它做"白日梦"。
+const DREAM_SYSTEM_PROMPTS: Record<UiLocale, string> = {
+  'zh-CN': `你是 Artemis 的潜意识，专门为它做"白日梦"。
 
 你的任务：把用户今天的工作素材（session 摘要、近期记忆、git 活动等）织成一段 300-500 字的中文梦境随笔。
 
@@ -77,9 +81,36 @@ const DREAM_SYSTEM_PROMPT = `你是 Artemis 的潜意识，专门为它做"白�
 ### 学到了什么
 - 风格/偏好/灵感 1
 - 风格/偏好/灵感 2
-（最多 3 条）`
+（最多 3 条）`,
 
-const DREAM_IMAGE_PROMPT_SYSTEM = `根据下面这段中文梦境，写一段适合 text-to-image 模型的英文 prompt。
+  en: `You are Artemis's subconscious, responsible for making its "daydreams".
+
+Your task: weave today's work materials (session digests, recent memories, git activity, and similar traces) into a 300-500 word dream essay in English.
+
+If the materials include "First Dream Fixed Seed", that is the original mythic text for Artemis's first dream: use it as the core imagery and tonal source, freely refining, compressing, and recomposing it rather than starting from scratch. Other materials should only enter as faint glimmers.
+
+Requirements:
+- Style: prose poem or stream of consciousness, allowing surreal jumps, metaphor, and sensory imagery.
+- Do not recap facts literally. Translate work into dream symbols (code → a metallic forest; debugging → searching for a key; refactoring → a house that moves rooms).
+- Do not expose exact file names, API keys, passwords, tokens, or URLs; replace them with vague codenames.
+- The final section must be exactly \`### What I learned\`, containing 1-3 distilled lines for Artemis itself: style, preference, or inspiration. Each line should be one specific sentence.
+- For English users, distill both user signals and AI behavior in English; do not leave this section in Chinese.
+- If the materials are sparse, add stream-of-consciousness imagery instead of saying there is no material.
+
+Output format (strict):
+
+# Dream Title
+(An English title, no more than 8 words)
+
+Body (300-500 English words)
+
+### What I learned
+- Style/preference/inspiration 1
+- Style/preference/inspiration 2
+(At most 3 lines)`,
+}
+
+const DREAM_IMAGE_PROMPT_SYSTEM = `根据下面这段梦境，写一段适合 text-to-image 模型的英文 prompt。
 
 要求：
 - 把梦境的核心意象转成视觉描述：场景、光线、材质、色调、构图
@@ -109,6 +140,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 export async function composeDream(options: ComposeDreamOptions): Promise<ComposeDreamResult> {
   const config: DreamConfig = { ...(await loadDreamConfig()), ...(options.configOverride ?? {}) }
+  const locale = options.locale ?? 'zh-CN'
 
   if (!config.enabled || config.mode === 'off') {
     return { ok: false, reason: 'Dream system disabled' }
@@ -132,13 +164,15 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
 
   const contextLines: string[] = []
   if (options.firstDreamSeed?.trim()) {
-    contextLines.push('# 初梦固定种子', options.firstDreamSeed.trim(), '')
+    contextLines.push(locale === 'zh-CN' ? '# 初梦固定种子' : '# First Dream Fixed Seed', options.firstDreamSeed.trim(), '')
   }
-  if (sessionDigest.length > 0) contextLines.push('# 今日 session 摘要', ...sessionDigest, '')
-  if (memoryDigest.length > 0) contextLines.push('# 增强记忆条目', ...memoryDigest, '')
-  if (gitDigest.length > 0) contextLines.push('# Git 活动', ...gitDigest, '')
+  if (sessionDigest.length > 0) contextLines.push(locale === 'zh-CN' ? '# 今日 session 摘要' : '# Today\'s Session Digest', ...sessionDigest, '')
+  if (memoryDigest.length > 0) contextLines.push(locale === 'zh-CN' ? '# 增强记忆条目' : '# Enhanced Memory Entries', ...memoryDigest, '')
+  if (gitDigest.length > 0) contextLines.push(locale === 'zh-CN' ? '# Git 活动' : '# Git Activity', ...gitDigest, '')
   if (contextLines.length === 0) {
-    contextLines.push('（今天素材稀薄；请用纯意识流写一段。）')
+    contextLines.push(locale === 'zh-CN'
+      ? '（今天素材稀薄；请用纯意识流写一段。）'
+      : '(Today\'s material is sparse; write this as pure stream-of-consciousness.)')
   }
 
   // ── compose dream MD via main provider ──────────────────────────────────
@@ -155,13 +189,13 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     })
   } catch (err) {
     const result = { ok: false, reason: `no provider configured: ${err instanceof Error ? err.message : String(err)}` }
-    await notifyDreamFinished(result).catch(() => undefined)
+    await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
 
   const now = new Date()
   const composeMessages = [
-    { id: 'dream-sys', role: 'system' as const, content: DREAM_SYSTEM_PROMPT, createdAt: now.toISOString() },
+    { id: 'dream-sys', role: 'system' as const, content: DREAM_SYSTEM_PROMPTS[locale], createdAt: now.toISOString() },
     { id: 'dream-usr', role: 'user' as const, content: contextLines.join('\n'), createdAt: now.toISOString() },
   ]
 
@@ -178,13 +212,13 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     }
   } catch (err) {
     const result = { ok: false, reason: `compose failed: ${err instanceof Error ? err.message : String(err)}` }
-    await notifyDreamFinished(result).catch(() => undefined)
+    await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
 
   if (!dreamMd) {
     const result = { ok: false, reason: 'empty dream response' }
-    await notifyDreamFinished(result).catch(() => undefined)
+    await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
 
@@ -230,7 +264,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   }
 
   // ── distill learned lines + persist index ───────────────────────────────
-  const learned = extractLearnedSection(dreamMd)
+  const learned = extractLearnedSection(dreamMd, locale)
   if (config.evolveSystemPrompt && learned.length > 0) {
     await appendLearnedPrompt(learned)
     try {
@@ -267,7 +301,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   }
 
   const result = { ok: true, entry, bridgesPushed }
-  await notifyDreamFinished(result).catch(() => undefined)
+  await notifyDreamFinished(result, locale).catch(() => undefined)
   return result
 }
 
@@ -285,8 +319,9 @@ async function deriveImagePrompt(provider: Awaited<ReturnType<typeof createTrack
   }
 }
 
-function extractLearnedSection(dreamMd: string): string[] {
-  const idx = dreamMd.indexOf('### 学到了什么')
+function extractLearnedSection(dreamMd: string, locale: UiLocale): string[] {
+  const heading = locale === 'zh-CN' ? '### 学到了什么' : '### What I learned'
+  const idx = dreamMd.indexOf(heading)
   if (idx < 0) return []
   const tail = dreamMd.slice(idx).split('\n').slice(1)
   const lines: string[] = []
@@ -316,7 +351,7 @@ function buildBridgeText(dreamMd: string, id: string): string {
   const title = titleLine.replace(/^#\s*/, '').trim()
   const body = dreamMd
     .replace(/^#\s+.+\n+/m, '')
-    .replace(/### 学到了什么[\s\S]*$/, '')
+    .replace(/### (?:学到了什么|What I learned)[\s\S]*$/, '')
     .trim()
   const teaser = body.length > 600 ? `${body.slice(0, 580)}…` : body
   return [
