@@ -1805,6 +1805,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // ── 系统 & 技能 ──
     { value: '/odin',       hint: t('Odin 技能库管理',           'Odin skill store') },
     { value: '/heimdall',   hint: t('Heimdall 线程控制面',        'Heimdall thread control plane') },
+    { value: '/mcp',        hint: t('MCP 服务管理',              'Manage MCP servers') },
+    { value: '/skills',     hint: t('技能库搜索与推荐',           'Search and recommend skills') },
+    { value: '/dream',      hint: t('梦境系统',                  'Dream system') },
     { value: '/hud',        hint: t('显示 HUD 状态栏',           'Show HUD status bar') },
     // ── 对话管理 ──
     { value: '/clear',      hint: t('重置对话历史',               'Reset conversation') },
@@ -1828,7 +1831,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/config',     hint: t('重新配置 AI 提供商',         'Reconfigure AI provider') },
     { value: '/config visual', hint: t('单独配置视觉模型',        'Configure visual model only') },
     { value: '/visual',     hint: t('快捷修改视觉 API 配置',     'Quick-edit visual API config') },
+    { value: '/vision',     hint: t('视觉配置别名',              'Visual config alias') },
     { value: '/vercel',     hint: t('配置 Vercel 部署 token',    'Configure Vercel deployment token') },
+    { value: '/spotify',    hint: t('连接 Spotify 账号',         'Connect Spotify account') },
     { value: '/config memory', hint: t('配置记忆增强',           'Configure memory enhancement') },
     { value: '/soul',       hint: t('启动 soul.md 人格配置引导',   'Start soul.md personality setup') },
     { value: '/newborn',    hint: t('重置全部配置',               'Wipe config & re-run setup') },
