@@ -20,6 +20,8 @@ export { APP_NAME, APP_PUBLISHER, APP_VERSION } from '../appMeta.js'
 
 export const DUAL_MODEL_COMMAND      = 'bifrost'
 export const WHOSYOURDADDY_FLAG      = '--whosyourdaddy'
+export const DEFAULT_AGENT_MAX_TURNS = 16
+export const MAX_AGENT_MAX_TURNS     = 50
 export const WHOSYOURDADDY_MIN_TURNS = 16
 
 const DEFAULT_DIRECT_TOOL_COUNT = getDirectToolCount()

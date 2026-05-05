@@ -8,6 +8,19 @@ type TelegramApiResponse<T> = {
   description?: string
 }
 
+export function normalizeTelegramBotToken(input: string): string {
+  const compact = input
+    .trim()
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, '')
+  const match = compact.match(/\d{5,20}:[A-Za-z0-9_-]{20,}/)
+  return match?.[0] ?? compact
+}
+
+export function isPlausibleTelegramBotToken(input: string): boolean {
+  return /^\d{5,20}:[A-Za-z0-9_-]{20,}$/.test(normalizeTelegramBotToken(input))
+}
+
 function guessMimeType(filename: string): string {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.png')) return 'image/png'
@@ -160,8 +173,8 @@ export class TelegramBotClient {
   private readonly botToken: string
 
   constructor(botToken: string) {
-    this.botToken = botToken
-    this.baseUrl = `https://api.telegram.org/bot${botToken}`
+    this.botToken = normalizeTelegramBotToken(botToken)
+    this.baseUrl = `https://api.telegram.org/bot${this.botToken}`
   }
 
   private async call<T>(method: string, payload?: Record<string, unknown>): Promise<T> {

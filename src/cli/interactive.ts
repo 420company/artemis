@@ -3718,6 +3718,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             '',
             `${t('文件', 'File')}: ${result.entry.mdPath}`,
             ...(result.entry.imagePath ? [`${t('配图', 'Image')}: ${result.entry.imagePath}`] : []),
+            ...(result.entry.videoPath ? [`${t('视频', 'Video')}: ${result.entry.videoPath}`] : []),
             ...(typeof result.bridgesPushed === 'number' && result.bridgesPushed > 0
               ? [t(`已推送到 ${result.bridgesPushed} 个聊天桥接。`, `Pushed to ${result.bridgesPushed} bridge chat(s).`)]
               : []),
@@ -3734,9 +3735,47 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           appendSystemPanel(t('梦境记录', 'Dream archive'), [t('还没有任何梦境。', 'No dreams yet.')])
         } else {
           appendSystemPanel(t('梦境记录', 'Dream archive'), list.slice(0, 20).map(e =>
-            `${e.id}  ${e.preview}`,
+            `${e.id}  ${e.videoPath ? '🎞' : e.imagePath ? '🖼' : '📝'}  ${e.preview}`,
           ))
         }
+        continue
+      }
+
+      if (arg === 'video' || arg.startsWith('video ')) {
+        const id = arg.slice('video'.length).trim() || undefined
+        const dreamVideo = await import('../services/dreamVideo.js')
+        appendSystemPanel(t('梦境视频', 'Dream video'), [id ? t(`开始生成 ${id} 的梦境视频…`, `Generating dream video for ${id}…`) : t('开始用最新梦境生成视频…', 'Generating video from the latest dream…')])
+        const result = await dreamVideo.generateDreamVideo({
+          cwd: workspaceRoot,
+          id,
+          onStatus: (text) => appendSystemPanel(t('梦境视频', 'Dream video'), [text]),
+        })
+        if (result.ok && result.videoPath) {
+          appendSystemPanel(t('梦境视频已生成', 'Dream video generated'), [
+            `${t('梦境', 'Dream')}: ${result.entry?.id ?? id ?? t('最新', 'latest')}`,
+            `${t('视频', 'Video')}: ${result.videoPath}`,
+            `${t('模型', 'Model')}: ${result.provider ?? '?'} / ${result.model ?? '?'}`,
+          ])
+        } else {
+          appendSystemPanel(t('梦境视频失败', 'Dream video failed'), [result.reason ?? t('未知原因', 'unknown')])
+        }
+        continue
+      }
+
+      if (arg === 'video-status') {
+        const dreamVideo = await import('../services/dreamVideo.js')
+        const status = await dreamVideo.checkDreamVideoCapability(workspaceRoot)
+        appendSystemPanel(t('梦境视频能力', 'Dream video capability'), status.ok
+          ? [
+              `${t('可生成', 'Available')}: ${t('是', 'yes')}`,
+              `${t('Provider', 'Provider')}: ${status.provider}`,
+              `${t('模型', 'Model')}: ${status.model}`,
+              `${t('来源', 'Source')}: ${status.source}`,
+            ]
+          : [
+              `${t('可生成', 'Available')}: ${t('否', 'no')}`,
+              status.reason ?? t('未知原因', 'unknown'),
+            ])
         continue
       }
 
@@ -3777,7 +3816,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '',
           t('最近梦境（最多 5 条）', 'Recent dreams (up to 5)'),
           ...(list.length > 0
-            ? list.slice(0, 5).map(e => `  ${e.id}  ${e.imagePath ? '🖼' : '📝'}  ${e.preview}`)
+            ? list.slice(0, 5).map(e => `  ${e.id}  ${e.videoPath ? '🎞' : e.imagePath ? '🖼' : '📝'}  ${e.preview}`)
             : [`  ${t('（还没有任何梦境）', '(no dreams yet)')}`]),
         ]
         appendSystemPanel(t('🌙 Dream System Status', '🌙 Dream System Status'), lines)
@@ -3807,6 +3846,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       appendSystemPanel(t('用法', 'Usage'), [
         '/dream status           ' + t('一键查看梦境系统当前状态（推荐）', 'One-shot dream system status (recommended)'),
         '/dream                  ' + t('立即编织一个梦境', 'Compose a dream now'),
+        '/dream video            ' + t('用最新梦境生成视频', 'Generate video from the latest dream'),
+        '/dream video <id>       ' + t('用指定梦境生成视频', 'Generate video from a specific dream'),
+        '/dream video-status     ' + t('检查梦境视频生成能力', 'Check dream video capability'),
         '/dream list             ' + t('列出最近的梦境', 'List recent dreams'),
         '/dream open <id>        ' + t('打开指定梦境', 'Open a dream'),
         '/dream forget <id>      ' + t('删除单条', 'Remove one'),

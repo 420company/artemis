@@ -13,6 +13,7 @@
  *     │                         to every system prompt (opt-in)
  *     ├── 2026-05-02_dawn.md  — individual dream texts
  *     └── 2026-05-02_dawn.png — optional vision-mode renders
+ *     └── 2026-05-02_dawn.mp4 — optional video renders
  */
 
 import { homedir } from 'node:os'
@@ -44,6 +45,7 @@ export interface DreamEntry {
   createdAt: string
   mdPath: string
   imagePath?: string
+  videoPath?: string
   trigger: 'idle-auto' | 'manual' | 'scheduled'
   /** Truncated first-paragraph preview for index listings. */
   preview: string
@@ -127,6 +129,16 @@ export async function appendDreamIndex(entry: DreamEntry): Promise<void> {
   await writeFile(INDEX_FILE, JSON.stringify(trimmed, null, 2), 'utf8')
 }
 
+export async function updateDreamEntry(id: string, patch: Partial<DreamEntry>): Promise<DreamEntry | null> {
+  const current = await loadDreamIndex()
+  const index = current.findIndex(e => e.id === id)
+  if (index < 0) return null
+  const updated = { ...current[index], ...patch, id }
+  current[index] = updated
+  await writeFile(INDEX_FILE, JSON.stringify(current, null, 2), 'utf8')
+  return updated
+}
+
 export async function removeDreamEntry(id: string): Promise<boolean> {
   const current = await loadDreamIndex()
   const target = current.find(e => e.id === id)
@@ -134,6 +146,7 @@ export async function removeDreamEntry(id: string): Promise<boolean> {
   await Promise.all([
     unlink(target.mdPath).catch(() => undefined),
     target.imagePath ? unlink(target.imagePath).catch(() => undefined) : Promise.resolve(),
+    target.videoPath ? unlink(target.videoPath).catch(() => undefined) : Promise.resolve(),
   ])
   const remaining = current.filter(e => e.id !== id)
   await writeFile(INDEX_FILE, JSON.stringify(remaining, null, 2), 'utf8')
@@ -160,10 +173,11 @@ export function buildDreamId(now: Date = new Date()): string {
     .padStart(2, '0')}`
 }
 
-export function buildDreamPaths(id: string): { mdPath: string; imagePath: string } {
+export function buildDreamPaths(id: string): { mdPath: string; imagePath: string; videoPath: string } {
   return {
     mdPath: path.join(DREAMS_ROOT, `${id}.md`),
     imagePath: path.join(DREAMS_ROOT, `${id}.png`),
+    videoPath: path.join(DREAMS_ROOT, `${id}.mp4`),
   }
 }
 
@@ -211,6 +225,24 @@ export async function readDreamBody(id: string): Promise<string | null> {
   if (!existsSync(mdPath)) return null
   try {
     return await readFile(mdPath, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+export async function findLatestDreamEntry(): Promise<DreamEntry | null> {
+  const indexed = await loadDreamIndex()
+  for (const entry of indexed) {
+    if (entry.mdPath && existsSync(entry.mdPath)) return entry
+  }
+  return null
+}
+
+export async function findLatestDreamBody(): Promise<{ entry: DreamEntry; body: string } | null> {
+  const entry = await findLatestDreamEntry()
+  if (!entry) return null
+  try {
+    return { entry, body: await readFile(entry.mdPath, 'utf8') }
   } catch {
     return null
   }

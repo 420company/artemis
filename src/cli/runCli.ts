@@ -14,7 +14,7 @@ import { notifyTerminal } from './bridgeNotify.js'
 import type { BridgeTerminalEvent } from './bridgeNotify.js'
 import { parseArgs, getHelpText } from './parseArgs.js'
 import { runGatewayCommand } from './gatewayService.js'
-import { getVersionText } from './branding.js'
+import { DEFAULT_AGENT_MAX_TURNS, MAX_AGENT_MAX_TURNS, getVersionText } from './branding.js'
 import { buildPanel } from './ui.js'
 import { CliSettingsStore } from './settings.js'
 import { ProviderStore } from '../providers/store.js'
@@ -170,7 +170,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const runtimeProviderData = await runtimeProviderStore.load()
       const configuredMaxTurns = runtimeProviderData.setup?.agent.maxIterations
       if (typeof configuredMaxTurns === 'number' && Number.isFinite(configuredMaxTurns) && configuredMaxTurns > 0) {
-        options.maxTurns = Math.max(1, Math.round(configuredMaxTurns))
+        options.maxTurns = Math.min(MAX_AGENT_MAX_TURNS, Math.max(1, Math.round(configuredMaxTurns)))
       }
     } catch {
       // keep CLI default when setup config is unavailable
@@ -1355,7 +1355,7 @@ async function runBragiCommand(options: {
     await runTelegramBridge({
       cwd,
       sessionStore,
-      maxTurns: 8,
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
       defaultPermissionMode: 'accept-all',
       onInfo: msg => console.log(msg),
     })
@@ -1382,7 +1382,7 @@ async function runBragiCommand(options: {
     await runDiscordBridge({
       cwd,
       sessionStore,
-      maxTurns: 8,
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
       defaultPermissionMode: 'accept-all',
       onInfo: msg => console.log(msg),
     })
@@ -1406,7 +1406,7 @@ async function runBragiCommand(options: {
       [t('按 Ctrl+C 停止。', 'Press Ctrl+C to stop.')]
     ))
     console.log()
-    await runWeChatBridge({ cwd, sessionStore, maxTurns: 8, defaultPermissionMode: 'accept-all', onInfo: msg => console.log(msg) })
+    await runWeChatBridge({ cwd, sessionStore, maxTurns: DEFAULT_AGENT_MAX_TURNS, defaultPermissionMode: 'accept-all', onInfo: msg => console.log(msg) })
     return
   }
 

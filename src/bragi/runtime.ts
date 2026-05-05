@@ -38,6 +38,7 @@ import { resolveWorkspaceIntent } from '../cli/workspaceIntent.js'
 import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
 import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import { sendBragiImageBroadcast } from './imageBroadcast.js'
+import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -439,7 +440,7 @@ export async function runRemoteCommand(
                   provider: providerRuntime.provider,
                   sessionStore: store,
                   permissionManager,
-                  maxTurns: opts.maxTurns ?? 8,
+                  maxTurns: opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS,
                   ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
                   resolveProvider: providerRouter.resolveProvider,
                   imageAttachments: command.images,
@@ -541,7 +542,7 @@ export async function runRemoteCommand(
             permissionMode: binding.permissionMode,
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
-            maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? 8) * 3),
+            maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS) * 3),
             pollRunningUserMessages: opts.pollRunningUserMessages,
             onRunningUserMessageAccepted: (text) => {
               const msg = t(

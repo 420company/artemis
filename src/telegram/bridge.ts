@@ -23,7 +23,7 @@ import { pickLocale } from '../cli/locale.js'
 import { buildPanel } from '../cli/ui.js'
 import { ensureGatewayAutoStart } from '../cli/gatewayService.js'
 import { SessionStore } from '../storage/sessions.js'
-import { TelegramBotClient, extractTelegramTextMessages, isTelegramNetworkFailure } from './client.js'
+import { TelegramBotClient, extractTelegramTextMessages, isPlausibleTelegramBotToken, isTelegramNetworkFailure, normalizeTelegramBotToken } from './client.js'
 import { TelegramStore } from './store.js'
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -113,26 +113,30 @@ async function loadTelegramToken(
 ): Promise<{ token: string; source: 'env' | 'telegram-store' | 'bragi-store' } | undefined> {
   const envToken = process.env.ARTEMIS_TELEGRAM_BOT_TOKEN
   if (envToken) {
-    await telegramStore.setBotToken(envToken)
-    onInfo?.(`[telegram] loaded bot token from environment (${maskToken(envToken)})`)
-    return { token: envToken, source: 'env' }
+    const token = normalizeTelegramBotToken(envToken)
+    await telegramStore.setBotToken(token)
+    onInfo?.(`[telegram] loaded bot token from environment (${maskToken(token)})`)
+    return { token, source: 'env' }
   }
 
   const telegramData = await telegramStore.load()
   if (telegramData.botToken) {
-    onInfo?.(`[telegram] loaded bot token from telegram store (${maskToken(telegramData.botToken)})`)
-    return { token: telegramData.botToken, source: 'telegram-store' }
+    const token = normalizeTelegramBotToken(telegramData.botToken)
+    if (token !== telegramData.botToken) await telegramStore.setBotToken(token)
+    onInfo?.(`[telegram] loaded bot token from telegram store (${maskToken(token)})`)
+    return { token, source: 'telegram-store' }
   }
 
   const bragiData = await bragiStore.load()
   const bragiToken = bragiData.platforms.telegram?.credentials.botToken
   if (bragiToken) {
+    const token = normalizeTelegramBotToken(bragiToken)
     // Keep the legacy runtime store hydrated because poll offsets and
     // authorized chats still live there. This bridges new Bragi config to the
     // older Telegram runtime path used by the background gateway.
-    await telegramStore.setBotToken(bragiToken)
-    onInfo?.(`[telegram] loaded bot token from bragi store (${maskToken(bragiToken)})`)
-    return { token: bragiToken, source: 'bragi-store' }
+    await telegramStore.setBotToken(token)
+    onInfo?.(`[telegram] loaded bot token from bragi store (${maskToken(token)})`)
+    return { token, source: 'bragi-store' }
   }
 
   return undefined
@@ -175,7 +179,21 @@ async function askTelegramToken(
     if (input === null || !input.trim()) {
       throw new Error(pickLocale(locale, { zh: '已取消 Telegram token 设置。', en: 'Telegram token setup cancelled.' }))
     }
-    const candidate = input.trim()
+    const candidate = normalizeTelegramBotToken(input)
+    if (!isPlausibleTelegramBotToken(candidate)) {
+      console.log()
+      console.log(buildPanel(
+        pickLocale(locale, { zh: 'Token 格式看起来不完整', en: 'Token format looks incomplete' }),
+        [
+          pickLocale(locale, {
+            zh: 'Telegram bot token 通常形如 123456789:AA...，请从 BotFather 复制完整 token。',
+            en: 'Telegram bot tokens usually look like 123456789:AA.... Please copy the complete token from BotFather.',
+          }),
+        ]
+      ))
+      console.log()
+      continue
+    }
     try {
       const client = new TelegramBotClient(candidate)
       const me = await client.getMe()

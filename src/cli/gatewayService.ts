@@ -16,6 +16,7 @@ import { TelegramStore } from '../telegram/store.js'
 import { WeChatStore } from '../wechat/store.js'
 import type { BridgeTerminalEvent } from './bridgeNotify.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
+import { DEFAULT_AGENT_MAX_TURNS } from './branding.js'
 
 const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
@@ -442,13 +443,13 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
   }
 
   if (await shouldAutoStartTelegram(options.cwd)) {
-    startBridge('telegram', signal => runTelegramBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('telegram', msg), onNotify: notify }))
+    startBridge('telegram', signal => runTelegramBridge({ cwd: options.cwd, sessionStore, maxTurns: DEFAULT_AGENT_MAX_TURNS, defaultPermissionMode, signal, onInfo: msg => log('telegram', msg), onNotify: notify }))
   }
   if (await shouldAutoStartDiscordBridge(options.cwd)) {
-    startBridge('discord', signal => runDiscordBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('discord', msg), onNotify: notify }))
+    startBridge('discord', signal => runDiscordBridge({ cwd: options.cwd, sessionStore, maxTurns: DEFAULT_AGENT_MAX_TURNS, defaultPermissionMode, signal, onInfo: msg => log('discord', msg), onNotify: notify }))
   }
   if (await shouldAutoStartWeChatBridge(options.cwd)) {
-    startBridge('wechat', signal => runWeChatBridge({ cwd: options.cwd, sessionStore, maxTurns: 8, defaultPermissionMode, signal, onInfo: msg => log('wechat', msg), onNotify: notify }))
+    startBridge('wechat', signal => runWeChatBridge({ cwd: options.cwd, sessionStore, maxTurns: DEFAULT_AGENT_MAX_TURNS, defaultPermissionMode, signal, onInfo: msg => log('wechat', msg), onNotify: notify }))
   }
 
   if (active === 0) {

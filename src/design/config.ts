@@ -1,6 +1,8 @@
 // 设计系统配置
 // 包含系统参数、默认设置和扩展性配置
 
+import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js';
+
 // 设计系统配置接口
 export interface DesignSystemConfig {
   // 基础配置
@@ -134,7 +136,7 @@ export const DEFAULT_CONFIG: DesignSystemConfig = {
   },
   
   defaultExecutionOptions: {
-    maxTurns: 15,
+    maxTurns: DEFAULT_AGENT_MAX_TURNS,
     permissionMode: 'accept-edits',
     appendUserMessage: true,
     completionContract: 'requires_execution_evidence',

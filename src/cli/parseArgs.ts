@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { WHOSYOURDADDY_FLAG, WHOSYOURDADDY_MIN_TURNS, getBrandingAttribution, getBrandingHeading } from './branding.js'
+import { DEFAULT_AGENT_MAX_TURNS, MAX_AGENT_MAX_TURNS, WHOSYOURDADDY_FLAG, WHOSYOURDADDY_MIN_TURNS, getBrandingAttribution, getBrandingHeading } from './branding.js'
 import { pickLocale } from './locale.js'
 import type { UiLocale } from './locale.js'
 
@@ -143,7 +143,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
   let apiKey: string | undefined = process.env.ARTEMIS_API_KEY
-  let maxTurns = 8
+  let maxTurns = DEFAULT_AGENT_MAX_TURNS
   let maxTurnsExplicit = false
   let permissionMode: PermissionMode = 'PRODUCER'
   let permissionModeExplicit = false
@@ -186,7 +186,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (cur === '--test-providers')  { testProviders = true; continue }
     if (cur === '--max-turns') {
       const v = Number(args.shift())
-      if (!Number.isInteger(v) || v <= 0) throw new Error('--max-turns must be a positive integer.')
+      if (!Number.isInteger(v) || v <= 0 || v > MAX_AGENT_MAX_TURNS) throw new Error(`--max-turns must be an integer between 1 and ${MAX_AGENT_MAX_TURNS}.`)
       maxTurns = v
       maxTurnsExplicit = true
       continue

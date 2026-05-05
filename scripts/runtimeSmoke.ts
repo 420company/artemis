@@ -6,6 +6,7 @@
  * Run: node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts
  */
 
+import { DEFAULT_AGENT_MAX_TURNS } from '../src/cli/branding.js'
 import { parseArgs } from '../src/cli/parseArgs.js'
 import { isCliStopIntent } from '../src/cli/interactive.js'
 import { CliSettingsStore } from '../src/cli/settings.js'
@@ -77,6 +78,7 @@ import {
   loadProjectInstructionFile,
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
+import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -139,6 +141,16 @@ assert(
     bridgeConfigIndex >= 0 && gatewayIndex > bridgeConfigIndex && markCompleteIndex > gatewayIndex,
   )
 }
+
+assert(
+  'telegram setup: pasted BotFather token is normalized before verification',
+  normalizeTelegramBotToken('  Use this token: 123456789:AA-BB_ccDD11223344556677889900 \n') === '123456789:AA-BB_ccDD11223344556677889900',
+)
+
+assert(
+  'telegram setup: hidden paste characters do not make a valid token fail local validation',
+  isPlausibleTelegramBotToken('\u200b123456789:AA-BB_ccDD11223344556677889900\uFEFF'),
+)
 
 {
   const recovered = parseAssistantEnvelopeForSmoke(`
@@ -705,7 +717,7 @@ function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): Prom
   const a = parseArgs([])
   assert('parseArgs: default command is chat', a.command === 'chat')
   assert('parseArgs: default permissionMode is PRODUCER', a.permissionMode === 'PRODUCER')
-  assert('parseArgs: default maxTurns is 8', a.maxTurns === 8)
+  assert('parseArgs: default maxTurns matches DEFAULT_AGENT_MAX_TURNS', a.maxTurns === DEFAULT_AGENT_MAX_TURNS)
   assert('parseArgs: setup defaults false', a.setup === false)
 }
 
@@ -728,6 +740,7 @@ function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): Prom
   const a = parseArgs(['--model', 'gpt-4o', '--max-turns', '20', 'hello world'])
   assert('parseArgs: model flag', a.model === 'gpt-4o')
   assert('parseArgs: maxTurns flag', a.maxTurns === 20)
+  assert('parseArgs: maxTurns flag is bounded', (() => { try { parseArgs(['--max-turns', '51']) } catch { return true } return false })())
   assert('parseArgs: prompt captured', a.prompt === 'hello world')
 }
 
