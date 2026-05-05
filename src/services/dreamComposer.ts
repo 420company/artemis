@@ -33,7 +33,8 @@ import {
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { createVisualProvider } from '../tools/visual/providers/interface.js'
-import { broadcastToBridges } from './bridgeNotifier.js'
+import { broadcastToBridges, listRegisteredBridges } from './bridgeNotifier.js'
+import { sendBragiImageBroadcast } from '../bragi/imageBroadcast.js'
 import { notifyDreamFinished, notifyDreamStarted } from './dreamNotifications.js'
 import type { UiLocale } from '../cli/locale.js'
 
@@ -292,12 +293,34 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   // ── push to bridges ─────────────────────────────────────────────────────
   let bridgesPushed = 0
   if (config.pushToBridges) {
+    const text = buildBridgeText(dreamMd, id)
+    const hasRegisteredMobileBridge = listRegisteredBridges().some(platform =>
+      platform === 'telegram' || platform === 'discord' || platform === 'wechat',
+    )
     const broadcast = await broadcastToBridges({
-      text: buildBridgeText(dreamMd, id),
+      text,
       imagePath,
       source: 'dream',
     })
     bridgesPushed = broadcast.sent
+
+    // The dream composer often runs in the CLI process, while Telegram/Discord/
+    // WeChat bridges live in the gateway daemon. In that topology the in-memory
+    // bridge registry only contains the CLI notifier, so broadcastToBridges()
+    // cannot reach the user's phone even though Bragi targets are configured.
+    // Reuse the same configured/live image sender as bridge_send_image so a
+    // generated dream picture is proactively delivered to mobile chats.
+    if (imagePath && (!hasRegisteredMobileBridge || bridgesPushed === 0)) {
+      const fallback = await sendBragiImageBroadcast({
+        cwd: options.cwd,
+        imagePath,
+        caption: text,
+        source: 'dream',
+      }).catch(() => null)
+      if (fallback) {
+        bridgesPushed += fallback.live.sent + fallback.configured.reduce((sum, item) => sum + item.sent, 0)
+      }
+    }
   }
 
   const result = { ok: true, entry, bridgesPushed }

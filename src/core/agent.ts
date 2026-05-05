@@ -2718,6 +2718,58 @@ function buildRuntimeManagedFailure(
   };
 }
 
+function isNonRetryableNpmPublishFailure(output: string): boolean {
+  const normalized = output.toLowerCase();
+  return (
+    /\bnpm\b/.test(normalized) &&
+    /\bpublish\b/.test(normalized) &&
+    (
+      /\be404\b/.test(normalized) ||
+      /\b404\s+not\s+found\b/.test(normalized) ||
+      /you do not have permission/i.test(output) ||
+      /not authorized/i.test(normalized) ||
+      /forbidden/i.test(normalized)
+    )
+  );
+}
+
+function classifyActionOutcomeFailure(outcome: ActionOutcome): ActionOutcome {
+  if (
+    outcome.ok ||
+    !outcome.error ||
+    outcome.error.retryable === false ||
+    outcome.action.type !== 'run_command'
+  ) {
+    return outcome;
+  }
+
+  const command = 'command' in outcome.action && typeof outcome.action.command === 'string'
+    ? outcome.action.command
+    : '';
+  const combined = [command, outcome.output, outcome.error.message].join('\n');
+  if (!isNonRetryableNpmPublishFailure(combined)) {
+    return outcome;
+  }
+
+  const message = [
+    outcome.error.message,
+    '',
+    'Classified as non-retryable: npm publish 404/permission failures require package ownership, access, or registry configuration changes; repeating the same command will not recover automatically.',
+  ].join('\n');
+
+  return {
+    ...outcome,
+    output: outcome.output,
+    error: buildToolError(outcome.error.code, message, {
+      retryable: false,
+      details: {
+        ...outcome.error.details,
+        classification: 'npm_publish_not_found_or_permission',
+      },
+    }),
+  };
+}
+
 function serializeToolPayload(input: {
   ok: boolean;
   action?: AgentAction;
@@ -4979,12 +5031,12 @@ async function executeAuthorizedAction(
         output_excerpt: truncate(result.output, 160),
       },
     );
-    return {
+    return classifyActionOutcomeFailure({
       action: completedAction,
       ok: result.ok,
       output: result.output,
       error: result.error,
-    };
+    });
   } catch (error) {
     options.onInfo?.(`[tool:${action.type}] error`);
     await recordHeimdallActionEvent(
@@ -5435,23 +5487,18 @@ export async function runAgent(
       videoRequired: localVideoGenerationRequired,
     },
   );
-  // Fail-fast guard for the requires_execution_evidence contract: count how many
-  // *consecutive* turns the model produced only intent text without any tool
-  // actions. After 2 such turns we abort instead of grinding through every
-  // remaining turn — that would otherwise waste minutes per run while the
-  // model just keeps narrating future intent.
+  // Continuation guard for the requires_execution_evidence contract: count how
+  // many consecutive turns the model produced only intent text without tool
+  // actions, then inject stronger runtime guidance instead of ending early.
   let consecutiveMissingExecutionEvidenceTurns = 0;
-  let lastIntentLikeReply = '';
   // Second guard for material-execution tasks: count consecutive turns where
   // the model only ran read-only ops (ls/cat/find/list_files/read_file/etc.)
   // and never produced a concrete write/run. This catches a different failure
   // mode than the "intent-only" counter: the model keeps invoking tools, so
   // actions.length > 0 every turn and the missing-evidence branch never
   // fires, but it never transitions from "investigating" to "building".
-  // Without this, the loop runs to maxTurns and the user gets nothing.
   let readOnlyOnlyTurnsWithoutWrites = 0;
   let readOnlyTurnsNudgeSent = false;
-  let lastReadOnlyOnlyReply = '';
   let pendingTrimmedActionFollowup = false;
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
   const odinRuntimeSection = await buildOdinRuntimeSection({
@@ -6436,45 +6483,6 @@ export async function runAgent(
 
     if (missingConcreteExecutionEvidence) {
       consecutiveMissingExecutionEvidenceTurns += 1;
-      lastIntentLikeReply = envelope.reply;
-
-      // Bail out after 3 consecutive turns of intent-only output. The first
-      // turn gets a gentle English nudge, the second turn gets the escalated
-      // ⛔ Chinese last-warning with a literal action example, and only the
-      // third turn triggers the user-facing fail-fast. Earlier we bailed at 2,
-      // but that meant the escalated guard (gated on counter >= 2) was dead
-      // code — the model never actually saw the strong Chinese reminder
-      // before being cut off.
-      const FAIL_FAST_THRESHOLD = 3;
-      if (
-        consecutiveMissingExecutionEvidenceTurns >= FAIL_FAST_THRESHOLD ||
-        turn >= options.maxTurns
-      ) {
-        const reason =
-          turn >= options.maxTurns
-            ? `已达到最大轮数 (${options.maxTurns})`
-            : `连续 ${consecutiveMissingExecutionEvidenceTurns} 轮模型只输出意图文本、没有调用任何工具`;
-        return {
-          reply: [
-            `执行被中止：${reason}。`,
-            '',
-            `模型最后一次回复:`,
-            `"${truncate(lastIntentLikeReply, 240)}"`,
-            '',
-            '常见原因：',
-            '- 当前 main 模型不擅长 / 不支持 tool calling，只会用文字描述"将要做什么"',
-            '- 上下文太长，模型被前面的研究/审阅/综合输出淹没',
-            '- 系统 prompt 中关于 JSON action 的约束被忽略',
-            '',
-            '建议下一步：',
-            '- 用 /bifrost 把 Forge (执行) 切换到一个支持函数调用的型号 (例如 ark-code-latest, gpt-5-codex, claude-sonnet-4-20250514)',
-            '- 或用 /clear 清空会话后再试',
-            '- 或直接把请求拆小，单步发给模型',
-          ].join('\n'),
-          turns: turn,
-        };
-      }
-
       const escalated = consecutiveMissingExecutionEvidenceTurns >= 2;
       options.onInfo?.(
         escalated
@@ -6486,12 +6494,12 @@ export async function runAgent(
         'tool',
         escalated
           ? [
-              '⛔ 最后一次警告 ⛔',
-              '你上一轮又只写了意图文本，没有调用任何工具。',
+              '⛔ 必须继续执行 ⛔',
+              `你已经连续 ${consecutiveMissingExecutionEvidenceTurns} 轮只写了意图文本，没有调用任何工具。`,
               '本轮必须直接输出包含 actions 的 JSON：',
               '{"reply": "...", "done": false, "actions": [{"type": "write_file", "path": "...", "content": "..."}]}',
               '只允许 write_file / insert_in_file / replace_in_file / apply_patch / run_command 之一。',
-              '不要再描述"将要做什么"。立即调用工具。',
+              '不要再描述"将要做什么"。立即调用工具；如果确实无法执行，必须明确返回 blocker 并说明不可恢复原因。',
             ].join('\n')
           : [
               'Execution contract:',
@@ -6534,29 +6542,6 @@ export async function runAgent(
         readOnlyTurnsNudgeSent = false;
       } else {
         readOnlyOnlyTurnsWithoutWrites += 1;
-        lastReadOnlyOnlyReply = envelope.reply;
-        const READ_ONLY_BAIL_THRESHOLD = 4;
-        if (readOnlyOnlyTurnsWithoutWrites >= READ_ONLY_BAIL_THRESHOLD) {
-          return {
-            reply: [
-              `执行被中止：连续 ${readOnlyOnlyTurnsWithoutWrites} 轮模型只调用了读/查询类工具 (ls / cat / find / read_file / list_files / search_files / delegate_task)，从未写入任何文件或执行任何构建命令。`,
-              '',
-              '模型最后一次回复:',
-              `"${truncate(lastReadOnlyOnlyReply, 240)}"`,
-              '',
-              '常见原因：',
-              '- 模型陷在"调研循环"里，每轮都在"再看一个文件就开始写"但永远不开始',
-              '- 模型把任务委托给了一个不存在的子 agent (例如 builder)',
-              '- 任务被规划得过细，模型反复读取同一批文件',
-              '',
-              '建议下一步：',
-              '- 用 /bifrost 切换 Forge (执行) 到更擅长直接动手的型号 (ark-code-latest, gpt-5-codex, claude-sonnet-4-20250514)',
-              '- 把请求拆小，明确告诉模型"直接 write_file 输出 HTML，不要先调研"',
-              '- 或用 /clear 清空上下文重来',
-            ].join('\n'),
-            turns: turn,
-          };
-        }
         if (readOnlyOnlyTurnsWithoutWrites >= 2 && !readOnlyTurnsNudgeSent) {
           readOnlyTurnsNudgeSent = true;
           options.onInfo?.(
