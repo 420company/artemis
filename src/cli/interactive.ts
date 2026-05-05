@@ -4445,6 +4445,7 @@ async function handleTurn(
         finalTokens: livePendingTokens,
       })
     }
+    const assistantTextReturned = totalReply.trim().length > 0 || lastChunk.trim().length > 0
 
     if (result.tokenStats) {
       updateHudState(hud, result.tokenStats)
@@ -4498,10 +4499,14 @@ async function handleTurn(
     // Pool is intentionally large so the same one rarely repeats in a session.
     const closer = pickKaomoji()
     viewport?.appendScrollBlock({
-      kind: 'system',
-      text: locale === 'zh-CN'
-        ? `✓ 本轮回复结束 · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`
-        : `✓ Turn finished · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`,
+      kind: assistantTextReturned ? 'system' : 'tool',
+      text: assistantTextReturned
+        ? (locale === 'zh-CN'
+          ? `✓ 本轮模型调用返回 · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`
+          : `✓ Model turn returned · ${totalElapsedSec}s · ${tokenSummary} · ${closer}`)
+        : (locale === 'zh-CN'
+          ? `⚠ 本轮没有返回最终回复文本 · ${totalElapsedSec}s · ${tokenSummary}`
+          : `⚠ No final reply text returned · ${totalElapsedSec}s · ${tokenSummary}`),
     })
   } catch (err: unknown) {
     stopPendingTick()

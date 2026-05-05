@@ -7,6 +7,8 @@ import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { createVisualProvider } from './visual/providers/interface.js';
 import { saveGeneratedAssetToWorkspace } from './visual/saveGeneratedAsset.js';
+import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
+import { normalizeVideoDurationForProvider } from './visual/videoParams.js';
 import {
   buildVisualSetupRequiredMessage,
   describeVisualProvider,
@@ -23,7 +25,6 @@ import {
 
 const DEFAULT_MODEL = 'seedance-1-5-pro-251215';
 const DEFAULT_RATIO = '16:9';
-const DEFAULT_DURATION = 5;
 const DEFAULT_SUBDIR = 'generated-media/videos';
 const DEFAULT_MAX_POLLS = 60;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -50,14 +51,6 @@ type TaskStatusResponse = {
 function buildDefaultOutputPath(cwd: string): string {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   return path.join(cwd, DEFAULT_SUBDIR, `${ts}.mp4`);
-}
-
-function sanitizeDuration(raw: number | undefined): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_DURATION;
-  const n = Math.floor(raw);
-  if (n < 1) return 1;
-  if (n > 60) return 60;
-  return n;
 }
 
 async function downloadUrl(url: string): Promise<Buffer> {
@@ -105,7 +98,7 @@ export async function executeGenerateVideo(
     const { apiKey, baseUrl } = await resolveBytePlusCredentials(context.cwd, 'video');
     const model = action.model?.trim() || DEFAULT_MODEL;
     const ratio = action.ratio?.trim() || DEFAULT_RATIO;
-    const duration = sanitizeDuration(action.duration);
+    const duration = normalizeVideoDurationForProvider(action.duration, 'byteplus', model);
     const maxPolls =
       typeof action.maxPolls === 'number' && action.maxPolls > 0
         ? Math.floor(action.maxPolls)
@@ -114,9 +107,18 @@ export async function executeGenerateVideo(
       typeof action.pollIntervalMs === 'number' && action.pollIntervalMs >= 1000
         ? Math.floor(action.pollIntervalMs)
         : DEFAULT_POLL_INTERVAL_MS;
+    const directed = buildDirectedVideoPrompt({
+      prompt: action.prompt,
+      provider: 'byteplus',
+      model,
+      duration,
+      ratio,
+      referenceImageCount: action.referenceImageUrls?.length ?? 0,
+    });
+    toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
     const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: action.prompt },
+      { type: 'text', text: directed.directedPrompt },
     ];
     if (Array.isArray(action.referenceImageUrls)) {
       for (const url of action.referenceImageUrls) {
@@ -317,11 +319,22 @@ async function generateVideoWithVisualProvider(
 ): Promise<ToolExecutionResult> {
   const videoConfig = config.video;
   toolLog(`🎬 使用${sourceLabel}生成视频: ${describeVisualProvider(config, 'video')}`);
-  const result = await provider.generateVideo({
+  const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model);
+  const ratio = action.ratio;
+  const directed = buildDirectedVideoPrompt({
     prompt: action.prompt,
+    provider: videoConfig.provider,
     model,
-    ratio: action.ratio,
-    duration: sanitizeDuration(action.duration),
+    duration,
+    ratio,
+    referenceImageCount: action.referenceImageUrls?.length ?? 0,
+  });
+  toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
+  const result = await provider.generateVideo({
+    prompt: directed.directedPrompt,
+    model,
+    ratio,
+    duration,
     referenceImageUrls: action.referenceImageUrls,
     generateAudio: action.generateAudio,
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,

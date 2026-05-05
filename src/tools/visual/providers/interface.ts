@@ -209,7 +209,7 @@ export function isProviderSupported(name: string) {
 }
 
 export function getAvailableProviders() {
-  return VISUAL_PROVIDERS
+  return VISUAL_PROVIDERS.filter(p => p.status === 'stable')
 }
 
 export function isPlaceholderVisualProvider(name: string): boolean {

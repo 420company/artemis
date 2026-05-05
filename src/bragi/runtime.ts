@@ -353,7 +353,6 @@ export async function runRemoteCommand(
       // Hoisted out so the catch + finally below can clear the heartbeat timer
       // even if think() throws partway through.
       let heartbeatTimer: NodeJS.Timeout | null = null
-      let turnStartedAtForFinish = Date.now()
       const explicitWorkspace = await resolveWorkspaceIntent(command.body, fallbackCwd, homedir())
       if (explicitWorkspace) {
         commandCwd = explicitWorkspace.workspacePath
@@ -506,7 +505,6 @@ export async function runRemoteCommand(
         // chat message describing the most recent activity so the user
         // knows the AI is alive. Cancelled in the finally block.
         const turnStartedAt = Date.now()
-        turnStartedAtForFinish = turnStartedAt
         let lastActivitySnapshot = t(
           '正在思考与调用工具，请耐心等待…',
           'Working through tools and reasoning, please hang tight…',
@@ -721,25 +719,10 @@ export async function runRemoteCommand(
           clearInterval(heartbeatTimer)
           heartbeatTimer = null
         }
-        // Suppress "noise from heartbeat warning" if the turn was so fast it
-        // never fired — only mention completion when the turn took long
-        // enough that the user might have been wondering. Keeps quick
-        // back-and-forth chats clean.
-        const totalSec = Math.round((Date.now() - turnStartedAtForFinish) / 1000)
-        if (totalSec >= 30) {
-          // Kaomoji-only closer (no trailing text) — see src/cli/kaomoji.ts
-          // for the shared pool used by both CLI and bridges.
-          const { pickKaomoji } = await import('../cli/kaomoji.js')
-          const closer = pickKaomoji()
-          try {
-            await opts.sendChatUpdate?.(t(
-              `✓ 已完成（用时 ${totalSec}s） · ${closer}`,
-              `✓ Done (took ${totalSec}s) · ${closer}`,
-            ))
-          } catch {
-            /* swallow — completion notice failure should not mask the real reply path */
-          }
-        }
+        // Do not send a separate "done" notice here. The caller sends the real
+        // final reply after runRemoteCommand returns; a pre-reply completion
+        // status is misleading when the model produced an empty reply, hit a
+        // blocker, or still needs a follow-up turn.
       }
     }
   }

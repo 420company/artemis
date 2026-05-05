@@ -1626,6 +1626,22 @@ function buildNativeToolLimitFinalizerMessage(maxRounds: number, latestUserText:
     );
 }
 
+function buildEmptyFinalReplyGuardMessage(latestUserText: string): SessionMessage {
+    return makeSessionMessage(
+        'user',
+        [
+            '[tool:runtime_guard]',
+            'The previous provider response contained no final user-visible text and no tool calls.',
+            'Do not call any more tools unless absolutely required. Produce a user-visible final reply now.',
+            'If the task is complete, summarize the concrete result. If it is incomplete, state the exact blocker or next action.',
+            'Never return an empty reply.',
+            '',
+            'Original user request:',
+            latestUserText.slice(0, 1200),
+        ].join('\n'),
+    );
+}
+
 function normalizeThinkArgs(
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
     maybeOptions?: ThinkOptions,
@@ -1816,6 +1832,7 @@ export async function think(
     let unresolvedDirectToolFailure: DirectToolFailureState | null = null;
     let previousResponseId: string | undefined;
     let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
+    let emptyFinalReplyRetryUsed = false;
 
     const absorbRunningUserMessages = (): void => {
         const updates = pollRunningUserMessages?.() ?? [];
@@ -2041,6 +2058,24 @@ export async function think(
         }
 
         let reply = completion.text ?? '';
+        if (supportsNativeTools && !plainChat && !reply.trim()) {
+            if (!emptyFinalReplyRetryUsed && round < maxNativeToolRounds) {
+                emptyFinalReplyRetryUsed = true;
+                onToolLog?.(
+                    'Provider returned an empty final reply; requesting a no-tool final reply.',
+                    'warn',
+                );
+                const guardMessage = buildEmptyFinalReplyGuardMessage(latestUserText);
+                providerConversationMessages = [...providerConversationMessages, guardMessage];
+                rawMessages = [...rawMessages, guardMessage];
+                tSession.restore(rawMessages);
+                continue;
+            }
+            reply = [
+                '本轮模型没有返回可见的最终文本。',
+                '运行时已停止把空回复当作任务完成；请发送“继续”，我会基于当前上下文继续处理，或把任务拆成更小的一步重试。',
+            ].join('\n');
+        }
         if (supportsNativeTools && !plainChat && reply.trim()) {
             if (isPseudoToolTranscript(reply)) {
                 throw new Error(buildProviderIncompatibilityMessage());
@@ -2074,6 +2109,11 @@ export async function think(
             }
         }
 
+        finalResult = {
+            ...completion,
+            text: reply,
+            nativeToolCalls: [],
+        };
         if (reply && completion.streamed !== true && onDelta) {
             onDelta(reply);
             emittedFinalText = true;

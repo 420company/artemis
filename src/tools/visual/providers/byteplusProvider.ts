@@ -7,6 +7,7 @@ import {
   VIDEO_POLL_TIMEOUT_MS,
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js'
+import { normalizeVideoDurationForProvider } from '../videoParams.js'
 
 export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'
@@ -134,7 +135,7 @@ export class BytePlusProvider implements VisualProvider {
       const { apiKey, baseUrl } = await this.credentialsPromise
       const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
       const ratio = params.ratio || '16:9'
-      const duration = params.duration || 5
+      const duration = normalizeVideoDurationForProvider(params.duration, this.name, model)
       
       const content: Array<Record<string, unknown>> = [
         { type: 'text', text: params.prompt },

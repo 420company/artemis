@@ -39,6 +39,9 @@ import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
 import { BytePlusProvider } from '../src/tools/visual/providers/byteplusProvider.js'
 import { OpenAIProvider } from '../src/tools/visual/providers/openaiProvider.js'
+import { getAvailableProviders } from '../src/tools/visual/providers/interface.js'
+import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
+import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
   isPathInsideWorkspace,
@@ -1522,6 +1525,63 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   } finally {
     globalThis.fetch = originalFetch
   }
+}
+
+{
+  const availableProviderNames = getAvailableProviders().map((provider) => provider.name)
+  assert(
+    'visual provider registry: public provider list excludes placeholders',
+    !availableProviderNames.includes('stable-diffusion') &&
+      !availableProviderNames.includes('gemini') &&
+      !availableProviderNames.includes('grok') &&
+      availableProviderNames.includes('byteplus') &&
+      availableProviderNames.includes('openai') &&
+      availableProviderNames.includes('google') &&
+      availableProviderNames.includes('custom'),
+    availableProviderNames.join(', '),
+  )
+}
+
+{
+  const directed = buildDirectedVideoPrompt({
+    prompt: '数字萨满, 哥特式教堂, 觉醒',
+    provider: 'byteplus',
+    model: 'dreamina-seedance-2-0-fast-260128',
+    duration: 5,
+    ratio: '16:9',
+  })
+  assert(
+    'video director: Seedance prompt expansion adds timeline and one focal point',
+    directed.directedPrompt.includes('0-2 seconds') &&
+      directed.directedPrompt.includes('single clear focal point') &&
+      directed.directedPrompt.includes('BytePlus Seedance') &&
+      directed.directedPrompt.includes('physically') &&
+      directed.directedPrompt.includes('no random morphing'),
+    directed.directedPrompt,
+  )
+}
+
+{
+  assert(
+    'video params: BytePlus Seedance 2.0 fast duration is clamped to the accepted minimum',
+    normalizeVideoDurationForProvider(2, 'byteplus', 'dreamina-seedance-2-0-fast-260128') === 5,
+  )
+  assert(
+    'video params: other video providers keep short durations when allowed by their adapter',
+    normalizeVideoDurationForProvider(2, 'google', 'veo-3.0-generate-preview') === 2,
+  )
+}
+
+{
+  const generateVideoSource = fs.readFileSync(path.join(process.cwd(), 'src/tools/generateVideo.ts'), 'utf8')
+  assert(
+    'generate_video: visual provider path sends Director prompt to video adapters',
+    /buildDirectedVideoPrompt\([\s\S]*provider:\s*videoConfig\.provider[\s\S]*prompt:\s*directed\.directedPrompt/.test(generateVideoSource),
+  )
+  assert(
+    'generate_video: legacy BytePlus fallback sends Director prompt',
+    /provider:\s*'byteplus'[\s\S]*\{ type:\s*'text', text:\s*directed\.directedPrompt \}/.test(generateVideoSource),
+  )
 }
 
 {
