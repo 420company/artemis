@@ -465,9 +465,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
           },
           body: JSON.stringify(body),
+          signal: options?.abortSignal,
         },
       )
     } catch (error) {
+      if (options?.abortSignal?.aborted) {
+        throw error
+      }
       throw new Error(buildProviderTransportErrorMessage(error, this.config))
     }
 
@@ -737,9 +741,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
           },
           body: JSON.stringify(body),
+          signal: options?.abortSignal,
         },
       );
     } catch (error) {
+      if (options?.abortSignal?.aborted) {
+        throw error;
+      }
       throw new Error(buildProviderTransportErrorMessage(error, this.config));
     }
 

@@ -196,9 +196,13 @@ export class MessagesCompatibleProvider implements ChatProvider {
             messages: messagesApiMessages,
             ...(anthropicTools?.length ? { tools: anthropicTools } : {}),
           }),
+          signal: options?.abortSignal,
         },
       );
     } catch (error) {
+      if (options?.abortSignal?.aborted) {
+        throw error;
+      }
       throw new Error(buildProviderTransportErrorMessage(error, this.config));
     }
 

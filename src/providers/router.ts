@@ -374,6 +374,9 @@ export async function createProviderRouter(
             }
             return result;
           } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+              throw error;
+            }
             lastError = error;
             const message = error instanceof Error ? error.message : String(error);
             options.onInfo?.(

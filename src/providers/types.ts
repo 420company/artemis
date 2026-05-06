@@ -88,6 +88,11 @@ export type ProviderRequestOptions = {
    * Ignored if the provider does not support images.
    */
   imageAttachments?: ImageAttachment[];
+  /**
+   * Optional cancellation signal. Interactive runtimes use this to stop an
+   * in-flight model request as soon as the user sends a correction/interjection.
+   */
+  abortSignal?: AbortSignal;
 };
 
 export type ProviderTarget = 'main' | AgentRole;

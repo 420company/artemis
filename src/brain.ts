@@ -1733,6 +1733,11 @@ export interface ThinkOptions {
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 24;
 
+function isAbortError(error: unknown): boolean {
+    return error instanceof DOMException && error.name === 'AbortError'
+        || error instanceof Error && error.name === 'AbortError';
+}
+
 export async function think(
     input: string,
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
@@ -1805,9 +1810,13 @@ export async function think(
     let previousResponseId: string | undefined;
     let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
     let emptyFinalReplyRetryUsed = false;
+    let runningMessageAbortController: AbortController | undefined;
+    let runningMessageAbortPending = false;
+    let runningMessageAbortTimer: ReturnType<typeof setInterval> | undefined;
 
-    const absorbRunningUserMessages = (): void => {
+    const absorbRunningUserMessages = (): number => {
         const updates = pollRunningUserMessages?.() ?? [];
+        let accepted = 0;
         for (const raw of updates) {
             const text = raw.trim();
             if (!text) continue;
@@ -1824,6 +1833,34 @@ export async function think(
             rawMessages = [...rawMessages, injected];
             tSession.restore(rawMessages);
             onRunningUserMessageAccepted?.(text);
+            accepted += 1;
+        }
+        return accepted;
+    };
+
+    const beginRunningMessageAbortWatch = (): AbortController | undefined => {
+        if (!pollRunningUserMessages) return undefined;
+        const controller = new AbortController();
+        runningMessageAbortController = controller;
+        runningMessageAbortPending = false;
+        runningMessageAbortTimer = setInterval(pollRunningMessagesDuringProvider, 250);
+        runningMessageAbortTimer.unref?.();
+        return controller;
+    };
+
+    const endRunningMessageAbortWatch = (): void => {
+        if (runningMessageAbortTimer) {
+            clearInterval(runningMessageAbortTimer);
+            runningMessageAbortTimer = undefined;
+        }
+        runningMessageAbortController = undefined;
+    };
+
+    const pollRunningMessagesDuringProvider = (): void => {
+        if (!runningMessageAbortController || runningMessageAbortController.signal.aborted) return;
+        if (absorbRunningUserMessages() > 0) {
+            runningMessageAbortPending = true;
+            runningMessageAbortController.abort();
         }
     };
 
@@ -1846,22 +1883,40 @@ export async function think(
         previousResponseId = undefined;
         pendingToolOutputs = undefined;
         const providerMessages = [...systemMessages, ...providerConversationMessages];
-        const completion = await completeWithOptionalStream(
-            p,
-            providerMessages,
-            onDelta,
-            {
-                ...responseContinuation,
-                nativeFunctionTools,
-                // User-supplied images are input context, not a generated/optional
-                // tool capability. Do not drop them just because the setup "vision"
-                // tool group was disabled; providers that cannot handle images will
-                // ignore/fail explicitly in their own adapter path.
-                imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
-                onReasoning,
-                guardStreamingText: supportsNativeTools && !plainChat,
-            },
-        );
+        const abortController = beginRunningMessageAbortWatch();
+        let completion: ProviderResponse;
+        try {
+            completion = await completeWithOptionalStream(
+                p,
+                providerMessages,
+                onDelta,
+                {
+                    ...responseContinuation,
+                    nativeFunctionTools,
+                    // User-supplied images are input context, not a generated/optional
+                    // tool capability. Do not drop them just because the setup "vision"
+                    // tool group was disabled; providers that cannot handle images will
+                    // ignore/fail explicitly in their own adapter path.
+                    imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
+                    onReasoning: (delta: string) => {
+                        pollRunningMessagesDuringProvider();
+                        onReasoning?.(delta);
+                    },
+                    guardStreamingText: supportsNativeTools && !plainChat,
+                    abortSignal: abortController?.signal,
+                },
+            );
+        } catch (error) {
+            if (runningMessageAbortPending && isAbortError(error)) {
+                continue;
+            }
+            throw error;
+        } finally {
+            endRunningMessageAbortWatch();
+        }
+        if (runningMessageAbortPending) {
+            continue;
+        }
         finalResult = completion;
 
         const nativeCalls = completion.nativeToolCalls ?? [];

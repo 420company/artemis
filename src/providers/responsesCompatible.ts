@@ -279,8 +279,12 @@ export class ResponsesCompatibleProvider implements ChatProvider {
           authorization: `Bearer ${this.config.apiKey}`,
         },
         body: JSON.stringify(payload),
+        signal: options?.abortSignal,
       });
     } catch (error) {
+      if (options?.abortSignal?.aborted) {
+        throw error;
+      }
       throw new Error(buildProviderTransportErrorMessage(error, this.config));
     }
 

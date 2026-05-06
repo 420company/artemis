@@ -638,6 +638,40 @@ export async function runNidhoggWorkflow(
   options: RunAgentOptions,
   config?: NidhoggConfig,
 ): Promise<RunResult> {
+  let activeUserPrompt = userPrompt;
+  const absorbNidhoggUserMessages = async (phase: string): Promise<number> => {
+    const updates = options.pollRunningUserMessages?.() ?? [];
+    const accepted: string[] = [];
+    for (const raw of updates) {
+      const text = raw.trim();
+      if (!text) continue;
+      accepted.push(text);
+      options.sessionStore.appendMessage(
+        session,
+        'user',
+        [
+          '[New user message received while Nidhogg was running]',
+          text,
+          '',
+          'Treat this as the latest correction for the adversarial loop. Re-scope the remaining generator, critic, judge, and synthesis work before continuing.',
+        ].join('\n'),
+      );
+      options.onRunningUserMessageAccepted?.(text);
+    }
+    if (accepted.length === 0) return 0;
+    activeUserPrompt = [
+      activeUserPrompt.trim(),
+      '',
+      'Latest in-progress user correction(s):',
+      ...accepted.map((text) => `- ${text}`),
+      '',
+      'Apply these corrections immediately to all remaining Nidhogg work.',
+    ].join('\n');
+    await options.sessionStore.save(session);
+    options.onInfo?.(`[nidhogg] accepted ${accepted.length} running user message(s) at ${phase}; updated remaining task scope`);
+    return accepted.length;
+  };
+
   const resolvedConfig = normalizeConfig(config);
   const imageAttachments: ImageAttachment[] = [];
   const imageLabels: string[] = [];
@@ -675,7 +709,7 @@ export async function runNidhoggWorkflow(
   session.plan = buildInitialPlan();
   await options.sessionStore.save(session);
   await options.sessionStore.appendWorkflowEntry(session, 'Nidhogg Started', [
-    `task=${truncate(userPrompt, 300)}`,
+    `task=${truncate(activeUserPrompt, 300)}`,
     `max_rounds=${resolvedConfig.maxRounds}`,
     `pass_threshold=${resolvedConfig.passThreshold}`,
     `critics=${criticKinds.join(',')}`,
@@ -692,6 +726,7 @@ export async function runNidhoggWorkflow(
 
   const checkInterrupt = async (phase: string): Promise<void> => {
     await processDelegatedRuntimeCommands(session, options);
+    await absorbNidhoggUserMessages(phase);
     options.onInfo?.(`[nidhogg] interrupt check passed: ${phase}`);
   };
 
@@ -705,14 +740,14 @@ export async function runNidhoggWorkflow(
       runSpecialistAgent(
         session,
         'builder',
-        buildGeneratorTask(userPrompt, round, finalJudgeVerdict?.priorityIssues),
+        buildGeneratorTask(activeUserPrompt, round, finalJudgeVerdict?.priorityIssues),
         {
           ...options,
           appendUserMessage: true,
           imageAttachments: round === 1 ? imageAttachments : undefined,
           onInfo: (message) => options.onInfo?.(`[nidhogg:builder:r${round}] ${message}`),
         },
-        { title: `[nidhogg:builder:r${round}] ${truncate(userPrompt, 60)}` },
+        { title: `[nidhogg:builder:r${round}] ${truncate(activeUserPrompt, 60)}` },
       ),
       GENERATOR_SOFT_TIMEOUT_MS,
     );
@@ -767,7 +802,7 @@ export async function runNidhoggWorkflow(
           runSpecialistAgent(
             session,
             'reviewer',
-            buildCriticTask(kind, userPrompt, lastGeneratorReply, round, imageLabels),
+            buildCriticTask(kind, activeUserPrompt, lastGeneratorReply, round, imageLabels),
             {
               ...options,
               appendUserMessage: true,
@@ -775,7 +810,7 @@ export async function runNidhoggWorkflow(
               imageAttachments: kind === 'visual' ? imageAttachments : undefined,
               onInfo: (message) => options.onInfo?.(`[nidhogg:${kind}:r${round}] ${message}`),
             },
-            { title: `[nidhogg:${kind}:r${round}] ${truncate(userPrompt, 50)}` },
+            { title: `[nidhogg:${kind}:r${round}] ${truncate(activeUserPrompt, 50)}` },
           ),
           CRITIC_SOFT_TIMEOUT_MS,
         );
@@ -840,14 +875,14 @@ export async function runNidhoggWorkflow(
       runSpecialistAgent(
         session,
         'arbiter',
-        buildJudgeTask(userPrompt, lastGeneratorReply, harnessResult, criticResults, round, previousOverallScore),
+        buildJudgeTask(activeUserPrompt, lastGeneratorReply, harnessResult, criticResults, round, previousOverallScore),
         {
           ...options,
           appendUserMessage: true,
           permissionManager: options.permissionManager.fork('read-only'),
           onInfo: (message) => options.onInfo?.(`[nidhogg:judge:r${round}] ${message}`),
         },
-        { title: `[nidhogg:judge:r${round}] ${truncate(userPrompt, 50)}` },
+        { title: `[nidhogg:judge:r${round}] ${truncate(activeUserPrompt, 50)}` },
       ),
       JUDGE_SOFT_TIMEOUT_MS,
     );
@@ -946,7 +981,7 @@ export async function runNidhoggWorkflow(
     : 'none';
 
   const synthesisPrompt = [
-    `Original task: ${userPrompt.trim()}`,
+    `Original task: ${activeUserPrompt.trim()}`,
     '',
     `Nidhogg adversarial loop completed after ${rounds.length} round(s).`,
     `Final verdict: ${finalVerdict}`,

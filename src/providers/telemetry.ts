@@ -347,6 +347,9 @@ export function createTrackedProviderFromConfig(
       try {
         return await wrapResult(await provider.complete(messages, options));
       } catch (error) {
+        if (options?.abortSignal?.aborted && error instanceof Error && error.name === 'AbortError') {
+          throw error;
+        }
         return wrapError(startedAt, error);
       }
     },
@@ -360,6 +363,9 @@ export function createTrackedProviderFromConfig(
           await provider.completeStream!(messages, onChunk, options),
         );
       } catch (error) {
+        if (options?.abortSignal?.aborted && error instanceof Error && error.name === 'AbortError') {
+          throw error;
+        }
         return wrapError(startedAt, error);
       }
     };

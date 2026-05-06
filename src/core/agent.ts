@@ -3228,6 +3228,11 @@ export type RunAgentOptions = {
   onRunningUserMessageAccepted?: (text: string) => void;
 };
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+    || error instanceof Error && error.name === 'AbortError';
+}
+
 function clampTurns(value: number): number {
   return Math.min(Math.max(value, 1), 50);
 }
@@ -5740,10 +5745,9 @@ export async function runAgent(
     );
   }
 
-  for (let turn = 1; turn <= options.maxTurns; turn += 1) {
-    await processDelegatedRuntimeCommands(session, runOptions);
-
+  const absorbRunningUserMessages = async (): Promise<number> => {
     const runningUserMessages = options.pollRunningUserMessages?.() ?? [];
+    let accepted = 0;
     for (const runningUserMessage of runningUserMessages) {
       const cleanMessage = runningUserMessage.trim();
       if (!cleanMessage) {
@@ -5756,10 +5760,47 @@ export async function runAgent(
         createdAt: new Date().toISOString(),
       });
       options.onRunningUserMessageAccepted?.(cleanMessage);
+      accepted += 1;
     }
-    if (runningUserMessages.length > 0) {
+    if (accepted > 0) {
       await options.sessionStore.save(session);
     }
+    return accepted;
+  };
+
+  let runningMessageAbortController: AbortController | undefined;
+  let runningMessageAbortTimer: ReturnType<typeof setInterval> | undefined;
+  let runningMessageAbortPending = false;
+
+  const beginRunningMessageAbortWatch = (): AbortController | undefined => {
+    if (!options.pollRunningUserMessages) return undefined;
+    const controller = new AbortController();
+    runningMessageAbortController = controller;
+    runningMessageAbortPending = false;
+    runningMessageAbortTimer = setInterval(() => {
+      void (async () => {
+        if (!runningMessageAbortController || runningMessageAbortController.signal.aborted) return;
+        if ((await absorbRunningUserMessages()) > 0) {
+          runningMessageAbortPending = true;
+          runningMessageAbortController.abort();
+        }
+      })();
+    }, 250);
+    runningMessageAbortTimer.unref?.();
+    return controller;
+  };
+
+  const endRunningMessageAbortWatch = (): void => {
+    if (runningMessageAbortTimer) {
+      clearInterval(runningMessageAbortTimer);
+      runningMessageAbortTimer = undefined;
+    }
+    runningMessageAbortController = undefined;
+  };
+
+  for (let turn = 1; turn <= options.maxTurns; turn += 1) {
+    await processDelegatedRuntimeCommands(session, runOptions);
+    await absorbRunningUserMessages();
 
     if (turn === 1) {
       await recordHeimdallStage(
@@ -5899,26 +5940,47 @@ export async function runAgent(
     // which the workflow renderer accumulates into a per-stage live buffer
     // and shows as it arrives in the terminal UI.
     let completion: ProviderResponse;
-    if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
-      const onInfoCallback = options.onInfo;
-      onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
-      try {
-        completion = await activeProvider.completeStream(
-          providerMessages,
-          (delta) => {
-            if (!delta) return;
-            // Encode newlines so the receiver can rebuild the text.
-            onInfoCallback(
-              `[stream-chunk] profile=${profile} turn=${turn} delta=${JSON.stringify(delta)}`,
-            );
-          },
-          providerCallOptions,
-        );
-      } finally {
-        onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
+    const abortController = beginRunningMessageAbortWatch();
+    try {
+      if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
+        const onInfoCallback = options.onInfo;
+        onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
+        try {
+          completion = await activeProvider.completeStream(
+            providerMessages,
+            (delta) => {
+              if (!delta) return;
+              // Encode newlines so the receiver can rebuild the text.
+              onInfoCallback(
+                `[stream-chunk] profile=${profile} turn=${turn} delta=${JSON.stringify(delta)}`,
+              );
+            },
+            {
+              ...providerCallOptions,
+              abortSignal: abortController?.signal,
+            },
+          );
+        } finally {
+          onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
+        }
+      } else {
+        completion = await activeProvider.complete(providerMessages, {
+          ...providerCallOptions,
+          abortSignal: abortController?.signal,
+        });
       }
-    } else {
-      completion = await activeProvider.complete(providerMessages, providerCallOptions);
+    } catch (error) {
+      if (runningMessageAbortPending && isAbortError(error)) {
+        options.onInfo?.(`[agent] running user message interrupted provider call; rebuilding context`);
+        continue;
+      }
+      throw error;
+    } finally {
+      endRunningMessageAbortWatch();
+    }
+    if (runningMessageAbortPending) {
+      options.onInfo?.(`[agent] running user message accepted; rebuilding context`);
+      continue;
     }
     completion = await runNativeToolLoop(
       activeProvider,
