@@ -482,8 +482,8 @@ export async function runRemoteCommand(
 
         const effectiveBody = workflowResolution?.effectivePrompt ?? command.body
         const startedText = t(
-          '已收到，正在后台处理；完成后会把结果发回聊天。',
-          'Received. Working in the background; the final result will be sent back here.',
+          '已接收 · 后台 workflow 运行中，完成后回传结果。',
+          'Received · background workflow running; the final result will be sent back here.',
         )
         await opts.onProgress?.(startedText, 'info')
         // Also send the "received" notice to the chat so users on phones
@@ -524,8 +524,8 @@ export async function runRemoteCommand(
         // knows the AI is alive. Cancelled in the finally block.
         const turnStartedAt = Date.now()
         let lastActivitySnapshot = t(
-          '正在思考与调用工具，请耐心等待…',
-          'Working through tools and reasoning, please hang tight…',
+          'reasoning + tools 运行中，等待下一段进度。',
+          'reasoning + tools running',
         )
         const HEARTBEAT_INTERVAL_MS = 45_000
         heartbeatTimer = setInterval(() => {
@@ -697,8 +697,8 @@ export async function runRemoteCommand(
               if (now - lastReasoningNoticeAt < 15_000) return
               lastReasoningNoticeAt = now
               emitProgress(t(
-                '🧠 模型正在思考，还在工作中。',
-                '🧠 The model is thinking and still working.',
+                '🧠 reasoning stream active · 模型仍在思考。',
+                '🧠 reasoning stream active',
               ))
             },
             onStream: () => {
@@ -706,8 +706,8 @@ export async function runRemoteCommand(
               if (now - lastStreamNoticeAt < 15_000) return
               lastStreamNoticeAt = now
               emitProgress(t(
-                '✍️ 正在生成回复。',
-                '✍️ Generating the reply.',
+                '✍️ response stream active · 正在输出回复。',
+                '✍️ response stream active',
               ))
             },
           })

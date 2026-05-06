@@ -711,10 +711,10 @@ async function runWithProgress<T>(
   let tick = 0;
   let done = false;
 
-  const title = pickLocale(locale, { zh: '正在验证 Provider', en: 'Verifying provider' });
+  const title = pickLocale(locale, { zh: 'Provider probe · 验证中', en: 'Provider probe' });
   const hint = pickLocale(locale, {
-    zh: '提示：慢速网络或冷启动的边缘模型首次验证可能较久，请勿关闭窗口。',
-    en: 'Note: slow networks or cold-start edge models can take a while — keep the window open.',
+    zh: 'slow network / cold-start edge model 可能需要更久，请保持窗口打开。',
+    en: 'slow network / cold-start edge model may take longer; keep this window open.',
   });
 
   const isTTY = process.stdout.isTTY ?? false;
@@ -765,7 +765,7 @@ async function runWithProgress<T>(
     clearInterval(timer);
     const elapsedFinal = ((Date.now() - start) / 1000).toFixed(1);
     writePanel(buildPanel(title, [
-      `✓  ${pickLocale(locale, { zh: '验证完成', en: 'Verification complete' })}  (${elapsedFinal}s)`,
+      `✓  ${pickLocale(locale, { zh: 'probe complete · 验证完成', en: 'probe complete' })}  (${elapsedFinal}s)`,
     ]), false);
     return result;
   } catch (err) {
@@ -797,8 +797,8 @@ export async function promptForVerifiedProviderProfile(
         promptIO,
         locale,
         pickLocale(locale, {
-          zh: `正在连接 ${protocolLabel}，首次探测可能需要 20–60 秒，请耐心等待…`,
-          en: `Connecting to ${protocolLabel}. The first probe can take 20–60 seconds — please hold on…`,
+          zh: `connecting ${protocolLabel} · first probe 可能需要 20–60s，请稍候`,
+          en: `connecting ${protocolLabel} · first probe may take 20–60s`,
         }),
         () => probeProviderConfig(profile, { locale }),
       );
@@ -811,8 +811,8 @@ export async function promptForVerifiedProviderProfile(
         promptIO,
         locale,
         pickLocale(locale, {
-          zh: `连接成功（${probe.latencyMs}ms）。正在验证原生工具调用…`,
-          en: `Connection OK (${probe.latencyMs}ms). Verifying native tool calls…`,
+          zh: `connection OK (${probe.latencyMs}ms) · 正在 probing native tool calls`,
+          en: `connection OK (${probe.latencyMs}ms) · probing native tool calls`,
         }),
         () => probeProviderNativeToolCalls(profile, { locale }),
       );
@@ -826,7 +826,7 @@ export async function promptForVerifiedProviderProfile(
 
     promptIO?.write(buildPanel('Provider connection test failed', failures));
     const next = await choosePromptOption(promptIO, {
-      title: pickLocale(locale, { zh: '连接测试失败，下一步？', en: 'Connection test failed. What next?' }),
+      title: pickLocale(locale, { zh: 'Provider probe failed · 验证失败', en: 'Provider probe failed' }),
       initialIndex: 0,
       choices: [
         { label: pickLocale(locale, { zh: '修改配置', en: 'Edit configuration' }), value: 'edit' as const },

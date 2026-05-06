@@ -930,18 +930,18 @@ function buildInteractiveLandingLines(options: {
     `  ${dm(t('执行模型', 'Exec'))}   ${c(137, 180, 250, modelLabel)}`,
     `  ${dm(t('思维模型', 'Brain'))}  ${brainLabel ? c(203, 166, 247, brainLabel) : dm(t('未配置', 'Not configured'))}`,
     `  ${dm(t('权限模式', 'Mode'))}   ${c(249, 226, 175, permissionMode)}`,
-    `  ${dm('T/S/M')}   ${c(137, 180, 250, String(DIRECT_TOOL_COUNT))} ${dm('/')} ${c(203, 166, 247, String(hud.skillCount))} ${dm('/')} ${c(148, 226, 213, String(hud.mcpServerCount))}`,
+    `  ${dm('tools')}   ${c(137, 180, 250, `${DIRECT_TOOL_COUNT} tools`)} ${dm('·')} ${c(203, 166, 247, `${hud.skillCount} skills`)} ${dm('·')} ${c(148, 226, 213, `${hud.mcpServerCount} MCP`)}`,
     '',
     `  ${c(245, 196, 94, bd(`✦ ${t('工作流', 'Workflows')}`))}`,
-    `    ${c(245, 196, 94, bd('/team'))} ${dm(t('← 不知道选哪个？让 AI 自动派单', '← Not sure? Let AI route for you'))}`,
+    `    ${c(245, 196, 94, bd('/team'))} ${dm(t('← 不确定路径时交给 Team router', '← Let Team router choose the path'))}`,
     `    ${c(148, 82, 255, bd('/niko'))} ${c(148, 82, 255, bd('/design'))} ${c(148, 82, 255, bd('/athena'))} ${c(148, 82, 255, bd('/nidhogg'))} ${c(148, 82, 255, bd('/contest'))} ${c(148, 82, 255, bd('/run'))}`,
     '',
     `  ${c(245, 196, 94, bd(`✦ ${t('设置', 'Setup')}`))}`,
     `    ${c(148, 82, 255, bd('/bifrost'))}  ${c(148, 82, 255, bd('/config'))}  ${c(148, 82, 255, bd('/permission'))}  ${c(148, 82, 255, bd('/newborn'))}`,
     '',
     modelLabel === '?'
-      ? `  ${c(255, 120, 155, t('⚠ 未检测到可用 Provider，请先运行 /config', '⚠ No usable provider. Run /config first.'))}`
-      : `  ${c(82, 196, 255, bd('(⌐■-■)'))}  ${bd(c(166, 227, 161, t('直接输入文字开始对话', 'Have a nice trip')))} ${dm(t('· / 浏览命令', '· / browse commands'))}`,
+      ? `  ${c(255, 120, 155, t('⚠ 未检测到可用 Provider，请先运行 /config', '⚠ No usable Provider. Run /config first.'))}`
+      : `  ${c(82, 196, 255, bd('(⌐■-■)'))}  ${bd(c(166, 227, 161, t('直接输入文字开始对话', 'Have a nice trip')))} ${dm(t('·  / 浏览命令', '·  / browse commands'))}`,
     '',
   ]
 
@@ -2440,22 +2440,22 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const enabled = data.servers.filter(s => s.enabled).length
         const total = data.servers.length
         const header = keyword
-          ? t(`MCP 搜索 "${keyword}" — ${servers.length}/${total} 命中, ${enabled} 已启用`, `MCP search "${keyword}" — ${servers.length}/${total} matches, ${enabled} enabled`)
-          : t(`MCP 服务 — 共 ${total}, ${enabled} 已启用`, `MCP servers — ${total} total, ${enabled} enabled`)
+          ? t(`MCP search "${keyword}"  ·  ${servers.length}/${total} 命中  ·  ${enabled} enabled`, `MCP search "${keyword}"  ·  ${servers.length}/${total} matched  ·  ${enabled} enabled`)
+          : t(`MCP servers  ·  共 ${total} 个  ·  ${enabled} enabled`, `MCP servers  ·  ${total} total  ·  ${enabled} enabled`)
         const rows = servers.slice(0, 40).map(s => {
           const status = s.enabled ? '\x1b[1;32mON\x1b[0m ' : '\x1b[2mOFF\x1b[0m'
           const name = (s.surface?.serverName ?? s.id).slice(0, 35).padEnd(35)
           return `${status}  ${name} [${s.transport}]  ${s.id}`
         })
         if (servers.length > 40) {
-          rows.push(t(`  … +${servers.length - 40} 更多 (用 /mcp list <关键词> 过滤)`, `  … +${servers.length - 40} more (use /mcp list <keyword> to filter)`))
+          rows.push(t(`  … +${servers.length - 40} more  ·  用 /mcp list <keyword> 继续过滤`, `  … +${servers.length - 40} more  ·  /mcp list <keyword>`))
         }
         if (rows.length === 0) {
           rows.push(t('无匹配项', 'No matches'))
         }
         if (!keyword && total > 0) {
           rows.push('')
-          rows.push(t('提示: /mcp suggest <意图> 智能推荐 | /mcp enable <id> 启用 | /mcp list <关键词> 搜索', 'Tip: /mcp suggest <intent> for AI-ranked suggestions | /mcp enable <id> | /mcp list <keyword>'))
+          rows.push(t('试试：/mcp suggest <intent> · /mcp enable <id> · /mcp list <keyword>', 'Try: /mcp suggest <intent> · /mcp enable <id> · /mcp list <keyword>'))
         }
         appendSystemPanel(header, rows)
       } else if (sub.startsWith('suggest ') || sub === 'suggest') {
@@ -2470,7 +2470,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           if (suggestions.length === 0) {
             appendSystemPanel(
               t(`MCP 建议: ${intent}`, `MCP suggestions: ${intent}`),
-              [t('无匹配建议——所有相关服务可能都已启用，或 intent 太宽泛', 'No suggestions — all relevant servers may already be enabled, or intent is too broad')],
+              [t('无建议 · 相关 MCP 可能已启用，或 intent 太宽。', 'No suggestions · relevant MCP may already be enabled, or the intent is too broad.')],
             )
           } else {
             const lines = suggestions.slice(0, 15).map((s: any) => {
@@ -2479,7 +2479,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
               return `  \x1b[1;35m${name}\x1b[0m  ${s.id}${score}`
             })
             lines.push('')
-            lines.push(t(`输入 /mcp enable <ID> 启用对应服务`, `Type /mcp enable <ID> to activate`))
+            lines.push(t(`下一步：/mcp enable <ID>`, `Next: /mcp enable <ID>`))
             appendSystemPanel(t(`MCP 建议: ${intent}`, `MCP suggestions: ${intent}`), lines)
           }
         }
@@ -2490,9 +2490,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           server.enabled = true
           await mcpStore.save(data)
           hud.mcpServerCount = data.servers.filter(s => s.enabled).length
-          appendSystemPanel(t('MCP 已启用', 'MCP Enabled'), [`→ ${id}`])
+          appendSystemPanel(t('MCP enabled · 已启用', 'MCP enabled'), [`→ ${id}`])
         } else {
-          appendSystemPanel(t('MCP 启用失败', 'MCP Enable Failed'), [t(`未找到 ID: ${id}`, `ID not found: ${id}`)])
+          appendSystemPanel(t('MCP enable failed · 启用失败', 'MCP enable failed'), [t(`ID 未找到: ${id}`, `ID not found: ${id}`)])
         }
       } else if (sub.startsWith('disable ')) {
         const id = sub.slice('disable '.length).trim()
@@ -2501,19 +2501,19 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           server.enabled = false
           await mcpStore.save(data)
           hud.mcpServerCount = data.servers.filter(s => s.enabled).length
-          appendSystemPanel(t('MCP 已禁用', 'MCP Disabled'), [`→ ${id}`])
+          appendSystemPanel(t('MCP disabled · 已禁用', 'MCP disabled'), [`→ ${id}`])
         } else {
-          appendSystemPanel(t('MCP 禁用失败', 'MCP Disable Failed'), [t(`未找到 ID: ${id}`, `ID not found: ${id}`)])
+          appendSystemPanel(t('MCP disable failed · 禁用失败', 'MCP disable failed'), [t(`ID 未找到: ${id}`, `ID not found: ${id}`)])
         }
       } else {
         appendSystemPanel(
           t('MCP 用法', 'MCP Usage'),
           [
-            '/mcp                       ' + t('列出所有 MCP 服务', 'list all MCP servers'),
-            '/mcp list <关键词>          ' + t('按关键词搜索', 'search by keyword'),
-            '/mcp suggest <意图>         ' + t('智能推荐相关服务', 'AI-ranked suggestions'),
-            '/mcp enable <ID>           ' + t('启用某个服务', 'enable a server'),
-            '/mcp disable <ID>          ' + t('禁用某个服务', 'disable a server'),
+            '/mcp                       ' + t('列出 MCP servers', 'list MCP servers'),
+            '/mcp list <keyword>         ' + t('按 id / surface name 过滤', 'filter by id or surface name'),
+            '/mcp suggest <intent>       ' + t('按 intent 排序推荐 MCP', 'rank MCP by intent'),
+            '/mcp enable <ID>            ' + t('启用一个 MCP', 'enable one MCP'),
+            '/mcp disable <ID>           ' + t('禁用一个 MCP', 'disable one MCP'),
           ],
         )
       }
@@ -2537,56 +2537,56 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       if (!argText || subLower === 'browse' || subLower === 'categories') {
         const grouped = groupSkillsByCategory(skills)
         const lines = [
-          t(`总技能数: ${skills.length}`, `Total skills: ${skills.length}`),
-          t('这些技能默认可用，不需要逐个启用；多数是任务流程/知识包，少数是可执行自动化。', 'Skills are available by default; most are instructional workflows, a few are executable automations.'),
+          t(`skills: ${skills.length}`, `skills: ${skills.length}`),
+          t('默认可用 · 多数是 workflow / knowledge pack，少数带 executable automation。', 'Available by default · mostly workflow / knowledge packs, with a few executable automations.'),
           '',
           ...grouped.slice(0, 16).map(group => {
             const examples = group.examples.map(skill => skill.id).join(', ')
             return `  ${group.category.padEnd(22)} ${String(group.count).padStart(4)}   ${examples}`
           }),
           '',
-          t('不知道技能名时：/skills recommend <你想做什么>', 'If you do not know the skill name: /skills recommend <what you want to do>'),
-          t('查看技能说明：/skills detail <skill-id>', 'Inspect a skill: /skills detail <skill-id>'),
+          t('试试：/skills recommend <intent>', 'Try: /skills recommend <intent>'),
+          t('打开详情：/skills detail <skill-id>', 'Open: /skills detail <skill-id>'),
         ]
-        appendSystemPanel(t('技能目录', 'Skill catalog'), lines)
+        appendSystemPanel(t('Skill catalog · 技能目录', 'Skill catalog'), lines)
       } else if (['recommend', 'suggest', 'idea', 'use'].includes(subLower)) {
         const intent = rest.join(' ').trim()
         if (!intent) {
-          appendSystemPanel(t('技能推荐', 'Skill recommendation'), [
-            t('用法：/skills recommend <你想完成的任务>', 'Usage: /skills recommend <what you want to accomplish>'),
-            t('例：/skills recommend 检查 Next.js 无障碍和 SEO 问题', 'Example: /skills recommend audit Next.js accessibility and SEO issues'),
+          appendSystemPanel(t('Skill recommendation · 技能推荐', 'Skill recommendation'), [
+            t('用法：/skills recommend <intent>', 'Usage: /skills recommend <intent>'),
+            t('示例：/skills recommend 检查 Next.js 无障碍和 SEO 问题', 'Example: /skills recommend audit Next.js accessibility and SEO issues'),
           ])
         } else {
           const matches = recommendSkills(skills, intent, 12)
           const lines = matches.length === 0
             ? [t(`没有找到适合「${intent}」的技能；可以换成更具体的任务描述。`, `No skill matched “${intent}”; try a more specific task description.`)]
             : matches.map(skill => {
-              const badge = skill.executable ? t('可执行', 'exec') : t('流程', 'guide')
+              const badge = skill.executable ? t('exec', 'exec') : t('guide', 'guide')
               return `  ${skill.id.slice(0, 36).padEnd(36)} [${badge}] ${skill.description.slice(0, 70)}`
             })
           if (matches.length > 0) {
-            lines.push('', t('下一步：直接用自然语言说任务，或 /skills detail <skill-id> 看完整用法。', 'Next: describe the task naturally, or run /skills detail <skill-id> for full usage.'))
+            lines.push('', t('下一步：直接描述任务 · /skills detail <skill-id>', 'Next: describe the task naturally · /skills detail <skill-id>'))
           }
-          appendSystemPanel(t(`技能推荐：${intent}`, `Skill recommendations: ${intent}`), lines)
+          appendSystemPanel(t(`Skill recommendations · ${intent}`, `Skill recommendations: ${intent}`), lines)
         }
       } else if (['detail', 'show', 'open', 'info'].includes(subLower)) {
         const id = rest.join(' ').trim()
         if (!id) {
-          appendSystemPanel(t('技能详情', 'Skill detail'), [t('用法：/skills detail <skill-id>', 'Usage: /skills detail <skill-id>')])
+          appendSystemPanel(t('Skill detail · 技能详情', 'Skill detail'), [t('用法：/skills detail <skill-id>', 'Usage: /skills detail <skill-id>')])
         } else {
           const detail = await getSkillDetail(workspaceRoot, id)
           if (!detail) {
-            appendSystemPanel(t('技能详情', 'Skill detail'), [t(`未找到技能：${id}`, `Skill not found: ${id}`)])
+            appendSystemPanel(t('Skill detail · 技能详情', 'Skill detail'), [t(`Skill 未找到: ${id}`, `Skill not found: ${id}`)])
           } else {
-            const badge = detail.executable ? t('可执行自动化', 'executable automation') : t('流程/知识包', 'instructional workflow')
-            appendSystemPanel(t(`技能：${detail.id}`, `Skill: ${detail.id}`), [
+            const badge = detail.executable ? t('executable automation', 'executable automation') : t('workflow / knowledge pack', 'workflow / knowledge pack')
+            appendSystemPanel(t(`Skill: ${detail.id}`, `Skill: ${detail.id}`), [
               `${t('类型', 'Type')}: ${badge}`,
               `${t('分类', 'Category')}: ${detail.category}`,
               `${t('说明', 'Description')}: ${detail.description}`,
               detail.path ? `${t('文件', 'File')}: ${detail.path}` : '',
               '',
-              t('可直接这样用：把你的目标用自然语言说出来，Artemis 会按该技能流程执行。', 'Use it by describing your goal naturally; Artemis will follow this skill workflow.'),
-              ...(detail.usage.length > 0 ? ['', t('文档中的示例命令：', 'Example commands from the skill:'), ...detail.usage.map(line => `  ${line}`)] : []),
+              t('用法：用自然语言描述目标，Artemis 会按该 skill workflow 执行。', 'Usage: describe the task naturally; Artemis will follow this skill workflow.'),
+              ...(detail.usage.length > 0 ? ['', t('示例：', 'Examples:'), ...detail.usage.map(line => `  ${line}`)] : []),
               ...(detail.preview.length > 0 ? ['', t('预览：', 'Preview:'), ...detail.preview.slice(0, 10).map(line => `  ${line.slice(0, 100)}`)] : []),
             ].filter(Boolean))
           }
@@ -2600,11 +2600,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           ])
         } else {
           const lines = matches.map(skill => {
-            const badge = skill.executable ? t('可执行', 'exec') : t('流程', 'guide')
+            const badge = skill.executable ? t('exec', 'exec') : t('guide', 'guide')
             return `  ${skill.id.slice(0, 36).padEnd(36)} [${badge}] ${skill.description.slice(0, 70)}`
           })
-          lines.push('', t('查看详情：/skills detail <skill-id>', 'Show detail: /skills detail <skill-id>'))
-          appendSystemPanel(t(`技能匹配：${argText} — ${matches.length} 命中`, `Skill matches: ${argText} — ${matches.length} matches`), lines)
+          lines.push('', t('打开详情：/skills detail <skill-id>', 'Open: /skills detail <skill-id>'))
+          appendSystemPanel(t(`Skill matches: ${argText}  ·  ${matches.length} 命中`, `Skill matches: ${argText}  ·  ${matches.length} matched`), lines)
         }
       }
       continue
@@ -3286,15 +3286,15 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const fmtProfile = (p: typeof curMain): string =>
           p ? `${p.label ?? p.id}  (${p.model})` : t('未配置', 'not configured')
 
-        appendSystemPanel(t('Bifrost 双模型 — 当前状态', 'Bifrost dual-model — status'), [
+        appendSystemPanel(t('Bifrost dual-model  ·  当前状态', 'Bifrost dual-model  ·  status'), [
           `🛠  ${t('执行', 'exec')}:   ${fmtProfile(curMain)}`,
           `🧠 ${t('思考', 'brain')}:  ${fmtProfile(curBrain)}`,
           '',
           curMain && curBrain
             ? t('已就绪 · 执行模型跑刀，思考模型主谋划',
                 'Ready · Exec executes, Brain plans')
-            : t('未就绪 · 即将引导补全缺失项',
-                'Incomplete · wizard will fill missing slot(s)'),
+            : t('未就绪 · 缺失 slot 将进入配置向导',
+                'Incomplete · missing slot(s) will enter setup'),
         ])
         prompt.forceRedraw()
 
@@ -3359,8 +3359,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
               t('现在使用单模型模式', 'Single model mode now active'),
               t(`当前模型: ${curMain.label ?? curMain.id} (${curMain.model})`, 
                 `Current model: ${curMain.label ?? curMain.id} (${curMain.model})`),
-              t('思考模型配置已保留，再次开启时无需重新设置', 
-                'Brain model configuration is preserved, no need to reconfigure when reopening'),
+              t('Brain profile 已保留，再次开启时直接恢复。', 
+                'Brain profile is preserved and will resume when re-enabled.'),
             ])
           } else {
             // 开启双模型，恢复之前的配置
@@ -3401,10 +3401,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
               ])
             } else {
               // 没有可用的思考模型配置，需要引导用户配置
-              appendSystemPanel(t('Bifrost — 需要配置思考模型', 'Bifrost — Brain model needed'), [
+              appendSystemPanel(t('Bifrost  ·  需要 Brain model', 'Bifrost  ·  Brain model required'), [
                 t('需要至少两个模型配置才能使用双模型功能', 
                   'At least two model profiles are needed for dual-model functionality'),
-                t('即将引导您配置思考模型', 'Wizard will guide you to configure the brain model'),
+                t('进入 Brain model 配置向导。', 'Entering Brain model setup.'),
               ])
               prompt.forceRedraw()
               
@@ -3440,8 +3440,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           hud.contextLimit = modelContextLimit
           hud.brainModel = brainLabel
           rebuildScrollBlocksFromMessages()
-          appendSystemPanel(t('Bifrost — 主/副模型互换完成', 'Bifrost — Main/Secondary model swap complete'), [
-            t('已成功互换执行模型和思考模型的角色', 'Successfully swapped the roles of the exec and brain models'),
+          appendSystemPanel(t('Bifrost  ·  role swap 完成', 'Bifrost  ·  role swap complete'), [
+            t('exec / brain roles 已互换。', 'exec / brain roles swapped.'),
             '',
             t('互换前:', 'Before swap:'),
             `  🛠  ${t('执行', 'exec')}: ${curMain.label ?? curMain.id} (${curMain.model})`,
@@ -3451,7 +3451,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             `  🛠  ${t('执行', 'exec')}: ${curBrain.label ?? curBrain.id} (${curBrain.model})`,
             `  🧠 ${t('思考', 'brain')}: ${curMain.label ?? curMain.id} (${curMain.model})`,
             '',
-            t('现在双模型功能继续运行，但角色已互换', 'Dual model functionality continues, but roles have been swapped'),
+            t('dual-model 继续运行，后续 turn 使用新的角色分配。', 'dual-model continues with the new role assignment.'),
           ])
           prompt.forceRedraw()
           continue
@@ -3464,7 +3464,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             bfData.specialistProfileId = undefined
           }
           await saveBoth(bfData)
-          appendSystemPanel(t('即将配置思考模型', 'About to configure brain model'),
+          appendSystemPanel(t('Bifrost  ·  配置 Brain model', 'Bifrost  ·  configure Brain model'),
             [t('思考模型是负责规划 / 研究 / 评审的"思考"模型。按 Esc 可随时取消。',
                'Brain model handles planning/research/review. Esc cancels at any point.')])
         } else if (action === 'reconfig-main' && curMain) {
@@ -3473,7 +3473,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             bfData.defaultMainProfileId = undefined
           }
           await saveBoth(bfData)
-          appendSystemPanel(t('即将配置执行模型', 'About to configure exec model'),
+          appendSystemPanel(t('Bifrost  ·  配置 exec model', 'Bifrost  ·  configure exec model'),
             [t('执行模型是负责执行工具调用与代码改动的主模型。按 Esc 可随时取消。',
                'Exec model runs tools and edits code. Esc cancels at any point.')])
         } else if (action === 'fill') {
@@ -3597,8 +3597,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             [t('请先配置 Provider（/config 或 /bifrost）。', 'Configure a provider first (/config or /bifrost).')])
           continue
         }
-        const polishWaiter = startWaitingPanel(t('Bundle 润色中...', 'Bundle polishing...'), [
-          t('刚才输入的文字正在润色，请稍候…', 'Your last input is being polished. Please wait…'),
+        const polishWaiter = startWaitingPanel(t('Bundle polishing · 润色中', 'Bundle polishing...'), [
+          t('pre-send polish 正在处理刚才的输入。', 'pre-send polish running'),
           truncatePlainToWidth(arg.replace(/\s+/g, ' '), 120),
         ], { animation: 'cat' })
         try {
@@ -3609,7 +3609,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             brainConfig: brainCfg,
             modelChoice: cur.bundleModelChoice,
           })
-          polishWaiter.stop(t('Bundle 润色完成', 'Bundle polish complete'), [
+          polishWaiter.stop(t('Bundle polish complete · 润色完成', 'Bundle polish complete'), [
             `${t('模型', 'Model')}: ${result.model}`,
           ])
           const pick = await prompt.releaseTerminal(() => runBundleDialog({
@@ -3893,9 +3893,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const elapsedSec = Math.floor((Date.now() - routerStartedMs) / 1000)
         const frame = routerFrames[Math.floor(Date.now() / 100) % routerFrames.length]!
         return [
-          `${t('Team 路由', 'Team router')}`,
-          `  ${frame} ${t('正在判断该走哪条工作流…', 'Deciding which workflow fits…')}  (${elapsedSec}s)`,
-          `  ${t('AI 正在分析任务意图，最长等待 45s。', 'AI is analyzing task intent — up to 45s.')}`,
+          `${t('Team router · 路由中', 'Team router')}`,
+          `  ${frame} ${t('intent scan → workflow routing，正在匹配任务路径', 'intent scan → workflow routing')}  (${elapsedSec}s)`,
+          `  ${t('router model 正在判断任务路径 · max 45s', 'router model is selecting the execution path · max 45s')}`,
         ].join('\n')
       }
       const routerBlockIndex = appendScrollBlock({
@@ -3941,7 +3941,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       updateScrollBlock(routerBlockIndex, {
         kind: 'system',
         text: [
-          `${t('Team 路由决策', 'Team router decision')}  (${routerElapsedSec}s)`,
+          `${t('Team router decision · 路由决策', 'Team router decision')}  (${routerElapsedSec}s)`,
           `  ${t('选择', 'Choice')}: ${choiceLabel}`,
           `  ${t('理由', 'Reason')}: ${route.reason}`,
           `  ${
@@ -4095,8 +4095,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const mainCfg   = provStore.getDefaultMainProfile(provData)
         const brainCfg  = provStore.getProfile(provData, provData.specialistProfileId)
         if (mainCfg || brainCfg) {
-          bundleWaiter = startWaitingPanel(t('Bundle 润色中...', 'Bundle polishing...'), [
-            t('刚才输入的文字正在润色，请稍候…', 'Your last input is being polished. Please wait…'),
+          bundleWaiter = startWaitingPanel(t('Bundle polishing · 润色中', 'Bundle polishing...'), [
+            t('pre-send polish 正在处理刚才的输入。', 'pre-send polish running'),
             truncatePlainToWidth(trimmed.replace(/\s+/g, ' '), 120),
           ], { animation: 'cat' })
           const bundleResult = await runBundle({
@@ -4106,7 +4106,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             brainConfig: brainCfg,
             modelChoice: bundleCur.bundleModelChoice,
           })
-          bundleWaiter.stop(t('Bundle 润色完成', 'Bundle polish complete'), [
+          bundleWaiter.stop(t('Bundle polish complete · 润色完成', 'Bundle polish complete'), [
             `${t('模型', 'Model')}: ${bundleResult.model}`,
           ])
           bundleWaiter = undefined
@@ -4694,14 +4694,14 @@ function renderHelp(locale: UiLocale): string {
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
   const commands = [
-    `/team <任务>       ${t('AI 自动派单 (推荐，不确定时先用它)', 'AI auto-router (recommended when unsure)')}`,
-    `/niko <任务>       ${t('探索方向后落地', 'Explore, then build')}`,
-    `/design <任务>     ${t('UI / 前端设计 → 实现', 'UI / frontend design → implement')}`,
-    `/athena <任务>     ${t('深研代码库并协调执行', 'Deep repo research + coordinated execution')}`,
-    `/nidhogg <任务>    ${t('对抗式实现硬化 / 逐轮逼近最优 (慢)', 'Adversarial hardening / iterative convergence (slow)')}`,
-    `/contest <任务>    ${t('路径辩论、方案裁决、再执行', 'Debate paths, select one, then execute')}`,
-    `/bifrost           ${t('开启思维/执行双模型', 'Enable dual-model mode')}`,
-    `/run <任务>        ${t('后台运行工作流', 'Run workflow in background')}`,
+    `/team <任务>       ${t('Team router 自动选择 workflow', 'Team router selects the workflow')}`,
+    `/niko <任务>       ${t('探索路径 → 收敛执行', 'Explore paths → execute')}`,
+    `/design <任务>     ${t('UI / frontend design → implementation', 'UI / frontend design → implementation')}`,
+    `/athena <任务>     ${t('repo research + 协调执行', 'repo research + coordinated execution')}`,
+    `/nidhogg <任务>    ${t('adversarial hardening / iterative convergence（slow）', 'adversarial hardening / iterative convergence (slow)')}`,
+    `/contest <任务>    ${t('debate paths → 裁决 → execute', 'debate paths → select → execute')}`,
+    `/bifrost           ${t('dual-model：exec + brain', 'dual-model: exec + brain')}`,
+    `/run <任务>        ${t('后台执行 background workflow', 'background workflow')}`,
     ``,
     `/clear             ${t('重置对话历史', 'Reset conversation')}`,
     `/save [title]      ${t('保存会话（可选标题）', 'Save session (optional title)')}`,
@@ -4714,22 +4714,22 @@ function renderHelp(locale: UiLocale): string {
     `/undo              ${t('撤回上一步操作', 'Undo last turn')}`,
     `/retry             ${t('重试上一步操作', 'Retry last turn')}`,
     ``,
-    `/odin              ${t('技能库管理', 'Odin skill store')}`,
-    `/heimdall          ${t('线程控制面 / 观察与审批', 'Thread control plane / observe and approve')}`,
-    `/hud               ${t('显示 HUD 状态栏', 'Show HUD status bar')}`,
+    `/odin              ${t('Odin skill store · 管理 skills', 'Odin skill store')}`,
+    `/heimdall          ${t('thread control plane / 观察 + approve', 'thread control plane / observe + approve')}`,
+    `/hud               ${t('HUD status bar · 查看状态', 'HUD status bar')}`,
     ``,
-    `/model [name]      ${t('切换执行模型', 'Show / switch model')}`,
-    `/swap              ${t('互换主/副模型', 'Swap main/brain models')}`,
-    `/locale [zh|en]    ${t('切换界面语言', 'Show / switch locale')}`,
-    `/permission [mode] ${t('切换权限模式', 'Show / switch permission mode')}`,
-    `/config            ${t('重新配置提供商', 'Reconfigure AI provider')}`,
-    `/config visual     ${t('单独配置视觉模型', 'Configure visual model only')}`,
-    `/visual            ${t('快捷修改视觉 API 配置', 'Quick-edit visual API config')}`,
-    `/vercel            ${t('配置 Vercel 部署 token', 'Configure Vercel deployment token')}`,
-    `/vercel status     ${t('查看 Vercel 授权状态', 'Show Vercel auth status')}`,
-    `/vercel logout     ${t('清除已保存的 Vercel token', 'Clear saved Vercel token')}`,
-    `/config memory     ${t('配置记忆增强', 'Configure memory enhancement')}`,
-    `/newborn           ${t('清空配置并重新引导', 'Wipe config and re-run setup')}`,
+    `/model [name]      ${t('查看 / 切换 exec model', 'show / switch exec model')}`,
+    `/swap              ${t('互换 exec / brain roles', 'swap exec / brain roles')}`,
+    `/locale [zh|en]    ${t('查看 / 切换 locale', 'show / switch locale')}`,
+    `/permission [mode] ${t('查看 / 切换 permission mode', 'show / switch permission mode')}`,
+    `/config            ${t('重新配置 Provider', 'reconfigure Provider')}`,
+    `/config visual     ${t('只配置 visual model', 'configure visual model only')}`,
+    `/visual            ${t('快速编辑 visual API config', 'quick-edit visual API config')}`,
+    `/vercel            ${t('配置 Vercel deployment token', 'configure Vercel deployment token')}`,
+    `/vercel status     ${t('查看 Vercel auth status', 'show Vercel auth status')}`,
+    `/vercel logout     ${t('清除已保存的 Vercel token', 'clear saved Vercel token')}`,
+    `/config memory     ${t('配置 memory enhancement', 'configure memory enhancement')}`,
+    `/newborn           ${t('清空 config 并重新引导', 'wipe config and re-run setup')}`,
     `/exit              ${t('退出程序', 'Exit')}`,
     `/help              ${t('显示此帮助', 'Show this help')}`,
   ]

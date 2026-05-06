@@ -353,7 +353,7 @@ function buildHeroFooter(locale: UiLocale, providerMissing?: boolean): string {
   const arrowColor = randomColor()
   const arrow = rgb(arrowColor[0], arrowColor[1], arrowColor[2], bold('(⌐■-■)'))
   const hint  = rgb(166, 227, 161, t('Have a nice trip', 'Have a nice trip'))
-  const sub   = dim(t('  · / 浏览命令', '  · / browse commands'))
+  const sub   = dim(t('  ·  / 浏览命令', '  ·  / browse commands'))
 
   // Compact one-line categories so the full hero (logo width ≈ 64) still fits
   // the user's terminal. Descriptions are reachable via /help; here we only
@@ -369,7 +369,7 @@ function buildHeroFooter(locale: UiLocale, providerMissing?: boolean): string {
       '',
       `  ${sec(`✦ ${t('设置', 'Setup')}`)} ${settingsLine}`,
       '',
-      `  ${rgb(255, 120, 155, t('⚠ 未检测到可用 Provider，请先运行', '⚠ No usable provider detected. Run'))} ${cmd('/config')}`,
+      `  ${rgb(255, 120, 155, t('⚠ 未检测到可用 Provider，请先运行', '⚠ No usable Provider detected. Run'))} ${cmd('/config')}`,
     ].join('\n')
   }
 
@@ -391,7 +391,7 @@ function buildCompactTips(locale: UiLocale): string[] {
     `${star} ${t('工作流', 'Workflows')}: ${cmd('/niko')} ${cmd('/athena')} ${cmd('/nidhogg')} ${cmd('/design')} ${cmd('/contest')} ${cmd('/run')}`,
     `${star} ${t('设置', 'Setup')}: ${cmd('/bifrost')} ${cmd('/config')} ${cmd('/permission')} ${cmd('/newborn')}`,
     '',
-    `${arrow} ${bold(rgb(166, 227, 161, t('直接输入文字开始对话', 'Have a nice trip')))} ${dim(t('· / 浏览命令', '· / browse commands'))}`,
+    `${arrow} ${bold(rgb(166, 227, 161, t('直接输入文字开始对话', 'Have a nice trip')))} ${dim(t('·  / 浏览命令', '·  / browse commands'))}`,
   ]
 }
 
@@ -419,7 +419,7 @@ export function buildInteractiveCompactHero(options: InteractiveCompactHeroOptio
     t('思维', 'Brain'),
     t('工作区', 'Workspace'),
     t('权限', 'Mode'),
-    'T/S/M',
+    'tools',
     t('桥接', 'Bridges'),
   ]
   const labelWidth = Math.max(...labels.map(label => stringWidth(label)))
@@ -442,7 +442,7 @@ export function buildInteractiveCompactHero(options: InteractiveCompactHeroOptio
     row(t('思维', 'Brain'), brainModel ?? t('未配置', 'Not configured')),
     row(t('工作区', 'Workspace'), shortCwd),
     row(t('权限', 'Mode'), permissionMode),
-    row('T/S/M', `${toolCount ?? DEFAULT_DIRECT_TOOL_COUNT} / ${skillCount ?? 0} / ${mcpCount ?? 0}`),
+    row('tools', `${toolCount ?? DEFAULT_DIRECT_TOOL_COUNT} tools · ${skillCount ?? 0} skills · ${mcpCount ?? 0} MCP`),
   ]
   if (bridges && bridges.length > 0) {
     bodyRows.push(row(t('桥接', 'Bridges'), bridges.join(' · ')))
@@ -461,7 +461,7 @@ export function buildInteractiveCompactHero(options: InteractiveCompactHeroOptio
 
   rows.push(rule)
   if (providerMissing) {
-    rows.push(`  ${rgb(255, 120, 155, t('未检测到可用 Provider，请先 /config', 'No usable provider. Run /config first.'))}`)
+    rows.push(`  ${rgb(255, 120, 155, t('未检测到可用 Provider，请先 /config', 'No usable Provider. Run /config first.'))}`)
   }
   rows.push(...buildCompactTips(locale))
   rows.push('')

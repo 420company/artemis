@@ -717,12 +717,12 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
   sectionTitle(tr(locale, '文档搜索 / 深度研究', 'Docs Search / Deep Research'), [
     tr(
       locale,
-      '普通网页搜索与文档查询不需要 Gemini API；Gemini Deep Research 是单独的深度研究能力。',
-      'Regular web search and docs lookup do not need a Gemini API key; Gemini Deep Research is a separate research capability.',
+      'search_web / lookup_docs 不需要 Gemini API；Gemini Deep Research 是独立的 research backend。',
+      'search_web / lookup_docs do not need a Gemini API key; Gemini Deep Research is a separate research backend.',
     ),
     tr(
       locale,
-      'Google 文档搜索需要 GOOGLE_CSE_ID + GOOGLE_API_KEY；缺少环境变量时会自动回退到 Bing。',
+      'Google docs search 需要 GOOGLE_CSE_ID + GOOGLE_API_KEY；缺失时会自动 fallback 到 Bing。',
       'Google docs search needs GOOGLE_CSE_ID + GOOGLE_API_KEY; Artemis falls back to Bing when they are missing.',
     ),
   ])
@@ -731,16 +731,16 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
     title: tr(locale, 'lookup_docs 使用哪个文档搜索引擎？', 'Which docs search engine should lookup_docs use?'),
     initialIndex: settings.docsSearchEngine === 'google' ? 1 : 0,
     choices: [
-      { label: 'Bing', value: 'bing', description: tr(locale, '默认，免 API key。', 'Default, no API key required.') },
-      { label: 'Google', value: 'google', description: tr(locale, '质量可能更高，但需要 GOOGLE_CSE_ID + GOOGLE_API_KEY。', 'May be higher quality, but needs GOOGLE_CSE_ID + GOOGLE_API_KEY.') },
+      { label: 'Bing', value: 'bing', description: tr(locale, 'default · 免 API key', 'default · no API key') },
+      { label: 'Google', value: 'google', description: tr(locale, 'higher precision · 需要 GOOGLE_CSE_ID + GOOGLE_API_KEY', 'higher precision · needs GOOGLE_CSE_ID + GOOGLE_API_KEY') },
     ],
   })
   await settingsStore.setDocsSearchEngine(docsEngine)
   if (docsEngine === 'google' && (!process.env.GOOGLE_CSE_ID || !process.env.GOOGLE_API_KEY)) {
     console.log(tr(
       locale,
-      '  ⚠ 当前未检测到 GOOGLE_CSE_ID + GOOGLE_API_KEY；lookup_docs 会自动回退到 Bing。',
-      '  ⚠ GOOGLE_CSE_ID + GOOGLE_API_KEY were not detected; lookup_docs will fall back to Bing.',
+        '  ⚠ 未检测到 GOOGLE_CSE_ID + GOOGLE_API_KEY；lookup_docs fallback: Bing。',
+        '  ⚠ GOOGLE_CSE_ID + GOOGLE_API_KEY were not detected; lookup_docs fallback: Bing.',
     ))
   }
 
@@ -748,8 +748,8 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
     title: tr(locale, 'deep_research 使用哪个研究后端？', 'Which research backend should deep_research use?'),
     initialIndex: settings.researchEngine === 'gemini-deep-research' ? 1 : 0,
     choices: [
-      { label: tr(locale, '内置提示（默认）', 'Built-in prompt (default)'), value: 'builtin', description: tr(locale, '不需要 Gemini API；适合普通使用。', 'No Gemini API required; good for regular use.') },
-      { label: 'Gemini Deep Research', value: 'gemini-deep-research', description: tr(locale, '需要 Gemini API key；用于更深入的多步调研。', 'Needs a Gemini API key; for deeper multi-step research.') },
+      { label: tr(locale, 'Built-in prompt (default)', 'Built-in prompt (default)'), value: 'builtin', description: tr(locale, '不需要 Gemini API key', 'no Gemini API key') },
+      { label: 'Gemini Deep Research', value: 'gemini-deep-research', description: tr(locale, '需要 Gemini API key · 用于 multi-step research', 'needs Gemini API key · multi-step research') },
     ],
   })
   await settingsStore.setResearchEngine(researchEngine)
@@ -774,14 +774,14 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
     if (!apiKey) {
       console.log(tr(
         locale,
-        '  ⚠ 未保存 Gemini API key；请在环境变量里设置 ARTEMIS_GEMINI_API_KEY 或 GEMINI_API_KEY 后再使用 deep_research。',
-        '  ⚠ No Gemini API key was saved; set ARTEMIS_GEMINI_API_KEY or GEMINI_API_KEY before using deep_research.',
+        '  ⚠ Gemini API key 未保存；使用 deep_research 前设置 ARTEMIS_GEMINI_API_KEY 或 GEMINI_API_KEY。',
+        '  ⚠ No Gemini API key saved; set ARTEMIS_GEMINI_API_KEY or GEMINI_API_KEY before using deep_research.',
       ))
     } else {
-      console.log(tr(locale, '  ✓ Gemini Deep Research 已配置。', '  ✓ Gemini Deep Research configured.'))
+      console.log(tr(locale, '  ✓ Gemini Deep Research configured · 已配置。', '  ✓ Gemini Deep Research configured.'))
     }
   } else {
-    console.log(tr(locale, '  ✓ deep_research 将保持默认内置模式。', '  ✓ deep_research will stay on the built-in mode.'))
+    console.log(tr(locale, '  ✓ deep_research backend: builtin · 保持内置模式。', '  ✓ deep_research backend: builtin.'))
   }
 }
 
