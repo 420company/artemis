@@ -285,6 +285,9 @@ export function formatBridgeImageBroadcastResult(result: BridgeImageBroadcastRes
     `caption: ${result.caption}`,
     `live bridges: ${result.live.registered.length ? result.live.registered.join(', ') : 'none'}; sent=${result.live.sent}; failed=${result.live.failed.length}`,
   ]
+  for (const failure of result.live.failed.slice(0, 5)) {
+    lines.push(`  - ${failure.platform}: ${failure.error}`)
+  }
   for (const item of result.configured) {
     lines.push(`${item.platform}: attempted=${item.attempted}; sent=${item.sent}; failed=${item.failed.length}`)
     for (const failure of item.failed.slice(0, 5)) {

@@ -10,6 +10,8 @@
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
@@ -274,6 +276,76 @@ async function prepareOutboundWeChatImage(imagePath: string): Promise<{ path: st
 function buildCdnUploadUrl(cdnBaseUrl: string, uploadParam: string, filekey: string): string {
   const base = cdnBaseUrl.replace(/\/+$/, '')
   return `${base}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`
+}
+
+function isWeChatCdnHost(rawUrl: string): boolean {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase()
+    return host.endsWith('.weixin.qq.com') || host.endsWith('.wechat.com')
+  } catch {
+    return false
+  }
+}
+
+async function postCdnBytesDirect(uploadUrl: string, body: Buffer, signal?: AbortSignal): Promise<{
+  status: number
+  statusText: string
+  ok: boolean
+  headers: Headers
+  text: () => Promise<string>
+}> {
+  const url = new URL(uploadUrl)
+  const request = url.protocol === 'http:' ? httpRequest : httpsRequest
+
+  return await new Promise((resolve, reject) => {
+    const req = request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(body.length),
+        },
+        timeout: WECHAT_CDN_UPLOAD_TIMEOUT_MS,
+        agent: false,
+      },
+      res => {
+        const chunks: Buffer[] = []
+        res.on('data', chunk => {
+          if (Buffer.isBuffer(chunk)) chunks.push(chunk)
+          else chunks.push(Buffer.from(chunk))
+        })
+        res.on('end', () => {
+          const headers = new Headers()
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (Array.isArray(value)) headers.set(key, value.join(', '))
+            else if (value !== undefined) headers.set(key, String(value))
+          }
+          const responseText = Buffer.concat(chunks).toString('utf8')
+          const status = res.statusCode ?? 0
+          resolve({
+            status,
+            statusText: res.statusMessage ?? '',
+            ok: status >= 200 && status < 300,
+            headers,
+            text: async () => responseText,
+          })
+        })
+      },
+    )
+    req.on('timeout', () => req.destroy(new Error(`WeChat CDN upload timed out after ${WECHAT_CDN_UPLOAD_TIMEOUT_MS}ms`)))
+    req.on('error', reject)
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+        return
+      }
+      signal.addEventListener('abort', () => {
+        req.destroy(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+      }, { once: true })
+    }
+    req.end(body)
+  })
 }
 
 function decryptInboundImage(bytes: Buffer, image: WeChatImageItem): Buffer {
@@ -719,14 +791,16 @@ export class WeChatGatewayClient {
     let lastError: Error | undefined
     for (let attempt = 1; attempt <= WECHAT_CDN_UPLOAD_MAX_RETRIES; attempt += 1) {
       try {
-        const response = await fetch(uploadUrl, {
-          method: 'POST',
-          headers: { 'content-type': 'application/octet-stream' },
-          body: new Uint8Array(ciphertext),
-          signal: signal
-            ? AbortSignal.any([AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS), signal])
-            : AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS),
-        })
+        const response = isWeChatCdnHost(uploadUrl)
+          ? await postCdnBytesDirect(uploadUrl, ciphertext, signal)
+          : await fetch(uploadUrl, {
+              method: 'POST',
+              headers: { 'content-type': 'application/octet-stream' },
+              body: new Uint8Array(ciphertext),
+              signal: signal
+                ? AbortSignal.any([AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS), signal])
+                : AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS),
+            })
         const encryptedParam = response.headers.get('x-encrypted-param')?.trim()
         if (response.status >= 400 && response.status < 500) {
           const errorMessage = response.headers.get('x-error-message') || await response.text().catch(() => response.statusText)
