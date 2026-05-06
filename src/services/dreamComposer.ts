@@ -35,8 +35,9 @@ import {
 import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { broadcastToBridges, listRegisteredBridges } from './bridgeNotifier.js'
 import { sendBragiImageBroadcast } from '../bragi/imageBroadcast.js'
-import { notifyDreamFinished, notifyDreamStarted } from './dreamNotifications.js'
+import { notifyDreamFinished } from './dreamNotifications.js'
 import type { UiLocale } from '../cli/locale.js'
+import { pickLocale } from '../cli/locale.js'
 
 export interface ComposeDreamOptions {
   cwd: string
@@ -153,8 +154,6 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
       return { ok: false, reason: `daily cap reached (${recent}/${config.maxDreamsPerDay})` }
     }
   }
-
-  await notifyDreamStarted(options.trigger).catch(() => undefined)
 
   options.onStatus?.('🌙 收集白天素材…')
 
@@ -293,7 +292,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   // ── push to bridges ─────────────────────────────────────────────────────
   let bridgesPushed = 0
   if (config.pushToBridges) {
-    const text = buildBridgeText(dreamMd, id)
+    const text = buildDreamBridgeText(dreamMd, entry, locale)
     const hasRegisteredMobileBridge = listRegisteredBridges().some(platform =>
       platform === 'telegram' || platform === 'discord' || platform === 'wechat',
     )
@@ -324,7 +323,6 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   }
 
   const result = { ok: true, entry, bridgesPushed }
-  await notifyDreamFinished(result, locale).catch(() => undefined)
   return result
 }
 
@@ -368,21 +366,27 @@ function extractPreview(dreamMd: string): string {
   return first.length > 140 ? `${first.slice(0, 137)}…` : first
 }
 
-function buildBridgeText(dreamMd: string, id: string): string {
+export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale: UiLocale = 'zh-CN'): string {
   const lines = dreamMd.split('\n')
-  const titleLine = lines.find(l => l.startsWith('# ')) ?? '# 梦境'
+  const titleLine = lines.find(l => l.startsWith('# ')) ?? pickLocale(locale, { zh: '# 梦境', en: '# Dream' })
   const title = titleLine.replace(/^#\s*/, '').trim()
   const body = dreamMd
     .replace(/^#\s+.+\n+/m, '')
     .replace(/### (?:学到了什么|What I learned)[\s\S]*$/, '')
     .trim()
-  const teaser = body.length > 600 ? `${body.slice(0, 580)}…` : body
   return [
     `🌙 ${title}`,
     '',
-    teaser,
+    body,
     '',
-    `_dream id: ${id}_`,
+    `_dream id: ${entry.id}_`,
+    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}：${entry.mdPath}`,
+    ...(entry.imagePath
+      ? [
+          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}：${entry.imagePath}`,
+          `🖼  ${entry.imagePath}`,
+        ]
+      : []),
   ].join('\n')
 }
 

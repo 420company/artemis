@@ -20,7 +20,9 @@ const EDIT_TOOLS = [
   'insert_in_file',
   'replace_in_file',
   'apply_patch',
+  'delete_file',
   'create_directory',
+  'delete_directory',
   'move_file',
   'copy_file',
   'format_code',
@@ -84,6 +86,64 @@ const MEDIA_TOOLS = [
   'generate_video',
 ] as const;
 
+const BROWSER_TOOLS = [
+  'browser_navigate',
+  'browser_screenshot',
+  'browser_extract_text',
+  'browser_click',
+  'browser_type',
+  'browser_wait_for',
+  'browser_close',
+] as const;
+
+const MUSIC_TOOLS = [
+  'spotify_play_liked',
+  'spotify_search_and_play',
+  'spotify_play_playlist',
+  'spotify_resume',
+  'spotify_pause',
+  'spotify_skip_next',
+  'spotify_skip_previous',
+  'spotify_set_volume',
+  'spotify_now_playing',
+  'spotify_set_device',
+] as const;
+
+const PRODUCTIVITY_TOOLS = [
+  'calendar_list_today',
+  'calendar_list_upcoming',
+  'calendar_add_event',
+  'reminders_list',
+  'reminders_add',
+  'reminders_complete',
+] as const;
+
+const AMBIENT_INFO_TOOLS = [
+  'weather_current',
+  'weather_forecast',
+  'world_clock',
+  'time_diff',
+  'currency_convert',
+  'currency_rates',
+  'flight_lookup',
+] as const;
+
+const SPEECH_TOOLS = [
+  'synthesize_speech',
+  'transcribe_audio',
+] as const;
+
+const MCP_MANAGEMENT_TOOLS = [
+  'mcp_list',
+  'mcp_enable',
+  'mcp_disable',
+  'mcp_suggest',
+] as const;
+
+const BRIDGE_TOOLS = [
+  'bridge_send_image',
+] as const;
+
 const FILE_OPERATION_REQUEST_RE =
   /(?:\b(create|mkdir|directory|folder|进入|cd|工作区|workspace|setup)\b|建立|创建|文件夹|目录|进入|工作区)/i;
 
@@ -116,6 +176,27 @@ const ENV_TIME_REQUEST_RE =
 
 const MEDIA_REQUEST_RE =
   /(?:\b(image|png|jpg|jpeg|gif|svg|icon|logo|banner|poster|screenshot|video|mp4|animation)\b|图片|图像|截图|视频|图标|标志|海报)/i;
+
+const BROWSER_REQUEST_RE =
+  /(?:\b(browser|browse|navigate|click|type|screenshot|extract text|web page|webpage|page automation)\b|浏览器|网页自动化|打开网页|点击|输入到|网页截图|提取网页)/i;
+
+const MUSIC_REQUEST_RE =
+  /(?:\b(spotify|music|song|playlist|volume|pause|resume|skip|now playing)\b|音乐|歌曲|播放|暂停|继续播放|下一首|上一首|歌单|音量|正在播放)/i;
+
+const PRODUCTIVITY_REQUEST_RE =
+  /(?:\b(calendar|event|meeting|schedule|reminder|todo|to-do|task list)\b|日历|日程|会议|活动|提醒|待办|备忘|完成提醒)/i;
+
+const AMBIENT_INFO_REQUEST_RE =
+  /(?:\b(weather|forecast|temperature|rain|snow|currency|exchange rate|fx|flight|timezone|world clock|time difference)\b|天气|气温|温度|下雨|下雪|汇率|货币|航班|飞机|时区|世界时钟|时差)/i;
+
+const SPEECH_REQUEST_RE =
+  /(?:\b(tts|speech|voice|audio|transcribe|transcription|dictation|read aloud|synthesize)\b|语音|音频|朗读|合成语音|转写|转录|听写|录音)/i;
+
+const MCP_REQUEST_RE =
+  /(?:\b(mcp|model context protocol|server config|tool server)\b|工具服务器|插件服务器|上下文协议)/i;
+
+const BRIDGE_REQUEST_RE =
+  /(?:\b(bridge|send image|mobile media|phone image)\b|桥接|发送图片|手机图片|媒体桥)/i;
 
 const CODING_FALLBACK_TOOLS = [
   ...EDIT_TOOLS,
@@ -204,10 +285,18 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   const wantsTextUtility = TEXT_UTILITY_REQUEST_RE.test(latestUserInput);
   const wantsEnvTime = ENV_TIME_REQUEST_RE.test(latestUserInput);
   const wantsMedia = MEDIA_REQUEST_RE.test(latestUserInput);
+  const wantsBrowser = BROWSER_REQUEST_RE.test(latestUserInput);
+  const wantsMusic = MUSIC_REQUEST_RE.test(latestUserInput);
+  const wantsProductivity = PRODUCTIVITY_REQUEST_RE.test(latestUserInput);
+  const wantsAmbientInfo = AMBIENT_INFO_REQUEST_RE.test(latestUserInput);
+  const wantsSpeech = SPEECH_REQUEST_RE.test(latestUserInput);
+  const wantsMcp = MCP_REQUEST_RE.test(latestUserInput);
+  const wantsBridge = BRIDGE_REQUEST_RE.test(latestUserInput);
   const wantsFileOperation = FILE_OPERATION_REQUEST_RE.test(latestUserInput);
 
   if (looksCoding) {
     addTools(selected, EDIT_TOOLS);
+    addTools(selected, TEXT_UTILITY_TOOLS);
   }
 
   if (wantsEdit) {
@@ -241,6 +330,34 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
 
   if (wantsMedia) {
     addTools(selected, MEDIA_TOOLS);
+  }
+
+  if (wantsBrowser) {
+    addTools(selected, BROWSER_TOOLS);
+  }
+
+  if (wantsMusic) {
+    addTools(selected, MUSIC_TOOLS);
+  }
+
+  if (wantsProductivity) {
+    addTools(selected, PRODUCTIVITY_TOOLS);
+  }
+
+  if (wantsAmbientInfo) {
+    addTools(selected, AMBIENT_INFO_TOOLS);
+  }
+
+  if (wantsSpeech) {
+    addTools(selected, SPEECH_TOOLS);
+  }
+
+  if (wantsMcp) {
+    addTools(selected, MCP_MANAGEMENT_TOOLS);
+  }
+
+  if (wantsBridge) {
+    addTools(selected, BRIDGE_TOOLS);
   }
 
   if (wantsFileOperation) {

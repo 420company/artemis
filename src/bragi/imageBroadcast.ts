@@ -91,23 +91,43 @@ async function loadWechatStoreCandidates(cwd: string) {
 }
 
 async function loadTelegramFallback(cwd: string) {
+  const globalCwd = resolve(homedir(), '.artemis')
+  const candidates = uniq([
+    cwd,
+    globalCwd,
+  ])
+  let botToken: string | undefined
+  const targets: string[] = []
   try {
     const { TelegramStore } = await import('../telegram/store.js')
-    const data = await new TelegramStore(cwd).load()
-    return {
-      botToken: data.botToken,
-      targets: data.allowedChatIds ?? [],
+    for (const candidate of candidates) {
+      const data = await new TelegramStore(candidate).load()
+      botToken ??= data.botToken
+      targets.push(
+        ...(data.allowedChatIds ?? []),
+        ...(data.chats ?? []).map(chat => chat.chatId),
+      )
     }
+    return { botToken, targets: uniq(targets) }
   } catch {
     return { targets: [] as string[] }
   }
 }
 
 async function loadDiscordFallbackTargets(cwd: string): Promise<string[]> {
+  const globalCwd = resolve(homedir(), '.artemis')
+  const candidates = uniq([
+    cwd,
+    globalCwd,
+  ])
+  const targets: string[] = []
   try {
     const { DiscordStore } = await import('../discord/store.js')
-    const data = await new DiscordStore(cwd).load()
-    return (data.targets ?? []).map(target => target.targetId)
+    for (const candidate of candidates) {
+      const data = await new DiscordStore(candidate).load()
+      targets.push(...(data.targets ?? []).map(target => target.targetId))
+    }
+    return uniq(targets)
   } catch {
     return []
   }
@@ -118,8 +138,8 @@ async function loadDiscordFallbackTargets(cwd: string): Promise<string[]> {
  * bridges first, then fall back to configured REST clients for Telegram and
  * Discord when their bridges are not currently running.
  *
- * WeChat requires a live context_token captured from an inbound message, so it
- * can only send images through the running WeChat bridge.
+ * WeChat requires a context_token captured from an inbound message. The live
+ * bridge is preferred, with a configured-store fallback for saved targets.
  */
 export async function sendBragiImageBroadcast(options: {
   cwd: string
@@ -142,12 +162,16 @@ export async function sendBragiImageBroadcast(options: {
 
   const store = new BragiStore(options.cwd)
   const data = await store.load()
+  const globalCwd = resolve(homedir(), '.artemis')
+  const globalData = resolve(options.cwd) === globalCwd
+    ? undefined
+    : await new BragiStore(globalCwd).load().catch(() => undefined)
   const configured: BridgeImageBroadcastResult['configured'] = []
   const skipped: string[] = []
 
   for (const platform of platforms) {
     if (registered.includes(platform) && !shouldUseConfiguredFallback) continue
-    const config = data.platforms[platform]
+    const config = data.platforms[platform] ?? globalData?.platforms[platform]
     if (!config?.enabled && platform !== 'wechat' && platform !== 'telegram') {
       skipped.push(`${platform}: not enabled`)
       continue
@@ -250,9 +274,18 @@ export async function sendBragiImageBroadcast(options: {
               if (!contextToken) {
                 throw new Error('missing WeChat context_token for target; send a fresh WeChat message to Artemis first')
               }
-              const sentImage = await client.sendImage(target, imagePath, contextToken, caption)
+              const sentImage = await client.sendImage(target, imagePath, contextToken)
               if (!sentImage.rendered) {
                 throw new Error(`WeChat iLink accepted image payload but mobile rendering is unconfirmed/known invisible for schema=${sentImage.schema}; response=${JSON.stringify(sentImage.response)}`)
+              }
+              if (options.source === 'dream' && caption.trim()) {
+                try {
+                  await client.sendText(target, caption, contextToken)
+                } catch {
+                  // The iLink token window is inconsistent after media sends.
+                  // Keep the successfully delivered dream image instead of
+                  // retrying and risking duplicate attachments.
+                }
               }
               record.sent += 1
             } catch (err) {

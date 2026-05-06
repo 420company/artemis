@@ -233,10 +233,18 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
             continue
           }
           if (payload.imagePath) {
-            const sentImage = await client.sendImage(targetId, payload.imagePath, contextToken, payload.text, options.signal)
+            const sentImage = await client.sendImage(targetId, payload.imagePath, contextToken, undefined, options.signal)
             options.onInfo?.(`[wechat] image push accepted target=${targetId} file=${sentImage.filename} bytes=${sentImage.bytes} schema=${sentImage.schema} rendered=${sentImage.rendered} response=${JSON.stringify(sentImage.response)}`)
             if (!sentImage.rendered) {
               throw new Error(`WeChat iLink accepted image payload but mobile rendering is unconfirmed/known invisible for schema=${sentImage.schema}; response=${JSON.stringify(sentImage.response)}`)
+            }
+            if (payload.source === 'dream' && payload.text.trim()) {
+              try {
+                await client.sendText(targetId, payload.text, contextToken, options.signal)
+              } catch (err) {
+                const error = err instanceof Error ? err.message : String(err)
+                options.onInfo?.(`[wechat] dream text follow-up after image failed target=${targetId}: ${error}`)
+              }
             }
           } else {
             await client.sendText(targetId, payload.text, contextToken, options.signal)

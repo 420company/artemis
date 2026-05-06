@@ -8,6 +8,10 @@ import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { compressMessages } from './core/contextCompressor.js';
+import {
+    projectDirectToolNames,
+    widenProjectedDirectToolNames,
+} from './core/directToolProjection.js';
 import { getToolDefinition } from './tools/registry.js';
 import {
     getBackgroundTaskRegistry,
@@ -373,6 +377,40 @@ function getDisabledToolGroup(
         return undefined;
     }
     return group;
+}
+
+function resolveProjectedDirectToolNames(
+    messages: SessionMessage[],
+    enabled: Record<string, boolean>,
+    widenAttempt: number,
+    currentToolNames: string[],
+): string[] {
+    const allEnabledTools = filterDirectToolsBySetup(listDirectToolNames(), enabled);
+    if (allEnabledTools.length === 0) {
+        return [];
+    }
+
+    const rawProjection =
+        widenAttempt > 0
+            ? widenProjectedDirectToolNames(
+                messages,
+                currentToolNames.length > 0 ? currentToolNames : projectDirectToolNames(messages),
+                widenAttempt - 1,
+            )
+            : projectDirectToolNames(messages);
+
+    const projected = filterDirectToolsBySetup(rawProjection, enabled);
+
+    // Fail open for ambiguous prompts. The projection always includes a small
+    // core read surface; if no task-specific tool family was selected, keeping
+    // only that core would be a quality regression for natural-language tasks
+    // such as reminders, music, browser automation, or integrations we have not
+    // learned to classify yet. In that case, preserve the old all-tools behavior.
+    if (widenAttempt === 0 && projected.length <= 8) {
+        return allEnabledTools;
+    }
+
+    return projected.length > 0 ? projected : allEnabledTools;
 }
 
 // ── provider ──────────────────────────────────────────────────────────────────
@@ -1650,6 +1688,42 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
     };
 }
 
+function addOptionalNumbers(left: number | undefined, right: number | undefined): number | undefined {
+    if (typeof left !== 'number') return right;
+    if (typeof right !== 'number') return left;
+    return left + right;
+}
+
+function accumulateProviderUsage(
+    current: ProviderResponse['usage'] | undefined,
+    next: ProviderResponse['usage'] | undefined,
+): ProviderResponse['usage'] | undefined {
+    if (!next) {
+        return current;
+    }
+
+    const promptTokens = addOptionalNumbers(current?.promptTokens, next.promptTokens);
+    const completionTokens = addOptionalNumbers(current?.completionTokens, next.completionTokens);
+    const totalTokens =
+        addOptionalNumbers(current?.totalTokens, next.totalTokens) ??
+        (typeof promptTokens === 'number' && typeof completionTokens === 'number'
+            ? promptTokens + completionTokens
+            : undefined);
+
+    return {
+        ...next,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        durationMs: addOptionalNumbers(current?.durationMs, next.durationMs),
+        firstResponseMs: current?.firstResponseMs ?? next.firstResponseMs,
+        source:
+            current?.source === 'estimated' || next.source === 'estimated'
+                ? 'estimated'
+                : next.source ?? current?.source,
+    };
+}
+
 function estimateResponseUsage(
     result: ProviderResponse,
     messages: SessionMessage[],
@@ -1795,11 +1869,30 @@ export async function think(
     const enabledTools = await loadSetupToolEnabled(cwd);
     const supportsNativeTools = p.supportsNativeToolCalls === true && !disableNativeTools;
     const plainChat = isPlainChatRequest(latestUserText);
-    const projectedToolNames = supportsNativeTools && !plainChat
-        ? filterDirectToolsBySetup(listDirectToolNames(), enabledTools)
+    let toolProjectionWidenAttempt = 0;
+    let projectedToolNames = supportsNativeTools && !plainChat
+        ? resolveProjectedDirectToolNames(
+            providerConversationMessages,
+            enabledTools,
+            toolProjectionWidenAttempt,
+            [],
+        )
         : [];
+    const widenProjectedTools = (): void => {
+        if (!supportsNativeTools || plainChat) {
+            return;
+        }
+        toolProjectionWidenAttempt += 1;
+        projectedToolNames = resolveProjectedDirectToolNames(
+            providerConversationMessages,
+            enabledTools,
+            toolProjectionWidenAttempt,
+            projectedToolNames,
+        );
+    };
     const hasImageAttachments = imageAttachments.length > 0;
     let finalResult: ProviderResponse | null = null;
+    let cumulativeUsage: ProviderResponse['usage'] | undefined;
     let emittedFinalText = false;
     let unresolvedDirectToolFailure: DirectToolFailureState | null = null;
     let previousResponseId: string | undefined;
@@ -1864,6 +1957,7 @@ export async function think(
                     guardStreamingText: supportsNativeTools && !plainChat,
                 },
             );
+        cumulativeUsage = accumulateProviderUsage(cumulativeUsage, completion.usage);
         finalResult = completion;
 
         const nativeCalls = completion.nativeToolCalls ?? [];
@@ -1886,6 +1980,7 @@ export async function think(
                         guardStreamingText: false,
                     },
                 );
+                cumulativeUsage = accumulateProviderUsage(cumulativeUsage, forcedCompletion.usage);
                 const forcedReply = (forcedCompletion.text ?? '').trim() || [
                     '我已经停止继续调用工具。',
                     '目前还没有足够的最终文本可返回；请发送“继续”让我基于当前上下文接着处理，或把任务拆成更小的一步。',
@@ -2043,6 +2138,7 @@ export async function think(
                 providerConversationMessages = [...providerConversationMessages, guardMessage];
                 rawMessages = [...rawMessages, guardMessage];
                 tSession.restore(rawMessages);
+                widenProjectedTools();
                 continue;
             }
             reply = [
@@ -2060,6 +2156,7 @@ export async function think(
                 providerConversationMessages = [...providerConversationMessages, guardMessage];
                 rawMessages = [...rawMessages, guardMessage];
                 tSession.restore(rawMessages);
+                widenProjectedTools();
                 continue;
             }
 
@@ -2078,6 +2175,7 @@ export async function think(
                     providerConversationMessages = [...providerConversationMessages, guardMessage];
                     rawMessages = [...rawMessages, guardMessage];
                     tSession.restore(rawMessages);
+                    widenProjectedTools();
                     continue;
                 }
             }
@@ -2104,6 +2202,19 @@ export async function think(
 
     if (!finalResult) {
         throw new Error('Provider did not return a response.');
+    }
+
+    if (cumulativeUsage) {
+        finalResult = {
+            ...finalResult,
+            usage: accumulateProviderUsage(undefined, {
+                ...finalResult.usage,
+                ...cumulativeUsage,
+                profileId: finalResult.usage?.profileId ?? cumulativeUsage.profileId,
+                profileLabel: finalResult.usage?.profileLabel ?? cumulativeUsage.profileLabel,
+                protocol: finalResult.usage?.protocol ?? cumulativeUsage.protocol,
+            }),
+        };
     }
 
     const tokenStats = responseUsageAsTokenStats(finalResult);

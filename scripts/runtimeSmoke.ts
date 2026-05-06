@@ -59,6 +59,7 @@ import {
   resolveWorkspaceForTargetPath,
 } from '../src/utils/workspaceRoots.js'
 import { projectDirectToolNames } from '../src/core/directToolProjection.js'
+import { buildDreamBridgeText } from '../src/services/dreamComposer.js'
 import type { SessionMessage } from '../src/core/types.js'
 import type {
   ChatProvider,
@@ -462,6 +463,60 @@ assert(
     shellProjection.includes('run_command') &&
     shellProjection.includes('git_commit'),
   shellProjection.join(', '),
+)
+
+const ambientProjection = projectDirectToolNames([
+  {
+    id: 'ambient-user',
+    role: 'user',
+    content: '明天上午提醒我看天气，如果下雨就播放 Spotify 歌单。',
+    createdAt: new Date().toISOString(),
+  },
+])
+
+assert(
+  'tool projection: ambient requests keep productivity, weather, and music tools',
+  ambientProjection.includes('reminders_add') &&
+    ambientProjection.includes('weather_forecast') &&
+    ambientProjection.includes('spotify_play_playlist') &&
+    !ambientProjection.includes('apply_patch'),
+  ambientProjection.join(', '),
+)
+
+const dreamBridgeText = buildDreamBridgeText(
+  [
+    '# 桥上晚潮',
+    '',
+    '我梦见一座有三座桥的港口，月亮的照片被送到对岸。',
+    '',
+    '第二段梦境仍然完整保留，不应该被截断。',
+    '',
+    '### 学到了什么',
+    '- 偏好完整、克制、不重复的通知。',
+  ].join('\n'),
+  {
+    id: '2026-05-06noon1533',
+    createdAt: '2026-05-06T08:33:00.000Z',
+    mdPath: '/Users/goat/.artemis/dreams/2026-05-06noon1533.md',
+    imagePath: '/Users/goat/.artemis/dreams/2026-05-06noon1533.png',
+    trigger: 'idle-auto',
+    preview: '我梦见一座有三座桥的港口',
+    tokenCost: { input: 1, output: 1 },
+  },
+  'zh-CN',
+)
+
+assert(
+  'dream notifications: bridge text keeps the full dream body and local paths',
+  dreamBridgeText.includes('🌙 桥上晚潮') &&
+    dreamBridgeText.includes('第二段梦境仍然完整保留') &&
+    dreamBridgeText.includes('我的日记：/Users/goat/.artemis/dreams/2026-05-06noon1533.md') &&
+    dreamBridgeText.includes('梦境画面：/Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
+    dreamBridgeText.includes('🖼  /Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
+    !dreamBridgeText.includes('梦境片段') &&
+    !dreamBridgeText.includes('刚刚好像') &&
+    !dreamBridgeText.includes('学到了什么'),
+  dreamBridgeText,
 )
 
 assert(
@@ -4685,18 +4740,18 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       `requests=${requests.length}`,
     )
     assert(
-      'native tool loop: coding requests start with the coding direct tool manifest',
-      firstToolNames.length === expectedDirectToolCount,
+      'native tool loop: coding requests start with a projected direct tool manifest',
+      firstToolNames.length > 0 && firstToolNames.length < expectedDirectToolCount,
       `tools=${firstToolNames.length}`,
     )
     assert(
-      'native tool loop: first request includes repo inspection and formatting tools',
+      'native tool loop: first request includes repo inspection tools without unrelated media tools',
       firstToolNames.includes('list_files') &&
         firstToolNames.includes('read_file') &&
         firstToolNames.includes('search_files') &&
-        firstToolNames.includes('format_json') &&
-        firstToolNames.includes('generate_image') &&
-        firstToolNames.includes('generate_video'),
+        firstToolNames.includes('run_command') &&
+        !firstToolNames.includes('generate_image') &&
+        !firstToolNames.includes('generate_video'),
       firstToolNames.join(', '),
     )
     assert(
@@ -4719,6 +4774,13 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       'provider telemetry: think() surfaces the active profile label in usage',
       result.usage?.profileLabel === 'Mock OpenAI-compatible',
       JSON.stringify(result.usage),
+    )
+    assert(
+      'provider telemetry: think() returns cumulative turn token usage',
+      result.tokenStats?.promptTokens === 22 &&
+        result.tokenStats?.completionTokens === 6 &&
+        result.tokenStats?.totalTokens === 28,
+      JSON.stringify(result.tokenStats),
     )
     assert(
       'provider telemetry: per-profile latency samples persist back into providers.json',
