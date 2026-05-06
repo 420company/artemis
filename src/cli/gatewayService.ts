@@ -17,6 +17,7 @@ import { WeChatStore } from '../wechat/store.js'
 import type { BridgeTerminalEvent } from './bridgeNotify.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import { DEFAULT_AGENT_MAX_TURNS } from './branding.js'
+import { resolveDataRootDir } from '../utils/fs.js'
 
 const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
@@ -46,6 +47,22 @@ function dataDir(): string {
 
 function normalizeGatewayCwd(cwd: string): string {
   return path.resolve(cwd)
+}
+
+function homeDataRoot(): string {
+  return path.join(os.homedir(), '.artemis')
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const p of paths) {
+    const normalized = path.resolve(p)
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+  }
+  return out
 }
 
 function plistPath(): string {
@@ -241,12 +258,10 @@ async function uninstallLaunchAgent(): Promise<void> {
 }
 
 async function startLaunchAgent(cwd: string): Promise<void> {
-  if (!fs.existsSync(plistPath())) {
-    await installLaunchAgent(cwd)
-    return
-  }
-  await runLaunchctl(['bootstrap', guiDomain(), plistPath()])
-  await runLaunchctl(['kickstart', '-k', `${guiDomain()}/${LAUNCH_AGENT_LABEL}`])
+  // Always refresh the LaunchAgent before starting. A stale plist can point at
+  // an old project cwd, making the daemon read the wrong .artemis directory even
+  // though the user's bridge setup in ~/.artemis is valid.
+  await installLaunchAgent(cwd)
 }
 
 async function stopLaunchAgent(): Promise<void> {
@@ -294,7 +309,7 @@ async function getLaunchAgentStatus(): Promise<string[]> {
 }
 
 export async function ensureGatewayAutoStart(cwd: string): Promise<void> {
-  cwd = normalizeGatewayCwd(cwd)
+  cwd = await resolveGatewayRuntimeCwd(cwd)
   if (process.platform === 'darwin') {
     await installLaunchAgent(cwd)
     return
@@ -306,6 +321,11 @@ export async function ensureGatewayAutoStart(cwd: string): Promise<void> {
 }
 
 async function getBridgeConfigStatus(cwd: string): Promise<string[]> {
+  const status = await getBridgeConfigSummary(cwd)
+  return status.lines
+}
+
+async function getBridgeConfigSummary(cwd: string): Promise<{ lines: string[]; runnable: number }> {
   const bragiData = await new BragiStore(cwd).load().catch(() => undefined)
   const telegramData = await new TelegramStore(cwd).load().catch(() => undefined)
   const wechatData = await new WeChatStore(cwd).load().catch(() => undefined)
@@ -328,7 +348,31 @@ async function getBridgeConfigStatus(cwd: string): Promise<string[]> {
   if (runnable === 0) {
     lines.push('No runnable bridge yet. Configure Telegram/Discord/WeChat once; setup now enables background auto-start automatically.')
   }
-  return lines
+  return { lines, runnable }
+}
+
+async function resolveGatewayRuntimeCwd(cwd: string): Promise<string> {
+  const requested = normalizeGatewayCwd(cwd)
+  const dataRoot = resolveDataRootDir(requested)
+  const candidates = uniquePaths([
+    dataRoot,
+    homeDataRoot(),
+    requested,
+  ])
+
+  for (const candidate of candidates) {
+    const summary = await getBridgeConfigSummary(candidate)
+    if (summary.runnable > 0) return candidate
+  }
+
+  // A freshly installed npm user may run `artemis gateway install` before any
+  // bridge setup exists. In that case pin the background daemon to the stable
+  // user data root instead of the shell's current project directory; otherwise
+  // later Telegram/Discord/WeChat setup can write ~/.artemis while launchd keeps
+  // reading <project>/.artemis and the phone bridges appear configured but never
+  // start after login.
+  if (path.basename(requested) === '.artemis') return requested
+  return homeDataRoot()
 }
 
 async function installWindowsTask(cwd: string): Promise<void> {
@@ -521,16 +565,17 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
   }
 
   if (sub === 'install' || sub === 'enable') {
-    if (process.platform === 'darwin') await installLaunchAgent(cwd)
-    else if (process.platform === 'win32') await installWindowsTask(cwd)
+    const runtimeCwd = await resolveGatewayRuntimeCwd(cwd)
+    if (process.platform === 'darwin') await installLaunchAgent(runtimeCwd)
+    else if (process.platform === 'win32') await installWindowsTask(runtimeCwd)
     else throw new Error('Artemis gateway auto-start currently supports macOS LaunchAgent and Windows Task Scheduler only.')
     console.log()
     console.log(buildPanel(t(locale, 'Gateway 已安装并启动', 'Gateway installed and started'), [
       t(locale, '以后系统登录后，Telegram/Discord/WeChat bridge 会在后台自动启动。', 'After OS login, Telegram/Discord/WeChat bridges will start in the background.'),
       `Backend: ${platformName}`,
       process.platform === 'darwin' ? `Plist: ${plistPath()}` : `Task: ${WINDOWS_TASK_NAME}`,
-      `CWD: ${cwd}`,
-      ...(await getBridgeConfigStatus(cwd)),
+      `CWD: ${runtimeCwd}`,
+      ...(await getBridgeConfigStatus(runtimeCwd)),
     ]))
     console.log()
     return
@@ -549,8 +594,9 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
   }
 
   if (sub === 'start') {
-    if (process.platform === 'darwin') await startLaunchAgent(cwd)
-    else if (process.platform === 'win32') await startWindowsTask(cwd)
+    const runtimeCwd = await resolveGatewayRuntimeCwd(cwd)
+    if (process.platform === 'darwin') await startLaunchAgent(runtimeCwd)
+    else if (process.platform === 'win32') await startWindowsTask(runtimeCwd)
     else throw new Error('Artemis gateway auto-start currently supports macOS LaunchAgent and Windows Task Scheduler only.')
     console.log()
     console.log(buildPanel(t(locale, 'Gateway 已启动', 'Gateway started'), process.platform === 'win32' ? await getWindowsTaskStatus() : await getLaunchAgentStatus()))
@@ -571,12 +617,13 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
   }
 
   if (sub === 'restart') {
+    const runtimeCwd = await resolveGatewayRuntimeCwd(cwd)
     if (process.platform === 'darwin') {
       await stopLaunchAgent()
-      await startLaunchAgent(cwd)
+      await startLaunchAgent(runtimeCwd)
     } else if (process.platform === 'win32') {
       await stopWindowsTask()
-      await startWindowsTask(cwd)
+      await startWindowsTask(runtimeCwd)
     } else throw new Error('Artemis gateway auto-start currently supports macOS LaunchAgent and Windows Task Scheduler only.')
     console.log()
     console.log(buildPanel(t(locale, 'Gateway 已重启', 'Gateway restarted'), process.platform === 'win32' ? await getWindowsTaskStatus() : await getLaunchAgentStatus()))
@@ -585,13 +632,14 @@ export async function runGatewayCommand(options: GatewayCommandOptions): Promise
   }
 
   if (sub === 'status') {
+    const runtimeCwd = await resolveGatewayRuntimeCwd(cwd)
     console.log()
     console.log(buildPanel(
       t(locale, 'Gateway 状态', 'Gateway status'),
       [
         ...(process.platform === 'win32' ? await getWindowsTaskStatus() : await getLaunchAgentStatus()),
-        `CWD: ${cwd}`,
-        ...(await getBridgeConfigStatus(cwd)),
+        `CWD: ${runtimeCwd}`,
+        ...(await getBridgeConfigStatus(runtimeCwd)),
       ]
     ))
     console.log()
