@@ -1733,11 +1733,6 @@ export interface ThinkOptions {
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 24;
 
-function isAbortError(error: unknown): boolean {
-    return error instanceof DOMException && error.name === 'AbortError'
-        || error instanceof Error && error.name === 'AbortError';
-}
-
 export async function think(
     input: string,
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
@@ -1810,10 +1805,6 @@ export async function think(
     let previousResponseId: string | undefined;
     let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
     let emptyFinalReplyRetryUsed = false;
-    let runningMessageAbortController: AbortController | undefined;
-    let runningMessageAbortPending = false;
-    let runningMessageAbortTimer: ReturnType<typeof setInterval> | undefined;
-
     const absorbRunningUserMessages = (): number => {
         const updates = pollRunningUserMessages?.() ?? [];
         let accepted = 0;
@@ -1838,32 +1829,6 @@ export async function think(
         return accepted;
     };
 
-    const beginRunningMessageAbortWatch = (): AbortController | undefined => {
-        if (!pollRunningUserMessages) return undefined;
-        const controller = new AbortController();
-        runningMessageAbortController = controller;
-        runningMessageAbortPending = false;
-        runningMessageAbortTimer = setInterval(pollRunningMessagesDuringProvider, 250);
-        runningMessageAbortTimer.unref?.();
-        return controller;
-    };
-
-    const endRunningMessageAbortWatch = (): void => {
-        if (runningMessageAbortTimer) {
-            clearInterval(runningMessageAbortTimer);
-            runningMessageAbortTimer = undefined;
-        }
-        runningMessageAbortController = undefined;
-    };
-
-    const pollRunningMessagesDuringProvider = (): void => {
-        if (!runningMessageAbortController || runningMessageAbortController.signal.aborted) return;
-        if (absorbRunningUserMessages() > 0) {
-            runningMessageAbortPending = true;
-            runningMessageAbortController.abort();
-        }
-    };
-
     const maxNativeToolRounds = Math.max(
         1,
         Math.floor(rawMaxNativeToolRounds ?? MAX_DIRECT_NATIVE_TOOL_ROUNDS),
@@ -1883,10 +1848,7 @@ export async function think(
         previousResponseId = undefined;
         pendingToolOutputs = undefined;
         const providerMessages = [...systemMessages, ...providerConversationMessages];
-        const abortController = beginRunningMessageAbortWatch();
-        let completion: ProviderResponse;
-        try {
-            completion = await completeWithOptionalStream(
+        const completion = await completeWithOptionalStream(
                 p,
                 providerMessages,
                 onDelta,
@@ -1898,25 +1860,10 @@ export async function think(
                     // tool group was disabled; providers that cannot handle images will
                     // ignore/fail explicitly in their own adapter path.
                     imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
-                    onReasoning: (delta: string) => {
-                        pollRunningMessagesDuringProvider();
-                        onReasoning?.(delta);
-                    },
+                    onReasoning,
                     guardStreamingText: supportsNativeTools && !plainChat,
-                    abortSignal: abortController?.signal,
                 },
             );
-        } catch (error) {
-            if (runningMessageAbortPending && isAbortError(error)) {
-                continue;
-            }
-            throw error;
-        } finally {
-            endRunningMessageAbortWatch();
-        }
-        if (runningMessageAbortPending) {
-            continue;
-        }
         finalResult = completion;
 
         const nativeCalls = completion.nativeToolCalls ?? [];
