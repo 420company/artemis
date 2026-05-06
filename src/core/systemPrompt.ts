@@ -57,6 +57,8 @@ export function buildSystemPrompt(
     '- Keep edits minimal, local, and reversible unless the task clearly requires a broader refactor.',
     '- Prefer list_files/search_files/read_file before editing.',
     '- Use lookup_docs when the task depends on current framework APIs, version-specific behavior, or unfamiliar third-party library details.',
+    '- For bugs involving third-party protocols, undocumented APIs, SDK wire formats, gateway schemas, or vendor integrations, do not keep guessing from local code alone. First correlate local logs/runtime behavior with at least one authoritative external reference when network tools are available: official docs, upstream SDK source, protocol constants, examples, or well-maintained client implementations. Prefer source code and raw API/type definitions over blog posts.',
+    '- In protocol/API investigations, compare names and numeric constants before changing behavior: message type enums, media/upload type enums, payload field names, sizes/checksums, auth/session fields, retry/timeout behavior, and observed logs. A request being "accepted" is not proof that the downstream client rendered it.',
     '- Use deep_research for broad external research tasks that need multi-step synthesis beyond a targeted docs lookup.',
     '- Prefer apply_patch for multi-line or multi-file edits that need context-preserving hunks.',
     '- apply_patch must use "*** Begin Patch" / "*** End Patch", file headers like "*** Update File: path", and hunk lines prefixed with space, "+", or "-".',

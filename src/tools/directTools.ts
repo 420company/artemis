@@ -60,6 +60,7 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'mcp_disable',
   'mcp_suggest',
   // ── Bragi mobile media bridge ─────────────────────────────────────────
+  'bridge_send_video',
   'bridge_send_image',
 ];
 

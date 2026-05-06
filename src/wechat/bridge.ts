@@ -232,7 +232,13 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
             options.onInfo?.(`[wechat] image push skipped target=${targetId}: ${error}`)
             continue
           }
-          if (payload.imagePath) {
+          if (payload.videoPath) {
+            const videoSignal = options.signal
+              ? AbortSignal.any([AbortSignal.timeout(180_000), options.signal])
+              : AbortSignal.timeout(180_000)
+            const sentVideo = await client.sendVideo(targetId, payload.videoPath, contextToken, videoSignal, options.onInfo)
+            options.onInfo?.(`[wechat] video push accepted target=${targetId} file=${sentVideo.filename} bytes=${sentVideo.bytes} schema=${sentVideo.schema} response=${JSON.stringify(sentVideo.response)}`)
+          } else if (payload.imagePath) {
             const sentImage = await client.sendImage(targetId, payload.imagePath, contextToken, undefined, options.signal)
             options.onInfo?.(`[wechat] image push accepted target=${targetId} file=${sentImage.filename} bytes=${sentImage.bytes} schema=${sentImage.schema} rendered=${sentImage.rendered} response=${JSON.stringify(sentImage.response)}`)
             if (!sentImage.rendered) {

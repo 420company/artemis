@@ -20,6 +20,7 @@ export interface BlessedPromptOptions {
   headerFn?: () => string
   footerHint?: string
   onTextChange?: (text: string) => void
+  onToggleTranscript?: () => void
 }
 
 export interface PickChoice<T> {
@@ -187,6 +188,7 @@ class TerminalPrompt implements BlessedPromptHandle {
   private readonly headerFn?: () => string
   private readonly footerHint: string
   private readonly onTextChange?: (text: string) => void
+  private readonly onToggleTranscript?: () => void
 
   private finalisedLines: string[] = []
   private transientLines: string[] = []
@@ -222,6 +224,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.headerFn = options.headerFn
     this.footerHint = options.footerHint ?? ''
     this.onTextChange = options.onTextChange
+    this.onToggleTranscript = options.onToggleTranscript
     // Windows console hosts can drop raw-mode keypress events while still showing
     // a blinking cursor, which makes the chat box look focused but impossible to
     // type into. Use cooked line input on Windows by default so the console host
@@ -573,6 +576,10 @@ class TerminalPrompt implements BlessedPromptHandle {
 
     if (key.ctrl && key.name === 'c') {
       this.handleCtrlC()
+      return
+    }
+    if (key.ctrl && key.name === 't') {
+      this.onToggleTranscript?.()
       return
     }
 

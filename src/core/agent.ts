@@ -1656,6 +1656,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `mcp_suggest "${truncate(action.intent, 80)}"`;
     case 'bridge_send_image':
       return `bridge_send_image ${truncate(action.imagePath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
+    case 'bridge_send_video':
+      return `bridge_send_video ${truncate(action.videoPath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
     case 'request_user_confirmation':
       return `request_user_confirmation "${truncate(action.question, 100)}"${action.screenshotPath ? ` screenshot=${truncate(action.screenshotPath, 80)}` : ''}`;
     default: {

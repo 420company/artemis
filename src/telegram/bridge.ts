@@ -382,7 +382,9 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
       const failed: Array<{ target: string; error: string }> = []
       for (const chatId of targets) {
         try {
-          if (payload.imagePath && existsSync(payload.imagePath)) {
+          if (payload.videoPath && existsSync(payload.videoPath)) {
+            await client.sendVideo(chatId, payload.videoPath, payload.text)
+          } else if (payload.imagePath && existsSync(payload.imagePath)) {
             // Use sendPhoto with caption — image + caption in one message,
             // so phone users actually see the screenshot inline.
             await client.sendPhoto(chatId, payload.imagePath, payload.text)
@@ -391,6 +393,9 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
             if (payload.imagePath) {
               // File doesn't exist (yet?) — surface the path as fallback.
               await client.sendMessage(chatId, `🖼 ${payload.imagePath}`)
+            }
+            if (payload.videoPath) {
+              await client.sendMessage(chatId, `🎬 ${payload.videoPath}`)
             }
           }
           sent += 1

@@ -468,6 +468,7 @@ export type AgentAction =
   | { type: 'mcp_suggest'; intent: string }
   // ── Bragi mobile media bridge ──────────────────────────────────────────
   | { type: 'bridge_send_image'; imagePath: string; caption?: string; platform?: 'telegram' | 'discord' | 'wechat' | 'all'; targetId?: string }
+  | { type: 'bridge_send_video'; videoPath: string; caption?: string; platform?: 'telegram' | 'discord' | 'wechat' | 'all'; targetId?: string }
   | { type: 'request_user_confirmation'; question: string; screenshotPath?: string; timeoutMs?: number };
 
 export type AgentActionType = AgentAction['type'];
@@ -541,6 +542,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'mcp_suggest',
   // ── Bragi mobile media bridge ──────────────────────────────────────────
   'bridge_send_image',
+  'bridge_send_video',
   'request_user_confirmation',
 ] as const satisfies readonly AgentActionType[];
 

@@ -220,7 +220,9 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
       const failed: Array<{ target: string; error: string }> = []
       for (const targetId of targets) {
         try {
-          if (payload.imagePath && existsSync(payload.imagePath)) {
+          if (payload.videoPath && existsSync(payload.videoPath)) {
+            await gateway.sendAttachment(targetId, payload.videoPath, payload.text)
+          } else if (payload.imagePath && existsSync(payload.imagePath)) {
             // Real attachment upload — phone users see the screenshot inline.
             await gateway.sendAttachment(targetId, payload.imagePath, payload.text)
           } else {
@@ -228,6 +230,9 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
             if (payload.imagePath) {
               // File missing on disk — surface path as fallback.
               await gateway.sendMessage(targetId, `🖼 ${payload.imagePath}`)
+            }
+            if (payload.videoPath) {
+              await gateway.sendMessage(targetId, `🎬 ${payload.videoPath}`)
             }
           }
           sent += 1

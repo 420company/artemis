@@ -28,6 +28,12 @@ const DEFAULT_RATIO = '16:9';
 const DEFAULT_SUBDIR = 'generated-media/videos';
 const DEFAULT_MAX_POLLS = 60;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+const UNSAFE_VIDEO_MODEL_ALIASES = new Set([
+  'auto',
+  'default',
+  'veo-3.1-fast',
+  'runway-gen3',
+]);
 
 type GenerateVideoAction = Extract<AgentAction, { type: 'generate_video' }>;
 
@@ -77,6 +83,13 @@ function extractVideoUrl(payload: TaskStatusResponse): string | undefined {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveConfiguredVideoModel(action: GenerateVideoAction, configuredModel: string): string {
+  const requestedModel = action.model?.trim();
+  if (!requestedModel) return configuredModel;
+  if (UNSAFE_VIDEO_MODEL_ALIASES.has(requestedModel.toLowerCase())) return configuredModel;
+  return requestedModel;
 }
 
 export async function executeGenerateVideo(
@@ -274,7 +287,11 @@ async function tryGenerateWithConfiguredVisualProvider(
     };
   }
 
-  const model = action.model?.trim() || configured.config.video.model || configured.model;
+  // Chat models sometimes pass provider-generic video aliases (for example
+  // "veo-3.1-fast", "default", "auto", or "runway-gen3") as action.model.
+  // Those aliases should not override the configured visual model, but explicit
+  // real model IDs must still work for custom video APIs.
+  const model = resolveConfiguredVideoModel(action, configured.config.video.model || configured.model);
   return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API');
 }
 

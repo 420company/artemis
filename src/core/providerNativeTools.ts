@@ -729,7 +729,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['query'],
         properties: {
-          query: nonEmptyStringSchema('Web search query.'),
+          query: nonEmptyStringSchema('Web search query. Use for third-party protocols, undocumented APIs, SDK/gateway schemas, or unstable external facts before guessing from local code. Prefer official docs, upstream source, raw type definitions, and maintained client implementations.'),
           limit: integerSchema('Optional limit for returned search results.'),
           backend: {
             type: 'string',
@@ -1457,13 +1457,29 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           intent: nonEmptyStringSchema('Natural-language description of what you want to do (e.g. "flight search", "git operations").'),
         },
       };
+    case 'bridge_send_video':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['videoPath'],
+        properties: {
+          videoPath: nonEmptyStringSchema('Local MP4 video file path to send as a real attachment. Use exactly "latest_dream_video" when the user asks to receive the latest Artemis dream video.'),
+          caption: optionalStringSchema('Optional caption shown with the video.'),
+          platform: {
+            type: 'string',
+            enum: ['telegram', 'discord', 'wechat', 'all'],
+            description: 'Target platform. Defaults to all.',
+          },
+          targetId: optionalStringSchema('Optional platform target id/chat id/channel id. Defaults to configured or live bridge targets.'),
+        },
+      };
     case 'bridge_send_image':
       return {
         type: 'object',
         additionalProperties: false,
         required: ['imagePath'],
         properties: {
-          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment. Use exactly "latest_dream" when the user asks to see Artemis dream/dreaming image; this resolves the newest image under ~/.artemis/dreams and must not generate a new .artemis/images/artemis_dream.png.'),
+          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment. Images only. Use exactly "latest_dream" for latest Artemis dream image. If the user mentions video, MP4, dream video, or latest_dream_video, use bridge_send_video instead.'),
           caption: optionalStringSchema('Optional caption shown with the image.'),
           platform: {
             type: 'string',

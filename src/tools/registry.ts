@@ -33,6 +33,7 @@ import { executeSearchFiles } from './searchFiles.js';
 import { executeSearchWeb } from './searchWeb.js';
 import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
+import { executeBridgeSendVideo } from './bridgeSendVideo.js';
 import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
 
 export type { ToolDefinition };
@@ -592,7 +593,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'search_web',
-    description: '搜索网页内容',
+    description: '搜索网页内容。调试第三方协议、未知 API、SDK/gateway/schema、接口 accepted 但客户端异常、版本常量不确定时，应主动用它查官方文档、上游源码或可信实现作为对照。',
     kind: 'search',
     permissionCategory: 'read',
     executionMode: 'blocking',
@@ -1445,7 +1446,7 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'bridge_send_image',
-    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。用户要“梦境图片/做梦图片”时必须用 imagePath="latest_dream" 发送 ~/.artemis/dreams 最新梦境图，不要调用 generate_image 新建 .artemis/images/artemis_dream.png；platform 默认 all。',
+    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。仅用于图片；用户要“梦境图片/做梦图片”时用 imagePath="latest_dream"。如果用户提到视频、MP4、梦境视频、latest_dream_video，必须改用 bridge_send_video，不要用本工具。platform 默认 all。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1459,6 +1460,24 @@ const capabilityToolDefs: ToolDefinition[] = [
       return errs;
     },
     execute: executeBridgeSendImage as any,
+  },
+
+  {
+    type: 'bridge_send_video',
+    description: '把本机 MP4 视频作为真实视频附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。用户要“梦境视频/做成视频发给我”时必须用 videoPath="latest_dream_video" 或已生成的 ~/.artemis/dreams/*.mp4；platform 默认 all。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.videoPath, 'videoPath', errs);
+      validateEnumString(a?.platform, 'platform', ['telegram', 'discord', 'wechat', 'all'] as const, errs);
+      validateOptionalNonEmptyString(a?.caption, 'caption', errs);
+      if (a?.targetId !== '') validateOptionalNonEmptyString(a?.targetId, 'targetId', errs);
+      return errs;
+    },
+    execute: executeBridgeSendVideo as any,
   },
   {
     type: 'request_user_confirmation',

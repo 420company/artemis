@@ -37,7 +37,7 @@ import type { ChatProvider, ProviderConfig } from '../providers/types.js'
 import { resolveWorkspaceIntent } from '../cli/workspaceIntent.js'
 import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
 import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
-import { sendBragiImageBroadcast } from './imageBroadcast.js'
+import { sendBragiImageBroadcast, sendBragiVideoBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
@@ -173,7 +173,13 @@ function formatMobileReply(text: string): string {
 function isDreamImageRequest(text: string): boolean {
   const normalized = text.replace(/\s+/g, '').toLowerCase()
   if (!/(梦境|做梦|dream)/i.test(normalized)) return false
+  if (/(视频|影片|mp4|video|latestdreamvideo|latest_dream_video)/i.test(normalized)) return false
   return /(图片|图|image|photo|pic|看看|看一下|发我|send|show)/i.test(normalized)
+}
+
+function isDreamVideoRequest(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '').toLowerCase()
+  return /(latestdreamvideo|latest_dream_video|梦境视频|做梦视频|dreamvideo|dreammp4|mp4)/i.test(normalized)
 }
 
 let bridgeThinkQueue: Promise<void> = Promise.resolve()
@@ -481,21 +487,54 @@ export async function runRemoteCommand(
         }
 
         const effectiveBody = workflowResolution?.effectivePrompt ?? command.body
+        const shouldSendDreamVideoDirectly = !workflowResolution && isDreamVideoRequest(command.body)
         const shouldSendDreamImageDirectly = !workflowResolution && isDreamImageRequest(command.body)
+        const shouldSendDreamMediaDirectly = shouldSendDreamVideoDirectly || shouldSendDreamImageDirectly
         const startedText = t(
           '请求已接收 · Artemis 正在后台处理，完成后将自动送达。',
           'Request received · Artemis is processing it in the background and will deliver the result once complete.',
         )
-        await opts.onProgress?.(startedText, 'info')
-        // Also send the "received" notice to the chat so users on phones
-        // know the message arrived and the AI is working — without this
-        // they stare at nothing for 30+ seconds wondering if it's stuck.
-        // Exception: direct WeChat dream-image replies need the fresh iLink
-        // context_token for the attachment itself. A preliminary text reply can
-        // consume that one-turn token/window and make the following image upload
-        // fail or arrive only after the slower configured fallback.
-        if (!shouldSendDreamImageDirectly) {
+        // Also send the "received" notice to the chat/status stream so users
+        // on phones know the message arrived and the AI is working. Exception:
+        // direct WeChat dream media replies need the fresh iLink context_token
+        // for the attachment itself; even a preliminary status/text message can
+        // consume that one-turn token/window and make the following media send
+        // fail or become invisible.
+        if (!shouldSendDreamMediaDirectly) {
+          await opts.onProgress?.(startedText, 'info')
           await opts.sendChatUpdate?.(startedText)
+        }
+
+        if (shouldSendDreamVideoDirectly) {
+          const platform = opts.bridgePlatform
+          await opts.onProgress?.(t(
+            '🔧 正在运行工具：bridge_send_video · latest_dream_video',
+            '🔧 Running tool: bridge_send_video · latest_dream_video',
+          ), 'info')
+          const broadcast = await sendBragiVideoBroadcast({
+            cwd: commandCwd,
+            videoPath: 'latest_dream_video',
+            caption: '🎬 Artemis latest dream video',
+            platform,
+            targetId: opts.targetId,
+            source: 'dream_video_request',
+          })
+          const failed = broadcast.live.failed.length + broadcast.configured.reduce((sum, item) => sum + item.failed.length, 0)
+          const sent = broadcast.live.sent + broadcast.configured.reduce((sum, item) => sum + item.sent, 0)
+          const firstFailure = broadcast.live.failed[0]?.error
+            ?? broadcast.configured.flatMap(item => item.failed)[0]?.error
+          const failureSuffix = firstFailure ? `; first_error=${firstFailure.slice(0, 180)}` : ''
+          await opts.onProgress?.(t(
+            `${failed === 0 ? '✅' : '⚠️'} 工具${failed === 0 ? '完成' : '失败'}：bridge_send_video · video: ${broadcast.videoPath}; sent=${sent}; failed=${failed}${failureSuffix}`,
+            `${failed === 0 ? '✅' : '⚠️'} Tool ${failed === 0 ? 'completed' : 'failed'}: bridge_send_video · video: ${broadcast.videoPath}; sent=${sent}; failed=${failed}${failureSuffix}`,
+          ), failed === 0 ? 'info' : 'warn')
+          return {
+            replies: [failed === 0
+              ? t('已提交最新梦境视频到微信发送接口；如果手机端仍未显示，请告诉我继续按日志排查。', 'Submitted the latest dream video to the WeChat send API; if it still does not appear on the phone, tell me and I will continue from the logs.')
+              : t('尝试发送最新梦境视频，但部分目标失败；详情见 CLI 日志。', 'Tried to send the latest dream video, but some targets failed; see CLI logs for details.')],
+            storedSession: binding.storedSession,
+            permissionMode: binding.permissionMode,
+          }
         }
 
         if (shouldSendDreamImageDirectly) {

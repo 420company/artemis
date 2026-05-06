@@ -230,6 +230,30 @@ export async function readDreamBody(id: string): Promise<string | null> {
   }
 }
 
+
+export async function findLatestDreamVideo(): Promise<string | null> {
+  const indexed = await loadDreamIndex()
+  for (const entry of indexed) {
+    if (entry.videoPath && existsSync(entry.videoPath)) return entry.videoPath
+    const { videoPath } = buildDreamPaths(entry.id)
+    if (existsSync(videoPath)) return videoPath
+  }
+  try {
+    const files = await readdir(DREAMS_ROOT)
+    const videos = await Promise.all(files
+      .filter(file => file.toLowerCase().endsWith('.mp4'))
+      .map(async file => {
+        const fullPath = path.join(DREAMS_ROOT, file)
+        const info = await stat(fullPath)
+        return { path: fullPath, mtimeMs: info.mtimeMs }
+      }))
+    videos.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    return videos[0]?.path ?? null
+  } catch {
+    return null
+  }
+}
+
 export async function findLatestDreamEntry(): Promise<DreamEntry | null> {
   const indexed = await loadDreamIndex()
   for (const entry of indexed) {

@@ -67,8 +67,9 @@ const COMMON_AGENT_PROTOCOL = `\
 5. 写代码时优先 replace_in_file 做局部改动；新建文件或整文件重写才用 write_file
 6. 修改后必须运行验证（编译/测试/启服务），看不到工具结果不得声称完成
 7. 子任务可以让 deep_research 工具去做并行调研（它在 worker 模型上跑，便宜快速），不要把简单的 read 任务也往那扔
-8. 在提示注入路径里，/niko /athena /design /contest 是任务风格指示；/nidhogg 的正式入口是后台 harness runner。若这里收到 nidhogg，只做自审和验证，不要伪造未运行的 critic/judge 结果
-9. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案`;
+8. 外部协议/API/SDK/gateway 类 bug（例如微信/Telegram/Discord/CDN/webhook/第三方 schema）必须先把本地日志与权威外部资料对照：官方文档、上游 SDK 源码、协议枚举、raw type 定义。不要只在本地代码里反复猜字段；优先核对数字常量、字段名、鉴权/会话、大小/md5/缩略图等硬事实
+9. 在提示注入路径里，/niko /athena /design /contest 是任务风格指示；/nidhogg 的正式入口是后台 harness runner。若这里收到 nidhogg，只做自审和验证，不要伪造未运行的 critic/judge 结果
+10. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案`;
 
 const DESIGN_HINT = `\
 [当前任务模式：/design 视觉/前端工程]
@@ -98,6 +99,7 @@ const NIKO_HINT = `\
 偏向需要先研究、分析、再动手的任务（codebase 改造、复杂迁移、性能优化、bug 调查）。本模式下你应该：
 
 • 先用 read/search 工具摸清现状——项目结构、相关文件、关键函数
+• 第三方协议/API 问题要并行查外部资料：search_web / lookup_docs / 上游源码，优先找枚举常量、payload type、字段名、SDK 实现；本地日志只能说明现象，不能替代协议事实
 • 复杂研究可以 spawn 一个 read-only 子代理做并行 explore（"找所有 X 的调用点并汇总"）
 • 用 todo 列出"研究→方案→实现→验证"的步骤；研究阶段不写代码，但**研究完直接进入实现**，不要写文档
 • 实现阶段：边写边验证（每改一个模块就跑一次相关测试 / 编译）

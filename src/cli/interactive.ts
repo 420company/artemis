@@ -647,7 +647,27 @@ function buildScrollBlocksFromMessages(messages: SessionMessage[]): ScrollBlock[
   return blocks
 }
 
-function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): string[] {
+const COLLAPSED_TOOL_HEAD_LINES = 6
+const COLLAPSED_TOOL_TAIL_LINES = 2
+
+function buildCollapsedToolLines(sourceLines: string[], expanded: boolean): string[] {
+  const nonEmpty = sourceLines.filter(line => line.trim().length > 0)
+  if (expanded || nonEmpty.length <= COLLAPSED_TOOL_HEAD_LINES + COLLAPSED_TOOL_TAIL_LINES + 3) {
+    return sourceLines
+  }
+
+  const head = sourceLines.slice(0, COLLAPSED_TOOL_HEAD_LINES)
+  const tail = COLLAPSED_TOOL_TAIL_LINES > 0 ? sourceLines.slice(-COLLAPSED_TOOL_TAIL_LINES) : []
+  const hidden = Math.max(0, sourceLines.length - head.length - tail.length)
+  const hint = `… +${hidden} lines (ctrl + t to view transcript)`
+  return tail.length > 0 ? [...head, hint, ...tail] : [...head, hint]
+}
+
+function buildViewportLinesFromBlocks(
+  blocks: ScrollBlock[],
+  cols: number,
+  options: { expandToolTranscripts?: boolean } = {},
+): string[] {
   const lines: string[] = []
   const bodyWidth = Math.max(1, cols - 2)
   const pushGap = (): void => {
@@ -717,7 +737,7 @@ function buildViewportLinesFromBlocks(blocks: ScrollBlock[], cols: number): stri
 
     if (block.kind === 'tool') {
       const source = block.preserveAnsi ? block.text : stripAnsi(block.text)
-      for (const raw of source.split('\n')) {
+      for (const raw of buildCollapsedToolLines(source.split('\n'), options.expandToolTranscripts === true)) {
         if (!raw) {
           lines.push('')
           continue
@@ -1072,6 +1092,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
   let scrollBlocks: ScrollBlock[] = []
   let transientBlocks: ScrollBlock[] | null = null
+  let expandToolTranscripts = false
   let prompt: BlessedPromptHandle | null = null
   let landingCommitted = false
 
@@ -1665,9 +1686,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     const { cols } = getViewportMetrics()
-    const finalised = buildViewportLinesFromBlocks(scrollBlocks, cols)
+    const finalised = buildViewportLinesFromBlocks(scrollBlocks, cols, { expandToolTranscripts })
     const transient = (transientBlocks && transientBlocks.length > 0)
-      ? buildViewportLinesFromBlocks(transientBlocks, cols)
+      ? buildViewportLinesFromBlocks(transientBlocks, cols, { expandToolTranscripts })
       : []
     prompt.setLines(finalised, transient)
   }
@@ -1911,9 +1932,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     history: savedHistory,
     headerFn: () => renderHud(hud),
     footerHint: t(
-      'Enter 提交  Ctrl+J 换行  ↑↓ 历史  Shift+↑↓/PgUp/PgDn 滚屏  / 命令',
-      'Enter submit  Ctrl+J newline  ↑↓ history  Shift+↑↓/PgUp/PgDn scroll  / cmds',
+      'Enter 提交  Ctrl+J 换行  Ctrl+T 展开/收起工具输出  ↑↓ 历史  / 命令',
+      'Enter submit  Ctrl+J newline  Ctrl+T expand/collapse tool output  ↑↓ history  / cmds',
     ),
+    onToggleTranscript: () => {
+      expandToolTranscripts = !expandToolTranscripts
+      syncViewportFromState()
+    },
     onTextChange: (text) => {
       if (text.startsWith('/') && !text.includes(' ')) {
         const filtered = SLASH_MENU_ITEMS.filter(item => item.value.startsWith(text))

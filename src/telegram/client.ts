@@ -257,6 +257,36 @@ export class TelegramBotClient {
     }
   }
 
+
+  async sendVideo(chatId: string, videoPath: string, caption?: string): Promise<void> {
+    const { readFile } = await import('node:fs/promises')
+    const { basename } = await import('node:path')
+    const buffer = await readFile(videoPath)
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    if (caption) form.append('caption', caption.slice(0, 1024))
+    form.append('video', new Blob([new Uint8Array(buffer)], { type: 'video/mp4' }), basename(videoPath))
+    let response: Response
+    try {
+      response = await fetch(`${this.baseUrl}/sendVideo`, { method: 'POST', body: form })
+    } catch (err) {
+      throw new Error(formatTelegramNetworkFailure('sendVideo', err), { cause: err })
+    }
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(formatTelegramApiFailure({
+        method: 'sendVideo',
+        status: response.status,
+        statusText: response.statusText,
+        body: body.slice(0, 300),
+      }))
+    }
+    const json = await response.json() as TelegramApiResponse<unknown>
+    if (!json.ok) {
+      throw new Error(formatTelegramApiFailure({ method: 'sendVideo', description: json.description }))
+    }
+  }
+
   async getFile(fileId: string): Promise<{ file_path: string }> {
     return this.call('getFile', { file_id: fileId })
   }

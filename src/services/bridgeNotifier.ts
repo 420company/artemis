@@ -24,6 +24,8 @@ export interface BridgeBroadcastPayload {
   /** Optional local image path to attach (PNG/JPG). Bridges that can't
    *  attach images should fall back to a "image saved locally" note. */
   imagePath?: string
+  /** Optional local video path to attach (MP4). */
+  videoPath?: string
   /** Optional platform target id/chat id/channel id. When omitted, bridges
    *  fan out to their currently authorized/live targets. */
   targetId?: string

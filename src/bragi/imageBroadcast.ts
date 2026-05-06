@@ -6,11 +6,21 @@ import { broadcastToBridges, listRegisteredBridges } from '../services/bridgeNot
 import type { BridgePlatform } from '../services/bridgeNotifier.js'
 import type { BragiPlatformId } from './types.js'
 import { resolveDataRootDir } from '../utils/fs.js'
-import { findLatestDreamImage } from '../services/dreamStore.js'
+import { findLatestDreamImage, findLatestDreamVideo } from '../services/dreamStore.js'
 
 export type BridgeImagePlatform = BragiPlatformId | 'all'
+export type BridgeMediaKind = 'image' | 'video'
 
 const LATEST_DREAM_IMAGE_SENTINEL = 'latest_dream'
+const LATEST_DREAM_VIDEO_SENTINEL = 'latest_dream_video'
+const LATEST_DREAM_VIDEO_ALIASES = new Set([
+  LATEST_DREAM_VIDEO_SENTINEL,
+  'latestdreamvideo',
+  'latest dream video',
+  'latest-dream-video',
+  'latest_dream_mp4',
+  'latestdreammp4',
+])
 
 export type BridgeImageBroadcastResult = {
   imagePath: string
@@ -70,6 +80,30 @@ async function resolveImagePath(inputPath: string, cwd: string): Promise<string>
   const found = candidates.find(candidate => existsSync(candidate))
   if (found) return found
   throw new Error(`image file not found: ${candidates.join(' | ')}`)
+}
+
+
+async function resolveVideoPath(inputPath: string, cwd: string): Promise<string> {
+  const trimmed = inputPath.trim()
+  if (!trimmed) throw new Error('video path is empty')
+  if (LATEST_DREAM_VIDEO_ALIASES.has(trimmed.toLowerCase())) {
+    const latest = await findLatestDreamVideo()
+    if (latest) return latest
+    throw new Error('no dream video found in ~/.artemis/dreams')
+  }
+
+  const candidates = isAbsolute(trimmed)
+    ? [trimmed]
+    : uniq([
+        resolve(cwd, trimmed),
+        resolve(resolveDataRootDir(cwd), trimmed),
+        resolve(homedir(), '.artemis', trimmed),
+        resolve(process.cwd(), trimmed),
+      ])
+
+  const found = candidates.find(candidate => existsSync(candidate))
+  if (found) return found
+  throw new Error(`video file not found: ${candidates.join(' | ')}`)
 }
 
 async function loadWechatStoreCandidates(cwd: string) {
@@ -310,6 +344,155 @@ export async function sendBragiImageBroadcast(options: {
     configured,
     skipped,
   }
+}
+
+
+export type BridgeVideoBroadcastResult = Omit<BridgeImageBroadcastResult, 'imagePath'> & { videoPath: string }
+
+export async function sendBragiVideoBroadcast(options: {
+  cwd: string
+  videoPath: string
+  caption?: string
+  platform?: BridgeImagePlatform
+  targetId?: string
+  source?: string
+}): Promise<BridgeVideoBroadcastResult> {
+  const videoPath = await resolveVideoPath(options.videoPath, options.cwd)
+  const caption = options.caption?.trim() || '🎬 Artemis video'
+  const platforms = normalizePlatforms(options.platform)
+  const targetId = normalizeOptionalTargetId(options.targetId)
+  const registered = listRegisteredBridges().filter(p => platforms.includes(p as BragiPlatformId))
+  const live = registered.length > 0
+    ? await broadcastToBridges({ text: caption, videoPath, targetId, platforms: registered, source: options.source ?? 'bridge_send_video' })
+    : { sent: 0, failed: [] }
+  // Do not immediately retry the same live bridge through the configured fallback.
+  // For WeChat/iLink video this can consume the fresh context_token twice and also
+  // hides the real live-bridge failure behind a duplicated failed=2 summary.
+  const fallbackPlatforms = platforms.filter(platform => !registered.includes(platform))
+
+  const store = new BragiStore(options.cwd)
+  const data = await store.load()
+  const globalCwd = resolve(homedir(), '.artemis')
+  const globalData = resolve(options.cwd) === globalCwd
+    ? undefined
+    : await new BragiStore(globalCwd).load().catch(() => undefined)
+  const configured: BridgeImageBroadcastResult['configured'] = []
+  const skipped: string[] = []
+
+  for (const platform of fallbackPlatforms) {
+    const config = data.platforms[platform] ?? globalData?.platforms[platform]
+    if (!config?.enabled && platform !== 'wechat' && platform !== 'telegram') {
+      skipped.push(`${platform}: not enabled`)
+      continue
+    }
+
+    let targets = targetId ? [targetId] : uniq(config?.allowedTargets ?? [])
+    let telegramFallback: Awaited<ReturnType<typeof loadTelegramFallback>> | undefined
+    if (platform === 'telegram' && targets.length === 0) {
+      telegramFallback = await loadTelegramFallback(options.cwd)
+      targets = uniq(telegramFallback.targets)
+    }
+    if (platform === 'discord' && targets.length === 0) targets = uniq(await loadDiscordFallbackTargets(options.cwd))
+    if (platform === 'wechat' && targets.length === 0) {
+      try {
+        const wechatCandidates = await loadWechatStoreCandidates(options.cwd)
+        targets = uniq(wechatCandidates.flatMap(({ data: wechatData }) => [
+          ...Object.keys(wechatData.contextTokens ?? {}),
+          ...(wechatData.contacts ?? []).map(c => c.fromUser),
+        ]))
+      } catch {
+        // Keep the normal no-target error below.
+      }
+    }
+
+    if (targets.length === 0) {
+      skipped.push(`${platform}: no allowed targets`)
+      continue
+    }
+
+    const record = { platform, attempted: targets.length, sent: 0, failed: [] as Array<{ target: string; error: string }> }
+    if (platform === 'telegram') {
+      telegramFallback ??= await loadTelegramFallback(options.cwd)
+      const botToken = config?.credentials.botToken || telegramFallback.botToken
+      if (!botToken) record.failed.push(...targets.map(target => ({ target, error: 'missing botToken' })))
+      else {
+        const { TelegramBotClient } = await import('../telegram/client.js')
+        const client = new TelegramBotClient(botToken)
+        for (const target of targets) {
+          try {
+            await client.sendVideo(target, videoPath, caption)
+            record.sent += 1
+          } catch (err) {
+            record.failed.push({ target, error: err instanceof Error ? err.message : String(err) })
+          }
+        }
+      }
+    } else if (platform === 'discord') {
+      if (!config) record.failed.push(...targets.map(target => ({ target, error: 'discord not configured' })))
+      else if (!config.credentials.botToken) record.failed.push(...targets.map(target => ({ target, error: 'missing botToken' })))
+      else {
+        const { DiscordBotClient } = await import('../discord/client.js')
+        const client = new DiscordBotClient(config.credentials.botToken)
+        for (const target of targets) {
+          try {
+            await client.sendAttachment(target, videoPath, caption)
+            record.sent += 1
+          } catch (err) {
+            record.failed.push({ target, error: err instanceof Error ? err.message : String(err) })
+          }
+        }
+      }
+    } else if (platform === 'wechat') {
+      try {
+        const { WeChatGatewayClient } = await import('../wechat/client.js')
+        const wechatCandidates = await loadWechatStoreCandidates(options.cwd)
+        const usable = wechatCandidates.find(({ data: wechatData }) => wechatData.gatewayUrl && wechatData.gatewayToken)
+        if (!usable) record.failed.push(...targets.map(target => ({ target, error: 'missing WeChat gatewayUrl/gatewayToken' })))
+        else {
+          const { store: wechatStore, data: wechatData } = usable
+          const gatewayBaseUrl = wechatData.gatewayUrl
+          const gatewayToken = wechatData.gatewayToken
+          if (!gatewayBaseUrl || !gatewayToken) record.failed.push(...targets.map(target => ({ target, error: 'missing WeChat gatewayUrl/gatewayToken' })))
+          else {
+            const client = new WeChatGatewayClient({ gatewayBaseUrl, gatewayToken })
+            for (const target of targets) {
+              try {
+                const contextToken = wechatStore.getContextToken(wechatData, target)
+                if (!contextToken) throw new Error('missing WeChat context_token for target; send a fresh WeChat message to Artemis first')
+                const signal = AbortSignal.timeout(180_000)
+                await client.sendVideo(target, videoPath, contextToken, signal)
+                record.sent += 1
+              } catch (err) {
+                record.failed.push({ target, error: err instanceof Error ? err.message : String(err) })
+              }
+            }
+          }
+        }
+      } catch (err) {
+        record.failed.push(...targets.map(target => ({ target, error: err instanceof Error ? err.message : String(err) })))
+      }
+    } else if (!isConfiguredPlatform(platform)) {
+      skipped.push(`${platform}: unsupported platform`)
+    }
+    configured.push(record)
+  }
+
+  return { videoPath, caption, live: { registered, sent: live.sent, failed: live.failed }, configured, skipped }
+}
+
+export function formatBridgeVideoBroadcastResult(result: BridgeVideoBroadcastResult): string {
+  const lines = [
+    `video: ${result.videoPath}`,
+    `caption: ${result.caption}`,
+    `live bridges: ${result.live.registered.length ? result.live.registered.join(', ') : 'none'}; sent=${result.live.sent}; failed=${result.live.failed.length}`,
+  ]
+  for (const failure of result.live.failed.slice(0, 5)) lines.push(`  - ${failure.platform}: ${failure.error}`)
+  for (const item of result.configured) {
+    lines.push(`${item.platform}: attempted=${item.attempted}; sent=${item.sent}; failed=${item.failed.length}`)
+    for (const failure of item.failed.slice(0, 5)) lines.push(`  - ${failure.target}: ${failure.error}`)
+  }
+  for (const skipped of result.skipped) lines.push(`skipped: ${skipped}`)
+  return lines.join('\n')
 }
 
 export function formatBridgeImageBroadcastResult(result: BridgeImageBroadcastResult): string {
