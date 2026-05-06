@@ -481,17 +481,24 @@ export async function runRemoteCommand(
         }
 
         const effectiveBody = workflowResolution?.effectivePrompt ?? command.body
+        const shouldSendDreamImageDirectly = !workflowResolution && isDreamImageRequest(command.body)
         const startedText = t(
-          '已接收 · 后台 workflow 运行中，完成后回传结果。',
-          'Received · background workflow running; the final result will be sent back here.',
+          '请求已接收 · Artemis 正在后台处理，完成后将自动送达。',
+          'Request received · Artemis is processing it in the background and will deliver the result once complete.',
         )
         await opts.onProgress?.(startedText, 'info')
         // Also send the "received" notice to the chat so users on phones
         // know the message arrived and the AI is working — without this
         // they stare at nothing for 30+ seconds wondering if it's stuck.
-        await opts.sendChatUpdate?.(startedText)
+        // Exception: direct WeChat dream-image replies need the fresh iLink
+        // context_token for the attachment itself. A preliminary text reply can
+        // consume that one-turn token/window and make the following image upload
+        // fail or arrive only after the slower configured fallback.
+        if (!shouldSendDreamImageDirectly) {
+          await opts.sendChatUpdate?.(startedText)
+        }
 
-        if (!workflowResolution && isDreamImageRequest(command.body)) {
+        if (shouldSendDreamImageDirectly) {
           const platform = opts.bridgePlatform
           await opts.onProgress?.(t(
             '🔧 正在运行工具：bridge_send_image · latest_dream',

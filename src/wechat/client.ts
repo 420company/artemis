@@ -85,6 +85,14 @@ type WeChatGetUploadUrlResponse = {
   upload_full_url?: string
 }
 
+type WeChatCdnUploadResponse = {
+  status: number
+  statusText: string
+  ok: boolean
+  headers: Headers
+  text: () => Promise<string>
+}
+
 // ─── public types ─────────────────────────────────────────────────────────────
 
 export type WeChatTextMessage = {
@@ -130,9 +138,15 @@ const WECHAT_MESSAGE_ITEM_IMAGE = 2
 const WECHAT_MESSAGE_ITEM_VOICE = 3
 const WECHAT_UPLOAD_MEDIA_IMAGE = 1
 const WECHAT_CDN_UPLOAD_MAX_RETRIES = 3
+const WECHAT_IMAGE_SEND_MAX_ATTEMPTS = 3
 const WECHAT_SEND_MEDIA_MAX_RETRIES = 3
 const WECHAT_SEND_MEDIA_RETRY_DELAY_MS = 500
 const WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES = 600_000
+const WECHAT_OUTBOUND_IMAGE_VARIANTS = [
+  { maxDimension: 1280, quality: 80 },
+  { maxDimension: 960, quality: 72 },
+  { maxDimension: 720, quality: 65 },
+] as const
 const execFileAsync = promisify(execFile)
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -175,6 +189,16 @@ function randomWeChatUin(): string {
 
 function isRetMinusTwoError(err: unknown): boolean {
   return err instanceof Error && /ret=-2\b/.test(err.message)
+}
+
+function isRetryableWeChatImageSendError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (
+    /WeChat CDN upload/i.test(err.message) ||
+    /HTTP 5\d\d\b/.test(err.message) ||
+    /timed out|aborted|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up/i.test(err.message) ||
+    isRetMinusTwoError(err)
+  )
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -245,10 +269,10 @@ function formatOutboundAesKey(aesKey: Buffer): string {
   return Buffer.from(aesKey.toString('hex'), 'utf8').toString('base64')
 }
 
-async function prepareOutboundWeChatImage(imagePath: string): Promise<{ path: string; cleanup: () => Promise<void> }> {
+async function prepareOutboundWeChatImage(imagePath: string, variant = 0): Promise<{ path: string; cleanup: () => Promise<void> }> {
   const original = await readFile(imagePath)
   const detected = imageTypeFromBytes(original)
-  if (detected?.contentType === 'image/jpeg' && original.length <= WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES) {
+  if (variant === 0 && detected?.contentType === 'image/jpeg' && original.length <= WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES) {
     return { path: imagePath, cleanup: async () => undefined }
   }
 
@@ -259,11 +283,12 @@ async function prepareOutboundWeChatImage(imagePath: string): Promise<{ path: st
     return { path: imagePath, cleanup: async () => undefined }
   }
 
+  const profile = WECHAT_OUTBOUND_IMAGE_VARIANTS[Math.min(variant, WECHAT_OUTBOUND_IMAGE_VARIANTS.length - 1)]
   const out = join(tmpdir(), `artemis-wechat-${Date.now()}-${randomBytes(4).toString('hex')}.jpg`)
   try {
     await execFileAsync(
       '/usr/bin/sips',
-      ['-s', 'format', 'jpeg', '-s', 'formatOptions', '80', '-Z', '1280', imagePath, '--out', out],
+      ['-s', 'format', 'jpeg', '-s', 'formatOptions', String(profile.quality), '-Z', String(profile.maxDimension), imagePath, '--out', out],
       { timeout: 30_000 },
     )
     return { path: out, cleanup: async () => { await unlink(out).catch(() => undefined) } }
@@ -278,6 +303,16 @@ function buildCdnUploadUrl(cdnBaseUrl: string, uploadParam: string, filekey: str
   return `${base}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`
 }
 
+function buildCdnUploadUrlCandidates(cdnBaseUrl: string, upload: WeChatGetUploadUrlResponse, filekey: string): string[] {
+  const candidates = [
+    upload.upload_param?.trim()
+      ? buildCdnUploadUrl(cdnBaseUrl, upload.upload_param.trim(), filekey)
+      : undefined,
+    upload.upload_full_url?.trim() || undefined,
+  ].filter((url): url is string => Boolean(url))
+  return Array.from(new Set(candidates))
+}
+
 function isWeChatCdnHost(rawUrl: string): boolean {
   try {
     const host = new URL(rawUrl).hostname.toLowerCase()
@@ -287,13 +322,7 @@ function isWeChatCdnHost(rawUrl: string): boolean {
   }
 }
 
-async function postCdnBytesDirect(uploadUrl: string, body: Buffer, signal?: AbortSignal): Promise<{
-  status: number
-  statusText: string
-  ok: boolean
-  headers: Headers
-  text: () => Promise<string>
-}> {
+async function postCdnBytesDirect(uploadUrl: string, body: Buffer, signal?: AbortSignal): Promise<WeChatCdnUploadResponse> {
   const url = new URL(uploadUrl)
   const request = url.protocol === 'http:' ? httpRequest : httpsRequest
 
@@ -659,45 +688,58 @@ export class WeChatGatewayClient {
     // after a fresh inbound message provides a new context token.
     void caption
 
-    const prepared = await prepareOutboundWeChatImage(imagePath)
-    try {
-      const image = await readFile(prepared.path)
-      if (image.length === 0) throw new Error(`WeChat image reply cannot send empty file: ${prepared.path}`)
+    const schema = 'image_item_cdn_media_v1'
+    let lastError: Error | undefined
+    for (let attempt = 1; attempt <= WECHAT_IMAGE_SEND_MAX_ATTEMPTS; attempt += 1) {
+      const prepared = await prepareOutboundWeChatImage(imagePath, attempt - 1)
+      try {
+        const image = await readFile(prepared.path)
+        if (image.length === 0) throw new Error(`WeChat image reply cannot send empty file: ${prepared.path}`)
 
-      const filename = basename(prepared.path)
-      const schema = 'image_item_cdn_media_v1'
-      const aesKey = randomBytes(16)
-      const filekey = randomBytes(16).toString('hex')
-      const upload = await this.getUploadUrl({
-        filekey,
-        mediaType: WECHAT_UPLOAD_MEDIA_IMAGE,
-        toUserId: peerUserId,
-        rawSize: image.length,
-        rawMd5: createHash('md5').update(image).digest('hex'),
-        cipherSize: aesEcbPaddedSize(image.length),
-        aesKeyHex: aesKey.toString('hex'),
-        signal,
-      })
-      const uploadUrl = upload.upload_full_url?.trim() || buildCdnUploadUrl(this.cdnBaseUrl, upload.upload_param?.trim() || '', filekey)
-      const encryptedQueryParam = await this.uploadEncryptedMedia(uploadUrl, image, aesKey, signal)
+        const filename = basename(prepared.path)
+        const aesKey = randomBytes(16)
+        const filekey = randomBytes(16).toString('hex')
+        const upload = await this.getUploadUrl({
+          filekey,
+          mediaType: WECHAT_UPLOAD_MEDIA_IMAGE,
+          toUserId: peerUserId,
+          rawSize: image.length,
+          rawMd5: createHash('md5').update(image).digest('hex'),
+          cipherSize: aesEcbPaddedSize(image.length),
+          aesKeyHex: aesKey.toString('hex'),
+          signal,
+        })
+        const uploadUrls = buildCdnUploadUrlCandidates(this.cdnBaseUrl, upload, filekey)
+        if (uploadUrls.length === 0) {
+          throw new Error(`WeChat getUploadUrl returned no upload URL/param: ${truncate(JSON.stringify(upload), 240)}`)
+        }
+        const encryptedQueryParam = await this.uploadEncryptedMedia(uploadUrls, image, aesKey, signal)
 
-      const item = {
-        type: WECHAT_MESSAGE_ITEM_IMAGE,
-        image_item: {
-          media: {
-            encrypt_query_param: encryptedQueryParam,
-            aes_key: formatOutboundAesKey(aesKey),
-            encrypt_type: 1,
+        const item = {
+          type: WECHAT_MESSAGE_ITEM_IMAGE,
+          image_item: {
+            media: {
+              encrypt_query_param: encryptedQueryParam,
+              aes_key: formatOutboundAesKey(aesKey),
+              encrypt_type: 1,
+            },
+            mid_size: aesEcbPaddedSize(image.length),
           },
-          mid_size: aesEcbPaddedSize(image.length),
-        },
-      }
-      const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendImage', signal)
+        }
+        const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendImage', signal)
 
-      return { filename, bytes: image.length, response, rendered: true, schema }
-    } finally {
-      await prepared.cleanup()
+        return { filename, bytes: image.length, response, rendered: true, schema }
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        if (attempt >= WECHAT_IMAGE_SEND_MAX_ATTEMPTS || !isRetryableWeChatImageSendError(lastError)) {
+          throw lastError
+        }
+        await delay(WECHAT_CDN_UPLOAD_RETRY_DELAY_MS * attempt, signal)
+      } finally {
+        await prepared.cleanup()
+      }
     }
+    throw lastError ?? new Error('WeChat image send failed')
   }
 
   private async sendSingleMediaItemWithRetry(
@@ -782,48 +824,55 @@ export class WeChatGatewayClient {
   }
 
   private async uploadEncryptedMedia(
-    uploadUrl: string,
+    uploadUrls: string[],
     plaintext: Buffer,
     aesKey: Buffer,
     signal?: AbortSignal,
   ): Promise<string> {
     const ciphertext = encryptOutboundMedia(plaintext, aesKey)
     let lastError: Error | undefined
-    for (let attempt = 1; attempt <= WECHAT_CDN_UPLOAD_MAX_RETRIES; attempt += 1) {
-      try {
-        const response = isWeChatCdnHost(uploadUrl)
-          ? await postCdnBytesDirect(uploadUrl, ciphertext, signal)
-          : await fetch(uploadUrl, {
-              method: 'POST',
-              headers: { 'content-type': 'application/octet-stream' },
-              body: new Uint8Array(ciphertext),
-              signal: signal
-                ? AbortSignal.any([AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS), signal])
-                : AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS),
-            })
-        const encryptedParam = response.headers.get('x-encrypted-param')?.trim()
-        if (response.status >= 400 && response.status < 500) {
-          const errorMessage = response.headers.get('x-error-message') || await response.text().catch(() => response.statusText)
-          throw new Error(`WeChat CDN upload client error HTTP ${response.status}: ${truncate(errorMessage || response.statusText, 180)}`)
+    for (const uploadUrl of uploadUrls) {
+      for (let attempt = 1; attempt <= WECHAT_CDN_UPLOAD_MAX_RETRIES; attempt += 1) {
+        try {
+          // Prefer the previous fetch-based upload path: it is what iLink's CDN
+          // accepted reliably before v0.1.98. The direct node:http path is kept
+          // only as a fallback for runtimes where fetch/undici cannot stream the
+          // encrypted body correctly.
+          let response: WeChatCdnUploadResponse = await fetch(uploadUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: new Uint8Array(ciphertext),
+            signal: signal
+              ? AbortSignal.any([AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS), signal])
+              : AbortSignal.timeout(WECHAT_CDN_UPLOAD_TIMEOUT_MS),
+          })
+          if (!response.ok && response.status >= 500 && isWeChatCdnHost(uploadUrl)) {
+            response = await postCdnBytesDirect(uploadUrl, ciphertext, signal)
+          }
+          const encryptedParam = response.headers.get('x-encrypted-param')?.trim()
+          if (response.status >= 400 && response.status < 500) {
+            const errorMessage = response.headers.get('x-error-message') || await response.text().catch(() => response.statusText)
+            throw new Error(`WeChat CDN upload client error HTTP ${response.status}: ${truncate(errorMessage || response.statusText, 180)}`)
+          }
+          if (!response.ok) {
+            const errorMessage = response.headers.get('x-error-message') || response.statusText
+            lastError = new Error(`WeChat CDN upload server error HTTP ${response.status}: ${truncate(errorMessage, 180)}`)
+            continue
+          }
+          if (!encryptedParam) {
+            lastError = new Error('WeChat CDN upload response missing x-encrypted-param')
+            continue
+          }
+          return encryptedParam
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err))
         }
-        if (!response.ok) {
-          const errorMessage = response.headers.get('x-error-message') || response.statusText
-          lastError = new Error(`WeChat CDN upload server error HTTP ${response.status}: ${truncate(errorMessage, 180)}`)
-          continue
+        if (attempt < WECHAT_CDN_UPLOAD_MAX_RETRIES) {
+          await delay(WECHAT_CDN_UPLOAD_RETRY_DELAY_MS * attempt, signal)
         }
-        if (!encryptedParam) {
-          lastError = new Error('WeChat CDN upload response missing x-encrypted-param')
-          continue
-        }
-        return encryptedParam
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err))
-      }
-      if (attempt < WECHAT_CDN_UPLOAD_MAX_RETRIES) {
-        await delay(WECHAT_CDN_UPLOAD_RETRY_DELAY_MS * attempt, signal)
       }
     }
-    throw new Error(`WeChat CDN upload failed after ${WECHAT_CDN_UPLOAD_MAX_RETRIES} attempts: ${lastError?.message ?? 'unknown error'}`)
+    throw new Error(`WeChat CDN upload failed after ${uploadUrls.length * WECHAT_CDN_UPLOAD_MAX_RETRIES} attempts across ${uploadUrls.length} URL(s): ${lastError?.message ?? 'unknown error'}`)
   }
 
   private async post<T>(
