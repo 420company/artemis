@@ -4807,6 +4807,150 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
 {
   const originalCwd = process.cwd()
+  const tmpDir = path.join(os.tmpdir(), `artemis-native-tool-compaction-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+  const largePayload = [
+    'HEAD-LARGE-TOOL-OUTPUT',
+    'commit b45746e Add bundled legacy plugin',
+    'x'.repeat(16000),
+    'TAIL-LARGE-TOOL-OUTPUT',
+  ].join('\n')
+
+  const requests: Array<Record<string, unknown>> = []
+  let requestCount = 0
+
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+      requests.push(body)
+      requestCount += 1
+
+      if (req.url === '/large-tool-payload') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, output: largePayload }))
+        return
+      }
+
+      if (req.url !== '/chat/completions') {
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not found' }))
+        return
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' })
+
+      const chatRequestCount = requests.filter((request) => Array.isArray(request.messages)).length
+
+      if (chatRequestCount === 1) {
+        res.end(JSON.stringify({
+          model: 'mock-openai-compatible',
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'call_read_large_1',
+                type: 'function',
+                function: {
+                  name: 'http_request',
+                  arguments: JSON.stringify({ url: `http://127.0.0.1:${(server.address() as { port: number }).port}/large-tool-payload` }),
+                },
+              }],
+            },
+          }],
+          usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+        }))
+        return
+      }
+
+      res.end(JSON.stringify({
+        model: 'mock-openai-compatible',
+        choices: [{ message: { content: '大工具结果已压缩但原文已落盘。' } }],
+        usage: { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220 },
+      }))
+    })
+  })
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') {
+      throw new Error('Mock provider server failed to bind to a TCP port.')
+    }
+
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-openai-large-tool',
+      profiles: [{
+        id: 'mock-openai-large-tool',
+        label: 'Mock OpenAI large tool output',
+        protocol: 'openai',
+        apiKey: 'test-key',
+        model: 'mock-openai-compatible',
+        baseUrl: `http://127.0.0.1:${address.port}`,
+      }],
+    }, null, 2), 'utf8')
+
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+
+    const result = await think('请求本地 large-tool-payload 并确认内容', () => {}, {
+      cwd: tmpDir,
+      permissionMode: 'accept-all',
+    })
+
+    const chatRequests = requests.filter((request) => Array.isArray(request.messages))
+    const secondRequestMessages =
+      ((chatRequests[1]?.messages as Array<Record<string, unknown>> | undefined) ?? [])
+    const compactedToolMessage = secondRequestMessages.find(
+      (message) => message.role === 'tool' && message.tool_call_id === 'call_read_large_1',
+    )
+    const compactedContent = String(compactedToolMessage?.content ?? '')
+    const artifactPathMatch = compactedContent.match(/Full original output saved at: ([^\n"]+)/) ||
+      compactedContent.match(/"artifactPath":\s*"([^"]+)"/)
+    const artifactPath = artifactPathMatch?.[1]
+    const artifactContent = artifactPath && fs.existsSync(artifactPath)
+      ? fs.readFileSync(artifactPath, 'utf8')
+      : ''
+
+    assert(
+      'native tool loop: large direct tool result is compacted before provider re-entry',
+      (compactedContent.includes('contextCompacted') ||
+        compactedContent.includes('Artemis tool result compacted for context')) &&
+        compactedContent.includes('Full original output saved at:') &&
+        compactedContent.length < 12000,
+      `length=${compactedContent.length}`,
+    )
+    assert(
+      'native tool loop: compacted direct tool artifact preserves full original output',
+      artifactContent.includes('HEAD-LARGE-TOOL-OUTPUT') &&
+        artifactContent.includes('TAIL-LARGE-TOOL-OUTPUT') &&
+        artifactContent.includes('x'.repeat(16000)),
+      artifactPath,
+    )
+    assert(
+      'provider telemetry: cumulative usage is not double-counted after native tools',
+      result.tokenStats?.promptTokens === 300 &&
+        result.tokenStats?.completionTokens === 30 &&
+        result.tokenStats?.totalTokens === 330,
+      JSON.stringify(result.tokenStats),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  const originalCwd = process.cwd()
   const tmpDir = path.join(os.tmpdir(), `artemis-native-tool-limit-finalizer-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })

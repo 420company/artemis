@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { release as osRelease } from 'node:os';
 import { ProviderStore } from './providers/store.js';
@@ -966,6 +968,113 @@ type DirectToolFailureState = {
     error?: DirectToolError;
 };
 
+type DirectToolContextOutput = {
+    fullOutput: string;
+    contextOutput: string;
+    artifactPath?: string;
+};
+
+const TOOL_CONTEXT_INLINE_CHAR_LIMIT = 12_000;
+const TOOL_CONTEXT_HEAD_CHAR_BUDGET = 4_000;
+const TOOL_CONTEXT_TAIL_CHAR_BUDGET = 3_000;
+const TOOL_ARTIFACT_DIR = path.join(process.env.HOME || process.cwd(), '.artemis', 'tmp', 'tool-results');
+
+function extractJsonEnvelopeOutput(text: string): { parsed: any; output: string } | null {
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object' && typeof parsed.output === 'string') {
+            return { parsed, output: parsed.output };
+        }
+    } catch {
+        /* not a JSON tool envelope */
+    }
+    return null;
+}
+
+function collectHighSignalLines(text: string, maxLines = 80): string[] {
+    const patterns = [
+        /\b(error|failed|failure|exception|traceback|fatal|denied|not found|missing|warning|warn|timeout|timed out)\b/i,
+        /\b(exit_code|exit code|status|ok|sha|commit|author|date|message|filename|status_code|http|HTTP)\b/i,
+        /\b(success|succeeded|completed|passed|verified|built|done|changed|modified|created|deleted)\b/i,
+        /(?:^|[\s/])(?:src|dist|lib|bin|scripts|plugins|skills|defaults|docs|test|tests)\/[\w./@-]+/i,
+        /^[-+@]{2,}|^diff --git\b|^@@\s/,
+    ];
+    const lines = text.split('\n');
+    const picked: string[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i] ?? '';
+        if (!patterns.some((pattern) => pattern.test(line))) continue;
+        const start = Math.max(0, i - 1);
+        const end = Math.min(lines.length, i + 2);
+        for (let j = start; j < end; j += 1) {
+            const candidate = (lines[j] ?? '').slice(0, 1000);
+            const key = `${j}:${candidate}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                picked.push(candidate);
+                if (picked.length >= maxLines) return picked;
+            }
+        }
+    }
+    return picked;
+}
+
+function buildLosslessToolSummary(fullOutput: string, artifactPath: string): string {
+    const envelope = extractJsonEnvelopeOutput(fullOutput);
+    const outputText = envelope?.output ?? fullOutput;
+    const head = outputText.slice(0, TOOL_CONTEXT_HEAD_CHAR_BUDGET).trimEnd();
+    const tail = outputText.slice(-TOOL_CONTEXT_TAIL_CHAR_BUDGET).trimStart();
+    const signal = collectHighSignalLines(outputText)
+        .join('\n')
+        .slice(0, 4_000)
+        .trim();
+    const omitted = Math.max(0, outputText.length - head.length - tail.length);
+    const summaryBody = [
+        '[Artemis tool result compacted for context]',
+        `Full original output saved at: ${artifactPath}`,
+        `Original chars: ${fullOutput.length}; visible output chars: ${outputText.length}; omitted chars from visible output: ${omitted}`,
+        'This compaction is evidence-preserving: if exact middle content is required, read the artifact path before making claims.',
+        signal ? '\nHigh-signal excerpts:' : undefined,
+        signal || undefined,
+        '\nHead excerpt:',
+        head,
+        '\nTail excerpt:',
+        tail,
+    ].filter((part): part is string => Boolean(part)).join('\n');
+
+    if (envelope) {
+        const compactEnvelope = {
+            ...envelope.parsed,
+            output: summaryBody,
+            artifactPath,
+            originalOutputChars: fullOutput.length,
+            contextCompacted: true,
+        };
+        return JSON.stringify(compactEnvelope, null, 2);
+    }
+
+    return summaryBody;
+}
+
+async function prepareDirectToolContextOutput(toolName: string, fullOutput: string): Promise<DirectToolContextOutput> {
+    if (fullOutput.length <= TOOL_CONTEXT_INLINE_CHAR_LIMIT) {
+        return { fullOutput, contextOutput: fullOutput };
+    }
+
+    const digest = createHash('sha256').update(fullOutput).digest('hex').slice(0, 16);
+    const safeToolName = toolName.replace(/[^a-zA-Z0-9_.-]+/g, '_').slice(0, 80) || 'tool';
+    const artifactPath = path.join(TOOL_ARTIFACT_DIR, `${Date.now()}-${safeToolName}-${digest}.txt`);
+    await mkdir(TOOL_ARTIFACT_DIR, { recursive: true });
+    await writeFile(artifactPath, fullOutput, 'utf8');
+
+    return {
+        fullOutput,
+        contextOutput: buildLosslessToolSummary(fullOutput, artifactPath),
+        artifactPath,
+    };
+}
+
 function buildDirectToolError(
     code: string,
     message: string,
@@ -1724,6 +1833,25 @@ function accumulateProviderUsage(
     };
 }
 
+function mergeFinalProviderUsage(
+    finalUsage: ProviderResponse['usage'] | undefined,
+    cumulative: ProviderResponse['usage'] | undefined,
+): ProviderResponse['usage'] | undefined {
+    if (!cumulative) return finalUsage;
+    if (!finalUsage) return cumulative;
+
+    // The final provider response has already been included in cumulativeUsage
+    // inside the tool loop. Do not add it again here; only preserve final-call
+    // metadata fields that are more specific than the accumulated counters.
+    return {
+        ...finalUsage,
+        ...cumulative,
+        profileId: finalUsage.profileId ?? cumulative.profileId,
+        profileLabel: finalUsage.profileLabel ?? cumulative.profileLabel,
+        protocol: finalUsage.protocol ?? cumulative.protocol,
+    };
+}
+
 function estimateResponseUsage(
     result: ProviderResponse,
     messages: SessionMessage[],
@@ -2096,6 +2224,7 @@ export async function think(
                     }),
                 );
                 const toolOutput = formatDirectToolOutput(toolResult);
+                const contextPreparedOutput = await prepareDirectToolContextOutput(call.name, toolOutput);
                 onToolResult?.(call.name, toolResult.ok, toolResult.output);
                 if (!toolResult.ok) {
                     unresolvedDirectToolFailure = {
@@ -2108,9 +2237,9 @@ export async function think(
                 }
                 toolOutputs.push({
                     callId: call.callId,
-                    output: toolOutput,
+                    output: contextPreparedOutput.contextOutput,
                 });
-                const toolMessage = makeSessionMessage('tool', toolOutput, {
+                const toolMessage = makeSessionMessage('tool', contextPreparedOutput.contextOutput, {
                     name: call.name,
                     toolUseId: call.callId,
                 });
@@ -2207,13 +2336,7 @@ export async function think(
     if (cumulativeUsage) {
         finalResult = {
             ...finalResult,
-            usage: accumulateProviderUsage(undefined, {
-                ...finalResult.usage,
-                ...cumulativeUsage,
-                profileId: finalResult.usage?.profileId ?? cumulativeUsage.profileId,
-                profileLabel: finalResult.usage?.profileLabel ?? cumulativeUsage.profileLabel,
-                protocol: finalResult.usage?.protocol ?? cumulativeUsage.protocol,
-            }),
+            usage: mergeFinalProviderUsage(finalResult.usage, cumulativeUsage),
         };
     }
 
