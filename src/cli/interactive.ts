@@ -289,6 +289,7 @@ import {
   hasExplicitRemoteVisualFallback,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
+import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../tools/visual/seedanceWorkflow.js'
 
 const HOME_DIR = os.homedir()
 const DIRECT_TOOL_COUNT = getDirectToolCount()
@@ -2334,7 +2335,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     const knownSlashCommand = SLASH_MENU_ITEMS.some((item) =>
       trimmed === item.value || trimmed.startsWith(`${item.value} `),
     )
-    if (trimmed.startsWith('/') && !knownSlashCommand) {
+    const isDraggedLocalMediaPath = trimmed.startsWith('/') && await hasExistingLocalMediaReference(cwd, trimmed)
+    if (trimmed.startsWith('/') && !knownSlashCommand && !isDraggedLocalMediaPath) {
       appendSystemPanel(t('未知命令', 'Unknown command'), [
         `${trimmed.split(/\s+/, 1)[0]} — ${t('运行 /help 查看可用命令。', 'Run /help to see available commands.')}`,
       ])
@@ -4215,6 +4217,26 @@ async function handleTurn(
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
 ): Promise<void> {
+  const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: cwd ?? process.cwd(),
+    cwd: cwd ?? process.cwd(),
+    text: input,
+  })
+  if (seedanceWorkflow.handled) {
+    viewport?.appendScrollBlock({
+      kind: 'system',
+      text: seedanceWorkflow.reply,
+    })
+    if (!viewport) {
+      console.log(seedanceWorkflow.reply)
+    }
+    return
+  }
+  if (seedanceWorkflow.prompt) {
+    input = seedanceWorkflow.prompt
+  }
+
   // Per-round state. The model may emit text → tool → text → tool → text. We
   // commit the assistant text as its own block before each tool call so the
   // visual order becomes: user → AI intro → tool result → AI follow-up →

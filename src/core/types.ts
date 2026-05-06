@@ -383,6 +383,11 @@ export type AgentAction =
       duration?: number;
       outputPath?: string;
       referenceImageUrls?: string[];
+      referenceVideoUrls?: string[];
+      referenceAudioUrls?: string[];
+      referenceImagePaths?: string[];
+      referenceVideoPaths?: string[];
+      referenceAudioPaths?: string[];
       generateAudio?: boolean;
       watermark?: boolean;
       maxPolls?: number;

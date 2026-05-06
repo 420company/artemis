@@ -201,6 +201,27 @@ function getLooseStringArg(
   return undefined;
 }
 
+function getLooseStringArrayArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): string[] | undefined {
+  for (const key of keys) {
+    const value = getLooseArgValue(args, key);
+    if (Array.isArray(value)) {
+      const items = value
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      if (items.length > 0) return items;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return [value.trim()];
+    }
+  }
+
+  return undefined;
+}
+
 function getLooseArgValue(
   args: Record<string, unknown>,
   key: string,
@@ -476,6 +497,48 @@ function buildActionFromLooseArgs(
           'file',
           'filepath',
           'file_path',
+        ),
+        referenceImageUrls: getLooseStringArrayArg(
+          args,
+          'referenceImageUrls',
+          'reference_image_urls',
+          'imageUrls',
+          'image_urls',
+        ),
+        referenceVideoUrls: getLooseStringArrayArg(
+          args,
+          'referenceVideoUrls',
+          'reference_video_urls',
+          'videoUrls',
+          'video_urls',
+        ),
+        referenceAudioUrls: getLooseStringArrayArg(
+          args,
+          'referenceAudioUrls',
+          'reference_audio_urls',
+          'audioUrls',
+          'audio_urls',
+        ),
+        referenceImagePaths: getLooseStringArrayArg(
+          args,
+          'referenceImagePaths',
+          'reference_image_paths',
+          'imagePaths',
+          'image_paths',
+        ),
+        referenceVideoPaths: getLooseStringArrayArg(
+          args,
+          'referenceVideoPaths',
+          'reference_video_paths',
+          'videoPaths',
+          'video_paths',
+        ),
+        referenceAudioPaths: getLooseStringArrayArg(
+          args,
+          'referenceAudioPaths',
+          'reference_audio_paths',
+          'audioPaths',
+          'audio_paths',
         ),
         generateAudio: getLooseBooleanArg(args, 'generateAudio', 'generate_audio', 'audio'),
         watermark: getLooseBooleanArg(args, 'watermark'),

@@ -140,6 +140,7 @@ async function downloadDiscordImages(payload: DiscordGatewayMessagePayload): Pro
         data: Buffer.from(await response.arrayBuffer()).toString('base64'),
         mediaType,
         label: `Discord image: ${attachment.filename ?? attachment.id}`,
+        sourceUrl: url,
       })
     } catch {
       // Keep the text message flowing even if a CDN image has expired or fails.

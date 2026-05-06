@@ -32,6 +32,8 @@ import {
   isPlaceholderVisualProvider,
 } from '../tools/visual/providers/interface.js'
 import {
+  BYTEPLUS_VIDEO_PRESETS,
+  type BytePlusVideoPreset,
   defaultVisualBaseUrlForProvider,
   defaultVisualModelForProvider,
 } from '../utils/visualGenerationConfig.js'
@@ -312,6 +314,164 @@ function printVisualProviderSupportNote(
   console.log()
 }
 
+function bytePlusDefaultVideoParams(preset?: BytePlusVideoPreset): VisualModelConfig['video']['defaultParams'] {
+  return {
+    duration: preset?.defaultParams.duration ?? '10s',
+    resolution: preset?.defaultParams.resolution ?? '720p',
+    quality: 'standard',
+    style: 'realistic',
+    format: 'mp4',
+    framerate: preset?.defaultParams.framerate ?? '24fps',
+    watermark: false,
+  }
+}
+
+async function chooseBytePlusVideoPreset(
+  t: (zh: string, en: string) => string,
+  ui?: VisualModelSetupUi,
+): Promise<BytePlusVideoPreset | 'custom' | 'back'> {
+  return chooseVisualSetupOption<BytePlusVideoPreset | 'custom' | 'back'>({
+    title: t('选择 BytePlus 视频模型', 'Choose a BytePlus video model'),
+    hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+    choices: [
+      ...BYTEPLUS_VIDEO_PRESETS.map((preset) => ({
+        label: t(preset.label.zh, preset.label.en),
+        description: t(preset.description.zh, preset.description.en),
+        value: preset,
+      })),
+      {
+        label: t('自定义 BytePlus 视频模型', 'Custom BytePlus video model'),
+        value: 'custom' as const,
+      },
+      { label: t('返回', 'Back'), value: 'back' as const },
+    ],
+  }, ui)
+}
+
+async function chooseBytePlusEndpoint(
+  t: (zh: string, en: string) => string,
+  preset: BytePlusVideoPreset | undefined,
+  ui?: VisualModelSetupUi,
+): Promise<string | 'back' | null> {
+  const choice = await chooseVisualSetupOption<'official' | 'custom' | 'back'>({
+    title: t('确认 BytePlus 视频 API 端点', 'Confirm BytePlus video API endpoint'),
+    hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+    choices: [
+      {
+        label: t('官方 ModelArk 端点', 'Official ModelArk endpoint'),
+        value: 'official',
+      },
+      {
+        label: t('自定义端点', 'Custom endpoint'),
+        value: 'custom',
+      },
+      { label: t('返回', 'Back'), value: 'back' },
+    ],
+  }, ui)
+
+  if (choice === 'back') return 'back'
+  if (choice === 'official') return preset?.baseUrl ?? defaultVisualBaseUrlForProvider('byteplus')
+
+  const custom = await askRequiredOptional(
+    c('  ' + t('BytePlus API Base URL: ', 'BytePlus API Base URL: '), A.bold + A.yellow),
+    t,
+  )
+  return custom
+}
+
+async function chooseBytePlusVideoModel(
+  t: (zh: string, en: string) => string,
+  preset: BytePlusVideoPreset | undefined,
+  ui?: VisualModelSetupUi,
+): Promise<string | 'back' | null> {
+  if (!preset) {
+    return askRequiredOptional(
+      c('  ' + t('BytePlus 视频模型 ID: ', 'BytePlus video model ID: '), A.bold + A.yellow),
+      t,
+    )
+  }
+
+  const choice = await chooseVisualSetupOption<'official' | 'custom' | 'back'>({
+    title: t('确认 BytePlus 视频模型', 'Confirm BytePlus video model'),
+    hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+    choices: [
+      {
+        label: t(`官方模型：${preset.model}`, `Official model: ${preset.model}`),
+        value: 'official',
+      },
+      {
+        label: t('自定义模型 ID', 'Custom model ID'),
+        value: 'custom',
+      },
+      { label: t('返回', 'Back'), value: 'back' },
+    ],
+  }, ui)
+
+  if (choice === 'back') return 'back'
+  if (choice === 'official') return preset.model
+  return askRequiredOptional(
+    c('  ' + t('BytePlus 视频模型 ID: ', 'BytePlus video model ID: '), A.bold + A.yellow),
+    t,
+  )
+}
+
+async function configureVidarAssetHosting(
+  t: (zh: string, en: string) => string,
+): Promise<VisualModelConfig['assetHosting'] | undefined> {
+  console.log()
+  console.log(c('  ' + t('本地视频/音频参考素材托管', 'Local video/audio reference asset hosting'), A.cyan))
+  console.log(c('  ' + t('Seedance 的视频/音频参考需要公网 URL；本地文件会先上传到 S3/R2 兼容对象存储。', 'Seedance video/audio references need public URLs; local files will be uploaded to S3/R2-compatible object storage first.'), A.dim))
+  console.log(c('  ' + t('如果暂时只使用公网 URL 或本地图片参考，可以跳过。', 'Skip this if you only use public URLs or local image references for now.'), A.dim))
+
+  const wantHosting = await askYesNo(
+    t,
+    t('是否现在配置本地视频/音频参考素材托管？', 'Configure local video/audio reference asset hosting now?'),
+    false,
+  )
+  console.log()
+  if (!wantHosting) return undefined
+
+  const provider = await chooseVisualSetupOption<'r2' | 's3' | 'cancel'>({
+    title: t('选择对象存储类型', 'Choose object storage type'),
+    hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+    choices: [
+      { label: 'Cloudflare R2', value: 'r2' },
+      { label: 'S3-compatible storage', value: 's3' },
+      { label: t('取消', 'Cancel'), value: 'cancel' },
+    ],
+  })
+  if (provider === 'cancel') return undefined
+
+  console.log(c('  ' + t('请填写对象存储信息。Access Key 只用于上传临时参考素材。', 'Enter object storage details. The access key is only used to upload temporary reference assets.'), A.dim))
+  const endpoint = await askRequiredOptional(c('  Endpoint: ', A.bold + A.yellow), t)
+  if (!endpoint) return undefined
+  const bucket = await askRequiredOptional(c('  Bucket: ', A.bold + A.yellow), t)
+  if (!bucket) return undefined
+  const regionInput = await askOptional(c('  ' + t('Region（留空使用 auto）: ', 'Region (blank = auto): '), A.bold + A.yellow))
+  const accessKeyId = await askRequiredOptional(c('  Access Key ID: ', A.bold + A.yellow), t)
+  if (!accessKeyId) return undefined
+  const secretAccessKey = await askLine(c('  Secret Access Key: ', A.bold + A.yellow), true)
+  if (!secretAccessKey) return undefined
+  const publicBaseUrl = await askRequiredOptional(c('  Public Base URL: ', A.bold + A.yellow), t)
+  if (!publicBaseUrl) return undefined
+  const prefixInput = await askOptional(c('  ' + t('对象前缀（可选，留空则直接存到 bucket 根路径）: ', 'Object prefix (optional, blank = bucket root): '), A.bold + A.yellow))
+  const maxUploadInput = await askOptional(c('  ' + t('单文件上传上限 MB（留空使用 2048）: ', 'Max upload per file in MB (blank = 2048): '), A.bold + A.yellow))
+  const maxUploadMegabytes = Number(maxUploadInput.trim())
+
+  return {
+    enabled: true,
+    provider,
+    endpoint,
+    bucket,
+    region: regionInput.trim() || 'auto',
+    accessKeyId,
+    secretAccessKey,
+    publicBaseUrl,
+    prefix: prefixInput.trim(),
+    ...(Number.isFinite(maxUploadMegabytes) && maxUploadMegabytes > 0 ? { maxUploadMegabytes } : {}),
+  }
+}
+
 function buildVisualProfileSummaryLines(
   visualProfile: VisualModelConfig,
   t: (zh: string, en: string) => string,
@@ -321,6 +481,7 @@ function buildVisualProfileSummaryLines(
   ]
   if (visualProfile.video.enabled) {
     lines.push(`${t('视频', 'Video')}: ${visualProfile.video.provider}/${visualProfile.video.model}`)
+    lines.push(`${t('本地视频/音频参考托管', 'Local video/audio reference hosting')}: ${visualProfile.assetHosting?.enabled ? visualProfile.assetHosting.provider : t('未配置', 'not configured')}`)
   } else {
     lines.push(`${t('视频', 'Video')}: ${t('未启用', 'disabled')}`)
   }
@@ -537,51 +698,88 @@ async function configureVisualModel(
   let videoConfig: VisualModelConfig['video'] | null = null
   if (wantVideo) {
     console.log(c('  ' + t('视频生成配置', 'Video generation configuration'), A.cyan))
-    const videoProvider = await chooseVisualSetupOption<string>({
-      title: t('选择视频生成提供商', 'Choose video generation provider'),
-      hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
-      choices: [
-        { label: 'BytePlus', value: 'byteplus' },
-        { label: 'Google Veo 3 (veo-3.0-generate-preview)', value: 'google' },
-        { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
-        { label: t('取消', 'Cancel'), value: '__cancel__' },
-      ],
-    }, options.ui)
+    providerLoop:
+    for (;;) {
+      const videoProvider = await chooseVisualSetupOption<string>({
+        title: t('选择视频生成提供商', 'Choose video generation provider'),
+        hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+        choices: [
+          { label: 'BytePlus Seedance', value: 'byteplus' },
+          { label: 'Google Veo 3 (veo-3.0-generate-preview)', value: 'google' },
+          { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
+          { label: t('取消', 'Cancel'), value: '__cancel__' },
+        ],
+      }, options.ui)
 
-    if (videoProvider === '__cancel__') {
-      return null
-    }
+      if (videoProvider === '__cancel__') {
+        return null
+      }
 
-    printVisualProviderSupportNote(videoProvider, zh)
+      printVisualProviderSupportNote(videoProvider, zh)
 
-    const videoApiKey = await askLine(c('  ' + t('API Key: ', 'API Key: '), A.bold + A.yellow), true)
-    if (!videoApiKey) {
-      return null
-    }
+      if (videoProvider === 'byteplus') {
+        for (;;) {
+          const presetChoice = await chooseBytePlusVideoPreset(t, options.ui)
+          if (presetChoice === 'back') continue providerLoop
 
-    const videoDefaultBaseUrl = defaultVisualBaseUrlForProvider(videoProvider)
-    const videoDefaultModel = defaultVisualModelForProvider(videoProvider, 'video')
-    const videoBaseUrl = await askVisualBaseUrl(videoProvider, t('视频', 'Video'))
-    if (videoBaseUrl === null) {
-      return null
-    }
-    const videoModel = await askOptional(c('  ' + t(`模型名称（留空使用默认 ${videoDefaultModel}）: `, `Model name (blank = ${videoDefaultModel}): `), A.bold + A.yellow))
+          const preset = presetChoice === 'custom' ? undefined : presetChoice
+          for (;;) {
+            const videoBaseUrl = await chooseBytePlusEndpoint(t, preset, options.ui)
+            if (videoBaseUrl === null) return null
+            if (videoBaseUrl === 'back') break
 
-    videoConfig = {
-      enabled: true,
-      provider: videoProvider,
-      apiKey: videoApiKey,
-      baseUrl: videoBaseUrl || videoDefaultBaseUrl,
-      model: videoModel || videoDefaultModel,
-      defaultParams: {
-        duration: '10s',
-        resolution: '1080p',
-        quality: 'standard',
-        style: 'realistic',
-        format: 'mp4',
-        framerate: '30fps',
-        watermark: false,
-      },
+            const videoModel = await chooseBytePlusVideoModel(t, preset, options.ui)
+            if (videoModel === null) return null
+            if (videoModel === 'back') continue
+
+            const videoApiKey = await askLine(c('  ' + t('API Key: ', 'API Key: '), A.bold + A.yellow), true)
+            if (!videoApiKey) {
+              return null
+            }
+
+            videoConfig = {
+              enabled: true,
+              provider: videoProvider,
+              apiKey: videoApiKey,
+              baseUrl: videoBaseUrl,
+              model: videoModel,
+              defaultParams: bytePlusDefaultVideoParams(preset),
+            }
+            break providerLoop
+          }
+        }
+      }
+
+      const videoApiKey = await askLine(c('  ' + t('API Key: ', 'API Key: '), A.bold + A.yellow), true)
+      if (!videoApiKey) {
+        return null
+      }
+
+      const videoDefaultBaseUrl = defaultVisualBaseUrlForProvider(videoProvider)
+      const videoDefaultModel = defaultVisualModelForProvider(videoProvider, 'video')
+      const videoBaseUrl = await askVisualBaseUrl(videoProvider, t('视频', 'Video'))
+      if (videoBaseUrl === null) {
+        return null
+      }
+      const videoModel = await askOptional(c('  ' + t(`模型名称（留空使用默认 ${videoDefaultModel}）: `, `Model name (blank = ${videoDefaultModel}): `), A.bold + A.yellow))
+
+      videoConfig = {
+        enabled: true,
+        provider: videoProvider,
+        apiKey: videoApiKey,
+        baseUrl: videoBaseUrl || videoDefaultBaseUrl,
+        model: videoModel || videoDefaultModel,
+        defaultParams: {
+          duration: '10s',
+          resolution: '1080p',
+          quality: 'standard',
+          style: 'realistic',
+          format: 'mp4',
+          framerate: '30fps',
+          watermark: false,
+        },
+      }
+      break
     }
   } else {
     videoConfig = {
@@ -601,6 +799,8 @@ async function configureVisualModel(
       },
     }
   }
+
+  const assetHosting = videoConfig?.enabled ? await configureVidarAssetHosting(t) : undefined
 
   // 
   const visualConfig: VisualModelConfig = {
@@ -627,6 +827,7 @@ async function configureVisualModel(
           },
     },
     video: videoConfig!,
+    ...(assetHosting ? { assetHosting } : {}),
   }
 
   console.log()

@@ -1,7 +1,10 @@
 const DEFAULT_VIDEO_DURATION = 5;
 const MIN_VIDEO_DURATION = 1;
 const MAX_VIDEO_DURATION = 60;
-const BYTEPLUS_SEEDANCE_FAST_MIN_DURATION = 5;
+const BYTEPLUS_SEEDANCE_2_MIN_DURATION = 4;
+const BYTEPLUS_SEEDANCE_2_MAX_DURATION = 15;
+const BYTEPLUS_SEEDANCE_1_5_MIN_DURATION = 4;
+const BYTEPLUS_SEEDANCE_1_5_MAX_DURATION = 12;
 
 export function sanitizeVideoDuration(raw: number | undefined): number {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_VIDEO_DURATION;
@@ -19,11 +22,22 @@ export function normalizeVideoDurationForProvider(
   const duration = sanitizeVideoDuration(raw);
   const key = `${provider ?? ''}/${model ?? ''}`.toLowerCase();
   if (
-    duration < BYTEPLUS_SEEDANCE_FAST_MIN_DURATION &&
     (key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina')) &&
-    key.includes('seedance-2-0-fast')
+    (key.includes('dreamina-seedance-2-0') || key.includes('seedance-2-0'))
   ) {
-    return BYTEPLUS_SEEDANCE_FAST_MIN_DURATION;
+    return Math.min(
+      BYTEPLUS_SEEDANCE_2_MAX_DURATION,
+      Math.max(BYTEPLUS_SEEDANCE_2_MIN_DURATION, duration),
+    );
+  }
+  if (
+    (key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina')) &&
+    key.includes('seedance-1-5')
+  ) {
+    return Math.min(
+      BYTEPLUS_SEEDANCE_1_5_MAX_DURATION,
+      Math.max(BYTEPLUS_SEEDANCE_1_5_MIN_DURATION, duration),
+    );
   }
   return duration;
 }

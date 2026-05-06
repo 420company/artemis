@@ -39,6 +39,7 @@ import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
 import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import { sendBragiImageBroadcast, sendBragiVideoBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
+import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -104,10 +105,15 @@ function sameBridgeWorkspacePath(a: string | undefined, b: string | undefined): 
 const IMAGE_PRODUCING_TOOLS = new Set([
   'browser_screenshot',
   'generate_image',
-  'generate_video', // mp4/gif first frame may be sent as preview where supported
+  'generate_video', // generated GIF previews may be sent as images where supported
+])
+
+const VIDEO_PRODUCING_TOOLS = new Set([
+  'generate_video',
 ])
 
 const IMAGE_EXTENSION_RE = /\.(png|jpe?g|gif|webp|bmp|svg)\b/i
+const VIDEO_EXTENSION_RE = /\.(mp4|mov|webm|m4v)\b/i
 
 /**
  * Extract image file paths from a tool's output string. We only run the scan
@@ -124,8 +130,22 @@ const IMAGE_EXTENSION_RE = /\.(png|jpe?g|gif|webp|bmp|svg)\b/i
  * Returns absolute paths, deduped, in source order. Existence is NOT checked
  * here — the bridge push will silently skip missing files.
  */
-function extractImagePathsFromToolOutput(toolName: string, output: unknown): string[] {
-  if (!IMAGE_PRODUCING_TOOLS.has(toolName)) return []
+export function extractImagePathsFromToolOutput(toolName: string, output: unknown): string[] {
+  return extractMediaPathsFromToolOutput(toolName, output, IMAGE_PRODUCING_TOOLS, IMAGE_EXTENSION_RE, 'png|jpe?g|gif|webp|bmp|svg')
+}
+
+export function extractVideoPathsFromToolOutput(toolName: string, output: unknown): string[] {
+  return extractMediaPathsFromToolOutput(toolName, output, VIDEO_PRODUCING_TOOLS, VIDEO_EXTENSION_RE, 'mp4|mov|webm|m4v')
+}
+
+function extractMediaPathsFromToolOutput(
+  toolName: string,
+  output: unknown,
+  producingTools: Set<string>,
+  extensionRe: RegExp,
+  extensionPattern: string,
+): string[] {
+  if (!producingTools.has(toolName)) return []
   let text: string
   if (typeof output === 'string') {
     text = output
@@ -139,11 +159,11 @@ function extractImagePathsFromToolOutput(toolName: string, output: unknown): str
   // The lookbehind matches start-of-string OR any character that is NOT a
   // path component character — this catches Chinese punctuation (：，。)
   // sitting right before the path, which a simple [\s"'] class would miss.
-  const re = /(?:^|[^A-Za-z0-9_./\\:])((?:\/|[A-Za-z]:[\\/])[^\s"'`]*?\.(?:png|jpe?g|gif|webp|bmp|svg))(?=$|[\s"'`])/gi
+  const re = new RegExp(`(?:^|[^A-Za-z0-9_./\\\\:])((?:/|[A-Za-z]:[\\\\/])[^\\s"'\\\`]*?\\.(?:${extensionPattern}))(?=$|[\\s"'\\\`])`, 'gi')
   let match: RegExpExecArray | null
   while ((match = re.exec(text)) !== null) {
     const candidate = match[1]?.trim()
-    if (candidate && IMAGE_EXTENSION_RE.test(candidate)) {
+    if (candidate && extensionRe.test(candidate)) {
       found.add(candidate)
     }
   }
@@ -391,6 +411,25 @@ export async function runRemoteCommand(
           `📁 Pinned this turn to workspace ${commandCwd}`,
         ), 'info')
       }
+
+      const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
+        scope: 'bridge',
+        key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+        cwd: commandCwd,
+        text: command.body,
+        imageAttachments: command.images,
+      })
+      if (seedanceWorkflow.handled) {
+        return {
+          replies: [seedanceWorkflow.reply],
+          storedSession: binding.storedSession,
+          permissionMode: binding.permissionMode,
+        }
+      }
+      if (seedanceWorkflow.prompt) {
+        command.body = seedanceWorkflow.prompt
+      }
+
       try {
         const emitProgress = (message: string, level: 'info' | 'warn' | 'error' = 'info'): void => {
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
@@ -730,6 +769,22 @@ export async function runRemoteCommand(
                         source: `tool:${String(name)}`,
                       })
                     } catch { /* image push is best-effort */ }
+                  })()
+                }
+                const videoPaths = extractVideoPathsFromToolOutput(String(name), output)
+                for (const videoPath of videoPaths) {
+                  void (async () => {
+                    try {
+                      const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
+                      await broadcastToBridges({
+                        text: t(
+                          `🎬 工具产出：${String(name)}`,
+                          `🎬 Tool output: ${String(name)}`,
+                        ),
+                        videoPath,
+                        source: `tool:${String(name)}`,
+                      })
+                    } catch { /* video push is best-effort */ }
                   })()
                 }
               }

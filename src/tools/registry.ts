@@ -454,6 +454,31 @@ function validateGenerateVideoAction(action: any): string[] {
     'referenceImageUrls',
     errors,
   );
+  validateStringArray(
+    action?.referenceVideoUrls,
+    'referenceVideoUrls',
+    errors,
+  );
+  validateStringArray(
+    action?.referenceAudioUrls,
+    'referenceAudioUrls',
+    errors,
+  );
+  validateStringArray(
+    action?.referenceImagePaths,
+    'referenceImagePaths',
+    errors,
+  );
+  validateStringArray(
+    action?.referenceVideoPaths,
+    'referenceVideoPaths',
+    errors,
+  );
+  validateStringArray(
+    action?.referenceAudioPaths,
+    'referenceAudioPaths',
+    errors,
+  );
   validateBooleanValue(action?.generateAudio, 'generateAudio', errors);
   validateBooleanValue(action?.watermark, 'watermark', errors);
   validatePositiveInteger(action?.maxPolls, 'maxPolls', errors);

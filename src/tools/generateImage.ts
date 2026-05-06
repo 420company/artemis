@@ -2,7 +2,7 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';
-import { resolveBytePlusCredentials } from './byteplusMedia.js';
+import { resolveModelArkMediaCredentials } from './vidarMedia.js';
 import FreyaSearch from './visual/freyaSearch.js';
 import { FreyaVisualAgent } from '../agents/freyaAgent.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
@@ -74,7 +74,7 @@ export async function executeGenerateImage(action: any, context: any) {
         }
 
         // Legacy BytePlus env/config fallback after visualProfile and main/secondary tests.
-        const { apiKey, baseUrl } = await resolveBytePlusCredentials(context.cwd, 'image');
+        const { apiKey, baseUrl } = await resolveModelArkMediaCredentials(context.cwd, 'image');
         const model = action.model?.trim() || DEFAULT_MODEL;
         const size = action.size?.trim() || DEFAULT_SIZE;
         const count = sanitizeCount(action.count);
@@ -186,7 +186,7 @@ export async function executeGenerateImage(action: any, context: any) {
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (allowWebFallback(action)) {
-            toolLog('ℹ️ BytePlus API unavailable, falling back to deep search...');
+            toolLog('ℹ️ Visual API unavailable, falling back to deep search...');
             return await fallbackToDeepSearch(action, context, message);
         }
         if (isVisualSetupRequiredError(error)) {

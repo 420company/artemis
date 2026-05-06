@@ -20,6 +20,11 @@ export interface VideoGenerationParams extends VisualGenerationParams {
   ratio?: string
   generateAudio?: boolean
   referenceImageUrls?: string[]
+  referenceVideoUrls?: string[]
+  referenceAudioUrls?: string[]
+  referenceImagePaths?: string[]
+  referenceVideoPaths?: string[]
+  referenceAudioPaths?: string[]
   watermark?: boolean
 }
 
@@ -102,8 +107,8 @@ export async function createVisualProvider(config: VisualModelConfig, assetType:
 export const VISUAL_PROVIDERS = [
   {
     name: 'byteplus',
-    label: 'BytePlus Ark',
-    description: 'BytePlus Ark Seedream 5.0 (图片) 和 Seedance 1.5 (视频) 模型',
+    label: 'Vidar Visual',
+    description: 'BytePlus ModelArk Seedream 图片生成与 Seedance 视频生成适配器',
     status: 'stable' as const,
     supportsImages: true,
     supportsVideos: true,

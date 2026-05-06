@@ -1028,7 +1028,32 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           outputPath: optionalStringSchema('Optional local file path to save the generated video.'),
           referenceImageUrls: {
             type: 'array',
-            description: 'Optional reference image URLs for style guidance.',
+            description: 'Optional image reference URLs. The runtime sends them only to video models that accept image references.',
+            items: { type: 'string' },
+          },
+          referenceVideoUrls: {
+            type: 'array',
+            description: 'Optional video reference URLs. The runtime sends them only to video models that accept video references.',
+            items: { type: 'string' },
+          },
+          referenceAudioUrls: {
+            type: 'array',
+            description: 'Optional audio reference URLs. The runtime sends them only to video models that accept audio references.',
+            items: { type: 'string' },
+          },
+          referenceImagePaths: {
+            type: 'array',
+            description: 'Optional local image reference paths. The runtime converts supported images to data URLs before sending them to compatible video models.',
+            items: { type: 'string' },
+          },
+          referenceVideoPaths: {
+            type: 'array',
+            description: 'Optional local video reference paths. Requires a future upload/asset hosting step before models that require URLs can use them.',
+            items: { type: 'string' },
+          },
+          referenceAudioPaths: {
+            type: 'array',
+            description: 'Optional local audio reference paths. Requires a future upload/asset hosting step before models that require URLs can use them.',
             items: { type: 'string' },
           },
           generateAudio: {

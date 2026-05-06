@@ -1,6 +1,6 @@
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
-import { normalizeBytePlusMediaBaseUrl } from '../../byteplusMedia.js'
+import { normalizeModelArkMediaBaseUrl } from '../../vidarMedia.js'
 import {
   IMAGE_GENERATION_TIMEOUT_MS,
   VIDEO_CREATE_TIMEOUT_MS,
@@ -8,6 +8,12 @@ import {
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js'
 import { normalizeVideoDurationForProvider } from '../videoParams.js'
+import {
+  formatUnsupportedVideoReferences,
+  getUnsupportedVideoReferences,
+  isGeneratedAudioUnsupported,
+  resolveVideoModelCapabilities,
+} from '../videoCapabilities.js'
 
 export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'
@@ -28,12 +34,12 @@ export class BytePlusProvider implements VisualProvider {
     if (this.assetType === 'image') {
       return {
         apiKey: this.config.image.apiKey,
-        baseUrl: normalizeBytePlusMediaBaseUrl(this.config.image.baseUrl)
+        baseUrl: normalizeModelArkMediaBaseUrl(this.config.image.baseUrl)
       }
     } else {
       return {
         apiKey: this.config.video.apiKey,
-        baseUrl: normalizeBytePlusMediaBaseUrl(this.config.video.baseUrl)
+        baseUrl: normalizeModelArkMediaBaseUrl(this.config.video.baseUrl)
       }
     }
   }
@@ -136,6 +142,16 @@ export class BytePlusProvider implements VisualProvider {
       const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
       const ratio = params.ratio || '16:9'
       const duration = normalizeVideoDurationForProvider(params.duration, this.name, model)
+      const capabilities = resolveVideoModelCapabilities(this.name, model)
+      const unsupportedReferences = getUnsupportedVideoReferences(params, capabilities)
+      if (unsupportedReferences.length > 0) {
+        throw new Error(
+          `The selected video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}. Choose Seedance 2.0 Pro for full multimodal reference input.`,
+        )
+      }
+      if (isGeneratedAudioUnsupported(params, capabilities)) {
+        throw new Error('The selected video model cannot generate audio. Choose Seedance 2.0 Pro, or set generateAudio to false.')
+      }
       
       const content: Array<Record<string, unknown>> = [
         { type: 'text', text: params.prompt },
@@ -153,13 +169,37 @@ export class BytePlusProvider implements VisualProvider {
         }
       }
 
+      if (params.referenceVideoUrls) {
+        for (const url of params.referenceVideoUrls) {
+          if (typeof url === 'string' && url.trim()) {
+            content.push({
+              type: 'video_url',
+              video_url: { url: url.trim() },
+              role: 'reference_video',
+            })
+          }
+        }
+      }
+
+      if (params.referenceAudioUrls) {
+        for (const url of params.referenceAudioUrls) {
+          if (typeof url === 'string' && url.trim()) {
+            content.push({
+              type: 'audio_url',
+              audio_url: { url: url.trim() },
+              role: 'reference_audio',
+            })
+          }
+        }
+      }
+
       const createEndpoint = `${baseUrl}/contents/generations/tasks`
       const createBody = {
         model,
         content,
         ratio,
         duration,
-        generate_audio: params.generateAudio !== false,
+        generate_audio: capabilities.canGenerateAudio ? params.generateAudio !== false : false,
         watermark: params.watermark ?? this.config.video.defaultParams.watermark ?? false,
       }
 
@@ -262,7 +302,10 @@ export class BytePlusProvider implements VisualProvider {
             quality: this.config.video.defaultParams.quality,
             style: this.config.video.defaultParams.style,
             generateAudio: createBody.generate_audio,
-            watermark: createBody.watermark
+            watermark: createBody.watermark,
+            referenceImageCount: params.referenceImageUrls?.length ?? 0,
+            referenceVideoCount: params.referenceVideoUrls?.length ?? 0,
+            referenceAudioCount: params.referenceAudioUrls?.length ?? 0,
           }
         }
       }

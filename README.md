@@ -1,725 +1,447 @@
-# Artemis — AI Engineering CLI
+# Artemis Code
 
-> Built by [420.COMPANY](https://www.420.company) · [npm](https://www.npmjs.com/package/artemis-code) · [GitHub](https://github.com/420company/artemis)
-> Created by 420.COMPANY with collaborative engineering support from OpenAI Codex and Anthropic Claude.
+<p align="center">
+  <img src="assets/artemis-github-banner.png" alt="Artemis Code GitHub banner" width="100%" />
+</p>
 
-[![npm version](https://img.shields.io/npm/v/artemis-code)](https://www.npmjs.com/package/artemis-code)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Node ≥ 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
+<p align="center">
+  <strong>AI engineering CLI for real local workspaces, long-running tasks, visual generation, memory, MCP plugins, and mobile bridges.</strong>
+</p>
 
-Artemis is a full-featured AI engineering CLI built for people who take their workflow seriously. Thirty-plus AI providers. Ninety pre-bundled MCP plugins. Nine hundred and ninety-nine specialized skills. A dual-model brain architecture. A live messaging bridge. And a Spotify integration so your workspace arrives ready — the moment you do.
+<p align="center">
+  <a href="https://www.npmjs.com/package/artemis-code"><img src="https://img.shields.io/npm/v/artemis-code" alt="npm version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT license" /></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20" /></a>
+</p>
 
-Recent Artemis releases have been optimized and upgraded end-to-end by Artemis Code itself: scanning the workspace, editing source, validating builds, hardening release boundaries, and preparing publishable versions through its own tool loop. Artemis has now reached a mature working capability for real engineering tasks. Users can trust that Artemis is actively learning from each release, strengthening its bridges, memory, MCP surface, and safety rails as it continues to evolve.
-
-### Latest autonomous upgrades
-
-The latest 0.1.x releases were not hand-written as static changelog entries after the fact. Artemis inspected its own repository, changed its own TypeScript source, ran type checks and builds, cleaned release boundaries, committed changes, pushed to GitHub, and published to npm through its normal tool workflow.
-
-Recent highlights:
-
-- `/soul` now opens a guided soul-file onboarding flow for creating `~/.artemis/soul.md`; startup no longer prints noisy soul setup text into the main interface.
-- The Dream System startup panel was simplified: it identifies itself as `Artemis · Dream System ·`, removes the long boot paragraph, and shows dream diary/image paths as plain copyable file paths for consistent macOS and Windows terminal behavior.
-- Running tasks can accept new user messages while Artemis is still working. Main chat, inline workflows, and detached `/nidhogg` background workflows now reconcile new instructions at safe points instead of losing them.
-- `/nidhogg` detached mode gained a cross-process message queue: the foreground CLI captures new input and the worker injects it into the active session before the next model turn.
-- Release hygiene was tightened so private `.artemis/` data, bridge sessions, browser state, tokens, and local runtime files stay out of Git and npm packages.
+<p align="center">
+  Built by <a href="https://www.420.company">420.COMPANY</a> · npm package <a href="https://www.npmjs.com/package/artemis-code"><code>artemis-code</code></a> · GitHub <a href="https://github.com/420company/artemis"><code>420company/artemis</code></a>
+</p>
 
 ---
 
-## Table of Contents
+## What is Artemis?
 
-- [Quick Start](#quick-start)
-- [Installation](#installation)
-- [Core Workflows](#core-workflows)
-- [Heimdall — Thread Visibility](#heimdall--thread-visibility)
-- [Bifrost — Dual-Model Architecture](#bifrost--dual-model-architecture)
-- [MCP Plugins](#mcp-plugins)
-- [999 Skills](#999-skills)
-- [Messaging Bridge (Bragi)](#messaging-bridge-bragi)
-- [Spotify Integration](#spotify-integration)
-- [Memory System](#memory-system)
-- [Visual Generation (Freya)](#visual-generation-freya)
-- [Agent Profiles](#agent-profiles)
-- [Odin Skill Evolution](#odin-skill-evolution)
-- [Supported AI Providers](#supported-ai-providers)
-- [All Commands Reference](#all-commands-reference)
-- [Permission Modes](#permission-modes)
-- [Configuration](#configuration)
-- [Development](#development)
-- [License](#license)
-- [中文说明](#中文说明)
+Artemis is a local-first AI engineering agent. It runs inside your real workspace, reads files, edits code, runs commands, validates changes, manages long tasks, generates images and videos, talks through messaging bridges, and keeps local memory across sessions.
+
+It is designed for work that must actually finish: inspect the repository, make the smallest safe change, run the right checks, clean release artifacts, and report only what the tools proved.
+
+Current release: **0.2.12**.
 
 ---
 
-## Quick Start
+## Highlights in 0.2.12
+
+- **Seedance 2.0 Pro multimodal video workflow**: Artemis now detects Seedance 2.0 Pro video intent and guides the user through reference selection before generation.
+- **Duration selection before video generation**: users can choose video duration before final confirmation; if skipped, Artemis defaults to 5 seconds.
+- **Audio control**: the workflow defaults to no generated audio unless the user explicitly requests audio.
+- **Local and URL media references**: CLI can accept local image/video/audio paths and URLs; local video/audio references can be uploaded through the Vidar asset hosting path when configured.
+- **Mobile bridge media handling**: Discord attachment URLs can be used as references; Telegram/WeChat binary attachments are handled conservatively when a public URL is required.
+- **Video delivery to phones**: generated `.mp4`, `.mov`, `.webm`, and `.m4v` tool outputs are detected and broadcast through active bridge channels when available.
+- **False-trigger protection**: questions such as “why did the video not send to my phone?” are treated as system/debug questions, not as a request to start video generation.
+- **Vidar Visual naming**: user-facing visual generation language now uses Vidar/Freya-style product naming while retaining internal provider keys for backward-compatible routing.
+- **Release hygiene**: local `.artemis` state, bridge sessions, tokens, logs, and runtime files are kept out of Git/npm release artifacts.
+
+---
+
+## Install
+
+Requirements: **Node.js 20+**.
 
 ```bash
 npm install -g artemis-code
 artemis
 ```
 
-The CLI guides you through provider setup on first run. Everything else is optional — add what you need, when you need it.
-
----
-
-## Installation
-
-**Requirements**: Node.js ≥ 20
+Check the installed version:
 
 ```bash
-npm install -g artemis-code
+artemis --version
 ```
 
-MCP server dependencies are installed on first use, not at install time. Your `npm install -g` completes in seconds.
-
----
-
-## Core Workflows
-
-Artemis ships six named workflows, each a distinct strategy for turning a task description into working code.
-
-### `/team` — Auto-Router *(recommended starting point)*
-
-Tell Artemis what you need. It analyzes your intent and dispatches to the most appropriate workflow automatically. No need to know which mode to pick.
-
-```
-/team refactor the payment module to support idempotent transactions
-```
-
----
-
-### `/niko` — Explore → Build
-
-A two-phase approach: first explore the problem space, gather evidence, and map the unknowns — then build from a position of certainty. Ideal when the best path forward isn't obvious up front.
-
-```
-/niko add multi-tenant support to the auth layer
-```
-
-**Phase 1:** Research. Reads codebase, identifies dependencies, considers edge cases.  
-**Phase 2:** Execution. Builds from findings, not assumptions.
-
----
-
-### `/design` — Design First
-
-Produces a full architecture document — data models, interfaces, component breakdown, migration strategy — before a single line of code is written. You review and approve the design. Then Artemis builds it.
-
-```
-/design redesign the notification system to be event-driven
-```
-
-Best for features where a poor early decision compounds into months of technical debt.
-
----
-
-### `/athena` — Deep Research + Coordinated Multi-Agent Execution
-
-Deploys multiple independent sub-agents in parallel to research the codebase, then synthesizes findings into a unified execution plan. Built for tasks that span many files, modules, or concerns simultaneously.
-
-```
-/athena audit all authentication flows for OWASP Top 10 vulnerabilities
-```
-
-**Roles deployed:** `planner`, `researcher` (parallel), `builder`, `reviewer`
-
----
-
-### `/nidhogg` — Adversarial Hardening
-
-Implements a solution, then turns an adversarial critic loose on it. The critic identifies weaknesses, edge cases, and failure modes. Artemis fixes them. Repeat until the solution holds under pressure.
-
-```
-/nidhogg implement the withdrawal transaction handler
-```
-
-The slowest workflow. The most robust output. Use it when correctness is not negotiable.
-
-Detached `/nidhogg` runs can now receive new user messages while the worker is still active. The foreground CLI writes those messages into a cross-process queue; the background worker reads them at the next safe point and injects them into the active session before continuing.
-
----
-
-### `/contest` — Path Debate & Selection
-
-Generates multiple competing approaches to the same problem, debates their trade-offs explicitly, selects the winner, and implements it. Useful when several architecturally distinct solutions are all plausible.
-
-```
-/contest choose between event sourcing and CQRS for our order history feature
-```
-
----
-
-## Heimdall — Thread Visibility
-
-`/heimdall` gives you real-time visibility into the agent's execution state: what it's doing, what it's waiting for, and what it needs from you.
+Upgrade:
 
 ```bash
-/heimdall              # current thread status
-/heimdall threads      # list all active threads
-/heimdall events       # recent event log
-/heimdall follow       # live-stream events in real time
-/heimdall upload <file> # pass files into an active thread
-/heimdall approve      # unblock a pending approval gate
-/heimdall reply <text> # respond to an agent clarification request
+npm install -g artemis-code@latest
 ```
-
-When a long-running task pauses for approval or input, `/heimdall` is how you interact with it without restarting.
 
 ---
 
-## Bifrost — Dual-Model Architecture
+## Quick start
 
-Most tasks don't need the same model for planning and execution. Bifrost lets you configure two providers independently: one for reasoning, one for speed.
+Open a project and run Artemis:
 
 ```bash
-/bifrost   # open dual-model configuration
-/mind      # swap active Forge ↔ Raven assignment
+cd /path/to/your/project
+artemis
 ```
 
-**Brain model (Raven):** High-capability reasoning model — used for planning, analysis, adversarial critique. Think Claude Opus, GPT-4o, DeepSeek-R1.
+Useful first commands:
 
-**Execution model (Forge):** Fast, code-focused model — handles tool calls, edits, and generation. Think Claude Haiku, GPT-4o Mini, DeepSeek-Coder.
+```text
+/config          Configure AI providers and defaults
+/config visual   Configure image/video generation
+/config vision   Configure image understanding
+/team            Let Artemis route the task to the right workflow
+/heimdall        Show current thread/task status
+/soul            Create or edit your personal operating contract
+```
 
-The result: reasoning quality of a large model, with the latency and cost profile of a small one.
+Example:
+
+```text
+/team inspect the auth module, fix the refresh-token race, and run tests
+```
+
+Artemis will inspect files, edit code, run validation, and summarize the result.
 
 ---
 
-## MCP Plugins
+## Core workflows
 
-Ninety MCP servers ship with Artemis, pre-configured and ready to enable. Zero manual setup for HTTP-based servers — they connect on first use.
+Artemis includes named workflows for different engineering styles.
 
-```bash
-/mcp list              # browse all 90 servers
-/mcp enable <id>       # enable a server
-/mcp probe <id>        # test connectivity
-/mcp add <command>     # add a custom server
-/mcp doctor            # diagnose MCP configuration
-```
-
-**Highlights:**
-
-| Server | Service | What it unlocks |
-|--------|---------|-----------------|
-| `cco-github-github` | GitHub | Repos, PRs, Issues, Actions |
-| `cco-vercel-vercel` | Vercel | Deploy, logs, domains |
-| `cco-firebase-firebase` | Firebase | Projects, Firestore, Hosting, Auth |
-| `cco-prisma-prisma-local` | Prisma | Schema management, migrations |
-| `cco-notion-notion` | Notion | Databases, documents |
-| `cco-slack-slack` | Slack | Channels, messages, users |
-| `cco-figma-figma` | Figma | Design file access |
-| `cco-atlassian-atlassian` | Jira / Confluence | Projects, tickets, docs |
-| `cco-postman-postman` | Postman | API collections, test runs |
-| `cco-shopify-shopify-mcp` | Shopify | eCommerce operations |
-| `cco-aikido-aikido-mcp` | Aikido Security | Vulnerability scanning |
-| `cco-aws-serverless-aws-serverless-mcp` | AWS SAM | Serverless deployment |
-| `cco-azure-azure` | Azure | Resource management |
-| `cco-sourcegraph-sourcegraph` | Sourcegraph | Deep codebase search |
-
-Transport types: 53 streamable HTTP (zero setup), 23 npm/npx, 9 Python/uvx, 4 binary.
+| Command | Purpose | Use it when |
+|---|---|---|
+| `/team` | Auto-router | You want Artemis to choose the right strategy. |
+| `/niko` | Explore → build | The problem needs investigation before implementation. |
+| `/design` | Design first | You want an architecture/design plan before code changes. |
+| `/athena` | Deep multi-agent research | The task spans many files or subsystems. |
+| `/nidhogg` | Background long-running workflow | You want a detached worker to continue while you chat. |
+| `/review` | Code review | You want defects, risks, and missing tests found before release. |
+| `/heimdall` | Thread visibility | You want to see active tasks, queues, and background workers. |
 
 ---
 
-## 999 Skills
+## What Artemis can do
 
-Skills are structured knowledge units — pre-built patterns for recurring engineering tasks. Artemis applies them automatically when a task matches.
+### 1. Real code work
 
-```bash
-/skills          # browse the full skill library
-/odin list       # inspect learned skills
-/odin search <keywords>  # find skills by topic
+- Read and search project files.
+- Edit source with minimal diffs.
+- Add tests and documentation.
+- Run `typecheck`, `lint`, test suites, build commands, and release checks.
+- Preserve workspace context across turns.
+- Avoid claiming success unless a tool result proves it.
+
+### 2. Long-running task management
+
+- Continue work in `/nidhogg` detached mode.
+- Accept new messages while a task is still running.
+- Reconcile new user instructions at safe points.
+- Track active threads through Heimdall.
+
+### 3. Provider routing
+
+Artemis supports many model providers and OpenAI-compatible endpoints. It can route main chat, specialist models, vision, visual generation, and fallback models independently.
+
+Common provider families include:
+
+- Anthropic Claude
+- OpenAI
+- Google Gemini
+- DeepSeek
+- Qwen / Alibaba-compatible endpoints
+- Moonshot Kimi
+- Baidu Wenxin
+- Zhipu GLM
+- xAI Grok
+- OpenRouter
+- Groq
+- Mistral
+- Minimax
+- Tencent Hunyuan
+- iFlytek Spark
+- Custom OpenAI-compatible providers
+
+Provider setup lives in local Artemis configuration. Secrets stay local.
+
+### 4. MCP plugins
+
+Artemis ships with a large MCP plugin catalog. MCP servers can be enabled for cloud, data, collaboration, observability, design/frontend, business, source-control, and security workflows.
+
+Typical uses:
+
+```text
+/mcp list
+/mcp enable <server-id>
+/mcp disable <server-id>
 ```
 
-The **Odin layer** evolves your skill library over time: after complex multi-step operations, Artemis can capture a new skill from what it just learned — so the next time the same pattern appears, it's faster and more precise.
+When an external service needs credentials, Artemis tells you which config entry is missing instead of pretending the service worked.
 
----
+### 5. Skills
 
-## Messaging Bridge (Bragi)
+Artemis includes a large skill library for recurring engineering tasks: framework-specific development, code review, test strategy, plugin development, research workflows, documentation, and more.
 
-Send tasks from Telegram, Discord, or WeChat. Artemis executes them on your machine with the same tool access as the terminal — and streams results back to your phone.
+Skills are applied automatically when a task matches their domain.
 
-```bash
-/bragi                       # control plane overview
-/bragi telegram setup        # configure Telegram bot
-/bragi discord setup         # configure Discord bot
-/bragi wechat setup          # configure WeChat gateway
+### 6. Memory
+
+Artemis stores local working memory under `~/.artemis/`.
+
+Main memory features:
+
+```text
+/wordup          Save a named session snapshot
+/wordupnow       Save immediately
+artemis resume --last
+artemis resume <sessionId>
+/soul            Create or edit ~/.artemis/soul.md
 ```
 
-The bridge inherits your active permission mode. Set `/accept-all` and your phone becomes a remote execution terminal.
+The soul file is your personal operating contract: tone, preferences, constraints, and how Artemis should work with you.
 
----
+### 7. Dream system
 
-## Spotify Integration
+Artemis can create local dream diaries from recent activity. Dreams are stored under:
 
-Artemis connects to Spotify so your workspace comes alive the moment you sit down. Search and play music, control playback, switch devices — all without leaving the terminal or your messaging app.
-
-**Available tools:**
-
-```
-spotify_play_liked       Play your Liked Songs (with optional shuffle)
-spotify_search_and_play  Find and play any track or playlist
-spotify_play_playlist    Play a named playlist from your library
-spotify_resume / pause   Playback control
-spotify_skip_next/prev   Track navigation
-spotify_set_volume       Volume control (0–100)
-spotify_now_playing      Show currently playing track
-spotify_set_device       Transfer playback to any device
+```text
+~/.artemis/dreams/
 ```
 
-**Via messaging bridge:** You can control Spotify directly from Telegram, Discord, or WeChat — ask Artemis to play something and it happens on your machine, wherever you are.
+Dreams may include Markdown, images, and videos. The dream system is used as a memory and reflection layer, not as a remote telemetry service.
 
-If no active device is found, Artemis automatically wakes the local Spotify app and retries.
+### 8. Visual generation with Freya / Vidar
 
----
+Artemis can generate images and videos from the same agent workflow used for code.
 
-## Memory System
+Configure visual generation:
 
-### WordUP — Session Snapshots
-
-Artemis saves compressed memory of your conversation context at key moments. Close the terminal, reopen later, and pick up exactly where you left off.
-
-```bash
-/wordup          # save a named snapshot
-/wordupnow       # force-save immediately
-artemis resume --last       # restore most recent snapshot
-artemis resume <sessionId>  # restore specific snapshot
+```text
+/config visual
+/config vision
 ```
 
-### Soul File
+Image capabilities:
 
-`~/.artemis/soul.md` — Your personal Artemis personality and operating contract. Artemis reads it at startup and applies it to every interaction: tone, communication style, what to avoid, how to present code, and how much mythic atmosphere to allow.
+- Generate banners, hero images, product/editorial assets, illustrations, and visual concepts.
+- Save images to local workspace or configured output paths.
+- Use vision models to understand user-provided images.
 
-```bash
-/soul   # guided soul.md onboarding and editing flow
+Video capabilities:
+
+- Text-to-video generation through configured video providers.
+- Seedance 1.5-style standard video generation.
+- Seedance 2.0 Pro multimodal generation via Vidar Visual configuration.
+- Reference image/video/audio URL support.
+- Local reference path support when asset hosting/upload is available.
+- Duration normalization according to model limits.
+- Optional generated audio when supported and explicitly requested.
+
+Example direct tool-style request:
+
+```text
+Generate a 9-second cinematic product video, 16:9, no audio, using this reference image URL: https://example.com/ref.png
 ```
 
-The old startup soul prompt has been removed from the main interface. If you want to create or revise the soul file, run `/soul` explicitly.
+Seedance 2.0 Pro workflow behavior:
 
-### Dream System
+1. User asks for a video.
+2. Artemis detects the configured Seedance 2.0 Pro model.
+3. Artemis asks whether to use the latest dream source or add multimodal references.
+4. User can send image/video/audio URLs or local paths.
+5. Artemis asks for duration before final generation.
+6. If the user skips duration, Artemis uses 5 seconds and no audio.
+7. On completion, generated video files can be pushed back through active messaging bridges.
 
-Artemis can compose dream diaries from recent activity: conversations, tool traces, files touched, and generated images. Dreams are stored locally under `~/.artemis/dreams/` as Markdown and optional PNG files.
+### 9. Messaging bridge: Bragi
 
-The startup panel is intentionally quiet: it shows the latest dream preview plus plain file paths for `我的日记` and `梦境画面`. Artemis avoids terminal-specific hyperlink escape codes so the display stays readable on macOS, Windows, and terminals that do not support clickable OSC8 links.
+Bragi lets Artemis receive and reply through messaging platforms while still operating in the local workspace.
 
----
+Supported bridge surfaces in this repository include:
 
-## Visual Generation (Freya)
+- Discord
+- Telegram
+- WeChat / iLink-style gateway
+- Local bridge notifier services
 
-The Freya pipeline adds image and video generation to the standard agent toolset. When a task requires a logo, banner, diagram, or hero image, Artemis generates it directly.
+Bridge capabilities:
 
-```bash
-/config visual   # configure visual provider and defaults
-/config vision   # configure vision model for image understanding
-```
+- Receive mobile messages and route them into Artemis.
+- Send progress updates back to chat.
+- Send generated images and videos back to active bridge targets.
+- Handle direct requests such as latest dream image/video delivery.
+- Avoid consuming fragile one-turn media tokens before sending actual WeChat media.
 
-**Supported providers:** OpenAI DALL-E, Google Gemini, Grok (xAI), Stable Diffusion, BytePlus, and custom endpoints.
+### 10. Spotify and ambient tools
 
----
+When configured, Artemis can control Spotify and provide ambient assistant utilities such as weather, calendar, reminders, time zones, currency conversion, and flight lookup. These are only triggered when the user clearly asks for that domain.
 
-## Agent Profiles
+### 11. Browser automation
 
-Multi-agent workflows like `/athena` and `/nidhogg` compose from nine specialist roles, each optimized for a specific function:
+Artemis can use a visible Chromium browser for sites that require JavaScript, login state, or interaction. It can navigate, click, type, wait for selectors, extract text, and take screenshots.
 
-| Role | Responsibility | Default Permission |
-|------|---------------|-------------------|
-| **Planner** | Decompose task into sequenced steps | Read-only |
-| **Researcher** | Codebase investigation, evidence gathering | Read-only |
-| **Builder** | Precise, minimal code changes | Inherits mode |
-| **Reviewer** | Find defects, risks, missing coverage | Read-only |
-| **Brainstormer** | Diverge → converge on best approach | Read-only |
-| **Arbiter** | Judge competing proposals, decide | Read-only |
-| **Architect** | System design, scalability, extensibility | Read-only |
-| **Designer** | UI/UX, SVG, frontend assets | Inherits mode |
-| **QA** | Test strategy, performance, security | Read-only |
+### 12. Safety and permissions
 
----
+Artemis uses permission modes and sensitive-path checks to avoid unsafe writes and accidental secret exposure.
 
-## Odin Skill Evolution
+Release hygiene includes:
 
-Odin watches your sessions and learns from them. After a sufficiently complex multi-step operation, it can capture what happened as a structured skill — complete with principles, tool chains, and known edge cases.
-
-```bash
-/odin list                # view active skills
-/odin search <keywords>   # find by topic
-/odin capture <name>      # manually save a skill
-/odin decay               # run confidence decay on stale skills
-/odin remove <id>         # remove a skill
-```
-
-Skills evolve: draft → active → stale → archived. Confidence degrades with disuse and strengthens with reuse.
-
----
-
-## Supported AI Providers
-
-30+ providers supported out of the box. Configure via `/model:config` or the setup wizard.
-
-| Provider | Region | Notes |
-|----------|--------|-------|
-| Anthropic | Global | Claude 3.5 / 4 family |
-| OpenAI | Global | GPT-4o, o1, o3 |
-| Google Gemini | Global | Gemini 2.0 / 2.5 |
-| DeepSeek | CN / Global | R1, V3, Coder |
-| Mistral | EU | Codestral, Mixtral |
-| Groq | Global | Fast inference |
-| OpenRouter | Global | Meta-provider |
-| xAI (Grok) | Global | Grok-3 |
-| Qwen (Alibaba) | CN | Qwen2.5-Coder |
-| Kimi (Moonshot) | CN | Long context |
-| BytePlus | CN | Skylark family |
-| Zhipu (GLM) | CN | GLM-4 |
-| Baidu (ERNIE) | CN | ERNIE 4.0 |
-| Minimax | CN | |
-| 360 AI | CN | |
-| Lingyi (01.AI) | CN | |
-| Spark (iFLYTEK) | CN | |
-| Hunyuan (Tencent) | CN | |
-| Doubao (ByteDance) | CN | |
-| Any OpenAI-compatible endpoint | — | Custom base URL |
-
----
-
-## All Commands Reference
-
-```
-Core
-  /help              Help and command list
-  /commands          Full command catalog
-  /new               Start new session
-  /clear             Clear screen / reset history
-  /exit              Exit session
-  /language          Switch interface language
-  /version           Show version
-
-Workflows
-  /team              Auto-route to best workflow
-  /niko              Explore → Build
-  /design            Design first → Implement
-  /athena            Multi-agent research + execution
-  /nidhogg           Harness engineering loop: build, verify, critique, judge
-  /contest           Path debate and selection
-
-Thread Control
-  /heimdall          Thread status and control
-  /ps                List background runtimes
-  /logs <id>         Show runtime logs
-  /wait <id>         Wait for runtime to complete
-  /attach <id>       Attach to a runtime's session
-  /kill <id>         Interrupt a runtime
-
-Model & Providers
-  /model [name]      Switch model mid-session
-  /model:config      Reopen provider setup wizard
-  /providers         Show saved provider profiles
-  /bifrost           Dual-model configuration
-  /mind              Swap Forge ↔ Raven assignment
-
-Messaging Bridge
-  /bragi             Bridge control plane
-  /bragi telegram    Telegram sessions and setup
-  /bragi discord     Discord sessions and setup
-  /bragi wechat      WeChat sessions and setup
-
-Knowledge & Research
-  /docs <query>      Documentation lookup
-  /research <query>  Deep research shortcut
-  /deep-research     Configure deep research engine
-
-Skills & Plugins
-  /skills            Browse 999 bundled skills
-  /odin              Skill evolution layer
-  /mcp               Manage MCP servers
-  /plugins           Inspect and run local plugins
-
-Memory & Sessions
-  /wordup            Save session snapshot
-  /wordupnow         Force-save snapshot
-  /soul              Guided soul.md setup/editing flow
-  /dream             Dream system controls and archive
-  /sessions          Manage saved sessions
-  /history           Recent message history
-  /context           Current context snapshot
-  /summary           Current session summary
-
-Configuration
-  /config            View or update configuration
-  /config visual     Visual model setup
-  /config memory     Memory enhancement setup
-  /artemis-md        Audit project instructions
-  /revise-artemis-md Generate instruction improvements
-  /doctor            System diagnostic
-
-Tasks & Planning
-  /plan              Show execution plan
-  /tasks             Task board (add, start, done, block)
-  /workflow          Workflow record
-
-Permissions
-  /mode <mode>       Set permission mode
-  /whosyourdaddy     Enable full autonomy mode
-  /evidence          Evidence graph
-  /verify            Generate verification plan
-```
-
----
-
-## Permission Modes
-
-```bash
-/mode prompt         # (default) confirm before writes and shell commands
-/mode read-only      # inspection only — no writes
-/mode accept-edits   # auto-approve file edits, confirm shell/network
-/mode accept-all     # full autonomy — no confirmations
-```
-
-Or launch directly into a mode:
-
-```bash
-artemis --accept-all
-artemis --read-only
-```
+- Excluding `.env`, `.npmrc`, logs, local `.artemis` state, and private runtime files from npm packages.
+- Keeping API keys local.
+- Avoiding secret values in logs and summaries.
+- Treating bridge media and generated assets carefully.
 
 ---
 
 ## Configuration
 
-Artemis stores all configuration in `~/.artemis/`:
+Run the setup wizard:
 
-```
-~/.artemis/
-  config.json          Provider profiles and settings
-  trust.json           Trusted workspaces
-  sessions/            WordUP session snapshots
-  soul.md              Your personal AI personality file
-  skills/              Learned Odin skills
+```bash
+artemis config --setup
 ```
 
-Project-level instructions: place an `ARTEMIS.md` at the root of any repository. Artemis reads it on startup and applies it to all interactions within that workspace. Legacy `Artemis.MD`, `Artemis.md`, `artemis.md`, and `.artemis.md` files are still accepted for compatibility.
+Or use interactive commands:
 
-### Privacy and local data
+```text
+/config
+/config visual
+/config vision
+```
 
-Artemis keeps user credentials, bridge sessions, browser state, runtime MCP configuration, and local memories inside user data directories such as `~/.artemis/` or a workspace-local `.artemis/`. These paths are intentionally ignored by Git and excluded from the npm package. The published package only ships the safe default MCP catalog at `defaults/mcp-servers.json`; it does not include your enabled MCP state, API keys, bot tokens, cookies, browser login data, or private bridge lock files.
+Typical config areas:
+
+- Main chat provider and model.
+- Specialist/fallback providers.
+- Visual image provider.
+- Visual video provider.
+- Vision model.
+- MCP servers.
+- Bridge settings.
+- Local memory behavior.
+
+Secrets are stored locally according to the configured provider store and platform capabilities.
+
+---
+
+## Common usage examples
+
+### Fix a bug
+
+```text
+/team find why login sessions expire early, patch it, and run the relevant tests
+```
+
+### Review current changes
+
+```text
+/review my current git diff for release blockers
+```
+
+### Generate an image
+
+```text
+Create a GitHub README hero banner for this project, cinematic but clean, no readable secrets
+```
+
+### Generate a Seedance 2.0 Pro video
+
+```text
+Generate a cinematic 9-second dream video using the latest dream as reference. No audio.
+```
+
+### Send latest dream video to phone
+
+```text
+发我最新梦境视频
+```
+
+### Continue in background
+
+```text
+/nidhogg refactor the visual provider layer and keep validating until tests pass
+```
 
 ---
 
 ## Development
 
+Clone and install:
+
 ```bash
-git clone https://github.com/420company/artemis
+git clone https://github.com/420company/artemis.git
 cd artemis
 npm install
-npm run run        # run from source
-npm run typecheck  # must pass with zero errors
-npm run lint       # ESLint
-npm run test:all   # run all smoke tests
-npm run build      # compile to dist/
-npm run release:check  # validate release readiness
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [docs/RELEASE.md](docs/RELEASE.md) for the GitHub/npm release flow.
+Run checks:
+
+```bash
+npm run typecheck
+npm run lint
+npm run test:runtime
+npm run build
+```
+
+Full release check:
+
+```bash
+npm run release:check
+```
+
+Package dry run:
+
+```bash
+npm pack --dry-run
+```
 
 ---
 
-## License
+## Release notes for maintainers
 
-MIT — open source, free for everyone. Fork it, extend it, make it yours.
+Before publishing:
 
-See [LICENSE](LICENSE) for the full text.
-
----
-
----
-
-# 中文说明
-
-> 由 [420.COMPANY](https://www.420.company) 构建
-
-Artemis 是一款面向工程师的全功能 AI 编程 CLI，专为认真对待工作流的人设计。三十余家 AI Provider、九十个预装 MCP 插件、九百九十九个专属技能包、双模型脑架构、实时消息桥接——以及一个 Spotify 集成，让你的工作区在你到达的那一刻就已就绪。
-
-最近几个版本已经由 Artemis Code 完全自主优化和升级：它会自己扫描工作区、修改源码、验证构建、加固发布边界，并通过工具闭环准备可发布版本。现在的 Artemis 已经具备成熟的真实工作能力，用户可以相信 Artemis 正在持续进化：它会在每一次发布里继续强化桥接、记忆、MCP 能力和安全护栏。
-
-### 最近的自主升级
-
-最近的 0.1.x 版本不是人工事后补写的静态更新说明。Artemis 已经能够检查自己的仓库、修改 TypeScript 源码、运行类型检查和构建、清理发布边界、提交 Git、推送 GitHub，并通过 npm 发布新版本。
-
-近期重点：
-
-- `/soul` 现在会打开引导式 soul 文件配置流程，用于创建或编辑 `~/.artemis/soul.md`；启动时不再把 soul 配置提示塞进主界面。
-- 梦境系统启动面板已简化：标识为 `Artemis · Dream System ·`，删除冗长启动段落，并把“我的日记”和“梦境画面”显示为纯文件路径，避免 macOS/Windows 终端不可点击链接造成混乱。
-- Artemis 正在执行任务时也能接收用户的新输入；普通主对话、inline workflow、detached `/nidhogg` 后台工作流都会在安全点重新整理这些新指令。
-- detached `/nidhogg` 增加跨进程消息队列：前台 CLI 捕获新输入，后台 worker 在下一次模型调用前读入并注入当前 session。
-- 发布边界已加固：私有 `.artemis/` 数据、桥接会话、浏览器状态、token 和本地 runtime 文件不会进入 Git 或 npm 包。
-
-我们为 vibe coder 打造了更好的 coding 氛围。得益于 Artemis 的 Spotify 集成，你可以通过 Telegram、Discord 或微信等第三方通讯软件随时控制你的 Spotify——无论身处何地，当你打开工作区时，好的 vibes 早已等候在那里。
+1. Review `git status --short` and `git diff`.
+2. Run typecheck, lint, runtime tests, and build.
+3. Remove local `.artemis`, logs, `.env`, `.npmrc`, temporary scripts, and generated private assets.
+4. Update `package.json`, `package-lock.json`, README, and docs.
+5. Run `npm pack --dry-run` and inspect included files.
+6. Commit, tag, push, and publish.
 
 ---
 
-## 快速开始
+## 中文说明
+
+Artemis Code 是一个面向真实本地工作区的 AI 工程 CLI。它可以读写代码、运行命令、修复问题、做代码审查、运行测试、生成图片和视频、连接手机消息桥、管理长期任务，并把记忆保存在本机。
+
+核心能力：
+
+- 工程任务：检查仓库、修改代码、运行验证、整理发布。
+- 多工作流：`/team`、`/niko`、`/design`、`/athena`、`/nidhogg`、`/review`。
+- 记忆系统：`/wordup`、`/soul`、梦境日记。
+- 视觉系统：Freya / Vidar 图片与视频生成，支持 Seedance 2.0 Pro 多模态视频流程。
+- 手机桥接：Discord、Telegram、WeChat 等入口可把消息送进本地 Artemis，并接收生成的图片/视频。
+- MCP 插件：内置大量 MCP 服务配置，可按需启用。
+- 安全边界：本地密钥、本地状态、临时文件和隐私数据默认不进入 Git/npm 发布包。
+
+安装：
 
 ```bash
 npm install -g artemis-code
 artemis
 ```
 
-首次启动时，CLI 会引导你完成 Provider 配置。其余一切按需启用。
+配置：
 
----
+```text
+/config
+/config visual
+/config vision
+```
 
-## 核心工作流
+常用：
 
-### `/team` — 自动路由 *(推荐新手起点)*
-
-描述你的任务，Artemis 自动判断并分发到最合适的工作流。
-
-### `/niko` — 探索 → 构建
-
-先广泛探索问题空间、收集证据，再从确定性出发构建实现。适用于最佳路径尚不明确的任务。
-
-### `/design` — 设计优先
-
-先生成完整架构文档（数据模型、接口定义、组件拆分、迁移策略），你审核并确认后，再动手写代码。
-
-### `/athena` — 深度研究 + 多 Agent 协作执行
-
-并行部署多个独立子 Agent 研究代码库，汇总发现后制定统一执行计划。适用于跨模块、跨文件的大型任务。
-
-### `/nidhogg` — 对抗性加固
-
-实现方案 → 对抗性审视弱点 → 迭代修复，直到方案在压力下仍然稳健。最慢，但输出最可靠。适用于支付、安全、数据完整性等关键路径。
-
-后台 detached `/nidhogg` 运行中也可以接收新消息：前台 CLI 会把用户的新输入写入跨进程队列，worker 在下一个安全点读入并合并到当前任务上下文。
-
-### `/contest` — 路径辩论与选择
-
-生成多种竞争性实现方案，明确辩论利弊权衡，选出最优方案并实现。
-
----
-
-## Heimdall — 线程可观测性
-
-`/heimdall` 让你实时看到 Agent 的执行状态、等待原因和所需输入。
-
-```bash
-/heimdall              # 当前线程状态
-/heimdall follow       # 实时事件流
-/heimdall approve      # 解除待审批阻塞
-/heimdall reply <内容>  # 回复 Agent 的澄清请求
-/heimdall upload <文件> # 向活跃线程传入文件
+```text
+/team 修复这个模块的问题并运行测试
+/review 检查当前改动有没有发布风险
+/nidhogg 后台继续完成这个重构
+发我最新梦境视频
 ```
 
 ---
 
-## Bifrost — 双模型架构
+## License
 
-规划与执行不需要同一个模型。Bifrost 让你为推理和执行分别配置最适合的 Provider。
-
-```bash
-/bifrost   # 打开双模型配置
-/mind      # 切换 Forge ↔ Raven 分配
-```
-
-**脑模型（Raven）：** 高能力推理模型，负责规划、分析、对抗性审查。如 Claude Opus、GPT-4o、DeepSeek-R1。  
-**执行模型（Forge）：** 快速、代码专项模型，负责工具调用、文件编辑、代码生成。如 Claude Haiku、GPT-4o Mini、DeepSeek-Coder。
-
-效果：大模型的推理质量 + 小模型的速度与成本。
-
----
-
-## MCP 插件
-
-九十个 MCP 服务器预装就绪，HTTP 类型的服务器零配置即可启用。
-
-```bash
-/mcp list              # 浏览全部 90 个服务器
-/mcp enable <id>       # 启用某个服务器
-/mcp doctor            # 诊断 MCP 配置状态
-```
-
-包含：GitHub、Vercel、Prisma、Notion、Slack、Figma、Jira/Confluence、Postman、Shopify、AWS SAM、Azure、Sourcegraph、Aikido Security 等。
-
-隐私边界：npm 包只包含安全的默认 MCP 目录模板 `defaults/mcp-servers.json`。你本机启用过哪些 MCP、API key、bot token、浏览器登录状态、桥接锁文件和会话数据都保存在 `.artemis/` 用户数据目录中；该目录被 Git 与 npm 发布流程排除，不会随包发布。
-
----
-
-## 消息桥接（Bragi）
-
-通过 Telegram、Discord 或微信发送任务。Artemis 在你的本地机器上执行，并将结果推送回你的手机。与终端完全相同的工具权限。
-
-```bash
-/bragi telegram setup   # 配置 Telegram 机器人
-/bragi discord setup    # 配置 Discord 机器人
-/bragi wechat setup     # 配置微信网关
-```
-
----
-
-## Spotify 集成
-
-Artemis 连接 Spotify，让你的工作区在你就座时就已进入状态。
-
-可通过终端或 **Telegram / Discord / 微信** 控制：
-
-- 播放喜爱的歌曲或播放列表
-- 暂停、继续、切换曲目
-- 调节音量、切换播放设备
-- 查看当前正在播放的内容
-
-找不到活跃设备时，Artemis 会自动唤醒本地 Spotify 客户端并重试。
-
----
-
-## 记忆系统
-
-### WordUP — 会话快照
-
-```bash
-/wordup          # 保存命名快照
-/wordupnow       # 立即强制保存
-artemis resume --last   # 恢复最近的快照
-```
-
-### Soul 文件
-
-`~/.artemis/soul.md` — Artemis 的个人性格与运行契约文件。Artemis 启动时读取，并应用于所有交互：语气、沟通风格、代码展示方式、偏好的工作节奏，以及梦境感应该保留多少。
-
-```bash
-/soul   # 打开 soul.md 引导式配置/编辑流程
-```
-
-旧的启动 soul 提示已从主界面移除。如果你想创建或调整 soul 文件，显式输入 `/soul` 即可。
-
-### 梦境系统
-
-Artemis 可以从近期活动中编织梦境日记：对话回声、工具脚印、触碰过的文件和生成过的画面。梦境文件保存在本地 `~/.artemis/dreams/`，通常包含 Markdown 日记和可选 PNG 画面。
-
-启动面板会保持安静：只显示最近梦境片段，以及“我的日记”“梦境画面”的纯文件路径。Artemis 不再使用终端专属超链接转义码，避免 macOS、Windows 或不支持 OSC8 的终端出现不可点击、文字混乱的问题。
-
----
-
-## 支持的 AI Provider
-
-支持 30+ 家 Provider：Anthropic、OpenAI、Google Gemini、DeepSeek、Qwen（阿里）、Kimi（月之暗面）、字节豆包、百度文心、智谱 GLM、BytePlus（火山引擎）、科大讯飞星火、腾讯混元、Minimax、360 AI、零一万物、Mistral、Groq、OpenRouter、xAI Grok，以及任意 OpenAI 兼容端点。
-
----
-
-## 开发
-
-```bash
-git clone https://github.com/420company/artemis
-cd artemis
-npm install
-npm run run        # 从源码运行
-npm run typecheck  # 必须零错误
-npm run build      # 编译至 dist/
-npm run release:check  # 发布前完整检查
-```
-
-详见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub/npm 发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
-
----
-
-## 开源协议
-
-MIT — 开源，免费，欢迎所有人。Fork 它，扩展它，让它成为你自己的工具。
-
-欢迎 PR、Issue 和一切形式的贡献。
-
-[https://github.com/420company/artemis](https://github.com/420company/artemis)
+MIT. See [LICENSE](LICENSE).

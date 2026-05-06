@@ -1,6 +1,6 @@
 {
   "name": "artemis-code",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "Artemis — AI assistant CLI by www.420.company",
   "main": "./dist/index.js",
   "type": "module",
@@ -21,6 +21,7 @@
     "mcp-packages/package-lock.json",
     "defaults/mcp-servers.json",
     "docs/*.md",
+    "assets/**",
     "README.md",
     "LICENSE",
     "bin/",

@@ -61,6 +61,8 @@ export type ImageAttachment = {
   mediaType: ImageMediaType;
   /** Optional hint injected as a text prefix before the image. */
   label?: string;
+  /** Optional original URL, when the bridge received the image from a public/CDN attachment. */
+  sourceUrl?: string;
 };
 
 export type ProviderRequestOptions = {
@@ -241,6 +243,19 @@ export type MemoryEnhancementConfig = {
   };
 };
 
+export type VidarAssetHostingConfig = {
+  enabled: boolean;
+  provider: 's3' | 'r2';
+  endpoint?: string;
+  bucket?: string;
+  region?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  publicBaseUrl?: string;
+  prefix?: string;
+  maxUploadMegabytes?: number;
+};
+
 export type VisualModelConfig = {
   enabled: boolean;
   image: {
@@ -258,6 +273,7 @@ export type VisualModelConfig = {
     model: string;
     defaultParams: VideoGenerationParams;
   };
+  assetHosting?: VidarAssetHostingConfig;
 };
 
 export type ImageGenerationParams = {

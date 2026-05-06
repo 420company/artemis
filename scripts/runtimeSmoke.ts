@@ -14,6 +14,7 @@ import {
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
 } from '../src/cli/settings.js'
 import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
+import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
 import { buildContextWindow } from '../src/core/context.js'
@@ -38,9 +39,10 @@ import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
 import { compressMessages } from '../src/core/contextCompressor.js'
-import { resolveBytePlusCredentials } from '../src/tools/byteplusMedia.js'
+import { resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
+import { executeGenerateVideo } from '../src/tools/generateVideo.js'
 import {
   resolveGeminiDeepResearchConfig,
   runGeminiDeepResearch,
@@ -48,6 +50,14 @@ import {
 import { BytePlusProvider } from '../src/tools/visual/providers/byteplusProvider.js'
 import { OpenAIProvider } from '../src/tools/visual/providers/openaiProvider.js'
 import { getAvailableProviders } from '../src/tools/visual/providers/interface.js'
+import {
+  BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+  getUnsupportedVideoReferences,
+  isGeneratedAudioUnsupported,
+  resolveVideoModelCapabilities,
+  shouldPromoteBytePlusVideoModel,
+} from '../src/tools/visual/videoCapabilities.js'
+import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
 import {
@@ -125,7 +135,8 @@ console.log('\n  runtimeSmoke')
 console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
-const providerNativeToolNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
+const providerNativeTools = buildProviderNativeFunctionTools()
+const providerNativeToolNames = providerNativeTools.map((tool) => tool.name)
 
 assert(
   'direct tools: shared manifest is a superset of provider-native callable tools',
@@ -138,6 +149,16 @@ assert(
   eq(providerNativeToolNames, getProviderCallableActionTypes()),
   providerNativeToolNames.join(', '),
 )
+
+{
+  const generateVideoTool = providerNativeTools.find((tool) => tool.name === 'generate_video')
+  const properties = generateVideoTool?.parameters?.properties as Record<string, unknown> | undefined
+  assert(
+    'provider native tools: generate_video exposes multimodal BytePlus reference inputs',
+    Boolean(properties?.referenceImageUrls && properties?.referenceVideoUrls && properties?.referenceAudioUrls),
+    JSON.stringify(properties ?? {}),
+  )
+}
 
 {
   const onboardingSource = fs.readFileSync(path.join(process.cwd(), 'src/cli/onboarding.ts'), 'utf8')
@@ -548,6 +569,400 @@ assert(
     !isCliStopIntent('停止之后继续解释'),
   'stop intent matcher regression',
 )
+
+{
+  const generatedPath = '/Users/goat/.artemis/dreams/last_dream_seedance.mp4'
+  const paths = extractVideoPathsFromToolOutput(
+    'generate_video',
+    `Generated video via configured visual API saved to ${generatedPath}`,
+  )
+  const ignored = extractVideoPathsFromToolOutput(
+    'read_file',
+    `Generated video via configured visual API saved to ${generatedPath}`,
+  )
+  assert(
+    'bridge runtime: generate_video mp4 output is extracted for automatic mobile broadcast',
+    paths.length === 1 && paths[0] === generatedPath && ignored.length === 0,
+    JSON.stringify({ paths, ignored }),
+  )
+}
+
+async function configureBytePlusVideoProfile(cwd: string, model: string): Promise<void> {
+  const store = new ProviderStore(cwd)
+  const data = await store.load()
+  data.visualProfile = {
+    enabled: true,
+    image: {
+      provider: 'byteplus',
+      apiKey: 'bp-key',
+      baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+      model: 'seedream-5-0-260128',
+      defaultParams: {
+        size: '2K',
+        quality: 'standard',
+        style: 'realistic',
+        watermark: false,
+      },
+    },
+    video: {
+      enabled: true,
+      provider: 'byteplus',
+      apiKey: 'bp-key',
+      baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+      model,
+      defaultParams: {
+        duration: '10s',
+        resolution: '1080p',
+        quality: 'standard',
+        style: 'realistic',
+        format: 'mp4',
+        framerate: '24fps',
+        watermark: false,
+      },
+    },
+  }
+  await store.save(data)
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-seedance-workflow-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, BYTEPLUS_SEEDANCE_2_PRO_MODEL)
+  const key = `smoke-${Date.now()}`
+
+  const first = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key,
+    cwd: tmpDir,
+    text: '生成一个赛博朋克产品发布视频',
+  })
+  assert(
+    'Seedance workflow: Pro video config asks for multimodal references before generation',
+    first.handled && first.reply.includes('Seedance 2.0 Pro') && first.reply.includes('图片参考'),
+    JSON.stringify(first),
+  )
+
+  const second = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key,
+    cwd: tmpDir,
+    text: '添加 https://example.com/ref.png 和 https://example.com/motion.mp4，整体更高级',
+  })
+  assert(
+    'Seedance workflow: collects image and video reference URLs across turns',
+    second.handled && second.reply.includes('图片 1') && second.reply.includes('视频 1'),
+    JSON.stringify(second),
+  )
+
+  const third = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key,
+    cwd: tmpDir,
+    text: '开始生成',
+  })
+  assert(
+    'Seedance workflow: asks for duration before final generation',
+    third.handled && third.reply.includes('请选择') && third.reply.includes('5 秒'),
+    JSON.stringify(third),
+  )
+
+  const fourth = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key,
+    cwd: tmpDir,
+    text: '10秒',
+  })
+  assert(
+    'Seedance workflow: duration confirmation builds generate_video prompt with exact reference arrays and audio default',
+    !fourth.handled &&
+      fourth.prompt?.includes(BYTEPLUS_SEEDANCE_2_PRO_MODEL) &&
+      fourth.prompt.includes('duration: 10') &&
+      fourth.prompt.includes('generateAudio: true') &&
+      fourth.prompt.includes('referenceImageUrls') &&
+      fourth.prompt.includes('https://example.com/ref.png') &&
+      fourth.prompt.includes('referenceVideoUrls') &&
+      fourth.prompt.includes('https://example.com/motion.mp4'),
+    JSON.stringify(fourth),
+  )
+
+
+  const nonDefaultDurationKey = `smoke-duration-${Date.now()}`
+  const durationFirst = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: nonDefaultDurationKey,
+    cwd: tmpDir,
+    text: '直接生成一个玻璃城市上空的慢镜头视频',
+  })
+  assert(
+    'Seedance workflow: direct generation asks for duration instead of defaulting immediately',
+    durationFirst.handled && durationFirst.reply.includes('请选择 Seedance 2.0 Pro 视频时长'),
+    JSON.stringify(durationFirst),
+  )
+  const durationSecond = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: nonDefaultDurationKey,
+    cwd: tmpDir,
+    text: '15秒，有声',
+  })
+  assert(
+    'Seedance workflow: selected non-default duration is preserved in generate_video prompt',
+    !durationSecond.handled &&
+      durationSecond.prompt?.includes('duration: 15') &&
+      durationSecond.prompt.includes('generateAudio: true'),
+    JSON.stringify(durationSecond),
+  )
+
+  const metaDiscussion = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: `smoke-meta-${Date.now()}`,
+    cwd: tmpDir,
+    text: '我没搞懂为什么我给你对话的过程中会一直提示生成视频，这一套工作流从触发到引导使用，到成功生成的流程和逻辑都有的吗？',
+  })
+  assert(
+    'Seedance workflow: meta discussion about video workflow does not trigger generation flow',
+    !metaDiscussion.handled && !metaDiscussion.prompt,
+    JSON.stringify(metaDiscussion),
+  )
+
+  const pendingMetaKey = `smoke-pending-meta-${Date.now()}`
+  const pendingFirst = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: pendingMetaKey,
+    cwd: tmpDir,
+    text: '生成一个赛博朋克产品发布视频',
+  })
+  assert(
+    'Seedance workflow: pending flow starts normally before meta discussion',
+    pendingFirst.handled,
+    JSON.stringify(pendingFirst),
+  )
+  const pendingMeta = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: pendingMetaKey,
+    cwd: tmpDir,
+    text: '为什么我讨论生成视频流程的时候还会进入工作流？检查一下逻辑。',
+  })
+  assert(
+    'Seedance workflow: meta discussion cancels pending workflow and returns to normal chat',
+    !pendingMeta.handled && !pendingMeta.prompt,
+    JSON.stringify(pendingMeta),
+  )
+
+  const deliveryQuestion = await handleSeedanceMultimodalWorkflow({
+    scope: 'bridge',
+    key: `smoke-delivery-${Date.now()}`,
+    cwd: tmpDir,
+    text: '为什么生成完成后系统没有主动把视频发给手机',
+  })
+  assert(
+    'Seedance workflow: delivery/support question about generated video does not trigger generation flow',
+    !deliveryQuestion.handled && !deliveryQuestion.prompt,
+    JSON.stringify(deliveryQuestion),
+  )
+
+  const supportQuestion = await handleSeedanceMultimodalWorkflow({
+    scope: 'bridge',
+    key: `smoke-video-support-${Date.now()}`,
+    cwd: tmpDir,
+    text: '检查一下生成视频后的发送逻辑，为什么没有推送到 Discord 手机端？',
+  })
+  assert(
+    'Seedance workflow: video support/debug question does not trigger generation flow',
+    !supportQuestion.handled && !supportQuestion.prompt,
+    JSON.stringify(supportQuestion),
+  )
+
+  const featureQuestion = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: `smoke-video-feature-${Date.now()}`,
+    cwd: tmpDir,
+    text: '生成视频这个功能有没有完整流程？为什么会乱触发？',
+  })
+  assert(
+    'Seedance workflow: feature discussion containing generation words does not trigger generation flow',
+    !featureQuestion.handled && !featureQuestion.prompt,
+    JSON.stringify(featureQuestion),
+  )
+
+  const dreamVideoRequest = await handleSeedanceMultimodalWorkflow({
+    scope: 'bridge',
+    key: `smoke-dream-video-${Date.now()}`,
+    cwd: tmpDir,
+    text: '请把最后一个梦境做成 10 秒视频给我',
+  })
+  assert(
+    'Seedance workflow: explicit dream-to-video request still triggers generation flow',
+    dreamVideoRequest.handled && dreamVideoRequest.reply.includes('Seedance 2.0 Pro'),
+    JSON.stringify(dreamVideoRequest),
+  )
+
+  const dreamSourceKey = `smoke-dream-source-${Date.now()}`
+  const dreamSourceOffer = await handleSeedanceMultimodalWorkflow({
+    scope: 'bridge',
+    key: dreamSourceKey,
+    cwd: tmpDir,
+    text: '请把最新梦境做成 10 秒视频给我',
+    latestDream: {
+      id: '2026-05-07_dawn_0520',
+      body: '# 桥上有雾\n\n今天的梦从一座分叉的桥开始。桥下不是河，是一排排沉睡的金属森林。',
+    },
+  })
+  assert(
+    'Seedance workflow: dream video request offers latest dream journal as text source',
+    dreamSourceOffer.handled &&
+      dreamSourceOffer.reply.includes('最新梦境日记') &&
+      dreamSourceOffer.reply.includes('2026-05-07_dawn_0520'),
+    JSON.stringify(dreamSourceOffer),
+  )
+  const dreamSourceYes = await handleSeedanceMultimodalWorkflow({
+    scope: 'bridge',
+    key: dreamSourceKey,
+    cwd: tmpDir,
+    text: '使用最新梦境',
+    latestDream: null,
+  })
+  assert(
+    'Seedance workflow: accepting latest dream journal builds generation prompt directly when duration is known',
+    !dreamSourceYes.handled &&
+      dreamSourceYes.prompt?.includes('[Artemis latest dream journal: 2026-05-07_dawn_0520]') &&
+      dreamSourceYes.prompt.includes('duration: 10') &&
+      dreamSourceYes.prompt.includes('桥上有雾') &&
+      dreamSourceYes.prompt.includes(BYTEPLUS_SEEDANCE_2_PRO_MODEL),
+    JSON.stringify(dreamSourceYes),
+  )
+
+  const dreamSourceNoKey = `smoke-dream-source-no-${Date.now()}`
+  const dreamSourceNoOffer = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: dreamSourceNoKey,
+    cwd: tmpDir,
+    text: '把最新梦境做成视频',
+    latestDream: {
+      id: '2026-05-07_night_2230',
+      body: '# 金属森林\n\n一盏小灯穿过金属森林。',
+    },
+  })
+  const dreamSourceNo = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key: dreamSourceNoKey,
+    cwd: tmpDir,
+    text: '不用，添加素材',
+    latestDream: null,
+  })
+  assert(
+    'Seedance workflow: declining latest dream journal returns to normal multimodal reference flow',
+    dreamSourceNoOffer.handled &&
+      dreamSourceNo.handled &&
+      dreamSourceNo.reply.includes('是否添加参考素材') &&
+      !dreamSourceNo.reply.includes('2026-05-07_night_2230'),
+    JSON.stringify({ dreamSourceNoOffer, dreamSourceNo }),
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-seedance-workflow-local-image-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, BYTEPLUS_SEEDANCE_2_PRO_MODEL)
+  const imagePath = path.join(tmpDir, 'ref.png')
+  fs.writeFileSync(imagePath, Buffer.from('iVBORw0KGgo=', 'base64'))
+  const key = `smoke-local-image-${Date.now()}`
+
+  assert(
+    'Seedance workflow: absolute dragged image path is recognized as local media, not a slash command',
+    await hasExistingLocalMediaReference(tmpDir, imagePath),
+    imagePath,
+  )
+
+  const first = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key,
+    cwd: tmpDir,
+    text: `生成一个产品视频，参考 ${imagePath}`,
+  })
+  assert(
+    'Seedance workflow: local image reference proceeds to duration confirmation',
+    first.handled && first.reply.includes('请选择'),
+    JSON.stringify(first),
+  )
+
+  const second = await handleSeedanceMultimodalWorkflow({
+    scope: 'cli',
+    key,
+    cwd: tmpDir,
+    text: '默认',
+  })
+  assert(
+    'Seedance workflow: local image paths are preserved for generate_video and default to 5s with audio',
+    !second.handled &&
+      second.prompt?.includes('duration: 5') &&
+      second.prompt.includes('generateAudio: true') &&
+      second.prompt.includes('referenceImagePaths') &&
+      second.prompt.includes(imagePath),
+    JSON.stringify(second),
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-video-local-video-ref-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, BYTEPLUS_SEEDANCE_2_PRO_MODEL)
+  const videoPath = path.join(tmpDir, 'reference.mp4')
+  fs.writeFileSync(videoPath, Buffer.from('not-a-real-video'))
+
+  const originalAssetEndpoint = process.env.VIDAR_ASSET_ENDPOINT
+  const originalAssetEnabled = process.env.VIDAR_ASSET_ENABLED
+  process.env.VIDAR_ASSET_ENDPOINT = 'disabled-for-smoke-test'
+  process.env.VIDAR_ASSET_ENABLED = 'false'
+
+  let result: Awaited<ReturnType<typeof executeGenerateVideo>>
+  try {
+    result = await executeGenerateVideo(
+      {
+        type: 'generate_video',
+        prompt: '生成一个参考本地视频的短片',
+        model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+        referenceVideoPaths: [videoPath],
+        maxPolls: 1,
+      } as any,
+      { cwd: tmpDir, permissionMode: 'full-access' } as any,
+    )
+  } finally {
+    if (originalAssetEndpoint === undefined) delete process.env.VIDAR_ASSET_ENDPOINT
+    else process.env.VIDAR_ASSET_ENDPOINT = originalAssetEndpoint
+    if (originalAssetEnabled === undefined) delete process.env.VIDAR_ASSET_ENABLED
+    else process.env.VIDAR_ASSET_ENABLED = originalAssetEnabled
+  }
+
+  assert(
+    'generate_video: local video/audio references fail before API call without asset hosting',
+    result.ok === false && String(result.output).includes('local video/audio references need Vidar asset hosting'),
+    String(result.output),
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-seedance-workflow-nonpro-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, 'seedance-1-5-pro-251215')
+  const outcome = await handleSeedanceMultimodalWorkflow({
+    scope: 'bridge',
+    key: `smoke-nonpro-${Date.now()}`,
+    cwd: tmpDir,
+    text: '生成一个产品视频',
+  })
+  assert(
+    'Seedance workflow: non-Pro video models keep the normal generation path',
+    !outcome.handled && !outcome.prompt,
+    JSON.stringify(outcome),
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
 
 {
   const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-fail-closed-${Date.now()}`)
@@ -1606,12 +2021,12 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   })
   let errorMessage = ''
   try {
-    await resolveBytePlusCredentials(tmpDir, 'image')
+    await resolveModelArkMediaCredentials(tmpDir, 'image')
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : String(error)
   }
   assert(
-    'BytePlus media credentials: coding profile does not authorize visual media calls',
+    'ModelArk media credentials: coding profile does not authorize visual media calls',
     errorMessage.includes('ARTEMIS_VISUAL_SETUP_REQUIRED'),
     errorMessage,
   )
@@ -1664,9 +2079,79 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
     await provider.generateImage({ prompt: 'test image' })
     assert(
-      'BytePlus visual provider: normalizes full image endpoint base URL before appending the API path',
+      'ModelArk visual provider: normalizes full image endpoint base URL before appending the API path',
       requestedUrls[0] === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations',
       `url=${requestedUrls[0]}`,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  const originalFetch = globalThis.fetch
+  let createBody: any
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    createBody = JSON.parse(String(init?.body ?? '{}'))
+    return new Response('{"error":{"message":"test stop"}}', { status: 500 })
+  }) as typeof fetch
+
+  try {
+    const provider = new BytePlusProvider(
+      {
+        enabled: true,
+        image: {
+          provider: 'byteplus',
+          apiKey: 'bp-key',
+          baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+          model: 'seedream-5-0-260128',
+          defaultParams: {
+            size: '2K',
+            quality: 'standard',
+            style: 'realistic',
+            watermark: false,
+          },
+        },
+        video: {
+          enabled: true,
+          provider: 'byteplus',
+          apiKey: 'bp-key',
+          baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks',
+          model: 'dreamina-seedance-2-0-260128',
+          defaultParams: {
+            duration: '10s',
+            resolution: '720p',
+            quality: 'standard',
+            style: 'realistic',
+            format: 'mp4',
+            framerate: '24fps',
+            watermark: false,
+          },
+        },
+      },
+      'video',
+    )
+
+    await provider.generateVideo({
+      prompt: 'cinematic product film',
+      model: 'dreamina-seedance-2-0-260128',
+      referenceImageUrls: ['https://example.com/ref.jpg'],
+      referenceVideoUrls: ['https://example.com/ref.mp4'],
+      referenceAudioUrls: ['https://example.com/ref.mp3'],
+      duration: 11,
+      ratio: '16:9',
+      generateAudio: true,
+    })
+    const roles = (createBody?.content ?? []).map((item: any) => item.role).filter(Boolean)
+    assert(
+      'ModelArk visual provider: Seedance 2.0 request includes image, video, and audio reference blocks',
+      createBody?.model === 'dreamina-seedance-2-0-260128' &&
+        roles.includes('reference_image') &&
+        roles.includes('reference_video') &&
+        roles.includes('reference_audio') &&
+        createBody.generate_audio === true &&
+        createBody.duration === 11,
+      JSON.stringify(createBody),
     )
   } finally {
     globalThis.fetch = originalFetch
@@ -1689,6 +2174,118 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 {
+  const seedance2Caps = resolveVideoModelCapabilities('byteplus', 'dreamina-seedance-2-0-260128')
+  const seedance15Caps = resolveVideoModelCapabilities('byteplus', 'seedance-1-5-pro-251215')
+  const textOnlyCaps = resolveVideoModelCapabilities('openai', 'sora-2')
+  assert(
+    'video capabilities: Seedance 2.0 accepts image, video, and audio references',
+    getUnsupportedVideoReferences(
+      {
+        referenceImageUrls: ['https://example.com/a.png'],
+        referenceVideoUrls: ['https://example.com/a.mp4'],
+        referenceAudioUrls: ['https://example.com/a.mp3'],
+      },
+      seedance2Caps,
+    ).length === 0,
+  )
+  assert(
+    'video capabilities: Seedance 1.5 accepts image references only',
+    getUnsupportedVideoReferences(
+      {
+        referenceImageUrls: ['https://example.com/a.png'],
+        referenceVideoUrls: ['https://example.com/a.mp4'],
+      },
+      seedance15Caps,
+    ).join(',') === 'video',
+  )
+  assert(
+    'video capabilities: text-only providers reject reference assets before request creation',
+    getUnsupportedVideoReferences(
+      { referenceImageUrls: ['https://example.com/a.png'] },
+      textOnlyCaps,
+    ).join(',') === 'image',
+  )
+  assert(
+    'video capabilities: Seedance 1.5 accepts explicit generated-audio requests',
+    !isGeneratedAudioUnsupported({ generateAudio: true }, seedance15Caps),
+  )
+  assert(
+    'video capabilities: BytePlus multimodal references promote default model to Seedance 2.0 Pro',
+    shouldPromoteBytePlusVideoModel(
+      { referenceVideoUrls: ['https://example.com/a.mp4'] },
+      {
+        enabled: true,
+        image: {
+          provider: 'byteplus',
+          apiKey: 'bp-key',
+          baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+          model: 'seedream-5-0-260128',
+          defaultParams: {
+            size: '2K',
+            quality: 'standard',
+            style: 'realistic',
+            watermark: false,
+          },
+        },
+        video: {
+          enabled: true,
+          provider: 'byteplus',
+          apiKey: 'bp-key',
+          baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+          model: 'seedance-1-5-pro-251215',
+          defaultParams: {
+            duration: '10s',
+            resolution: '1080p',
+            quality: 'standard',
+            style: 'realistic',
+            format: 'mp4',
+            framerate: '24fps',
+            watermark: false,
+          },
+        },
+      },
+    ) && BYTEPLUS_SEEDANCE_2_PRO_MODEL === 'dreamina-seedance-2-0-260128',
+  )
+  assert(
+    'video capabilities: explicit generated audio promotes default BytePlus video model to Seedance 2.0 Pro',
+    shouldPromoteBytePlusVideoModel(
+      { generateAudio: true },
+      {
+        enabled: true,
+        image: {
+          provider: 'byteplus',
+          apiKey: 'bp-key',
+          baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+          model: 'seedream-5-0-260128',
+          defaultParams: {
+            size: '2K',
+            quality: 'standard',
+            style: 'realistic',
+            watermark: false,
+          },
+        },
+        video: {
+          enabled: true,
+          provider: 'byteplus',
+          apiKey: 'bp-key',
+          baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+          model: 'seedance-1-5-pro-251215',
+          defaultParams: {
+            duration: '10s',
+            resolution: '1080p',
+            quality: 'standard',
+            style: 'realistic',
+            format: 'mp4',
+            framerate: '24fps',
+            watermark: false,
+          },
+        },
+      },
+    ),
+  )
+}
+
+{
   const directed = buildDirectedVideoPrompt({
     prompt: '数字萨满, 哥特式教堂, 觉醒',
     provider: 'byteplus',
@@ -1700,7 +2297,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'video director: Seedance prompt expansion adds timeline and one focal point',
     directed.directedPrompt.includes('0-2 seconds') &&
       directed.directedPrompt.includes('single clear focal point') &&
-      directed.directedPrompt.includes('BytePlus Seedance') &&
+      directed.directedPrompt.includes('Seedance') &&
       directed.directedPrompt.includes('physically') &&
       directed.directedPrompt.includes('no random morphing'),
     directed.directedPrompt,
@@ -1708,9 +2305,44 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 {
+  const directed = buildDirectedVideoPrompt({
+    prompt: '把一张奶茶产品图做成15秒电商广告视频，镜头展示杯身凝结水珠和旋转开盖',
+    provider: 'byteplus',
+    model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+    duration: 15,
+    ratio: '9:16',
+    referenceImageCount: 1,
+    referenceVideoCount: 1,
+    referenceAudioCount: 1,
+  })
   assert(
-    'video params: BytePlus Seedance 2.0 fast duration is clamped to the accepted minimum',
-    normalizeVideoDurationForProvider(2, 'byteplus', 'dreamina-seedance-2-0-fast-260128') === 5,
+    'video director: Seedance 2.0 Pro prompt includes technical spec, reference usage, sound design, and negative constraints',
+    directed.providerProfile.includes('Seedance 2.0 Pro') &&
+      directed.directedPrompt.includes('Technical spec') &&
+      directed.directedPrompt.includes('9:16') &&
+      directed.directedPrompt.includes('15秒') &&
+      directed.directedPrompt.includes('Timestamp storyboard') &&
+      directed.directedPrompt.includes('Reference usage') &&
+      directed.directedPrompt.includes('reference images') &&
+      directed.directedPrompt.includes('reference videos') &&
+      directed.directedPrompt.includes('reference audio') &&
+      directed.directedPrompt.includes('Sound design') &&
+      directed.directedPrompt.includes('no subtitles') &&
+      directed.directedPrompt.includes('no watermark'),
+    directed.directedPrompt,
+  )
+}
+
+{
+  assert(
+    'video params: Seedance 2.0 duration is clamped to the official range',
+    normalizeVideoDurationForProvider(2, 'byteplus', 'dreamina-seedance-2-0-fast-260128') === 4 &&
+      normalizeVideoDurationForProvider(20, 'byteplus', 'dreamina-seedance-2-0-260128') === 15,
+  )
+  assert(
+    'video params: Seedance 1.5 Pro duration is clamped to the official range',
+    normalizeVideoDurationForProvider(2, 'byteplus', 'seedance-1-5-pro-251215') === 4 &&
+      normalizeVideoDurationForProvider(20, 'byteplus', 'seedance-1-5-pro-251215') === 12,
   )
   assert(
     'video params: other video providers keep short durations when allowed by their adapter',
@@ -1785,6 +2417,82 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     )
   } finally {
     globalThis.fetch = originalFetch
+  }
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-vidar-asset-hosting-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, BYTEPLUS_SEEDANCE_2_PRO_MODEL)
+  const store = new ProviderStore(tmpDir)
+  const data = await store.load()
+  if (!data.visualProfile) throw new Error('missing visual profile')
+  data.visualProfile.assetHosting = {
+    enabled: true,
+    provider: 'r2',
+    endpoint: 'https://r2.example.test',
+    bucket: 'artemis-assets',
+    region: 'auto',
+    accessKeyId: 'asset-key',
+    secretAccessKey: 'asset-secret',
+    publicBaseUrl: 'https://assets.example.test',
+    prefix: 'tmp/vidar',
+  }
+  await store.save(data)
+
+  const referencePath = path.join(tmpDir, 'local reference.mp4')
+  fs.writeFileSync(referencePath, Buffer.from('fake-video-bytes'))
+  const originalFetch = globalThis.fetch
+  const uploadUrls: string[] = []
+  const createBodies: Array<Record<string, unknown>> = []
+  const tinyMp4 = Buffer.from('AAAAIGZ0eXBtcDQyAAAAAG1wNDFtcDQyaXNvbTY=', 'base64')
+
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = String(input)
+    if (init?.method === 'PUT' && url.startsWith('https://r2.example.test/')) {
+      uploadUrls.push(url)
+      const auth = String((init.headers as Record<string, string>)?.Authorization ?? '')
+      return new Response('', { status: auth.includes('AWS4-HMAC-SHA256') ? 200 : 403 })
+    }
+    if (url.endsWith('/contents/generations/tasks')) {
+      createBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response('{"id":"task-local-ref"}', { status: 200 })
+    }
+    if (url.endsWith('/contents/generations/tasks/task-local-ref')) {
+      return new Response('{"status":"succeeded","content":{"video_url":"https://cdn.example.test/out.mp4"}}', { status: 200 })
+    }
+    if (url === 'https://cdn.example.test/out.mp4') {
+      return new Response(tinyMp4, { status: 200 })
+    }
+    return new Response(`unexpected url ${url}`, { status: 500 })
+  }) as typeof fetch
+
+  try {
+    const result = await executeGenerateVideo(
+      {
+        type: 'generate_video',
+        prompt: '生成一个参考本地视频的短片',
+        model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+        referenceVideoPaths: [referencePath],
+        outputPath: path.join(tmpDir, 'out.mp4'),
+        pollIntervalMs: 1000,
+        maxPolls: 1,
+      } as any,
+      { cwd: tmpDir, permissionMode: 'full-access' } as any,
+    )
+    const content = createBodies[0]?.content as Array<Record<string, any>> | undefined
+    const videoRef = content?.find((item) => item.type === 'video_url')
+    assert(
+      'generate_video: local video reference uploads via Vidar asset hosting before ModelArk request',
+      result.ok === true &&
+        uploadUrls.length === 1 &&
+        uploadUrls[0].includes('/artemis-assets/tmp/vidar/video/') &&
+        String(videoRef?.video_url?.url ?? '').startsWith('https://assets.example.test/tmp/vidar/video/'),
+      `result=${result.output} uploads=${JSON.stringify(uploadUrls)} body=${JSON.stringify(createBodies[0])}`,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 

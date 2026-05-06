@@ -1,18 +1,19 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import { homedir } from 'node:os';
 import { ProviderStore } from '../providers/store.js';
 import type { ProviderStoreData } from '../providers/types.js';
-import { VISUAL_SETUP_REQUIRED_ERROR } from '../utils/visualGenerationConfig.js';
+import {
+  BYTEPLUS_VISUAL_BASE_URL,
+  VISUAL_SETUP_REQUIRED_ERROR,
+} from '../utils/visualGenerationConfig.js';
 
-export type BytePlusMediaCredentials = {
+export type ModelArkMediaCredentials = {
   apiKey: string;
   baseUrl: string;
 };
 
-export type BytePlusMediaAssetKind = 'image' | 'video';
+export type ModelArkMediaAssetKind = 'image' | 'video';
 
-const BYTEPLUS_DEFAULT_BASE_URL = 'https://ark.ap-southeast.bytepluses.com/api/v3';
-const BYTEPLUS_HOST_FRAGMENT = 'bytepluses.com';
+const MODEL_ARK_HOST_FRAGMENT = 'bytepluses.com';
 
 function isEnabledFlag(value: unknown): boolean {
   if (value === true) return true;
@@ -20,15 +21,15 @@ function isEnabledFlag(value: unknown): boolean {
   return false;
 }
 
-export function normalizeBytePlusMediaBaseUrl(baseUrl: string | undefined): string {
+export function normalizeModelArkMediaBaseUrl(baseUrl: string | undefined): string {
   if (!baseUrl) {
-    return BYTEPLUS_DEFAULT_BASE_URL;
+    return BYTEPLUS_VISUAL_BASE_URL;
   }
 
   try {
     const parsed = new URL(baseUrl);
-    if (!parsed.hostname.includes(BYTEPLUS_HOST_FRAGMENT)) {
-      return BYTEPLUS_DEFAULT_BASE_URL;
+    if (!parsed.hostname.includes(MODEL_ARK_HOST_FRAGMENT)) {
+      return BYTEPLUS_VISUAL_BASE_URL;
     }
 
     const segments = parsed.pathname.split('/').filter(Boolean);
@@ -40,24 +41,24 @@ export function normalizeBytePlusMediaBaseUrl(baseUrl: string | undefined): stri
 
     return `${parsed.origin}${normalizedPath}`;
   } catch {
-    return BYTEPLUS_DEFAULT_BASE_URL;
+    return BYTEPLUS_VISUAL_BASE_URL;
   }
 }
 
-export async function resolveBytePlusCredentials(
+export async function resolveModelArkMediaCredentials(
   cwd: string,
-  assetKind: BytePlusMediaAssetKind,
-): Promise<BytePlusMediaCredentials> {
+  assetKind: ModelArkMediaAssetKind,
+): Promise<ModelArkMediaCredentials> {
   const envKey = process.env.ARK_API_KEY?.trim();
   if (envKey) {
-    return { apiKey: envKey, baseUrl: BYTEPLUS_DEFAULT_BASE_URL };
+    return { apiKey: envKey, baseUrl: BYTEPLUS_VISUAL_BASE_URL };
   }
-  
+
   const stores = [new ProviderStore(cwd)];
   if (cwd !== homedir()) {
     stores.push(new ProviderStore(homedir()));
   }
-  
+
   for (const store of stores) {
     let data: ProviderStoreData;
     try {
@@ -65,7 +66,7 @@ export async function resolveBytePlusCredentials(
     } catch {
       continue;
     }
-    
+
     const visualProfile = data.visualProfile;
     const slot = assetKind === 'image' ? visualProfile?.image : visualProfile?.video;
     const profileEnabled = isEnabledFlag(visualProfile?.enabled) || Boolean(slot?.apiKey?.trim());
@@ -75,24 +76,19 @@ export async function resolveBytePlusCredentials(
         continue;
       }
 
-      // Visual generation credentials must remain independent from main / secondary
-      // chat providers. Only the explicit visual slot may authorize media calls.
       if (
         slot?.provider?.toLowerCase() === 'byteplus' &&
         slot.apiKey?.trim()
       ) {
         return {
           apiKey: slot.apiKey,
-          baseUrl: normalizeBytePlusMediaBaseUrl(slot.baseUrl),
+          baseUrl: normalizeModelArkMediaBaseUrl(slot.baseUrl),
         };
       }
     }
-
-    // Do not fall back to the main chat provider. Chat API credentials and
-    // visual-generation credentials are intentionally configured separately.
   }
-  
+
   throw new Error(
-    `${VISUAL_SETUP_REQUIRED_ERROR}: BytePlus ${assetKind} credentials not found. Configure an enabled visual ${assetKind} profile in the current workspace or home directory.`,
+    `${VISUAL_SETUP_REQUIRED_ERROR}: ModelArk ${assetKind} credentials not found. Configure an enabled visual ${assetKind} profile in the current workspace or home directory.`,
   );
 }

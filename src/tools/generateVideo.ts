@@ -1,12 +1,24 @@
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentAction } from '../core/types.js';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';
-import { resolveBytePlusCredentials } from './byteplusMedia.js';
+import { uploadLocalReferenceAssets } from './vidarAssetHosting.js';
+import { resolveModelArkMediaCredentials } from './vidarMedia.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { createVisualProvider } from './visual/providers/interface.js';
 import { saveGeneratedAssetToWorkspace } from './visual/saveGeneratedAsset.js';
+import {
+  BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+  formatUnsupportedVideoReferences,
+  getUnsupportedVideoReferences,
+  hasMultimodalVideoReferences,
+  isBytePlusProvider,
+  isGeneratedAudioUnsupported,
+  requiresGeneratedAudio,
+  resolveVideoModelCapabilities,
+  shouldPromoteBytePlusVideoModel,
+} from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
 import { normalizeVideoDurationForProvider } from './visual/videoParams.js';
 import {
@@ -81,6 +93,51 @@ function extractVideoUrl(payload: TaskStatusResponse): string | undefined {
   );
 }
 
+function appendReferenceContent(
+  content: Array<Record<string, unknown>>,
+  urls: string[] | undefined,
+  type: 'image_url' | 'video_url' | 'audio_url',
+  role: 'reference_image' | 'reference_video' | 'reference_audio',
+): void {
+  if (!Array.isArray(urls)) return;
+  for (const url of urls) {
+    if (typeof url !== 'string' || !url.trim()) continue;
+    content.push({
+      type,
+      [type]: { url: url.trim() },
+      role,
+    });
+  }
+}
+
+function mimeTypeForImagePath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  return 'image/png';
+}
+
+function nonEmptyValues(values: string[] | undefined): string[] {
+  return Array.isArray(values)
+    ? values.map((value) => value.trim()).filter(Boolean)
+    : [];
+}
+
+async function localImagePathsToDataUrls(paths: string[] | undefined, context: ToolExecutionContext): Promise<string[]> {
+  const dataUrls: string[] = [];
+  for (const rawPath of nonEmptyValues(paths)) {
+    const resolved = await resolveToolPathWithWorkspaceAccess({
+      inputPath: rawPath,
+      toolName: 'generate_video',
+      context,
+    });
+    const buffer = await readFile(resolved.absolute);
+    dataUrls.push(`data:${mimeTypeForImagePath(resolved.absolute)};base64,${buffer.toString('base64')}`);
+  }
+  return dataUrls;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -108,8 +165,27 @@ export async function executeGenerateVideo(
     }
 
     // Legacy BytePlus env/config fallback after visualProfile and main/secondary tests.
-    const { apiKey, baseUrl } = await resolveBytePlusCredentials(context.cwd, 'video');
-    const model = action.model?.trim() || DEFAULT_MODEL;
+    const { apiKey, baseUrl } = await resolveModelArkMediaCredentials(context.cwd, 'video');
+    const model = action.model?.trim() || (hasMultimodalVideoReferences(action) || requiresGeneratedAudio(action) ? BYTEPLUS_SEEDANCE_2_PRO_MODEL : DEFAULT_MODEL);
+    const capabilities = resolveVideoModelCapabilities('byteplus', model);
+    const unsupportedReferences = getUnsupportedVideoReferences(
+      action,
+      capabilities,
+    );
+    if (unsupportedReferences.length > 0) {
+      return {
+        action,
+        ok: false,
+        output: `generate_video: selected video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}. Choose Seedance 2.0 Pro for full multimodal reference input.`,
+      };
+    }
+    if (isGeneratedAudioUnsupported(action, capabilities)) {
+      return {
+        action,
+        ok: false,
+        output: 'generate_video: selected video model cannot generate audio. Choose Seedance 2.0 Pro, or set generateAudio to false.',
+      };
+    }
     const ratio = action.ratio?.trim() || DEFAULT_RATIO;
     const duration = normalizeVideoDurationForProvider(action.duration, 'byteplus', model);
     const maxPolls =
@@ -127,23 +203,29 @@ export async function executeGenerateVideo(
       duration,
       ratio,
       referenceImageCount: action.referenceImageUrls?.length ?? 0,
+      referenceVideoCount: (action.referenceVideoUrls?.length ?? 0) + (action.referenceVideoPaths?.length ?? 0),
+      referenceAudioCount: (action.referenceAudioUrls?.length ?? 0) + (action.referenceAudioPaths?.length ?? 0),
     });
     toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
     const content: Array<Record<string, unknown>> = [
       { type: 'text', text: directed.directedPrompt },
     ];
-    if (Array.isArray(action.referenceImageUrls)) {
-      for (const url of action.referenceImageUrls) {
-        if (typeof url === 'string' && url.trim()) {
-          content.push({
-            type: 'image_url',
-            image_url: { url: url.trim() },
-            role: 'reference_image',
-          });
-        }
-      }
-    }
+    const referenceImageUrls = [
+      ...nonEmptyValues(action.referenceImageUrls),
+      ...await localImagePathsToDataUrls(action.referenceImagePaths, context),
+    ];
+    const referenceVideoUrls = [
+      ...nonEmptyValues(action.referenceVideoUrls),
+      ...await uploadLocalReferenceAssets(action.referenceVideoPaths, 'video', context),
+    ];
+    const referenceAudioUrls = [
+      ...nonEmptyValues(action.referenceAudioUrls),
+      ...await uploadLocalReferenceAssets(action.referenceAudioPaths, 'audio', context),
+    ];
+    appendReferenceContent(content, referenceImageUrls, 'image_url', 'reference_image');
+    appendReferenceContent(content, referenceVideoUrls, 'video_url', 'reference_video');
+    appendReferenceContent(content, referenceAudioUrls, 'audio_url', 'reference_audio');
 
     const createEndpoint = `${baseUrl}/contents/generations/tasks`;
     const createBody = {
@@ -151,7 +233,7 @@ export async function executeGenerateVideo(
       content,
       ratio,
       duration,
-      generate_audio: action.generateAudio !== false,
+      generate_audio: capabilities.canGenerateAudio ? action.generateAudio !== false : false,
       watermark: Boolean(action.watermark),
     };
 
@@ -291,7 +373,9 @@ async function tryGenerateWithConfiguredVisualProvider(
   // "veo-3.1-fast", "default", "auto", or "runway-gen3") as action.model.
   // Those aliases should not override the configured visual model, but explicit
   // real model IDs must still work for custom video APIs.
-  const model = resolveConfiguredVideoModel(action, configured.config.video.model || configured.model);
+  const model = shouldPromoteBytePlusVideoModel(action, configured.config)
+    ? BYTEPLUS_SEEDANCE_2_PRO_MODEL
+    : resolveConfiguredVideoModel(action, configured.config.video.model || configured.model);
   return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API');
 }
 
@@ -311,7 +395,10 @@ async function tryGenerateWithMainSecondaryFallbackProviders(
         failures.push(`${candidate.label}: provider does not support videos`);
         continue;
       }
-      const result = await generateVideoWithVisualProvider(action, context, candidate.config, provider, candidate.model, 'main/secondary fallback');
+      const model = shouldPromoteBytePlusVideoModel(action, candidate.config)
+        ? BYTEPLUS_SEEDANCE_2_PRO_MODEL
+        : candidate.model;
+      const result = await generateVideoWithVisualProvider(action, context, candidate.config, provider, model, 'main/secondary fallback');
       if (result.ok) return result;
       failures.push(`${candidate.label}: ${result.output}`);
     } catch (error) {
@@ -337,14 +424,50 @@ async function generateVideoWithVisualProvider(
   const videoConfig = config.video;
   toolLog(`🎬 使用${sourceLabel}生成视频: ${describeVisualProvider(config, 'video')}`);
   const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model);
+  const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model);
+  const unsupportedReferences = getUnsupportedVideoReferences(action, capabilities);
+  if (unsupportedReferences.length > 0) {
+    const modelHint = isBytePlusProvider(videoConfig.provider)
+      ? ' Choose Seedance 2.0 Pro for full multimodal reference input.'
+      : ' Use this provider with a text-only prompt, or configure a model that accepts reference assets.';
+    return {
+      action,
+      ok: false,
+      output: `generate_video: ${videoConfig.provider}/${model} does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}.${modelHint}`,
+    };
+  }
+  if (isGeneratedAudioUnsupported(action, capabilities)) {
+    const modelHint = isBytePlusProvider(videoConfig.provider)
+      ? ' Choose Seedance 2.0 Pro, or set generateAudio to false.'
+      : ' Disable generateAudio, or configure a model that supports audio output.';
+    return {
+      action,
+      ok: false,
+      output: `generate_video: ${videoConfig.provider}/${model} cannot generate audio.${modelHint}`,
+    };
+  }
   const ratio = action.ratio;
+  const referenceImageUrls = [
+    ...nonEmptyValues(action.referenceImageUrls),
+    ...await localImagePathsToDataUrls(action.referenceImagePaths, context),
+  ];
+  const referenceVideoUrls = [
+    ...nonEmptyValues(action.referenceVideoUrls),
+    ...await uploadLocalReferenceAssets(action.referenceVideoPaths, 'video', context),
+  ];
+  const referenceAudioUrls = [
+    ...nonEmptyValues(action.referenceAudioUrls),
+    ...await uploadLocalReferenceAssets(action.referenceAudioPaths, 'audio', context),
+  ];
   const directed = buildDirectedVideoPrompt({
     prompt: action.prompt,
     provider: videoConfig.provider,
     model,
     duration,
     ratio,
-    referenceImageCount: action.referenceImageUrls?.length ?? 0,
+    referenceImageCount: referenceImageUrls.length,
+    referenceVideoCount: referenceVideoUrls.length,
+    referenceAudioCount: referenceAudioUrls.length,
   });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({
@@ -352,7 +475,9 @@ async function generateVideoWithVisualProvider(
     model,
     ratio,
     duration,
-    referenceImageUrls: action.referenceImageUrls,
+    referenceImageUrls,
+    referenceVideoUrls,
+    referenceAudioUrls,
     generateAudio: action.generateAudio,
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,

@@ -7,6 +7,8 @@ export type VideoDirectorInput = {
   duration?: number;
   ratio?: string;
   referenceImageCount?: number;
+  referenceVideoCount?: number;
+  referenceAudioCount?: number;
 };
 
 export type VideoDirectorResult = {
@@ -23,7 +25,7 @@ export type VideoDirectorResult = {
 type SceneKind = 'portrait' | 'product' | 'environment' | 'abstract';
 
 const MAX_SOURCE_PROMPT_CHARS = 900;
-const MAX_DIRECTED_PROMPT_CHARS = 1800;
+const MAX_DIRECTED_PROMPT_CHARS = 2600;
 
 const PERSON_HINTS = [
   'person',
@@ -206,7 +208,7 @@ function buildPhysics(kind: SceneKind): string {
 function providerProfile(provider?: string, model?: string): string {
   const key = `${provider ?? ''}/${model ?? ''}`.toLowerCase();
   if (key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina')) {
-    return 'BytePlus Seedance: concise English prompt, explicit action sequence, one camera move, stable subject continuity';
+    return 'Seedance 2.0 Pro: timestamp storyboard, explicit reference usage, camera language, sound design, and negative constraints';
   }
   if (key.includes('openai') || key.includes('sora')) {
     return 'OpenAI video: shot type, subject, action, setting, lighting, and final frame clarity';
@@ -215,6 +217,103 @@ function providerProfile(provider?: string, model?: string): string {
     return 'Google Veo: cinematic shot description with clear subject, motion, environment, and coherent timing';
   }
   return 'Generic video model: structured cinematic prompt with subject, action, camera, lighting, and physical constraints';
+}
+
+function isSeedanceProfile(provider?: string, model?: string): boolean {
+  const key = `${provider ?? ''}/${model ?? ''}`.toLowerCase();
+  return key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina');
+}
+
+function buildSeedanceTechnicalSpec(duration: number, ratio?: string): string {
+  const aspect = ratio?.trim() || '16:9';
+  const orientation = aspect === '9:16' ? '竖屏' : aspect === '1:1' ? '方形构图' : '横屏';
+  return `${orientation}${aspect}, 24fps, ${duration}秒, cinematic lighting, high fidelity, no watermark.`;
+}
+
+function buildSeedanceReferencePlan(input: VideoDirectorInput): string {
+  const parts: string[] = [];
+  if ((input.referenceImageCount ?? 0) > 0) {
+    parts.push(`Use reference images as identity, product, scene, first-frame, or style anchors; preserve exact subject silhouette, materials, palette, and composition cues.`);
+  }
+  if ((input.referenceVideoCount ?? 0) > 0) {
+    parts.push('Use reference videos only for camera motion, action rhythm, transitions, pacing, and continuity; do not randomly copy unrelated subjects.');
+  }
+  if ((input.referenceAudioCount ?? 0) > 0) {
+    parts.push('Use reference audio for music tempo, voice tone, ambience, and beat-synced motion.');
+  }
+  return parts.length > 0
+    ? parts.join(' ')
+    : 'No external references: create a self-contained scene with one subject, one action chain, and one continuous camera idea.';
+}
+
+function buildSeedanceSoundPlan(prompt: string, referenceAudioCount: number): string {
+  const hasDialogue = /dialogue|line|quote|台词|对白|旁白|说|讲|念|voice/i.test(prompt);
+  const hasMusic = /music|beat|song|mv|音乐|卡点|节拍|旋律|配乐/i.test(prompt);
+  if (referenceAudioCount > 0 || hasMusic) {
+    return 'Sound design: generated audio enabled; sync movement cuts, impacts, ambience, and camera emphasis to the music or reference rhythm.';
+  }
+  if (hasDialogue) {
+    return 'Sound design: generated audio enabled; keep dialogue short, emotionally tagged, and synchronized with mouth/action timing; include ambience and key sound effects.';
+  }
+  return 'Sound design: generated audio enabled; add natural ambience, material sounds, movement accents, and a restrained cinematic bed.';
+}
+
+function buildSeedanceNegativePrompt(kind: SceneKind): string {
+  const anatomy = kind === 'portrait'
+    ? ', no extra limbs, no face drift, no broken hands'
+    : '';
+  return `Negative constraints: no subtitles, no text overlays, no logos, no watermark, no random morphing, no flicker, no melting objects, no duplicate subjects${anatomy}.`;
+}
+
+function buildSeedanceScenarioStrategy(prompt: string, kind: SceneKind): string {
+  if (/product|drink|bottle|phone|watch|car|shoe|jewelry|food|产品|商品|广告|饮料|手机|手表|汽车|鞋|珠宝|美食/i.test(prompt)) {
+    return 'Scenario strategy: advertising/product film; show hero object first, reveal texture through macro detail, then finish with a clean product hero frame.';
+  }
+  if (/dialogue|drama|short drama|台词|对白|短剧|剧情|反转|女主|男主|总裁/i.test(prompt)) {
+    return 'Scenario strategy: short drama; separate visual beats from dialogue beats, keep actor emotion readable, and make each line short enough for the shot timing.';
+  }
+  if (/music|beat|mv|dance|音乐|卡点|舞蹈|节拍|旋律/i.test(prompt)) {
+    return 'Scenario strategy: music video; align scene changes, pose changes, and camera emphasis to beat points without chaotic cuts.';
+  }
+  if (/one take|long take|一镜到底|连续镜头/i.test(prompt)) {
+    return 'Scenario strategy: one-take long shot; no hard cuts, use occlusion, camera travel, and spatial transitions to move between moments.';
+  }
+  if (kind === 'environment') {
+    return 'Scenario strategy: cinematic environment; maintain readable depth layers and let atmosphere, light, particles, and wind carry motion.';
+  }
+  return 'Scenario strategy: narrative cinematic clip; one coherent action chain with visible cause and effect.';
+}
+
+function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string): string {
+  const originalPrompt = cleanPrompt(input.prompt);
+  const kind = detectSceneKind(originalPrompt);
+  const duration = typeof input.duration === 'number' && Number.isFinite(input.duration) ? input.duration : 5;
+  const focalPoint = buildFocalPoint(originalPrompt, kind);
+  const timeline = buildTimeline(duration, kind);
+  const camera = buildCamera(kind, input.ratio);
+  const lighting = buildLighting(kind, originalPrompt);
+  const physics = buildPhysics(kind);
+  const referencePlan = buildSeedanceReferencePlan(input);
+  const soundPlan = buildSeedanceSoundPlan(originalPrompt, input.referenceAudioCount ?? 0);
+  const scenario = buildSeedanceScenarioStrategy(originalPrompt, kind);
+  const negative = buildSeedanceNegativePrompt(kind);
+
+  return truncateDirectedPrompt([
+    `Seedance 2.0 Pro optimized prompt.`,
+    `Technical spec: ${buildSeedanceTechnicalSpec(duration, input.ratio)}`,
+    `Source brief: ${originalPrompt}.`,
+    `Director profile: ${profile}.`,
+    scenario,
+    `single clear focal point: ${focalPoint}.`,
+    `Timestamp storyboard: ${timeline}.`,
+    `Camera language: ${camera}.`,
+    `Lighting and texture: ${lighting}.`,
+    `Motion physics: ${physics}.`,
+    `Reference usage: ${referencePlan}`,
+    soundPlan,
+    negative,
+    `Final frame: stable, cinematic, visually coherent, with physically plausible continuity.`,
+  ].join(' '));
 }
 
 function truncateDirectedPrompt(prompt: string): string {
@@ -232,8 +331,26 @@ export function buildDirectedVideoPrompt(input: VideoDirectorInput): VideoDirect
   const lighting = buildLighting(kind, originalPrompt);
   const physics = buildPhysics(kind);
   const profile = providerProfile(input.provider, input.model);
-  const referenceNote = input.referenceImageCount && input.referenceImageCount > 0
-    ? `Preserve the identity, palette, composition hints, and key visual details from the ${input.referenceImageCount} reference image${input.referenceImageCount === 1 ? '' : 's'}.`
+  if (isSeedanceProfile(input.provider, input.model)) {
+    const directedPrompt = buildSeedanceDirectedPrompt(input, profile);
+    return {
+      originalPrompt,
+      directedPrompt,
+      providerProfile: profile,
+      focalPoint,
+      camera,
+      lighting,
+      physics,
+      constraints: buildSeedanceNegativePrompt(kind),
+    };
+  }
+
+  const referenceCount =
+    (input.referenceImageCount ?? 0) +
+    (input.referenceVideoCount ?? 0) +
+    (input.referenceAudioCount ?? 0);
+  const referenceNote = referenceCount > 0
+    ? `Preserve the identity, motion language, sound cues, palette, composition hints, and key details from the provided reference assets.`
     : 'No collage behavior: invent only details that support the central scene.';
   const constraints = [
     'ultra-high fidelity cinematic video',

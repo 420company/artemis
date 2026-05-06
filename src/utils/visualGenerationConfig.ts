@@ -23,7 +23,68 @@ export type VisualGenerationNeed = {
 };
 
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+export const BYTEPLUS_VISUAL_BASE_URL = 'https://ark.ap-southeast.bytepluses.com/api/v3';
+export const BYTEPLUS_VIDEO_TASKS_ENDPOINT = `${BYTEPLUS_VISUAL_BASE_URL}/contents/generations/tasks`;
 export const VISUAL_SETUP_REQUIRED_ERROR = 'ARTEMIS_VISUAL_SETUP_REQUIRED';
+
+export type BytePlusVideoPreset = {
+  id: 'seedance-2-pro' | 'seedance-2-fast' | 'seedance-1-5-pro';
+  label: { zh: string; en: string };
+  description: { zh: string; en: string };
+  model: string;
+  baseUrl: string;
+  endpoint: string;
+  defaultParams: {
+    duration: '5s' | '7s' | '10s' | '15s';
+    resolution: '720p' | '1080p';
+    framerate: '24fps';
+  };
+};
+
+export const BYTEPLUS_VIDEO_PRESETS: readonly BytePlusVideoPreset[] = [
+  {
+    id: 'seedance-2-pro',
+    label: { zh: 'Seedance 2.0 Pro', en: 'Seedance 2.0 Pro' },
+    description: {
+      zh: '专业级多模态视频创作，适合需要图像、视频、音频与文本共同塑造画面的作品。',
+      en: 'Professional multimodal video creation with coordinated text, image, video, and audio references.',
+    },
+    model: 'dreamina-seedance-2-0-260128',
+    baseUrl: BYTEPLUS_VISUAL_BASE_URL,
+    endpoint: BYTEPLUS_VIDEO_TASKS_ENDPOINT,
+    defaultParams: { duration: '10s', resolution: '720p', framerate: '24fps' },
+  },
+  {
+    id: 'seedance-2-fast',
+    label: { zh: 'Seedance 2.0 Fast', en: 'Seedance 2.0 Fast' },
+    description: {
+      zh: '面向高频创作与快速成片流程，保留 Seedance 2.0 的多模态参考能力。',
+      en: 'Optimized for high-tempo creation workflows while preserving Seedance 2.0 multimodal references.',
+    },
+    model: 'dreamina-seedance-2-0-fast-260128',
+    baseUrl: BYTEPLUS_VISUAL_BASE_URL,
+    endpoint: BYTEPLUS_VIDEO_TASKS_ENDPOINT,
+    defaultParams: { duration: '10s', resolution: '720p', framerate: '24fps' },
+  },
+  {
+    id: 'seedance-1-5-pro',
+    label: { zh: 'Seedance 1.5 Pro', en: 'Seedance 1.5 Pro' },
+    description: {
+      zh: '成熟稳定的图文生视频模型，适合脚本驱动、首帧参考与商业短片制作。',
+      en: 'A mature text and image guided video model for scripted clips, first-frame reference, and commercial production.',
+    },
+    model: 'seedance-1-5-pro-251215',
+    baseUrl: BYTEPLUS_VISUAL_BASE_URL,
+    endpoint: BYTEPLUS_VIDEO_TASKS_ENDPOINT,
+    defaultParams: { duration: '10s', resolution: '1080p', framerate: '24fps' },
+  },
+];
+
+export function getBytePlusVideoPreset(model: string | undefined): BytePlusVideoPreset | undefined {
+  const normalized = model?.trim();
+  if (!normalized) return undefined;
+  return BYTEPLUS_VIDEO_PRESETS.find((preset) => preset.model === normalized);
+}
 
 function isEnabledFlag(value: unknown): boolean {
   if (value === true) return true;
@@ -165,7 +226,7 @@ export function defaultVisualBaseUrlForProvider(provider: string): string {
     case 'openai':
       return OPENAI_BASE_URL;
     case 'byteplus':
-      return 'https://ark.ap-southeast.bytepluses.com/api/v3';
+      return BYTEPLUS_VISUAL_BASE_URL;
     case 'google':
     case 'gemini':
       return 'https://generativelanguage.googleapis.com/v1beta';
