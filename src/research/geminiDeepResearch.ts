@@ -7,7 +7,7 @@ import { buildPanel } from '../cli/ui.js';
 
 const DEFAULT_GEMINI_INTERACTIONS_BASE_URL =
   'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_MAX_POLLS = 30;
+const DEFAULT_MAX_POLLS = 120;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 type FetchLike = typeof fetch;

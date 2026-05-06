@@ -12,7 +12,7 @@ import {
 export const DEFAULT_WORDUP_INTERVAL_MINUTES = 30
 export const DEFAULT_DOCS_SEARCH_ENGINE = 'bing'
 export const DEFAULT_RESEARCH_ENGINE = 'builtin'
-export const DEFAULT_GEMINI_DEEP_RESEARCH_AGENT = 'models/gemini-2.0-flash'
+export const DEFAULT_GEMINI_DEEP_RESEARCH_AGENT = 'deep-research-preview-04-2026'
 
 export type DocsSearchEngine = 'bing' | 'google'
 export type ResearchEngine = 'builtin' | 'gemini-deep-research'
@@ -97,6 +97,19 @@ function normalizeResearchEngine(value: unknown): ResearchEngine {
   return value === 'gemini-deep-research' ? 'gemini-deep-research' : DEFAULT_RESEARCH_ENGINE
 }
 
+function normalizeGeminiDeepResearchAgent(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (
+    !trimmed ||
+    trimmed.startsWith('models/gemini-') ||
+    trimmed.startsWith('gemini-')
+  ) {
+    return undefined
+  }
+  return trimmed
+}
+
 export class CliSettingsStore {
   private rootDir: string
   private filePath: string
@@ -131,9 +144,7 @@ export class CliSettingsStore {
       geminiApiKey: typeof p.geminiApiKey === 'string' && p.geminiApiKey.trim()
         ? p.geminiApiKey.trim()
         : undefined,
-      geminiDeepResearchAgent: typeof p.geminiDeepResearchAgent === 'string' && p.geminiDeepResearchAgent.trim()
-        ? p.geminiDeepResearchAgent.trim()
-        : undefined,
+      geminiDeepResearchAgent: normalizeGeminiDeepResearchAgent(p.geminiDeepResearchAgent),
       onboardingCompleted: p.onboardingCompleted === true,
       bundleConfigured: p.bundleConfigured === true,
       bundleEnabled: p.bundleEnabled === true,
@@ -176,8 +187,9 @@ export class CliSettingsStore {
         ? partial.researchEngineConfigured : current.researchEngineConfigured,
       geminiApiKey: typeof partial.geminiApiKey === 'string'
         ? partial.geminiApiKey.trim() || undefined : current.geminiApiKey,
-      geminiDeepResearchAgent: typeof partial.geminiDeepResearchAgent === 'string'
-        ? partial.geminiDeepResearchAgent.trim() || undefined : current.geminiDeepResearchAgent,
+      geminiDeepResearchAgent: partial.geminiDeepResearchAgent !== undefined
+        ? normalizeGeminiDeepResearchAgent(partial.geminiDeepResearchAgent)
+        : current.geminiDeepResearchAgent,
       onboardingCompleted: typeof partial.onboardingCompleted === 'boolean'
         ? partial.onboardingCompleted : current.onboardingCompleted,
       bundleConfigured: typeof partial.bundleConfigured === 'boolean'

@@ -104,15 +104,16 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     // Endpoint: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     suggestedModels: [
+      'gemini-3.1-pro-preview',
+      'gemini-3-pro-preview',
+      'gemini-3-flash-preview',
       'gemini-2.5-pro',
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
-      'gemini-2.5-flash-preview-09-2025',
-      'gemini-2.5-flash-lite-preview-09-2025',
     ],
     notes: {
-      zh: ['Google Gemini OpenAI-compatible 接口。', '当前官方主线是 Gemini 2.5 Pro / Flash / Flash-Lite。'],
-      en: ['Google Gemini via OpenAI-compatible endpoint.', 'The current official mainline is Gemini 2.5 Pro / Flash / Flash-Lite.'],
+      zh: ['Google Gemini OpenAI-compatible 接口。', '优先使用 Gemini 3.x；2.5 系列仅作为兼容或成本备选。'],
+      en: ['Google Gemini via OpenAI-compatible endpoint.', 'Prefer Gemini 3.x; Gemini 2.5 remains a compatibility or cost fallback.'],
     },
   },
 
@@ -324,7 +325,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     defaultAlias: { zh: 'Gemini OAuth 模型', en: 'Gemini OAuth model' },
     protocol: 'openai',
     baseUrl: 'cloudcode-pa://google',
-    suggestedModels: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    suggestedModels: ['gemini-3.1-pro-preview', 'gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro'],
     notes: {
       zh: ['Hermes 通过 Google OAuth + Code Assist 使用，可支持免费层。', '当前先记录路由信息。'],
       en: ['Hermes uses Google OAuth + Code Assist and can support the free tier.', 'This currently records the route metadata.'],
@@ -343,7 +344,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'gpt-5.1-codex',
       'claude-opus-4.1',
       'claude-sonnet-4',
-      'gemini-2.5-pro',
+      'gemini-3.1-pro-preview',
+      'gemini-3-pro-preview',
       'grok-code-fast-1',
     ],
     notes: {

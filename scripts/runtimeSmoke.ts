@@ -9,7 +9,10 @@
 import { DEFAULT_AGENT_MAX_TURNS } from '../src/cli/branding.js'
 import { parseArgs } from '../src/cli/parseArgs.js'
 import { isCliStopIntent } from '../src/cli/interactive.js'
-import { CliSettingsStore } from '../src/cli/settings.js'
+import {
+  CliSettingsStore,
+  DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+} from '../src/cli/settings.js'
 import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
@@ -38,6 +41,7 @@ import { compressMessages } from '../src/core/contextCompressor.js'
 import { resolveBytePlusCredentials } from '../src/tools/byteplusMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
+import { resolveGeminiDeepResearchConfig } from '../src/research/geminiDeepResearch.js'
 import { BytePlusProvider } from '../src/tools/visual/providers/byteplusProvider.js'
 import { OpenAIProvider } from '../src/tools/visual/providers/openaiProvider.js'
 import { getAvailableProviders } from '../src/tools/visual/providers/interface.js'
@@ -997,6 +1001,29 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'workspace trust store: sibling paths are not trusted by another root',
     !(await settingsStore.isWorkspaceTrusted(siblingDir)),
     'sibling dir should not be trusted',
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-deep-research-settings-${Date.now()}`)
+  const settingsDir = path.join(tmpDir, '.artemis')
+  fs.mkdirSync(settingsDir, { recursive: true })
+  fs.writeFileSync(path.join(settingsDir, 'cli-settings.json'), JSON.stringify({
+    researchEngine: 'gemini-deep-research',
+    researchEngineConfigured: true,
+    geminiApiKey: 'test-key',
+    geminiDeepResearchAgent: 'models/gemini-example-model',
+  }, null, 2), 'utf8')
+
+  const settings = await new CliSettingsStore(tmpDir).load()
+  const resolved = resolveGeminiDeepResearchConfig(settings)
+  assert(
+    'deep research settings: legacy Gemini model default normalizes to the current Deep Research agent',
+    resolved.agent === DEFAULT_GEMINI_DEEP_RESEARCH_AGENT &&
+      resolved.agent === 'deep-research-preview-04-2026',
+    resolved.agent,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
