@@ -5,6 +5,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { PermissionMode } from '../cli/parseArgs.js'
+import { normalizePermissionModeValue } from '../security/permissionModes.js'
 import type { SecretStore } from '../security/secretStore.js'
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js'
 
@@ -30,11 +31,6 @@ export type WeChatStoreData = {
 
 function now(): string { return new Date().toISOString() }
 function getEmptyStore(): WeChatStoreData { return { allowedUsers: [], contacts: [] } }
-
-function isPermissionMode(v: unknown): v is PermissionMode {
-  return v === 'PRODUCER' || v === 'GHOSTWRITER' || v === 'WRITER' ||
-    v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
-}
 
 export class WeChatStore {
   private readonly rootDir: string
@@ -73,8 +69,11 @@ export class WeChatStore {
         ? p.contacts.filter(
             (e): e is WeChatContactState =>
               Boolean(e) && typeof e === 'object' && typeof e.fromUser === 'string' &&
-              typeof e.sessionId === 'string' && isPermissionMode(e.permissionMode),
-          )
+              typeof e.sessionId === 'string' && Boolean(normalizePermissionModeValue(e.permissionMode)),
+          ).map((e) => ({
+            ...e,
+            permissionMode: normalizePermissionModeValue(e.permissionMode)!,
+          }))
         : [],
     }
   }

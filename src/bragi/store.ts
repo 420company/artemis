@@ -17,7 +17,7 @@ import type {
   BragiSessionRecord,
   BragiStoreData,
 } from './types.js'
-import type { PermissionMode } from '../cli/parseArgs.js'
+import { normalizePermissionModeValue } from '../security/permissionModes.js'
 
 function now(): string { return new Date().toISOString() }
 
@@ -50,11 +50,6 @@ function normalizePlatformConfig(value: unknown): BragiPlatformConfig | undefine
   }
 }
 
-function isPermissionMode(v: unknown): v is PermissionMode {
-  return v === 'PRODUCER' || v === 'GHOSTWRITER' || v === 'WRITER' ||
-    v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
-}
-
 function isBragiPlatform(v: unknown): v is BragiPlatformId {
   return v === 'telegram' || v === 'discord' || v === 'wechat'
 }
@@ -67,7 +62,8 @@ function normalizeSessionRecord(value: unknown): BragiSessionRecord | undefined 
   if (typeof p.targetId !== 'string') return undefined
   if (typeof p.targetLabel !== 'string') return undefined
   if (typeof p.sessionId !== 'string') return undefined
-  if (!isPermissionMode(p.permissionMode)) return undefined
+  const permissionMode = normalizePermissionModeValue(p.permissionMode)
+  if (!permissionMode) return undefined
   return {
     sessionKey: typeof p.sessionKey === 'string' && p.sessionKey.trim()
       ? p.sessionKey
@@ -77,7 +73,7 @@ function normalizeSessionRecord(value: unknown): BragiSessionRecord | undefined 
     targetId: p.targetId,
     targetLabel: p.targetLabel,
     sessionId: p.sessionId,
-    permissionMode: p.permissionMode,
+    permissionMode,
     updatedAt: typeof p.updatedAt === 'string' ? p.updatedAt : now(),
   }
 }

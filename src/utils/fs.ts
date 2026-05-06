@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { access, mkdir, readdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, basename, resolve, relative, sep, extname, isAbsolute } from 'node:path'
+import { join, basename, dirname, resolve, relative, sep, extname, isAbsolute } from 'node:path'
 
 const DEFAULT_IGNORES = new Set([
   '.git', 'node_modules', '.next', 'dist', 'build', '.artemis',
@@ -63,9 +63,11 @@ export function ensureNotSensitivePath(absolute: string, inputPath: string): voi
 export function resolveDataRootDir(cwd: string): string {
   const normalized = resolve(cwd)
   if (basename(normalized) === '.artemis') return normalized
-  // If cwd is root directory, use home directory instead to avoid creating /.artemis
-  if (normalized === '/' || normalized === sep) {
-    return join(homedir(), '.artemis')
+  const homeDir = resolve(homedir())
+  // If cwd is a filesystem/account-container root, use the user's home data
+  // root instead of trying to create /.artemis or /Users/.artemis.
+  if (normalized === '/' || normalized === sep || normalized === dirname(homeDir)) {
+    return join(homeDir, '.artemis')
   }
   return join(normalized, '.artemis')
 }

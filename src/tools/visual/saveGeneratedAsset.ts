@@ -51,7 +51,7 @@ export async function saveGeneratedAssetToWorkspace(options: {
     toolName: options.toolName,
     context: options.context,
   });
-  if (options.context.permissionMode !== 'accept-all') {
+  if (options.context.permissionMode !== 'full-access') {
     ensureNotSensitivePath(absolute, targetWithExtension);
   }
 

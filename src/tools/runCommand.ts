@@ -245,7 +245,7 @@ export async function executeRunCommand(
     action.timeoutMs,
   );
 
-  if (context.permissionMode !== 'accept-all' && commandAccessesSensitivePath(action.command)) {
+  if (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command)) {
     return Promise.resolve({
       action,
       ok: false,
@@ -255,11 +255,24 @@ export async function executeRunCommand(
 
   const dangerousReason = commandMatchesDangerousPattern(action.command)
   if (dangerousReason) {
-    return Promise.resolve({
-      action,
-      ok: false,
-      output: `Access denied: command ${dangerousReason}. Break it into discrete, inspectable steps if you need the same effect.`,
+    if (!context.requestUserConfirmation) {
+      return Promise.resolve({
+        action,
+        ok: false,
+        output: `Access denied: command ${dangerousReason}. No confirmation channel is available for this high-risk action.`,
+      })
+    }
+    const allowed = await context.requestUserConfirmation({
+      question: `High-risk shell command detected: ${dangerousReason}\n\nCommand:\n${truncate(action.command, 800)}\n\nRun it anyway?`,
+      timeoutMs: 10 * 60_000,
     })
+    if (!allowed) {
+      return Promise.resolve({
+        action,
+        ok: false,
+        output: `Command not run: user declined high-risk shell command (${dangerousReason}).`,
+      })
+    }
   }
 
   let simulatedCwd = context.cwd;

@@ -19,6 +19,12 @@ import { buildDirectNativeFunctionTools, listDirectToolNames } from './tools/dir
 import type { ToolExecutionResult, WorkspaceSwitchRequest } from './tools/types.js';
 import { withRuntimeLogSink, type RuntimeLogLevel } from './utils/log.js';
 import {
+    mapPermissionModeToToolAccess,
+    normalizePermissionMode,
+    type PermissionModeInput,
+    type ToolAccessMode,
+} from './security/permissionModes.js';
+import {
     isPathInsideWorkspace,
     resolveWorkspaceCandidatePath,
     resolveWorkspaceForTargetPath,
@@ -1227,7 +1233,7 @@ async function executeToolInner(name: any, input: any, opts: any) {
     if (EXTRA_TOOL_NAMES.has(name)) {
         // Determine permission category for gate.
         // Shell tools execute user-controlled subprocess (hooks, npm scripts,
-        // formatter plugins) — they must NOT bypass shell gates in accept-edits mode.
+        // formatter plugins) — they must NOT bypass shell gates in WRITER mode.
         const shellTools = new Set(['git_commit', 'npm_run', 'format_code']);
         const writeTools = new Set(['delete_file', 'move_file', 'copy_file', 'create_directory',
             'delete_directory', 'git_add', 'download_file']);
@@ -1321,6 +1327,7 @@ async function executeToolInner(name: any, input: any, opts: any) {
             requestWorkspaceSwitch: onWorkspaceSwitchRequest,
             requestUserConfirmation: onUserConfirmationRequest,
             readFileHistory,
+            permissionMode: mapPermissionModeForToolContext(permissionMode),
         });
         return attachDirectToolFailureError(name, {
             ok: result.ok,
@@ -1344,25 +1351,13 @@ function isEditPermissionCategory(category: string): boolean {
     return isReadPermissionCategory(category) || category === 'write';
 }
 
-function mapPermissionModeForToolContext(permissionMode: any): 'ask' | 'accept-all' | 'read' | 'write' {
-    switch (permissionMode) {
-        case 'PRODUCER':
-        case 'accept-all':
-            return 'accept-all';
-        case 'WRITER':
-        case 'accept-edits':
-            return 'write';
-        case 'read-only':
-            return 'read';
-        case 'GHOSTWRITER':
-        case 'prompt':
-        default:
-            return 'ask';
-    }
+function mapPermissionModeForToolContext(permissionMode: PermissionModeInput): ToolAccessMode {
+    return mapPermissionModeToToolAccess(permissionMode);
 }
 
 async function checkPermission(toolName: any, category: any, permissionMode: any, onPermissionRequest: any, args: any) {
     const normalizedCategory = String(category ?? 'none');
+    permissionMode = normalizePermissionMode(permissionMode as PermissionModeInput);
     if (isReadPermissionCategory(normalizedCategory)) {
         return null;
     }
@@ -1397,29 +1392,6 @@ async function checkPermission(toolName: any, category: any, permissionMode: any
     // read-only: only read/no-op categories allowed
     if (permissionMode === 'read-only') {
         return `Permission denied: "${toolName}" requires ${category} access but mode is read-only.`;
-    }
-
-    if (permissionMode === 'accept-all') {
-        return null;
-    }
-
-    // accept-edits: file writes are allowed, shell/execute/agent/admin remain gated.
-    if (permissionMode === 'accept-edits') {
-        if (isEditPermissionCategory(normalizedCategory)) {
-            return null;
-        }
-        return `Permission denied: "${toolName}" requires ${category} access but mode is accept-edits.`;
-    }
-
-    // prompt mode: ask callback
-    if (permissionMode === 'prompt') {
-        if (onPermissionRequest) {
-            const allowed = await onPermissionRequest(toolName, category, args);
-            if (!allowed)
-                return `User denied permission for tool "${toolName}".`;
-            return null;
-        }
-        return `Permission denied: "${toolName}" requires ${category} access but prompt mode has no permission callback.`;
     }
 
     return `Permission denied: unknown permission mode "${permissionMode}".`;
@@ -1741,7 +1713,7 @@ function buildProviderIncompatibilityMessage(): string {
 }
 
 export interface ThinkOptions {
-    permissionMode?: 'PRODUCER' | 'GHOSTWRITER' | 'WRITER' | 'prompt' | 'read-only' | 'accept-edits' | 'accept-all';
+    permissionMode?: PermissionModeInput;
     onPermissionRequest?: (toolName: string, category: string, args: any) => Promise<boolean>;
     locale?: 'en' | 'zh';
     cwd?: string;
@@ -1777,7 +1749,7 @@ export async function think(
     const { onDelta, options } = normalizeThinkArgs(onDeltaOrOptions, maybeOptions);
     const {
         cwd = process.cwd(),
-        permissionMode = 'prompt',
+        permissionMode = 'GHOSTWRITER',
         onPermissionRequest,
         onToolCall,
         onToolResult,

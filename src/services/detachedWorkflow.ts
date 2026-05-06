@@ -15,6 +15,7 @@ import { createProviderRouter } from '../providers/router.js';
 import { resolveMainProviderConfig } from '../providers/onboarding.js';
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js';
 import { PermissionManager } from '../security/permissions.js';
+import { isPermissionModeInput, normalizePermissionMode } from '../security/permissionModes.js';
 import { SessionStore } from '../storage/sessions.js';
 import { appendTaskRuntime, createTaskRuntimeRecord, updateTaskRuntime } from '../core/taskRuntime.js';
 import { getWorkflowDisplayName, getWorkflowSessionTitle, isReadOnlyWorkflow, runWorkflowMode, type WorkflowMode } from '../core/workflowMode.js';
@@ -439,13 +440,8 @@ function parseWorkerArgs(argv: string[]): DetachedWorkflowWorkerArgs {
     }
     if (head === '--permission-mode') {
       const mode = next.shift();
-      if (
-        mode === 'prompt' ||
-        mode === 'read-only' ||
-        mode === 'accept-edits' ||
-        mode === 'accept-all'
-      ) {
-        parsed.permissionMode = mode;
+      if (isPermissionModeInput(mode)) {
+        parsed.permissionMode = normalizePermissionMode(mode);
       }
       continue;
     }

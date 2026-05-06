@@ -2,15 +2,14 @@ import path from 'node:path'
 import { DEFAULT_AGENT_MAX_TURNS, MAX_AGENT_MAX_TURNS, WHOSYOURDADDY_FLAG, WHOSYOURDADDY_MIN_TURNS, getBrandingAttribution, getBrandingHeading } from './branding.js'
 import { pickLocale } from './locale.js'
 import type { UiLocale } from './locale.js'
+import {
+  isPermissionModeInput,
+  normalizePermissionMode,
+  type CanonicalPermissionMode,
+  type PermissionModeInput,
+} from '../security/permissionModes.js'
 
-export type PermissionMode =
-  | 'PRODUCER'
-  | 'GHOSTWRITER'
-  | 'WRITER'
-  | 'prompt'
-  | 'read-only'
-  | 'accept-edits'
-  | 'accept-all'
+export type PermissionMode = CanonicalPermissionMode
 
 export type CliCommand =
   | 'chat'
@@ -75,10 +74,8 @@ function isCliCommand(value: string | undefined): value is CliCommand {
   return CLI_COMMANDS.has(value as CliCommand)
 }
 
-function isPermissionMode(value: string | undefined): value is PermissionMode {
-  return value === 'PRODUCER' || value === 'GHOSTWRITER' || value === 'WRITER' ||
-    value === 'prompt' || value === 'read-only' ||
-    value === 'accept-edits' || value === 'accept-all'
+function isPermissionMode(value: string | undefined): value is PermissionModeInput {
+  return isPermissionModeInput(value)
 }
 
 function looksLikeSessionId(value: string): boolean {
@@ -130,7 +127,7 @@ ${t('选项', 'Options')}:
   --max-turns <n>
   --permission-mode <PRODUCER|GHOSTWRITER|WRITER>
   --bg
-  ${WHOSYOURDADDY_FLAG}    ${t('危险：强制 accept-all 并持续执行', 'Dangerous: force accept-all + keep running')}
+  ${WHOSYOURDADDY_FLAG}    ${t('危险：强制 PRODUCER 并持续执行', 'Dangerous: force PRODUCER + keep running')}
   --cwd <path>
 `.trim()
 }
@@ -196,9 +193,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const normalized = v?.toUpperCase()
       const mode = isPermissionMode(normalized) ? normalized : v
       if (!isPermissionMode(mode)) throw new Error('Invalid --permission-mode value.')
-      permissionMode = mode
+      permissionMode = normalizePermissionMode(mode)
       permissionModeExplicit = true
-      if (permissionMode !== 'PRODUCER' && permissionMode !== 'accept-all') autoDrive = false
+      if (permissionMode !== 'PRODUCER') autoDrive = false
       continue
     }
     if (cur === WHOSYOURDADDY_FLAG) {

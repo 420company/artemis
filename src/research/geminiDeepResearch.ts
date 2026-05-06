@@ -1,3 +1,4 @@
+import { GoogleGenAI } from '@google/genai';
 import {
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
   type CliSettings,
@@ -5,17 +6,12 @@ import {
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { buildPanel } from '../cli/ui.js';
 
-const DEFAULT_GEMINI_INTERACTIONS_BASE_URL =
-  'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_MAX_POLLS = 120;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
-
-type FetchLike = typeof fetch;
 
 export type GeminiDeepResearchConfig = {
   apiKey: string;
   agent: string;
-  baseUrl: string;
   maxPolls: number;
   pollIntervalMs: number;
 };
@@ -42,6 +38,15 @@ type GeminiInteraction = {
     message?: string;
     code?: string;
   };
+};
+
+export type GeminiDeepResearchClient = {
+  createInteraction(options: {
+    prompt: string;
+    agent: string;
+    systemInstruction?: string;
+  }): Promise<GeminiInteraction>;
+  getInteraction(interactionId: string): Promise<GeminiInteraction>;
 };
 
 export type GeminiDeepResearchResult = {
@@ -73,13 +78,6 @@ function normalizePositiveInteger(
     : fallback;
 }
 
-function buildHeaders(apiKey: string): Record<string, string> {
-  return {
-    'content-type': 'application/json',
-    'x-goog-api-key': apiKey,
-  };
-}
-
 function buildInteractionText(interaction: GeminiInteraction): string {
   const text = (interaction.outputs ?? [])
     .filter((entry) => entry.type === 'text' && typeof entry.text === 'string')
@@ -109,25 +107,23 @@ export function resolveGeminiDeepResearchConfig(
     apiKey,
     agent:
       settings.geminiDeepResearchAgent || DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
-    baseUrl: DEFAULT_GEMINI_INTERACTIONS_BASE_URL,
     maxPolls: DEFAULT_MAX_POLLS,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
   };
 }
 
-async function createInteraction(options: {
-  prompt: string;
-  config: GeminiDeepResearchConfig;
-  systemInstruction?: string;
-  fetchImpl: FetchLike;
-}): Promise<GeminiInteraction> {
-  const response = await options.fetchImpl(
-    `${options.config.baseUrl}/interactions`,
-    {
-      method: 'POST',
-      headers: buildHeaders(options.config.apiKey),
-      body: JSON.stringify({
-        agent: options.config.agent,
+export function createGoogleGenAIResearchClient(
+  config: GeminiDeepResearchConfig,
+): GeminiDeepResearchClient {
+  const client = new GoogleGenAI({
+    apiKey: config.apiKey,
+    apiVersion: 'v1beta',
+  });
+
+  return {
+    async createInteraction(options) {
+      return await client.interactions.create({
+        agent: options.agent,
         input: options.prompt,
         system_instruction: options.systemInstruction,
         background: true,
@@ -136,38 +132,12 @@ async function createInteraction(options: {
           type: 'deep-research',
           thinking_summaries: 'auto',
         },
-      }),
+      }) as GeminiInteraction;
     },
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Gemini Deep Research create failed: HTTP ${response.status}`,
-    );
-  }
-
-  return (await response.json()) as GeminiInteraction;
-}
-
-async function getInteraction(options: {
-  interactionId: string;
-  config: GeminiDeepResearchConfig;
-  fetchImpl: FetchLike;
-}): Promise<GeminiInteraction> {
-  const response = await options.fetchImpl(
-    `${options.config.baseUrl}/interactions/${encodeURIComponent(options.interactionId)}`,
-    {
-      headers: buildHeaders(options.config.apiKey),
+    async getInteraction(interactionId) {
+      return await client.interactions.get(interactionId) as GeminiInteraction;
     },
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Gemini Deep Research poll failed: HTTP ${response.status}`,
-    );
-  }
-
-  return (await response.json()) as GeminiInteraction;
+  };
 }
 
 export async function runGeminiDeepResearch(options: {
@@ -176,10 +146,10 @@ export async function runGeminiDeepResearch(options: {
   systemInstruction?: string;
   maxPolls?: number;
   pollIntervalMs?: number;
-  fetchImpl?: FetchLike;
+  client?: GeminiDeepResearchClient;
 }): Promise<GeminiDeepResearchResult> {
-  const fetchImpl = options.fetchImpl ?? fetch;
   const config = resolveGeminiDeepResearchConfig(options.settings);
+  const client = options.client ?? createGoogleGenAIResearchClient(config);
   const maxPolls = normalizePositiveInteger(
     options.maxPolls,
     config.maxPolls,
@@ -189,11 +159,10 @@ export async function runGeminiDeepResearch(options: {
     config.pollIntervalMs,
   );
 
-  let interaction = await createInteraction({
+  let interaction = await client.createInteraction({
     prompt: options.prompt,
-    config,
+    agent: config.agent,
     systemInstruction: options.systemInstruction,
-    fetchImpl,
   });
 
   if (!interaction.id) {
@@ -218,11 +187,7 @@ export async function runGeminiDeepResearch(options: {
     }
 
     await sleep(pollIntervalMs);
-    interaction = await getInteraction({
-      interactionId: interaction.id,
-      config,
-      fetchImpl,
-    });
+    interaction = await client.getInteraction(interaction.id);
   }
 
   return {

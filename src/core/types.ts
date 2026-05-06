@@ -40,14 +40,7 @@ export type VerificationCommandRecord = {
   createdAt: string;
 };
 
-export type PermissionMode =
-  | 'PRODUCER'
-  | 'GHOSTWRITER'
-  | 'WRITER'
-  | 'prompt'
-  | 'read-only'
-  | 'accept-edits'
-  | 'accept-all';
+export type { CanonicalPermissionMode as PermissionMode } from '../security/permissionModes.js';
 
 export type SessionAutonomyMode = 'standard' | 'autodrive';
 

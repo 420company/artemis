@@ -240,7 +240,7 @@ export function validateAgentRuntimePolicies(): string[] {
       continue;
     }
 
-    const delegatedMode = getDelegatedPermissionMode(role, 'accept-all');
+    const delegatedMode = getDelegatedPermissionMode(role, 'PRODUCER');
     if (delegatedMode === 'read-only') {
       const nonReadTypes = allowedTypes.filter(
         (type) => getPermissionCategoryForActionType(type) !== 'read',

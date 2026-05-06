@@ -12,6 +12,7 @@ import {
   TELEGRAM_SENSITIVE_FIELDS,
 } from '../security/bragiSecrets.js'
 import type { SecretStore } from '../security/secretStore.js'
+import { normalizePermissionModeValue } from '../security/permissionModes.js'
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js'
 
 export type TelegramChatState = {
@@ -31,11 +32,6 @@ export type TelegramStoreData = {
 
 function now(): string { return new Date().toISOString() }
 function getEmptyStore(): TelegramStoreData { return { allowedChatIds: [], chats: [] } }
-
-function isPermissionMode(v: unknown): v is PermissionMode {
-  return v === 'PRODUCER' || v === 'GHOSTWRITER' || v === 'WRITER' ||
-    v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
-}
 
 export class TelegramStore {
   private readonly rootDir: string
@@ -77,8 +73,11 @@ export class TelegramStore {
             (e): e is TelegramChatState =>
               Boolean(e) && typeof e === 'object' &&
               typeof e.chatId === 'string' && typeof e.sessionId === 'string' &&
-              isPermissionMode(e.permissionMode) && typeof e.updatedAt === 'string',
-          )
+              Boolean(normalizePermissionModeValue(e.permissionMode)) && typeof e.updatedAt === 'string',
+          ).map((e) => ({
+            ...e,
+            permissionMode: normalizePermissionModeValue(e.permissionMode)!,
+          }))
         : [],
     }
   }

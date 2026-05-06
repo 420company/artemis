@@ -42,7 +42,7 @@ export async function executeReplaceInFile(
     toolName: 'replace_in_file',
     context,
   });
-  if (context.permissionMode !== 'accept-all') {
+  if (context.permissionMode !== 'full-access') {
     ensureNotSensitivePath(absolute, action.path);
   }
   const content = await readTextFileSafe(absolute);

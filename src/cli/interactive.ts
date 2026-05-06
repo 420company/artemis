@@ -2113,7 +2113,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         prompt: effectivePrompt,
         command,
         maxTurns: opts.maxTurns,
-        permissionMode: permissionMode as 'PRODUCER' | 'GHOSTWRITER' | 'WRITER' | 'prompt' | 'read-only' | 'accept-edits' | 'accept-all',
+        permissionMode,
         permissionModeExplicit: false,
         providerConfig: provConfig,
       })
@@ -4185,7 +4185,7 @@ async function handleTurn(
   locale: UiLocale,
   hud: ReturnType<typeof createHudState>,
   cwd?: string,
-  permissionMode?: string,
+  permissionMode?: PermissionMode,
   viewport?: ScrollViewportController,
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
@@ -4335,7 +4335,7 @@ async function handleTurn(
 
   const thinkOpts: ThinkOptions = {
     cwd: cwd ?? process.cwd(),
-    permissionMode: permissionMode as 'PRODUCER' | 'GHOSTWRITER' | 'WRITER' | 'prompt' | 'read-only' | 'accept-edits' | 'accept-all' | undefined,
+    permissionMode,
 
     onToolCall: (name, args) => {
       // Commit any pending assistant intro text BEFORE the tool runs so the

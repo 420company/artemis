@@ -88,7 +88,7 @@ export async function executeReadFile(
     toolName: 'read_file',
     context,
   });
-  if (context.permissionMode !== 'accept-all') {
+  if (context.permissionMode !== 'full-access') {
     ensureNotSensitivePath(absolute, action.path);
   }
   const historyKey = readHistoryKey(absolute, action.startLine, action.endLine);

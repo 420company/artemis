@@ -586,8 +586,8 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
   {
     id: 'mode',
     group: 'permissions',
-    slash: '/mode <prompt|read-only|accept-edits|accept-all>',
-    remote: '/mode <prompt|read-only|accept-edits|accept-all>',
+    slash: '/mode <GHOSTWRITER|read-only|WRITER|PRODUCER>',
+    remote: '/mode <GHOSTWRITER|read-only|WRITER|PRODUCER>',
     autocomplete: true,
     desc: { zh: 'Switch the permission mode', en: 'Switch the permission mode' },
   },

@@ -58,27 +58,27 @@ export class YoloClassifier {
       
       case 'write':
         return { 
-          allowed: context.permissionMode === 'accept-all' || 
+          allowed: context.permissionMode === 'full-access' || 
                   context.permissionMode === 'write',
           requiresApproval: context.permissionMode === 'ask'
         }
       
       case 'execute':
         return { 
-          allowed: context.permissionMode === 'accept-all',
+          allowed: context.permissionMode === 'full-access',
           requiresApproval: true
         }
       
       case 'sensitive':
         return { 
-          allowed: context.permissionMode === 'accept-all',
+          allowed: context.permissionMode === 'full-access',
           requiresApproval: true,
           reason: 'This action involves sensitive operations and requires approval'
         }
       
       case 'admin':
         return { 
-          allowed: context.permissionMode === 'accept-all' && 
+          allowed: context.permissionMode === 'full-access' && 
                   context.isAdmin,
           requiresApproval: true,
           reason: 'This action requires admin privileges'
@@ -111,7 +111,7 @@ export class PermissionManager {
     this.policies.set('write', {
       category: 'write',
       check: (context) => ({
-        allowed: context.permissionMode === 'accept-all' || 
+        allowed: context.permissionMode === 'full-access' || 
                 context.permissionMode === 'write',
         requiresApproval: context.permissionMode === 'ask'
       })
@@ -120,7 +120,7 @@ export class PermissionManager {
     this.policies.set('execute', {
       category: 'execute',
       check: (context) => ({
-        allowed: context.permissionMode === 'accept-all',
+        allowed: context.permissionMode === 'full-access',
         requiresApproval: true
       })
     })
@@ -128,7 +128,7 @@ export class PermissionManager {
     this.policies.set('sensitive', {
       category: 'sensitive',
       check: (context) => ({
-        allowed: context.permissionMode === 'accept-all',
+        allowed: context.permissionMode === 'full-access',
         requiresApproval: true,
         reason: 'Sensitive operation'
       })
@@ -137,7 +137,7 @@ export class PermissionManager {
     this.policies.set('admin', {
       category: 'admin',
       check: (context) => ({
-        allowed: context.permissionMode === 'accept-all' && context.isAdmin,
+        allowed: context.permissionMode === 'full-access' && context.isAdmin,
         requiresApproval: true,
         reason: 'Admin privileges required'
       })

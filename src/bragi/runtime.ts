@@ -78,6 +78,12 @@ function summarizeToolArgs(args: unknown): string {
   return ''
 }
 
+function isUnsafeBridgeWorkspace(cwd: string): boolean {
+  const normalized = path.resolve(cwd)
+  const homeDir = path.resolve(homedir())
+  return normalized === path.parse(normalized).root || normalized === path.dirname(homeDir)
+}
+
 function summarizeToolOutput(output: unknown): string {
   if (typeof output !== 'string') return ''
   const compact = output.replace(/\s+/g, ' ').trim()
@@ -287,7 +293,18 @@ export async function runRemoteCommand(
   }
 ): Promise<RemoteRuntimeResult> {
   const { binding, store, locale, cwd } = opts
-  const fallbackCwd = binding.storedSession.cwd || cwd || process.cwd()
+  const storedCwd = binding.storedSession.cwd
+  const fallbackCwd = storedCwd && !isUnsafeBridgeWorkspace(storedCwd)
+    ? storedCwd
+    : cwd || process.cwd()
+  if (storedCwd && storedCwd !== fallbackCwd && isUnsafeBridgeWorkspace(storedCwd)) {
+    binding.storedSession.cwd = fallbackCwd
+    await store.save({
+      ...binding.storedSession,
+      cwd: fallbackCwd,
+      updatedAt: new Date().toISOString(),
+    })
+  }
   let commandCwd = fallbackCwd
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
@@ -534,7 +551,7 @@ export async function runRemoteCommand(
         //                emits "let me run pwd" intent text whose call gets
         //                denied, leaving the IM user with a dangling intent
         //                line as the only reply.
-        //   PRODUCER/GHOSTWRITER/WRITER/accept-* → enable tools so remote coding via IM works.
+        //   PRODUCER/GHOSTWRITER/WRITER → enable tools so remote coding via IM works.
         const result = await withBridgeThinkLock(async () => {
           restoreSession(binding.storedSession.messages)
           return think(effectiveBody, {

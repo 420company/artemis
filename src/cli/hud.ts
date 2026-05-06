@@ -134,7 +134,7 @@ export function createHudState(defaultModel: string, contextLimit?: number): Hud
     defaultModel,
     lastModel: defaultModel,
     contextLimit: normalizeContextLimit(contextLimit),
-    permissionMode: 'accept-all',
+    permissionMode: 'full-access',
     sessionMessageCount: 0,
     changedFilesCount: 0,
     verificationCount: 0,

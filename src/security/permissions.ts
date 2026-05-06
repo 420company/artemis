@@ -4,6 +4,7 @@ import { getToolPermissionCategory } from '../tools/registry.js';
 import type { ToolPermissionCategory } from '../tools/types.js';
 import { chooseInteractiveOption } from '../cli/prompt.js';
 import { isReadOnlyCommand } from './commandPolicy.js';
+import { normalizePermissionMode, type PermissionModeInput } from './permissionModes.js';
 
 export type PermissionCategory = ToolPermissionCategory;
 
@@ -202,8 +203,8 @@ export class PermissionManager {
     agent: false,
   };
 
-  constructor(mode: PermissionMode, interactive: boolean) {
-    this.mode = mode;
+  constructor(mode: PermissionModeInput, interactive: boolean) {
+    this.mode = normalizePermissionMode(mode);
     this.interactive = interactive;
   }
 
@@ -215,12 +216,12 @@ export class PermissionManager {
     return this.interactive;
   }
 
-  setMode(mode: PermissionMode): void {
-    this.mode = mode;
+  setMode(mode: PermissionModeInput): void {
+    this.mode = normalizePermissionMode(mode);
   }
 
-  fork(mode: PermissionMode = this.mode): PermissionManager {
-    const next = new PermissionManager(mode, this.interactive);
+  fork(mode: PermissionModeInput = this.mode): PermissionManager {
+    const next = new PermissionManager(normalizePermissionMode(mode), this.interactive);
     next.sessionGrants.write = this.sessionGrants.write;
     next.sessionGrants.execute = this.sessionGrants.execute;
     next.sessionGrants.sensitive = this.sessionGrants.sensitive;
@@ -239,11 +240,11 @@ export class PermissionManager {
       return { allowed: false, reason: `${category} blocked by read-only mode` };
     }
 
-    if (this.mode === 'PRODUCER' || this.mode === 'accept-all') {
+    if (this.mode === 'PRODUCER') {
       return { allowed: true, reason: `allowed by ${this.mode} mode` };
     }
 
-    if (this.mode === 'WRITER' || this.mode === 'accept-edits') {
+    if (this.mode === 'WRITER') {
       if (category === 'write') {
         return { allowed: true, reason: `allowed by ${this.mode} mode` };
       }

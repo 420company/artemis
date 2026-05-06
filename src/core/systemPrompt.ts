@@ -85,9 +85,9 @@ export function buildSystemPrompt(
     '- For prompt-writing and design tasks, prefer layered briefs with named fields over dense paragraphs: concept, audience, source context, style anchors, composition, materials, color, interaction or motion, exclusions, and verification.',
     '- For creative work, use at most one or two primary style anchors unless the user explicitly requests a broader style study. If styles conflict, state the dominant style ratio in the task plan or prompt brief.',
     buildWorkflowStrengthContract(),
-    ...(permissionMode === 'accept-all'
+    ...(permissionMode === 'PRODUCER'
       ? [
-        '- WhosYourDaddy mode is active: do not stop after an intermediate phase to ask whether to continue.',
+        '- PRODUCER mode is active: do not stop after an intermediate phase to ask whether to continue.',
         '- Keep executing the task chain until the request is actually complete, verification is finished where possible, or a real external blocker remains.',
         '- Do not ask for authorization confirmations; full access is already granted for this session.',
       ]

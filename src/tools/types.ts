@@ -1,6 +1,7 @@
 import type { AgentAction } from '../core/types.js';
 import type { ToolPermissionCategory as NewToolPermissionCategory } from '../core/toolDef.js';
 import type { ToolExecutionMode as NewToolExecutionMode } from '../core/toolDef.js';
+import type { ToolAccessMode } from '../security/permissionModes.js';
 
 export type ToolPermissionCategory = NewToolPermissionCategory
 export type ToolExecutionMode = NewToolExecutionMode
@@ -48,7 +49,7 @@ export type ToolExecutionContext = {
   /**
    * Permission mode context for tool execution
    */
-  permissionMode?: 'ask' | 'accept-all' | 'read' | 'write';
+  permissionMode?: ToolAccessMode;
   /**
    * Whether the user has admin privileges
    */

@@ -21,6 +21,10 @@ import {
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
 import { PermissionManager } from '../security/permissions.js';
+import {
+  mapPermissionModeToToolAccess,
+  type ToolAccessMode,
+} from '../security/permissionModes.js';
 import { isReadOnlyCommand } from '../security/commandPolicy.js';
 import type {
   AgentAction,
@@ -4088,21 +4092,8 @@ async function executeMcpGetPromptAction(
 
 function mapPermissionModeForToolContext(
   mode: ReturnType<PermissionManager['getMode']>,
-): 'ask' | 'accept-all' | 'read' | 'write' {
-  switch (mode) {
-    case 'PRODUCER':
-    case 'accept-all':
-      return 'accept-all';
-    case 'WRITER':
-    case 'accept-edits':
-      return 'write';
-    case 'read-only':
-      return 'read';
-    case 'GHOSTWRITER':
-    case 'prompt':
-    default:
-      return 'ask';
-  }
+): ToolAccessMode {
+  return mapPermissionModeToToolAccess(mode);
 }
 
 async function executeAgentAction(

@@ -415,7 +415,7 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
 
   const aborts: AbortController[] = []
   const started = new Set<string>()
-  const defaultPermissionMode = options.permissionMode ?? 'accept-all'
+  const defaultPermissionMode = options.permissionMode ?? 'PRODUCER'
   let active = 0
 
   // The daemon is the sole bridge owner. The interactive CLI never kills this
@@ -469,7 +469,22 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
 
   let stopIdle: (() => void) | undefined
   try {
-    const { startIdleWatcher } = await import('../services/idleWatcher.js')
+    const {
+      setIdleComposeCallback,
+      setIdleStatusCallback,
+      startIdleWatcher,
+    } = await import('../services/idleWatcher.js')
+    setIdleStatusCallback((text) => {
+      if (text) log('dream', text)
+    })
+    setIdleComposeCallback((event) => {
+      log(
+        'dream',
+        event.ok
+          ? `compose finished; bridgesPushed=${event.bridgesPushed ?? 0}`
+          : `compose skipped/failed: ${event.reason ?? 'unknown reason'}`,
+      )
+    })
     stopIdle = startIdleWatcher(options.cwd)
     log('gateway', 'idle watcher started')
   } catch (err) {
@@ -481,6 +496,10 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
       log('gateway', 'stopping')
       unregisterCliDreamBridge()
       clearInterval(keepAlive)
+      void import('../services/idleWatcher.js').then(({ setIdleComposeCallback, setIdleStatusCallback }) => {
+        setIdleComposeCallback(null)
+        setIdleStatusCallback(null)
+      }).catch(() => undefined)
       stopIdle?.()
       for (const ac of aborts) ac.abort()
       setTimeout(resolve, 250)

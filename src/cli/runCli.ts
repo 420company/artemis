@@ -619,7 +619,7 @@ async function runToolCommand(options: { cwd: string; locale: UiLocale; args: st
   } as any
   const result = await executeAction(action, {
     cwd,
-    permissionMode: 'accept-all',
+    permissionMode: 'full-access',
     updateCwd: () => {},
   })
   console.log(result.output)
@@ -1356,7 +1356,7 @@ async function runBragiCommand(options: {
       cwd,
       sessionStore,
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
-      defaultPermissionMode: 'accept-all',
+      defaultPermissionMode: 'PRODUCER',
       onInfo: msg => console.log(msg),
     })
     return
@@ -1383,7 +1383,7 @@ async function runBragiCommand(options: {
       cwd,
       sessionStore,
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
-      defaultPermissionMode: 'accept-all',
+      defaultPermissionMode: 'PRODUCER',
       onInfo: msg => console.log(msg),
     })
     return
@@ -1406,7 +1406,7 @@ async function runBragiCommand(options: {
       [t('按 Ctrl+C 停止。', 'Press Ctrl+C to stop.')]
     ))
     console.log()
-    await runWeChatBridge({ cwd, sessionStore, maxTurns: DEFAULT_AGENT_MAX_TURNS, defaultPermissionMode: 'accept-all', onInfo: msg => console.log(msg) })
+    await runWeChatBridge({ cwd, sessionStore, maxTurns: DEFAULT_AGENT_MAX_TURNS, defaultPermissionMode: 'PRODUCER', onInfo: msg => console.log(msg) })
     return
   }
 

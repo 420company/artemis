@@ -234,7 +234,7 @@ export async function executeGenerateVideo(
       toolName: 'generate_video',
       context,
     });
-    if (context.permissionMode !== 'accept-all') {
+    if (context.permissionMode !== 'full-access') {
       ensureNotSensitivePath(absolute, targetRaw);
     }
 

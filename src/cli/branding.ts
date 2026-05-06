@@ -300,10 +300,10 @@ function buildSystemInfo(opts: SystemInfoOpts): string {
   rows.push(infoRow(t('工作区', 'workspace'), shortCwd, [166, 227, 161], undefined, Math.max(22, valueWidthLimit)))
 
   const modeColor: Record<string, [number,number,number]> = {
-    'accept-all':   [250, 179, 135],
-    'accept-edits': [249, 226, 175],
+    'PRODUCER':     [250, 179, 135],
+    'WRITER':       [249, 226, 175],
     'read-only':    [166, 227, 161],
-    'prompt':       [203, 166, 247],
+    'GHOSTWRITER':  [203, 166, 247],
   }
   const [mr, mg, mb] = modeColor[permissionMode] ?? [200, 200, 200]
   rows.push(infoRow(t('权限模式', 'permission'), permissionMode, [mr, mg, mb]))

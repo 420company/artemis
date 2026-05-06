@@ -74,7 +74,7 @@ async function loadOrPrepareThreadState(options: {
   return prepareHeimdallThreadState({
     cwd: options.cwd,
     session: options.session,
-    permissionMode: 'prompt',
+    permissionMode: 'GHOSTWRITER',
   });
 }
 

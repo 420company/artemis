@@ -5,6 +5,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { PermissionMode } from '../cli/parseArgs.js'
+import { normalizePermissionModeValue } from '../security/permissionModes.js'
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js'
 
 export type DiscordTargetState = {
@@ -20,11 +21,6 @@ export type DiscordStoreData = {
 
 function now(): string { return new Date().toISOString() }
 function getEmptyStore(): DiscordStoreData { return { targets: [] } }
-
-function isPermissionMode(v: unknown): v is PermissionMode {
-  return v === 'PRODUCER' || v === 'GHOSTWRITER' || v === 'WRITER' ||
-    v === 'prompt' || v === 'read-only' || v === 'accept-edits' || v === 'accept-all'
-}
 
 export class DiscordStore {
   private readonly rootDir: string
@@ -48,8 +44,11 @@ export class DiscordStore {
             (e): e is DiscordTargetState =>
               Boolean(e) && typeof e === 'object' &&
               typeof e.targetId === 'string' && typeof e.sessionId === 'string' &&
-              isPermissionMode(e.permissionMode) && typeof e.updatedAt === 'string',
-          )
+              Boolean(normalizePermissionModeValue(e.permissionMode)) && typeof e.updatedAt === 'string',
+          ).map((e) => ({
+            ...e,
+            permissionMode: normalizePermissionModeValue(e.permissionMode)!,
+          }))
         : [],
     }
   }

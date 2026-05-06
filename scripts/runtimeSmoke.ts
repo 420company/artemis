@@ -41,7 +41,10 @@ import { compressMessages } from '../src/core/contextCompressor.js'
 import { resolveBytePlusCredentials } from '../src/tools/byteplusMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
-import { resolveGeminiDeepResearchConfig } from '../src/research/geminiDeepResearch.js'
+import {
+  resolveGeminiDeepResearchConfig,
+  runGeminiDeepResearch,
+} from '../src/research/geminiDeepResearch.js'
 import { BytePlusProvider } from '../src/tools/visual/providers/byteplusProvider.js'
 import { OpenAIProvider } from '../src/tools/visual/providers/openaiProvider.js'
 import { getAvailableProviders } from '../src/tools/visual/providers/interface.js'
@@ -1024,6 +1027,54 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     resolved.agent === DEFAULT_GEMINI_DEEP_RESEARCH_AGENT &&
       resolved.agent === 'deep-research-preview-04-2026',
     resolved.agent,
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-deep-research-sdk-${Date.now()}`)
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+  const settingsStore = new CliSettingsStore(tmpDir)
+  await settingsStore.update({
+    researchEngine: 'gemini-deep-research',
+    researchEngineConfigured: true,
+    geminiApiKey: 'test-key',
+  })
+  const settings = await settingsStore.load()
+  let polls = 0
+  const result = await runGeminiDeepResearch({
+    prompt: 'Research SDK wiring.',
+    settings,
+    pollIntervalMs: 1,
+    client: {
+      async createInteraction() {
+        return {
+          id: 'interaction_test',
+          agent: DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+          status: 'in_progress',
+          outputs: [],
+        }
+      },
+      async getInteraction() {
+        polls += 1
+        return {
+          id: 'interaction_test',
+          agent: DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+          status: 'completed',
+          outputs: [{ type: 'text', text: 'SDK-backed research complete.' }],
+          usage: { total_tokens: 42 },
+        }
+      },
+    },
+  })
+  assert(
+    'deep research SDK client: run path creates, polls, and formats completed interactions',
+    polls === 1 &&
+      result.status === 'completed' &&
+      result.text === 'SDK-backed research complete.' &&
+      result.usage?.total_tokens === 42,
+    JSON.stringify({ polls, result }),
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })

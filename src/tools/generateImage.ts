@@ -157,7 +157,7 @@ export async function executeGenerateImage(action: any, context: any) {
                 toolName: 'generate_image',
                 context,
             });
-            if (context.permissionMode !== 'accept-all') {
+            if (context.permissionMode !== 'full-access') {
                 ensureNotSensitivePath(absolute, targetRaw);
             }
 
@@ -392,7 +392,7 @@ async function fallbackToDeepSearch(action: any, context: any, reason?: string) 
             toolName: 'generate_image',
             context,
         });
-        if (context.permissionMode !== 'accept-all') {
+        if (context.permissionMode !== 'full-access') {
             ensureNotSensitivePath(absolute, targetRaw);
         }
         await ensureDir(path.dirname(absolute));

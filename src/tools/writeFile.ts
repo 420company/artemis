@@ -21,7 +21,7 @@ export async function executeWriteFile(
     toolName: 'write_file',
     context,
   });
-  if (context.permissionMode !== 'accept-all') {
+  if (context.permissionMode !== 'full-access') {
     ensureNotSensitivePath(absolute, action.path);
   }
   const existed = await pathExists(absolute);

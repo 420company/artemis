@@ -620,7 +620,7 @@ export async function readHeimdallThreadState(
           latestMediaPaths: [],
           updatedAt: now(),
         },
-      permissionMode: parsed.permissionMode ?? 'prompt',
+      permissionMode: parsed.permissionMode ?? 'GHOSTWRITER',
       workflowMode: parsed.workflowMode,
       runtimeId: parsed.runtimeId,
       remoteOrigin: parsed.remoteOrigin,

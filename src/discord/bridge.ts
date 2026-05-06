@@ -160,7 +160,7 @@ export type RunDiscordBridgeOptions = {
   maxTurns: number
   secretStore?: SecretStore
   /** Permission mode applied when creating a new bridge session. Inherits
-   *  from the CLI's --permission-mode (default accept-all) so remote coding
+   *  from the CLI's --permission-mode (default PRODUCER) so remote coding
    *  via IM works out of the box. */
   defaultPermissionMode?: PermissionMode
   onInfo?: (message: string) => void

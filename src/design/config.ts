@@ -137,7 +137,7 @@ export const DEFAULT_CONFIG: DesignSystemConfig = {
   
   defaultExecutionOptions: {
     maxTurns: DEFAULT_AGENT_MAX_TURNS,
-    permissionMode: 'accept-edits',
+    permissionMode: 'WRITER',
     appendUserMessage: true,
     completionContract: 'requires_execution_evidence',
   },

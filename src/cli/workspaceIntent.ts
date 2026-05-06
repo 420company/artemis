@@ -3,6 +3,7 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 import {
   findNearestExistingWorkspaceRoot,
+  isOverbroadTrustedWorkspaceRoot,
   resolveWorkspaceCandidatePath,
 } from '../utils/workspaceRoots.js'
 
@@ -15,31 +16,21 @@ export type WorkspaceIntentResolution = {
 
 const STRONG_PATH_INTENT_PREFIXES = [
   '进入',
+  '进入工作区',
   '切换到',
+  '切换工作区到',
   '切到',
   '工作区设为',
   '工作区设置为',
   '工作区切换到',
+  '设置工作区为',
   '设为工作区',
   '作为工作区',
   'cd to',
   'switch to',
+  'switch workspace to',
   'change to',
-] as const
-
-const CONTEXT_PATH_INTENT_PREFIXES = [
-  ...STRONG_PATH_INTENT_PREFIXES,
-  '在',
-  '到',
-  '保存到',
-  '写到',
-  '放到',
-  'use',
-  'inside',
-  'under',
-  'in',
-  'at',
-  'to',
+  'change workspace to',
 ] as const
 
 function escapeRegExp(value: string): string {
@@ -89,14 +80,26 @@ function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): s
 }
 
 function extractQuotedPath(input: string): string | null {
-  const quoted = input.match(new RegExp(`["“'‘\`](${ABSOLUTE_PATH_START}[^"”'’\`\\r\\n]*)["”'’\`]`))
-  return quoted?.[1]?.trim() ?? null
+  const quoteChars = `["“'‘\`]`
+  const endQuoteChars = `["”'’\`]`
+  const pathCapture = `(${ABSOLUTE_PATH_START}[^"”'’\`\\r\\n]*)`
+  const strongPrefixPattern = STRONG_PATH_INTENT_PREFIXES
+    .map(prefix => escapeRegExp(prefix))
+    .join('|')
+
+  const strongQuoted = input.match(
+    new RegExp(`^\\s*(?:${strongPrefixPattern})(?:\\s+|[:：]\\s*)${quoteChars}${pathCapture}${endQuoteChars}`, 'i'),
+  )
+  if (strongQuoted?.[1]?.trim()) return strongQuoted[1].trim()
+
+  const leadingQuoted = input.trimStart().match(new RegExp(`^${quoteChars}${pathCapture}${endQuoteChars}`))
+  return leadingQuoted?.[1]?.trim() ?? null
 }
 
-function extractPrefixedPath(input: string, strongOnly = false): string | null {
+function extractPrefixedPath(input: string): string | null {
   const zhStops = '继续|并|然后|之后|再|接着|创建|建立|新建|制作|做|写|修改|更新|运行|执行|设为|作为'
   const enStops = 'and|then|create|build|make|write|edit|run'
-  const prefixes = strongOnly ? STRONG_PATH_INTENT_PREFIXES : CONTEXT_PATH_INTENT_PREFIXES
+  const prefixes = STRONG_PATH_INTENT_PREFIXES
   for (const prefix of prefixes) {
     const pattern = new RegExp(
       `${escapeRegExp(prefix)}(?:\\s+|[:：]\\s*)(${ABSOLUTE_PATH_START}[\\s\\S]*?)(?=$|[\\r\\n，。；;,]|\\s+(?:${zhStops})|\\s+(?:${enStops})\\b)`,
@@ -109,6 +112,20 @@ function extractPrefixedPath(input: string, strongOnly = false): string | null {
       return candidate
     }
   }
+  return null
+}
+
+function extractPathWithWorkspaceMarker(input: string): string | null {
+  const marker = String.raw`(?:设为工作区|作为工作区|设置为工作区|use\s+as\s+(?:the\s+)?workspace|set\s+as\s+(?:the\s+)?workspace)`
+  const quotedPath = String.raw`["“'‘\`](${ABSOLUTE_PATH_START}[^"”'’\`\r\n]*)["”'’\`]`
+  const barePath = String.raw`(${ABSOLUTE_PATH_START}[^\s，。；;,\r\n]*)`
+
+  const quotedBefore = input.match(new RegExp(`${quotedPath}[\\s\\S]{0,80}?${marker}`, 'i'))
+  if (quotedBefore?.[1]?.trim()) return quotedBefore[1].trim()
+
+  const bareBefore = input.match(new RegExp(`${barePath}[\\s\\S]{0,80}?${marker}`, 'i'))
+  if (bareBefore?.[1]?.trim()) return bareBefore[1].trim()
+
   return null
 }
 
@@ -223,6 +240,12 @@ export async function resolveWorkspaceIntent(
     const requestedPath = subpath ? path.join(aliasRoot, subpath) : aliasRoot
     const existing = await findNearestExistingWorkspaceRoot(requestedPath)
     if (!existing) return null
+    if (
+      existing.usedNearestExistingParent &&
+      isOverbroadTrustedWorkspaceRoot(existing.workspacePath, homeDir)
+    ) {
+      return null
+    }
     return {
       requestedPath,
       workspacePath: existing.workspacePath,
@@ -233,7 +256,8 @@ export async function resolveWorkspaceIntent(
 
   const rawPath =
     extractQuotedPath(input) ??
-    extractPrefixedPath(input, strongOnly) ??
+    extractPrefixedPath(input) ??
+    extractPathWithWorkspaceMarker(input) ??
     extractLeadingPath(input)
   if (!rawPath) return null
 
@@ -241,6 +265,12 @@ export async function resolveWorkspaceIntent(
   if (!requestedPath) return null
   const existing = await findNearestExistingWorkspaceRoot(requestedPath)
   if (!existing) return null
+  if (
+    existing.usedNearestExistingParent &&
+    isOverbroadTrustedWorkspaceRoot(existing.workspacePath, homeDir)
+  ) {
+    return null
+  }
 
   return {
     requestedPath,
