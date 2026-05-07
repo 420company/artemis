@@ -8,7 +8,7 @@ This is the release path for publishing Artemis to GitHub and npm.
 - Default branch: `main`
 - npm package: `artemis-code`
 - CLI binary: `artemis` from `dist/cli.js`
-- Current prepared release: `0.2.12`
+- Current prepared release: `0.2.13`
 - README hero image: `assets/artemis-github-banner.png`
 
 ## Release Principle
@@ -119,7 +119,7 @@ artemis --help
 
 The reported version should match the Git tag and npm version.
 
-## Current 0.2.12 Notes
+## Current 0.2.13 Notes
 
 - Added and refined the Seedance 2.0 Pro multimodal video workflow with latest-dream source selection and reference collection.
 - Added duration confirmation before final video generation.
@@ -134,7 +134,7 @@ The reported version should match the Git tag and npm version.
 - Separated WeChat media-type handling for video and file delivery.
 - Updated README, usage documentation, release guide, credits language, and GitHub presentation assets.
 
-## 当前 0.2.12 中文说明
+## 当前 0.2.13 中文说明
 
 - 新增并完善 Seedance 2.0 Pro 多模态视频流程，支持选择最新梦境与收集参考素材。
 - 在最终生成前确认视频时长。
