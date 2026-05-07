@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto';
 export type BackgroundTaskKind =
   | 'generate_image'
   | 'generate_video'
+  | 'generate_long_video'
   | 'delegate_task';
 
 export type BackgroundTaskStatus = 'running' | 'completed' | 'failed';
@@ -204,7 +205,7 @@ export function formatBackgroundTaskLine(
   const icon =
     record.kind === 'generate_image'
       ? '🎨'
-      : record.kind === 'generate_video'
+      : record.kind === 'generate_video' || record.kind === 'generate_long_video'
         ? '🎬'
         : '🤖';
   const elapsed = Math.max(

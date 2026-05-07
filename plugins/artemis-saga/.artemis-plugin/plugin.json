@@ -1,0 +1,15 @@
+{
+  "name": "artemis-saga",
+  "version": "0.1.0",
+  "description": "Saga long-video production workflow for Artemis: story breakdown, provider-safe clip generation, Hyperframes timeline output, and final MP4 assembly.",
+  "enabled": true,
+  "capabilities": ["long-video", "video-workflow", "hyperframes", "mobile-bridge"],
+  "instructionsFile": "PLUGIN.md",
+  "policy": {
+    "read": false,
+    "write": false,
+    "shell": false,
+    "delegate": false,
+    "commandPrefixes": []
+  }
+}

@@ -290,6 +290,7 @@ import {
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../tools/visual/seedanceWorkflow.js'
+import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 
 const HOME_DIR = os.homedir()
 const DIRECT_TOOL_COUNT = getDirectToolCount()
@@ -1823,6 +1824,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/nidhogg',    hint: t('对抗式实现硬化 / 慢但最稳',  'Adversarial hardening / slow but strongest') },
     { value: '/contest',    hint: t('路径辩论与方案裁决',         'Path debate and selection') },
     { value: '/bifrost',    hint: t('配置思维/执行双模型',        'Setup dual brain/exec models') },
+    { value: '/sage',       hint: t('Saga 长视频生成（直接进入）', 'Saga long-video generation (direct)') },
     { value: '/run',        hint: t('后台运行工作流',             'Run workflow in background') },
     // ── 系统 & 技能 ──
     { value: '/odin',       hint: t('Odin 技能库管理',           'Odin skill store') },
@@ -4217,6 +4219,48 @@ async function handleTurn(
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
 ): Promise<void> {
+  // /sage <content> — explicit Saga long-video entry. Strip the prefix and
+  // force-flag the workflow so it skips intent detection (the user has
+  // already declared intent by typing the slash command).
+  let sagaForceIntent = false
+  let sagaInput = input
+  const sagaTrim = input.trimStart()
+  if (sagaTrim === '/sage' || /^\/sage(\s|$)/i.test(sagaTrim)) {
+    const stripped = sagaTrim.replace(/^\/sage\s*/i, '').trim()
+    if (!stripped) {
+      const reply = pickLocale(locale, {
+        zh: 'Saga 长视频：请在 /sage 后跟一段故事文字（中英文均可）。例：/sage 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
+        en: 'Saga long video: type /sage followed by a story description. Example: /sage A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
+      })
+      viewport?.appendScrollBlock({ kind: 'system', text: reply })
+      if (!viewport) console.log(reply)
+      return
+    }
+    sagaInput = stripped
+    sagaForceIntent = true
+  }
+
+  const sagaWorkflow = await handleSagaLongVideoWorkflow({
+    scope: 'cli',
+    key: cwd ?? process.cwd(),
+    cwd: cwd ?? process.cwd(),
+    text: sagaInput,
+    forceIntent: sagaForceIntent,
+  })
+  if (sagaWorkflow.handled) {
+    viewport?.appendScrollBlock({
+      kind: 'system',
+      text: sagaWorkflow.reply,
+    })
+    if (!viewport) {
+      console.log(sagaWorkflow.reply)
+    }
+    return
+  }
+  if (sagaWorkflow.prompt) {
+    input = sagaWorkflow.prompt
+  }
+
   const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
     scope: 'cli',
     key: cwd ?? process.cwd(),

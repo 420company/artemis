@@ -33,6 +33,10 @@ test-output/
 test-*/
 coverage/
 
+# Saga long-video test outputs (provider-generated content, large,
+# privacy-sensitive, never published).
+generated-media/
+
 # Skill vendor dirs
 skills/web-spider/vendor/
 

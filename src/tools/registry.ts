@@ -20,6 +20,7 @@ import { securityAuditToolDef } from '../core/securityAuditSystem.js';
 import { executeApplyPatch } from './applyPatch.js';
 import { executeDeepResearch } from './deepResearch.js';
 import { executeGenerateImage } from './generateImage.js';
+import { executeGenerateLongVideo } from './generateLongVideo.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
@@ -487,6 +488,134 @@ function validateGenerateVideoAction(action: any): string[] {
   return errors;
 }
 
+const SAGA_TRANSITION_KINDS = [
+  'cut',
+  'crossfade',
+  'dissolve',
+  'light-leak',
+  'fade-black',
+  'fade-white',
+  'wipe-left',
+  'wipe-right',
+  'slide-up',
+  'push-left',
+  'push-right',
+  'circle-open',
+  'circle-close',
+  'blur',
+  'zoom-in',
+  'zoom-out',
+  'flash',
+  'speed-ramp',
+  'whip-pan',
+  'whip-pan-left',
+  'match-cut',
+  'glitch',
+  'cinematic-fade',
+  'iris-pulse',
+  'squeeze-h',
+  'squeeze-v',
+  'cover-down',
+  'cover-up',
+  'reveal-left',
+  'shader-light-leak',
+  'shader-whip-pan',
+  'shader-glitch',
+  'shader-cinematic-zoom',
+  'shader-domain-warp',
+  'shader-ridged-burn',
+  'shader-sdf-iris',
+  'shader-ripple-waves',
+  'shader-gravitational-lens',
+  'shader-chromatic-split',
+  'shader-swirl-vortex',
+  'shader-thermal-distortion',
+  'shader-flash-through-white',
+  'shader-cross-warp-morph',
+] as const;
+
+function validateGenerateLongVideoAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
+  validateOptionalNonEmptyString(action?.story, 'story', errors);
+  if (action?.shots !== undefined) {
+    if (!Array.isArray(action.shots)) {
+      errors.push('shots must be an array when provided.');
+    } else {
+      action.shots.forEach((shot: any, index: number) => {
+        if (!shot || typeof shot !== 'object' || Array.isArray(shot)) {
+          errors.push(`shots[${index}] must be an object.`);
+          return;
+        }
+        validateOptionalNonEmptyString(shot.title, `shots[${index}].title`, errors);
+        validatePositiveInteger(shot.duration, `shots[${index}].duration`, errors);
+        validateOptionalNonEmptyString(shot.storyBeat, `shots[${index}].storyBeat`, errors);
+        validateOptionalNonEmptyString(shot.visualPrompt, `shots[${index}].visualPrompt`, errors);
+        validateOptionalNonEmptyString(shot.prompt, `shots[${index}].prompt`, errors);
+        validateOptionalNonEmptyString(shot.camera, `shots[${index}].camera`, errors);
+        validateOptionalNonEmptyString(shot.continuity, `shots[${index}].continuity`, errors);
+        validateOptionalNonEmptyString(shot.transition, `shots[${index}].transition`, errors);
+        if (shot.transitionKind !== undefined) {
+          validateEnumString(shot.transitionKind, `shots[${index}].transitionKind`, SAGA_TRANSITION_KINDS, errors);
+        }
+      });
+    }
+  }
+  if (action?.continuity !== undefined) {
+    if (!action.continuity || typeof action.continuity !== 'object' || Array.isArray(action.continuity)) {
+      errors.push('continuity must be an object when provided.');
+    } else {
+      validateStringArray(action.continuity.characters, 'continuity.characters', errors);
+      validateStringArray(action.continuity.wardrobe, 'continuity.wardrobe', errors);
+      validateStringArray(action.continuity.props, 'continuity.props', errors);
+      validateStringArray(action.continuity.locations, 'continuity.locations', errors);
+      validateStringArray(action.continuity.palette, 'continuity.palette', errors);
+      validateOptionalNonEmptyString(action.continuity.lighting, 'continuity.lighting', errors);
+      validateOptionalNonEmptyString(action.continuity.cameraLanguage, 'continuity.cameraLanguage', errors);
+      validateOptionalNonEmptyString(action.continuity.mood, 'continuity.mood', errors);
+    }
+  }
+  validateOptionalNonEmptyString(action?.model, 'model', errors);
+  validateOptionalNonEmptyString(action?.ratio, 'ratio', errors);
+  validatePositiveInteger(action?.duration, 'duration', errors);
+  validatePositiveInteger(action?.totalDuration, 'totalDuration', errors);
+  validateOptionalNonEmptyString(action?.projectId, 'projectId', errors);
+  validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
+  validateEnumString(action?.assemblyMode, 'assemblyMode', ['auto', 'ffmpeg', 'hyperframes', 'saga'] as const, errors);
+  validateBooleanValue(action?.resume, 'resume', errors);
+  validateEnumString(action?.chainReferenceFrames, 'chainReferenceFrames', ['auto', 'always', 'off'] as const, errors);
+  validateEnumString(action?.continuityMode, 'continuityMode', ['auto', 'strong-vision', 'text-only'] as const, errors);
+  validatePositiveInteger(action?.crossfadeMs, 'crossfadeMs', errors);
+  validateEnumString(action?.defaultTransition, 'defaultTransition', SAGA_TRANSITION_KINDS, errors);
+  validateBooleanValue(action?.colorMatch, 'colorMatch', errors);
+  validateEnumString(action?.quality, 'quality', ['draft', 'standard', 'high'] as const, errors);
+  validateEnumString(
+    action?.fps !== undefined ? String(action.fps) : undefined,
+    'fps',
+    ['24', '30', '60'] as const,
+    errors,
+  );
+  validateEnumString(action?.gpu, 'gpu', ['auto', 'on', 'off'] as const, errors);
+  validateOptionalNonEmptyString(action?.videoBitrate, 'videoBitrate', errors);
+  if (action?.crf !== undefined) {
+    if (typeof action.crf !== 'number' || !Number.isFinite(action.crf) || action.crf < 0 || action.crf > 63) {
+      errors.push('crf must be a number between 0 and 63.');
+    }
+  }
+  validateStringArray(action?.referenceImageUrls, 'referenceImageUrls', errors);
+  validateStringArray(action?.referenceVideoUrls, 'referenceVideoUrls', errors);
+  validateStringArray(action?.referenceAudioUrls, 'referenceAudioUrls', errors);
+  validateStringArray(action?.referenceImagePaths, 'referenceImagePaths', errors);
+  validateStringArray(action?.referenceVideoPaths, 'referenceVideoPaths', errors);
+  validateStringArray(action?.referenceAudioPaths, 'referenceAudioPaths', errors);
+  validateBooleanValue(action?.generateAudio, 'generateAudio', errors);
+  validateBooleanValue(action?.watermark, 'watermark', errors);
+  validatePositiveInteger(action?.maxPolls, 'maxPolls', errors);
+  validatePositiveInteger(action?.pollIntervalMs, 'pollIntervalMs', errors);
+  validateBooleanValue(action?.runInBackground, 'runInBackground', errors);
+  return errors;
+}
+
 function validateSynthesizeSpeechAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.text, 'text', errors);
@@ -804,6 +933,16 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateGenerateVideoAction,
     execute: executeGenerateVideo as any,
+  },
+  {
+    type: 'generate_long_video',
+    description: 'Saga 长视频生产链：把长故事拆成多个短视频片段，逐段调用已配置的视频模型生成，再用 Hyperframes/FFmpeg 合成为完整 MP4。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateGenerateLongVideoAction,
+    execute: executeGenerateLongVideo as any,
   },
   {
     type: 'synthesize_speech',

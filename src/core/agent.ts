@@ -545,6 +545,89 @@ function buildActionFromLooseArgs(
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
       };
     }
+    case 'generate_long_video':
+    case 'long_video':
+    case 'create_long_video':
+    case 'saga_video': {
+      const prompt = getLooseStringArg(args, 'prompt', 'description', 'text', 'story');
+      if (!prompt?.trim()) return null;
+      return {
+        type: 'generate_long_video',
+        prompt,
+        story: getLooseStringArg(args, 'story'),
+        model: getLooseStringArg(args, 'model'),
+        ratio: getLooseStringArg(args, 'ratio', 'aspectRatio', 'aspect_ratio'),
+        duration: getLooseIntegerArg(args, 'duration', 'durationSeconds', 'duration_seconds'),
+        totalDuration: getLooseIntegerArg(args, 'totalDuration', 'total_duration', 'totalSeconds', 'total_seconds'),
+        projectId: getLooseStringArg(args, 'projectId', 'project_id', 'name'),
+        outputPath: getLooseStringArg(
+          args,
+          'outputPath',
+          'output_path',
+          'destination',
+          'dest',
+          'path',
+          'file',
+          'filepath',
+          'file_path',
+        ),
+        assemblyMode: getLooseStringArg(args, 'assemblyMode', 'assembly_mode') as any,
+        shots: (() => {
+          const value =
+            getLooseArgValue(args, 'shots') ??
+            getLooseArgValue(args, 'segments') ??
+            getLooseArgValue(args, 'shotList') ??
+            getLooseArgValue(args, 'shot_list');
+          return Array.isArray(value) ? value as any : undefined;
+        })(),
+        resume: getLooseBooleanArg(args, 'resume'),
+        referenceImageUrls: getLooseStringArrayArg(
+          args,
+          'referenceImageUrls',
+          'reference_image_urls',
+          'imageUrls',
+          'image_urls',
+        ),
+        referenceVideoUrls: getLooseStringArrayArg(
+          args,
+          'referenceVideoUrls',
+          'reference_video_urls',
+          'videoUrls',
+          'video_urls',
+        ),
+        referenceAudioUrls: getLooseStringArrayArg(
+          args,
+          'referenceAudioUrls',
+          'reference_audio_urls',
+          'audioUrls',
+          'audio_urls',
+        ),
+        referenceImagePaths: getLooseStringArrayArg(
+          args,
+          'referenceImagePaths',
+          'reference_image_paths',
+          'imagePaths',
+          'image_paths',
+        ),
+        referenceVideoPaths: getLooseStringArrayArg(
+          args,
+          'referenceVideoPaths',
+          'reference_video_paths',
+          'videoPaths',
+          'video_paths',
+        ),
+        referenceAudioPaths: getLooseStringArrayArg(
+          args,
+          'referenceAudioPaths',
+          'reference_audio_paths',
+          'audioPaths',
+          'audio_paths',
+        ),
+        generateAudio: getLooseBooleanArg(args, 'generateAudio', 'generate_audio', 'audio'),
+        watermark: getLooseBooleanArg(args, 'watermark'),
+        runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
+      };
+    }
     case 'synthesize_speech':
     case 'tts':
     case 'text_to_speech': {
@@ -1154,6 +1237,7 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'apply_patch':
     case 'generate_image':
     case 'generate_video':
+    case 'generate_long_video':
     case 'synthesize_speech':
     case 'transcribe_audio':
       return true;
@@ -1619,6 +1703,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `generate_image model=${action.model ?? 'seedream-5-0-260128'} prompt=${truncate(action.prompt, 120)}`;
     case 'generate_video':
       return `generate_video model=${action.model ?? 'seedance-1-5-pro-251215'} duration=${action.duration ?? 5}s prompt=${truncate(action.prompt, 120)}`;
+    case 'generate_long_video':
+      return `generate_long_video model=${action.model ?? 'configured'} total=${action.totalDuration ?? action.duration ?? 60}s prompt=${truncate(action.prompt, 120)}`;
     case 'synthesize_speech':
       return `synthesize_speech voice=${action.voice ?? 'configured'} text=${truncate(action.text, 120)}`;
     case 'transcribe_audio':
@@ -4814,7 +4900,7 @@ function isBackgroundEligibleAction(action: AgentAction): boolean {
   if ((action as { runInBackground?: unknown }).runInBackground !== true) {
     return false;
   }
-  if (action.type === 'generate_image' || action.type === 'generate_video') {
+  if (action.type === 'generate_image' || action.type === 'generate_video' || action.type === 'generate_long_video') {
     return true;
   }
   if (action.type === 'delegate_task') {
@@ -4825,12 +4911,12 @@ function isBackgroundEligibleAction(action: AgentAction): boolean {
 }
 
 function describeBackgroundTaskLabel(action: AgentAction): string {
-  if (action.type === 'generate_image' || action.type === 'generate_video') {
+  if (action.type === 'generate_image' || action.type === 'generate_video' || action.type === 'generate_long_video') {
     const promptText =
       typeof (action as { prompt?: unknown }).prompt === 'string'
         ? truncate((action as { prompt: string }).prompt, 60)
         : '(no prompt)';
-    const noun = action.type === 'generate_image' ? 'image' : 'video';
+    const noun = action.type === 'generate_image' ? 'image' : action.type === 'generate_long_video' ? 'long video' : 'video';
     return `${noun}: ${promptText}`;
   }
   if (action.type === 'delegate_task') {
@@ -5658,7 +5744,7 @@ export async function runAgent(
         }
       }
 
-      if (outcome.ok && outcome.action.type === 'generate_video') {
+      if (outcome.ok && (outcome.action.type === 'generate_video' || outcome.action.type === 'generate_long_video')) {
         completionChecklist.videoGenerationObserved = true;
         if (
           completionChecklist.unresolvedToolFailure?.actionType === 'generate_video'

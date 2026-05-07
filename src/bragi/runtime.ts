@@ -40,6 +40,7 @@ import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import { sendBragiImageBroadcast, sendBragiVideoBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
+import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -411,6 +412,25 @@ export async function runRemoteCommand(
           `📁 已将本轮工作区固定为 ${commandCwd}`,
           `📁 Pinned this turn to workspace ${commandCwd}`,
         ), 'info')
+      }
+
+      const sagaWorkflow = await handleSagaLongVideoWorkflow({
+        scope: 'bridge',
+        key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+        cwd: commandCwd,
+        text: command.body,
+        deliveryPlatform: opts.bridgePlatform,
+        deliveryTargetId: opts.targetId,
+      })
+      if (sagaWorkflow.handled) {
+        return {
+          replies: [sagaWorkflow.reply],
+          storedSession: binding.storedSession,
+          permissionMode: binding.permissionMode,
+        }
+      }
+      if (sagaWorkflow.prompt) {
+        command.body = sagaWorkflow.prompt
       }
 
       const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({

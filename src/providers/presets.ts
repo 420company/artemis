@@ -49,13 +49,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.openai.com/v1',
     suggestedModels: [
       'gpt-5.5',
+      'gpt-5.5-pro',
       'gpt-5.5-mini',
       'gpt-5.5-nano',
       'gpt-5.4',
       'gpt-5.4-mini',
       'gpt-5.4-nano',
-      'gpt-5.2',
-      'gpt-5.2-codex',
       'gpt-5.1',
       'gpt-5.1-codex',
       'gpt-5.1-codex-max',
@@ -75,8 +74,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'o4-mini',
     ],
     notes: {
-      zh: ['OpenAI 官方接口。', '标准 API 文档当前列出 gpt-5.5 / 5.4 / 5.2 / 5.1 / 5 系列、gpt-5-codex 系列，以及 gpt-4.1 / o3 / o4-mini。'],
-      en: ['Official OpenAI API.', 'The current standard API docs list the GPT-5.5 / 5.4 / 5.2 / 5.1 / 5 line, GPT-5-Codex variants, plus GPT-4.1 / o3 / o4-mini.'],
+      zh: ['OpenAI 官方接口。', '推荐 gpt-5.5-pro（旗舰）或 gpt-5.5（日常）。'],
+      en: ['Official OpenAI API.', 'Recommended: gpt-5.5-pro (flagship) or gpt-5.5 (everyday).'],
     },
   },
 

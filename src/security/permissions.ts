@@ -80,6 +80,8 @@ function describeAction(action: AgentAction): string {
       return `generate image via BytePlus Seedream (${action.model ?? 'seedream-5-0-260128'})`;
     case 'generate_video':
       return `generate video via Seedance (${action.model ?? 'seedance-1-5-pro-251215'})`;
+    case 'generate_long_video':
+      return `generate long video via Saga (${action.model ?? 'configured video model'})`;
     case 'synthesize_speech':
       return `synthesize speech with configured TTS${action.outputPath ? ` to ${action.outputPath}` : ''}`;
     case 'transcribe_audio':

@@ -395,6 +395,133 @@ export type AgentAction =
       runInBackground?: boolean;
     }
   | {
+      type: 'generate_long_video';
+      prompt: string;
+      story?: string;
+      shots?: Array<{
+        title?: string;
+        duration?: number;
+        storyBeat?: string;
+        visualPrompt?: string;
+        prompt?: string;
+        camera?: string;
+        continuity?: string;
+        transition?: string;
+        transitionKind?:
+          | 'cut'
+          | 'crossfade'
+          | 'dissolve'
+          | 'light-leak'
+          | 'fade-black'
+          | 'fade-white'
+          | 'wipe-left'
+          | 'wipe-right'
+          | 'slide-up'
+          | 'push-left'
+          | 'push-right'
+          | 'circle-open'
+          | 'circle-close'
+          | 'blur'
+          | 'zoom-in'
+          | 'zoom-out'
+          | 'flash'
+          | 'speed-ramp'
+          | 'whip-pan'
+          | 'whip-pan-left'
+          | 'match-cut'
+          | 'glitch'
+          | 'cinematic-fade'
+          | 'iris-pulse'
+          | 'squeeze-h'
+          | 'squeeze-v'
+          | 'cover-down'
+          | 'cover-up'
+          | 'reveal-left'
+          | 'shader-light-leak'
+          | 'shader-whip-pan'
+          | 'shader-glitch'
+          | 'shader-cinematic-zoom'
+          | 'shader-domain-warp'
+          | 'shader-ridged-burn'
+          | 'shader-sdf-iris'
+          | 'shader-ripple-waves'
+          | 'shader-gravitational-lens'
+          | 'shader-chromatic-split'
+          | 'shader-swirl-vortex'
+          | 'shader-thermal-distortion'
+          | 'shader-flash-through-white'
+          | 'shader-cross-warp-morph';
+      }>;
+      continuity?: {
+        characters?: string[];
+        wardrobe?: string[];
+        props?: string[];
+        locations?: string[];
+        palette?: string[];
+        lighting?: string;
+        cameraLanguage?: string;
+        mood?: string;
+      };
+      model?: string;
+      ratio?: string;
+      duration?: number;
+      totalDuration?: number;
+      projectId?: string;
+      outputPath?: string;
+      assemblyMode?: 'auto' | 'ffmpeg' | 'hyperframes' | 'saga';
+      resume?: boolean;
+      chainReferenceFrames?: 'auto' | 'always' | 'off';
+      crossfadeMs?: number;
+      defaultTransition?:
+        | 'cut'
+        | 'crossfade'
+        | 'dissolve'
+        | 'light-leak'
+        | 'fade-black'
+        | 'fade-white'
+        | 'wipe-left'
+        | 'wipe-right'
+        | 'slide-up'
+        | 'push-left'
+        | 'push-right'
+        | 'circle-open'
+        | 'circle-close'
+        | 'blur'
+        | 'zoom-in'
+        | 'zoom-out'
+        | 'flash'
+        | 'speed-ramp'
+        | 'whip-pan'
+        | 'whip-pan-left'
+        | 'match-cut'
+        | 'glitch'
+        | 'cinematic-fade'
+        | 'iris-pulse'
+        | 'squeeze-h'
+        | 'squeeze-v'
+        | 'cover-down'
+        | 'cover-up'
+        | 'reveal-left';
+      continuityMode?: 'auto' | 'strong-vision' | 'text-only';
+      colorMatch?: boolean;
+      quality?: 'draft' | 'standard' | 'high';
+      fps?: 24 | 30 | 60;
+      gpu?: 'auto' | 'on' | 'off';
+      videoBitrate?: string;
+      crf?: number;
+      referenceImageUrls?: string[];
+      referenceVideoUrls?: string[];
+      referenceAudioUrls?: string[];
+      referenceImagePaths?: string[];
+      referenceVideoPaths?: string[];
+      referenceAudioPaths?: string[];
+      generateAudio?: boolean;
+      watermark?: boolean;
+      maxPolls?: number;
+      pollIntervalMs?: number;
+      runInBackground?: boolean;
+    }
+  | {
       type: 'synthesize_speech';
       text: string;
       voice?: string;
@@ -503,6 +630,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'odin_import_cloud_skills',
   'generate_image',
   'generate_video',
+  'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
   'request_freya_visual_asset',
