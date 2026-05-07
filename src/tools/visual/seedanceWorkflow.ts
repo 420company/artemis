@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ImageAttachment } from '../../providers/types.js';
-import { findLatestDreamBody } from '../../services/dreamStore.js';
+import { buildDreamPaths, findLatestDreamBody } from '../../services/dreamStore.js';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
 import {
   BYTEPLUS_SEEDANCE_2_PRO_MODEL,
@@ -18,6 +18,8 @@ export type SeedanceWorkflowInput = {
   text: string;
   imageAttachments?: ImageAttachment[];
   latestDream?: SeedanceDreamSource | null;
+  deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
+  deliveryTargetId?: string;
 };
 
 export type SeedanceWorkflowOutcome =
@@ -33,6 +35,7 @@ export type SeedanceDreamSource = {
 type SeedanceWorkflowStage = 'choosing_dream_source' | 'collecting_refs' | 'choosing_duration';
 
 type SeedanceWorkflowState = {
+  scope: SeedanceWorkflowScope;
   cwd: string;
   prompt: string;
   originalPrompt: string;
@@ -45,6 +48,8 @@ type SeedanceWorkflowState = {
   referenceAudioPaths: string[];
   duration?: number;
   generateAudio: boolean;
+  deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
+  deliveryTargetId?: string;
   stage: SeedanceWorkflowStage;
   createdAt: number;
   updatedAt: number;
@@ -351,6 +356,7 @@ function isExplicitSeedanceVideoRequest(text: string): boolean {
 }
 
 function buildGenerationPrompt(state: SeedanceWorkflowState): string {
+  const dreamVideoPath = state.dreamSource ? buildDreamPaths(state.dreamSource.id).videoPath : undefined;
   const lines = [
     state.prompt,
     '',
@@ -358,6 +364,7 @@ function buildGenerationPrompt(state: SeedanceWorkflowState): string {
     `Use generate_video with model "${BYTEPLUS_SEEDANCE_2_PRO_MODEL}".`,
     `duration: ${state.duration ?? DEFAULT_SEEDANCE_DURATION}`,
     `generateAudio: ${state.generateAudio}`,
+    ...(dreamVideoPath ? [`outputPath: ${JSON.stringify(dreamVideoPath)}`] : []),
     'Preserve the user intent and pass these reference arrays exactly when calling the tool.',
   ];
   if (state.referenceImageUrls.length > 0) {
@@ -379,6 +386,15 @@ function buildGenerationPrompt(state: SeedanceWorkflowState): string {
     lines.push(`referenceAudioPaths: ${JSON.stringify(state.referenceAudioPaths)}`);
   }
   lines.push('If reference arrays are present, do not omit them from generate_video. Videos should include generated audio by default unless the user explicitly asked for silence.');
+  if (state.scope === 'bridge' && dreamVideoPath) {
+    const sendArgs = [
+      `videoPath: ${JSON.stringify(dreamVideoPath)}`,
+      state.deliveryPlatform ? `platform: ${JSON.stringify(state.deliveryPlatform)}` : undefined,
+      state.deliveryTargetId ? `targetId: ${JSON.stringify(state.deliveryTargetId)}` : undefined,
+      `caption: ${JSON.stringify(`🎬 Artemis dream video: ${state.dreamSource?.id ?? 'latest'}`)}`,
+    ].filter(Boolean).join(', ');
+    lines.push(`After generate_video succeeds, immediately call bridge_send_video with { ${sendArgs} }. Send only the exact newly generated outputPath for this flow; do not use any latest-media sentinel or previously existing dream video.`);
+  }
   return lines.join('\n');
 }
 
@@ -489,6 +505,7 @@ export async function handleSeedanceMultimodalWorkflow(
   const latestDream = hasDreamVideoIntent(text) ? await resolveLatestDreamSource(input) : null;
 
   const nextState: SeedanceWorkflowState = {
+    scope: input.scope,
     cwd: input.cwd,
     prompt: text,
     originalPrompt: text,
@@ -500,6 +517,8 @@ export async function handleSeedanceMultimodalWorkflow(
     referenceVideoPaths: refs.videoPaths,
     referenceAudioPaths: refs.audioPaths,
     generateAudio: !wantsSilence(text),
+    deliveryPlatform: input.deliveryPlatform,
+    deliveryTargetId: input.deliveryTargetId,
     stage: 'collecting_refs',
     createdAt: Date.now(),
     updatedAt: Date.now(),

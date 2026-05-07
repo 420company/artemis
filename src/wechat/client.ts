@@ -152,12 +152,13 @@ const WECHAT_MESSAGE_ITEM_VIDEO = 5
 const WECHAT_MESSAGE_ITEM_FILE = 4
 const WECHAT_UPLOAD_MEDIA_IMAGE = 1
 const WECHAT_UPLOAD_MEDIA_VIDEO = 2
-const WECHAT_UPLOAD_MEDIA_FILE = 3
+const WECHAT_UPLOAD_MEDIA_FILE = 4
 const WECHAT_CDN_UPLOAD_MAX_RETRIES = 3
 const WECHAT_IMAGE_SEND_MAX_ATTEMPTS = 3
 const WECHAT_SEND_MEDIA_MAX_RETRIES = 3
 const WECHAT_SEND_MEDIA_RETRY_DELAY_MS = 500
 const WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES = 600_000
+const WECHAT_OUTBOUND_VIDEO_MAX_DIRECT_BYTES = 1_000_000
 const WECHAT_OUTBOUND_IMAGE_VARIANTS = [
   { maxDimension: 1280, quality: 80 },
   { maxDimension: 960, quality: 72 },
@@ -362,7 +363,44 @@ async function probeImageDimensions(imagePath: string): Promise<{ width: number;
 }
 
 async function prepareOutboundWeChatVideo(videoPath: string): Promise<WeChatPreparedVideo> {
-  const bytes = await readFile(videoPath)
+  let preparedVideoPath = videoPath
+  const originalBytes = await readFile(videoPath)
+  if (originalBytes.length === 0) throw new Error(`WeChat video reply cannot send empty file: ${videoPath}`)
+
+  let optimizedVideoPath: string | undefined
+  if (originalBytes.length > WECHAT_OUTBOUND_VIDEO_MAX_DIRECT_BYTES) {
+    optimizedVideoPath = join(tmpdir(), `artemis-wechat-video-${Date.now()}-${randomBytes(4).toString('hex')}.mp4`)
+    try {
+      await execFileAsync(
+        '/usr/local/bin/ffmpeg',
+        [
+          '-y',
+          '-i', videoPath,
+          '-map', '0:v:0',
+          '-map', '0:a?',
+          '-vf', 'scale=640:-2',
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-crf', '32',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-b:a', '64k',
+          '-movflags', '+faststart',
+          optimizedVideoPath,
+        ],
+        { timeout: 120_000 },
+      )
+      const optimizedStat = await readFile(optimizedVideoPath)
+      if (optimizedStat.length > 0 && optimizedStat.length < originalBytes.length) {
+        preparedVideoPath = optimizedVideoPath
+      }
+    } catch {
+      await unlink(optimizedVideoPath).catch(() => undefined)
+      optimizedVideoPath = undefined
+    }
+  }
+
+  const bytes = preparedVideoPath === videoPath ? originalBytes : await readFile(preparedVideoPath)
   if (bytes.length === 0) throw new Error(`WeChat video reply cannot send empty file: ${videoPath}`)
 
   const thumbPath = join(tmpdir(), `artemis-wechat-video-thumb-${Date.now()}-${randomBytes(4).toString('hex')}.jpg`)
@@ -370,25 +408,29 @@ async function prepareOutboundWeChatVideo(videoPath: string): Promise<WeChatPrep
   try {
     await execFileAsync(
       '/usr/local/bin/ffmpeg',
-      ['-y', '-i', videoPath, '-frames:v', '1', '-vf', 'scale=288:-2', '-q:v', '4', thumbPath],
+      ['-y', '-i', preparedVideoPath, '-frames:v', '1', '-vf', 'scale=288:-2', '-q:v', '4', thumbPath],
       { timeout: 30_000 },
     )
     cleanupNeeded = true
     const thumbBytes = await readFile(thumbPath)
     const dimensions = await probeImageDimensions(thumbPath)
     return {
-      path: videoPath,
+      path: preparedVideoPath,
       bytes,
       md5: createHash('md5').update(bytes).digest('hex'),
-      durationSeconds: await probeVideoDurationSeconds(videoPath),
+      durationSeconds: await probeVideoDurationSeconds(preparedVideoPath),
       thumbPath,
       thumbBytes,
       thumbWidth: dimensions.width,
       thumbHeight: dimensions.height,
-      cleanup: async () => { await unlink(thumbPath).catch(() => undefined) },
+      cleanup: async () => {
+        await unlink(thumbPath).catch(() => undefined)
+        if (optimizedVideoPath) await unlink(optimizedVideoPath).catch(() => undefined)
+      },
     }
   } catch (err) {
     if (cleanupNeeded) await unlink(thumbPath).catch(() => undefined)
+    if (optimizedVideoPath) await unlink(optimizedVideoPath).catch(() => undefined)
     throw new Error(`WeChat video thumbnail generation failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }

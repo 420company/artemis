@@ -54,6 +54,10 @@ function isConfiguredPlatform(platform: string): platform is BragiPlatformId {
   return platform === 'telegram' || platform === 'discord' || platform === 'wechat'
 }
 
+function isStaleWeChatContextError(err: unknown): boolean {
+  return err instanceof Error && /ret=-2\b/.test(err.message)
+}
+
 function normalizeOptionalTargetId(targetId: string | undefined): string | undefined {
   const trimmed = targetId?.trim()
   return trimmed || undefined
@@ -323,6 +327,9 @@ export async function sendBragiImageBroadcast(options: {
               }
               record.sent += 1
             } catch (err) {
+              if (isStaleWeChatContextError(err)) {
+                await wechatStore.clearContextToken(target)
+              }
               record.failed.push({ target, error: err instanceof Error ? err.message : String(err) })
             }
           }
@@ -463,6 +470,9 @@ export async function sendBragiVideoBroadcast(options: {
                 await client.sendVideo(target, videoPath, contextToken, signal)
                 record.sent += 1
               } catch (err) {
+                if (isStaleWeChatContextError(err)) {
+                  await wechatStore.clearContextToken(target)
+                }
                 record.failed.push({ target, error: err instanceof Error ? err.message : String(err) })
               }
             }

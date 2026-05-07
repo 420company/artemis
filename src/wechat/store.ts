@@ -119,6 +119,15 @@ export class WeChatStore {
     await this.save(data)
   }
 
+  async clearContextToken(peerUserId: string): Promise<void> {
+    const data = await this.load()
+    if (!data.contextTokens?.[peerUserId]) return
+    const next = { ...data.contextTokens }
+    delete next[peerUserId]
+    data.contextTokens = next
+    await this.save(data)
+  }
+
   isAuthorized(data: WeChatStoreData, fromUser: string): boolean {
     return data.allowedUsers.length === 0 ||
       data.allowedUsers.includes('*') ||

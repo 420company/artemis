@@ -43,6 +43,10 @@ function uniqStrings(values: Array<string | undefined>): string[] {
   return out
 }
 
+function isStaleWeChatContextError(err: unknown): boolean {
+  return err instanceof Error && /ret=-2\b/.test(err.message)
+}
+
 async function appendWeChatMediaDebugRecord(record: unknown): Promise<void> {
   await mkdir(WECHAT_MEDIA_DEBUG_DIR, { recursive: true })
   await appendFile(WECHAT_MEDIA_DEBUG_FILE, `${JSON.stringify(record)}\n`, 'utf8')
@@ -258,6 +262,10 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
           sent += 1
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
+          if (isStaleWeChatContextError(err)) {
+            await wechatStore.clearContextToken(targetId)
+            options.onInfo?.(`[wechat] cleared stale context_token for target=${targetId} after ret=-2`)
+          }
           failed.push({ target: targetId, error })
           options.onInfo?.(`[wechat] dream push to ${targetId} failed: ${error}`)
         }
@@ -393,7 +401,15 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
           `WeChat: no context token for ${targetId}. The user must send a message first before we can reply.`,
         )
       }
-      await client.sendText(targetId, text, contextToken, options.signal)
+      try {
+        await client.sendText(targetId, text, contextToken, options.signal)
+      } catch (err) {
+        if (isStaleWeChatContextError(err)) {
+          await wechatStore.clearContextToken(targetId)
+          options.onInfo?.(`[wechat] cleared stale context_token for target=${targetId} after ret=-2`)
+        }
+        throw err
+      }
     },
   })
   unregisterBridge()

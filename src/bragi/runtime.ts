@@ -199,6 +199,7 @@ function isDreamImageRequest(text: string): boolean {
 
 function isDreamVideoRequest(text: string): boolean {
   const normalized = text.replace(/\s+/g, '').toLowerCase()
+  if (/(生成|创建|制作|做成|转成|转为|变成|generate|create|make|render|produce)/i.test(normalized)) return false
   return /(latestdreamvideo|latest_dream_video|梦境视频|做梦视频|dreamvideo|dreammp4|mp4)/i.test(normalized)
 }
 
@@ -418,6 +419,8 @@ export async function runRemoteCommand(
         cwd: commandCwd,
         text: command.body,
         imageAttachments: command.images,
+        deliveryPlatform: opts.bridgePlatform,
+        deliveryTargetId: opts.targetId,
       })
       if (seedanceWorkflow.handled) {
         return {
