@@ -105,6 +105,16 @@ type WeChatPreparedVideo = {
   cleanup: () => Promise<void>
 }
 
+type WeChatVideoVariant = {
+  label: string
+  maxBytes: number
+  scale: string
+  videoBitrate: string
+  maxrate: string
+  bufsize: string
+  audioBitrate: string
+}
+
 // ─── public types ─────────────────────────────────────────────────────────────
 
 export type WeChatTextMessage = {
@@ -158,7 +168,11 @@ const WECHAT_IMAGE_SEND_MAX_ATTEMPTS = 3
 const WECHAT_SEND_MEDIA_MAX_RETRIES = 3
 const WECHAT_SEND_MEDIA_RETRY_DELAY_MS = 500
 const WECHAT_OUTBOUND_IMAGE_MAX_DIRECT_BYTES = 600_000
-const WECHAT_OUTBOUND_VIDEO_MAX_DIRECT_BYTES = 1_000_000
+const WECHAT_OUTBOUND_VIDEO_VARIANTS: WeChatVideoVariant[] = [
+  { label: 'wechat-360-500k', maxBytes: 600_000, scale: '360:-2', videoBitrate: '500k', maxrate: '500k', bufsize: '1000k', audioBitrate: '64k' },
+  { label: 'wechat-320-350k', maxBytes: 450_000, scale: '320:-2', videoBitrate: '350k', maxrate: '350k', bufsize: '700k', audioBitrate: '48k' },
+  { label: 'wechat-288-250k', maxBytes: 350_000, scale: '288:-2', videoBitrate: '250k', maxrate: '250k', bufsize: '500k', audioBitrate: '48k' },
+]
 const WECHAT_OUTBOUND_IMAGE_VARIANTS = [
   { maxDimension: 1280, quality: 80 },
   { maxDimension: 960, quality: 72 },
@@ -362,14 +376,17 @@ async function probeImageDimensions(imagePath: string): Promise<{ width: number;
   return { width: 288, height: 162 }
 }
 
-async function prepareOutboundWeChatVideo(videoPath: string): Promise<WeChatPreparedVideo> {
+async function prepareOutboundWeChatVideo(
+  videoPath: string,
+  variant: WeChatVideoVariant = WECHAT_OUTBOUND_VIDEO_VARIANTS[0],
+): Promise<WeChatPreparedVideo> {
   let preparedVideoPath = videoPath
   const originalBytes = await readFile(videoPath)
   if (originalBytes.length === 0) throw new Error(`WeChat video reply cannot send empty file: ${videoPath}`)
 
   let optimizedVideoPath: string | undefined
-  if (originalBytes.length > WECHAT_OUTBOUND_VIDEO_MAX_DIRECT_BYTES) {
-    optimizedVideoPath = join(tmpdir(), `artemis-wechat-video-${Date.now()}-${randomBytes(4).toString('hex')}.mp4`)
+  if (originalBytes.length > variant.maxBytes) {
+    optimizedVideoPath = join(tmpdir(), `artemis-wechat-video-${variant.label}-${Date.now()}-${randomBytes(4).toString('hex')}.mp4`)
     try {
       await execFileAsync(
         '/usr/local/bin/ffmpeg',
@@ -378,20 +395,22 @@ async function prepareOutboundWeChatVideo(videoPath: string): Promise<WeChatPrep
           '-i', videoPath,
           '-map', '0:v:0',
           '-map', '0:a?',
-          '-vf', 'scale=640:-2',
+          '-vf', `scale=${variant.scale}`,
           '-c:v', 'libx264',
           '-preset', 'veryfast',
-          '-crf', '32',
+          '-b:v', variant.videoBitrate,
+          '-maxrate', variant.maxrate,
+          '-bufsize', variant.bufsize,
           '-pix_fmt', 'yuv420p',
           '-c:a', 'aac',
-          '-b:a', '64k',
+          '-b:a', variant.audioBitrate,
           '-movflags', '+faststart',
           optimizedVideoPath,
         ],
-        { timeout: 120_000 },
+        { timeout: 180_000 },
       )
-      const optimizedStat = await readFile(optimizedVideoPath)
-      if (optimizedStat.length > 0 && optimizedStat.length < originalBytes.length) {
+      const optimizedBytes = await readFile(optimizedVideoPath)
+      if (optimizedBytes.length > 0 && optimizedBytes.length < originalBytes.length) {
         preparedVideoPath = optimizedVideoPath
       }
     } catch {
@@ -873,39 +892,46 @@ export class WeChatGatewayClient {
     }
 
     const filename = basename(videoPath)
-    onProgress?.(`[wechat] video send stage=prepare_video path=${videoPath}`)
-    const prepared = await prepareOutboundWeChatVideo(videoPath)
-    onProgress?.(`[wechat] video send stage=prepare_video_done bytes=${prepared.bytes.length} duration=${prepared.durationSeconds}s thumbBytes=${prepared.thumbBytes.length} thumb=${prepared.thumbWidth}x${prepared.thumbHeight}`)
-    try {
-      const uploaded = await this.uploadVideoWithThumbnail(peerUserId, prepared.bytes, prepared.thumbBytes, signal, onProgress)
-      const item = {
-        type: WECHAT_MESSAGE_ITEM_VIDEO,
-        video_item: {
-          media: {
-            encrypt_query_param: uploaded.video.encryptedQueryParam,
-            aes_key: formatOutboundAesKey(uploaded.aesKey),
-            encrypt_type: 1,
+    let lastError: Error | undefined
+    for (const variant of WECHAT_OUTBOUND_VIDEO_VARIANTS) {
+      onProgress?.(`[wechat] video send stage=prepare_video path=${videoPath} variant=${variant.label}`)
+      const prepared = await prepareOutboundWeChatVideo(videoPath, variant)
+      onProgress?.(`[wechat] video send stage=prepare_video_done variant=${variant.label} preparedPath=${prepared.path} bytes=${prepared.bytes.length} duration=${prepared.durationSeconds}s thumbBytes=${prepared.thumbBytes.length} thumb=${prepared.thumbWidth}x${prepared.thumbHeight}`)
+      try {
+        const uploaded = await this.uploadVideoWithThumbnail(peerUserId, prepared.bytes, prepared.thumbBytes, signal, onProgress)
+        const item = {
+          type: WECHAT_MESSAGE_ITEM_VIDEO,
+          video_item: {
+            media: {
+              encrypt_query_param: uploaded.video.encryptedQueryParam,
+              aes_key: formatOutboundAesKey(uploaded.aesKey),
+              encrypt_type: 1,
+            },
+            video_size: uploaded.video.cipherSize,
+            play_length: prepared.durationSeconds,
+            video_md5: prepared.md5,
+            thumb_media: {
+              encrypt_query_param: uploaded.thumb.encryptedQueryParam,
+              aes_key: formatOutboundAesKey(uploaded.aesKey),
+              encrypt_type: 1,
+            },
+            thumb_size: uploaded.thumb.cipherSize,
+            thumb_height: prepared.thumbHeight,
+            thumb_width: prepared.thumbWidth,
           },
-          video_size: uploaded.video.cipherSize,
-          play_length: prepared.durationSeconds,
-          video_md5: prepared.md5,
-          thumb_media: {
-            encrypt_query_param: uploaded.thumb.encryptedQueryParam,
-            aes_key: formatOutboundAesKey(uploaded.aesKey),
-            encrypt_type: 1,
-          },
-          thumb_size: uploaded.thumb.cipherSize,
-          thumb_height: prepared.thumbHeight,
-          thumb_width: prepared.thumbWidth,
-        },
+        }
+        onProgress?.(`[wechat] video send stage=sendmessage_start schema=video_item_cdn_media_v2 variant=${variant.label} videoCipherBytes=${uploaded.video.cipherSize} thumbCipherBytes=${uploaded.thumb.cipherSize}`)
+        const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendVideo', signal)
+        onProgress?.(`[wechat] video send stage=sendmessage_done schema=video_item_cdn_media_v2 variant=${variant.label} response=${JSON.stringify(response)}`)
+        return { filename, bytes: prepared.bytes.length, response, schema: `video_item_cdn_media_v2/${variant.label}` }
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        onProgress?.(`[wechat] video send stage=variant_failed variant=${variant.label} error=${lastError.message}`)
+      } finally {
+        await prepared.cleanup()
       }
-      onProgress?.(`[wechat] video send stage=sendmessage_start schema=video_item_cdn_media_v2 videoCipherBytes=${uploaded.video.cipherSize} thumbCipherBytes=${uploaded.thumb.cipherSize}`)
-      const response = await this.sendSingleMediaItemWithRetry(peerUserId, contextToken, item, 'sendVideo', signal)
-      onProgress?.(`[wechat] video send stage=sendmessage_done schema=video_item_cdn_media_v2 response=${JSON.stringify(response)}`)
-      return { filename, bytes: prepared.bytes.length, response, schema: 'video_item_cdn_media_v2' }
-    } finally {
-      await prepared.cleanup()
     }
+    throw lastError ?? new Error('WeChat video send failed')
   }
 
   async sendFile(

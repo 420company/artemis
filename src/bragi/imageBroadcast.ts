@@ -466,8 +466,10 @@ export async function sendBragiVideoBroadcast(options: {
               try {
                 const contextToken = wechatStore.getContextToken(wechatData, target)
                 if (!contextToken) throw new Error('missing WeChat context_token for target; send a fresh WeChat message to Artemis first')
-                const signal = AbortSignal.timeout(180_000)
-                await client.sendVideo(target, videoPath, contextToken, signal)
+                const signal = AbortSignal.timeout(600_000)
+                await client.sendVideo(target, videoPath, contextToken, signal, message => {
+                  if (process.env.ARTEMIS_DEBUG_WECHAT_VIDEO === '1') console.error(message)
+                })
                 record.sent += 1
               } catch (err) {
                 if (isStaleWeChatContextError(err)) {

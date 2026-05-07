@@ -238,8 +238,8 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
           }
           if (payload.videoPath) {
             const videoSignal = options.signal
-              ? AbortSignal.any([AbortSignal.timeout(180_000), options.signal])
-              : AbortSignal.timeout(180_000)
+              ? AbortSignal.any([AbortSignal.timeout(600_000), options.signal])
+              : AbortSignal.timeout(600_000)
             const sentVideo = await client.sendVideo(targetId, payload.videoPath, contextToken, videoSignal, options.onInfo)
             options.onInfo?.(`[wechat] video push accepted target=${targetId} file=${sentVideo.filename} bytes=${sentVideo.bytes} schema=${sentVideo.schema} response=${JSON.stringify(sentVideo.response)}`)
           } else if (payload.imagePath) {
