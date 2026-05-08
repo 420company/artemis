@@ -59,6 +59,7 @@ import {
 } from '../src/tools/visual/videoCapabilities.js'
 import { handleSeedanceMultimodalWorkflow as handleSeedanceMultimodalWorkflowRaw, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
 import {
+  buildProvidedTurnaroundSafetyDerivativeStory,
   buildSegmentKeyframePrompt,
   buildSuperVisualCharacterTurnaroundPrompt,
   isLikelyProvidedTurnaroundReferenceForTest,
@@ -2299,6 +2300,20 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       '/tmp/telegram-upload-01.png',
       'An illustrated character reference sheet showing the same woman in front view, side profile, and back view.',
     ),
+  )
+  const dynamicDerivativeStory = buildProvidedTurnaroundSafetyDerivativeStory({
+    story: 'Turn this exact reference into a safe video anchor.',
+    visionDescription: 'A copper humanoid robot with a triangular glass visor, asymmetrical shoulder armor, a teal cape, and a glowing hexagonal chest emblem.',
+    referenceNotes: ['keep the teal cape and hexagonal emblem unchanged'],
+  })
+  assert(
+    'super visual mode: safe derivative prompt uses dynamic vision inventory instead of job-specific hardcoded details',
+    dynamicDerivativeStory.includes('DYNAMIC FEATURE INVENTORY') &&
+      dynamicDerivativeStory.includes('copper humanoid robot') &&
+      dynamicDerivativeStory.includes('triangular glass visor') &&
+      dynamicDerivativeStory.includes('teal cape') &&
+      dynamicDerivativeStory.includes('hexagonal chest emblem') &&
+      !/lingerie|stockings|playing-card|playing card|robe transparency/i.test(dynamicDerivativeStory),
   )
   assert(
     'super visual upload: small 1.7MB turnaround PNG is not recompressed',

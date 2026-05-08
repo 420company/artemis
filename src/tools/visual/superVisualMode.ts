@@ -139,6 +139,41 @@ function compactList(values: string | string[] | undefined): string {
   return Array.isArray(values) ? values.map(compact).filter(Boolean).join(' | ') : '';
 }
 
+export function buildProvidedTurnaroundSafetyDerivativeStory(input: {
+  story: string;
+  visionDescription?: string | null;
+  referenceNotes?: string[];
+}): string {
+  const visionTruth = compact(input.visionDescription ?? undefined);
+  const referenceNotes = compactList(input.referenceNotes);
+  const dynamicInventory = visionTruth
+    ? [
+        'DYNAMIC FEATURE INVENTORY (extracted from the actual supplied reference; this is the lock list for the derivative):',
+        visionTruth,
+      ].join('\n')
+    : [
+        'DYNAMIC FEATURE INVENTORY:',
+        'Read the supplied image directly and build the lock list from what is actually visible. Do not use stock character defaults or examples from previous jobs.',
+      ].join('\n');
+  const notesBlock = referenceNotes
+    ? [
+        'USER REFERENCE NOTES (also authoritative when they describe the supplied reference):',
+        referenceNotes,
+      ].join('\n')
+    : '';
+
+  return [
+    input.story,
+    '',
+    'IDENTITY-PRESERVING SAFETY DERIVATIVE: the input is already a complete reference/turnaround and is the non-negotiable source of truth. This is NOT a redesign task. Make a trace-like / rotoscope-like illustrated derivative of the SAME subject only so downstream video providers receive a non-photographic reference.',
+    dynamicInventory,
+    notesBlock,
+    'Before drawing, internally extract and lock every visible identity-bearing feature from the supplied image: subject morphology/anatomy or product geometry, face/head structure if present, hair/fur/surface texture if present, body/build/proportions, silhouette, pose family, wardrobe/material layers, accessories, markings, logos/patterns, handheld or attached props, color palette, front/side/back differences, and any privacy/information orientation of props. Copy only features that are actually visible or explicitly supplied by the user.',
+    'The output may change only the rendering medium from photoreal/photo-like to provider-safe illustrated reference-sheet art. Identity, geometry, outfit/surface materials, accessories, markings, proportions, palette, and prop semantics must remain as close to the input as the model can reproduce.',
+    'Forbidden: changing the subject into a different person/object, changing age/build/species/product form, changing hairstyle/surface pattern, changing coverage/visibility of any mask/occluder, changing wardrobe/product design, changing color palette, removing visible accessories/markings/props, adding new identity-defining elements, adding text labels, adding extra subjects, or turning the reference sheet into an action scene.',
+  ].filter(Boolean).join('\n');
+}
+
 // Fixed prompt framework — character turnaround sheet.
 // The structural requirements (front/side/back full body, neutral background,
 // no labels, etc) NEVER change. When the user supplies an input image, the
@@ -961,14 +996,11 @@ export async function maybeGenerateSuperVisualReference(options: {
       const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
       const safePrompt = buildSuperVisualCharacterTurnaroundPrompt({
         title: options.title,
-        story: [
-          options.story,
-          '',
-          'IDENTITY-PRESERVING SAFETY DERIVATIVE: the input is already a complete three-view character turnaround and is the non-negotiable source of truth. This is NOT a redesign task. Make a trace-like / rotoscope-like illustrated derivative of the SAME person only so downstream video providers receive a non-photographic reference.',
-          'Copy the visible identity details one by one: same face shape, jawline, covered-eye mask shape and position, hair length / volume / waves / color, body proportions, skin tone, posture, lingerie cut, robe transparency and drape, stockings, jewelry, nail color, playing-card prop, and front/side/back silhouettes. Preserve the exact wardrobe and accessories; do not simplify them away.',
-          'Forbidden: changing the character into a different woman, changing age/build, changing hairstyle, changing mask coverage, changing lingerie design, changing color palette, removing stockings/robe/jewelry/cards, adding new costume pieces, adding text labels, adding extra people, or turning the reference sheet into an action scene.',
-          'The output may change only the rendering medium from photoreal/photo-like to provider-safe illustrated character-sheet art. Identity, outfit, accessories, proportions, and prop semantics must remain as close to the input as the model can reproduce.',
-        ].join('\n'),
+        story: buildProvidedTurnaroundSafetyDerivativeStory({
+          story: options.story,
+          visionDescription,
+          referenceNotes: options.action.referenceNotes,
+        }),
         ratio: options.ratio,
         referenceNotes: options.action.referenceNotes,
         continuity: options.action.continuity,
