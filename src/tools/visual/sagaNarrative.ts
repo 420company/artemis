@@ -650,6 +650,7 @@ export function buildSagaConstitution(entities: NarrativeEntities): string {
     `6. NARRATIVE ARC — For an N-shot video, shot 1 establishes ${protagonistLabel}; the middle shots develop tension/exploration; the final shot resolves with a memorable beat. Do not put the strongest beat in the middle.`,
     `7. STORYBEAT FORMAT — Each storyBeat is a TIMELINE of physical actions: "0–Xs: [subject] [verb in present-tense] [object/target]; [environmental motion]. Xs–Ys: [next verb] ... Ys–end: [resolving verb] ...". The subject of MOST timeline beats must be ${protagonistLabel}.`,
     `8. SPATIAL REALITY CHECK — Every action's effect must be physically caused by the action's actual contact in 3D space. Body parts only contact surfaces at the matching height. The most common failure: describing a hand-wave or arm-swipe at chest/shoulder level as "splashing water" or "rippling the surface" while water is at the protagonist's feet — this is geometrically impossible and reads as a clear AI artifact to viewers. To touch water, the protagonist must dip the hand DOWN to the water line, OR the foot/leg must impact the water. Symbolic gestures (waving, pointing, reaching up) at heights ABOVE the contact surface produce NO contact effect on that surface. Likewise: feet must touch the actual ground (not float above), hair and fabric drape by gravity unless lifted by motion or wind, limbs cannot pass through hair/fabric/walls. Obey the Spatial reality block above; never write a storyBeat that violates the forbidden spatial errors list.`,
+    `9. COMPOSITION DIVERSITY — Each shot's primary action+target combination must be UNIQUE within the video. Do NOT plan two shots that both end up as "she raises a card to her lips" or "she gazes into the camera holding the orb" — even if the titles are different, if the dominant pose / framing collapse onto the same iconic moment the downstream video model averages them and the audience sees the same shot twice. The 4-shot arc is: shot 1 establishes (entry / setup / first reveal — NEVER the climactic pose), middle shots develop (each adds a new body movement, prop interaction, or scene-state change), final shot resolves with the most memorable beat. Each storyBeat's first sub-segment (0–Xs) should differ in primary action verb AND target object from every other shot's first sub-segment.`,
     '═══════════════════════════════════════════════════════════════',
   );
 
@@ -823,7 +824,68 @@ export function runNarrativeCritic(args: {
     }
   }
 
+  // Rule 4 — COMPOSITION DIVERSITY: no two shots may share the same primary
+  // action+target signature. The classic failure mode (observed in early
+  // tests) is the planner producing 4 shots whose titles look distinct but
+  // whose storyBeats all converge on the same iconic pose (e.g., shots 1
+  // and 2 both ending up as "card raised to lips"). The downstream video
+  // model then "averages" the shots into the same composition. Detecting
+  // this at planning time, before generation, lets the rewriter spread the
+  // signatures across the timeline.
+  if (shots.length >= 2) {
+    const signatures = shots.map((shot) => extractCompositionSignature(shot));
+    for (let i = 1; i < shots.length; i += 1) {
+      const prev = signatures[i - 1]!;
+      const curr = signatures[i]!;
+      const sim = jaccardSimilarity(prev, curr);
+      // 0.5 threshold — tuned to flag clear overlap (≥half tokens shared)
+      // without pinging on natural scene continuity (same room, same wardrobe).
+      if (sim >= 0.5) {
+        const dupVio = violations.find((v) => v.shotIndex === shots[i]!.index);
+        const reason = `Rule 4 violated: shot ${i + 1} primary composition repeats shot ${i} (action+target token overlap = ${Math.round(sim * 100)}%). Two consecutive shots cannot collapse onto the same iconic pose; the timeline must progress.`;
+        if (dupVio) dupVio.reasons.push(reason);
+        else violations.push({ shotIndex: shots[i]!.index, shotTitle: shots[i]!.title, reasons: [reason] });
+      }
+    }
+  }
+
   return violations;
+}
+
+// Extract the composition signature for diversity checks. We pick the FIRST
+// timeline beat (the primary action of the shot) and tokenize, dropping
+// scene/setting filler so two shots aren't flagged just for sharing "room"
+// or "table". The remainder is the action+target footprint of the shot.
+const COMPOSITION_STOPWORDS = new Set([
+  'the', 'a', 'an', 'her', 'his', 'their', 'she', 'he', 'they',
+  '她', '他', '她们', '他们',
+  'shot', 'scene', 'frame', 'camera', 'view', '镜头', '画面', '场景',
+  'with', 'in', 'on', 'at', 'and', 'or', 'of', 'to', 'as', 'by', 'over',
+  '与', '在', '和', '或', '的', '里', '上', '中', '了', '后', '前',
+  '主角', 'protagonist',
+]);
+function extractCompositionSignature(shot: PlannedShotForCritic): Set<string> {
+  // Take everything before the first timeline-segment terminator. CJK uses 。
+  // Latin uses . — we also accept ; as a beat separator. We don't want to
+  // include the second/third sub-beat because they describe shot's progression
+  // INSIDE the shot, which can naturally echo the next shot's opening.
+  const beat = (shot.storyBeat ?? '').split(/[;。.；]/)[0] ?? '';
+  const visual = (shot.visualPrompt ?? '');
+  // Tokenize both halves, take meaningful tokens (≥2 chars, not stopwords).
+  const sig = new Set<string>();
+  for (const tok of tokenize(`${beat} ${visual}`)) {
+    if (tok.length < 2) continue;
+    if (COMPOSITION_STOPWORDS.has(tok)) continue;
+    sig.add(tok);
+  }
+  return sig;
+}
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  for (const x of a) if (b.has(x)) intersection += 1;
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
 }
 
 // ─── Self-dialogue rewriter ───────────────────────────────────────────────
@@ -852,6 +914,8 @@ Constraints:
 - All nouns (entities) in storyBeat must come from: protagonist, supportingCharacters, props, environments.
 - All verbs should come from the action vocabulary or be natural variants.
 - Each storyBeat must be a TIMELINE: "0–Xs: ... Xs–Ys: ... Ys–end: ..." with at least 2 sub-segments and concrete physical motion in each.
+- COMPOSITION DIVERSITY: when the violation reasons mention Rule 4 (or "primary composition repeats"), your rewrite MUST give this shot a DIFFERENT primary action verb AND a DIFFERENT primary target object from the neighboring shots. Look at nextShotHint and any prior shot beats in the context — pick an action / target combo that does NOT overlap with theirs. If the context shows another shot already does "card raised to lips", do NOT also write that pose; pick "card slides across felt" or "she leans toward the lamp" or another distinct beat.
+- All physical contact in the rewrite must obey the spatialReality block (when supplied). No effects without physical cause; body parts contact surfaces only at matching heights.
 - The "transition" closing-frame must visually hook into the user's next shot (which is described in the context).`;
 
 export async function rewriteShotWithDialogue(options: {

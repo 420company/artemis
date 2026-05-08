@@ -63,7 +63,7 @@ import {
   buildSuperVisualCharacterTurnaroundPrompt,
   isSuperVisualModeEligible,
 } from '../src/tools/visual/superVisualMode.js'
-import { buildSagaConstitution } from '../src/tools/visual/sagaNarrative.js'
+import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
 import {
@@ -2337,6 +2337,51 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     constitutionWithSpatial.includes('Spatial reality (3D physics') &&
       constitutionWithSpatial.includes('SPATIAL REALITY CHECK') &&
       constitutionWithSpatial.includes('wet sand at shoreline'),
+  )
+  // Composition diversity (Rule 4): two shots whose primary action+target
+  // collapse onto the same iconic pose must be flagged before generation.
+  const diversityViolations = runNarrativeCritic({
+    shots: [
+      {
+        index: 1,
+        title: '门缝紫光',
+        storyBeat: '0–2s: 主角缓缓将手中红色扑克牌举到唇边轻吻；紫光打在蕾丝眼罩上。',
+      },
+      {
+        index: 2,
+        title: '呢绒桌沿',
+        storyBeat: '0–2s: 主角再次将手中红色扑克牌缓缓举到唇边亲吻；蕾丝眼罩在紫光下反射。',
+      },
+      {
+        index: 3,
+        title: '俯身收尾',
+        storyBeat: '0–2s: 主角倾身越过桌面将牌缓缓贴到呢绒桌面上；红甲指尖压住牌角。',
+      },
+    ],
+    entities: {
+      protagonist: { name: '主角', type: 'character', confidence: 0.95, evidence: 'test' },
+      supportingCharacters: [],
+      props: ['红色扑克牌', '蕾丝眼罩', '呢绒桌面'],
+      environments: ['暗色扑克房'],
+      relationships: [],
+      actions: ['举牌', '亲吻', '倾身', '放牌'],
+      protagonistAccessories: [],
+      mode: 'character',
+      modeRationale: 'test',
+      source: 'llm',
+    },
+  })
+  assert(
+    'composition diversity: critic flags shot 2 when its primary composition collapses onto shot 1',
+    diversityViolations.some(
+      (v) => v.shotIndex === 2 && v.reasons.some((r) => r.includes('Rule 4 violated')),
+    ),
+  )
+  assert(
+    'composition diversity: critic does NOT flag shot 3 (its action+target are distinct)',
+    !diversityViolations.some(
+      (v) => v.shotIndex === 3 && v.reasons.some((r) => r.includes('Rule 4 violated')),
+    ),
   )
   assert(
     'video capabilities: Seedance 1.5 accepts explicit generated-audio requests',
