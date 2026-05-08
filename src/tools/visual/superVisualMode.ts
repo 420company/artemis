@@ -50,7 +50,7 @@ export type SuperVisualModeResult =
       referenceImagePath: string;
       promptPath: string;
       sourceAssetPath?: string;
-      mode: 'provided-turnaround' | 'image-to-image' | 'text-to-image';
+      mode: 'provided-turnaround' | 'provided-turnaround-safe-derivative' | 'image-to-image' | 'text-to-image';
       userImagesUsed: number;
       reason: string;
       // True when the user's input image was detected as a real-person
@@ -923,6 +923,105 @@ export async function maybeGenerateSuperVisualReference(options: {
         resolvedUserImagePaths: userInputs,
       };
     }
+    const originalReferencePath = path.join(superVisualDir, 'source-provided-turnaround' + (path.extname(providedTurnaroundByPath) || '.png'));
+    if (path.resolve(providedTurnaroundByPath) !== path.resolve(originalReferencePath)) {
+      await copyFile(providedTurnaroundByPath, originalReferencePath);
+    }
+    const visionDescription = await describeUserImageWithVision({
+      imagePath: providedTurnaroundByPath,
+      context: options.context,
+    });
+    if (visionDescription) {
+      await writeFile(
+        path.join(superVisualDir, 'character-vision-description.txt'),
+        visionDescription,
+        'utf8',
+      );
+    }
+    const providedLooksRealPerson = visionDescription ? looksLikeRealPersonDescription(visionDescription) : true;
+
+    const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
+    const imageProviderName = imageConfigured?.config.image.provider;
+    const imageModel = imageConfigured?.model ?? imageConfigured?.config.image.model;
+    const ineligible = getSuperVisualModeIneligibilityReason({
+      imageProvider: imageProviderName,
+      imageModel,
+      videoReferenceInputs: options.videoLimits.referenceInputs,
+    });
+
+    if (providedLooksRealPerson) {
+      if (!imageConfigured || ineligible) {
+        return {
+          enabled: false,
+          reason: `provided turnaround appears photoreal/real-person and no provider-safe illustrated derivative can be generated: ${ineligible ?? 'image generation provider is not configured'}`,
+          inputIsRealPerson: true,
+          resolvedUserImagePaths: userInputs,
+        };
+      }
+      const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
+      const safePrompt = buildSuperVisualCharacterTurnaroundPrompt({
+        title: options.title,
+        story: [
+          options.story,
+          '',
+          'The input is already a complete three-view character turnaround. Convert it into a provider-safe illustrated character reference sheet while preserving the exact same front/side/back identity, outfit, accessories, proportions, color palette, and visible props. Do not invent a different person.',
+        ].join('\n'),
+        ratio: options.ratio,
+        referenceNotes: options.action.referenceNotes,
+        continuity: options.action.continuity,
+        withUserImageInput: true,
+        visionDescription: visionDescription ?? undefined,
+        style: 'illustrated',
+        inputLooksRealPerson: true,
+      });
+      await writeFile(promptPath, safePrompt, 'utf8');
+      const apiKey = imageConfigured.config.image.apiKey?.trim();
+      const baseUrl = imageConfigured.config.image.baseUrl?.trim();
+      if (apiKey && baseUrl) {
+        toolLog(`🎨 Super Visual: 用户三视图疑似真人/照片质感，先生成 provider-safe 插画化身份锚。`);
+        const edit = await postOpenAIImageEdit({
+          baseUrl,
+          apiKey,
+          model: resolvedImageModel,
+          prompt: safePrompt,
+          inputImagePaths: [providedTurnaroundByPath],
+          size: '1536x1024',
+          quality: 'high',
+        });
+        if (edit.ok) {
+          const safeReferencePath = imageReferenceArtifactPath(options.projectDir, '.png');
+          await writeFile(safeReferencePath, edit.buffer);
+          toolLog(`✅ Super Visual: 已从用户三视图派生 provider-safe 身份锚 → ${safeReferencePath}`);
+          return {
+            enabled: true,
+            provider: describeVisualProvider(imageConfigured.config, 'image'),
+            model: resolvedImageModel,
+            referenceImagePath: safeReferencePath,
+            promptPath,
+            sourceAssetPath: originalReferencePath,
+            mode: 'provided-turnaround-safe-derivative',
+            userImagesUsed: 1,
+            reason: `generated provider-safe illustrated derivative from provided turnaround: ${providedTurnaroundByPath}`,
+            inputIsRealPerson: true,
+            resolvedUserImagePaths: userInputs,
+          };
+        }
+        if (/HTTP 5\d\d|upstream_error|rate.?limit|429|timeout|timed out|aborted/i.test(edit.error)) markRelaySick(edit.error);
+        return {
+          enabled: false,
+          reason: `provided turnaround appears photoreal/real-person but safe derivative generation failed: ${edit.error.slice(0, 200)}`,
+          inputIsRealPerson: true,
+          resolvedUserImagePaths: userInputs,
+        };
+      }
+      return {
+        enabled: false,
+        reason: 'provided turnaround appears photoreal/real-person but image edit credentials are unavailable; refusing to send the original directly to the video provider',
+        inputIsRealPerson: true,
+        resolvedUserImagePaths: userInputs,
+      };
+    }
+
     const referenceImagePath = imageReferenceArtifactPath(options.projectDir, providedTurnaroundByPath);
     if (path.resolve(providedTurnaroundByPath) !== path.resolve(referenceImagePath)) {
       await copyFile(providedTurnaroundByPath, referenceImagePath);
