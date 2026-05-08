@@ -1079,7 +1079,11 @@ export async function executeGenerateLongVideo(
             consecutivePrivacyFails += 1;
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频生成 API 内容过滤拦截了 chain frame，剥离 chain 后重试中（尝试 ${attempt + 2}/3）...`);
           } else if (imageBlocked && hasGlobalUserImageReferences && usingUserImageReferences) {
-            // Stylized reference_image rejected — drop and try first_frame only.
+            // reference_image got rejected — drop the user-supplied reference
+            // images and retry with whatever remaining anchors we have
+            // (per-segment AI keyframe + chain frame if active). If those are
+            // empty too, the next attempt falls through to text-only via
+            // segment.textOnlyPrompt (see hasAnyImageRef branch below).
             usingUserImageReferences = false;
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：reference_image 被内容过滤拦截，剥离 reference_image 后重试中（尝试 ${attempt + 2}/3）...`);
           } else if (audioBlocked && usingAudio) {
