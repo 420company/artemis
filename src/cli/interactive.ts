@@ -4245,6 +4245,7 @@ async function handleTurn(
     key: cwd ?? process.cwd(),
     cwd: cwd ?? process.cwd(),
     text: sagaInput,
+    locale,
     forceIntent: sagaForceIntent,
   })
   if (sagaWorkflow.handled) {
@@ -4280,6 +4281,7 @@ async function handleTurn(
       key: cwd ?? process.cwd(),
       cwd: cwd ?? process.cwd(),
       text: input,
+      locale,
     })
     if (seedanceWorkflow.handled) {
       viewport?.appendScrollBlock({

@@ -15,11 +15,24 @@ import { createVisualProvider } from './providers/interface.js';
 // Visual mode for `RELAY_SICK_COOLDOWN_MS` to avoid burning ~13 minutes per
 // long-video run. Reset on daemon restart.
 const RELAY_SICK_COOLDOWN_MS = 10 * 60 * 1000;
+const IMAGE_EDIT_TOTAL_TIMEOUT_MS = 4 * 60 * 1000;
+const SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS = IMAGE_EDIT_TOTAL_TIMEOUT_MS + 15_000;
 let relaySickUntil = 0;
 function isRelaySick(): boolean { return Date.now() < relaySickUntil; }
 function markRelaySick(reason: string): void {
   relaySickUntil = Date.now() + RELAY_SICK_COOLDOWN_MS;
   toolWarn(`⚠️ Super Visual: 标记 image relay 为 sick（10 分钟内跳过三视图生成）— 原因: ${reason.slice(0, 160)}`);
+}
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
@@ -540,7 +553,12 @@ async function postOpenAIImageEdit(options: {
   const transientStatuses = new Set([429, 500, 502, 503, 504]);
   const attempts = 3;
   let lastError = '';
+  const startedAt = Date.now();
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const remainingMs = IMAGE_EDIT_TOTAL_TIMEOUT_MS - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      return { ok: false, error: `images/edits timed out after ${Math.round(IMAGE_EDIT_TOTAL_TIMEOUT_MS / 1000)}s` };
+    }
     const form = new FormData();
     form.append('model', options.model);
     form.append('prompt', options.prompt);
@@ -570,6 +588,7 @@ async function postOpenAIImageEdit(options: {
         method: 'POST',
         headers: { Authorization: `Bearer ${options.apiKey}` },
         body: form,
+        signal: AbortSignal.timeout(Math.max(1000, remainingMs)),
       });
     } catch (error) {
       lastError = `network error: ${error instanceof Error ? error.message : String(error)}`;
@@ -601,7 +620,7 @@ async function postOpenAIImageEdit(options: {
       }
       if (item.b64_json) return { ok: true, buffer: Buffer.from(item.b64_json, 'base64') };
       if (item.url) {
-        const downloaded = await fetch(item.url);
+        const downloaded = await fetch(item.url, { signal: AbortSignal.timeout(60_000) });
         if (!downloaded.ok) return { ok: false, error: `download failed: ${downloaded.status}` };
         const ab = await downloaded.arrayBuffer();
         return { ok: true, buffer: Buffer.from(ab) };
@@ -944,7 +963,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     toolWarn(`⚠️ Super Visual: image-to-image 失败（${edit.error.slice(0, 200)}）。`);
     if (!visionDescription) {
       const errorText = `image-to-image failed and no vision description available; refusing to fabricate an unrelated turnaround. Detail: ${edit.error.slice(0, 200)}`;
-      if (/HTTP 5\d\d|upstream_error|rate.?limit|429/i.test(edit.error)) markRelaySick(edit.error);
+      if (/HTTP 5\d\d|upstream_error|rate.?limit|429|timeout|timed out|aborted/i.test(edit.error)) markRelaySick(edit.error);
       toolWarn(`⚠️ Super Visual: 没有 vision-describe 兜底，跳过 text-to-image fallback（避免生成与原图无关的角色）。`);
       return {
         enabled: false,
@@ -1119,15 +1138,22 @@ export async function generateSegmentKeyframe(options: {
     const inputImagePaths = withPreviousLastFrame
       ? [options.turnaroundPath, options.previousLastFramePath!]
       : [options.turnaroundPath];
-    const edit = await postOpenAIImageEdit({
-      baseUrl,
-      apiKey,
-      model: resolvedImageModel,
-      prompt,
-      inputImagePaths,
-      size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
-      quality: 'high',
-    });
+    const edit = await withTimeout(
+      postOpenAIImageEdit({
+        baseUrl,
+        apiKey,
+        model: resolvedImageModel,
+        prompt,
+        inputImagePaths,
+        size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
+        quality: 'high',
+      }),
+      SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS,
+      'segment keyframe image edit',
+    ).catch((error) => ({
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    }));
     if (edit.ok) {
       const framePath = segmentKeyframePath(options.projectDir, options.shotIndex);
       await writeFile(framePath, edit.buffer);

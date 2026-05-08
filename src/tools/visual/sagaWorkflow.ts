@@ -18,15 +18,23 @@ import {
 } from './sagaNarrative.js';
 import { pickLocale, type UiLocale } from '../../cli/locale.js';
 
-// Detect UI locale from a user-supplied text sample. Heuristic: if the
-// sample contains more CJK characters than Latin letters, it's Chinese;
-// otherwise English. Used to localize Saga workflow replies dynamically
-// per user instead of relying on global env vars (which are server-side).
+// Fallback locale detection for older callers that cannot pass the selected UI
+// locale explicitly.
 function detectLocaleFromText(text: string): UiLocale {
   if (!text) return 'en';
   const cjk = (text.match(/[一-鿿]/g) ?? []).length;
   const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+
+  // Prefer Chinese when the user supplied substantive Chinese text, even if the
+  // message also contains large English policy/tooling blocks. The previous
+  // cjk >= latin heuristic misclassified mixed Chinese requests as English when
+  // embedded English instructions outnumbered the user's Chinese brief.
+  if (cjk >= 8) return 'zh-CN';
   return cjk >= latin ? 'zh-CN' : 'en';
+}
+
+export function resolveSagaWorkflowLocaleForTest(text: string, explicitLocale?: UiLocale): UiLocale {
+  return explicitLocale ?? detectLocaleFromText(text);
 }
 
 export type SagaWorkflowScope = 'cli' | 'bridge';
@@ -36,6 +44,7 @@ export type SagaWorkflowInput = {
   key: string;
   cwd: string;
   text: string;
+  locale?: UiLocale;
   imageAttachments?: ImageAttachment[];
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
   deliveryTargetId?: string;
@@ -63,7 +72,8 @@ type SagaWorkflowState = {
   referenceVideoPaths: string[];
   referenceAudioPaths: string[];
   referenceNotes: string[];
-  // UI locale detected from user's first text input. Drives reply language.
+  // UI locale selected by the caller. Falls back to text detection only for
+  // older callers that do not pass a locale.
   locale: UiLocale;
   // additional substantive story text the user types during collecting_refs
   accumulatedStory: string[];
@@ -709,7 +719,7 @@ function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWor
     referenceVideoPaths: [],
     referenceAudioPaths: [],
     referenceNotes: [],
-    locale: detectLocaleFromText(input.text),
+    locale: input.locale ?? detectLocaleFromText(input.text),
     accumulatedStory: [],
     prefilledDuration: clampDuration(extractTargetDuration(input.text)),
     deliveryPlatform: input.deliveryPlatform,
@@ -727,6 +737,8 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
   // ─── continuing an active workflow ──────────────────────────────────
   if (state) {
+    if (input.locale) state.locale = input.locale;
+
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
       return { handled: true, reply: pickLocale(state.locale, { zh: '已停止本次生成流程。', en: 'This generation has been stopped.' }) };

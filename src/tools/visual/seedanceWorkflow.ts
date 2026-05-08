@@ -8,6 +8,7 @@ import {
   isBytePlusProvider,
   resolveVideoModelCapabilities,
 } from './videoCapabilities.js';
+import { pickLocale, type UiLocale } from '../../cli/locale.js';
 
 export type SeedanceWorkflowScope = 'cli' | 'bridge';
 
@@ -16,6 +17,7 @@ export type SeedanceWorkflowInput = {
   key: string;
   cwd: string;
   text: string;
+  locale?: UiLocale;
   imageAttachments?: ImageAttachment[];
   latestDream?: SeedanceDreamSource | null;
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
@@ -48,6 +50,7 @@ type SeedanceWorkflowState = {
   referenceAudioPaths: string[];
   duration?: number;
   generateAudio: boolean;
+  locale: UiLocale;
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
   deliveryTargetId?: string;
   stage: SeedanceWorkflowStage;
@@ -265,54 +268,101 @@ function buildDreamVideoPrompt(dream: SeedanceDreamSource, userRequest: string):
   ].join('\n');
 }
 
-function buildOfferMessage(scope: SeedanceWorkflowScope, hasUnusableAttachment: boolean, dreamSource?: SeedanceDreamSource): string {
+function buildOfferMessage(scope: SeedanceWorkflowScope, locale: UiLocale, hasUnusableAttachment: boolean, dreamSource?: SeedanceDreamSource): string {
   const attachmentNote = hasUnusableAttachment
-    ? '\n\n我已看到你发送了图片附件，会尽量转成 Base64 作为图片参考；视频/音频附件仍需要 URL 或后续 asset 上传能力。'
+    ? pickLocale(locale, {
+      zh: '\n\n我已看到你发送了图片附件，会尽量转成 Base64 作为图片参考；视频/音频附件仍需要 URL 或后续 asset 上传能力。',
+      en: '\n\nI saw your image attachment and will try to convert it to Base64 as an image reference; video/audio attachments still need URLs or later asset-upload support.',
+    })
     : '';
   const dreamLine = dreamSource
-    ? `- 回复“使用最新梦境”，直接用最新梦境日记（${dreamSource.id}）作为文字参考生成梦境视频`
+    ? pickLocale(locale, {
+      zh: `- 回复“使用最新梦境”，直接用最新梦境日记（${dreamSource.id}）作为文字参考生成梦境视频`,
+      en: `- Reply "use latest dream" to use the latest dream journal (${dreamSource.id}) as the text reference`,
+    })
     : '';
   if (scope === 'cli') {
-    return [
-      '当前配置的视频模型是 Seedance 2.0 Pro，多模态视频模型。',
-      '它支持用文字 + 图片参考 + 视频参考 + 音频参考一起生成视频。',
-      '',
-      '是否添加参考素材来提升生成质量？',
-      dreamLine,
-      '- 回复“添加”，然后发送图片路径/图片 URL、视频 URL、音频 URL 和补充文字',
-      '- 回复“直接生成”，只用当前文字生成',
-      '- 回复“取消”，放弃本次视频生成',
-      attachmentNote,
-    ].join('\n');
+    return pickLocale(locale, {
+      zh: [
+        '当前配置的视频模型是 Seedance 2.0 Pro，多模态视频模型。',
+        '它支持用文字 + 图片参考 + 视频参考 + 音频参考一起生成视频。',
+        '',
+        '是否添加参考素材来提升生成质量？',
+        dreamLine,
+        '- 回复“添加”，然后发送图片路径/图片 URL、视频 URL、音频 URL 和补充文字',
+        '- 回复“直接生成”，只用当前文字生成',
+        '- 回复“取消”，放弃本次视频生成',
+        attachmentNote,
+      ].join('\n'),
+      en: [
+        'The configured video model is Seedance 2.0 Pro, a multimodal video model.',
+        'It can generate video from text plus image, video, and audio references.',
+        '',
+        'Do you want to add references to improve generation quality?',
+        dreamLine,
+        '- Reply "add", then send image paths/image URLs, video URLs, audio URLs, and extra text',
+        '- Reply "direct generate" to generate from the current text only',
+        '- Reply "cancel" to stop this video generation',
+        attachmentNote,
+      ].join('\n'),
+    });
   }
-  return [
-    '当前视频模型是 Seedance 2.0 Pro，支持多模态参考生成。',
-    ...(dreamSource ? [`可回复“使用最新梦境”，直接用最新梦境日记（${dreamSource.id}）作为文字参考生成梦境视频。`] : []),
-    '你可以继续发送图片 URL、视频 URL、音频 URL 和补充文字；完成后回复“开始生成”。',
-    '回复“直接生成”则只用当前文字生成；回复“取消”放弃。',
-    attachmentNote,
-  ].filter(Boolean).join('\n');
+  return pickLocale(locale, {
+    zh: [
+      '当前视频模型是 Seedance 2.0 Pro，支持多模态参考生成。',
+      ...(dreamSource ? [`可回复“使用最新梦境”，直接用最新梦境日记（${dreamSource.id}）作为文字参考生成梦境视频。`] : []),
+      '你可以继续发送图片 URL、视频 URL、音频 URL 和补充文字；完成后回复“开始生成”。',
+      '回复“直接生成”则只用当前文字生成；回复“取消”放弃。',
+      attachmentNote,
+    ].filter(Boolean).join('\n'),
+    en: [
+      'The current video model is Seedance 2.0 Pro and supports multimodal references.',
+      ...(dreamSource ? [`Reply "use latest dream" to use the latest dream journal (${dreamSource.id}) as the text reference.`] : []),
+      'You can keep sending image URLs, video URLs, audio URLs, and extra text; reply "start" when ready.',
+      'Reply "direct generate" to use only the current text; reply "cancel" to stop.',
+      attachmentNote,
+    ].filter(Boolean).join('\n'),
+  });
 }
 
 function buildCollectingMessage(state: SeedanceWorkflowState, hasUnusableAttachment: boolean): string {
-  const lines = [
-    '已进入 Seedance 2.0 Pro 多模态视频工作流。',
-    `已收集：图片 ${state.referenceImageUrls.length + state.referenceImagePaths.length} 个，视频 ${state.referenceVideoUrls.length + state.referenceVideoPaths.length} 个，音频 ${state.referenceAudioUrls.length + state.referenceAudioPaths.length} 个。`,
-  ];
+  const lines = state.locale === 'zh-CN'
+    ? [
+      '已进入 Seedance 2.0 Pro 多模态视频工作流。',
+      `已收集：图片 ${state.referenceImageUrls.length + state.referenceImagePaths.length} 个，视频 ${state.referenceVideoUrls.length + state.referenceVideoPaths.length} 个，音频 ${state.referenceAudioUrls.length + state.referenceAudioPaths.length} 个。`,
+    ]
+    : [
+      'Entered the Seedance 2.0 Pro multimodal video workflow.',
+      `Collected: ${state.referenceImageUrls.length + state.referenceImagePaths.length} images, ${state.referenceVideoUrls.length + state.referenceVideoPaths.length} videos, ${state.referenceAudioUrls.length + state.referenceAudioPaths.length} audio references.`,
+    ];
   if (hasUnusableAttachment) {
-    lines.push('提示：图片附件会转成 Base64；视频/音频附件目前不能直接转公网 URL。');
+    lines.push(pickLocale(state.locale, {
+      zh: '提示：图片附件会转成 Base64；视频/音频附件目前不能直接转公网 URL。',
+      en: 'Note: image attachments will be converted to Base64; video/audio attachments cannot be converted to public URLs yet.',
+    }));
   }
-  lines.push('继续发送参考 URL/本地图片路径或补充文字；完成后回复“开始生成”。');
+  lines.push(pickLocale(state.locale, {
+    zh: '继续发送参考 URL/本地图片路径或补充文字；完成后回复“开始生成”。',
+    en: 'Keep sending reference URLs/local image paths or extra text; reply "start" when ready.',
+  }));
   return lines.join('\n');
 }
 
 function buildDurationMessage(state: SeedanceWorkflowState): string {
-  return [
-    '最后确认：请选择 Seedance 2.0 Pro 视频时长。',
-    `已收集参考素材 ${referenceCount(state)} 个。`,
-    '可回复：4、5、10、15 秒；或回复“默认/跳过”使用 5 秒。',
-    '默认生成有声视频；如果不要声音，请明确说“静音/无声”。',
-  ].join('\n');
+  return pickLocale(state.locale, {
+    zh: [
+      '最后确认：请选择 Seedance 2.0 Pro 视频时长。',
+      `已收集参考素材 ${referenceCount(state)} 个。`,
+      '可回复：4、5、10、15 秒；或回复“默认/跳过”使用 5 秒。',
+      '默认生成有声视频；如果不要声音，请明确说“静音/无声”。',
+    ].join('\n'),
+    en: [
+      'Final confirmation: choose the Seedance 2.0 Pro video duration.',
+      `Collected ${referenceCount(state)} reference item(s).`,
+      'Reply with 4, 5, 10, or 15 seconds; or reply "default/skip" to use 5 seconds.',
+      'Audio is generated by default; say "silent/no audio" if you do not want sound.',
+    ].join('\n'),
+  });
 }
 
 function wantsAudio(text: string): boolean {
@@ -425,9 +475,17 @@ export async function handleSeedanceMultimodalWorkflow(
   const hasUnusableAttachment = Boolean(input.imageAttachments?.some((attachment) => !attachment.sourceUrl && !attachment.data));
 
   if (state) {
+    if (input.locale) state.locale = input.locale;
+
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
-      return { handled: true, reply: '已取消 Seedance 2.0 Pro 多模态视频生成。' };
+      return {
+        handled: true,
+        reply: pickLocale(state.locale, {
+          zh: '已取消 Seedance 2.0 Pro 多模态视频生成。',
+          en: 'Canceled Seedance 2.0 Pro multimodal video generation.',
+        }),
+      };
     }
 
     if (isSeedanceWorkflowSupportDiscussion(text)) {
@@ -450,7 +508,7 @@ export async function handleSeedanceMultimodalWorkflow(
         state.dreamSource = undefined;
         state.stage = 'collecting_refs';
         state.updatedAt = Date.now();
-        return { handled: true, reply: buildOfferMessage(input.scope, hasUnusableAttachment) };
+        return { handled: true, reply: buildOfferMessage(input.scope, state.locale, hasUnusableAttachment) };
       }
       mergeReferences(state, refs);
       if (hasUsableRefs) {
@@ -460,10 +518,16 @@ export async function handleSeedanceMultimodalWorkflow(
       }
       return {
         handled: true,
-        reply: [
-          `是否使用最新梦境日记（${state.dreamSource?.id ?? 'latest'}）作为文字参考？`,
-          '回复“使用最新梦境”继续；回复“不用/添加素材”则按普通 Seedance 2.0 多模态流程继续；回复“取消”放弃。',
-        ].join('\n'),
+        reply: pickLocale(state.locale, {
+          zh: [
+            `是否使用最新梦境日记（${state.dreamSource?.id ?? 'latest'}）作为文字参考？`,
+            '回复“使用最新梦境”继续；回复“不用/添加素材”则按普通 Seedance 2.0 多模态流程继续；回复“取消”放弃。',
+          ].join('\n'),
+          en: [
+            `Use the latest dream journal (${state.dreamSource?.id ?? 'latest'}) as the text reference?`,
+            'Reply "use latest dream" to continue; reply "no/add references" for the normal Seedance 2.0 multimodal flow; reply "cancel" to stop.',
+          ].join('\n'),
+        }),
       };
     }
 
@@ -517,6 +581,7 @@ export async function handleSeedanceMultimodalWorkflow(
     referenceVideoPaths: refs.videoPaths,
     referenceAudioPaths: refs.audioPaths,
     generateAudio: !wantsSilence(text),
+    locale: input.locale ?? 'zh-CN',
     deliveryPlatform: input.deliveryPlatform,
     deliveryTargetId: input.deliveryTargetId,
     stage: 'collecting_refs',
@@ -537,13 +602,22 @@ export async function handleSeedanceMultimodalWorkflow(
     WORKFLOWS.set(key, nextState);
     return {
       handled: true,
-      reply: [
-        '检测到你要生成梦境视频，且当前视频模型是 Seedance 2.0 Pro。',
-        `是否直接使用最新梦境日记（${latestDream.id}）作为视频生成的文字参考？`,
-        '- 回复“使用最新梦境”：用日记文本生成梦境视频，并自动套用 Seedance 2.0 Pro Director 优化',
-        '- 回复“添加素材/不用”：按原 Seedance 2.0 多模态流程继续，可继续发图片/视频/音频参考',
-        '- 回复“取消”：放弃本次视频生成',
-      ].join('\n'),
+      reply: pickLocale(nextState.locale, {
+        zh: [
+          '检测到你要生成梦境视频，且当前视频模型是 Seedance 2.0 Pro。',
+          `是否直接使用最新梦境日记（${latestDream.id}）作为视频生成的文字参考？`,
+          '- 回复“使用最新梦境”：用日记文本生成梦境视频，并自动套用 Seedance 2.0 Pro Director 优化',
+          '- 回复“添加素材/不用”：按原 Seedance 2.0 多模态流程继续，可继续发图片/视频/音频参考',
+          '- 回复“取消”：放弃本次视频生成',
+        ].join('\n'),
+        en: [
+          'Detected a dream-video request, and the current video model is Seedance 2.0 Pro.',
+          `Use the latest dream journal (${latestDream.id}) directly as the text reference?`,
+          '- Reply "use latest dream": generate from the journal text with Seedance 2.0 Pro Director optimization',
+          '- Reply "add references/no": continue with the normal Seedance 2.0 multimodal flow and send image/video/audio references',
+          '- Reply "cancel": stop this video generation',
+        ].join('\n'),
+      }),
     };
   }
 
@@ -551,7 +625,7 @@ export async function handleSeedanceMultimodalWorkflow(
   if (referenceCount(nextState) > 0) {
     return { handled: true, reply: buildCollectingMessage(nextState, hasUnusableAttachment) };
   }
-  return { handled: true, reply: buildOfferMessage(input.scope, hasUnusableAttachment, latestDream ?? undefined) };
+  return { handled: true, reply: buildOfferMessage(input.scope, nextState.locale, hasUnusableAttachment, latestDream ?? undefined) };
 }
 
 export function clearSeedanceMultimodalWorkflow(scope: SeedanceWorkflowScope, key: string): void {
