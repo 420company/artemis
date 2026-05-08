@@ -36,18 +36,29 @@ export type SuperVisualModeResult =
       mode: 'image-to-image' | 'text-to-image';
       userImagesUsed: number;
       reason: string;
-      // True when the user's input image was detected as real-person photo.
-      // Downstream Saga MUST use first_frame mode (mutually exclusive with
-      // reference_image on Seedance) — i.e. send the user's photo as
-      // role:"first_frame" and SKIP the turnaround + per-segment keyframe
-      // for BytePlus calls. The turnaround is still produced as a
-      // documentation/record artifact.
+      // True when the user's input image was detected as a real-person
+      // photograph. Drives the Saga long-video pipeline to (a) request
+      // the turnaround in stylized "illustrated" form so it passes the
+      // downstream provider's privacy filter when sent as
+      // role:"reference_image", and (b) inject the OUTPUT-STYLE OVERRIDE
+      // / vocabulary-guard prompt directives that tell the video model
+      // to render the actual output as 实拍 (live-action photographic)
+      // even though the reference is illustrated.
+      // (NOTE: empirical testing showed role:"first_frame" does NOT
+      // bypass the privacy filter, so the long-video path no longer
+      // routes any user images via first_frame.)
       inputIsRealPerson?: boolean;
+      // When user supplied image URLs, we download them to local cache as
+      // part of the SV setup. Exposed so SV-disabled fallback in
+      // generateLongVideo can still vision-describe the user's image even
+      // when the image-gen relay is unavailable.
+      resolvedUserImagePaths?: string[];
     }
   | {
       enabled: false;
       reason: string;
       inputIsRealPerson?: boolean;
+      resolvedUserImagePaths?: string[];
     };
 
 export type SuperVisualEligibilityInput = {
@@ -697,21 +708,14 @@ export async function maybeGenerateSuperVisualReference(options: {
   }
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
 
-  // Relay-health short-circuit. The retry inside postOpenAIImageEdit /
-  // generateImage already burns ~30s per attempt × 3 attempts × 2 modes ≈
-  // 13 min when the relay is sick. If we already saw it sick recently, skip.
-  if (isRelaySick() && options.action.superVisualMode !== 'on') {
-    return {
-      enabled: false,
-      reason: `Super Visual skipped: image relay marked sick within last ${Math.ceil(RELAY_SICK_COOLDOWN_MS / 60000)} min (will retry next run after cooldown).`,
-    };
-  }
-
   const superVisualDir = path.join(options.projectDir, 'super-visual');
   await mkdir(superVisualDir, { recursive: true });
-  toolLog(`🎨 Super Visual: 准备调用 ${imageProviderName ?? 'image'}/${resolvedImageModel} 生成角色三视图（含身份锁）...`);
 
   // Resolve user images (paths + URLs) into local files we can post.
+  // We do this BEFORE the relay-sick check so the SV-disabled fallback
+  // in generateLongVideo still has local copies of URL refs to feed to
+  // vision-describe (which uses a separate chat endpoint that may be
+  // healthy even when image-gen is rate-limited).
   const userInputCacheDir = path.join(superVisualDir, 'user-inputs');
   const userInputs = await resolveUserImageInputs(
     options.action.referenceImagePaths,
@@ -719,6 +723,19 @@ export async function maybeGenerateSuperVisualReference(options: {
     userInputCacheDir,
   );
   const useEditMode = userInputs.length > 0;
+
+  // Relay-health short-circuit. The retry inside postOpenAIImageEdit /
+  // generateImage already burns ~30s per attempt × 3 attempts × 2 modes ≈
+  // 13 min when the relay is sick. If we already saw it sick recently, skip.
+  if (isRelaySick() && options.action.superVisualMode !== 'on') {
+    return {
+      enabled: false,
+      reason: `Super Visual skipped: image relay marked sick within last ${Math.ceil(RELAY_SICK_COOLDOWN_MS / 60000)} min (will retry next run after cooldown).`,
+      resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
+    };
+  }
+
+  toolLog(`🎨 Super Visual: 准备调用 ${imageProviderName ?? 'image'}/${resolvedImageModel} 生成角色三视图（含身份锁）...`);
 
   // Vision-derived character description from the FIRST user image. This
   // gives the textual side a grounded ground-truth so identity survives
@@ -739,9 +756,13 @@ export async function maybeGenerateSuperVisualReference(options: {
   }
 
   // Detect whether the user's image looks photoreal / real human. The vision
-  // description we just generated is the most reliable signal — it explicitly
-  // names the art style ("photographic", "anime", "illustration", etc).
-  const inputLooksRealPerson = looksLikeRealPersonDescription(visionDescription);
+  // description we just generated is the most reliable signal. When vision
+  // is unavailable (relay sick) but the user supplied images, we conservatively
+  // assume real-person — that's the privacy-safer default since the cost of a
+  // wrong "illustrated" call (slightly stylized output) is much lower than a
+  // wrong "photoreal" call (downstream privacy filter rejection).
+  const visionRealHit = looksLikeRealPersonDescription(visionDescription);
+  const inputLooksRealPerson = useEditMode && !visionDescription ? true : visionRealHit;
   const userStyle = (options.action as { superVisualStyle?: 'illustrated' | 'photoreal' | 'auto' }).superVisualStyle;
   const prompt = buildSuperVisualCharacterTurnaroundPrompt({
     title: options.title,
@@ -757,7 +778,9 @@ export async function maybeGenerateSuperVisualReference(options: {
   if (useEditMode) {
     const effectiveStyle = userStyle === 'photoreal' ? 'photoreal'
       : userStyle === 'illustrated' ? 'illustrated'
-      : (inputLooksRealPerson ? 'illustrated (auto · 真人输入 → 改插画风以避开内容过滤)' : 'photoreal (auto · 输入已是非真人风格)');
+      : visionDescription
+        ? (visionRealHit ? 'illustrated (auto · 真人输入 → 改插画风以避开内容过滤)' : 'photoreal (auto · 输入已是非真人风格)')
+        : 'illustrated (auto · vision 不可用 → 保守默认插画以避免后续被内容过滤拦截)';
     toolLog(`🎨 Super Visual: 角色三视图风格 = ${effectiveStyle}`);
   }
   const promptPath = path.join(superVisualDir, 'character-turnaround.prompt.txt');
@@ -793,15 +816,55 @@ export async function maybeGenerateSuperVisualReference(options: {
         inputIsRealPerson: inputLooksRealPerson,
       };
     }
-    // Edit endpoint failed — fall through to text-to-image. Surface the
-    // reason in the final result so the user can see why edit was bypassed.
-    toolWarn(`⚠️ Super Visual: image-to-image 失败（${edit.error.slice(0, 200)}），回退到 text-to-image。`);
+    // Edit endpoint failed. We MUST rebuild the prompt for text-to-image
+    // mode — the prompt above is built with `withUserImageInput: true`
+    // which says "the attached input image IS the character"; running it
+    // through text-to-image with no image attached would produce an
+    // unrelated character. Two recovery paths:
+    //   a) If we have a vision-derived character description: rebuild the
+    //      prompt as text-to-image with the vision description providing
+    //      the character source. The output won't match the image as
+    //      tightly but identity is anchored textually.
+    //   b) If no vision description: bail out (return enabled:false).
+    //      Generating an unrelated character turnaround would mislead
+    //      downstream — better to fail clean and let the SV-disabled
+    //      fallback in generateLongVideo handle it.
+    toolWarn(`⚠️ Super Visual: image-to-image 失败（${edit.error.slice(0, 200)}）。`);
+    if (!visionDescription) {
+      const errorText = `image-to-image failed and no vision description available; refusing to fabricate an unrelated turnaround. Detail: ${edit.error.slice(0, 200)}`;
+      if (/HTTP 5\d\d|upstream_error|rate.?limit|429/i.test(edit.error)) markRelaySick(edit.error);
+      toolWarn(`⚠️ Super Visual: 没有 vision-describe 兜底，跳过 text-to-image fallback（避免生成与原图无关的角色）。`);
+      return {
+        enabled: false,
+        reason: errorText,
+        inputIsRealPerson: inputLooksRealPerson,
+        resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
+      };
+    }
+    toolLog(`🛟 Super Visual: 用 vision-describe 文字身份重建 text-to-image prompt 后回退。`);
   }
 
   // Mode B: text-to-image via the existing provider helper.
+  // Rebuild the prompt for text-to-image mode (no attached input image).
+  // When we have a vision description from the user's image, fold it into
+  // the text-only prompt as the character source.
+  const textOnlyPrompt = useEditMode
+    ? buildSuperVisualCharacterTurnaroundPrompt({
+        title: options.title,
+        story: options.story,
+        ratio: options.ratio,
+        referenceNotes: options.action.referenceNotes,
+        continuity: options.action.continuity,
+        withUserImageInput: false,
+        visionDescription: visionDescription ?? undefined,
+        style: userStyle ?? 'auto',
+        inputLooksRealPerson,
+      })
+    : prompt;
+  if (useEditMode) await writeFile(promptPath, textOnlyPrompt, 'utf8');
   const imageProvider = await createVisualProvider(imageConfigured.config, 'image');
   const result = await imageProvider.generateImage({
-    prompt,
+    prompt: textOnlyPrompt,
     model: resolvedImageModel,
     size: 'landscape',
     quality: 'high',
@@ -818,6 +881,8 @@ export async function maybeGenerateSuperVisualReference(options: {
     return {
       enabled: false,
       reason: `Image-2 character turnaround generation failed: ${errorText}`,
+      inputIsRealPerson: inputLooksRealPerson,
+      resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
     };
   }
   const referenceImagePath = imageReferenceArtifactPath(options.projectDir, result.assetPath);

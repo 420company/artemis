@@ -667,8 +667,12 @@ export async function executeGenerateLongVideo(
         const cachedPath = path.join(projectDir, 'super-visual', 'character-vision-description.txt');
         visionDesc = (await readFile(cachedPath, 'utf8')).trim() || null;
       } catch { /* no cache */ }
-      if (!visionDesc && userReferenceImagePaths[0]) {
-        visionDesc = await describeUserImageWithVision({ imagePath: userReferenceImagePaths[0], context });
+      // Prefer the local copies SV already downloaded (covers URL-only case);
+      // fall back to user-supplied paths if SV didn't resolve them.
+      const fallbackImagePath = (superVisualMode as { resolvedUserImagePaths?: string[] }).resolvedUserImagePaths?.[0]
+        ?? userReferenceImagePaths[0];
+      if (!visionDesc && fallbackImagePath) {
+        visionDesc = await describeUserImageWithVision({ imagePath: fallbackImagePath, context });
       }
       if (visionDesc) {
         story = [

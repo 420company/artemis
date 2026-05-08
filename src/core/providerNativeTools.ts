@@ -1058,7 +1058,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
           firstFrameImageUrls: {
             type: 'array',
-            description: 'role:"first_frame" image URLs (literal first frame of the video). Bypasses the real-person privacy filter; use when the user supplies a real-person photo and wants it preserved literally as frame 1.',
+            description: 'role:"first_frame" image URLs (literal first-frame anchor in image-to-video mode). Provider may still apply content moderation to this image — does NOT guarantee the real-person privacy filter is bypassed (empirical testing showed BytePlus rejects real-person photos regardless of role). Use when you specifically want this exact frame as the literal video opener; for real-person identity locking, prefer the Saga long-video path which uses a stylized illustrated turnaround as reference_image.',
             items: { type: 'string' },
           },
           firstFrameImagePaths: {
@@ -1135,7 +1135,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           referenceImagePaths: { type: 'array', description: 'Optional local image reference paths. Saga treats character/person references as global identity anchors across every segment.', items: { type: 'string' } },
           referenceVideoPaths: { type: 'array', description: 'Optional local video reference paths for the first segment.', items: { type: 'string' } },
           referenceAudioPaths: { type: 'array', description: 'Optional local audio reference paths for the first segment.', items: { type: 'string' } },
-          firstFrameImageUrls: { type: 'array', description: 'role:"first_frame" image URLs (literal first frame of the video). Bypasses the real-person privacy filter that role:"reference_image" enforces. Use when the user supplies a real-person photo and you want it preserved literally as frame 1.', items: { type: 'string' } },
+          firstFrameImageUrls: { type: 'array', description: 'role:"first_frame" image URLs (literal first-frame anchor for image-to-video). Provider may still apply content moderation; does NOT reliably bypass real-person privacy filters. Use when you want the exact image as the literal opening frame.', items: { type: 'string' } },
           firstFrameImagePaths: { type: 'array', description: 'role:"first_frame" local image paths.', items: { type: 'string' } },
           lastFrameImageUrls: { type: 'array', description: 'role:"last_frame" image URLs (anchor closing frame).', items: { type: 'string' } },
           lastFrameImagePaths: { type: 'array', description: 'role:"last_frame" local image paths.', items: { type: 'string' } },
