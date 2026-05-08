@@ -23,7 +23,6 @@ import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
 import { normalizeVideoDurationForProvider } from './visual/videoParams.js';
 import {
   buildVisualSetupRequiredMessage,
-  describeVisualProvider,
   isVisualSetupRequiredError,
   resolveConfiguredVisualProvider,
   resolveMainSecondaryVisualFallbackCandidates,

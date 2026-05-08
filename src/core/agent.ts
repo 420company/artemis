@@ -4277,7 +4277,6 @@ function maybeRerouteToSagaLongVideo(
   let hasSagaMarker = false;
   let totalDurationFromContext: number | undefined;
   let projectIdFromContext: string | undefined;
-  let titleFromContext: string | undefined;
   for (const msg of messages) {
     const content = typeof msg.content === 'string' ? msg.content : '';
     if (!content) continue;
@@ -4287,8 +4286,6 @@ function maybeRerouteToSagaLongVideo(
       if (dur) totalDurationFromContext = Number.parseInt(dur[1] ?? '', 10);
       const pid = content.match(/projectId:\s*"([^"]+)"/);
       if (pid) projectIdFromContext = pid[1];
-      const title = content.match(/^title:\s*"([^"]+)"/m);
-      if (title) titleFromContext = title[1];
     }
   }
   if (!hasSagaMarker) return action;

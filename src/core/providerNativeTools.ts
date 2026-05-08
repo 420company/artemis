@@ -1058,7 +1058,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
           firstFrameImageUrls: {
             type: 'array',
-            description: 'role:"first_frame" image URLs (literal first-frame anchor in image-to-video mode). Provider may still apply content moderation to this image — does NOT guarantee the real-person privacy filter is bypassed (empirical testing showed BytePlus rejects real-person photos regardless of role). Use when you specifically want this exact frame as the literal video opener; for real-person identity locking, prefer the Saga long-video path which uses a stylized illustrated turnaround as reference_image.',
+            description: 'role:"first_frame" image URLs (literal first-frame anchor in image-to-video mode). Provider image checks may still reject this image. Use when you specifically want this exact frame as the literal video opener; for identity locking, prefer the Saga long-video path with a dedicated turnaround reference_image.',
             items: { type: 'string' },
           },
           firstFrameImagePaths: {
@@ -1135,11 +1135,11 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           referenceImagePaths: { type: 'array', description: 'Optional local image reference paths. Saga treats character/person references as global identity anchors across every segment.', items: { type: 'string' } },
           referenceVideoPaths: { type: 'array', description: 'Optional local video reference paths for the first segment.', items: { type: 'string' } },
           referenceAudioPaths: { type: 'array', description: 'Optional local audio reference paths for the first segment.', items: { type: 'string' } },
-          firstFrameImageUrls: { type: 'array', description: 'role:"first_frame" image URLs (literal first-frame anchor for image-to-video). Provider may still apply content moderation; does NOT reliably bypass real-person privacy filters. Use when you want the exact image as the literal opening frame.', items: { type: 'string' } },
+          firstFrameImageUrls: { type: 'array', description: 'role:"first_frame" image URLs (literal first-frame anchor for image-to-video). Provider image checks may still reject this image. Use when you want the exact image as the literal opening frame.', items: { type: 'string' } },
           firstFrameImagePaths: { type: 'array', description: 'role:"first_frame" local image paths.', items: { type: 'string' } },
           lastFrameImageUrls: { type: 'array', description: 'role:"last_frame" image URLs (anchor closing frame).', items: { type: 'string' } },
           lastFrameImagePaths: { type: 'array', description: 'role:"last_frame" local image paths.', items: { type: 'string' } },
-          generateAudio: { type: 'boolean', description: 'Default true. Saga retries with audio off when a provider safety filter rejects.' },
+          generateAudio: { type: 'boolean', description: 'Default true. Saga retries with audio off when the provider rejects audio output.' },
           watermark: { type: 'boolean', description: 'Optional watermark flag.' },
           maxPolls: integerSchema('Optional max poll attempts per segment.'),
           pollIntervalMs: integerSchema('Optional poll interval per segment.'),

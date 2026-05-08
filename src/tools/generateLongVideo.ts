@@ -23,7 +23,6 @@ import {
   type NarrativeEntities,
   type NarrativeLibraryEntry,
   type ShotViolation,
-  type PlannedShotForCritic,
 } from './visual/sagaNarrative.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import {
@@ -334,6 +333,18 @@ function looksLikeIdentityRuleBoilerplate(value: string | undefined): boolean {
   return IDENTITY_RULE_BOILERPLATE_PATTERNS.some((re) => re.test(normalized));
 }
 
+function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number): string {
+  const first = Math.max(1, Math.floor(duration * 0.35));
+  const second = Math.max(first + 1, Math.floor(duration * 0.7));
+  const actionSets = [
+    ['steps through the scene with a deliberate weight shift', 'turns the shoulders and reaches toward the next focal point', 'continues the gesture into the closing frame while fabric and hair keep moving'],
+    ['leans into motion and crosses the foreground plane', 'lifts one hand to interact with the scene element', 'releases the movement into drifting particles and a carried-through body turn'],
+    ['enters mid-stride with one foot already moving', 'rotates around the prop or light source with visible parallax', 'finishes in a moving silhouette that points into the next shot'],
+  ];
+  const actions = actionSets[index % actionSets.length]!;
+  return `0–${first}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${first}–${second}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${second}–end: the protagonist ${actions[2]}. Scene intent: ${storyChunk}`;
+}
+
 function buildSegments(options: {
   story: string;
   shots?: SagaShotInput[];
@@ -352,7 +363,7 @@ function buildSegments(options: {
     : [];
   const segmentCount = plannedShots.length > 0
     ? plannedShots.length
-    : Math.max(1, Math.ceil(options.totalSeconds / options.preferredSegmentSeconds));
+    : Math.max(1, Math.ceil(options.totalSeconds / Math.max(4, Math.min(options.preferredSegmentSeconds, 6))));
   const durations = distributeDurations(options.totalSeconds, segmentCount, options.maxSegmentSeconds);
   const segments: SagaSegment[] = [];
 
@@ -373,8 +384,8 @@ function buildSegments(options: {
     // generation has REAL action context to render.
     const storyChunkFallback = (beats.slice(start, end).join(' ') || options.story).slice(0, 900);
     const rawPlannedStoryBeat = looksLikeIdentityRuleBoilerplate(planned?.storyBeat) ? undefined : planned?.storyBeat;
-    const storyBeat = sanitizeInline(rawPlannedStoryBeat, storyChunkFallback);
     const duration = normalizeShotDuration(planned?.duration, durations[index] ?? options.preferredSegmentSeconds, options.maxSegmentSeconds);
+    const storyBeat = sanitizeInline(rawPlannedStoryBeat, buildMotionTimelineFallback(storyChunkFallback, duration, index));
     const title = sanitizeInline(planned?.title, `Shot ${index + 1}`);
     const rawPlannedVisualPrompt = looksLikeIdentityRuleBoilerplate(planned?.visualPrompt) ? undefined : planned?.visualPrompt;
     const visualPrompt = sanitizeInline(
@@ -383,7 +394,7 @@ function buildSegments(options: {
     );
     const camera = sanitizeInline(
       planned?.camera,
-      index % 3 === 0 ? 'slow controlled dolly movement with stable subject tracking' : index % 3 === 1 ? 'gentle handheld cinematic push-in with natural parallax' : 'locked-off establishing composition with subtle environmental motion',
+      index % 3 === 0 ? 'slow controlled dolly movement with stable subject tracking and visible parallax' : index % 3 === 1 ? 'gentle handheld cinematic push-in following the protagonist through the motion' : 'gimbal arc around the protagonist with continuous environmental motion',
     );
     const continuity = sanitizeInline(
       planned?.continuity,
@@ -391,7 +402,7 @@ function buildSegments(options: {
     );
     const transition = sanitizeInline(
       planned?.transition,
-      index === 0 ? 'open from black with a stable first frame' : 'cut cleanly from the previous stable final frame',
+      index === 0 ? 'open from black into a mid-action first frame, not a static pose' : 'carry the protagonist mid-motion from the previous closing frame into the next opening frame; match direction, limb momentum, hair/fabric flow, and light movement',
     );
     resolved.push({ title, duration, storyBeat, visualPrompt, camera, continuity, transition, planned });
   }
@@ -561,6 +572,18 @@ function deriveContinuityFromShots(action: GenerateLongVideoAction): {
   return { shotContinuityNotes, shotCameraNotes };
 }
 
+function deriveOcclusionLocksFromAccessories(accessories: string[] | undefined): string[] {
+  const locks: string[] = [];
+  for (const item of accessories ?? []) {
+    if (/(eye[\s-]*mask|blindfold|遮.*眼|眼罩|蒙眼|覆眼|遮住双眼|遮住眼睛)/i.test(item)) {
+      locks.push(`Eye-covering accessory lock: ${item}. The accessory fully covers the eyes in every shot; eyes, pupils, irises, eyelashes behind it, and eye gaze must never be visible or implied through the cover.`);
+    } else if (/(face[\s-]*mask|mask|veil|面罩|面具|面纱|遮.*脸|遮面)/i.test(item)) {
+      locks.push(`Face-covering accessory lock: ${item}. The covered facial area stays hidden in every shot; do not reveal anatomy that the accessory covers.`);
+    }
+  }
+  return locks;
+}
+
 export async function executeGenerateLongVideo(
   action: GenerateLongVideoAction,
   context: ToolExecutionContext,
@@ -623,7 +646,6 @@ export async function executeGenerateLongVideo(
       title,
       ratio,
       videoLimits: limits,
-      hasUserImageReference: hasGlobalUserImageReferences,
     });
     // Real-person input requires text-only mode. BytePlus's image classifier
     // rejects real-person photos regardless of role (reference_image,
@@ -718,6 +740,7 @@ export async function executeGenerateLongVideo(
             'ACCESSORY LOCK — IDENTITY-DEFINING — The protagonist has the following locked accessories (extracted from the reference image and the user\'s description):',
             ...accessoriesList.map((item) => `  · ${item}`),
             'These accessories are part of the protagonist\'s identity. They must appear in EVERY shot, in the same position, in the same color and style, throughout the ENTIRE video. NEVER describe removing, lifting, repositioning, swapping, or modifying any of them. NEVER introduce a different accessory of the same category (e.g., if a face-covering item is locked, do not add any other face-covering item). NEVER write timeline beats like "she pushes her X up" / "she takes off her X" / "she replaces her X". The accessories are permanent for the whole video.',
+            ...deriveOcclusionLocksFromAccessories(accessoriesList).map((lock) => `OCCLUSION CONSEQUENCE — ${lock}`),
           ].join('\n')
         : 'ACCESSORY LOCK — Whatever the protagonist is wearing or holding in the reference image is part of their locked identity and must appear unchanged in every shot. Do not describe removing or repositioning anything visible on the protagonist in the reference.';
       const storyAdditions: string[] = [
@@ -726,13 +749,13 @@ export async function executeGenerateLongVideo(
       ];
       if (realPersonInput) {
         storyAdditions.push(
-          'OUTPUT-STYLE OVERRIDE — IMPORTANT: although the supplied character reference is rendered as an illustrated/anime turnaround sheet (a stylization step done to bypass the upstream image classifier), the actual VIDEO OUTPUT must be 实拍 (live-action photographic) — restore photographic skin texture, real lighting, real fabrics, real volumetrics, anatomically accurate human bodies, and cinematic photography (35mm/50mm lens, golden hour, shallow depth of field, color graded). Treat the reference as identity-only; the rendering style is photoreal/cinematic.',
+          'OUTPUT-STYLE OVERRIDE — IMPORTANT: although the supplied character reference is rendered as an illustrated/anime turnaround sheet for identity normalization, the actual VIDEO OUTPUT must be 实拍 (live-action photographic) — restore photographic skin texture, real lighting, real fabrics, real volumetrics, anatomically accurate human bodies, and cinematic photography (35mm/50mm lens, golden hour, shallow depth of field, color graded). Treat the reference as identity-only; the rendering style is photoreal/cinematic.',
           'PROMPT VOCABULARY GUARD — In every shot\'s storyBeat / visualPrompt / camera / continuity, AVOID the words "真人", "real person", "real human face", "actual person". Use these instead to convey realism: 实拍, 写实, 质感, 电影感, photographic, cinematic, live-action, 35mm/50mm lens, 自然光, 真实质感. The avoid-list applies to the surface text only — the underlying intent of "render this as photographic real-person footage" is preserved through the alternate vocabulary.',
         );
       }
       story = [story, '', ...storyAdditions].join('\n');
       if (realPersonInput) {
-        toolLog(`🎯 Saga: 真人输入识别 → 启用"插画参考 + 实拍输出"双层路径（用户原图已被消化为插画化三视图作为身份锚；提示词层面用"实拍/写实/质感"等词汇引导 Seedance 还原真人风格输出，避开"真人"等触发词）。`);
+        toolLog(`🎯 Saga: 已启用角色身份锁与写实输出路径。`);
       }
     }
 
@@ -974,7 +997,10 @@ export async function executeGenerateLongVideo(
             turnaroundPath: superVisualMode.referenceImagePath,
             previousLastFramePath: segment.index > 1 ? previousLastFramePath : undefined,
             accessoriesLock: narrativeEntities?.protagonistAccessories,
-            occlusionLock: wm.occlusion,
+            occlusionLock: [
+              ...(wm.occlusion ?? []),
+              ...deriveOcclusionLocksFromAccessories(narrativeEntities?.protagonistAccessories),
+            ],
             permanentWardrobe: wm.wardrobe?.permanent,
             distinguishingMarks: wm.distinguishingMarks,
             identityLockedProps: wm.identityLockedProps,
@@ -1095,7 +1121,7 @@ export async function executeGenerateLongVideo(
           if (imageBlocked && usingChain) {
             usingChain = false;
             consecutivePrivacyFails += 1;
-            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频生成 API 内容过滤拦截了 chain frame，剥离 chain 后重试中（尝试 ${attempt + 2}/3）...`);
+            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了上一段衔接帧，剥离衔接帧后重试中（尝试 ${attempt + 2}/3）...`);
           } else if (imageBlocked && hasGlobalUserImageReferences && usingUserImageReferences) {
             // reference_image got rejected — drop the user-supplied reference
             // images and retry with whatever remaining anchors we have
@@ -1103,10 +1129,10 @@ export async function executeGenerateLongVideo(
             // empty too, the next attempt falls through to text-only via
             // segment.textOnlyPrompt (see hasAnyImageRef branch below).
             usingUserImageReferences = false;
-            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：reference_image 被内容过滤拦截，剥离 reference_image 后重试中（尝试 ${attempt + 2}/3）...`);
+            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了参考图，剥离参考图后重试中（尝试 ${attempt + 2}/3）...`);
           } else if (audioBlocked && usingAudio) {
             usingAudio = false;
-            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频生成 API 内容过滤拦截了输出音频，关闭音频后重试中（尝试 ${attempt + 2}/3）...`);
+            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了音频输出，关闭音频后重试中（尝试 ${attempt + 2}/3）...`);
           } else {
             // Both have already been stripped on a prior attempt and we're
             // still failing; nothing more to try.
@@ -1298,6 +1324,29 @@ export async function executeGenerateLongVideo(
         userAudioPreference,
         continuityMode,
         chainAbandonedMidRun: chainEnabled !== chainFrames,
+        referenceIntegrity: {
+          hasUserImageReferences: hasGlobalUserImageReferences,
+          superVisualEnabled: superVisualMode.enabled,
+          superVisualMode: superVisualMode.enabled ? superVisualMode.mode : 'off',
+          canonicalReferencePath: superVisualMode.enabled ? superVisualMode.referenceImagePath : undefined,
+          inputIsRealPerson: Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson),
+          userImageReferenceDroppedSegments,
+          chainDroppedSegments,
+          status: userImageReferenceDroppedSegments.length > 0 || chainDroppedSegments.length > 0
+            ? 'degraded'
+            : 'ok',
+          notes: [
+            userImageReferenceDroppedSegments.length > 0
+              ? `User image references were dropped for segments: ${userImageReferenceDroppedSegments.join(', ')}`
+              : undefined,
+            chainDroppedSegments.length > 0
+              ? `Chain reference frames were dropped for segments: ${chainDroppedSegments.join(', ')}`
+              : undefined,
+            !superVisualMode.enabled
+              ? `Super Visual is disabled/unavailable: ${superVisualMode.reason}`
+              : undefined,
+          ].filter(Boolean),
+        },
       },
       segments: segments.map((segment) => ({
         index: segment.index,
@@ -1389,7 +1438,7 @@ export async function executeGenerateLongVideo(
         `Saga generated long video using model ${String(model).replace(/^[^/]+\//, '')}.`,
         `Segments: ${segments.length} x <=${limits.maxSegmentSeconds}s, target duration ${totalSeconds}s, planned duration ${actualTotalSeconds}s, output duration ${measuredOutputSeconds.toFixed(2)}s.`,
         `Renderer: saga (${renderResult.encoderUsed}); transitions: ${renderResult.appliedTransitions.map((t) => `${t.kind}@${t.durationMs}ms`).join(', ') || 'none'}.`,
-        `Continuity: mode=${continuityMode}, chainReferenceFrames=${chainFrames}, chained-segments=${chainedFromPrev.length}, chain-dropped-segments=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run after privacy filter)' : ''}.`,
+        `Continuity: mode=${continuityMode}, chainReferenceFrames=${chainFrames}, chained-segments=${chainedFromPrev.length}, chain-dropped-segments=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run after provider rejection)' : ''}.`,
         `Super visual: ${superVisualMode.enabled ? `enabled mode=${superVisualMode.mode} userImagesUsed=${superVisualMode.userImagesUsed} (${superVisualMode.referenceImagePath})` : `off (${superVisualMode.reason})`}.`,
         `Segment keyframes: generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? `, failures=${segmentKeyframeFailures.length} [${segmentKeyframeFailures.map((f) => `seg${f.index}: ${f.reason}`).join('; ')}]` : ''}.`,
         `References: user-image-reference-dropped-segments=${userImageReferenceDroppedSegments.length}.`,

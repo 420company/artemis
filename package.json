@@ -62,7 +62,7 @@
     "docker:logs": "./docker.sh logs",
     "docker:status": "./docker.sh status",
     "test:workspaceIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workspaceIntentSmoke.ts",
-    "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts"
+    "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

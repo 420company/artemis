@@ -61,7 +61,9 @@ import { handleSeedanceMultimodalWorkflow as handleSeedanceMultimodalWorkflowRaw
 import {
   buildSegmentKeyframePrompt,
   buildSuperVisualCharacterTurnaroundPrompt,
+  isLikelyProvidedTurnaroundReferenceForTest,
   isSuperVisualModeEligible,
+  shouldCompressImageForUploadForTest,
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
@@ -2286,6 +2288,29 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   assert(
     'super visual mode: text-only prompt without vision description has no orphan VISUAL TRUTH header',
     !fallbackPromptNoVision.includes('VISUAL TRUTH'),
+  )
+  assert(
+    'super visual mode: provided character-turnaround file is recognized as an already-built identity sheet',
+    isLikelyProvidedTurnaroundReferenceForTest('/Users/goat/Pictures/character-turnaround.png'),
+  )
+  assert(
+    'super visual mode: vision-described three-view sheet is recognized even when the upload filename is generic',
+    isLikelyProvidedTurnaroundReferenceForTest(
+      '/tmp/telegram-upload-01.png',
+      'An illustrated character reference sheet showing the same woman in front view, side profile, and back view.',
+    ),
+  )
+  assert(
+    'super visual upload: small 1.7MB turnaround PNG is not recompressed',
+    !shouldCompressImageForUploadForTest(Math.round(1.7 * 1024 * 1024), Math.round(1.7 * 1024 * 1024), 1),
+  )
+  assert(
+    'super visual upload: large single image is compressed',
+    shouldCompressImageForUploadForTest(7 * 1024 * 1024, 7 * 1024 * 1024, 1),
+  )
+  assert(
+    'super visual upload: medium images are compressed only when the multipart batch is large',
+    shouldCompressImageForUploadForTest(3 * 1024 * 1024, 12 * 1024 * 1024, 4),
   )
   // Spatial-reality regression guard: when the world model gives a water
   // line + physics rules + forbidden errors, the per-segment keyframe prompt

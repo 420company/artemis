@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
@@ -17,6 +17,9 @@ import { createVisualProvider } from './providers/interface.js';
 const RELAY_SICK_COOLDOWN_MS = 10 * 60 * 1000;
 const IMAGE_EDIT_TOTAL_TIMEOUT_MS = 4 * 60 * 1000;
 const SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS = IMAGE_EDIT_TOTAL_TIMEOUT_MS + 15_000;
+const IMAGE_EDIT_SINGLE_FILE_COMPRESS_THRESHOLD_BYTES = 6 * 1024 * 1024;
+const IMAGE_EDIT_TOTAL_FORM_COMPRESS_THRESHOLD_BYTES = 10 * 1024 * 1024;
+const IMAGE_EDIT_FORCED_COMPRESS_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 let relaySickUntil = 0;
 function isRelaySick(): boolean { return Date.now() < relaySickUntil; }
 function markRelaySick(reason: string): void {
@@ -47,7 +50,7 @@ export type SuperVisualModeResult =
       referenceImagePath: string;
       promptPath: string;
       sourceAssetPath?: string;
-      mode: 'image-to-image' | 'text-to-image';
+      mode: 'provided-turnaround' | 'image-to-image' | 'text-to-image';
       userImagesUsed: number;
       reason: string;
       // True when the user's input image was detected as a real-person
@@ -358,6 +361,9 @@ export function buildSegmentKeyframePrompt(input: {
   if (input.accessoriesLock && input.accessoriesLock.length > 0) {
     lockBlocks.push('LOCKED ACCESSORIES (must appear in this keyframe in the same position/color/style — never replace, swap, or remove):');
     for (const item of input.accessoriesLock) lockBlocks.push(`  · ${item}`);
+    if (input.accessoriesLock.some((item) => /(eye[\s-]*mask|blindfold|遮.*眼|眼罩|蒙眼|覆眼|遮住双眼|遮住眼睛)/i.test(item))) {
+      lockBlocks.push('EYE-COVER HARD RULE: the locked eye-covering accessory fully hides the eyes. Do NOT draw visible eyes, pupils, irises, eye gaze, or transparent eye shapes through/around it. Never lift, slide, loosen, or remove it.');
+    }
   }
   if (input.occlusionLock && input.occlusionLock.length > 0) {
     lockBlocks.push('LOCKED OCCLUSIONS (must persist across every shot — these elements partially cover the protagonist and the cover must NOT be removed):');
@@ -431,6 +437,7 @@ export function buildSegmentKeyframePrompt(input: {
     '- The character must be MID-ACTION at the moment depicted, not standing still or posing for a portrait.',
     '- Pick a moment where the body, hair, fabric, or environment is in motion: mid-stride, mid-gesture, mid-turn, hair caught by wind, fabric flowing, particles in air, water splashing, foot lifted, hand reaching.',
     '- This is the STARTING frame of a moving video clip. The video model will animate forward from this exact moment, so the body must already be in motion — the next 0.5 s of movement should be implied by the pose.',
+    input.withPreviousLastFrame ? '- Continue the previous closing-frame momentum from IMAGE 2: match body direction, limb inertia, camera travel, and hair/fabric flow rather than resetting to a neutral pose.' : '',
     '- AVOID: arms-at-sides standing portrait, neutral facing-camera pose, static "lookbook" composition, character planted in a frozen ready-stance.',
     '',
     '- Background, lighting, color cast match the scene.' + (input.withPreviousLastFrame ? ' Continue the environment from IMAGE 2.' : ''),
@@ -458,18 +465,33 @@ function normalizeBaseUrl(baseUrl: string): string {
   return (baseUrl || '').replace(/\/+$/, '');
 }
 
-// Auto-compress image inputs before sending to /v1/images/edits. The OpenAI
-// API accepts up to 25MB per image, but relays in front of OpenAI (such as
-// http://...:8080) frequently have body-size caps in the 1–10MB range —
-// large PNGs / RAW exports silently hang or get dropped at the relay layer.
-// ffmpeg is already a hard dependency, so we use it for the downscale +
-// JPEG re-encode without adding new packages.
-//
-// Behavior:
-//   · file ≤ 2MB AND already JPEG → use as-is (no waste)
-//   · otherwise → ffmpeg → max 2048px on long edge, JPEG q:v 4 (≈92%
-//     quality), written to a hashed cache path under os.tmpdir()
-async function maybeCompressForUpload(filePath: string): Promise<string> {
+type UploadCompressionPlan = {
+  totalInputBytes: number;
+  inputCount: number;
+};
+
+function shouldCompressImageForUpload(fileBytes: number, plan: UploadCompressionPlan): boolean {
+  const totalIsLarge = plan.totalInputBytes > IMAGE_EDIT_TOTAL_FORM_COMPRESS_THRESHOLD_BYTES;
+  const fileIsLarge = fileBytes > IMAGE_EDIT_SINGLE_FILE_COMPRESS_THRESHOLD_BYTES;
+  const fileNeedsHelpInLargeBatch = totalIsLarge && fileBytes > IMAGE_EDIT_FORCED_COMPRESS_FILE_THRESHOLD_BYTES;
+  return fileIsLarge || fileNeedsHelpInLargeBatch;
+}
+
+export function shouldCompressImageForUploadForTest(
+  fileBytes: number,
+  totalInputBytes: number,
+  inputCount = 1,
+): boolean {
+  return shouldCompressImageForUpload(fileBytes, { totalInputBytes, inputCount });
+}
+
+// Auto-compress image inputs before sending to /v1/images/edits, but only
+// when there is a real payload-size risk. Small PNG/WebP/JPEG references are
+// identity anchors and should be uploaded losslessly; recompressing a 1–2MB
+// turnaround sheet to a tiny JPEG hurts fine wardrobe/accessory detail and
+// does not meaningfully protect the relay. We compress when either a single
+// file is large or the entire multipart image batch is large.
+async function maybeCompressForUpload(filePath: string, plan: UploadCompressionPlan): Promise<string> {
   let stat;
   try {
     const fs = await import('node:fs/promises');
@@ -478,12 +500,14 @@ async function maybeCompressForUpload(filePath: string): Promise<string> {
     return filePath;
   }
   const sizeMb = stat.size / (1024 * 1024);
-  const ext = path.extname(filePath).toLowerCase();
-  if (sizeMb <= 2 && (ext === '.jpg' || ext === '.jpeg')) {
+  if (!shouldCompressImageForUpload(stat.size, plan)) {
     return filePath;
   }
   // Hash the path so repeated reads of the same source reuse the cache.
-  const cacheKey = createHash('sha256').update(filePath).digest('hex').slice(0, 24);
+  const cacheKey = createHash('sha256')
+    .update(`${filePath}:${stat.size}:${Math.round(stat.mtimeMs)}:${plan.totalInputBytes}:${plan.inputCount}`)
+    .digest('hex')
+    .slice(0, 24);
   const os = await import('node:os');
   const compressedPath = path.join(os.tmpdir(), `saga-edit-input-${cacheKey}.jpg`);
   // If the cached compressed copy already exists and is fresh, reuse.
@@ -510,7 +534,7 @@ async function maybeCompressForUpload(filePath: string): Promise<string> {
     ], { timeout: 60_000 });
     const fs = await import('node:fs/promises');
     const newStat = await fs.stat(compressedPath);
-    toolLog(`🗜️  Super Visual: 上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 避免 relay body-size 上限。`);
+    toolLog(`🗜️  Super Visual: 上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 当前批次 ${plan.inputCount} 张 / ${(plan.totalInputBytes / (1024 * 1024)).toFixed(1)}MB。`);
     return compressedPath;
   } catch (error) {
     toolWarn(`⚠️ Super Visual: 图片压缩失败（${error instanceof Error ? error.message.slice(0, 160) : String(error)}），使用原图。`);
@@ -518,8 +542,8 @@ async function maybeCompressForUpload(filePath: string): Promise<string> {
   }
 }
 
-async function readImageAsBlob(filePath: string): Promise<{ blob: Blob; filename: string }> {
-  const effectivePath = await maybeCompressForUpload(filePath);
+async function readImageAsBlob(filePath: string, plan: UploadCompressionPlan): Promise<{ blob: Blob; filename: string }> {
+  const effectivePath = await maybeCompressForUpload(filePath, plan);
   const buffer = await readFile(effectivePath);
   const ext = path.extname(effectivePath).toLowerCase();
   const type = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
@@ -554,6 +578,23 @@ async function postOpenAIImageEdit(options: {
   const attempts = 3;
   let lastError = '';
   const startedAt = Date.now();
+  let uploadPlan: UploadCompressionPlan = { totalInputBytes: 0, inputCount: options.inputImagePaths.length };
+  try {
+    const fs = await import('node:fs/promises');
+    const stats = await Promise.all(options.inputImagePaths.map(async (filePath) => {
+      try {
+        return await fs.stat(filePath);
+      } catch {
+        return undefined;
+      }
+    }));
+    uploadPlan = {
+      totalInputBytes: stats.reduce((sum, stat) => sum + (stat?.size ?? 0), 0),
+      inputCount: options.inputImagePaths.length,
+    };
+  } catch {
+    // Keep the conservative zero-byte plan; read errors are handled below.
+  }
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const remainingMs = IMAGE_EDIT_TOTAL_TIMEOUT_MS - (Date.now() - startedAt);
     if (remainingMs <= 0) {
@@ -573,7 +614,7 @@ async function postOpenAIImageEdit(options: {
     const fieldName = isMulti ? 'image[]' : 'image';
     for (const filePath of options.inputImagePaths) {
       try {
-        const { blob, filename } = await readImageAsBlob(filePath);
+        const { blob, filename } = await readImageAsBlob(filePath, uploadPlan);
         form.append(fieldName, blob, filename);
       } catch (error) {
         formBuildFailed = true;
@@ -726,6 +767,39 @@ function looksLikeRealPersonDescription(description: string | null | undefined):
   return false;
 }
 
+function isLikelyProvidedTurnaroundPath(filePath: string): boolean {
+  const base = path.basename(filePath).toLowerCase();
+  return /(?:^|[-_.\s])(character[-_.\s]*)?turnaround(?:[-_.\s]|$)/i.test(base)
+    || /(?:^|[-_.\s])(?:three[-_.\s]*view|3[-_.\s]*view|front[-_.\s]*side[-_.\s]*back)(?:[-_.\s]|$)/i.test(base)
+    || /三视图|三面图|转面图|角色设定/.test(path.basename(filePath));
+}
+
+function findProvidedTurnaroundInput(userInputs: string[], originalPaths?: string[], referenceNotes?: string[]): string | undefined {
+  for (let i = 0; i < userInputs.length; i += 1) {
+    const cachedPath = userInputs[i];
+    const originalPath = originalPaths?.[i];
+    const note = referenceNotes?.join('\n') ?? '';
+    if (isLikelyProvidedTurnaroundPath(cachedPath)
+      || (originalPath && isLikelyProvidedTurnaroundPath(originalPath))
+      || isLikelyTurnaroundDescription(note)) {
+      return cachedPath;
+    }
+  }
+  return undefined;
+}
+
+function isLikelyTurnaroundDescription(description: string | null | undefined): boolean {
+  if (!description) return false;
+  const lowered = description.toLowerCase();
+  return /\b(character sheet|turnaround|model sheet|reference sheet|three[- ]view|3[- ]view)\b/.test(lowered)
+    || /\bfront\b[\s\S]{0,80}\b(side|profile)\b[\s\S]{0,80}\bback\b/.test(lowered)
+    || /三视图|三面图|转面图|角色设定|正面[\s\S]{0,80}侧面[\s\S]{0,80}背面/.test(description);
+}
+
+export function isLikelyProvidedTurnaroundReferenceForTest(filePath: string, description?: string | null): boolean {
+  return isLikelyProvidedTurnaroundPath(filePath) || isLikelyTurnaroundDescription(description);
+}
+
 export async function describeUserImageWithVision(options: {
   imagePath: string;
   context: ToolExecutionContext;
@@ -814,10 +888,68 @@ export async function maybeGenerateSuperVisualReference(options: {
   title: string;
   ratio: string;
   videoLimits: VideoModelLimits;
-  hasUserImageReference: boolean;
 }): Promise<SuperVisualModeResult> {
   if (options.action.superVisualMode === 'off') {
     return { enabled: false, reason: 'disabled by request' };
+  }
+
+  const superVisualDir = path.join(options.projectDir, 'super-visual');
+  await mkdir(superVisualDir, { recursive: true });
+
+  // Resolve user images (paths + URLs) into local files we can post.
+  // We do this BEFORE the relay-sick check so the SV-disabled fallback
+  // in generateLongVideo still has local copies of URL refs to feed to
+  // vision-describe (which uses a separate chat endpoint that may be
+  // healthy even when image-gen is rate-limited).
+  const userInputCacheDir = path.join(superVisualDir, 'user-inputs');
+  const userInputs = await resolveUserImageInputs(
+    options.action.referenceImagePaths,
+    options.action.referenceImageUrls,
+    userInputCacheDir,
+  );
+  const useEditMode = userInputs.length > 0;
+  const promptPath = path.join(superVisualDir, 'character-turnaround.prompt.txt');
+
+  const providedTurnaroundByPath = findProvidedTurnaroundInput(
+    userInputs,
+    options.action.referenceImagePaths,
+    options.action.referenceNotes,
+  );
+  if (providedTurnaroundByPath) {
+    if (!options.videoLimits.referenceInputs.includes('image')) {
+      return {
+        enabled: false,
+        reason: 'provided turnaround reference cannot be used because this video model does not accept image references',
+        resolvedUserImagePaths: userInputs,
+      };
+    }
+    const referenceImagePath = imageReferenceArtifactPath(options.projectDir, providedTurnaroundByPath);
+    if (path.resolve(providedTurnaroundByPath) !== path.resolve(referenceImagePath)) {
+      await copyFile(providedTurnaroundByPath, referenceImagePath);
+    }
+    await writeFile(
+      promptPath,
+      [
+        'User supplied an already-built character turnaround reference sheet.',
+        `Source: ${providedTurnaroundByPath}`,
+        'Saga must use this image directly as the canonical character identity sheet; do not regenerate or reinterpret it.',
+      ].join('\n'),
+      'utf8',
+    );
+    toolLog(`✅ Super Visual: 已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}`);
+    return {
+      enabled: true,
+      provider: 'provided-reference',
+      model: 'provided-turnaround',
+      referenceImagePath,
+      promptPath,
+      sourceAssetPath: providedTurnaroundByPath,
+      mode: 'provided-turnaround',
+      userImagesUsed: 1,
+      reason: `used provided character turnaround reference: ${providedTurnaroundByPath}`,
+      inputIsRealPerson: false,
+      resolvedUserImagePaths: userInputs,
+    };
   }
 
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
@@ -838,22 +970,6 @@ export async function maybeGenerateSuperVisualReference(options: {
     return { enabled: false, reason: ineligible };
   }
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
-
-  const superVisualDir = path.join(options.projectDir, 'super-visual');
-  await mkdir(superVisualDir, { recursive: true });
-
-  // Resolve user images (paths + URLs) into local files we can post.
-  // We do this BEFORE the relay-sick check so the SV-disabled fallback
-  // in generateLongVideo still has local copies of URL refs to feed to
-  // vision-describe (which uses a separate chat endpoint that may be
-  // healthy even when image-gen is rate-limited).
-  const userInputCacheDir = path.join(superVisualDir, 'user-inputs');
-  const userInputs = await resolveUserImageInputs(
-    options.action.referenceImagePaths,
-    options.action.referenceImageUrls,
-    userInputCacheDir,
-  );
-  const useEditMode = userInputs.length > 0;
 
   // Relay-health short-circuit. The retry inside postOpenAIImageEdit /
   // generateImage already burns ~30s per attempt × 3 attempts × 2 modes ≈
@@ -910,11 +1026,10 @@ export async function maybeGenerateSuperVisualReference(options: {
     const effectiveStyle = userStyle === 'photoreal' ? 'photoreal'
       : userStyle === 'illustrated' ? 'illustrated'
       : visionDescription
-        ? (visionRealHit ? 'illustrated (auto · 真人输入 → 改插画风以避开内容过滤)' : 'photoreal (auto · 输入已是非真人风格)')
-        : 'illustrated (auto · vision 不可用 → 保守默认插画以避免后续被内容过滤拦截)';
+        ? (visionRealHit ? 'illustrated' : 'photoreal')
+        : 'illustrated';
     toolLog(`🎨 Super Visual: 角色三视图风格 = ${effectiveStyle}`);
   }
-  const promptPath = path.join(superVisualDir, 'character-turnaround.prompt.txt');
   await writeFile(promptPath, prompt, 'utf8');
 
   const apiKey = imageConfigured.config.image.apiKey?.trim();
@@ -1008,7 +1123,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     if (/HTTP 5\d\d|upstream_error|rate.?limit|429/i.test(errorText)) {
       markRelaySick(errorText);
     }
-    toolWarn(`⚠️ Super Visual: 角色三视图生成失败 — ${errorText}。Saga 将改用用户原图作为身份锚（可能触发视频生成 API 的内容过滤导致每段重试）。`);
+    toolWarn(`⚠️ Super Visual: 角色三视图生成失败 — ${errorText}。Saga 将改用用户原图作为身份锚。`);
     return {
       enabled: false,
       reason: `Image-2 character turnaround generation failed: ${errorText}`,
