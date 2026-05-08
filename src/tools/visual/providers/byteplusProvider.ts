@@ -170,8 +170,12 @@ export class BytePlusProvider implements VisualProvider {
       }
 
       // role:"first_frame" — image-to-video literal first-frame anchor.
-      // Different code path on the provider side; bypasses the real-person
-      // privacy filter that role:"reference_image" enforces.
+      // Pins the exact opening frame of the generated video. Provider still
+      // moderates this image; empirically it does NOT reliably bypass the
+      // real-person privacy filter (the classifier inspects the bytes, not
+      // the role tag). For real-person identity locking, prefer the Saga
+      // long-video path which uses an illustrated turnaround as
+      // role:"reference_image" + photoreal-output prompt directives.
       if (params.firstFrameImageUrls) {
         for (const url of params.firstFrameImageUrls) {
           if (typeof url === 'string' && url.trim()) {

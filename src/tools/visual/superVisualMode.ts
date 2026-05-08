@@ -210,7 +210,24 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
     ].filter(Boolean).join('\n');
   }
 
-  // TEXT-ONLY MODE — no user image. Build the character entirely from text.
+  // TEXT-ONLY MODE — no user image attached to /images/edits, so identity
+  // must be carried entirely through text. This branch is used in two
+  // scenarios:
+  //   (a) The user never supplied a reference image (pure text-to-character).
+  //   (b) The user DID supply an image, but /images/edits failed and we
+  //       are falling back to text-to-image. In that case
+  //       `visionDescription` carries the vision-LLM's reading of the user's
+  //       image, and is the ONLY thing tying the generated turnaround to
+  //       the user's intended character. It MUST be embedded in the prompt
+  //       as VISUAL TRUTH at the top, otherwise the fallback produces an
+  //       unrelated character.
+  const visionTruth = compact(input.visionDescription)
+    ? [
+        'VISUAL TRUTH (vision-described directly from the user\'s reference image — the generated character must match these features exactly):',
+        compact(input.visionDescription),
+        '',
+      ].join('\n')
+    : '';
   const dynamicSections = [
     `Project title: ${compact(input.title) || 'Untitled character video'}`,
     `Video aspect ratio: ${input.ratio}`,
@@ -226,6 +243,7 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
   return [
     'Create one original character turnaround reference sheet for locking identity in a long video generation workflow.',
     '',
+    visionTruth,
     ...dynamicSections,
     '',
     'Image requirements (FIXED):',
@@ -235,7 +253,7 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
     '- Character sheet layout only; no action scene, no environment scene, no other people, no alternate costumes.',
     '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles.',
     '- If the user requested an anime or illustrated character, keep the output as an illustrated/anime character and do not convert it into a real human actor.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 // Per-segment opening keyframe prompt.

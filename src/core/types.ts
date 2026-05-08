@@ -388,8 +388,10 @@ export type AgentAction =
       referenceImagePaths?: string[];
       referenceVideoPaths?: string[];
       referenceAudioPaths?: string[];
-      // role:"first_frame" — image-to-video literal first frame. Bypasses
-      // the real-person privacy filter that role:"reference_image" enforces.
+      // role:"first_frame" — image-to-video literal first-frame anchor.
+      // Provider may still apply content moderation; does NOT reliably
+      // bypass real-person privacy filters (empirical testing showed
+      // BytePlus rejects real-person photos regardless of role).
       firstFrameImageUrls?: string[];
       firstFrameImagePaths?: string[];
       lastFrameImageUrls?: string[];
@@ -523,10 +525,13 @@ export type AgentAction =
       referenceImagePaths?: string[];
       referenceVideoPaths?: string[];
       referenceAudioPaths?: string[];
-      // Literal "first frame of the video" image inputs. role:"first_frame"
-      // in the BytePlus / Seedance request — bypasses the real-person privacy
-      // filter that role:"reference_image" enforces. Use this for the user's
-      // real-person photos (image-to-video chain mode).
+      // Literal "first frame of the video" image input. role:"first_frame"
+      // in the BytePlus / Seedance request — pins the exact opening frame.
+      // Provider may still apply content moderation; does NOT reliably
+      // bypass real-person privacy filters. For real-person identity
+      // locking the Saga long-video pipeline uses an illustrated
+      // turnaround as role:"reference_image" with photoreal-output
+      // prompt directives instead.
       firstFrameImageUrls?: string[];
       firstFrameImagePaths?: string[];
       // Optional last-frame anchor image. role:"last_frame".

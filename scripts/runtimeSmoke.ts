@@ -2250,6 +2250,38 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       turnaroundPrompt.includes('full-body') &&
       turnaroundPrompt.includes('No text, no labels'),
   )
+  // Regression guard: when /images/edits fails and we fall back to
+  // text-to-image with a vision-derived character description, the
+  // text-only prompt MUST embed the vision description as VISUAL TRUTH —
+  // otherwise the fallback generates a character unrelated to the user's
+  // input image.
+  const fallbackPromptWithVision = buildSuperVisualCharacterTurnaroundPrompt({
+    title: 'Reference Locked Hero',
+    story: 'An anime protagonist explores a glass observatory.',
+    ratio: '16:9',
+    referenceNotes: [],
+    withUserImageInput: false,
+    visionDescription: 'A young woman with silver hair and a blue cloak, wearing a black lace eye-mask',
+  })
+  assert(
+    'super visual mode: text-only fallback prompt includes the vision-derived character description',
+    fallbackPromptWithVision.includes('VISUAL TRUTH') &&
+      fallbackPromptWithVision.includes('silver hair') &&
+      fallbackPromptWithVision.includes('black lace eye-mask'),
+  )
+  // And without a vision description, the prompt should not have a stray
+  // VISUAL TRUTH header pointing at nothing.
+  const fallbackPromptNoVision = buildSuperVisualCharacterTurnaroundPrompt({
+    title: 'Reference Locked Hero',
+    story: 'An anime protagonist explores a glass observatory.',
+    ratio: '16:9',
+    referenceNotes: [],
+    withUserImageInput: false,
+  })
+  assert(
+    'super visual mode: text-only prompt without vision description has no orphan VISUAL TRUTH header',
+    !fallbackPromptNoVision.includes('VISUAL TRUTH'),
+  )
   assert(
     'video capabilities: Seedance 1.5 accepts explicit generated-audio requests',
     !isGeneratedAudioUnsupported({ generateAudio: true }, seedance15Caps),
