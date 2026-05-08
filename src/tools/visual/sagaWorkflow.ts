@@ -11,10 +11,23 @@ import {
   buildSagaConstitution,
   emitNarrativeStatus,
   narrativeKeywordFallback,
+  sanitizeForVideoProvider,
   type NarrativeEntities,
   type ProtagonistMode,
   type ProtagonistType,
 } from './sagaNarrative.js';
+import { pickLocale, type UiLocale } from '../../cli/locale.js';
+
+// Detect UI locale from a user-supplied text sample. Heuristic: if the
+// sample contains more CJK characters than Latin letters, it's Chinese;
+// otherwise English. Used to localize Saga workflow replies dynamically
+// per user instead of relying on global env vars (which are server-side).
+function detectLocaleFromText(text: string): UiLocale {
+  if (!text) return 'en';
+  const cjk = (text.match(/[一-鿿]/g) ?? []).length;
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  return cjk >= latin ? 'zh-CN' : 'en';
+}
 
 export type SagaWorkflowScope = 'cli' | 'bridge';
 
@@ -50,12 +63,14 @@ type SagaWorkflowState = {
   referenceVideoPaths: string[];
   referenceAudioPaths: string[];
   referenceNotes: string[];
+  // UI locale detected from user's first text input. Drives reply language.
+  locale: UiLocale;
   // additional substantive story text the user types during collecting_refs
   accumulatedStory: string[];
   // narrative analysis (Layer 1 LLM result, may be overwritten by Layer 2 user clarification)
   narrative?: NarrativeEntities;
   // when narrative confidence is low, we present 4 options and wait for the user's pick
-  protagonistOptions?: Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string }>;
+  protagonistOptions?: Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string; isOwnDescription?: boolean }>;
   // pre-extracted duration from original message (if any)
   prefilledDuration?: number;
   targetDuration?: number;
@@ -311,41 +326,61 @@ function combinedStoryText(state: SagaWorkflowState): string {
 
 // ─── Replies ─────────────────────────────────────────────────────────────
 
-async function buildModelLine(cwd: string): Promise<string> {
+async function buildModelLine(cwd: string, locale: UiLocale = 'zh-CN'): Promise<string> {
   const configured = await resolveConfiguredVisualProvider(cwd, 'video');
-  if (!configured) return '当前没有检测到可用视频模型配置。';
+  if (!configured) {
+    return pickLocale(locale, {
+      zh: '当前没有检测到可用视频模型配置。',
+      en: 'No usable video model is currently configured.',
+    });
+  }
   const limits = resolveVideoModelLimits(configured.config.video.provider, configured.model);
-  return `当前视频模型：${configured.config.video.provider}/${configured.model}，单段上限约 ${limits.maxSegmentSeconds} 秒，Saga 会自动拆成多段再合成。`;
+  // Strip provider prefix from user-visible model line.
+  const modelOnly = String(configured.model).replace(/^[^/]+\//, '');
+  return pickLocale(locale, {
+    zh: `当前视频模型：${modelOnly}，单段上限约 ${limits.maxSegmentSeconds} 秒，Saga 会自动拆成多段再合成。`,
+    en: `Current video model: ${modelOnly}, per-segment cap ≈ ${limits.maxSegmentSeconds}s; Saga splits into multiple segments and stitches.`,
+  });
 }
 
 async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
-  const modelLine = await buildModelLine(state.cwd);
-  return [
-    'Saga 已检测到你要做"长视频"。',
-    modelLine,
-    '当前视频模型支持多模态参考生成。',
-    '你可以继续发送：',
-    '  · 图片 / 视频 / 音频 URL，或本地文件路径（作为视觉/听觉参考）',
-    '  · 你自己的故事文字 / 剧本 / 分镜 / 设定（Saga 会按你写的剧本来拍；不写就由 Saga 根据你最初的需求自由发挥）',
-    '完成后回复"开始生成"。',
-    '如果不需要补充任何参考素材或文字，回复"直接生成"或"跳过"。',
-    '回复"取消"放弃本次 Saga 长视频流程。',
-  ].join('\n');
+  const modelLine = await buildModelLine(state.cwd, state.locale);
+  return pickLocale(state.locale, {
+    zh: [
+      '好，要做一段长视频。先把参考材料备齐。',
+      modelLine,
+      '这个模型支持图、视频、音、文字的混合参考，可以继续发：',
+      '  · 图 / 视频 / 音 的链接或本地路径，作为视觉与听觉参考',
+      '  · 你的剧本 / 分镜 / 设定 / 故事 — 写了我会照你的来；没写就由我来安排。',
+      '准备好了回复 "开始生成"；想直接开始就回复 "跳过"；不做了回复 "取消"。',
+    ].join('\n'),
+    en: [
+      'Good — a long-form piece. Let\'s gather the reference materials first.',
+      modelLine,
+      'This model accepts mixed references — image, video, audio, text. You can keep sending:',
+      '  · Image / video / audio URLs or local paths, as visual and auditory references',
+      '  · Your own script / shot list / setting / story — if you write one, I\'ll follow it; if not, I\'ll compose it.',
+      'When you\'re ready, reply "start". To skip extras and begin, reply "skip". To stop, reply "cancel".',
+    ].join('\n'),
+  });
 }
 
 function buildRefAckMessage(state: SagaWorkflowState): string {
-  const total = refTotal(state);
   const storyCount = state.accumulatedStory.length;
-  const lines = [
-    `已收集：图片 ${state.referenceImageUrls.length + state.referenceImagePaths.length} 个，视频 ${state.referenceVideoUrls.length + state.referenceVideoPaths.length} 个，音频 ${state.referenceAudioUrls.length + state.referenceAudioPaths.length} 个（共 ${total}），故事文字 ${storyCount} 段。`,
-  ];
-  if (storyCount > 0) {
-    lines.push('已记录你的故事文字，Saga 在生成时会优先使用你写的剧本。');
+  const imgs = state.referenceImageUrls.length + state.referenceImagePaths.length;
+  const vids = state.referenceVideoUrls.length + state.referenceVideoPaths.length;
+  const auds = state.referenceAudioUrls.length + state.referenceAudioPaths.length;
+  if (state.locale === 'zh-CN') {
+    const counts = `图 ${imgs} · 视频 ${vids} · 音频 ${auds} · 剧本段 ${storyCount}`;
+    const lines = [`已收：${counts}`];
+    if (storyCount > 0) lines.push('剧本已归档，生成时会严格按你的版本来。');
+    lines.push('可以继续补充，或回复 "开始生成" 进入下一步。');
+    return lines.join('\n');
   }
-  lines.push(
-    '可继续补充参考素材或故事文字，或回复"开始生成"进入下一步。',
-    '回复"取消"放弃本次流程。',
-  );
+  const counts = `${imgs} images · ${vids} videos · ${auds} audio · ${storyCount} script segments`;
+  const lines = [`Received: ${counts}`];
+  if (storyCount > 0) lines.push('Script archived — generation will follow your version exactly.');
+  lines.push('Send more if you like, or reply "start" to proceed.');
   return lines.join('\n');
 }
 
@@ -371,51 +406,72 @@ async function runNarrativeAnalysis(state: SagaWorkflowState): Promise<Narrative
 }
 
 function shouldAskProtagonistClarification(narrative: NarrativeEntities): boolean {
+  // Keyword-fallback fires when the LLM is unavailable. Its output has no
+  // concrete entities — clarification options would be empty, deadlocking
+  // the user. Better to proceed with whatever defaults Saga has and let the
+  // critic / rewriter clean up downstream.
+  if (narrative.source === 'keyword-fallback') return false;
   if (narrative.mode === 'unclear' || narrative.mode === 'mixed') return true;
   return narrative.protagonist.confidence < NARRATIVE_CONFIDENCE_THRESHOLD;
 }
 
-function buildProtagonistOptions(state: SagaWorkflowState, narrative: NarrativeEntities): Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string }> {
-  const opts: Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string }> = [];
+function buildProtagonistOptions(state: SagaWorkflowState, narrative: NarrativeEntities): Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string; isOwnDescription?: boolean }> {
+  const opts: Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string; isOwnDescription?: boolean }> = [];
+  const tag = (type: ProtagonistType) => pickLocale(state.locale, {
+    zh: type === 'character' ? '角色为主' : type === 'product' ? '产品/道具为主' : '场景为主',
+    en: type === 'character' ? 'character lead' : type === 'product' ? 'product / object lead' : 'environment lead',
+  });
+  const ownLabel = pickLocale(state.locale, {
+    zh: '我自己来描述（直接告诉我谁或者什么是主角）',
+    en: 'I\'ll describe it myself (just tell me who or what the lead is)',
+  });
   if (narrative.protagonist.name && narrative.protagonist.name !== '(unnamed)' && narrative.protagonist.name !== '(undetermined — fallback)') {
     opts.push({
       key: 'A',
-      label: `${narrative.protagonist.name}（${narrative.protagonist.type === 'character' ? '角色' : narrative.protagonist.type === 'product' ? '产品' : '场景'}为主）`,
+      label: `${narrative.protagonist.name} (${tag(narrative.protagonist.type)})`,
       type: narrative.protagonist.type,
       mode: narrative.protagonist.type,
       name: narrative.protagonist.name,
     });
   }
   for (const supporting of narrative.supportingCharacters.slice(0, 2)) {
-    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${supporting}（角色为主）`, type: 'character', mode: 'character', name: supporting });
+    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${supporting} (${tag('character')})`, type: 'character', mode: 'character', name: supporting });
   }
   for (const prop of narrative.props.slice(0, 2)) {
-    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${prop}（产品/道具为主）`, type: 'product', mode: 'product', name: prop });
+    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${prop} (${tag('product')})`, type: 'product', mode: 'product', name: prop });
   }
   for (const env of narrative.environments.slice(0, 1)) {
-    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${env}（场景为主）`, type: 'environment', mode: 'environment', name: env });
+    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${env} (${tag('environment')})`, type: 'environment', mode: 'environment', name: env });
   }
-  // Always include a "use my own description" option
   opts.push({
     key: String.fromCharCode(65 + opts.length),
-    label: '我自己描述（请直接告诉 Saga 谁/什么是主角）',
+    label: ownLabel,
     type: narrative.protagonist.type,
     mode: narrative.protagonist.type,
     name: narrative.protagonist.name,
+    isOwnDescription: true,
   });
   return opts;
 }
 
 function buildProtagonistAskMessage(state: SagaWorkflowState): string {
-  const lines: string[] = [
-    'Saga 还没完全确定本次视频的"主角"。',
-    state.narrative?.modeRationale ? `分析依据：${state.narrative.modeRationale}` : '',
-    '请回复以下编号选择主角，或直接用一句话告诉 Saga 谁/什么是主角：',
-  ].filter(Boolean);
-  for (const opt of state.protagonistOptions ?? []) {
-    lines.push(`  ${opt.key}. ${opt.label}`);
+  if (state.locale === 'zh-CN') {
+    const lines = [
+      '主角还没完全确定，需要你敲定一下。',
+      state.narrative?.modeRationale ? `我目前的判断：${state.narrative.modeRationale}` : '',
+      '请选择编号，或直接用一句话告诉我谁是主角：',
+    ].filter(Boolean);
+    for (const opt of state.protagonistOptions ?? []) lines.push(`  ${opt.key}. ${opt.label}`);
+    lines.push('不做了回复 "取消"。');
+    return lines.join('\n');
   }
-  lines.push('回复"取消"放弃本次 Saga 长视频流程。');
+  const lines = [
+    `Need you to confirm the lead — I haven't fully settled on one.`,
+    state.narrative?.modeRationale ? `My current read: ${state.narrative.modeRationale}` : '',
+    'Pick a letter, or tell me in one sentence who the lead is:',
+  ].filter(Boolean);
+  for (const opt of state.protagonistOptions ?? []) lines.push(`  ${opt.key}. ${opt.label}`);
+  lines.push('To stop, reply "cancel".');
   return lines.join('\n');
 }
 
@@ -427,8 +483,10 @@ function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean
   if (keyMatch) {
     const chosen = state.protagonistOptions.find((opt) => opt.key.toUpperCase() === keyMatch[1]!.toUpperCase());
     if (chosen) {
-      // The last option ("我自己描述") needs the user to type more; treat it as freeform-pending if they only sent the key alone
-      if (chosen.label.startsWith('我自己描述') && trimmed.length <= 2) {
+      // "我自己来描述" / "I'll describe it myself" needs the user to actually
+      // type a description. If they sent just the letter alone, wait for the
+      // real description on the next turn.
+      if (chosen.isOwnDescription && trimmed.length <= 2) {
         return false;
       }
       state.narrative = {
@@ -457,37 +515,53 @@ function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean
 }
 
 async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string> {
-  const modelLine = await buildModelLine(state.cwd);
+  const modelLine = await buildModelLine(state.cwd, state.locale);
   const estimated = estimateDuration(combinedStoryText(state));
-  const refLine = refTotal(state) > 0
-    ? `已收集参考素材 ${refTotal(state)} 个（图${state.referenceImageUrls.length + state.referenceImagePaths.length}/视频${state.referenceVideoUrls.length + state.referenceVideoPaths.length}/音频${state.referenceAudioUrls.length + state.referenceAudioPaths.length}）。`
-    : '本次没有附加参考素材，将完全基于文本生成。';
-  const storyLine = state.accumulatedStory.length > 0
-    ? `已记录你提供的故事文字 ${state.accumulatedStory.length} 段，Saga 会按你写的剧本来拍。`
-    : '本次没有补充故事文字，Saga 会根据你最初的需求自由发挥。';
+  const refsCount = refTotal(state);
+  const imgs = state.referenceImageUrls.length + state.referenceImagePaths.length;
+  const vids = state.referenceVideoUrls.length + state.referenceVideoPaths.length;
+  const auds = state.referenceAudioUrls.length + state.referenceAudioPaths.length;
+  const storyCount = state.accumulatedStory.length;
+  if (state.locale === 'zh-CN') {
+    const refLine = refsCount > 0 ? `参考材料：图 ${imgs} / 视频 ${vids} / 音频 ${auds}。` : '本次没有参考素材，将完全依据文字描述生成。';
+    const storyLine = storyCount > 0 ? `剧本共 ${storyCount} 段，会严格按你写的来。` : '剧本由我来安排。';
+    return [
+      '已经准备好开始生成，最后确认一下时长。',
+      modelLine,
+      refLine,
+      storyLine,
+      `请告诉我视频总长度 — "60秒"、"90秒"、"2分钟" 之类都行；想让我自己决定就回复 "自动"（建议 ${estimated} 秒）。`,
+      '不做了回复 "取消"。',
+    ].join('\n');
+  }
+  const refLine = refsCount > 0 ? `Reference materials: ${imgs} images / ${vids} videos / ${auds} audio.` : 'No reference materials this run — generation will follow text only.';
+  const storyLine = storyCount > 0 ? `Script: ${storyCount} segments, exactly as you wrote it.` : 'Script: I\'ll compose it.';
   return [
-    'Saga 准备开始长视频生成。',
+    'Ready to begin — just need to confirm the total length.',
     modelLine,
     refLine,
     storyLine,
-    `请回复目标总时长，例如：60秒、90秒、2分钟；也可以回复"默认/自动"使用建议的 ${estimated} 秒。`,
-    '回复"取消"放弃本次 Saga 长视频流程。',
+    `How long should the video be? Tell me a duration — "60s", "90s", "2 minutes" — or reply "auto" and I'll choose (suggesting ${estimated}s).`,
+    'To stop, reply "cancel".',
   ].join('\n');
 }
 
 // ─── Final saga generation prompt ────────────────────────────────────────
 
 function buildGenerationPrompt(state: SagaWorkflowState): string {
-  const fullStory = combinedStoryText(state);
+  // Sanitize user input on the way through — provider-side trigger words
+  // (like "真人") get mapped to safe equivalents that preserve meaning.
+  const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
   const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
   const ratio = extractRatio(fullStory) ?? '16:9';
   const projectId = `saga-${Date.now()}`;
-  const userScriptBlock = state.accumulatedStory.length > 0
+  const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
+  const userScriptBlock = sanitizedAccumulated.length > 0
     ? [
         '',
         '[USER-SUPPLIED SCRIPT — AUTHORITATIVE]',
         'The user provided the following story text. Use it AS-IS as the controlling narrative; do not invent or substitute a different story. Distribute it across shots so the storyBeats follow this script faithfully:',
-        ...state.accumulatedStory.map((segment, idx) => `--- Story segment ${idx + 1} ---\n${segment}`),
+        ...sanitizedAccumulated.map((segment, idx) => `--- Story segment ${idx + 1} ---\n${segment}`),
         '',
       ].join('\n')
     : '';
@@ -504,6 +578,8 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
           environments: state.narrative.environments,
           relationships: state.narrative.relationships,
           actions: state.narrative.actions,
+          protagonistAccessories: state.narrative.protagonistAccessories,
+          worldModel: state.narrative.worldModel,
           mode: state.narrative.mode,
           modeRationale: state.narrative.modeRationale,
           source: state.narrative.source,
@@ -611,6 +687,7 @@ function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWor
     referenceVideoPaths: [],
     referenceAudioPaths: [],
     referenceNotes: [],
+    locale: detectLocaleFromText(input.text),
     accumulatedStory: [],
     prefilledDuration: clampDuration(extractTargetDuration(input.text)),
     deliveryPlatform: input.deliveryPlatform,
@@ -630,7 +707,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   if (state) {
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
-      return { handled: true, reply: '已取消 Saga 长视频生成流程。' };
+      return { handled: true, reply: pickLocale(state.locale, { zh: '已停止本次生成流程。', en: 'This generation has been stopped.' }) };
     }
 
     // Always try to merge any new refs in this turn (URLs, files, attachments).

@@ -36,10 +36,18 @@ export type SuperVisualModeResult =
       mode: 'image-to-image' | 'text-to-image';
       userImagesUsed: number;
       reason: string;
+      // True when the user's input image was detected as real-person photo.
+      // Downstream Saga MUST use first_frame mode (mutually exclusive with
+      // reference_image on Seedance) — i.e. send the user's photo as
+      // role:"first_frame" and SKIP the turnaround + per-segment keyframe
+      // for BytePlus calls. The turnaround is still produced as a
+      // documentation/record artifact.
+      inputIsRealPerson?: boolean;
     }
   | {
       enabled: false;
       reason: string;
+      inputIsRealPerson?: boolean;
     };
 
 export type SuperVisualEligibilityInput = {
@@ -249,6 +257,23 @@ export function buildSegmentKeyframePrompt(input: {
   // textually as well as visually — survives even when the relay's image
   // conditioning weakens or when the planner drops the ball on storyBeat.
   visionDescription?: string;
+  // Locked accessories (extracted dynamically from user content, not
+  // hardcoded). Listed in the keyframe prompt so segments 2..N's keyframes
+  // don't accidentally drop or replace identity-defining wearables.
+  accessoriesLock?: string[];
+  // Persistent occlusions (masks, hooded cloaks, hair curtains) that must
+  // appear in every shot.
+  occlusionLock?: string[];
+  // Permanent wardrobe items that must remain across every shot.
+  permanentWardrobe?: string[];
+  // Distinguishing marks (tattoos, scars, birthmarks).
+  distinguishingMarks?: string[];
+  // Identity-locked props always carried by the protagonist.
+  identityLockedProps?: string[];
+  // Free-form continuity rules from the world model.
+  continuityRules?: string[];
+  // Things to avoid showing.
+  exclusions?: string[];
 }): string {
   const shot = input.shot;
   const identitySection = input.withPreviousLastFrame
@@ -275,10 +300,43 @@ export function buildSegmentKeyframePrompt(input: {
       ].join('\n')
     : '';
 
+  // World-model identity locks — rendered dynamically from the analyst's
+  // extracted fields so segments 2..N don't lose accessories, occlusions,
+  // permanent wardrobe, distinguishing marks, locked props, or custom rules.
+  const lockBlocks: string[] = [];
+  if (input.accessoriesLock && input.accessoriesLock.length > 0) {
+    lockBlocks.push('LOCKED ACCESSORIES (must appear in this keyframe in the same position/color/style — never replace, swap, or remove):');
+    for (const item of input.accessoriesLock) lockBlocks.push(`  · ${item}`);
+  }
+  if (input.occlusionLock && input.occlusionLock.length > 0) {
+    lockBlocks.push('LOCKED OCCLUSIONS (must persist across every shot — these elements partially cover the protagonist and the cover must NOT be removed):');
+    for (const item of input.occlusionLock) lockBlocks.push(`  · ${item}`);
+  }
+  if (input.permanentWardrobe && input.permanentWardrobe.length > 0) {
+    lockBlocks.push('LOCKED PERMANENT WARDROBE:');
+    for (const item of input.permanentWardrobe) lockBlocks.push(`  · ${item}`);
+  }
+  if (input.distinguishingMarks && input.distinguishingMarks.length > 0) {
+    lockBlocks.push('DISTINGUISHING MARKS (anatomically permanent — must appear):');
+    for (const item of input.distinguishingMarks) lockBlocks.push(`  · ${item}`);
+  }
+  if (input.identityLockedProps && input.identityLockedProps.length > 0) {
+    lockBlocks.push('IDENTITY-LOCKED PROPS (always present with the protagonist):');
+    for (const item of input.identityLockedProps) lockBlocks.push(`  · ${item}`);
+  }
+  if (input.continuityRules && input.continuityRules.length > 0) {
+    lockBlocks.push('PROJECT CONTINUITY RULES:');
+    for (const rule of input.continuityRules) lockBlocks.push(`  · ${rule}`);
+  }
+  if (input.exclusions && input.exclusions.length > 0) {
+    lockBlocks.push(`EXCLUSIONS (do NOT include): ${input.exclusions.join(', ')}`);
+  }
+  const locksSection = lockBlocks.length > 0 ? ['', ...lockBlocks, ''].join('\n') : '';
+
   return [
     identitySection,
     visionTruth,
-    '',
+    locksSection,
     `This is the opening keyframe for shot ${input.shotIndex} of ${input.shotCount} in a long-form video.`,
     `Aspect ratio: ${input.ratio}`,
     `Title: ${compact(shot.title) || `Shot ${input.shotIndex}`}`,
@@ -292,6 +350,7 @@ export function buildSegmentKeyframePrompt(input: {
     'OUTPUT REQUIREMENTS (FIXED):',
     '- Single image only; do not output a sheet, grid, or multi-panel.',
     '- The IMAGE 1 protagonist is the central subject. Do NOT replace the protagonist with anyone else.',
+    '- ALL LOCKED ITEMS above must appear unchanged.',
     '',
     'CRITICAL — ACTION-IN-PROGRESS POSE (not a still portrait):',
     '- The character must be MID-ACTION at the moment depicted, not standing still or posing for a portrait.',
@@ -519,7 +578,7 @@ function looksLikeRealPersonDescription(description: string | null | undefined):
   return false;
 }
 
-async function describeUserImageWithVision(options: {
+export async function describeUserImageWithVision(options: {
   imagePath: string;
   context: ToolExecutionContext;
 }): Promise<string | null> {
@@ -719,6 +778,7 @@ export async function maybeGenerateSuperVisualReference(options: {
         mode: 'image-to-image',
         userImagesUsed: userInputs.length,
         reason: `generated character turnaround from ${userInputs.length} user image(s) via ${describeVisualProvider(imageConfigured.config, 'image')} image edit`,
+        inputIsRealPerson: inputLooksRealPerson,
       };
     }
     // Edit endpoint failed — fall through to text-to-image. Surface the
@@ -763,6 +823,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     reason: useEditMode
       ? `generated character turnaround text-to-image (image edit fallback) via ${describeVisualProvider(imageConfigured.config, 'image')}`
       : `generated character turnaround text-to-image via ${describeVisualProvider(imageConfigured.config, 'image')}`,
+    inputIsRealPerson: inputLooksRealPerson,
   };
 }
 
@@ -790,6 +851,18 @@ export async function generateSegmentKeyframe(options: {
   // for relay chaining. When supplied, the keyframe edit call gets two
   // input images: turnaround (identity) + prev last frame (scene continuity).
   previousLastFramePath?: string;
+  // Identity-locking signals from the world model — passed through to the
+  // keyframe prompt so segments 2..N keep the same accessories, occlusions,
+  // wardrobe, marks, locked props, and project-specific continuity rules.
+  // Each list is optional and dynamic — extracted by the LLM analyst from
+  // the user's content. No hardcoded examples.
+  accessoriesLock?: string[];
+  occlusionLock?: string[];
+  permanentWardrobe?: string[];
+  distinguishingMarks?: string[];
+  identityLockedProps?: string[];
+  continuityRules?: string[];
+  exclusions?: string[];
 }): Promise<SegmentKeyframeResult> {
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (!imageConfigured) return { ok: false, reason: 'image provider not configured' };
@@ -825,6 +898,13 @@ export async function generateSegmentKeyframe(options: {
     ratio: options.ratio,
     withPreviousLastFrame,
     visionDescription,
+    accessoriesLock: options.accessoriesLock,
+    occlusionLock: options.occlusionLock,
+    permanentWardrobe: options.permanentWardrobe,
+    distinguishingMarks: options.distinguishingMarks,
+    identityLockedProps: options.identityLockedProps,
+    continuityRules: options.continuityRules,
+    exclusions: options.exclusions,
   });
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-keyframe.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');

@@ -538,12 +538,35 @@ export type AgentAction =
       pollIntervalMs?: number;
       runInBackground?: boolean;
       narrativeEntities?: {
-        protagonist?: { name?: string; type?: 'character' | 'product' | 'environment'; confidence?: number; evidence?: string };
+        protagonist?: { name?: string; type?: 'character' | 'product' | 'environment'; confidence?: number; evidence?: string; aliases?: string[] };
         supportingCharacters?: string[];
         props?: string[];
         environments?: string[];
         relationships?: string[];
         actions?: string[];
+        protagonistAccessories?: string[];
+        worldModel?: {
+          weather?: string;
+          lighting?: string;
+          timeOfDay?: string;
+          gravity?: string;
+          occlusion?: string[];
+          wardrobe?: { permanent?: string[]; variable?: string[] };
+          distinguishingMarks?: string[];
+          bodyProportions?: string;
+          skinTone?: string;
+          hair?: string;
+          clutter?: string[];
+          palette?: string[];
+          mood?: string;
+          soundscape?: string;
+          cameraVocabulary?: string[];
+          identityLockedProps?: string[];
+          sceneVariableProps?: string[];
+          visualRhymes?: string[];
+          continuityRules?: string[];
+          exclusions?: string[];
+        };
         mode?: 'character' | 'product' | 'environment' | 'mixed' | 'unclear';
         modeRationale?: string;
         source?: 'llm' | 'user-clarification' | 'keyword-fallback';

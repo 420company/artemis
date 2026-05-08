@@ -1163,6 +1163,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
               environments: { type: 'array', items: { type: 'string' } },
               relationships: { type: 'array', items: { type: 'string' } },
               actions: { type: 'array', items: { type: 'string' } },
+              protagonistAccessories: { type: 'array', description: 'Identity-defining wearable accessories on the protagonist (eye-mask, hat, jewelry, etc) — extracted dynamically from user content. Each entry is concrete (color + style + body location). Locked across every shot in the video.', items: { type: 'string' } },
               mode: { type: 'string', enum: ['character', 'product', 'environment', 'mixed', 'unclear'] },
               modeRationale: { type: 'string' },
               source: { type: 'string', enum: ['llm', 'user-clarification', 'keyword-fallback'] },
