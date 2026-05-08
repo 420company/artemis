@@ -200,21 +200,34 @@ Rules:
 
 type ChatModelInfo = { apiKey: string; baseUrl: string; model: string };
 
+// Resolve the chat / vision endpoint. Read the user's MAIN profile
+// (not the image-gen provider config) — these may live on different relays
+// in some setups and assuming they're co-located silently fails when
+// they're not. Falls back to image-provider config only as a last resort.
 async function resolveChatModel(cwd: string): Promise<ChatModelInfo | null> {
-  const imageConfigured = await resolveConfiguredVisualProvider(cwd, 'image');
-  const apiKey = imageConfigured?.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured?.config.image.baseUrl?.trim();
-  if (!apiKey || !baseUrl) return null;
-  let model = 'gpt-5.5';
+  let mainApiKey: string | undefined;
+  let mainBaseUrl: string | undefined;
+  let mainModel = 'gpt-5.5';
   try {
     const { ProviderStore } = await import('../../providers/store.js');
     const store = await new ProviderStore(cwd).load();
     const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
-    if (main?.model) model = main.model;
-  } catch {
-    // keep fallback
+    if (main) {
+      if (main.apiKey) mainApiKey = main.apiKey.trim();
+      if (main.baseUrl) mainBaseUrl = main.baseUrl.trim();
+      if (main.model) mainModel = main.model;
+    }
+  } catch { /* fall through to image-provider config */ }
+  if (mainApiKey && mainBaseUrl) {
+    return { apiKey: mainApiKey, baseUrl: mainBaseUrl, model: mainModel };
   }
-  return { apiKey, baseUrl, model };
+  // Last-resort fallback: image provider's chat endpoint (only correct when
+  // image and chat share a relay).
+  const imageConfigured = await resolveConfiguredVisualProvider(cwd, 'image');
+  const apiKey = imageConfigured?.config.image.apiKey?.trim();
+  const baseUrl = imageConfigured?.config.image.baseUrl?.trim();
+  if (!apiKey || !baseUrl) return null;
+  return { apiKey, baseUrl, model: mainModel };
 }
 
 async function readImageAsDataUrl(filePath: string): Promise<string | null> {

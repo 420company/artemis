@@ -424,10 +424,16 @@ async function postOpenAIImageEdit(options: {
     if (options.size) form.append('size', options.size);
     if (options.quality) form.append('quality', options.quality);
     let formBuildFailed = false;
+    // OpenAI Image API field naming: single image uses "image"; multiple
+    // images use "image[]" (the array variant). Some relays accept either,
+    // but using the wrong form for multi-image silently picks just the
+    // last upload. Branch on count to match the official spec.
+    const isMulti = options.inputImagePaths.length > 1;
+    const fieldName = isMulti ? 'image[]' : 'image';
     for (const filePath of options.inputImagePaths) {
       try {
         const { blob, filename } = await readImageAsBlob(filePath);
-        form.append('image', blob, filename);
+        form.append(fieldName, blob, filename);
       } catch (error) {
         formBuildFailed = true;
         lastError = `read input image failed (${filePath}): ${error instanceof Error ? error.message : String(error)}`;
@@ -582,24 +588,30 @@ export async function describeUserImageWithVision(options: {
   imagePath: string;
   context: ToolExecutionContext;
 }): Promise<string | null> {
-  const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
-  if (!imageConfigured) return null;
-  const apiKey = imageConfigured.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured.config.image.baseUrl?.trim();
-  if (!apiKey || !baseUrl) return null;
-
-  // Resolve the main chat model (vision-capable). The user's relay typically
-  // hosts both gpt-image-2 and gpt-5.x at the same baseUrl, so we reuse the
-  // image provider's auth and endpoint for the chat-completions call.
+  // Resolve the chat/vision endpoint from the user's MAIN profile first;
+  // only fall back to the image-provider's relay when no main profile is
+  // configured. (Some users put main and image on different relays;
+  // assuming they share fails silently.)
+  let apiKey: string | undefined;
+  let baseUrl: string | undefined;
   let chatModel = 'gpt-5.5';
   try {
     const { ProviderStore } = await import('../../providers/store.js');
     const store = await new ProviderStore(options.context.cwd).load();
     const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
-    if (main?.model) chatModel = main.model;
-  } catch {
-    // fall back to gpt-5.5
+    if (main) {
+      if (main.apiKey) apiKey = main.apiKey.trim();
+      if (main.baseUrl) baseUrl = main.baseUrl.trim();
+      if (main.model) chatModel = main.model;
+    }
+  } catch { /* fall through */ }
+  if (!apiKey || !baseUrl) {
+    const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
+    if (!imageConfigured) return null;
+    apiKey = imageConfigured.config.image.apiKey?.trim();
+    baseUrl = imageConfigured.config.image.baseUrl?.trim();
   }
+  if (!apiKey || !baseUrl) return null;
 
   let buffer: Buffer;
   try {

@@ -478,22 +478,44 @@ function buildProtagonistAskMessage(state: SagaWorkflowState): string {
 function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean {
   if (!state.narrative || !state.protagonistOptions) return false;
   const trimmed = text.trim();
-  // Match a single-letter option key
-  const keyMatch = trimmed.match(/^([A-Za-z])\b/);
+  // Match a single letter at the start, optionally followed by a separator
+  // and a freeform description. Examples that all parse:
+  //   "A"
+  //   "A."
+  //   "A. 红衣女孩是主角"
+  //   "D 红衣女孩是主角"
+  //   "B - the cookie sister"
+  const keyMatch = trimmed.match(/^([A-Za-z])\b\s*[\.、,。:：\-—–]?\s*(.*)$/);
   if (keyMatch) {
     const chosen = state.protagonistOptions.find((opt) => opt.key.toUpperCase() === keyMatch[1]!.toUpperCase());
     if (chosen) {
-      // "我自己来描述" / "I'll describe it myself" needs the user to actually
-      // type a description. If they sent just the letter alone, wait for the
-      // real description on the next turn.
-      if (chosen.isOwnDescription && trimmed.length <= 2) {
-        return false;
+      const trailing = (keyMatch[2] ?? '').trim();
+      if (chosen.isOwnDescription) {
+        // Own-description option requires actual descriptive text. If the
+        // user only sent the letter, wait for them to type more on the
+        // next turn. If they sent letter + description, USE the description.
+        if (!trailing || trailing.length < 2) return false;
+        state.narrative = {
+          ...state.narrative,
+          protagonist: { ...state.narrative.protagonist, name: trailing, type: state.narrative.protagonist.type, confidence: 1.0, evidence: 'user freeform clarification (own description)' },
+          mode: state.narrative.protagonist.type,
+          modeRationale: `User typed their own protagonist description: "${trailing.slice(0, 80)}"`,
+          source: 'user-clarification',
+        };
+        return true;
       }
+      // For a non-own-description option, prefer trailing text if it's a
+      // substantive description (len >=2); otherwise use the option's
+      // canonical name. This way "D 红衣女孩是主角" overrides chosen.name
+      // with the user's actual phrasing, while "D" alone uses the option.
+      const finalName = trailing.length >= 2 ? trailing : chosen.name;
       state.narrative = {
         ...state.narrative,
-        protagonist: { ...state.narrative.protagonist, name: chosen.name, type: chosen.type, confidence: 1.0, evidence: 'user clarification' },
+        protagonist: { ...state.narrative.protagonist, name: finalName, type: chosen.type, confidence: 1.0, evidence: trailing.length >= 2 ? 'user clarification (option + description)' : 'user clarification (option)' },
         mode: chosen.mode,
-        modeRationale: `User selected option ${chosen.key}: ${chosen.label}`,
+        modeRationale: trailing.length >= 2
+          ? `User picked ${chosen.key} and provided their own description: "${trailing.slice(0, 80)}"`
+          : `User selected option ${chosen.key}: ${chosen.label}`,
         source: 'user-clarification',
       };
       return true;

@@ -643,8 +643,15 @@ export async function executeGenerateLongVideo(
     // Coerce narrativeEntities once and use it everywhere downstream
     // (constitution rendering, accessoryLock, keyframe generation, critic).
     const narrativeEntities = coerceNarrativeEntities(action.narrativeEntities);
-    const firstFrameUserPhotoPaths: string[] = [];
-    const firstFrameUserPhotoUrls: string[] = [];
+    // NOTE: role:"first_frame" turned out NOT to bypass BytePlus's real-
+    // person privacy filter empirically (the filter is image-classifier-
+    // based and ignores the role tag). Saga therefore uses ONLY
+    // role:"reference_image" with the illustrated turnaround as identity
+    // anchor + per-segment AI keyframe + chain frame; user real photos
+    // are dropped on the server-side path. We keep firstFrameImage* in
+    // the action schema for callers who explicitly want image-to-video
+    // first-frame mode in single-shot generate_video calls, but the long-
+    // video path does not synthesize first_frame requests.
     // SV-disabled fallback: when the canonical illustrated turnaround is
     // unavailable (relay sick) but the user provided reference images, we
     // can't send those photos to the video provider (the privacy filter
@@ -714,6 +721,15 @@ export async function executeGenerateLongVideo(
       }
     }
 
+    // Sanitize story BEFORE the continuity bible is built so unsanitized
+    // trigger words don't leak into per-segment compiled prompts via the
+    // bible's "Source story" injection. (continuity.ts re-uses the source
+    // story verbatim for every segment.)
+    const storySanitizeDiff = diffSanitize(story);
+    if (storySanitizeDiff.length > 0) {
+      toolWarn(`🛡️ Saga 词汇护栏: story 中替换 ${storySanitizeDiff.length} 处敏感触发词 (${storySanitizeDiff.slice(0, 3).map((d) => `${d.from} → ${d.to}`).join('; ')}${storySanitizeDiff.length > 3 ? '; ...' : ''})。`);
+    }
+    story = sanitizeForVideoProvider(story);
     const { shotContinuityNotes, shotCameraNotes } = deriveContinuityFromShots(action);
     const continuityBible = buildContinuityBible({
       story,
@@ -737,14 +753,9 @@ export async function executeGenerateLongVideo(
       userOverride: userContinuityOverride,
     });
 
-    // Sanitize story before segment build so any forbidden surface words
-    // ("真人" etc.) the user typed are mapped to safe equivalents that
-    // preserve meaning. Diagnostic logged when changes happen.
-    const storySanitizeDiff = diffSanitize(story);
-    if (storySanitizeDiff.length > 0) {
-      toolWarn(`🛡️ Saga 词汇护栏: 在 story 中替换 ${storySanitizeDiff.length} 处敏感触发词 (${storySanitizeDiff.slice(0, 3).map((d) => `${d.from} → ${d.to}`).join('; ')}${storySanitizeDiff.length > 3 ? '; ...' : ''})。`);
-    }
-    const sanitizedStory = sanitizeForVideoProvider(story);
+    // Sanitize per-shot author-facing fields (storyBeat / visualPrompt /
+    // camera / continuity / transition / prompt). Story itself was already
+    // sanitized before continuityBible was built.
     const sanitizedShots = action.shots?.map((shot) => ({
       ...shot,
       storyBeat: shot.storyBeat ? sanitizeForVideoProvider(shot.storyBeat) : shot.storyBeat,
@@ -755,7 +766,7 @@ export async function executeGenerateLongVideo(
       prompt: shot.prompt ? sanitizeForVideoProvider(shot.prompt) : shot.prompt,
     }));
     const segments = buildSegments({
-      story: sanitizedStory,
+      story,
       shots: sanitizedShots,
       projectDir,
       hyperframesProjectDir,
@@ -810,9 +821,11 @@ export async function executeGenerateLongVideo(
             });
             if (rewrite) {
               toolLog(`✏️  Saga Critic: shot ${seg.index} 已重写 (round ${round}) — ${rewrite.storyBeat.slice(0, 80)}...`);
-              seg.storyBeat = rewrite.storyBeat;
-              seg.visualPrompt = rewrite.visualPrompt;
-              if (rewrite.transition) seg.transition = rewrite.transition;
+              // Sanitize rewriter output too — the LLM may reintroduce
+              // trigger words even when the original storyBeat was clean.
+              seg.storyBeat = sanitizeForVideoProvider(rewrite.storyBeat);
+              seg.visualPrompt = sanitizeForVideoProvider(rewrite.visualPrompt);
+              if (rewrite.transition) seg.transition = sanitizeForVideoProvider(rewrite.transition);
               // Recompile compiled prompts so the new storyBeat actually reaches BytePlus
               const previous = segIdx > 0 ? segments[segIdx - 1]! : null;
               const startingFrameAnchor = previous
@@ -999,27 +1012,23 @@ export async function executeGenerateLongVideo(
           //   · Super Visual stylized turnaround (when enabled, illustrated
           //     three-view sheet)
           //   · Per-segment AI-generated keyframe (illustrated, by gpt-image-2)
-          const firstFrameImagePaths: string[] = [];
-          const firstFrameImageUrls: string[] = [];
-          if (segment.index === 1) {
-            firstFrameImagePaths.push(...firstFrameUserPhotoPaths);
-            firstFrameImageUrls.push(...firstFrameUserPhotoUrls);
-          } else if (usingChain && previousLastFramePath) {
-            firstFrameImagePaths.push(previousLastFramePath);
-          }
           const segmentKeyframe = segmentKeyframePaths.get(segment.index);
           const keyframePaths = segmentKeyframe ? [segmentKeyframe] : [];
-          const referenceImagePaths = [...keyframePaths, ...(usingUserImageReferences ? userReferenceImagePaths : [])];
+          const chainPaths = usingChain && previousLastFramePath ? [previousLastFramePath] : [];
+          const referenceImagePaths = [
+            ...keyframePaths,
+            ...chainPaths,
+            ...(usingUserImageReferences ? userReferenceImagePaths : []),
+          ];
           const referenceImageUrlsForCall = usingUserImageReferences ? userReferenceImageUrls : [];
-          const promptToUse = usingChain || usingUserImageReferences || firstFrameImagePaths.length > 0 ? segment.prompt : segment.textOnlyPrompt;
+          const hasAnyImageRef = referenceImagePaths.length > 0 || referenceImageUrlsForCall.length > 0;
+          const promptToUse = hasAnyImageRef ? segment.prompt : segment.textOnlyPrompt;
           const result = await executeGenerateVideo(
             {
               ...baseReq,
-              prompt: promptToUse,
+              prompt: sanitizeForVideoProvider(promptToUse),
               referenceImageUrls: referenceImageUrlsForCall.length > 0 ? referenceImageUrlsForCall : undefined,
               referenceImagePaths,
-              firstFrameImagePaths: firstFrameImagePaths.length > 0 ? firstFrameImagePaths : undefined,
-              firstFrameImageUrls: firstFrameImageUrls.length > 0 ? firstFrameImageUrls : undefined,
               generateAudio: usingAudio,
             },
             context,

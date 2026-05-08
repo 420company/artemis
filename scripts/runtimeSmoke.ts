@@ -2219,8 +2219,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     }),
   )
   assert(
-    'super visual mode: user image references take precedence over generated turnarounds',
-    !isSuperVisualModeEligible({
+    'super visual mode: user image references digest into an illustrated turnaround (not bypass)',
+    isSuperVisualModeEligible({
       hasUserImageReference: true,
       imageProvider: 'openai',
       imageModel: 'gpt-image-2',
