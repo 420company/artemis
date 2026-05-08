@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
   describeVisualProvider,
@@ -444,9 +445,70 @@ function normalizeBaseUrl(baseUrl: string): string {
   return (baseUrl || '').replace(/\/+$/, '');
 }
 
-async function readImageAsBlob(filePath: string): Promise<{ blob: Blob; filename: string }> {
-  const buffer = await readFile(filePath);
+// Auto-compress image inputs before sending to /v1/images/edits. The OpenAI
+// API accepts up to 25MB per image, but relays in front of OpenAI (such as
+// http://...:8080) frequently have body-size caps in the 1–10MB range —
+// large PNGs / RAW exports silently hang or get dropped at the relay layer.
+// ffmpeg is already a hard dependency, so we use it for the downscale +
+// JPEG re-encode without adding new packages.
+//
+// Behavior:
+//   · file ≤ 2MB AND already JPEG → use as-is (no waste)
+//   · otherwise → ffmpeg → max 2048px on long edge, JPEG q:v 4 (≈92%
+//     quality), written to a hashed cache path under os.tmpdir()
+async function maybeCompressForUpload(filePath: string): Promise<string> {
+  let stat;
+  try {
+    const fs = await import('node:fs/promises');
+    stat = await fs.stat(filePath);
+  } catch {
+    return filePath;
+  }
+  const sizeMb = stat.size / (1024 * 1024);
   const ext = path.extname(filePath).toLowerCase();
+  if (sizeMb <= 2 && (ext === '.jpg' || ext === '.jpeg')) {
+    return filePath;
+  }
+  // Hash the path so repeated reads of the same source reuse the cache.
+  const cacheKey = createHash('sha256').update(filePath).digest('hex').slice(0, 24);
+  const os = await import('node:os');
+  const compressedPath = path.join(os.tmpdir(), `saga-edit-input-${cacheKey}.jpg`);
+  // If the cached compressed copy already exists and is fresh, reuse.
+  try {
+    const fs = await import('node:fs/promises');
+    const cachedStat = await fs.stat(compressedPath);
+    if (cachedStat.size > 0 && cachedStat.mtimeMs > stat.mtimeMs) {
+      return compressedPath;
+    }
+  } catch { /* not cached yet */ }
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const { resolveFfmpegBinaryPath } = await import('./sagaRenderer/concat.js');
+    const ffmpegBin = await resolveFfmpegBinaryPath();
+    await execFileAsync(ffmpegBin, [
+      '-y',
+      '-loglevel', 'error',
+      '-i', filePath,
+      '-vf', `scale='min(2048,iw)':'min(2048,ih)':force_original_aspect_ratio=decrease`,
+      '-q:v', '4', // ≈ 92% quality JPEG; visually indistinguishable from source for vision models
+      compressedPath,
+    ], { timeout: 60_000 });
+    const fs = await import('node:fs/promises');
+    const newStat = await fs.stat(compressedPath);
+    toolLog(`🗜️  Super Visual: 上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 避免 relay body-size 上限。`);
+    return compressedPath;
+  } catch (error) {
+    toolWarn(`⚠️ Super Visual: 图片压缩失败（${error instanceof Error ? error.message.slice(0, 160) : String(error)}），使用原图。`);
+    return filePath;
+  }
+}
+
+async function readImageAsBlob(filePath: string): Promise<{ blob: Blob; filename: string }> {
+  const effectivePath = await maybeCompressForUpload(filePath);
+  const buffer = await readFile(effectivePath);
+  const ext = path.extname(effectivePath).toLowerCase();
   const type = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
     : ext === '.webp' ? 'image/webp'
     : ext === '.gif' ? 'image/gif'
@@ -455,7 +517,7 @@ async function readImageAsBlob(filePath: string): Promise<{ blob: Blob; filename
   const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
   return {
     blob: new Blob([ab], { type }),
-    filename: path.basename(filePath),
+    filename: path.basename(effectivePath),
   };
 }
 
