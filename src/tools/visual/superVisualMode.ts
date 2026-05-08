@@ -964,7 +964,10 @@ export async function maybeGenerateSuperVisualReference(options: {
         story: [
           options.story,
           '',
-          'The input is already a complete three-view character turnaround. Convert it into a provider-safe illustrated character reference sheet while preserving the exact same front/side/back identity, outfit, accessories, proportions, color palette, and visible props. Do not invent a different person.',
+          'IDENTITY-PRESERVING SAFETY DERIVATIVE: the input is already a complete three-view character turnaround and is the non-negotiable source of truth. This is NOT a redesign task. Make a trace-like / rotoscope-like illustrated derivative of the SAME person only so downstream video providers receive a non-photographic reference.',
+          'Copy the visible identity details one by one: same face shape, jawline, covered-eye mask shape and position, hair length / volume / waves / color, body proportions, skin tone, posture, lingerie cut, robe transparency and drape, stockings, jewelry, nail color, playing-card prop, and front/side/back silhouettes. Preserve the exact wardrobe and accessories; do not simplify them away.',
+          'Forbidden: changing the character into a different woman, changing age/build, changing hairstyle, changing mask coverage, changing lingerie design, changing color palette, removing stockings/robe/jewelry/cards, adding new costume pieces, adding text labels, adding extra people, or turning the reference sheet into an action scene.',
+          'The output may change only the rendering medium from photoreal/photo-like to provider-safe illustrated character-sheet art. Identity, outfit, accessories, proportions, and prop semantics must remain as close to the input as the model can reproduce.',
         ].join('\n'),
         ratio: options.ratio,
         referenceNotes: options.action.referenceNotes,
