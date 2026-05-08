@@ -8,6 +8,7 @@ import {
   isBytePlusProvider,
   resolveVideoModelCapabilities,
 } from './videoCapabilities.js';
+import { isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 
 export type SeedanceWorkflowScope = 'cli' | 'bridge';
@@ -113,22 +114,30 @@ function extractHttpUrls(text: string): string[] {
 }
 
 function looksLikeLocalMediaPath(value: string): boolean {
-  return /(?:^|[\s"'`(（])(?:~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)?[^\s"'`，。；、)）]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)(?:$|[\s"'`，。；、)）])/i.test(value);
+  return /(?:^|[\s"'`(（])(?:file:\/\/|~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)[^\n"'`，。；、)）]+?\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)(?:$|[\s"'`，。；、)）])/i.test(value);
 }
 
 function extractLocalMediaPathCandidates(text: string): string[] {
   const values: string[] = [];
-  const pattern = /(?:~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)?[^\s"'`，。；、)）]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
+  const pattern = /(?:file:\/\/|~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)[^\n"'`，。；、)）]+?\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
   for (const match of text.matchAll(pattern)) {
-    const value = match[0].replace(/[),.;，。]+$/g, '');
+    const value = match[0].replace(/[),.;，。]+$/g, '').replace(/\\(.)/g, '$1');
     if (!/^https?:\/\//i.test(value) && looksLikeLocalMediaPath(` ${value} `)) values.push(value);
   }
   return unique(values);
 }
 
 function resolveLocalPath(cwd: string, raw: string): string {
-  if (raw.startsWith('~/')) return path.join(process.env.HOME ?? '', raw.slice(2));
-  return path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
+  let candidate = raw;
+  if (candidate.startsWith('file://')) {
+    try {
+      candidate = decodeURIComponent(new URL(candidate).pathname);
+    } catch {
+      return raw;
+    }
+  }
+  if (candidate.startsWith('~/')) return path.join(process.env.HOME ?? '', candidate.slice(2));
+  return path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate);
 }
 
 async function existingLocalMediaPaths(cwd: string, text: string): Promise<string[]> {
@@ -185,7 +194,7 @@ async function classifyReferenceUrls(
 
   for (const localPath of await existingLocalMediaPaths(cwd, text)) {
     const lower = localPath.toLowerCase();
-    if (/\.(?:png|jpe?g|webp|gif)$/.test(lower)) {
+    if (/\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif)$/.test(lower)) {
       imagePaths.push(localPath);
     } else if (/\.(?:mp4|mov|webm|m4v)$/.test(lower)) {
       videoPaths.push(localPath);
@@ -383,20 +392,12 @@ function hasVideoCreationSyntax(text: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
-function hasDirectCreationRequestMarker(text: string): boolean {
-  return /(?:请|帮我|给我|我要|我想|需要|现在|直接|开始|please|can you|could you|for me)/i.test(text);
-}
-
 function isSeedanceWorkflowSupportDiscussion(text: string): boolean {
-  const normalized = compact(text);
-  if (!normalized) return false;
-  const mentionsVideo = /(?:Seedance|多模态|generate_video|referenceImageUrls|referenceVideoUrls|视频|短片|动画|动效|片段|video|movie|clip|animation|motion)/i.test(normalized);
-  if (!mentionsVideo) return false;
-  const asksOrReviews = /(?:为什么|怎么回事|怎么|如何|没搞懂|有没有|是否|能不能|能否|可以吗|吗|？|\?|检查|审查|review|修复|实现|逻辑|代码|文档|支持|不支持|bug|问题|报错|失败|没有)/i.test(normalized);
-  if (!asksOrReviews) return false;
-  const mentionsSystemSurface = /(?:Seedance|多模态|工作流|流程|引导|触发|提示|确认|referenceImageUrls|referenceVideoUrls|generate_video|系统|功能|逻辑|代码|发送|发给手机|发送到手机|手机|Discord|Telegram|WeChat|bridge|投递|完成后|生成完成|主动发送|主动把视频发)/i.test(normalized);
-  const explicitCreationRequest = hasVideoCreationSyntax(normalized) && hasDirectCreationRequestMarker(normalized) && !mentionsSystemSurface;
-  return !explicitCreationRequest;
+  return isWorkflowSupportDiscussion(text, {
+    workflowTerms: /(?:Seedance|多模态|generate_video|referenceImageUrls|referenceVideoUrls|视频|短片|动画|动效|片段|video|movie|clip|animation|motion)/i,
+    creationSyntax: hasVideoCreationSyntax,
+    systemSurfaceTerms: /(?:Seedance|多模态|工作流|流程|引导|触发|提示|确认|referenceImageUrls|referenceVideoUrls|generate_video|系统|功能|逻辑|代码|发送|发给手机|发送到手机|手机|Discord|Telegram|WeChat|bridge|投递|完成后|生成完成|主动发送|主动把视频发)/i,
+  });
 }
 
 function isExplicitSeedanceVideoRequest(text: string): boolean {

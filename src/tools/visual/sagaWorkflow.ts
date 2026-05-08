@@ -16,6 +16,7 @@ import {
   type ProtagonistMode,
   type ProtagonistType,
 } from './sagaNarrative.js';
+import { isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
@@ -112,6 +113,13 @@ function hasLongVideoIntent(text: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isSagaWorkflowSupportDiscussion(text: string): boolean {
+  return isWorkflowSupportDiscussion(text, {
+    workflowTerms: /(?:Saga|长视频|完整视频|generate_long_video|generate_video|视频|短片|动画|片段|video|movie|clip|工作流|流程|触发|生成)/i,
+    creationSyntax: hasLongVideoIntent,
+  });
+}
+
 function extractTargetDuration(text: string): number | undefined {
   const normalized = compact(text);
   const zhMinute = normalized.match(/(\d{1,3})\s*(?:分钟|分)/);
@@ -158,17 +166,25 @@ function extractHttpUrls(text: string): string[] {
 
 function extractLocalMediaPathCandidates(text: string): string[] {
   const values: string[] = [];
-  const pattern = /(?:~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)?[^\s"'`，。；、)）]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
+  const pattern = /(?:file:\/\/|~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)[^\n"'`，。；、)）]+?\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
   for (const match of text.matchAll(pattern)) {
-    values.push(match[0]);
+    values.push(match[0].replace(/[),.;，。]+$/g, '').replace(/\\(.)/g, '$1'));
   }
   return unique(values);
 }
 
 function resolveLocalPath(cwd: string, raw: string): string {
-  if (raw.startsWith('~/')) return path.join(os.homedir(), raw.slice(2));
-  if (raw.startsWith('/')) return raw;
-  return path.resolve(cwd, raw);
+  let candidate = raw;
+  if (candidate.startsWith('file://')) {
+    try {
+      candidate = decodeURIComponent(new URL(candidate).pathname);
+    } catch {
+      return raw;
+    }
+  }
+  if (candidate.startsWith('~/')) return path.join(os.homedir(), candidate.slice(2));
+  if (candidate.startsWith('/')) return candidate;
+  return path.resolve(cwd, candidate);
 }
 
 async function existingLocalMediaPaths(cwd: string, text: string): Promise<string[]> {
@@ -242,7 +258,7 @@ async function classifyReferences(
   }
   for (const localPath of await existingLocalMediaPaths(cwd, text)) {
     const lower = localPath.toLowerCase();
-    if (/\.(?:png|jpe?g|webp|gif)$/.test(lower)) imagePaths.push(localPath);
+    if (/\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif)$/.test(lower)) imagePaths.push(localPath);
     else if (/\.(?:mp4|mov|webm|m4v)$/.test(lower)) videoPaths.push(localPath);
     else if (/\.(?:mp3|wav|m4a|aac|flac|ogg)$/.test(lower)) audioPaths.push(localPath);
   }
@@ -727,6 +743,11 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
       return { handled: true, reply: pickLocale(state.locale, { zh: '已停止本次生成流程。', en: 'This generation has been stopped.' }) };
+    }
+
+    if (isSagaWorkflowSupportDiscussion(text)) {
+      WORKFLOWS.delete(key);
+      return { handled: false };
     }
 
     // Always try to merge any new refs in this turn (URLs, files, attachments).

@@ -85,8 +85,10 @@ type PlaceholderRange = {
   end: number
   displayText: string
   realText: string
-  kind: 'paste' | 'image'
+  kind: 'paste' | 'media'
 }
+
+type LocalMediaKind = 'image' | 'video' | 'audio'
 
 const CSI = '\x1b['
 const OSC = '\x1b]'
@@ -131,6 +133,14 @@ function stripShellQuoting(text: string): string {
   // Unescape backslash escapes (\<space>, \<paren>, \\, etc).
   out = out.replace(/\\(.)/g, '$1')
   return out
+}
+
+function localMediaKindForPath(filePath: string): LocalMediaKind | null {
+  const lowerExt = extname(filePath).toLowerCase()
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.heic', '.heif'].includes(lowerExt)) return 'image'
+  if (['.mp4', '.mov', '.webm', '.m4v'].includes(lowerExt)) return 'video'
+  if (['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'].includes(lowerExt)) return 'audio'
+  return null
 }
 
 function deleteLastGrapheme(text: string): string {
@@ -742,7 +752,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     const printable = this.extractPrintable(key)
     if (printable) {
       this.insertAtCursor(printable)
-      // After inserting text, check if the entire input is now an image file path.
+      // After inserting text, check if the entire input is now a local media file path.
       // Handles drag-and-drop from Finder which bypasses bracketed paste in some terminals.
       // Quick pre-filter: only run existsSync when the value looks like a file path.
       if (this.placeholderRanges.length === 0) {
@@ -751,16 +761,16 @@ class TerminalPrompt implements BlessedPromptHandle {
         const looksLikePath = (
           !stripped.includes('\n') &&
           (stripped.startsWith('/') || stripped.startsWith('~') || stripped.startsWith('file://')) &&
-          /\.(png|jpg|jpeg|gif|webp|bmp|svg|heic|heif)$/i.test(stripped)
+          /\.(png|jpg|jpeg|gif|webp|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)$/i.test(stripped)
         )
         if (looksLikePath) {
-          const imagePath = this.detectImagePath(stripped)
-          if (imagePath) {
+          const media = this.detectLocalMediaPath(stripped)
+          if (media) {
             this.inputValue = ''
             this.inputCursor = 0
             this.placeholderRanges = []
-            const displayText = `[image#${++this.imagePlaceholderCount}]`
-            this.insertPlaceholder(displayText, imagePath, 'image')
+            const displayText = `[${media.kind}#${++this.imagePlaceholderCount}]`
+            this.insertPlaceholder(displayText, media.path, 'media')
             return
           }
         }
@@ -881,10 +891,10 @@ class TerminalPrompt implements BlessedPromptHandle {
     const normalised = sanitised.replace(/\r\n?/g, '\n')
     if (!normalised) return
 
-    const imagePath = this.detectImagePath(normalised)
-    if (imagePath) {
-      const displayText = `[image#${++this.imagePlaceholderCount}]`
-      this.insertPlaceholder(displayText, imagePath, 'image')
+    const media = this.detectLocalMediaPath(normalised)
+    if (media) {
+      const displayText = `[${media.kind}#${++this.imagePlaceholderCount}]`
+      this.insertPlaceholder(displayText, media.path, 'media')
       return
     }
 
@@ -901,7 +911,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.insertAtCursor(normalised)
   }
 
-  private detectImagePath(text: string): string | null {
+  private detectLocalMediaPath(text: string): { path: string, kind: LocalMediaKind } | null {
     const trimmed = stripShellQuoting(text.trim())
     if (!trimmed || trimmed.includes('\n')) return null
 
@@ -914,19 +924,18 @@ class TerminalPrompt implements BlessedPromptHandle {
       }
     }
 
-    const lowerExt = extname(candidate).toLowerCase()
-    const imageExts = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.heic', '.heif'])
-    if (!imageExts.has(lowerExt)) return null
+    const kind = localMediaKindForPath(candidate)
+    if (!kind) return null
     if (!existsSync(candidate)) return null
     try {
       if (!statSync(candidate).isFile()) return null
     } catch {
       return null
     }
-    return candidate
+    return { path: candidate, kind }
   }
 
-  private insertPlaceholder(displayText: string, realText: string, kind: 'paste' | 'image'): void {
+  private insertPlaceholder(displayText: string, realText: string, kind: 'paste' | 'media'): void {
     const start = this.inputValue.length
     this.inputValue += displayText
     const end = this.inputValue.length
