@@ -1,5 +1,20 @@
+import { createHash } from 'node:crypto';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
 import { resolveVideoModelLimits } from './videoModelLimits.js';
+import { resolveVideoModelCapabilities } from './videoCapabilities.js';
+import type { ImageAttachment } from '../../providers/types.js';
+import {
+  analyzeNarrative,
+  buildSagaConstitution,
+  emitNarrativeStatus,
+  narrativeKeywordFallback,
+  type NarrativeEntities,
+  type ProtagonistMode,
+  type ProtagonistType,
+} from './sagaNarrative.js';
 
 export type SagaWorkflowScope = 'cli' | 'bridge';
 
@@ -8,11 +23,10 @@ export type SagaWorkflowInput = {
   key: string;
   cwd: string;
   text: string;
+  imageAttachments?: ImageAttachment[];
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
   deliveryTargetId?: string;
-  // When true, skip the long-video intent regex check and treat the text as
-  // an explicit Saga long-video request. Used by the /sage slash command —
-  // the user has already declared their intent, no ambiguity to resolve.
+  // /sage explicit entry — skip the long-video intent regex check.
   forceIntent?: boolean;
 };
 
@@ -20,10 +34,30 @@ export type SagaWorkflowOutcome =
   | { handled: false; prompt?: string }
   | { handled: true; reply: string };
 
+type SagaWorkflowStage = 'collecting_refs' | 'awaiting_protagonist_clarification' | 'awaiting_duration';
+
 type SagaWorkflowState = {
   scope: SagaWorkflowScope;
   cwd: string;
   originalText: string;
+  stage: SagaWorkflowStage;
+  multimodalCapable: boolean;
+  // collected references
+  referenceImageUrls: string[];
+  referenceVideoUrls: string[];
+  referenceAudioUrls: string[];
+  referenceImagePaths: string[];
+  referenceVideoPaths: string[];
+  referenceAudioPaths: string[];
+  referenceNotes: string[];
+  // additional substantive story text the user types during collecting_refs
+  accumulatedStory: string[];
+  // narrative analysis (Layer 1 LLM result, may be overwritten by Layer 2 user clarification)
+  narrative?: NarrativeEntities;
+  // when narrative confidence is low, we present 4 options and wait for the user's pick
+  protagonistOptions?: Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string }>;
+  // pre-extracted duration from original message (if any)
+  prefilledDuration?: number;
   targetDuration?: number;
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
   deliveryTargetId?: string;
@@ -33,8 +67,10 @@ type SagaWorkflowState = {
 
 const WORKFLOWS = new Map<string, SagaWorkflowState>();
 const WORKFLOW_TTL_MS = 30 * 60 * 1000;
+
 const CANCEL_RE = /^(?:取消|算了|停止|不要了|cancel|stop)$/i;
 const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok|yes|y|sure|default)$/i;
+const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
 
 function normalizeKey(input: SagaWorkflowInput): string {
   return `${input.scope}:${input.key}`;
@@ -42,6 +78,10 @@ function normalizeKey(input: SagaWorkflowInput): string {
 
 function compact(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
+}
+
+function unique(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function pruneExpiredWorkflows(): void {
@@ -95,65 +135,429 @@ function extractRatio(text: string): string | undefined {
   return undefined;
 }
 
-async function buildDurationQuestion(state: SagaWorkflowState): Promise<string> {
-  const configured = await resolveConfiguredVisualProvider(state.cwd, 'video');
-  const modelLine = configured
-    ? (() => {
-        const limits = resolveVideoModelLimits(configured.config.video.provider, configured.model);
-        return `当前视频模型：${configured.config.video.provider}/${configured.model}，单段上限约 ${limits.maxSegmentSeconds} 秒，Saga 会自动拆成多段再合成。`;
-      })()
-    : '当前没有检测到可用视频模型配置。';
-  const estimated = estimateDuration(state.originalText);
+// ─── Reference collection helpers ─────────────────────────────────────────
+
+function extractHttpUrls(text: string): string[] {
+  const urls: string[] = [];
+  const pattern = /https?:\/\/[^\s<>"'`，。；、]+/gi;
+  for (const match of text.matchAll(pattern)) {
+    urls.push(match[0].replace(/[),.;，。]+$/g, ''));
+  }
+  return unique(urls);
+}
+
+function extractLocalMediaPathCandidates(text: string): string[] {
+  const values: string[] = [];
+  const pattern = /(?:~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)?[^\s"'`，。；、)）]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
+  for (const match of text.matchAll(pattern)) {
+    values.push(match[0]);
+  }
+  return unique(values);
+}
+
+function resolveLocalPath(cwd: string, raw: string): string {
+  if (raw.startsWith('~/')) return path.join(os.homedir(), raw.slice(2));
+  if (raw.startsWith('/')) return raw;
+  return path.resolve(cwd, raw);
+}
+
+async function existingLocalMediaPaths(cwd: string, text: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const raw of extractLocalMediaPathCandidates(text)) {
+    const resolved = resolveLocalPath(cwd, raw);
+    try {
+      const info = await stat(resolved);
+      if (info.isFile() && info.size > 64) found.push(resolved);
+    } catch {
+      // ignore non-existent
+    }
+  }
+  return unique(found);
+}
+
+function imageExtensionForMediaType(mediaType: ImageAttachment['mediaType']): string {
+  if (mediaType === 'image/jpeg') return '.jpg';
+  if (mediaType === 'image/webp') return '.webp';
+  if (mediaType === 'image/gif') return '.gif';
+  return '.png';
+}
+
+async function saveImageAttachmentsToLocalPaths(cwd: string, imageAttachments?: ImageAttachment[]): Promise<string[]> {
+  const out: string[] = [];
+  const dir = path.join(cwd, 'generated-media', 'saga-refs');
+  let dirReady = false;
+  for (const attachment of imageAttachments ?? []) {
+    if (attachment.data && attachment.mediaType) {
+      const bytes = Buffer.from(attachment.data, 'base64');
+      if (bytes.length <= 0) continue;
+      if (!dirReady) {
+        await mkdir(dir, { recursive: true });
+        dirReady = true;
+      }
+      const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 24);
+      const filePath = path.join(dir, `reference-${hash}${imageExtensionForMediaType(attachment.mediaType)}`);
+      await writeFile(filePath, bytes);
+      out.push(filePath);
+    }
+  }
+  return unique(out);
+}
+
+type ExtractedReferences = {
+  imageUrls: string[];
+  videoUrls: string[];
+  audioUrls: string[];
+  imagePaths: string[];
+  videoPaths: string[];
+  audioPaths: string[];
+};
+
+async function classifyReferences(
+  cwd: string,
+  text: string,
+  imageAttachments?: ImageAttachment[],
+): Promise<ExtractedReferences> {
+  const imageUrls: string[] = [];
+  const videoUrls: string[] = [];
+  const audioUrls: string[] = [];
+  const imagePaths: string[] = [];
+  const videoPaths: string[] = [];
+  const audioPaths: string[] = [];
+
+  for (const url of extractHttpUrls(text)) {
+    const lower = url.toLowerCase();
+    if (/\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/.test(lower)) imageUrls.push(url);
+    else if (/\.(?:mp4|mov|webm|m4v)(?:[?#].*)?$/.test(lower)) videoUrls.push(url);
+    else if (/\.(?:mp3|wav|m4a|aac|flac|ogg)(?:[?#].*)?$/.test(lower)) audioUrls.push(url);
+  }
+  for (const localPath of await existingLocalMediaPaths(cwd, text)) {
+    const lower = localPath.toLowerCase();
+    if (/\.(?:png|jpe?g|webp|gif)$/.test(lower)) imagePaths.push(localPath);
+    else if (/\.(?:mp4|mov|webm|m4v)$/.test(lower)) videoPaths.push(localPath);
+    else if (/\.(?:mp3|wav|m4a|aac|flac|ogg)$/.test(lower)) audioPaths.push(localPath);
+  }
+  for (const attachment of imageAttachments ?? []) {
+    if (attachment.sourceUrl && !attachment.data) imageUrls.push(attachment.sourceUrl);
+  }
+  imagePaths.push(...await saveImageAttachmentsToLocalPaths(cwd, imageAttachments));
+
+  return {
+    imageUrls: unique(imageUrls),
+    videoUrls: unique(videoUrls),
+    audioUrls: unique(audioUrls),
+    imagePaths: unique(imagePaths),
+    videoPaths: unique(videoPaths),
+    audioPaths: unique(audioPaths),
+  };
+}
+
+function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
+  state.referenceImageUrls = unique([...state.referenceImageUrls, ...refs.imageUrls]);
+  state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
+  state.referenceAudioUrls = unique([...state.referenceAudioUrls, ...refs.audioUrls]);
+  state.referenceImagePaths = unique([...state.referenceImagePaths, ...refs.imagePaths]);
+  state.referenceVideoPaths = unique([...state.referenceVideoPaths, ...refs.videoPaths]);
+  state.referenceAudioPaths = unique([...state.referenceAudioPaths, ...refs.audioPaths]);
+  state.updatedAt = Date.now();
+}
+
+function refTotal(state: SagaWorkflowState): number {
+  return state.referenceImageUrls.length + state.referenceVideoUrls.length + state.referenceAudioUrls.length
+    + state.referenceImagePaths.length + state.referenceVideoPaths.length + state.referenceAudioPaths.length;
+}
+
+function maybeRememberReferenceNote(state: SagaWorkflowState, text: string): void {
+  const note = compact(text);
+  if (!note || START_RE.test(note) || CANCEL_RE.test(note) || CONFIRM_DEFAULT_RE.test(note)) return;
+  if (/^\[用户发送了一张图片/.test(note)) return;
+  state.referenceNotes = unique([...state.referenceNotes, note]).slice(-8);
+  state.updatedAt = Date.now();
+}
+
+// Strip http(s) URLs and standalone media-path-like tokens from a turn so the
+// remaining text reflects only the user's narrative content. We use this to
+// decide whether a turn is "just refs" or actually contains story material.
+function stripRefTokens(text: string): string {
+  let stripped = text.replace(/https?:\/\/\S+/gi, ' ');
+  stripped = stripped.replace(/(?:~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)?\S+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)\b/gi, ' ');
+  stripped = stripped.replace(/^\[用户发送了一张图片[^\]]*\]/g, ' ');
+  return compact(stripped);
+}
+
+function maybeAccumulateStory(state: SagaWorkflowState, text: string): boolean {
+  const compacted = compact(text);
+  if (!compacted) return false;
+  if (START_RE.test(compacted) || CANCEL_RE.test(compacted) || CONFIRM_DEFAULT_RE.test(compacted)) return false;
+  const narrative = stripRefTokens(text);
+  // Threshold: ~30 chars of non-ref text. This catches a script paragraph but
+  // skips short captions like "这是主角" which still go to referenceNotes.
+  if (narrative.length < 30) return false;
+  const existing = new Set(state.accumulatedStory.map((entry) => entry.trim()));
+  const candidate = compacted;
+  if (existing.has(candidate)) return false;
+  state.accumulatedStory.push(candidate);
+  state.updatedAt = Date.now();
+  return true;
+}
+
+function combinedStoryText(state: SagaWorkflowState): string {
+  const parts: string[] = [];
+  if (state.originalText) parts.push(state.originalText);
+  for (const segment of state.accumulatedStory) {
+    if (segment && !parts.includes(segment)) parts.push(segment);
+  }
+  return parts.join('\n\n');
+}
+
+// ─── Replies ─────────────────────────────────────────────────────────────
+
+async function buildModelLine(cwd: string): Promise<string> {
+  const configured = await resolveConfiguredVisualProvider(cwd, 'video');
+  if (!configured) return '当前没有检测到可用视频模型配置。';
+  const limits = resolveVideoModelLimits(configured.config.video.provider, configured.model);
+  return `当前视频模型：${configured.config.video.provider}/${configured.model}，单段上限约 ${limits.maxSegmentSeconds} 秒，Saga 会自动拆成多段再合成。`;
+}
+
+async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
+  const modelLine = await buildModelLine(state.cwd);
   return [
-    'Saga 已检测到你要做“长视频”。',
+    'Saga 已检测到你要做"长视频"。',
     modelLine,
-    `我建议这个故事先做成 ${estimated} 秒。`,
-    '请回复目标总时长，例如：60秒、90秒、2分钟；也可以回复“默认/自动”使用建议时长。',
-    '回复“取消”放弃本次 Saga 长视频流程。',
+    '当前视频模型支持多模态参考生成。',
+    '你可以继续发送：',
+    '  · 图片 / 视频 / 音频 URL，或本地文件路径（作为视觉/听觉参考）',
+    '  · 你自己的故事文字 / 剧本 / 分镜 / 设定（Saga 会按你写的剧本来拍；不写就由 Saga 根据你最初的需求自由发挥）',
+    '完成后回复"开始生成"。',
+    '如果不需要补充任何参考素材或文字，回复"直接生成"或"跳过"。',
+    '回复"取消"放弃本次 Saga 长视频流程。',
   ].join('\n');
 }
 
-function buildGenerationPrompt(state: SagaWorkflowState): string {
-  const targetDuration = clampDuration(state.targetDuration) ?? estimateDuration(state.originalText);
-  const ratio = extractRatio(state.originalText) ?? '16:9';
-  const projectId = `saga-${Date.now()}`;
+function buildRefAckMessage(state: SagaWorkflowState): string {
+  const total = refTotal(state);
+  const storyCount = state.accumulatedStory.length;
   const lines = [
-    state.originalText,
-    '',
+    `已收集：图片 ${state.referenceImageUrls.length + state.referenceImagePaths.length} 个，视频 ${state.referenceVideoUrls.length + state.referenceVideoPaths.length} 个，音频 ${state.referenceAudioUrls.length + state.referenceAudioPaths.length} 个（共 ${total}），故事文字 ${storyCount} 段。`,
+  ];
+  if (storyCount > 0) {
+    lines.push('已记录你的故事文字，Saga 在生成时会优先使用你写的剧本。');
+  }
+  lines.push(
+    '可继续补充参考素材或故事文字，或回复"开始生成"进入下一步。',
+    '回复"取消"放弃本次流程。',
+  );
+  return lines.join('\n');
+}
+
+// ─── Narrative analysis & protagonist clarification ─────────────────────
+
+const NARRATIVE_CONFIDENCE_THRESHOLD = 0.7;
+
+async function runNarrativeAnalysis(state: SagaWorkflowState): Promise<NarrativeEntities> {
+  const fullStory = combinedStoryText(state);
+  const imagePaths = [...state.referenceImagePaths];
+  const llmResult = await analyzeNarrative({
+    cwd: state.cwd,
+    userText: fullStory,
+    imagePaths,
+  });
+  if (llmResult) return llmResult;
+  // LLM unavailable — keyword fallback (no image-content inspection here; we only know
+  // an image was supplied. Treat any user image as a likely face for character-detection.)
+  return narrativeKeywordFallback({
+    userText: fullStory,
+    hasFaceLikelyInImages: imagePaths.length > 0,
+  });
+}
+
+function shouldAskProtagonistClarification(narrative: NarrativeEntities): boolean {
+  if (narrative.mode === 'unclear' || narrative.mode === 'mixed') return true;
+  return narrative.protagonist.confidence < NARRATIVE_CONFIDENCE_THRESHOLD;
+}
+
+function buildProtagonistOptions(state: SagaWorkflowState, narrative: NarrativeEntities): Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string }> {
+  const opts: Array<{ key: string; label: string; type: ProtagonistType; mode: ProtagonistMode; name: string }> = [];
+  if (narrative.protagonist.name && narrative.protagonist.name !== '(unnamed)' && narrative.protagonist.name !== '(undetermined — fallback)') {
+    opts.push({
+      key: 'A',
+      label: `${narrative.protagonist.name}（${narrative.protagonist.type === 'character' ? '角色' : narrative.protagonist.type === 'product' ? '产品' : '场景'}为主）`,
+      type: narrative.protagonist.type,
+      mode: narrative.protagonist.type,
+      name: narrative.protagonist.name,
+    });
+  }
+  for (const supporting of narrative.supportingCharacters.slice(0, 2)) {
+    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${supporting}（角色为主）`, type: 'character', mode: 'character', name: supporting });
+  }
+  for (const prop of narrative.props.slice(0, 2)) {
+    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${prop}（产品/道具为主）`, type: 'product', mode: 'product', name: prop });
+  }
+  for (const env of narrative.environments.slice(0, 1)) {
+    opts.push({ key: String.fromCharCode(65 + opts.length), label: `${env}（场景为主）`, type: 'environment', mode: 'environment', name: env });
+  }
+  // Always include a "use my own description" option
+  opts.push({
+    key: String.fromCharCode(65 + opts.length),
+    label: '我自己描述（请直接告诉 Saga 谁/什么是主角）',
+    type: narrative.protagonist.type,
+    mode: narrative.protagonist.type,
+    name: narrative.protagonist.name,
+  });
+  return opts;
+}
+
+function buildProtagonistAskMessage(state: SagaWorkflowState): string {
+  const lines: string[] = [
+    'Saga 还没完全确定本次视频的"主角"。',
+    state.narrative?.modeRationale ? `分析依据：${state.narrative.modeRationale}` : '',
+    '请回复以下编号选择主角，或直接用一句话告诉 Saga 谁/什么是主角：',
+  ].filter(Boolean);
+  for (const opt of state.protagonistOptions ?? []) {
+    lines.push(`  ${opt.key}. ${opt.label}`);
+  }
+  lines.push('回复"取消"放弃本次 Saga 长视频流程。');
+  return lines.join('\n');
+}
+
+function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean {
+  if (!state.narrative || !state.protagonistOptions) return false;
+  const trimmed = text.trim();
+  // Match a single-letter option key
+  const keyMatch = trimmed.match(/^([A-Za-z])\b/);
+  if (keyMatch) {
+    const chosen = state.protagonistOptions.find((opt) => opt.key.toUpperCase() === keyMatch[1]!.toUpperCase());
+    if (chosen) {
+      // The last option ("我自己描述") needs the user to type more; treat it as freeform-pending if they only sent the key alone
+      if (chosen.label.startsWith('我自己描述') && trimmed.length <= 2) {
+        return false;
+      }
+      state.narrative = {
+        ...state.narrative,
+        protagonist: { ...state.narrative.protagonist, name: chosen.name, type: chosen.type, confidence: 1.0, evidence: 'user clarification' },
+        mode: chosen.mode,
+        modeRationale: `User selected option ${chosen.key}: ${chosen.label}`,
+        source: 'user-clarification',
+      };
+      return true;
+    }
+  }
+  // Freeform: user typed a description; treat the trimmed text as the protagonist name and infer type from existing narrative
+  if (trimmed.length >= 2) {
+    const inferredType: ProtagonistType = state.narrative.protagonist.type;
+    state.narrative = {
+      ...state.narrative,
+      protagonist: { ...state.narrative.protagonist, name: trimmed, type: inferredType, confidence: 1.0, evidence: 'user freeform clarification' },
+      mode: inferredType,
+      modeRationale: `User freeform clarification: "${trimmed.slice(0, 80)}"`,
+      source: 'user-clarification',
+    };
+    return true;
+  }
+  return false;
+}
+
+async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string> {
+  const modelLine = await buildModelLine(state.cwd);
+  const estimated = estimateDuration(combinedStoryText(state));
+  const refLine = refTotal(state) > 0
+    ? `已收集参考素材 ${refTotal(state)} 个（图${state.referenceImageUrls.length + state.referenceImagePaths.length}/视频${state.referenceVideoUrls.length + state.referenceVideoPaths.length}/音频${state.referenceAudioUrls.length + state.referenceAudioPaths.length}）。`
+    : '本次没有附加参考素材，将完全基于文本生成。';
+  const storyLine = state.accumulatedStory.length > 0
+    ? `已记录你提供的故事文字 ${state.accumulatedStory.length} 段，Saga 会按你写的剧本来拍。`
+    : '本次没有补充故事文字，Saga 会根据你最初的需求自由发挥。';
+  return [
+    'Saga 准备开始长视频生成。',
+    modelLine,
+    refLine,
+    storyLine,
+    `请回复目标总时长，例如：60秒、90秒、2分钟；也可以回复"默认/自动"使用建议的 ${estimated} 秒。`,
+    '回复"取消"放弃本次 Saga 长视频流程。',
+  ].join('\n');
+}
+
+// ─── Final saga generation prompt ────────────────────────────────────────
+
+function buildGenerationPrompt(state: SagaWorkflowState): string {
+  const fullStory = combinedStoryText(state);
+  const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
+  const ratio = extractRatio(fullStory) ?? '16:9';
+  const projectId = `saga-${Date.now()}`;
+  const userScriptBlock = state.accumulatedStory.length > 0
+    ? [
+        '',
+        '[USER-SUPPLIED SCRIPT — AUTHORITATIVE]',
+        'The user provided the following story text. Use it AS-IS as the controlling narrative; do not invent or substitute a different story. Distribute it across shots so the storyBeats follow this script faithfully:',
+        ...state.accumulatedStory.map((segment, idx) => `--- Story segment ${idx + 1} ---\n${segment}`),
+        '',
+      ].join('\n')
+    : '';
+  const narrativeBlock = state.narrative
+    ? [
+        '',
+        buildSagaConstitution(state.narrative),
+        '',
+        '[Saga Narrative Entity Map — pass this through to generate_long_video as `narrativeEntities` so the planner and critic can use it]',
+        JSON.stringify({
+          protagonist: state.narrative.protagonist,
+          supportingCharacters: state.narrative.supportingCharacters,
+          props: state.narrative.props,
+          environments: state.narrative.environments,
+          relationships: state.narrative.relationships,
+          actions: state.narrative.actions,
+          mode: state.narrative.mode,
+          modeRationale: state.narrative.modeRationale,
+          source: state.narrative.source,
+        }, null, 2),
+        '',
+      ].join('\n')
+    : '';
+  const lines: string[] = [
+    fullStory,
+    userScriptBlock,
+    narrativeBlock,
     '[Artemis Saga long video workflow]',
     'Call generate_long_video exactly once for this request.',
     `projectId: ${JSON.stringify(projectId)}`,
+    'title: create a concise human-searchable title (2-8 words). Prefer a user-provided film title; otherwise summarize the central image/action.',
     `totalDuration: ${targetDuration}`,
     `ratio: ${JSON.stringify(ratio)}`,
     'assemblyMode: "saga"',
     'chainReferenceFrames: "auto"',
     'colorMatch: true',
     'generateAudio: true',
-    'Before calling the tool, act as the Saga producer with a cinematic-director discipline:',
-    '1. IDENTITY LOCK — Read the story and lock anchors that must NEVER change between shots: characters (face, age, ethnicity, build, hair, distinguishing features), wardrobe (every visible garment with concrete colors and materials — include hex codes when meaningful, e.g. "#1a2542 navy cotton hooded jacket"), persistent props (with materials), locations, palette (3-5 hex or named colors), lighting (key direction + temperature), camera language (focal feel, motion type), and overall mood. Pass them through the top-level continuity object: { characters, wardrobe, props, locations, palette, lighting, cameraLanguage, mood }. Saga will inject them verbatim into every shot prompt as an identity card so the model cannot drift.',
-    '2. CONTINUITY MODE — Saga auto-selects: "strong-vision" (image-ref capable models, BytePlus Seedance/Veo) chains the previous segment\'s last frame into the next shot; "text-only" (Gen-3 / Kling text mode) compensates with triple-repeated identity anchors and starting-frame text descriptions. You do not configure this; just write strong identity anchors and Saga handles the rest.',
-    '3. SHOTS — Plan a structured shots array. Each shot must include: title, duration, storyBeat, visualPrompt, camera, continuity, transition. Optionally a polished English `prompt` (Saga will inject identity card + style-lock + scene-priority + frame-out + aesthetic-lock around it). Optionally pick a transitionKind from the catalog in step 6.',
-    '4. CINEMATIC VOCABULARY — In visualPrompt and camera, use influential industry words, not amateur ones. Pick from the catalogs below as appropriate for the beat:',
-    '   • Camera movement: tracking shot, FPV drone, dolly zoom (Vertigo), Steadicam glide, crane, locked-off establishing, slow handheld push-in, whip pan, gimbal arc, micro dolly, snorricam',
-    '   • Lens / framing: 24mm wide environmental, 35mm reportage, 50mm normal, 85mm portrait, 135mm telephoto compression, anamorphic 2.39:1 with horizontal flares, fisheye 14mm, macro 100mm',
-    '   • Lighting: golden hour key, blue hour, magic hour, IMAX overhead skylight, hard key + bounce fill, soft window light, neon glow, candle warm 2200K, practical-only, volumetric beams through fog/haze, rim back-light',
-    '   • Render targets: photoreal cinematic, UE5 Lumen, Octane GPU, ray-traced reflections, global illumination, subsurface scattering on skin, depth-of-field bokeh, optical lens distortion',
-    '   • Stock / look: Kodak Portra 400 grain, IMAX 70mm grain, Arri Alexa LogC, Cinestill 800T halation, anamorphic flares, gentle film halation in highlights',
-    '   • Action verbs (replace static descriptions with verbs of motion): drifts, lingers, sweeps, eases into, pulls back, presses in, breathes, settles, tilts, glides',
-    '5. TIME-AXIS BEATS — For shots longer than 5 s, write storyBeat with explicit timing if it helps the model: "0–2s subject enters frame and grounds, 2–4s subject performs the main action, 4–6s lighting softens and we settle into a hold." DiT models reward explicit temporal arcs. The time slices are descriptive, not literal — Saga still wraps everything in the SCENE-PRIORITY block.',
-    '5b. HEAD/TAIL VISUAL ECHO (match-cut planning) — This is the language-side companion of Saga\'s reference-frame chain. For every adjacent pair of shots, write shot N\'s `transition` field as a CONCRETE description of the closing frame (subject pose, framing, focal point, dominant color, camera angle, lighting key direction), then OPEN shot N+1\'s `visualPrompt` with a matching opening-frame description that visually rhymes — same subject pose, same framing or one consistent reframe, same color cast, same camera height. Even when the transition is a hard cut, this makes the boundary feel inevitable instead of jarring; with a clean-fade or shader transition it makes the post-fade reveal land on a frame the eye expects. The model also gets two visually coherent prompts to anchor on, which dramatically reduces "two unrelated worlds" drift.',
-    '6. TRANSITIONS — Vary them deliberately. Two families:',
-    '   FFmpeg classic (fast, no browser): cut, crossfade, dissolve, light-leak, fade-black, fade-white, wipe-left, wipe-right, slide-up, push-left, push-right, circle-open, circle-close, blur, zoom-in, zoom-out, flash, speed-ramp, whip-pan, whip-pan-left, match-cut, glitch, cinematic-fade, iris-pulse, squeeze-h, squeeze-v, cover-down, cover-up, reveal-left. The "soft" ones (crossfade/dissolve/light-leak/cinematic-fade/fade-black/fade-white) automatically use Saga\'s hold-frame mode — the xfade window is between two FROZEN boundary frames, so no motion-mixing pollution.',
-    '   Saga GLSL shaders (Playwright + WebGL, ~1-2 s overhead per transition, premium quality): shader-light-leak (warm bloom + horizontal sweep), shader-whip-pan (motion blur slide), shader-glitch (block tear + RGB split + scanlines), shader-cinematic-zoom (radial zoom + edge chromatic aberration), shader-domain-warp (organic noise distortion), shader-ridged-burn (burning-paper edge with sparks), shader-sdf-iris (iris with glowing accent ring), shader-ripple-waves (concentric ripple distortion), shader-gravitational-lens (black-hole UV pull + chromatic aberration), shader-chromatic-split (radial RGB separation), shader-swirl-vortex (spiral rotation), shader-thermal-distortion (heat shimmer), shader-flash-through-white (clean RGB flash), shader-cross-warp-morph (asymmetric noise morph). All shader-* transitions are RGB-correct (no YUV color shift), and use hardware-accelerated WebGL.',
-    '   Pick by intent: crossfade / light-leak / shader-light-leak / cinematic-fade / shader-domain-warp for "this continues" bridges; cut / match-cut / shader-flash-through-white for sharp register shifts; flash / speed-ramp / shader-whip-pan / shader-cinematic-zoom for energy; fade-black for act breaks; glitch / shader-glitch / shader-chromatic-split for cyber/tech beats; shader-ridged-burn / shader-sdf-iris for dramatic reveals; shader-gravitational-lens / shader-swirl-vortex for surreal beats. Using the same transition every shot reads as mechanical — vary kind AND intent across the project.',
-    '7. SCENE-PRIORITY RULE — storyBeat is the subject for the FULL clip duration. The transition field describes ONLY the closing ~0.5 seconds. Do NOT let the closing-frame instruction become the subject of the whole clip. Saga explicitly marks the transition as low-priority in the model prompt.',
-    '8. PHYSICS & FAILURE GUARDS — Saga\'s aesthetic-lock automatically appends physics anchors (physically accurate gravity, fluid dynamics, anatomically correct, no morphing / flickering / melting / extra limbs / facial deformation) to every prompt. You do NOT need to repeat these — focus your visualPrompt on the actual scene.',
-    '9. SCENE-JUMP HANDLING — When the story has a hard location jump, insert at least one transition shot that bridges the two locations through a shared visual element (same character carrying same prop, same key light direction, same color cast) so the model has continuity to latch on to.',
-    '10. DURATIONS — Shot durations must add up to the requested total duration; each shot must stay within the detected provider segment limit.',
-    'Saga will generate each provider-safe clip, automatically chain the previous segment\'s last frame into the next shot as a reference image (when the model supports it), retry segments that fail audio or image safety filters with the offending input dropped, and assemble a final MP4 with eased / multi-stage transitions, loudness-normalized audio, and per-segment frame-trimmed inputs (no flashback frames at boundaries).',
-    'Do not call generate_video manually for each segment unless generate_long_video is unavailable.',
   ];
-  if (state.scope === 'bridge') {
+
+  if (state.referenceImageUrls.length > 0) lines.push(`referenceImageUrls: ${JSON.stringify(state.referenceImageUrls)}`);
+  if (state.referenceVideoUrls.length > 0) lines.push(`referenceVideoUrls: ${JSON.stringify(state.referenceVideoUrls)}`);
+  if (state.referenceAudioUrls.length > 0) lines.push(`referenceAudioUrls: ${JSON.stringify(state.referenceAudioUrls)}`);
+  if (state.referenceImagePaths.length > 0) lines.push(`referenceImagePaths: ${JSON.stringify(state.referenceImagePaths)}`);
+  if (state.referenceVideoPaths.length > 0) lines.push(`referenceVideoPaths: ${JSON.stringify(state.referenceVideoPaths)}`);
+  if (state.referenceAudioPaths.length > 0) lines.push(`referenceAudioPaths: ${JSON.stringify(state.referenceAudioPaths)}`);
+  if (state.referenceNotes.length > 0) lines.push(`referenceNotes: ${JSON.stringify(state.referenceNotes)}`);
+
+  lines.push(
+    'Before calling the tool, act as the Saga producer with cinematic-director discipline:',
+    '0. USER REFERENCE IMAGE RULE — If the user supplied an image and described it as a character/person/form/avatar/image/形象/角色/人物, treat that image as the GLOBAL CHARACTER IDENTITY reference, not merely as a first-frame scene. Extract the subject identity from the image and carry it through every shot. Do not replace the subject with unrelated real people.',
+    '1. CHARACTER IDENTITY LOCK — Character/person consistency is a GLOBAL HARD RULE. If a person, character, mascot, user-provided new image, or recurring subject appears in this long video, lock their face, age, ethnicity/species, build, hair, distinguishing features, silhouette, and wardrobe/material cues across every shot unless the user explicitly asks for transformation or multiple different identities.',
+    '1b. SELECTIVE SCENE LOCKS — Scene/location consistency is NOT automatically global. Lock locations, architecture, weather, props, palette, lighting, cameraLanguage, and mood only when the request/story needs the same scene, same product/set, or a continuous environment. If the film is a montage, dream sequence, or intentional scene journey, allow scene changes while preserving the global character identity.',
+    '2. CONTINUITY MODE — Saga auto-selects strong-vision (image-ref capable) vs text-only based on the configured model. You do not configure this.',
+    '3. SHOTS — Plan a structured shots array. Each shot: title, duration, storyBeat, visualPrompt, camera, continuity, transition, optional transitionKind.',
+    '3a. MOTION REQUIREMENT (CRITICAL — videos look "AI-dead" without this) — storyBeat MUST be a TIMELINE of physical actions, not a static description. Use this format:',
+    '    "0–Xs: [character] [action verb in present-tense] [body part / object]; [environmental motion]. Xs–Ys: [next action verb] [next change]. Ys–end: [resolving action]."',
+    '    Action verbs (use these — not "stands", "is", "looks"): walks, steps, turns, lifts, reaches, drops, catches, leaps, kneels, scatters, spins, opens, closes, pushes, pulls, rises, descends, glides, twirls, summons, releases, shatters.',
+    '    Always include continuous environmental motion: hair tossed by wind, fabric/cape flowing, particles drifting, rain streaks, fog rolling, light flickering, water rippling, dust motes, leaves falling, fireflies, mist rising, smoke curling.',
+    '    Always describe at least ONE deliberate body movement per ~3 s of clip duration — never let a shot be a single static pose.',
+    '    storyBeat may NOT be: identity-preservation rules, generic continuity language, or "the character stands/sits/looks" with no movement. Saga rejects boilerplate storyBeats and falls back to story chunks.',
+    '4. CINEMATIC VOCABULARY — Use industry terms (35mm/50mm lens, golden hour, volumetric beams, ray-traced reflections, IMAX 70mm grain, Arri Alexa LogC). For camera, prefer ACTIVE camera language: tracking shot, dolly-in, dolly-out, crane down, gimbal arc, whip pan, snorricam, handheld follow, parallax push. Avoid "locked-off" / "static" / "establishing only" unless the scene is genuinely meant to be still.',
+    '5. HEAD/TAIL VISUAL ECHO — Write each shot N\'s `transition` as a concrete description of its closing frame (in mid-action, not a freeze); open shot N+1\'s `visualPrompt` with a matching opening-frame description that visually rhymes.',
+    '6. TRANSITIONS — Vary kind and intent across the project. See SagaTransitionKind catalog.',
+    '7. SCENE-PRIORITY — storyBeat dominates the full clip duration; transition field describes only the closing 0.5 s.',
+    '8. PHYSICS & FAILURE GUARDS — Saga\'s aesthetic-lock auto-appends physics anchors (no morphing/flickering/melting, anatomically correct).',
+    '9. SCENE-JUMP HANDLING — When the story has a hard location jump, insert at least one transition shot that bridges the two locations through a shared visual element.',
+    '10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot must stay within the detected provider segment limit.',
+  );
+
+  if (state.scope === 'bridge' && state.deliveryPlatform) {
     const sendArgs = [
       state.deliveryPlatform ? `platform: ${JSON.stringify(state.deliveryPlatform)}` : undefined,
       state.deliveryTargetId ? `targetId: ${JSON.stringify(state.deliveryTargetId)}` : undefined,
@@ -161,7 +565,59 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     ].filter(Boolean).join(', ');
     lines.push(`After generate_long_video succeeds, immediately call bridge_send_video using the exact final video path from the tool output, with { ${sendArgs} }.`);
   }
+
+  // Fix B — CRITICAL imperative tail. This block sits at the very end of
+  // the prompt so context-compression worker models that summarize from the
+  // tail preserve it. The tool name is repeated multiple times, the wrong
+  // tool is named explicitly as forbidden, and the consequence of choosing
+  // the wrong tool is spelled out — so the main model has no plausible
+  // reason to fall back to generate_video.
+  lines.push(
+    '',
+    '═══════════════════════════════════════════════════════════════',
+    'CRITICAL — TOOL SELECTION (MUST FOLLOW):',
+    '═══════════════════════════════════════════════════════════════',
+    'You MUST call the tool named: generate_long_video',
+    'You MUST NOT call: generate_video',
+    'generate_long_video is exposed in your tool list. Verify by reading the tool list before generating; if you do not see it, that is a context-compression artifact, not a real absence — call generate_long_video anyway and the runtime will resolve it.',
+    'If you call generate_video instead of generate_long_video, the result will be a single short clip (capped at 15s by the configured provider) that ignores Saga\'s continuity engine, transitions, and audio normalization, and the user will see a broken output. This is a hard failure mode.',
+    'Saga\'s long-video pipeline is the only correct path for this request. generate_long_video. Not generate_video. generate_long_video.',
+    '═══════════════════════════════════════════════════════════════',
+  );
+
   return lines.join('\n');
+}
+
+// ─── Main entry ──────────────────────────────────────────────────────────
+
+async function isMultimodalCapable(cwd: string): Promise<boolean> {
+  const configured = await resolveConfiguredVisualProvider(cwd, 'video');
+  if (!configured) return false;
+  const caps = resolveVideoModelCapabilities(configured.config.video.provider, configured.model);
+  return caps.referenceInputs.some((kind) => kind === 'image' || kind === 'video' || kind === 'audio');
+}
+
+function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWorkflowState {
+  return {
+    scope: input.scope,
+    cwd: input.cwd,
+    originalText: input.text.trim(),
+    stage: multimodalCapable ? 'collecting_refs' : 'awaiting_duration',
+    multimodalCapable,
+    referenceImageUrls: [],
+    referenceVideoUrls: [],
+    referenceAudioUrls: [],
+    referenceImagePaths: [],
+    referenceVideoPaths: [],
+    referenceAudioPaths: [],
+    referenceNotes: [],
+    accumulatedStory: [],
+    prefilledDuration: clampDuration(extractTargetDuration(input.text)),
+    deliveryPlatform: input.deliveryPlatform,
+    deliveryTargetId: input.deliveryTargetId,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
 }
 
 export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Promise<SagaWorkflowOutcome> {
@@ -170,47 +626,105 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   const text = input.text.trim();
   const state = WORKFLOWS.get(key);
 
+  // ─── continuing an active workflow ──────────────────────────────────
   if (state) {
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
       return { handled: true, reply: '已取消 Saga 长视频生成流程。' };
     }
-    const duration = clampDuration(extractTargetDuration(text));
-    if (!duration && !CONFIRM_DEFAULT_RE.test(text)) {
+
+    // Always try to merge any new refs in this turn (URLs, files, attachments).
+    if (state.stage === 'collecting_refs') {
+      const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
+      mergeRefs(state, refs);
+      maybeRememberReferenceNote(state, text);
+      maybeAccumulateStory(state, text);
+
+      if (START_RE.test(text)) {
+        // User done collecting → run narrative analysis BEFORE moving on
+        if (!state.narrative) {
+          state.narrative = await runNarrativeAnalysis(state);
+          emitNarrativeStatus(state.narrative);
+        }
+        if (shouldAskProtagonistClarification(state.narrative)) {
+          state.protagonistOptions = buildProtagonistOptions(state, state.narrative);
+          state.stage = 'awaiting_protagonist_clarification';
+          state.updatedAt = Date.now();
+          return { handled: true, reply: buildProtagonistAskMessage(state) };
+        }
+        // High confidence — proceed to duration
+        if (state.prefilledDuration) {
+          state.targetDuration = state.prefilledDuration;
+          WORKFLOWS.delete(key);
+          return { handled: false, prompt: buildGenerationPrompt(state) };
+        }
+        state.stage = 'awaiting_duration';
+        state.updatedAt = Date.now();
+        return { handled: true, reply: await buildDurationAskMessage(state) };
+      }
+
+      // Acknowledge the refs and continue collecting
       state.updatedAt = Date.now();
-      return { handled: true, reply: await buildDurationQuestion(state) };
+      return { handled: true, reply: buildRefAckMessage(state) };
     }
-    state.targetDuration = duration ?? estimateDuration(state.originalText);
-    state.updatedAt = Date.now();
-    WORKFLOWS.delete(key);
-    return { handled: false, prompt: buildGenerationPrompt(state) };
+
+    if (state.stage === 'awaiting_protagonist_clarification') {
+      const applied = applyProtagonistChoice(state, text);
+      if (!applied) {
+        state.updatedAt = Date.now();
+        return { handled: true, reply: buildProtagonistAskMessage(state) };
+      }
+      // Good — proceed to duration
+      if (state.prefilledDuration) {
+        state.targetDuration = state.prefilledDuration;
+        WORKFLOWS.delete(key);
+        return { handled: false, prompt: buildGenerationPrompt(state) };
+      }
+      state.stage = 'awaiting_duration';
+      state.updatedAt = Date.now();
+      return { handled: true, reply: await buildDurationAskMessage(state) };
+    }
+
+    if (state.stage === 'awaiting_duration') {
+      const duration = clampDuration(extractTargetDuration(text));
+      if (!duration && !CONFIRM_DEFAULT_RE.test(text)) {
+        state.updatedAt = Date.now();
+        return { handled: true, reply: await buildDurationAskMessage(state) };
+      }
+      state.targetDuration = duration ?? estimateDuration(state.originalText);
+      WORKFLOWS.delete(key);
+      return { handled: false, prompt: buildGenerationPrompt(state) };
+    }
   }
 
+  // ─── fresh request ──────────────────────────────────────────────────
   if (!input.forceIntent && !hasLongVideoIntent(text)) {
     return { handled: false };
   }
-
   const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');
-  if (!configured) {
-    return { handled: false };
+  if (!configured) return { handled: false };
+
+  const multimodalCapable = await isMultimodalCapable(input.cwd);
+  const next = newState(input, multimodalCapable);
+
+  // Even on the first turn, if the user already attached references in this
+  // very message (Telegram image / inline URL), we want to capture them.
+  if (multimodalCapable) {
+    const refs = await classifyReferences(next.cwd, text, input.imageAttachments);
+    mergeRefs(next, refs);
   }
 
-  const duration = clampDuration(extractTargetDuration(text));
-  const nextState: SagaWorkflowState = {
-    scope: input.scope,
-    cwd: input.cwd,
-    originalText: text,
-    targetDuration: duration,
-    deliveryPlatform: input.deliveryPlatform,
-    deliveryTargetId: input.deliveryTargetId,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-
-  if (duration) {
-    return { handled: false, prompt: buildGenerationPrompt(nextState) };
+  if (multimodalCapable) {
+    WORKFLOWS.set(key, next);
+    return { handled: true, reply: await buildRefAskMessage(next) };
   }
 
-  WORKFLOWS.set(key, nextState);
-  return { handled: true, reply: await buildDurationQuestion(nextState) };
+  // text-only model: skip the reference question entirely
+  if (next.prefilledDuration) {
+    next.targetDuration = next.prefilledDuration;
+    return { handled: false, prompt: buildGenerationPrompt(next) };
+  }
+  next.stage = 'awaiting_duration';
+  WORKFLOWS.set(key, next);
+  return { handled: true, reply: await buildDurationAskMessage(next) };
 }

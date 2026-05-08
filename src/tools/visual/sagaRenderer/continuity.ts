@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { SagaContinuityBible, SagaSegmentInput } from './types.js';
+import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -13,13 +14,13 @@ const execFileAsync = promisify(execFile);
 //
 //  - "strong-vision" — provider accepts image references. Saga extracts the
 //    last frame of segment N and feeds it to segment N+1 as a referenceImage.
-//    Identity card is still injected but the visual handoff carries most of
-//    the load.
+//    A continuity card is still injected but the visual handoff
+//    carries most of the load.
 //
 //  - "text-only" — provider rejects image refs. Saga compensates with
-//    aggressive verbal anchoring:
-//      • triple-repeat the identity card (head, mid, tail of the prompt)
-//      • inline hex color codes and numerical body attributes
+//    stronger verbal anchoring:
+//      • repeat the character identity card near the head/tail
+//      • inline concrete colors/materials when supplied
 //      • prepend a [STARTING-FRAME-ANCHOR] block derived from the previous
 //        shot's `transition` field so the model sees an explicit visual
 //        handoff in text
@@ -81,26 +82,26 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   const mood = pickFirstSentence(input.mood, 'grounded cinematic, emotionally consistent across every shot');
 
   const identityLines = [
-    '[SAGA-CONTINUITY: same world, same people, same wardrobe, same props, same lighting, same camera language across every shot]',
+    '[SAGA-CONTINUITY-POLICY: character/person identity is globally locked across the long video; scene/location continuity is selective and follows the user request/story logic]',
     characters.length > 0
-      ? `[CHARACTERS: ${characters.join(' | ')}]`
-      : '[CHARACTERS: same exact identity as the previous shot — same face, hair, body, age, ethnicity]',
+      ? `[LOCKED-CHARACTERS: ${characters.join(' | ')}]`
+      : '[CHARACTERS: same exact recurring identity as the previous shot — same face, hair, body, age, ethnicity/species, silhouette, and distinguishing features]',
     wardrobe.length > 0
-      ? `[WARDROBE: ${wardrobe.join(' | ')}]`
-      : '[WARDROBE: same exact clothes, same fabric, same colors as the previous shot]',
+      ? `[LOCKED-WARDROBE: ${wardrobe.join(' | ')}]`
+      : '[WARDROBE: same clothing/material cues for recurring characters unless the story explicitly changes costume]',
     props.length > 0
-      ? `[PROPS: ${props.join(' | ')}]`
-      : '[PROPS: same handheld objects and persistent set pieces as the previous shot]',
+      ? `[LOCKED-PROPS: ${props.join(' | ')}]`
+      : '[PROPS: no global prop lock; preserve only props that the story treats as recurring]',
     locations.length > 0
-      ? `[LOCATIONS: ${locations.join(' | ')}]`
-      : '[LOCATIONS: continuous from the previous shot — same architecture, materials, signage, and weather]',
+      ? `[LOCKED-LOCATIONS: ${locations.join(' | ')}]`
+      : '[LOCATIONS: no global scene lock; maintain scene continuity only when a shot is meant to continue the same place]',
     palette.length > 0
       ? `[PALETTE: ${palette.join(' | ')}]`
-      : '[PALETTE: same dominant colors and color temperature as the previous shot]',
+      : '[PALETTE: cohesive cinematic color design, but not identical colors in every shot unless requested]',
     `[LIGHTING: ${lighting}]`,
     `[CAMERA: ${cameraLanguage}]`,
     `[MOOD: ${mood}]`,
-    '[NEGATIVE: no identity drift, no wardrobe change, no scene jump, no flicker, no warped anatomy, no melting objects, no readable text, no subtitles, no logos, no UI, no watermark]',
+    '[NEGATIVE: no character identity drift, no unintended wardrobe drift for recurring characters, no accidental jump cuts inside continuous scenes, no flicker, no warped anatomy, no melting objects, no readable text, no subtitles, no logos, no UI, no watermark]',
   ];
 
   const sharedNotes = uniqueStrings(input.shotContinuityNotes ?? []);
@@ -113,8 +114,8 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   const bible = [
     'Saga long-form video continuity bible.',
     `Aspect ratio: ${input.ratio}.`,
-    'Maintain consistent characters, wardrobe, locations, color palette, lighting direction, material details, and camera language across every generated clip.',
-    'When a story beat changes the location, treat the new place as adjacent in the same world — preserve identity, lighting temperature shift, and a clear visual through-line.',
+    'Maintain character/person identity as a global hard rule across generated clips. Preserve face, silhouette, body traits, hair, and recurring wardrobe/material cues unless the user explicitly asks for transformation or multiple identities.',
+    'Use selective scene continuity: when a story beat changes location, let the scene change happen deliberately; when the beat continues the same place, preserve the relevant location/environment anchors and visual through-line.',
     `Source story: ${input.story.replace(/\s+/g, ' ').trim().slice(0, 1600)}`,
   ].join(' ');
 
@@ -148,7 +149,7 @@ const SAGA_AESTHETIC_LOCK_BLOCK = [
   'render: photoreal cinematic image, ultra-high fidelity, UE5 cinematic / Unreal Lumen / Octane render quality, ray-traced reflections, global illumination, subsurface scattering on skin, volumetric atmospheric light',
   'medium: 35mm or 50mm cinematic lens feel, anamorphic-friendly framing, IMAX 70mm film grain texture, Arri Alexa-class color science, shallow depth of field where appropriate',
   'physics: physically accurate gravity, realistic momentum, weight-aware motion, fluid dynamics for liquids, wind influence on hair and fabric, no time-warp, no frame-skipping artifacts',
-  'integrity: anatomically correct human structure, stable hand and finger count, identity-locked face, locked wardrobe geometry, materials hold their identity across the clip',
+  'integrity: anatomically correct human structure, stable hand and finger count, identity-locked recurring face and silhouette, stable wardrobe/material cues for recurring characters and locked props',
   'forbidden: no morphing, no melting, no flickering, no jittering, no extra limbs, no fused or warped fingers, no facial deformation, no garbled text, no readable subtitles, no logos, no UI overlays, no watermarks',
   '[/AESTHETIC-LOCK]',
 ].join('\n');
@@ -158,7 +159,7 @@ const SAGA_AESTHETIC_LOCK_BLOCK = [
 // "sees" it twice.
 function styleLockBlock(bible: SagaContinuityBible): string {
   const palette = bible.palette.length > 0 ? bible.palette.join(', ') : 'consistent palette across all shots';
-  const wardrobe = bible.wardrobe.length > 0 ? bible.wardrobe.join('; ') : 'same wardrobe across shots';
+  const wardrobe = bible.wardrobe.length > 0 ? bible.wardrobe.join('; ') : 'stable recurring-character wardrobe/material cues unless story changes costume';
   return [
     '[STYLE-LOCK]',
     `palette: ${palette}`,
@@ -264,19 +265,27 @@ export function compileShotPromptWithContinuity(options: {
 
   const tail: string[] = [];
 
-  // Text-only mode: re-state identity anchors at the tail so the model
+  // Text-only mode: re-state character identity anchors at the tail so the model
   // attends to them again. Linguistic redundancy is the #1 lever for
   // text-only continuity.
   if (options.mode === 'text-only') {
+    const lockedLines = [
+      options.bible.characters.length > 0 ? `locked-characters: ${options.bible.characters.join(' | ')}` : '',
+      options.bible.wardrobe.length > 0 ? `locked-wardrobe: ${options.bible.wardrobe.join(' | ')}` : '',
+      options.bible.props.length > 0 ? `locked-props: ${options.bible.props.join(' | ')}` : '',
+      options.bible.locations.length > 0 ? `locked-locations: ${options.bible.locations.join(' | ')}` : '',
+    ].filter(Boolean);
     tail.push(
       [
-        '[CONTINUITY-RESTATE — same person, same wardrobe, same props, same lighting, same camera language as the previous shot]',
-        options.bible.characters.length > 0 ? `characters: ${options.bible.characters.join(' | ')}` : '',
-        options.bible.wardrobe.length > 0 ? `wardrobe: ${options.bible.wardrobe.join(' | ')}` : '',
-        options.bible.props.length > 0 ? `props: ${options.bible.props.join(' | ')}` : '',
+        '[CONTINUITY-RESTATE — global character identity lock; preserve scene/location only when explicitly continuous]',
+        ...lockedLines,
+        options.bible.characters.length === 0 ? 'characters: same recurring identity as previous shot; no face/body/silhouette drift' : '',
+        options.bible.wardrobe.length === 0 ? 'wardrobe: stable recurring-character clothing/material cues unless story changes costume' : '',
+        `lighting: ${options.bible.lighting}`,
+        `camera: ${options.bible.cameraLanguage}`,
+        `mood: ${options.bible.mood}`,
         '[/CONTINUITY-RESTATE]',
       ]
-        .filter(Boolean)
         .join('\n'),
     );
     tail.push(styleLock); // second appearance for text-only mode
@@ -313,7 +322,7 @@ export async function extractLastFrame(options: {
   let lastError = '';
   for (const args of tryArgs) {
     try {
-      await execFileAsync('ffmpeg', args, { timeout: 60_000 });
+      await execFileAsync(await resolveFfmpegBinaryPath(), args, { timeout: 60_000 });
       const info = await stat(options.outputPath);
       if (info.size > 1024) {
         return { ok: true, framePath: options.outputPath };
@@ -326,7 +335,7 @@ export async function extractLastFrame(options: {
 
   try {
     const probe = await execFileAsync(
-      'ffprobe',
+      await resolveFfprobeBinaryPath(),
       ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', options.videoPath],
       { timeout: 30_000 },
     );
@@ -334,7 +343,7 @@ export async function extractLastFrame(options: {
     if (Number.isFinite(duration) && duration > 0.2) {
       const seek = Math.max(0, duration - 0.12).toFixed(2);
       await execFileAsync(
-        'ffmpeg',
+        await resolveFfmpegBinaryPath(),
         ['-y', '-ss', seek, '-i', options.videoPath, '-frames:v', '1', '-q:v', '2', options.outputPath],
         { timeout: 60_000 },
       );

@@ -58,6 +58,10 @@ import {
   shouldPromoteBytePlusVideoModel,
 } from '../src/tools/visual/videoCapabilities.js'
 import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
+import {
+  buildSuperVisualCharacterTurnaroundPrompt,
+  isSuperVisualModeEligible,
+} from '../src/tools/visual/superVisualMode.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
 import {
@@ -2204,6 +2208,47 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       { referenceImageUrls: ['https://example.com/a.png'] },
       textOnlyCaps,
     ).join(',') === 'image',
+  )
+  assert(
+    'super visual mode: OpenAI gpt-image-2 plus multimodal video references is eligible',
+    isSuperVisualModeEligible({
+      hasUserImageReference: false,
+      imageProvider: 'openai',
+      imageModel: 'gpt-image-2',
+      videoReferenceInputs: seedance2Caps.referenceInputs,
+    }),
+  )
+  assert(
+    'super visual mode: user image references take precedence over generated turnarounds',
+    !isSuperVisualModeEligible({
+      hasUserImageReference: true,
+      imageProvider: 'openai',
+      imageModel: 'gpt-image-2',
+      videoReferenceInputs: seedance2Caps.referenceInputs,
+    }),
+  )
+  assert(
+    'super visual mode: image-only video reference models are not eligible',
+    !isSuperVisualModeEligible({
+      hasUserImageReference: false,
+      imageProvider: 'openai',
+      imageModel: 'gpt-image-2',
+      videoReferenceInputs: seedance15Caps.referenceInputs,
+    }),
+  )
+  const turnaroundPrompt = buildSuperVisualCharacterTurnaroundPrompt({
+    title: 'Reference Locked Hero',
+    story: 'An anime protagonist explores a glass observatory.',
+    ratio: '16:9',
+    referenceNotes: ['silver hair', 'blue cloak'],
+  })
+  assert(
+    'super visual mode: turnaround prompt asks for front, side, and back full-body views without labels',
+    turnaroundPrompt.includes('front view') &&
+      turnaroundPrompt.includes('side profile view') &&
+      turnaroundPrompt.includes('back view') &&
+      turnaroundPrompt.includes('full-body') &&
+      turnaroundPrompt.includes('No text, no labels'),
   )
   assert(
     'video capabilities: Seedance 1.5 accepts explicit generated-audio requests',

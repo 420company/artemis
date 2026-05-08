@@ -397,7 +397,9 @@ export type AgentAction =
   | {
       type: 'generate_long_video';
       prompt: string;
+      title?: string;
       story?: string;
+      referenceNotes?: string[];
       shots?: Array<{
         title?: string;
         duration?: number;
@@ -520,6 +522,17 @@ export type AgentAction =
       maxPolls?: number;
       pollIntervalMs?: number;
       runInBackground?: boolean;
+      narrativeEntities?: {
+        protagonist?: { name?: string; type?: 'character' | 'product' | 'environment'; confidence?: number; evidence?: string };
+        supportingCharacters?: string[];
+        props?: string[];
+        environments?: string[];
+        relationships?: string[];
+        actions?: string[];
+        mode?: 'character' | 'product' | 'environment' | 'mixed' | 'unclear';
+        modeRationale?: string;
+        source?: 'llm' | 'user-clarification' | 'keyword-fallback';
+      };
     }
   | {
       type: 'synthesize_speech';

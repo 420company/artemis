@@ -49,6 +49,7 @@ import { executeAction } from '../tools/index.js'
 import { getToolDefinition, toolDefs, validateToolRegistryIntegrity } from '../tools/registry.js'
 import { getVisualProviderSupportNote } from '../tools/visual/providers/interface.js'
 import { resolveDataRootDir } from '../utils/fs.js'
+import { splitCommandArgs } from './commandArgs.js'
 
 export async function runCli(argv: string[]): Promise<void> {
   let options
@@ -272,7 +273,7 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
-  const commandArgs = splitCommandArgs(options.prompt)
+  const commandArgs = options.promptArgs ?? splitCommandArgs(options.prompt)
 
   // ── tool ───────────────────────────────────────────────────────────────────
   if (options.command === 'tool') {
@@ -513,13 +514,6 @@ export async function runCli(argv: string[]): Promise<void> {
 
   // Clean up log watcher
   logWatchAbort?.abort()
-}
-
-function splitCommandArgs(prompt: string | undefined): string[] {
-  return (prompt ?? '')
-    .split(/\s+/)
-    .map(part => part.trim())
-    .filter(Boolean)
 }
 
 function parsePrimitiveValue(value: string): unknown {

@@ -99,6 +99,17 @@ export class OpenAIProvider implements VisualProvider {
         res = await postOpenAIImageGeneration(endpoint, apiKey, effectiveBody);
         raw = await res.text();
       }
+      // OpenAI-compatible relays (e.g. http://69.5.20.196:8080/v1) periodically
+      // return HTTP 429/500/502/503/504 during transient OpenAI hiccups. Retry
+      // up to 2 more times with exponential backoff before surfacing the error.
+      const transientStatuses = new Set([429, 500, 502, 503, 504]);
+      let transientAttempts = 0;
+      while (!res.ok && transientStatuses.has(res.status) && transientAttempts < 2) {
+        transientAttempts += 1;
+        await new Promise((resolve) => setTimeout(resolve, 2000 * transientAttempts));
+        res = await postOpenAIImageGeneration(endpoint, apiKey, effectiveBody);
+        raw = await res.text();
+      }
       if (!res.ok) {
         throw new Error(buildOpenAIImageError({
           status: res.status,

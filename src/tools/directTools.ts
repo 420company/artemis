@@ -19,6 +19,7 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'run_command',
   'generate_image',
   'generate_video',
+  'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
   // ── Spotify integration ──────────────────────────────────────────────

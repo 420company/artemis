@@ -20,6 +20,55 @@ import { renderSagaShaderTransition, type SagaShaderName } from './shaderTransit
 
 const execFileAsync = promisify(execFile);
 
+// Resolve the ffmpeg / ffprobe binary path. The Saga gateway daemon is
+// launched by launchd with a minimal PATH (just /usr/bin:/bin), so a bare
+// `ffmpeg` spawn ENOENTs. We probe a list of common install locations
+// once and cache the absolute path. Falls back to the bare name on the
+// off-chance PATH does include it (interactive runs work that way).
+let cachedFfmpegPath: string | null = null;
+let cachedFfprobePath: string | null = null;
+
+async function probeBinary(name: 'ffmpeg' | 'ffprobe'): Promise<string> {
+  const candidates = [
+    `/usr/local/bin/${name}`,
+    `/opt/homebrew/bin/${name}`,
+    `/usr/bin/${name}`,
+    `/snap/bin/${name}`,
+    name, // last-resort PATH lookup
+  ];
+  const { stat } = await import('node:fs/promises');
+  for (const candidate of candidates) {
+    if (candidate === name) return candidate; // PATH lookup happens at spawn time
+    try {
+      const info = await stat(candidate);
+      if (info.isFile()) return candidate;
+    } catch {
+      // try next
+    }
+  }
+  return name;
+}
+
+async function ffmpegPath(): Promise<string> {
+  if (cachedFfmpegPath !== null) return cachedFfmpegPath;
+  cachedFfmpegPath = await probeBinary('ffmpeg');
+  return cachedFfmpegPath;
+}
+
+async function ffprobePath(): Promise<string> {
+  if (cachedFfprobePath !== null) return cachedFfprobePath;
+  cachedFfprobePath = await probeBinary('ffprobe');
+  return cachedFfprobePath;
+}
+
+export async function resolveFfmpegBinaryPath(): Promise<string> {
+  return ffmpegPath();
+}
+
+export async function resolveFfprobeBinaryPath(): Promise<string> {
+  return ffprobePath();
+}
+
 // Build an FFmpeg invocation that:
 //
 //  1. Takes N input segments
@@ -61,7 +110,7 @@ function escConcatPath(p: string): string {
 async function probeAudio(filePath: string): Promise<boolean> {
   try {
     const result = await execFileAsync(
-      'ffprobe',
+      await ffprobePath(),
       ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_type', '-of', 'default=nw=1:nk=1', filePath],
       { timeout: 30_000 },
     );
@@ -74,7 +123,7 @@ async function probeAudio(filePath: string): Promise<boolean> {
 async function probeDurationSeconds(filePath: string): Promise<number | null> {
   try {
     const result = await execFileAsync(
-      'ffprobe',
+      await ffprobePath(),
       ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', filePath],
       { timeout: 30_000 },
     );
@@ -142,7 +191,7 @@ export async function concatWithSagaRenderer(input: SagaConcatInput): Promise<Sa
   if (input.segments.length === 1) {
     const common = await buildCommonEncodeArgs(encode);
     const args = ['-y', '-i', input.segments[0]!.outputPath, '-vf', normalizationVf(encode), ...common.args, input.outputPath];
-    await execFileAsync('ffmpeg', args, { timeout: 30 * 60_000 });
+    await execFileAsync(await ffmpegPath(), args, { timeout: 30 * 60_000 });
     return {
       outputPath: input.outputPath,
       ffmpegArgs: args,
@@ -177,7 +226,7 @@ export async function concatWithSagaRenderer(input: SagaConcatInput): Promise<Sa
       ...common.args,
       input.outputPath,
     ];
-    await execFileAsync('ffmpeg', args, { timeout: 30 * 60_000 });
+    await execFileAsync(await ffmpegPath(), args, { timeout: 30 * 60_000 });
     return {
       outputPath: input.outputPath,
       ffmpegArgs: args,
@@ -355,7 +404,7 @@ export async function concatWithSagaRenderer(input: SagaConcatInput): Promise<Sa
     input.outputPath,
   ];
 
-  await execFileAsync('ffmpeg', args, { timeout: 60 * 60_000 });
+  await execFileAsync(await ffmpegPath(), args, { timeout: 60 * 60_000 });
 
   // Final output duration mirrors the FFmpeg filter-graph math:
   //   sum(D_i)  +  sum(X_i where transition i is hold-frame)
@@ -575,7 +624,7 @@ async function concatWithCleanFades(input: SagaConcatInput): Promise<SagaConcatR
     input.outputPath,
   ];
 
-  await execFileAsync('ffmpeg', args, { timeout: 60 * 60_000 });
+  await execFileAsync(await ffmpegPath(), args, { timeout: 60 * 60_000 });
 
   // Clean-fade transitions add zero net duration (they fade in-place
   // within segments). Shader transitions add their full duration.
@@ -600,7 +649,7 @@ async function concatWithCleanFades(input: SagaConcatInput): Promise<SagaConcatR
 
 async function extractFirstFrameToPng(filePath: string, outputPath: string): Promise<boolean> {
   try {
-    await execFileAsync('ffmpeg', ['-y', '-i', filePath, '-frames:v', '1', '-q:v', '2', outputPath], {
+    await execFileAsync(await ffmpegPath(), ['-y', '-i', filePath, '-frames:v', '1', '-q:v', '2', outputPath], {
       timeout: 30_000,
     });
     const info = await stat(outputPath);
@@ -613,7 +662,7 @@ async function extractFirstFrameToPng(filePath: string, outputPath: string): Pro
 async function extractLastFrameToPng(filePath: string, outputPath: string): Promise<boolean> {
   try {
     await execFileAsync(
-      'ffmpeg',
+      await ffmpegPath(),
       ['-y', '-sseof', '-0.1', '-i', filePath, '-update', '1', '-frames:v', '1', '-q:v', '2', outputPath],
       { timeout: 30_000 },
     );
@@ -780,7 +829,7 @@ async function concatWithShaderTransitions(input: SagaConcatInput): Promise<Saga
     input.outputPath,
   ];
 
-  await execFileAsync('ffmpeg', args, { timeout: 60 * 60_000 });
+  await execFileAsync(await ffmpegPath(), args, { timeout: 60 * 60_000 });
 
   // Final duration: segments + successfully-rendered shader durations.
   const shaderTotal = shaderRenders.reduce((sum, r) => sum + (r?.durationS ?? 0), 0);
@@ -801,7 +850,7 @@ async function concatWithShaderTransitions(input: SagaConcatInput): Promise<Saga
 
 export async function ensureFfmpegAvailable(): Promise<{ ok: boolean; version?: string; error?: string }> {
   try {
-    const result = await execFileAsync('ffmpeg', ['-hide_banner', '-version'], { timeout: 30_000 });
+    const result = await execFileAsync(await ffmpegPath(), ['-hide_banner', '-version'], { timeout: 30_000 });
     const firstLine = (result.stdout || '').split(/\r?\n/)[0] ?? '';
     return { ok: true, version: firstLine };
   } catch (error) {

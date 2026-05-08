@@ -84,6 +84,7 @@ const ENV_TIME_TOOLS = [
 const MEDIA_TOOLS = [
   'generate_image',
   'generate_video',
+  'generate_long_video',
 ] as const;
 
 const BROWSER_TOOLS = [

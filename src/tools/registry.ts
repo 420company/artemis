@@ -447,6 +447,7 @@ function validateGenerateVideoAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
   validateOptionalNonEmptyString(action?.model, 'model', errors);
+  validateStringArray(action?.referenceNotes, 'referenceNotes', errors);
   validateOptionalNonEmptyString(action?.ratio, 'ratio', errors);
   validatePositiveInteger(action?.duration, 'duration', errors);
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
@@ -537,6 +538,7 @@ const SAGA_TRANSITION_KINDS = [
 function validateGenerateLongVideoAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
+  validateOptionalNonEmptyString(action?.title, 'title', errors);
   validateOptionalNonEmptyString(action?.story, 'story', errors);
   if (action?.shots !== undefined) {
     if (!Array.isArray(action.shots)) {

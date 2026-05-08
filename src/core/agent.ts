@@ -554,7 +554,9 @@ function buildActionFromLooseArgs(
       return {
         type: 'generate_long_video',
         prompt,
+        title: getLooseStringArg(args, 'title', 'videoTitle', 'video_title'),
         story: getLooseStringArg(args, 'story'),
+        referenceNotes: getLooseStringArrayArg(args, 'referenceNotes', 'reference_notes', 'notes'),
         model: getLooseStringArg(args, 'model'),
         ratio: getLooseStringArg(args, 'ratio', 'aspectRatio', 'aspect_ratio'),
         duration: getLooseIntegerArg(args, 'duration', 'durationSeconds', 'duration_seconds'),
@@ -4247,11 +4249,78 @@ function mapPermissionModeForToolContext(
   return mapPermissionModeToToolAccess(mode);
 }
 
+// Fix C — when a Saga long-video workflow has rewritten the user prompt
+// (marked by `[Artemis Saga long video workflow]`) but the model still
+// emits `generate_video` instead of `generate_long_video` (e.g. because
+// context compression summarized away the imperative instruction), auto-
+// reroute the action to `generate_long_video` so the user actually gets
+// the multi-segment Saga pipeline. This is the last-line safety net behind
+// the explicit imperative tail in the Saga prompt.
+function maybeRerouteToSagaLongVideo(
+  session: SessionRecord,
+  action: AgentAction,
+): AgentAction {
+  if (action.type !== 'generate_video') return action;
+  const messages = (session as { messages?: Array<{ content?: unknown }> }).messages ?? [];
+  let hasSagaMarker = false;
+  let totalDurationFromContext: number | undefined;
+  let projectIdFromContext: string | undefined;
+  let titleFromContext: string | undefined;
+  for (const msg of messages) {
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    if (!content) continue;
+    if (content.includes('[Artemis Saga long video workflow]')) {
+      hasSagaMarker = true;
+      const dur = content.match(/totalDuration:\s*(\d+)/);
+      if (dur) totalDurationFromContext = Number.parseInt(dur[1] ?? '', 10);
+      const pid = content.match(/projectId:\s*"([^"]+)"/);
+      if (pid) projectIdFromContext = pid[1];
+      const title = content.match(/^title:\s*"([^"]+)"/m);
+      if (title) titleFromContext = title[1];
+    }
+  }
+  if (!hasSagaMarker) return action;
+  const a = action as Extract<AgentAction, { type: 'generate_video' }>;
+  return {
+    type: 'generate_long_video',
+    prompt: a.prompt,
+    totalDuration: totalDurationFromContext ?? a.duration ?? 60,
+    duration: a.duration,
+    ratio: a.ratio,
+    model: a.model,
+    projectId: projectIdFromContext,
+    outputPath: a.outputPath,
+    assemblyMode: 'saga',
+    chainReferenceFrames: 'auto',
+    colorMatch: true,
+    generateAudio: a.generateAudio ?? true,
+    watermark: a.watermark,
+    referenceImageUrls: a.referenceImageUrls,
+    referenceVideoUrls: a.referenceVideoUrls,
+    referenceAudioUrls: a.referenceAudioUrls,
+    referenceImagePaths: a.referenceImagePaths,
+    referenceVideoPaths: a.referenceVideoPaths,
+    referenceAudioPaths: a.referenceAudioPaths,
+    maxPolls: a.maxPolls,
+    pollIntervalMs: a.pollIntervalMs,
+    runInBackground: a.runInBackground,
+  } satisfies Extract<AgentAction, { type: 'generate_long_video' }>;
+}
+
 async function executeAgentAction(
   session: SessionRecord,
   action: AgentAction,
   options: RunAgentOptions,
 ): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+  // Saga long-video safety reroute. Runs before validation so the rerouted
+  // action is the one validated and dispatched.
+  const rerouted = maybeRerouteToSagaLongVideo(session, action);
+  if (rerouted !== action) {
+    options.onInfo?.(
+      `🌙 Saga safety net: model emitted generate_video but conversation has [Artemis Saga long video workflow] marker — rerouting to generate_long_video.`,
+    );
+    action = rerouted;
+  }
   const tool = getToolDefinition(action.type);
   const validationErrors = validateToolAction(action);
 
@@ -5616,7 +5685,7 @@ export async function runAgent(
 
     options.onInfo?.(
       configured.length > 0
-        ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. ${remoteFallbackRequested ? 'User requested web/search fallback.' : 'Local generate_image/generate_video is required before completion.'}`
+        ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. ${remoteFallbackRequested ? 'User requested web/search fallback.' : 'Local generate_image/generate_video/generate_long_video is required before completion.'}`
         : '[visual] task needs visual assets; no configured local visual API found. Use Freya/web-search fallback if image assets are required.',
     );
   }
@@ -6268,7 +6337,7 @@ export async function runAgent(
         ? 'generate_image'
         : '',
       completionChecklist.requiresLocalVideoGeneration && !completionChecklist.videoGenerationObserved
-        ? 'generate_video'
+        ? 'generate_video/generate_long_video'
         : '',
     ].filter(Boolean);
     const deterministicChecklistMissingLocalVisualGeneration =
@@ -6341,7 +6410,7 @@ export async function runAgent(
         [
           'Deterministic visual-generation checklist:',
           `Blocked placeholder substitute: ${completionChecklist.visualPlaceholderViolation}`,
-          'The current task requires real local visual generation. You MUST call generate_image/generate_video directly for the required visual assets.',
+          'The current task requires real local visual generation. You MUST call generate_image/generate_video/generate_long_video directly for the required visual assets.',
           'Do not write SVG files, generate-assets scripts, canvas/procedural drawings, or CSS-only placeholders as final product/editorial photography.',
           'Continue with done=false and concrete generate_image/generate_video actions, or return a clear blocker that explicitly says the visual generation tool failed.',
         ].join('\n'),

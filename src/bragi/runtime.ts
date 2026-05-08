@@ -107,10 +107,12 @@ const IMAGE_PRODUCING_TOOLS = new Set([
   'browser_screenshot',
   'generate_image',
   'generate_video', // generated GIF previews may be sent as images where supported
+  'generate_long_video',
 ])
 
 const VIDEO_PRODUCING_TOOLS = new Set([
   'generate_video',
+  'generate_long_video',
 ])
 
 const IMAGE_EXTENSION_RE = /\.(png|jpe?g|gif|webp|bmp|svg)\b/i
@@ -164,6 +166,23 @@ function extractMediaPathsFromToolOutput(
   let match: RegExpExecArray | null
   while ((match = re.exec(text)) !== null) {
     const candidate = match[1]?.trim()
+    if (candidate && extensionRe.test(candidate)) {
+      found.add(candidate)
+    }
+  }
+
+  // Labeled tool-output lines often contain absolute paths under workspaces
+  // with spaces, e.g. "Video: /Users/me/Artemis Code/out.mp4".
+  // The generic scanner above intentionally stops at whitespace, so handle
+  // these explicit media-path lines separately.
+  const labeledLineRe = new RegExp(
+    `(?:^|\\n)\\s*(?:(?:Video|Image|Output|Path|File)\\s*[:：]|Generated\\s+(?:image|video)[^\\n]*?\\bsaved\\s+to\\b)\\s*(.+?\\.(?:${extensionPattern}))\\s*$`,
+    'gi',
+  )
+  while ((match = labeledLineRe.exec(text)) !== null) {
+    const candidate = match[1]
+      ?.trim()
+      .replace(/[),，。]+$/g, '')
     if (candidate && extensionRe.test(candidate)) {
       found.add(candidate)
     }
@@ -419,6 +438,7 @@ export async function runRemoteCommand(
         key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
         cwd: commandCwd,
         text: command.body,
+        imageAttachments: command.images,
         deliveryPlatform: opts.bridgePlatform,
         deliveryTargetId: opts.targetId,
       })
@@ -429,28 +449,44 @@ export async function runRemoteCommand(
           permissionMode: binding.permissionMode,
         }
       }
+      // When Saga has rewritten the body to a long-video generation prompt,
+      // skip the Seedance multimodal workflow — it would otherwise match
+      // its own intent regex on the rewritten body (which mentions "video"
+      // / "Seedance" / "references") and hijack the flow into a single-shot
+      // generate_video call. Saga's prompt contains a stable marker
+      // `[Artemis Saga long video workflow]` that we use to detect this.
+      const sagaTookOver = Boolean(sagaWorkflow.prompt)
       if (sagaWorkflow.prompt) {
         command.body = sagaWorkflow.prompt
+        await opts.onProgress?.(
+          t(
+            `🌙 Saga 长视频工作流已接管：改写 user prompt (${sagaWorkflow.prompt.length} 字符)，跳过 Seedance 多模态分支。`,
+            `🌙 Saga long-video workflow engaged: rewrote user prompt (${sagaWorkflow.prompt.length} chars), skipping Seedance multimodal branch.`,
+          ),
+          'info',
+        )
       }
 
-      const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
-        scope: 'bridge',
-        key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
-        cwd: commandCwd,
-        text: command.body,
-        imageAttachments: command.images,
-        deliveryPlatform: opts.bridgePlatform,
-        deliveryTargetId: opts.targetId,
-      })
-      if (seedanceWorkflow.handled) {
-        return {
-          replies: [seedanceWorkflow.reply],
-          storedSession: binding.storedSession,
-          permissionMode: binding.permissionMode,
+      if (!sagaTookOver) {
+        const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
+          scope: 'bridge',
+          key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+          cwd: commandCwd,
+          text: command.body,
+          imageAttachments: command.images,
+          deliveryPlatform: opts.bridgePlatform,
+          deliveryTargetId: opts.targetId,
+        })
+        if (seedanceWorkflow.handled) {
+          return {
+            replies: [seedanceWorkflow.reply],
+            storedSession: binding.storedSession,
+            permissionMode: binding.permissionMode,
+          }
         }
-      }
-      if (seedanceWorkflow.prompt) {
-        command.body = seedanceWorkflow.prompt
+        if (seedanceWorkflow.prompt) {
+          command.body = seedanceWorkflow.prompt
+        }
       }
 
       try {

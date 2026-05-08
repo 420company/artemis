@@ -37,7 +37,8 @@ export async function detectAvailableEncoders(): Promise<SagaEncoderProfile[]> {
     isGpu: false,
   };
   try {
-    const { stdout } = await execFileAsync('ffmpeg', ['-hide_banner', '-encoders'], { timeout: 30_000 });
+    const { resolveFfmpegBinaryPath } = await import('./concat.js');
+    const { stdout } = await execFileAsync(await resolveFfmpegBinaryPath(), ['-hide_banner', '-encoders'], { timeout: 30_000 });
     const encoders: SagaEncoderProfile[] = [];
     if (process.platform === 'darwin' && /h264_videotoolbox/i.test(stdout)) {
       encoders.push({

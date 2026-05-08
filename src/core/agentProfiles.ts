@@ -22,6 +22,7 @@ const BUILDER_ACTION_TYPES: AgentAction['type'][] = [
   'run_command',
   'generate_image',
   'generate_video',
+  'generate_long_video',
 ];
 
 const DESIGNER_ACTION_TYPES: AgentAction['type'][] = [

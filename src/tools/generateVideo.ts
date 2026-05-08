@@ -38,7 +38,11 @@ import {
 const DEFAULT_MODEL = 'seedance-1-5-pro-251215';
 const DEFAULT_RATIO = '16:9';
 const DEFAULT_SUBDIR = 'generated-media/videos';
-const DEFAULT_MAX_POLLS = 60;
+// 120 polls × 5s = 10 minutes. BytePlus 6-15s segments occasionally take
+// 5-7 minutes when the provider's queue is busy; 60-poll cap (5 min) was
+// causing false-negative timeouts. The Saga retry layer will submit a fresh
+// task if even this window is exceeded.
+const DEFAULT_MAX_POLLS = 120;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const UNSAFE_VIDEO_MODEL_ALIASES = new Set([
   'auto',

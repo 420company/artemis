@@ -51,6 +51,7 @@ export interface ParsedArgs {
   baseUrl?: string
   apiKey?: string
   prompt?: string
+  promptArgs?: string[]
   sessionId?: string
   resumeLast: boolean
   maxTurns: number
@@ -229,6 +230,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return {
     command, cwd, model, baseUrl, apiKey,
     prompt: promptParts.length > 0 ? promptParts.join(' ') : undefined,
+    promptArgs: promptParts.length > 0 ? [...promptParts] : undefined,
     sessionId, resumeLast, maxTurns, maxTurnsExplicit, permissionMode, permissionModeExplicit,
     autoDrive, testProviders, background, setup,
   }

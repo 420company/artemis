@@ -4257,28 +4257,43 @@ async function handleTurn(
     }
     return
   }
+  // When Saga rewrites the body to a long-video generation prompt, skip
+  // the Seedance multimodal workflow. Saga's rewritten prompt mentions
+  // "video" / "Seedance" / "references" and would otherwise re-trigger
+  // Seedance's intent regex, hijacking the flow into a single-shot
+  // generate_video call.
+  const sagaTookOver = Boolean(sagaWorkflow.prompt)
   if (sagaWorkflow.prompt) {
     input = sagaWorkflow.prompt
-  }
-
-  const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
-    scope: 'cli',
-    key: cwd ?? process.cwd(),
-    cwd: cwd ?? process.cwd(),
-    text: input,
-  })
-  if (seedanceWorkflow.handled) {
     viewport?.appendScrollBlock({
       kind: 'system',
-      text: seedanceWorkflow.reply,
+      text: pickLocale(locale, {
+        zh: `🌙 Saga 长视频工作流已接管：改写 user prompt (${sagaWorkflow.prompt.length} 字符)，跳过 Seedance 多模态分支。`,
+        en: `🌙 Saga long-video workflow engaged: rewrote user prompt (${sagaWorkflow.prompt.length} chars), skipping Seedance multimodal branch.`,
+      }),
     })
-    if (!viewport) {
-      console.log(seedanceWorkflow.reply)
-    }
-    return
   }
-  if (seedanceWorkflow.prompt) {
-    input = seedanceWorkflow.prompt
+
+  if (!sagaTookOver) {
+    const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
+      scope: 'cli',
+      key: cwd ?? process.cwd(),
+      cwd: cwd ?? process.cwd(),
+      text: input,
+    })
+    if (seedanceWorkflow.handled) {
+      viewport?.appendScrollBlock({
+        kind: 'system',
+        text: seedanceWorkflow.reply,
+      })
+      if (!viewport) {
+        console.log(seedanceWorkflow.reply)
+      }
+      return
+    }
+    if (seedanceWorkflow.prompt) {
+      input = seedanceWorkflow.prompt
+    }
   }
 
   // Per-round state. The model may emit text → tool → text → tool → text. We
