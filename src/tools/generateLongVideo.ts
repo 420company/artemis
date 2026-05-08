@@ -637,6 +637,7 @@ export async function executeGenerateLongVideo(
 
     let userReferenceImagePaths = nonEmptyStringArray(action.referenceImagePaths);
     let userReferenceImageUrls = nonEmptyStringArray(action.referenceImageUrls);
+    const requestedUserImageReferenceCount = userReferenceImagePaths.length + userReferenceImageUrls.length;
     let hasGlobalUserImageReferences = userReferenceImagePaths.length > 0 || userReferenceImageUrls.length > 0;
     const superVisualMode = await maybeGenerateSuperVisualReference({
       action,
@@ -1325,6 +1326,7 @@ export async function executeGenerateLongVideo(
         continuityMode,
         chainAbandonedMidRun: chainEnabled !== chainFrames,
         referenceIntegrity: {
+          requestedUserImageReferenceCount,
           hasUserImageReferences: hasGlobalUserImageReferences,
           superVisualEnabled: superVisualMode.enabled,
           superVisualMode: superVisualMode.enabled ? superVisualMode.mode : 'off',
@@ -1332,7 +1334,12 @@ export async function executeGenerateLongVideo(
           inputIsRealPerson: Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson),
           userImageReferenceDroppedSegments,
           chainDroppedSegments,
-          status: userImageReferenceDroppedSegments.length > 0 || chainDroppedSegments.length > 0
+          segmentKeyframeFailureCount: segmentKeyframeFailures.length,
+          segmentKeyframeFailures,
+          status: userImageReferenceDroppedSegments.length > 0
+            || chainDroppedSegments.length > 0
+            || segmentKeyframeFailures.length > 0
+            || (requestedUserImageReferenceCount > 0 && !superVisualMode.enabled)
             ? 'degraded'
             : 'ok',
           notes: [
@@ -1344,6 +1351,9 @@ export async function executeGenerateLongVideo(
               : undefined,
             !superVisualMode.enabled
               ? `Super Visual is disabled/unavailable: ${superVisualMode.reason}`
+              : undefined,
+            segmentKeyframeFailures.length > 0
+              ? `Segment keyframes failed: ${segmentKeyframeFailures.map((f) => `seg${f.index}: ${f.reason}`).join('; ')}`
               : undefined,
           ].filter(Boolean),
         },
