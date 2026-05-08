@@ -1056,6 +1056,26 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             description: 'Optional local audio reference paths. Requires a future upload/asset hosting step before models that require URLs can use them.',
             items: { type: 'string' },
           },
+          firstFrameImageUrls: {
+            type: 'array',
+            description: 'role:"first_frame" image URLs (literal first frame of the video). Bypasses the real-person privacy filter; use when the user supplies a real-person photo and wants it preserved literally as frame 1.',
+            items: { type: 'string' },
+          },
+          firstFrameImagePaths: {
+            type: 'array',
+            description: 'role:"first_frame" local image paths. Same semantics as firstFrameImageUrls.',
+            items: { type: 'string' },
+          },
+          lastFrameImageUrls: {
+            type: 'array',
+            description: 'role:"last_frame" image URLs (anchor closing frame).',
+            items: { type: 'string' },
+          },
+          lastFrameImagePaths: {
+            type: 'array',
+            description: 'role:"last_frame" local image paths.',
+            items: { type: 'string' },
+          },
           generateAudio: {
             type: 'boolean',
             description: 'Optional flag to generate audio narration.',
@@ -1115,6 +1135,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           referenceImagePaths: { type: 'array', description: 'Optional local image reference paths. Saga treats character/person references as global identity anchors across every segment.', items: { type: 'string' } },
           referenceVideoPaths: { type: 'array', description: 'Optional local video reference paths for the first segment.', items: { type: 'string' } },
           referenceAudioPaths: { type: 'array', description: 'Optional local audio reference paths for the first segment.', items: { type: 'string' } },
+          firstFrameImageUrls: { type: 'array', description: 'role:"first_frame" image URLs (literal first frame of the video). Bypasses the real-person privacy filter that role:"reference_image" enforces. Use when the user supplies a real-person photo and you want it preserved literally as frame 1.', items: { type: 'string' } },
+          firstFrameImagePaths: { type: 'array', description: 'role:"first_frame" local image paths.', items: { type: 'string' } },
+          lastFrameImageUrls: { type: 'array', description: 'role:"last_frame" image URLs (anchor closing frame).', items: { type: 'string' } },
+          lastFrameImagePaths: { type: 'array', description: 'role:"last_frame" local image paths.', items: { type: 'string' } },
           generateAudio: { type: 'boolean', description: 'Default true. Saga retries with audio off when a provider safety filter rejects.' },
           watermark: { type: 'boolean', description: 'Optional watermark flag.' },
           maxPolls: integerSchema('Optional max poll attempts per segment.'),

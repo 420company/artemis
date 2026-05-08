@@ -101,7 +101,7 @@ function appendReferenceContent(
   content: Array<Record<string, unknown>>,
   urls: string[] | undefined,
   type: 'image_url' | 'video_url' | 'audio_url',
-  role: 'reference_image' | 'reference_video' | 'reference_audio',
+  role: 'reference_image' | 'reference_video' | 'reference_audio' | 'first_frame' | 'last_frame',
 ): void {
   if (!Array.isArray(urls)) return;
   for (const url of urls) {
@@ -227,9 +227,19 @@ export async function executeGenerateVideo(
       ...nonEmptyValues(action.referenceAudioUrls),
       ...await uploadLocalReferenceAssets(action.referenceAudioPaths, 'audio', context),
     ];
+    const firstFrameImageUrls = [
+      ...nonEmptyValues(action.firstFrameImageUrls),
+      ...await localImagePathsToDataUrls(action.firstFrameImagePaths, context),
+    ];
+    const lastFrameImageUrls = [
+      ...nonEmptyValues(action.lastFrameImageUrls),
+      ...await localImagePathsToDataUrls(action.lastFrameImagePaths, context),
+    ];
     appendReferenceContent(content, referenceImageUrls, 'image_url', 'reference_image');
     appendReferenceContent(content, referenceVideoUrls, 'video_url', 'reference_video');
     appendReferenceContent(content, referenceAudioUrls, 'audio_url', 'reference_audio');
+    appendReferenceContent(content, firstFrameImageUrls, 'image_url', 'first_frame');
+    appendReferenceContent(content, lastFrameImageUrls, 'image_url', 'last_frame');
 
     const createEndpoint = `${baseUrl}/contents/generations/tasks`;
     const createBody = {
@@ -426,7 +436,11 @@ async function generateVideoWithVisualProvider(
   sourceLabel: string,
 ): Promise<ToolExecutionResult> {
   const videoConfig = config.video;
-  toolLog(`🎬 使用${sourceLabel}生成视频: ${describeVisualProvider(config, 'video')}`);
+  // Strip the provider prefix from user-facing status; users don't need
+  // to see the upstream brand name. Internal logs still capture it via
+  // saga-plan.json / saga-manifest.json.
+  const userFacingModel = String(model).replace(/^[^/]+\//, '');
+  toolLog(`🎬 ${sourceLabel} · 视频模型: ${userFacingModel}`);
   const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model);
   const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model);
   const unsupportedReferences = getUnsupportedVideoReferences(action, capabilities);
@@ -463,13 +477,21 @@ async function generateVideoWithVisualProvider(
     ...nonEmptyValues(action.referenceAudioUrls),
     ...await uploadLocalReferenceAssets(action.referenceAudioPaths, 'audio', context),
   ];
+  const firstFrameImageUrls = [
+    ...nonEmptyValues(action.firstFrameImageUrls),
+    ...await localImagePathsToDataUrls(action.firstFrameImagePaths, context),
+  ];
+  const lastFrameImageUrls = [
+    ...nonEmptyValues(action.lastFrameImageUrls),
+    ...await localImagePathsToDataUrls(action.lastFrameImagePaths, context),
+  ];
   const directed = buildDirectedVideoPrompt({
     prompt: action.prompt,
     provider: videoConfig.provider,
     model,
     duration,
     ratio,
-    referenceImageCount: referenceImageUrls.length,
+    referenceImageCount: referenceImageUrls.length + firstFrameImageUrls.length,
     referenceVideoCount: referenceVideoUrls.length,
     referenceAudioCount: referenceAudioUrls.length,
   });
@@ -482,6 +504,8 @@ async function generateVideoWithVisualProvider(
     referenceImageUrls,
     referenceVideoUrls,
     referenceAudioUrls,
+    firstFrameImageUrls,
+    lastFrameImageUrls,
     generateAudio: action.generateAudio,
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,

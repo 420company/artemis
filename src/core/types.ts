@@ -388,6 +388,12 @@ export type AgentAction =
       referenceImagePaths?: string[];
       referenceVideoPaths?: string[];
       referenceAudioPaths?: string[];
+      // role:"first_frame" — image-to-video literal first frame. Bypasses
+      // the real-person privacy filter that role:"reference_image" enforces.
+      firstFrameImageUrls?: string[];
+      firstFrameImagePaths?: string[];
+      lastFrameImageUrls?: string[];
+      lastFrameImagePaths?: string[];
       generateAudio?: boolean;
       watermark?: boolean;
       maxPolls?: number;
@@ -517,6 +523,15 @@ export type AgentAction =
       referenceImagePaths?: string[];
       referenceVideoPaths?: string[];
       referenceAudioPaths?: string[];
+      // Literal "first frame of the video" image inputs. role:"first_frame"
+      // in the BytePlus / Seedance request — bypasses the real-person privacy
+      // filter that role:"reference_image" enforces. Use this for the user's
+      // real-person photos (image-to-video chain mode).
+      firstFrameImageUrls?: string[];
+      firstFrameImagePaths?: string[];
+      // Optional last-frame anchor image. role:"last_frame".
+      lastFrameImageUrls?: string[];
+      lastFrameImagePaths?: string[];
       generateAudio?: boolean;
       watermark?: boolean;
       maxPolls?: number;

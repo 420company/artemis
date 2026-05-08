@@ -377,22 +377,61 @@ export function buildSagaConstitution(entities: NarrativeEntities): string {
 
 // ─── Pre-flight critic (local, no LLM) ────────────────────────────────────
 
+// Tokenize for both Latin and CJK so the relationship-fidelity check
+// works in any language. Latin tokens split on punctuation/whitespace.
+// CJK runs are emitted as a 2-character sliding window — a pragmatic
+// compromise between single-character bigrams and full word segmentation
+// (which would require shipping a tokenizer dictionary). The window lets
+// a relationship and a storyBeat match when they share enough character
+// pairs, regardless of phrasing.
 function tokenize(text: string): string[] {
-  return (text || '')
-    .toLowerCase()
-    .replace(/[　-〿＀-￯]/g, ' ')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
+  if (!text) return [];
+  const lowered = text.toLowerCase();
+  const out: string[] = [];
+  // Latin/digit tokens by punctuation/whitespace split
+  for (const part of lowered.split(/[^\p{L}\p{N}]+/gu)) {
+    if (!part) continue;
+    if (/[一-鿿]/.test(part)) {
+      // Emit each 2-char CJK window
+      for (let i = 0; i < part.length - 1; i += 1) out.push(part.slice(i, i + 2));
+      // Also emit single CJK chars when the run is exactly 1 char
+      if (part.length === 1) out.push(part);
+    } else if (/[a-z0-9]/.test(part)) {
+      out.push(part);
+    }
+  }
+  return out;
 }
 
 function entityAppearsIn(entity: string, text: string): boolean {
   if (!entity || !text) return false;
   const lower = text.toLowerCase();
   if (lower.includes(entity.toLowerCase())) return true;
-  // Also try CJK substrings in case the entity is multi-character.
-  const tokens = tokenize(entity);
-  return tokens.length > 0 && tokens.every((token) => lower.includes(token));
+  // CJK fallback: at least 2 of the entity's characters appear in the text
+  const cjkChars = entity.match(/[一-鿿]/g) ?? [];
+  if (cjkChars.length >= 2) {
+    const hits = cjkChars.filter((ch) => lower.includes(ch)).length;
+    return hits >= Math.min(cjkChars.length, 2);
+  }
+  return false;
+}
+
+// Pronouns that refer back to the protagonist after the first naming.
+// Accepting these in storyBeats lets us write natural prose ("she walks",
+// "她穿过") instead of repeating the full name on every line.
+const PROTAGONIST_PRONOUNS = ['她', '他', '她们', '他们', 'she', 'her', 'hers', 'he', 'him', 'his'];
+
+function containsProtagonistPronoun(text: string): boolean {
+  const lower = text.toLowerCase();
+  for (const pronoun of PROTAGONIST_PRONOUNS) {
+    // For Latin pronouns ensure word boundary; CJK pronouns can be substring.
+    if (/^[a-z]+$/.test(pronoun)) {
+      if (new RegExp(`\\b${pronoun}\\b`).test(lower)) return true;
+    } else {
+      if (lower.includes(pronoun)) return true;
+    }
+  }
+  return false;
 }
 
 function dominantSubject(shot: PlannedShotForCritic, entities: NarrativeEntities): {
@@ -403,9 +442,19 @@ function dominantSubject(shot: PlannedShotForCritic, entities: NarrativeEntities
   const beat = `${shot.storyBeat ?? ''}\n${shot.visualPrompt ?? ''}`;
   const lower = beat.toLowerCase();
   const protagonistName = entities.protagonist.name.toLowerCase();
-  const protagonistMentions = protagonistName && protagonistName !== '(unnamed)'
+  let protagonistMentions = protagonistName && protagonistName !== '(unnamed)'
     ? (lower.match(new RegExp(protagonistName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length
     : 0;
+  // Pronouns count as protagonist mentions (natural prose doesn't repeat the
+  // full name on every timeline beat). Also allow the protagonist's name's
+  // significant CJK chars (≥2-char run) as a partial match — "饼干姐姐" mentioned
+  // anywhere in the beat counts even if name string match fails due to commas.
+  if (protagonistMentions === 0 && containsProtagonistPronoun(beat)) {
+    protagonistMentions = 1;
+  }
+  if (protagonistMentions === 0 && protagonistName && entityAppearsIn(entities.protagonist.name, beat)) {
+    protagonistMentions = 1;
+  }
 
   const propMentions = new Map<string, number>();
   for (const prop of entities.props) {
@@ -518,6 +567,7 @@ Output ONE JSON object (no markdown, no commentary):
 
 Constraints:
 - The protagonist MUST be the subject of most timeline beats in storyBeat.
+- Use the protagonist's full name AT MOST ONCE per shot (typically in the first sub-segment). After that, refer with a pronoun ("她", "他", "she", "he", "her", "him") or a short descriptor — never repeat the full name on every timeline beat. Repeated full-name mentions read as awkward boilerplate.
 - All nouns (entities) in storyBeat must come from: protagonist, supportingCharacters, props, environments.
 - All verbs should come from the action vocabulary or be natural variants.
 - Each storyBeat must be a TIMELINE: "0–Xs: ... Xs–Ys: ... Ys–end: ..." with at least 2 sub-segments and concrete physical motion in each.

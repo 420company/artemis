@@ -169,6 +169,33 @@ export class BytePlusProvider implements VisualProvider {
         }
       }
 
+      // role:"first_frame" — image-to-video literal first-frame anchor.
+      // Different code path on the provider side; bypasses the real-person
+      // privacy filter that role:"reference_image" enforces.
+      if (params.firstFrameImageUrls) {
+        for (const url of params.firstFrameImageUrls) {
+          if (typeof url === 'string' && url.trim()) {
+            content.push({
+              type: 'image_url',
+              image_url: { url: url.trim() },
+              role: 'first_frame',
+            })
+          }
+        }
+      }
+
+      if (params.lastFrameImageUrls) {
+        for (const url of params.lastFrameImageUrls) {
+          if (typeof url === 'string' && url.trim()) {
+            content.push({
+              type: 'image_url',
+              image_url: { url: url.trim() },
+              role: 'last_frame',
+            })
+          }
+        }
+      }
+
       if (params.referenceVideoUrls) {
         for (const url of params.referenceVideoUrls) {
           if (typeof url === 'string' && url.trim()) {

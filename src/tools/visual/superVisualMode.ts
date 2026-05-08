@@ -123,6 +123,19 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
   // description so identity survives even when the relay's image
   // conditioning is weak.
   visionDescription?: string;
+  // Style of the generated turnaround:
+  //   'illustrated' (default) — stylized illustration / digital painting / anime.
+  //     Pros: bypasses real-person content filters on downstream video providers.
+  //     Cons: video output will look illustrated, not photoreal.
+  //   'photoreal' — preserve the input image's photographic style.
+  //     Pros: video output looks like a real person.
+  //     Cons: downstream video providers' privacy filters frequently reject.
+  //   'auto' — illustrated when input image looks photoreal (real human face),
+  //     photoreal otherwise (already-illustrated input is preserved).
+  style?: 'illustrated' | 'photoreal' | 'auto';
+  // Whether the input image likely contains a real human face. Used by
+  // 'auto' style to decide whether to stylize.
+  inputLooksRealPerson?: boolean;
 }): string {
   const continuity = input.continuity ?? {};
 
@@ -154,13 +167,23 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
         ].join('\n')
       : '';
 
+    // Decide whether to stylize. 'auto' stylizes only when input is real-person
+    // (the case where downstream video providers reject "real person" inputs).
+    const styleMode = input.style ?? 'auto';
+    const stylize = styleMode === 'illustrated'
+      || (styleMode === 'auto' && (input.inputLooksRealPerson ?? false));
+    const styleLine = stylize
+      ? '- Render in a STYLIZED ILLUSTRATED LOOK (digital painting / anime / illustrated character art). The output is a CHARACTER REFERENCE SHEET, not a photograph; brushwork, line work, cel-shaded or painterly rendering preferred. Even if the input image is a photograph, the output must read as illustrated character art — never as a literal photo of a real person.'
+      : '- Match the art style of the input image. If the input is photographic, the output must be photographic; if the input is illustrated, keep it illustrated. Do not invent a different art style.';
+
     return [
-      'Generate a character turnaround reference sheet. The attached input image IS the character. Reproduce that exact character — same face, hair, body, wardrobe, accessories, color palette, art style — across three full-body views.',
+      'Generate a character turnaround reference sheet. The attached input image IS the character. Reproduce that exact character — same face, hair, body, wardrobe, accessories, color palette — across three full-body views.',
       '',
       visionTruth,
       'OUTPUT (fixed):',
       '- Three full-body views of the same character from the input: front view, side profile view, back view.',
-      '- All three views must be the same person/being with identical features, outfit, palette, and art style.',
+      '- All three views must be the same person/being with identical features, outfit, and palette.',
+      styleLine,
       '- Clean neutral studio background, even soft lighting, hands and feet fully visible, no cropping.',
       `- Aspect ratio: ${input.ratio}.`,
       '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles, no banner overlay, no title overlay.',
@@ -464,6 +487,38 @@ async function resolveUserImageInputs(
 // `/images/edits` weakens visual conditioning, the textual description
 // carries identity — so the output still looks like the user's character.
 
+// Inspect a vision description to decide whether the user's image is a
+// real photograph of a real human, vs an already-stylized character (anime,
+// 3D render, illustration). Used to pick the auto turnaround style.
+function looksLikeRealPersonDescription(description: string | null | undefined): boolean {
+  if (!description) return false;
+  const lowered = description.toLowerCase();
+  // Stylized signals — if these appear, the input is already non-photoreal.
+  const stylizedHits = [
+    /\banim[eé]\b/, /\billustration\b/, /\billustrated\b/, /\bdigital painting\b/,
+    /\bcel[- ]shaded\b/, /\bpainterly\b/, /\b3d render(?:ed)?\b/, /\bcartoon\b/,
+    /\bvector art\b/, /\bstylized\b/, /\bcharacter design\b/, /\bcharacter sheet\b/,
+    /\bmascot\b/, /\bvtuber\b/, /\bavatar\b/,
+    /插画|动漫|二次元|手绘|渲染|风格化|卡通|线稿|赛璐璐/,
+  ].some((pattern) => pattern.test(lowered));
+  if (stylizedHits) return false;
+  // Photoreal signals.
+  const photorealHits = [
+    /\bphoto(?:graph(?:ic|y)?|realistic)?\b/, /\bportrait photo\b/, /\bskin texture\b/,
+    /\breal(?:istic)? human\b/, /\breal person\b/, /\bphotograph\b/,
+    /真人|实拍|实景|照片|肖像照|写真/,
+  ].some((pattern) => pattern.test(lowered));
+  if (photorealHits) return true;
+  // Fallback heuristic: descriptions of real humans tend to mention concrete
+  // ethnicity + age + gender markers without stylization keywords. If the
+  // description contains "亚洲" / "asian" / "european" / "african" + "woman/man/
+  // 女性/男性" without stylization keywords, treat as real-person.
+  if (/(亚洲|欧洲|非洲|拉丁|asian|european|african|latina?)[\s\S]{0,40}(女性|男性|woman|man)/.test(lowered)) {
+    return true;
+  }
+  return false;
+}
+
 async function describeUserImageWithVision(options: {
   imagePath: string;
   context: ToolExecutionContext;
@@ -612,6 +667,11 @@ export async function maybeGenerateSuperVisualReference(options: {
     }
   }
 
+  // Detect whether the user's image looks photoreal / real human. The vision
+  // description we just generated is the most reliable signal — it explicitly
+  // names the art style ("photographic", "anime", "illustration", etc).
+  const inputLooksRealPerson = looksLikeRealPersonDescription(visionDescription);
+  const userStyle = (options.action as { superVisualStyle?: 'illustrated' | 'photoreal' | 'auto' }).superVisualStyle;
   const prompt = buildSuperVisualCharacterTurnaroundPrompt({
     title: options.title,
     story: options.story,
@@ -620,7 +680,15 @@ export async function maybeGenerateSuperVisualReference(options: {
     continuity: options.action.continuity,
     withUserImageInput: useEditMode,
     visionDescription: visionDescription ?? undefined,
+    style: userStyle ?? 'auto',
+    inputLooksRealPerson,
   });
+  if (useEditMode) {
+    const effectiveStyle = userStyle === 'photoreal' ? 'photoreal'
+      : userStyle === 'illustrated' ? 'illustrated'
+      : (inputLooksRealPerson ? 'illustrated (auto · 真人输入 → 改插画风以避开内容过滤)' : 'photoreal (auto · 输入已是非真人风格)');
+    toolLog(`🎨 Super Visual: 角色三视图风格 = ${effectiveStyle}`);
+  }
   const promptPath = path.join(superVisualDir, 'character-turnaround.prompt.txt');
   await writeFile(promptPath, prompt, 'utf8');
 

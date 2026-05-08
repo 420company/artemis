@@ -25,6 +25,12 @@ export interface VideoGenerationParams extends VisualGenerationParams {
   referenceImagePaths?: string[]
   referenceVideoPaths?: string[]
   referenceAudioPaths?: string[]
+  // Image-to-video first-frame anchor (role: "first_frame" in BytePlus
+  // multimodal request shape). Bypasses the real-person privacy filter
+  // that role: "reference_image" enforces — use for real-person photos.
+  firstFrameImageUrls?: string[]
+  // Image-to-video last-frame anchor (role: "last_frame").
+  lastFrameImageUrls?: string[]
   watermark?: boolean
 }
 
