@@ -571,6 +571,14 @@ export type AgentAction =
           visualRhymes?: string[];
           continuityRules?: string[];
           exclusions?: string[];
+          spatialReality?: {
+            groundSurface?: string;
+            waterLine?: string;
+            occlusionRules?: string[];
+            perspectiveCues?: string;
+            physicsRules?: string[];
+            forbiddenSpatialErrors?: string[];
+          };
         };
         mode?: 'character' | 'product' | 'environment' | 'mixed' | 'unclear';
         modeRationale?: string;

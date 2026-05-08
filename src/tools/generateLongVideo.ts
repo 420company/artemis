@@ -133,6 +133,17 @@ function coerceNarrativeEntities(raw: GenerateLongVideoAction['narrativeEntities
       visualRhymes: asNonEmptyStringArray(wmRaw.visualRhymes),
       continuityRules: asNonEmptyStringArray(wmRaw.continuityRules),
       exclusions: asNonEmptyStringArray(wmRaw.exclusions),
+      spatialReality: (() => {
+        const sr = (wmRaw.spatialReality ?? {}) as Record<string, unknown>;
+        return {
+          groundSurface: typeof sr.groundSurface === 'string' ? sr.groundSurface : undefined,
+          waterLine: typeof sr.waterLine === 'string' ? sr.waterLine : undefined,
+          occlusionRules: asNonEmptyStringArray(sr.occlusionRules),
+          perspectiveCues: typeof sr.perspectiveCues === 'string' ? sr.perspectiveCues : undefined,
+          physicsRules: asNonEmptyStringArray(sr.physicsRules),
+          forbiddenSpatialErrors: asNonEmptyStringArray(sr.forbiddenSpatialErrors),
+        };
+      })(),
     },
     mode,
     modeRationale: typeof raw.modeRationale === 'string' ? raw.modeRationale : '',
@@ -969,6 +980,13 @@ export async function executeGenerateLongVideo(
             identityLockedProps: wm.identityLockedProps,
             continuityRules: wm.continuityRules,
             exclusions: wm.exclusions,
+            // Spatial reality — drives physics-correct pose composition
+            // (contact zones, causality, no impossible body→surface gestures).
+            groundSurface: wm.spatialReality?.groundSurface,
+            waterLine: wm.spatialReality?.waterLine,
+            perspectiveCues: wm.spatialReality?.perspectiveCues,
+            physicsRules: wm.spatialReality?.physicsRules,
+            forbiddenSpatialErrors: wm.spatialReality?.forbiddenSpatialErrors,
           });
           if (keyframeResult.ok) {
             segmentKeyframePaths.set(segment.index, keyframeResult.framePath);

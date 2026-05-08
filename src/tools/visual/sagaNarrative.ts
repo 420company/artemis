@@ -90,6 +90,46 @@ export type SagaWorldModel = {
   // Things to avoid showing per the user's intent (e.g., "no other primary
   // character", "no modern technology", "no on-screen text").
   exclusions?: string[];
+  // SPATIAL REALITY — the implicit 3D laws of the scene. Without this, the
+  // video model conflates symbolic gestures with physical effects (e.g.
+  // a hand-wave at chest height "splashes" water that's at the feet, which
+  // is geometrically impossible). The analyst extracts these from the user's
+  // brief + reference image so every shot can honor real-world physics:
+  // contact only happens where body parts and surfaces actually meet,
+  // gravity pulls hair/fabric down unless a force lifts them, occlusions
+  // persist, perspective foreshortens, and effects must have physical cause.
+  spatialReality?: {
+    // What the protagonist stands on most of the time, e.g. "wet sand at
+    // shoreline", "dry sand above the wave line", "stone observatory floor",
+    // "moss-covered forest ground".
+    groundSurface?: string;
+    // Where surrounding fluid/material meets the protagonist, e.g.
+    // "ankle-deep ocean water when wading; otherwise water is several meters
+    // away at the surf line", "knee-deep snow", "no water this scene". This
+    // is THE critical constraint that prevents "hand at chest splashes water
+    // at feet" errors.
+    waterLine?: string;
+    // Body parts that are partly or fully occluded ACROSS all shots, e.g.
+    // "eye-mask covers upper face permanently", "long hair drapes over right
+    // shoulder occluding part of collarbone". Different from worldModel.
+    // occlusion: this is the per-body-part visibility rule, not the wearable.
+    occlusionRules?: string[];
+    // Depth / scale / camera relationship cues, e.g. "protagonist mid-ground,
+    // sea horizon far, beach extends behind toward vanishing point",
+    // "interior tight space, no ground visible past 2 meters".
+    perspectiveCues?: string;
+    // Concrete physics rules the scene obeys, e.g. "water contact only at
+    // feet/calves when wading; hand-water contact requires deliberate dip-
+    // down", "hair drapes by gravity unless wind lifts it", "fabric flows
+    // downward unless caught by motion or wind", "no clipping of limbs
+    // through fabric or hair".
+    physicsRules?: string[];
+    // Spatial errors to explicitly forbid in storyBeats, e.g.
+    // "Hand at chest level cannot splash water on dry sand",
+    // "Feet must contact the actual surface, not float above it",
+    // "Cannot pass limbs through hair, fabric, walls, or other solids".
+    forbiddenSpatialErrors?: string[];
+  };
 };
 
 export type NarrativeEntities = {
@@ -183,7 +223,15 @@ Output ONE JSON object (no markdown, no commentary, no code fence) with EXACTLY 
     "sceneVariableProps": [<props that can change per shot — different beach umbrellas across shots, different magic effects per scene>],
     "visualRhymes": [<inter-shot visual hooks — recurring motifs that carry across cuts, e.g. "the violet particle drift", "her gaze direction left-to-right", "sun glint on water">],
     "continuityRules": [<custom per-project rules the user implies or states, free-form sentences. e.g. "the orb is always in her left hand", "the cat is always to her right", "she never looks down">],
-    "exclusions": [<things explicitly to avoid — "no other primary characters", "no modern technology", "no on-screen text", "no removing of accessories">]
+    "exclusions": [<things explicitly to avoid — "no other primary characters", "no modern technology", "no on-screen text", "no removing of accessories">],
+    "spatialReality": {
+      "groundSurface": "<what the protagonist physically stands on most of the time, e.g. 'wet sand at shoreline', 'dry sand above wave line', 'stone observatory floor', 'moss forest floor', null>",
+      "waterLine": "<where surrounding fluid (ocean / lake / river / pool / rain) physically meets the protagonist's body. CRITICAL for preventing geometry errors: e.g. 'ankle-deep ocean water when wading; otherwise water is several meters away at the surf line', 'no water', 'rain falling on head and shoulders'>",
+      "occlusionRules": [<which parts of the protagonist or scene are partially occluded ACROSS every shot, e.g. 'eye-mask permanently covers upper face — eyes are never visible', 'long hair drapes over right shoulder occluding part of collarbone'>],
+      "perspectiveCues": "<depth / scale / camera relationship cues, e.g. 'protagonist mid-ground, sea horizon far, beach extends behind toward vanishing point', 'interior tight space, no ground visible past 2 meters'>",
+      "physicsRules": [<concrete real-world physics rules the scene obeys. Be especially explicit about CONTACT and CAUSALITY. Examples: 'Water contact only at feet/calves when wading; hand-touches-water requires deliberate dip-down — a hand-wave at chest height cuts AIR, not water', 'Hair drapes by gravity unless wind lifts it', 'Fabric flows downward unless caught by motion or wind', 'No clipping of limbs through hair, fabric, or solids', 'A splash effect requires actual physical impact at the water surface'>],
+      "forbiddenSpatialErrors": [<spatial mistakes to forbid in every storyBeat, framed as concrete physics violations the model must avoid. Examples: 'Hand at chest level cannot make water splash if water is at feet', 'Feet cannot float above the actual surface', 'Cannot pass limbs through fabric, hair, walls, or other solids', 'Symbolic gestures (waving, pointing) at heights above the contact surface produce no contact effect on the surface']
+    }
   },
   "mode": "character" | "product" | "environment" | "mixed" | "unclear",
   "modeRationale": "<one or two sentences explaining the mode and why>"
@@ -196,7 +244,8 @@ Rules:
 4. Be especially observant of OCCLUSIONS (masks, hoods, hair-curtains) — they are critical for identity privacy and must persist across every shot.
 5. Be observant of WARDROBE permanence vs variability — if the user says "in different outfits" or shows variation, mark as variable; otherwise treat as permanent.
 6. The world model fields (weather, lighting, gravity, palette, mood, etc.) drive the visual coherence — fill them out richly when the input gives signal.
-7. Output the JSON only.`;
+7. SPATIAL REALITY is the most physics-critical block. Reason carefully about where surfaces, water, walls, and the protagonist's body parts actually meet in 3D. The most common video-generation error is conflating a SYMBOLIC gesture with a PHYSICAL effect — e.g. "she waves her hand and water splashes" while the hand is at chest height and water is at her feet. That is geometrically impossible. Be EXPLICIT in physicsRules and forbiddenSpatialErrors about contact zones, causality, and impossible body→surface couplings. If a scene has water, ALWAYS specify the waterLine. If the protagonist is on the ground, ALWAYS specify the groundSurface.
+8. Output the JSON only.`;
 
 type ChatModelInfo = { apiKey: string; baseUrl: string; model: string };
 
@@ -352,6 +401,7 @@ export async function analyzeNarrative(options: {
   };
   const worldModelRaw = (analysis.worldModel ?? {}) as Record<string, unknown>;
   const wardrobeRaw = (worldModelRaw.wardrobe ?? {}) as Record<string, unknown>;
+  const spatialRaw = (worldModelRaw.spatialReality ?? {}) as Record<string, unknown>;
   const worldModel: SagaWorldModel = {
     weather: typeof worldModelRaw.weather === 'string' ? worldModelRaw.weather.trim() : undefined,
     lighting: typeof worldModelRaw.lighting === 'string' ? worldModelRaw.lighting.trim() : undefined,
@@ -376,6 +426,14 @@ export async function analyzeNarrative(options: {
     visualRhymes: asStringArray(worldModelRaw.visualRhymes),
     continuityRules: asStringArray(worldModelRaw.continuityRules),
     exclusions: asStringArray(worldModelRaw.exclusions),
+    spatialReality: {
+      groundSurface: typeof spatialRaw.groundSurface === 'string' ? spatialRaw.groundSurface.trim() : undefined,
+      waterLine: typeof spatialRaw.waterLine === 'string' ? spatialRaw.waterLine.trim() : undefined,
+      occlusionRules: asStringArray(spatialRaw.occlusionRules),
+      perspectiveCues: typeof spatialRaw.perspectiveCues === 'string' ? spatialRaw.perspectiveCues.trim() : undefined,
+      physicsRules: asStringArray(spatialRaw.physicsRules),
+      forbiddenSpatialErrors: asStringArray(spatialRaw.forbiddenSpatialErrors),
+    },
   };
 
   return {
@@ -532,6 +590,30 @@ export function buildSagaConstitution(entities: NarrativeEntities): string {
     for (const line of worldLines) lines.push(`  ${line}`);
   }
 
+  // SPATIAL REALITY block — the most physics-critical rules.
+  const sr = w.spatialReality ?? {};
+  const srLines: string[] = [];
+  if (sr.groundSurface) srLines.push(`Ground surface (where the protagonist physically stands): ${sr.groundSurface}`);
+  if (sr.waterLine) srLines.push(`Water contact line (where surrounding fluid meets the body): ${sr.waterLine}`);
+  if (sr.occlusionRules && sr.occlusionRules.length > 0) {
+    srLines.push('Permanent occlusions (apply across every shot):');
+    for (const rule of sr.occlusionRules) srLines.push(`  · ${rule}`);
+  }
+  if (sr.perspectiveCues) srLines.push(`Perspective cues: ${sr.perspectiveCues}`);
+  if (sr.physicsRules && sr.physicsRules.length > 0) {
+    srLines.push('Physics rules (causality and contact must obey these):');
+    for (const rule of sr.physicsRules) srLines.push(`  · ${rule}`);
+  }
+  if (sr.forbiddenSpatialErrors && sr.forbiddenSpatialErrors.length > 0) {
+    srLines.push('Forbidden spatial errors (any storyBeat that triggers these is rejected):');
+    for (const err of sr.forbiddenSpatialErrors) srLines.push(`  · ${err}`);
+  }
+  if (srLines.length > 0) {
+    lines.push('');
+    lines.push('Spatial reality (3D physics — locked across every shot):');
+    for (const line of srLines) lines.push(`  ${line}`);
+  }
+
   lines.push('', 'RULES (in priority order — break a higher rule and the shot is rejected):');
 
   if (isCharacter) {
@@ -567,6 +649,7 @@ export function buildSagaConstitution(entities: NarrativeEntities): string {
     `5. INTER-SHOT HOOK — Every shot N's closing frame must visually hook into shot N+1's opening frame. Hooks are: protagonist gaze direction, action carry-through, light direction continuity, or a transferable element. The "transition" field describes the hook concretely.`,
     `6. NARRATIVE ARC — For an N-shot video, shot 1 establishes ${protagonistLabel}; the middle shots develop tension/exploration; the final shot resolves with a memorable beat. Do not put the strongest beat in the middle.`,
     `7. STORYBEAT FORMAT — Each storyBeat is a TIMELINE of physical actions: "0–Xs: [subject] [verb in present-tense] [object/target]; [environmental motion]. Xs–Ys: [next verb] ... Ys–end: [resolving verb] ...". The subject of MOST timeline beats must be ${protagonistLabel}.`,
+    `8. SPATIAL REALITY CHECK — Every action's effect must be physically caused by the action's actual contact in 3D space. Body parts only contact surfaces at the matching height. The most common failure: describing a hand-wave or arm-swipe at chest/shoulder level as "splashing water" or "rippling the surface" while water is at the protagonist's feet — this is geometrically impossible and reads as a clear AI artifact to viewers. To touch water, the protagonist must dip the hand DOWN to the water line, OR the foot/leg must impact the water. Symbolic gestures (waving, pointing, reaching up) at heights ABOVE the contact surface produce NO contact effect on that surface. Likewise: feet must touch the actual ground (not float above), hair and fabric drape by gravity unless lifted by motion or wind, limbs cannot pass through hair/fabric/walls. Obey the Spatial reality block above; never write a storyBeat that violates the forbidden spatial errors list.`,
     '═══════════════════════════════════════════════════════════════',
   );
 

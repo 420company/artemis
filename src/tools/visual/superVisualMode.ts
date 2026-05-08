@@ -303,6 +303,14 @@ export function buildSegmentKeyframePrompt(input: {
   continuityRules?: string[];
   // Things to avoid showing.
   exclusions?: string[];
+  // Spatial reality block — passed through so the keyframe pose is
+  // physically plausible (contact zones correct, no impossible body→
+  // surface interactions like "hand at chest splashes water at feet").
+  groundSurface?: string;
+  waterLine?: string;
+  perspectiveCues?: string;
+  physicsRules?: string[];
+  forbiddenSpatialErrors?: string[];
 }): string {
   const shot = input.shot;
   const identitySection = input.withPreviousLastFrame
@@ -359,6 +367,30 @@ export function buildSegmentKeyframePrompt(input: {
   }
   if (input.exclusions && input.exclusions.length > 0) {
     lockBlocks.push(`EXCLUSIONS (do NOT include): ${input.exclusions.join(', ')}`);
+  }
+
+  // SPATIAL REALITY block for the keyframe — most-common video-gen failure
+  // is geometric impossibility (e.g. "hand at chest splashes water at feet").
+  // Inject the scene's contact zones and forbidden errors so the keyframe's
+  // pose stays physically plausible.
+  if (input.groundSurface) lockBlocks.push(`GROUND SURFACE: ${input.groundSurface}`);
+  if (input.waterLine) lockBlocks.push(`WATER CONTACT LINE: ${input.waterLine}`);
+  if (input.perspectiveCues) lockBlocks.push(`PERSPECTIVE: ${input.perspectiveCues}`);
+  if (input.physicsRules && input.physicsRules.length > 0) {
+    lockBlocks.push('PHYSICS RULES (every contact / cause-effect in the pose must obey these):');
+    for (const r of input.physicsRules) lockBlocks.push(`  · ${r}`);
+  }
+  if (input.forbiddenSpatialErrors && input.forbiddenSpatialErrors.length > 0) {
+    lockBlocks.push('FORBIDDEN SPATIAL ERRORS (do NOT compose any of these):');
+    for (const e of input.forbiddenSpatialErrors) lockBlocks.push(`  · ${e}`);
+  }
+  if (input.groundSurface || input.waterLine || (input.physicsRules && input.physicsRules.length > 0)) {
+    lockBlocks.push(
+      'SPATIAL REALITY CHECK FOR THIS POSE: body parts contact only surfaces at the matching height. ' +
+      'A hand at chest level cuts AIR; to touch water/sand the hand must reach DOWN to the water/ground line. ' +
+      'Symbolic gestures at heights above the contact surface produce no contact effect on that surface — do NOT paint a splash, ripple, or sand-spray under a hand that is not physically at that surface. ' +
+      'Feet must rest on the actual ground (no floating). Hair and fabric drape by gravity unless visibly lifted by wind or motion. No clipping of limbs through hair, fabric, or solids.'
+    );
   }
   const locksSection = lockBlocks.length > 0 ? ['', ...lockBlocks, ''].join('\n') : '';
 
@@ -958,6 +990,13 @@ export async function generateSegmentKeyframe(options: {
   identityLockedProps?: string[];
   continuityRules?: string[];
   exclusions?: string[];
+  // SPATIAL REALITY pass-through (from world-model) so per-segment keyframe
+  // poses respect 3D contact / causality / occlusion rules.
+  groundSurface?: string;
+  waterLine?: string;
+  perspectiveCues?: string;
+  physicsRules?: string[];
+  forbiddenSpatialErrors?: string[];
 }): Promise<SegmentKeyframeResult> {
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (!imageConfigured) return { ok: false, reason: 'image provider not configured' };
@@ -1000,6 +1039,11 @@ export async function generateSegmentKeyframe(options: {
     identityLockedProps: options.identityLockedProps,
     continuityRules: options.continuityRules,
     exclusions: options.exclusions,
+    groundSurface: options.groundSurface,
+    waterLine: options.waterLine,
+    perspectiveCues: options.perspectiveCues,
+    physicsRules: options.physicsRules,
+    forbiddenSpatialErrors: options.forbiddenSpatialErrors,
   });
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-keyframe.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');

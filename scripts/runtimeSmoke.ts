@@ -59,9 +59,11 @@ import {
 } from '../src/tools/visual/videoCapabilities.js'
 import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
 import {
+  buildSegmentKeyframePrompt,
   buildSuperVisualCharacterTurnaroundPrompt,
   isSuperVisualModeEligible,
 } from '../src/tools/visual/superVisualMode.js'
+import { buildSagaConstitution } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
 import {
@@ -2281,6 +2283,60 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   assert(
     'super visual mode: text-only prompt without vision description has no orphan VISUAL TRUTH header',
     !fallbackPromptNoVision.includes('VISUAL TRUTH'),
+  )
+  // Spatial-reality regression guard: when the world model gives a water
+  // line + physics rules + forbidden errors, the per-segment keyframe prompt
+  // MUST surface them so the keyframe pose stays geometrically possible.
+  const spatialKeyframe = buildSegmentKeyframePrompt({
+    shotIndex: 1,
+    shotCount: 5,
+    shot: { title: 'Beach walk', storyBeat: 'protagonist walks along the surf' },
+    ratio: '16:9',
+    withPreviousLastFrame: false,
+    groundSurface: 'wet sand at shoreline',
+    waterLine: 'ankle-deep when wading; otherwise water is meters away',
+    physicsRules: [
+      'Hand-touches-water requires deliberate dip-down to the water line',
+    ],
+    forbiddenSpatialErrors: [
+      'Hand at chest level cannot make water splash if water is at the feet',
+    ],
+  })
+  assert(
+    'spatial reality: keyframe prompt surfaces ground / water-line / physics / forbidden errors',
+    spatialKeyframe.includes('GROUND SURFACE') &&
+      spatialKeyframe.includes('WATER CONTACT LINE') &&
+      spatialKeyframe.includes('PHYSICS RULES') &&
+      spatialKeyframe.includes('FORBIDDEN SPATIAL ERRORS') &&
+      spatialKeyframe.includes('SPATIAL REALITY CHECK FOR THIS POSE'),
+  )
+  // And the saga constitution must render the spatial-reality block plus
+  // emit the SPATIAL REALITY CHECK rule body when the analyst supplies it.
+  const constitutionWithSpatial = buildSagaConstitution({
+    protagonist: { name: 'Test Hero', type: 'character', confidence: 0.95, evidence: 'test' },
+    supportingCharacters: [],
+    props: [],
+    environments: ['beach'],
+    relationships: [],
+    actions: ['walks'],
+    protagonistAccessories: [],
+    worldModel: {
+      spatialReality: {
+        groundSurface: 'wet sand at shoreline',
+        waterLine: 'ankle-deep when wading',
+        physicsRules: ['Hand-touches-water requires dip-down'],
+        forbiddenSpatialErrors: ['Hand at chest cannot splash water at feet'],
+      },
+    },
+    mode: 'character',
+    modeRationale: 'test',
+    source: 'llm',
+  })
+  assert(
+    'spatial reality: saga constitution renders the spatial-reality block and the rule-8 check',
+    constitutionWithSpatial.includes('Spatial reality (3D physics') &&
+      constitutionWithSpatial.includes('SPATIAL REALITY CHECK') &&
+      constitutionWithSpatial.includes('wet sand at shoreline'),
   )
   assert(
     'video capabilities: Seedance 1.5 accepts explicit generated-audio requests',

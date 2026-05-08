@@ -1195,6 +1195,18 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
                   visualRhymes: { type: 'array', description: 'Inter-shot visual hooks — recurring motifs that carry across cuts.', items: { type: 'string' } },
                   continuityRules: { type: 'array', description: 'Custom per-project rules the user implies or states.', items: { type: 'string' } },
                   exclusions: { type: 'array', description: 'Things explicitly to avoid showing.', items: { type: 'string' } },
+                  spatialReality: {
+                    type: 'object',
+                    description: 'SPATIAL REALITY — the implicit 3D laws of the scene. Most-common video-gen failure is geometric impossibility (e.g. "hand at chest splashes water at feet" while water is meters below the hand). Populate richly when the input gives signal so every shot honors real-world physics.',
+                    properties: {
+                      groundSurface: { type: 'string', description: 'What the protagonist physically stands on (e.g. "wet sand at shoreline", "stone observatory floor").' },
+                      waterLine: { type: 'string', description: 'Where surrounding fluid meets the protagonist body (CRITICAL: pinpoint contact zone, e.g. "ankle-deep when wading").' },
+                      occlusionRules: { type: 'array', description: 'Body parts permanently or partially occluded across every shot.', items: { type: 'string' } },
+                      perspectiveCues: { type: 'string', description: 'Depth / scale / camera-relationship cues.' },
+                      physicsRules: { type: 'array', description: 'Concrete real-world physics rules — be explicit about CONTACT and CAUSALITY (which body parts can contact which surfaces, what gestures produce what effects).', items: { type: 'string' } },
+                      forbiddenSpatialErrors: { type: 'array', description: 'Specific spatial impossibilities to forbid in every storyBeat.', items: { type: 'string' } },
+                    },
+                  },
                 },
               },
               mode: { type: 'string', enum: ['character', 'product', 'environment', 'mixed', 'unclear'] },
