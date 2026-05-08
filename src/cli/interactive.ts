@@ -2044,7 +2044,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         queue.push(line)
         appendScrollBlock({
           kind: 'user',
-          text: `${line}\n\n${t('↳ 新对话已接收：Artemis 会在下一个安全点重新整理当前任务。', '↳ New message received: Artemis will reconcile it with the current task at the next safe point.')}`,
+          text: `${line}\n\n${t('↳ 纠错已接收：Artemis 会立即尝试中断当前思考并同步到任务。', '↳ Correction received: Artemis will immediately try to interrupt the current thought and sync it into the task.')}`,
           timestamp: timeStampLabel(),
         })
         prompt.forceRedraw()
@@ -2106,7 +2106,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             kind: 'system',
             text: interrupted > 0
               ? t(`已发送中断信号（${interrupted} 个运行中任务）。`, `Interrupt signal sent (${interrupted} active runtime(s)).`)
-              : t('已收到停止请求；当前任务会在下一个安全点停下。', 'Stop request received; the current task will stop at the next safe point.'),
+              : t('已收到停止请求；正在尝试立即中断当前任务。', 'Stop request received; trying to interrupt the current task immediately.'),
           })
           prompt.forceRedraw()
           continue
@@ -2181,7 +2181,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           })
           appendScrollBlock({
             kind: 'user',
-            text: `${cleanLine}\n\n${t('↳ 新对话已接收：Nidhogg 会在下一个安全点重新整理当前任务。', '↳ New message received: Nidhogg will reconcile it with the current task at the next safe point.')}`,
+            text: `${cleanLine}\n\n${t('↳ 纠错已接收：Nidhogg 会立即同步到当前对抗循环。', '↳ Correction received: Nidhogg will immediately sync it into the current adversarial loop.')}`,
             timestamp: timeStampLabel(),
           })
           prompt.forceRedraw()

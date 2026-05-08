@@ -16,25 +16,10 @@ import {
   type ProtagonistMode,
   type ProtagonistType,
 } from './sagaNarrative.js';
-import { pickLocale, type UiLocale } from '../../cli/locale.js';
+import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 
-// Fallback locale detection for older callers that cannot pass the selected UI
-// locale explicitly.
-function detectLocaleFromText(text: string): UiLocale {
-  if (!text) return 'en';
-  const cjk = (text.match(/[一-鿿]/g) ?? []).length;
-  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
-
-  // Prefer Chinese when the user supplied substantive Chinese text, even if the
-  // message also contains large English policy/tooling blocks. The previous
-  // cjk >= latin heuristic misclassified mixed Chinese requests as English when
-  // embedded English instructions outnumbered the user's Chinese brief.
-  if (cjk >= 8) return 'zh-CN';
-  return cjk >= latin ? 'zh-CN' : 'en';
-}
-
-export function resolveSagaWorkflowLocaleForTest(text: string, explicitLocale?: UiLocale): UiLocale {
-  return explicitLocale ?? detectLocaleFromText(text);
+export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
+  return explicitLocale ?? DEFAULT_UI_LOCALE;
 }
 
 export type SagaWorkflowScope = 'cli' | 'bridge';
@@ -72,8 +57,8 @@ type SagaWorkflowState = {
   referenceVideoPaths: string[];
   referenceAudioPaths: string[];
   referenceNotes: string[];
-  // UI locale selected by the caller. Falls back to text detection only for
-  // older callers that do not pass a locale.
+  // UI locale selected by the caller. The workflow must not infer language from
+  // the prompt body because prompts often contain mixed-language policy blocks.
   locale: UiLocale;
   // additional substantive story text the user types during collecting_refs
   accumulatedStory: string[];
@@ -495,7 +480,7 @@ function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean
   //   "A. 红衣女孩是主角"
   //   "D 红衣女孩是主角"
   //   "B - the cookie sister"
-  const keyMatch = trimmed.match(/^([A-Za-z])\b\s*[\.、,。:：\-—–]?\s*(.*)$/);
+  const keyMatch = trimmed.match(/^([A-Za-z])\b\s*[.、,。:：\-—–]?\s*(.*)$/);
   if (keyMatch) {
     const chosen = state.protagonistOptions.find((opt) => opt.key.toUpperCase() === keyMatch[1]!.toUpperCase());
     if (chosen) {
@@ -719,7 +704,7 @@ function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWor
     referenceVideoPaths: [],
     referenceAudioPaths: [],
     referenceNotes: [],
-    locale: input.locale ?? detectLocaleFromText(input.text),
+    locale: resolveSagaWorkflowLocaleForTest(input.locale),
     accumulatedStory: [],
     prefilledDuration: clampDuration(extractTargetDuration(input.text)),
     deliveryPlatform: input.deliveryPlatform,

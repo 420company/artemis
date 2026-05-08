@@ -1935,6 +1935,15 @@ export interface ThinkOptions {
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 24;
+const RUNNING_INTERJECTION_POLL_MS = 750;
+
+function isAbortLikeError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const record = error as { name?: unknown; code?: unknown; message?: unknown };
+    return record.name === 'AbortError' ||
+        record.code === 'ABORT_ERR' ||
+        /aborted|abort/i.test(String(record.message ?? ''));
+}
 
 export async function think(
     input: string,
@@ -2050,12 +2059,53 @@ export async function think(
         }
         return accepted;
     };
+    const completeWithRunningInterjectionCheck = async (
+        messages: SessionMessage[],
+        completionOptions: Record<string, unknown>,
+    ): Promise<{ interrupted: true } | { interrupted: false; completion: ProviderResponse }> => {
+        const controller = new AbortController();
+        let interrupted = false;
+        let polling = false;
+        const poll = (): void => {
+            if (polling || controller.signal.aborted) return;
+            polling = true;
+            try {
+                if (absorbRunningUserMessages() > 0) {
+                    interrupted = true;
+                    controller.abort();
+                }
+            } finally {
+                polling = false;
+            }
+        };
+        const timer = setInterval(poll, RUNNING_INTERJECTION_POLL_MS);
+        try {
+            const completion = await completeWithOptionalStream(
+                p,
+                messages,
+                onDelta,
+                {
+                    ...completionOptions,
+                    abortSignal: controller.signal,
+                },
+            );
+            return { interrupted: false, completion };
+        } catch (error) {
+            if (interrupted && isAbortLikeError(error)) {
+                return { interrupted: true };
+            }
+            throw error;
+        } finally {
+            clearInterval(timer);
+        }
+    };
 
     const maxNativeToolRounds = Math.max(
         1,
         Math.floor(rawMaxNativeToolRounds ?? MAX_DIRECT_NATIVE_TOOL_ROUNDS),
     );
 
+    nativeRoundLoop:
     for (let round = 1; round <= maxNativeToolRounds; round += 1) {
         absorbRunningUserMessages();
         const nativeFunctionTools = supportsNativeTools && projectedToolNames.length > 0
@@ -2070,22 +2120,27 @@ export async function think(
         previousResponseId = undefined;
         pendingToolOutputs = undefined;
         const providerMessages = [...systemMessages, ...providerConversationMessages];
-        const completion = await completeWithOptionalStream(
-                p,
-                providerMessages,
-                onDelta,
-                {
-                    ...responseContinuation,
-                    nativeFunctionTools,
-                    // User-supplied images are input context, not a generated/optional
-                    // tool capability. Do not drop them just because the setup "vision"
-                    // tool group was disabled; providers that cannot handle images will
-                    // ignore/fail explicitly in their own adapter path.
-                    imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
-                    onReasoning,
-                    guardStreamingText: supportsNativeTools && !plainChat,
-                },
-            );
+        const completionAttempt = await completeWithRunningInterjectionCheck(
+            providerMessages,
+            {
+                ...responseContinuation,
+                nativeFunctionTools,
+                // User-supplied images are input context, not a generated/optional
+                // tool capability. Do not drop them just because the setup "vision"
+                // tool group was disabled; providers that cannot handle images will
+                // ignore/fail explicitly in their own adapter path.
+                imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
+                onReasoning,
+                guardStreamingText: supportsNativeTools && !plainChat,
+            },
+        );
+        if (completionAttempt.interrupted) {
+            previousResponseId = undefined;
+            pendingToolOutputs = undefined;
+            widenProjectedTools();
+            continue;
+        }
+        const completion = completionAttempt.completion;
         cumulativeUsage = accumulateProviderUsage(cumulativeUsage, completion.usage);
         finalResult = completion;
 
@@ -2100,15 +2155,20 @@ export async function think(
                     maxNativeToolRounds,
                     latestUserText,
                 );
-                const forcedCompletion = await completeWithOptionalStream(
-                    p,
+                const forcedAttempt = await completeWithRunningInterjectionCheck(
                     [...providerMessages, finalizerMessage],
-                    onDelta,
                     {
                         onReasoning,
                         guardStreamingText: false,
                     },
                 );
+                if (forcedAttempt.interrupted) {
+                    previousResponseId = undefined;
+                    pendingToolOutputs = undefined;
+                    widenProjectedTools();
+                    continue nativeRoundLoop;
+                }
+                const forcedCompletion = forcedAttempt.completion;
                 cumulativeUsage = accumulateProviderUsage(cumulativeUsage, forcedCompletion.usage);
                 const forcedReply = (forcedCompletion.text ?? '').trim() || [
                     '我已经停止继续调用工具。',

@@ -10,6 +10,7 @@ import type {
   ProviderNativeToolOutput,
   ProviderTarget,
   ProviderResponse,
+  ProviderRequestOptions,
 } from '../providers/types.js';
 import { executeAction } from '../tools/index.js';
 import type { WorkspaceSwitchRequest } from '../tools/types.js';
@@ -3381,6 +3382,17 @@ export type RunAgentOptions = {
   onRunningUserMessageAccepted?: (text: string) => void;
 };
 
+const RUNNING_INTERJECTION_POLL_MS = 750;
+const RUNNING_INTERJECTION_RESTART_TEXT = '__ARTEMIS_RUNNING_INTERJECTION_RESTART__';
+
+function isAbortLikeError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as { name?: unknown; code?: unknown; message?: unknown };
+  return record.name === 'AbortError' ||
+    record.code === 'ABORT_ERR' ||
+    /aborted|abort/i.test(String(record.message ?? ''));
+}
+
 function clampTurns(value: number): number {
   return Math.min(Math.max(value, 1), 50);
 }
@@ -5948,11 +5960,24 @@ export async function runAgent(
         await options.sessionStore.save(session);
       }
 
-      currentCompletion = await provider.complete(providerMessages, {
-        previousResponseId: currentCompletion.responseId,
-        toolOutputs,
-        nativeFunctionTools,
-      });
+      const nextCompletion = await completeWithRunningInterjectionCheck(
+        provider,
+        providerMessages,
+        {
+          previousResponseId: currentCompletion.responseId,
+          toolOutputs,
+          nativeFunctionTools,
+        },
+      );
+      if (nextCompletion.interrupted) {
+        return {
+          text: RUNNING_INTERJECTION_RESTART_TEXT,
+          raw: null,
+          nativeToolCalls: [],
+          streamed: false,
+        };
+      }
+      currentCompletion = nextCompletion.completion;
     }
 
     throw new Error(
@@ -5981,6 +6006,51 @@ export async function runAgent(
       await options.sessionStore.save(session);
     }
     return accepted;
+  };
+
+  const completeWithRunningInterjectionCheck = async (
+    provider: ChatProvider,
+    providerMessages: SessionMessage[],
+    requestOptions: ProviderRequestOptions,
+    onChunk?: (delta: string) => void,
+  ): Promise<{ interrupted: true } | { interrupted: false; completion: ProviderResponse }> => {
+    const controller = new AbortController();
+    let interrupted = false;
+    let polling = false;
+    const poll = async (): Promise<void> => {
+      if (polling || controller.signal.aborted) return;
+      polling = true;
+      try {
+        if ((await absorbRunningUserMessages()) > 0) {
+          interrupted = true;
+          controller.abort();
+        }
+      } finally {
+        polling = false;
+      }
+    };
+    const timer = setInterval(() => {
+      void poll();
+    }, RUNNING_INTERJECTION_POLL_MS);
+    try {
+      const completion = onChunk && typeof provider.completeStream === 'function'
+        ? await provider.completeStream(providerMessages, onChunk, {
+          ...requestOptions,
+          abortSignal: controller.signal,
+        })
+        : await provider.complete(providerMessages, {
+          ...requestOptions,
+          abortSignal: controller.signal,
+        });
+      return { interrupted: false, completion };
+    } catch (error) {
+      if (interrupted && isAbortLikeError(error)) {
+        return { interrupted: true };
+      }
+      throw error;
+    } finally {
+      clearInterval(timer);
+    }
   };
 
   for (let turn = 1; turn <= options.maxTurns; turn += 1) {
@@ -6129,8 +6199,12 @@ export async function runAgent(
         const onInfoCallback = options.onInfo;
         onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
         try {
-          completion = await activeProvider.completeStream(
+          const streamedAttempt = await completeWithRunningInterjectionCheck(
+            activeProvider,
             providerMessages,
+            {
+              ...providerCallOptions,
+            },
             (delta) => {
               if (!delta) return;
               // Encode newlines so the receiver can rebuild the text.
@@ -6138,17 +6212,24 @@ export async function runAgent(
                 `[stream-chunk] profile=${profile} turn=${turn} delta=${JSON.stringify(delta)}`,
               );
             },
-            {
-              ...providerCallOptions,
-            },
           );
+          if (streamedAttempt.interrupted) {
+            options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted; restarting with latest user message`);
+            continue;
+          }
+          completion = streamedAttempt.completion;
         } finally {
           onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
         }
     } else {
-      completion = await activeProvider.complete(providerMessages, {
+      const completionAttempt = await completeWithRunningInterjectionCheck(activeProvider, providerMessages, {
         ...providerCallOptions,
       });
+      if (completionAttempt.interrupted) {
+        options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted; restarting with latest user message`);
+        continue;
+      }
+      completion = completionAttempt.completion;
     }
     completion = await runNativeToolLoop(
       activeProvider,
@@ -6156,6 +6237,10 @@ export async function runAgent(
       completion,
       nativeToolRuntime,
     );
+    if (completion.text === RUNNING_INTERJECTION_RESTART_TEXT) {
+      options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted during native tool continuation; restarting with latest user message`);
+      continue;
+    }
     // Surface per-turn token usage so the workflow progress UI can attribute
     // tokens to the currently-active stage (researcher / reviewer / synthesis
     // / execute). The string format is what applyWorkflowProgressInfo parses.

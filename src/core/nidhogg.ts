@@ -639,13 +639,11 @@ export async function runNidhoggWorkflow(
   config?: NidhoggConfig,
 ): Promise<RunResult> {
   let activeUserPrompt = userPrompt;
-  const absorbNidhoggUserMessages = async (phase: string): Promise<number> => {
-    const updates = options.pollRunningUserMessages?.() ?? [];
-    const accepted: string[] = [];
-    for (const raw of updates) {
-      const text = raw.trim();
-      if (!text) continue;
-      accepted.push(text);
+  const externallyAcceptedCorrections: string[] = [];
+  const applyNidhoggCorrections = async (phase: string, accepted: string[]): Promise<number> => {
+    const cleaned = accepted.map((text) => text.trim()).filter(Boolean);
+    if (cleaned.length === 0) return 0;
+    for (const text of cleaned) {
       options.sessionStore.appendMessage(
         session,
         'user',
@@ -656,21 +654,38 @@ export async function runNidhoggWorkflow(
           'Treat this as the latest correction for the adversarial loop. Re-scope the remaining generator, critic, judge, and synthesis work before continuing.',
         ].join('\n'),
       );
-      options.onRunningUserMessageAccepted?.(text);
     }
-    if (accepted.length === 0) return 0;
     activeUserPrompt = [
       activeUserPrompt.trim(),
       '',
       'Latest in-progress user correction(s):',
-      ...accepted.map((text) => `- ${text}`),
+      ...cleaned.map((text) => `- ${text}`),
       '',
       'Apply these corrections immediately to all remaining Nidhogg work.',
     ].join('\n');
     await options.sessionStore.save(session);
-    options.onInfo?.(`[nidhogg] accepted ${accepted.length} running user message(s) at ${phase}; updated remaining task scope`);
-    return accepted.length;
+    options.onInfo?.(`[nidhogg] accepted ${cleaned.length} running user correction(s) at ${phase}; updated remaining task scope`);
+    return cleaned.length;
   };
+  const absorbNidhoggUserMessages = async (phase: string): Promise<number> => {
+    const updates = options.pollRunningUserMessages?.() ?? [];
+    const accepted = updates.map((raw) => raw.trim()).filter(Boolean);
+    for (const text of accepted) options.onRunningUserMessageAccepted?.(text);
+    const external = externallyAcceptedCorrections.splice(0);
+    return applyNidhoggCorrections(phase, [...accepted, ...external]);
+  };
+  const buildNestedNidhoggOptions = (
+    phase: string,
+    overrides: Partial<RunAgentOptions> = {},
+  ): RunAgentOptions => ({
+    ...options,
+    ...overrides,
+    onRunningUserMessageAccepted: (text) => {
+      externallyAcceptedCorrections.push(text);
+      options.onRunningUserMessageAccepted?.(text);
+      options.onInfo?.(`[nidhogg] running correction accepted inside ${phase}: ${truncate(text, 160)}`);
+    },
+  });
 
   const resolvedConfig = normalizeConfig(config);
   const imageAttachments: ImageAttachment[] = [];
@@ -742,7 +757,7 @@ export async function runNidhoggWorkflow(
         'builder',
         buildGeneratorTask(activeUserPrompt, round, finalJudgeVerdict?.priorityIssues),
         {
-          ...options,
+          ...buildNestedNidhoggOptions(`builder round ${round}`),
           appendUserMessage: true,
           imageAttachments: round === 1 ? imageAttachments : undefined,
           onInfo: (message) => options.onInfo?.(`[nidhogg:builder:r${round}] ${message}`),
@@ -763,6 +778,7 @@ export async function runNidhoggWorkflow(
       generatorTurns = generatorOutcome.value.result.turns;
       totalTurns += generatorTurns;
     }
+    await absorbNidhoggUserMessages(`round ${round} generator done`);
 
     const harnessResult = parseHarnessFromGeneratorOutput(lastGeneratorReply);
     await options.sessionStore.upsertEvidenceClaim(session, {
@@ -804,9 +820,10 @@ export async function runNidhoggWorkflow(
             'reviewer',
             buildCriticTask(kind, activeUserPrompt, lastGeneratorReply, round, imageLabels),
             {
-              ...options,
+              ...buildNestedNidhoggOptions(`critic:${kind} round ${round}`, {
+                permissionManager: options.permissionManager.fork('read-only'),
+              }),
               appendUserMessage: true,
-              permissionManager: options.permissionManager.fork('read-only'),
               imageAttachments: kind === 'visual' ? imageAttachments : undefined,
               onInfo: (message) => options.onInfo?.(`[nidhogg:${kind}:r${round}] ${message}`),
             },
@@ -842,6 +859,7 @@ export async function runNidhoggWorkflow(
         return { kind, result, reply, timedOut: false };
       }),
     );
+    await absorbNidhoggUserMessages(`round ${round} critic pool done`);
 
     const criticResults: CriticResult[] = [];
     for (const criticRun of criticRuns) {
@@ -877,9 +895,10 @@ export async function runNidhoggWorkflow(
         'arbiter',
         buildJudgeTask(activeUserPrompt, lastGeneratorReply, harnessResult, criticResults, round, previousOverallScore),
         {
-          ...options,
+          ...buildNestedNidhoggOptions(`judge round ${round}`, {
+            permissionManager: options.permissionManager.fork('read-only'),
+          }),
           appendUserMessage: true,
-          permissionManager: options.permissionManager.fork('read-only'),
           onInfo: (message) => options.onInfo?.(`[nidhogg:judge:r${round}] ${message}`),
         },
         { title: `[nidhogg:judge:r${round}] ${truncate(activeUserPrompt, 50)}` },
@@ -894,6 +913,7 @@ export async function runNidhoggWorkflow(
     if (!judgeOutcome.timedOut) {
       totalTurns += judgeOutcome.value.result.turns;
     }
+    await absorbNidhoggUserMessages(`round ${round} judge done`);
     const judgeVerdict = parseJudgeVerdict(
       judgeReply,
       criticResults,
@@ -1004,7 +1024,7 @@ export async function runNidhoggWorkflow(
 
   options.onInfo?.('[nidhogg] synthesizing final output');
   const finalResult = await runAgent(session, synthesisPrompt, {
-    ...options,
+    ...buildNestedNidhoggOptions('final synthesis'),
     profile: 'main',
     appendUserMessage: true,
   });

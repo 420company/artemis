@@ -8,7 +8,7 @@ import {
   isBytePlusProvider,
   resolveVideoModelCapabilities,
 } from './videoCapabilities.js';
-import { pickLocale, type UiLocale } from '../../cli/locale.js';
+import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 
 export type SeedanceWorkflowScope = 'cli' | 'bridge';
 
@@ -581,7 +581,7 @@ export async function handleSeedanceMultimodalWorkflow(
     referenceVideoPaths: refs.videoPaths,
     referenceAudioPaths: refs.audioPaths,
     generateAudio: !wantsSilence(text),
-    locale: input.locale ?? 'zh-CN',
+    locale: input.locale ?? DEFAULT_UI_LOCALE,
     deliveryPlatform: input.deliveryPlatform,
     deliveryTargetId: input.deliveryTargetId,
     stage: 'collecting_refs',

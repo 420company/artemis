@@ -57,7 +57,7 @@ import {
   resolveVideoModelCapabilities,
   shouldPromoteBytePlusVideoModel,
 } from '../src/tools/visual/videoCapabilities.js'
-import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
+import { handleSeedanceMultimodalWorkflow as handleSeedanceMultimodalWorkflowRaw, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
 import {
   buildSegmentKeyframePrompt,
   buildSuperVisualCharacterTurnaroundPrompt,
@@ -111,6 +111,9 @@ import type { PromptIO } from '../src/providers/types.js'
 
 let passed = 0
 let failed = 0
+
+const handleSeedanceMultimodalWorkflow: typeof handleSeedanceMultimodalWorkflowRaw = (input) =>
+  handleSeedanceMultimodalWorkflowRaw({ locale: 'zh-CN', ...input })
 
 function assert(label: string, cond: boolean, detail?: string): void {
   if (cond) {
