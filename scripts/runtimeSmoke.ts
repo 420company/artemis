@@ -541,11 +541,14 @@ const dreamBridgeText = buildDreamBridgeText(
 )
 
 assert(
-  'dream notifications: bridge text keeps the full dream body and local paths',
+  'dream notifications: bridge text keeps the full dream body and clean local file labels',
   dreamBridgeText.includes('🌙 桥上晚潮') &&
     dreamBridgeText.includes('第二段梦境仍然完整保留') &&
-    dreamBridgeText.includes('我的日记：/Users/goat/.artemis/dreams/2026-05-06noon1533.md') &&
-    dreamBridgeText.includes('梦境画面：/Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
+    dreamBridgeText.includes('我的日记：2026-05-06noon1533.md') &&
+    dreamBridgeText.includes('梦境画面：2026-05-06noon1533.png') &&
+    !dreamBridgeText.includes('/Users/goat/.artemis/dreams/2026-05-06noon1533.md') &&
+    !dreamBridgeText.includes('/Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
+    !dreamBridgeText.includes('2026-05-06noon1533.md/Users/') &&
     !dreamBridgeText.includes('梦境片段') &&
     !dreamBridgeText.includes('刚刚好像') &&
     !dreamBridgeText.includes('学到了什么'),

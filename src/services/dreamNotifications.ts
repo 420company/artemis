@@ -6,6 +6,7 @@ import type { ComposeDreamResult } from './dreamComposer.js'
 import { getDreamsRoot, type DreamEntry } from './dreamStore.js'
 import type { UiLocale } from '../cli/locale.js'
 import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
+import { formatLocalFileLink } from '../cli/ui.js'
 
 export const DREAM_SYSTEM_NAME = 'Dream System'
 
@@ -14,6 +15,14 @@ export const FIRST_DREAM_ZH = 'Artemis 第一次进入梦境系统。请写一�
 export const FIRST_DREAM_EN = 'Artemis is entering the dream system for the first time. Write a light, restrained dream with a sense of first awakening, without inventing anything the user has said.'
 
 const FIRST_DREAM_MARKER_FILE = path.join(getDreamsRoot(), 'first-dream-shown.json')
+
+function formatDreamPathField(label: string, filePath: string): string {
+  return `${label}: ${formatLocalFileLink(filePath)}`
+}
+
+function formatDreamPathFieldWithSep(label: string, sep: string, filePath: string): string {
+  return `${label}${sep}${formatLocalFileLink(filePath)}`
+}
 
 function pickLocaleList(locale: UiLocale, values: { zh: string[]; en: string[] }): string[] {
   return locale === 'zh-CN' ? values.zh : values.en
@@ -31,8 +40,8 @@ export async function notifyDreamSystemStartup(latest?: DreamEntry | null, local
   if (latest) {
     text = [
         `${pickLocale(locale, { zh: '上一枚梦的种子', en: 'Previous dream seed' })}: ${latest.preview}`,
-        `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}: ${latest.mdPath}`,
-        ...(latest.imagePath ? [`${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}: ${latest.imagePath}`] : []),
+        formatDreamPathField(pickLocale(locale, { zh: '我的日记', en: 'My journal' }), latest.mdPath),
+        ...(latest.imagePath ? [formatDreamPathField(pickLocale(locale, { zh: '梦境画面', en: 'Dream image' }), latest.imagePath)] : []),
       ].join('\n')
   } else {
     await shouldShowFirstDream().catch(() => false)
@@ -101,8 +110,8 @@ export async function notifyDreamFinished(result: ComposeDreamResult, locale: Ui
           en: 'A new dream has fallen into the scroll; its faint signals have crystallized softly.',
         }),
         `${pickLocale(locale, { zh: '梦境片段', en: 'Dream fragment' })}${sep}${result.entry.preview}`,
-        `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}${sep}${result.entry.mdPath}`,
-        ...(result.entry.imagePath ? [`${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}${sep}${result.entry.imagePath}`] : []),
+        formatDreamPathFieldWithSep(pickLocale(locale, { zh: '我的日记', en: 'My journal' }), sep, result.entry.mdPath),
+        ...(result.entry.imagePath ? [formatDreamPathFieldWithSep(pickLocale(locale, { zh: '梦境画面', en: 'Dream image' }), sep, result.entry.imagePath)] : []),
       ].join('\n')
     : [
         pickLocale(locale, {

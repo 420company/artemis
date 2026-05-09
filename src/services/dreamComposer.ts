@@ -38,6 +38,7 @@ import { sendBragiImageBroadcast } from '../bragi/imageBroadcast.js'
 import { notifyDreamFinished } from './dreamNotifications.js'
 import type { UiLocale } from '../cli/locale.js'
 import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
+import { formatLocalFileLink } from '../cli/ui.js'
 
 export interface ComposeDreamOptions {
   cwd: string
@@ -382,10 +383,10 @@ export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale:
     body,
     '',
     `_dream id: ${entry.id}_`,
-    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}${sep}${entry.mdPath}`,
+    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}${sep}${formatLocalFileLink(entry.mdPath)}`,
     ...(entry.imagePath
       ? [
-          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}${sep}${entry.imagePath}`,
+          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}${sep}${formatLocalFileLink(entry.imagePath)}`,
         ]
       : []),
   ].join('\n')

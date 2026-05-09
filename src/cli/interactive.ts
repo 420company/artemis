@@ -216,7 +216,7 @@ import { formatToolDone, formatToolPermission, formatToolResultPreview } from '.
 import { setBridgePrinter } from './bridgeNotify.js'
 import type { BridgeTerminalEvent, TerminalNotification } from './bridgeNotify.js'
 import { buildInteractiveCompactHero, buildInteractiveHero, APP_NAME, APP_VERSION, APP_PUBLISHER } from './branding.js'
-import { buildPanel, formatRichOutput, isHighEasterEggTrigger, buildHighEasterEggCompact } from './ui.js'
+import { buildPanel, formatRichOutput, formatLocalFileLink, isHighEasterEggTrigger, buildHighEasterEggCompact } from './ui.js'
 import { createHudState, updateHudState, renderHud, fmtTok } from './hud.js'
 import type { UiLocale } from './locale.js'
 import { pickLocale } from './locale.js'
@@ -1162,6 +1162,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
   const renderPlainPanel = (title: string, lines: string[]): string =>
     renderTimelinePanel(title, lines)
+
+  const formatLocalPathField = (label: string, filePath: string): string =>
+    `${label}: ${formatLocalFileLink(filePath)}`
 
   const appendSystemText = (text: string): number =>
     appendScrollBlock({ kind: 'system', text, preserveAnsi: true })
@@ -3830,9 +3833,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           appendSystemPanel(t('梦境已生成', 'Dream composed'), [
             `${result.entry.preview}`,
             '',
-            `${t('文件', 'File')}: ${result.entry.mdPath}`,
-            ...(result.entry.imagePath ? [`${t('配图', 'Image')}: ${result.entry.imagePath}`] : []),
-            ...(result.entry.videoPath ? [`${t('视频', 'Video')}: ${result.entry.videoPath}`] : []),
+            formatLocalPathField(t('文件', 'File'), result.entry.mdPath),
+            ...(result.entry.imagePath ? [formatLocalPathField(t('配图', 'Image'), result.entry.imagePath)] : []),
+            ...(result.entry.videoPath ? [formatLocalPathField(t('视频', 'Video'), result.entry.videoPath)] : []),
             ...(typeof result.bridgesPushed === 'number' && result.bridgesPushed > 0
               ? [t(`已推送到 ${result.bridgesPushed} 个聊天桥接。`, `Pushed to ${result.bridgesPushed} bridge chat(s).`)]
               : []),
@@ -3868,7 +3871,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         if (result.ok && result.videoPath) {
           appendSystemPanel(t('梦境视频已生成', 'Dream video generated'), [
             `${t('梦境', 'Dream')}: ${result.entry?.id ?? id ?? t('最新', 'latest')}`,
-            `${t('视频', 'Video')}: ${result.videoPath}`,
+            formatLocalPathField(t('视频', 'Video'), result.videoPath),
             `${t('模型', 'Model')}: ${result.provider ?? '?'} / ${result.model ?? '?'}`,
           ])
         } else {

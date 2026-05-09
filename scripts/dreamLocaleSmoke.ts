@@ -26,6 +26,16 @@ for (const expected of ['My journal: ', 'Dream image: ']) {
     throw new Error(`Expected English bridge label ${expected} in: ${bridgeText}`);
   }
 }
+for (const expected of ['artemis-dream.md', 'artemis-dream.png']) {
+  if (!bridgeText.includes(expected)) {
+    throw new Error(`Expected local dream link label ${expected} in: ${bridgeText}`);
+  }
+}
+for (const forbidden of ['/tmp/artemis-dream.md', '/tmp/artemis-dream.png', 'artemis-dream.md/tmp/']) {
+  if (bridgeText.includes(forbidden)) {
+    throw new Error(`Dream bridge text leaked or dirtied a local path ${forbidden}: ${bridgeText}`);
+  }
+}
 for (const forbidden of ['我的日记', '梦境画面', '：']) {
   if (bridgeText.includes(forbidden)) {
     throw new Error(`English bridge text leaked Chinese marker ${forbidden}: ${bridgeText}`);
