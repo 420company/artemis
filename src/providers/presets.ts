@@ -72,10 +72,29 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'o3',
       'o3-mini',
       'o4-mini',
+      // ── Image generation ──
+      'gpt-5.4-image-2',
+      'gpt-5-image',
+      'gpt-5-image-mini',
+      // ── Audio / multimodal ──
+      'gpt-audio',
+      'gpt-audio-mini',
+      'gpt-4o-audio-preview',
+      // ── Embedding (memory / RAG) ──
+      'text-embedding-3-large',
+      'text-embedding-3-small',
     ],
     notes: {
-      zh: ['OpenAI 官方接口。', '推荐 gpt-5.5-pro（旗舰）或 gpt-5.5（日常）。'],
-      en: ['Official OpenAI API.', 'Recommended: gpt-5.5-pro (flagship) or gpt-5.5 (everyday).'],
+      zh: [
+        'OpenAI 官方接口，涵盖聊天、代码、图像、语音和嵌入模型。',
+        '推荐 gpt-5.5-pro（旗舰）或 gpt-5.5（日常）。',
+        '支持图像生成（gpt-5.4-image-2 等）、语音对话（gpt-audio 系列）和嵌入检索。',
+      ],
+      en: [
+        'Official OpenAI API — chat, code, image, audio, and embedding models.',
+        'Recommended: gpt-5.5-pro (flagship) or gpt-5.5 (everyday).',
+        'Supports image generation (gpt-5.4-image-2 etc.), voice (gpt-audio series), and embeddings.',
+      ],
     },
   },
 
@@ -89,8 +108,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.deepseek.com',
     suggestedModels: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-chat', 'deepseek-reasoner'],
     notes: {
-      zh: ['DeepSeek 官方接口，OpenAI-compatible。', '官方已发布 deepseek-v4-pro / deepseek-v4-flash；deepseek-chat / deepseek-reasoner 目前仍可用，但官方已宣布将在 2026-07-24 停止。'],
-      en: ['Official DeepSeek API, OpenAI-compatible.', 'DeepSeek now exposes deepseek-v4-pro and deepseek-v4-flash; deepseek-chat and deepseek-reasoner still work today but are scheduled for removal on 2026-07-24.'],
+      zh: ['DeepSeek 官方接口。', '推荐 deepseek-v4-pro 或 deepseek-v4-flash；旧版 deepseek-chat / deepseek-reasoner 将于 2026-07-24 停服。'],
+      en: ['Official DeepSeek API.', 'Recommended: deepseek-v4-pro or deepseek-v4-flash; legacy deepseek-chat / deepseek-reasoner retire on 2026-07-24.'],
     },
   },
 
@@ -109,10 +128,23 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'gemini-2.5-pro',
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
+      // ── Image generation ──
+      'gemini-3.1-flash-image-preview',
+      'gemini-3-pro-image-preview',
+      // ── Embedding (memory / RAG) ──
+      'gemini-embedding-2-preview',
     ],
     notes: {
-      zh: ['Google Gemini OpenAI-compatible 接口。', '优先使用 Gemini 3.x；2.5 系列仅作为兼容或成本备选。'],
-      en: ['Google Gemini via OpenAI-compatible endpoint.', 'Prefer Gemini 3.x; Gemini 2.5 remains a compatibility or cost fallback.'],
+      zh: [
+        'Google Gemini 官方接口，涵盖聊天、图像生成和嵌入模型。',
+        '推荐 Gemini 3.x 系列；2.5 系列为经济备选。',
+        '支持图像生成和多模态嵌入检索。',
+      ],
+      en: [
+        'Official Google Gemini API — chat, image generation, and embedding models.',
+        'Recommended: Gemini 3.x series; 2.5 series as cost-effective fallback.',
+        'Supports image generation and multimodal embeddings.',
+      ],
     },
   },
 
@@ -133,8 +165,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'moonshot-v1-8k',
     ],
     notes: {
-      zh: ['Moonshot AI 官方接口，OpenAI-compatible。', '当前官方首页主推 kimi-k2.6、kimi-k2.5、kimi-k2。'],
-      en: ['Official Moonshot AI API, OpenAI-compatible.', 'The current Moonshot front page leads with kimi-k2.6, kimi-k2.5, and kimi-k2.'],
+      zh: ['Moonshot AI 官方接口。', '推荐 kimi-k2.6 或 kimi-k2.5。'],
+      en: ['Official Moonshot AI API.', 'Recommended: kimi-k2.6 or kimi-k2.5.'],
     },
   },
   {
@@ -145,8 +177,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.moonshot.ai/v1',
     suggestedModels: ['kimi-k2.6', 'kimi-k2.5', 'kimi-k2', 'moonshot-v1-128k', 'moonshot-v1-32k'],
     notes: {
-      zh: ['api.kimi.com Coding Plan 与 Moonshot API。', 'sk-kimi- 开头 key 可切到 coding endpoint。'],
-      en: ['api.kimi.com Coding Plan and Moonshot API.', 'sk-kimi-* keys may route to the coding endpoint.'],
+      zh: ['Kimi Coding Plan，专注代码场景。'],
+      en: ['Kimi Coding Plan, focused on coding scenarios.'],
     },
   },
   {
@@ -171,8 +203,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.minimax.io/anthropic',
     suggestedModels: ['MiniMax-M2.7', 'MiniMax-M2.7-highspeed', 'MiniMax-M2.5', 'MiniMax-M2.5-highspeed', 'MiniMax-M2.1', 'MiniMax-M2.1-highspeed'],
     notes: {
-      zh: ['MiniMax global direct API，Hermes 走 Anthropic-style endpoint。'],
-      en: ['MiniMax global direct API via Anthropic-style endpoint in Hermes.'],
+      zh: ['MiniMax 国际版，涵盖 M2.7 / M2.5 / M2.1 系列。'],
+      en: ['MiniMax International — M2.7 / M2.5 / M2.1 series.'],
     },
   },
   {
@@ -207,8 +239,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'glm-4.5-flash',
     ],
     notes: {
-      zh: ['智谱 AI / Z.ai 官方接口，OpenAI-compatible。', '当前官方 API 参考主线为 glm-5.1 / glm-5-turbo / glm-5 / glm-4.7 系列。'],
-      en: ['Zhipu AI / Z.ai official API, OpenAI-compatible.', 'The current official API reference centers on glm-5.1 / glm-5-turbo / glm-5 and the GLM-4.7 family.'],
+      zh: ['智谱 AI 官方接口。', '推荐 glm-5.1 或 glm-5-turbo。'],
+      en: ['Official Zhipu AI API.', 'Recommended: glm-5.1 or glm-5-turbo.'],
     },
   },
   {
@@ -219,8 +251,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.z.ai/api/paas/v4',
     suggestedModels: ['glm-5.1', 'glm-5-turbo', 'glm-5', 'glm-4.7', 'glm-4.7-flash', 'glm-4.7-flashx', 'glm-4.5-air', 'glm-4.5-flash'],
     notes: {
-      zh: ['Zhipu / Z.AI 直连接口。', '可用 GLM_API_KEY / ZAI_API_KEY。'],
-      en: ['Zhipu / Z.AI direct API.', 'Can use GLM_API_KEY / ZAI_API_KEY.'],
+      zh: ['Z.AI 海外版直连接口。'],
+      en: ['Z.AI International direct API.'],
     },
   },
 
@@ -242,8 +274,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'z-ai/glm-5.1',
     ],
     notes: {
-      zh: ['聚合多家模型，单个 API key 即可访问数百个模型。', '模型名格式：provider/model-name。'],
-      en: ['Aggregate router — access hundreds of models with one API key.', 'Model format: provider/model-name.'],
+      zh: ['聚合路由，一个 API key 访问数百个模型。'],
+      en: ['Aggregate router — access hundreds of models with one API key.'],
     },
   },
 
@@ -265,8 +297,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'z-ai/glm-5.1',
     ],
     notes: {
-      zh: ['Nous Research 订阅入口；Hermes 中支持托管工具网关。', '如使用 OAuth/订阅登录，后续需要补专门认证适配。'],
-      en: ['Nous Research subscription endpoint; Hermes supports managed tool gateway.', 'OAuth/subscription login needs a dedicated auth adapter.'],
+      zh: ['Nous Research 订阅制模型服务。'],
+      en: ['Nous Research subscription-based model service.'],
     },
     runtimeReady: false,
   },
@@ -286,8 +318,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'moonshotai/kimi-k2.6',
     ],
     notes: {
-      zh: ['Vercel AI Gateway，OpenAI-compatible。', 'Hermes 标注为 200+ models，$5 free credit，无 markup。'],
-      en: ['Vercel AI Gateway, OpenAI-compatible.', 'Hermes lists it as 200+ models, $5 free credit, no markup.'],
+      zh: ['Vercel AI Gateway，200+ 模型，含 $5 免费额度。'],
+      en: ['Vercel AI Gateway — 200+ models, $5 free credit.'],
     },
   },
 
@@ -300,8 +332,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     suggestedModels: ['gpt-5.2-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex', 'gpt-5-codex'],
     notes: {
-      zh: ['Hermes 通过 Codex OAuth 认证。', '当前 Artemis 先保存为 provider 配置；OAuth 自动登录需后续接入。'],
-      en: ['Hermes authenticates this through Codex OAuth.', 'Artemis stores this as a provider profile first; OAuth automation can be added later.'],
+      zh: ['OpenAI Codex 代码模型，需 Codex OAuth 认证。'],
+      en: ['OpenAI Codex code models, requires Codex OAuth.'],
     },
     runtimeReady: false,
   },
@@ -313,8 +345,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://portal.qwen.ai/v1',
     suggestedModels: ['qwen3-coder-next', 'qwen3.6-plus', 'qwen3.5-plus', 'qwen-max'],
     notes: {
-      zh: ['复用本地 Qwen CLI 登录。', '需要后续接入 OAuth token 读取。'],
-      en: ['Reuses local Qwen CLI login.', 'Needs a token reader adapter for full OAuth support.'],
+      zh: ['Qwen 官方 OAuth 模型，需 Qwen CLI 登录。'],
+      en: ['Official Qwen OAuth models, requires Qwen CLI login.'],
     },
     runtimeReady: false,
   },
@@ -326,8 +358,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'cloudcode-pa://google',
     suggestedModels: ['gemini-3.1-pro-preview', 'gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro'],
     notes: {
-      zh: ['Hermes 通过 Google OAuth + Code Assist 使用，可支持免费层。', '当前先记录路由信息。'],
-      en: ['Hermes uses Google OAuth + Code Assist and can support the free tier.', 'This currently records the route metadata.'],
+      zh: ['Google Gemini OAuth + Code Assist，可享免费额度。'],
+      en: ['Google Gemini OAuth + Code Assist, free tier available.'],
     },
     runtimeReady: false,
   },
@@ -348,8 +380,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'grok-code-fast-1',
     ],
     notes: {
-      zh: ['使用 GITHUB_TOKEN、GH_TOKEN 或 Copilot token。', 'Hermes 可从 gh auth token 复用。'],
-      en: ['Uses GITHUB_TOKEN, GH_TOKEN, or a Copilot token.', 'Hermes can reuse gh auth token.'],
+      zh: ['GitHub Copilot，需 GitHub / Copilot token。'],
+      en: ['GitHub Copilot, requires GitHub / Copilot token.'],
     },
     runtimeReady: false,
   },
@@ -361,8 +393,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'acp://copilot',
     suggestedModels: ['gpt-5.2', 'gpt-5.2-codex', 'claude-sonnet-4'],
     notes: {
-      zh: ['Hermes 通过 `copilot --acp --stdio` 子进程接入。', '当前先保存配置元数据。'],
-      en: ['Hermes spawns `copilot --acp --stdio`.', 'This currently stores metadata first.'],
+      zh: ['GitHub Copilot ACP 子进程协议。'],
+      en: ['GitHub Copilot ACP subprocess protocol.'],
     },
     runtimeReady: false,
   },
@@ -373,7 +405,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     label:        { zh: 'XiaoMi MiMo', en: 'XiaoMi MiMo' },
     defaultAlias: { zh: 'MiMo 模型', en: 'MiMo model' },
     protocol: 'openai',
-    baseUrl: 'https://api.mimo-v2.com/v1',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
     apiKeyHeader: 'api-key',
     suggestedModels: [
       'mimo-v2.5-pro',
@@ -387,8 +419,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'mimo-v2-flash',
     ],
     notes: {
-      zh: ['MiMo-V2 / V2.5 模型，OpenAI-compatible。', '官方 Quick Start 使用 https://api.mimo-v2.com/v1 和 api-key 请求头。'],
-      en: ['MiMo-V2 / V2.5 models, OpenAI-compatible.', 'The official Quick Start uses https://api.mimo-v2.com/v1 and the api-key header.'],
+      zh: ['小米 MiMo-V2 / V2.5 系列，涵盖聊天、TTS 语音合成和多模态模型。'],
+      en: ['XiaoMi MiMo-V2 / V2.5 series — chat, TTS voice synthesis, and multimodal models.'],
     },
   },
   {
@@ -434,8 +466,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.stepfun.ai/v1',
     suggestedModels: ['step-3.5-flash-2603', 'step-3.5-flash', 'step-3', 'step-2-16k'],
     notes: {
-      zh: ['兼容你截图中的 Hermes provider 项。', '英文迁移文档使用 https://api.stepfun.ai/v1；官方示例模型包括 step-3.5-flash / step-3.5-flash-2603 / step-3 / step-2-16k。'],
-      en: ['Compatibility entry for the Hermes provider shown in your screenshot.', 'The current English migration guide uses https://api.stepfun.ai/v1 and shows step-3.5-flash / step-3.5-flash-2603 / step-3 / step-2-16k as official examples.'],
+      zh: ['阶跃星辰 StepFun 官方接口。', '推荐 step-3.5-flash 或 step-3。'],
+      en: ['Official StepFun API.', 'Recommended: step-3.5-flash or step-3.'],
     },
   },
   {
@@ -527,8 +559,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'qwen3.5-plus',
     ],
     notes: {
-      zh: ['open models，Hermes 标注为 $10/month subscription。', '官方文档按模型切分端点：MiniMax 走 Messages，其余当前公开模型走 Chat Completions。'],
-      en: ['Open models, listed by Hermes as a $10/month subscription.', 'Official docs split endpoints by model family: MiniMax uses Messages, and the other currently listed models use Chat Completions.'],
+      zh: ['Kilo Code 订阅制模型服务，$10/月。'],
+      en: ['Kilo Code subscription-based model service, $10/month.'],
     },
   },
   {
@@ -548,6 +580,41 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       en: ['Claude, Nova, Llama, DeepSeek; IAM/API-key auth needs a dedicated adapter.'],
     },
     runtimeReady: false,
+  },
+
+  // ── Mistral ────────────────────────────────────────────────────────────────
+  {
+    id: 'mistral',
+    label:        { zh: 'Mistral',   en: 'Mistral' },
+    defaultAlias: { zh: 'Mistral 模型', en: 'Mistral model' },
+    protocol: 'openai',
+    // Endpoint: https://api.mistral.ai/v1/chat/completions
+    baseUrl: 'https://api.mistral.ai/v1',
+    suggestedModels: [
+      'mistral-large-latest',
+      'mistral-medium-latest',
+      'mistral-small-latest',
+      'codestral-latest',
+      'pixtral-large-latest',
+      // ── Embedding ──
+      'mistral-embed',
+      // ── TTS ──
+      'voxtral-mini-latest',
+    ],
+    notes: {
+      zh: [
+        'Mistral AI 官方接口，OpenAI-compatible。',
+        '推荐 mistral-large-latest（旗舰）或 mistral-small-latest（日常）。',
+        'Embedding：mistral-embed，可用于记忆增强或 RAG。',
+        'TTS：voxtral-mini-latest，支持零样本语音克隆和多语言。',
+      ],
+      en: [
+        'Official Mistral AI API, OpenAI-compatible.',
+        'Recommended: mistral-large-latest (flagship) or mistral-small-latest (everyday).',
+        'Embedding: mistral-embed for memory enhancement or RAG.',
+        'TTS: voxtral-mini-latest with zero-shot voice cloning and multilingual support.',
+      ],
+    },
   },
 
   // ── BytePlus (international) ──────────────────────────────────────────────
@@ -576,19 +643,21 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'glm-4-7-251222',
       'deepseek-v3-2-251201',
       'gpt-oss-120b-250805',
+      // ── Embedding (memory / RAG) ──
+      'skylark-embedding-vision-251215',
+      'skylark-embedding-vision-250615',
+      'skylark-embedding-vision-250328',
     ],
     notes: {
       zh: [
-        'BytePlus，OpenAI-compatible。',
-        'Coding Plan 需将 baseUrl 改为 /api/coding/v3；Seed 2.0 模型使用真实模型名 seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215。',
-        '图像 / 视频生成请单独配置 visualProfile；不再默认复用主/副模型 API key。',
-        '自定义部署填 Endpoint ID（ep- 开头）。',
+        'BytePlus 国际版 ModelArk，涵盖代码、推理、聊天和嵌入模型。',
+        '推荐 Seed 2.0 系列或 glm-5.1。',
+        '支持 Skylark 嵌入模型（记忆增强）和自定义私有部署。',
       ],
       en: [
-        'BytePlus, OpenAI-compatible.',
-        'Coding Plan: switch baseUrl to /api/coding/v3; Seed 2.0 entries use the real model names seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215.',
-        'Configure image/video generation separately in visualProfile; main/secondary provider keys are no longer reused automatically.',
-        'Custom deployments: use a deployed Endpoint ID (ep-...).',
+        'BytePlus International ModelArk — code, reasoning, chat, and embedding models.',
+        'Recommended: Seed 2.0 series or glm-5.1.',
+        'Supports Skylark embedding models (memory enhancement) and custom private deployments.',
       ],
     },
   },

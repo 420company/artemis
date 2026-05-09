@@ -15,7 +15,28 @@ const DEFAULT_MEMORY_CONFIG: MemoryEnhancementConfig = {
 const DEFAULT_BYTEPLUS_CONFIG = {
   apiKey: '',
   baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/coding/v3',
-  model: 'skylark-embedding-vision'
+  model: 'skylark-embedding-vision-251215', // latest as of 2026-05
+};
+
+// OpenAI 记忆增强默认配置
+const DEFAULT_OPENAI_CONFIG = {
+  apiKey: '',
+  baseUrl: 'https://api.openai.com/v1',
+  model: 'text-embedding-3-small', // best value; 1536 dims, $0.02/1M tokens
+};
+
+// Google Gemini 记忆增强默认配置
+const DEFAULT_GOOGLE_CONFIG = {
+  apiKey: '',
+  baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+  model: 'gemini-embedding-2-preview', // multimodal; 8K context
+};
+
+// Mistral 记忆增强默认配置
+const DEFAULT_MISTRAL_CONFIG = {
+  apiKey: '',
+  baseUrl: 'https://api.mistral.ai/v1',
+  model: 'mistral-embed',
 };
 
 // 本地记忆增强默认配置
@@ -38,7 +59,7 @@ type StoredMemory = {
   embedding: number[];
   metadata?: any;
   timestamp: number;
-  provider: 'byteplus' | 'local';
+  provider: 'byteplus' | 'openai' | 'google' | 'mistral' | 'local';
   model?: string;
 };
 
@@ -86,8 +107,8 @@ class PersistentMemoryIndex {
   }
 }
 
-function normalizeBaseUrl(baseUrl: string | undefined): string {
-  return (baseUrl || DEFAULT_BYTEPLUS_CONFIG.baseUrl).replace(/\/+$/, '');
+function normalizeBaseUrl(baseUrl: string | undefined, fallback: string): string {
+  return (baseUrl || fallback).replace(/\/+$/, '');
 }
 
 function createMemoryId(): string {
@@ -202,7 +223,7 @@ export class BytePlusMemoryEnhancement implements MemoryEnhancementSystem {
   }
   
   private async generateEmbedding(text: string): Promise<number[]> {
-    const response = await fetch(`${normalizeBaseUrl(this.config.config?.baseUrl)}/embeddings`, {
+    const response = await fetch(`${normalizeBaseUrl(this.config.config?.baseUrl, DEFAULT_BYTEPLUS_CONFIG.baseUrl)}/embeddings`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -222,6 +243,228 @@ export class BytePlusMemoryEnhancement implements MemoryEnhancementSystem {
     const embedding = data.data?.[0]?.embedding;
     if (!Array.isArray(embedding) || !embedding.every((value) => typeof value === 'number')) {
       throw new Error('BytePlus embedding response did not include a numeric embedding vector');
+    }
+    return embedding;
+  }
+}
+
+// Google Gemini 记忆增强实现
+export class GoogleMemoryEnhancement implements MemoryEnhancementSystem {
+  private config: MemoryEnhancementConfig;
+  private index: PersistentMemoryIndex;
+
+  constructor(config: MemoryEnhancementConfig, cwd: string) {
+    this.config = config;
+    this.index = new PersistentMemoryIndex(cwd);
+  }
+
+  async initialize(): Promise<void> {
+    if (!this.config.enabled || this.config.provider !== 'google') {
+      throw new Error('Google memory enhancement is not enabled or incorrectly configured');
+    }
+    if (!this.config.config?.apiKey) {
+      throw new Error('Google API key is required');
+    }
+  }
+
+  async addMemory(text: string, metadata?: any): Promise<string> {
+    const id = createMemoryId();
+    const embedding = await this.generateEmbedding(text);
+    await this.index.add({
+      id,
+      text,
+      embedding,
+      metadata,
+      timestamp: Date.now(),
+      provider: 'google',
+      model: this.config.config?.model ?? DEFAULT_GOOGLE_CONFIG.model,
+    });
+    return id;
+  }
+
+  async searchMemories(query: string, limit = 5): Promise<MemoryResult[]> {
+    const queryEmbedding = await this.generateEmbedding(query);
+    return rankMemories(await this.index.load(), queryEmbedding, limit);
+  }
+
+  async clearMemories(): Promise<void> {
+    await this.index.clear();
+  }
+
+  private async generateEmbedding(text: string): Promise<number[]> {
+    const baseUrl = normalizeBaseUrl(this.config.config?.baseUrl, DEFAULT_GOOGLE_CONFIG.baseUrl);
+    const body: Record<string, unknown> = {
+      model: this.config.config?.model ?? DEFAULT_GOOGLE_CONFIG.model,
+      input: text,
+    };
+
+    const response = await fetch(`${baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.config?.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      throw new Error(`Google embedding failed (${response.status}): ${errBody.slice(0, 200)}`);
+    }
+
+    const data = await response.json() as { data?: Array<{ embedding?: unknown }> };
+    const embedding = data.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || !embedding.every((value) => typeof value === 'number')) {
+      throw new Error('Google embedding response did not include a numeric embedding vector');
+    }
+    return embedding;
+  }
+}
+
+// Mistral 记忆增强实现
+export class MistralMemoryEnhancement implements MemoryEnhancementSystem {
+  private config: MemoryEnhancementConfig;
+  private index: PersistentMemoryIndex;
+
+  constructor(config: MemoryEnhancementConfig, cwd: string) {
+    this.config = config;
+    this.index = new PersistentMemoryIndex(cwd);
+  }
+
+  async initialize(): Promise<void> {
+    if (!this.config.enabled || this.config.provider !== 'mistral') {
+      throw new Error('Mistral memory enhancement is not enabled or incorrectly configured');
+    }
+    if (!this.config.config?.apiKey) {
+      throw new Error('Mistral API key is required');
+    }
+  }
+
+  async addMemory(text: string, metadata?: any): Promise<string> {
+    const id = createMemoryId();
+    const embedding = await this.generateEmbedding(text);
+    await this.index.add({
+      id,
+      text,
+      embedding,
+      metadata,
+      timestamp: Date.now(),
+      provider: 'mistral',
+      model: this.config.config?.model ?? DEFAULT_MISTRAL_CONFIG.model,
+    });
+    return id;
+  }
+
+  async searchMemories(query: string, limit = 5): Promise<MemoryResult[]> {
+    const queryEmbedding = await this.generateEmbedding(query);
+    return rankMemories(await this.index.load(), queryEmbedding, limit);
+  }
+
+  async clearMemories(): Promise<void> {
+    await this.index.clear();
+  }
+
+  private async generateEmbedding(text: string): Promise<number[]> {
+    const baseUrl = normalizeBaseUrl(this.config.config?.baseUrl, DEFAULT_MISTRAL_CONFIG.baseUrl);
+    const body: Record<string, unknown> = {
+      model: this.config.config?.model ?? DEFAULT_MISTRAL_CONFIG.model,
+      input: text,
+    };
+
+    const response = await fetch(`${baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.config?.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      throw new Error(`Mistral embedding failed (${response.status}): ${errBody.slice(0, 200)}`);
+    }
+
+    const data = await response.json() as { data?: Array<{ embedding?: unknown }> };
+    const embedding = data.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || !embedding.every((value) => typeof value === 'number')) {
+      throw new Error('Mistral embedding response did not include a numeric embedding vector');
+    }
+    return embedding;
+  }
+}
+
+// OpenAI 记忆增强实现
+export class OpenAIMemoryEnhancement implements MemoryEnhancementSystem {
+  private config: MemoryEnhancementConfig;
+  private index: PersistentMemoryIndex;
+
+  constructor(config: MemoryEnhancementConfig, cwd: string) {
+    this.config = config;
+    this.index = new PersistentMemoryIndex(cwd);
+  }
+
+  async initialize(): Promise<void> {
+    if (!this.config.enabled || this.config.provider !== 'openai') {
+      throw new Error('OpenAI memory enhancement is not enabled or incorrectly configured');
+    }
+    if (!this.config.config?.apiKey) {
+      throw new Error('OpenAI API key is required');
+    }
+  }
+
+  async addMemory(text: string, metadata?: any): Promise<string> {
+    const id = createMemoryId();
+    const embedding = await this.generateEmbedding(text);
+    await this.index.add({
+      id,
+      text,
+      embedding,
+      metadata,
+      timestamp: Date.now(),
+      provider: 'openai',
+      model: this.config.config?.model ?? DEFAULT_OPENAI_CONFIG.model,
+    });
+    return id;
+  }
+
+  async searchMemories(query: string, limit = 5): Promise<MemoryResult[]> {
+    const queryEmbedding = await this.generateEmbedding(query);
+    return rankMemories(await this.index.load(), queryEmbedding, limit);
+  }
+
+  async clearMemories(): Promise<void> {
+    await this.index.clear();
+  }
+
+  private async generateEmbedding(text: string): Promise<number[]> {
+    const baseUrl = normalizeBaseUrl(this.config.config?.baseUrl, DEFAULT_OPENAI_CONFIG.baseUrl);
+    const body: Record<string, unknown> = {
+      model: this.config.config?.model ?? DEFAULT_OPENAI_CONFIG.model,
+      input: text,
+    };
+    if (this.config.config?.dimensions) {
+      body.dimensions = this.config.config.dimensions;
+    }
+
+    const response = await fetch(`${baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.config?.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      throw new Error(`OpenAI embedding failed (${response.status}): ${errBody.slice(0, 200)}`);
+    }
+
+    const data = await response.json() as { data?: Array<{ embedding?: unknown }> };
+    const embedding = data.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || !embedding.every((value) => typeof value === 'number')) {
+      throw new Error('OpenAI embedding response did not include a numeric embedding vector');
     }
     return embedding;
   }
@@ -278,6 +521,12 @@ export class MemoryEnhancementFactory {
     switch (config.provider) {
       case 'byteplus':
         return new BytePlusMemoryEnhancement(config, cwd);
+      case 'openai':
+        return new OpenAIMemoryEnhancement(config, cwd);
+      case 'google':
+        return new GoogleMemoryEnhancement(config, cwd);
+      case 'mistral':
+        return new MistralMemoryEnhancement(config, cwd);
       case 'local':
         return new LocalMemoryEnhancement(config, cwd);
       default:

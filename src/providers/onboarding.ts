@@ -113,8 +113,8 @@ function detectBytePlusFamily(model: string): BytePlusFamily {
   if (/seedream-/i.test(lower)) return 'image';
   if (/seedance-/i.test(lower)) return 'video';
   if (/skylark-embedding-/i.test(lower)) return 'embedding';
-  if (/ark-code-latest|seed-2-0-(pro|lite|mini)-|bytedance-seed-code|kimi-k2\.5$|kimi-k2-thinking$|glm-5\.1$|glm-4\.7$|gpt-oss-120b(?:-[0-9]+)?$/i.test(lower)) return 'coding';
-  if (/deepseek-|kimi-k2-thinking-|gpt-oss-120b-|skylark-pro-|seed-1-8-|seed-1-6-|seed-1-6-flash-|glm-4-7-/i.test(lower)) return 'chat';
+  if (/ark-code-latest|seed-2-0-(pro|lite|mini)-|bytedance-seed-code|kimi-k2\.5$|glm-5\.1$|glm-4\.7$|gpt-oss-120b(?:-[0-9]+)?$/i.test(lower)) return 'coding';
+  if (/deepseek-|gpt-oss-120b-|skylark-pro-|seed-1-8-|seed-1-6-|seed-1-6-flash-|glm-4-7-/i.test(lower)) return 'chat';
   return 'unknown';
 }
 

@@ -33,19 +33,34 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
     };
   }
 
-  const providerChoice = await chooseInteractiveOption<'byteplus' | 'local'>({
+  const providerChoice = await chooseInteractiveOption<'byteplus' | 'openai' | 'google' | 'mistral' | 'local'>({
     title: t('选择记忆增强方案'),
     hint: t('↑↓ 移动  Enter 确认'),
     choices: [
       { 
-        label: t('智能云方案'), 
+        label: t('BytePlus 云嵌入'), 
         value: 'byteplus', 
-        description: t('使用 BytePlus 专业嵌入模型，提供高质量语义检索，需配置 API Key')
+        description: t('Skylark Embedding Vision，高质量中英文+视觉，需 BytePlus API Key')
+      },
+      { 
+        label: t('OpenAI 云嵌入'), 
+        value: 'openai', 
+        description: t('text-embedding-3-small/large，成熟稳定，需 OpenAI API Key')
+      },
+      { 
+        label: t('Google Gemini 云嵌入'), 
+        value: 'google', 
+        description: t('gemini-embedding-2-preview，多模态嵌入，需 Google API Key')
+      },
+      { 
+        label: t('Mistral 云嵌入'), 
+        value: 'mistral', 
+        description: t('mistral-embed，轻量高效，需 Mistral API Key')
       },
       { 
         label: t('本地方案'), 
         value: 'local', 
-        description: t('使用本地算法实现基础记忆功能，无需额外配置，适合离线使用')
+        description: t('本地算法，无需联网，适合离线使用')
       }
     ]
   });
@@ -59,7 +74,7 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
     config.config = {
       apiKey: '',
       baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/coding/v3',
-      model: 'skylark-embedding-vision'
+      model: 'skylark-embedding-vision-251215'
     };
 
     console.log('\n' + t('BytePlus 配置'));
@@ -76,19 +91,29 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
     } else {
       config.config!.apiKey = apiKey;
       
-      const modelChoice = await chooseInteractiveOption<'skylark-embedding-vision' | 'custom'>({
-        title: t('选择嵌入模型'),
+      const modelChoice = await chooseInteractiveOption<'skylark-embedding-vision-251215' | 'skylark-embedding-vision-250615' | 'skylark-embedding-vision-250328' | 'custom'>({
+        title: t('选择 BytePlus 嵌入模型'),
         hint: t('↑↓ 移动  Enter 确认'),
         choices: [
           { 
-            label: t('Skylark Embedding Vision'), 
-            value: 'skylark-embedding-vision', 
-            description: t('支持视觉内容的高质量嵌入模型（推荐）')
+            label: t('Skylark Embedding Vision (251215)'), 
+            value: 'skylark-embedding-vision-251215', 
+            description: t('最新版本，高质量中英文+视觉嵌入（推荐）')
+          },
+          { 
+            label: t('Skylark Embedding Vision (250615)'), 
+            value: 'skylark-embedding-vision-250615', 
+            description: t('中期版本')
+          },
+          { 
+            label: t('Skylark Embedding Vision (250328)'), 
+            value: 'skylark-embedding-vision-250328', 
+            description: t('早期版本')
           },
           { 
             label: t('自定义模型'), 
             value: 'custom', 
-            description: t('使用其他 BytePlus 嵌入模型')
+            description: t('使用其他 BytePlus 嵌入模型或自定义端点 ID')
           }
         ]
       });
@@ -98,11 +123,10 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
         if (customModel) {
           config.config!.model = customModel;
         }
+      } else {
+        config.config!.model = modelChoice;
       }
 
-      // API URL: present the default and let user keep it or override.
-      // Avoids forcing every user to type the full BytePlus endpoint when
-      // they're using the default skylark-embedding-vision model anyway.
       const baseUrlChoice = await chooseInteractiveOption<'default' | 'custom'>({
         title: t('选择 API 地址'),
         hint: t('↑↓ 移动  Enter 确认'),
@@ -110,12 +134,129 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
           {
             label: t('使用默认地址（推荐）'),
             value: 'default',
-            description: config.config!.baseUrl
+            description: config.config!.baseUrl!
           },
           {
             label: t('自定义 API 地址'),
             value: 'custom',
             description: t('如果你部署了 BytePlus 私有网关或使用代理，选这个')
+          }
+        ]
+      });
+      if (baseUrlChoice === 'custom') {
+        const customBaseUrl = await askForInput(t('自定义 API 地址'), false);
+        if (customBaseUrl) {
+          config.config!.baseUrl = customBaseUrl;
+        }
+      }
+    }
+  } else if (providerChoice === 'google') {
+    config.config = {
+      apiKey: '',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      model: 'gemini-embedding-2-preview'
+    };
+
+    console.log('\n' + t('Google Gemini 配置'));
+    console.log(t('请配置 Google API Key 以使用记忆增强功能'));
+    
+    const apiKey = await askForInput(t('API Key'), true);
+    
+    if (!apiKey) {
+      console.log(t('API Key 不能为空，将使用本地方案'));
+      config.provider = 'local';
+      config.config = {
+        model: 'local-embedding'
+      };
+    } else {
+      config.config!.apiKey = apiKey;
+    }
+  } else if (providerChoice === 'mistral') {
+    config.config = {
+      apiKey: '',
+      baseUrl: 'https://api.mistral.ai/v1',
+      model: 'mistral-embed'
+    };
+
+    console.log('\n' + t('Mistral 配置'));
+    console.log(t('请配置 Mistral API Key 以使用记忆增强功能'));
+    
+    const apiKey = await askForInput(t('API Key'), true);
+    
+    if (!apiKey) {
+      console.log(t('API Key 不能为空，将使用本地方案'));
+      config.provider = 'local';
+      config.config = {
+        model: 'local-embedding'
+      };
+    } else {
+      config.config!.apiKey = apiKey;
+    }
+  } else if (providerChoice === 'openai') {
+    config.config = {
+      apiKey: '',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'text-embedding-3-small'
+    };
+
+    console.log('\n' + t('OpenAI 配置'));
+    console.log(t('请配置 OpenAI API Key 以使用记忆增强功能'));
+    
+    const apiKey = await askForInput(t('API Key'), true);
+    
+    if (!apiKey) {
+      console.log(t('API Key 不能为空，将使用本地方案'));
+      config.provider = 'local';
+      config.config = {
+        model: 'local-embedding'
+      };
+    } else {
+      config.config!.apiKey = apiKey;
+      
+      const modelChoice = await chooseInteractiveOption<'text-embedding-3-small' | 'text-embedding-3-large' | 'custom'>({
+        title: t('选择 OpenAI 嵌入模型'),
+        hint: t('↑↓ 移动  Enter 确认'),
+        choices: [
+          { 
+            label: t('text-embedding-3-small'), 
+            value: 'text-embedding-3-small', 
+            description: t('性价比最高，1536 维，$0.02/1M tokens（推荐）')
+          },
+          { 
+            label: t('text-embedding-3-large'), 
+            value: 'text-embedding-3-large', 
+            description: t('最高质量，3072 维，$0.13/1M tokens')
+          },
+          { 
+            label: t('自定义模型'), 
+            value: 'custom', 
+            description: t('使用其他 OpenAI 嵌入模型')
+          }
+        ]
+      });
+      
+      if (modelChoice === 'custom') {
+        const customModel = await askForInput(t('自定义模型名称'));
+        if (customModel) {
+          config.config!.model = customModel;
+        }
+      } else {
+        config.config!.model = modelChoice;
+      }
+
+      const baseUrlChoice = await chooseInteractiveOption<'default' | 'custom'>({
+        title: t('选择 API 地址'),
+        hint: t('↑↓ 移动  Enter 确认'),
+        choices: [
+          {
+            label: t('使用默认地址（推荐）'),
+            value: 'default',
+            description: config.config!.baseUrl!
+          },
+          {
+            label: t('自定义 API 地址'),
+            value: 'custom',
+            description: t('如果你使用 Azure OpenAI 或其他兼容端点，选这个')
           }
         ]
       });
@@ -133,9 +274,16 @@ export async function promptMemoryEnhancementConfig(t: (key: string) => string, 
   }
 
   console.log('');
+  const providerLabel: Record<string, string> = {
+    byteplus: 'BytePlus 云嵌入',
+    openai: 'OpenAI 云嵌入',
+    google: 'Google Gemini 云嵌入',
+    mistral: 'Mistral 云嵌入',
+    local: '本地嵌入',
+  };
   console.log('  ' + t('─── 记忆增强已就绪 ───'));
   console.log('');
-  console.log('  ✓ ' + t('方案：') + t(config.provider === 'byteplus' ? '智能云（BytePlus）' : '本地嵌入'));
+  console.log('  ✓ ' + t('方案：') + t(providerLabel[config.provider] ?? config.provider));
 
   if (config.config) {
     if (config.provider === 'byteplus') {
@@ -191,7 +339,8 @@ export function buildMemoryProfileSummaryLines(config: MemoryEnhancementConfig, 
     lines.push(t('记忆增强：已启用'));
     lines.push(t('方案：') + t(config.provider === 'byteplus' ? '智能云' : '本地'));
     
-    if (config.provider === 'byteplus' && config.config) {
+    const isCloud = config.provider === 'byteplus' || config.provider === 'openai' || config.provider === 'google' || config.provider === 'mistral';
+    if (isCloud && config.config) {
       lines.push(t('模型：') + config.config.model);
       lines.push(t('API 地址：') + config.config.baseUrl);
       if (config.config.apiKey) {

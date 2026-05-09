@@ -235,11 +235,13 @@ export type ArtemisSetupConfig = {
 
 export type MemoryEnhancementConfig = {
   enabled: boolean;
-  provider: 'byteplus' | 'local' | 'none';
+  provider: 'byteplus' | 'openai' | 'google' | 'mistral' | 'local' | 'none';
   config?: {
     apiKey?: string;
     baseUrl?: string;
     model?: string;
+    /** Embedding dimensions override (e.g. 1024 for text-embedding-3-small with dims). */
+    dimensions?: number;
   };
 };
 

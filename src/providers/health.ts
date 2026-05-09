@@ -145,19 +145,26 @@ function normalizeProbeReply(text: string): string {
 }
 
 /**
- * Some models (e.g. GLM 5.1 thinking, Qwen reasoning variants) prepend a
- * chain-of-thought before the actual answer. The connection probe asks for
- * "OK" — if the last non-whitespace token is "OK" (possibly after a long
- * reasoning block), the connection is verified.
+ * Some models (e.g. GLM 5.1 thinking, Qwen reasoning variants) do not return
+ * the exact literal "OK" — they may prepend or append chain-of-thought text.
+ * The connection probe asks for "OK"; if the model clearly intended to say OK,
+ * the connection is verified.
+ *
+ * Known patterns:
+ *   - GLM 5.1:   "OK\n---\nHello! How can I help you today?"
+ *                (OK at the start, then model adds unprompted follow-up)
+ *   - DeepThink: "... 2. Formulate the Output:\nOK"
+ *                (chain-of-thought before OK)
+ *   - Seedance:  "OK" with reasoning in a separate reasoning_content field
+ *                (content field is clean, this case is already handled)
  */
 function probeReplyLooksLikeOK(raw: string): boolean {
   const normalized = normalizeProbeReply(raw);
   if (normalized === 'OK') return true;
-  // Match "OK" at the end of the text, possibly after newlines / spaces
-  // from a preceding reasoning section.  Handles:
-  //   "... 2. Formulate the Output:\nOK"
-  //   "...最终答案：OK"
+  // Match "OK" at the end of the text (chain-of-thought before OK)
   if (/(?:^|\s)OK$/.test(normalized)) return true;
+  // Match "OK" at the start of the text (GLM 5.1 pattern: "OK\n---\n...")
+  if (/^OK(?:\s|$)/.test(normalized)) return true;
   return false;
 }
 
