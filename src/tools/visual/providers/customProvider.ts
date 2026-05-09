@@ -33,6 +33,30 @@ const OUTPUT_DIR = path.join(os.homedir(), '.artemis', 'assets', 'generated')
 const DEFAULT_POLL_INTERVAL_MS = 10_000
 const DEFAULT_MAX_POLLS = 90
 
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
+  if (active.length === 0) return undefined
+  if (active.length === 1) return active[0]
+  return AbortSignal.any(active)
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', onAbort)
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      cleanup()
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 export class CustomProvider implements VisualProvider {
   readonly name = 'custom'
   readonly supportsImages = true
@@ -163,7 +187,7 @@ export class CustomProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body,
-        signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
       })
       const createRaw = await createRes.text()
       if (!createRes.ok) {
@@ -194,10 +218,10 @@ export class CustomProvider implements VisualProvider {
           throw new Error(`Custom video ${videoId} failed. ${currentJob.error?.message ?? ''}`.trim())
         }
 
-        await sleep(pollIntervalMs)
+        await abortableSleep(pollIntervalMs, params.abortSignal)
         const pollRes = await fetch(`${baseUrl}/videos/${encodeURIComponent(videoId)}`, {
           headers: { Authorization: `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS),
+          signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),
         })
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
@@ -213,7 +237,7 @@ export class CustomProvider implements VisualProvider {
 
       const downloadRes = await fetch(`${baseUrl}/videos/${encodeURIComponent(videoId)}/content`, {
         headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
       })
       if (!downloadRes.ok) {
         const detail = await downloadRes.text().catch(() => '')
@@ -322,6 +346,3 @@ function parseVideoJob(raw: string): CustomVideoJob {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}

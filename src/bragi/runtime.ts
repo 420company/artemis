@@ -433,16 +433,25 @@ export async function runRemoteCommand(
         ), 'info')
       }
 
-      const sagaWorkflow = await handleSagaLongVideoWorkflow({
-        scope: 'bridge',
-        key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
-        cwd: commandCwd,
-        text: command.body,
-        locale,
-        imageAttachments: command.images,
-        deliveryPlatform: opts.bridgePlatform,
-        deliveryTargetId: opts.targetId,
-      })
+      const sagaTrim = command.body.trimStart()
+      const sagaForceIntent = sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)
+      const sagaText = sagaForceIntent ? sagaTrim.replace(/^\/saga\s*/i, '').trim() : command.body
+      const sagaWorkflow = sagaForceIntent && !sagaText
+        ? { handled: true as const, reply: t(
+            'Saga 长视频：请在 /saga 后跟一段故事文字。例：/saga 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
+            'Saga long video: type /saga followed by a story description. Example: /saga A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
+          ) }
+        : await handleSagaLongVideoWorkflow({
+            scope: 'bridge',
+            key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+            cwd: commandCwd,
+            text: sagaText,
+            locale,
+            imageAttachments: command.images,
+            deliveryPlatform: opts.bridgePlatform,
+            deliveryTargetId: opts.targetId,
+            forceIntent: sagaForceIntent,
+          })
       if (sagaWorkflow.handled) {
         return {
           replies: [sagaWorkflow.reply],
@@ -705,7 +714,7 @@ export async function runRemoteCommand(
             permissionMode: binding.permissionMode,
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
-            maxNativeToolRounds: Math.max(32, (opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS) * 3),
+            maxNativeToolRounds: Math.max(96, (opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS) * 3),
             pollRunningUserMessages: opts.pollRunningUserMessages,
             onRunningUserMessageAccepted: (text) => {
               const msg = t(

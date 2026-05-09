@@ -66,7 +66,7 @@ export abstract class BaseAgent {
   capabilities: string[] = []
   tools: string[] = []
   config: AgentConfig = {
-    maxTurns: 10,
+    maxTurns: 48,
     timeout: 30000,
     enableMemory: true,
     memorySize: 50,

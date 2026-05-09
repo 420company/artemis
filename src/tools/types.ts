@@ -42,6 +42,12 @@ export type ToolExecutionContext = {
     timeoutMs?: number;
   }) => Promise<boolean>;
   /**
+   * Abort signal controlled by the runtime. Long-running tools should stop
+   * promptly when the user interjects during execution so the agent can
+   * re-plan with the new instruction instead of waiting for the tool to finish.
+   */
+  abortSignal?: AbortSignal;
+  /**
    * Per-turn read_file dedupe state. Safe only within one tool loop and invalidated
    * by writes before it is consulted again.
    */

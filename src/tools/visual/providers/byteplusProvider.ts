@@ -15,6 +15,30 @@ import {
   resolveVideoModelCapabilities,
 } from '../videoCapabilities.js'
 
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
+  if (active.length === 0) return undefined
+  if (active.length === 1) return active[0]
+  return AbortSignal.any(active)
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', onAbort)
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      cleanup()
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'
   readonly supportsImages = true
@@ -241,7 +265,7 @@ export class BytePlusProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(createBody),
-        signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
       })
 
       const createRaw = await createRes.text()
@@ -263,11 +287,11 @@ export class BytePlusProvider implements VisualProvider {
       const pollIntervalMs = 5000
 
       for (let attempt = 0; attempt < maxPolls; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
+        await sleep(pollIntervalMs, params.abortSignal)
         
         const pollRes = await fetch(statusEndpoint, {
           headers: { Authorization: `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS),
+          signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),
         })
         
         const pollRaw = await pollRes.text()
@@ -303,7 +327,7 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error(`Task ${taskId} did not finish within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const videoRes = await fetch(videoUrl, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
+      const videoRes = await fetch(videoUrl, { signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)) })
       if (!videoRes.ok) {
         throw new Error(`Video download failed: HTTP ${videoRes.status}`)
       }

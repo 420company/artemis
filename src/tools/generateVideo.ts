@@ -74,9 +74,9 @@ function buildDefaultOutputPath(cwd: string): string {
   return path.join(cwd, DEFAULT_SUBDIR, `${ts}.mp4`);
 }
 
-async function downloadUrl(url: string): Promise<Buffer> {
+async function downloadUrl(url: string, signal?: AbortSignal): Promise<Buffer> {
   const res = await fetch(url, {
-    signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
+    signal: combineAbortSignals(signal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
   });
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
   const ab = await res.arrayBuffer();
@@ -141,8 +141,34 @@ async function localImagePathsToDataUrls(paths: string[] | undefined, context: T
   return dataUrls;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException('The operation was aborted.', 'AbortError');
+  }
+}
+
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (active.length === 0) return undefined;
+  if (active.length === 1) return active[0];
+  return AbortSignal.any(active);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function resolveConfiguredVideoModel(action: GenerateVideoAction, configuredModel: string): string {
@@ -257,7 +283,7 @@ export async function executeGenerateVideo(
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(createBody),
-      signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
+      signal: combineAbortSignals(context.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
     });
 
     const createRaw = await createRes.text();
@@ -294,10 +320,10 @@ export async function executeGenerateVideo(
     let lastStatus = 'pending';
 
     for (let attempt = 0; attempt < maxPolls; attempt++) {
-      await sleep(pollIntervalMs);
+      await sleep(pollIntervalMs, context.abortSignal);
       const pollRes = await fetch(statusEndpoint, {
         headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS),
+        signal: combineAbortSignals(context.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),
       });
       const pollRaw = await pollRes.text();
       if (!pollRes.ok) {
@@ -346,7 +372,7 @@ export async function executeGenerateVideo(
       ensureNotSensitivePath(absolute, targetRaw);
     }
 
-    const buf = await downloadUrl(videoUrl);
+    const buf = await downloadUrl(videoUrl, context.abortSignal);
     await ensureDir(path.dirname(absolute));
     await writeFile(absolute, buf);
 
@@ -509,6 +535,7 @@ async function generateVideoWithVisualProvider(
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,
     pollIntervalMs: action.pollIntervalMs,
+    abortSignal: context.abortSignal,
   } as any);
 
   if (!result.success || !result.assetPath) {

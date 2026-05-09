@@ -37,6 +37,30 @@ function resolveBaseUrl(config: VisualModelConfig, assetType: 'image' | 'video')
   return url.replace(/\/$/, '')
 }
 
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
+  if (active.length === 0) return undefined
+  if (active.length === 1) return active[0]
+  return AbortSignal.any(active)
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', onAbort)
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      cleanup()
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 function deriveOutputPath(filename: string): string {
   const dir = path.join(homedir(), 'Desktop')
   return path.join(dir, filename)
@@ -120,7 +144,7 @@ export class GoogleProvider implements VisualProvider {
           instances: [{ prompt: params.prompt }],
           parameters: { aspectRatio, durationSeconds, personGeneration: 'allow_all' },
         }),
-        signal: AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
       })
       if (!startResponse.ok) {
         const body = await startResponse.text().catch(() => '')
@@ -137,8 +161,8 @@ export class GoogleProvider implements VisualProvider {
       const pollIntervalMs = 10_000
       let videoUri: string | undefined
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
-        const pollResponse = await fetch(pollEndpoint, { signal: AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS) })
+        await sleep(pollIntervalMs, params.abortSignal)
+        const pollResponse = await fetch(pollEndpoint, { signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)) })
         if (!pollResponse.ok) {
           const body = await pollResponse.text().catch(() => '')
           throw new Error(`Google Veo poll ${pollResponse.status}: ${body.slice(0, 400)}`)
@@ -159,7 +183,7 @@ export class GoogleProvider implements VisualProvider {
       if (!videoUri) throw new Error('Google Veo did not return a video within the timeout.')
 
       const downloadUrl = videoUri.includes('?') ? `${videoUri}&key=${encodeURIComponent(apiKey)}` : `${videoUri}?key=${encodeURIComponent(apiKey)}`
-      const downloadResponse = await fetch(downloadUrl, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
+      const downloadResponse = await fetch(downloadUrl, { signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)) })
       if (!downloadResponse.ok) {
         throw new Error(`Failed to download Veo video: ${downloadResponse.status}`)
       }

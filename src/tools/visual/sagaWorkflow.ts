@@ -34,7 +34,7 @@ export type SagaWorkflowInput = {
   imageAttachments?: ImageAttachment[];
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
   deliveryTargetId?: string;
-  // /sage explicit entry — skip the long-video intent regex check.
+  // /saga explicit entry — skip the long-video intent check.
   forceIntent?: boolean;
 };
 
@@ -816,7 +816,14 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   }
 
   // ─── fresh request ──────────────────────────────────────────────────
-  if (!input.forceIntent && !hasLongVideoIntent(text)) {
+  // Starting Saga is intentionally explicit-only. Free-form chat often contains
+  // pasted logs or meta-discussion with words like "generate video / 20s";
+  // auto-starting here makes normal conversation unusable. CLI/bridge callers
+  // set forceIntent only after the user types /saga.
+  if (!input.forceIntent) {
+    return { handled: false };
+  }
+  if (isSagaWorkflowSupportDiscussion(text) || !hasLongVideoIntent(text)) {
     return { handled: false };
   }
   const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');

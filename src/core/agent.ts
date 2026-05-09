@@ -3378,12 +3378,24 @@ export type RunAgentOptions = {
    */
   inputProtocol?: 'hoder' | 'standard';
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
+  requestUserConfirmation?: (request: {
+    question: string;
+    screenshotPath?: string;
+    timeoutMs?: number;
+  }) => Promise<boolean>;
   pollRunningUserMessages?: () => string[];
   onRunningUserMessageAccepted?: (text: string) => void;
 };
 
 const RUNNING_INTERJECTION_POLL_MS = 750;
 const RUNNING_INTERJECTION_RESTART_TEXT = '__ARTEMIS_RUNNING_INTERJECTION_RESTART__';
+
+class RunningInterjectionAbortError extends Error {
+  constructor() {
+    super(RUNNING_INTERJECTION_RESTART_TEXT);
+    this.name = 'RunningInterjectionAbortError';
+  }
+}
 
 function isAbortLikeError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
@@ -4320,6 +4332,7 @@ async function executeAgentAction(
   session: SessionRecord,
   action: AgentAction,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
   // Saga long-video safety reroute. Runs before validation so the rerouted
   // action is the one validated and dispatched.
@@ -4357,6 +4370,8 @@ async function executeAgentAction(
       },
       () => executeAction(action, {
         cwd: options.cwd,
+        abortSignal,
+        requestUserConfirmation: options.requestUserConfirmation,
         updateCwd: async (newCwd) => {
           options.cwd = newCwd;
           session.cwd = newCwd;
@@ -5124,8 +5139,12 @@ async function executeAuthorizedAction(
   action: AgentAction,
   options: RunAgentOptions,
   preAuthorized = false,
+  abortSignal?: AbortSignal,
 ): Promise<ActionOutcome> {
   try {
+    if (abortSignal?.aborted) {
+      throw new RunningInterjectionAbortError();
+    }
     const hydratedAction = await hydrateRuntimeManagedAction(action, options.cwd);
     const profile = options.profile ?? 'main';
     const profilePolicy = validateProfileAction(profile, hydratedAction);
@@ -5207,7 +5226,7 @@ async function executeAuthorizedAction(
       return startBackgroundAction(session, hydratedAction, options);
     }
 
-    const result = await executeAgentAction(session, hydratedAction, options);
+    const result = await executeAgentAction(session, hydratedAction, options, abortSignal);
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;
     if (options.heimdallThreadState) {
@@ -5270,6 +5289,79 @@ async function executeAuthorizedAction(
       },
     );
     return buildGuardrailFailureOutcome(action, error);
+  }
+}
+
+/**
+ * Wraps executeAuthorizedAction with a 750ms poll for inbound user messages.
+ * If the user interjects while the tool is running, the polled messages are
+ * appended to the session, the tool's abort signal is fired so the underlying
+ * fetch/sleep can short-circuit, and a RunningInterjectionAbortError is thrown
+ * for the caller to translate into a turn restart. Without a polling provider
+ * this degrades to a plain executeAuthorizedAction call.
+ */
+async function executeWithRunningInterjectionCheck(
+  session: SessionRecord,
+  action: AgentAction,
+  options: RunAgentOptions,
+  preAuthorized = false,
+): Promise<ActionOutcome> {
+  const poll = options.pollRunningUserMessages;
+  if (!poll) {
+    return executeAuthorizedAction(session, action, options, preAuthorized);
+  }
+
+  const controller = new AbortController();
+  let interrupted = false;
+  let polling = false;
+
+  const checkOnce = async (): Promise<void> => {
+    if (polling || controller.signal.aborted) return;
+    polling = true;
+    try {
+      const messages = poll() ?? [];
+      let accepted = 0;
+      for (const raw of messages) {
+        const cleanMessage = raw.trim();
+        if (!cleanMessage) continue;
+        session.messages.push({
+          id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          role: 'user',
+          content: cleanMessage,
+          createdAt: new Date().toISOString(),
+        });
+        options.onRunningUserMessageAccepted?.(cleanMessage);
+        accepted += 1;
+      }
+      if (accepted > 0) {
+        await options.sessionStore.save(session);
+        interrupted = true;
+        controller.abort();
+      }
+    } finally {
+      polling = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void checkOnce();
+  }, RUNNING_INTERJECTION_POLL_MS);
+
+  try {
+    return await executeAuthorizedAction(
+      session,
+      action,
+      options,
+      preAuthorized,
+      controller.signal,
+    );
+  } catch (error) {
+    if (interrupted) {
+      throw new RunningInterjectionAbortError();
+    }
+    throw error;
+  } finally {
+    clearInterval(timer);
   }
 }
 
@@ -5452,7 +5544,7 @@ async function executeActionBatch(
 
       const results = await Promise.all(
         allowed.map((entry) =>
-          executeAuthorizedAction(session, entry.action, options, true),
+          executeWithRunningInterjectionCheck(session, entry.action, options, true),
         ),
       );
       allowed.forEach((entry, index) => {
@@ -5545,7 +5637,7 @@ async function executeActionBatch(
       const onlyAllowed = allowed[0]!;
       executedByIndex.set(
         onlyAllowed.index,
-        await executeAuthorizedAction(session, onlyAllowed.action, options, true),
+        await executeWithRunningInterjectionCheck(session, onlyAllowed.action, options, true),
       );
     } else {
       options.onInfo?.(
@@ -5554,7 +5646,7 @@ async function executeActionBatch(
 
       const batchResults = await Promise.all(
         allowed.map((entry) =>
-          executeAuthorizedAction(session, entry.action, options, true),
+          executeWithRunningInterjectionCheck(session, entry.action, options, true),
         ),
       );
       allowed.forEach((entry, index) => {
@@ -5607,7 +5699,7 @@ async function executeActionBatch(
     }
 
     outcomes.push(
-      await executeAuthorizedAction(session, allowed[0], options, true),
+      await executeWithRunningInterjectionCheck(session, allowed[0], options, true),
     );
   }
 
@@ -5935,11 +6027,24 @@ export async function runAgent(
           continue;
         }
 
-        const outcome = await executeAuthorizedAction(
-          session,
-          mapped.action,
-          options,
-        );
+        let outcome: ActionOutcome;
+        try {
+          outcome = await executeWithRunningInterjectionCheck(
+            session,
+            mapped.action,
+            options,
+          );
+        } catch (error) {
+          if (error instanceof RunningInterjectionAbortError) {
+            return {
+              text: RUNNING_INTERJECTION_RESTART_TEXT,
+              raw: null,
+              nativeToolCalls: [],
+              streamed: false,
+            };
+          }
+          throw error;
+        }
         outcomes.push(outcome);
         toolOutputs.push({
           callId: call.callId,
@@ -6736,11 +6841,21 @@ export async function runAgent(
           options.onInfo?.(
             `[agent] synthesizing ${fallbackReadActions.length} fallback read_file action(s) from the active task context`,
           );
-          const fallbackOutcomes = await executeActionBatch(
-            session,
-            fallbackReadActions,
-            runOptions,
-          );
+          let fallbackOutcomes: ActionOutcome[];
+          try {
+            fallbackOutcomes = await executeActionBatch(
+              session,
+              fallbackReadActions,
+              runOptions,
+            );
+          } catch (error) {
+            if (error instanceof RunningInterjectionAbortError) {
+              options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted during fallback reads; restarting`);
+              await options.sessionStore.save(session);
+              continue;
+            }
+            throw error;
+          }
           await recordOutcomes(fallbackOutcomes);
           await options.sessionStore.save(session);
           continue;
@@ -6910,7 +7025,17 @@ export async function runAgent(
       );
     }
 
-    const outcomes = await executeActionBatch(session, actions, runOptions);
+    let outcomes: ActionOutcome[];
+    try {
+      outcomes = await executeActionBatch(session, actions, runOptions);
+    } catch (error) {
+      if (error instanceof RunningInterjectionAbortError) {
+        options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted during tool batch; restarting`);
+        await options.sessionStore.save(session);
+        continue;
+      }
+      throw error;
+    }
     await recordOutcomes(outcomes);
     await recordOutcomeWorkflowEntry(session, options, turn, outcomes);
 

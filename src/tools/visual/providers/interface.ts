@@ -34,6 +34,9 @@ export interface VideoGenerationParams extends VisualGenerationParams {
   // Image-to-video last-frame anchor (role: "last_frame").
   lastFrameImageUrls?: string[]
   watermark?: boolean
+  maxPolls?: number
+  pollIntervalMs?: number
+  abortSignal?: AbortSignal
 }
 
 export interface GenerationResult {

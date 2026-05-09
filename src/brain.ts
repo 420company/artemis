@@ -1934,7 +1934,7 @@ export interface ThinkOptions {
     onRunningUserMessageAccepted?: (text: string) => void;
 }
 
-const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 24;
+const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
 const RUNNING_INTERJECTION_POLL_MS = 750;
 
 function isAbortLikeError(error: unknown): boolean {

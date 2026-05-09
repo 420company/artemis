@@ -1824,7 +1824,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/nidhogg',    hint: t('对抗式实现硬化 / 慢但最稳',  'Adversarial hardening / slow but strongest') },
     { value: '/contest',    hint: t('路径辩论与方案裁决',         'Path debate and selection') },
     { value: '/bifrost',    hint: t('配置思维/执行双模型',        'Setup dual brain/exec models') },
-    { value: '/sage',       hint: t('Saga 长视频生成（直接进入）', 'Saga long-video generation (direct)') },
+    { value: '/saga',       hint: t('Saga 长视频生成（显式进入）', 'Saga long-video generation (explicit)') },
     { value: '/run',        hint: t('后台运行工作流',             'Run workflow in background') },
     // ── 系统 & 技能 ──
     { value: '/odin',       hint: t('Odin 技能库管理',           'Odin skill store') },
@@ -2044,7 +2044,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         queue.push(line)
         appendScrollBlock({
           kind: 'user',
-          text: `${line}\n\n${t('↳ 纠错已接收：Artemis 会立即尝试中断当前思考并同步到任务。', '↳ Correction received: Artemis will immediately try to interrupt the current thought and sync it into the task.')}`,
+          text: `${line}\n\n${t('↳ 纠错已接收：Artemis 已同步到当前任务；若正在思考会尽快中断，若正在跑工具会在下一个安全点应用。', '↳ Correction received: Artemis synced it into the current task; model thinking will be interrupted when possible, tool execution applies it at the next safe point.')}`,
           timestamp: timeStampLabel(),
         })
         prompt.forceRedraw()
@@ -4064,7 +4064,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       } else {
         // Inline workflow — Claude Code style: inject domain hint into brain's
         // system prompt suffix, then run the same handleTurn loop as free-form
-        // chat. The brain's 24-round tool loop handles execution flexibly,
+        // chat. The brain's native tool loop handles execution flexibly,
         // no rigid pipeline. mode is narrowed to WorkflowMode in this branch.
         const wfMode: WorkflowMode = mode as WorkflowMode
         appendSystemPanel(
@@ -4219,18 +4219,18 @@ async function handleTurn(
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
 ): Promise<void> {
-  // /sage <content> — explicit Saga long-video entry. Strip the prefix and
+  // /saga <content> — explicit Saga long-video entry. Strip the prefix and
   // force-flag the workflow so it skips intent detection (the user has
   // already declared intent by typing the slash command).
   let sagaForceIntent = false
   let sagaInput = input
   const sagaTrim = input.trimStart()
-  if (sagaTrim === '/sage' || /^\/sage(\s|$)/i.test(sagaTrim)) {
-    const stripped = sagaTrim.replace(/^\/sage\s*/i, '').trim()
+  if (sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)) {
+    const stripped = sagaTrim.replace(/^\/saga\s*/i, '').trim()
     if (!stripped) {
       const reply = pickLocale(locale, {
-        zh: 'Saga 长视频：请在 /sage 后跟一段故事文字（中英文均可）。例：/sage 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
-        en: 'Saga long video: type /sage followed by a story description. Example: /sage A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
+        zh: 'Saga 长视频：请在 /saga 后跟一段故事文字（中英文均可）。例：/saga 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
+        en: 'Saga long video: type /saga followed by a story description. Example: /saga A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
       })
       viewport?.appendScrollBlock({ kind: 'system', text: reply })
       if (!viewport) console.log(reply)
@@ -4688,7 +4688,7 @@ async function handleTurn(
  * Run a workflow command as a hint-injected turn through the brain's normal
  * main loop. Replaces the old phase-based pipeline with a Claude Code style
  * flow: inject a domain hint into the brain's system prompt, then let the
- * brain's 24-round tool loop handle the task end-to-end.
+ * brain's native tool loop handle the task end-to-end.
  *
  * The brain decides when to call tools, when to spawn sub-agents, when to
  * generate images — all in a single conversation, just like Claude Code does.

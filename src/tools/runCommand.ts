@@ -362,12 +362,49 @@ export async function executeRunCommand(
       shell: true,
       windowsHide: true,
       env: spawnEnv,
+      // Create a process group on POSIX so cancellation/timeout can kill the
+      // whole shell tree, not just the wrapper shell. On Windows detached
+      // process-group semantics differ, so keep the existing direct kill path.
+      detached: !isWindows,
     });
 
     let stdout = '';
     let stderr = '';
     let resolved = false;
     let overflowKilled = false;
+    let aborted = false;
+
+    const killChild = (signal: NodeJS.Signals = 'SIGTERM'): void => {
+      if (child.killed) return;
+      if (!isWindows && typeof child.pid === 'number') {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to killing the shell process directly. This can happen if
+          // the platform did not create a distinct process group for this child.
+        }
+      }
+      child.kill(signal);
+    };
+
+    const cleanupAbortListener = (): void => {
+      context.abortSignal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = (): void => {
+      aborted = true;
+      killChild('SIGTERM');
+      setTimeout(() => {
+        if (!resolved) killChild('SIGKILL');
+      }, 1_000).unref?.();
+    };
+
+    if (context.abortSignal?.aborted) {
+      onAbort();
+    } else {
+      context.abortSignal?.addEventListener('abort', onAbort, { once: true });
+    }
 
     const extractCwdFromOutput = (raw: string): { cleaned: string; newCwd: string | null } => {
       // Take the LAST occurrence: the EXIT-trap's emission is guaranteed to
@@ -390,11 +427,12 @@ export async function executeRunCommand(
     };
 
     const timer = setTimeout(() => {
-      child.kill();
+      killChild('SIGTERM');
       if (resolved) {
         return;
       }
       resolved = true;
+      cleanupAbortListener();
       resolve({
         action,
         ok: false,
@@ -409,7 +447,7 @@ export async function executeRunCommand(
       const next = text.length > remaining ? current + text.slice(0, remaining) : current + text;
       if (next.length >= MAX_STREAM_BYTES && !overflowKilled) {
         overflowKilled = true;
-        child.kill();
+        killChild('SIGTERM');
       }
       return next;
     };
@@ -424,6 +462,7 @@ export async function executeRunCommand(
 
     child.on('error', (error) => {
       clearTimeout(timer);
+      cleanupAbortListener();
       if (resolved) {
         return;
       }
@@ -437,11 +476,28 @@ export async function executeRunCommand(
 
     child.on('close', (code) => {
       clearTimeout(timer);
+      cleanupAbortListener();
       if (resolved) {
         return;
       }
       (async () => {
         resolved = true;
+        if (aborted) {
+          resolve({
+            action,
+            ok: false,
+            output: [
+              `command: ${action.command}`,
+              'interrupted: true',
+              'reason: user correction received while command was running',
+              'stdout:',
+              truncate(stdout, TIMEOUT_PREVIEW_CHARS),
+              'stderr:',
+              truncate(stderr, TIMEOUT_PREVIEW_CHARS),
+            ].join('\n'),
+          });
+          return;
+        }
         const warnings: string[] = [];
         if (overflowKilled) {
           warnings.push(
