@@ -207,7 +207,7 @@ export function formatBackgroundTaskLine(
       ? '🎨'
       : record.kind === 'generate_video' || record.kind === 'generate_long_video'
         ? '🎬'
-        : '🤖';
+        : '👩‍🦳';
   const elapsed = Math.max(
     0,
     Math.floor(((record.completedAtMs ?? nowMs) - record.startedAtMs) / 1000),

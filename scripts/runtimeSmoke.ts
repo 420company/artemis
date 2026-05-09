@@ -6,7 +6,7 @@
  * Run: node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts
  */
 
-import { DEFAULT_AGENT_MAX_TURNS } from '../src/cli/branding.js'
+import { DEFAULT_AGENT_MAX_TURNS, MAX_AGENT_MAX_TURNS } from '../src/cli/branding.js'
 import { parseArgs } from '../src/cli/parseArgs.js'
 import { isCliStopIntent } from '../src/cli/interactive.js'
 import {
@@ -1229,7 +1229,7 @@ function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): Prom
   const a = parseArgs(['--model', 'gpt-4o', '--max-turns', '20', 'hello world'])
   assert('parseArgs: model flag', a.model === 'gpt-4o')
   assert('parseArgs: maxTurns flag', a.maxTurns === 20)
-  assert('parseArgs: maxTurns flag is bounded', (() => { try { parseArgs(['--max-turns', '51']) } catch { return true } return false })())
+  assert('parseArgs: maxTurns flag is bounded', (() => { try { parseArgs(['--max-turns', String(MAX_AGENT_MAX_TURNS + 1)]) } catch { return true } return false })())
   assert('parseArgs: prompt captured', a.prompt === 'hello world')
 }
 

@@ -156,37 +156,35 @@ function styleCodeLine(line: string): string {
   if ((trimmed.startsWith('-') && !trimmed.startsWith('---')) || /error|failed|invalid/i.test(trimmed))
     return color(line, `${ANSI.bgRed}${ANSI.white}`)
   if (trimmed.startsWith('@@') || /^\*\*\* (Begin|End|Update|Add|Delete)/.test(trimmed))
-    return color(line, `${ANSI.bgBlue}${ANSI.white}`)
+    return color(line, `${ANSI.bold}${ANSI.skyblue}`)
   return color(line, ANSI.skyblue)
 }
 
-function codeFenceLabel(lang: string): string {
+function codeFenceLabel(lang: string): string | undefined {
   const key = lang.trim().toLowerCase()
-  if (!key) return ' 代码 '
+  if (!key || key === 'text' || key === 'txt') return undefined
   const labels: Record<string, string> = {
-    text: ' 文本 ',
-    txt: ' 文本 ',
-    ts: ' TypeScript ',
-    typescript: ' TypeScript ',
-    js: ' JavaScript ',
-    javascript: ' JavaScript ',
-    tsx: ' TypeScript / React ',
-    jsx: ' JavaScript / React ',
-    json: ' JSON 配置 ',
-    bash: ' 终端命令 ',
-    sh: ' 终端命令 ',
-    shell: ' 终端命令 ',
-    zsh: ' 终端命令 ',
-    diff: ' 代码变更 ',
-    patch: ' 代码变更 ',
-    css: ' CSS 样式 ',
-    html: ' HTML ',
-    yaml: ' YAML 配置 ',
-    yml: ' YAML 配置 ',
-    markdown: ' Markdown 文档 ',
-    md: ' Markdown 文档 ',
+    ts: 'TypeScript',
+    typescript: 'TypeScript',
+    js: 'JavaScript',
+    javascript: 'JavaScript',
+    tsx: 'TSX',
+    jsx: 'JSX',
+    json: 'JSON',
+    bash: 'Shell',
+    sh: 'Shell',
+    shell: 'Shell',
+    zsh: 'Shell',
+    diff: 'Diff',
+    patch: 'Patch',
+    css: 'CSS',
+    html: 'HTML',
+    yaml: 'YAML',
+    yml: 'YAML',
+    markdown: 'Markdown',
+    md: 'Markdown',
   }
-  return labels[key] ?? ` ${lang.trim()} `
+  return labels[key] ?? lang.trim()
 }
 
 /** Apply inline Markdown styling: **bold**, *italic*, `code`, ~~strike~~ */
@@ -197,8 +195,8 @@ function applyInlineStyles(line: string): string {
     .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => color(a ?? b, ANSI.bold + ANSI.white))
     // *italic* or _italic_
     .replace(/\*([^*]+?)\*|_([^_]+?)_/g, (_, a, b) => color(a ?? b, ANSI.italic))
-    // `inline code`
-    .replace(/`([^`]+?)`/g, (_, code) => color(` ${code} `, `${ANSI.bgGray}${ANSI.cyan}`))
+    // `inline code` — emphasize with foreground color only; background blocks are visually noisy in chat text.
+    .replace(/`([^`]+?)`/g, (_, code) => color(code, ANSI.cyan))
     // ~~strikethrough~~
     .replace(/~~(.+?)~~/g, (_, s) => color(s, ANSI.dim))
 }
@@ -218,9 +216,8 @@ export function formatRichOutput(message: string): string {
     if (trimmed.startsWith('<run_command>')) {
       inCodeBlock = true
       codeLang = 'bash'
-      const label = ' bash '
       output.push('')
-      output.push(color(label, `${ANSI.bgBlue}${ANSI.white}${ANSI.bold}`))
+      output.push(color('Shell', `${ANSI.skyblue}${ANSI.bold}`))
       output.push('')
       continue
     }
@@ -263,8 +260,10 @@ export function formatRichOutput(message: string): string {
         const label = codeLang === 'bud' ? ' HAVE A NICE TRIP! '
           : codeFenceLabel(codeLang)
         output.push('')
-        output.push(color(label, `${ANSI.bgBlue}${ANSI.white}${ANSI.bold}`))
-        output.push('')
+        if (label) {
+          output.push(color(label, `${ANSI.skyblue}${ANSI.bold}`))
+          output.push('')
+        }
       } else {
         inCodeBlock = false
         codeLang    = ''

@@ -72,7 +72,7 @@ function bridgePlatformBadge(platform: BridgePlatform): string {
     case 'telegram': return '✈️ Telegram'
     case 'discord': return '💬 Discord'
     case 'wechat': return '🟢 WeChat'
-    case 'cli': return '🌙 Artemis'
+    case 'cli': return '👩‍🦳'
   }
 }
 
@@ -82,7 +82,7 @@ function buildPlainConversationHeader(options: {
   platform?: BridgePlatform
   targetLabel?: string
 }): string {
-  const icon = options.role === 'assistant' ? '🤖' : '🧑'
+  const icon = options.role === 'assistant' ? '👩‍🦳' : '👤'
   const parts: string[] = []
   if (options.platform) parts.push(bridgePlatformBadge(options.platform))
   if (options.targetLabel) parts.push(options.targetLabel)
@@ -97,8 +97,8 @@ function buildAnsiConversationHeader(options: {
   targetLabel?: string
 }): string {
   const lead = options.role === 'assistant'
-    ? `${CC.dmauve}╸${_R}${CC.bmauve} 🤖${_R}`
-    : `${CC.dblue}▌${_R}${CC.bblue} 🧑${_R}`
+    ? `${CC.dmauve}╸${_R}${CC.bmauve} 👩‍🦳${_R}`
+    : `${CC.dblue}▌${_R}${CC.bblue} 👤${_R}`
   const parts: string[] = []
   if (options.platform) parts.push(bridgePlatformBadge(options.platform))
   if (options.targetLabel) parts.push(options.targetLabel)
@@ -389,8 +389,8 @@ function buildTimelineMarker(glyph: string, accent: string, meta?: string[]): st
     : `  ${styledGlyph}`
 }
 
-const USER_GLYPH = '🧑'
-const ASSISTANT_GLYPH = '🤖'
+const USER_GLYPH = '👤'
+const ASSISTANT_GLYPH = '👩‍🦳'
 
 function formatElapsedShort(ms: number): string {
   if (ms < 1000) return '<1s'
@@ -4470,7 +4470,7 @@ async function handleTurn(
       })
       // Between-turns indicator: after a tool result, the model is processing
       // it and may take 5–30s before the next stream chunk arrives. Without a
-      // pending block here, the user just sees a frozen 🤖 timestamp and
+      // pending block here, the user just sees a frozen assistant timestamp and
       // assumes the CLI hung. Open one immediately so the spinner + elapsed
       // counter is visible during the gap. Idempotent if multiple parallel
       // tool results race in — only the first one opens the block.
