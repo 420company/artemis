@@ -106,6 +106,7 @@ import {
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
+import { detectVisualGenerationNeed } from '../src/utils/visualGenerationConfig.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -1068,6 +1069,25 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 }
 
 {
+  const negativePrompts = [
+    '我在查视觉系统为什么误触发菜单，不要生成任何图片。',
+    '复制素材说明过来，检查里面的配置字段。',
+    '这个功能需要视觉系统支持，但现在只是排查代码。',
+    '这个页面用到素材管理逻辑，帮我看实现。',
+  ]
+  for (const prompt of negativePrompts) {
+    const need = detectVisualGenerationNeed(prompt)
+    assert(`visual intent: no false positive for ${prompt}`, !need.image && !need.video)
+  }
+
+  const imageNeed = detectVisualGenerationNeed('请生成一张产品海报图片。')
+  assert('visual intent: explicit Chinese image generation is detected', imageNeed.image && !imageNeed.video)
+
+  const videoNeed = detectVisualGenerationNeed('Create a short product video clip for the landing page.')
+  assert('visual intent: explicit English video generation is detected', videoNeed.video)
+}
+
+{
   const tmpDir = path.join(os.tmpdir(), `artemis-visual-required-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   await configureMockImageProfile(tmpDir)
@@ -1281,6 +1301,53 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 {
+  const tmpDir = path.join(os.tmpdir(), `artemis-tool-intake-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'tool intake truncation smoke' })
+  const rawToolResult = JSON.stringify({
+    ok: true,
+    action: { type: 'run_command', command: 'npm test' },
+    output: `${'line\n'.repeat(1_400)}IMPORTANT_TAIL`,
+  })
+  store.appendMessage(session, 'tool', rawToolResult, 'run_command')
+  const stored = session.messages[0]?.content ?? ''
+
+  assert(
+    'session store: tool messages are truncated before entering history',
+    stored.length < rawToolResult.length && stored.includes('IMPORTANT_TAIL') && stored.includes('truncated'),
+    `stored=${stored.length} raw=${rawToolResult.length}`,
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-context-compact-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'compact context smoke' })
+  for (let i = 0; i < 12; i += 1) {
+    store.appendMessage(session, 'assistant', `turn ${i} ${'analysis '.repeat(500)}`)
+    store.appendMessage(session, 'tool', JSON.stringify({
+      ok: true,
+      action: { type: 'run_command', command: `echo ${i}` },
+      output: 'tool-output '.repeat(2_000),
+    }), 'run_command')
+  }
+  store.appendMessage(session, 'user', 'latest task')
+  const context = await buildContextWindow(session, 'main')
+
+  assert(
+    'context window: compacted main context stays below the send budget',
+    context.stats.approxChars <= 72_000 + 24_000,
+    `approx=${context.stats.approxChars}`,
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
   const prompt = buildSystemPrompt('/Users/goat', 'accept-all', 'standard', 'main', true)
   assert(
     'system prompt: file tools are grounded in real local paths, not /mnt virtual aliases',
@@ -1486,6 +1553,17 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'workspace trust store: sibling paths are not trusted by another root',
     !(await settingsStore.isWorkspaceTrusted(siblingDir)),
     'sibling dir should not be trusted',
+  )
+
+  await settingsStore.update({ visualAssetPreference: 'local' })
+  assert(
+    'visual policy settings: saved preference persists',
+    (await settingsStore.load()).visualAssetPreference === 'local',
+  )
+  await settingsStore.clearVisualAssetPreference()
+  assert(
+    'visual policy settings: reset clears saved preference',
+    (await settingsStore.load()).visualAssetPreference === undefined,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -5483,6 +5561,42 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 // ── Context compression: OpenAI tool_calls pairing ──────────────────────────
+
+{
+  const now = new Date().toISOString()
+  let summarizePrompt = ''
+  const messages: SessionMessage[] = [
+    { id: 'u1', role: 'user', content: 'head', createdAt: now },
+    {
+      id: 't1',
+      role: 'tool',
+      content: JSON.stringify({
+        ok: false,
+        action: { type: 'insert_in_file', path: 'src/core/agent.ts' },
+        output: `${'x'.repeat(900)} tool_invalid_arguments atLine must be a positive integer ${'y'.repeat(900)}`,
+        error: { code: 'tool_invalid_arguments', message: 'Invalid arguments: atLine must be a positive integer' },
+      }),
+      name: 'insert_in_file',
+      createdAt: now,
+    },
+    { id: 'u2', role: 'user', content: 'tail '.repeat(2_000), createdAt: now },
+  ]
+
+  await compressMessages(messages, async (prompt) => {
+    summarizePrompt = prompt
+    return '[summary]'
+  }, {
+    tokenLimit: 100,
+    threshold: 0.5,
+    protectHead: 0,
+    protectTailTokens: 0,
+  })
+
+  assert(
+    'context compression: failed tool results keep actionable error details for summarization',
+    summarizePrompt.includes('tool_invalid_arguments') && summarizePrompt.includes('atLine must be a positive integer'),
+  )
+}
 
 {
   const now = new Date().toISOString()

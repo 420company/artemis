@@ -16,6 +16,7 @@ import type { SessionMessage } from './types.js'
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const TOOL_RESULT_KEEP_CHARS = 200
+const TOOL_ERROR_KEEP_CHARS = 1_500
 const TOOL_RESULT_PLACEHOLDER = '[旧工具输出已清除以节省上下文]'
 
 /** Rough token estimate: 1 token ≈ 4 chars */
@@ -29,11 +30,49 @@ function estimateMsgListTokens(msgs: SessionMessage[]): number {
 
 // ─── Phase 1: lossless tool-result pruning ────────────────────────────────────
 
+function looksLikeToolFailure(content: string): boolean {
+  const lower = content.toLowerCase()
+  return lower.includes('"ok": false') ||
+    lower.includes('tool_invalid_arguments') ||
+    lower.includes('invalid arguments') ||
+    lower.includes('execution error') ||
+    lower.includes('error:') ||
+    lower.includes('failed')
+}
+
+function truncateToolFailureContent(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    const output = typeof parsed.output === 'string' ? parsed.output : ''
+    const outputHead = output.slice(0, 500)
+    const outputTail = output.length > 1_000 ? output.slice(-500) : output.slice(500)
+    return JSON.stringify({
+      ...parsed,
+      output: output.length > 1_000
+        ? `${outputHead}
+...[旧工具失败输出已截断 ${output.length - 1_000} chars，保留错误结构和输出首尾]
+${outputTail}`
+        : output,
+    })
+  } catch {
+    return `${content.slice(0, TOOL_ERROR_KEEP_CHARS)}
+...[旧工具失败输出已截断，保留错误开头以便恢复]`
+  }
+}
+
 function pruneToolResults(messages: SessionMessage[], protectedFromIdx: number): SessionMessage[] {
   return messages.map((msg, i) => {
     if (msg.role !== 'tool') return msg
     if (i >= protectedFromIdx) return msg
     if (msg.content.length <= TOOL_RESULT_KEEP_CHARS) return msg
+    if (looksLikeToolFailure(msg.content)) {
+      return {
+        ...msg,
+        content: msg.content.length <= TOOL_ERROR_KEEP_CHARS
+          ? msg.content
+          : truncateToolFailureContent(msg.content),
+      }
+    }
     return { ...msg, content: TOOL_RESULT_PLACEHOLDER }
   })
 }
@@ -111,18 +150,37 @@ function scoreMessageSemanticImportance(msg: SessionMessage): number {
 function filterSemanticImportance(messages: SessionMessage[], targetReduction: number): SessionMessage[] {
   if (messages.length < 10) return messages
   
-  const scored = messages.map(m => ({
+  const scored = messages.map((m, index) => ({
     msg: m,
-    score: scoreMessageSemanticImportance(m)
+    index,
+    score: scoreMessageSemanticImportance(m),
   }))
 
-  // Sort by importance but preserve original order for the final list
+  // Sort by importance but preserve original order for the final list.
+  // Keep assistant tool-call messages and their immediately following tool
+  // results together; dropping either side can make OpenAI/Anthropic reject the
+  // compressed request or deprive the summarizer of the failure evidence.
   const sorted = [...scored].sort((a, b) => b.score - a.score)
-  const keepCount = Math.floor(messages.length * (1 - targetReduction))
+  const keepCount = Math.max(1, Math.floor(messages.length * (1 - targetReduction)))
   const threshold = sorted[keepCount]?.score ?? 0
+  const keep = new Set<number>()
+
+  for (const item of scored) {
+    if (item.score >= threshold || item.msg.role === 'user') {
+      keep.add(item.index)
+    }
+    if (assistantNeedsToolResults(item.msg)) {
+      keep.add(item.index)
+      if (messages[item.index + 1]?.role === 'tool') keep.add(item.index + 1)
+    }
+    if (item.msg.role === 'tool' && item.index > 0 && assistantNeedsToolResults(messages[item.index - 1]!)) {
+      keep.add(item.index - 1)
+      keep.add(item.index)
+    }
+  }
 
   return scored
-    .filter(s => s.score >= threshold || s.msg.role === 'user') // Always keep user intent
+    .filter(s => keep.has(s.index))
     .map(s => s.msg)
 }
 
@@ -158,7 +216,10 @@ async function buildStructuredSummary(
   summarize: SummarizeFn,
 ): Promise<string> {
   const history = messages
-    .map(m => `[${m.role}]: ${m.content.slice(0, 600)}`)
+    .map((m) => {
+      const limit = m.role === 'tool' && looksLikeToolFailure(m.content) ? 2_000 : 600
+      return `[${m.role}]: ${m.content.slice(0, limit)}`
+    })
     .join('\n\n---\n\n')
 
   const prevSection = previousSummary
@@ -305,14 +366,14 @@ export async function compressMessages(
 
   if (middle.length === 0) {
     // Not enough middle to compress — Phase 1 only (prune tool results)
-    const pruned = pruneToolResults(messages, headEnd)
+    const pruned = pruneToolResults(messages, tailStart)
     const tokensAfter = estimateMsgListTokens(pruned)
     onInfo?.(`[压缩] 中段不足，仅修剪工具结果：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
     return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
   }
 
   // ── Phase 1 on middle: prune tool results ─────────────────────────────────
-  let prunedMiddle = pruneToolResults(middle, 0)
+  let prunedMiddle = pruneToolResults(middle, middle.length)
   onInfo?.(`[压缩] Phase 1: 修剪 ${middle.length} 条中段消息的工具结果`)
 
   // ── Phase 5: Semantic-Aware Importance Filtering ──────────────────────────
@@ -333,7 +394,7 @@ export async function compressMessages(
     // user can debug (was silent before, often masking provider auth errors).
     const msg = err instanceof Error ? err.message : String(err)
     onInfo?.(`[压缩] Phase 3 失败 → 退回 Phase 1: ${msg}`)
-    const pruned = pruneToolResults(messages, headEnd)
+    const pruned = pruneToolResults(messages, tailStart)
     const tokensAfter = estimateMsgListTokens(pruned)
     onInfo?.(`[压缩] 结果（仅修剪）：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
     return { messages: pruned, compressed: true, tokensBefore, tokensAfter }

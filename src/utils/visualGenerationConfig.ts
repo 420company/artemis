@@ -243,19 +243,23 @@ export function describeVisualProvider(config: VisualModelConfig, assetKind: Vis
 
 export function detectVisualGenerationNeed(input: string): VisualGenerationNeed {
   const text = input.toLowerCase();
-  const image = [
+  const imageNegated = /(?:不要|无需|不需要|别)[\s\S]{0,24}(?:生成|创建|制作|绘制|设计|渲染|产出|画)?[\s\S]{0,24}(?:图片|图像|照片|插图|视觉素材|配图|商品图|产品图|海报|封面|banner)/i.test(input) ||
+    /\b(?:do\s+not|don't|dont|no\s+need\s+to|without)\b[\s\S]{0,40}\b(?:generate|create|make|draw|render|produce|design)?[\s\S]{0,40}\b(?:image|picture|photo|illustration|visual|asset|product shot)\b/i.test(text);
+  const image = !imageNegated && [
     /\b(generate|create|make|draw|render|produce|design)\b[\s\S]{0,80}\b(image|picture|photo|illustration|visual|asset|product shot)\b/i,
     /\b(image|picture|photo|illustration|visual|asset|product shot)\b[\s\S]{0,80}\b(generate|create|make|draw|render|produce|design)\b/i,
-    /(?:生成|创建|制作|绘制|设计|渲染|产出|需要|用到|配)[\s\S]{0,80}(?:图片|图像|照片|插图|视觉|素材|配图|商品图|产品图)/i,
-    /(?:图片|图像|照片|插图|视觉|素材|配图|商品图|产品图)[\s\S]{0,80}(?:生成|创建|制作|绘制|设计|渲染|产出|需要|用到)/i,
+    /(?:生成|创建|制作|绘制|设计|渲染|产出|画|画一张)[\s\S]{0,80}(?:图片|图像|照片|插图|视觉素材|配图|商品图|产品图|海报|封面|banner)/i,
+    /(?:图片|图像|照片|插图|视觉素材|配图|商品图|产品图|海报|封面|banner)[\s\S]{0,80}(?:生成|创建|制作|绘制|设计|渲染|产出)/i,
     /(?:商品配图|产品配图|产品摄影|商品摄影|产品拍摄|商品拍摄|海报|封面|banner|hero image)/i,
   ].some((pattern) => pattern.test(text));
 
-  const video = [
+  const videoNegated = /(?:不要|无需|不需要|别)[\s\S]{0,24}(?:生成|创建|制作|设计|渲染|产出|剪辑?)?[\s\S]{0,24}(?:视频|短片|动画|动效)/i.test(input) ||
+    /\b(?:do\s+not|don't|dont|no\s+need\s+to|without)\b[\s\S]{0,40}\b(?:generate|create|make|render|produce|design)?[\s\S]{0,40}\b(?:video|movie|clip|animation|motion)\b/i.test(text);
+  const video = !videoNegated && [
     /\b(generate|create|make|render|produce|design)\b[\s\S]{0,80}\b(video|movie|clip|animation|motion)\b/i,
     /\b(video|movie|clip|animation|motion)\b[\s\S]{0,80}\b(generate|create|make|render|produce|design)\b/i,
-    /(?:生成|创建|制作|设计|渲染|产出|需要|用到)[\s\S]{0,80}(?:视频|短片|动画|动效|片段)/i,
-    /(?:视频|短片|动画|动效|片段)[\s\S]{0,80}(?:生成|创建|制作|设计|渲染|产出|需要|用到)/i,
+    /(?:生成|创建|制作|设计|渲染|产出|剪|做)[\s\S]{0,80}(?:视频|短片|动画|动效)/i,
+    /(?:视频|短片|动画|动效)[\s\S]{0,80}(?:生成|创建|制作|设计|渲染|产出|剪辑)/i,
   ].some((pattern) => pattern.test(text));
 
   return { image, video };

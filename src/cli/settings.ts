@@ -20,6 +20,7 @@ export type ResearchEngine = 'builtin' | 'gemini-deep-research'
 export type BundleModelChoice = 'main' | 'brain'
 export type BundleMode = 'auto' | 'manual'
 export const DEFAULT_BUNDLE_MIN_LENGTH = 60
+export type VisualAssetPreference = 'local' | 'search' | 'skip'
 
 export interface CliSettings {
   uiLocale: UiLocale
@@ -42,6 +43,7 @@ export interface CliSettings {
   dailyAuditEnabled: boolean
   trustedWorkspaceRoots: string[]
   lastTrustedWorkspaceRoot?: string
+  visualAssetPreference?: VisualAssetPreference
 }
 
 function getDefaultCliSettings(): CliSettings {
@@ -66,7 +68,14 @@ function getDefaultCliSettings(): CliSettings {
     dailyAuditEnabled: false,
     trustedWorkspaceRoots: [],
     lastTrustedWorkspaceRoot: undefined,
+    visualAssetPreference: undefined,
   }
+}
+
+function normalizeVisualAssetPreference(value: unknown): VisualAssetPreference | undefined {
+  return value === 'local' || value === 'search' || value === 'skip'
+    ? value
+    : undefined
 }
 
 function normalizeBundleMode(value: unknown): BundleMode {
@@ -156,6 +165,7 @@ export class CliSettingsStore {
       lastTrustedWorkspaceRoot: typeof p.lastTrustedWorkspaceRoot === 'string' && p.lastTrustedWorkspaceRoot.trim()
         ? path.resolve(p.lastTrustedWorkspaceRoot.trim())
         : undefined,
+      visualAssetPreference: normalizeVisualAssetPreference(p.visualAssetPreference),
     }
   }
 
@@ -212,6 +222,9 @@ export class CliSettingsStore {
         : partial.lastTrustedWorkspaceRoot === undefined
           ? current.lastTrustedWorkspaceRoot
           : undefined,
+      visualAssetPreference: partial.visualAssetPreference !== undefined
+        ? normalizeVisualAssetPreference(partial.visualAssetPreference)
+        : current.visualAssetPreference,
     }
     await this.save(next)
     return next
@@ -250,6 +263,16 @@ export class CliSettingsStore {
 
   async setDocsSearchEngine(engine: DocsSearchEngine): Promise<CliSettings> {
     return this.update({ docsSearchEngine: engine, docsSearchEngineConfigured: true })
+  }
+
+  async clearVisualAssetPreference(): Promise<CliSettings> {
+    const current = await this.load()
+    const next: CliSettings = {
+      ...current,
+      visualAssetPreference: undefined,
+    }
+    await this.save(next)
+    return next
   }
 
   async setResearchEngine(engine: ResearchEngine): Promise<CliSettings> {

@@ -1166,6 +1166,15 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const appendSystemPanel = (title: string, lines: string[]): number =>
     appendScrollBlock({ kind: 'system', text: renderPlainPanel(title, lines), preserveAnsi: true })
 
+  const buildLocalVisualPolicyPrompt = (requestText: string): string =>
+    `${requestText}\n\n[Visual generation policy]\nThe user confirmed local visual generation. Photographic / product / editorial / lifestyle assets MUST be produced via generate_image (or generate_video when appropriate). Icons, logos, UI controls, loaders, geometric or abstract decoration, charts, diagrams, and other vector-native graphics MAY be authored as SVG/CSS directly — these are the right tool for those jobs and are not violations. The forbidden pattern is substituting hand-authored SVG/canvas/procedural code for what should be a real photograph (e.g. writing a node/python script that draws "product images" instead of calling generate_image). If generate_image returns an error, report it to the user explicitly and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders for photographic subjects.`
+
+  const buildSearchVisualPolicyPrompt = (requestText: string): string =>
+    `${requestText}\n\n[Visual generation policy]\nThe user declined local visual generation for this turn. Do not call generate_image/generate_video; use web-search visual assets if needed.`
+
+  const buildSkipVisualPolicyPrompt = (requestText: string): string =>
+    `${requestText}\n\n[Visual generation policy]\nThe user chose to skip visual asset generation/search for this turn. Avoid image/video generation and visual web-search.`
+
   const maybeApplyVisualGenerationPolicy = async (requestText: string): Promise<string> => {
     const need = detectVisualGenerationNeed(requestText)
     if (!need.image && !need.video) {
@@ -1177,7 +1186,25 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       need.video ? await resolveConfiguredVisualProvider(workspaceRoot, 'video') : null,
     ].filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
 
+    const configuredText = configured.map((entry) => describeVisualProvider(entry.config, entry.assetKind)).join(', ')
+    const settings = await opts.settingsStore.load()
+    const savedPreference = settings.visualAssetPreference
+
     if (configured.length === 0) {
+      if (savedPreference === 'search') {
+        appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
+          t('沿用已保存偏好：使用网络搜索素材。', 'Using saved preference: web-search assets.'),
+        ])
+        return buildSearchVisualPolicyPrompt(requestText)
+      }
+
+      if (savedPreference === 'skip') {
+        appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
+          t('沿用已保存偏好：跳过视觉素材生成/搜索。', 'Using saved preference: skip visual assets.'),
+        ])
+        return buildSkipVisualPolicyPrompt(requestText)
+      }
+
       const checkedPaths = [
         path.join(resolveDataRootDir(workspaceRoot), 'providers.json'),
         path.join(HOME_DIR, '.artemis', 'providers.json'),
@@ -1187,22 +1214,26 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '检测到任务需要图片/视频，但没有找到已配置且启用的本地视觉生成 API。',
           'Detected image/video needs, but no enabled local visual generation API is configured.',
         ),
-        t(
-          '本轮如需视觉素材，将使用网络搜索素材，不会伪装成本地生成。',
-          'This turn will use web-search assets if needed and will not claim local generation.',
-        ),
+        savedPreference === 'local'
+          ? t(
+              '你之前选择了本地视觉 API，但当前配置不可用；本轮将改用网络搜索素材。请重新配置 providers.json 后再使用本地视觉生成。',
+              'Your saved preference is local visual API, but the current configuration is unavailable; this turn will use web-search assets. Reconfigure providers.json before using local visual generation again.',
+            )
+          : t(
+              '本轮如需视觉素材，将使用网络搜索素材，不会伪装成本地生成。',
+              'This turn will use web-search assets if needed and will not claim local generation.',
+            ),
         `${t('已检查配置: ', 'Checked config: ')}${checkedPaths.join(' ; ')}`,
       ])
       return `${requestText}\n\n[Visual generation policy]\nNo configured local visual generation API is available. Use web-search assets if needed, and do not claim local generation.`
     }
 
-    const configuredText = configured.map((entry) => describeVisualProvider(entry.config, entry.assetKind)).join(', ')
     if (hasExplicitRemoteVisualFallback(requestText)) {
       appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
         t('用户已明确要求使用网络/搜索素材。', 'User explicitly requested online/search assets.'),
         `${t('已配置本地视觉 API: ', 'Configured local visual API: ')}${configuredText}`,
       ])
-      return `${requestText}\n\n[Visual generation policy]\nThe user explicitly requested online/search visual assets. Do not call generate_image/generate_video unless the user asks again.`
+      return buildSearchVisualPolicyPrompt(requestText)
     }
 
     if (hasExplicitLocalVisualConsent(requestText) || process.stdin.isTTY !== true) {
@@ -1210,7 +1241,28 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         t('检测到用户已明确同意使用本地视觉生成。', 'Detected explicit consent for local visual generation.'),
         `${t('将优先使用: ', 'Will prefer: ')}${configuredText}`,
       ])
-      return `${requestText}\n\n[Visual generation policy]\nThe user explicitly approved local visual generation. Photographic / product / editorial / lifestyle assets MUST be produced via generate_image (or generate_video when appropriate). Icons, logos, UI controls, loaders, geometric or abstract decoration, charts, diagrams, and other vector-native graphics MAY be authored as SVG/CSS directly — these are the right tool for those jobs and are not violations. The forbidden pattern is substituting hand-authored SVG/canvas/procedural code for what should be a real photograph (e.g. writing a node/python script that draws "product images" instead of calling generate_image). If generate_image returns an error, report it to the user explicitly and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders for photographic subjects.`
+      return buildLocalVisualPolicyPrompt(requestText)
+    }
+
+    if (savedPreference === 'local') {
+      appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
+        `${t('沿用已保存偏好：使用本地视觉 API: ', 'Using saved preference: local visual API: ')}${configuredText}`,
+      ])
+      return buildLocalVisualPolicyPrompt(requestText)
+    }
+
+    if (savedPreference === 'search') {
+      appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
+        t('沿用已保存偏好：使用网络搜索素材。', 'Using saved preference: web-search assets.'),
+      ])
+      return buildSearchVisualPolicyPrompt(requestText)
+    }
+
+    if (savedPreference === 'skip') {
+      appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
+        t('沿用已保存偏好：跳过视觉素材生成/搜索。', 'Using saved preference: skip visual assets.'),
+      ])
+      return buildSkipVisualPolicyPrompt(requestText)
     }
 
     let choice: 'local' | 'search' | 'skip'
@@ -1242,24 +1294,29 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       choice = 'local'
     }
 
+    await opts.settingsStore.update({ visualAssetPreference: choice })
+
     if (choice === 'local') {
       appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
         `${t('用户确认启用本地视觉 API: ', 'User confirmed local visual API: ')}${configuredText}`,
+        t('已保存为默认视觉素材策略，之后不再重复询问。', 'Saved as the default visual asset policy; Artemis will not ask again.'),
       ])
-      return `${requestText}\n\n[Visual generation policy]\nThe user confirmed local visual generation. Photographic / product / editorial / lifestyle assets MUST be produced via generate_image (or generate_video when appropriate). Icons, logos, UI controls, loaders, geometric or abstract decoration, charts, diagrams, and other vector-native graphics MAY be authored as SVG/CSS directly — these are the right tool for those jobs and are not violations. The forbidden pattern is substituting hand-authored SVG/canvas/procedural code for what should be a real photograph (e.g. writing a node/python script that draws "product images" instead of calling generate_image). If generate_image returns an error, report it to the user explicitly and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders for photographic subjects.`
+      return buildLocalVisualPolicyPrompt(requestText)
     }
 
     if (choice === 'search') {
       appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
         t('用户选择网络搜索素材，本轮不调用本地视觉生成 API。', 'User chose web-search assets; do not call local visual generation APIs this turn.'),
+        t('已保存为默认视觉素材策略，之后不再重复询问。', 'Saved as the default visual asset policy; Artemis will not ask again.'),
       ])
-      return `${requestText}\n\n[Visual generation policy]\nThe user declined local visual generation for this turn. Do not call generate_image/generate_video; use web-search visual assets if needed.`
+      return buildSearchVisualPolicyPrompt(requestText)
     }
 
     appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
       t('用户选择跳过视觉素材生成/搜索。', 'User chose to skip visual asset generation/search.'),
+      t('已保存为默认视觉素材策略，之后不再重复询问。', 'Saved as the default visual asset policy; Artemis will not ask again.'),
     ])
-    return `${requestText}\n\n[Visual generation policy]\nThe user chose to skip visual asset generation/search for this turn. Avoid image/video generation and visual web-search.`
+    return buildSkipVisualPolicyPrompt(requestText)
   }
 
   // Animated "waiting" panel: appends a system block that ticks a Braille
@@ -1856,6 +1913,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/config visual', hint: t('单独配置视觉模型',        'Configure visual model only') },
     { value: '/visual',     hint: t('快捷修改视觉 API 配置',     'Quick-edit visual API config') },
     { value: '/vision',     hint: t('视觉配置别名',              'Visual config alias') },
+    { value: '/visual-policy reset', hint: t('重置视觉素材默认策略', 'Reset saved visual asset policy') },
     { value: '/vercel',     hint: t('配置 Vercel 部署 token',    'Configure Vercel deployment token') },
     { value: '/spotify',    hint: t('连接 Spotify 账号',         'Connect Spotify account') },
     { value: '/config memory', hint: t('配置记忆增强',           'Configure memory enhancement') },
@@ -2413,6 +2471,30 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           ? [t('视觉模型配置已更新，可以继续使用 Artemis。', 'Visual model settings updated. You can continue using Artemis.')]
           : [t('已保留当前视觉模型配置。', 'Kept the current visual model settings.')],
       )
+      continue
+    }
+
+    // ── /visual-policy reset — Clear saved image/video asset decision ───────
+    if (trimmed === '/visual-policy' || trimmed.startsWith('/visual-policy ')) {
+      const subcommand = trimmed.slice('/visual-policy'.length).trim().toLowerCase()
+      if (subcommand === 'reset' || subcommand === 'clear') {
+        await opts.settingsStore.clearVisualAssetPreference()
+        appendSystemPanel(
+          t('视觉素材策略已重置', 'Visual asset policy reset'),
+          [
+            t(
+              '已清除已保存的视觉素材默认策略。下次检测到图片/视频素材需求时，Artemis 会重新询问你。',
+              'Cleared the saved visual asset policy. Artemis will ask again next time it detects an image/video asset need.',
+            ),
+          ],
+        )
+      } else {
+        appendSystemPanel(t('用法', 'Usage'), [
+          '/visual-policy reset',
+          t('清除已保存的视觉素材默认策略。', 'Clear the saved visual asset policy.'),
+        ])
+      }
+      prompt.forceRedraw()
       continue
     }
 
@@ -4833,6 +4915,7 @@ function renderHelp(locale: UiLocale): string {
     `/config            ${t('重新配置 Provider', 'reconfigure Provider')}`,
     `/config visual     ${t('只配置 visual model', 'configure visual model only')}`,
     `/visual            ${t('快速编辑 visual API config', 'quick-edit visual API config')}`,
+    `/visual-policy reset ${t('重置视觉素材默认策略', 'reset saved visual asset policy')}`,
     `/vercel            ${t('配置 Vercel deployment token', 'configure Vercel deployment token')}`,
     `/vercel status     ${t('查看 Vercel auth status', 'show Vercel auth status')}`,
     `/vercel logout     ${t('清除已保存的 Vercel token', 'clear saved Vercel token')}`,

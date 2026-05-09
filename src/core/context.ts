@@ -4,6 +4,8 @@ import { resolveOdinSkillContext } from '../odin/runtime.js';
 
 const MIN_RECENT_MESSAGES = 6;
 const LARGE_CONTEXT_MESSAGE_LIMIT = 65_535;
+const MAIN_RECENT_MESSAGE_CHAR_LIMIT = 24_000;
+const TOOL_SUMMARY_LINE_CHAR_LIMIT = 1_500;
 
 type ContextBudgetProfile = {
   recentMessageCharLimit: number;
@@ -14,19 +16,19 @@ type ContextBudgetProfile = {
 };
 
 const MAIN_CONTEXT_BUDGET: ContextBudgetProfile = {
-  recentMessageCharLimit: LARGE_CONTEXT_MESSAGE_LIMIT,
+  recentMessageCharLimit: MAIN_RECENT_MESSAGE_CHAR_LIMIT,
   latestUserMessageCharLimit: LARGE_CONTEXT_MESSAGE_LIMIT,
-  summaryLineCharLimit: 4_096,
-  summaryCharLimit: LARGE_CONTEXT_MESSAGE_LIMIT,
-  contextCharBudget: LARGE_CONTEXT_MESSAGE_LIMIT * 2,
+  summaryLineCharLimit: 2_048,
+  summaryCharLimit: 24_000,
+  contextCharBudget: 72_000,
 };
 
 const SPECIALIST_CONTEXT_BUDGET: ContextBudgetProfile = {
-  recentMessageCharLimit: LARGE_CONTEXT_MESSAGE_LIMIT,
-  latestUserMessageCharLimit: LARGE_CONTEXT_MESSAGE_LIMIT,
-  summaryLineCharLimit: 4_096,
-  summaryCharLimit: LARGE_CONTEXT_MESSAGE_LIMIT,
-  contextCharBudget: LARGE_CONTEXT_MESSAGE_LIMIT * 2,
+  recentMessageCharLimit: 16_000,
+  latestUserMessageCharLimit: 32_000,
+  summaryLineCharLimit: 1_500,
+  summaryCharLimit: 16_000,
+  contextCharBudget: 48_000,
 };
 
 type ContextStats = {
@@ -103,7 +105,7 @@ function compactToolContent(
         normalizeWhitespace(
           `delegate_task role=${role} status=${delegateStatus} sessionId=${sessionId} reply=${reply} ${guidance}`,
         ),
-        recentMessageCharLimit,
+        Math.min(recentMessageCharLimit, TOOL_SUMMARY_LINE_CHAR_LIMIT),
       );
     }
 
@@ -127,7 +129,7 @@ function compactToolContent(
         normalizeWhitespace(
           `approve_builder_execution status=${approvalStatus} sessionId=${sessionId} reply=${reply}`,
         ),
-        recentMessageCharLimit,
+        Math.min(recentMessageCharLimit, TOOL_SUMMARY_LINE_CHAR_LIMIT),
       );
     }
 
@@ -147,10 +149,10 @@ function compactToolContent(
 
     return truncate(
       `${actionType} target=${target} status=${status} result=${output}`,
-      recentMessageCharLimit,
+      Math.min(recentMessageCharLimit, TOOL_SUMMARY_LINE_CHAR_LIMIT),
     );
   } catch {
-    return truncate(normalizeWhitespace(content), recentMessageCharLimit);
+    return truncate(normalizeWhitespace(content), Math.min(recentMessageCharLimit, TOOL_SUMMARY_LINE_CHAR_LIMIT));
   }
 }
 

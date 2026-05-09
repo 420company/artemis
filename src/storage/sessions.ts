@@ -25,6 +25,7 @@ import type {
   VerificationCommandRecord,
 } from '../core/types.js';
 import { isHeimdallEventKind } from '../core/types.js';
+import { smartTruncateToolContent } from '../core/session.js';
 import {
   canonicalizeClaimStatement,
   synchronizeEvidenceGraph,
@@ -324,7 +325,7 @@ export class SessionStore {
     const message: SessionMessage = {
       id: randomUUID(),
       role,
-      content,
+      content: role === 'tool' ? smartTruncateToolContent(content) : content,
       name,
       createdAt: now(),
     };
