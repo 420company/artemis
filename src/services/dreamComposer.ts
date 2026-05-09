@@ -369,6 +369,9 @@ function extractPreview(dreamMd: string): string {
 
 export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale: UiLocale = DEFAULT_UI_LOCALE): string {
   const sep = pickLocale(locale, { zh: '：', en: ': ' })
+  const pathSep = sep.endsWith(' ') ? sep : `${sep} `
+  const mdName = formatDreamFileName(entry.mdPath)
+  const imageName = entry.imagePath ? formatDreamFileName(entry.imagePath) : null
   const lines = dreamMd.split('\n')
   const titleLine = lines.find(l => l.startsWith('# ')) ?? pickLocale(locale, { zh: '# 梦境', en: '# Dream' })
   const title = titleLine.replace(/^#\s*/, '').trim()
@@ -382,13 +385,17 @@ export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale:
     body,
     '',
     `_dream id: ${entry.id}_`,
-    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}${sep}${entry.mdPath}`,
+    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}${pathSep}${mdName} ${entry.mdPath}`,
     ...(entry.imagePath
       ? [
-          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}${sep}${entry.imagePath}`,
+          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}${pathSep}${imageName ?? path.basename(entry.imagePath)} ${entry.imagePath}`,
         ]
       : []),
   ].join('\n')
+}
+
+function formatDreamFileName(filePath: string): string {
+  return path.basename(filePath).replace(/^\d{4}-\d{2}-\d{2}/, '')
 }
 
 async function gatherMemoryDigest(): Promise<string[]> {

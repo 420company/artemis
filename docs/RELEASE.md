@@ -8,7 +8,7 @@ This is the release path for publishing Artemis to GitHub and npm.
 - Default branch: `main`
 - npm package: `artemis-code`
 - CLI binary: `artemis` from `dist/cli.js`
-- Current prepared release: `0.2.25`
+- Current prepared release: `0.2.35`
 - README hero image: `assets/artemis-github-banner.png`
 
 ## Release Principle
@@ -119,20 +119,28 @@ artemis --help
 
 The reported version should match the Git tag and npm version.
 
-## Current 0.2.25 Notes
+## Current 0.2.35 Notes
 
-- Improved running correction handling for normal conversations, agent workflows, and Nidhogg by polling for user interjections during model calls and aborting in-flight provider requests when possible.
+- Dream bridge text now shows human-readable filenames alongside full paths; hero/banner image paths aligned across all outputs.
+- Fixed dream local file links and Windows input handling so cross-platform dream workflows resolve correctly.
+- Polished dream notifications: improved bridge and notification formatting for cleaner dream delivery across Telegram, Discord, and WeChat.
+- Tightened context compression and reset visual policy between generation sessions.
+- Refined chat emoji markers and CLI chat labels for lighter, less intrusive output.
+- Added startup update check: Artemis alerts when a newer version is available.
+- Tool-run interjection: running conversations, agent workflows, and Nidhogg poll for user corrections during model calls; video providers can be cancelled mid-generation.
+- Saga identity continuity hardening: dynamic identity inventory for safe turnaround derivatives; strengthened identity preservation; photoreal turnaround anchors for video keyframes; improved Saga reference integrity diagnostics and visual continuity.
 - Routed Saga and Seedance workflow text through the explicitly selected UI locale instead of inferring language from prompt contents.
-- Added a Saga locale smoke test that verifies explicit Chinese and English locale selection always wins.
-- Added a 30 second night-beach Saga long-video test script using the provided character turnaround reference.
-- Added Super Visual image-edit and segment-keyframe timeout handling so visual-generation stalls fail cleanly.
-- Refreshed README, usage documentation, and release notes to remove stale release references.
+- Super Visual image-edit and segment-keyframe timeout handling so visual-generation stalls fail cleanly.
 
-## 当前 0.2.25 中文说明
+## 当前 0.2.35 中文说明
 
-- 优化普通对话、agent 工作流和 Nidhogg 的运行中纠错：模型调用期间会轮询用户插话，并在可行时中断当前 provider 请求，用最新指令重跑。
+- 梦境桥接文本现在同时显示可读文件名和完整路径；hero/banner 图片路径在各输出中保持一致。
+- 修正梦境本地文件链接和 Windows 输入处理，跨平台梦境工作流现在正确解析。
+- 完善梦境通知：改进桥接和通知格式，在 Telegram、Discord、WeChat 上更清晰地展示梦境内容。
+- 收紧上下文压缩；视觉策略重置确保生成会话间状态干净。
+- 精炼聊天 emoji 标记和 CLI 聊天标签，输出更轻量、更不突兀。
+- 新增启动更新检查：Artemis 启动时检查新版本，有升级可用时提醒用户。
+- 工具运行插话：运行中对话、agent 工作流和 Nidhogg 会在模型调用期间轮询用户纠错；视频生成可在中途取消。
+- Saga 身份连续性加固：动态身份清单用于安全的三视图衍生；加强身份保留；三视图角色锚定视频关键帧；改进 Saga 参考完整性诊断和视觉连续性。
 - Saga 和 Seedance 的界面文案严格使用用户选择的 UI 语言，不再根据 prompt 内容猜测中文或英文。
-- 新增 Saga locale smoke test，验证显式中文/英文选择始终优先。
-- 新增 30 秒夜晚海边 Saga 长视频测试脚本，使用给定三视图角色参考。
 - Super Visual 的图片编辑和片段关键帧调用增加超时处理，避免视觉生成长期卡住。
-- README、使用说明和发布说明已清理旧版本信息。

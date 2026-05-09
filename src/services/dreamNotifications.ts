@@ -16,11 +16,16 @@ export const FIRST_DREAM_EN = 'Artemis is entering the dream system for the firs
 const FIRST_DREAM_MARKER_FILE = path.join(getDreamsRoot(), 'first-dream-shown.json')
 
 function formatDreamPathField(label: string, filePath: string): string {
-  return `${label}: ${filePath}`
+  return `${label}: ${formatDreamFileName(filePath)} ${filePath}`
 }
 
 function formatDreamPathFieldWithSep(label: string, sep: string, filePath: string): string {
-  return `${label}${sep}${filePath}`
+  const normalizedSep = sep.endsWith(' ') ? sep : `${sep} `
+  return `${label}${normalizedSep}${formatDreamFileName(filePath)} ${filePath}`
+}
+
+function formatDreamFileName(filePath: string): string {
+  return path.basename(filePath).replace(/^\d{4}-\d{2}-\d{2}/, '')
 }
 
 function pickLocaleList(locale: UiLocale, values: { zh: string[]; en: string[] }): string[] {

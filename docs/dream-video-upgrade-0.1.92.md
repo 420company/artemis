@@ -1,3 +1,6 @@
+> **Historical document** — This describes the 0.1.92 dream-video integration upgrade. The dream video system has since been significantly extended. See `docs/RELEASE.md` for the current release notes.
+> **历史文档** — 本文档描述 0.1.92 版本的梦境视频链路升级。梦境视频系统此后已大幅扩展，当前版本说明请参考 `docs/RELEASE.md`。
+
 # Artemis 0.1.92 梦境视频链路升级说明
 
 日期：2026-05-05
