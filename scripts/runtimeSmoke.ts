@@ -546,7 +546,6 @@ assert(
     dreamBridgeText.includes('第二段梦境仍然完整保留') &&
     dreamBridgeText.includes('我的日记：/Users/goat/.artemis/dreams/2026-05-06noon1533.md') &&
     dreamBridgeText.includes('梦境画面：/Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
-    dreamBridgeText.includes('🖼  /Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
     !dreamBridgeText.includes('梦境片段') &&
     !dreamBridgeText.includes('刚刚好像') &&
     !dreamBridgeText.includes('学到了什么'),
@@ -5595,6 +5594,58 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   assert(
     'context compression: failed tool results keep actionable error details for summarization',
     summarizePrompt.includes('tool_invalid_arguments') && summarizePrompt.includes('atLine must be a positive integer'),
+  )
+}
+
+{
+  const now = new Date().toISOString()
+  const currentTaskMarker = 'CURRENT_TASK_MARKER_keep_latest_requirement_after_compression'
+  const modifiedFile = 'src/core/contextCompressor.ts'
+  const messages: SessionMessage[] = [
+    { id: 'u1', role: 'user', content: `Please continue the context compression audit. ${currentTaskMarker} ${'x'.repeat(900)}`, createdAt: now },
+    { id: 'a1', role: 'assistant', content: `I changed ${modifiedFile} and still need to validate.`, createdAt: now },
+    { id: 'u2', role: 'user', content: 'tail '.repeat(2_000), createdAt: now },
+  ]
+
+  let summarizePrompt = ''
+  const result = await compressMessages(messages, async (prompt) => {
+    summarizePrompt = prompt
+    return '```json\n' + JSON.stringify({
+      goal: 'Audit context compression safety.',
+      current_task: `Continue the compression audit; preserve ${currentTaskMarker}.`,
+      completed: ['Inspected compressor implementation.'],
+      in_progress: ['Adding regression coverage.'],
+      key_decisions: ['Compression summaries must preserve task core, files, tools, and validation state.'],
+      relevant_files: [modifiedFile],
+      modified_files: [modifiedFile],
+      tools_and_commands: ['read_file', 'apply_patch', 'npm run typecheck'],
+      validation: ['Not yet run in this synthetic case.'],
+      risks: ['Summary may omit the latest requirement or modified files.'],
+      next_steps: ['Run targeted runtime smoke.'],
+      critical_context: 'Do not claim validation results that were not observed.',
+    }) + '\n```'
+  }, {
+    tokenLimit: 100,
+    threshold: 0.5,
+    protectHead: 0,
+    protectTailTokens: 0,
+  })
+
+  const compactedContent = result.messages.map(m => m.content).join('\n')
+  assert(
+    'context compression: summary prompt preserves longer latest user task markers',
+    summarizePrompt.includes(currentTaskMarker),
+    summarizePrompt,
+  )
+  assert(
+    'context compression: structured summary preserves current task, modified files, tools, validation and risks',
+    compactedContent.includes('当前任务：') &&
+      compactedContent.includes(currentTaskMarker) &&
+      compactedContent.includes(`已修改文件：${modifiedFile}`) &&
+      compactedContent.includes('工具与命令：') &&
+      compactedContent.includes('验证：') &&
+      compactedContent.includes('风险/注意：'),
+    compactedContent,
   )
 }
 

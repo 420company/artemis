@@ -72,7 +72,10 @@ function bridgePlatformBadge(platform: BridgePlatform): string {
     case 'telegram': return '✈️ Telegram'
     case 'discord': return '🫧 Discord'
     case 'wechat': return '🟢 WeChat'
-    case 'cli': return '👸'
+    // CLI bridge messages are already rendered with the assistant/user glyph in
+    // the timeline marker. Returning another princess here makes startup dream
+    // notifications look like "👸 👸 · Dream System".
+    case 'cli': return ''
   }
 }
 
@@ -3859,6 +3862,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const result = await dreamVideo.generateDreamVideo({
           cwd: workspaceRoot,
           id,
+          locale,
           onStatus: (text) => appendSystemPanel(t('梦境视频', 'Dream video'), [text]),
         })
         if (result.ok && result.videoPath) {

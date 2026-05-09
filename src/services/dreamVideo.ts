@@ -16,6 +16,8 @@ import {
   describeVisualProvider,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
+import type { UiLocale } from '../cli/locale.js'
+import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 
 export interface DreamVideoCapability {
   ok: boolean
@@ -35,6 +37,7 @@ export interface GenerateDreamVideoOptions {
   watermark?: boolean
   /** Status callback for CLI HUD ticks. */
   onStatus?: (text: string) => void
+  locale?: UiLocale
 }
 
 export interface GenerateDreamVideoResult {
@@ -85,12 +88,14 @@ export async function checkDreamVideoCapability(cwd: string): Promise<DreamVideo
 }
 
 export async function generateDreamVideo(options: GenerateDreamVideoOptions): Promise<GenerateDreamVideoResult> {
+  const locale = options.locale ?? DEFAULT_UI_LOCALE
+  const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
   const selected = await selectDream(options.id)
   if (!selected) {
-    return { ok: false, reason: options.id ? `Dream not found: ${options.id}` : 'No dream found' }
+    return { ok: false, reason: options.id ? `${t('找不到梦境', 'Dream not found')}: ${options.id}` : t('找不到梦境', 'No dream found') }
   }
 
-  options.onStatus?.('🌙 检查梦境视频能力…')
+  options.onStatus?.(t('🌙 检查梦境视频能力…', '🌙 Checking dream video capability…'))
   const configured = await resolveConfiguredVisualProvider(options.cwd, 'video')
   if (!configured) {
     return { ok: false, entry: selected.entry, reason: buildVisualSetupRequiredMessage('video') }
@@ -103,7 +108,7 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
       entry: selected.entry,
       provider: configured.provider,
       model: configured.model,
-      reason: `configured visual provider does not support video generation: ${configured.provider}`,
+      reason: `${t('已配置的视觉 provider 不支持视频生成', 'configured visual provider does not support video generation')}: ${configured.provider}`,
     }
   }
 
@@ -125,7 +130,7 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
     referenceImageCount: 0,
   })
 
-  options.onStatus?.(`🌙 生成梦境视频：${describeVisualProvider(configured.config, 'video')}…`)
+  options.onStatus?.(`${t('🌙 生成梦境视频', '🌙 Generating dream video')}: ${describeVisualProvider(configured.config, 'video')}…`)
   const result = await provider.generateVideo({
     prompt: directed.directedPrompt,
     model,
@@ -141,7 +146,7 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
       entry: selected.entry,
       provider: configured.provider,
       model,
-      reason: result.error ?? 'video generation returned no asset',
+      reason: result.error ?? t('视频生成没有返回产物', 'video generation returned no asset'),
       directedPrompt: directed.directedPrompt,
     }
   }

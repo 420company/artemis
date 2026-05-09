@@ -37,7 +37,7 @@ import { broadcastToBridges, listRegisteredBridges } from './bridgeNotifier.js'
 import { sendBragiImageBroadcast } from '../bragi/imageBroadcast.js'
 import { notifyDreamFinished } from './dreamNotifications.js'
 import type { UiLocale } from '../cli/locale.js'
-import { pickLocale } from '../cli/locale.js'
+import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 
 export interface ComposeDreamOptions {
   cwd: string
@@ -112,16 +112,16 @@ Body (300-500 English words)
 (At most 3 lines)`,
 }
 
-const DREAM_IMAGE_PROMPT_SYSTEM = `根据下面这段梦境，写一段适合 text-to-image 模型的英文 prompt。
+const DREAM_IMAGE_PROMPT_SYSTEM = `Write an English prompt suitable for a text-to-image model based on the dream below.
 
-要求：
-- 把梦境的核心意象转成视觉描述：场景、光线、材质、色调、构图
-- 50-90 个英文词，逗号分隔短语
-- 加上 "dreamlike, surreal, soft cinematic lighting, painterly" 这类风格锚
-- 不要包含人物面部特征、品牌、logo、文字
-- 直接输出 prompt，不要解释
+Requirements:
+- Translate the dream's core imagery into visual description: scene, light, material, color palette, composition.
+- 50-90 English words, comma-separated phrases.
+- Include style anchors such as "dreamlike, surreal, soft cinematic lighting, painterly".
+- Do not include facial details, brands, logos, or readable text.
+- Output the prompt only; do not explain.
 
-梦境：`
+Dream:`
 
 const DREAM_TEXT_TIMEOUT_MS = 90_000
 const DREAM_IMAGE_PROMPT_TIMEOUT_MS = 45_000
@@ -142,7 +142,8 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 export async function composeDream(options: ComposeDreamOptions): Promise<ComposeDreamResult> {
   const config: DreamConfig = { ...(await loadDreamConfig()), ...(options.configOverride ?? {}) }
-  const locale = options.locale ?? 'zh-CN'
+  const locale = options.locale ?? DEFAULT_UI_LOCALE
+  const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
   if (!config.enabled || config.mode === 'off') {
     return { ok: false, reason: 'Dream system disabled' }
@@ -155,7 +156,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     }
   }
 
-  options.onStatus?.('🌙 收集白天素材…')
+  options.onStatus?.(t('🌙 收集白天素材…', '🌙 Gathering daytime traces…'))
 
   // ── gather context ──────────────────────────────────────────────────────
   const sessionDigest = await gatherRecentSessionDigest(8)
@@ -176,7 +177,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   }
 
   // ── compose dream MD via main provider ──────────────────────────────────
-  options.onStatus?.('🌙 编织梦境…')
+  options.onStatus?.(t('🌙 编织梦境…', '🌙 Weaving the dream…'))
   let provider
   try {
     const provConfig = await resolveMainProviderConfig({ cwd: options.cwd, config: {} })
@@ -188,7 +189,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
       profileLabel: typeof profileLabel === 'string' ? profileLabel : undefined,
     })
   } catch (err) {
-    const result = { ok: false, reason: `no provider configured: ${err instanceof Error ? err.message : String(err)}` }
+    const result = { ok: false, reason: `${t('未配置 provider', 'no provider configured')}: ${err instanceof Error ? err.message : String(err)}` }
     await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
@@ -211,13 +212,13 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
       }
     }
   } catch (err) {
-    const result = { ok: false, reason: `compose failed: ${err instanceof Error ? err.message : String(err)}` }
+    const result = { ok: false, reason: `${t('梦境生成失败', 'compose failed')}: ${err instanceof Error ? err.message : String(err)}` }
     await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
 
   if (!dreamMd) {
-    const result = { ok: false, reason: 'empty dream response' }
+    const result = { ok: false, reason: t('梦境响应为空', 'empty dream response') }
     await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
@@ -232,11 +233,11 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   let imagePath: string | undefined
   let imageNote: string | undefined
   if (config.mode === 'vision') {
-    options.onStatus?.('🌙 渲染梦境图…')
+    options.onStatus?.(t('🌙 渲染梦境图…', '🌙 Rendering dream image…'))
     try {
       const imgPrompt = await deriveImagePrompt(provider, dreamMd, now)
       if (!imgPrompt) {
-        imageNote = 'image prompt derivation returned empty'
+        imageNote = t('图像 prompt 推导为空', 'image prompt derivation returned empty')
       } else {
         const visual = await resolveConfiguredVisualProvider(options.cwd, 'image')
         if (!visual) {
@@ -366,7 +367,8 @@ function extractPreview(dreamMd: string): string {
   return first.length > 140 ? `${first.slice(0, 137)}…` : first
 }
 
-export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale: UiLocale = 'zh-CN'): string {
+export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale: UiLocale = DEFAULT_UI_LOCALE): string {
+  const sep = pickLocale(locale, { zh: '：', en: ': ' })
   const lines = dreamMd.split('\n')
   const titleLine = lines.find(l => l.startsWith('# ')) ?? pickLocale(locale, { zh: '# 梦境', en: '# Dream' })
   const title = titleLine.replace(/^#\s*/, '').trim()
@@ -380,11 +382,10 @@ export function buildDreamBridgeText(dreamMd: string, entry: DreamEntry, locale:
     body,
     '',
     `_dream id: ${entry.id}_`,
-    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}：${entry.mdPath}`,
+    `${pickLocale(locale, { zh: '我的日记', en: 'My journal' })}${sep}${entry.mdPath}`,
     ...(entry.imagePath
       ? [
-          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}：${entry.imagePath}`,
-          `🖼  ${entry.imagePath}`,
+          `${pickLocale(locale, { zh: '梦境画面', en: 'Dream image' })}${sep}${entry.imagePath}`,
         ]
       : []),
   ].join('\n')

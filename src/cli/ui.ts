@@ -1,4 +1,5 @@
 import { stdout } from 'node:process'
+import { pathToFileURL } from 'node:url'
 
 export const PANEL_WIDTH = 70
 
@@ -190,7 +191,7 @@ function codeFenceLabel(lang: string): string | undefined {
 /** Apply inline Markdown styling: **bold**, *italic*, `code`, ~~strike~~ */
 function applyInlineStyles(line: string): string {
   if (!useAnsi()) return line
-  return line
+  return linkLocalPaths(line)
     // **bold** or __bold__
     .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => color(a ?? b, ANSI.bold + ANSI.white))
     // *italic* or _italic_
@@ -199,6 +200,22 @@ function applyInlineStyles(line: string): string {
     .replace(/`([^`]+?)`/g, (_, code) => color(code, ANSI.cyan))
     // ~~strikethrough~~
     .replace(/~~(.+?)~~/g, (_, s) => color(s, ANSI.dim))
+}
+
+const LOCAL_PATH_RE = /(?<![\w:/.-])(\/(?:[^\s`'"<>|，。；：！？、（）【】《》])+)/g
+
+function linkLocalPaths(line: string): string {
+  if (!useAnsi()) return line
+  return line.replace(LOCAL_PATH_RE, (pathText: string) => {
+    const trimmed = pathText.replace(/[),.;:!?]+$/, '')
+    const suffix = pathText.slice(trimmed.length)
+    try {
+      const href = pathToFileURL(trimmed).href
+      return `\x1b]8;;${href}\x1b\\${trimmed}\x1b]8;;\x1b\\${suffix}`
+    } catch {
+      return pathText
+    }
+  })
 }
 
 /** Full terminal Markdown renderer */

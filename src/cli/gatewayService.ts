@@ -451,7 +451,7 @@ export async function runGatewayDaemon(options: { cwd: string; permissionMode?: 
         platform: 'cli',
         direction: 'outbound',
         targetLabel: 'Dream System',
-        text: payload.text + (payload.imagePath ? `\n🖼  ${payload.imagePath}` : ''),
+        text: payload.text,
       })
       return 1
     },

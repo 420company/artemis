@@ -474,7 +474,7 @@ export async function runCli(argv: string[]): Promise<void> {
               platform: 'cli',
               direction: 'outbound',
               targetLabel: 'Dream System',
-              text: payload.text + (payload.imagePath ? `\n🖼  ${payload.imagePath}` : ''),
+              text: payload.text,
             })
           }
         }

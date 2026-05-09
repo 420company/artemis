@@ -20,6 +20,7 @@
 import { composeDream } from './dreamComposer.js'
 import { loadDreamConfig } from './dreamStore.js'
 import type { UiLocale } from '../cli/locale.js'
+import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 
 let lastActivityAt = Date.now()
 let watcherInterval: NodeJS.Timeout | null = null
@@ -60,7 +61,7 @@ function isInNightWindow(now: Date, startHour: number, endHour: number): boolean
   return hour >= startHour || hour < endHour
 }
 
-export function startIdleWatcher(cwd: string, locale: UiLocale = 'zh-CN'): () => void {
+export function startIdleWatcher(cwd: string, locale: UiLocale = DEFAULT_UI_LOCALE): () => void {
   if (watcherInterval) return () => stopIdleWatcher()
 
   let daytimeRollIndex = 0
@@ -85,7 +86,7 @@ export function startIdleWatcher(cwd: string, locale: UiLocale = 'zh-CN'): () =>
 
     composeInFlight = true
     try {
-      onStatusCallback?.('🌙 dreaming…')
+      onStatusCallback?.(pickLocale(locale, { zh: '🌙 I\'m feeling trippy…', en: '🌙 dreaming…' }))
       const result = await composeDream({ cwd, trigger: 'idle-auto', locale, onStatus: onStatusCallback ?? undefined })
       onComposeCallback?.({
         ok: result.ok,

@@ -191,6 +191,8 @@ export type SummarizeFn = (prompt: string) => Promise<string>
 const SUMMARY_PROMPT = `\
 请将以下对话历史压缩为结构化摘要。
 
+目标：压缩后接手的 AI 必须能继续当前任务，不误改文件、不丢工具链、不忘验证。
+
 对话历史：
 {HISTORY}
 
@@ -200,15 +202,25 @@ const SUMMARY_PROMPT = `\
 \`\`\`json
 {
   "goal": "用户的总体目标",
+  "current_task": "当前正在处理的具体任务/用户最新要求",
   "completed": ["已完成事项1", "已完成事项2"],
   "in_progress": ["进行中事项"],
   "key_decisions": ["关键决策和结论"],
   "relevant_files": ["相关文件路径"],
+  "modified_files": ["已修改但可能尚未提交/发布的文件路径"],
+  "tools_and_commands": ["已经使用过且后续可能仍需要的工具或命令"],
+  "validation": ["已运行的验证及结果，或尚未验证的缺口"],
+  "risks": ["可能导致跑偏/误改/丢上下文的风险"],
   "next_steps": ["下一步行动"],
   "critical_context": "其他不可丢失的上下文"
 }
 \`\`\`
-摘要要精简，只保留最重要的信息，用中文输出。`
+摘要要精简，只保留最重要的信息，用中文输出。
+必须遵守：
+- 如果对话中出现明确路径、文件名、命令、工具名、错误信息、验证结果，尽量原样保留。
+- 如果用户最新要求改变了任务方向，必须写入 current_task。
+- 如果存在未完成的修改或尚未验证的改动，必须写入 in_progress、modified_files、validation 或 risks。
+- 不要编造未执行的工具结果或验证结论。`
 
 async function buildStructuredSummary(
   messages: SessionMessage[],
@@ -217,7 +229,7 @@ async function buildStructuredSummary(
 ): Promise<string> {
   const history = messages
     .map((m) => {
-      const limit = m.role === 'tool' && looksLikeToolFailure(m.content) ? 2_000 : 600
+      const limit = m.role === 'tool' && looksLikeToolFailure(m.content) ? 2_000 : m.role === 'user' ? 1_200 : 800
       return `[${m.role}]: ${m.content.slice(0, limit)}`
     })
     .join('\n\n---\n\n')
@@ -249,6 +261,7 @@ function formatSummary(obj: Record<string, unknown>): string {
   const arr  = (v: unknown) => Array.isArray(v) ? v as string[] : []
 
   if (obj.goal)            lines.push(`目标：${str(obj.goal)}`)
+  if (obj.current_task)    lines.push(`当前任务：${str(obj.current_task)}`)
   if (arr(obj.completed).length) {
     lines.push('已完成：'); arr(obj.completed).forEach(c => lines.push(`  · ${c}`))
   }
@@ -260,6 +273,17 @@ function formatSummary(obj: Record<string, unknown>): string {
   }
   if (arr(obj.relevant_files).length)
     lines.push(`相关文件：${arr(obj.relevant_files).join(', ')}`)
+  if (arr(obj.modified_files).length)
+    lines.push(`已修改文件：${arr(obj.modified_files).join(', ')}`)
+  if (arr(obj.tools_and_commands).length) {
+    lines.push('工具与命令：'); arr(obj.tools_and_commands).forEach(c => lines.push(`  · ${c}`))
+  }
+  if (arr(obj.validation).length) {
+    lines.push('验证：'); arr(obj.validation).forEach(c => lines.push(`  · ${c}`))
+  }
+  if (arr(obj.risks).length) {
+    lines.push('风险/注意：'); arr(obj.risks).forEach(c => lines.push(`  · ${c}`))
+  }
   if (arr(obj.next_steps).length) {
     lines.push('下一步：'); arr(obj.next_steps).forEach(c => lines.push(`  · ${c}`))
   }
