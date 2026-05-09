@@ -1,6 +1,6 @@
 # Artemis 使用说明 / User Guide
 
-当前版本：**0.2.37**  
+当前版本：**0.2.39**  
 GitHub：`https://github.com/420company/artemis`  
 npm：`artemis-code`  
 命令：`artemis`

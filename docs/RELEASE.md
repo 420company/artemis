@@ -8,7 +8,7 @@ This is the release path for publishing Artemis to GitHub and npm.
 - Default branch: `main`
 - npm package: `artemis-code`
 - CLI binary: `artemis` from `dist/cli.js`
-- Current prepared release: `0.2.37`
+- Current prepared release: `0.2.39`
 - README hero image: `assets/artemis-github-banner.png`
 
 ## Release Principle
@@ -119,7 +119,12 @@ artemis --help
 
 The reported version should match the Git tag and npm version.
 
-## Current 0.2.37 Notes
+## Current 0.2.39 Notes
+
+- Accurate context windows: `estimateContextLimit` now returns real context sizes for all 15+ provider families (Claude Opus 4.7/Sonnet 4.6 → 1M, Haiku 4.5 → 200K, Gemini 3.1 Pro → 2M, MiniMax M2.7/M2.5 → 1M, Codestral → 256K, Nova → 300K, Moonshot v1 variants → 8K/32K/128K, etc.).
+- Updated Claude models: Anthropic preset now lists Opus 4.7, Sonnet 4.6, Haiku 4.5 as the current line; all Claude references across OpenRouter, Copilot, Bedrock, Kilo, OpenCode presets unified to the 4.6/4.7 generation.
+
+## Previous 0.2.37 Notes
 
 - Relaxed provider connection probe: thinking models (GLM 5.1, Qwen reasoning variants, etc.) that prepend a chain-of-thought reasoning block before the literal "OK" reply no longer fail the connection test. The probe now accepts "OK" at the end of the response text.
 - Truncated long probe error messages (over 200 chars) for readability.
