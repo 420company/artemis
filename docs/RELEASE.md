@@ -8,7 +8,7 @@ This is the release path for publishing Artemis to GitHub and npm.
 - Default branch: `main`
 - npm package: `artemis-code`
 - CLI binary: `artemis` from `dist/cli.js`
-- Current prepared release: `0.2.36`
+- Current prepared release: `0.2.37`
 - README hero image: `assets/artemis-github-banner.png`
 
 ## Release Principle
@@ -119,7 +119,10 @@ artemis --help
 
 The reported version should match the Git tag and npm version.
 
-## Current 0.2.36 Notes
+## Current 0.2.37 Notes
+
+- Relaxed provider connection probe: thinking models (GLM 5.1, Qwen reasoning variants, etc.) that prepend a chain-of-thought reasoning block before the literal "OK" reply no longer fail the connection test. The probe now accepts "OK" at the end of the response text.
+- Truncated long probe error messages (over 200 chars) for readability.
 
 - Dream bridge text now shows human-readable filenames alongside full paths; hero/banner image paths aligned across all outputs.
 - Fixed dream local file links and Windows input handling so cross-platform dream workflows resolve correctly.
@@ -132,7 +135,10 @@ The reported version should match the Git tag and npm version.
 - Routed Saga and Seedance workflow text through the explicitly selected UI locale instead of inferring language from prompt contents.
 - Super Visual image-edit and segment-keyframe timeout handling so visual-generation stalls fail cleanly.
 
-## 当前 0.2.36 中文说明
+## 当前 0.2.37 中文说明
+
+- 放宽 provider 连接测试：思考型模型（GLM 5.1、Qwen 推理变体等）在字面 "OK" 回复前附带推理过程时不再判定连接失败。probe 现在接受回复文本末尾的 "OK"。
+- 过长的 probe 错误信息（超过 200 字符）会被截断以保持可读性。
 
 - 梦境桥接文本现在同时显示可读文件名和完整路径；hero/banner 图片路径在各输出中保持一致。
 - 修正梦境本地文件链接和 Windows 输入处理，跨平台梦境工作流现在正确解析。

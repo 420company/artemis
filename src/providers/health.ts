@@ -144,6 +144,23 @@ function normalizeProbeReply(text: string): string {
     .toUpperCase();
 }
 
+/**
+ * Some models (e.g. GLM 5.1 thinking, Qwen reasoning variants) prepend a
+ * chain-of-thought before the actual answer. The connection probe asks for
+ * "OK" — if the last non-whitespace token is "OK" (possibly after a long
+ * reasoning block), the connection is verified.
+ */
+function probeReplyLooksLikeOK(raw: string): boolean {
+  const normalized = normalizeProbeReply(raw);
+  if (normalized === 'OK') return true;
+  // Match "OK" at the end of the text, possibly after newlines / spaces
+  // from a preceding reasoning section.  Handles:
+  //   "... 2. Formulate the Output:\nOK"
+  //   "...最终答案：OK"
+  if (/(?:^|\s)OK$/.test(normalized)) return true;
+  return false;
+}
+
 export function inspectInlineProviderConfig(config: {
   protocol?: string;
   model?: string;
@@ -231,14 +248,16 @@ export async function probeProviderConfig(
     ]);
     const latencyMs = Date.now() - startedAt;
     const text = response.text.trim();
-    const normalizedText = normalizeProbeReply(text);
 
-    if (normalizedText !== 'OK') {
+    if (!probeReplyLooksLikeOK(text)) {
+      const normalizedText = normalizeProbeReply(text);
       return {
         ok: false,
         latencyMs,
         message: appendProbeDiagnosis(
-          `Provider responded, but the probe reply was "${text}" instead of "OK".`,
+          normalizedText
+            ? `Provider responded, but the probe reply was "${text.length > 200 ? text.slice(0, 200) + '…' : text}" instead of "OK".`
+            : 'Provider responded with an empty reply.',
           config,
           locale,
         ),
