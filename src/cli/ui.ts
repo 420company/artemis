@@ -37,8 +37,13 @@ export function color(text: string, code: string): string {
 }
 
 export function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+  return text
+    // OSC sequences, including OSC8 hyperlinks terminated by BEL or ST.
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, '')
+    // CSI SGR and similar ANSI sequences.
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
 }
 
 export function toPlainTextOutput(text: string): string {

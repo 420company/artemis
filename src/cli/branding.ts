@@ -277,7 +277,7 @@ function buildSystemInfo(opts: SystemInfoOpts): string {
   // 在第一行显示双模型状态
   const dualModeActive = !!brainModel
   rows.push(infoRow(
-    t('双模型模式', 'Dual-model mode'), 
+    t('双模型模式', 'Dual-model'), 
     dualModeActive ? t('开启', 'Enabled') : t('关闭', 'Disabled'), 
     dualModeActive ? [137, 180, 250] : [166, 227, 161],
     dualModeActive ? t('运行 /bifrost 关闭', 'Run /bifrost to disable') : t('运行 /bifrost 开启', 'Run /bifrost to enable')

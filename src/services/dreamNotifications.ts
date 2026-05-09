@@ -6,7 +6,6 @@ import type { ComposeDreamResult } from './dreamComposer.js'
 import { getDreamsRoot, type DreamEntry } from './dreamStore.js'
 import type { UiLocale } from '../cli/locale.js'
 import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
-import { formatLocalFileLink } from '../cli/ui.js'
 
 export const DREAM_SYSTEM_NAME = 'Dream System'
 
@@ -17,11 +16,11 @@ export const FIRST_DREAM_EN = 'Artemis is entering the dream system for the firs
 const FIRST_DREAM_MARKER_FILE = path.join(getDreamsRoot(), 'first-dream-shown.json')
 
 function formatDreamPathField(label: string, filePath: string): string {
-  return `${label}: ${formatLocalFileLink(filePath)}`
+  return `${label}: ${filePath}`
 }
 
 function formatDreamPathFieldWithSep(label: string, sep: string, filePath: string): string {
-  return `${label}${sep}${formatLocalFileLink(filePath)}`
+  return `${label}${sep}${filePath}`
 }
 
 function pickLocaleList(locale: UiLocale, values: { zh: string[]; en: string[] }): string[] {
