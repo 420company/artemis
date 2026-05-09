@@ -43,6 +43,13 @@ import type { UiLocale } from './locale.js'
 import { normalizeUiLocale } from './locale.js'
 import type { PermissionMode } from './parseArgs.js'
 import { findInstructionFiles } from './artemisMd.js'
+import {
+  startUpdateCheck,
+  awaitUpdateCheckOutcome,
+  maybePromptForUpdate,
+} from './updateCheck.js'
+import { createInteractivePromptIO } from './prompt.js'
+import { APP_VERSION } from '../appMeta.js'
 import { QueryEngine } from '../core/queryEngine.js'
 import { SecurityAuditSystem } from '../core/securityAuditSystem.js'
 import { executeAction } from '../tools/index.js'
@@ -81,6 +88,11 @@ export async function runCli(argv: string[]): Promise<void> {
     process.env.ARTEMIS_LOCALE ?? (settings.uiLocaleConfigured ? settings.uiLocale : undefined)
   )
   let suppressInitialNewbornOnce = false
+  const updateCheckedCommands = new Set(['chat', 'resume', 'run', 'athena', 'design', 'niko', 'contest', 'nidhogg'])
+  const shouldCheckForUpdates = updateCheckedCommands.has(options.command)
+  const updateCheckPromise = shouldCheckForUpdates
+    ? startUpdateCheck({ currentVersion: APP_VERSION })
+    : undefined
 
   // ── help ────────────────────────────────────────────────────────────────────
   if (options.command === 'help') {
@@ -178,6 +190,19 @@ export async function runCli(argv: string[]): Promise<void> {
     }
   }
 
+  const handleStartupUpdateCheck = async (): Promise<void> => {
+    if (!updateCheckPromise) return
+    const outcome = await awaitUpdateCheckOutcome(updateCheckPromise)
+    const result = await maybePromptForUpdate({
+      outcome,
+      locale,
+      promptIO: createInteractivePromptIO(),
+    })
+    if (result === 'updated') {
+      process.exit(0)
+    }
+  }
+
   // ── config ──────────────────────────────────────────────────────────────────
   if (options.command === 'config') {
     const configSubcommand = options.prompt?.trim().toLowerCase()
@@ -232,6 +257,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
   // ── resume ──────────────────────────────────────────────────────────────────
   if (options.command === 'resume') {
+    await handleStartupUpdateCheck()
     await runResumeCommand({ cwd: options.cwd, locale, sessionId: options.sessionId, settingsStore, permissionMode: options.permissionMode, autoDrive: options.autoDrive, model: options.model, maxTurns: options.maxTurns })
     return
   }
@@ -493,6 +519,8 @@ export async function runCli(argv: string[]): Promise<void> {
   const initialPrompt = workflowCommands.has(options.command)
     ? `/${options.command} ${options.prompt ?? ''}`.trim()
     : options.prompt
+
+  await handleStartupUpdateCheck()
 
   await runInteractive({
     cwd: options.cwd,
