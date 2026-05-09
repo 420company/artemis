@@ -97,6 +97,15 @@ const SHOW_CURSOR = '\x1b[?25h'
 const ENABLE_BRACKETED_PASTE = '\x1b[?2004h'
 const DISABLE_BRACKETED_PASTE = '\x1b[?2004l'
 
+export function shouldUseCookedLineInputForTest(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (platform !== 'win32') return false
+  if (env.ARTEMIS_WINDOWS_RAW_INPUT === '1') return false
+  return env.ARTEMIS_WINDOWS_COOKED_INPUT === '1'
+}
+
 function truncateToWidth(text: string, maxWidth: number): string {
   if (maxWidth <= 0) return ''
   if (stringWidth(stripAnsi(text)) <= maxWidth) return text
@@ -235,12 +244,10 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.footerHint = options.footerHint ?? ''
     this.onTextChange = options.onTextChange
     this.onToggleTranscript = options.onToggleTranscript
-    // Windows console hosts can drop raw-mode keypress events while still showing
-    // a blinking cursor, which makes the chat box look focused but impossible to
-    // type into. Use cooked line input on Windows by default so the console host
-    // owns text entry/IME and Artemis receives complete submitted lines. Keep a
-    // raw-mode escape hatch for terminals where per-key editing is known to work.
-    this.cookedLineInput = process.platform === 'win32' && process.env.ARTEMIS_WINDOWS_RAW_INPUT !== '1'
+    // Slash autocomplete, history navigation and overlay pickers all rely on
+    // per-key events. Keep Windows in raw mode by default; cooked mode is only an
+    // explicit compatibility escape hatch for broken console hosts.
+    this.cookedLineInput = shouldUseCookedLineInputForTest(process.platform, process.env)
   }
 
   read(): Promise<string | null> {

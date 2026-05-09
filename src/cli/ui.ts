@@ -1,6 +1,5 @@
 import { stdout } from 'node:process'
 import { pathToFileURL } from 'node:url'
-import path from 'node:path'
 
 export const PANEL_WIDTH = 70
 
@@ -205,12 +204,12 @@ function applyInlineStyles(line: string): string {
 
 const LOCAL_PATH_RE = /(?<![\w:/.-])(\/(?:[^\s`'"<>|，。；：！？、（）【】《》])+)/g
 
-export function formatLocalFileLink(filePath: string, label = path.basename(filePath)): string {
-  if (!useAnsi()) return label
+export function formatLocalFileLink(filePath: string): string {
+  if (!useAnsi()) return filePath
   try {
-    return `\x1b]8;;${pathToFileURL(filePath).href}\x1b\\${label}\x1b]8;;\x1b\\`
+    return `\x1b]8;;${pathToFileURL(filePath).href}\x1b\\${filePath}\x1b]8;;\x1b\\`
   } catch {
-    return label
+    return filePath
   }
 }
 
