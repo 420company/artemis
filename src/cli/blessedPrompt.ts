@@ -202,6 +202,8 @@ class TerminalPrompt implements BlessedPromptHandle {
   private transientLines: string[] = []
   private drawnFinalisedCount = 0
   private bottomZoneHeight = 0
+  private bottomZoneTopRow = 1
+  private bottomZoneTransientHeight = 0
   private cursorOffsetFromZoneTop = 0
   private menuItems: SlashMenuItem[] = []
   private menuIndex = 0
@@ -326,6 +328,8 @@ class TerminalPrompt implements BlessedPromptHandle {
       // clear input/prompt state and must not erase the user's scrollback.
       process.stdout.write(`${CSI}3J${CSI}2J${CSI}H`)
       this.bottomZoneHeight = 0
+      this.bottomZoneTopRow = 1
+      this.bottomZoneTransientHeight = 0
       this.cursorOffsetFromZoneTop = 0
     }
     this.render()
@@ -411,6 +415,8 @@ class TerminalPrompt implements BlessedPromptHandle {
     // have left the screen in any state — start clean and let render() rewrite
     // the finalised content from scratch.
     this.bottomZoneHeight = 0
+    this.bottomZoneTopRow = 1
+    this.bottomZoneTransientHeight = 0
     this.cursorOffsetFromZoneTop = 0
     this.drawnFinalisedCount = 0
 
@@ -438,6 +444,8 @@ class TerminalPrompt implements BlessedPromptHandle {
         const hardClear = process.platform === 'win32' ? `${CSI}3J${CSI}2J${CSI}H` : `${CSI}2J${CSI}H`
         process.stdout.write(`${CSI}0m${HIDE_CURSOR}${hardClear}`)
         this.bottomZoneHeight = 0
+        this.bottomZoneTopRow = 1
+        this.bottomZoneTransientHeight = 0
         this.cursorOffsetFromZoneTop = 0
         this.drawnFinalisedCount = 0
         this.render()
@@ -1149,12 +1157,16 @@ class TerminalPrompt implements BlessedPromptHandle {
     const cursorBoxRow = Math.max(0, Math.min(TerminalPrompt.INPUT_INNER_ROWS - 1, cursorVisibleRow))
     const cursorRowInZone = Math.max(0, Math.min(H_NEW - 1, inputBoxTopOffset + 1 + cursorBoxRow - cropFromTop))
     const cursorCol = Math.max(0, Math.min(cols - 1, 4 + cursorAbsColInLine))
+    const previousZoneHeight = this.bottomZoneHeight
+    const previousZoneTopRow = this.bottomZoneTopRow || (previousZoneHeight > 0 ? rows - previousZoneHeight + 1 : 1)
+    const previousTransientHeight = this.bottomZoneTransientHeight
+    const transientShrink = Math.max(0, previousTransientHeight - transientForDisplay.length)
 
     // ── Phase 1: wipe previous bottom zone ────────────────────────────────
     out.write(`${CSI}0m`)
     out.write(HIDE_CURSOR)
 
-    if (this.bottomZoneHeight > 0) {
+    if (previousZoneHeight > 0) {
       if (this.cursorOffsetFromZoneTop > 0) {
         out.write(`${CSI}${this.cursorOffsetFromZoneTop}F`)
       } else {
@@ -1189,9 +1201,18 @@ class TerminalPrompt implements BlessedPromptHandle {
     // ── Phase 3: position cursor at row T = rows - H_NEW + 1 ──────────────
     // R_w is where the cursor was after wipe. Phase 2 advanced it by
     // newRowsWritten, capped at `rows` (terminal scrolls when at bottom).
-    const R_w = (this.bottomZoneHeight > 0) ? rows - this.bottomZoneHeight + 1 : 1
+    const R_w = previousZoneHeight > 0 ? previousZoneTopRow : 1
     const R_after = Math.min(rows, R_w + newRowsWritten)
-    const T = rows - H_NEW + 1
+    const naturalT = rows - H_NEW + 1
+    // When a tall transient block (notably the reasoning cat) disappears, do
+    // not immediately snap the HUD/input zone back down to the terminal bottom.
+    // Snapping down leaves the released rows as visible blank space between the
+    // just-finalised assistant output and the next text. Keep the new zone top
+    // anchored where the old transient block began; normal later renders can
+    // drift back to the bottom as real finalised output scrolls in.
+    const T = transientShrink > 0
+      ? Math.max(1, Math.min(naturalT, previousZoneTopRow + Math.max(0, newRowsWritten)))
+      : naturalT
     if (R_after <= T) {
       // Position cursor at row T without writing blank lines into scrollback.
       // Using \r\n padding caused orphan blank rows in scrollback when the
@@ -1233,6 +1254,8 @@ class TerminalPrompt implements BlessedPromptHandle {
     if (cursorCol > 0) out.write(`${CSI}${cursorCol}C`)
 
     this.bottomZoneHeight = H_NEW
+    this.bottomZoneTopRow = T
+    this.bottomZoneTransientHeight = transientForDisplay.length
     this.cursorOffsetFromZoneTop = cursorRowInZone
 
     out.write(SHOW_CURSOR)
