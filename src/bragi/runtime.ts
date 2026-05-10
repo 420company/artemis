@@ -41,6 +41,8 @@ import { sendBragiImageBroadcast, sendBragiVideoBroadcast } from './imageBroadca
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
 import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
+import { executeAction } from '../tools/index.js'
+import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -520,6 +522,7 @@ export async function runRemoteCommand(
           'info',
         )
       }
+      const directSagaAction = sagaWorkflow.action
 
       if (!sagaTookOver) {
         const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
@@ -714,6 +717,52 @@ export async function runRemoteCommand(
               ? t('已发送最新梦境图片。', 'Sent the latest dream image.')
               : t('尝试发送最新梦境图片，但部分目标失败；详情见 CLI 日志。', 'Tried to send the latest dream image, but some targets failed; see CLI logs for details.')],
             storedSession: binding.storedSession,
+            permissionMode: binding.permissionMode,
+          }
+        }
+
+        if (directSagaAction) {
+          await opts.onProgress?.(t(
+            `🔧 正在直接运行工具：generate_long_video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
+            `🔧 Running tool directly: generate_long_video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
+          ), 'info')
+          const result = await executeAction(directSagaAction, {
+            cwd: commandCwd,
+            locale,
+            permissionMode: mapPermissionModeToToolAccess(binding.permissionMode),
+            sessionId: binding.storedSession.id,
+          })
+          const msg = t(
+            `${result.ok ? '✅' : '⚠️'} 工具${result.ok ? '完成' : '失败'}：generate_long_video${summarizeToolOutput(result.output)}`,
+            `${result.ok ? '✅' : '⚠️'} Tool ${result.ok ? 'completed' : 'failed'}: generate_long_video${summarizeToolOutput(result.output)}`,
+          )
+          await opts.onProgress?.(msg, result.ok ? 'info' : 'warn')
+
+          if (result.ok) {
+            const videoPaths = extractVideoPathsFromToolOutput('generate_long_video', result.output)
+            for (const videoPath of videoPaths) {
+              try {
+                const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
+                await broadcastToBridges({
+                  text: t('🎬 Saga 长视频已生成。', '🎬 Saga long video generated.'),
+                  videoPath,
+                  source: 'tool:generate_long_video',
+                })
+              } catch { /* best-effort video push */ }
+            }
+          }
+
+          const updated = {
+            ...binding.storedSession,
+            cwd: commandCwd,
+            updatedAt: new Date().toISOString(),
+          }
+          await store.save(updated)
+          return {
+            replies: [result.ok
+              ? t(`长视频生成完成。\n${truncate(result.output, 1200)}`, `Long video generation completed.\n${truncate(result.output, 1200)}`)
+              : t(`长视频生成失败：\n${truncate(result.output, 1200)}`, `Long video generation failed:\n${truncate(result.output, 1200)}`)],
+            storedSession: updated,
             permissionMode: binding.permissionMode,
           }
         }

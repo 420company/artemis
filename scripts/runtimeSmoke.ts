@@ -58,6 +58,7 @@ import {
   shouldPromoteBytePlusVideoModel,
 } from '../src/tools/visual/videoCapabilities.js'
 import { handleSeedanceMultimodalWorkflow as handleSeedanceMultimodalWorkflowRaw, hasExistingLocalMediaReference } from '../src/tools/visual/seedanceWorkflow.js'
+import { handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js'
 import {
   buildProvidedTurnaroundSafetyDerivativeStory,
   buildSegmentKeyframePrompt,
@@ -954,6 +955,55 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
     'generate_video: local video/audio references fail before API call without asset hosting',
     result.ok === false && String(result.output).includes('local video/audio references need Vidar asset hosting'),
     String(result.output),
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-saga-direct-action-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, BYTEPLUS_SEEDANCE_2_PRO_MODEL)
+  const key = `saga-direct-${Date.now()}`
+
+  const first = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key,
+    cwd: tmpDir,
+    text: '帮我生成一段长视频',
+    locale: 'zh-CN',
+  })
+  const second = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key,
+    cwd: tmpDir,
+    text: '20s',
+    locale: 'zh-CN',
+  })
+  const third = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key,
+    cwd: tmpDir,
+    text: '用这张照片的风格生成一段视频，用作VJ素材，要求迷幻，高维度，流体感，液态感要强，用分形艺术来创造，变化要多，要大，够迷幻。',
+    locale: 'zh-CN',
+  })
+  const fourth = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key,
+    cwd: tmpDir,
+    text: 'start',
+    locale: 'zh-CN',
+  })
+
+  assert(
+    'Saga workflow: confirmed bridge start returns direct generate_long_video action',
+    first.handled && second.handled && third.handled &&
+      !fourth.handled &&
+      fourth.action?.type === 'generate_long_video' &&
+      fourth.action.totalDuration === 20 &&
+      fourth.action.prompt.includes('[Artemis Saga long video workflow]') &&
+      fourth.action.story?.includes('VJ素材'),
+    JSON.stringify(fourth),
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })

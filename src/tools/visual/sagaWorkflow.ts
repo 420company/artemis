@@ -18,6 +18,7 @@ import {
 } from './sagaNarrative.js';
 import { isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
+import type { AgentAction } from '../../core/types.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
   return explicitLocale ?? DEFAULT_UI_LOCALE;
@@ -39,7 +40,7 @@ export type SagaWorkflowInput = {
 };
 
 export type SagaWorkflowOutcome =
-  | { handled: false; prompt?: string }
+  | { handled: false; prompt?: string; action?: Extract<AgentAction, { type: 'generate_long_video' }> }
   | { handled: true; reply: string };
 
 type SagaWorkflowStage = 'awaiting_initial_duration' | 'collecting_refs' | 'awaiting_protagonist_clarification' | 'awaiting_duration';
@@ -734,6 +735,34 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   return lines.join('\n');
 }
 
+function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, { type: 'generate_long_video' }> {
+  const prompt = buildGenerationPrompt(state);
+  const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
+  const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
+  const ratio = extractRatio(fullStory) ?? '16:9';
+  const projectIdMatch = prompt.match(/^projectId:\s*"([^"]+)"/m);
+  return {
+    type: 'generate_long_video',
+    prompt,
+    story: fullStory,
+    projectId: projectIdMatch?.[1] ?? `saga-${Date.now()}`,
+    totalDuration: targetDuration,
+    ratio,
+    assemblyMode: 'saga',
+    chainReferenceFrames: 'auto',
+    colorMatch: true,
+    generateAudio: true,
+    referenceImageUrls: [...state.referenceImageUrls],
+    referenceVideoUrls: [...state.referenceVideoUrls],
+    referenceAudioUrls: [...state.referenceAudioUrls],
+    referenceImagePaths: [...state.referenceImagePaths],
+    referenceVideoPaths: [...state.referenceVideoPaths],
+    referenceAudioPaths: [...state.referenceAudioPaths],
+    referenceNotes: [...state.referenceNotes],
+    ...(state.narrative ? { narrativeEntities: state.narrative } : {}),
+  };
+}
+
 // ─── Main entry ──────────────────────────────────────────────────────────
 
 async function isMultimodalCapable(cwd: string): Promise<boolean> {
@@ -831,7 +860,8 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
         }
         // High confidence — duration was confirmed before reference collection.
         WORKFLOWS.delete(key);
-        return { handled: false, prompt: buildGenerationPrompt(state) };
+        const action = buildGenerationAction(state);
+        return { handled: false, prompt: action.prompt, action };
       }
 
       // Acknowledge the refs and continue collecting
@@ -847,7 +877,8 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       }
       // Good — duration was confirmed before reference collection.
       WORKFLOWS.delete(key);
-      return { handled: false, prompt: buildGenerationPrompt(state) };
+      const action = buildGenerationAction(state);
+      return { handled: false, prompt: action.prompt, action };
     }
 
     if (state.stage === 'awaiting_duration') {
@@ -858,7 +889,8 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       }
       state.targetDuration = duration ?? estimateDuration(state.originalText);
       WORKFLOWS.delete(key);
-      return { handled: false, prompt: buildGenerationPrompt(state) };
+      const action = buildGenerationAction(state);
+      return { handled: false, prompt: action.prompt, action };
     }
   }
 
@@ -893,7 +925,8 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       WORKFLOWS.set(key, next);
       return { handled: true, reply: await buildRefAskMessage(next) };
     }
-    return { handled: false, prompt: buildGenerationPrompt(next) };
+    const action = buildGenerationAction(next);
+    return { handled: false, prompt: action.prompt, action };
   }
 
   next.stage = 'awaiting_initial_duration';
