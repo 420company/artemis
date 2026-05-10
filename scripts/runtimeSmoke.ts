@@ -1263,7 +1263,11 @@ function createBytePlusCodingPromptIO(state: { sawProtocolMenu: boolean }): Prom
         return options.choices[0]!.value;
       }
       if (options.title.includes('Choose model')) {
-        return options.choices.find((choice) => choice.label === 'seed-2-0-pro-260328')!.value;
+        // glm-5.1 is a genuine coding-family model; selecting it from the Coding
+        // profile should route to /api/coding/v3.  (seed-2-0-pro-260328 is a
+        // chat-family model that the new alignBytePlus logic correctly re-routes
+        // to /api/v3 even inside the Coding profile type.)
+        return options.choices.find((choice) => choice.label === 'glm-5.1')!.value;
       }
       throw new Error(`Unexpected prompt menu: ${options.title}`);
     },
@@ -2137,7 +2141,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'BytePlus coding preset: uses the coding OpenAI endpoint, keeps latest official model ids, and skips protocol prompts',
       profile?.profile.protocol === 'openai' &&
       profile.profile.baseUrl === 'https://ark.ap-southeast.bytepluses.com/api/coding/v3' &&
-      profile.profile.model === 'seed-2-0-pro-260328' &&
+      profile.profile.model === 'glm-5.1' &&
       state.sawProtocolMenu === false,
     `protocol=${profile?.profile.protocol} baseUrl=${profile?.profile.baseUrl} model=${profile?.profile.model} sawProtocol=${state.sawProtocolMenu}`,
   )

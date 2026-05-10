@@ -643,18 +643,22 @@ export async function promptForProviderProfile(
       );
       if (model === BACK) break;
       if (preset.id === 'byteplus') {
-        const aligned = resolved.bytePlusFamily
-          ? { ...alignBytePlus(protocol, finalBaseUrl, model), family: resolved.bytePlusFamily }
-          : alignBytePlus(protocol, finalBaseUrl, model);
-        if (resolved.bytePlusFamily === 'coding') {
-          aligned.protocol = protocol === 'messages' ? 'messages' : 'openai';
+        // alignBytePlus detects the correct family from the model name and
+        // routes to the right endpoint.  The user-chosen profile type
+        // (resolved.bytePlusFamily) is only a hint for the initial URL/protocol
+        // selection — it must NOT override the model-level routing, otherwise
+        // models like glm-5.1 (coding-only) get sent to /api/v3 (404) when
+        // the user picked the Chat profile type.
+        const aligned = alignBytePlus(protocol, finalBaseUrl, model);
+        if (aligned.family === 'coding') {
+          aligned.protocol = aligned.protocol === 'messages' ? 'messages' : 'openai';
           aligned.baseUrl = aligned.protocol === 'messages'
             ? 'https://ark.ap-southeast.bytepluses.com/api/coding'
             : 'https://ark.ap-southeast.bytepluses.com/api/coding/v3';
-        } else if (resolved.bytePlusFamily === 'chat') {
+        } else if (aligned.family === 'chat') {
           aligned.protocol = 'openai';
           aligned.baseUrl = 'https://ark.ap-southeast.bytepluses.com/api/v3';
-        } else if (resolved.bytePlusFamily === 'responses') {
+        } else if (aligned.family === 'responses') {
           aligned.protocol = 'responses';
           aligned.baseUrl = 'https://ark.ap-southeast.bytepluses.com/api/v3';
         }
