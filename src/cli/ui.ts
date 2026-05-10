@@ -32,6 +32,32 @@ function useAnsi(): boolean {
   return stdout.isTTY === true
 }
 
+/** Detect whether the terminal supports OSC 8 hyperlinks.
+ *  iTerm2, kitty, WezTerm, Ghostty, Windows Terminal 1.18+, etc. advertise
+ *  this via the `COLORTERM` env var or specific TERM_PROGRAM values.
+ *  When in doubt, skip hyperlinks — raw OSC 8 bytes corrupt terminals that
+ *  don't understand them (paths glue together, spurious CSI sequences appear). */
+let _osc8Supported: boolean | undefined = undefined
+function supportsOsc8Hyperlinks(): boolean {
+  if (_osc8Supported !== undefined) return _osc8Supported
+  if (!useAnsi()) { _osc8Supported = false; return false }
+  const colorterm = (process.env.COLORTERM ?? '').toLowerCase()
+  const termProg  = (process.env.TERM_PROGRAM ?? '').toLowerCase()
+  const term      = (process.env.TERM ?? '').toLowerCase()
+  _osc8Supported = (
+    colorterm === 'truecolor' || colorterm === '24bit' ||
+    termProg === 'iterm.app' || termProg === 'iterm2' ||
+    termProg === 'wezterm' ||
+    termProg === 'ghostty' ||
+    termProg === 'kitty' ||
+    termProg === 'alacritty' ||
+    term === 'xterm-kitty' ||
+    // Windows Terminal 1.18+ sets WT_SESSION
+    Boolean(process.env.WT_SESSION)
+  )
+  return _osc8Supported
+}
+
 export function color(text: string, code: string): string {
   return useAnsi() ? `${code}${text}${ANSI.reset}` : text
 }
@@ -210,7 +236,7 @@ function applyInlineStyles(line: string): string {
 const LOCAL_PATH_RE = /(?<![\w:/.-])(\/(?:[^\s`'"<>|，。；：！？、（）【】《》])+)/g
 
 export function formatLocalFileLink(filePath: string): string {
-  if (!useAnsi()) return filePath
+  if (!supportsOsc8Hyperlinks()) return filePath
   try {
     return `\x1b]8;;${pathToFileURL(filePath).href}\x1b\\${filePath}\x1b]8;;\x1b\\`
   } catch {
@@ -219,7 +245,7 @@ export function formatLocalFileLink(filePath: string): string {
 }
 
 function linkLocalPaths(line: string): string {
-  if (!useAnsi()) return line
+  if (!supportsOsc8Hyperlinks()) return line
   return line.replace(LOCAL_PATH_RE, (pathText: string) => {
     const trimmed = pathText.replace(/[),.;:!?]+$/, '')
     const suffix = pathText.slice(trimmed.length)

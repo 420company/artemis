@@ -607,7 +607,7 @@ function buildViewportLinesFromMessages(messages: SessionMessage[], cols: number
 
 type ScrollBlock =
   | { kind: 'user'; text: string; timestamp?: string }
-  | { kind: 'assistant'; text: string; timestamp?: string; pending?: boolean; pendingStartMs?: number; pendingPhase?: 'generating' | 'thinking'; pendingLiveTokens?: number; finalElapsedMs?: number; finalTokens?: number }
+  | { kind: 'assistant'; text: string; timestamp?: string; pending?: boolean; pendingStartMs?: number; pendingPhase?: 'generating' | 'thinking'; pendingLiveTokens?: number; finalElapsedMs?: number; finalTokens?: number; finalWasThinking?: boolean }
   | { kind: 'tool'; text: string; preserveAnsi?: boolean }
   | { kind: 'bridge'; role: ConversationRole; platform: BridgePlatform; targetLabel: string; text: string; timestamp?: string }
   | { kind: 'workflow'; label: string; text: string; pending?: boolean; pendingStartMs?: number }
@@ -715,6 +715,21 @@ function buildViewportLinesFromBlocks(
         assistantMeta.push(`${fmtTok(block.finalTokens)} tok`)
       }
       lines.push(buildTimelineMarker(ASSISTANT_GLYPH, TL.assistantDot, assistantMeta.length > 0 ? assistantMeta : undefined))
+      // When a thinking/reasoning phase was visible (cat animation), preserve
+      // a one-line summary so the content doesn't vanish into nothing on finalize.
+      if (block.finalWasThinking && !block.pending) {
+        const thinkMeta: string[] = []
+        if (typeof block.finalElapsedMs === 'number' && block.finalElapsedMs > 0) {
+          thinkMeta.push(formatElapsedShort(block.finalElapsedMs))
+        }
+        if (typeof block.finalTokens === 'number' && block.finalTokens > 0) {
+          thinkMeta.push(`${fmtTok(block.finalTokens)} tok`)
+        }
+        const thinkLabel = thinkMeta.length > 0
+          ? `推理 · Reasoning · ${thinkMeta.join(' · ')}`
+          : '推理 · Reasoning'
+        lines.push(`  ${tint('⠏', TL.assistantDot)} ${tint(thinkLabel, TL.meta)}`)
+      }
       // An empty finalized assistant block (no content, not pending) was
       // appearing as just a lone timestamp — invisible reply. Surface a dim
       // placeholder so the user knows the turn completed without content.
@@ -2471,6 +2486,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             const bragiData  = await bragiStore.load()
             hud.pluginCount  = Object.values(bragiData.platforms).filter(p => p?.enabled).length
           } catch { /* ignore */ }
+          prompt.forceRedraw()
         }
       }
       continue
@@ -2930,6 +2946,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             }
           }
         } catch { /* non-fatal */ }
+        prompt.forceRedraw()
       }
       // Re-run workspace trust dialog (matches initial-launch behavior)
       const trustResult = await prompt.releaseTerminal(() => runWorkspaceTrustDialog({
@@ -3062,6 +3079,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         hud.lastModel = arg
         hud.contextLimit = modelContextLimit
         appendSystemPanel(t('模型已切换', 'Model switched'), [`→ ${arg}`])
+        prompt.forceRedraw()
       }
       continue
     }
@@ -3142,6 +3160,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         t('当前主模型 (Execution): ', 'Current Main (Execution): ') + `\x1b[1;32m${main?.label ?? main?.id}\x1b[0m (${main?.model})`,
         t('当前副模型 (Brain): ', 'Current Brain (Raven): ') + `\x1b[1;36m${brain?.label ?? brain?.id}\x1b[0m (${brain?.model})`,
       ])
+      prompt.forceRedraw()
       continue
     }
 
@@ -4518,6 +4537,7 @@ async function handleTurn(
         timestamp: aiTimestamp,
         finalElapsedMs,
         finalTokens: livePendingTokens,
+        finalWasThinking: (pendingPhase as 'generating' | 'thinking') === 'thinking',
       })
       totalReply = totalReply ? `${totalReply}\n\n${accumulated}` : accumulated
     } else {
@@ -4697,6 +4717,7 @@ async function handleTurn(
           timestamp: aiTimestamp,
           finalElapsedMs,
           finalTokens: livePendingTokens,
+          finalWasThinking: (pendingPhase as 'generating' | 'thinking') === 'thinking',
         })
       } else {
         viewport.removeScrollBlock(assistantBlockIndex)
@@ -4711,6 +4732,7 @@ async function handleTurn(
         timestamp: aiTimestamp,
         finalElapsedMs,
         finalTokens: livePendingTokens,
+        finalWasThinking: (pendingPhase as 'generating' | 'thinking') === 'thinking',
       })
     }
     const assistantTextReturned = totalReply.trim().length > 0 || lastChunk.trim().length > 0

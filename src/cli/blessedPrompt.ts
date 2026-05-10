@@ -1191,8 +1191,16 @@ class TerminalPrompt implements BlessedPromptHandle {
     const R_after = Math.min(rows, R_w + newRowsWritten)
     const T = rows - H_NEW + 1
     if (R_after <= T) {
-      // Pad blank rows so zone bottoms out cleanly.
-      for (let i = 0; i < T - R_after; i++) out.write('\r\n')
+      // Position cursor at row T without writing blank lines into scrollback.
+      // Using \r\n padding caused orphan blank rows in scrollback when the
+      // transient zone (e.g. the thinking-cat animation) shrank between frames:
+      // the pad lines were already committed to scrollback and could never be
+      // reclaimed, leaving visible gaps between tool output blocks.
+      const moveDown = T - R_after
+      if (moveDown > 0) {
+        out.write('\r')
+        out.write(`${CSI}${moveDown}B`)
+      }
     } else {
       // Already past the target start row. Push content above row T into
       // scrollback by scrolling, then move cursor up to T. Writing H_NEW-1

@@ -95,9 +95,9 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'seed-1-6-flash-250715': 128_000,
   'ark-code-latest': 128_000,
   'bytedance-seed-code': 128_000,
-  'glm-5.1': 128_000,
-  'glm-5-turbo': 128_000,
-  'glm-5': 128_000,
+  'glm-5.1': 1_000_000,
+  'glm-5-turbo': 1_000_000,
+  'glm-5': 1_000_000,
   'glm-4.7': 128_000,
   'glm-4.7-flash': 128_000,
   'glm-4.7-flashx': 128_000,
@@ -177,6 +177,7 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('moonshot')) return 128_000
 
   // ── GLM / Zhipu ──────────────────────────────────────────────────────────
+  if (m.includes('glm-5')) return 1_000_000
   if (m.includes('glm')) return 128_000
 
   // ── Qwen / DashScope ─────────────────────────────────────────────────────
