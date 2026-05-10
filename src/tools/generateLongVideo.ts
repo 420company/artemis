@@ -469,7 +469,7 @@ function isAudioSafetyError(message: string | undefined): boolean {
 
 function isImagePrivacyError(message: string | undefined): boolean {
   if (!message) return false;
-  return /InputImageSensitiveContentDetected|Invalid image file in references|invalid image|image file.*invalid|input image.*sensitive|input image.*privacy|input image may contain real person|input.*moderation|input.*safety|expected at most one first frame|expected at most \d+ (?:first|last|reference)/i.test(message);
+  return /InputImageSensitiveContentDetected|Invalid image file in references|invalid image|image file.*invalid|input image.*sensitive|input image.*privacy|input image may contain real person|input.*moderation|input.*safety|expected at most one first frame|expected at most \d+ (?:first|last|reference)|first\/last frame.*cannot be mixed|content cannot be mixed with reference/i.test(message);
 }
 
 // BytePlus / Seedance frequently leaves a task in `running` state past the
@@ -1058,17 +1058,21 @@ export async function executeGenerateLongVideo(
           referenceAudioUrls: segment.index === 1 ? action.referenceAudioUrls : undefined,
           referenceVideoPaths: segment.index === 1 ? action.referenceVideoPaths : undefined,
           referenceAudioPaths: segment.index === 1 ? action.referenceAudioPaths : undefined,
-          // Segment 1 may use a user-supplied literal first frame. Segments
-          // 2..N MUST start from the previous segment's actual tail frame,
-          // not merely use it as a loose reference image. This is the cut-point
-          // relay: seg2 opens on seg1's final frame, seg3 opens on seg2's final
-          // frame, etc. We still include the generated keyframe / turnaround as
-          // reference_image for identity and composition, but first_frame is the
-          // hard temporal handoff anchor when the provider accepts it.
+          // Segment 1 may use a user-supplied literal first frame (role:"first_frame").
+          // Segments 2..N chain from the previous segment's tail frame.
+          // BytePlus Seedance 2.0 does NOT allow mixing role:"first_frame" with
+          // role:"reference_image" in the same request (HTTP 400:
+          // "first/last frame content cannot be mixed with reference media
+          // content"). Since segments 2..N always carry reference images
+          // (keyframe + optional user refs), we must NOT place the chain frame
+          // into firstFrameImagePaths; instead we route it through
+          // referenceImagePaths as role:"reference_image" (see chainPaths
+          // below). This gives up the strict "open on this exact frame"
+          // semantic of first_frame but is the only way to keep both the
+          // chain continuity image and the identity/composition reference
+          // images in the same API call.
           firstFrameImageUrls: segment.index === 1 ? action.firstFrameImageUrls : undefined,
-          firstFrameImagePaths: segment.index === 1
-            ? action.firstFrameImagePaths
-            : (chainEnabled && previousLastFramePath ? [previousLastFramePath] : undefined),
+          firstFrameImagePaths: segment.index === 1 ? action.firstFrameImagePaths : undefined,
           lastFrameImageUrls: segment.index === segments.length ? action.lastFrameImageUrls : undefined,
           lastFrameImagePaths: segment.index === segments.length ? action.lastFrameImagePaths : undefined,
           watermark: action.watermark,
@@ -1105,11 +1109,15 @@ export async function executeGenerateLongVideo(
           //     because the previous segment was rendered from illustrated refs)
           const segmentKeyframe = segmentKeyframePaths.get(segment.index);
           const keyframePaths = segmentKeyframe ? [segmentKeyframe] : [];
-          // The previous tail frame is now sent as role:"first_frame" via
-          // baseReq for a literal opening anchor. Do not duplicate it here as
-          // reference_image; duplicate image roles make some providers reject
-          // the request or dilute which image is the actual cut-point anchor.
-          const chainPaths: string[] = [];
+          // Chain frame is sent as role:"reference_image" (not first_frame)
+          // because BytePlus rejects mixing first_frame + reference_image
+          // in the same request. Putting it here lets the video model see
+          // both the identity keyframe and the temporal continuation frame.
+          // Retry logic (usingChain=false) strips this from the reference
+          // array on privacy-filter failures.
+          const chainPaths: string[] = usingChain && segment.index > 1 && previousLastFramePath
+            ? [previousLastFramePath]
+            : [];
           const referenceImagePaths = [
             ...keyframePaths,
             ...chainPaths,
