@@ -95,6 +95,8 @@ const CSI = '\x1b['
 const OSC = '\x1b]'
 const HIDE_CURSOR = '\x1b[?25l'
 const SHOW_CURSOR = '\x1b[?25h'
+const DISABLE_AUTOWRAP = '\x1b[?7l'
+const ENABLE_AUTOWRAP = '\x1b[?7h'
 const ENABLE_BRACKETED_PASTE = '\x1b[?2004h'
 const DISABLE_BRACKETED_PASTE = '\x1b[?2004l'
 
@@ -1211,10 +1213,18 @@ class TerminalPrompt implements BlessedPromptHandle {
     }
 
     // ── Phase 4: draw the bottom zone in place ────────────────────────────
+    // The HUD separators and input box intentionally span the terminal width.
+    // Some terminals auto-wrap when the last column is written, which leaves
+    // the cursor one row lower than our bookkeeping and causes ghost rule lines
+    // to cover the prompt/status area on the next redraw. Disable autowrap only
+    // for the pinned zone and clear each row before drawing it.
+    out.write(DISABLE_AUTOWRAP)
     for (let i = 0; i < zoneLines.length; i++) {
+      out.write(`${CSI}2K`)
       out.write(zoneLines[i] ?? '')
       if (i < zoneLines.length - 1) out.write('\r\n')
     }
+    out.write(ENABLE_AUTOWRAP)
 
     // ── Phase 5: park cursor in the input field ───────────────────────────
     const moveUp = (zoneLines.length - 1) - cursorRowInZone
