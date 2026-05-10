@@ -8,6 +8,12 @@ import {
   isBytePlusProvider,
   resolveVideoModelCapabilities,
 } from './videoCapabilities.js';
+import {
+  analyzeNarrative,
+  buildSagaConstitution,
+  narrativeKeywordFallback,
+  type NarrativeEntities,
+} from './sagaNarrative.js';
 import { isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 
@@ -43,6 +49,7 @@ type SeedanceWorkflowState = {
   prompt: string;
   originalPrompt: string;
   dreamSource?: SeedanceDreamSource;
+  dreamNarrative?: NarrativeEntities;
   referenceImageUrls: string[];
   referenceVideoUrls: string[];
   referenceAudioUrls: string[];
@@ -277,6 +284,23 @@ function buildDreamVideoPrompt(dream: SeedanceDreamSource, userRequest: string):
   ].join('\n');
 }
 
+async function analyzeDreamNarrative(cwd: string, dream: SeedanceDreamSource): Promise<NarrativeEntities> {
+  const analysisText = [
+    `[Artemis latest dream journal: ${dream.id}]`,
+    'Analyze this dream journal before video generation. Identify the central “god” / protagonist: human, animal, creature, object, place, weather, abstract symbol, or recurring motif. Extract parameters that make the later video orbit that god rather than random scenery.',
+    dream.body
+      .replace(/^<!--[^]*?-->\s*/m, '')
+      .replace(/### (?:学到了什么|What I learned)[\s\S]*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 1600),
+  ].join('\n');
+  return await analyzeNarrative({ cwd, userText: analysisText }) ?? narrativeKeywordFallback({
+    userText: analysisText,
+    hasFaceLikelyInImages: false,
+  });
+}
+
 function buildOfferMessage(scope: SeedanceWorkflowScope, locale: UiLocale, hasUnusableAttachment: boolean, dreamSource?: SeedanceDreamSource): string {
   const attachmentNote = hasUnusableAttachment
     ? pickLocale(locale, {
@@ -408,8 +432,20 @@ function isExplicitSeedanceVideoRequest(text: string): boolean {
 
 function buildGenerationPrompt(state: SeedanceWorkflowState): string {
   const dreamVideoPath = state.dreamSource ? buildDreamPaths(state.dreamSource.id).videoPath : undefined;
+  const dreamNarrativeBlock = state.dreamNarrative
+    ? [
+        '',
+        '[Dream journal protagonist / god analysis — authoritative]',
+        buildSagaConstitution(state.dreamNarrative),
+        `[Dream Video Narrative Entity Map]\n${JSON.stringify(state.dreamNarrative, null, 2)}`,
+        state.dreamNarrative.protagonist.type !== 'character'
+          ? 'Non-human god rule: do not force a generic human narrator. Make the camera orbit the identified object / creature / environment / symbol using macro, subjective, environmental, or symbolic point-of-view shots that keep it alive as the central subject.'
+          : 'Character god rule: preserve the same protagonist identity and do not replace them with a different character between shots.',
+      ].join('\n')
+    : '';
   const lines = [
     state.prompt,
+    dreamNarrativeBlock,
     '',
     '[Seedance 2.0 Pro multimodal video workflow]',
     `Use generate_video with model "${BYTEPLUS_SEEDANCE_2_PRO_MODEL}".`,
@@ -496,6 +532,7 @@ export async function handleSeedanceMultimodalWorkflow(
 
     if (state.stage === 'choosing_dream_source') {
       if (DREAM_SOURCE_YES_RE.test(text) && state.dreamSource) {
+        state.dreamNarrative = await analyzeDreamNarrative(state.cwd, state.dreamSource);
         state.prompt = buildDreamVideoPrompt(state.dreamSource, state.originalPrompt);
         state.stage = 'choosing_duration';
         state.updatedAt = Date.now();

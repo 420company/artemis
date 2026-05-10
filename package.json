@@ -1,6 +1,6 @@
 {
   "name": "artemis-code",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "description": "Artemis — AI assistant CLI by www.420.company",
   "main": "./dist/index.js",
   "type": "module",

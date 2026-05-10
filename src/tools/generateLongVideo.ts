@@ -15,9 +15,12 @@ import { executeGenerateVideo } from './generateVideo.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { describeUserImageWithVision, generateSegmentKeyframe, maybeGenerateSuperVisualReference } from './visual/superVisualMode.js';
 import {
+  analyzeNarrative,
   appendNarrativeLibraryEntry,
+  buildSagaConstitution,
   runNarrativeCritic,
   rewriteShotWithDialogue,
+  narrativeKeywordFallback,
   sanitizeForVideoProvider,
   diffSanitize,
   type NarrativeEntities,
@@ -676,7 +679,29 @@ export async function executeGenerateLongVideo(
       : false;
     // Coerce narrativeEntities once and use it everywhere downstream
     // (constitution rendering, accessoryLock, keyframe generation, critic).
-    const narrativeEntities = coerceNarrativeEntities(action.narrativeEntities);
+    let narrativeEntities = coerceNarrativeEntities(action.narrativeEntities);
+    if (!narrativeEntities) {
+      // Direct tool calls and dream-video callers may bypass the interactive
+      // Saga workflow. Still run the same "god/protagonist" analysis here so
+      // every long-video path gets one central subject and world model before
+      // shot planning, critic checks, keyframes, and continuity prompts.
+      narrativeEntities = await analyzeNarrative({
+        cwd: context.cwd,
+        userText: story,
+        imagePaths: userReferenceImagePaths,
+      }) ?? narrativeKeywordFallback({
+        userText: story,
+        hasFaceLikelyInImages: hasGlobalUserImageReferences,
+      });
+      story = [
+        story,
+        '',
+        buildSagaConstitution(narrativeEntities),
+        '',
+        `[Saga Narrative Entity Map — internally resolved for this generate_long_video call]\n${JSON.stringify(narrativeEntities, null, 2)}`,
+      ].join('\n');
+      toolLog(`🧠 Saga: 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})。`);
+    }
     // NOTE: role:"first_frame" turned out NOT to bypass BytePlus's real-
     // person privacy filter empirically (the filter is image-classifier-
     // based and ignores the role tag). Saga therefore uses ONLY
@@ -1033,6 +1058,19 @@ export async function executeGenerateLongVideo(
           referenceAudioUrls: segment.index === 1 ? action.referenceAudioUrls : undefined,
           referenceVideoPaths: segment.index === 1 ? action.referenceVideoPaths : undefined,
           referenceAudioPaths: segment.index === 1 ? action.referenceAudioPaths : undefined,
+          // Segment 1 may use a user-supplied literal first frame. Segments
+          // 2..N MUST start from the previous segment's actual tail frame,
+          // not merely use it as a loose reference image. This is the cut-point
+          // relay: seg2 opens on seg1's final frame, seg3 opens on seg2's final
+          // frame, etc. We still include the generated keyframe / turnaround as
+          // reference_image for identity and composition, but first_frame is the
+          // hard temporal handoff anchor when the provider accepts it.
+          firstFrameImageUrls: segment.index === 1 ? action.firstFrameImageUrls : undefined,
+          firstFrameImagePaths: segment.index === 1
+            ? action.firstFrameImagePaths
+            : (chainEnabled && previousLastFramePath ? [previousLastFramePath] : undefined),
+          lastFrameImageUrls: segment.index === segments.length ? action.lastFrameImageUrls : undefined,
+          lastFrameImagePaths: segment.index === segments.length ? action.lastFrameImagePaths : undefined,
           watermark: action.watermark,
           maxPolls: action.maxPolls,
           pollIntervalMs: action.pollIntervalMs,
@@ -1067,7 +1105,11 @@ export async function executeGenerateLongVideo(
           //     because the previous segment was rendered from illustrated refs)
           const segmentKeyframe = segmentKeyframePaths.get(segment.index);
           const keyframePaths = segmentKeyframe ? [segmentKeyframe] : [];
-          const chainPaths = usingChain && previousLastFramePath ? [previousLastFramePath] : [];
+          // The previous tail frame is now sent as role:"first_frame" via
+          // baseReq for a literal opening anchor. Do not duplicate it here as
+          // reference_image; duplicate image roles make some providers reject
+          // the request or dilute which image is the actual cut-point anchor.
+          const chainPaths: string[] = [];
           const referenceImagePaths = [
             ...keyframePaths,
             ...chainPaths,

@@ -12,6 +12,11 @@ import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { buildDirectedVideoPrompt } from '../tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider } from '../tools/visual/videoParams.js'
 import {
+  analyzeNarrative,
+  buildSagaConstitution,
+  narrativeKeywordFallback,
+} from '../tools/visual/sagaNarrative.js'
+import {
   buildVisualSetupRequiredMessage,
   describeVisualProvider,
   resolveConfiguredVisualProvider,
@@ -120,7 +125,15 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
     model,
   )
   const ratio = options.ratio ?? DEFAULT_DREAM_VIDEO_RATIO
-  const prompt = buildDreamVideoSourcePrompt(selected.entry, selected.body)
+  options.onStatus?.(t('🌙 分析梦境日记的主角 / “上帝”…', '🌙 Analyzing the dream journal protagonist / “god”…'))
+  const narrative = await analyzeNarrative({
+    cwd: options.cwd,
+    userText: buildDreamVideoAnalysisText(selected.entry, selected.body),
+  }) ?? narrativeKeywordFallback({
+    userText: selected.body,
+    hasFaceLikelyInImages: false,
+  })
+  const prompt = buildDreamVideoSourcePrompt(selected.entry, selected.body, narrative)
   const directed = buildDirectedVideoPrompt({
     prompt,
     provider: videoConfig.provider,
@@ -197,18 +210,45 @@ async function selectDream(id?: string): Promise<{ entry: DreamEntry; body: stri
   return { entry, body }
 }
 
-function buildDreamVideoSourcePrompt(entry: DreamEntry, body: string): string {
+function buildDreamVideoAnalysisText(entry: DreamEntry, body: string): string {
+  return [
+    `Dream id: ${entry.id}`,
+    'Analyze this Artemis dream journal before video generation. Identify the central “god” / protagonist: it may be a human, animal, creature, object, place, weather system, abstract symbol, or recurring motif. Extract world-model parameters for a coherent dream video.',
+    cleanDreamBody(body, 1600),
+  ].join('\n')
+}
+
+function cleanDreamBody(body: string, maxChars: number): string {
+  return body
+    .replace(/^<!--[^]*?-->\s*/m, '')
+    .replace(/### (?:学到了什么|What I learned)[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxChars)
+}
+
+function buildDreamVideoSourcePrompt(entry: DreamEntry, body: string, narrative: Awaited<ReturnType<typeof analyzeNarrative>>): string {
   const compactBody = body
     .replace(/^<!--[^]*?-->\s*/m, '')
     .replace(/### (?:学到了什么|What I learned)[\s\S]*$/i, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 1200)
+  const resolvedNarrative = narrative ?? narrativeKeywordFallback({ userText: compactBody, hasFaceLikelyInImages: false })
+  const protagonist = resolvedNarrative.protagonist
+  const nonHumanPerspective = protagonist.type !== 'character'
+    ? [
+        'Non-human protagonist rule: the camera and story perspective must orbit the identified god directly. If the god is an object, creature, place, atmosphere, or symbol, do NOT force a generic human narrator. Use object-level / creature-level / environment-level cinematography: macro tracking, subjective motion, surrounding reactions, symbolic point-of-view, and recurring visual rhymes that make the non-human god feel intentional and alive.',
+      ]
+    : []
 
   return [
     `Dream id: ${entry.id}`,
-    'Create a poetic cinematic video from this Artemis dream.',
+    'Create a poetic cinematic video from this Artemis dream. FIRST treat the dream journal as source material, then obey the extracted protagonist / “god” model below.',
+    buildSagaConstitution(resolvedNarrative),
+    `[Dream Video Narrative Entity Map]\n${JSON.stringify(resolvedNarrative, null, 2)}`,
+    ...nonHumanPerspective,
     compactBody,
-    'Visual priorities: preserve the dream symbols, restrained motion, clear focal point, soft cinematic lighting, coherent physical movement, no readable text, no logos, no UI.',
+    'Visual priorities: preserve the dream symbols, restrained motion, clear focal point, soft cinematic lighting, coherent physical movement, no readable text, no logos, no UI. Every shot must keep orbiting the identified god/protagonist, not a random new subject.',
   ].join(' ')
 }
