@@ -2897,7 +2897,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       resetSession()
 
       // Re-run the first-run language chooser before onboarding.
-      prompt.clearBuffer()
+      prompt.clearBuffer({ hard: true })
       locale = await prompt.releaseTerminal(() => runFirstRunWelcome({ settingsStore: opts.settingsStore }))
 
       // Re-run onboarding

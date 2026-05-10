@@ -544,8 +544,8 @@ assert(
   'dream notifications: bridge text keeps the full dream body and full local paths',
   dreamBridgeText.includes('🌙 桥上晚潮') &&
     dreamBridgeText.includes('第二段梦境仍然完整保留') &&
-    dreamBridgeText.includes('我的日记：/Users/goat/.artemis/dreams/2026-05-06noon1533.md') &&
-    dreamBridgeText.includes('梦境画面：/Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
+    dreamBridgeText.includes('我的日记： noon1533.md /Users/goat/.artemis/dreams/2026-05-06noon1533.md') &&
+    dreamBridgeText.includes('梦境画面： noon1533.png /Users/goat/.artemis/dreams/2026-05-06noon1533.png') &&
     !dreamBridgeText.includes('2026-05-06noon1533.md/Users/') &&
     !dreamBridgeText.includes('梦境片段') &&
     !dreamBridgeText.includes('刚刚好像') &&
@@ -1672,11 +1672,12 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   )
   assert(
     'workflow routing: /team only routes to executable workflow modes',
-    teamSource.includes("choice: 'niko'") &&
-      workflowSource.includes("mode === 'design'") &&
-      workflowSource.includes("mode === 'athena'") &&
+    teamSource.includes("const VALID_CHOICES") &&
+      teamSource.includes("'niko',") &&
       workflowSource.includes("mode === 'nidhogg'") &&
-      workflowSource.includes("mode === 'contest'"),
+      workflowSource.includes('buildWorkflowHint(mode') &&
+      workflowSource.includes(': await runAgent(') &&
+      workflowSource.includes("completionContract: 'requires_execution_evidence'"),
   )
   assert(
     'interactive routing: path intent is trusted before team/workflow/direct execution',

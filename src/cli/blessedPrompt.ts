@@ -54,7 +54,7 @@ export interface BlessedPromptHandle {
   dispose(): void
   mountViewport(): void
   forceRedraw(): void
-  clearBuffer(): void
+  clearBuffer(options?: { hard?: boolean }): void
   history: string[]
   releaseTerminal<T>(fn: () => Promise<T>): Promise<T>
   confirm(options: { title: string, lines?: string[], confirmLabel?: string, cancelLabel?: string, timeoutMs?: number }): Promise<boolean>
@@ -301,7 +301,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.render()
   }
 
-  clearBuffer(): void {
+  clearBuffer(options: { hard?: boolean } = {}): void {
     this.submittedQueue = []
     this.inputValue = ''
     this.inputCursor = 0
@@ -310,13 +310,18 @@ class TerminalPrompt implements BlessedPromptHandle {
     this.historyDraft = ''
     this.onTextChange?.('')
 
-    this.finalisedLines = []
     this.transientLines = []
-    this.drawnFinalisedCount = 0
 
-    if (process.stdout.isTTY) {
-      // Hard wipe — visible screen + scrollback. Used by /clear and /newborn
-      // so the new session starts on a truly empty terminal.
+    if (options.hard) {
+      this.finalisedLines = []
+      this.drawnFinalisedCount = 0
+    }
+
+    if (options.hard && process.stdout.isTTY) {
+      // Hard wipe — visible screen + scrollback. This must only be used for
+      // explicit destructive screen resets (for example /newborn). Normal
+      // command flows (/config, /bifrost, setup wizards) call clearBuffer() to
+      // clear input/prompt state and must not erase the user's scrollback.
       process.stdout.write(`${CSI}3J${CSI}2J${CSI}H`)
       this.bottomZoneHeight = 0
       this.cursorOffsetFromZoneTop = 0
@@ -650,7 +655,7 @@ class TerminalPrompt implements BlessedPromptHandle {
         this.render()
         return
       }
-      if (key.name === 'tab' || key.name === 'return' || key.name === 'enter') {
+      if (key.name === 'tab') {
         this.applyMenuSelection()
         return
       }
@@ -719,8 +724,13 @@ class TerminalPrompt implements BlessedPromptHandle {
         return
       }
       if (this.menuItems.length > 0 && this.inputValue.startsWith('/') && !this.inputValue.includes('\n')) {
-        this.applyMenuSelection()
-        return
+        const exact = this.menuItems.some(item => item.value.toLowerCase() === this.inputValue.trim().toLowerCase())
+        if (exact) {
+          this.menuItems = []
+        } else {
+          this.applyMenuSelection()
+          return
+        }
       }
       const submitted = this.inputValue.replace(/\r\n?/g, '\n').replace(/\n+$/, '')
       this.inputValue = ''

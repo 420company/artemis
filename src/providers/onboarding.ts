@@ -58,6 +58,7 @@ type ResolvedPreset = {
   defaultProtocol?: ProviderProtocol;
   baseUrls?: Partial<Record<ProviderProtocol, string[]>>;
   apiKeyHeader?: ProviderApiKeyHeader;
+  bytePlusFamily?: BytePlusFamily;
 };
 
 type BytePlusFamily =
@@ -413,6 +414,7 @@ async function resolvePreset(
       baseUrls: {
         openai: ['https://ark.ap-southeast.bytepluses.com/api/coding/v3'],
       },
+      bytePlusFamily: 'coding',
     };
   }
 
@@ -440,6 +442,7 @@ async function resolvePreset(
       ],
       defaultProtocol: 'openai',
       baseUrls: { openai: ['https://ark.ap-southeast.bytepluses.com/api/v3'] },
+      bytePlusFamily: 'chat',
     };
   }
 
@@ -466,6 +469,7 @@ async function resolvePreset(
     ],
     defaultProtocol: 'responses',
     baseUrls: { responses: ['https://ark.ap-southeast.bytepluses.com/api/v3'] },
+    bytePlusFamily: 'responses',
   };
 }
 
@@ -639,7 +643,21 @@ export async function promptForProviderProfile(
       );
       if (model === BACK) break;
       if (preset.id === 'byteplus') {
-        const aligned = alignBytePlus(protocol, finalBaseUrl, model);
+        const aligned = resolved.bytePlusFamily
+          ? { ...alignBytePlus(protocol, finalBaseUrl, model), family: resolved.bytePlusFamily }
+          : alignBytePlus(protocol, finalBaseUrl, model);
+        if (resolved.bytePlusFamily === 'coding') {
+          aligned.protocol = protocol === 'messages' ? 'messages' : 'openai';
+          aligned.baseUrl = aligned.protocol === 'messages'
+            ? 'https://ark.ap-southeast.bytepluses.com/api/coding'
+            : 'https://ark.ap-southeast.bytepluses.com/api/coding/v3';
+        } else if (resolved.bytePlusFamily === 'chat') {
+          aligned.protocol = 'openai';
+          aligned.baseUrl = 'https://ark.ap-southeast.bytepluses.com/api/v3';
+        } else if (resolved.bytePlusFamily === 'responses') {
+          aligned.protocol = 'responses';
+          aligned.baseUrl = 'https://ark.ap-southeast.bytepluses.com/api/v3';
+        }
         if (aligned.family === 'image' || aligned.family === 'video' || aligned.family === 'embedding') {
           promptIO?.write(
             buildPanel('Provider guardrail', [
