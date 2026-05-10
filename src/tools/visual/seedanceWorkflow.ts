@@ -250,6 +250,33 @@ function extractDuration(text: string): number | undefined {
   return Math.min(MAX_SEEDANCE_2_DURATION, Math.max(MIN_SEEDANCE_2_DURATION, raw));
 }
 
+function extractRawDuration(text: string): number | undefined {
+  if (DEFAULT_DURATION_RE.test(text.trim())) return DEFAULT_SEEDANCE_DURATION;
+  const match = text.match(/(?:时长|duration)?\s*(\d{1,2})\s*(?:秒|s|sec|seconds)?/i);
+  if (!match) return undefined;
+  const raw = Number.parseInt(match[1], 10);
+  return Number.isFinite(raw) ? raw : undefined;
+}
+
+function isAllowedSeedanceDuration(raw: number): boolean {
+  return raw === 4 || raw === 5 || raw === 10 || raw === 15;
+}
+
+function buildInvalidDurationMessage(state: SeedanceWorkflowState, raw: number): string {
+  return pickLocale(state.locale, {
+    zh: [
+      `Seedance 2.0 Pro 单段多模态视频目前只支持 4、5、10、15 秒；你回复的是 ${raw} 秒。`,
+      '请回复：4、5、10、15 秒；或回复“默认/跳过”使用 5 秒。',
+      '如果你要 20 秒以上，请重新发起“生成20秒长视频”，我会走 Saga 长视频分段流程。',
+    ].join('\n'),
+    en: [
+      `Seedance 2.0 Pro single-shot multimodal video currently only supports 4, 5, 10, or 15 seconds; you replied ${raw} seconds.`,
+      'Reply with 4, 5, 10, or 15 seconds; or reply "default/skip" to use 5 seconds.',
+      'For 20s or longer, start a new request like "generate a 20s long video" and I will use the Saga segmented long-video flow.',
+    ].join('\n'),
+  });
+}
+
 function isDirectGenerateIntent(text: string): boolean {
   const trimmed = text.trim();
   return DIRECT_GENERATE_RE.test(trimmed) || DIRECT_GENERATE_PREFIX_RE.test(trimmed);
@@ -571,10 +598,15 @@ export async function handleSeedanceMultimodalWorkflow(
 
     if (state.stage === 'choosing_duration') {
       mergeReferences(state, refs);
-      const duration = extractDuration(text);
-      if (!duration && !wantsAudio(text) && !wantsSilence(text)) {
+      const rawDuration = extractRawDuration(text);
+      if (!rawDuration && !wantsAudio(text) && !wantsSilence(text)) {
         return { handled: true, reply: buildDurationMessage(state) };
       }
+      if (rawDuration && !isAllowedSeedanceDuration(rawDuration)) {
+        state.updatedAt = Date.now();
+        return { handled: true, reply: buildInvalidDurationMessage(state, rawDuration) };
+      }
+      const duration = rawDuration ? extractDuration(text) : undefined;
       state.duration = duration ?? DEFAULT_SEEDANCE_DURATION;
       if (wantsAudio(text)) state.generateAudio = true;
       if (wantsSilence(text)) state.generateAudio = false;

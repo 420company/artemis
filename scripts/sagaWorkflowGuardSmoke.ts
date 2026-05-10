@@ -8,14 +8,34 @@ async function main(): Promise<void> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'artemis-saga-guard-'));
   const key = `guard-${Date.now()}`;
 
-  const first = await handleSagaLongVideoWorkflow({
+  const genericTimedVideo = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key,
     cwd,
     locale: 'zh',
     text: '帮我生成一段30秒左右的视频，你的角色现在叫饼干姐姐，亚洲女性，内容是在不同的海滩享受阳光和海风。',
   });
-  assert.equal(first.handled, false, 'plain chat mentioning video generation must not auto-enter Saga; require /saga');
+  assert.equal(genericTimedVideo.handled, false, 'generic timed video must not auto-enter Saga without explicit long-video wording');
+
+  const naturalLongVideo = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '帮我生成一段长视频',
+  });
+  assert.equal(naturalLongVideo.handled, true, 'explicit natural-language long-video wording should enter Saga');
+  assert.match(naturalLongVideo.reply, /final stitched video duration|最终成片的总时长|目标总时长/i, 'Saga should ask for total stitched duration before collecting refs');
+
+  const afterDuration = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '20秒',
+  });
+  assert.equal(afterDuration.handled, true, 'after total duration confirmation Saga should continue to reference collection');
+  assert.match(afterDuration.reply, /Target total duration: 20s|目标总时长：20 秒/, 'duration confirmation should be treated as total duration, not per-segment duration');
 
   const pastedLog = await handleSagaLongVideoWorkflow({
     scope: 'bridge',

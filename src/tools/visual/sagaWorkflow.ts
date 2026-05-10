@@ -42,7 +42,7 @@ export type SagaWorkflowOutcome =
   | { handled: false; prompt?: string }
   | { handled: true; reply: string };
 
-type SagaWorkflowStage = 'collecting_refs' | 'awaiting_protagonist_clarification' | 'awaiting_duration';
+type SagaWorkflowStage = 'awaiting_initial_duration' | 'collecting_refs' | 'awaiting_protagonist_clarification' | 'awaiting_duration';
 
 type SagaWorkflowState = {
   scope: SagaWorkflowScope;
@@ -111,6 +111,13 @@ function hasLongVideoIntent(text: string): boolean {
     /\b(?:long[-\s]?form|long|full|complete)\b[\s\S]{0,80}\b(?:video|movie|clip)\b/i,
     /\b(?:generate|create|make|produce|turn)\b[\s\S]{0,80}\b(?:long|full|complete)\b[\s\S]{0,80}\b(?:video|movie|clip)\b/i,
   ].some((pattern) => pattern.test(normalized));
+}
+
+function hasExplicitLongVideoPhrase(text: string): boolean {
+  const normalized = compact(text);
+  if (!normalized) return false;
+  return /(?:长视频|长片|完整视频|完整短片|完整影片|一整条视频|视频解决方案|生产链|剪辑链|剪成|剪辑成片)/i.test(normalized)
+    || /\b(?:long[-\s]?form|long|full|complete)\b[\s\S]{0,80}\b(?:video|movie|clip)\b/i.test(normalized);
 }
 
 function isSagaWorkflowSupportDiscussion(text: string): boolean {
@@ -356,22 +363,51 @@ async function buildModelLine(cwd: string, locale: UiLocale = 'zh-CN'): Promise<
 
 async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
   const modelLine = await buildModelLine(state.cwd, state.locale);
+  const durationLine = state.targetDuration
+    ? pickLocale(state.locale, {
+      zh: `目标总时长：${state.targetDuration} 秒。`,
+      en: `Target total duration: ${state.targetDuration}s.`,
+    })
+    : '';
   return pickLocale(state.locale, {
     zh: [
-      '好，要做一段长视频。先把参考材料备齐。',
+      '好，要做一段长视频。总时长已确定，接下来把参考材料备齐。',
+      durationLine,
       modelLine,
       '这个模型支持图、视频、音、文字的混合参考，可以继续发：',
       '  · 图 / 视频 / 音 的链接或本地路径，作为视觉与听觉参考',
       '  · 你的剧本 / 分镜 / 设定 / 故事 — 写了我会照你的来；没写就由我来安排。',
       '准备好了回复 "开始生成"；想直接开始就回复 "跳过"；不做了回复 "取消"。',
-    ].join('\n'),
+    ].filter(Boolean).join('\n'),
     en: [
-      'Good — a long-form piece. Let\'s gather the reference materials first.',
+      'Good — a long-form piece. The total duration is set; now let\'s gather references.',
+      durationLine,
       modelLine,
       'This model accepts mixed references — image, video, audio, text. You can keep sending:',
       '  · Image / video / audio URLs or local paths, as visual and auditory references',
       '  · Your own script / shot list / setting / story — if you write one, I\'ll follow it; if not, I\'ll compose it.',
       'When you\'re ready, reply "start". To skip extras and begin, reply "skip". To stop, reply "cancel".',
+    ].filter(Boolean).join('\n'),
+  });
+}
+
+async function buildInitialDurationAskMessage(state: SagaWorkflowState): Promise<string> {
+  const modelLine = await buildModelLine(state.cwd, state.locale);
+  const estimated = estimateDuration(combinedStoryText(state));
+  return pickLocale(state.locale, {
+    zh: [
+      '好，要做一段长视频。先确认最终成片的总时长。',
+      modelLine,
+      `请回复目标总时长，例如：20秒、30秒、60秒、2分钟；回复“自动/默认”则使用建议 ${estimated} 秒。`,
+      '确认总时长后，我会继续收集图片 / 视频 / 音频 / 文字参考。',
+      '不做了回复“取消”。',
+    ].join('\n'),
+    en: [
+      'Good — a long-form piece. First, confirm the final stitched video duration.',
+      modelLine,
+      `Reply with the target total duration, e.g. 20s, 30s, 60s, 2 minutes; reply "auto/default" to use the suggested ${estimated}s.`,
+      'After duration is confirmed, I will collect image / video / audio / text references.',
+      'Reply "cancel" to stop.',
     ].join('\n'),
   });
 }
@@ -712,7 +748,7 @@ function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWor
     scope: input.scope,
     cwd: input.cwd,
     originalText: input.text.trim(),
-    stage: multimodalCapable ? 'collecting_refs' : 'awaiting_duration',
+    stage: 'awaiting_initial_duration',
     multimodalCapable,
     referenceImageUrls: [],
     referenceVideoUrls: [],
@@ -752,6 +788,29 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
     }
 
     // Always try to merge any new refs in this turn (URLs, files, attachments).
+    if (state.stage === 'awaiting_initial_duration') {
+      const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
+      mergeRefs(state, refs);
+      maybeRememberReferenceNote(state, text);
+      maybeAccumulateStory(state, text);
+
+      const duration = clampDuration(extractTargetDuration(text));
+      if (!duration && !CONFIRM_DEFAULT_RE.test(text)) {
+        state.updatedAt = Date.now();
+        return { handled: true, reply: await buildInitialDurationAskMessage(state) };
+      }
+      state.targetDuration = duration ?? estimateDuration(combinedStoryText(state));
+      if (state.multimodalCapable) {
+        state.stage = 'collecting_refs';
+        state.updatedAt = Date.now();
+        return { handled: true, reply: await buildRefAskMessage(state) };
+      }
+      // text-only model: skip the reference question entirely
+      state.stage = 'collecting_refs';
+      state.updatedAt = Date.now();
+      return { handled: true, reply: buildRefAckMessage(state) };
+    }
+
     if (state.stage === 'collecting_refs') {
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
       mergeRefs(state, refs);
@@ -770,15 +829,9 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
           state.updatedAt = Date.now();
           return { handled: true, reply: buildProtagonistAskMessage(state) };
         }
-        // High confidence — proceed to duration
-        if (state.prefilledDuration) {
-          state.targetDuration = state.prefilledDuration;
-          WORKFLOWS.delete(key);
-          return { handled: false, prompt: buildGenerationPrompt(state) };
-        }
-        state.stage = 'awaiting_duration';
-        state.updatedAt = Date.now();
-        return { handled: true, reply: await buildDurationAskMessage(state) };
+        // High confidence — duration was confirmed before reference collection.
+        WORKFLOWS.delete(key);
+        return { handled: false, prompt: buildGenerationPrompt(state) };
       }
 
       // Acknowledge the refs and continue collecting
@@ -792,15 +845,9 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
         state.updatedAt = Date.now();
         return { handled: true, reply: buildProtagonistAskMessage(state) };
       }
-      // Good — proceed to duration
-      if (state.prefilledDuration) {
-        state.targetDuration = state.prefilledDuration;
-        WORKFLOWS.delete(key);
-        return { handled: false, prompt: buildGenerationPrompt(state) };
-      }
-      state.stage = 'awaiting_duration';
-      state.updatedAt = Date.now();
-      return { handled: true, reply: await buildDurationAskMessage(state) };
+      // Good — duration was confirmed before reference collection.
+      WORKFLOWS.delete(key);
+      return { handled: false, prompt: buildGenerationPrompt(state) };
     }
 
     if (state.stage === 'awaiting_duration') {
@@ -816,14 +863,14 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   }
 
   // ─── fresh request ──────────────────────────────────────────────────
-  // Starting Saga is intentionally explicit-only. Free-form chat often contains
-  // pasted logs or meta-discussion with words like "generate video / 20s";
-  // auto-starting here makes normal conversation unusable. CLI/bridge callers
-  // set forceIntent only after the user types /saga.
-  if (!input.forceIntent) {
-    return { handled: false };
-  }
-  if (isSagaWorkflowSupportDiscussion(text) || !hasLongVideoIntent(text)) {
+  // Starting Saga from plain chat is allowed only for explicit long-video
+  // wording ("长视频", "完整视频", "long video", etc.). Generic requests like
+  // "生成30秒视频" still fall through to the normal video workflow so pasted
+  // logs and short-clip requests do not hijack the chat.
+  const shouldStartSaga = input.forceIntent
+    ? hasLongVideoIntent(text)
+    : hasExplicitLongVideoPhrase(text);
+  if (isSagaWorkflowSupportDiscussion(text) || !shouldStartSaga) {
     return { handled: false };
   }
   const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');
@@ -839,17 +886,17 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
     mergeRefs(next, refs);
   }
 
-  if (multimodalCapable) {
-    WORKFLOWS.set(key, next);
-    return { handled: true, reply: await buildRefAskMessage(next) };
-  }
-
-  // text-only model: skip the reference question entirely
   if (next.prefilledDuration) {
     next.targetDuration = next.prefilledDuration;
+    if (multimodalCapable) {
+      next.stage = 'collecting_refs';
+      WORKFLOWS.set(key, next);
+      return { handled: true, reply: await buildRefAskMessage(next) };
+    }
     return { handled: false, prompt: buildGenerationPrompt(next) };
   }
-  next.stage = 'awaiting_duration';
+
+  next.stage = 'awaiting_initial_duration';
   WORKFLOWS.set(key, next);
-  return { handled: true, reply: await buildDurationAskMessage(next) };
+  return { handled: true, reply: await buildInitialDurationAskMessage(next) };
 }
