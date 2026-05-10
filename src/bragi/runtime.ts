@@ -9,7 +9,7 @@
  * Only one concurrent task per target ID is allowed.
  */
 
-import { think, resetSession, getMessages, restoreSession } from '../brain.js'
+import { think, resetSession, getMessages, restoreSessionStateForCwd } from '../brain.js'
 import { open, readFile, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { hostname, homedir } from 'node:os'
@@ -24,7 +24,7 @@ import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js
 import { ensureDir, resolveDataRootDir, truncate } from '../utils/fs.js'
 import stripAnsi from 'strip-ansi'
 import {
-  detectWorkflowSlashCommand,
+  detectExplicitWorkflowIntent,
   resolveWorkflow,
   type WorkflowResolution,
 } from '../core/workflowDispatcher.js'
@@ -277,6 +277,43 @@ export type BragiSessionBinding = {
   rolledOver: boolean
 }
 
+function parseSessionTime(value: string | undefined): number {
+  if (!value) return 0
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+async function rebaseBridgeBindingToLatestMainSession(options: {
+  binding: BragiSessionBinding
+  store: SessionStore
+  cwd: string
+  onInfo?: (message: string) => void
+}): Promise<BragiSessionBinding> {
+  const latest = await options.store.loadLatest().catch(() => null)
+  if (!latest || latest.id === options.binding.storedSession.id) {
+    return options.binding
+  }
+  if (latest.kind && latest.kind !== 'main') {
+    return options.binding
+  }
+  if (!sameBridgeWorkspacePath(latest.cwd, options.cwd)) {
+    return options.binding
+  }
+
+  const latestUpdatedAt = parseSessionTime(latest.updatedAt)
+  const boundUpdatedAt = parseSessionTime(options.binding.storedSession.updatedAt)
+  if (latestUpdatedAt <= boundUpdatedAt) {
+    return options.binding
+  }
+
+  options.onInfo?.(`[bridge] attached remote chat to latest main session ${latest.id} (was ${options.binding.storedSession.id})`)
+  return {
+    ...options.binding,
+    storedSession: latest,
+    rolledOver: true,
+  }
+}
+
 export type RemoteRuntimeResult = {
   replies: string[]
   storedSession: SessionRecord
@@ -339,11 +376,18 @@ export async function runRemoteCommand(
     targetId?: string
   }
 ): Promise<RemoteRuntimeResult> {
-  const { binding, store, locale, cwd } = opts
+  let binding = opts.binding
+  const { store, locale, cwd } = opts
   const storedCwd = binding.storedSession.cwd
   const fallbackCwd = storedCwd && !isUnsafeBridgeWorkspace(storedCwd)
     ? storedCwd
     : cwd || process.cwd()
+  binding = await rebaseBridgeBindingToLatestMainSession({
+    binding,
+    store,
+    cwd: fallbackCwd,
+    onInfo: (message) => void Promise.resolve(opts.onProgress?.(message, 'info')).catch(() => {}),
+  })
   if (storedCwd && storedCwd !== fallbackCwd && isUnsafeBridgeWorkspace(storedCwd)) {
     binding.storedSession.cwd = fallbackCwd
     await store.save({
@@ -507,7 +551,7 @@ export async function runRemoteCommand(
 
         // Workflow slash dispatch: detect /team /niko /design /athena /nidhogg /contest /run
         // and apply visual generation policy. Falls back to direct chat when no command.
-        const slashMatch = detectWorkflowSlashCommand(command.body)
+        const slashMatch = detectExplicitWorkflowIntent(command.body)
         let workflowResolution: WorkflowResolution | undefined
         let providerRuntime: BridgeProviderRuntime | undefined
         if (slashMatch.command) {
@@ -707,11 +751,17 @@ export async function runRemoteCommand(
         //                denied, leaving the IM user with a dangling intent
         //                line as the only reply.
         //   PRODUCER/GHOSTWRITER/WRITER → enable tools so remote coding via IM works.
+        let latestCompressionSummary = binding.storedSession.summary
         const result = await withBridgeThinkLock(async () => {
-          restoreSession(binding.storedSession.messages)
+          restoreSessionStateForCwd({
+            messages: binding.storedSession.messages,
+            summary: binding.storedSession.summary,
+          }, commandCwd)
           return think(effectiveBody, {
             cwd: commandCwd,
             permissionMode: binding.permissionMode,
+            initialCompressionSummary: binding.storedSession.summary,
+            onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
             maxNativeToolRounds: Math.max(96, (opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS) * 3),
@@ -890,6 +940,7 @@ export async function runRemoteCommand(
           ...binding.storedSession,
           cwd: result.cwd ?? binding.storedSession.cwd,
           messages,
+          summary: latestCompressionSummary ?? binding.storedSession.summary ?? '',
           updatedAt: new Date().toISOString(),
         }
         await store.save(updated)
@@ -1417,6 +1468,8 @@ export async function runBragiMessagePump<TCheckpoint>(
             bridgePlatform: bridgePlatform === 'cli' ? undefined : bridgePlatform,
             targetId: message.targetId,
           })
+
+          activeTask.sessionId = result.storedSession.id
 
           await options.persistRuntimeResult(message, result)
 

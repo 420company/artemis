@@ -10,6 +10,8 @@ import {
 import {
   CliSettingsStore,
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+  DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS,
+  DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
   type DocsSearchEngine,
   type ResearchEngine,
 } from './settings.js'
@@ -101,7 +103,7 @@ async function askText(prompt: string, defaultValue = '', mask = false): Promise
   return raw.trim() || defaultValue
 }
 
-async function askNumber(prompt: string, defaultValue: number, options: {
+async function askNumber(locale: UiLocale, prompt: string, defaultValue: number, options: {
   min?: number
   max?: number
   integer?: boolean
@@ -117,7 +119,7 @@ async function askNumber(prompt: string, defaultValue: number, options: {
     ) {
       return options.integer ? Math.round(parsed) : parsed
     }
-    console.log(`  ${prompt} must be a valid number.`)
+    console.log(tr(locale, `  ${prompt} 必须是有效数字。`, `  ${prompt} must be a valid number.`))
   }
 }
 
@@ -157,7 +159,7 @@ async function askYesNo(
 async function configureTerminalSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
   try {
     const { cwd, locale } = options
-    sectionTitle('Terminal Backend', [
+    sectionTitle(tr(locale, '终端后端', 'Terminal Backend'), [
       tr(locale, '选择命令执行的环境，影响工具隔离性。', 'Choose where commands run, affects tool isolation.'),
     ])
     
@@ -177,16 +179,17 @@ async function configureTerminalSettings(options: { cwd: string; locale: UiLocal
       terminal: { backend },
     }))
     
-    console.log(`  ✓ Terminal backend set to: ${backend}`)
+    console.log(tr(locale, `  ✓ 终端后端已设置为：${backend}`, `  ✓ Terminal backend set to: ${backend}`))
   } catch (error) {
-    console.error(`  ❌ Failed to configure terminal settings: ${error instanceof Error ? error.message : String(error)}`)
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(tr(options.locale, `  ❌ 终端设置配置失败：${message}`, `  ❌ Failed to configure terminal settings: ${message}`))
     throw error
   }
 }
 
 async function configureTTSSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
-  sectionTitle('Voice Input / Output', [
+  sectionTitle(tr(locale, '语音输入 / 输出', 'Voice Input / Output'), [
     tr(
       locale,
       '配置真实语音输出。当前内置 Microsoft Edge TTS 免费线路，不需要 API key。',
@@ -312,7 +315,7 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
 async function configureToolSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
   try {
     const { cwd, locale } = options
-    sectionTitle('Tool Configuration', [
+    sectionTitle(tr(locale, '工具配置', 'Tool Configuration'), [
       tr(locale, '按组开关 AI 可以使用的工具能力。', 'Toggle the tool groups available to the AI by category.'),
       tr(
         locale,
@@ -413,9 +416,9 @@ async function configureToolSettings(options: { cwd: string; locale: UiLocale })
     }))
     
     const enabledCount = Object.values(enabledConfig).filter(enabled => enabled).length
-    console.log(`  ✓ Enabled ${enabledCount} tools`)
+    console.log(tr(locale, `  ✓ 已启用 ${enabledCount} 组工具`, `  ✓ Enabled ${enabledCount} tool groups`))
   } catch (error) {
-    console.error(`  ❌ Failed to configure tool settings: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(tr(options.locale, `  ❌ 工具配置失败：${error instanceof Error ? error.message : String(error)}`, `  ❌ Failed to configure tool settings: ${error instanceof Error ? error.message : String(error)}`))
     throw error
   }
 }
@@ -423,7 +426,7 @@ async function configureToolSettings(options: { cwd: string; locale: UiLocale })
 async function configureSessionSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
   try {
     const { cwd, locale } = options
-    sectionTitle('Session Management', [
+    sectionTitle(tr(locale, '会话管理', 'Session Management'), [
       tr(locale, '配置会话自动重置策略，管理 API 成本。', 'Configure session auto-reset policies to manage API costs.'),
     ])
     
@@ -441,7 +444,7 @@ async function configureSessionSettings(options: { cwd: string; locale: UiLocale
     const config: any = { mode: resetMode }
     
     if (resetMode === 'both' || resetMode === 'idle') {
-      const timeout = await askNumber(tr(locale, 'Inactivity timeout (minutes)', 'Inactivity timeout (minutes)'), 1440, {
+      const timeout = await askNumber(locale, tr(locale, '空闲超时（分钟）', 'Inactivity timeout (minutes)'), 1440, {
         min: 1,
         integer: true,
       })
@@ -449,7 +452,7 @@ async function configureSessionSettings(options: { cwd: string; locale: UiLocale
     }
     
     if (resetMode === 'both' || resetMode === 'daily') {
-      const hour = await askNumber(tr(locale, 'Daily reset hour (0-23)', 'Daily reset hour (0-23)'), 4, {
+      const hour = await askNumber(locale, tr(locale, '每日重置小时（0-23）', 'Daily reset hour (0-23)'), 4, {
         min: 0,
         max: 23,
         integer: true,
@@ -465,9 +468,9 @@ async function configureSessionSettings(options: { cwd: string; locale: UiLocale
       },
     }))
     
-    console.log(`  ✓ Session management configured`)
+    console.log(tr(locale, '  ✓ 会话管理已配置', '  ✓ Session management configured'))
   } catch (error) {
-    console.error(`  ❌ Failed to configure session settings: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(tr(options.locale, `  ❌ 会话设置配置失败：${error instanceof Error ? error.message : String(error)}`, `  ❌ Failed to configure session settings: ${error instanceof Error ? error.message : String(error)}`))
     throw error
   }
 }
@@ -499,6 +502,8 @@ async function persistProfileToTargets(cwd: string, profile: ProviderProfile, as
           apiKey: profile.apiKey,
           model: profile.model,
           contextLength: profile.contextLength,
+          contextLengthSource: profile.contextLengthSource,
+          contextLengthCheckedAt: profile.contextLengthCheckedAt,
         })
       }
     }
@@ -546,6 +551,8 @@ async function configureProviderProfile(options: {
           apiKey: saved.apiKey ?? '',
           model: saved.model,
           contextLength: saved.contextLength,
+          contextLengthSource: saved.contextLengthSource,
+          contextLengthCheckedAt: saved.contextLengthCheckedAt,
         }
         await persistProfileToTargets(cwd, profile, role === 'secondary')
         return profile
@@ -561,7 +568,7 @@ async function configureProviderProfile(options: {
       })
       data.customProviders = (data.customProviders ?? []).filter((provider) => provider.id !== selected)
       await store.save(data)
-      console.log('  ✓ Removed saved custom provider.')
+      console.log(tr(locale, '  ✓ 已删除保存的自定义 Provider。', '  ✓ Removed saved custom provider.'))
     }
   }
 
@@ -588,7 +595,7 @@ async function configureProviderProfile(options: {
 
 async function configureModelProvider(options: { cwd: string; locale: UiLocale; quick?: boolean }): Promise<void> {
   const { cwd, locale } = options
-  sectionTitle('Inference Provider', [
+  sectionTitle(tr(locale, '推理模型 Provider', 'Inference Provider'), [
     tr(locale, '只显示当前运行时真正支持的 Provider 配置路径。', 'Only shows provider paths that the current runtime can actually execute.'),
   ])
 
@@ -614,33 +621,80 @@ async function configureModelProvider(options: { cwd: string; locale: UiLocale; 
   }
 }
 
+async function configureQuickMemoryEnhancement(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { cwd, locale } = options
+  const setupMemory = await askYesNo(
+    locale,
+    tr(locale, '现在配置记忆增强系统？', 'Configure memory enhancement now?'),
+    true,
+    tr(
+      locale,
+      '推荐启用。它会把长期偏好、项目事实和稳定背景写入可检索记忆，长任务不必完全依赖当前上下文窗口。',
+      'Recommended. It stores long-term preferences, project facts, and stable background in retrievable memory so long tasks do not rely only on the current context window.',
+    ),
+  )
+  if (setupMemory) {
+    await runMemoryEnhancementSetup(locale, cwd)
+  } else {
+    console.log(tr(locale, '  ✓ 已跳过记忆增强，可之后用 artemis setup memory 配置。', '  ✓ Memory enhancement skipped; configure it later with artemis setup memory.'))
+  }
+}
+
+async function configureQuickVoiceIO(options: { cwd: string; locale: UiLocale }): Promise<void> {
+  const { cwd, locale } = options
+  const setupVoice = await askYesNo(
+    locale,
+    tr(locale, '现在配置语音输入/输出？', 'Configure voice input/output now?'),
+    true,
+    tr(
+      locale,
+      '推荐启用 STT。配置通讯桥接后，你可以发送语音，由本地 Whisper 转文字再交给 Artemis 处理；TTS 可把回复合成为语音文件。',
+      'Recommended for STT. After messaging bridges are configured, you can send voice, let local Whisper transcribe it, and pass the text to Artemis; TTS can synthesize replies as audio files.',
+    ),
+  )
+  if (setupVoice) {
+    await configureTTSSettings({ cwd, locale })
+  } else {
+    console.log(tr(locale, '  ✓ 已跳过语音输入/输出，可之后用 artemis setup tts 配置。', '  ✓ Voice input/output skipped; configure it later with artemis setup tts.'))
+  }
+}
+
 async function configureAgentSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
   const store = new ProviderStore(cwd)
   const data = await store.load()
   const current = data.setup?.agent
-  sectionTitle('Agent Settings', [
+  sectionTitle(tr(locale, 'Agent 设置', 'Agent Settings'), [
     tr(locale, '这里只保留当前运行时已经接入的 Agent 配置。', 'This section only exposes agent settings that are already wired into runtime.'),
   ])
 
   const agent: AgentSetupConfig = {
     ...(current ?? data.setup!.agent),
-    maxIterations: await askNumber('Max iterations', current?.maxIterations ?? 90, { integer: true, min: 1 }),
+    maxIterations: await askNumber(locale, tr(locale, '最大执行轮数', 'Max iterations'), current?.maxIterations ?? 90, { integer: true, min: 1 }),
     compression: {
       ...(current?.compression ?? data.setup!.agent.compression),
       enabled: true,
-      threshold: await askNumber('Compression threshold (0.5-0.95)', current?.compression.threshold ?? 0.5, { min: 0.5, max: 0.95 }),
+      threshold: await askNumber(
+        locale,
+        tr(locale, '上下文压缩阈值（0.5-0.95，留空保持自适应默认值）', 'Compression threshold (0.5-0.95, blank keeps adaptive default)'),
+        current?.compression.threshold ?? 0.7,
+        { min: 0.5, max: 0.95 },
+      ),
     },
   }
 
   await store.updateSetupConfig((setup) => ({ ...setup, agent }))
-  console.log(`  ✓ Max iterations: ${agent.maxIterations}`)
-  console.log(`  ✓ Compression threshold: ${agent.compression.threshold}`)
+  console.log(tr(locale, `  ✓ 最大执行轮数：${agent.maxIterations}`, `  ✓ Max iterations: ${agent.maxIterations}`))
+  console.log(tr(
+    locale,
+    `  ✓ 上下文压缩阈值：${agent.compression.threshold ?? '自适应'}`,
+    `  ✓ Compression threshold: ${agent.compression.threshold ?? 'adaptive'}`,
+  ))
 }
 
 async function configureGateway(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
-  sectionTitle('Messaging Platforms', [
+  sectionTitle(tr(locale, '通讯平台', 'Messaging Platforms'), [
     tr(locale, '保留 Artemis 原有 3 个通讯配置：Telegram、Discord、WeChat。', 'Keeps the original Artemis messaging setup: Telegram, Discord, WeChat.'),
     tr(locale, '这里没有超时自动选择；必须手动确认。', 'No timeout-based auto-selection here; user confirmation is required.'),
   ])
@@ -755,6 +809,11 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
   await settingsStore.setResearchEngine(researchEngine)
 
   if (researchEngine === 'gemini-deep-research') {
+    console.log(tr(
+      locale,
+      '  ℹ 当前使用 Google GenAI SDK 的 background interaction + 轮询模式，不是 webhook。复杂研究可以延长轮询时间；完成前会保留 interaction id。',
+      '  ℹ This uses the Google GenAI SDK background interaction + polling mode, not webhooks. For complex research, extend the polling window; the interaction id is preserved.',
+    ))
     const existingKey = process.env.ARTEMIS_GEMINI_API_KEY || process.env.GEMINI_API_KEY || settings.geminiApiKey || ''
     const apiKey = await askText(
       tr(locale, 'Gemini API key（可留空使用环境变量 ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY）', 'Gemini API key (leave blank to use ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY)'),
@@ -765,9 +824,23 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
       tr(locale, 'Gemini Deep Research agent', 'Gemini Deep Research agent'),
       settings.geminiDeepResearchAgent || DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
     )
+    const maxPolls = await askNumber(
+      locale,
+      tr(locale, 'Gemini Deep Research 最大轮询次数', 'Gemini Deep Research max poll attempts'),
+      settings.geminiDeepResearchMaxPolls ?? DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS,
+      { integer: true, min: 1 },
+    )
+    const pollIntervalMs = await askNumber(
+      locale,
+      tr(locale, 'Gemini Deep Research 轮询间隔（毫秒）', 'Gemini Deep Research poll interval (ms)'),
+      settings.geminiDeepResearchPollIntervalMs ?? DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
+      { integer: true, min: 1 },
+    )
     await settingsStore.update({
       geminiApiKey: apiKey || undefined,
       geminiDeepResearchAgent: agent || DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+      geminiDeepResearchMaxPolls: maxPolls,
+      geminiDeepResearchPollIntervalMs: pollIntervalMs,
       researchEngine: 'gemini-deep-research',
       researchEngineConfigured: true,
     })
@@ -778,7 +851,11 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
         '  ⚠ No Gemini API key saved; set ARTEMIS_GEMINI_API_KEY or GEMINI_API_KEY before using deep_research.',
       ))
     } else {
-      console.log(tr(locale, '  ✓ Gemini Deep Research configured · 已配置。', '  ✓ Gemini Deep Research configured.'))
+      console.log(tr(
+        locale,
+        `  ✓ Gemini Deep Research 已配置。轮询窗口约 ${Math.round((maxPolls * pollIntervalMs) / 60000)} 分钟。`,
+        `  ✓ Gemini Deep Research configured. Polling window is about ${Math.round((maxPolls * pollIntervalMs) / 60000)} minutes.`,
+      ))
     }
   } else {
     console.log(tr(locale, '  ✓ deep_research backend: builtin · 保持内置模式。', '  ✓ deep_research backend: builtin.'))
@@ -800,7 +877,7 @@ function summarizeSkillCategories(skills: Array<{ category?: string }>, limit = 
 
 async function configureSkillsCatalog(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { locale } = options
-  sectionTitle('Skills Catalog', [
+  sectionTitle(tr(locale, 'Skills 目录', 'Skills Catalog'), [
     tr(
       locale,
       'Skills 已作为内置能力加载，不在安装时逐个选择，避免 999+ 个技能变成低效清单。',
@@ -839,7 +916,7 @@ async function configureAutomationCron(options: { cwd: string; locale: UiLocale 
   const jobs = cron.getJobs()
   const repoAudit = jobs.find((job) => job.id === 'repo-audit')
 
-  sectionTitle('Automation / Cron', [
+  sectionTitle(tr(locale, '自动化 / Cron', 'Automation / Cron'), [
     tr(
       locale,
       '这里只配置当前真实接通的自动化任务，不展示尚未接入运行时的空壳选项。',
@@ -906,9 +983,9 @@ function hasVisualImageConfig(data: Awaited<ReturnType<ProviderStore['load']>>):
   )
 }
 
-async function printConfigurationLocation(cwd: string): Promise<void> {
+async function printConfigurationLocation(cwd: string, locale: UiLocale): Promise<void> {
   const root = resolveDataRootDir(cwd)
-  sectionTitle('Configuration Location', [
+  sectionTitle(tr(locale, '配置位置', 'Configuration Location'), [
     `Config file:  ${path.join(root, 'providers.json')}`,
     `Settings:     ${path.join(root, 'cli-settings.json')}`,
     `Messaging:    ${path.join(root, 'bragi.json')}`,
@@ -952,16 +1029,16 @@ async function printSetupSummary(cwd: string, locale: UiLocale): Promise<void> {
 
 async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
-  await printConfigurationLocation(cwd)
+  await printConfigurationLocation(cwd, locale)
   await configureModelProvider({ cwd, locale })
+  await runMemoryEnhancementSetup(locale, cwd)
   await configureBundleSettings({ cwd, locale })
   await configureSkillsCatalog({ cwd, locale })
   await runVisualModelSetup(locale, cwd)
   await configureGateway({ cwd, locale })
-  await runMemoryEnhancementSetup(locale, cwd)
+  await configureTTSSettings({ cwd, locale })
   await configureAutomationCron({ cwd, locale })
   await configureTerminalSettings({ cwd, locale })
-  await configureTTSSettings({ cwd, locale })
   await configureSessionSettings({ cwd, locale })
   await configureDocsAndResearchSettings({ cwd, locale })
   await new CliSettingsStore(cwd).update({ onboardingCompleted: true }).catch(() => {})
@@ -970,11 +1047,12 @@ async function runFullSetup(options: { cwd: string; locale: UiLocale }): Promise
 
 async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }): Promise<void> {
   const { cwd, locale } = options
-  sectionTitle('Quick Setup', [
-    tr(locale, '配置主/副 Provider、视觉模型，并可选配置通讯平台。', 'Configure primary/secondary providers, visual model, and optionally messaging.'),
+  sectionTitle(tr(locale, '快速配置', 'Quick Setup'), [
+    tr(locale, '配置主/副 Provider、记忆增强、视觉模型、通讯平台和语音输入/输出。', 'Configure primary/secondary providers, memory enhancement, visual model, messaging, and voice input/output.'),
   ])
 
   await configureModelProvider({ cwd, locale, quick: true })
+  await configureQuickMemoryEnhancement({ cwd, locale })
 
   const setupBundle = await askYesNo(
     locale,
@@ -1004,6 +1082,8 @@ async function runFirstTimeQuickSetup(options: { cwd: string; locale: UiLocale }
     await configureGateway({ cwd, locale })
   }
 
+  await configureQuickVoiceIO({ cwd, locale })
+
   const setupDocs = await askYesNo(
     locale,
     tr(locale, '现在配置文档搜索 / Gemini Deep Research？', 'Configure docs search / Gemini Deep Research now?'),
@@ -1022,21 +1102,24 @@ async function runMissingOnlySetup(options: { cwd: string; locale: UiLocale }): 
   const { cwd, locale } = options
   const store = new ProviderStore(cwd)
   const data = await store.load()
-  sectionTitle('Quick Setup — Missing Items Only')
+  sectionTitle(tr(locale, '快速配置 — 只补缺失项', 'Quick Setup — Missing Items Only'))
 
   const missing: string[] = []
   const main = store.getDefaultMainProfile(data)
   if (!main?.apiKey || !main.baseUrl || !main.model) missing.push('main provider')
+  if (!data.memoryProfile?.enabled) missing.push('memory enhancement')
   if (!hasVisualImageConfig(data)) missing.push('visual model')
+  if (!data.setup?.tools?.enabled?.stt && !data.setup?.tools?.enabled?.tts) missing.push('voice input/output')
 
   if (missing.length === 0) {
-    console.log('  ✓ Everything essential is configured.')
-    console.log('  Run Full Setup if you want to reconfigure everything.')
+    console.log(tr(locale, '  ✓ 必要配置都已完成。', '  ✓ Everything essential is configured.'))
+    console.log(tr(locale, '  如果想重新配置全部项目，可以运行 Full Setup。', '  Run Full Setup if you want to reconfigure everything.'))
     return
   }
 
-  console.log(`  Missing: ${missing.join(', ')}`)
+  console.log(tr(locale, `  缺失：${missing.join(', ')}`, `  Missing: ${missing.join(', ')}`))
   if (missing.includes('main provider')) await configureModelProvider({ cwd, locale, quick: true })
+  if (missing.includes('memory enhancement')) await configureQuickMemoryEnhancement({ cwd, locale })
   if (missing.includes('visual model')) {
     const setupVisual = await askYesNo(
       locale,
@@ -1045,6 +1128,7 @@ async function runMissingOnlySetup(options: { cwd: string; locale: UiLocale }): 
     )
     if (setupVisual) await runVisualModelSetup(locale, cwd)
   }
+  if (missing.includes('voice input/output')) await configureQuickVoiceIO({ cwd, locale })
   await printSetupSummary(cwd, locale)
 }
 
@@ -1072,7 +1156,7 @@ async function configureDreamSettings(options: { cwd: string; locale: UiLocale }
   const { loadDreamConfig, saveDreamConfig } = await import('../services/dreamStore.js')
   const current = await loadDreamConfig()
 
-  sectionTitle('Artemis Dreams', [
+  sectionTitle(tr(locale, 'Artemis 梦境', 'Artemis Dreams'), [
     tr(locale, '空闲超过 1 小时后，Artemis 会读取今天的工作记录，写一段梦境笔记。', 'After ≥1h of inactivity, Artemis reads today\'s session activity and composes a dream note.'),
     tr(locale, '梦境提炼出的风格/偏好可以累加到长期系统提示词，让 AI 进化出自己的风格。', 'Distilled lines from each dream can accumulate into a long-term system-prompt suffix.'),
     tr(locale, '完成的梦境会主动推送到所有已授权的 Telegram/Discord/WeChat 聊天。', 'Each finished dream is broadcast to every authorized Telegram/Discord/WeChat chat.'),
@@ -1126,15 +1210,14 @@ async function configureDreamSettings(options: { cwd: string; locale: UiLocale }
 export async function runSetupWizard(options: SetupWizardOptions): Promise<void> {
   const { cwd, locale } = options
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.log('  Not an interactive terminal — setup requires a TTY.')
-    console.log('  非交互终端，配置向导需要交互式终端。')
+    console.log(tr(locale, '  非交互终端，配置向导需要交互式终端。', '  Not an interactive terminal — setup requires a TTY.'))
     return
   }
 
   const section = normalizeSection(options.section)
   if (options.section && !section) {
-    console.log(`Unknown setup section: ${options.section}`)
-    console.log('Available: model, bundle, skills, visual, gateway, memory, cron, terminal, tts, session, dream, docs')
+    console.log(tr(locale, `未知配置分区：${options.section}`, `Unknown setup section: ${options.section}`))
+    console.log(tr(locale, '可用分区：model, bundle, skills, visual, gateway, memory, cron, terminal, tts, session, dream, docs', 'Available: model, bundle, skills, visual, gateway, memory, cron, terminal, tts, session, dream, docs'))
     return
   }
   if (section) {
@@ -1147,7 +1230,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
   const settings = await new CliSettingsStore(cwd).load()
   const existing = Boolean(store.getDefaultMainProfile(data)) || settings.onboardingCompleted
 
-  sectionTitle('Artemis Setup Wizard', [
+  sectionTitle(tr(locale, 'Artemis 配置向导', 'Artemis Setup Wizard'), [
     tr(locale, '选择要配置的项目；不确定就先选 Quick setup 跑通最小可用环境。', 'Pick what to configure, or run Quick setup for a minimal working baseline.'),
     tr(locale, '随时按 Ctrl+C 退出。', 'Press Ctrl+C at any time to exit.'),
   ])
@@ -1170,21 +1253,21 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<void>
     title: tr(locale, '选择配置操作', 'What would you like to do?'),
     initialIndex: 0,
     choices: [
-      { label: 'Quick Setup - configure missing items only', value: 'quick' },
-      { label: 'Full Setup - reconfigure everything', value: 'full' },
-      { label: 'Model & Provider', value: 'model' },
-      { label: 'Prompt Polishing / Bundle', value: 'bundle' },
-      { label: 'Skills Catalog', value: 'skills' },
-      { label: 'Visual / Image & Video', value: 'visual' },
-      { label: 'Messaging Platforms', value: 'gateway' },
-      { label: 'Memory Enhancement', value: 'memory' },
-      { label: 'Automation / Cron', value: 'automation' },
-      { label: 'Terminal Backend', value: 'terminal' },
-      { label: 'Voice Input / Output', value: 'tts' },
-      { label: 'Session Management', value: 'session' },
-      { label: 'Docs Search / Deep Research', value: 'docs' },
-      { label: 'Dream System', value: 'dream' },
-      { label: 'Exit', value: 'exit' },
+      { label: tr(locale, 'Quick Setup - 只补缺失项', 'Quick Setup - configure missing items only'), value: 'quick' },
+      { label: tr(locale, 'Full Setup - 重新配置全部项目', 'Full Setup - reconfigure everything'), value: 'full' },
+      { label: tr(locale, '模型与 Provider', 'Model & Provider'), value: 'model' },
+      { label: tr(locale, '提示词润色 / Bundle', 'Prompt Polishing / Bundle'), value: 'bundle' },
+      { label: tr(locale, 'Skills 目录', 'Skills Catalog'), value: 'skills' },
+      { label: tr(locale, '视觉 / 图片与视频', 'Visual / Image & Video'), value: 'visual' },
+      { label: tr(locale, '通讯平台', 'Messaging Platforms'), value: 'gateway' },
+      { label: tr(locale, '记忆增强', 'Memory Enhancement'), value: 'memory' },
+      { label: tr(locale, '自动化 / Cron', 'Automation / Cron'), value: 'automation' },
+      { label: tr(locale, '终端后端', 'Terminal Backend'), value: 'terminal' },
+      { label: tr(locale, '语音输入 / 输出', 'Voice Input / Output'), value: 'tts' },
+      { label: tr(locale, '会话管理', 'Session Management'), value: 'session' },
+      { label: tr(locale, '文档搜索 / 深度研究', 'Docs Search / Deep Research'), value: 'docs' },
+      { label: tr(locale, '梦境系统', 'Dream System'), value: 'dream' },
+      { label: tr(locale, '退出', 'Exit'), value: 'exit' },
     ],
   })
 

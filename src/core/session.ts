@@ -148,6 +148,13 @@ export class Session {
   setContext(key: string, value: any): void {
     this.context[key] = value;
   }
+
+  /**
+   * 删除上下文项。
+   */
+  deleteContext(key: string): void {
+    delete this.context[key];
+  }
   
   /**
    * 获取上下文

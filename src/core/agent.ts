@@ -12,6 +12,7 @@ import type {
   ProviderResponse,
   ProviderRequestOptions,
 } from '../providers/types.js';
+import type { UiLocale } from '../cli/locale.js';
 import { executeAction } from '../tools/index.js';
 import type { WorkspaceSwitchRequest } from '../tools/types.js';
 import {
@@ -3336,10 +3337,12 @@ async function handleVerificationReminder(
 
 export type RunAgentOptions = {
   cwd: string;
+  locale?: UiLocale;
   provider: ChatProvider;
   sessionStore: SessionStore;
   permissionManager: PermissionManager;
   maxTurns: number;
+  contextLength?: number;
   rootRuntimeId?: string;
   profile?: 'main' | AgentRole;
   delegationDepth?: number;
@@ -4370,6 +4373,7 @@ async function executeAgentAction(
       },
       () => executeAction(action, {
         cwd: options.cwd,
+        locale: options.locale,
         abortSignal,
         requestUserConfirmation: options.requestUserConfirmation,
         updateCwd: async (newCwd) => {
@@ -6176,7 +6180,12 @@ export async function runAgent(
         },
       );
     }
-    const context = await buildContextWindow(session, profile, options.cwd);
+    const activeProvider =
+      options.resolveProvider?.(profile) ?? options.provider;
+    const context = await buildContextWindow(session, profile, {
+      cwd: options.cwd,
+      contextLength: options.contextLength,
+    });
     session.summary = context.summary;
     options.onInfo?.(
       `[context] included=${context.stats.includedMessages}/${context.stats.totalMessages} summarized=${context.stats.summarizedMessages} chars~${context.stats.approxChars}`,
@@ -6199,8 +6208,6 @@ export async function runAgent(
       );
     }
 
-    const activeProvider =
-      options.resolveProvider?.(profile) ?? options.provider;
     const providerMessages = await buildProviderMessages(
       context,
       options.cwd,

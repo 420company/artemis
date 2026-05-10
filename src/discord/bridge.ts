@@ -168,8 +168,6 @@ export type RunDiscordBridgeOptions = {
   signal?: AbortSignal
 }
 
-const DISCORD_SESSION_ROLLOVER_MSG_COUNT = 80
-
 function buildDiscordSessionTitle(targetLabel: string, cwd: string): string {
   return `Discord ${targetLabel} in ${cwd.split('/').pop() ?? cwd}`
 }
@@ -315,15 +313,7 @@ export async function runDiscordBridge(options: RunDiscordBridgeOptions): Promis
           if (loaded.recovered) {
             return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: true }
           }
-          if (session && session.messages.length < DISCORD_SESSION_ROLLOVER_MSG_COUNT) {
-            return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
-          }
-          const next = options.sessionStore.createSession()
-          next.title = buildDiscordSessionTitle(message.targetLabel, options.cwd)
-          await options.sessionStore.save(next)
-          await discordStore.upsertTarget({ targetId: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
-          await bragiStore.upsertSession({ platform: 'discord', scope: message.targetId, targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
-          return { storedSession: next, permissionMode: existing.permissionMode, rolledOver: true }
+          return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
         }
 
         const session = options.sessionStore.createSession()

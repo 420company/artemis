@@ -12,6 +12,7 @@ import type {
   VisualModelConfig,
 } from './types.js';
 import { ensureDir, pathExists } from '../utils/fs.js';
+import { detectModelContextLength } from './modelContext.js';
 
 function getDefaultSetupConfig(): ArtemisSetupConfig {
   return {
@@ -20,7 +21,6 @@ function getDefaultSetupConfig(): ArtemisSetupConfig {
       toolProgress: 'all',
       compression: {
         enabled: true,
-        threshold: 0.5,
       },
       sessionReset: {
         mode: 'both',
@@ -362,6 +362,82 @@ export class ProviderStore {
     }
 
     await this.save(data);
+    return data;
+  }
+
+  async refreshProfileContextLength(id: string): Promise<ProviderProfile | undefined> {
+    const data = await this.load();
+    const index = data.profiles.findIndex((entry) => entry.id === id);
+    if (index < 0) return undefined;
+
+    const profile = data.profiles[index]!;
+    const detected = await detectModelContextLength(profile);
+    if (!detected.contextLength || detected.source === 'unknown') {
+      return profile;
+    }
+
+    const refreshed: ProviderProfile = {
+      ...profile,
+      contextLength: detected.contextLength,
+      contextLengthSource: detected.source,
+      contextLengthCheckedAt: detected.checkedAt,
+    };
+    data.profiles[index] = refreshed;
+
+    if (data.customProviders?.length) {
+      data.customProviders = data.customProviders.map((provider) => {
+        if (provider.baseUrl !== refreshed.baseUrl || provider.model !== refreshed.model) return provider;
+        return {
+          ...provider,
+          contextLength: refreshed.contextLength,
+          contextLengthSource: refreshed.contextLengthSource,
+          contextLengthCheckedAt: refreshed.contextLengthCheckedAt,
+        };
+      });
+    }
+
+    await this.save(data);
+    return refreshed;
+  }
+
+  async refreshContextLengths(): Promise<ProviderStoreData> {
+    const data = await this.load();
+    let changed = false;
+    const refreshedByKey = new Map<string, ProviderProfile>();
+
+    const refreshProfile = async (profile: ProviderProfile): Promise<ProviderProfile> => {
+      const detected = await detectModelContextLength(profile);
+      if (!detected.contextLength || detected.source === 'unknown') return profile;
+      const refreshed: ProviderProfile = {
+        ...profile,
+        contextLength: detected.contextLength,
+        contextLengthSource: detected.source,
+        contextLengthCheckedAt: detected.checkedAt,
+      };
+      refreshedByKey.set(`${refreshed.baseUrl}\n${refreshed.model}`, refreshed);
+      changed = true;
+      return refreshed;
+    };
+
+    data.profiles = await Promise.all(data.profiles.map(refreshProfile));
+
+    if (data.customProviders?.length) {
+      data.customProviders = data.customProviders.map((provider) => {
+        const matched = refreshedByKey.get(`${provider.baseUrl}\n${provider.model}`);
+        if (!matched) return provider;
+        changed = true;
+        return {
+          ...provider,
+          contextLength: matched.contextLength,
+          contextLengthSource: matched.contextLengthSource,
+          contextLengthCheckedAt: matched.contextLengthCheckedAt,
+        };
+      });
+    }
+
+    if (changed) {
+      await this.save(data);
+    }
     return data;
   }
 

@@ -20,7 +20,6 @@ export const CLI_COMMAND_TOKENS = [
   'search-engine',
   'research-engine',
   'deep-research',
-  'deep-research-config',
   'sponsor',
   'artemis-md',
   'revise-artemis-md',

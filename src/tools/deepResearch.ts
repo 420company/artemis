@@ -1,4 +1,5 @@
 import { CliSettingsStore } from '../cli/settings.js';
+import { pickLocale } from '../cli/locale.js';
 import {
   formatGeminiDeepResearchReport,
   runGeminiDeepResearch,
@@ -10,6 +11,7 @@ export async function executeDeepResearch(
   action: Extract<AgentAction, { type: 'deep_research' }>,
   context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
+  const locale = context.locale ?? 'en';
   try {
     const settingsStore = new CliSettingsStore(context.cwd);
     const settings = await settingsStore.load();
@@ -22,7 +24,10 @@ export async function executeDeepResearch(
       return {
         action,
         ok: false,
-        output: 'Gemini Deep Research is not configured. Run `artemis setup docs` and choose Gemini Deep Research, or set ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY.',
+        output: pickLocale(locale, {
+          zh: 'Gemini Deep Research 尚未配置。请运行 `artemis setup docs` 并选择 Gemini Deep Research，或设置 ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY。',
+          en: 'Gemini Deep Research is not configured. Run `artemis setup docs` and choose Gemini Deep Research, or set ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY.',
+        }),
       };
     }
     const result = await runGeminiDeepResearch({
@@ -38,6 +43,7 @@ export async function executeDeepResearch(
       output: formatGeminiDeepResearchReport({
         query: action.query,
         result,
+        locale,
       }),
     };
   } catch (error) {
@@ -45,7 +51,10 @@ export async function executeDeepResearch(
     return {
       action,
       ok: false,
-      output: `Gemini Deep Research failed: ${message}`,
+      output: pickLocale(locale, {
+        zh: `Gemini Deep Research 执行失败：${message}`,
+        en: `Gemini Deep Research failed: ${message}`,
+      }),
     };
   }
 }

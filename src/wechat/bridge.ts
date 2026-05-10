@@ -66,8 +66,6 @@ export type RunWeChatBridgeOptions = {
   signal?: AbortSignal
 }
 
-const WECHAT_SESSION_ROLLOVER_MSG_COUNT = 80
-
 // ─── credential wizard ────────────────────────────────────────────────────────
 
 async function askWeChatCredentials(
@@ -369,15 +367,7 @@ export async function runWeChatBridge(options: RunWeChatBridgeOptions): Promise<
         if (loaded.recovered) {
           return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: true }
         }
-        if (session && session.messages.length < WECHAT_SESSION_ROLLOVER_MSG_COUNT) {
-          return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
-        }
-        const next = options.sessionStore.createSession()
-        next.title = buildSessionTitle(message.targetId)
-        await options.sessionStore.save(next)
-        await wechatStore.upsertContact({ fromUser: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
-        await bragiStore.upsertSession({ platform: 'wechat', scope: 'p2p', targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
-        return { storedSession: next, permissionMode: existing.permissionMode, rolledOver: true }
+        return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
       }
       const session = options.sessionStore.createSession()
       session.title = buildSessionTitle(message.targetId)

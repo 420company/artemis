@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../core/types.js';
+import { normalizeUiLocale, type UiLocale } from '../cli/locale.js';
 import type {
   ChatProvider,
   ProviderConfig,
@@ -54,30 +55,41 @@ function buildProviderErrorMessage(
   response: Response,
   body: string,
   config: ProviderConfig,
+  locale: UiLocale,
 ): string {
+  const zh = locale === 'zh-CN';
   const lines = [
-    `Provider request failed: ${response.status} ${response.statusText}`,
+    zh
+      ? `连接测试没有通过：${response.status} ${response.statusText}`
+      : `Connection test failed: ${response.status} ${response.statusText}`,
   ];
 
   const trimmedBody = body.trim();
   if (trimmedBody) {
-    lines.push(trimmedBody);
+    lines.push(formatProviderErrorBody(trimmedBody, locale));
   }
 
   if (response.status === 401 || response.status === 403) {
     lines.push(
-      [
-        'Hint: the API key was rejected.',
-        'Check that this BytePlus key is valid and allowed to access the selected model.',
-      ].join(' '),
+      zh
+        ? [
+            '可能原因：API Key 无效，或者当前 Key 没有使用所选模型的权限。',
+            '请检查 BytePlus 控制台里的 Key、模型权限和额度状态。',
+          ].join(' ')
+        : [
+            'Possible cause: the API key is invalid, or this key is not allowed to use the selected model.',
+            'Check the key, model permissions, and quota status in the BytePlus console.',
+          ].join(' '),
     );
   }
 
   if (response.status === 404) {
     lines.push(
       [
-        'Hint: this client uses the BytePlus Responses API and appends /responses.',
-        `Check that the base URL (${config.baseUrl}) is the BytePlus /api/v3 root, not a chat-only or coding-only path.`,
+        zh ? '可能原因：接口地址不匹配。' : 'Possible cause: the API endpoint does not match this model.',
+        zh
+          ? `请使用 BytePlus /api/v3 根地址，不要填聊天专用或代码专用路径。当前地址：${config.baseUrl}`
+          : `Use the BytePlus /api/v3 root URL, not a chat-only or coding-only path. Current URL: ${config.baseUrl}`,
       ].join(' '),
     );
   }
@@ -85,8 +97,12 @@ function buildProviderErrorMessage(
   if (response.status === 400) {
     lines.push(
       [
-        `Hint: verify that the selected model (${config.model}) is a Responses-capable BytePlus model for ${config.baseUrl.replace(/\/+$/, '')}/responses.`,
-        'Chat-completions models and Coding-only endpoints can return 400-level request errors here.',
+        zh
+          ? '可能原因：所选模型和接口类型不匹配，或请求格式被服务端拒绝。'
+          : 'Possible cause: the selected model does not match this API type, or the server rejected the request format.',
+        zh
+          ? `当前模型：${config.model}；当前地址：${config.baseUrl.replace(/\/+$/, '')}/responses。`
+          : `Current model: ${config.model}; current URL: ${config.baseUrl.replace(/\/+$/, '')}/responses.`,
       ].join(' '),
     );
   }
@@ -94,17 +110,53 @@ function buildProviderErrorMessage(
   return lines.join('\n');
 }
 
+function resolveProviderMessageLocale(options?: ProviderRequestOptions): UiLocale {
+  return options?.locale ?? normalizeUiLocale(process.env.ARTEMIS_LOCALE);
+}
+
+function formatProviderErrorBody(body: string, locale: 'zh-CN' | 'en'): string {
+  const zh = locale === 'zh-CN';
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown; param?: unknown } };
+    const message = typeof parsed.error?.message === 'string' ? parsed.error.message : '';
+    const param = typeof parsed.error?.param === 'string' ? parsed.error.param : '';
+
+    if (param === 'input.content.text' || message.includes('input.content.text')) {
+      return zh
+        ? '服务端提示：请求内容格式不符合该模型要求，缺少必要的文本内容。'
+        : 'Server message: the request content format does not match this model; required text content is missing.';
+    }
+
+    if (message) {
+      return zh ? `服务端提示：${message}` : `Server message: ${message}`;
+    }
+  } catch {
+    // Keep the original body when the provider did not return JSON.
+  }
+
+  return body;
+}
+
 function buildProviderTransportErrorMessage(
   error: unknown,
   config: ProviderConfig,
+  locale: UiLocale,
 ): string {
+  const zh = locale === 'zh-CN';
   const message = error instanceof Error ? error.message : String(error);
-  return [
-    `Provider request failed before an HTTP response was received: ${message}`,
-    `Requested URL root: ${config.baseUrl}`,
-    `Requested model: ${config.model}`,
-    'Hint: check the BytePlus base URL, local network access, and any proxy or gateway settings.',
-  ].join('\n');
+  return zh
+    ? [
+        `还没有收到服务端响应：${message}`,
+        `当前地址：${config.baseUrl}`,
+        `当前模型：${config.model}`,
+        '请检查网络连接、代理设置，以及 BytePlus 接口地址是否可访问。',
+      ].join('\n')
+    : [
+        `No response was received from the server: ${message}`,
+        `Current URL: ${config.baseUrl}`,
+        `Current model: ${config.model}`,
+        'Check your network connection, proxy settings, and whether the BytePlus endpoint is reachable.',
+      ].join('\n');
 }
 
 function mapMessage(message: SessionMessage): ResponsesInputItem | null {
@@ -249,6 +301,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
     options?: ProviderRequestOptions,
   ): Promise<ProviderResponse> {
     const startedAt = Date.now();
+    const locale = resolveProviderMessageLocale(options);
     let response: Response;
     const payload: Record<string, unknown> = {
       model: this.config.model,
@@ -285,12 +338,12 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       if (options?.abortSignal?.aborted) {
         throw error;
       }
-      throw new Error(buildProviderTransportErrorMessage(error, this.config));
+      throw new Error(buildProviderTransportErrorMessage(error, this.config, locale));
     }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(buildProviderErrorMessage(response, body, this.config));
+      throw new Error(buildProviderErrorMessage(response, body, this.config, locale));
     }
 
     const json = (await response.json()) as Record<string, unknown>;

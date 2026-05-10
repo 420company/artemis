@@ -188,27 +188,32 @@ async function enrichProviderContextLengths(
   profiles: ProviderProfile[],
   t: (zh: string, en: string) => string,
 ): Promise<ProviderProfile[]> {
+  if (profiles.length === 0) return profiles
   const missing = profiles.filter((profile) => !profile.contextLength)
-  if (missing.length === 0) return profiles
 
   console.log()
   const shouldDetect = await askYesNo(
     t,
-    t(
-      'API 已配置完成。为了让 HUD 上下文进度更准确，是否现在自动检测模型上下文长度？',
-      'API setup is complete. Detect model context lengths now so the HUD context meter is accurate?',
-    ),
+    missing.length > 0
+      ? t(
+          'API 已配置完成。为了让 HUD 和上下文压缩更准确，是否现在自动检测模型上下文容量？',
+          'API setup is complete. Detect model context capacities now so the HUD and compression are accurate?',
+        )
+      : t(
+          'API 已配置完成。是否刷新模型上下文容量？会优先读取供应商 /models 元数据，读不到才保留估算。',
+          'API setup is complete. Refresh model context capacities now? Artemis will prefer provider /models metadata and only keep estimates when metadata is unavailable.',
+        ),
     true,
   )
   console.log()
   if (!shouldDetect) return profiles
 
   const nextProfiles = [...profiles]
-  for (const profile of missing) {
+  for (const profile of profiles) {
     console.log(c(`  ${t('正在检测', 'Detecting')}: ${profile.label ?? profile.id} (${profile.model})`, A.dim))
     const detected = await detectModelContextLength(profile)
     if (!detected.contextLength) {
-      console.log(c(`  ${t('未能自动识别上下文长度，将继续使用运行时估算', 'Could not detect context length; runtime fallback will be used')}: ${profile.model}`, A.yellow))
+      console.log(c(`  ${t('未能从 API 元数据识别上下文容量，将继续使用运行时保守估算', 'Could not read context capacity from API metadata; runtime fallback will be used')}: ${profile.model}`, A.yellow))
       continue
     }
 
@@ -217,6 +222,8 @@ async function enrichProviderContextLengths(
       nextProfiles[index] = {
         ...nextProfiles[index]!,
         contextLength: detected.contextLength,
+        contextLengthSource: detected.source === 'unknown' ? undefined : detected.source,
+        contextLengthCheckedAt: detected.checkedAt,
       }
     }
     const sourceLabel = detected.source === 'models-api'

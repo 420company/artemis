@@ -14,6 +14,7 @@ import {
 import { stringWidth } from '../input/stringWidth.js'
 import { PASTE_END, PASTE_START } from '../termio/csi.js'
 import type { SlashMenuItem } from './prompt.js'
+import { stripTerminalPathQuoting } from './terminalPath.js'
 
 export interface BlessedPromptOptions {
   history?: string[]
@@ -130,20 +131,6 @@ function truncateToWidth(text: string, maxWidth: number): string {
  *   /path/with\ spaces/foo.png      → /path/with spaces/foo.png
  *   /path/with\(parens\)/foo.png    → /path/with(parens)/foo.png
  */
-function stripShellQuoting(text: string): string {
-  let out = text.trim()
-  if (out.length >= 2) {
-    const first = out[0]
-    const last = out[out.length - 1]
-    if ((first === "'" || first === '"') && first === last) {
-      out = out.slice(1, -1)
-    }
-  }
-  // Unescape backslash escapes (\<space>, \<paren>, \\, etc).
-  out = out.replace(/\\(.)/g, '$1')
-  return out
-}
-
 function localMediaKindForPath(filePath: string): LocalMediaKind | null {
   const lowerExt = extname(filePath).toLowerCase()
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.heic', '.heif'].includes(lowerExt)) return 'image'
@@ -731,7 +718,7 @@ class TerminalPrompt implements BlessedPromptHandle {
         this.insertAtCursor('\n')
         return
       }
-      if (this.menuItems.length > 0 && this.inputValue.startsWith('/') && !this.inputValue.includes(' ')) {
+      if (this.menuItems.length > 0 && this.inputValue.startsWith('/') && !this.inputValue.includes('\n')) {
         this.applyMenuSelection()
         return
       }
@@ -764,7 +751,7 @@ class TerminalPrompt implements BlessedPromptHandle {
       // Quick pre-filter: only run existsSync when the value looks like a file path.
       if (this.placeholderRanges.length === 0) {
         const candidate = this.inputValue.trim()
-        const stripped = stripShellQuoting(candidate)
+        const stripped = stripTerminalPathQuoting(candidate)
         const looksLikePath = (
           !stripped.includes('\n') &&
           (stripped.startsWith('/') || stripped.startsWith('~') || stripped.startsWith('file://')) &&
@@ -919,7 +906,7 @@ class TerminalPrompt implements BlessedPromptHandle {
   }
 
   private detectLocalMediaPath(text: string): { path: string, kind: LocalMediaKind } | null {
-    const trimmed = stripShellQuoting(text.trim())
+    const trimmed = stripTerminalPathQuoting(text.trim())
     if (!trimmed || trimmed.includes('\n')) return null
 
     let candidate = trimmed

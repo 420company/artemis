@@ -18,6 +18,7 @@ import {
   formatProviderPresetLabel,
   type ProviderPreset,
 } from './presets.js';
+import { detectModelContextLength } from './modelContext.js';
 import { ProviderStore } from './store.js';
 import type {
   PromptIO,
@@ -113,17 +114,24 @@ function detectBytePlusFamily(model: string): BytePlusFamily {
   if (/seedream-/i.test(lower)) return 'image';
   if (/seedance-/i.test(lower)) return 'video';
   if (/skylark-embedding-/i.test(lower)) return 'embedding';
-  if (/ark-code-latest|seed-2-0-(pro|lite|mini)-|bytedance-seed-code|kimi-k2\.5$|glm-5\.1$|glm-4\.7$|gpt-oss-120b(?:-[0-9]+)?$/i.test(lower)) return 'coding';
-  if (/deepseek-|gpt-oss-120b-|skylark-pro-|seed-1-8-|seed-1-6-|seed-1-6-flash-|glm-4-7-/i.test(lower)) return 'chat';
+  if (/ark-code-latest|bytedance-seed-code|kimi-k2\.5$|glm-5\.1$|glm-4\.7$|^gpt-oss-120b$/i.test(lower)) return 'coding';
+  if (/seed-2-0-(pro|lite|mini)-|skylark-pro-|seed-1-8-|seed-1-6-|seed-1-6-flash-|glm-4-7-|deepseek-v3-2-|gpt-oss-120b-[0-9]+$/i.test(lower)) return 'chat';
   return 'unknown';
 }
 
-function alignBytePlus(
+function isBytePlusResponsesCapableModel(model: string): boolean {
+  const lower = model.trim().toLowerCase();
+  return /seed-2-0-(pro|lite|mini|code-preview)-|seed-1-8-|seed-1-6-|seed-1-6-flash-|glm-4-7-|deepseek-v3-2-/i.test(lower);
+}
+
+export function alignBytePlusForTest(
   protocol: ProviderProtocol,
   baseUrl: string,
   model: string,
 ): { protocol: ProviderProtocol; baseUrl: string; family: BytePlusFamily } {
-  const family = detectBytePlusFamily(model);
+  const family = protocol === 'responses' && isBytePlusResponsesCapableModel(model)
+    ? 'responses'
+    : detectBytePlusFamily(model);
   let nextProtocol = protocol;
   let nextBaseUrl = baseUrl;
   if (family === 'chat') {
@@ -150,6 +158,8 @@ function alignBytePlus(
   }
   return { protocol: nextProtocol, baseUrl: nextBaseUrl, family };
 }
+
+const alignBytePlus = alignBytePlusForTest;
 
 function detectOpenCodeZenFamily(model: string): OpenCodeZenFamily {
   const lower = model.trim().toLowerCase();
@@ -354,11 +364,11 @@ async function resolvePreset(
         }),
       },
       {
-        label: 'Chat / Reasoning',
+        label: 'ModelArk Chat / Reasoning',
         value: 'chat' as const,
         description: pickLocale(locale, {
-          zh: '普通聊天和推理模型',
-          en: 'General chat and reasoning models',
+          zh: '普通文本、推理和通用对话模型',
+          en: 'General text, reasoning, and chat models',
         }),
       },
       {
@@ -395,8 +405,8 @@ async function resolvePreset(
       ],
       notes: [
         pickLocale(locale, {
-          zh: '默认使用 Coding 接口（/api/coding/v3）；Seed 2.0 模型使用真实模型名 seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215，并直接提供 bytedance-seed-code / glm-5.1 / glm-4.7 / kimi-k2.5 / gpt-oss-120b。',
-          en: 'Uses the Coding endpoint (/api/coding/v3) by default. Seed 2.0 entries use the real model names seed-2-0-pro-260328 / seed-2-0-lite-260228 / seed-2-0-mini-260215, with bytedance-seed-code / glm-5.1 / glm-4.7 / kimi-k2.5 / gpt-oss-120b available directly.',
+          zh: '默认使用官方 Coding Plan 专用接口（OpenAI-compatible: /api/coding/v3；Anthropic-compatible: /api/coding）。请勿切到 /api/v3，以免产生额外费用。',
+          en: 'Uses the official dedicated Coding Plan endpoint (OpenAI-compatible: /api/coding/v3; Anthropic-compatible: /api/coding). Do not switch to /api/v3, because that can incur extra charges.',
         }),
       ],
       defaultProtocol: 'openai',
@@ -409,9 +419,12 @@ async function resolvePreset(
   if (family === 'chat') {
     return {
       preset,
-      providerLabel: 'BytePlus Chat / Reasoning',
-      defaultAlias: pickLocale(locale, { zh: 'BytePlus 推理模型', en: 'BytePlus reasoning model' }),
+      providerLabel: 'BytePlus ModelArk Chat',
+      defaultAlias: pickLocale(locale, { zh: 'BytePlus 通用模型', en: 'BytePlus general model' }),
       suggestedModels: [
+        'seed-2-0-pro-260328',
+        'seed-2-0-lite-260228',
+        'seed-2-0-mini-260215',
         'seed-1-8-251228',
         'seed-1-6-250915',
         'seed-1-6-flash-250715',
@@ -421,8 +434,8 @@ async function resolvePreset(
       ],
       notes: [
         pickLocale(locale, {
-          zh: '默认使用常规聊天接口（/api/v3）；推荐列表已按海外版 ModelArk 当前通用文本模型同步。',
-          en: 'Uses the standard chat endpoint (/api/v3) by default; the suggested list matches the current international ModelArk text lineup.',
+          zh: '默认使用 ModelArk 通用文本接口（/api/v3）。部分模型需要先在 BytePlus 控制台开通，未开通时连接测试会提示具体模型。',
+          en: 'Uses the general ModelArk text endpoint (/api/v3) by default. Some models must be activated in the BytePlus console first; the connection test will show the exact model if access is missing.',
         }),
       ],
       defaultProtocol: 'openai',
@@ -436,11 +449,19 @@ async function resolvePreset(
     defaultAlias: pickLocale(locale, { zh: 'BytePlus Responses 模型', en: 'BytePlus Responses model' }),
     suggestedModels: [
       'seed-2-0-code-preview-260328',
+      'seed-2-0-pro-260328',
+      'seed-2-0-lite-260228',
+      'seed-2-0-mini-260215',
+      'seed-1-8-251228',
+      'seed-1-6-250915',
+      'seed-1-6-flash-250715',
+      'glm-4-7-251222',
+      'deepseek-v3-2-251201',
     ],
     notes: [
       pickLocale(locale, {
-        zh: '默认使用 Responses 接口（/api/v3/responses）；seed-2.0 系列与 code-preview 已按海外版官方模型表同步。',
-        en: 'Uses the Responses endpoint (/api/v3/responses) by default; the Seed 2.0 line and code-preview model match the official international model list.',
+        zh: '默认使用 Responses 接口（/api/v3/responses）。Seed 2.0、Seed 1.8、Seed 1.6、GLM 4.7 与 DeepSeek V3.2 已按真实请求结果放入此入口。',
+        en: 'Uses the Responses endpoint (/api/v3/responses). Seed 2.0, Seed 1.8, Seed 1.6, GLM 4.7, and DeepSeek V3.2 are placed here based on real request results.',
       }),
     ],
     defaultProtocol: 'responses',
@@ -711,10 +732,10 @@ async function runWithProgress<T>(
   let tick = 0;
   let done = false;
 
-  const title = pickLocale(locale, { zh: 'Provider probe · 验证中', en: 'Provider probe' });
+  const title = pickLocale(locale, { zh: 'API 连接测试', en: 'API connection test' });
   const hint = pickLocale(locale, {
-    zh: 'slow network / cold-start edge model 可能需要更久，请保持窗口打开。',
-    en: 'slow network / cold-start edge model may take longer; keep this window open.',
+    zh: '首次连接或网络较慢时可能需要更久，请保持窗口打开。',
+    en: 'First connection or a slow network can take longer; keep this window open.',
   });
 
   const isTTY = process.stdout.isTTY ?? false;
@@ -765,7 +786,7 @@ async function runWithProgress<T>(
     clearInterval(timer);
     const elapsedFinal = ((Date.now() - start) / 1000).toFixed(1);
     writePanel(buildPanel(title, [
-      `✓  ${pickLocale(locale, { zh: 'probe complete · 验证完成', en: 'probe complete' })}  (${elapsedFinal}s)`,
+      `✓  ${pickLocale(locale, { zh: '连接测试完成', en: 'Connection test complete' })}  (${elapsedFinal}s)`,
     ]), false);
     return result;
   } catch (err) {
@@ -797,8 +818,8 @@ export async function promptForVerifiedProviderProfile(
         promptIO,
         locale,
         pickLocale(locale, {
-          zh: `connecting ${protocolLabel} · first probe 可能需要 20–60s，请稍候`,
-          en: `connecting ${protocolLabel} · first probe may take 20–60s`,
+          zh: `正在连接 ${protocolLabel}，首次测试可能需要 20–60s，请稍候`,
+          en: `Connecting to ${protocolLabel}; the first test may take 20–60s`,
         }),
         () => probeProviderConfig(profile, { locale }),
       );
@@ -811,22 +832,62 @@ export async function promptForVerifiedProviderProfile(
         promptIO,
         locale,
         pickLocale(locale, {
-          zh: `connection OK (${probe.latencyMs}ms) · 正在 probing native tool calls`,
-          en: `connection OK (${probe.latencyMs}ms) · probing native tool calls`,
+          zh: `连接成功 (${probe.latencyMs}ms)，正在确认工具调用能力`,
+          en: `Connection OK (${probe.latencyMs}ms); checking tool-call support`,
         }),
         () => probeProviderNativeToolCalls(profile, { locale }),
       );
       if (nativeToolProbe.ok) {
-        return profile;
+        const detected = await runWithProgress(
+          promptIO,
+          locale,
+          pickLocale(locale, {
+            zh: '工具调用能力已确认，正在读取模型上下文容量',
+            en: 'Tool-call support confirmed; reading model context capacity',
+          }),
+          () => detectModelContextLength(profile),
+        );
+        const enrichedProfile = detected.contextLength && detected.source !== 'unknown'
+          ? {
+              ...profile,
+              contextLength: detected.contextLength,
+              contextLengthSource: detected.source,
+              contextLengthCheckedAt: detected.checkedAt,
+            }
+          : profile;
+        const sourceLabel = detected.source === 'models-api'
+          ? '/models'
+          : detected.source === 'known-model'
+            ? pickLocale(locale, { zh: '内置模型规则', en: 'known-model rules' })
+            : pickLocale(locale, { zh: '未公开', en: 'not exposed' });
+        promptIO?.write(buildPanel(pickLocale(locale, { zh: 'API 连接测试通过', en: 'API connection test passed' }), [
+          pickLocale(locale, {
+            zh: `模型：${profile.model}`,
+            en: `Model: ${profile.model}`,
+          }),
+          detected.contextLength
+            ? pickLocale(locale, {
+                zh: `上下文容量：${detected.contextLength.toLocaleString()} tokens（来源：${sourceLabel}）`,
+                en: `Context capacity: ${detected.contextLength.toLocaleString()} tokens (source: ${sourceLabel})`,
+              })
+            : pickLocale(locale, {
+                zh: '这个 API 没有公开上下文容量元数据；运行时会继续使用保守估算。',
+                en: 'This API did not expose context-capacity metadata; runtime will keep using a conservative estimate.',
+              }),
+        ]));
+        return enrichedProfile;
       }
       failures.push(
-        `${protocolLabel}: connection OK (${probe.latencyMs}ms), but native tool calling failed.\n${nativeToolProbe.message}`,
+        pickLocale(locale, {
+          zh: `${protocolLabel}: 连接成功 (${probe.latencyMs}ms)，但工具调用能力没有通过测试。\n${nativeToolProbe.message}`,
+          en: `${protocolLabel}: connection OK (${probe.latencyMs}ms), but tool-call support did not pass.\n${nativeToolProbe.message}`,
+        }),
       );
     }
 
-    promptIO?.write(buildPanel('Provider connection test failed', failures));
+    promptIO?.write(buildPanel(pickLocale(locale, { zh: 'API 连接测试未通过', en: 'API connection test failed' }), failures));
     const next = await choosePromptOption(promptIO, {
-      title: pickLocale(locale, { zh: 'Provider probe failed · 验证失败', en: 'Provider probe failed' }),
+      title: pickLocale(locale, { zh: 'API 连接测试未通过', en: 'API connection test failed' }),
       initialIndex: 0,
       choices: [
         { label: pickLocale(locale, { zh: '修改配置', en: 'Edit configuration' }), value: 'edit' as const },
@@ -858,7 +919,7 @@ export async function resolveMainProviderConfig(options: {
   const inline = inspectInlineProviderConfig(options.config);
   if (inline.status === 'complete') return inline.config;
   if (inline.status === 'incomplete') {
-    throw new Error(`Provide the missing ARTEMIS_* values together: ${inline.missing.join(', ')}.`);
+    throw new Error(`API 配置还不完整，请同时提供这些值：${inline.missing.join(', ')}。`);
   }
 
   const store = new ProviderStore(options.cwd);
@@ -872,7 +933,7 @@ export async function resolveMainProviderConfig(options: {
   if (globalMainProfile) return globalMainProfile;
 
   if (options.promptIO?.available !== true) {
-    throw new Error('No execution provider is configured. Run artemis interactively or provide ARTEMIS_MODEL, ARTEMIS_BASE_URL, and ARTEMIS_API_KEY together.');
+    throw new Error('还没有配置执行模型。请先运行交互式配置，或同时提供 ARTEMIS_MODEL、ARTEMIS_BASE_URL 和 ARTEMIS_API_KEY。');
   }
 
   const locale = await resolveLocale(options);

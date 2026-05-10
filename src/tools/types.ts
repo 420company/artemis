@@ -1,4 +1,5 @@
 import type { AgentAction } from '../core/types.js';
+import type { UiLocale } from '../cli/locale.js';
 import type { ToolPermissionCategory as NewToolPermissionCategory } from '../core/toolDef.js';
 import type { ToolExecutionMode as NewToolExecutionMode } from '../core/toolDef.js';
 import type { ToolAccessMode } from '../security/permissionModes.js';
@@ -18,6 +19,8 @@ export type WorkspaceSwitchRequest = {
 
 export type ToolExecutionContext = {
   cwd: string;
+  /** UI locale selected by the user. Tools should use this for user-visible output. */
+  locale?: UiLocale;
   /**
    * Callback a tool can invoke to persist a new working directory back to the
    * caller. Used by run_command to track `cd` across subprocess boundaries

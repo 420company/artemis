@@ -1,4 +1,5 @@
 import type { AgentRole, SessionMessage } from '../core/types.js';
+import type { UiLocale } from '../cli/locale.js';
 
 export type ProviderProtocol = 'openai' | 'messages' | 'responses';
 export type ProviderApiKeyHeader = 'authorization' | 'api-key' | 'x-api-key';
@@ -32,6 +33,9 @@ export type ProviderProfile = ProviderConfig & {
   id: string;
   label?: string;
   contextLength?: number;
+  /** Where contextLength came from. models-api means provider metadata, known-model means Artemis fallback rules. */
+  contextLengthSource?: 'models-api' | 'known-model' | 'manual';
+  contextLengthCheckedAt?: string;
   telemetry?: ProviderProfileTelemetry;
 };
 
@@ -66,6 +70,8 @@ export type ImageAttachment = {
 };
 
 export type ProviderRequestOptions = {
+  /** UI language selected by the user during Artemis setup. */
+  locale?: UiLocale;
   nativeFunctionTools?: ProviderNativeFunctionTool[];
   previousResponseId?: string;
   toolOutputs?: ProviderNativeToolOutput[];
@@ -119,6 +125,8 @@ export type CustomProviderConfig = {
   apiKeyHeader?: ProviderApiKeyHeader;
   model: string;
   contextLength?: number;
+  contextLengthSource?: 'models-api' | 'known-model' | 'manual';
+  contextLengthCheckedAt?: string;
 };
 
 export type AuxiliaryModelTask =
@@ -154,7 +162,8 @@ export type AgentSetupConfig = {
   toolProgress: 'off' | 'new' | 'all' | 'verbose';
   compression: {
     enabled: boolean;
-    threshold: number;
+    /** Optional manual trigger ratio. When omitted, Artemis uses adaptive 55/65/70% thresholds by model window. */
+    threshold?: number;
   };
   sessionReset: {
     mode: 'both' | 'idle' | 'daily' | 'never';

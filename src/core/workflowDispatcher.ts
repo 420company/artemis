@@ -49,6 +49,7 @@ const WORKFLOW_SLASH_SET: ReadonlySet<string> = new Set(WORKFLOW_SLASH_COMMANDS)
 export interface WorkflowSlashMatch {
   command: WorkflowSlash | null
   body: string
+  source?: 'slash' | 'natural-language'
 }
 
 /**
@@ -58,13 +59,36 @@ export interface WorkflowSlashMatch {
 export function detectWorkflowSlashCommand(text: string): WorkflowSlashMatch {
   const trimmed = text.trim()
   for (const cmd of WORKFLOW_SLASH_COMMANDS) {
-    if (trimmed.toLowerCase() === cmd) return { command: cmd, body: '' }
+    if (trimmed.toLowerCase() === cmd) return { command: cmd, body: '', source: 'slash' }
     const lowerHead = trimmed.slice(0, cmd.length + 1).toLowerCase()
     if (lowerHead === cmd + ' ' || lowerHead === cmd + '\n') {
-      return { command: cmd, body: trimmed.slice(cmd.length).trim() }
+      return { command: cmd, body: trimmed.slice(cmd.length).trim(), source: 'slash' }
     }
   }
   return { command: null, body: trimmed }
+}
+
+const NATURAL_WORKFLOW_INTENT_RE = /(?:启用|启动|开启|进入|切到|切换到|使用|用|走|run|use|start|switch\s+to)\s*(?:工作流|模式|workflow|mode)?\s*$/i
+
+export function detectExplicitWorkflowIntent(text: string): WorkflowSlashMatch {
+  const slashMatch = detectWorkflowSlashCommand(text)
+  if (slashMatch.command) return slashMatch
+
+  const trimmed = text.trim()
+  const matches: Array<{ command: WorkflowSlash; index: number }> = []
+  for (const cmd of WORKFLOW_SLASH_COMMANDS) {
+    const re = new RegExp(cmd.replace('/', '\\/'), 'i')
+    const match = re.exec(trimmed)
+    if (!match) continue
+    const before = trimmed.slice(0, match.index)
+    if (!NATURAL_WORKFLOW_INTENT_RE.test(before)) continue
+    matches.push({ command: cmd, index: match.index })
+  }
+  if (matches.length === 0) return { command: null, body: trimmed }
+
+  const priority: WorkflowSlash[] = ['/team', '/design', '/athena', '/niko', '/contest', '/nidhogg', '/run']
+  const chosen = priority.find((cmd) => matches.some((match) => match.command === cmd)) ?? matches[0]!.command
+  return { command: chosen, body: trimmed, source: 'natural-language' }
 }
 
 export function isWorkflowSlashCommand(token: string): token is WorkflowSlash {

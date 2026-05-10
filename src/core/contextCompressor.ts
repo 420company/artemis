@@ -296,7 +296,7 @@ function formatSummary(obj: Record<string, unknown>): string {
 export interface CompressionOptions {
   /** Estimated token limit of the model. Default: 180_000 */
   tokenLimit?: number
-  /** Compress when token usage exceeds this fraction of limit. Default: 0.5 */
+  /** Compress when token usage exceeds this fraction of limit. Default: adaptive, usually 0.70 */
   threshold?: number
   /** Number of messages to protect at the head. Default: 3 */
   protectHead?: number
@@ -321,15 +321,29 @@ export interface CompressResult {
 }
 
 /**
- * Hard cap on session size before compression fires, regardless of the model's
- * context window. Without this, a 1M-context model would let the conversation
- * grow to 400K tokens (40% of 1M) before compressing — meaning every API call
- * burned 400K input tokens unnecessarily. We now compress at min(40% of model
- * limit, ABSOLUTE_COMPRESS_AT_TOKENS) so users with big-context models still
- * see compression kick in at a reasonable budget instead of paying for the
- * full window every turn.
+ * Compression follows the selected model's real window. Default policy:
+ *   - small windows (<64K): start at 60% so tool output still fits;
+ *   - medium windows (64K-256K): start at 70%;
+ *   - large windows (>256K): start at 80%.
+ * A high soft cap remains as cost protection for million-token models, but it
+ * no longer forces 200K/1M models to compress at the old 40K ceiling.
  */
-const ABSOLUTE_COMPRESS_AT_TOKENS = 40_000
+const LARGE_CONTEXT_SOFT_COMPRESS_AT_TOKENS = 700_000
+
+export function getAdaptiveCompressionThreshold(tokenLimit: number): number {
+  if (!Number.isFinite(tokenLimit) || tokenLimit <= 0) return 0.70
+  if (tokenLimit < 64_000) return 0.60
+  if (tokenLimit <= 256_000) return 0.70
+  return 0.80
+}
+
+export function getCompressionTriggerTokens(tokenLimit: number, threshold?: number): number {
+  const safeLimit = Number.isFinite(tokenLimit) && tokenLimit > 0 ? tokenLimit : 180_000
+  const resolvedThreshold = typeof threshold === 'number' && Number.isFinite(threshold) && threshold > 0
+    ? threshold
+    : getAdaptiveCompressionThreshold(safeLimit)
+  return Math.max(1, Math.floor(Math.min(safeLimit * resolvedThreshold, LARGE_CONTEXT_SOFT_COMPRESS_AT_TOKENS)))
+}
 
 export async function compressMessages(
   messages: SessionMessage[],
@@ -337,10 +351,7 @@ export async function compressMessages(
   opts: CompressionOptions = {},
 ): Promise<CompressResult> {
   const tokenLimit       = opts.tokenLimit       ?? 180_000
-  // Compress when the conversation reaches 40 % of the context window.
-  // The previous default of 50 % was too permissive — multi-agent design
-  // workflows were spending 1M+ input tokens before compression ever fired.
-  const threshold        = opts.threshold        ?? 0.40
+  const threshold        = opts.threshold        ?? getAdaptiveCompressionThreshold(tokenLimit)
   const protectHead      = opts.protectHead      ?? 3
   // Shrink the uncompressed tail from 20K → 12K tokens so the compressor
   // can reclaim more space during multi-agent workflows.
@@ -350,10 +361,7 @@ export async function compressMessages(
 
   const tokensBefore = estimateMsgListTokens(messages)
 
-  // Compression triggers at min(threshold% of model limit, hard absolute cap).
-  // The hard cap is the new piece — it prevents big-context models from
-  // letting conversations grow to 400K+ before any cleanup happens.
-  const triggerAt = Math.min(tokenLimit * threshold, ABSOLUTE_COMPRESS_AT_TOKENS)
+  const triggerAt = getCompressionTriggerTokens(tokenLimit, threshold)
   if (tokensBefore < triggerAt) {
     return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore }
   }

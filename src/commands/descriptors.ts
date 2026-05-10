@@ -363,14 +363,6 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     desc: { zh: 'Run a deep research query', en: 'Run a deep research query' },
   },
   {
-    id: 'deep-research-config',
-    group: 'knowledge',
-    cli: 'deep-research-config',
-    slash: '/deep-research-config',
-    autocomplete: true,
-    desc: { zh: 'Configure deep research', en: 'Configure deep research' },
-  },
-  {
     id: 'providers',
     group: 'models',
     cli: 'providers',

@@ -112,8 +112,6 @@ let systemPromptSuffix: string = '';
 let _modelOverride: any;
 let _apiKeyOverride: any;
 let _baseUrlOverride: any;
-// Context compression state — persists across turns for "update, not rewrite"
-let _lastSummaryText: any;
 let _lastPromptTokens = 0;
 let _compressionThresholdOverride: number | undefined;
 // ── Dual-model worker provider ──────────────────────────────────────────────
@@ -627,7 +625,6 @@ function getSession(cwd: string = process.cwd()) {
 /** Reset conversation history (keeps provider alive). */
 export function resetSession() {
     session = null;
-    _lastSummaryText = undefined;
     _lastPromptTokens = 0;
 }
 
@@ -716,7 +713,31 @@ export const summarizeOnce = async (prompt: any) => {
 
 /** Restore a saved session's messages into the active session. */
 export function restoreSession(messages: any) {
-    getSession().restore(messages);
+    const activeSession = getSession();
+    activeSession.restore(messages);
+    activeSession.deleteContext('compressionSummary');
+}
+
+export function restoreSessionForCwd(messages: any, cwd: string) {
+    const activeSession = getSession(cwd);
+    activeSession.restore(messages);
+    activeSession.deleteContext('compressionSummary');
+}
+
+export function restoreSessionStateForCwd(state: { messages: any; summary?: string }, cwd: string) {
+    const activeSession = getSession(cwd);
+    activeSession.restore(state.messages);
+    const summary = typeof state.summary === 'string' ? state.summary.trim() : '';
+    if (summary) {
+        activeSession.setContext('compressionSummary', summary);
+    } else {
+        activeSession.deleteContext('compressionSummary');
+    }
+}
+
+export function getCompressionSummary(cwd: string = process.cwd()): string | undefined {
+    const summary = getSession(cwd).getContext('compressionSummary');
+    return typeof summary === 'string' && summary.trim() ? summary : undefined;
 }
 
 /** Return current messages (for session persistence). */
@@ -881,29 +902,33 @@ async function buildRuntimeSystemMessages(
     return runtimeMessages;
 }
 
-async function buildProviderConversationMessages(
+async function compressSessionMessagesForProvider(
+    activeSession: Session,
     conversationMessages: SessionMessage[],
     model?: string,
     contextLength?: number,
     reservedTokens = 0,
     onInfo?: (message: string) => void,
-): Promise<SessionMessage[]> {
+): Promise<{ messages: SessionMessage[]; summaryText?: string }> {
     if (!model) {
-        return conversationMessages;
+        return { messages: conversationMessages };
     }
 
+    const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
     const fullLimit = getConfiguredContextLimit(model, contextLength);
     const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
     const compression = await compressMessages(conversationMessages, summarizeOnce, {
         tokenLimit: availableLimit,
-        previousSummary: _lastSummaryText,
+        previousSummary,
         threshold: _compressionThresholdOverride,
         onInfo,
     });
+
     if (compression.summaryText) {
-        _lastSummaryText = compression.summaryText;
+        activeSession.setContext('compressionSummary', compression.summaryText);
     }
-    return compression.messages;
+
+    return { messages: compression.messages, summaryText: compression.summaryText };
 }
 
 // ── Tool definitions for Anthropic API ───────────────────────────────────────
@@ -1932,6 +1957,8 @@ export interface ThinkOptions {
     maxNativeToolRounds?: number;
     pollRunningUserMessages?: () => string[];
     onRunningUserMessageAccepted?: (text: string) => void;
+    initialCompressionSummary?: string;
+    onCompressionSummary?: (summary: string) => void;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -1975,10 +2002,15 @@ export async function think(
         maxNativeToolRounds: rawMaxNativeToolRounds,
         pollRunningUserMessages,
         onRunningUserMessageAccepted,
+        initialCompressionSummary,
+        onCompressionSummary,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
     tSession.updateSystemPrompt(buildSystemPromptText(locale));
+    if (initialCompressionSummary?.trim() && !tSession.getContext('compressionSummary')) {
+        tSession.setContext('compressionSummary', initialCompressionSummary);
+    }
     tSession.addUser(input);
 
     const p = await loadProvider(cwd);
@@ -1992,7 +2024,8 @@ export async function think(
         providerConfigVal?.contextLength,
     );
     const reservedSystemTokens = Math.round(estimateConversationTokens(systemMessages));
-    let providerConversationMessages = await buildProviderConversationMessages(
+    let providerCompression = await compressSessionMessagesForProvider(
+        tSession,
         rawMessages,
         providerConfigVal?.model,
         providerConfigVal?.contextLength,
@@ -2002,6 +2035,10 @@ export async function think(
         // when/why the compressor fired or whether it succeeded).
         onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
     );
+    if (providerCompression.summaryText) {
+        onCompressionSummary?.(providerCompression.summaryText);
+    }
+    let providerConversationMessages = providerCompression.messages;
 
     const latestUserText = getLatestUserText(rawMessages);
     const enabledTools = await loadSetupToolEnabled(cwd);
@@ -2108,6 +2145,20 @@ export async function think(
     nativeRoundLoop:
     for (let round = 1; round <= maxNativeToolRounds; round += 1) {
         absorbRunningUserMessages();
+        if (round > 1) {
+            providerCompression = await compressSessionMessagesForProvider(
+                tSession,
+                rawMessages,
+                providerConfigVal?.model,
+                providerConfigVal?.contextLength,
+                reservedSystemTokens,
+                onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
+            );
+            if (providerCompression.summaryText) {
+                onCompressionSummary?.(providerCompression.summaryText);
+            }
+            providerConversationMessages = providerCompression.messages;
+        }
         const nativeFunctionTools = supportsNativeTools && projectedToolNames.length > 0
             ? buildDirectNativeFunctionTools({ allowedToolNames: projectedToolNames })
             : undefined;

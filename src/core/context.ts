@@ -31,6 +31,11 @@ const SPECIALIST_CONTEXT_BUDGET: ContextBudgetProfile = {
   contextCharBudget: 48_000,
 };
 
+export type ContextWindowOptions = {
+  cwd?: string;
+  contextLength?: number;
+};
+
 type ContextStats = {
   totalMessages: number;
   includedMessages: number;
@@ -249,18 +254,40 @@ function trimSelectedMessages(
 
 function getContextBudgets(
   profile: 'main' | AgentRole,
+  contextLength?: number,
 ): ContextBudgetProfile {
-  return profile === 'main'
+  const base = profile === 'main'
     ? MAIN_CONTEXT_BUDGET
     : SPECIALIST_CONTEXT_BUDGET;
+  if (typeof contextLength !== 'number' || !Number.isFinite(contextLength) || contextLength <= 0) {
+    return base;
+  }
+
+  const targetChars = Math.max(
+    base.contextCharBudget,
+    Math.min(480_000, Math.floor(contextLength * 2.2)),
+  );
+  if (targetChars === base.contextCharBudget) {
+    return base;
+  }
+
+  const scale = targetChars / base.contextCharBudget;
+  return {
+    recentMessageCharLimit: Math.min(160_000, Math.floor(base.recentMessageCharLimit * Math.min(scale, 4))),
+    latestUserMessageCharLimit: Math.min(240_000, Math.floor(base.latestUserMessageCharLimit * Math.min(scale, 4))),
+    summaryLineCharLimit: Math.min(8_192, Math.floor(base.summaryLineCharLimit * Math.min(scale, 3))),
+    summaryCharLimit: Math.min(120_000, Math.floor(base.summaryCharLimit * Math.min(scale, 4))),
+    contextCharBudget: targetChars,
+  };
 }
 
 export async function buildContextWindow(
   session: SessionRecord,
   profile: 'main' | AgentRole = 'main',
-  cwd?: string,
+  optionsOrCwd?: ContextWindowOptions | string,
 ): Promise<ContextBuildResult> {
-  const budgets = getContextBudgets(profile);
+  const options = typeof optionsOrCwd === 'string' ? { cwd: optionsOrCwd } : optionsOrCwd;
+  const budgets = getContextBudgets(profile, options?.contextLength);
   const selected: SessionMessage[] = [];
   let approxChars = 0;
   let cursor = session.messages.length - 1;
@@ -293,11 +320,11 @@ export async function buildContextWindow(
   const userMessages = session.messages.filter(msg => msg.role === 'user');
   const latestUserMessage = userMessages[userMessages.length - 1];
   
-  if (latestUserMessage && cwd) {
+  if (latestUserMessage && options?.cwd) {
     // 调用 resolveOdinSkillContext 查找匹配的技能
     try {
       const skillContext = await resolveOdinSkillContext({
-        cwd,
+        cwd: options.cwd,
         task: latestUserMessage.content,
         scope: 'local',
       });

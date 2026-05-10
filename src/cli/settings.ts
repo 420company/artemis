@@ -13,6 +13,8 @@ export const DEFAULT_WORDUP_INTERVAL_MINUTES = 30
 export const DEFAULT_DOCS_SEARCH_ENGINE = 'bing'
 export const DEFAULT_RESEARCH_ENGINE = 'builtin'
 export const DEFAULT_GEMINI_DEEP_RESEARCH_AGENT = 'deep-research-preview-04-2026'
+export const DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS = 360
+export const DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS = 5_000
 
 export type DocsSearchEngine = 'bing' | 'google'
 export type ResearchEngine = 'builtin' | 'gemini-deep-research'
@@ -34,6 +36,8 @@ export interface CliSettings {
   researchEngineConfigured: boolean
   geminiApiKey?: string
   geminiDeepResearchAgent?: string
+  geminiDeepResearchMaxPolls?: number
+  geminiDeepResearchPollIntervalMs?: number
   onboardingCompleted: boolean
   bundleConfigured: boolean
   bundleEnabled: boolean
@@ -59,6 +63,8 @@ function getDefaultCliSettings(): CliSettings {
     researchEngineConfigured: false,
     geminiApiKey: undefined,
     geminiDeepResearchAgent: undefined,
+    geminiDeepResearchMaxPolls: DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS,
+    geminiDeepResearchPollIntervalMs: DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
     onboardingCompleted: false,
     bundleConfigured: false,
     bundleEnabled: false,
@@ -119,6 +125,12 @@ function normalizeGeminiDeepResearchAgent(value: unknown): string | undefined {
   return trimmed
 }
 
+function normalizePositiveIntegerSetting(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.round(value))
+    : fallback
+}
+
 export class CliSettingsStore {
   private rootDir: string
   private filePath: string
@@ -154,6 +166,14 @@ export class CliSettingsStore {
         ? p.geminiApiKey.trim()
         : undefined,
       geminiDeepResearchAgent: normalizeGeminiDeepResearchAgent(p.geminiDeepResearchAgent),
+      geminiDeepResearchMaxPolls: normalizePositiveIntegerSetting(
+        p.geminiDeepResearchMaxPolls,
+        DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS,
+      ),
+      geminiDeepResearchPollIntervalMs: normalizePositiveIntegerSetting(
+        p.geminiDeepResearchPollIntervalMs,
+        DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
+      ),
       onboardingCompleted: p.onboardingCompleted === true,
       bundleConfigured: p.bundleConfigured === true,
       bundleEnabled: p.bundleEnabled === true,
@@ -200,6 +220,12 @@ export class CliSettingsStore {
       geminiDeepResearchAgent: partial.geminiDeepResearchAgent !== undefined
         ? normalizeGeminiDeepResearchAgent(partial.geminiDeepResearchAgent)
         : current.geminiDeepResearchAgent,
+      geminiDeepResearchMaxPolls: partial.geminiDeepResearchMaxPolls !== undefined
+        ? normalizePositiveIntegerSetting(partial.geminiDeepResearchMaxPolls, DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS)
+        : current.geminiDeepResearchMaxPolls,
+      geminiDeepResearchPollIntervalMs: partial.geminiDeepResearchPollIntervalMs !== undefined
+        ? normalizePositiveIntegerSetting(partial.geminiDeepResearchPollIntervalMs, DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS)
+        : current.geminiDeepResearchPollIntervalMs,
       onboardingCompleted: typeof partial.onboardingCompleted === 'boolean'
         ? partial.onboardingCompleted : current.onboardingCompleted,
       bundleConfigured: typeof partial.bundleConfigured === 'boolean'

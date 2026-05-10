@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
+import { pickLocale, type UiLocale } from '../cli/locale.js';
 import type {
   ChatProvider,
   ProviderApiKeyHeader,
@@ -12,14 +13,21 @@ function buildProviderErrorMessage(
   response: Response,
   body: string,
   config: ProviderConfig,
+  locale: UiLocale = 'en',
 ): string {
+  const trimmedBody = body.trim();
   const lines = [
-    `Provider request failed: ${response.status} ${response.statusText}`,
+    pickLocale(locale, {
+      zh: `连接测试没有通过：${response.status} ${response.statusText}`,
+      en: `Connection test failed: ${response.status} ${response.statusText}`,
+    }),
   ];
 
-  const trimmedBody = body.trim();
   if (trimmedBody) {
-    lines.push(trimmedBody);
+    lines.push(pickLocale(locale, {
+      zh: `服务端提示：${trimmedBody}`,
+      en: `Server message: ${trimmedBody}`,
+    }));
   }
 
   const normalizedBaseUrl = config.baseUrl.replace(/\/+$/, '');
@@ -33,40 +41,24 @@ function buildProviderErrorMessage(
     response.status === 404 &&
     /\/api\/coding$/i.test(normalizedBaseUrl)
   ) {
-    lines.push(
-      [
-        'Hint: this client is OpenAI-compatible and appends /chat/completions.',
-        'For BytePlus Coding Plan, use the OpenAI-compatible base URL ending in /api/coding/v3.',
-        'The plain /api/coding base URL is for a different compatibility mode.',
-      ].join(' '),
-    );
+    lines.push(pickLocale(locale, {
+      zh: 'BytePlus Coding Plan 的 OpenAI-compatible 地址应以 /api/coding/v3 结尾；/api/coding 属于另一种兼容模式。',
+      en: 'For BytePlus Coding Plan, the OpenAI-compatible Base URL should end with /api/coding/v3; /api/coding is for a different compatibility mode.',
+    }));
   }
 
-  if (response.status === 401) {
-    lines.push(
-      [
-        'Hint: the API key was rejected.',
-        'Check that ARTEMIS_API_KEY is correct for this provider and that the key still has access to the selected model.',
-      ].join(' '),
-    );
-  }
-
-  if (response.status === 403) {
-    lines.push(
-      [
-        'Hint: the request was forbidden.',
-        'Check that this key and account are allowed to use the selected model and base URL.',
-      ].join(' '),
-    );
+  if (response.status === 401 || response.status === 403) {
+    lines.push(pickLocale(locale, {
+      zh: 'API key 没有通过校验。请确认 key 没有输错，并且当前账号有权限使用所选模型。',
+      en: 'The API key was rejected. Check that the key is correct and that your account can use the selected model.',
+    }));
   }
 
   if (response.status === 429) {
-    lines.push(
-      [
-        'Hint: the provider rate-limited or quota-limited this request.',
-        'Wait and retry, or switch to another model/profile before re-running artemis doctor --test-providers.',
-      ].join(' '),
-    );
+    lines.push(pickLocale(locale, {
+      zh: '当前请求触发了限速或额度限制。请稍后重试，或切换到另一个模型/API 配置。',
+      en: 'The request hit a rate limit or quota limit. Retry later, or switch to another model/API profile.',
+    }));
   }
 
   if (response.status === 400) {
@@ -74,19 +66,15 @@ function buildProviderErrorMessage(
       googleGemini &&
       /api_key_invalid|api key not valid|invalid api key|authentication/i.test(lowerBody)
     ) {
-      lines.push(
-        [
-          'Hint: Google Gemini rejected this API key.',
-          'Use a Google AI Studio / Gemini API key for generativelanguage.googleapis.com.',
-        ].join(' '),
-      );
+      lines.push(pickLocale(locale, {
+        zh: 'Google Gemini 没有接受这个 API key。请使用 Google AI Studio / Gemini API key。',
+        en: 'Google Gemini did not accept this API key. Use a Google AI Studio / Gemini API key.',
+      }));
     } else {
-      lines.push(
-        [
-          `Hint: verify the selected model (${config.model}) matches this base URL (${normalizedBaseUrl}).`,
-          'A model/base-URL mismatch commonly returns 400-level request errors.',
-        ].join(' '),
-      );
+      lines.push(pickLocale(locale, {
+        zh: `请求格式没有被服务接受。请确认模型 ${config.model} 适用于当前 Base URL：${normalizedBaseUrl}`,
+        en: `The service did not accept the request format. Make sure model ${config.model} works with this Base URL: ${normalizedBaseUrl}`,
+      }));
     }
   }
 
@@ -96,30 +84,44 @@ function buildProviderErrorMessage(
 function buildProviderTransportErrorMessage(
   error: unknown,
   config: ProviderConfig,
+  locale: UiLocale = 'en',
 ): string {
   const message = error instanceof Error ? error.message : String(error);
   const lines = [
-    `Provider request failed before an HTTP response was received: ${message}`,
-    `Requested URL root: ${config.baseUrl}`,
-    `Requested model: ${config.model}`,
+    pickLocale(locale, {
+      zh: `还没有收到服务响应，连接就中断了：${message}`,
+      en: `The connection stopped before the service returned a response: ${message}`,
+    }),
+    pickLocale(locale, {
+      zh: `当前 Base URL：${config.baseUrl}`,
+      en: `Current Base URL: ${config.baseUrl}`,
+    }),
+    pickLocale(locale, {
+      zh: `当前模型：${config.model}`,
+      en: `Current model: ${config.model}`,
+    }),
   ];
 
   if (/ENOTFOUND|getaddrinfo/i.test(message)) {
-    lines.push(
-      'Hint: the provider host could not be resolved. Check the base URL and the local network connection.',
-    );
+    lines.push(pickLocale(locale, {
+      zh: '没有解析到服务地址。请检查 Base URL 和本机网络连接。',
+      en: 'The service host could not be resolved. Check the Base URL and local network connection.',
+    }));
   } else if (/ECONNREFUSED/i.test(message)) {
-    lines.push(
-      'Hint: the provider endpoint refused the connection. Check the base URL and make sure the remote service is listening.',
-    );
+    lines.push(pickLocale(locale, {
+      zh: '服务拒绝了连接。请检查 Base URL，并确认远端服务正在运行。',
+      en: 'The service refused the connection. Check the Base URL and make sure the remote service is running.',
+    }));
   } else if (/timed out|ETIMEDOUT|timeout/i.test(message)) {
-    lines.push(
-      'Hint: the provider did not respond in time. Retry, or test the same profile with artemis doctor --test-providers.',
-    );
+    lines.push(pickLocale(locale, {
+      zh: '服务响应超时。可以稍后重试，或换一个模型/API 配置再试。',
+      en: 'The service timed out. Retry later, or test another model/API profile.',
+    }));
   } else if (/fetch failed/i.test(message)) {
-    lines.push(
-      'Hint: the request could not be completed. Check the base URL, network access, and any local proxy or gateway settings.',
-    );
+    lines.push(pickLocale(locale, {
+      zh: '请求没有完成。请检查 Base URL、网络连接，以及代理或网关设置。',
+      en: 'The request could not be completed. Check the Base URL, network access, and any proxy or gateway settings.',
+    }));
   }
 
   return lines.join('\n');
@@ -472,12 +474,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
       if (options?.abortSignal?.aborted) {
         throw error
       }
-      throw new Error(buildProviderTransportErrorMessage(error, this.config))
+      throw new Error(buildProviderTransportErrorMessage(error, this.config, options?.locale))
     }
 
     if (!response.ok) {
       const errBody = await response.text()
-      throw new Error(buildProviderErrorMessage(response, errBody, this.config))
+      throw new Error(buildProviderErrorMessage(response, errBody, this.config, options?.locale))
     }
 
     // Some OpenAI-compatible endpoints accept `stream: true` in the request but
@@ -748,12 +750,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
       if (options?.abortSignal?.aborted) {
         throw error;
       }
-      throw new Error(buildProviderTransportErrorMessage(error, this.config));
+      throw new Error(buildProviderTransportErrorMessage(error, this.config, options?.locale));
     }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(buildProviderErrorMessage(response, body, this.config));
+      throw new Error(buildProviderErrorMessage(response, body, this.config, options?.locale));
     }
 
     type OpenAIToolCall = { id: string; type: string; function: { name: string; arguments: string } };

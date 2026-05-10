@@ -200,7 +200,7 @@ function renderLiveWorkflowViewport(state: LiveWorkflowRenderState): void {
 import path from 'node:path'
 import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
-import { think, resetSession, getMessages, restoreSession, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens, getBifrostContextAuditReport } from '../brain.js'
+import { think, resetSession, getMessages, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
@@ -262,7 +262,8 @@ import { wordupNow } from './wordup.js'
 import { getWorkflowDisplayName } from '../core/workflowMode.js'
 import type { WorkflowMode } from '../core/workflowMode.js'
 import { buildWorkflowHint, buildWorkflowCompletionNote } from '../core/workflowHints.js'
-import { routeTeamRequest, describeChoice } from '../core/team.js'
+import { detectExplicitWorkflowIntent } from '../core/workflowDispatcher.js'
+import { routeTeamRequest, routeTeamRequestFallback, describeChoice } from '../core/team.js'
 import {
   applyWorkflowProgressInfo,
   createWorkflowProgressState,
@@ -292,7 +293,7 @@ import {
   hasExplicitRemoteVisualFallback,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
-import { handleSeedanceMultimodalWorkflow, hasExistingLocalMediaReference } from '../tools/visual/seedanceWorkflow.js'
+import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
 import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 
 const HOME_DIR = os.homedir()
@@ -551,6 +552,8 @@ function styleTimelineLogLine(text: string): string {
 // quiet for the 5-20s gap before the first token; an animated frame plus a
 // concrete phrase makes "the AI is working" unmistakable.
 const PENDING_SPINNER_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'] as const
+const PENDING_STATUS_REDRAW_INTERVAL_MS = 1000
+const PENDING_STATUS_MAX_TICKS = 60 * 60
 
 function buildPendingAssistantLines(options: {
   phase: 'generating' | 'thinking'
@@ -1669,7 +1672,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     if (!result.configured) {
       appendSystemPanel(
         t('工作流未启动', 'Workflow not started'),
-        [t('还没有可用的 Execution provider，且你刚才取消了配置。', 'No execution provider is configured, and setup was cancelled.')],
+        [t('还没有可用的执行模型/API 配置，且你刚才取消了配置。', 'No execution model/API profile is configured, and setup was cancelled.')],
       )
       prompt!.forceRedraw()
       return false
@@ -1817,7 +1820,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       : await sessionStore.loadLatest()
     if (loaded) {
       storedSession = loaded
-      restoreSession(loaded.messages)
+      restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary }, workspaceRoot)
       hud.sessionMessageCount = loaded.messages.length
       hud.sessionTotalTokens = 0
     }
@@ -1930,6 +1933,31 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/exit',       hint: t('退出',                       'Exit') },
   ]
 
+  const REGISTERED_SLASH_COMMANDS = new Set<string>([
+    ...SLASH_MENU_ITEMS.map((item) => item.value.split(/\s+/, 1)[0].toLowerCase()),
+    '/quit',
+  ])
+
+  const leadingSlashCommandToken = (text: string): string | null => {
+    const token = text.trimStart().split(/\s+/, 1)[0]
+    return token.startsWith('/') ? token.toLowerCase() : null
+  }
+
+  const isRegisteredSlashCommandInput = (text: string): boolean => {
+    const token = leadingSlashCommandToken(text)
+    return token !== null && REGISTERED_SLASH_COMMANDS.has(token)
+  }
+
+  const slashArgs = (text: string, command: string): string | null => {
+    const trimmedText = text.trimStart()
+    const token = trimmedText.split(/\s+/, 1)[0]
+    if (token.toLowerCase() !== command) return null
+    return trimmedText.slice(token.length).trim()
+  }
+
+  const isSlashCommand = (text: string, command: string): boolean => slashArgs(text, command) !== null
+  const isExactSlashCommand = (text: string, command: string): boolean => slashArgs(text, command) === ''
+
   const commitTransientBlocks = (): void => {
     if (!transientBlocks || transientBlocks.length === 0) {
       transientBlocks = null
@@ -2007,8 +2035,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       syncViewportFromState()
     },
     onTextChange: (text) => {
-      if (text.startsWith('/') && !text.includes(' ')) {
-        const filtered = SLASH_MENU_ITEMS.filter(item => item.value.startsWith(text))
+      // Only show the slash menu when the current text matches a registered
+      // Artemis command prefix. A leading slash alone is not a command: macOS
+      // and Linux drag-and-drop paths also start with `/`.
+      if (text.startsWith('/') && !text.includes('\n')) {
+        const query = text.toLowerCase()
+        const filtered = SLASH_MENU_ITEMS.filter(item => item.value.toLowerCase().startsWith(query))
         prompt?.setMenu(filtered.length > 0 ? filtered : null)
         prompt?.setSuggestion('')  // no ghost text when menu is showing
       } else {
@@ -2279,7 +2311,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     let trimmed: string = line.trim()
     if (!trimmed) continue
 
-    if (activeDetachedCapture && !trimmed.startsWith('/')) {
+    if (activeDetachedCapture && !isRegisteredSlashCommandInput(trimmed)) {
       activeDetachedCapture.capture(line)
       continue
     }
@@ -2293,7 +2325,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       } catch { /* ignore */ }
     })()
 
-    if (suppressInitialNewbornOnce && trimmed === '/newborn') {
+    if (suppressInitialNewbornOnce && isExactSlashCommand(trimmed, '/newborn')) {
       suppressInitialNewbornOnce = false
       appendSystemPanel(
         t('提示', 'Notice'),
@@ -2314,7 +2346,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── slash commands ────────────────────────────────────────────────────────
-    if (trimmed === '/exit' || trimmed === '/quit') {
+    if (isExactSlashCommand(trimmed, '/exit') || isExactSlashCommand(trimmed, '/quit')) {
       await askAndSaveSession('/exit')
       await updateUserProfileSilent(getMessages(), locale)
       prompt.dispose()
@@ -2328,7 +2360,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       return
     }
 
-    if (trimmed === '/clear') {
+    if (isExactSlashCommand(trimmed, '/clear')) {
       await askAndSaveSession('/clear')
       const msgsBefore = getMessages()
       await updateUserProfileSilent(msgsBefore, locale)
@@ -2344,17 +2376,17 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/hud') {
+    if (isExactSlashCommand(trimmed, '/hud')) {
       appendSystemPanel(t('HUD', 'HUD'), [stripAnsi(renderHud(hud))])
       continue
     }
 
-    if (trimmed === '/sessions') {
+    if (isExactSlashCommand(trimmed, '/sessions')) {
       appendSystemText(await renderSessions(sessionStore, locale))
       continue
     }
 
-    if (trimmed.startsWith('/search')) {
+    if (isSlashCommand(trimmed, '/search')) {
       const query = trimmed.slice('/search'.length).trim()
       if (!query) {
         appendSystemPanel(t('用法', 'Usage'), [`/search <${t('关键词', 'keyword')}>`])
@@ -2386,34 +2418,14 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/help') {
+    if (isExactSlashCommand(trimmed, '/help')) {
       appendSystemText(renderHelp(locale))
       continue
     }
-
-    // Unknown slash-prefixed input is almost certainly an attempted command or
-    // menu search, not a free-form AI request. Letting it fall through to the
-    // regular turn path is dangerous on Windows: `/foo` can be interpreted by
-    // workspace-intent detection as a POSIX absolute path, which Node resolves
-    // on the current drive (for example `C:\\foo`) and can trigger a trust
-    // prompt for the drive root. Keep the prompt alive and show a local error
-    // instead of submitting anything to the model/system.
-    const knownSlashCommand = SLASH_MENU_ITEMS.some((item) =>
-      trimmed === item.value || trimmed.startsWith(`${item.value} `),
-    )
-    const isDraggedLocalMediaPath = trimmed.startsWith('/') && await hasExistingLocalMediaReference(cwd, trimmed)
-    if (trimmed.startsWith('/') && !knownSlashCommand && !isDraggedLocalMediaPath) {
-      appendSystemPanel(t('未知命令', 'Unknown command'), [
-        `${trimmed.split(/\s+/, 1)[0]} — ${t('运行 /help 查看可用命令。', 'Run /help to see available commands.')}`,
-      ])
-      prompt.forceRedraw()
-      continue
-    }
-
     // ── /config ──────────────────────────────────────────────────────────────
-    const configMatch = trimmed.match(/^\/config(?:\s+(.+))?$/)
-    if (configMatch) {
-      const configSubcommand = (configMatch[1] ?? '').trim().toLowerCase()
+    const configArgs = slashArgs(trimmed, '/config')
+    if (configArgs !== null) {
+      const configSubcommand = configArgs.toLowerCase()
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
       if (configSubcommand === 'visual' || configSubcommand === 'vision') {
@@ -2465,7 +2477,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /visual — Reconfigure visual (image/video) model only ───────────────
-    if (trimmed === '/visual' || trimmed === '/vision') {
+    if (isExactSlashCommand(trimmed, '/visual') || isExactSlashCommand(trimmed, '/vision')) {
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
       const result = await prompt.releaseTerminal(() => runVisualModelSetup(locale, cwd))
@@ -2481,7 +2493,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /visual-policy reset — Clear saved image/video asset decision ───────
-    if (trimmed === '/visual-policy' || trimmed.startsWith('/visual-policy ')) {
+    if (isSlashCommand(trimmed, '/visual-policy')) {
       const subcommand = trimmed.slice('/visual-policy'.length).trim().toLowerCase()
       if (subcommand === 'reset' || subcommand === 'clear') {
         await opts.settingsStore.clearVisualAssetPreference()
@@ -2505,7 +2517,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /vercel — Configure Vercel deployment token in-CLI ───────────────────
-    if (trimmed === '/vercel' || trimmed.startsWith('/vercel ')) {
+    if (isSlashCommand(trimmed, '/vercel')) {
       const sub = trimmed.slice('/vercel'.length).trim().toLowerCase()
       await askAndSaveSession(trimmed)
       prompt.clearBuffer()
@@ -2538,7 +2550,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /mcp [sub] ──────────────────────────────────────────────────────────
-    if (trimmed === '/mcp' || trimmed.startsWith('/mcp ')) {
+    if (isSlashCommand(trimmed, '/mcp')) {
       const mcpStore = new McpServerStore(cwd)
       const data = await mcpStore.load()
       const sub = trimmed.slice('/mcp'.length).trim().toLowerCase()
@@ -2639,7 +2651,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     // ── /skills [command|keyword] ───────────────────────────────────────────
     // Make 999+ skills usable even when the user does not know the exact skill name.
-    if (trimmed === '/skills' || trimmed.startsWith('/skills ')) {
+    if (isSlashCommand(trimmed, '/skills')) {
       const {
         getSkillDetail,
         groupSkillsByCategory,
@@ -2731,7 +2743,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // Spotify OAuth (PKCE) flow. After /spotify login, brain has 10
     // spotify_* tools available for use from CLI or via bridges (Telegram /
     // Discord / WeChat).
-    if (trimmed === '/spotify' || trimmed.startsWith('/spotify ')) {
+    if (isSlashCommand(trimmed, '/spotify')) {
       const sub = trimmed.slice('/spotify'.length).trim()
       const { loadSpotifyConfig, saveSpotifyConfig, clearSpotifyAuth } = await import('../tools/spotify/store.js')
 
@@ -2843,7 +2855,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/newborn') {
+    if (isExactSlashCommand(trimmed, '/newborn')) {
       const localDataRoot = resolveDataRootDir(cwd)
       const globalDataRoot = path.join(HOME_DIR, '.artemis')
       const filesToWipe = [
@@ -2934,7 +2946,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/soul' || trimmed.startsWith('/soul ')) {
+    if (isSlashCommand(trimmed, '/soul')) {
       const rawArg = trimmed.slice('/soul'.length).trim().toLowerCase()
       const arg = rawArg || 'start'
       const soulPath = getSoulPath()
@@ -3024,13 +3036,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/history') {
+    if (isExactSlashCommand(trimmed, '/history')) {
       appendSystemText(await renderHistory(historyStore, locale))
       continue
     }
 
     // ── /model [name] ─────────────────────────────────────────────────────────
-    if (trimmed === '/model' || trimmed.startsWith('/model ')) {
+    if (isSlashCommand(trimmed, '/model')) {
       const arg = trimmed.slice('/model'.length).trim()
       if (!arg) {
         appendSystemPanel(t('当前模型', 'Current model'), [
@@ -3055,7 +3067,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /locale [zh|en] ───────────────────────────────────────────────────────
-    if (trimmed === '/locale' || trimmed.startsWith('/locale ')) {
+    if (isSlashCommand(trimmed, '/locale')) {
       const arg = trimmed.slice('/locale'.length).trim().toLowerCase()
       if (!arg) {
         appendSystemPanel(t('当前语言', 'Current locale'), [
@@ -3073,7 +3085,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /save [title] ─────────────────────────────────────────────────────────
-    if (trimmed === '/save' || trimmed.startsWith('/save ')) {
+    if (isSlashCommand(trimmed, '/save')) {
       const title = trimmed.slice('/save'.length).trim()
       const messages = getMessages()
       if (messages.length === 0) {
@@ -3081,10 +3093,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       } else {
         if (storedSession) {
           if (title) storedSession = { ...storedSession, title }
-          storedSession = { ...storedSession, messages, updatedAt: new Date().toISOString() }
+          storedSession = { ...storedSession, messages, summary: getCompressionSummary(workspaceRoot) ?? storedSession.summary, updatedAt: new Date().toISOString() }
           await sessionStore.save(storedSession)
         } else {
-          const newSession = Object.assign(sessionStore.createSession({ title: title || undefined }), { messages })
+          const newSession = Object.assign(sessionStore.createSession({ title: title || undefined }), { messages, summary: getCompressionSummary(workspaceRoot) ?? '' })
           await sessionStore.save(newSession)
           storedSession = newSession
         }
@@ -3096,7 +3108,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/swap') {
+    if (isExactSlashCommand(trimmed, '/swap')) {
       const data = await activeStore.load()
       const mainId = data.defaultMainProfileId
       const brainId = data.specialistProfileId
@@ -3133,7 +3145,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/wordup') {
+    if (isExactSlashCommand(trimmed, '/wordup')) {
       const messages = getMessages()
       storedSession = await wordupNow({ store: sessionStore, storedSession, messages }) ?? storedSession
       appendSystemPanel(t('WordUP 快照已保存', 'WordUP snapshot saved'), [
@@ -3146,7 +3158,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/wordupnow') {
+    if (isExactSlashCommand(trimmed, '/wordupnow')) {
       const messages = getMessages()
       storedSession = await wordupNow({ store: sessionStore, storedSession, messages }) ?? storedSession
       appendSystemPanel(t('WordUP 强制快照已保存', 'WordUP forced snapshot saved'), [
@@ -3159,7 +3171,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/undo') {
+    if (isExactSlashCommand(trimmed, '/undo')) {
       const msgs = getMessages()
       if (msgs.length === 0) {
         appendSystemPanel(t('无法撤回', 'Cannot undo'), [t('当前会话没有历史记录。', 'Conversation is empty.')])
@@ -3183,7 +3195,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/retry') {
+    if (isExactSlashCommand(trimmed, '/retry')) {
       const msgs = getMessages()
       if (msgs.length === 0) {
         appendSystemPanel(t('无法重试', 'Cannot retry'), [t('当前会话没有历史记录。', 'Conversation is empty.')])
@@ -3215,7 +3227,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    if (trimmed === '/resume' || trimmed.startsWith('/resume ')) {
+    if (isSlashCommand(trimmed, '/resume')) {
       const id = trimmed.slice('/resume'.length).trim()
       if (!id) {
         appendSystemPanel(t('用法', 'Usage'), ['/resume <session_id>'])
@@ -3223,7 +3235,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const loaded = await sessionStore.load(id)
         if (loaded) {
           storedSession = loaded
-          restoreSession(loaded.messages)
+          restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary }, workspaceRoot)
           hud.sessionMessageCount = loaded.messages.length
           hud.sessionTotalTokens = 0
           rebuildScrollBlocksFromMessages()
@@ -3239,7 +3251,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /cd <path> — change workspace root at runtime ─────────────────────────
-    if (trimmed === '/cd' || trimmed.startsWith('/cd ')) {
+    if (isSlashCommand(trimmed, '/cd')) {
       const arg = trimmed.slice('/cd'.length).trim()
       if (!arg) {
         appendSystemPanel(
@@ -3279,7 +3291,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /permission [mode] ────────────────────────────────────────────────────
-    if (trimmed === '/permission' || trimmed.startsWith('/permission ')) {
+    if (isSlashCommand(trimmed, '/permission')) {
       const arg = trimmed.slice('/permission'.length).trim().toUpperCase()
       const modes = ['PRODUCER', 'GHOSTWRITER', 'WRITER'] as const
       type PermMode = typeof modes[number]
@@ -3333,7 +3345,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /docs — pick docs search engine (bing/google) ─────────────────────────
-    if (trimmed === '/docs' || trimmed.startsWith('/docs ')) {
+    if (isSlashCommand(trimmed, '/docs')) {
       const arg = trimmed.slice('/docs'.length).trim().toLowerCase()
       const engines: DocsSearchEngine[] = ['bing', 'google']
       const descriptions: Record<DocsSearchEngine, [string, string]> = {
@@ -3373,13 +3385,14 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /bifrost — dual-model setup ───────────────────────────────────────────
-    if (trimmed === '/bifrost audit') {
+    const bifrostArgs = slashArgs(trimmed, '/bifrost')
+    if (bifrostArgs !== null && bifrostArgs.toLowerCase() === 'audit') {
       appendSystemPanel(t('Bifrost context 审计', 'Bifrost context audit'), getBifrostContextAuditReport())
       prompt.forceRedraw()
       continue
     }
 
-    if (trimmed === '/bifrost') {
+    if (bifrostArgs !== null) {
       try {
         prompt.clearBuffer()
         // Mirror the rest of the codebase: read+write to BOTH the local cwd
@@ -3668,7 +3681,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /bundle — Bundle polisher management ──────────────────────────────────
-    if (trimmed === '/bundle' || trimmed.startsWith('/bundle ')) {
+    if (isSlashCommand(trimmed, '/bundle')) {
       const arg = trimmed.slice('/bundle'.length).trim()
       const cur = await opts.settingsStore.load()
 
@@ -3767,7 +3780,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /odin [sub] — skill store ──────────────────────────────────────────────
-    if (trimmed === '/odin' || trimmed.startsWith('/odin ')) {
+    if (isSlashCommand(trimmed, '/odin')) {
       const sub = trimmed.slice('/odin'.length).trim().toLowerCase()
       const odinStore = new OdinStore(cwd)
       if (!sub || sub === 'list' || sub === 'ls') {
@@ -3791,7 +3804,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /heimdall [sub] — thread monitor ──────────────────────────────────────
-    if (trimmed === '/heimdall' || trimmed.startsWith('/heimdall ')) {
+    if (isSlashCommand(trimmed, '/heimdall')) {
       const args = trimmed.slice('/heimdall'.length).trim()
       if (args && !(await maybeSwitchWorkspaceForRequest(args))) {
         continue
@@ -3821,7 +3834,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     // ── /dream — manually trigger or inspect the dream system ─────────────────
-    if (trimmed === '/dream' || trimmed.startsWith('/dream ')) {
+    if (isSlashCommand(trimmed, '/dream')) {
       const arg = trimmed.slice('/dream'.length).trim()
       const dreamModule = await import('../services/dreamComposer.js')
       const dreamStore = await import('../services/dreamStore.js')
@@ -3980,8 +3993,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // users who already know which workflow they want; /team is for "I don't
     // know, you decide" — a brief LLM call picks among direct/brainstorm/
     // design/athena/nidhogg and we dispatch accordingly.
-    if (trimmed === '/team' || trimmed.startsWith('/team ')) {
-      const teamPrompt = trimmed.slice('/team'.length).trim()
+    const teamIntent = detectExplicitWorkflowIntent(trimmed)
+    if (teamIntent.command === '/team') {
+      const teamPrompt = teamIntent.body.trim()
       if (!teamPrompt) {
         appendSystemPanel(
           t('用法', 'Usage'),
@@ -4046,10 +4060,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         route = await routeTeamRequest(teamPrompt, provider)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        route = {
-          choice: 'niko',
-          reason: `router exception: ${msg}`,
-        }
+        route = routeTeamRequestFallback(teamPrompt, `router exception: ${msg}`)
       } finally {
         clearInterval(routerTick)
       }
@@ -4121,12 +4132,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       '/contest': 'contest',
       '/run':     'run',
     }
-    const workflowMatch: [string, WorkflowMode | 'run'] | undefined = Object.entries(WORKFLOW_COMMANDS).find(([cmd]) =>
-      trimmed === cmd || trimmed.startsWith(cmd + ' ')
-    ) as [string, WorkflowMode | 'run'] | undefined
+    const explicitWorkflowIntent = teamIntent.command === '/team' ? { command: null, body: trimmed } : detectExplicitWorkflowIntent(trimmed)
+    const workflowMatch: [string, WorkflowMode | 'run'] | undefined = explicitWorkflowIntent.command
+      ? [explicitWorkflowIntent.command, WORKFLOW_COMMANDS[explicitWorkflowIntent.command]] as [string, WorkflowMode | 'run']
+      : undefined
     if (workflowMatch) {
       const [cmd, mode]: [string, WorkflowMode | 'run'] = workflowMatch
-      const workflowPrompt = trimmed.slice(cmd.length).trim()
+      const workflowPrompt = explicitWorkflowIntent.body.trim()
       if (!workflowPrompt) {
         appendSystemPanel(
           t('用法', 'Usage'),
@@ -4287,7 +4299,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     if (storedSession) {
       storedSession = { ...storedSession, messages, updatedAt: new Date().toISOString() }
     } else {
-      storedSession = Object.assign(sessionStore.createSession(), { messages })
+      storedSession = Object.assign(sessionStore.createSession(), { messages, summary: getCompressionSummary(workspaceRoot) ?? '' })
     }
     await sessionStore.save(storedSession).catch(() => { /* non-fatal */ })
 
@@ -4404,6 +4416,8 @@ async function handleTurn(
   // ticks while we wait for the first content byte. Without this, the block
   // only refreshes on delta arrivals and users perceive the UI as frozen.
   let pendingTick: NodeJS.Timeout | null = null
+  let pendingTickCount = 0
+  let lastPendingRenderKey = ''
   let totalReply = ''
 
   const estimateStreamTokens = (text: string): number => {
@@ -4413,6 +4427,14 @@ async function handleTurn(
 
   const flushAssistantBlock = (text: string, pending: boolean): void => {
     if (assistantBlockIndex === null || !viewport) return
+    if (pending) {
+      const elapsedSec = Math.floor((Date.now() - pendingStartMs) / 1000)
+      const renderKey = `${text.length}:${pendingPhase}:${livePendingTokens}:${elapsedSec}`
+      if (renderKey === lastPendingRenderKey) return
+      lastPendingRenderKey = renderKey
+    } else {
+      lastPendingRenderKey = ''
+    }
     viewport.updateScrollBlock(assistantBlockIndex, {
       kind: 'assistant',
       text,
@@ -4456,10 +4478,15 @@ async function handleTurn(
     // below any accumulated text — without the tick, that tail freezes the
     // moment the model pauses streaming, and the user sees a static block
     // for the 5–30s the model spends planning the next chunk / tool call.
-    const intervalMs = process.platform === 'win32' ? 1000 : 250
+    pendingTickCount = 0
     pendingTick = setInterval(() => {
+      pendingTickCount += 1
+      if (pendingTickCount > PENDING_STATUS_MAX_TICKS) {
+        stopPendingTick()
+        return
+      }
       flushAssistantBlock(accumulated, true)
-    }, intervalMs)
+    }, PENDING_STATUS_REDRAW_INTERVAL_MS)
   }
 
   const cancelScheduledFlush = (): void => {
@@ -4500,6 +4527,7 @@ async function handleTurn(
     accumulated = ''
     livePendingTokens = 0
     pendingPhase = 'generating'
+    lastPendingRenderKey = ''
   }
 
   // Open a new pending assistant block in the transient zone so streaming
@@ -4511,6 +4539,7 @@ async function handleTurn(
     pendingStartMs = Date.now()
     pendingPhase = 'generating'
     livePendingTokens = 0
+    lastPendingRenderKey = ''
     assistantBlockIndex = viewport.appendScrollBlock({
       kind: 'assistant',
       text: '',

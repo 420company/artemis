@@ -7,6 +7,7 @@
  */
 
 import { stringWidth } from '../input/stringWidth.js'
+import { inferKnownModelContextLength } from '../providers/modelContext.js'
 
 const A = {
   reset:   '\x1b[0m',
@@ -63,79 +64,7 @@ export function normalizeContextLimit(value: unknown): number | undefined {
 export function estimateContextLimit(model: string, configuredLimit?: number): number {
   const explicit = normalizeContextLimit(configuredLimit)
   if (explicit) return explicit
-
-  const m = model.toLowerCase()
-
-  // ── Anthropic Claude ──────────────────────────────────────────────────────
-  // Claude Opus 4.7 / Sonnet 4.6: 1M context
-  if (m.includes('claude-opus-4-7') || m.includes('claude-opus-4.7')) return 1_000_000
-  if (m.includes('claude-sonnet-4-6') || m.includes('claude-sonnet-4.6')) return 1_000_000
-  // Claude Haiku 4.5: 200K context
-  if (m.includes('claude-haiku-4-5') || m.includes('claude-haiku-4.5')) return 200_000
-  // Claude Opus 4.1 / 4 / Sonnet 4 / 3.7 Sonnet / 3.5 Haiku: 200K context
-  if (m.includes('claude')) return 200_000
-
-  // ── OpenAI GPT ───────────────────────────────────────────────────────────
-  if (m.includes('gpt-5.5')) return 1_000_000
-  if (m.includes('gpt-5.4')) return 1_000_000
-  if (m.includes('gpt-5.1') || m.includes('gpt-5.2')) return 1_000_000
-  if (m.includes('gpt-5')) return 400_000
-  if (m.includes('gpt-4.1')) return 1_000_000
-  if (m.includes('o3') || m.includes('o4-mini')) return 200_000
-  if (m.includes('gpt-4o') || m.includes('gpt-4-turbo')) return 128_000
-  if (m.includes('gpt-4')) return 128_000
-  if (m.includes('gpt-3.5')) return 16_000
-  if (m.includes('gpt-oss')) return 128_000
-
-  // ── Google Gemini ────────────────────────────────────────────────────────
-  if (m.includes('gemini-3.1-pro') || m.includes('gemini-3-pro-preview')) return 2_000_000
-  if (m.includes('gemini-3') || m.includes('gemini-2')) return 1_000_000
-  if (m.includes('gemini-1.5')) return 1_000_000
-  if (m.includes('gemini')) return 1_000_000
-
-  // ── DeepSeek ─────────────────────────────────────────────────────────────
-  if (m.includes('deepseek')) return 128_000
-
-  // ── Kimi / Moonshot ──────────────────────────────────────────────────────
-  if (m.includes('kimi')) return 128_000
-  if (m.includes('moonshot-v1-128k')) return 128_000
-  if (m.includes('moonshot-v1-32k')) return 32_000
-  if (m.includes('moonshot-v1-8k')) return 8_000
-  if (m.includes('moonshot')) return 128_000
-
-  // ── GLM / Zhipu ──────────────────────────────────────────────────────────
-  if (m.includes('glm')) return 128_000
-
-  // ── Qwen / DashScope ─────────────────────────────────────────────────────
-  if (m.includes('qwen')) return 128_000
-
-  // ── BytePlus / Seed / Ark ────────────────────────────────────────────────
-  if (m.includes('seed-') || m.includes('ark-') || m.includes('bytedance')) return 128_000
-
-  // ── Mistral ──────────────────────────────────────────────────────────────
-  if (m.includes('codestral')) return 256_000
-  if (m.includes('mistral')) return 128_000
-
-  // ── MiniMax ──────────────────────────────────────────────────────────────
-  if (m.includes('minimax')) return 1_000_000
-
-  // ── XiaoMi MiMo ──────────────────────────────────────────────────────────
-  if (m.includes('mimo')) return 128_000
-
-  // ── StepFun ──────────────────────────────────────────────────────────────
-  if (m.includes('step-')) return 128_000
-
-  // ── AWS Bedrock ──────────────────────────────────────────────────────────
-  if (m.includes('nova')) return 300_000
-
-  // ── xAI Grok ─────────────────────────────────────────────────────────────
-  if (m.includes('grok')) return 128_000
-
-  // ── Llama ────────────────────────────────────────────────────────────────
-  if (m.includes('llama')) return 128_000
-
-  // ── Default: 128K ────────────────────────────────────────────────────────
-  return 128_000
+  return inferKnownModelContextLength(model) ?? 128_000
 }
 
 export function fmtTok(n: number): string {

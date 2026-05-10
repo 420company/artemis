@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../core/types.js';
+import { pickLocale, type UiLocale } from '../cli/locale.js';
 import type {
   ChatProvider,
   ProviderConfig,
@@ -6,45 +7,50 @@ import type {
   ProviderResponse,
 } from './types.js';
 
+function cleanProviderBody(body: string): string {
+  return body.trim();
+}
+
 function buildProviderErrorMessage(
   response: Response,
   body: string,
   config: ProviderConfig,
+  locale: UiLocale = 'en',
 ): string {
   const lines = [
-    `Provider request failed: ${response.status} ${response.statusText}`,
+    pickLocale(locale, {
+      zh: `连接测试没有通过：${response.status} ${response.statusText}`,
+      en: `Connection test failed: ${response.status} ${response.statusText}`,
+    }),
   ];
 
-  const trimmedBody = body.trim();
+  const trimmedBody = cleanProviderBody(body);
   if (trimmedBody) {
-    lines.push(trimmedBody);
+    lines.push(pickLocale(locale, {
+      zh: `服务端提示：${trimmedBody}`,
+      en: `Server message: ${trimmedBody}`,
+    }));
   }
 
   if (response.status === 404) {
-    lines.push(
-      [
-        'Hint: this client uses the Messages-compatible protocol and appends /v1/messages.',
-        `Check that the base URL (${config.baseUrl}) is the Messages-compatible root for this provider.`,
-      ].join(' '),
-    );
+    lines.push(pickLocale(locale, {
+      zh: `没有找到对应的 Messages 接口。请确认 Base URL 是该服务的根地址；Artemis 会自动在后面加上 /v1/messages。当前 Base URL：${config.baseUrl}`,
+      en: `The Messages endpoint was not found. Make sure the Base URL is the provider root; Artemis adds /v1/messages automatically. Current Base URL: ${config.baseUrl}`,
+    }));
   }
 
-  if (response.status === 401) {
-    lines.push(
-      [
-        'Hint: the API key was rejected.',
-        'Check that ARTEMIS_API_KEY is correct for this provider and still allowed to access the selected model.',
-      ].join(' '),
-    );
+  if (response.status === 401 || response.status === 403) {
+    lines.push(pickLocale(locale, {
+      zh: 'API key 没有通过校验。请确认 key 没有输错，并且当前账号有权限使用所选模型。',
+      en: 'The API key was rejected. Check that the key is correct and that your account can use the selected model.',
+    }));
   }
 
   if (response.status === 400) {
-    lines.push(
-      [
-        `Hint: verify the selected model (${config.model}) matches this Messages-compatible base URL (${config.baseUrl}).`,
-        'A protocol or model mismatch commonly returns 400-level request errors.',
-      ].join(' '),
-    );
+    lines.push(pickLocale(locale, {
+      zh: `请求格式没有被服务接受。请确认模型 ${config.model} 适用于当前 Messages 接口：${config.baseUrl}`,
+      en: `The service did not accept the request format. Make sure model ${config.model} works with this Messages endpoint: ${config.baseUrl}`,
+    }));
   }
 
   return lines.join('\n');
@@ -53,13 +59,26 @@ function buildProviderErrorMessage(
 function buildProviderTransportErrorMessage(
   error: unknown,
   config: ProviderConfig,
+  locale: UiLocale = 'en',
 ): string {
   const message = error instanceof Error ? error.message : String(error);
   return [
-    `Provider request failed before an HTTP response was received: ${message}`,
-    `Requested URL root: ${config.baseUrl}`,
-    `Requested model: ${config.model}`,
-    'Hint: check the base URL, local network access, and any proxy or gateway settings.',
+    pickLocale(locale, {
+      zh: `还没有收到服务响应，连接就中断了：${message}`,
+      en: `The connection stopped before the service returned a response: ${message}`,
+    }),
+    pickLocale(locale, {
+      zh: `当前 Base URL：${config.baseUrl}`,
+      en: `Current Base URL: ${config.baseUrl}`,
+    }),
+    pickLocale(locale, {
+      zh: `当前模型：${config.model}`,
+      en: `Current model: ${config.model}`,
+    }),
+    pickLocale(locale, {
+      zh: '请检查 Base URL、网络连接，以及代理或网关设置。',
+      en: 'Check the Base URL, network connection, and any proxy or gateway settings.',
+    }),
   ].join('\n');
 }
 
@@ -203,12 +222,12 @@ export class MessagesCompatibleProvider implements ChatProvider {
       if (options?.abortSignal?.aborted) {
         throw error;
       }
-      throw new Error(buildProviderTransportErrorMessage(error, this.config));
+      throw new Error(buildProviderTransportErrorMessage(error, this.config, options?.locale));
     }
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(buildProviderErrorMessage(response, body, this.config));
+      throw new Error(buildProviderErrorMessage(response, body, this.config, options?.locale));
     }
 
     type AnthropicContentBlock = { type?: string; text?: string; id?: string; name?: string; input?: unknown };

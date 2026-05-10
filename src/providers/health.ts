@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../core/types.js';
+import stripAnsi from 'strip-ansi';
 import { createProviderFromConfig, normalizeProviderProtocol } from './factory.js';
 import type {
   ChatProvider,
@@ -136,8 +137,10 @@ function appendProbeDiagnosis(message: string, config: ProviderConfig, locale: '
 }
 
 function normalizeProbeReply(text: string): string {
-  return text
+  return stripAnsi(text)
     .trim()
+    // Strip occasionally leaked terminal color fragments.
+    .replace(/(?:^|\s)<?\d{1,2}m[^\s<>]*\/?[^\s<>]*>?/gi, ' ')
     .replace(/^["'`]+|["'`]+$/g, '')
     .replace(/[.!?。！？]+$/u, '')
     .trim()
@@ -161,6 +164,8 @@ function normalizeProbeReply(text: string): string {
 function probeReplyLooksLikeOK(raw: string): boolean {
   const normalized = normalizeProbeReply(raw);
   if (normalized === 'OK') return true;
+  // Match noisy wrapper fragments such as "OK<3mvalue/argvalue>".
+  if (/^OK(?:\s|<|$)/.test(normalized)) return true;
   // Match "OK" at the end of the text (chain-of-thought before OK)
   if (/(?:^|\s)OK$/.test(normalized)) return true;
   // Match "OK" at the start of the text (GLM 5.1 pattern: "OK\n---\n...")
@@ -242,7 +247,7 @@ export async function probeProviderConfig(
 
   try {
     const response = await Promise.race([
-      provider.complete(probeMessages),
+      provider.complete(probeMessages, { locale }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           reject(
@@ -263,8 +268,12 @@ export async function probeProviderConfig(
         latencyMs,
         message: appendProbeDiagnosis(
           normalizedText
-            ? `Provider responded, but the probe reply was "${text.length > 200 ? text.slice(0, 200) + '…' : text}" instead of "OK".`
-            : 'Provider responded with an empty reply.',
+            ? locale === 'zh-CN'
+              ? `服务已响应，但返回内容不是预期的“OK”：${text.length > 200 ? text.slice(0, 200) + '…' : text}`
+              : `Provider responded, but the probe reply was "${text.length > 200 ? text.slice(0, 200) + '…' : text}" instead of "OK".`
+            : locale === 'zh-CN'
+              ? '服务已响应，但返回内容为空。'
+              : 'Provider responded with an empty reply.',
           config,
           locale,
         ),
@@ -274,7 +283,9 @@ export async function probeProviderConfig(
     return {
       ok: true,
       latencyMs,
-      message: `Provider connection test passed in ${latencyMs}ms.`,
+      message: locale === 'zh-CN'
+        ? `连接测试通过，用时 ${latencyMs}ms。`
+        : `Provider connection test passed in ${latencyMs}ms.`,
     };
   } catch (error) {
     return {
@@ -331,6 +342,7 @@ export async function probeProviderNativeToolCalls(
   try {
     const response = await Promise.race([
       provider.complete(probeMessages, {
+        locale,
         nativeFunctionTools: [NATIVE_TOOL_PROBE_DEF],
       }),
       new Promise<never>((_, reject) => {

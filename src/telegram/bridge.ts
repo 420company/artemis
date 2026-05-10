@@ -42,8 +42,6 @@ export type RunTelegramBridgeOptions = {
   signal?: AbortSignal
 }
 
-const TELEGRAM_SESSION_ROLLOVER_MSG_COUNT = 80
-
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function maskToken(token: string): string {
@@ -485,16 +483,7 @@ export async function runTelegramBridge(options: RunTelegramBridgeOptions): Prom
         if (loaded.recovered) {
           return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: true }
         }
-        if (session && session.messages.length < TELEGRAM_SESSION_ROLLOVER_MSG_COUNT) {
-          return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
-        }
-        // rollover
-        const next = options.sessionStore.createSession()
-        next.title = buildTelegramSessionTitle(message.targetLabel, options.cwd)
-        await options.sessionStore.save(next)
-        await telegramStore.upsertChat({ chatId: message.targetId, sessionId: next.id, permissionMode: existing.permissionMode })
-        await bragiStore.upsertSession({ platform: 'telegram', scope: message.targetId, targetId: message.targetId, targetLabel: message.targetLabel, sessionId: next.id, permissionMode: existing.permissionMode })
-        return { storedSession: next, permissionMode: existing.permissionMode, rolledOver: true }
+        return { storedSession: session, permissionMode: existing.permissionMode, rolledOver: false }
       }
 
       const session = options.sessionStore.createSession()

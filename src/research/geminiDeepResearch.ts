@@ -1,13 +1,15 @@
 import { GoogleGenAI } from '@google/genai';
 import {
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
+  DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS,
+  DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
   type CliSettings,
 } from '../cli/settings.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { buildPanel } from '../cli/ui.js';
 
-const DEFAULT_MAX_POLLS = 120;
-const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_MAX_POLLS = DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS;
+const DEFAULT_POLL_INTERVAL_MS = DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS;
 
 export type GeminiDeepResearchConfig = {
   apiKey: string;
@@ -99,7 +101,7 @@ export function resolveGeminiDeepResearchConfig(
   const apiKey = getApiKeyFromEnv() || settings.geminiApiKey;
   if (!apiKey) {
     throw new Error(
-      'Gemini Deep Research is not configured. Run `artemis deep-research-config` once or set ARTEMIS_GEMINI_API_KEY.',
+      'Gemini Deep Research is not configured. Run `artemis setup docs` once or set ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY.',
     );
   }
 
@@ -107,8 +109,8 @@ export function resolveGeminiDeepResearchConfig(
     apiKey,
     agent:
       settings.geminiDeepResearchAgent || DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
-    maxPolls: DEFAULT_MAX_POLLS,
-    pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+    maxPolls: normalizePositiveInteger(settings.geminiDeepResearchMaxPolls, DEFAULT_MAX_POLLS),
+    pollIntervalMs: normalizePositiveInteger(settings.geminiDeepResearchPollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
   };
 }
 
