@@ -11,6 +11,18 @@ import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } fr
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { compressMessages } from './core/contextCompressor.js';
 import {
+  recordCollapse,
+  getOrCreateLedger,
+  buildPostCompactRecoveryMessages,
+  createFileStateSnapshot,
+  recordCompressionFailure,
+  recordCompressionSuccess,
+  isCircuitBreakerTripped,
+  createCircuitBreakerState,
+  recordTurnCompleted,
+} from './core/collapse/index.js';
+import type { CircuitBreakerState, CollapseEntry } from './core/collapse/index.js';
+import {
     projectDirectToolNames,
     widenProjectedDirectToolNames,
 } from './core/directToolProjection.js';
@@ -902,6 +914,18 @@ async function buildRuntimeSystemMessages(
     return runtimeMessages;
 }
 
+// ── Circuit breaker state (per session) ─────────────────────────────────────
+const sessionCircuitBreakers = new Map<string, CircuitBreakerState>()
+
+function getCircuitBreaker(sessionId: string): CircuitBreakerState {
+  let state = sessionCircuitBreakers.get(sessionId)
+  if (!state) {
+    state = createCircuitBreakerState()
+    sessionCircuitBreakers.set(sessionId, state)
+  }
+  return state
+}
+
 async function compressSessionMessagesForProvider(
     activeSession: Session,
     conversationMessages: SessionMessage[],
@@ -914,18 +938,122 @@ async function compressSessionMessagesForProvider(
         return { messages: conversationMessages };
     }
 
+    // ── Circuit breaker: skip compression if tripped ────────────────────────
+    const breaker = getCircuitBreaker(activeSession.getWorkingDirectory())
+    if (isCircuitBreakerTripped(breaker)) {
+      onInfo?.('[压缩] 断路器已触发，跳过本次压缩（连续失败过多）')
+      return { messages: conversationMessages };
+    }
+
     const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
     const fullLimit = getConfiguredContextLimit(model, contextLength);
     const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
-    const compression = await compressMessages(conversationMessages, summarizeOnce, {
+    const tokensBefore = Math.ceil(conversationMessages.reduce((s, m) => s + m.content.length / 4, 0))
+
+    let compression: { messages: SessionMessage[]; summaryText?: string; compressed: boolean; tokensBefore: number; tokensAfter: number }
+    try {
+      compression = await compressMessages(conversationMessages, summarizeOnce, {
         tokenLimit: availableLimit,
         previousSummary,
         threshold: _compressionThresholdOverride,
         onInfo,
-    });
+      });
+    } catch (e: any) {
+      // Record failure in circuit breaker
+      const updatedBreaker = recordCompressionFailure(breaker, e.message)
+      sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
+      onInfo?.(`[压缩] 压缩失败（${updatedBreaker.consecutiveFailures}/${3}）: ${e.message}`)
+      return { messages: conversationMessages };
+    }
 
     if (compression.summaryText) {
         activeSession.setContext('compressionSummary', compression.summaryText);
+    }
+
+    // ── Persistent Collapse Ledger: record the event ────────────────────────
+    if (compression.compressed) {
+      try {
+        const sessionId = activeSession.getWorkingDirectory()
+        const compressedIds = conversationMessages
+          .filter((m, i) => !compression.messages.some(cm => cm.id === m.id))
+          .map(m => m.id)
+
+        const entry: CollapseEntry = {
+          id: `collapse-${Date.now()}`,
+          collapsedAt: new Date().toISOString(),
+          tokensBefore: compression.tokensBefore ?? tokensBefore,
+          tokensAfter: compression.tokensAfter ?? Math.ceil(compression.messages.reduce((s: number, m: SessionMessage) => s + m.content.length / 4, 0)),
+          compressedMessageIds: compressedIds,
+          summaryText: compression.summaryText,
+          mode: tokensBefore >= 700_000 ? 'full_compact' : 'microcompact',
+        }
+
+        // Capture current file states and tool context for recovery
+        const sessionTools = (activeSession.getContext('activeToolNames') as string[]) ?? []
+        const sessionMcp = (activeSession.getContext('activeMcpServers') as string[]) ?? []
+        const sessionSkills = (activeSession.getContext('activeSkills') as string[]) ?? []
+
+        // Extract file paths from tool messages in the conversation history.
+        // This gives postCompactRecovery actual data to restore after compression.
+        const fileStates: import('./core/collapse/ledger.js').FileStateSnapshot[] = []
+        const seenPaths = new Set<string>()
+        for (const msg of conversationMessages) {
+          if (msg.role !== 'tool' || !msg.name) continue
+          if (msg.name !== 'read_file' && msg.name !== 'write_file' && msg.name !== 'apply_patch') continue
+          try {
+            const parsed = JSON.parse(msg.content) as Record<string, unknown>
+            const fp = typeof parsed.path === 'string' ? parsed.path
+                     : typeof parsed.filePath === 'string' ? parsed.filePath
+                     : null
+            if (!fp || seenPaths.has(fp)) continue
+            seenPaths.add(fp)
+            // Try to read the current file to create a state snapshot
+            try {
+              const { readFile: rf, stat: st } = await import('node:fs/promises')
+              const content = await rf(fp, 'utf-8')
+              const stats = await st(fp)
+              fileStates.push(createFileStateSnapshot(fp, content, stats.mtimeMs))
+            } catch {
+              // File may have been deleted or is binary — create a minimal snapshot
+              fileStates.push({
+                filePath: fp,
+                contentHash: 'unavailable',
+                headContent: `[文件不可读: ${fp}]`,
+                mtimeMs: 0,
+              })
+            }
+          } catch { /* not JSON — skip */ }
+        }
+
+        // Build plan snapshot from compression summary (the best context we have)
+        const planSnapshot = compression.summaryText
+          ? { content: compression.summaryText, status: 'active' }
+          : undefined
+
+        await recordCollapse(sessionId, entry, {
+          fileStates: fileStates.slice(0, 8), // Limit to 8 most relevant files
+          planSnapshot,
+          activeTools: sessionTools,
+          activeMcpServers: sessionMcp,
+          activeSkills: sessionSkills,
+        })
+
+        // ── Post-compact recovery: re-inject critical context ───────────────
+        const ledger = await getOrCreateLedger(sessionId)
+        const recoveryMessages = await buildPostCompactRecoveryMessages(ledger)
+
+        if (recoveryMessages.length > 0) {
+          compression.messages = [...compression.messages, ...recoveryMessages]
+          onInfo?.(`[恢复] 已注入 ${recoveryMessages.length} 条压缩恢复消息（文件状态/计划/工具）`)
+        }
+
+        // Record success in circuit breaker
+        const updatedBreaker = recordCompressionSuccess(breaker)
+        sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
+      } catch (ledgerError: any) {
+        // Ledger failure should never block the main compression flow
+        onInfo?.(`[Ledger] 压缩记录写入失败（不影响当前压缩）: ${ledgerError.message}`)
+      }
     }
 
     return { messages: compression.messages, summaryText: compression.summaryText };
