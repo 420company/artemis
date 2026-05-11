@@ -196,6 +196,20 @@ export class MessagesCompatibleProvider implements ChatProvider {
       description: t.description ?? '',
       input_schema: t.parameters,
     }));
+    // Prompt caching: mark the last tool definition so Anthropic caches the
+    // entire stable tools prefix. Saves ~90% on tool-definition input tokens
+    // for subsequent requests in the same server-side session.
+    if (anthropicTools?.length) {
+      const last = anthropicTools[anthropicTools.length - 1]!;
+      (last as Record<string, unknown>).cache_control = { type: 'ephemeral' };
+    }
+
+    // Prompt caching: send system prompt as content blocks with cache_control
+    // so Anthropic caches the stable prefix. On cache hit, input_tokens for
+    // the system prompt drop to ~1/10 of the full price.
+    const systemBlocks = system
+      ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
+      : undefined;
 
     let response: Response;
     try {
@@ -211,7 +225,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
           body: JSON.stringify({
             model: this.config.model,
             max_tokens: 8096,
-            ...(system ? { system } : {}),
+            ...(systemBlocks ? { system: systemBlocks } : {}),
             messages: messagesApiMessages,
             ...(anthropicTools?.length ? { tools: anthropicTools } : {}),
           }),
