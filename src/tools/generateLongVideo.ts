@@ -1060,6 +1060,7 @@ export async function executeGenerateLongVideo(
             },
             turnaroundPath: superVisualMode.referenceImagePath,
             previousLastFramePath: segment.index > 1 ? previousLastFramePath : undefined,
+            realPersonInput,
             accessoriesLock: narrativeEntities?.protagonistAccessories,
             occlusionLock: [
               ...(wm.occlusion ?? []),

@@ -363,6 +363,13 @@ export function buildSegmentKeyframePrompt(input: {
   perspectiveCues?: string;
   physicsRules?: string[];
   forbiddenSpatialErrors?: string[];
+  // When true, the source image was detected as / assumed to be a real person.
+  // The keyframe MUST be rendered in a stylized illustrated / anime look so it
+  // passes downstream video-provider privacy filters. Without this flag the
+  // keyframe prompt only says "same art style as the turnaround", which is too
+  // weak when IMAGE 2 (previous last frame) is photoreal — gpt-image-2 follows
+  // IMAGE 2's photorealism and the resulting keyframe gets rejected.
+  realPersonInput?: boolean;
 }): string {
   const shot = input.shot;
   const identitySection = input.withPreviousLastFrame
@@ -477,7 +484,9 @@ export function buildSegmentKeyframePrompt(input: {
     '',
     '- Background, lighting, color cast match the scene.' + (input.withPreviousLastFrame ? ' Continue the environment from IMAGE 2.' : ''),
     '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles.',
-    '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
+    input.realPersonInput
+      ? '- CRITICAL STYLE RULE: the output MUST be rendered in a STYLIZED ILLUSTRATED / ANIME look (digital painting, cel-shading, or painted character art). Even if IMAGE 2 appears photoreal, DO NOT match its photorealism — the turnaround sheet in IMAGE 1 is illustrated, and the output keyframe must also be illustrated. This is a hard constraint to pass downstream privacy filters. Brushwork, line work, and stylized rendering preferred. NO photoreal skin texture, NO photo-grain, NO lens blur.'
+      : '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
   ].filter(Boolean).join('\n');
 }
 
@@ -894,23 +903,54 @@ export async function describeUserImageWithVision(options: {
     max_tokens: 600,
   } as Record<string, unknown>;
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
-    try { parsed = JSON.parse(text); } catch { return null; }
-    const content = parsed?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') return null;
-    const trimmed = content.replace(/\s+/g, ' ').trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch {
-    return null;
+  // Up to 2 attempts — relays can return transient 502/429 that self-heal
+  // on a quick retry. Previously a single failure silently killed VISUAL
+  // TRUTH, cascading into missing identity descriptions in turnaround &
+  // keyframe prompts, which then caused BytePlus real-person filter rejections.
+  const maxAttempts = 2;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        toolWarn(`⚠️ Super Visual: vision-describe 失败（HTTP ${res.status}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
+        if (attempt < maxAttempts - 1 && (res.status === 429 || res.status >= 500)) {
+          await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+          continue;
+        }
+        return null;
+      }
+      const text = await res.text();
+      let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
+      try { parsed = JSON.parse(text); } catch {
+        toolWarn(`⚠️ Super Visual: vision-describe 响应 JSON 解析失败（尝试 ${attempt + 1}/${maxAttempts}）`);
+        return null;
+      }
+      const content = parsed?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') {
+        toolWarn(`⚠️ Super Visual: vision-describe 返回空内容（尝试 ${attempt + 1}/${maxAttempts}）`);
+        return null;
+      }
+      const trimmed = content.replace(/\s+/g, ' ').trim();
+      if (trimmed.length === 0) {
+        toolWarn(`⚠️ Super Visual: vision-describe 返回空白描述（尝试 ${attempt + 1}/${maxAttempts}）`);
+        return null;
+      }
+      return trimmed;
+    } catch (err) {
+      toolWarn(`⚠️ Super Visual: vision-describe 网络异常（尝试 ${attempt + 1}/${maxAttempts}）— ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+      return null;
+    }
   }
+  return null;
 }
 
 // ─── Main entry: turnaround ───────────────────────────────────────────────
@@ -1308,6 +1348,11 @@ export async function generateSegmentKeyframe(options: {
   // for relay chaining. When supplied, the keyframe edit call gets two
   // input images: turnaround (identity) + prev last frame (scene continuity).
   previousLastFramePath?: string;
+  // When true, the user's source image was detected as (or conservatively
+  // assumed to be) a real person. The keyframe must enforce a strong
+  // illustrated / anime style so it passes the video provider's privacy
+  // filter — even when IMAGE 2 (prev last frame) looks photoreal.
+  realPersonInput?: boolean;
   // Identity-locking signals from the world model — passed through to the
   // keyframe prompt so segments 2..N keep the same accessories, occlusions,
   // wardrobe, marks, locked props, and project-specific continuity rules.
@@ -1342,7 +1387,18 @@ export async function generateSegmentKeyframe(options: {
   const prevLastExists = options.previousLastFramePath
     ? await fileExists(options.previousLastFramePath)
     : false;
-  const withPreviousLastFrame = turnaroundExists && prevLastExists;
+  // When realPersonInput is true, the previous segment's last frame is a
+  // photoreal video-extracted frame. Feeding it as IMAGE 2 to gpt-image-2
+  // almost always makes the keyframe drift toward photorealism, which then
+  // gets rejected by BytePlus's InputImageSensitiveContentDetected filter.
+  // Drop it — the turnaround (IMAGE 1) + prompt are sufficient for identity
+  // and scene continuity; the video model will animate from the keyframe
+  // anyway.
+  const skipPrevFrame = options.realPersonInput && prevLastExists;
+  if (skipPrevFrame) {
+    toolWarn(`⚠️ Super Visual: realPersonInput=true，跳过上一段衔接帧（避免 gpt-image-2 被真人截图带偏为 photoreal 风格）`);
+  }
+  const withPreviousLastFrame = !skipPrevFrame && turnaroundExists && prevLastExists;
 
   // Re-load the vision description that the turnaround stage saved to disk
   // (if any) so this keyframe also gets the textual identity anchor.
@@ -1374,6 +1430,7 @@ export async function generateSegmentKeyframe(options: {
     perspectiveCues: options.perspectiveCues,
     physicsRules: options.physicsRules,
     forbiddenSpatialErrors: options.forbiddenSpatialErrors,
+    realPersonInput: options.realPersonInput,
   });
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-keyframe.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');
@@ -1384,6 +1441,8 @@ export async function generateSegmentKeyframe(options: {
   if (apiKey && baseUrl && turnaroundExists) {
     // Order matters — turnaround first (identity), prev-last-frame second
     // (scene handoff). The prompt explicitly references this order.
+    // When skipPrevFrame is true, only turnaround is fed — no photoreal
+    // frame to bias gpt-image-2 toward photorealism.
     const inputImagePaths = withPreviousLastFrame
       ? [options.turnaroundPath, options.previousLastFramePath!]
       : [options.turnaroundPath];
