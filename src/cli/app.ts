@@ -9,80 +9,80 @@ export class ArtemisCLI {
   private queryEngine = getQueryEngine()
   private sessionManager = getSessionManager()
   private costTracker = getCostTracker()
-  
+
   private sessionId: string
-  
+
   constructor(_options: any = {}) {
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       prompt: 'Artemis > '
     })
-    
+
     this.sessionId = this.sessionManager.createSession()
-    
+
     this.initialize()
   }
-  
+
   private initialize(): void {
-    console.log('🚀 Artemis v0.5.7 - AI 编程助手')
+    console.log('🚀 Artemis v0.2.52 - AI 编程助手')
     console.log('================================')
     console.log('类型 "help" 查看命令列表')
     console.log('类型 "quit" 或按 Ctrl+C 退出')
     console.log()
-    
+
     this.rl.prompt()
-    
+
     this.rl.on('line', (line) => {
       this.handleInput(line.trim())
     })
-    
+
     this.rl.on('close', () => {
       this.cleanup()
     })
   }
-  
+
   private async handleInput(input: string): Promise<void> {
     if (!input) {
       this.rl.prompt()
       return
     }
-    
+
     const command = input.toLowerCase().split(' ')[0]
-    
+
     switch (command) {
       case 'quit':
       case 'exit':
         this.rl.close()
         return
-        
+
       case 'help':
         this.showHelp()
         break
-        
+
       case 'clear':
         this.clearScreen()
         break
-        
+
       case 'stats':
         this.showStats()
         break
-        
+
       case 'session':
         this.showSessionInfo()
         break
-        
+
       case 'cost':
         this.showCostInfo()
         break
-        
+
       default:
         await this.handleQuery(input)
     }
-    
+
     this.rl.prompt()
   }
-  
+
   private showHelp(): void {
     console.log()
     console.log('可用命令:')
@@ -99,15 +99,15 @@ export class ArtemisCLI {
     console.log('  "运行 npm install"')
     console.log()
   }
-  
+
   private clearScreen(): void {
     process.stdout.write('\x1B[2J\x1B[0f')
   }
-  
+
   private showStats(): void {
     const costTracker = getCostTracker()
     const cost = costTracker.getTotalUsage()
-    
+
     console.log()
     console.log('📊 会话统计:')
     console.log('============')
@@ -118,10 +118,10 @@ export class ArtemisCLI {
     console.log(`平均成本每百万令牌: $${(cost.cost / cost.totalTokens * 1_000_000).toFixed(2)}`)
     console.log()
   }
-  
+
   private showSessionInfo(): void {
     const session = this.sessionManager.getSession(this.sessionId)
-    
+
     if (session) {
       console.log()
       console.log('🔄 会话信息:')
@@ -133,11 +133,11 @@ export class ArtemisCLI {
       console.log()
     }
   }
-  
+
   private showCostInfo(): void {
     const costTracker = getCostTracker()
     const costReport = costTracker.getCostReport()
-    
+
     console.log()
     console.log('💰 成本信息:')
     console.log('============')
@@ -147,11 +147,11 @@ export class ArtemisCLI {
     console.log(`平均成本每百万令牌: ${costReport.averageCostPerToken}`)
     console.log()
     console.log('按模型统计的调用:')
-    
+
     Object.entries(costReport.callsPerModel).forEach(([model, count]) => {
       console.log(`  ${model}: ${count} 次`)
     })
-    
+
     if (costReport.mostExpensiveCall) {
       console.log()
       console.log('最昂贵的调用:')
@@ -160,17 +160,17 @@ export class ArtemisCLI {
       console.log(`  输入令牌: ${costReport.mostExpensiveCall.inputTokens}`)
       console.log(`  输出令牌: ${costReport.mostExpensiveCall.outputTokens}`)
     }
-    
+
     console.log()
   }
-  
+
   private async handleQuery(input: string): Promise<void> {
     try {
       console.log()
       console.log('🤔 处理查询中...')
-      
+
       const result = await this.queryEngine.executeQuery(input)
-      
+
       if (result.error) {
         console.log(`❌ 错误: ${result.error}`)
       } else {
@@ -188,18 +188,18 @@ export class ArtemisCLI {
       console.log()
     }
   }
-  
+
   private cleanup(): void {
     console.log()
     console.log('👋 再见!')
-    
+
     const costTracker = getCostTracker()
     const totalCost = costTracker.getTotalUsage().cost
-    
+
     if (totalCost > 0) {
       console.log(`💲 会话总成本: $${totalCost.toFixed(4)}`)
     }
-    
+
     process.exit(0)
   }
 }

@@ -5877,23 +5877,23 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
   // Simulate a session where the last assistant message was 10 minutes ago
   // Need >4 compactable tool messages since KEEP_RECENT=4
-  const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString()
+  const pastTime = new Date(Date.now() - 45 * 60_000).toISOString()
   const now = new Date().toISOString()
   const messages: SessionMessage[] = [
-    { id: 'u1', role: 'user', content: 'do something', createdAt: tenMinAgo },
-    { id: 'a1', role: 'assistant', content: 'sure', createdAt: tenMinAgo },
-    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: tenMinAgo },
-    { id: 't2', role: 'tool', content: 'w'.repeat(5_000), name: 'run_command', createdAt: tenMinAgo },
-    { id: 't3', role: 'tool', content: 'v'.repeat(5_000), name: 'search', createdAt: tenMinAgo },
-    { id: 't4', role: 'tool', content: 'u'.repeat(5_000), name: 'list_directory', createdAt: tenMinAgo },
-    { id: 't5', role: 'tool', content: 't'.repeat(5_000), name: 'grep', createdAt: tenMinAgo },
-    { id: 't6', role: 'tool', content: 's'.repeat(5_000), name: 'read_file', createdAt: tenMinAgo },
+    { id: 'u1', role: 'user', content: 'do something', createdAt: pastTime },
+    { id: 'a1', role: 'assistant', content: 'sure', createdAt: pastTime },
+    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: pastTime },
+    { id: 't2', role: 'tool', content: 'w'.repeat(5_000), name: 'run_command', createdAt: pastTime },
+    { id: 't3', role: 'tool', content: 'v'.repeat(5_000), name: 'search', createdAt: pastTime },
+    { id: 't4', role: 'tool', content: 'u'.repeat(5_000), name: 'list_directory', createdAt: pastTime },
+    { id: 't5', role: 'tool', content: 't'.repeat(5_000), name: 'grep', createdAt: pastTime },
+    { id: 't6', role: 'tool', content: 's'.repeat(5_000), name: 'read_file', createdAt: pastTime },
     { id: 'u2', role: 'user', content: 'continue', createdAt: now },
   ]
 
   const result = maybeTimeBasedMicrocompact(messages)
   assert(
-    'time-based microcompact: triggers when last assistant is >5min old',
+    'time-based microcompact: triggers when last assistant is >42min old',
     result !== null && result.compressed === true,
   )
 

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>An uncompromising AI coding agent. Local-first workspace integration, infinite context stability, and elegant autonomous execution.</strong>
+  <strong>An uncompromising AI coding agent and visual director. Local-first workspace integration, infinite context stability, and elegant autonomous execution.</strong>
 </p>
 
 <p align="center">
@@ -22,590 +22,100 @@
 
 ## English
 
-### The Artemis Philosophy
+### Meet Artemis
+Artemis is not a chatbox that spits out code snippets for you to manually copy and paste. She is your local-first, autonomous engineering assistant and creative visual director.
 
-Artemis is a local-first AI engineering agent built for production. She doesn't just offer suggestions—she enters your workspace, comprehends your repository, writes code, executes tests, and verifies outcomes autonomously.
+She enters your workspace, comprehends your repository's architecture, writes the code, executes the terminal commands, runs the tests, and only reports back when the task is verifiably complete. You focus on the vision; Artemis handles the execution.
 
-Designed for work that demands completion: she inspects first, modifies only what is strictly necessary, safeguards your secrets, and reports nothing but verifiable truth.
+Current Release: **0.2.51**
 
-Current release: **0.2.48**.
+### What She Can Do For You
 
-Since the **0.1.x** lineage, Artemis has reached a state of technological self-sufficiency. Her continuous renovation, debugging, and visual-generation capabilities have been built by Artemis herself. She can inspect, edit, compile, test, and release her own evolution with uncompromising precision.
+#### 🛠️ Autonomous Engineering
+Tell Artemis what feature to build or what bug to fix. She will inspect your files, edit the source code using precise differential patches, add missing tests, and run your build scripts. If she encounters an error, she will independently read the logs and fix it until the build turns green. 
+**How to use:** Simply type your request, or use `/team` to let her choose the best routing strategy. For long, complex refactoring, use `/nidhogg` to send her to the background so she can work while you focus on other things.
 
-### The 0.2.48 Evolution
+#### 🧠 Persistent Memory & Infinite Context
+Artemis never forgets. She uses an Enterprise-Grade Persistent Collapse Ledger to save her memory, terminal outputs, and file snapshots straight to your local disk. If your computer crashes or you close your laptop, you can pick up the conversation exactly where you left off. 
+**How to use:** Your memory is automatically managed, but you can explicitly save a snapshot via `/wordup`. Establish your personal working style, tone, and constraints by editing your `/soul` contract.
 
-- **Enterprise-Grade Context Stability (Persistent Collapse Ledger)**: Artemis now preserves context compression history, tool output artifacts, and file state snapshots on disk. She never loses her memory during long-running tasks or abrupt interruptions.
-- **Provider Prompt Caching & Token Optimization**: Drastic cost reduction (up to 90%) for Anthropic models via `cache_control: ephemeral` boundaries on system prompts and tools.
-- **Tool-Type Aware Microcompact**: Intelligent context compression that prunes obsolete read logs but preserves critical write execution evidence.
-- **Time-Based Microcompact Cleanup**: Automatically purges stale tool outputs when the session sits idle for over 42 minutes, maximizing cache hit rates.
-- **Refined Terminal Aesthetics**: Eradicated UI artifacts and blank space bugs. Replaced legacy animations with elegant, dual-language reasoning indicators (`AI 正在思考 · Thinking`).
-- **Accurate Context Windows**: Native awareness for 15+ provider families including Claude Opus/Sonnet (1M), Haiku (200K), Gemini 3.1 Pro (2M), and more.
-- **Polished Multimodal & Saga Identity**: Seamless visual generation policies, robust Saga video identity continuity, and improved Dream delivery across WeChat, Discord, and Telegram bridges.
+#### 🎬 Cinematic Visuals & The Saga Video Engine
+Artemis isn't just an engineer; she is a world-class visual director. Need a README banner? A product mockup? Or a 60-second cinematic video? She comes equipped with the powerful **Saga Engine**, integrating seamlessly with text-to-image and state-of-the-art video providers (like Seedance 2.0 Pro). 
+- **Chain-Frame Continuity:** Artemis intelligently extracts video tail-frames, translates them into safe 3D reference anchors, and uses them to chain ultra-long videos together seamlessly—bypassing strict provider privacy filters while maintaining perfect character and scene continuity.
+- **Pure Abstract Mode:** Generating pure landscapes or VJ loops? Just tell her "abstract", and she will lock out all human-generation tendencies from the AI.
+**How to use:** Just say "Generate a cinematic 10-second video of..." and follow her interactive prompt right in the CLI or Telegram!
 
-### Official Group
+#### 📱 Mobile Bridge (Bragi)
+Take Artemis with you. Through the Bragi bridge, Artemis can link to Telegram, Discord, or WeChat. You can message her a bug report from your phone while on a train, and she will fix it on your local machine and send the generated images/videos directly back to your chat.
 
-![Artemis Official Group](assets/artemis-offcial-group.png)
-
-### Install
+### Getting Started
 
 Requirements: **Node.js 20+**.
 
 ```bash
 npm install -g artemis-code
-artemis
 ```
 
-Check the installed version:
-
-```bash
-artemis --version
-```
-
-Upgrade:
-
-```bash
-npm install -g artemis-code@latest
-```
-
-### Quick start
-
-Open a project and run Artemis:
+Open any project folder and wake her up:
 
 ```bash
 cd /path/to/your/project
 artemis
 ```
 
-Useful first commands:
-
-```text
-/config          Configure providers, tools, and local behavior
-/config visual   Configure image/video generation
-/config vision   Configure image understanding
-/team            Let Artemis route the task to the right workflow
-/review          Review current changes for defects and release blockers
-/heimdall        Show active threads and task status
-/nidhogg         Run a long task in the background
-/soul            Create or edit your personal operating contract
-/wordup          Save a session snapshot
-```
-
-Example:
-
-```text
-/team inspect the auth module, fix the refresh-token race, add the missing test, and run validation
-```
-
-Artemis will inspect files, edit code, run validation, and summarize what changed.
-
-### Core workflows
-
-| Command | Purpose | Use it when |
-|---|---|---|
-| `/team` | Auto-router | You want Artemis to choose the right strategy. |
-| `/niko` | Explore → build | The problem needs investigation before implementation. |
-| `/design` | Design first | You want architecture and trade-offs before code. |
-| `/athena` | Deep research | The task spans many files, systems, or unknowns. |
-| `/nidhogg` | Background long-running work | You want a detached worker to continue while you chat. |
-| `/review` | Code review | You want defects, risks, and missing tests found before release. |
-| `/heimdall` | Thread visibility | You want to see active tasks, queues, and workers. |
-
-### Capabilities
-
-#### Real code work
-
-- Read and search project files.
-- Edit source with minimal diffs.
-- Add tests and documentation.
-- Run `typecheck`, `lint`, smoke tests, build commands, and release checks.
-- Preserve workspace context across turns.
-- Avoid claiming success unless a tool result proves it.
-
-#### Long-running work
-
-- Continue work through `/nidhogg` detached mode.
-- Accept new messages while a task is running.
-- Poll for corrections during running work and restart with the latest instruction when possible.
-- Track active tasks through Heimdall.
-
-#### Providers and model routing
-
-Artemis supports many provider families and OpenAI-compatible endpoints. Main chat, specialist models, vision, image generation, video generation, and fallback models can be routed independently.
-
-Common provider families include Anthropic Claude, OpenAI, Google Gemini, DeepSeek, Qwen / Alibaba-compatible endpoints, Moonshot Kimi, Baidu Wenxin, Zhipu GLM, xAI Grok, OpenRouter, Groq, Mistral, Minimax, Tencent Hunyuan, iFlytek Spark, and custom OpenAI-compatible providers.
-
-Provider setup lives in local Artemis configuration. Secrets stay local.
-
-#### MCP plugins
-
-Artemis ships with a large MCP plugin catalog for cloud, data, collaboration, observability, design/frontend, business, source-control, and security workflows.
-
-```text
-/mcp list
-/mcp enable <server-id>
-/mcp disable <server-id>
-```
-
-When an external service needs credentials, Artemis reports the missing local configuration instead of pretending the service worked.
-
-#### Memory and soul
-
-Artemis stores local working memory under `~/.artemis/`.
-
-```text
-/wordup          Save a named session snapshot
-/wordupnow       Save immediately
-artemis resume --last
-artemis resume <sessionId>
-/soul            Create or edit ~/.artemis/soul.md
-```
-
-The soul file is your personal operating contract: tone, preferences, constraints, and how Artemis should work with you.
-
-#### Dream system
-
-Dream diaries are stored under:
-
-```text
-~/.artemis/dreams/
-```
-
-Dreams may include Markdown, images, and videos. Dream videos are linked back to the dream identity so the latest dream video can be found, sent, and audited without relying on a hard-coded filename.
-
-#### Visual generation: Freya / Vidar
-
-Artemis can generate images and videos from the same agent workflow used for engineering.
-
-Configure visual generation:
-
-```text
-/config visual
-/config vision
-```
-
-Image capabilities:
-
-- GitHub banners and README hero images.
-- Product, editorial, lifestyle, and concept assets.
-- Illustrations and visual drafts.
-- Vision-model understanding of user-provided images.
-
-Video capabilities:
-
-- Text-to-video generation through configured video providers.
-- Seedance 1.5-style standard generation.
-- Seedance 2.0 Pro multimodal generation through Vidar Visual configuration.
-- Reference image/video/audio URL support.
-- Local reference path support when asset hosting/upload is configured.
-- Duration normalization according to model limits.
-- Explicit generated-audio control when supported.
-- Dream diary → directed prompt → generated MP4 → dream index → mobile delivery.
-
-Seedance 2.0 Pro workflow:
-
-1. User asks for a video.
-2. Artemis detects the configured Seedance 2.0 Pro model.
-3. Artemis asks whether to use the latest dream diary or collect multimodal references.
-4. User can send image/video/audio URLs or local paths.
-5. Artemis asks for duration before final generation.
-6. If the user skips duration, Artemis uses the configured/default duration.
-7. Artemis generates the video and saves it with a dream-aware filename when the source is a dream.
-8. Artemis can send the exact generated file to active bridge targets.
-
-Example:
-
-```text
-Generate a cinematic 10-second dream video using the latest dream as reference, with sound.
-```
-
-#### Bragi mobile bridge
-
-Bragi lets Artemis receive and reply through messaging platforms while still operating inside the local workspace.
-
-Supported bridge surfaces in this repository include:
-
-- Telegram
-- Discord
-- WeChat / iLink-style gateway
-- Local bridge notifier services
-
-Media delivery strategy:
-
-| Platform | Current strategy |
-|---|---|
-| Telegram | Send original MP4 when available; verified with original-quality delivery. |
-| Discord | Send original MP4 when available; verified with original-quality delivery. |
-| WeChat | Send the highest verified successful video card, falling back through smaller variants when WeChat CDN rejects a larger one. Original MP4 file follow-up is disabled because the file channel rejected the original video. |
-
-Bridge capabilities:
-
-- Receive mobile messages and route them into Artemis.
-- Send progress updates back to chat.
-- Send generated images and videos back to active bridge targets.
-- Handle direct requests such as “send the latest dream image/video”.
-- Avoid treating debugging questions as new generation requests.
-- Recover from stale WeChat context tokens when the gateway reports invalid context.
-
-#### Browser automation and ambient tools
-
-Artemis can use a visible Chromium browser for sites that require JavaScript, login state, or interaction. It can navigate, click, type, wait, extract text, and take screenshots.
-
-When configured, Artemis can also handle ambient tasks such as Spotify control, weather, calendar, reminders, time zones, currency conversion, and flight lookup. These are triggered only when the user clearly asks for that domain.
-
-### Configuration
-
-Run the setup wizard:
-
-```bash
-artemis config --setup
-```
-
-Or use interactive commands:
-
-```text
-/config
-/config visual
-/config vision
-```
-
-Typical configuration areas:
-
-- Main chat provider and model.
-- Specialist/fallback providers.
-- Visual image provider.
-- Visual video provider.
-- Vision model.
-- MCP servers.
-- Bragi bridge targets.
-- Local memory behavior.
-
-### Common examples
-
-```text
-/team find why login sessions expire early, patch it, and run the relevant tests
-/review my current git diff for release blockers
-/nidhogg refactor the visual provider layer and keep validating until tests pass
-Create a cinematic GitHub README banner for this project
-Generate a 10-second Seedance 2.0 Pro dream video from the latest dream diary
-Send me the latest dream video
-```
-
-### Development
-
-```bash
-git clone https://github.com/420company/artemis.git
-cd artemis
-npm install
-npm run typecheck
-npm run lint
-npm run test:runtime
-npm run build
-```
-
-Full release check:
-
-```bash
-npm run release:check
-```
-
-Before release, update `README.md`, `docs/USAGE.md`, `docs/RELEASE.md`, versioned feature docs, and public assets when the feature surface changes.
+**Essential Commands:**
+- `/config` — Configure your AI providers, API keys, and preferences.
+- `/team` — The smart router. Let Artemis handle the task her way.
+- `/nidhogg` — Detach Artemis to the background for heavy lifting.
+- `/review` — Have her review your Git diff for bugs and release blockers.
 
 ---
 
 ## 中文
 
-### Artemis 哲学
+### 遇见 Artemis
+Artemis 从来不是一个只会给你建议、让你自己去复制粘贴代码的聊天机器人。她是你真正的本地自动化工程助理，也是你的私人视觉创意总监。
 
-Artemis 是一款为真实生产环境打造的本地优先 AI 工程助理。她拒绝做一个只会给建议的聊天框，而是直接潜入你的代码库，阅读源码、修改文件、运行终端、验证测试并全自动收尾。
+她会直接进入你的工作区，理解整个代码库的架构，亲自动手修改代码，在终端里运行编译，跑通测试用例，并且只有在一切都验证无误后，才会向你汇报“工作完成”。你只需要负责构思，Artemis 负责把活干得漂亮。
 
-为那些“必须被完成”的工作而生：先进行事实检查，只做最小必要改动，安全隔离密钥，只汇报工具验证过的客观事实。
+当前版本：**0.2.51**
 
-当前版本：**0.2.48**。
+### 她能为你做什么？
 
-自 **0.1.x** 时代起，Artemis 的持续重构、故障排查、版本发布及视觉功能扩展，均由她自己在这个代码库中独立完成。她拥有极高的技术自给自足能力，可以端到端地审核、编译、打包、解释并发布自己的进化。
+#### 🛠️ 真正的自动化工程
+告诉 Artemis 你想要什么新功能，或者发现了什么 Bug。她会自动检索相关文件，以极度精准的 Diff 方式修改源码，补齐缺失的测试用例，并自动运行你的构建命令。如果报错了？她会自己看报错日志，自己重写代码，直到终端亮起绿灯。
+**怎么用：** 直接跟她提需求，或者输入 `/team` 让她自己决定工作流。如果是一个超级漫长的重构任务，输入 `/nidhogg` 把她挂在后台，她会默默干活，你则可以去喝杯咖啡。
 
-### 0.2.48 极致进化
+#### 🧠 永不失忆的持久化记忆
+Artemis 拥有企业级的记忆持久化能力（Persistent Collapse Ledger）。即使你合上电脑、关闭终端，她的记忆、工具执行结果和代码快照也都已经安全地落盘保存。当你再次唤醒她时，一切都能无缝接续。
+**怎么用：** 记忆系统是全自动运作的。你也可以通过 `/soul` 命令为她立下规矩：定义你的代码洁癖、你的偏好语气，甚至她的性格，她会永远遵守。
 
-- **企业级上下文稳定 (Persistent Collapse Ledger)**：实现了长任务不失忆的持久化压缩账本，压缩事件、文件快照、工具输出 Artifact 现已完整落盘，系统重启也能无缝接续上下文。
-- **Prompt Caching 成本斩断**：通过 `cache_control: ephemeral` 精准切割 System Prompt 和工具边界，Anthropic 模型重复提问时 Token 成本大幅下降 (可达 90%)。
-- **工具感知型微压缩 (Microcompact)**：智能区分“只读查询”与“写入执行”，在超长对话中自动清理多余读取日志，但永远保留核心代码写入的执行证据。
-- **时间触发的缓存净化**：当会话静默超过 42 分钟，自动微缩闲置工具输出，极大提升 Cache Hit 命中率。
-- **UI 美学与交互净化**：根除了动态猫颜文字带来的终端重绘残影与空行 Bug，重构为双语单行、极致优雅的推理指示器（`模型推理中 · Reasoning`）。
-- **精准 15+ 模型家族感知**：全量重写上下文容量计算，对 Claude Opus (1M)、Gemini 3.1 Pro (2M)、DeepSeek、MiniMax 等主流推理大模型提供原生的 Token 边界支持。
-- **全方位视觉与梦境护航**：优化了微信、Telegram、Discord 多端桥接的媒体下发策略，从源头上加固了 Saga 三视图身份防畸变算法。
+#### 🎬 院线级视觉与 Saga 长视频引擎
+除了写代码，Artemis 还是一个顶尖的视觉导演。需要一张高级的 README 封面？产品概念图？或者一段 60 秒的剧情连续剧？她内置了强悍的 **Saga 视觉引擎**，原生支持对接最先进的视频大模型（如 Seedance 2.0 Pro）。
+- **链式尾帧无缝转场：** 针对长视频合成，Artemis 会自动截取视频尾帧，在后台极速将其“洗稿”转绘为 3D 安全参考图，不仅完美规避了大厂严苛的“真人版权拦截”，还能保证角色、光影与镜头动势的完美连贯！
+- **纯视觉模式拦截：** 想要生成纯风景或者迷幻的 VJ 素材？只要在聊天里说一句“纯视觉”，Artemis 就会在底层锁死人物生成，绝对不会出现诡异的人影。
+**怎么用：** 直接告诉她“帮我生成一段长视频...”，在终端或者 Telegram 里，她会自动引导你完成所有步骤。
 
-### 安装
-
-要求：**Node.js 20+**。
-
-```bash
-npm install -g artemis-code
-artemis
-```
-
-检查版本：
-
-```bash
-artemis --version
-```
-
-升级：
-
-```bash
-npm install -g artemis-code@latest
-```
+#### 📱 手机端无缝互联 (Bragi)
+把 Artemis 装进口袋。通过 Bragi 桥接模块，你可以将 Artemis 绑定到 Telegram、Discord 甚至微信。即使你在通勤的地铁上，只要给 Artemis 发一条消息，她就会在你家里的电脑上开始跑代码；如果生成了精美的视频，她会直接推送到你的手机聊天框里。
 
 ### 快速开始
 
-进入项目目录：
+环境要求：**Node.js 20+**。
+
+```bash
+npm install -g artemis-code
+```
+
+进入你的任意项目，唤醒她：
 
 ```bash
 cd /path/to/your/project
 artemis
 ```
 
-常用命令：
-
-```text
-/config          配置模型、工具和本地行为
-/config visual   配置图片/视频生成
-/config vision   配置图片理解模型
-/team            让 Artemis 自动选择工作流
-/review          审查当前改动和发布风险
-/heimdall        查看任务和线程状态
-/nidhogg         后台执行长期任务
-/soul            创建或编辑个人协作契约
-/wordup          保存会话快照
-```
-
-示例：
-
-```text
-/team 检查登录模块，修复 refresh token 竞态，补测试并运行验证
-```
-
-Artemis 会自己检查文件、修改代码、运行验证，并汇报结果。
-
-### 核心工作流
-
-| 命令 | 用途 | 适合场景 |
-|---|---|---|
-| `/team` | 自动路由 | 不确定该用哪种方式处理任务。 |
-| `/niko` | 先探索再实现 | 问题需要调查后才能改。 |
-| `/design` | 先设计 | 需要架构方案、取舍和实现计划。 |
-| `/athena` | 深度研究 | 跨模块、跨系统、信息不完整的任务。 |
-| `/nidhogg` | 后台长期任务 | 希望任务继续跑，同时前台还能交流。 |
-| `/review` | 代码审查 | 发布前查缺陷、风险和遗漏测试。 |
-| `/heimdall` | 线程可视化 | 查看当前任务、队列和后台 worker。 |
-
-### 能力总览
-
-#### 真实工程工作
-
-- 读取、搜索和理解项目文件。
-- 以最小 diff 修改源码。
-- 添加测试和文档。
-- 运行 `typecheck`、`lint`、smoke test、build 和发布检查。
-- 在多轮对话中保持工作区上下文。
-- 没有工具结果证明时，不声称成功。
-
-#### 长任务管理
-
-- 使用 `/nidhogg` 后台执行长期任务。
-- 长任务运行时仍能接收新消息。
-- 在任务运行中轮询纠错，尽可能中断当前思考并用最新指令继续。
-- 通过 Heimdall 查看线程状态。
-
-#### Provider 与模型路由
-
-Artemis 支持多类模型服务和 OpenAI-compatible endpoint。主聊天、专家模型、视觉理解、图片生成、视频生成和 fallback 模型都可以独立配置。
-
-常见 provider 包括 Anthropic Claude、OpenAI、Google Gemini、DeepSeek、Qwen / 阿里兼容端点、Moonshot Kimi、百度文心、智谱 GLM、xAI Grok、OpenRouter、Groq、Mistral、Minimax、腾讯混元、讯飞星火，以及自定义 OpenAI-compatible provider。
-
-配置保存在本地，密钥不进入仓库。
-
-#### MCP 插件
-
-Artemis 内置大量 MCP server 配置，覆盖云服务、数据、协作、可观测性、设计前端、商业、安全和代码托管等场景。
-
-```text
-/mcp list
-/mcp enable <server-id>
-/mcp disable <server-id>
-```
-
-外部服务缺凭证时，Artemis 会说明缺少哪个本地配置字段，而不是假装调用成功。
-
-#### 记忆与 Soul
-
-Artemis 的本地记忆位于：
-
-```text
-~/.artemis/
-```
-
-常用入口：
-
-```text
-/wordup          保存会话快照
-/wordupnow       立即保存
-artemis resume --last
-artemis resume <sessionId>
-/soul            创建或编辑 ~/.artemis/soul.md
-```
-
-`soul.md` 是你的个人协作契约：语气、偏好、边界、禁区，以及 Artemis 应该如何与你共事。
-
-#### 梦境系统
-
-梦境文件默认位于：
-
-```text
-~/.artemis/dreams/
-```
-
-梦境可以包含 Markdown、图片和视频。梦境视频会写回对应梦境索引，并使用与梦境身份相关的文件名，避免硬编码覆盖，也方便“发送最新梦境视频”时准确找到目标。
-
-#### 视觉生成：Freya / Vidar
-
-Artemis 可以在同一个工程代理流程里生成图片和视频。
-
-配置入口：
-
-```text
-/config visual
-/config vision
-```
-
-图片能力：
-
-- GitHub banner / README hero。
-- 产品图、编辑图、生活方式图和概念视觉。
-- 插画、视觉草案与品牌氛围图。
-- 使用 vision 模型理解用户提供的图片。
-
-视频能力：
-
-- 文本生成视频。
-- Seedance 1.5 风格标准视频。
-- Seedance 2.0 Pro 多模态视频。
-- 图片、视频、音频 URL 参考。
-- 本地素材路径参考；配置资产托管后可上传本地素材。
-- 根据模型限制规范化 duration。
-- 支持显式生成声音。
-- 最新梦境日记 → 导演提示词 → MP4 产物 → 梦境索引 → 手机发送。
-
-Seedance 2.0 Pro 协作流程：
-
-1. 用户提出生成视频需求。
-2. Artemis 检测当前是否为 Seedance 2.0 Pro 模型。
-3. Artemis 询问使用最新梦境，还是继续添加多模态素材。
-4. 用户可以发送图片、视频、音频 URL 或本地路径。
-5. Artemis 在最终生成前询问视频时长。
-6. 用户跳过时使用默认/配置时长。
-7. Artemis 生成视频；如果来源是梦境，则使用梦境感知命名。
-8. Artemis 可以把精确的新视频文件发送到活跃手机桥接目标。
-
-示例：
-
-```text
-用最新梦境生成一个 10 秒 Seedance 2.0 Pro 视频，有声音
-```
-
-#### Bragi 手机桥接
-
-Bragi 让 Artemis 通过手机消息平台接收指令，同时仍然在本地工作区执行。
-
-当前仓库包含：
-
-- Telegram
-- Discord
-- WeChat / iLink gateway
-- 本地 bridge notifier
-
-媒体发送策略：
-
-| 平台 | 当前策略 |
-|---|---|
-| Telegram | 直接发送原始 MP4，已验证原始清晰度可达。 |
-| Discord | 直接发送原始 MP4，已验证原始清晰度可达。 |
-| WeChat | 只发送微信可接受的最高视频卡片；如果较高档位被 CDN 拒绝，则自动降级。已取消原始 MP4 文件追加发送。 |
-
-桥接能力：
-
-- 手机发消息，Artemis 在本地工作区执行。
-- 把执行进度发送回聊天窗口。
-- 图片/视频生成后推送到活跃桥接目标。
-- 支持“发我最新梦境图片/视频”。
-- 避免把“为什么视频没发手机”这类排障问题误判为新生成请求。
-- WeChat context 过期时自动清理缓存，等待新消息刷新上下文。
-
-#### 浏览器自动化与日常工具
-
-Artemis 可以使用可见 Chromium 浏览器处理需要 JavaScript、登录态或交互的网站：导航、点击、输入、等待、提取文本和截图。
-
-在配置后，Artemis 也可以处理 Spotify、天气、日历、提醒事项、时区、汇率和航班查询等日常工具。只有当用户明确表达对应意图时才会触发。
-
-### 配置
-
-初始化配置：
-
-```bash
-artemis config --setup
-```
-
-交互式配置：
-
-```text
-/config
-/config visual
-/config vision
-```
-
-常见配置项：
-
-- 主聊天 provider / model。
-- 专家模型和 fallback 模型。
-- 图片生成 provider。
-- 视频生成 provider。
-- 视觉理解模型。
-- MCP server。
-- Bragi bridge 目标。
-- 本地记忆行为。
-
-### 常用示例
-
-```text
-/team 修复登录过期问题，补测试并运行验证
-/review 检查当前 git diff 有没有发布风险
-/nidhogg 后台完成视觉 provider 重构并持续验证
-创建一个高级、克制、电影感的 GitHub README banner
-用最新梦境生成 10 秒 Seedance 2.0 Pro 视频
-发我最新梦境视频
-```
-
-### 本地开发
-
-```bash
-git clone https://github.com/420company/artemis.git
-cd artemis
-npm install
-npm run typecheck
-npm run lint
-npm run test:runtime
-npm run build
-```
-
-完整发布检查：
-
-```bash
-npm run release:check
-```
-
-发布前请同步更新 `README.md`、`docs/USAGE.md`、`docs/RELEASE.md`、版本化功能说明和公开展示资产。
-
----
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+**必备命令：**
+- `/config` — 零门槛配置你的 AI 模型密钥与生成偏好。
+- `/team` — 智能路由，把任务丢给她，剩下的不用管。
+- `/nidhogg` — 派 Artemis 去后台执行极其耗时的深度任务。
+- `/review` — 发布前，让她帮你做一次代码审查，找出潜在的灾难。

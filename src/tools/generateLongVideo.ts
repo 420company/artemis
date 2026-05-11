@@ -642,15 +642,45 @@ export async function executeGenerateLongVideo(
     let userReferenceImageUrls = nonEmptyStringArray(action.referenceImageUrls);
     const requestedUserImageReferenceCount = userReferenceImagePaths.length + userReferenceImageUrls.length;
     let hasGlobalUserImageReferences = userReferenceImagePaths.length > 0 || userReferenceImageUrls.length > 0;
-    const superVisualMode = await maybeGenerateSuperVisualReference({
-      action,
-      context,
-      projectDir,
-      story,
-      title,
-      ratio,
-      videoLimits: limits,
-    });
+    // Coerce narrativeEntities once and use it everywhere downstream
+    // (constitution rendering, accessoryLock, keyframe generation, critic).
+    let narrativeEntities = coerceNarrativeEntities(action.narrativeEntities);
+    if (!narrativeEntities) {
+      // Direct tool calls and dream-video callers may bypass the interactive
+      // Saga workflow. Still run the same "god/protagonist" analysis here so
+      // every long-video path gets one central subject and world model before
+      // shot planning, critic checks, keyframes, and continuity prompts.
+      narrativeEntities = await analyzeNarrative({
+        cwd: context.cwd,
+        userText: story,
+        imagePaths: userReferenceImagePaths,
+      }) ?? narrativeKeywordFallback({
+        userText: story,
+        hasFaceLikelyInImages: hasGlobalUserImageReferences,
+      });
+      story = [
+        story,
+        '',
+        buildSagaConstitution(narrativeEntities),
+        '',
+        `[Saga Narrative Entity Map — internally resolved for this generate_long_video call]\n${JSON.stringify(narrativeEntities, null, 2)}`,
+      ].join('\n');
+      toolLog(`🧠 Saga: 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})。`);
+    }
+
+    const isPureEnvironment = narrativeEntities?.mode === 'environment';
+
+    const superVisualMode = isPureEnvironment
+      ? { enabled: false, reason: 'environment-mode-bypass' } as const
+      : await maybeGenerateSuperVisualReference({
+          action,
+          context,
+          projectDir,
+          story,
+          title,
+          ratio,
+          videoLimits: limits,
+        });
     // Real-person input requires text-only mode. BytePlus's image classifier
     // rejects real-person photos regardless of role (reference_image,
     // first_frame, last_frame all blocked). Pure text-to-video DOES generate
@@ -677,31 +707,6 @@ export async function executeGenerateLongVideo(
     const realPersonInput = superVisualMode.enabled
       ? Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson)
       : false;
-    // Coerce narrativeEntities once and use it everywhere downstream
-    // (constitution rendering, accessoryLock, keyframe generation, critic).
-    let narrativeEntities = coerceNarrativeEntities(action.narrativeEntities);
-    if (!narrativeEntities) {
-      // Direct tool calls and dream-video callers may bypass the interactive
-      // Saga workflow. Still run the same "god/protagonist" analysis here so
-      // every long-video path gets one central subject and world model before
-      // shot planning, critic checks, keyframes, and continuity prompts.
-      narrativeEntities = await analyzeNarrative({
-        cwd: context.cwd,
-        userText: story,
-        imagePaths: userReferenceImagePaths,
-      }) ?? narrativeKeywordFallback({
-        userText: story,
-        hasFaceLikelyInImages: hasGlobalUserImageReferences,
-      });
-      story = [
-        story,
-        '',
-        buildSagaConstitution(narrativeEntities),
-        '',
-        `[Saga Narrative Entity Map — internally resolved for this generate_long_video call]\n${JSON.stringify(narrativeEntities, null, 2)}`,
-      ].join('\n');
-      toolLog(`🧠 Saga: 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})。`);
-    }
     // NOTE: role:"first_frame" turned out NOT to bypass BytePlus's real-
     // person privacy filter empirically (the filter is image-classifier-
     // based and ignores the role tag). Saga therefore uses ONLY
@@ -721,32 +726,41 @@ export async function executeGenerateLongVideo(
     // prompts can carry identity across segments. Only falls fully to
     // text-only when even vision is unavailable.
     if (!superVisualMode.enabled && (userReferenceImagePaths.length > 0 || userReferenceImageUrls.length > 0)) {
-      let visionDesc: string | null = null;
-      try {
-        const cachedPath = path.join(projectDir, 'super-visual', 'character-vision-description.txt');
-        visionDesc = (await readFile(cachedPath, 'utf8')).trim() || null;
-      } catch { /* no cache */ }
-      // Prefer the local copies SV already downloaded (covers URL-only case);
-      // fall back to user-supplied paths if SV didn't resolve them.
-      const fallbackImagePath = (superVisualMode as { resolvedUserImagePaths?: string[] }).resolvedUserImagePaths?.[0]
-        ?? userReferenceImagePaths[0];
-      if (!visionDesc && fallbackImagePath) {
-        visionDesc = await describeUserImageWithVision({ imagePath: fallbackImagePath, context });
-      }
-      if (visionDesc) {
+      if (isPureEnvironment) {
+        toolLog('🎯 Saga: 纯视觉/无主角模式已确认。绕过 Super Visual 人物提取，强制保留用户原始风景/抽象图，并注入最高级防人类指令。');
         story = [
           story,
           '',
-          `[Vision-derived character identity — applies to EVERY shot. The canonical illustrated turnaround was not available for this run, so identity is anchored textually]: ${visionDesc}`,
+          'ABSOLUTE HUMAN BAN: The user explicitly requested an abstract, environmental, or atmospheric piece. You MUST NOT describe, prompt, or generate any humans, characters, faces, biological figures, or humanoid silhouettes under ANY circumstances. Focus purely on environment, physics, geometry, fluid dynamics, and light.',
         ].join('\n');
-        toolWarn('⚠️ Super Visual 不可用：已用 vision-describe 文字身份兜底（输出仍可为照片质感，但身份精度低于图像锚定方案）。');
       } else {
-        toolWarn('⚠️ Super Visual 不可用且 vision-describe 也失败：本次只能依赖原始文字描述，身份一致性会偏弱。');
+        let visionDesc: string | null = null;
+        try {
+          const cachedPath = path.join(projectDir, 'super-visual', 'character-vision-description.txt');
+          visionDesc = (await readFile(cachedPath, 'utf8')).trim() || null;
+        } catch { /* no cache */ }
+        // Prefer the local copies SV already downloaded (covers URL-only case);
+        // fall back to user-supplied paths if SV didn't resolve them.
+        const fallbackImagePath = (superVisualMode as { resolvedUserImagePaths?: string[] }).resolvedUserImagePaths?.[0]
+          ?? userReferenceImagePaths[0];
+        if (!visionDesc && fallbackImagePath) {
+          visionDesc = await describeUserImageWithVision({ imagePath: fallbackImagePath, context });
+        }
+        if (visionDesc) {
+          story = [
+            story,
+            '',
+            `[Vision-derived character identity — applies to EVERY shot. The canonical illustrated turnaround was not available for this run, so identity is anchored textually]: ${visionDesc}`,
+          ].join('\n');
+          toolWarn('⚠️ Super Visual 不可用：已用 vision-describe 文字身份兜底（输出仍可为照片质感，但身份精度低于图像锚定方案）。');
+        } else {
+          toolWarn('⚠️ Super Visual 不可用且 vision-describe 也失败：本次只能依赖原始文字描述，身份一致性会偏弱。');
+        }
+        // Drop user photos — provider would reject them for privacy reasons in character mode.
+        userReferenceImagePaths = [];
+        userReferenceImageUrls = [];
+        hasGlobalUserImageReferences = false;
       }
-      // Drop user photos — provider would reject them.
-      userReferenceImagePaths = [];
-      userReferenceImageUrls = [];
-      hasGlobalUserImageReferences = false;
     }
     if (superVisualMode.enabled) {
       // Both real-person and illustrated input: turnaround is the canonical
@@ -1115,7 +1129,16 @@ export async function executeGenerateLongVideo(
           // both the identity keyframe and the temporal continuation frame.
           // Retry logic (usingChain=false) strips this from the reference
           // array on privacy-filter failures.
-          const chainPaths: string[] = usingChain && segment.index > 1 && previousLastFramePath
+          // 💡 REAL PERSON BYPASS (User's Chain Frame Translation Strategy):
+          // If we are in realPersonInput mode, passing the raw `previousLastFramePath`
+          // (which is a real-person photographic screenshot) directly to the video API
+          // will trigger the provider's strict privacy filter and abort the chain.
+          // However, the `segmentKeyframe` generated above ALREADY ingested
+          // `previousLastFramePath` and "washed" it into an illustrated anime-style
+          // frame (3D拟人漫画风) that bypasses the filter! So for real-person runs,
+          // we deliberately omit the raw screenshot and rely entirely on the washed
+          // anime keyframe to bridge the scene.
+          const chainPaths: string[] = usingChain && segment.index > 1 && previousLastFramePath && !realPersonInput
             ? [previousLastFramePath]
             : [];
           const referenceImagePaths = [

@@ -83,6 +83,7 @@ const WORKFLOW_TTL_MS = 30 * 60 * 1000;
 const CANCEL_RE = /^(?:取消|算了|停止|不要了|cancel|stop)$/i;
 const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok|yes|y|sure|default)$/i;
 const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
+const ABSTRACT_RE = /^(?:无主角|纯视觉|纯风景|抽象视觉|abstract|no lead|no character|没有主角)$/i;
 
 function normalizeKey(input: SagaWorkflowInput): string {
   return `${input.scope}:${input.key}`;
@@ -378,6 +379,7 @@ async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
       '这个模型支持图、视频、音、文字的混合参考，可以继续发：',
       '  · 图 / 视频 / 音 的链接或本地路径，作为视觉与听觉参考',
       '  · 你的剧本 / 分镜 / 设定 / 故事 — 写了我会照你的来；没写就由我来安排。',
+      '💡 进阶提示：如果您要生成纯风景或纯视觉素材，请在后续回复『无主角』或『纯视觉』。',
       '准备好了回复 "开始生成"；想直接开始就回复 "跳过"；不做了回复 "取消"。',
     ].filter(Boolean).join('\n'),
     en: [
@@ -387,6 +389,7 @@ async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
       'This model accepts mixed references — image, video, audio, text. You can keep sending:',
       '  · Image / video / audio URLs or local paths, as visual and auditory references',
       '  · Your own script / shot list / setting / story — if you write one, I\'ll follow it; if not, I\'ll compose it.',
+      '💡 Pro tip: For pure landscapes or abstract visual material, reply "no lead" or "abstract" to bypass character logic.',
       'When you\'re ready, reply "start". To skip extras and begin, reply "skip". To stop, reply "cancel".',
     ].filter(Boolean).join('\n'),
   });
@@ -422,12 +425,14 @@ function buildRefAckMessage(state: SagaWorkflowState): string {
     const counts = `图 ${imgs} · 视频 ${vids} · 音频 ${auds} · 剧本段 ${storyCount}`;
     const lines = [`已收：${counts}`];
     if (storyCount > 0) lines.push('剧本已归档，生成时会严格按你的版本来。');
+    lines.push('💡 如果是纯风景或纯视觉素材，请回复 "无主角" 或 "纯视觉"。');
     lines.push('可以继续补充，或回复 "开始生成" 进入下一步。');
     return lines.join('\n');
   }
   const counts = `${imgs} images · ${vids} videos · ${auds} audio · ${storyCount} script segments`;
   const lines = [`Received: ${counts}`];
   if (storyCount > 0) lines.push('Script archived — generation will follow your version exactly.');
+  lines.push('💡 Reply "abstract" or "no lead" if this is a pure landscape or visual piece.');
   lines.push('Send more if you like, or reply "start" to proceed.');
   return lines.join('\n');
 }
@@ -473,6 +478,10 @@ function buildProtagonistOptions(state: SagaWorkflowState, narrative: NarrativeE
     zh: '我自己来描述（直接告诉我谁或者什么是主角）',
     en: 'I\'ll describe it myself (just tell me who or what the lead is)',
   });
+  const noLeadLabel = pickLocale(state.locale, {
+    zh: '这是一个纯环境/抽象/氛围视频（绝对不要出现任何人物或主体）',
+    en: 'This is a pure environment/abstract/atmospheric video (NO characters or subjects at all)',
+  });
   if (narrative.protagonist.name && narrative.protagonist.name !== '(unnamed)' && narrative.protagonist.name !== '(undetermined — fallback)') {
     opts.push({
       key: 'A',
@@ -498,6 +507,14 @@ function buildProtagonistOptions(state: SagaWorkflowState, narrative: NarrativeE
     mode: narrative.protagonist.type,
     name: narrative.protagonist.name,
     isOwnDescription: true,
+  });
+  opts.push({
+    key: 'X',
+    label: noLeadLabel,
+    type: 'environment',
+    mode: 'environment',
+    name: 'Pure Abstract Environment',
+    isOwnDescription: false,
   });
   return opts;
 }
@@ -845,6 +862,25 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       mergeRefs(state, refs);
       maybeRememberReferenceNote(state, text);
       maybeAccumulateStory(state, text);
+
+      if (ABSTRACT_RE.test(text)) {
+        state.narrative = {
+          protagonist: { name: 'Pure Abstract Environment', type: 'environment', confidence: 1.0, evidence: 'User explicitly requested no characters.' },
+          supportingCharacters: [],
+          props: [],
+          environments: ['Abstract Visual Environment'],
+          relationships: [],
+          actions: [],
+          worldModel: {},
+          protagonistAccessories: [],
+          mode: 'environment',
+          modeRationale: 'User explicitly requested "abstract/no lead" mode via chat command.',
+          source: 'user-clarification',
+        };
+        WORKFLOWS.delete(key);
+        const action = buildGenerationAction(state);
+        return { handled: false, prompt: action.prompt, action };
+      }
 
       if (START_RE.test(text)) {
         // User done collecting → run narrative analysis BEFORE moving on
