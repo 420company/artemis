@@ -26,7 +26,7 @@ const MICROCOMPACT_SOFT_TRIGGER_TOKENS = 40_000
  * old tool results before sending the request to shrink what gets rewritten.
  * Mirrors ClaudeCode's timeBasedMCConfig.gapThresholdMinutes (default 5).
  */
-const TIME_BASED_MC_GAP_MINUTES = 5
+const TIME_BASED_MC_GAP_MINUTES = 42
 const TIME_BASED_MC_KEEP_RECENT = 4
 
 /**

@@ -489,15 +489,23 @@ function buildPendingAssistantLines(options: {
   startedAtMs?: number
   liveTokens?: number
   estimatedTokens?: number
+  locale?: UiLocale
 }): string[] {
   const elapsedMs = options.startedAtMs ? Math.max(0, Date.now() - options.startedAtMs) : 0
   const elapsed = Math.floor(elapsedMs / 1000)
   const frame = PENDING_SPINNER_FRAMES[Math.floor(Date.now() / 100) % PENDING_SPINNER_FRAMES.length]!
-  const phrase = options.phase === 'thinking' ? 'AI 正在思考 · Thinking' : '模型生成中 · Generating'
+  
+  let phrase = ''
+  if (options.locale === 'en') {
+    phrase = options.phase === 'thinking' ? 'Reasoning' : 'Generating'
+  } else {
+    phrase = options.phase === 'thinking' ? '模型推理中 · Reasoning' : 'AI 正在思考 · Thinking'
+  }
+
   const estimatedTokens = Math.max(0, options.estimatedTokens ?? Math.ceil(elapsedMs / 1000 * 8))
   const liveTokens = Math.max(0, options.liveTokens ?? 0, estimatedTokens)
   const liveTokenNote = `${fmtTok(liveTokens)} tok`
-  const hint = 'Esc to Interrupt'
+  const hint = options.locale === 'en' ? 'Esc to Interrupt' : '按 Esc 中断'
   const lines = [
     `  ${tint(frame, TL.assistantDot)} ${tint(phrase, TL.assistantDot)}  ${tint(`(${elapsed}s · ${liveTokenNote} · ${hint})`, TL.meta)}`,
   ]
@@ -577,7 +585,7 @@ function buildCollapsedToolLines(sourceLines: string[], expanded: boolean): stri
 function buildViewportLinesFromBlocks(
   blocks: ScrollBlock[],
   cols: number,
-  options: { expandToolTranscripts?: boolean } = {},
+  options: { expandToolTranscripts?: boolean; locale?: UiLocale } = {},
 ): string[] {
   const lines: string[] = []
   const bodyWidth = Math.max(1, cols - 2)
@@ -606,6 +614,7 @@ function buildViewportLinesFromBlocks(
           startedAtMs: block.pendingStartMs,
           liveTokens: block.pendingLiveTokens,
           estimatedTokens: block.pendingStartMs ? Math.ceil((Date.now() - block.pendingStartMs) / 1000 * 8) : undefined,
+          locale: options.locale,
         }))
         continue
       }
@@ -656,6 +665,7 @@ function buildViewportLinesFromBlocks(
           startedAtMs: block.pendingStartMs,
           liveTokens: block.pendingLiveTokens,
           estimatedTokens: block.pendingStartMs ? Math.ceil((Date.now() - block.pendingStartMs) / 1000 * 8) : undefined,
+          locale: options.locale,
         }))
       }
       continue
@@ -801,7 +811,7 @@ function buildTimelineWithLanding(options: {
     visibleRows: options.visibleRows,
     bridges: options.bridges,
   }))
-  const convoLines = buildViewportLinesFromBlocks(options.blocks, options.cols)
+  const convoLines = buildViewportLinesFromBlocks(options.blocks, options.cols, { locale: options.locale })
   if (landingLines.length === 0) return convoLines
   if (convoLines.length === 0) return landingLines
   return [...landingLines, '', ...convoLines]
@@ -1639,9 +1649,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     const { cols } = getViewportMetrics()
-    const finalised = buildViewportLinesFromBlocks(scrollBlocks, cols, { expandToolTranscripts })
+    const finalised = buildViewportLinesFromBlocks(scrollBlocks, cols, { expandToolTranscripts, locale })
     const transient = (transientBlocks && transientBlocks.length > 0)
-      ? buildViewportLinesFromBlocks(transientBlocks, cols, { expandToolTranscripts })
+      ? buildViewportLinesFromBlocks(transientBlocks, cols, { expandToolTranscripts, locale })
       : []
     prompt.setLines(finalised, transient)
   }
