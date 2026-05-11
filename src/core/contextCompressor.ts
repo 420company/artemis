@@ -18,6 +18,40 @@ import type { SessionMessage } from './types.js'
 const TOOL_RESULT_KEEP_CHARS = 200
 const TOOL_ERROR_KEEP_CHARS = 1_500
 const TOOL_RESULT_PLACEHOLDER = '[旧工具输出已清除以节省上下文]'
+const MICROCOMPACT_SOFT_TRIGGER_TOKENS = 40_000
+
+/**
+ * Time-based microcompact: if the last assistant message is older than this
+ * threshold, the server-side prompt cache is cold anyway — proactively clear
+ * old tool results before sending the request to shrink what gets rewritten.
+ * Mirrors ClaudeCode's timeBasedMCConfig.gapThresholdMinutes (default 5).
+ */
+const TIME_BASED_MC_GAP_MINUTES = 5
+const TIME_BASED_MC_KEEP_RECENT = 4
+
+/**
+ * Only microcompact tool outputs from these tool types. Write operations
+ * (write_file, apply_patch, insert_in_file) are preserved because they
+ * serve as execution evidence the model may need for correctness checks.
+ *
+ * Mirrors ClaudeCode's COMPACTABLE_TOOLS set (microCompact.ts:41-50).
+ */
+const COMPACTABLE_TOOL_NAMES = new Set([
+  'read_file',
+  'run_command',
+  'npm_run',
+  'search',
+  'grep',
+  'list_directory',
+  'file_info',
+  'browser_screenshot',
+  'web_search',
+  'web_fetch',
+  'deep_research',
+  // Legacy / alias names that may appear in older sessions
+  'searchreplace',
+  'readfile',
+])
 
 /** Rough token estimate: 1 token ≈ 4 chars */
 function estimateTokens(content: string): number {
@@ -60,11 +94,60 @@ ${outputTail}`
   }
 }
 
+/**
+ * Tools whose outputs represent execution evidence (writes, patches) and
+ * MUST NOT be compacted even when large. The model needs these to verify
+ * that its edits were applied correctly.
+ */
+const NON_COMPACTABLE_TOOL_NAMES = new Set([
+  'write_file',
+  'apply_patch',
+  'insert_in_file',
+  'replace_in_file',
+  'create_file',
+  'delete_file',
+  'writefile',  // legacy alias
+])
+
+/**
+ * Check if a tool message's name matches a compactable tool type.
+ * Tool messages may carry the tool name in msg.name or embedded in the
+ * JSON content as action.type.
+ */
+function isCompactableToolMessage(msg: SessionMessage): boolean {
+  // Direct name field (set by session store on tool messages)
+  const toolName = msg.name
+  if (toolName) {
+    // Explicitly non-compactable tools are never cleared
+    if (NON_COMPACTABLE_TOOL_NAMES.has(toolName)) return false
+    // Explicitly compactable tools
+    if (COMPACTABLE_TOOL_NAMES.has(toolName)) return true
+  }
+  // Try parsing the JSON envelope for action.type
+  try {
+    const parsed = JSON.parse(msg.content) as Record<string, unknown>
+    const action = parsed.action as Record<string, unknown> | undefined
+    const actionType = action && typeof action.type === 'string' ? action.type : null
+    if (actionType) {
+      if (NON_COMPACTABLE_TOOL_NAMES.has(actionType)) return false
+      if (COMPACTABLE_TOOL_NAMES.has(actionType)) return true
+    }
+  } catch { /* not JSON or no action field */ }
+  // Fallback: if we can't determine the type AND name is unknown, still
+  // compact very large generic tool outputs. But if we have a name and it
+  // wasn't in either set, be conservative and don't compact.
+  if (toolName) return false
+  return msg.content.length > 4_000
+}
+
 function pruneToolResults(messages: SessionMessage[], protectedFromIdx: number): SessionMessage[] {
   return messages.map((msg, i) => {
     if (msg.role !== 'tool') return msg
     if (i >= protectedFromIdx) return msg
     if (msg.content.length <= TOOL_RESULT_KEEP_CHARS) return msg
+    // Only compact tools whose outputs are deterministic/reproducible.
+    // Write operations (write_file, apply_patch) are preserved as evidence.
+    if (!isCompactableToolMessage(msg)) return msg
     if (looksLikeToolFailure(msg.content)) {
       return {
         ...msg,
@@ -321,14 +404,11 @@ export interface CompressResult {
 }
 
 /**
- * Compression follows the selected model's real window. Default policy:
- *   - small windows (<64K): start at 60% so tool output still fits;
- *   - medium windows (64K-256K): start at 70%;
- *   - large windows (>256K): start at 80%.
- * A high soft cap remains as cost protection for million-token models, but it
- * no longer forces 200K/1M models to compress at the old 40K ceiling.
+ * Full summarizing compaction follows the model window. Large-window models
+ * should be allowed to retain more live conversation state; early cleanup is
+ * handled by deterministic microcompaction of old tool outputs instead.
  */
-const LARGE_CONTEXT_SOFT_COMPRESS_AT_TOKENS = 700_000
+const LARGE_CONTEXT_FULL_COMPRESS_AT_TOKENS = 700_000
 
 export function getAdaptiveCompressionThreshold(tokenLimit: number): number {
   if (!Number.isFinite(tokenLimit) || tokenLimit <= 0) return 0.70
@@ -342,7 +422,69 @@ export function getCompressionTriggerTokens(tokenLimit: number, threshold?: numb
   const resolvedThreshold = typeof threshold === 'number' && Number.isFinite(threshold) && threshold > 0
     ? threshold
     : getAdaptiveCompressionThreshold(safeLimit)
-  return Math.max(1, Math.floor(Math.min(safeLimit * resolvedThreshold, LARGE_CONTEXT_SOFT_COMPRESS_AT_TOKENS)))
+  return Math.max(1, Math.floor(Math.min(safeLimit * resolvedThreshold, LARGE_CONTEXT_FULL_COMPRESS_AT_TOKENS)))
+}
+
+export function getMicrocompactTriggerTokens(tokenLimit: number): number {
+  const safeLimit = Number.isFinite(tokenLimit) && tokenLimit > 0 ? tokenLimit : 180_000
+  return Math.max(8_000, Math.floor(Math.min(safeLimit * 0.10, MICROCOMPACT_SOFT_TRIGGER_TOKENS)))
+}
+
+/**
+ * Time-based microcompact: when the last assistant message is older than
+ * TIME_BASED_MC_GAP_MINUTES, the provider-side prompt cache is cold. Clear
+ * old tool results proactively to reduce what gets re-tokenized.
+ *
+ * Returns null when the trigger doesn't fire (no old enough assistant msg,
+ * nothing to clear). Caller falls through to the regular microcompact path.
+ *
+ * Mirrors ClaudeCode's maybeTimeBasedMicrocompact (microCompact.ts:446-530).
+ */
+export function maybeTimeBasedMicrocompact(
+  messages: SessionMessage[],
+  onInfo?: (message: string) => void,
+): CompressResult | null {
+  // Find the last assistant message and check the time gap
+  let lastAssistantIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'assistant') { lastAssistantIdx = i; break }
+  }
+  if (lastAssistantIdx < 0) return null
+
+  const lastAssistant = messages[lastAssistantIdx]!
+  const createdAt = lastAssistant.createdAt ? new Date(lastAssistant.createdAt).getTime() : 0
+  if (!createdAt) return null
+  const gapMinutes = (Date.now() - createdAt) / 60_000
+  if (!Number.isFinite(gapMinutes) || gapMinutes < TIME_BASED_MC_GAP_MINUTES) return null
+
+  // Collect compactable tool message indices
+  const compactableIndices: number[] = []
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]!.role === 'tool' && isCompactableToolMessage(messages[i]!) && messages[i]!.content.length > TOOL_RESULT_KEEP_CHARS) {
+      compactableIndices.push(i)
+    }
+  }
+  // Keep the most recent N tool outputs
+  const keepSet = new Set(compactableIndices.slice(-TIME_BASED_MC_KEEP_RECENT))
+  const clearIndices = compactableIndices.filter(i => !keepSet.has(i))
+  if (clearIndices.length === 0) return null
+
+  const clearSet = new Set(clearIndices)
+  const tokensBefore = estimateMsgListTokens(messages)
+
+  const pruned = messages.map((msg, i) => {
+    if (!clearSet.has(i)) return msg
+    if (looksLikeToolFailure(msg.content)) {
+      return { ...msg, content: msg.content.length <= TOOL_ERROR_KEEP_CHARS ? msg.content : truncateToolFailureContent(msg.content) }
+    }
+    return { ...msg, content: TOOL_RESULT_PLACEHOLDER }
+  })
+
+  const tokensAfter = estimateMsgListTokens(pruned)
+  if (tokensAfter >= tokensBefore) return null
+
+  onInfo?.(`[时间微压缩] 距上次回复 ${Math.round(gapMinutes)}min > ${TIME_BASED_MC_GAP_MINUTES}min 阈值，清理 ${clearIndices.length} 条旧工具输出 (~${Math.round((tokensBefore - tokensAfter) / 1000)}K tokens)，保留最近 ${keepSet.size} 条`)
+  return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
 }
 
 export async function compressMessages(
@@ -361,8 +503,32 @@ export async function compressMessages(
 
   const tokensBefore = estimateMsgListTokens(messages)
 
+  // ── Time-based microcompact: runs first, short-circuits ───────────────
+  // If the gap since the last assistant message exceeds the threshold,
+  // the provider-side cache has expired — clear old tool results now.
+  const timeBased = maybeTimeBasedMicrocompact(messages, onInfo)
+  if (timeBased) return timeBased
+
   const triggerAt = getCompressionTriggerTokens(tokenLimit, threshold)
   if (tokensBefore < triggerAt) {
+    const microcompactAt = getMicrocompactTriggerTokens(tokenLimit)
+    if (tokensBefore >= microcompactAt) {
+      // Protect tail by token budget instead of fixed message count.
+      // Walk backward until we've accumulated ~12K tokens of tail protection.
+      let tailProtectTokens = 0
+      let protectedFromIdx = messages.length
+      for (let i = messages.length - 1; i >= 0; i--) {
+        tailProtectTokens += estimateTokens(messages[i]!.content)
+        if (tailProtectTokens > 12_000) { protectedFromIdx = i + 1; break }
+      }
+      protectedFromIdx = Math.max(0, protectedFromIdx)
+      const pruned = pruneToolResults(messages, protectedFromIdx)
+      const tokensAfter = estimateMsgListTokens(pruned)
+      if (tokensAfter < tokensBefore) {
+        onInfo?.(`[微压缩] 清理旧工具输出：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ~${Math.round(tailProtectTokens / 1000)}K 对话原文`)
+        return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
+      }
+    }
     return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore }
   }
 

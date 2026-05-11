@@ -38,7 +38,7 @@ import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
-import { compressMessages } from '../src/core/contextCompressor.js'
+import { compressMessages, getCompressionTriggerTokens, getMicrocompactTriggerTokens } from '../src/core/contextCompressor.js'
 import { resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
@@ -1395,6 +1395,81 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   assert(
     'context window: compacted main context stays below the send budget',
     context.stats.approxChars <= 72_000 + 24_000,
+    `approx=${context.stats.approxChars}`,
+  )
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  assert(
+    'context compression: 1M-token models keep large-window full compaction headroom',
+    getCompressionTriggerTokens(1_000_000) === 700_000,
+    `trigger=${getCompressionTriggerTokens(1_000_000)}`,
+  )
+  assert(
+    'context compression: 1M-token models still microcompact tool output at 40K',
+    getMicrocompactTriggerTokens(1_000_000) === 40_000,
+    `trigger=${getMicrocompactTriggerTokens(1_000_000)}`,
+  )
+}
+
+{
+  const now = new Date().toISOString()
+  const messages: SessionMessage[] = []
+  for (let i = 0; i < 30; i += 1) {
+    messages.push({ id: `a${i}`, role: 'assistant', content: `step ${i}`, createdAt: now })
+    messages.push({
+      id: `t${i}`,
+      role: 'tool',
+      name: 'run_command',
+      content: JSON.stringify({
+        ok: true,
+        action: { type: 'run_command', command: `npm test ${i}` },
+        output: 'log-line '.repeat(4_000),
+      }),
+      createdAt: now,
+    })
+  }
+  messages.push({ id: 'u-tail', role: 'user', content: 'latest task should stay raw', createdAt: now })
+
+  let summarizerCalled = false
+  const result = await compressMessages(messages, async () => {
+    summarizerCalled = true
+    return '[summary]'
+  }, {
+    tokenLimit: 1_000_000,
+  })
+
+  assert(
+    'context compression: microcompact prunes old tool output without summarizing large-window conversations',
+    result.compressed === true &&
+      summarizerCalled === false &&
+      result.tokensAfter < result.tokensBefore &&
+      result.messages.at(-1)?.content === 'latest task should stay raw',
+    `called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
+  )
+}
+
+{
+  const tmpDir = path.join(os.tmpdir(), `artemis-large-model-context-cap-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'large model context cap smoke' })
+  for (let i = 0; i < 40; i += 1) {
+    store.appendMessage(session, 'assistant', `analysis ${i} ${'detail '.repeat(2_500)}`)
+    store.appendMessage(session, 'tool', JSON.stringify({
+      ok: true,
+      action: { type: 'read_file', path: `src/file-${i}.ts` },
+      output: 'file-output '.repeat(4_000),
+    }), 'read_file')
+  }
+  store.appendMessage(session, 'user', 'latest task')
+  const context = await buildContextWindow(session, 'main', { contextLength: 1_000_000 })
+
+  assert(
+    'context window: large model metadata does not expand active context past cost cap',
+    context.stats.approxChars <= 320_000,
     `approx=${context.stats.approxChars}`,
   )
 
@@ -5759,6 +5834,103 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   assert(
     'context compression: tail boundary does not split OpenAI tool_calls from tool results',
     openAIToolCallsRemainPaired(result.messages),
+  )
+}
+
+// ── Tool-type-aware microcompact ──────────────────────────────────────────────
+
+{
+  const now = new Date().toISOString()
+  const messages: SessionMessage[] = [
+    { id: 'u1', role: 'user', content: 'read and modify file', createdAt: now },
+    // A read_file output — should be compacted (read-only, deterministic)
+    { id: 't1', role: 'tool', content: 'x'.repeat(20_000), name: 'read_file', createdAt: now },
+    // A write_file output — should be PRESERVED (execution evidence)
+    { id: 't2', role: 'tool', content: 'y'.repeat(20_000), name: 'write_file', createdAt: now },
+    { id: 'u2', role: 'user', content: 'continue', createdAt: now },
+  ]
+
+  const result = await compressMessages(messages, async () => '[summary]', {
+    tokenLimit: 5_000, // Trigger microcompact
+    threshold: 0.95,   // Full compact threshold very high — won't trigger
+  })
+
+  // read_file output should have been replaced with placeholder
+  const readFileMsg = result.messages.find(m => m.id === 't1')
+  assert(
+    'microcompact: read_file tool output is compacted',
+    readFileMsg != null && readFileMsg.content.length < 200,
+  )
+
+  // write_file output should still be intact
+  const writeFileMsg = result.messages.find(m => m.id === 't2')
+  assert(
+    'microcompact: write_file tool output is PRESERVED as evidence',
+    writeFileMsg != null && writeFileMsg.content.length === 20_000,
+  )
+}
+
+// ── Time-based microcompact ──────────────────────────────────────────────────
+
+{
+  const { maybeTimeBasedMicrocompact } = await import('../src/core/contextCompressor.js')
+
+  // Simulate a session where the last assistant message was 10 minutes ago
+  // Need >4 compactable tool messages since KEEP_RECENT=4
+  const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString()
+  const now = new Date().toISOString()
+  const messages: SessionMessage[] = [
+    { id: 'u1', role: 'user', content: 'do something', createdAt: tenMinAgo },
+    { id: 'a1', role: 'assistant', content: 'sure', createdAt: tenMinAgo },
+    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: tenMinAgo },
+    { id: 't2', role: 'tool', content: 'w'.repeat(5_000), name: 'run_command', createdAt: tenMinAgo },
+    { id: 't3', role: 'tool', content: 'v'.repeat(5_000), name: 'search', createdAt: tenMinAgo },
+    { id: 't4', role: 'tool', content: 'u'.repeat(5_000), name: 'list_directory', createdAt: tenMinAgo },
+    { id: 't5', role: 'tool', content: 't'.repeat(5_000), name: 'grep', createdAt: tenMinAgo },
+    { id: 't6', role: 'tool', content: 's'.repeat(5_000), name: 'read_file', createdAt: tenMinAgo },
+    { id: 'u2', role: 'user', content: 'continue', createdAt: now },
+  ]
+
+  const result = maybeTimeBasedMicrocompact(messages)
+  assert(
+    'time-based microcompact: triggers when last assistant is >5min old',
+    result !== null && result.compressed === true,
+  )
+
+  // Now with a recent assistant message — should NOT trigger
+  const recentMessages: SessionMessage[] = [
+    { id: 'u1', role: 'user', content: 'do something', createdAt: now },
+    { id: 'a1', role: 'assistant', content: 'sure', createdAt: now },
+    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: now },
+    { id: 'u2', role: 'user', content: 'continue', createdAt: now },
+  ]
+
+  const recentResult = maybeTimeBasedMicrocompact(recentMessages)
+  assert(
+    'time-based microcompact: does NOT trigger when last assistant is recent',
+    recentResult === null,
+  )
+}
+
+// ── Ledger FileStateSnapshot creation ────────────────────────────────────────
+
+{
+  const { createFileStateSnapshot, hashContent } = await import('../src/core/collapse/ledger.js')
+
+  const testContent = 'export function hello() { return "world" }\n'
+  const snapshot = createFileStateSnapshot('/tmp/test-file.ts', testContent, Date.now())
+
+  assert(
+    'collapse ledger: createFileStateSnapshot returns correct filePath',
+    snapshot.filePath === '/tmp/test-file.ts',
+  )
+  assert(
+    'collapse ledger: createFileStateSnapshot computes content hash',
+    snapshot.contentHash === hashContent(testContent),
+  )
+  assert(
+    'collapse ledger: createFileStateSnapshot captures head content',
+    snapshot.headContent === testContent,
   )
 }
 

@@ -2745,7 +2745,9 @@ async function buildProviderMessages(
 
   if (globalInsights && globalInsights.length > 0) {
     systemSections.push('🧠 [Project Mnemosyne: Learned User Preferences]');
-    systemSections.push(...globalInsights.map((i: any) => `- ${i.content}`));
+    systemSections.push(...globalInsights
+      .slice(0, 12)
+      .map((i: any) => `- ${truncate(String(i.content ?? ''), 240)}`));
     systemSections.push('');
   }
 
@@ -2762,7 +2764,7 @@ async function buildProviderMessages(
         const memories = await memory.searchMemories(latestUserMessage, 5);
         if (memories.length > 0) {
           systemSections.push('🧠 [Enhanced Memory: Relevant Retrieved Context]');
-          systemSections.push(...memories.map((entry) => `- ${entry.text}`));
+          systemSections.push(...memories.map((entry) => `- ${truncate(entry.text, 360)}`));
           systemSections.push('');
         }
       }

@@ -6,6 +6,9 @@ const MIN_RECENT_MESSAGES = 6;
 const LARGE_CONTEXT_MESSAGE_LIMIT = 65_535;
 const MAIN_RECENT_MESSAGE_CHAR_LIMIT = 24_000;
 const TOOL_SUMMARY_LINE_CHAR_LIMIT = 1_500;
+const APPROX_CHARS_PER_TOKEN = 4;
+const MAIN_MODEL_CONTEXT_CHAR_CAP = 320_000;
+const SPECIALIST_MODEL_CONTEXT_CHAR_CAP = 160_000;
 
 type ContextBudgetProfile = {
   recentMessageCharLimit: number;
@@ -200,6 +203,22 @@ function buildSummary(
   return truncate(lines.join('\n'), budgets.summaryCharLimit);
 }
 
+function truncateToExactCharBudget(text: string, maxChars: number): string {
+  if (maxChars <= 0) return '';
+  if (text.length <= maxChars) return text;
+
+  const suffix = `\n...[truncated ${text.length - maxChars} chars]`;
+  if (suffix.length >= maxChars) {
+    return text.slice(0, maxChars);
+  }
+
+  return `${text.slice(0, maxChars - suffix.length)}${suffix}`;
+}
+
+function sumMessageContentChars(messages: SessionMessage[]): number {
+  return messages.reduce((sum, message) => sum + message.content.length, 0);
+}
+
 function appendWithinBudget(
   selected: SessionMessage[],
   message: SessionMessage,
@@ -263,20 +282,20 @@ function getContextBudgets(
     return base;
   }
 
+  const maxContextChars = profile === 'main'
+    ? MAIN_MODEL_CONTEXT_CHAR_CAP
+    : SPECIALIST_MODEL_CONTEXT_CHAR_CAP;
   const targetChars = Math.max(
-    base.contextCharBudget,
-    Math.min(480_000, Math.floor(contextLength * 2.2)),
+    24_000,
+    Math.min(maxContextChars, Math.floor(contextLength * APPROX_CHARS_PER_TOKEN)),
   );
-  if (targetChars === base.contextCharBudget) {
-    return base;
-  }
 
   const scale = targetChars / base.contextCharBudget;
   return {
-    recentMessageCharLimit: Math.min(160_000, Math.floor(base.recentMessageCharLimit * Math.min(scale, 4))),
-    latestUserMessageCharLimit: Math.min(240_000, Math.floor(base.latestUserMessageCharLimit * Math.min(scale, 4))),
-    summaryLineCharLimit: Math.min(8_192, Math.floor(base.summaryLineCharLimit * Math.min(scale, 3))),
-    summaryCharLimit: Math.min(120_000, Math.floor(base.summaryCharLimit * Math.min(scale, 4))),
+    recentMessageCharLimit: Math.max(6_000, Math.min(48_000, Math.floor(base.recentMessageCharLimit * Math.min(scale, 2)))),
+    latestUserMessageCharLimit: Math.max(12_000, Math.min(LARGE_CONTEXT_MESSAGE_LIMIT, Math.floor(targetChars * 0.55))),
+    summaryLineCharLimit: Math.max(600, Math.min(2_048, Math.floor(base.summaryLineCharLimit * Math.min(scale, 1)))),
+    summaryCharLimit: Math.max(6_000, Math.min(48_000, Math.floor(targetChars * 0.30))),
     contextCharBudget: targetChars,
   };
 }
@@ -350,6 +369,15 @@ export async function buildContextWindow(
     approxChars,
     budgets.contextCharBudget,
   );
+
+  if (summary && approxChars > budgets.contextCharBudget) {
+    const selectedChars = sumMessageContentChars(selected);
+    summary = truncateToExactCharBudget(
+      summary,
+      Math.max(0, budgets.contextCharBudget - selectedChars),
+    );
+    approxChars = selectedChars + summary.length;
+  }
 
   return {
     summary,
