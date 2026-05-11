@@ -70,8 +70,8 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_RATIO: SagaRatio = '16:9';
 const DEFAULT_TOTAL_SECONDS = 60;
 const MAX_TOTAL_SECONDS = 600;
-const DEFAULT_TRANSITION: SagaTransitionKind = 'crossfade';
-const DEFAULT_CROSSFADE_MS = 250;
+const DEFAULT_TRANSITION: SagaTransitionKind = 'cut';
+const DEFAULT_CROSSFADE_MS = 350;
 const DEFAULT_LONG_VIDEO_SUBDIR = 'generated-media/long-videos';
 
 function clampTotalSeconds(value: number | undefined): number {
