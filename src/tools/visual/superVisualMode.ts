@@ -363,12 +363,14 @@ export function buildSegmentKeyframePrompt(input: {
   perspectiveCues?: string;
   physicsRules?: string[];
   forbiddenSpatialErrors?: string[];
-  // When true, the source image was detected as / assumed to be a real person.
-  // The keyframe MUST be rendered in a stylized illustrated / anime look so it
-  // passes downstream video-provider privacy filters. Without this flag the
-  // keyframe prompt only says "same art style as the turnaround", which is too
-  // weak when IMAGE 2 (previous last frame) is photoreal — gpt-image-2 follows
-  // IMAGE 2's photorealism and the resulting keyframe gets rejected.
+  // When true AND visionDescription is missing, the turnaround was generated
+  // without VISUAL TRUTH — it may not be strongly enough stylized to pass the
+  // video provider's privacy filter. In that case the keyframe prompt needs
+  // an explicit CRITICAL STYLE RULE to force illustrated output. When
+  // visionDescription IS present (the normal saga-cookie-beach path), the
+  // turnaround already has strong identity constraints and we just say "same
+  // art style as the turnaround" — this preserves the quality of the original
+  // working pipeline.
   realPersonInput?: boolean;
 }): string {
   const shot = input.shot;
@@ -484,7 +486,7 @@ export function buildSegmentKeyframePrompt(input: {
     '',
     '- Background, lighting, color cast match the scene.' + (input.withPreviousLastFrame ? ' Continue the environment from IMAGE 2.' : ''),
     '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles.',
-    input.realPersonInput
+    input.realPersonInput && !input.visionDescription
       ? '- CRITICAL STYLE RULE: the output MUST be rendered in a STYLIZED ILLUSTRATED / ANIME look (digital painting, cel-shading, or painted character art). Even if IMAGE 2 appears photoreal, DO NOT match its photorealism — the turnaround sheet in IMAGE 1 is illustrated, and the output keyframe must also be illustrated. This is a hard constraint to pass downstream privacy filters. Brushwork, line work, and stylized rendering preferred. NO photoreal skin texture, NO photo-grain, NO lens blur.'
       : '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
   ].filter(Boolean).join('\n');
@@ -1392,14 +1394,22 @@ export async function generateSegmentKeyframe(options: {
   const prevLastExists = options.previousLastFramePath
     ? await fileExists(options.previousLastFramePath)
     : false;
-  // When realPersonInput is true, the previous segment's last frame is a
-  // photoreal video-extracted frame. Feeding it as IMAGE 2 to gpt-image-2
-  // almost always makes the keyframe drift toward photorealism, which then
-  // gets rejected by BytePlus's InputImageSensitiveContentDetected filter.
-  // Drop it — the turnaround (IMAGE 1) + prompt are sufficient for identity
-  // and scene continuity; the video model will animate from the keyframe
-  // anyway.
-  const skipPrevFrame = options.realPersonInput && prevLastExists;
+  // When realPersonInput is true AND there's no vision description (VISUAL
+  // TRUTH missing), the turnaround lacks strong identity constraints and
+  // gpt-image-2 is likely to follow the photoreal IMAGE 2, producing a
+  // keyframe that BytePlus rejects. Drop IMAGE 2 in this case.
+  // When visionDescription IS present (the normal saga-cookie-beach path),
+  // gpt-image-2 has strong text anchoring and won't drift — keep IMAGE 2
+  // for better scene continuity, same as the original working pipeline.
+  let skipPrevFrame = false;
+  try {
+    const visionFile = path.join(options.projectDir, 'super-visual', 'character-vision-description.txt');
+    const hasVisionDescription = (await readFile(visionFile, 'utf8')).trim().length > 0;
+    skipPrevFrame = !!options.realPersonInput && !hasVisionDescription && prevLastExists;
+  } catch {
+    // No vision description file → treat as missing
+    skipPrevFrame = !!options.realPersonInput && prevLastExists;
+  }
   if (skipPrevFrame) {
     toolWarn(`⚠️ Super Visual: realPersonInput=true，跳过上一段衔接帧（避免 gpt-image-2 被真人截图带偏为 photoreal 风格）`);
   }

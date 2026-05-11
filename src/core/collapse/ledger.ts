@@ -84,12 +84,19 @@ const LEDGER_DIR = path.join(
   'collapse-ledger',
 )
 
+function sessionIdToSafeFileName(sessionId: string): string {
+  // Hash the sessionId to ensure it's a safe file name without path separators
+  return createHash('sha256').update(sessionId).digest('hex').substring(0, 16)
+}
+
 function ledgerPath(sessionId: string): string {
-  return path.join(LEDGER_DIR, `${sessionId}.json`)
+  const safeId = sessionIdToSafeFileName(sessionId)
+  return path.join(LEDGER_DIR, `${safeId}.json`)
 }
 
 function artifactDir(sessionId: string): string {
-  return path.join(LEDGER_DIR, 'artifacts', sessionId)
+  const safeId = sessionIdToSafeFileName(sessionId)
+  return path.join(LEDGER_DIR, 'artifacts', safeId)
 }
 
 async function ensureDir(dir: string): Promise<void> {
