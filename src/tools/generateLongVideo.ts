@@ -1004,8 +1004,17 @@ export async function executeGenerateLongVideo(
     // model a hard identity anchor + a hard scene anchor for that segment.
     const segmentKeyframePaths = new Map<number, string>();
     const segmentKeyframeFailures: Array<{ index: number; reason: string }> = [];
+    let lastHeartbeat = Date.now();
+    const heartbeatInterval = 60_000 * 2; // 2 minutes
+
     toolLog(`🎬 Saga: 开始按段生成 ${segments.length} 段视频（${actualTotalSeconds}s 总时长）。`);
     for (const segment of segments) {
+      // Manual heartbeat check to keep the bridge alive
+      if (Date.now() - lastHeartbeat > heartbeatInterval) {
+        toolLog(`💓 Saga 状态：正在处理长视频项目 ${projectId}，当前进度 ${segment.index}/${segments.length} 段...`);
+        lastHeartbeat = Date.now();
+      }
+
       const canReuse = action.resume !== false && await existingUsableFile(segment.outputPath);
       if (canReuse) {
         reusedSegmentPaths.push(segment.outputPath);
@@ -1020,6 +1029,7 @@ export async function executeGenerateLongVideo(
         // turnaround) AND scene continuity (from the previous closing frame).
         // For shot 1 there is no previous frame yet, so identity-only edit.
         if (superVisualMode.enabled) {
+          toolLog(`🎨 正在为第 ${segment.index} 段生成视觉参考关键帧 (Image-2)...`);
           const wm = narrativeEntities?.worldModel ?? {};
           const keyframeResult = await generateSegmentKeyframe({
             context,
