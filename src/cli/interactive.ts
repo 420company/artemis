@@ -440,77 +440,6 @@ function renderTimelinePanel(title: string, bodyLines: string[]): string {
   return output.join('\n')
 }
 
-const THINKING_CAT_FRAMES = [
-  {
-    starsTop: '   ·    ✦    ·    ',
-    starsBottom: '    ✦    ·    ✦   ',
-    accent: TL.note,
-    cat: [
-      '    /\\_/\\   ',
-      '   ( ^.^ )  ',
-      '    > = <   ',
-      '   /     \\  ',
-    ],
-  },
-  {
-    starsTop: '  ✦    ·    ✦    ·',
-    starsBottom: '  ·    ✦    ·    ✦',
-    accent: TL.tagBlue,
-    cat: [
-      '    /\\_/\\   ',
-      '   ( -.- )  ',
-      '    < = <   ',
-      '   /     \\  ',
-    ],
-  },
-  {
-    starsTop: '    ✦    ·    ✦   ',
-    starsBottom: ' ·    ✦    ·    · ',
-    accent: TL.tagPurple,
-    cat: [
-      '    /\\_/\\   ',
-      '   ( o.o )  ',
-      '    > ~ <   ',
-      '   /  |  \\  ',
-    ],
-  },
-  {
-    starsTop: ' ·   ✦    ·    ✦  ',
-    starsBottom: '   ✦    ·   ✦    ',
-    accent: TL.tagGold,
-    cat: [
-      '    /\\_/\\   ',
-      '   ( ^o^ )  ',
-      '    > = >   ',
-      '   /     \\  ',
-    ],
-  },
-] as const
-
-function buildThinkingCatLines(statusText = '· Meow to the Moon! 🚀', frameIndex?: number): string[] {
-  const frame = THINKING_CAT_FRAMES[
-    typeof frameIndex === 'number'
-      ? Math.abs(Math.floor(frameIndex)) % THINKING_CAT_FRAMES.length
-      : Math.floor(Date.now() / 250) % THINKING_CAT_FRAMES.length
-  ]!
-  const textAccent = [
-    TL.note,
-    TL.tagBlue,
-    TL.tagPurple,
-    TL.tagGold,
-    TL.tagGreen,
-  ][
-    typeof frameIndex === 'number'
-      ? Math.abs(Math.floor(frameIndex)) % 5
-      : Math.floor(Date.now() / 200) % 5
-  ]!
-  return [
-    `       ${tint(frame.starsTop, TL.meta)}`,
-    ...frame.cat.map((line) => `       ${tint(line, frame.accent)}`),
-    `       ${tint(frame.starsBottom, TL.meta)}`,
-    `       ${tint(statusText, textAccent)}`,
-  ]
-}
 
 function styleTimelineLogLine(text: string): string {
   if (!process.stdout.isTTY) return text
@@ -564,40 +493,14 @@ function buildPendingAssistantLines(options: {
   const elapsedMs = options.startedAtMs ? Math.max(0, Date.now() - options.startedAtMs) : 0
   const elapsed = Math.floor(elapsedMs / 1000)
   const frame = PENDING_SPINNER_FRAMES[Math.floor(Date.now() / 100) % PENDING_SPINNER_FRAMES.length]!
-  const phraseZh = options.phase === 'thinking' ? '模型推理中' : 'AI 正在思考'
-  const phraseEn = options.phase === 'thinking' ? 'Reasoning' : 'Thinking'
-  const phrase = `${phraseZh} · ${phraseEn}`
+  const phrase = options.phase === 'thinking' ? 'AI 正在思考 · Thinking' : '模型生成中 · Generating'
   const estimatedTokens = Math.max(0, options.estimatedTokens ?? Math.ceil(elapsedMs / 1000 * 8))
   const liveTokens = Math.max(0, options.liveTokens ?? 0, estimatedTokens)
   const liveTokenNote = `${fmtTok(liveTokens)} tok`
-  // Hint that the user can interrupt — Claude shows this and it reassures
-  // people who think the CLI hung.
-  const hint = '按 Esc 中断'
+  const hint = 'Esc to Interrupt'
   const lines = [
     `  ${tint(frame, TL.assistantDot)} ${tint(phrase, TL.assistantDot)}  ${tint(`(${elapsed}s · ${liveTokenNote} · ${hint})`, TL.meta)}`,
   ]
-  // Reasoning-phase guidance: only show in `thinking` state. Tells the user
-  // (a) why the wait is long even though no text appears yet, (b) how to
-  // verify the call hasn't actually died, (c) how to switch to a faster
-  // model. Tier escalates with elapsed time so quick thinks stay quiet.
-  if (options.phase === 'thinking') {
-    lines.push(...buildThinkingCatLines(undefined, Math.floor(elapsedMs / 250)))
-    if (elapsed >= 60) {
-      lines.push(
-        `       ${tint('· 当前模型正在生成隐藏推理 (reasoning_content)，最终答案输出前可能暂时没有文字。', TL.meta)}`,
-      )
-      lines.push(
-        `       ${tint(`· 已用 ${elapsed}s · 累计 ${liveTokenNote} —— token 仍在增长说明模型正常工作；若卡死不动 60s+ 请按 Esc 中断。`, TL.meta)}`,
-      )
-      lines.push(
-        `       ${tint('· 如果普通聊天也经常这样，建议 /config 切到非 reasoning 主模型。', TL.meta)}`,
-      )
-    } else if (elapsed >= 15) {
-      lines.push(
-        `       ${tint('· 当前模型仍在推理阶段；可以等待，或按 Esc 中断后换用更快的主模型。', TL.meta)}`,
-      )
-    }
-  }
   return lines
 }
 
@@ -834,51 +737,20 @@ function buildViewportLinesFromBlocks(
         }
         lines.push(`  ${raw}`)
       }
-      // 
+      // Remove workflow multi-line cat animation
       if (block.pending && block.pendingStartMs) {
         const elapsedMs = Math.max(0, Date.now() - block.pendingStartMs)
         const elapsed = Math.floor(elapsedMs / 1000)
         if (elapsed >= 15) {
-          const catFrames = [
-            `       ${tint('    /\\_/\\   ', TL.note)}`,
-            `       ${tint('   ( ^.^ )  ', TL.note)}`,
-            `       ${tint('    > = <   ', TL.note)}`,
-            `       ${tint('   /     \\  ', TL.note)}`,
+          const animationFrames = [
+            `       ${tint('· Processing workflow... 🚀 ', TL.note)}`,
+            `       ${tint('· Processing workflow... 🚀 ', TL.tagBlue)}`,
+            `       ${tint('· Processing workflow... 🚀 ', TL.tagPurple)}`,
+            `       ${tint('· Processing workflow... 🚀 ', TL.tagGold)}`,
+            `       ${tint('· Processing workflow... 🚀 ', TL.tagGreen)}`,
           ]
-          // 1200ms per face (gentle breathing rhythm — was 500ms which felt too flashy)
-          const catFrameIndex = Math.floor(Date.now() / 1200) % 3
-          const animatedCatFrames = [
-            [
-              `       ${tint('    /\\_/\\   ', TL.note)}`,
-              `       ${tint('   ( ^.^ )  ', TL.note)}`,
-              `       ${tint('    > = <   ', TL.note)}`,
-              `       ${tint('   /     \\  ', TL.note)}`,
-            ],
-            [
-              `       ${tint('    /\\_/\\   ', TL.note)}`,
-              `       ${tint('   ( -.- )  ', TL.note)}`,
-              `       ${tint('    > = <   ', TL.note)}`,
-              `       ${tint('   /     \\  ', TL.note)}`,
-            ],
-            [
-              `       ${tint('    /\\_/\\   ', TL.note)}`,
-              `       ${tint('   ( o.o )  ', TL.note)}`,
-              `       ${tint('    > ~ <   ', TL.note)}`,
-              `       ${tint('   /     \\  ', TL.note)}`,
-            ],
-          ]
-          lines.push(...animatedCatFrames[catFrameIndex])
-          // 
-      const animationFrames = [
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.note)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagBlue)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagPurple)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagGold)}`,
-        `       ${tint('· Meow to the Moon! 🚀 ', TL.tagGreen)}`,
-      ]
-      // 800ms per color (was 200ms which strobed unpleasantly)
-      const textFrameIndex = Math.floor(Date.now() / 800) % animationFrames.length
-      lines.push(animationFrames[textFrameIndex])
+          const textFrameIndex = Math.floor(Date.now() / 800) % animationFrames.length
+          lines.push(animationFrames[textFrameIndex])
         }
       }
     }
@@ -1364,9 +1236,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       const elapsedSec = Math.floor(elapsedMs / 1000)
       const spinnerFrame = SPINNER_FRAMES[Math.floor(Date.now() / 100) % SPINNER_FRAMES.length]!
       const catFrameIndex = Math.floor(elapsedMs / CAT_FRAME_INTERVAL_MS)
-      const animationLines = options.animation === 'cat'
-        ? buildThinkingCatLines(t('· 正在润色刚才输入的文字，请稍候…', '· Polishing your last input. Please wait…'), catFrameIndex)
-        : []
+      const animationLines: string[] = []
       return renderPlainPanel(title, [
         ...animationLines,
         ...bodyLines,

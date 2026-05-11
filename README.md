@@ -1,11 +1,11 @@
-# Artemis Code
+# Artemis
 
 <p align="center">
   <img src="assets/artemis-github-banner.png" alt="Artemis Code GitHub banner" width="100%" />
 </p>
 
 <p align="center">
-  <strong>A local-first AI engineering agent for real workspaces, visual generation, memory, mobile bridges, MCP plugins, and long-running autonomous tasks.</strong>
+  <strong>An uncompromising AI coding agent. Local-first workspace integration, infinite context stability, and elegant autonomous execution.</strong>
 </p>
 
 <p align="center">
@@ -15,39 +15,32 @@
 </p>
 
 <p align="center">
-  Built by <a href="https://www.420.company">420.COMPANY</a> · npm package <a href="https://www.npmjs.com/package/artemis-code"><code>artemis-code</code></a> · GitHub <a href="https://github.com/420company/artemis"><code>420company/artemis</code></a>
+  Crafted by <a href="https://www.420.company">420.COMPANY</a> · npm: <a href="https://www.npmjs.com/package/artemis-code"><code>artemis-code</code></a> · GitHub: <a href="https://github.com/420company/artemis"><code>420company/artemis</code></a>
 </p>
 
 ---
 
 ## English
 
-### What is Artemis?
+### The Artemis Philosophy
 
-Artemis Code is a local-first AI engineering CLI. It enters a real workspace, reads the repository, edits files, runs commands, validates changes, manages long-running tasks, generates images and videos, connects to mobile messaging bridges, and keeps memory on the local machine.
+Artemis is a local-first AI engineering agent built for production. She doesn't just offer suggestions—she enters your workspace, comprehends your repository, writes code, executes tests, and verifies outcomes autonomously.
 
-It is designed for work that must actually finish: inspect first, change only what is necessary, run the correct verification, keep secrets out of logs and packages, and report only what the tools proved.
+Designed for work that demands completion: she inspects first, modifies only what is strictly necessary, safeguards your secrets, and reports nothing but verifiable truth.
 
-Current release: **0.2.39**.
+Current release: **0.2.47**.
 
-Since the **0.1.x** line, the continuous renovation, upgrade, debugging, release preparation, documentation refresh, bridge repair, and visual-generation expansion of Artemis have been completed by Artemis itself inside this repository. Artemis now upgrades her own codebase end to end: she can inspect, edit, compile, test, package, publish, and explain her own evolution. Claude and Codex may be used as external review lenses when helpful, but the implementation and release work for the current Artemis line is driven by Artemis.
+Since the **0.1.x** lineage, Artemis has reached a state of technological self-sufficiency. Her continuous renovation, debugging, and visual-generation capabilities have been built by Artemis herself. She can inspect, edit, compile, test, and release her own evolution with uncompromising precision.
 
-### What is new in the current line
+### The 0.2.47 Evolution
 
-- **Release 0.2.39: accurate context windows & updated Claude models**: `estimateContextLimit` now returns real context sizes for all 15+ provider families (Claude Opus 4.7/Sonnet 4.6 → 1M, Haiku 4.5 → 200K, Gemini 3.1 Pro → 2M, MiniMax M2.7/M2.5 → 1M, Codestral → 256K, Nova → 300K, Moonshot v1 variants → 8K/32K/128K, etc.); Anthropic preset updated to current model line (Opus 4.7, Sonnet 4.6, Haiku 4.5); all Claude references across presets unified to the 4.6/4.7 generation.
-- **Release 0.2.38: expanded memory enhancement & preset cleanup**: memory enhancement now supports BytePlus, OpenAI, Google Gemini, and Mistral embedding providers; XiaoMi MiMo preset URL corrected; all provider preset notes rewritten for user-friendly descriptions; OpenRouter memory provider replaced with direct Google/Mistral embeddings.
-- **Release 0.2.37: relaxed provider connection probe**: thinking models (GLM 5.1, Qwen reasoning, etc.) that prepend chain-of-thought before "OK" no longer fail the connection test.
-- **Release 0.2.36: unified documentation refresh**: all version references, release notes, and documentation files updated to the current line; dream-video-upgrade doc marked as historical.
-- **Dream path fixes**: dream local file links and Windows input handling corrected so cross-platform dream workflows resolve correctly.
-- **Release 0.2.32: polished dream notifications**: bridge and notification formatting improved for cleaner dream delivery across Telegram, Discord, and WeChat.
-- **Release 0.2.31: tightened context and reset visual policy**: context compression refined; visual policy reset ensures clean state between generation sessions.
-- **Release 0.2.30: refined chat emoji markers**: chat output markers are lighter and less intrusive during long conversations.
-- **Release 0.2.29: refined CLI chat markers and code labels**: CLI chat labels and code block markers streamlined for readability.
-- **Release 0.2.28: startup update check**: Artemis now checks for new versions on startup and alerts when an upgrade is available.
-- **Release 0.2.27: tool-run interjection + cancellable video providers**: running conversations, agent workflows, and Nidhogg poll for user corrections during model calls; video providers can be cancelled mid-generation.
-- **Saga identity continuity hardening** (0.2.26–0.2.27): dynamic identity inventory for safe turnaround derivatives; strengthened identity preservation; photoreal turnaround anchors for video keyframes; improved Saga reference integrity diagnostics and visual continuity.
-- **Strict UI locale routing**: visual workflows use the language selected in the UI; Saga and Seedance no longer infer interface language from mixed-language prompts or policy blocks.
-- **Super Visual stability**: image-edit and segment-keyframe calls now have bounded timeouts and relay sick-state handling so stuck visual requests fail cleanly.
+- **Enterprise-Grade Context Stability (Persistent Collapse Ledger)**: Artemis now preserves context compression history, tool output artifacts, and file state snapshots on disk. She never loses her memory during long-running tasks or abrupt interruptions.
+- **Provider Prompt Caching & Token Optimization**: Drastic cost reduction (up to 90%) for Anthropic models via `cache_control: ephemeral` boundaries on system prompts and tools.
+- **Tool-Type Aware Microcompact**: Intelligent context compression that prunes obsolete read logs but preserves critical write execution evidence.
+- **Time-Based Microcompact Cleanup**: Automatically purges stale tool outputs when the session sits idle for over 5 minutes, maximizing cache hit rates.
+- **Refined Terminal Aesthetics**: Eradicated UI artifacts and blank space bugs. Replaced legacy animations with elegant, dual-language reasoning indicators (`AI 正在思考 · Thinking`).
+- **Accurate Context Windows**: Native awareness for 15+ provider families including Claude Opus/Sonnet (1M), Haiku (200K), Gemini 3.1 Pro (2M), and more.
+- **Polished Multimodal & Saga Identity**: Seamless visual generation policies, robust Saga video identity continuity, and improved Dream delivery across WeChat, Discord, and Telegram bridges.
 
 ### Official Group
 
@@ -321,32 +314,25 @@ Before release, update `README.md`, `docs/USAGE.md`, `docs/RELEASE.md`, versione
 
 ## 中文
 
-### Artemis 是什么？
+### Artemis 哲学
 
-Artemis Code 是一个本地优先的 AI 工程 CLI。她进入真实工作区，阅读仓库，修改文件，运行命令，验证结果，管理长期任务，生成图片与视频，连接手机消息桥，并把记忆保存在本机。
+Artemis 是一款为真实生产环境打造的本地优先 AI 工程助理。她拒绝做一个只会给建议的聊天框，而是直接潜入你的代码库，阅读源码、修改文件、运行终端、验证测试并全自动收尾。
 
-她不是一个只给建议的聊天壳，而是一个会亲自完成工作的工程代理：先检查事实，再做最小必要改动，随后运行验证，清理发布边界，最后只汇报工具结果已经证明的事情。
+为那些“必须被完成”的工作而生：先进行事实检查，只做最小必要改动，安全隔离密钥，只汇报工具验证过的客观事实。
 
-当前版本：**0.2.39**。
+当前版本：**0.2.47**。
 
-从 **0.1.x** 开始，Artemis 的持续改造、升级、排障、发布准备、文档刷新、桥接修复与视觉生成扩展，已经由 Artemis 在这个仓库中独立完成。她现在可以端到端升级自己的代码库：检查、编辑、编译、测试、打包、发布，并解释自己的演化。Claude 和 Codex 只会在需要时作为外部审计视角使用；当前 Artemis 版本线的实现与发布工作由 Artemis 自己推进。
+自 **0.1.x** 时代起，Artemis 的持续重构、故障排查、版本发布及视觉功能扩展，均由她自己在这个代码库中独立完成。她拥有极高的技术自给自足能力，可以端到端地审核、编译、打包、解释并发布自己的进化。
 
-### 当前版本重点更新
+### 0.2.47 极致进化
 
-- **Release 0.2.39：精准上下文窗口 & Claude 模型更新**：`estimateContextLimit` 现返回所有 15+ provider 家族的真实上下文容量（Claude Opus 4.7/Sonnet 4.6 → 1M、Haiku 4.5 → 200K、Gemini 3.1 Pro → 2M、MiniMax M2.7/M2.5 → 1M、Codestral → 256K、Nova → 300K、Moonshot v1 变体 → 8K/32K/128K 等）；Anthropic 预设更新至当前模型线（Opus 4.7、Sonnet 4.6、Haiku 4.5）；所有预设中的 Claude 引用统一至 4.6/4.7 代。
-- **Release 0.2.38：记忆增强扩展 & 预设清理**：记忆增强现在支持 BytePlus、OpenAI、Google Gemini 和 Mistral 嵌入提供商；修正小米 MiMo 预设 URL；所有 provider 预设说明重写为用户友好的功能描述；OpenRouter 记忆提供商替换为直连 Google/Mistral 嵌入。
-- **Release 0.2.37：放宽 provider 连接测试**：思考型模型（GLM 5.1、Qwen 推理等）在 "OK" 前输出思考过程时不再判定连接测试失败。
-- **Release 0.2.36：统一文档刷新**：所有版本引用、发布说明和文档文件已更新至当前版本线；梦境视频升级文档已标记为历史文档。
-- **梦境路径修复**：修正了梦境本地文件链接和 Windows 输入处理，跨平台梦境工作流现在正确解析。
-- **Release 0.2.32：完善梦境通知**：改进桥接和通知格式，在 Telegram、Discord、WeChat 上更清晰地展示梦境内容。
-- **Release 0.2.31：收紧上下文与重置视觉策略**：优化上下文压缩；视觉策略重置确保生成会话间状态干净。
-- **Release 0.2.30：精炼聊天 emoji 标记**：聊天输出标记更轻量、更不突兀。
-- **Release 0.2.29：精炼 CLI 聊天标记和代码标签**：CLI 聊天标签和代码块标记更简洁易读。
-- **Release 0.2.28：启动更新检查**：Artemis 启动时检查新版本，有升级可用时提醒用户。
-- **Release 0.2.27：工具运行插话 + 可取消视频 provider**：运行中对话、agent 工作流和 Nidhogg 会在模型调用期间轮询用户纠错；视频生成可在中途取消。
-- **Saga 身份连续性加固**（0.2.26–0.2.27）：动态身份清单用于安全的三视图衍生；加强身份保留；三视图角色锚定视频关键帧；改进 Saga 参考完整性诊断和视觉连续性。
-- **严格跟随界面语言**：视觉工作流使用用户进入 Artemis 时选择的中文/英文版本；Saga 和 Seedance 不再通过 prompt 内容猜测界面语言。
-- **Super Visual 稳定性**：图片编辑和片段关键帧调用增加超时与 relay sick-state 处理，避免视觉请求长期卡死。
+- **企业级上下文稳定 (Persistent Collapse Ledger)**：实现了长任务不失忆的持久化压缩账本，压缩事件、文件快照、工具输出 Artifact 现已完整落盘，系统重启也能无缝接续上下文。
+- **Prompt Caching 成本斩断**：通过 `cache_control: ephemeral` 精准切割 System Prompt 和工具边界，Anthropic 模型重复提问时 Token 成本大幅下降 (可达 90%)。
+- **工具感知型微压缩 (Microcompact)**：智能区分“只读查询”与“写入执行”，在超长对话中自动清理多余读取日志，但永远保留核心代码写入的执行证据。
+- **时间触发的缓存净化**：当会话静默超过 5 分钟，自动微缩闲置工具输出，极大提升 Cache Hit 命中率。
+- **UI 美学与交互净化**：根除了动态猫颜文字带来的终端重绘残影与空行 Bug，重构为双语单行、极致优雅的推理指示器（`模型推理中 · Reasoning`）。
+- **精准 15+ 模型家族感知**：全量重写上下文容量计算，对 Claude Opus (1M)、Gemini 3.1 Pro (2M)、DeepSeek、MiniMax 等主流推理大模型提供原生的 Token 边界支持。
+- **全方位视觉与梦境护航**：优化了微信、Telegram、Discord 多端桥接的媒体下发策略，从源头上加固了 Saga 三视图身份防畸变算法。
 
 ### 安装
 
