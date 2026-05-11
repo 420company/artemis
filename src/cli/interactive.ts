@@ -4269,8 +4269,8 @@ async function handleTurn(
     viewport?.appendScrollBlock({
       kind: 'system',
       text: pickLocale(locale, {
-        zh: `🌙 Saga 长视频工作流已接管：注入导演级 System Prompt (${sagaWorkflow.prompt.length} 字符)，跳过 Seedance 多模态分支。`,
-        en: `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars), skipping Seedance multimodal branch.`,
+        zh: `🌙 Saga 长视频工作流已接管：注入导演级 System Prompt (${sagaWorkflow.prompt.length} 字符)。`,
+        en: `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars).`,
       }),
     })
   }

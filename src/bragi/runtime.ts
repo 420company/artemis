@@ -516,8 +516,8 @@ export async function runRemoteCommand(
         command.body = sagaWorkflow.prompt
         await opts.onProgress?.(
           t(
-            `🌙 Saga 长视频工作流已接管：注入导演级 System Prompt (${sagaWorkflow.prompt.length} 字符)，跳过 Seedance 多模态分支。`,
-            `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars), skipping Seedance multimodal branch.`,
+            `🌙 Saga 长视频工作流已接管：注入导演级 System Prompt (${sagaWorkflow.prompt.length} 字符)。`,
+            `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars).`,
           ),
           'info',
         )
