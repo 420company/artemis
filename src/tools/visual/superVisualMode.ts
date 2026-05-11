@@ -848,28 +848,33 @@ export async function describeUserImageWithVision(options: {
   imagePath: string;
   context: ToolExecutionContext;
 }): Promise<string | null> {
-  // Resolve the chat/vision endpoint from the user's MAIN profile first;
-  // only fall back to the image-provider's relay when no main profile is
-  // configured. (Some users put main and image on different relays;
-  // assuming they share fails silently.)
+  // Resolve the chat/vision endpoint. Image provider's relay (backed by
+  // OpenAI, supports multimodal /chat/completions) goes FIRST — this is the
+  // endpoint that actually understands image_url inputs. The main LLM profile
+  // (often a coding model like glm-5.1 on a BytePlus coding endpoint) does NOT
+  // support vision and should only be used as a last resort.
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
-  let chatModel = 'gpt-5.5';
-  try {
-    const { ProviderStore } = await import('../../providers/store.js');
-    const store = await new ProviderStore(options.context.cwd).load();
-    const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
-    if (main) {
-      if (main.apiKey) apiKey = main.apiKey.trim();
-      if (main.baseUrl) baseUrl = main.baseUrl.trim();
-      if (main.model) chatModel = main.model;
-    }
-  } catch { /* fall through */ }
-  if (!apiKey || !baseUrl) {
-    const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
-    if (!imageConfigured) return null;
+  let chatModel: string | undefined;
+  // ── Priority 1: image provider's relay (OpenAI-compatible, supports vision)
+  const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
+  if (imageConfigured) {
     apiKey = imageConfigured.config.image.apiKey?.trim();
     baseUrl = imageConfigured.config.image.baseUrl?.trim();
+    chatModel = 'gpt-4o'; // OpenAI relay — use a known vision-capable model
+  }
+  // ── Priority 2: main LLM profile (may not support vision, but worth trying)
+  if (!apiKey || !baseUrl) {
+    try {
+      const { ProviderStore } = await import('../../providers/store.js');
+      const store = await new ProviderStore(options.context.cwd).load();
+      const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
+      if (main) {
+        if (main.apiKey) apiKey = main.apiKey.trim();
+        if (main.baseUrl) baseUrl = main.baseUrl.trim();
+        if (main.model) chatModel = main.model;
+      }
+    } catch { /* fall through */ }
   }
   if (!apiKey || !baseUrl) return null;
 
@@ -885,7 +890,7 @@ export async function describeUserImageWithVision(options: {
 
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const body = {
-    model: chatModel,
+    model: chatModel || 'gpt-4o',
     messages: [
       {
         role: 'system',
