@@ -681,6 +681,20 @@ export async function executeGenerateLongVideo(
           ratio,
           videoLimits: limits,
         });
+
+    // CRITICAL: If the user provided an image but Super Visual failed due to safety/privacy,
+    // we MUST NOT silently fall back to hallucination. Interrupt and ask for a new image.
+    if (!superVisualMode.enabled && hasGlobalUserImageReferences) {
+      const isSafetyFail = /privacy|safety|sensitive|blocked|rejected/i.test(superVisualMode.reason ?? '');
+      if (isSafetyFail) {
+        return {
+          action,
+          ok: false,
+          output: `🚨 角色身份锁定失败：你提供的参考图被安全过滤系统拦截 (${superVisualMode.reason})。\n\n这通常是因为图片中包含：\n1. 过于写实的真人面部（触发隐私保护）\n2. 复杂的版权内容\n3. 触发了提供商的敏感词过滤\n\n建议操作：\n- 请提供一张背景更干净、更偏向“插画/3D/动漫”风格的角色图。\n- 或者尝试删除图片，仅使用文字描述生成。\n- 请更换图片后重新发送指令。`,
+        };
+      }
+    }
+
     // Real-person input requires text-only mode. BytePlus's image classifier
     // rejects real-person photos regardless of role (reference_image,
     // first_frame, last_frame all blocked). Pure text-to-video DOES generate
