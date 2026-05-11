@@ -102,7 +102,23 @@ type SuperVisualActionInput = {
     mood?: string | string[];
   };
   superVisualMode?: 'auto' | 'on' | 'off';
+  superVisualStyle?: 'illustrated' | 'photoreal' | 'auto';
 };
+
+function wantsPhotorealVideoOutput(input: {
+  story?: string;
+  prompt?: string;
+  title?: string;
+  referenceNotes?: string[];
+  superVisualStyle?: 'illustrated' | 'photoreal' | 'auto';
+}): boolean {
+  if (input.superVisualStyle === 'photoreal') return true;
+  const haystack = [input.title, input.story, input.prompt, ...(input.referenceNotes ?? [])]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+  return /(?:实拍|写实|真人|真实|照片|摄影|photoreal|photographic|live[- ]action|cinematic|real skin|natural skin|真实皮肤|电影感)/i.test(haystack);
+}
 
 // ─── Eligibility ──────────────────────────────────────────────────────────
 
@@ -1017,6 +1033,13 @@ export async function maybeGenerateSuperVisualReference(options: {
       );
     }
     const providedLooksRealPerson = visionDescription ? looksLikeRealPersonDescription(visionDescription) : true;
+    const photorealOutputRequested = wantsPhotorealVideoOutput({
+      story: options.story,
+      prompt: options.action.prompt,
+      title: options.title,
+      referenceNotes: options.action.referenceNotes,
+      superVisualStyle: options.action.superVisualStyle,
+    });
 
     const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
     const imageProviderName = imageConfigured?.config.image.provider;
@@ -1110,10 +1133,20 @@ export async function maybeGenerateSuperVisualReference(options: {
         'User supplied an already-built character turnaround reference sheet.',
         `Source: ${providedTurnaroundByPath}`,
         'Saga must use this image directly as the canonical character identity sheet; do not regenerate or reinterpret it.',
+        '',
+        visionDescription
+          ? [
+              'VISUAL TRUTH (vision-described directly from the supplied turnaround / safety proxy — describes the canonical character identity; segment keyframes must preserve these features):',
+              visionDescription,
+            ].join('\n')
+          : 'VISUAL TRUTH: unavailable; preserve the supplied turnaround identity exactly and do not infer a different protagonist.',
+        photorealOutputRequested
+          ? 'OUTPUT INTENT: the turnaround is an identity/safety proxy only; the final long-video output should use the live-action photographic Saga path.'
+          : '',
       ].join('\n'),
       'utf8',
     );
-    toolLog(`✅ Super Visual: 已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}`);
+    toolLog(`✅ Super Visual: 已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}${photorealOutputRequested ? '（写实输出路径）' : ''}`);
     return {
       enabled: true,
       provider: 'provided-reference',
@@ -1124,7 +1157,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       mode: 'provided-turnaround',
       userImagesUsed: 1,
       reason: `used provided character turnaround reference: ${providedTurnaroundByPath}`,
-      inputIsRealPerson: false,
+      inputIsRealPerson: photorealOutputRequested,
       resolvedUserImagePaths: userInputs,
     };
   }
