@@ -1137,15 +1137,15 @@ export async function executeGenerateLongVideo(
           // role:"first_frame" does NOT bypass the provider's real-person
           // privacy filter (the classifier is image-bytes-based, ignores
           // role tags). So Saga keeps everything on reference_image and
-          // relies on the Super Visual stylized turnaround + per-segment
-          // AI keyframe (both illustrated, both pass the filter) to carry
-          // identity, while the prompt-level OUTPUT-STYLE OVERRIDE tells
-          // the video model to render PHOTOREAL output despite illustrated
-          // references.
-          //   · Super Visual stylized turnaround (illustrated three-view sheet)
-          //   · Per-segment AI keyframe (illustrated, gpt-image-2 generated)
-          //   · Chain frame from previous segment's last frame (illustrated
-          //     because the previous segment was rendered from illustrated refs)
+          // relies on the Super Visual safe turnaround + per-segment
+          // AI keyframe (both generated from safe visual references plus
+          // VISUAL TRUTH identity text) to carry identity, while the
+          // prompt-level OUTPUT-STYLE OVERRIDE tells the video model to render
+          // PHOTOREAL output despite the non-photographic safety proxy.
+          //   · Super Visual safe turnaround (three-view identity sheet)
+          //   · Per-segment AI keyframe (gpt-image-2 generated with VISUAL TRUTH)
+          //   · Chain frame from previous segment's last frame (only when it is
+          //     safe to submit directly)
           const segmentKeyframe = segmentKeyframePaths.get(segment.index);
           const keyframePaths = segmentKeyframe ? [segmentKeyframe] : [];
           // Chain frame is sent as role:"reference_image" (not first_frame)
@@ -1159,10 +1159,11 @@ export async function executeGenerateLongVideo(
           // (which is a real-person photographic screenshot) directly to the video API
           // will trigger the provider's strict privacy filter and abort the chain.
           // However, the `segmentKeyframe` generated above ALREADY ingested
-          // `previousLastFramePath` and "washed" it into an illustrated anime-style
-          // frame (3D拟人漫画风) that bypasses the filter! So for real-person runs,
-          // we deliberately omit the raw screenshot and rely entirely on the washed
-          // anime keyframe to bridge the scene.
+          // `previousLastFramePath` through the safe Super Visual keyframe path,
+          // preserving the scene handoff without submitting raw real-person
+          // screenshots to the video provider. So for real-person runs, we
+          // deliberately omit the raw screenshot and rely on that generated
+          // keyframe to bridge the scene.
           const chainPaths: string[] = usingChain && segment.index > 1 && previousLastFramePath && !realPersonInput
             ? [previousLastFramePath]
             : [];

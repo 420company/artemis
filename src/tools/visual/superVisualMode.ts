@@ -363,14 +363,12 @@ export function buildSegmentKeyframePrompt(input: {
   perspectiveCues?: string;
   physicsRules?: string[];
   forbiddenSpatialErrors?: string[];
-  // When true AND visionDescription is missing, the turnaround was generated
-  // without VISUAL TRUTH — it may not be strongly enough stylized to pass the
-  // video provider's privacy filter. In that case the keyframe prompt needs
-  // an explicit CRITICAL STYLE RULE to force illustrated output. When
-  // visionDescription IS present (the normal saga-cookie-beach path), the
-  // turnaround already has strong identity constraints and we just say "same
-  // art style as the turnaround" — this preserves the quality of the original
-  // working pipeline.
+  // True when the user's original reference was detected as a real person.
+  // Segment keyframes must still follow the original saga-cookie-beach formula:
+  // VISUAL TRUTH identity text + safe turnaround reference + mild style
+  // inheritance. Do NOT force these keyframes into anime/illustration here —
+  // that contradicts the long-video OUTPUT-STYLE OVERRIDE and makes later
+  // video segments drift away from the desired live-action result.
   realPersonInput?: boolean;
 }): string {
   const shot = input.shot;
@@ -486,9 +484,7 @@ export function buildSegmentKeyframePrompt(input: {
     '',
     '- Background, lighting, color cast match the scene.' + (input.withPreviousLastFrame ? ' Continue the environment from IMAGE 2.' : ''),
     '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles.',
-    input.realPersonInput && !input.visionDescription
-      ? '- CRITICAL STYLE RULE: the output MUST be rendered in a STYLIZED ILLUSTRATED / ANIME look (digital painting, cel-shading, or painted character art). Even if IMAGE 2 appears photoreal, DO NOT match its photorealism — the turnaround sheet in IMAGE 1 is illustrated, and the output keyframe must also be illustrated. This is a hard constraint to pass downstream privacy filters. Brushwork, line work, and stylized rendering preferred. NO photoreal skin texture, NO photo-grain, NO lens blur.'
-      : '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
+    '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
   ].filter(Boolean).join('\n');
 }
 
@@ -1357,8 +1353,10 @@ export async function generateSegmentKeyframe(options: {
   previousLastFramePath?: string;
   // When true, the user's source image was detected as (or conservatively
   // assumed to be) a real person. The keyframe must enforce a strong
-  // illustrated / anime style so it passes the video provider's privacy
-  // filter — even when IMAGE 2 (prev last frame) looks photoreal.
+  // original user reference looked like a real person. This is used only for
+  // logging / safety fallbacks; segment keyframes intentionally keep the
+  // saga-cookie-beach formula (VISUAL TRUTH + safe turnaround + mild style
+  // inheritance) instead of forcing anime/illustrated output.
   realPersonInput?: boolean;
   // Identity-locking signals from the world model — passed through to the
   // keyframe prompt so segments 2..N keep the same accessories, occlusions,
@@ -1394,37 +1392,38 @@ export async function generateSegmentKeyframe(options: {
   const prevLastExists = options.previousLastFramePath
     ? await fileExists(options.previousLastFramePath)
     : false;
-  // When realPersonInput is true AND there's no vision description (VISUAL
-  // TRUTH missing), the turnaround lacks strong identity constraints and
-  // gpt-image-2 is likely to follow the photoreal IMAGE 2, producing a
-  // keyframe that BytePlus rejects. Drop IMAGE 2 in this case.
-  // When visionDescription IS present (the normal saga-cookie-beach path),
-  // gpt-image-2 has strong text anchoring and won't drift — keep IMAGE 2
-  // for better scene continuity, same as the original working pipeline.
-  let skipPrevFrame = false;
-  try {
-    const visionFile = path.join(options.projectDir, 'super-visual', 'character-vision-description.txt');
-    const hasVisionDescription = (await readFile(visionFile, 'utf8')).trim().length > 0;
-    skipPrevFrame = !!options.realPersonInput && !hasVisionDescription && prevLastExists;
-  } catch {
-    // No vision description file → treat as missing
-    skipPrevFrame = !!options.realPersonInput && prevLastExists;
-  }
-  if (skipPrevFrame) {
-    toolWarn(`⚠️ Super Visual: realPersonInput=true，跳过上一段衔接帧（避免 gpt-image-2 被真人截图带偏为 photoreal 风格）`);
-  }
-  const withPreviousLastFrame = !skipPrevFrame && turnaroundExists && prevLastExists;
-
   // Re-load the vision description that the turnaround stage saved to disk
   // (if any) so this keyframe also gets the textual identity anchor.
+  // GOLDEN PATH (saga-cookie-beach): every segment keyframe prompt carries
+  // VISUAL TRUTH. If the file is missing (old run, transient vision failure,
+  // or provided-turnaround path), attempt to regenerate it before building
+  // the prompt instead of falling into an unanchored / hard-stylized path.
   let visionDescription: string | undefined;
+  const visionPath = path.join(superVisualDir, 'character-vision-description.txt');
   try {
-    const visionPath = path.join(superVisualDir, 'character-vision-description.txt');
     const content = await readFile(visionPath, 'utf8');
     if (content.trim()) visionDescription = content.trim();
   } catch {
-    // no vision description file — that's OK, prompt just omits the section
+    // Try to restore VISUAL TRUTH from the safe turnaround itself. This keeps
+    // downstream segment prompts in the same grounded mode as the original
+    // successful saga-cookie-beach pipeline even when the initial describe
+    // call failed or a user supplied a prebuilt turnaround.
+    const describeSource = turnaroundExists ? options.turnaroundPath : undefined;
+    if (describeSource) {
+      const restored = await describeUserImageWithVision({
+        imagePath: describeSource,
+        context: options.context,
+      });
+      if (restored?.trim()) {
+        visionDescription = restored.trim();
+        await writeFile(visionPath, visionDescription, 'utf8');
+        toolLog('🎨 Super Visual: 已为分段关键帧补写 VISUAL TRUTH（character-vision-description.txt）');
+      } else if (options.realPersonInput) {
+        toolWarn('⚠️ Super Visual: realPersonInput=true 但无法恢复 VISUAL TRUTH；将继续使用安全三视图与温和风格继承，不再强制漫画化关键帧。');
+      }
+    }
   }
+  const withPreviousLastFrame = turnaroundExists && prevLastExists;
 
   const prompt = buildSegmentKeyframePrompt({
     shotIndex: options.shotIndex,
