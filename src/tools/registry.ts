@@ -1612,7 +1612,7 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'bridge_send_image',
-    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。仅用于图片；用户要“梦境图片/做梦图片”时用 imagePath="latest_dream"。如果用户提到视频、MP4、梦境视频、latest_dream_video，必须改用 bridge_send_video，不要用本工具。platform 默认 all。',
+    description: '把本机图片作为真实图片附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。仅用于明确的图片附件发送任务；不要因为普通自然语言里出现“梦境图片/发送梦境”等文字就调用本工具。最新梦境查看与发送统一使用显式命令 /dream show。platform 默认 all。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1630,7 +1630,7 @@ const capabilityToolDefs: ToolDefinition[] = [
 
   {
     type: 'bridge_send_video',
-    description: '把本机 MP4 视频作为真实视频附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。用户要“梦境视频/做成视频发给我”时必须用 videoPath="latest_dream_video" 或已生成的 ~/.artemis/dreams/*.mp4；platform 默认 all。',
+    description: '把本机 MP4 视频作为真实视频附件发送到已配置/已运行的 Telegram、Discord、WeChat 手机聊天。仅用于明确的视频附件发送任务；不要因为普通自然语言里出现“梦境视频/发送梦境”等文字就调用本工具。最新梦境查看与发送统一使用显式命令 /dream show。platform 默认 all。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',

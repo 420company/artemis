@@ -198,7 +198,7 @@ const MCP_REQUEST_RE =
   /(?:\b(mcp|model context protocol|server config|tool server)\b|工具服务器|插件服务器|上下文协议)/i;
 
 const BRIDGE_REQUEST_RE =
-  /(?:\b(bridge|send image|send video|mobile media|phone image|phone video|wechat|telegram|discord|mp4|latest[_\s-]?dream[_\s-]?video|dream video)\b|桥接|发送图片|发送视频|发视频|手机图片|手机视频|媒体桥|微信|视频|梦境视频)/i;
+  /(?:\b(bridge|send image|send video|mobile media|phone image|phone video|wechat|telegram|discord|mp4)\b|桥接|发送图片|发送视频|发视频|手机图片|手机视频|媒体桥|微信|视频)/i;
 
 const EXTERNAL_PROTOCOL_DEBUG_RE =
   /(?:\b(protocol|schema|sdk|api|gateway|webhook|cdn|media[_\s-]?type|message[_\s-]?type|enum|wire format|undocumented|third[-\s]?party|integration|wechat|weixin|telegram|discord)\b|协议|接口|网关|第三方|外部|微信|企业微信|电报|飞书|钉钉|枚举|字段|常量|上传类型|消息类型|不渲染|手机不显示|accepted)/i;

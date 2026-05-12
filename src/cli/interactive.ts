@@ -3770,6 +3770,54 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         continue
       }
 
+      if (arg === 'show') {
+        const list = await dreamStore.loadDreamIndex()
+        const latest = list[0]
+        if (!latest) {
+          appendSystemPanel(t('梦境', 'Dream'), [t('还没有任何梦境。', 'No dreams yet.')])
+          continue
+        }
+
+        const body = await dreamStore.readDreamBody(latest.id)
+        const caption = [
+          t('🌙 Artemis 最新梦境', '🌙 Artemis latest dream'),
+          '',
+          body?.trim() || latest.preview,
+        ].join('\n')
+
+        const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
+        const { sendBragiImageBroadcast } = await import('../bragi/imageBroadcast.js')
+
+        const textResult = await broadcastToBridges({
+          text: caption,
+          source: 'dream_show',
+        })
+        let imageSummary = t('最新梦境没有配图。', 'Latest dream has no image.')
+        if (latest.imagePath) {
+          const imageResult = await sendBragiImageBroadcast({
+            cwd: workspaceRoot,
+            imagePath: latest.imagePath,
+            caption: t('🌙 Artemis 最新梦境配图', '🌙 Artemis latest dream image'),
+            source: 'dream_show',
+          })
+          const imageSent = imageResult.live.sent + imageResult.configured.reduce((sum, item) => sum + item.sent, 0)
+          const imageFailed = imageResult.live.failed.length + imageResult.configured.reduce((sum, item) => sum + item.failed.length, 0)
+          imageSummary = t(
+            `配图发送：sent=${imageSent}; failed=${imageFailed}`,
+            `Image delivery: sent=${imageSent}; failed=${imageFailed}`,
+          )
+        }
+
+        appendSystemPanel(t('梦境已发送', 'Dream sent'), [
+          `${t('梦境', 'Dream')}: ${latest.id}`,
+          `${t('日记发送', 'Diary delivery')}: sent=${textResult.sent}; failed=${textResult.failed.length}`,
+          imageSummary,
+          formatLocalPathField(t('文件', 'File'), latest.mdPath),
+          ...(latest.imagePath ? [formatLocalPathField(t('配图', 'Image'), latest.imagePath)] : []),
+        ])
+        continue
+      }
+
       if (arg === 'video' || arg.startsWith('video ')) {
         const id = arg.slice('video'.length).trim() || undefined
         const dreamVideo = await import('../services/dreamVideo.js')
@@ -3875,6 +3923,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
       appendSystemPanel(t('用法', 'Usage'), [
         '/dream status           ' + t('一键查看梦境系统当前状态（推荐）', 'One-shot dream system status (recommended)'),
+        '/dream show             ' + t('发送最新梦境日记和配图到已配置聊天', 'Send the latest dream diary and image to configured chats'),
         '/dream                  ' + t('立即编织一个梦境', 'Compose a dream now'),
         '/dream video            ' + t('用最新梦境生成视频', 'Generate video from the latest dream'),
         '/dream video <id>       ' + t('用指定梦境生成视频', 'Generate video from a specific dream'),

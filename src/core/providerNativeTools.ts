@@ -1632,7 +1632,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['videoPath'],
         properties: {
-          videoPath: nonEmptyStringSchema('Local MP4 video file path to send as a real attachment. Use exactly "latest_dream_video" when the user asks to receive the latest Artemis dream video.'),
+          videoPath: nonEmptyStringSchema('Local MP4 video file path to send as a real attachment. Do not use natural-language dream requests to infer this field; latest dream viewing/sending is handled only by the explicit /dream show command.'),
           caption: optionalStringSchema('Optional caption shown with the video.'),
           platform: {
             type: 'string',
@@ -1648,7 +1648,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['imagePath'],
         properties: {
-          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment. Images only. Use exactly "latest_dream" for latest Artemis dream image. If the user mentions video, MP4, dream video, or latest_dream_video, use bridge_send_video instead.'),
+          imagePath: nonEmptyStringSchema('Local image file path to send as a real attachment. Images only. Do not use natural-language dream requests to infer this field; latest dream viewing/sending is handled only by the explicit /dream show command.'),
           caption: optionalStringSchema('Optional caption shown with the image.'),
           platform: {
             type: 'string',

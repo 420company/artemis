@@ -37,12 +37,14 @@ import type { ChatProvider, ProviderConfig } from '../providers/types.js'
 import { resolveWorkspaceIntent } from '../cli/workspaceIntent.js'
 import { RuntimeDirectoryService } from '../services/runtimeDirectory.js'
 import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
-import { sendBragiImageBroadcast, sendBragiVideoBroadcast } from './imageBroadcast.js'
+import { sendBragiImageBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
 import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 import { executeAction } from '../tools/index.js'
 import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
+import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
+import { broadcastToBridges } from '../services/bridgeNotifier.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -212,19 +214,6 @@ function formatMobileReply(text: string): string {
   return out.trim()
 }
 
-function isDreamImageRequest(text: string): boolean {
-  const normalized = text.replace(/\s+/g, '').toLowerCase()
-  if (!/(梦境|做梦|dream)/i.test(normalized)) return false
-  if (/(视频|影片|mp4|video|latestdreamvideo|latest_dream_video)/i.test(normalized)) return false
-  return /(图片|图|image|photo|pic|看看|看一下|发我|send|show)/i.test(normalized)
-}
-
-function isDreamVideoRequest(text: string): boolean {
-  const normalized = text.replace(/\s+/g, '').toLowerCase()
-  if (/(生成|创建|制作|做成|转成|转为|变成|generate|create|make|render|produce)/i.test(normalized)) return false
-  return /(latestdreamvideo|latest_dream_video|梦境视频|做梦视频|dreamvideo|dreammp4|mp4)/i.test(normalized)
-}
-
 let bridgeThinkQueue: Promise<void> = Promise.resolve()
 
 async function withBridgeThinkLock<T>(run: () => Promise<T>): Promise<T> {
@@ -324,7 +313,7 @@ export type RemoteRuntimeResult = {
 
 // ─── slash command parser ─────────────────────────────────────────────────────
 
-export type RemoteCommandType = 'start' | 'stop' | 'status' | 'clear' | 'help' | 'chat'
+export type RemoteCommandType = 'start' | 'stop' | 'status' | 'clear' | 'help' | 'dream_show' | 'chat'
 
 export type RemoteCommand = {
   type: RemoteCommandType
@@ -345,6 +334,7 @@ export function parseRemoteCommand(text: string, opts?: { commandSuffixPattern?:
   if (lower === '/status') return { type: 'status', body: cleaned, images: opts?.images }
   if (lower === '/clear')  return { type: 'clear',  body: cleaned, images: opts?.images }
   if (lower === '/help')   return { type: 'help',   body: cleaned, images: opts?.images }
+  if (lower === '/dream show') return { type: 'dream_show', body: cleaned, images: opts?.images }
   return { type: 'chat', body: cleaned, images: opts?.images }
 }
 
@@ -416,8 +406,8 @@ export async function runRemoteCommand(
       return {
         replies: [
           t(
-            '/start — 初始化会话\n/status — 查看当前状态\n/clear — 重置对话历史\n/help — 显示此帮助\n\n直接发送消息开始对话。',
-            '/start — Initialize session\n/status — Show current status\n/clear — Reset conversation\n/help — Show this help\n\nOr just send a message to chat.',
+            '/start — 初始化会话\n/status — 查看当前状态\n/clear — 重置对话历史\n/dream show — 发送最新梦境日记和配图\n/help — 显示此帮助\n\n直接发送消息开始对话。',
+            '/start — Initialize session\n/status — Show current status\n/clear — Reset conversation\n/dream show — Send latest dream diary and image\n/help — Show this help\n\nOr just send a message to chat.',
           ),
         ],
         storedSession: binding.storedSession,
@@ -448,6 +438,55 @@ export async function runRemoteCommand(
       return {
         replies: [t('对话历史已清空。', 'Conversation cleared.')],
         storedSession: fresh,
+        permissionMode: binding.permissionMode,
+      }
+    }
+
+    case 'dream_show': {
+      const list = await loadDreamIndex()
+      const latest = list[0]
+      if (!latest) {
+        return {
+          replies: [t('还没有任何梦境。', 'No dreams yet.')],
+          storedSession: binding.storedSession,
+          permissionMode: binding.permissionMode,
+        }
+      }
+
+      const body = await readDreamBody(latest.id)
+      const caption = [
+        t('🌙 Artemis 最新梦境', '🌙 Artemis latest dream'),
+        '',
+        body?.trim() || latest.preview,
+      ].join('\n')
+
+      const textResult = await broadcastToBridges({
+        text: caption,
+        platforms: opts.bridgePlatform ? [opts.bridgePlatform] : undefined,
+        targetId: opts.targetId,
+        source: 'dream_show',
+      })
+      let imageSent = 0
+      let imageFailed = 0
+      if (latest.imagePath) {
+        const imageResult = await sendBragiImageBroadcast({
+          cwd: commandCwd,
+          imagePath: latest.imagePath,
+          caption: t('🌙 Artemis 最新梦境配图', '🌙 Artemis latest dream image'),
+          platform: opts.bridgePlatform,
+          targetId: opts.targetId,
+          source: 'dream_show',
+        })
+        imageSent = imageResult.live.sent + imageResult.configured.reduce((sum, item) => sum + item.sent, 0)
+        imageFailed = imageResult.live.failed.length + imageResult.configured.reduce((sum, item) => sum + item.failed.length, 0)
+      }
+
+      return {
+        replies: [t(
+          `已发送最新梦境：${latest.id}\n日记 sent=${textResult.sent}; failed=${textResult.failed.length}\n配图 sent=${imageSent}; failed=${imageFailed}`,
+          `Sent latest dream: ${latest.id}\nDiary sent=${textResult.sent}; failed=${textResult.failed.length}\nImage sent=${imageSent}; failed=${imageFailed}`,
+        )],
+        storedSession: binding.storedSession,
         permissionMode: binding.permissionMode,
       }
     }
@@ -643,83 +682,12 @@ export async function runRemoteCommand(
         }
 
         const effectiveBody = workflowResolution?.effectivePrompt ?? command.body
-        const shouldSendDreamVideoDirectly = !workflowResolution && isDreamVideoRequest(command.body)
-        const shouldSendDreamImageDirectly = !workflowResolution && isDreamImageRequest(command.body)
-        const shouldSendDreamMediaDirectly = shouldSendDreamVideoDirectly || shouldSendDreamImageDirectly
         const startedText = t(
           '请求已接收 · Artemis 正在后台处理，完成后将自动送达。',
           'Request received · Artemis is processing it in the background and will deliver the result once complete.',
         )
-        // Also send the "received" notice to the chat/status stream so users
-        // on phones know the message arrived and the AI is working. Exception:
-        // direct WeChat dream media replies need the fresh iLink context_token
-        // for the attachment itself; even a preliminary status/text message can
-        // consume that one-turn token/window and make the following media send
-        // fail or become invisible.
-        if (!shouldSendDreamMediaDirectly) {
-          await opts.onProgress?.(startedText, 'info')
-          await opts.sendChatUpdate?.(startedText)
-        }
-
-        if (shouldSendDreamVideoDirectly) {
-          const platform = opts.bridgePlatform
-          await opts.onProgress?.(t(
-            '🔧 正在运行工具：bridge_send_video · latest_dream_video',
-            '🔧 Running tool: bridge_send_video · latest_dream_video',
-          ), 'info')
-          const broadcast = await sendBragiVideoBroadcast({
-            cwd: commandCwd,
-            videoPath: 'latest_dream_video',
-            caption: '🎬 Artemis latest dream video',
-            platform,
-            targetId: opts.targetId,
-            source: 'dream_video_request',
-          })
-          const failed = broadcast.live.failed.length + broadcast.configured.reduce((sum, item) => sum + item.failed.length, 0)
-          const sent = broadcast.live.sent + broadcast.configured.reduce((sum, item) => sum + item.sent, 0)
-          const firstFailure = broadcast.live.failed[0]?.error
-            ?? broadcast.configured.flatMap(item => item.failed)[0]?.error
-          const failureSuffix = firstFailure ? `; first_error=${firstFailure.slice(0, 180)}` : ''
-          await opts.onProgress?.(t(
-            `${failed === 0 ? '✅' : '⚠️'} 工具${failed === 0 ? '完成' : '失败'}：bridge_send_video · video: ${broadcast.videoPath}; sent=${sent}; failed=${failed}${failureSuffix}`,
-            `${failed === 0 ? '✅' : '⚠️'} Tool ${failed === 0 ? 'completed' : 'failed'}: bridge_send_video · video: ${broadcast.videoPath}; sent=${sent}; failed=${failed}${failureSuffix}`,
-          ), failed === 0 ? 'info' : 'warn')
-          return {
-            replies: [failed === 0
-              ? t('已提交最新梦境视频到微信发送接口；如果手机端仍未显示，请告诉我继续按日志排查。', 'Submitted the latest dream video to the WeChat send API; if it still does not appear on the phone, tell me and I will continue from the logs.')
-              : t('尝试发送最新梦境视频，但部分目标失败；详情见 CLI 日志。', 'Tried to send the latest dream video, but some targets failed; see CLI logs for details.')],
-            storedSession: binding.storedSession,
-            permissionMode: binding.permissionMode,
-          }
-        }
-
-        if (shouldSendDreamImageDirectly) {
-          const platform = opts.bridgePlatform
-          await opts.onProgress?.(t(
-            '🔧 正在运行工具：bridge_send_image · latest_dream',
-            '🔧 Running tool: bridge_send_image · latest_dream',
-          ), 'info')
-          const broadcast = await sendBragiImageBroadcast({
-            cwd: commandCwd,
-            imagePath: 'latest_dream',
-            caption: 'Artemis 梦境',
-            platform,
-            targetId: opts.targetId,
-            source: 'dream_image_request',
-          })
-          const failed = broadcast.live.failed.length + broadcast.configured.reduce((sum, item) => sum + item.failed.length, 0)
-          await opts.onProgress?.(t(
-            `${failed === 0 ? '✅' : '⚠️'} 工具${failed === 0 ? '完成' : '失败'}：bridge_send_image · image: ${broadcast.imagePath}; sent=${broadcast.live.sent + broadcast.configured.reduce((sum, item) => sum + item.sent, 0)}; failed=${failed}`,
-            `${failed === 0 ? '✅' : '⚠️'} Tool ${failed === 0 ? 'completed' : 'failed'}: bridge_send_image · image: ${broadcast.imagePath}; sent=${broadcast.live.sent + broadcast.configured.reduce((sum, item) => sum + item.sent, 0)}; failed=${failed}`,
-          ), failed === 0 ? 'info' : 'warn')
-          return {
-            replies: [failed === 0
-              ? t('已发送最新梦境图片。', 'Sent the latest dream image.')
-              : t('尝试发送最新梦境图片，但部分目标失败；详情见 CLI 日志。', 'Tried to send the latest dream image, but some targets failed; see CLI logs for details.')],
-            storedSession: binding.storedSession,
-            permissionMode: binding.permissionMode,
-          }
-        }
+        await opts.onProgress?.(startedText, 'info')
+        await opts.sendChatUpdate?.(startedText)
 
         if (directSagaAction) {
           await opts.onProgress?.(t(
