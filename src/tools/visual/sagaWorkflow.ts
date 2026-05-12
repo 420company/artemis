@@ -43,7 +43,7 @@ export type SagaWorkflowOutcome =
   | { handled: false; prompt?: string; action?: Extract<AgentAction, { type: 'generate_long_video' }> }
   | { handled: true; reply: string };
 
-type SagaWorkflowStage = 'awaiting_initial_duration' | 'collecting_refs' | 'awaiting_protagonist_clarification' | 'awaiting_duration';
+type SagaWorkflowStage = 'awaiting_initial_duration' | 'collecting_refs' | 'awaiting_storyboard_image' | 'awaiting_protagonist_clarification' | 'awaiting_duration';
 
 type SagaWorkflowState = {
   scope: SagaWorkflowScope;
@@ -56,6 +56,8 @@ type SagaWorkflowState = {
   referenceVideoUrls: string[];
   referenceAudioUrls: string[];
   referenceImagePaths: string[];
+  storyboardImageUrls: string[];
+  storyboardImagePaths: string[];
   referenceVideoPaths: string[];
   referenceAudioPaths: string[];
   referenceNotes: string[];
@@ -84,6 +86,7 @@ const CANCEL_RE = /^(?:取消|算了|停止|不要了|cancel|stop)$/i;
 const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok|yes|y|sure|default)$/i;
 const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
 const ABSTRACT_RE = /^(?:无主角|纯视觉|纯风景|抽象视觉|abstract|no lead|no character|没有主角)$/i;
+const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发送分镜|storyboard|storyboard image|shot board)$/i;
 
 function normalizeKey(input: SagaWorkflowInput): string {
   return `${input.scope}:${input.key}`;
@@ -296,9 +299,22 @@ function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
   state.updatedAt = Date.now();
 }
 
+function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
+  state.storyboardImageUrls = unique([...state.storyboardImageUrls, ...refs.imageUrls]);
+  state.storyboardImagePaths = unique([...state.storyboardImagePaths, ...refs.imagePaths]);
+  // Non-image attachments sent while waiting for the storyboard are still useful
+  // references, but image attachments are intentionally kept out of identity refs.
+  state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
+  state.referenceAudioUrls = unique([...state.referenceAudioUrls, ...refs.audioUrls]);
+  state.referenceVideoPaths = unique([...state.referenceVideoPaths, ...refs.videoPaths]);
+  state.referenceAudioPaths = unique([...state.referenceAudioPaths, ...refs.audioPaths]);
+  state.updatedAt = Date.now();
+}
+
 function refTotal(state: SagaWorkflowState): number {
   return state.referenceImageUrls.length + state.referenceVideoUrls.length + state.referenceAudioUrls.length
-    + state.referenceImagePaths.length + state.referenceVideoPaths.length + state.referenceAudioPaths.length;
+    + state.referenceImagePaths.length + state.referenceVideoPaths.length + state.referenceAudioPaths.length
+    + state.storyboardImageUrls.length + state.storyboardImagePaths.length;
 }
 
 function maybeRememberReferenceNote(state: SagaWorkflowState, text: string): void {
@@ -379,6 +395,7 @@ async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
       '这个模型支持图、视频、音、文字的混合参考，可以继续发：',
       '  · 图 / 视频 / 音 的链接或本地路径，作为视觉与听觉参考',
       '  · 你的剧本 / 分镜 / 设定 / 故事 — 写了我会照你的来；没写就由我来安排。',
+      '  · 如果你有一张“多镜头分镜图”，先回复“分镜图”，我会把下一张图片当作分镜剧本来解析。',
       '💡 进阶提示：如果您要生成纯风景或纯视觉素材，请在后续回复『无主角』或『纯视觉』。',
       '准备好了回复 "开始生成"；想直接开始就回复 "跳过"；不做了回复 "取消"。',
     ].filter(Boolean).join('\n'),
@@ -389,6 +406,7 @@ async function buildRefAskMessage(state: SagaWorkflowState): Promise<string> {
       'This model accepts mixed references — image, video, audio, text. You can keep sending:',
       '  · Image / video / audio URLs or local paths, as visual and auditory references',
       '  · Your own script / shot list / setting / story — if you write one, I\'ll follow it; if not, I\'ll compose it.',
+      '  · If you have a multi-shot storyboard image, reply "storyboard" first; I will treat the next image as the storyboard script.',
       '💡 Pro tip: For pure landscapes or abstract visual material, reply "no lead" or "abstract" to bypass character logic.',
       'When you\'re ready, reply "start". To skip extras and begin, reply "skip". To stop, reply "cancel".',
     ].filter(Boolean).join('\n'),
@@ -419,22 +437,34 @@ async function buildInitialDurationAskMessage(state: SagaWorkflowState): Promise
 function buildRefAckMessage(state: SagaWorkflowState): string {
   const storyCount = state.accumulatedStory.length;
   const imgs = state.referenceImageUrls.length + state.referenceImagePaths.length;
+  const storyboardImgs = state.storyboardImageUrls.length + state.storyboardImagePaths.length;
   const vids = state.referenceVideoUrls.length + state.referenceVideoPaths.length;
   const auds = state.referenceAudioUrls.length + state.referenceAudioPaths.length;
   if (state.locale === 'zh-CN') {
-    const counts = `图 ${imgs} · 视频 ${vids} · 音频 ${auds} · 剧本段 ${storyCount}`;
+    const counts = `图 ${imgs} · 分镜图 ${storyboardImgs} · 视频 ${vids} · 音频 ${auds} · 剧本段 ${storyCount}`;
     const lines = [`已收：${counts}`];
     if (storyCount > 0) lines.push('剧本已归档，生成时会严格按你的版本来。');
+    if (storyboardImgs > 0) lines.push('分镜图已归档，生成前会先解析成镜头段落。');
+    lines.push('如果下一张图片是完整分镜剧本，请先回复 "分镜图"。');
     lines.push('💡 如果是纯风景或纯视觉素材，请回复 "无主角" 或 "纯视觉"。');
     lines.push('可以继续补充，或回复 "开始生成" 进入下一步。');
     return lines.join('\n');
   }
-  const counts = `${imgs} images · ${vids} videos · ${auds} audio · ${storyCount} script segments`;
+  const counts = `${imgs} images · ${storyboardImgs} storyboard images · ${vids} videos · ${auds} audio · ${storyCount} script segments`;
   const lines = [`Received: ${counts}`];
   if (storyCount > 0) lines.push('Script archived — generation will follow your version exactly.');
+  if (storyboardImgs > 0) lines.push('Storyboard image archived — it will be parsed into shot segments before generation.');
+  lines.push('If your next image is a complete storyboard script, reply "storyboard" first.');
   lines.push('💡 Reply "abstract" or "no lead" if this is a pure landscape or visual piece.');
   lines.push('Send more if you like, or reply "start" to proceed.');
   return lines.join('\n');
+}
+
+function buildStoryboardAskMessage(state: SagaWorkflowState): string {
+  return pickLocale(state.locale, {
+    zh: '好的，下一张图片我会按“完整分镜剧本图”处理：解析镜头顺序、画面内容、动作、景别、镜头运动和时长。请直接发送分镜图；发错了可回复“取消”。',
+    en: 'Got it. I will treat the next image as a complete storyboard script: shot order, visual content, action, framing, camera movement, and duration. Send the storyboard image now, or reply "cancel" to stop.',
+  });
 }
 
 // ─── Narrative analysis & protagonist clarification ─────────────────────
@@ -677,6 +707,17 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   const lines: string[] = [
     fullStory,
     userScriptBlock,
+    state.storyboardImageUrls.length > 0 || state.storyboardImagePaths.length > 0
+      ? [
+        '[User storyboard image references]',
+        'The user explicitly marked these image(s) as complete storyboard scripts, not character identity references.',
+        'Parse them into shot order, visual actions, framing, camera movement, continuity notes, and durations before planning the final shots.',
+        'Do NOT copy storyboard panel borders, labels, arrows, UI, captions, handwritten notes, or comic layout into the generated video.',
+        'Use storyboard images as director intent only; identity reference images remain separate.',
+        state.storyboardImageUrls.length > 0 ? `storyboardImageUrls: ${JSON.stringify(state.storyboardImageUrls)}` : '',
+        state.storyboardImagePaths.length > 0 ? `storyboardImagePaths: ${JSON.stringify(state.storyboardImagePaths)}` : '',
+      ].filter(Boolean).join('\n')
+      : '',
     narrativeBlock,
     '[Artemis Saga long video workflow]',
     'Call generate_long_video exactly once for this request.',
@@ -691,9 +732,11 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   ];
 
   if (state.referenceImageUrls.length > 0) lines.push(`referenceImageUrls: ${JSON.stringify(state.referenceImageUrls)}`);
+  if (state.storyboardImageUrls.length > 0) lines.push(`storyboardImageUrls: ${JSON.stringify(state.storyboardImageUrls)}`);
   if (state.referenceVideoUrls.length > 0) lines.push(`referenceVideoUrls: ${JSON.stringify(state.referenceVideoUrls)}`);
   if (state.referenceAudioUrls.length > 0) lines.push(`referenceAudioUrls: ${JSON.stringify(state.referenceAudioUrls)}`);
   if (state.referenceImagePaths.length > 0) lines.push(`referenceImagePaths: ${JSON.stringify(state.referenceImagePaths)}`);
+  if (state.storyboardImagePaths.length > 0) lines.push(`storyboardImagePaths: ${JSON.stringify(state.storyboardImagePaths)}`);
   if (state.referenceVideoPaths.length > 0) lines.push(`referenceVideoPaths: ${JSON.stringify(state.referenceVideoPaths)}`);
   if (state.referenceAudioPaths.length > 0) lines.push(`referenceAudioPaths: ${JSON.stringify(state.referenceAudioPaths)}`);
   if (state.referenceNotes.length > 0) lines.push(`referenceNotes: ${JSON.stringify(state.referenceNotes)}`);
@@ -777,9 +820,11 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
     colorMatch: true,
     generateAudio: true,
     referenceImageUrls: [...state.referenceImageUrls],
+    storyboardImageUrls: [...state.storyboardImageUrls],
     referenceVideoUrls: [...state.referenceVideoUrls],
     referenceAudioUrls: [...state.referenceAudioUrls],
     referenceImagePaths: [...state.referenceImagePaths],
+    storyboardImagePaths: [...state.storyboardImagePaths],
     referenceVideoPaths: [...state.referenceVideoPaths],
     referenceAudioPaths: [...state.referenceAudioPaths],
     referenceNotes: [...state.referenceNotes],
@@ -804,9 +849,11 @@ function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWor
     stage: 'awaiting_initial_duration',
     multimodalCapable,
     referenceImageUrls: [],
+    storyboardImageUrls: [],
     referenceVideoUrls: [],
     referenceAudioUrls: [],
     referenceImagePaths: [],
+    storyboardImagePaths: [],
     referenceVideoPaths: [],
     referenceAudioPaths: [],
     referenceNotes: [],
@@ -870,6 +917,12 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       maybeRememberReferenceNote(state, text);
       maybeAccumulateStory(state, text);
 
+      if (STORYBOARD_RE.test(text)) {
+        state.stage = 'awaiting_storyboard_image';
+        state.updatedAt = Date.now();
+        return { handled: true, reply: buildStoryboardAskMessage(state) };
+      }
+
       if (ABSTRACT_RE.test(text)) {
         state.narrative = {
           protagonist: { name: 'Pure Abstract Environment', type: 'environment', confidence: 1.0, evidence: 'User explicitly requested no characters.' },
@@ -908,6 +961,20 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       }
 
       // Acknowledge the refs and continue collecting
+      state.updatedAt = Date.now();
+      return { handled: true, reply: buildRefAckMessage(state) };
+    }
+
+    if (state.stage === 'awaiting_storyboard_image') {
+      const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
+      mergeStoryboardRefs(state, refs);
+      maybeRememberReferenceNote(state, text);
+      const storyboardCount = state.storyboardImageUrls.length + state.storyboardImagePaths.length;
+      if (storyboardCount === 0) {
+        state.updatedAt = Date.now();
+        return { handled: true, reply: buildStoryboardAskMessage(state) };
+      }
+      state.stage = 'collecting_refs';
       state.updatedAt = Date.now();
       return { handled: true, reply: buildRefAckMessage(state) };
     }

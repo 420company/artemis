@@ -1130,9 +1130,11 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           videoBitrate: optionalStringSchema('Optional bitrate spec, e.g. 10M.'),
           crf: integerSchema('Optional CRF override (0-63).'),
           referenceImageUrls: { type: 'array', description: 'Optional image reference URLs. Saga treats character/person references as global identity anchors across every segment.', items: { type: 'string' } },
+          storyboardImageUrls: { type: 'array', description: 'Optional image URLs explicitly supplied as complete storyboard / shot-board scripts. Saga parses them into shot order and director intent; they are not identity anchors.', items: { type: 'string' } },
           referenceVideoUrls: { type: 'array', description: 'Optional video reference URLs for the first segment.', items: { type: 'string' } },
           referenceAudioUrls: { type: 'array', description: 'Optional audio reference URLs for the first segment.', items: { type: 'string' } },
           referenceImagePaths: { type: 'array', description: 'Optional local image reference paths. Saga treats character/person references as global identity anchors across every segment.', items: { type: 'string' } },
+          storyboardImagePaths: { type: 'array', description: 'Optional local images explicitly supplied as complete storyboard / shot-board scripts. Saga parses them into shots and does not use them as character identity references.', items: { type: 'string' } },
           referenceVideoPaths: { type: 'array', description: 'Optional local video reference paths for the first segment.', items: { type: 'string' } },
           referenceAudioPaths: { type: 'array', description: 'Optional local audio reference paths for the first segment.', items: { type: 'string' } },
           firstFrameImageUrls: { type: 'array', description: 'role:"first_frame" image URLs (literal first-frame anchor for image-to-video). Provider image checks may still reject this image. Use when you want the exact image as the literal opening frame.', items: { type: 'string' } },
@@ -1588,6 +1590,29 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
       };
     case 'browser_close':
       return { type: 'object', additionalProperties: false, properties: {} };
+
+
+    case 'computer_screenshot':
+      return { type: 'object', additionalProperties: false, properties: { outputPath: optionalStringSchema('Optional output path for the screenshot PNG.') } };
+    case 'computer_click':
+    case 'computer_move':
+      return { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number', description: 'Absolute screen X coordinate.' }, y: { type: 'number', description: 'Absolute screen Y coordinate.' } } };
+    case 'computer_type':
+      return { type: 'object', additionalProperties: false, required: ['text'], properties: { text: { type: 'string', description: 'Text to type into the focused desktop application.' } } };
+    case 'computer_key':
+      return { type: 'object', additionalProperties: false, required: ['key'], properties: { key: nonEmptyStringSchema('Single key to press, e.g. enter, tab, escape.') } };
+    case 'computer_drag':
+      return { type: 'object', additionalProperties: false, required: ['fromX', 'fromY', 'toX', 'toY'], properties: { fromX: { type: 'number' }, fromY: { type: 'number' }, toX: { type: 'number' }, toY: { type: 'number' }, durationMs: { type: 'number', description: 'Optional drag hold duration in milliseconds.' } } };
+    case 'computer_hotkey':
+      return { type: 'object', additionalProperties: false, required: ['keys'], properties: { keys: { type: 'array', items: { type: 'string' }, description: 'Shortcut keys, e.g. ["cmd","l"] on macOS or ["ctrl","l"] on Windows.' } } };
+    case 'computer_clipboard_get':
+    case 'computer_active_window':
+    case 'computer_doctor':
+      return { type: 'object', additionalProperties: false, properties: {} };
+    case 'computer_clipboard_set':
+      return { type: 'object', additionalProperties: false, required: ['text'], properties: { text: { type: 'string', description: 'Plain text to put on the system clipboard.' } } };
+    case 'computer_open_app':
+      return { type: 'object', additionalProperties: false, required: ['name'], properties: { name: nonEmptyStringSchema('Application name or path to open.') } };
 
     // ── MCP self-management ────────────────────────────────────────────
     case 'mcp_list':

@@ -520,9 +520,13 @@ export type AgentAction =
       videoBitrate?: string;
       crf?: number;
       referenceImageUrls?: string[];
+      // Images explicitly supplied as complete storyboard / shot-board scripts.
+      // These are director-intent references, not character identity anchors.
+      storyboardImageUrls?: string[];
       referenceVideoUrls?: string[];
       referenceAudioUrls?: string[];
       referenceImagePaths?: string[];
+      storyboardImagePaths?: string[];
       referenceVideoPaths?: string[];
       referenceAudioPaths?: string[];
       // Literal "first frame of the video" image input. role:"first_frame"
@@ -657,6 +661,19 @@ export type AgentAction =
   | { type: 'browser_type'; selector: string; text: string; pressEnter?: boolean }
   | { type: 'browser_wait_for'; selector?: string; text?: string; timeoutMs?: number }
   | { type: 'browser_close' }
+  // ── Computer / desktop automation (macOS + Windows best effort) ──────
+  | { type: 'computer_screenshot'; outputPath?: string }
+  | { type: 'computer_click'; x: number; y: number }
+  | { type: 'computer_move'; x: number; y: number }
+  | { type: 'computer_drag'; fromX: number; fromY: number; toX: number; toY: number; durationMs?: number }
+  | { type: 'computer_type'; text: string }
+  | { type: 'computer_key'; key: string }
+  | { type: 'computer_hotkey'; keys: string[] }
+  | { type: 'computer_clipboard_get' }
+  | { type: 'computer_clipboard_set'; text: string }
+  | { type: 'computer_open_app'; name: string }
+  | { type: 'computer_active_window' }
+  | { type: 'computer_doctor' }
   // ── MCP self-management ────────────────────────────────────────────────
   | { type: 'mcp_list'; filter?: string; status?: 'all' | 'enabled' | 'disabled' }
   | { type: 'mcp_enable'; id: string }
@@ -732,6 +749,19 @@ export const ALL_AGENT_ACTION_TYPES = [
   'browser_type',
   'browser_wait_for',
   'browser_close',
+  // ── Computer / desktop automation ───────────────────────────────────
+  'computer_screenshot',
+  'computer_click',
+  'computer_move',
+  'computer_drag',
+  'computer_type',
+  'computer_key',
+  'computer_hotkey',
+  'computer_clipboard_get',
+  'computer_clipboard_set',
+  'computer_open_app',
+  'computer_active_window',
+  'computer_doctor',
   // ── MCP self-management ────────────────────────────────────────────────
   'mcp_list',
   'mcp_enable',

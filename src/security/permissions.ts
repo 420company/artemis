@@ -171,6 +171,31 @@ function describeAction(action: AgentAction): string {
       return `browser: wait for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':
       return 'browser: close';
+    // ── Computer / desktop automation ───────────────────────────────────
+    case 'computer_screenshot':
+      return 'computer: screenshot';
+    case 'computer_click':
+      return `computer: click ${action.x},${action.y}`;
+    case 'computer_move':
+      return `computer: move ${action.x},${action.y}`;
+    case 'computer_type':
+      return 'computer: type text';
+    case 'computer_key':
+      return `computer: key ${action.key}`;
+    case 'computer_drag':
+      return `computer: drag ${action.fromX},${action.fromY} → ${action.toX},${action.toY}`;
+    case 'computer_hotkey':
+      return `computer: hotkey ${action.keys.join('+')}`;
+    case 'computer_clipboard_get':
+      return 'computer: read clipboard';
+    case 'computer_clipboard_set':
+      return 'computer: set clipboard';
+    case 'computer_open_app':
+      return `computer: open app ${action.name}`;
+    case 'computer_active_window':
+      return 'computer: active window';
+    case 'computer_doctor':
+      return 'computer: doctor';
     // ── MCP self-management ─────────────────────────────────────────────
     case 'mcp_list':
       return `mcp: list${action.filter ? ` (filter: ${action.filter})` : ''}`;

@@ -226,6 +226,8 @@ import type { DocsSearchEngine } from './settings.js'
 import { ProviderStore } from '../providers/store.js'
 import { SessionStore } from '../storage/sessions.js'
 import type { SessionMessage, SessionRecord } from '../core/types.js'
+import { executeAction } from '../tools/index.js'
+import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { PromptHistoryStore } from './promptHistory.js'
 import { buildFullSystemSuffix } from './artemisMd.js'
 import { loadUserProfile, saveUserProfile, autoUpdateUserProfile } from '../memory/userProfile.js'
@@ -4322,6 +4324,34 @@ async function handleTurn(
         en: `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars).`,
       }),
     })
+  }
+  if (sagaWorkflow.action) {
+    viewport?.appendScrollBlock({
+      kind: 'system',
+      text: pickLocale(locale, {
+        zh: `🔧 正在直接运行工具：generate_long_video · ${sagaWorkflow.action.totalDuration ?? sagaWorkflow.action.duration ?? 60}s`,
+        en: `🔧 Running tool directly: generate_long_video · ${sagaWorkflow.action.totalDuration ?? sagaWorkflow.action.duration ?? 60}s`,
+      }),
+    })
+    if (!viewport) {
+      console.log(pickLocale(locale, {
+        zh: '正在直接运行工具：generate_long_video',
+        en: 'Running tool directly: generate_long_video',
+      }))
+    }
+    const result = await executeAction(sagaWorkflow.action, {
+      cwd: cwd ?? process.cwd(),
+      locale,
+      permissionMode: mapPermissionModeToToolAccess(permissionMode ?? 'GHOSTWRITER'),
+      sessionId: 'cli',
+    })
+    const text = pickLocale(locale, {
+      zh: `${result.ok ? '✅' : '⚠️'} 长视频${result.ok ? '生成完成' : '生成失败'}：\n${String(result.output).slice(0, 1600)}`,
+      en: `${result.ok ? '✅' : '⚠️'} Long video ${result.ok ? 'generation completed' : 'generation failed'}:\n${String(result.output).slice(0, 1600)}`,
+    })
+    viewport?.appendScrollBlock({ kind: 'system', text })
+    if (!viewport) console.log(text)
+    return
   }
 
   if (!sagaTookOver) {

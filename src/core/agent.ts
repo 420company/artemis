@@ -1798,6 +1798,31 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `browser_wait_for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':
       return 'browser_close';
+    // ── Computer / desktop automation ───────────────────────────────────
+    case 'computer_screenshot':
+      return `computer_screenshot${action.outputPath ? ` output=${truncate(action.outputPath, 80)}` : ''}`;
+    case 'computer_click':
+      return `computer_click ${action.x},${action.y}`;
+    case 'computer_move':
+      return `computer_move ${action.x},${action.y}`;
+    case 'computer_type':
+      return `computer_type text=${truncate(action.text, 50)}`;
+    case 'computer_key':
+      return `computer_key ${truncate(action.key, 30)}`;
+    case 'computer_drag':
+      return `computer_drag ${action.fromX},${action.fromY} → ${action.toX},${action.toY}`;
+    case 'computer_hotkey':
+      return `computer_hotkey ${action.keys.join('+')}`;
+    case 'computer_clipboard_get':
+      return 'computer_clipboard_get';
+    case 'computer_clipboard_set':
+      return `computer_clipboard_set text=${truncate(action.text, 50)}`;
+    case 'computer_open_app':
+      return `computer_open_app ${truncate(action.name, 80)}`;
+    case 'computer_active_window':
+      return 'computer_active_window';
+    case 'computer_doctor':
+      return 'computer_doctor';
     // ── MCP self-management ─────────────────────────────────────────────
     case 'mcp_list':
       return `mcp_list${action.filter ? ` filter=${action.filter}` : ''}${action.status ? ` status=${action.status}` : ''}`;

@@ -14,6 +14,7 @@ import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { describeUserImageWithVision, generateSafeBridgeKeyframe, generateSegmentKeyframe, maybeGenerateSuperVisualReference } from './visual/superVisualMode.js';
+import { parseStoryboardImageWithVision } from './visual/storyboardParser.js';
 import {
   analyzeNarrative,
   appendNarrativeLibraryEntry,
@@ -638,6 +639,38 @@ export async function executeGenerateLongVideo(
     await mkdir(path.join(projectDir, 'segments'), { recursive: true });
     await mkdir(path.join(hyperframesProjectDir, 'media', 'segments'), { recursive: true });
 
+    const storyboardImagePaths: string[] = [];
+    for (const entry of nonEmptyStringArray(action.storyboardImagePaths)) {
+      const resolved = await resolveToolPathWithWorkspaceAccess({ inputPath: entry, toolName: 'generate_long_video', context });
+      storyboardImagePaths.push(resolved.absolute);
+    }
+    const storyboardParseResults: Array<{ imagePath: string; parsed: unknown }> = [];
+    let storyboardShots = action.shots;
+    if ((!storyboardShots || storyboardShots.length === 0) && storyboardImagePaths.length > 0) {
+      for (const imagePath of storyboardImagePaths) {
+        const parsed = await parseStoryboardImageWithVision({ imagePath, context });
+        if (parsed?.shots.length) {
+          storyboardParseResults.push({ imagePath, parsed });
+          storyboardShots = parsed.shots;
+          story = [
+            story,
+            '',
+            '[Storyboard image parsed into shot list]',
+            parsed.summary ? `Summary: ${parsed.summary}` : '',
+            parsed.globalStyle ? `Global style: ${parsed.globalStyle}` : '',
+            parsed.globalContinuity ? `Global continuity: ${parsed.globalContinuity}` : '',
+          ].filter(Boolean).join('\n');
+          await writeFile(
+            path.join(projectDir, 'storyboard-parse.json'),
+            JSON.stringify({ source: 'vision', imagePath, parsed }, null, 2),
+            'utf8',
+          );
+          toolLog(`🧩 Storyboard: 已从分镜图解析出 ${parsed.shots.length} 个镜头 → ${imagePath}`);
+          break;
+        }
+      }
+    }
+
     let userReferenceImagePaths = nonEmptyStringArray(action.referenceImagePaths);
     let userReferenceImageUrls = nonEmptyStringArray(action.referenceImageUrls);
     const requestedUserImageReferenceCount = userReferenceImagePaths.length + userReferenceImageUrls.length;
@@ -981,7 +1014,7 @@ export async function executeGenerateLongVideo(
     const defaultTransition: SagaTransitionKind = (action.defaultTransition as SagaTransitionKind | undefined) ?? DEFAULT_TRANSITION;
     const crossfadeMs = typeof action.crossfadeMs === 'number' && action.crossfadeMs >= 0 ? action.crossfadeMs : DEFAULT_CROSSFADE_MS;
     const transitionPlans = buildTransitionPlans({
-      shots: action.shots,
+      shots: storyboardShots,
       segmentCount: segments.length,
       defaultKind: defaultTransition,
       defaultMs: crossfadeMs,
@@ -1373,7 +1406,7 @@ export async function executeGenerateLongVideo(
           rewroteShotIndices,
         },
       } : null,
-      planningMode: action.shots && action.shots.length > 0 ? 'model-shot-list' : 'local-fallback',
+      planningMode: storyboardShots && storyboardShots.length > 0 ? (storyboardParseResults.length > 0 ? 'storyboard-image-shot-list' : 'model-shot-list') : 'local-fallback',
       continuity: {
         mode: continuityMode,
         identityCard: continuityBible.identityCard,
@@ -1456,6 +1489,15 @@ export async function executeGenerateLongVideo(
         userAudioPreference,
         continuityMode,
         chainAbandonedMidRun: chainEnabled !== chainFrames,
+        storyboard: {
+          requestedStoryboardImageCount: storyboardImagePaths.length + nonEmptyStringArray(action.storyboardImageUrls).length,
+          parsedStoryboardCount: storyboardParseResults.length,
+          parsedShotCount: storyboardParseResults.reduce((sum, item) => {
+            const parsed = item.parsed as { shots?: unknown[] };
+            return sum + (Array.isArray(parsed.shots) ? parsed.shots.length : 0);
+          }, 0),
+          parsePath: storyboardParseResults.length > 0 ? path.join(projectDir, 'storyboard-parse.json') : undefined,
+        },
         referenceIntegrity: {
           requestedUserImageReferenceCount,
           hasUserImageReferences: hasGlobalUserImageReferences,

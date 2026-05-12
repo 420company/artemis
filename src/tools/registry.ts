@@ -1545,6 +1545,93 @@ const capabilityToolDefs: ToolDefinition[] = [
     }) as any,
   },
 
+
+  // ── Computer / desktop automation ───────────────────────────────────
+  {
+    type: 'computer_screenshot',
+    description: 'Capture the current desktop screen to an image file. macOS uses screencapture; Windows uses PowerShell/System.Drawing. Requires Screen Recording permission on macOS.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; validateOptionalNonEmptyString(a?.outputPath, 'outputPath', e); return e; },
+    execute: (async (a: any) => { const { executeComputerScreenshot } = await import('./computer/computerTools.js'); return executeComputerScreenshot(a); }) as any,
+  },
+  {
+    type: 'computer_click',
+    description: 'Click absolute desktop coordinates. Requires Accessibility permission on macOS; may be blocked on Windows secure/elevated desktops.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; if (typeof a?.x !== 'number') e.push('x is required.'); if (typeof a?.y !== 'number') e.push('y is required.'); return e; },
+    execute: (async (a: any) => { const { executeComputerClick } = await import('./computer/computerTools.js'); return executeComputerClick(a); }) as any,
+  },
+  {
+    type: 'computer_move',
+    description: 'Move the mouse cursor to absolute desktop coordinates.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; if (typeof a?.x !== 'number') e.push('x is required.'); if (typeof a?.y !== 'number') e.push('y is required.'); return e; },
+    execute: (async (a: any) => { const { executeComputerMove } = await import('./computer/computerTools.js'); return executeComputerMove(a); }) as any,
+  },
+  {
+    type: 'computer_type',
+    description: 'Type text into the currently focused desktop application.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; validateRequiredNonEmptyString(a?.text, 'text', e); return e; },
+    execute: (async (a: any) => { const { executeComputerType } = await import('./computer/computerTools.js'); return executeComputerType(a); }) as any,
+  },
+  {
+    type: 'computer_key',
+    description: 'Press a single key in the active desktop application, e.g. enter, tab, escape, or a platform-specific key code/name.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; validateRequiredNonEmptyString(a?.key, 'key', e); return e; },
+    execute: (async (a: any) => { const { executeComputerKey } = await import('./computer/computerTools.js'); return executeComputerKey(a); }) as any,
+  },
+  {
+    type: 'computer_drag',
+    description: 'Drag from one absolute desktop coordinate to another.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; for (const k of ['fromX','fromY','toX','toY']) if (typeof a?.[k] !== 'number') e.push(`${k} is required.`); return e; },
+    execute: (async (a: any) => { const { executeComputerDrag } = await import('./computer/computerTools.js'); return executeComputerDrag(a); }) as any,
+  },
+  {
+    type: 'computer_hotkey',
+    description: 'Press a keyboard shortcut in the active desktop application, e.g. keys=["cmd","l"] or ["ctrl","l"].',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => Array.isArray(a?.keys) && a.keys.length > 0 ? [] : ['keys is required.'],
+    execute: (async (a: any) => { const { executeComputerHotkey } = await import('./computer/computerTools.js'); return executeComputerHotkey(a); }) as any,
+  },
+  {
+    type: 'computer_clipboard_get',
+    description: 'Read plain text from the system clipboard.',
+    kind: 'code', permissionCategory: 'read', executionMode: 'blocking', parallelSafe: false,
+    validate: () => [],
+    execute: (async (a: any) => { const { executeComputerClipboardGet } = await import('./computer/computerTools.js'); return executeComputerClipboardGet(a); }) as any,
+  },
+  {
+    type: 'computer_clipboard_set',
+    description: 'Write plain text to the system clipboard.',
+    kind: 'code', permissionCategory: 'write', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; validateRequiredNonEmptyString(a?.text, 'text', e); return e; },
+    execute: (async (a: any) => { const { executeComputerClipboardSet } = await import('./computer/computerTools.js'); return executeComputerClipboardSet(a); }) as any,
+  },
+  {
+    type: 'computer_open_app',
+    description: 'Open a local desktop application by name/path. macOS uses open -a; Windows uses Start-Process.',
+    kind: 'code', permissionCategory: 'execute', executionMode: 'blocking', parallelSafe: false,
+    validate: (a: any) => { const e: string[] = []; validateRequiredNonEmptyString(a?.name, 'name', e); return e; },
+    execute: (async (a: any) => { const { executeComputerOpenApp } = await import('./computer/computerTools.js'); return executeComputerOpenApp(a); }) as any,
+  },
+  {
+    type: 'computer_active_window',
+    description: 'Return the active/frontmost desktop application or window title.',
+    kind: 'code', permissionCategory: 'read', executionMode: 'blocking', parallelSafe: true,
+    validate: () => [],
+    execute: (async (a: any) => { const { executeComputerActiveWindow } = await import('./computer/computerTools.js'); return executeComputerActiveWindow(a); }) as any,
+  },
+  {
+    type: 'computer_doctor',
+    description: 'Diagnose desktop/browser automation availability: platform, Playwright package, and macOS/Windows permission notes.',
+    kind: 'code', permissionCategory: 'read', executionMode: 'blocking', parallelSafe: true,
+    validate: () => [],
+    execute: (async (a: any) => { const { executeComputerDoctor } = await import('./computer/computerTools.js'); return executeComputerDoctor(a); }) as any,
+  },
+
   // ── MCP self-management ────────────────────────────────────────────────
   {
     type: 'mcp_list',

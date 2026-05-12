@@ -1,6 +1,6 @@
 {
   "name": "artemis-code",
-  "version": "0.2.62",
+  "version": "0.2.63",
   "description": "An uncompromising AI coding agent that executes tasks autonomously and beautifully.",
   "main": "./dist/index.js",
   "type": "module",
