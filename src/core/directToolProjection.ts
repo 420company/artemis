@@ -200,6 +200,12 @@ const MCP_REQUEST_RE =
 const BRIDGE_REQUEST_RE =
   /(?:\b(bridge|send image|send video|mobile media|phone image|phone video|wechat|telegram|discord|mp4)\b|桥接|发送图片|发送视频|发视频|手机图片|手机视频|媒体桥|微信|视频)/i;
 
+const BRIDGE_EXPLICIT_SEND_RE =
+  /(?:\b(?:send|deliver|forward|share)\b.{0,40}\b(?:image|photo|picture|video|mp4|wechat|telegram|discord|phone|mobile)\b|\b(?:bridge_send_image|bridge_send_video)\b|(?:发送|发|推送|投递).{0,24}(?:图片|图|照片|视频|mp4|微信|Telegram|Discord|手机)|(?:图片|图|照片|视频|mp4).{0,24}(?:发送|发|推送|投递).{0,24}(?:手机|微信|Telegram|Discord)|发给我|发到手机|发送到手机)/i;
+
+const BRIDGE_DISCUSSION_ONLY_RE =
+  /(?:\b(?:方案|architecture|架构|设计|实现|文档|PRD|system prompt|prompt|代码|接口|API|server|storage|database|MongoDB|Cloudflare|R2|Vercel|Next\.js|React|component|schema|webhook|pipeline)\b|方案|架构|设计|实现|文档|代码|接口|数据库|服务器|存储|网页|前端|后端|组件|瀑布流|分页|鉴权|防刷|免费服务器|上传|发布接口|获取列表)/i;
+
 const EXTERNAL_PROTOCOL_DEBUG_RE =
   /(?:\b(protocol|schema|sdk|api|gateway|webhook|cdn|media[_\s-]?type|message[_\s-]?type|enum|wire format|undocumented|third[-\s]?party|integration|wechat|weixin|telegram|discord)\b|协议|接口|网关|第三方|外部|微信|企业微信|电报|飞书|钉钉|枚举|字段|常量|上传类型|消息类型|不渲染|手机不显示|accepted)/i;
 
@@ -297,6 +303,8 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   const wantsSpeech = SPEECH_REQUEST_RE.test(latestUserInput);
   const wantsMcp = MCP_REQUEST_RE.test(latestUserInput);
   const wantsBridge = BRIDGE_REQUEST_RE.test(latestUserInput);
+  const wantsExplicitBridgeSend = BRIDGE_EXPLICIT_SEND_RE.test(latestUserInput);
+  const bridgeDiscussionOnly = BRIDGE_DISCUSSION_ONLY_RE.test(latestUserInput) && !wantsExplicitBridgeSend;
   const wantsFileOperation = FILE_OPERATION_REQUEST_RE.test(latestUserInput);
   const wantsExternalProtocolDebug = EXTERNAL_PROTOCOL_DEBUG_RE.test(latestUserInput) &&
     (looksCoding || wantsNetwork || wantsBridge || wantsDocs);
@@ -367,7 +375,7 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
     addTools(selected, MCP_MANAGEMENT_TOOLS);
   }
 
-  if (wantsBridge) {
+  if (wantsBridge && wantsExplicitBridgeSend && !bridgeDiscussionOnly) {
     addTools(selected, BRIDGE_TOOLS);
   }
 

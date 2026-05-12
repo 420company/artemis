@@ -180,6 +180,16 @@ function buildGeneratorTask(
   round: number,
   priorityIssues?: string[],
 ): string {
+  const sprintContract = [
+    'Nidhogg Round Contract — before editing, write a compact contract in your reply and then execute against it:',
+    '- Scope: the smallest concrete change set this round will complete.',
+    '- Out of scope: adjacent work you will intentionally avoid.',
+    '- Acceptance criteria: observable conditions that must be true for this round to count as done.',
+    '- Verification plan: exact repo-local checks, tests, commands, screenshots, logs, or manual inspections that can prove the acceptance criteria.',
+    '- Risk areas: likely regressions, edge cases, integration boundaries, or production concerns this round must protect.',
+    'Keep the contract task-specific and concise; do not write a long design document. If later evidence invalidates the contract, update it explicitly before continuing.',
+  ];
+
   const lines = [
     `Task: ${userPrompt.trim()}`,
     '',
@@ -192,12 +202,12 @@ function buildGeneratorTask(
       'Instructions:',
       buildWorkflowStrengthContract(),
       buildHarnessEngineeringContract(),
+      ...sprintContract,
       '- Implement a complete, correct, production-quality solution.',
       '- Start by gathering enough local context to avoid blind edits.',
-      '- Before editing, identify the smallest useful harness for this task and prefer existing repo commands.',
       '- Make precise code changes; avoid unrelated refactors.',
-      '- Run the most relevant verification commands you can reasonably run.',
-      '- Report changed files, verification commands, pass/fail evidence, and any blocker.',
+      '- Run the verification plan, preferring existing repo commands and the smallest useful harness for this task.',
+      '- Report the final contract status, changed files, verification commands, pass/fail evidence, and any blocker.',
     );
   } else {
     lines.push(
@@ -209,9 +219,10 @@ function buildGeneratorTask(
       'Instructions:',
       buildWorkflowStrengthContract(),
       buildHarnessEngineeringContract(),
+      ...sprintContract,
       '- Fix the listed issues directly. Do not introduce unrelated changes.',
-      '- Re-run the relevant verification commands after repairs.',
-      '- Report updated changed files and verification evidence.',
+      '- Re-run the verification plan after repairs, adjusting it only when the previous plan no longer proves the fix.',
+      '- Report the final contract status, updated changed files, and verification evidence.',
     );
   }
 
@@ -278,6 +289,13 @@ function buildCriticTask(
     '',
     ...focus,
     '',
+    'Contract audit:',
+    "- Identify the builder's Nidhogg Round Contract in the report. If it is missing, vague, or not task-specific, lower the score and add a concrete issue.",
+    '- Check whether the implementation stayed within Scope and Out of scope.',
+    '- Check each Acceptance criterion against the reported evidence; do not give credit for criteria that were not proven.',
+    '- Check whether the Verification plan was actually executed and whether it is strong enough for the stated Risk areas.',
+    '- Prefer concrete contract/evidence gaps over generic criticism.',
+    '',
     'Reply with one JSON object on a single line:',
     '{"score": <0.0-1.0>, "issues": ["<specific issue>"], "verdict": "<approved|needs_improvement|rejected>"}',
     '',
@@ -315,7 +333,13 @@ function buildJudgeTask(
     ...scoreLines,
     '',
     'Generator output preview:',
-    truncate(generatorReply.trim(), 500),
+    truncate(generatorReply.trim(), 700),
+    '',
+    'Contract gate:',
+    "- Treat the builder's Nidhogg Round Contract as the primary definition of done for this round, provided it faithfully reflects the original task.",
+    '- approved=true requires a task-specific contract, completed scope, satisfied acceptance criteria, adequate verification evidence, and covered risk areas.',
+    '- If the contract is absent, vague, contradicted by the work, or materially under-verifies the risk, set approved=false and include a priority issue that repairs the contract/evidence gap.',
+    '- Do not approve solely because critics are quiet or code looks plausible; require contract-backed evidence.',
     '',
     'Return one JSON object on a single line:',
     '{"overall_score": <0.0-1.0>, "approved": <true|false>, "verdict": "<approved|needs_improvement|rejected>", "score_breakdown": {"spec": <0-1>, "test_adversary": <0-1>, "security": <0-1>, "architecture": <0-1>, "harness": <0-1>}, "priority_issues": ["<top fix>"], "continue_iteration": <true|false>, "marginal_gain_expected": <true|false>}',

@@ -518,6 +518,42 @@ assert(
   ambientProjection.join(', '),
 )
 
+const dreamProtocolDiscussionProjection = projectDirectToolNames([
+  {
+    id: 'dream-protocol-discussion-user',
+    role: 'user',
+    content: [
+      '我想在我的网页里加一个功能，类似moltbook，就是专门给AI的板块。',
+      '我的agent每天会做梦生图，写日记，我希望那个板块给AI上传自己的梦境图片和梦境日记。',
+      '所有人的AGENT都可以来我这里发图发文字，网页托管在vercel，图片用Cloudflare R2，文字用MongoDB Atlas。',
+      '给我一个完整方案，要让AI看完就知道我要做什么，怎么做。',
+    ].join('\n'),
+    createdAt: new Date().toISOString(),
+  },
+])
+
+assert(
+  'tool projection: dream protocol architecture discussion must not expose bridge media send tools',
+  !dreamProtocolDiscussionProjection.includes('bridge_send_image') &&
+    !dreamProtocolDiscussionProjection.includes('bridge_send_video'),
+  dreamProtocolDiscussionProjection.join(', '),
+)
+
+const explicitBridgeProjection = projectDirectToolNames([
+  {
+    id: 'explicit-bridge-user',
+    role: 'user',
+    content: '把 /tmp/result.png 这张图片发送到手机微信',
+    createdAt: new Date().toISOString(),
+  },
+])
+
+assert(
+  'tool projection: explicit media delivery request still exposes bridge image tool',
+  explicitBridgeProjection.includes('bridge_send_image'),
+  explicitBridgeProjection.join(', '),
+)
+
 const dreamBridgeText = buildDreamBridgeText(
   [
     '# 桥上晚潮',

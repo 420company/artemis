@@ -6,15 +6,13 @@ import { broadcastToBridges, listRegisteredBridges } from '../services/bridgeNot
 import type { BridgePlatform } from '../services/bridgeNotifier.js'
 import type { BragiPlatformId } from './types.js'
 import { resolveDataRootDir } from '../utils/fs.js'
-import { findLatestDreamImage, findLatestDreamVideo } from '../services/dreamStore.js'
 
 export type BridgeImagePlatform = BragiPlatformId | 'all'
 export type BridgeMediaKind = 'image' | 'video'
 
 const LATEST_DREAM_IMAGE_SENTINEL = 'latest_dream'
-const LATEST_DREAM_VIDEO_SENTINEL = 'latest_dream_video'
 const LATEST_DREAM_VIDEO_ALIASES = new Set([
-  LATEST_DREAM_VIDEO_SENTINEL,
+  'latest_dream_video',
   'latestdreamvideo',
   'latest dream video',
   'latest-dream-video',
@@ -67,9 +65,7 @@ async function resolveImagePath(inputPath: string, cwd: string): Promise<string>
   const trimmed = inputPath.trim()
   if (!trimmed) throw new Error('image path is empty')
   if (trimmed === LATEST_DREAM_IMAGE_SENTINEL) {
-    const latest = await findLatestDreamImage()
-    if (latest) return latest
-    throw new Error('no dream image found in ~/.artemis/dreams')
+    throw new Error('latest_dream sentinel is disabled for bridge_send_image; use the explicit /dream show command')
   }
 
   const candidates = isAbsolute(trimmed)
@@ -91,9 +87,7 @@ async function resolveVideoPath(inputPath: string, cwd: string): Promise<string>
   const trimmed = inputPath.trim()
   if (!trimmed) throw new Error('video path is empty')
   if (LATEST_DREAM_VIDEO_ALIASES.has(trimmed.toLowerCase())) {
-    const latest = await findLatestDreamVideo()
-    if (latest) return latest
-    throw new Error('no dream video found in ~/.artemis/dreams')
+    throw new Error('latest_dream_video sentinel is disabled for bridge_send_video; use the explicit /dream show command')
   }
 
   const candidates = isAbsolute(trimmed)
