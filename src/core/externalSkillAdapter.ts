@@ -73,17 +73,17 @@ export abstract class BaseSkillAdapter implements SkillAdapter {
   abstract convert(skill: ExternalSkill): Promise<any>;
 }
 
-// Claude Code 技能适配器
+// SKILL.md 外部技能适配器
 export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
   format = 'claude' as const;
   
   async hasSkillFile(directory: string): Promise<boolean> {
-    // Claude 官方技能通常包含 SKILL.md 文件
+    // SKILL.md 外部技能通常包含 SKILL.md 文件
     return await pathExists(path.join(directory, 'SKILL.md'));
   }
   
   async hasRequiredFiles(directory: string): Promise<boolean> {
-    // Claude 官方技能至少需要包含 SKILL.md 文件
+    // SKILL.md 外部技能至少需要包含 SKILL.md 文件
     return await this.hasSkillFile(directory);
   }
   
@@ -92,7 +92,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
       id: name.toLowerCase().replace(/[^a-z0-9._-]+/g, '-'),
       name,
       title: name,
-      description: 'Claude Code 技能',
+      description: 'SKILL.md 外部技能',
       source: directory,
       dirPath: directory,
       skillPath: path.join(directory, 'SKILL.md'),

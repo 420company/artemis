@@ -4111,7 +4111,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         // Background detached workflow
         activeDetachedCapture = await launchDetachedWorkflow('run', effectiveWorkflowPrompt)
       } else {
-        // Inline workflow — Claude Code style: inject domain hint into brain's
+        // Inline workflow — Artemis style: inject domain hint into brain's
         // system prompt suffix, then run the same handleTurn loop as free-form
         // chat. The brain's native tool loop handles execution flexibly,
         // no rigid pipeline. mode is narrowed to WorkflowMode in this branch.
@@ -4755,12 +4755,12 @@ async function handleTurn(
 
 /**
  * Run a workflow command as a hint-injected turn through the brain's normal
- * main loop. Replaces the old phase-based pipeline with a Claude Code style
+ * main loop. Replaces the old phase-based pipeline with an Artemis style
  * flow: inject a domain hint into the brain's system prompt, then let the
  * brain's native tool loop handle the task end-to-end.
  *
  * The brain decides when to call tools, when to spawn sub-agents, when to
- * generate images — all in a single conversation, just like Claude Code does.
+ * generate images — all in a single Artemis conversation.
  */
 async function runHintedWorkflowTurn(
   mode: WorkflowMode,

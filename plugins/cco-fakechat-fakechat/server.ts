@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Fake chat for Claude Code.
+ * Fake chat for Artemis.
  *
  * Localhost web UI for testing the channel contract. No external service,
  * no tokens, no access control.

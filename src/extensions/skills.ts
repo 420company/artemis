@@ -57,7 +57,7 @@ async function loadSkillFromDirectory(options: {
   const skillJsonPath = path.join(dirPath, 'SKILL.json');
   const issues: string[] = [];
 
-  // 检查是否是外部技能格式（Claude Code 或 OpenClaw）
+  // 检查是否是外部技能格式（SKILL.md 或 OpenClaw）
   const adapterManager = new SkillAdapterManager();
   try {
     const adapter = await adapterManager.findAdapterForDirectory(dirPath);

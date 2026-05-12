@@ -4,7 +4,7 @@
  *
  * Each /slashcommand (niko, athena, nidhogg, design, contest) now becomes a
  * domain-specific bias the brain reads at the top of its system prompt. The
- * brain's regular 24-round tool loop handles execution, just like Claude Code.
+ * brain's regular 24-round tool loop handles execution under the Artemis execution protocol.
  *
  * Names are preserved by user request — they have personal significance.
  */
@@ -46,13 +46,13 @@ export function buildWorkflowHint(
 }
 
 /**
- * Shared agent protocol — the "Claude Code style" execution rules every
+ * Shared agent protocol — the Artemis execution rules every
  * workflow inherits. This is what differentiates the new model from the old
  * pipeline approach: the brain decides *every* step based on task state.
  */
 const COMMON_AGENT_PROTOCOL = `\
 [执行协议]
-你是一个能直接调用工具完成任务的 agent，工作方式严格对齐 Claude Code：
+你是一个能直接调用工具完成任务的 agent，工作方式遵循 Artemis 执行协议：
 
 1. 任务理解 → 用一句话告诉用户即将做什么 → 直接调工具动手（不要先讨论再动手）
 2. 复杂任务（≥3 步）开局先输出一份"任务清单"，格式如下，并在每步之间更新它：

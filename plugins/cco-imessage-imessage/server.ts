@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /// <reference types="bun-types" />
 /**
- * iMessage channel for Claude Code — direct chat.db + AppleScript.
+ * iMessage channel for Artemis — direct chat.db + AppleScript.
  *
  * Reads ~/Library/Messages/chat.db (SQLite) for history and new-message
  * polling. Sends via `osascript` → Messages.app. No external server.
@@ -36,7 +36,7 @@ const APPEND_SIGNATURE = process.env.IMESSAGE_APPEND_SIGNATURE !== 'false'
 // drops SMS/RCS so a forged sender can't reach the gate. Opt in only if you
 // understand the risk.
 const ALLOW_SMS = process.env.IMESSAGE_ALLOW_SMS === 'true'
-const SIGNATURE = '\nSent by Claude'
+const SIGNATURE = '\nSent by Artemis'
 const CHAT_DB =
   process.env.IMESSAGE_DB_PATH ?? join(homedir(), 'Library', 'Messages', 'chat.db')
 
@@ -403,7 +403,7 @@ function checkApprovals(): void {
       rmSync(file, { force: true })
       continue
     }
-    const err = sendText(chatGuid, "Paired! Say hi to Claude.")
+    const err = sendText(chatGuid, "Paired! Say hi to Artemis.")
     if (err) process.stderr.write(`imessage channel: approval confirm failed: ${err}\n`)
     rmSync(file, { force: true })
   }
@@ -433,7 +433,7 @@ const echo = new Map<string, number>()
 
 function echoKey(raw: string): string {
   return raw
-    .replace(/\s*Sent by Claude\s*$/, '')
+    .replace(/\s*Sent by (?:Artemis|Claude)\s*$/, '')
     .replace(/[\u200d\ufe00-\ufe0f]/g, '')    // ZWJ + variation selectors — chat.db is inconsistent about these
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201c\u201d]/g, '"')
@@ -732,7 +732,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
-// When Claude Code closes the MCP connection, stdin gets EOF. Without this
+// When Artemis closes the MCP connection, stdin gets EOF. Without this
 // the poll interval keeps the process alive forever as a zombie holding the
 // chat.db handle open.
 let shuttingDown = false
@@ -819,7 +819,7 @@ function handleInbound(r: Row): void {
       const lead = result.isResend ? 'Still pending' : 'Pairing required'
       const err = sendText(
         r.chat_guid,
-        `${lead} — run in Claude Code:\n\n/imessage:access pair ${result.code}`,
+        `${lead} — run in Artemis:\n\n/imessage:access pair ${result.code}`,
       )
       if (err) process.stderr.write(`imessage channel: pairing code send failed: ${err}\n`)
       return
