@@ -1128,6 +1128,12 @@ export async function executeGenerateLongVideo(
         let usingChain = chainEnabled && previousLastFramePath !== undefined;
         let usingAudio = userAudioPreference;
         let usingUserImageReferences = hasGlobalUserImageReferences;
+        // Per-segment Image-2 keyframes can occasionally become too
+        // photographic in real-person runs. BytePlus then rejects the bytes as
+        // privacy-sensitive before generation starts. Keep them for the first
+        // attempt because they improve composition, but be ready to drop them
+        // independently from the safer Super Visual turnaround reference.
+        let usingSegmentKeyframe = true;
         let lastError = '';
         let succeeded = false;
 
@@ -1147,7 +1153,7 @@ export async function executeGenerateLongVideo(
           //   · Chain frame from previous segment's last frame (only when it is
           //     safe to submit directly)
           const segmentKeyframe = segmentKeyframePaths.get(segment.index);
-          const keyframePaths = segmentKeyframe ? [segmentKeyframe] : [];
+          const keyframePaths = usingSegmentKeyframe && segmentKeyframe ? [segmentKeyframe] : [];
           // Chain frame is sent as role:"reference_image" (not first_frame)
           // because BytePlus rejects mixing first_frame + reference_image
           // in the same request. Putting it here lets the video model see
@@ -1218,7 +1224,11 @@ export async function executeGenerateLongVideo(
           // Decide the next attempt's degradation. We strip the offending
           // input first; subsequent attempts can additionally strip the
           // other.
-          if (imageBlocked && usingChain) {
+          if (imageBlocked && usingSegmentKeyframe && segmentKeyframe) {
+            usingSegmentKeyframe = false;
+            consecutivePrivacyFails += 1;
+            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了分段关键帧，剥离关键帧、保留安全身份锚后重试中（尝试 ${attempt + 2}/3）...`);
+          } else if (imageBlocked && usingChain) {
             usingChain = false;
             consecutivePrivacyFails += 1;
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了上一段衔接帧，剥离衔接帧后重试中（尝试 ${attempt + 2}/3）...`);
