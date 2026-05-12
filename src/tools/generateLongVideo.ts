@@ -695,13 +695,12 @@ export async function executeGenerateLongVideo(
       }
     }
 
-    // Real-person input requires text-only mode. BytePlus's image classifier
+    // Real-person input cannot submit the user's original photos or raw
+    // photographic closing frames directly to BytePlus. Its image classifier
     // rejects real-person photos regardless of role (reference_image,
-    // first_frame, last_frame all blocked). Pure text-to-video DOES generate
-    // photoreal output successfully — that's the only available path for
-    // real-person video on this provider. We inject the vision-derived
-    // character description into every segment's identityCard so identity
-    // stays visually approximate across segments even without image anchors.
+    // first_frame, last_frame all blocked). The working path is an identity-
+    // only illustrated turnaround plus generated per-segment proxy keyframes
+    // that restore photographic/cinematic output in the prompt.
     // Real-person bypass strategy (a.k.a. "illustration → 实拍 restore"):
     //   1. Super Visual converts the user's real-person photo into an
     //      illustrated three-view turnaround via gpt-image-2 (already runs
@@ -715,9 +714,10 @@ export async function executeGenerateLongVideo(
     //      though the reference is illustrated. We deliberately avoid the
     //      word "真人" in prompts because that itself triggers prompt-side
     //      content moderation; we use "实拍 / 写实 / 质感 / 电影感" instead.
-    //   5. Per-segment AI keyframes (illustrated, gpt-image-2 generated)
-    //      and chain frames (extracted from BytePlus output) continue to
-    //      flow through reference_image as before.
+    //   5. Per-segment AI keyframes (gpt-image-2 generated, prompted to be
+    //      photographic/cinematic for real-person input) ingest the previous
+    //      segment's closing frame during image-edit generation. The raw
+    //      closing frame is NOT submitted to BytePlus in real-person mode.
     const realPersonInput = superVisualMode.enabled
       ? Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson)
       : false;
@@ -1171,7 +1171,9 @@ export async function executeGenerateLongVideo(
           // screenshots to the video provider. So for real-person runs, we
           // deliberately omit the raw screenshot and rely on that generated
           // keyframe to bridge the scene.
-          const chainPaths: string[] = usingChain && segment.index > 1 && previousLastFramePath && !realPersonInput
+          const rawChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && !realPersonInput;
+          const proxyChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && realPersonInput && Boolean(segmentKeyframe);
+          const chainPaths: string[] = rawChainEligible && previousLastFramePath
             ? [previousLastFramePath]
             : [];
           const referenceImagePaths = [
@@ -1194,14 +1196,14 @@ export async function executeGenerateLongVideo(
           );
           if (result.ok) {
             succeeded = true;
-            if (usingChain && segment.index > 1 && previousLastFramePath) chainedFromPrev.push(segment.outputPath);
+            if ((rawChainEligible || proxyChainEligible) && segment.index > 1 && previousLastFramePath) chainedFromPrev.push(segment.outputPath);
             if (!usingChain && chainEnabled && previousLastFramePath) chainDroppedSegments.push(segment.index);
             if (hasGlobalUserImageReferences && !usingUserImageReferences) userImageReferenceDroppedSegments.push(segment.index);
             if (!usingAudio && userAudioPreference) audioRetriedSegments.push(segment.index);
             if (usingChain) consecutivePrivacyFails = 0;
             const tags = [
               attempt > 0 ? `重试${attempt}` : '一次过',
-              usingChain ? 'chain' : '无chain',
+              rawChainEligible ? 'raw-chain' : proxyChainEligible ? 'proxy-chain' : usingChain ? 'chain待定' : '无chain',
               usingAudio ? '有音' : '无音',
               usingUserImageReferences ? '用户图' : '无用户图',
             ].join(' / ');
@@ -1461,6 +1463,9 @@ export async function executeGenerateLongVideo(
           superVisualMode: superVisualMode.enabled ? superVisualMode.mode : 'off',
           canonicalReferencePath: superVisualMode.enabled ? superVisualMode.referenceImagePath : undefined,
           inputIsRealPerson: Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson),
+          chainFrameSubmissionMode: (superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson
+            ? 'proxy-keyframe-ingests-previous-last-frame'
+            : 'raw-previous-last-frame-reference',
           userImageReferenceDroppedSegments,
           chainDroppedSegments,
           segmentKeyframeFailureCount: segmentKeyframeFailures.length,

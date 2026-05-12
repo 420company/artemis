@@ -25,7 +25,9 @@ const withVision = buildSegmentKeyframePrompt({
 
 assert.match(withVision, /VISUAL TRUTH/i, 'golden path prompt must carry VISUAL TRUTH identity text');
 assert.match(withVision, /Photorealistic female-presenting character/i, 'vision description must be included verbatim');
-assert.match(withVision, /Same art style as the turnaround/i, 'segment keyframes should use the original mild style inheritance rule');
+assert.match(withVision, /live-action photographic \/ cinematic realism/i, 'real-person keyframes must explicitly restore cinematic photographic output');
+assert.match(withVision, /identity-only/i, 'real-person keyframes must treat illustrated turnaround as identity-only');
+assert.doesNotMatch(withVision, /Same art style as the turnaround/i, 'real-person keyframes must not inherit illustrated turnaround style');
 assert.doesNotMatch(withVision, /NO photoreal/i, 'segment keyframes must never ban photoreal output');
 assert.doesNotMatch(withVision, /MUST be rendered in a STYLIZED ILLUSTRATED \/ ANIME/i, 'segment keyframes must not force anime/illustrated output');
 assert.doesNotMatch(withVision, /privacy filters/i, 'prompt must not expose provider-bypass implementation details');
@@ -41,6 +43,7 @@ const missingVision = buildSegmentKeyframePrompt({
 
 assert.doesNotMatch(missingVision, /NO photoreal/i, 'fallback prompt must not regress to photoreal ban when VISUAL TRUTH is missing');
 assert.doesNotMatch(missingVision, /MUST be rendered in a STYLIZED ILLUSTRATED \/ ANIME/i, 'fallback prompt must not force anime when VISUAL TRUTH is missing');
-assert.match(missingVision, /Same art style as the turnaround/i, 'fallback prompt should still preserve the golden mild style rule');
+assert.match(missingVision, /live-action photographic \/ cinematic realism/i, 'fallback prompt must still restore cinematic photographic output');
+assert.doesNotMatch(missingVision, /Same art style as the turnaround/i, 'fallback prompt must not preserve illustrated style for real-person input');
 
 console.log('super visual golden path smoke ok');

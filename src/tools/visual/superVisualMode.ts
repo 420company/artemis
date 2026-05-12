@@ -17,6 +17,7 @@ import { createVisualProvider } from './providers/interface.js';
 const RELAY_SICK_COOLDOWN_MS = 10 * 60 * 1000;
 const IMAGE_EDIT_TOTAL_TIMEOUT_MS = 4 * 60 * 1000;
 const SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS = IMAGE_EDIT_TOTAL_TIMEOUT_MS + 15_000;
+const SAFE_BRIDGE_IMAGE_EDIT_TIMEOUT_MS = 90_000;
 const IMAGE_EDIT_SINGLE_FILE_COMPRESS_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const IMAGE_EDIT_TOTAL_FORM_COMPRESS_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const IMAGE_EDIT_FORCED_COMPRESS_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024;
@@ -388,20 +389,23 @@ export function buildSegmentKeyframePrompt(input: {
   realPersonInput?: boolean;
 }): string {
   const shot = input.shot;
+  const styleIdentityRule = input.realPersonInput
+    ? 'Preserve identity-defining structure and materials, but DO NOT inherit the illustrated/anime/rendering style from IMAGE 1. IMAGE 1 is an identity-only safety reference; the output keyframe must be live-action photographic / cinematic with real skin, real fabric, real product materials, and natural light.'
+    : 'Preserve identity-defining structure, color palette, and art style from IMAGE 1.';
   const identitySection = input.withPreviousLastFrame
     ? [
         'PRIMARY DIRECTIVE — TWO INPUT IMAGES.',
-        'IMAGE 1 (turnaround sheet) defines the canonical character identity. The output protagonist MUST match IMAGE 1: same face, hair, eyes, body proportions, skin tone, wardrobe, accessories, color palette, art style.',
+        `IMAGE 1 (turnaround sheet) defines canonical identity only: same face/subject structure, hair, eyes, body proportions, skin tone, wardrobe, accessories, and product/material cues. ${styleIdentityRule}`,
         'IMAGE 2 (previous segment\'s closing frame) defines the visual handoff: the same environment, lighting key direction, color temperature, framing, and any persistent props. The output should look like a natural continuation of IMAGE 2 — as if a fraction of a second has passed.',
-        'COMPOSE the new opening frame so that IDENTITY is preserved from IMAGE 1 and SCENE/STAGING is continuous with IMAGE 2. The protagonist should be in IMAGE 2\'s world, dressed and looking like IMAGE 1, in the action pose described below.',
-        'DO NOT redesign the protagonist. DO NOT teleport to a new world. DO NOT swap the art style.',
-        'EVEN IF the scene description below mentions other characters (a guard, a keeper, a friend, etc.), the PROTAGONIST in the output is always the IMAGE 1 character. Other characters are secondary and may be omitted entirely. The IMAGE 1 character is never replaced.',
+        'COMPOSE the new opening frame so that IDENTITY is preserved from IMAGE 1 and SCENE/STAGING is continuous with IMAGE 2. The protagonist should be in IMAGE 2\'s world, in the action pose described below.',
+        input.realPersonInput ? 'DO NOT redesign the protagonist. DO NOT teleport to a new world. DO NOT copy illustration/anime/comic rendering from IMAGE 1; restore cinematic photographic realism.' : 'DO NOT redesign the protagonist. DO NOT teleport to a new world. DO NOT swap the art style.',
+        'EVEN IF the scene description below mentions other characters (a guard, a keeper, a friend, etc.), the PROTAGONIST in the output is always the IMAGE 1 subject. Other characters are secondary and may be omitted entirely. The IMAGE 1 subject is never replaced.',
       ].join('\n')
     : [
         'PRIMARY DIRECTIVE — IDENTITY LOCK FROM ATTACHED IMAGE.',
-        'The attached input image is the canonical character turnaround sheet for this entire video. The protagonist in this shot MUST look identical to the front-view of that turnaround.',
-        'Preserve every visible feature: face, hair (length / shape / color / any non-human ear or feature), eyes, body proportions, skin tone, complete outfit and accessories, color palette, art style.',
-        'EVEN IF the scene description below mentions other characters, the PROTAGONIST is always the IMAGE 1 character. Other characters are secondary and may be omitted entirely. The IMAGE 1 character is never replaced or reinterpreted.',
+        `The attached input image is the canonical identity reference for this entire video. The protagonist in this shot MUST match the front-view identity of that reference. ${styleIdentityRule}`,
+        input.realPersonInput ? 'Preserve visible identity features and locked wardrobe/props, but translate them into live-action photographic/cinematic materials; do not keep line art, cel shading, painterly brushwork, manga/anime/comic styling, or illustration texture.' : 'Preserve every visible feature: face, hair (length / shape / color / any non-human ear or feature), eyes, body proportions, skin tone, complete outfit and accessories, color palette, art style.',
+        'EVEN IF the scene description below mentions other characters, the PROTAGONIST is always the IMAGE 1 subject. Other characters are secondary and may be omitted entirely. The IMAGE 1 subject is never replaced or reinterpreted.',
       ].join('\n');
 
   const visionTruth = compact(input.visionDescription)
@@ -500,7 +504,9 @@ export function buildSegmentKeyframePrompt(input: {
     '',
     '- Background, lighting, color cast match the scene.' + (input.withPreviousLastFrame ? ' Continue the environment from IMAGE 2.' : ''),
     '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles.',
-    '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
+    input.realPersonInput
+      ? '- STYLE OUTPUT: live-action photographic / cinematic realism. Do NOT inherit illustration/anime/comic style from the turnaround; treat it as identity-only.'
+      : '- Same art style as the turnaround (illustrated stays illustrated; photoreal stays photoreal).',
   ].filter(Boolean).join('\n');
 }
 
@@ -516,18 +522,18 @@ function buildSafeBridgeKeyframePrompt(input: {
     'Create a provider-safe visual proxy frame for long-video continuity.',
     '',
     'PRIMARY PURPOSE:',
-    `- Reinterpret the attached image (${sourceLabel}) as a SAFE CINEMATIC PRODUCTION CONCEPT FRAME.`,
+    `- Reinterpret the attached image (${sourceLabel}) as a NEUTRAL CINEMATIC CONTINUITY FRAME.`,
     '- Preserve the exact composition, pose, body direction, camera angle, focal length feeling, lighting direction, color temperature, environment layout, wardrobe silhouette, hair shape, props, and motion cues.',
-    '- This image will be used only as a continuity/reference bridge for a video model; it must carry staging information cleanly without looking like a private real-person photograph.',
+    '- This image will be used only as a continuity/reference bridge for a video model; it must carry staging information cleanly while avoiding private-person photographic specificity.',
     '',
     'SAFETY STYLE — REQUIRED:',
-    '- Output must read as high-end cinematic concept art / painterly production still / illustrated film keyframe.',
-    '- Use tasteful brushwork, softened skin detail, non-photographic facial texture, and concept-art rendering.',
-    '- Do NOT output a literal photograph, selfie, social-media portrait, paparazzi image, documentary still, or any image that appears to be a real identifiable person.',
+    '- Output should read as a clean cinematic production frame with realistic geometry, natural materials, photographic lighting direction, and grounded product/environment texture.',
+    '- If a human face is present, reduce identifiable facial specificity subtly; do NOT convert the whole frame into anime, manga, comic, painterly concept art, cel shading, or heavily illustrated rendering.',
+    '- Do NOT output a selfie, social-media portrait, paparazzi image, documentary still, or any image that appears to identify a private real person.',
     '- Do NOT add labels, panels, captions, watermarks, UI, or text.',
     '',
     'CONTINUITY LOCK:',
-    '- Do not redesign the character, outfit, environment, or action. Only translate the rendering style into a safer non-photographic proxy.',
+    '- Do not redesign the character, outfit, environment, or action. Preserve photographic staging and materials; only soften private identity details if necessary.',
     '- Keep the frame single-image, same scene, same moment, same visual handoff. No sheet/grid/multi-panel.',
     `- Aspect ratio: ${input.ratio}`,
     `- Shot index: ${input.shotIndex}`,
@@ -564,19 +570,17 @@ export async function generateSafeBridgeKeyframe(options: {
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-safe-bridge.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');
 
-  const edit = await withTimeout(
-    postOpenAIImageEdit({
-      baseUrl,
-      apiKey,
-      model: resolvedImageModel,
-      prompt,
-      inputImagePaths: [options.sourceFramePath],
-      size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
-      quality: 'high',
-    }),
-    SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS,
-    'safe bridge keyframe image edit',
-  ).catch((error) => ({
+  const edit = await postOpenAIImageEdit({
+    baseUrl,
+    apiKey,
+    model: resolvedImageModel,
+    prompt,
+    inputImagePaths: [options.sourceFramePath],
+    size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
+    quality: 'high',
+    timeoutMs: SAFE_BRIDGE_IMAGE_EDIT_TIMEOUT_MS,
+    attempts: 1,
+  }).catch((error) => ({
     ok: false as const,
     error: error instanceof Error ? error.message : String(error),
   }));
@@ -711,6 +715,8 @@ async function postOpenAIImageEdit(options: {
   inputImagePaths: string[];
   size?: string;
   quality?: string;
+  timeoutMs?: number;
+  attempts?: number;
 }): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
   if (options.inputImagePaths.length === 0) {
     return { ok: false, error: 'no input images supplied' };
@@ -720,7 +726,8 @@ async function postOpenAIImageEdit(options: {
   // (e.g. http://69.5.20.196:8080/v1) intermittently return HTTP 502/503/504
   // upstream_error during transient OpenAI hiccups; one retry recovers.
   const transientStatuses = new Set([429, 500, 502, 503, 504]);
-  const attempts = 3;
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const totalTimeoutMs = Math.max(1000, options.timeoutMs ?? IMAGE_EDIT_TOTAL_TIMEOUT_MS);
   let lastError = '';
   const startedAt = Date.now();
   let uploadPlan: UploadCompressionPlan = { totalInputBytes: 0, inputCount: options.inputImagePaths.length };
@@ -741,9 +748,9 @@ async function postOpenAIImageEdit(options: {
     // Keep the conservative zero-byte plan; read errors are handled below.
   }
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const remainingMs = IMAGE_EDIT_TOTAL_TIMEOUT_MS - (Date.now() - startedAt);
+    const remainingMs = totalTimeoutMs - (Date.now() - startedAt);
     if (remainingMs <= 0) {
-      return { ok: false, error: `images/edits timed out after ${Math.round(IMAGE_EDIT_TOTAL_TIMEOUT_MS / 1000)}s` };
+      return { ok: false, error: `images/edits timed out after ${Math.round(totalTimeoutMs / 1000)}s` };
     }
     const form = new FormData();
     form.append('model', options.model);
