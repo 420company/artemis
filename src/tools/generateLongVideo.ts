@@ -13,7 +13,7 @@ import {
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
-import { describeUserImageWithVision, generateSegmentKeyframe, maybeGenerateSuperVisualReference } from './visual/superVisualMode.js';
+import { describeUserImageWithVision, generateSafeBridgeKeyframe, generateSegmentKeyframe, maybeGenerateSuperVisualReference } from './visual/superVisualMode.js';
 import {
   analyzeNarrative,
   appendNarrativeLibraryEntry,
@@ -1134,6 +1134,7 @@ export async function executeGenerateLongVideo(
         // attempt because they improve composition, but be ready to drop them
         // independently from the safer Super Visual turnaround reference.
         let usingSegmentKeyframe = true;
+        let safeBridgeKeyframeAttempted = false;
         let lastError = '';
         let succeeded = false;
 
@@ -1224,7 +1225,26 @@ export async function executeGenerateLongVideo(
           // Decide the next attempt's degradation. We strip the offending
           // input first; subsequent attempts can additionally strip the
           // other.
-          if (imageBlocked && usingSegmentKeyframe && segmentKeyframe) {
+          if (imageBlocked && usingSegmentKeyframe && segmentKeyframe && realPersonInput && !safeBridgeKeyframeAttempted) {
+            safeBridgeKeyframeAttempted = true;
+            consecutivePrivacyFails += 1;
+            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了分段关键帧，正在生成安全桥接帧后重试（尝试 ${attempt + 2}/3）...`);
+            const safeBridge = await generateSafeBridgeKeyframe({
+              context,
+              projectDir,
+              ratio,
+              shotIndex: segment.index,
+              sourceFramePath: segmentKeyframe,
+              sourceKind: 'segment-keyframe',
+            });
+            if (safeBridge.ok) {
+              segmentKeyframePaths.set(segment.index, safeBridge.framePath);
+              toolLog(`🎨 第 ${segment.index}/${segments.length} 段：已生成安全桥接帧 ${safeBridge.framePath}`);
+            } else {
+              usingSegmentKeyframe = false;
+              toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：安全桥接帧生成失败（${safeBridge.reason.slice(0, 180)}），剥离关键帧、保留安全身份锚后重试中（尝试 ${attempt + 2}/3）...`);
+            }
+          } else if (imageBlocked && usingSegmentKeyframe && segmentKeyframe) {
             usingSegmentKeyframe = false;
             consecutivePrivacyFails += 1;
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频服务拒绝了分段关键帧，剥离关键帧、保留安全身份锚后重试中（尝试 ${attempt + 2}/3）...`);

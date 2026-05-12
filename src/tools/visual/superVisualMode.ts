@@ -504,6 +504,89 @@ export function buildSegmentKeyframePrompt(input: {
   ].filter(Boolean).join('\n');
 }
 
+function buildSafeBridgeKeyframePrompt(input: {
+  shotIndex: number;
+  ratio: string;
+  sourceKind: 'segment-keyframe' | 'previous-last-frame';
+}): string {
+  const sourceLabel = input.sourceKind === 'previous-last-frame'
+    ? 'the previous video segment closing frame'
+    : 'the rejected/opening segment keyframe';
+  return [
+    'Create a provider-safe visual proxy frame for long-video continuity.',
+    '',
+    'PRIMARY PURPOSE:',
+    `- Reinterpret the attached image (${sourceLabel}) as a SAFE CINEMATIC PRODUCTION CONCEPT FRAME.`,
+    '- Preserve the exact composition, pose, body direction, camera angle, focal length feeling, lighting direction, color temperature, environment layout, wardrobe silhouette, hair shape, props, and motion cues.',
+    '- This image will be used only as a continuity/reference bridge for a video model; it must carry staging information cleanly without looking like a private real-person photograph.',
+    '',
+    'SAFETY STYLE — REQUIRED:',
+    '- Output must read as high-end cinematic concept art / painterly production still / illustrated film keyframe.',
+    '- Use tasteful brushwork, softened skin detail, non-photographic facial texture, and concept-art rendering.',
+    '- Do NOT output a literal photograph, selfie, social-media portrait, paparazzi image, documentary still, or any image that appears to be a real identifiable person.',
+    '- Do NOT add labels, panels, captions, watermarks, UI, or text.',
+    '',
+    'CONTINUITY LOCK:',
+    '- Do not redesign the character, outfit, environment, or action. Only translate the rendering style into a safer non-photographic proxy.',
+    '- Keep the frame single-image, same scene, same moment, same visual handoff. No sheet/grid/multi-panel.',
+    `- Aspect ratio: ${input.ratio}`,
+    `- Shot index: ${input.shotIndex}`,
+  ].join('\n');
+}
+
+export async function generateSafeBridgeKeyframe(options: {
+  context: ToolExecutionContext;
+  projectDir: string;
+  ratio: string;
+  shotIndex: number;
+  sourceFramePath: string;
+  sourceKind?: 'segment-keyframe' | 'previous-last-frame';
+}): Promise<SegmentKeyframeResult> {
+  const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
+  if (!imageConfigured) return { ok: false, reason: 'image provider not configured' };
+  const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
+  if (!isOpenAIGptImage2(imageConfigured.config.image.provider, resolvedImageModel)) {
+    return { ok: false, reason: 'image provider is not OpenAI gpt-image-2' };
+  }
+
+  const apiKey = imageConfigured.config.image.apiKey?.trim();
+  const baseUrl = imageConfigured.config.image.baseUrl?.trim();
+  if (!apiKey || !baseUrl) return { ok: false, reason: 'image edit credentials not configured' };
+  if (!await fileExists(options.sourceFramePath)) return { ok: false, reason: 'source frame not found' };
+
+  const superVisualDir = path.join(options.projectDir, 'super-visual');
+  await mkdir(superVisualDir, { recursive: true });
+  const prompt = buildSafeBridgeKeyframePrompt({
+    shotIndex: options.shotIndex,
+    ratio: options.ratio,
+    sourceKind: options.sourceKind ?? 'segment-keyframe',
+  });
+  const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-safe-bridge.prompt.txt`);
+  await writeFile(promptPath, prompt, 'utf8');
+
+  const edit = await withTimeout(
+    postOpenAIImageEdit({
+      baseUrl,
+      apiKey,
+      model: resolvedImageModel,
+      prompt,
+      inputImagePaths: [options.sourceFramePath],
+      size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
+      quality: 'high',
+    }),
+    SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS,
+    'safe bridge keyframe image edit',
+  ).catch((error) => ({
+    ok: false as const,
+    error: error instanceof Error ? error.message : String(error),
+  }));
+  if (!edit.ok) return { ok: false, reason: `safe bridge generation failed: ${edit.error}` };
+
+  const framePath = safeBridgeKeyframePath(options.projectDir, options.shotIndex);
+  await writeFile(framePath, edit.buffer);
+  return { ok: true, framePath, promptPath, mode: 'image-to-image' };
+}
+
 function imageReferenceArtifactPath(projectDir: string, sourceAssetPath: string | undefined): string {
   const ext = sourceAssetPath ? path.extname(sourceAssetPath) : '';
   return path.join(projectDir, 'super-visual', `character-turnaround${ext || '.png'}`);
@@ -511,6 +594,10 @@ function imageReferenceArtifactPath(projectDir: string, sourceAssetPath: string 
 
 function segmentKeyframePath(projectDir: string, shotIndex: number, ext: string = '.png'): string {
   return path.join(projectDir, 'super-visual', `segment-${String(shotIndex).padStart(3, '0')}-keyframe${ext}`);
+}
+
+function safeBridgeKeyframePath(projectDir: string, shotIndex: number, ext: string = '.png'): string {
+  return path.join(projectDir, 'super-visual', `segment-${String(shotIndex).padStart(3, '0')}-safe-bridge${ext}`);
 }
 
 // ─── OpenAI image edit helper (multipart) ─────────────────────────────────
