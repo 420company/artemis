@@ -192,6 +192,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *     → MUST FORCE reasoning_content (with empty fallback) on every assistant
  *     message including those without original reasoning.
  *
+ *   - Xiaomi MiMo (mimo-v2.5-pro etc.):
+ *     Same requirement as DeepSeek-V4 — thinking mode demands reasoning_content
+ *     round-trip or returns 400.
+ *
  *   - Everything else (default): preserve when present, omit when absent.
  *     Includes OpenAI o-series (reasoning is internal, no echo needed),
  *     Z.AI GLM, Qwen reasoning variants, etc. Conservative middle ground —
@@ -206,6 +210,8 @@ function getReasoningContentMode(model: string | undefined): ReasoningContentMod
   const m = (model ?? '').toLowerCase();
   // DeepSeek V4 thinking family — REQUIRES reasoning_content
   if (m.includes('deepseek-v4') || (m.includes('deepseek') && m.includes('-v4'))) return 'force';
+  // Xiaomi MiMo thinking models — same requirement as DeepSeek-V4
+  if (m.includes('mimo')) return 'force';
   // DeepSeek Reasoner / R1 family — REJECTS reasoning_content in inputs
   if (m.includes('deepseek-reasoner') || m.includes('deepseek-r1') || m.endsWith('-r1') || m.includes('/deepseek-r1')) return 'strip';
   // Default: preserve if present, omit if not
