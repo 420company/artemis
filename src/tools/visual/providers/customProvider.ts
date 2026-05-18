@@ -171,13 +171,17 @@ export class CustomProvider implements VisualProvider {
       const model = params.model || videoConfig.model || 'custom-video'
 
       // ─── Wan 2.x protocol branch ──────────────────────────────────
-      if (isWanModel(model)) {
-        return this.generateVideoWan(params, apiKey, baseUrl, model, startedAt)
-      }
-
-      // ─── Seedance via OpenCrow /videos/generations (BytePlus native format) ─
-      if (isSeedanceModel(model)) {
-        return this.generateVideoSeedance(params, apiKey, baseUrl, model, startedAt)
+      // Only route to Wan/Seedance native protocols when the base URL points
+      // directly to a BytePlus / Volcengine endpoint. Proxy services like
+      // router.ai only support the original FormData + /videos format.
+      const isNativeBytePlus = /volces\.com|volcengine|bytedance|opencrow|byteplus/i.test(baseUrl)
+      if (isNativeBytePlus) {
+        if (isWanModel(model)) {
+          return this.generateVideoWan(params, apiKey, baseUrl, model, startedAt)
+        }
+        if (isSeedanceModel(model)) {
+          return this.generateVideoSeedance(params, apiKey, baseUrl, model, startedAt)
+        }
       }
 
       // ─── Original custom protocol (FormData + /videos) ────────────
