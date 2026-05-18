@@ -205,6 +205,66 @@ function buildPhysics(kind: SceneKind): string {
   }
 }
 
+/**
+ * Fibonacci composition — use the golden ratio (1.618) as the master formula
+ * for visual composition and camera timing.
+ */
+function buildFibonacciComposition(kind: SceneKind): string {
+  const focalPoints = kind === 'portrait'
+    ? 'Place the subject\'s eyes, hands, and key props on Fibonacci spiral intersections (golden-ratio power points).'
+    : kind === 'product'
+      ? 'Position the hero object at a golden-ratio intersection; let reflections and specular highlights follow the spiral.'
+      : 'Anchor the dominant visual mass at a golden-ratio power point; let secondary elements trail along the spiral.';
+  return [
+    focalPoints,
+    'For camera motion, use Fibonacci-based acceleration beats (1s, 1s, 2s, 3s, 5s) for organic velocity — slow start, gradual build, smooth settle.',
+    'Background elements and set dressing must obey natural perspective falloff (Z-depth scaling); no arbitrary scaling glitches.',
+  ].join(' ');
+}
+
+/**
+ * Spatial depth & realistic scale — enforce physically plausible 2D/3D depth
+ * relationships between subject, environment, and background.
+ */
+function buildSpatialDepth(kind: SceneKind, prompt: string): string {
+  const hasIndoor = /room|bedroom|kitchen|bathroom|indoor|室内|房间|卧室|厨房|浴室/i.test(prompt);
+  const hasOutdoor = /street|city|park|beach|forest|outdoor|街道|城市|公园|海滩|森林/i.test(prompt);
+  const envContext = hasIndoor
+    ? 'Indoor: character must fit doorframes, furniture, and ceiling height at realistic human scale.'
+    : hasOutdoor
+      ? 'Outdoor: character scale must be consistent with street furniture, vehicles, buildings, and background people.'
+      : '';
+  const portraitScale = kind === 'portrait'
+    ? ' The protagonist\'s head-to-body ratio, limb proportions, and spatial footprint relative to nearby objects must match real human anatomy — no "giant syndrome" or disproportionate scaling.'
+    : '';
+  return [
+    `Maintain readable depth layers: foreground (closest to camera), midground (subject zone), background (environment). Each layer must have distinct parallax and focus level.`,
+    `Subject-to-environment scale must be physically grounded: the character's height and volume relative to doorframes, furniture, vehicles, buildings, background people, and horizon line must be consistent and realistic.${envContext}${portraitScale}`,
+    'Z-depth perspective falloff: objects farther from camera shrink at optically correct rates; no flat cardboard-cutout background.',
+  ].join(' ');
+}
+
+/**
+ * Intelligent creative extension ("brain-completion") logic:
+ * - User-specified conditions (scene, costume, action, mood, etc.) are MANDATORY.
+ * - AI may INVENT details the user did NOT specify, but ONLY those that are
+ *   logically required by the specified conditions (e.g., user says "rainy
+ *   street" → AI must add wet surfaces, puddles, umbrellas — even though user
+ *   didn't mention them — because rain logically implies them).
+ * - If the user specifies NOTHING beyond a subject, AI has full creative
+ *   freedom to design environment, mood, and action.
+ * - The key rule: AI never OVERRIDES a user condition, but it MUST fill in
+ *   all the implicit consequences of user conditions.
+ */
+function buildIntelligentExtension(_prompt: string): string {
+  return [
+    'Creative extension rule: every condition the user explicitly specified (scene, costume, action, mood, transition, prop) is non-negotiable and must appear exactly as described.',
+    'AI may invent details the user did NOT mention, but only those that are logically entailed by the specified conditions — e.g., "rain" implies wet surfaces, puddles, umbrellas; "bedroom at night" implies warm lamp light, rumpled sheets, intimate scale.',
+    'If the user specified no conditions beyond a subject, AI has full creative freedom to design environment, mood, and action.',
+    'Never override or contradict a user-specified condition; always fill in the implicit physical and atmospheric consequences of what the user did specify.',
+  ].join(' ');
+}
+
 function providerProfile(provider?: string, model?: string): string {
   const key = `${provider ?? ''}/${model ?? ''}`.toLowerCase();
   if (key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina')) {
@@ -293,6 +353,9 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
   const camera = buildCamera(kind, input.ratio);
   const lighting = buildLighting(kind, originalPrompt);
   const physics = buildPhysics(kind);
+  const fibonacci = buildFibonacciComposition(kind);
+  const spatial = buildSpatialDepth(kind, originalPrompt);
+  const extension = buildIntelligentExtension(originalPrompt);
   const referencePlan = buildSeedanceReferencePlan(input);
   const soundPlan = buildSeedanceSoundPlan(originalPrompt, input.referenceAudioCount ?? 0);
   const scenario = buildSeedanceScenarioStrategy(originalPrompt, kind);
@@ -304,11 +367,14 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
     `Source brief: ${originalPrompt}.`,
     `Director profile: ${profile}.`,
     scenario,
+    extension,
     `single clear focal point: ${focalPoint}.`,
     `Timestamp storyboard: ${timeline}.`,
     `Camera language: ${camera}.`,
+    `Fibonacci composition: ${fibonacci}.`,
     `Lighting and texture: ${lighting}.`,
     `Motion physics: ${physics}.`,
+    `Spatial depth & scale: ${spatial}.`,
     `Reference usage: ${referencePlan}`,
     soundPlan,
     negative,
@@ -363,14 +429,21 @@ export function buildDirectedVideoPrompt(input: VideoDirectorInput): VideoDirect
     'no extra limbs or distorted anatomy',
   ].join(', ');
 
+  const fibonacci = buildFibonacciComposition(kind);
+  const spatial = buildSpatialDepth(kind, originalPrompt);
+  const extension = buildIntelligentExtension(originalPrompt);
+
   const directedPrompt = truncateDirectedPrompt([
     `Source dream brief: ${originalPrompt}.`,
     `Director profile: ${profile}.`,
+    extension,
     `Focal point: ${focalPoint}.`,
     `Timeline: ${timeline}.`,
     `Camera: ${camera}.`,
+    `Fibonacci composition: ${fibonacci}.`,
     `Lighting and texture: ${lighting}.`,
     `Motion physics: ${physics}.`,
+    `Spatial depth & scale: ${spatial}.`,
     referenceNote,
     `Quality constraints: ${constraints}.`,
   ].join(' '));
