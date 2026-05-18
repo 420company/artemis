@@ -89,6 +89,68 @@ export function resolveVideoModelCapabilities(
     }
   }
 
+  // Seedance models via custom provider (e.g. OpenCrow)
+  const modelKey = normalize(model)
+  if (isSeedance2Model(model)) {
+    return {
+      provider,
+      model,
+      referenceInputs: ['image', 'video', 'audio'],
+      canGenerateAudio: true,
+    }
+  }
+  if (isSeedance15Model(model)) {
+    return {
+      provider,
+      model,
+      referenceInputs: ['image'],
+      canGenerateAudio: true,
+    }
+  }
+  if (modelKey.includes('seedance-1-0')) {
+    return {
+      provider,
+      model,
+      referenceInputs: ['image'],
+      canGenerateAudio: false,
+    }
+  }
+
+  // Wan 2.x models via custom provider
+  if (modelKey.startsWith('wan2.7-r2v') || modelKey.startsWith('wan2.6-r2v')) {
+    return {
+      provider,
+      model,
+      referenceInputs: ['image', 'video'],
+      canGenerateAudio: false,
+    }
+  }
+  if (modelKey.startsWith('wan2.7-i2v') || modelKey.startsWith('wan2.6-i2v')) {
+    return {
+      provider,
+      model,
+      referenceInputs: ['image'],
+      canGenerateAudio: false,
+    }
+  }
+  if (modelKey.startsWith('wan2.7-t2v') || modelKey.startsWith('wan2.6-t2v')) {
+    return {
+      provider,
+      model,
+      referenceInputs: [],
+      canGenerateAudio: false,
+    }
+  }
+  // Wan 2.6-t2v / i2v with audio support
+  if (modelKey.startsWith('wan2.6-') && modelKey.includes('audio')) {
+    return {
+      provider,
+      model,
+      referenceInputs: modelKey.includes('i2v') ? ['image'] : [],
+      canGenerateAudio: true,
+    }
+  }
+
   return {
     provider,
     model,

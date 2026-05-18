@@ -169,6 +169,417 @@ export class CustomProvider implements VisualProvider {
       }
 
       const model = params.model || videoConfig.model || 'custom-video'
+
+      // ─── Wan 2.x protocol branch ──────────────────────────────────
+      if (isWanModel(model)) {
+        return this.generateVideoWan(params, apiKey, baseUrl, model, startedAt)
+      }
+
+      // ─── Seedance via OpenCrow /videos/generations (BytePlus native format) ─
+      if (isSeedanceModel(model)) {
+        return this.generateVideoSeedance(params, apiKey, baseUrl, model, startedAt)
+      }
+
+      // ─── Original custom protocol (FormData + /videos) ────────────
+      return this.generateVideoCustom(params, apiKey, baseUrl, model, startedAt)
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        generationTime: Date.now() - startedAt,
+      }
+    }
+  }
+
+  /**
+   * Wan 2.x API protocol — POST /videos/generations with JSON body
+   * { model, duration, resolution, aspect_ratio, input: { prompt, media? }, parameters: { … } }
+   * Poll: GET /videos/generations/{task_id}
+   */
+  private async generateVideoWan(
+    params: VideoGenerationParams,
+    apiKey: string,
+    baseUrl: string,
+    model: string,
+    startedAt: number,
+  ): Promise<GenerationResult> {
+    try {
+      const videoConfig = this.config.video
+      const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
+      const durationNum = Math.max(1, Math.min(60, Math.floor(duration)))
+      const ratio = params.ratio || '16:9'
+
+      // Local file paths are resolved and uploaded by generateVideo before the
+      // provider is called. Provider protocol code should only send public URLs.
+
+      // Build input.media array for reference images / first-frame
+      const media: Array<{ type: string; url: string }> = []
+      const allRefImageUrls = [
+        ...(params.referenceImageUrls ?? []),
+        ...(params.firstFrameImageUrls ?? []),
+      ]
+      for (const url of allRefImageUrls) {
+        if (typeof url === 'string' && url.trim()) {
+          media.push({ type: 'reference_image', url: url.trim() })
+        }
+      }
+      // Wan 2.7-i2v uses first_frame role; if only 1 image and model is i2v, use first_frame
+      if (media.length === 1 && /i2v$/i.test(model.trim())) {
+        media[0].type = 'first_frame'
+      }
+
+      const input: Record<string, unknown> = { prompt: params.prompt }
+      if (media.length > 0) {
+        input.media = media
+      }
+      // Wan 2.6-i2v legacy: img_url at top of input
+      if (allRefImageUrls.length === 1 && /^wan2\.6/i.test(model.trim())) {
+        input.img_url = allRefImageUrls[0]
+        delete input.media
+      }
+      // Wan 2.6-r2v legacy: reference_urls
+      const allRefVideoUrls = params.referenceVideoUrls ?? []
+      if (allRefVideoUrls.length > 0 && /^wan2\.6/i.test(model.trim())) {
+        input.reference_urls = allRefVideoUrls
+        delete input.media
+      }
+
+      const body: Record<string, unknown> = {
+        model,
+        duration: durationNum,
+        resolution: videoConfig.defaultParams.resolution || '720p',
+        aspect_ratio: ratio,
+        input,
+        parameters: {
+          resolution: (videoConfig.defaultParams.resolution || '720p').toUpperCase(),
+          ratio,
+          duration: durationNum,
+          prompt_extend: (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false,
+          watermark: (videoConfig.defaultParams as Record<string, unknown>).watermark !== false,
+        },
+      }
+
+      const createRes = await fetch(`${baseUrl}/videos/generations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
+      })
+      const createRaw = await createRes.text()
+      if (!createRes.ok) {
+        throw new Error(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`)
+      }
+
+      let createPayload: WanVideoGenerationsResponse
+      try {
+        createPayload = JSON.parse(createRaw) as WanVideoGenerationsResponse
+      } catch {
+        throw new Error(`Custom video create response was invalid JSON: ${createRaw.slice(0, 500)}`)
+      }
+
+      const taskId = createPayload.id ?? createPayload.task_id
+      if (!taskId) {
+        throw new Error(`Custom video create response contained no id: ${createRaw.slice(0, 500)}`)
+      }
+
+      const extraParams = params as unknown as { maxPolls?: unknown; pollIntervalMs?: unknown }
+      const maxPolls = typeof extraParams.maxPolls === 'number'
+        ? Math.max(1, Math.floor(extraParams.maxPolls))
+        : DEFAULT_MAX_POLLS
+      const pollIntervalMs = typeof extraParams.pollIntervalMs === 'number'
+        ? Math.max(2_000, Math.floor(extraParams.pollIntervalMs))
+        : DEFAULT_POLL_INTERVAL_MS
+
+      let videoUrl: string | undefined
+      let lastStatus = 'pending'
+
+      for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+        await abortableSleep(pollIntervalMs, params.abortSignal)
+        const pollRes = await fetch(`${baseUrl}/videos/generations/${encodeURIComponent(taskId)}`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),
+        })
+        const pollRaw = await pollRes.text()
+        if (!pollRes.ok) {
+          throw new Error(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`)
+        }
+        let pollPayload: WanVideoGenerationsResponse
+        try {
+          pollPayload = JSON.parse(pollRaw) as WanVideoGenerationsResponse
+        } catch {
+          continue
+        }
+        lastStatus = (pollPayload.status ?? '').toLowerCase()
+        if (lastStatus === 'failed' || lastStatus === 'cancelled' || lastStatus === 'canceled') {
+          throw new Error(`Custom video ${taskId} failed. ${pollPayload.error?.message ?? ''}`.trim())
+        }
+        const maybeUrl = extractWanVideoUrl(pollPayload)
+        if (maybeUrl && (lastStatus === 'succeeded' || lastStatus === 'completed' || lastStatus === 'success' || lastStatus === '')) {
+          videoUrl = maybeUrl
+          break
+        }
+      }
+
+      if (!videoUrl) {
+        throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
+      }
+
+      const downloadRes = await fetch(videoUrl, {
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
+      })
+      if (!downloadRes.ok) {
+        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
+      }
+
+      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
+      await writeFileEnsured(videoPath, buffer)
+
+      return {
+        success: true,
+        assetPath: videoPath,
+        generationTime: Date.now() - startedAt,
+        modelInfo: {
+          provider: this.name,
+          model,
+          params: {
+            id: taskId,
+            duration: durationNum,
+            ratio,
+            protocol: 'wan',
+          },
+        },
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        generationTime: Date.now() - startedAt,
+      }
+    }
+  }
+
+  /**
+   * Seedance via OpenCrow — POST /videos/generations with BytePlus native JSON body
+   * { model, content: [{type:"text",...}, {type:"image_url",...}], duration, resolution, ratio, generate_audio, … }
+   * Poll: GET /videos/generations/{task_id}
+   */
+  private async generateVideoSeedance(
+    params: VideoGenerationParams,
+    apiKey: string,
+    baseUrl: string,
+    model: string,
+    startedAt: number,
+  ): Promise<GenerationResult> {
+    try {
+      const videoConfig = this.config.video
+      const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
+      const durationNum = Math.max(1, Math.min(15, Math.floor(duration)))
+      const ratio = params.ratio || '16:9'
+
+      // Local file paths are resolved and uploaded by generateVideo before the
+      // provider is called. Seedance/Dreamina rejects data: URIs, so only public
+      // URL fields are serialized here.
+
+      // Build content array (BytePlus native format)
+      const content: Array<Record<string, unknown>> = [
+        { type: 'text', text: params.prompt },
+      ]
+
+      // Reference images
+      const allRefImageUrls = [
+        ...(params.referenceImageUrls ?? []),
+      ]
+      for (const url of allRefImageUrls) {
+        content.push({
+          type: 'image_url',
+          image_url: { url },
+          role: 'reference_image',
+        })
+      }
+
+      // First-frame images
+      const allFirstFrameUrls = [
+        ...(params.firstFrameImageUrls ?? []),
+      ]
+      for (const url of allFirstFrameUrls) {
+        content.push({
+          type: 'image_url',
+          image_url: { url },
+          role: 'first_frame',
+        })
+      }
+
+      // Last-frame images
+      const allLastFrameUrls = [
+        ...(params.lastFrameImageUrls ?? []),
+      ]
+      for (const url of allLastFrameUrls) {
+        content.push({
+          type: 'image_url',
+          image_url: { url },
+          role: 'last_frame',
+        })
+      }
+
+      // Reference videos
+      const allRefVideoUrls = [
+        ...(params.referenceVideoUrls ?? []),
+      ]
+      for (const url of allRefVideoUrls) {
+        content.push({
+          type: 'video_url',
+          video_url: { url },
+          role: 'reference_video',
+        })
+      }
+
+      // Reference audio
+      const allRefAudioUrls = [
+        ...(params.referenceAudioUrls ?? []),
+      ]
+      for (const url of allRefAudioUrls) {
+        content.push({
+          type: 'audio_url',
+          audio_url: { url },
+        })
+      }
+
+      const body: Record<string, unknown> = {
+        model,
+        content,
+        duration: durationNum,
+        resolution: videoConfig.defaultParams.resolution || '720p',
+        ratio,
+        generate_audio: params.generateAudio === true && /^dreamina-seedance-2/i.test(model.trim()),
+        watermark: (videoConfig.defaultParams as Record<string, unknown>).watermark === true,
+      }
+
+      const createRes = await fetch(`${baseUrl}/videos/generations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
+      })
+      const createRaw = await createRes.text()
+      if (!createRes.ok) {
+        throw new Error(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`)
+      }
+
+      let createPayload: { id?: string; task_id?: string; status?: string; error?: { message?: string } }
+      try {
+        createPayload = JSON.parse(createRaw)
+      } catch {
+        throw new Error(`Custom video create response was invalid JSON: ${createRaw.slice(0, 500)}`)
+      }
+
+      const taskId = createPayload.id ?? createPayload.task_id
+      if (!taskId) {
+        throw new Error(`Custom video create response contained no id: ${createRaw.slice(0, 500)}`)
+      }
+
+      const extraParams = params as unknown as { maxPolls?: unknown; pollIntervalMs?: unknown }
+      const maxPolls = typeof extraParams.maxPolls === 'number'
+        ? Math.max(1, Math.floor(extraParams.maxPolls))
+        : DEFAULT_MAX_POLLS
+      const pollIntervalMs = typeof extraParams.pollIntervalMs === 'number'
+        ? Math.max(2_000, Math.floor(extraParams.pollIntervalMs))
+        : DEFAULT_POLL_INTERVAL_MS
+
+      let videoUrl: string | undefined
+      let lastStatus = 'pending'
+
+      for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+        await abortableSleep(pollIntervalMs, params.abortSignal)
+        const pollRes = await fetch(`${baseUrl}/videos/generations/${encodeURIComponent(taskId)}`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),
+        })
+        const pollRaw = await pollRes.text()
+        if (!pollRes.ok) {
+          throw new Error(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`)
+        }
+        let pollPayload: {
+          id?: string
+          status?: string
+          content?: { video_url?: string; url?: string }
+          video_url?: string
+          url?: string
+          error?: { message?: string }
+        }
+        try {
+          pollPayload = JSON.parse(pollRaw)
+        } catch {
+          continue
+        }
+        lastStatus = (pollPayload.status ?? '').toLowerCase()
+        if (lastStatus === 'failed' || lastStatus === 'cancelled' || lastStatus === 'canceled' || lastStatus === 'timeout') {
+          throw new Error(`Custom video ${taskId} failed (status=${lastStatus}). ${pollPayload.error?.message ?? ''}`.trim())
+        }
+        const maybeUrl = pollPayload.content?.video_url ?? pollPayload.content?.url ?? pollPayload.video_url ?? pollPayload.url
+        if (maybeUrl && (lastStatus === 'succeeded' || lastStatus === 'completed' || lastStatus === 'success')) {
+          videoUrl = maybeUrl
+          break
+        }
+      }
+
+      if (!videoUrl) {
+        throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
+      }
+
+      const downloadRes = await fetch(videoUrl, {
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
+      })
+      if (!downloadRes.ok) {
+        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
+      }
+
+      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
+      await writeFileEnsured(videoPath, buffer)
+
+      return {
+        success: true,
+        assetPath: videoPath,
+        generationTime: Date.now() - startedAt,
+        modelInfo: {
+          provider: this.name,
+          model,
+          params: {
+            id: taskId,
+            duration: durationNum,
+            ratio,
+            protocol: 'seedance-opencrow',
+          },
+        },
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        generationTime: Date.now() - startedAt,
+      }
+    }
+  }
+
+  /**
+   * Original custom video protocol — FormData + /videos endpoint
+   */
+  private async generateVideoCustom(
+    params: VideoGenerationParams,
+    apiKey: string,
+    baseUrl: string,
+    model: string,
+    startedAt: number,
+  ): Promise<GenerationResult> {
+    try {
+      const videoConfig = this.config.video
       const seconds = mapVideoSeconds(params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration))
       const size = mapVideoSize({
         ratio: params.ratio,
@@ -313,6 +724,32 @@ function mapImageQuality(quality: string | undefined): string | undefined {
   if (normalized === 'standard') return 'medium'
   if (normalized === 'low' || normalized === 'medium' || normalized === 'high') return normalized
   return undefined
+}
+
+function isWanModel(model: string): boolean {
+  return /^wan\d/i.test(model.trim())
+}
+
+function isSeedanceModel(model: string): boolean {
+  const key = model.trim().toLowerCase()
+  return key.startsWith('dreamina-seedance') || key.startsWith('seedance-')
+}
+
+type WanVideoGenerationsResponse = {
+  id?: string
+  task_id?: string
+  status?: string
+  content?: {
+    video_url?: string
+    url?: string
+  }
+  video_url?: string
+  url?: string
+  error?: { message?: string }
+}
+
+function extractWanVideoUrl(payload: WanVideoGenerationsResponse): string | undefined {
+  return payload.content?.video_url ?? payload.content?.url ?? payload.video_url ?? payload.url
 }
 
 function durationStringToNumber(duration: string): number {

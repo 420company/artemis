@@ -7,7 +7,7 @@ import type { ProviderStoreData, VidarAssetHostingConfig } from '../providers/ty
 import type { ToolExecutionContext } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 
-export type HostedReferenceKind = 'video' | 'audio';
+export type HostedReferenceKind = 'video' | 'audio' | 'image';
 
 type ResolvedAssetHostingConfig = Required<Pick<VidarAssetHostingConfig, 'endpoint' | 'bucket' | 'accessKeyId' | 'secretAccessKey' | 'publicBaseUrl'>> & {
   provider: 's3' | 'r2';
@@ -57,6 +57,12 @@ function inferContentType(filePath: string, kind: HostedReferenceKind): string {
     if (ext === '.m4v') return 'video/x-m4v';
     return 'video/mp4';
   }
+  if (kind === 'image') {
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+    if (ext === '.webp') return 'image/webp';
+    if (ext === '.gif') return 'image/gif';
+    return 'image/png';
+  }
   if (ext === '.wav') return 'audio/wav';
   if (ext === '.m4a') return 'audio/mp4';
   if (ext === '.aac') return 'audio/aac';
@@ -94,7 +100,7 @@ function encodeObjectKey(key: string): string {
 }
 
 function buildObjectKey(config: ResolvedAssetHostingConfig, filePath: string, kind: HostedReferenceKind): string {
-  const ext = path.extname(filePath).toLowerCase() || (kind === 'video' ? '.mp4' : '.mp3');
+  const ext = path.extname(filePath).toLowerCase() || (kind === 'video' ? '.mp4' : kind === 'image' ? '.png' : '.mp3');
   const safeBase = path.basename(filePath, ext).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || kind;
   const objectPath = `${kind}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${safeBase}${ext}`;
   return config.prefix ? `${config.prefix}/${objectPath}` : objectPath;

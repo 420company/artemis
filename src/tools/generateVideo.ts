@@ -127,6 +127,17 @@ function nonEmptyValues(values: string[] | undefined): string[] {
     : [];
 }
 
+function requiresPublicImageUrls(provider: string, model: string): boolean {
+  return provider === 'custom' && /seedance|dreamina/i.test(model);
+}
+
+async function localImagePathsToProviderUrls(paths: string[] | undefined, context: ToolExecutionContext, provider: string, model: string): Promise<string[]> {
+  if (requiresPublicImageUrls(provider, model)) {
+    return uploadLocalReferenceAssets(paths, 'image', context);
+  }
+  return localImagePathsToDataUrls(paths, context);
+}
+
 async function localImagePathsToDataUrls(paths: string[] | undefined, context: ToolExecutionContext): Promise<string[]> {
   const dataUrls: string[] = [];
   for (const rawPath of nonEmptyValues(paths)) {
@@ -492,7 +503,7 @@ async function generateVideoWithVisualProvider(
   const ratio = action.ratio;
   const referenceImageUrls = [
     ...nonEmptyValues(action.referenceImageUrls),
-    ...await localImagePathsToDataUrls(action.referenceImagePaths, context),
+    ...await localImagePathsToProviderUrls(action.referenceImagePaths, context, videoConfig.provider, model),
   ];
   const referenceVideoUrls = [
     ...nonEmptyValues(action.referenceVideoUrls),
@@ -504,11 +515,11 @@ async function generateVideoWithVisualProvider(
   ];
   const firstFrameImageUrls = [
     ...nonEmptyValues(action.firstFrameImageUrls),
-    ...await localImagePathsToDataUrls(action.firstFrameImagePaths, context),
+    ...await localImagePathsToProviderUrls(action.firstFrameImagePaths, context, videoConfig.provider, model),
   ];
   const lastFrameImageUrls = [
     ...nonEmptyValues(action.lastFrameImageUrls),
-    ...await localImagePathsToDataUrls(action.lastFrameImagePaths, context),
+    ...await localImagePathsToProviderUrls(action.lastFrameImagePaths, context, videoConfig.provider, model),
   ];
   const directed = buildDirectedVideoPrompt({
     prompt: action.prompt,
