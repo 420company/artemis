@@ -37,6 +37,16 @@ async function main(): Promise<void> {
   assert.equal(afterDuration.handled, true, 'after total duration confirmation Saga should continue to reference collection');
   assert.match(afterDuration.reply, /Target total duration: 20s|目标总时长：20 秒/, 'duration confirmation should be treated as total duration, not per-segment duration');
 
+  const shortDirectorNote = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '剧情你来创造。',
+  });
+  assert.equal(shortDirectorNote.handled, true, 'short director/story directive should remain in Saga reference collection');
+  assert.match(shortDirectorNote.reply, /剧本段 1|1 script segments/, 'short director/story directive should be counted as a script segment');
+
   const pastedLog = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-paste`,

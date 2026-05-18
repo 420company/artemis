@@ -86,6 +86,7 @@ const CANCEL_RE = /^(?:取消|算了|停止|不要了|cancel|stop)$/i;
 const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok|yes|y|sure|default)$/i;
 const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
 const ABSTRACT_RE = /^(?:无主角|纯视觉|纯风景|抽象视觉|abstract|no lead|no character|没有主角)$/i;
+const STORY_DIRECTIVE_RE = /(?:剧情|剧本|分镜|故事|镜头|场景|情节|你来创造|你来安排|你来写|自由发挥|按.*(?:拍|生成)|create the story|write the story|story|script|shot|scene)/i;
 const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发送分镜|storyboard|storyboard image|shot board)$/i;
 
 function normalizeKey(input: SagaWorkflowInput): string {
@@ -342,7 +343,10 @@ function maybeAccumulateStory(state: SagaWorkflowState, text: string): boolean {
   const narrative = stripRefTokens(text);
   // Threshold: ~30 chars of non-ref text. This catches a script paragraph but
   // skips short captions like "这是主角" which still go to referenceNotes.
-  if (narrative.length < 30) return false;
+  // However, short turns such as "剧情你来创造" are substantive generation
+  // direction and must be counted as script/director notes instead of being
+  // hidden only in referenceNotes.
+  if (narrative.length < 30 && !STORY_DIRECTIVE_RE.test(narrative)) return false;
   const existing = new Set(state.accumulatedStory.map((entry) => entry.trim()));
   const candidate = compacted;
   if (existing.has(candidate)) return false;
