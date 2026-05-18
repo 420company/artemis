@@ -258,7 +258,7 @@ export class CustomProvider implements VisualProvider {
           ratio,
           duration: durationNum,
           prompt_extend: (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false,
-          watermark: (videoConfig.defaultParams as Record<string, unknown>).watermark !== false,
+          watermark: params.watermark !== false,
         },
       }
 
@@ -458,7 +458,7 @@ export class CustomProvider implements VisualProvider {
         resolution: videoConfig.defaultParams.resolution || '720p',
         ratio,
         generate_audio: params.generateAudio === true && /^dreamina-seedance-2/i.test(model.trim()),
-        watermark: (videoConfig.defaultParams as Record<string, unknown>).watermark === true,
+        watermark: params.watermark === true,
       }
 
       const createRes = await fetch(`${baseUrl}/videos/generations`, {
