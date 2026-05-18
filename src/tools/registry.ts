@@ -111,7 +111,9 @@ function validatePositiveInteger(
     return;
   }
 
-  if (!Number.isInteger(value) || Number(value) <= 0) {
+  // Accept native number or strictly numeric string (tool call framework may stringify).
+  const num = typeof value === 'string' && /^[1-9]\d*$/.test(value.trim()) ? Number(value.trim()) : value;
+  if (!Number.isInteger(num) || Number(num) <= 0) {
     errors.push(`${label} must be a positive integer.`);
   }
 }
@@ -127,7 +129,8 @@ function validateIntegerRange(
     return;
   }
 
-  if (!Number.isInteger(value) || Number(value) < min || Number(value) > max) {
+  const num = typeof value === 'string' && /^-?\d+$/.test(value.trim()) ? Number(value.trim()) : value;
+  if (!Number.isInteger(num) || Number(num) < min || Number(num) > max) {
     errors.push(`${label} must be an integer between ${min} and ${max}.`);
   }
 }
@@ -141,9 +144,12 @@ function validateBooleanValue(
     return;
   }
 
-  if (typeof value !== 'boolean') {
-    errors.push(`${label} must be a boolean.`);
-  }
+  // Accept native boolean or strict boolean-like values (tool call framework may stringify).
+  if (typeof value === 'boolean') return;
+  if (typeof value === 'string' && /^(true|false|0|1)$/i.test(value.trim())) return;
+  if (typeof value === 'number' && (value === 0 || value === 1)) return;
+
+  errors.push(`${label} must be a boolean.`);
 }
 
 function validateEnumString<TValue extends string>(
@@ -170,7 +176,12 @@ function validateStringArray(
     return;
   }
 
-  if (!Array.isArray(value) || value.some((entry) => !isNonEmptyString(entry))) {
+  // Accept native array or JSON-stringified array (tool call framework may stringify)
+  let arr = value;
+  if (typeof value === 'string') {
+    try { arr = JSON.parse(value); } catch { /* not valid JSON */ }
+  }
+  if (!Array.isArray(arr) || arr.some((entry) => !isNonEmptyString(entry))) {
     errors.push(`${label} must be an array of non-empty strings.`);
   }
 }

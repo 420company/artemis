@@ -55,7 +55,9 @@ export interface DreamEntry {
   tokenCost?: { input: number; output: number }
 }
 
-const DREAMS_ROOT = path.join(homedir(), '.artemis', 'dreams')
+const DREAMS_ROOT = process.env.ARTEMIS_DREAMS_ROOT && process.env.ARTEMIS_DREAMS_ROOT.trim().length > 0
+  ? process.env.ARTEMIS_DREAMS_ROOT
+  : path.join(homedir(), '.artemis', 'dreams')
 const CONFIG_FILE = path.join(DREAMS_ROOT, 'config.json')
 const INDEX_FILE = path.join(DREAMS_ROOT, 'index.json')
 const LEARNED_PROMPT_FILE = path.join(DREAMS_ROOT, 'learned-prompt.md')
