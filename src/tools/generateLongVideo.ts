@@ -427,7 +427,7 @@ function mergeStringArrays(...values: Array<string[] | undefined>): string[] {
 
 function extractSceneAnchorsFromStory(story: string): string[] {
   const anchors: string[] = [];
-  const sceneMatch = story.match(/(?:场景|地点|环境|setting|location)\s*[:：]\s*([^\n\[]+)/i);
+  const sceneMatch = story.match(/(?:场景|地点|环境|setting|location)\s*[:：]\s*([^\n[]+)/i);
   if (sceneMatch?.[1]) {
     anchors.push(sceneMatch[1].replace(/\s+/g, ' ').trim().slice(0, 160));
   }

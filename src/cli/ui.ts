@@ -229,7 +229,7 @@ function applyInlineStyles(line: string): string {
     // __bold__ — must NOT be adjacent to path / identifier characters,
     // otherwise filenames like `__init__.py` or path fragments like
     // `2026-05-19__draft__.md` get false-matched as bold.
-    .replace(/(?<![A-Za-z0-9/.\-])__(.+?)__(?![A-Za-z0-9/.\-])/g, (_, t) => color(t, ANSI.bold + ANSI.white))
+    .replace(/(?<![A-Za-z0-9/.-])__(.+?)__(?![A-Za-z0-9/.-])/g, (_, t) => color(t, ANSI.bold + ANSI.white))
     // *italic* — `*` never appears in paths so no boundary protection.
     .replace(/\*([^*]+?)\*/g, (_, t) => color(t, ANSI.italic))
     // _italic_ — REQUIRES word-boundary on both sides. Without this, filenames
@@ -237,7 +237,7 @@ function applyInlineStyles(line: string): string {
     // visible `3mdawn23m_0918.md` artifacts on terminals that don't fully
     // render ANSI italic. The lookbehind/ahead reject any path/identifier
     // character (letters, digits, slash, dot, hyphen) adjacent to the `_`.
-    .replace(/(?<![A-Za-z0-9/_.\-])_([^_\n]+?)_(?![A-Za-z0-9/_.\-])/g, (_, t) => color(t, ANSI.italic))
+    .replace(/(?<![A-Za-z0-9/_.-])_([^_\n]+?)_(?![A-Za-z0-9/_.-])/g, (_, t) => color(t, ANSI.italic))
     // `inline code` — emphasize with foreground color only; background blocks are visually noisy in chat text.
     .replace(/`([^`]+?)`/g, (_, code) => color(code, ANSI.cyan))
     // ~~strikethrough~~

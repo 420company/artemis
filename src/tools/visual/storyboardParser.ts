@@ -113,7 +113,7 @@ export async function parseStoryboardImageWithVision(options: {
     // their relay actually serves. Filter out image-generation aliases so they
     // don't end up sent to /chat/completions (where they'd 400/503).
     const explicitVision = imageConfigured?.config.image.visionModel?.trim();
-    const visionCandidates = explicitVision && !/image|dall[\-_]?e/i.test(explicitVision)
+    const visionCandidates = explicitVision && !/image|dall[-_]?e/i.test(explicitVision)
       ? [explicitVision]
       : ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'];
     for (const m of visionCandidates) {

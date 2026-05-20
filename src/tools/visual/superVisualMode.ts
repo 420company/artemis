@@ -980,7 +980,7 @@ export async function describeUserImageWithVision(options: {
     // fallback chain. Filter out anything matching image-generation patterns
     // (`*-image-*` or DALL-E variants) since those won't work on /chat/completions.
     const explicit = imageConfigured.config.image.visionModel?.trim();
-    if (explicit && !/image|dall[\-_]?e/i.test(explicit)) {
+    if (explicit && !/image|dall[-_]?e/i.test(explicit)) {
       chatModel = explicit;
     } else {
       visionFallbacks = [...VISION_MODEL_FALLBACKS];
