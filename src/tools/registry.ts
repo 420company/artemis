@@ -493,6 +493,7 @@ function validateGenerateVideoAction(action: any): string[] {
     errors,
   );
   validateBooleanValue(action?.generateAudio, 'generateAudio', errors);
+  validateEnumString(action?.subtitleMode, 'subtitleMode', ['auto', 'always', 'off'] as const, errors);
   validateBooleanValue(action?.watermark, 'watermark', errors);
   validatePositiveInteger(action?.maxPolls, 'maxPolls', errors);
   validatePositiveInteger(action?.pollIntervalMs, 'pollIntervalMs', errors);

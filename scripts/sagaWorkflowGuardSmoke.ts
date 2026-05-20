@@ -83,8 +83,8 @@ async function main(): Promise<void> {
     locale: 'zh',
     text: '开始生成',
   });
-  assert.equal(afterStart.handled, true, 'after materials are done Saga should ask final duration before generating');
-  assert.match(afterStart.reply, /最后确认一下总时长|confirm the total length|确认.*主角|confirm the lead/i, 'Saga may clarify protagonist before final duration');
+  assert.equal(afterStart.handled, true, 'after materials are done Saga should ask subtitle mode or optional protagonist before final duration');
+  assert.match(afterStart.reply, /是否携带字幕|include subtitles|确认.*主角|confirm the lead/i, 'Saga may clarify protagonist before subtitle mode');
 
   const afterOptionalClarification = /确认.*主角|confirm the lead/i.test(afterStart.reply)
     ? await handleSagaLongVideoWorkflow({
@@ -95,8 +95,18 @@ async function main(): Promise<void> {
         text: 'B 梦幻海滩女主角',
       })
     : afterStart;
-  assert.equal(afterOptionalClarification.handled, true, 'after optional protagonist clarification Saga should ask final duration');
-  assert.match(afterOptionalClarification.reply, /最后确认一下总时长|confirm the total length/i, 'duration must be confirmed after script/material collection');
+  assert.equal(afterOptionalClarification.handled, true, 'after optional protagonist clarification Saga should ask subtitle mode');
+  assert.match(afterOptionalClarification.reply, /是否携带字幕|include subtitles/i, 'subtitle mode must be selected before final duration');
+
+  const afterSubtitleMode = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '带字幕',
+  });
+  assert.equal(afterSubtitleMode.handled, true, 'after subtitle mode Saga should ask final duration');
+  assert.match(afterSubtitleMode.reply, /最后确认一下总时长|confirm the total length/i, 'duration must be confirmed after subtitle selection');
 
   const afterFinalDuration = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
@@ -107,6 +117,8 @@ async function main(): Promise<void> {
   });
   assert.equal(afterFinalDuration.handled, false, 'after final duration Saga should emit generate_long_video action');
   assert.equal(afterFinalDuration.action?.totalDuration, 20, 'final duration should be treated as total stitched duration');
+  assert.equal(afterFinalDuration.action?.subtitleMode, 'always', 'subtitle menu choice should be carried into generate_long_video action');
+  assert.match(afterFinalDuration.action?.prompt ?? '', /subtitleMode: "always"/, 'workflow prompt should tell the model to pass subtitleMode');
 
   const scriptedKey = `${key}-scripted`;
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频' });
@@ -123,6 +135,7 @@ async function main(): Promise<void> {
   if (scriptedStart.handled && /确认.*主角|confirm the lead/i.test(scriptedStart.reply)) {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: 'B 旧影院里的女孩' });
   }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '自动' });
   const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '10秒' });
   assert.equal(scriptedFinal.handled, false, 'scripted Saga should emit generate_long_video action');
   assert.equal(scriptedFinal.action?.preserveUserScript, true, 'explicit user script must be preserved through generate_long_video action');
@@ -136,6 +149,7 @@ async function main(): Promise<void> {
   if (cleanStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(cleanStart.reply)) {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: 'X' });
   }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '无字幕' });
   const cleanFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '10秒' });
   assert.equal(cleanFinal.handled, false, 'clean-direct Saga should emit generate_long_video action');
   assert.equal(cleanFinal.action?.cleanDirect, true, 'clean/direct wording should enable cleanDirect mode');

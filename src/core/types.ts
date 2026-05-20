@@ -544,6 +544,7 @@ export type AgentAction =
       lastFrameImageUrls?: string[];
       lastFrameImagePaths?: string[];
       generateAudio?: boolean;
+      subtitleMode?: 'auto' | 'always' | 'off';
       watermark?: boolean;
       maxPolls?: number;
       pollIntervalMs?: number;

@@ -29,6 +29,7 @@ import {
   type NarrativeLibraryEntry,
   type ShotViolation,
 } from './visual/sagaNarrative.js';
+import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import {
   buildContinuityBible,
@@ -816,6 +817,22 @@ export async function executeGenerateLongVideo(
         ? `\n\nReference notes from user: ${referenceNotes.join(' | ')}`
         : '',
     ].join('').trim();
+    const languageNormalized = await normalizeSagaPromptForVideoGeneration({
+      cwd: context.cwd,
+      text: story,
+      enableLlmRewrite: !action.cleanDirect,
+      subtitleMode: action.subtitleMode ?? 'auto',
+    });
+    story = [
+      languageNormalized.generationText,
+      '',
+      '[Original user brief — semantic source only; do not render as separate on-screen text]',
+      languageNormalized.originalText,
+      languageNormalized.dialogueLines.length > 0
+        ? `\n[Dialogue map — exact original text and detected language]\n${JSON.stringify(languageNormalized.dialogueLines, null, 2)}`
+        : '',
+    ].filter(Boolean).join('\n');
+    toolLog(`🌐 Saga Visual Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     const title = deriveVideoTitle(action, story);
     const generatedAt = new Date();
     const localGeneratedAt = formatLocalTimestamp(generatedAt);
