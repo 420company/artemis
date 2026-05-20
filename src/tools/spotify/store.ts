@@ -12,6 +12,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
+import { resolveArtemisHomeDir } from '../../utils/fs.js';
 
 export interface SpotifyAuth {
   accessToken: string;
@@ -36,7 +37,7 @@ export interface SpotifyConfig {
   };
 }
 
-const STORE_PATH = path.join(os.homedir(), '.artemis', 'spotify.json');
+const STORE_PATH = path.join(resolveArtemisHomeDir(), 'spotify.json');
 const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:8888/callback';
 
 /** Default OAuth redirect URI used by Artemis for the local callback server. */

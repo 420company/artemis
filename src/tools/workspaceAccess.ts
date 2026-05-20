@@ -1,12 +1,19 @@
 import path from 'node:path'
 import type { ToolExecutionContext, WorkspaceSwitchRequest } from './types.js'
 import { fromHeimdallVirtualPath } from '../core/heimdall.js'
+import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js'
 import {
   isPathInsideWorkspace,
   resolveWorkspaceCandidatePath,
   resolveWorkspaceForTargetPath,
 } from '../utils/workspaceRoots.js'
 import { resolveInsideRoot } from '../utils/fs.js'
+
+const MEDIA_OUTPUT_TOOLS = new Set([
+  'generate_image',
+  'generate_video',
+  'generate_long_video',
+])
 
 function normalizeToolInputPath(
   inputPath: string,
@@ -46,6 +53,17 @@ export async function ensureWorkspaceForToolCandidate(options: {
 
   if (isPathInsideWorkspace(baseCwd, candidatePath)) {
     return baseCwd
+  }
+
+  // Visual/media generation tools intentionally write large outputs outside
+  // the current code workspace, under the trusted Artemis media library. This
+  // must not trigger an interactive workspace switch prompt: in CLI it can be
+  // declined before generation starts, and in Desktop there may be no prompt UI.
+  // Keep this scoped to generation tools only; ordinary file tools still need
+  // the normal workspace trust gate for paths outside cwd.
+  const artemisMediaRoot = getMediaOutputRoot()
+  if (MEDIA_OUTPUT_TOOLS.has(toolName) && isPathInsideWorkspace(artemisMediaRoot, candidatePath)) {
+    return artemisMediaRoot
   }
 
   const resolution = await resolveWorkspaceForTargetPath(candidatePath, baseCwd)

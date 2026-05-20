@@ -12,12 +12,13 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 
 const SOUL_MAX_BYTES = 4_000
 
 /** Load ~/.artemis/soul.md. Returns empty string if missing or unreadable. */
 export async function loadSoul(): Promise<string> {
-  const soulPath = join(homedir(), '.artemis', 'soul.md')
+  const soulPath = join(resolveArtemisHomeDir(), 'soul.md')
   try {
     const raw = await readFile(soulPath, 'utf8')
     return raw.trim().slice(0, SOUL_MAX_BYTES)

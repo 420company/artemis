@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { access, mkdir, readdir, readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, basename, dirname, resolve, relative, sep, extname, isAbsolute } from 'node:path'
 
@@ -60,8 +61,21 @@ export function ensureNotSensitivePath(absolute: string, inputPath: string): voi
   }
 }
 
+export function resolveArtemisHomeDir(): string {
+  const explicit = process.env.ARTEMIS_HOME?.trim()
+  if (explicit) return resolve(explicit)
+  return join(resolve(homedir()), '.artemis')
+}
+
 export function resolveDataRootDir(cwd: string): string {
   const normalized = resolve(cwd)
+  const explicitHome = process.env.ARTEMIS_HOME?.trim()
+  if (explicitHome) {
+    const root = resolve(explicitHome)
+    if (normalized === root || basename(normalized) === '.artemis') return root
+    const hash = createHash('sha1').update(normalized).digest('hex').slice(0, 16)
+    return join(root, 'workspaces', hash)
+  }
   if (basename(normalized) === '.artemis') return normalized
   const homeDir = resolve(homedir())
   // If cwd is a filesystem/account-container root, use the user's home data

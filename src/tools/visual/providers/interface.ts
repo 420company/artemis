@@ -160,20 +160,20 @@ export const VISUAL_PROVIDERS = [
     supportsImages: true,
     supportsVideos: false,
     defaultModel: {
-      image: 'gemini-1.5-pro',
+      image: 'gemini-3-pro-image-preview',
       video: 'none'
     }
   },
   {
     name: 'google',
     label: 'Google Veo + Gemini Image',
-    description: 'Google Generative AI: Veo 3 视频生成 + Gemini 2.5 Flash Image 图片生成',
+    description: 'Google Generative AI: Veo 3.1 视频生成 + Gemini 3 / Nano Banana 图片生成',
     status: 'stable' as const,
     supportsImages: true,
     supportsVideos: true,
     defaultModel: {
-      image: 'gemini-2.5-flash-image',
-      video: 'veo-3.0-generate-preview'
+      image: 'gemini-3-pro-image-preview',
+      video: 'veo-3.1-generate-preview'
     }
   },
   {

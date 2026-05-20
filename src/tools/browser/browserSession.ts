@@ -19,8 +19,9 @@ import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page } from 'playwright';
+import { resolveArtemisHomeDir } from '../../utils/fs.js';
 
-const PROFILE_DIR = path.join(os.homedir(), '.artemis', 'browser-data');
+const PROFILE_DIR = path.join(resolveArtemisHomeDir(), 'browser-data');
 const TEMP_PROFILE_PREFIX = path.join(os.tmpdir(), 'artemis-browser-');
 const DEFAULT_TIMEOUT_MS = 20_000;
 

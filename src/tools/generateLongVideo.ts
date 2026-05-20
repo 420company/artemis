@@ -3,7 +3,7 @@ import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { AgentAction } from '../core/types.js';
-import { ensureNotSensitivePath } from '../utils/fs.js';
+import { ensureNotSensitivePath, resolveArtemisHomeDir } from '../utils/fs.js';
 import { toolLog, toolWarn } from '../utils/log.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import {
@@ -796,7 +796,7 @@ export async function executeGenerateLongVideo(
     try {
       const { readFileSync, existsSync, unlinkSync } = await import('node:fs');
       const { homedir } = await import('node:os');
-      const sourcePath = path.join(homedir(), '.artemis', 'saga-pending', `${projectId}-source-story.txt`);
+      const sourcePath = path.join(resolveArtemisHomeDir(), 'saga-pending', `${projectId}-source-story.txt`);
       if (existsSync(sourcePath)) {
         const sideStory = readFileSync(sourcePath, 'utf8');
         if (sideStory && sideStory.length > resolvedSourceStory.length) {

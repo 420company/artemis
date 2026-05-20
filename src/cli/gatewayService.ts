@@ -17,7 +17,7 @@ import { WeChatStore } from '../wechat/store.js'
 import type { BridgeTerminalEvent } from './bridgeNotify.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import { DEFAULT_AGENT_MAX_TURNS } from './branding.js'
-import { resolveDataRootDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 
 const LAUNCH_AGENT_LABEL = 'com.artemis.gateway'
 const LAUNCH_AGENT_FILE = `${LAUNCH_AGENT_LABEL}.plist`
@@ -42,7 +42,7 @@ function t(locale: UiLocale, zh: string, en: string): string {
 }
 
 function dataDir(): string {
-  return path.join(os.homedir(), '.artemis')
+  return resolveArtemisHomeDir()
 }
 
 function normalizeGatewayCwd(cwd: string): string {
@@ -50,7 +50,7 @@ function normalizeGatewayCwd(cwd: string): string {
 }
 
 function homeDataRoot(): string {
-  return path.join(os.homedir(), '.artemis')
+  return resolveArtemisHomeDir()
 }
 
 function uniquePaths(paths: string[]): string[] {

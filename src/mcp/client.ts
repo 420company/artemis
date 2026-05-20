@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_NAME, APP_VERSION } from '../appMeta.js';
+import { resolveArtemisHomeDir } from '../utils/fs.js';
 import type { SessionMessage } from '../core/types.js';
 import type {
   McpAuthState,
@@ -117,7 +118,7 @@ const CLI_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const CLI_PLUGINS_DIR = path.join(CLI_ROOT, 'plugins');
 // Prefer the user-data install (~/.artemis/mcp-packages) so MCP node_modules survives
 // `npm install -g artemis-code` reinstalls. Falls back to the bundled dir otherwise.
-const USER_MCP_PACKAGES_DIR = path.join(os.homedir(), '.artemis', 'mcp-packages');
+const USER_MCP_PACKAGES_DIR = path.join(resolveArtemisHomeDir(), 'mcp-packages');
 const BUNDLED_MCP_PACKAGES_DIR = path.join(CLI_ROOT, 'mcp-packages');
 const CLI_MCP_PACKAGES_DIR = existsSync(path.join(USER_MCP_PACKAGES_DIR, 'node_modules'))
   ? USER_MCP_PACKAGES_DIR

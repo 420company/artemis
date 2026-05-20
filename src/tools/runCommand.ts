@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { readFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 import type { AgentAction } from '../core/types.js';
-import { invalidateWalkFilesCache, truncate } from '../utils/fs.js';
+import { invalidateWalkFilesCache, resolveArtemisHomeDir, truncate } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import {
   isPathInsideWorkspace,
@@ -30,7 +30,7 @@ function isVercelInvocation(command: string): boolean {
 
 function readSavedVercelToken(): string | null {
   try {
-    const storePath = joinPath(homedir(), '.artemis', 'vercel.json');
+    const storePath = joinPath(resolveArtemisHomeDir(), 'vercel.json');
     const raw = readFileSync(storePath, 'utf8');
     const parsed = JSON.parse(raw) as { token?: unknown };
     return typeof parsed?.token === 'string' && parsed.token.length > 0
@@ -95,10 +95,10 @@ function commandAccessesAllowedArtemisDiagnosticPath(cmd: string): boolean {
   const expanded = expandForInspection(cmd).replace(/\\/g, '/')
   const home = homedir().replace(/\\/g, '/')
   const allowed = [
-    `${home}/.artemis/dreams`,
-    `${home}/.artemis/gateway.log`,
-    `${home}/.artemis/gateway.launchd.log`,
-    `${home}/.artemis/gateway.launchd.err.log`,
+    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/dreams`,
+    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.log`,
+    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.launchd.log`,
+    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.launchd.err.log`,
   ]
   return allowed.some(path => expanded.includes(path))
 }

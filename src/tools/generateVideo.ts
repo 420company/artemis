@@ -20,6 +20,7 @@ import {
   shouldPromoteBytePlusVideoModel,
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
+import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
 import { normalizeVideoDurationForProvider } from './visual/videoParams.js';
 import {
   buildVisualSetupRequiredMessage,
@@ -531,13 +532,25 @@ async function generateVideoWithVisualProvider(
   // generic tasteful imagery. Skip the Director and pass the user's prompt
   // verbatim so the provider can render exactly what was asked for.
   const bypassDirector = videoConfig.nsfw === true;
+  const languageNormalized = bypassDirector
+    ? null
+    : await normalizeSagaPromptForVideoGeneration({
+        cwd: context.cwd,
+        text: action.prompt,
+        enableLlmRewrite: true,
+        subtitleMode: 'auto',
+      });
+  const generationPrompt = languageNormalized?.generationText ?? action.prompt;
+  if (languageNormalized) {
+    toolLog(`🌐 Video Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
+  }
   const directed = bypassDirector
     ? {
         directedPrompt: action.prompt,
         providerProfile: 'NSFW provider: Director bypassed, prompt passed verbatim',
       }
     : buildDirectedVideoPrompt({
-        prompt: action.prompt,
+        prompt: generationPrompt,
         provider: videoConfig.provider,
         model,
         duration,

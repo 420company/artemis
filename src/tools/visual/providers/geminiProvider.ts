@@ -24,7 +24,7 @@ export class GeminiProvider implements VisualProvider {
       generationTime: Date.now() - startTime,
       modelInfo: {
         provider: this.name,
-        model: params.model || 'gemini-2.5-flash-image',
+        model: params.model || 'gemini-3-pro-image-preview',
         params: {},
       },
     }

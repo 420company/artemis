@@ -19,9 +19,9 @@ import { promises as fs, readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import type { UiLocale } from './locale.js'
 import { pickLocale } from './locale.js'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 
-const HOME_DIR = os.homedir()
-const STORE_PATH = path.join(HOME_DIR, '.artemis', 'vercel.json')
+const STORE_PATH = path.join(resolveArtemisHomeDir(), 'vercel.json')
 
 const A = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',

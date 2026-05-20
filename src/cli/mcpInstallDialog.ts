@@ -1,14 +1,13 @@
 import { emitKeypressEvents } from 'node:readline'
 import { spawn } from 'node:child_process'
 import { createWriteStream, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as https from 'node:https'
 import { pipeline } from 'node:stream/promises'
 import { stringWidth } from '../input/stringWidth.js'
 import type { UiLocale } from './locale.js'
-import { resolveDataRootDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 
 const ESC     = '\x1b'
 const ALT_ON  = `${ESC}[?1049h${ESC}[H${ESC}[2J`
@@ -23,7 +22,7 @@ const WHISPER_MODEL_URL  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve
 const WHISPER_MODEL_MIN_BYTES = 100 * 1024 * 1024
 // Install MCP deps into a user-data directory so they survive `npm install -g` reinstalls
 // of artemis-code (which would otherwise wipe out the bundled mcp-packages/node_modules).
-export const MCP_INSTALL_DIR = path.join(homedir(), '.artemis', 'mcp-packages')
+export const MCP_INSTALL_DIR = path.join(resolveArtemisHomeDir(), 'mcp-packages')
 
 function readJsonFile<T = unknown>(filePath: string): T | undefined {
   try {
@@ -47,7 +46,7 @@ function whisperModelPath(cwd: string): string {
 }
 
 function globalWhisperModelPath(): string {
-  return path.join(homedir(), '.artemis', 'models', WHISPER_MODEL_NAME)
+  return path.join(resolveArtemisHomeDir(), 'models', WHISPER_MODEL_NAME)
 }
 
 function candidateWhisperModelPaths(cwd: string): string[] {

@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
 import path from 'node:path'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 
 export type SoulLocale = 'zh-CN' | 'en'
 export type SoulMode = 'quick' | 'standard' | 'deep'
@@ -38,7 +38,7 @@ export interface SoulProfile {
   traitsEn: string[]
 }
 
-const SOUL_ROOT = path.join(homedir(), '.artemis')
+const SOUL_ROOT = resolveArtemisHomeDir()
 const SOUL_FILE = path.join(SOUL_ROOT, 'soul.md')
 const SOUL_ONBOARDING_STATE_FILE = path.join(SOUL_ROOT, 'soul-onboarding.json')
 

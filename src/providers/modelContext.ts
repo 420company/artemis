@@ -70,6 +70,8 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'gpt-oss-120b-250805': 128_000,
 
   // Google Gemini
+  'gemini-3.5': 2_000_000,
+  'gemini-3.5-flash': 1_000_000,
   'gemini-3.1-pro-preview': 2_000_000,
   'gemini-3-pro-preview': 2_000_000,
   'gemini-3-flash-preview': 1_000_000,
@@ -161,6 +163,7 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('gpt-oss')) return 128_000
 
   // ── Google Gemini ────────────────────────────────────────────────────────
+  if (m.includes('gemini-3.5') && !m.includes('flash')) return 2_000_000
   if (m.includes('gemini-3.1-pro') || m.includes('gemini-3-pro-preview')) return 2_000_000
   if (m.includes('gemini-3') || m.includes('gemini-2')) return 1_000_000
   if (m.includes('gemini-1.5')) return 1_000_000

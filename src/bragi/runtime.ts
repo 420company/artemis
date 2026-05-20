@@ -21,7 +21,7 @@ import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
 import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js'
-import { ensureDir, resolveDataRootDir, truncate } from '../utils/fs.js'
+import { ensureDir, resolveArtemisHomeDir, resolveDataRootDir, truncate } from '../utils/fs.js'
 import stripAnsi from 'strip-ansi'
 import {
   detectExplicitWorkflowIntent,
@@ -1181,7 +1181,7 @@ function normalizeLockToken(input: string): string {
 
 function bridgeLockPath(cwd: string, platform: BridgePlatform, identity?: string): string {
   if (identity) {
-    return path.join(homedir(), '.artemis', 'bridge-locks', `bridge-lock-${platform}-${normalizeLockToken(identity)}.json`)
+    return path.join(resolveArtemisHomeDir(), 'bridge-locks', `bridge-lock-${platform}-${normalizeLockToken(identity)}.json`)
   }
   return path.join(resolveDataRootDir(cwd), `bridge-lock-${platform}.json`)
 }

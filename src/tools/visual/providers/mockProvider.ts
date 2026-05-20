@@ -1,3 +1,4 @@
+import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
 
@@ -25,7 +26,7 @@ export class MockProvider implements VisualProvider {
       const path = await import('path')
       const os = await import('os')
       
-      const tempDir = path.join(os.homedir(), '.artemis', 'assets', 'generated')
+      const tempDir = path.join(resolveArtemisHomeDir(), 'assets', 'generated')
       await fs.mkdir(tempDir, { recursive: true })
       
       const timestamp = Date.now()
@@ -67,7 +68,7 @@ export class MockProvider implements VisualProvider {
       const path = await import('path')
       const os = await import('os')
       
-      const tempDir = path.join(os.homedir(), '.artemis', 'assets', 'generated')
+      const tempDir = path.join(resolveArtemisHomeDir(), 'assets', 'generated')
       await fs.mkdir(tempDir, { recursive: true })
       
       const timestamp = Date.now()

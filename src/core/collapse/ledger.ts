@@ -14,6 +14,7 @@ import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { resolveArtemisHomeDir } from '../../utils/fs.js'
 // SessionMessage type not directly used here but related modules re-export it
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -85,11 +86,7 @@ export interface CollapseLedger {
 
 // ─── Persistence ────────────────────────────────────────────────────
 
-const LEDGER_DIR = path.join(
-  process.env.HOME || process.cwd(),
-  '.artemis',
-  'collapse-ledger',
-)
+const LEDGER_DIR = path.join(resolveArtemisHomeDir(), 'collapse-ledger')
 
 function sessionIdToSafeFileName(sessionId: string): string {
   // Hash the sessionId to ensure it's a safe file name without path separators

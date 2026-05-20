@@ -16,8 +16,8 @@
  *     └── 2026-05-02_dawn.mp4 — optional video renders
  */
 
-import { homedir } from 'node:os'
 import path from 'node:path'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 import { mkdir, readFile, writeFile, readdir, unlink, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
@@ -57,7 +57,7 @@ export interface DreamEntry {
 
 const DREAMS_ROOT = process.env.ARTEMIS_DREAMS_ROOT && process.env.ARTEMIS_DREAMS_ROOT.trim().length > 0
   ? process.env.ARTEMIS_DREAMS_ROOT
-  : path.join(homedir(), '.artemis', 'dreams')
+  : path.join(resolveArtemisHomeDir(), 'dreams')
 const CONFIG_FILE = path.join(DREAMS_ROOT, 'config.json')
 const INDEX_FILE = path.join(DREAMS_ROOT, 'index.json')
 const LEARNED_PROMPT_FILE = path.join(DREAMS_ROOT, 'learned-prompt.md')
@@ -313,7 +313,7 @@ export async function findLatestDreamImage(): Promise<string | null> {
  * arbitrary chat content into the dream LLM call.
  */
 export async function gatherRecentSessionDigest(maxSessions = 8): Promise<string[]> {
-  const sessionsDir = path.join(homedir(), '.artemis', 'sessions')
+  const sessionsDir = path.join(resolveArtemisHomeDir(), 'sessions')
   if (!existsSync(sessionsDir)) return []
   const files = await readdir(sessionsDir).catch(() => [])
   const cutoff = Date.now() - 24 * 60 * 60 * 1000

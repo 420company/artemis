@@ -287,7 +287,7 @@ import stripAnsi from 'strip-ansi'
 import { stringWidth } from '../input/stringWidth.js'
 import { getDirectToolCount } from '../tools/directTools.js'
 import type { WorkspaceSwitchRequest } from '../tools/types.js'
-import { resolveDataRootDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
 import {
   detectVisualGenerationNeed,
@@ -1116,7 +1116,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
       const checkedPaths = [
         path.join(resolveDataRootDir(workspaceRoot), 'providers.json'),
-        path.join(HOME_DIR, '.artemis', 'providers.json'),
+        path.join(resolveArtemisHomeDir(), 'providers.json'),
       ]
       appendSystemPanel(t('视觉素材策略', 'Visual asset policy'), [
         t(
@@ -1372,7 +1372,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // Keep this aligned with utils/fs.ts and tools/runCommand.ts so /dream
     // status/open and AI self-introspection can read the dream scrolls without
     // opening the rest of ~/.artemis.
-    path.join(HOME_DIR, '.artemis', 'dreams'),
+    path.join(resolveArtemisHomeDir(), 'dreams'),
   ].map((entry) => path.resolve(entry))
 
   const normalizeWorkspacePathForCompare = (target: string): string => {
@@ -2756,7 +2756,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     if (isExactSlashCommand(trimmed, '/newborn')) {
       const localDataRoot = resolveDataRootDir(cwd)
-      const globalDataRoot = path.join(HOME_DIR, '.artemis')
+      const globalDataRoot = resolveArtemisHomeDir()
       const filesToWipe = [
         path.join(localDataRoot, 'providers.json'),
         path.join(localDataRoot, 'bragi.json'),

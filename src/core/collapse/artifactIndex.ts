@@ -17,13 +17,9 @@ import { writeFile, readFile, readdir, stat, mkdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { resolveArtemisHomeDir } from '../../utils/fs.js'
 
-const ARTIFACT_BASE_DIR = path.join(
-  process.env.HOME || process.cwd(),
-  '.artemis',
-  'tmp',
-  'tool-artifacts',
-)
+const ARTIFACT_BASE_DIR = path.join(resolveArtemisHomeDir(), 'tmp', 'tool-artifacts')
 
 const TOOL_OUTPUT_INLINE_CHAR_LIMIT = 4_000
 const TOOL_OUTPUT_HEAD_CHARS = 800

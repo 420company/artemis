@@ -9,9 +9,10 @@
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 import { join } from 'node:path'
 
-const PROFILE_PATH = join(homedir(), '.artemis', 'user.md')
+const PROFILE_PATH = join(resolveArtemisHomeDir(), 'user.md')
 const PROFILE_MAX_CHARS = 2_400  // ~600 tokens — keep it lean
 
 export async function loadUserProfile(): Promise<string> {
@@ -24,7 +25,7 @@ export async function loadUserProfile(): Promise<string> {
 }
 
 export async function saveUserProfile(content: string): Promise<void> {
-  await mkdir(join(homedir(), '.artemis'), { recursive: true })
+  await mkdir(resolveArtemisHomeDir(), { recursive: true })
   await writeFile(PROFILE_PATH, content.slice(0, PROFILE_MAX_CHARS).trimEnd() + '\n', 'utf8')
 }
 

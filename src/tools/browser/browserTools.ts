@@ -20,6 +20,7 @@ import os from 'node:os';
 import fsp from 'node:fs/promises';
 import { getActivePage, closeActivePage, describePlaywrightError } from './browserSession.js';
 import type { Page } from 'playwright';
+import { resolveArtemisHomeDir } from '../../utils/fs.js';
 
 export interface ToolResult {
   ok: boolean;
@@ -27,7 +28,7 @@ export interface ToolResult {
   error?: { code: string; message: string };
 }
 
-const SCREENSHOT_DIR = path.join(os.homedir(), '.artemis', 'browser-screenshots');
+const SCREENSHOT_DIR = path.join(resolveArtemisHomeDir(), 'browser-screenshots');
 const MAX_TEXT_OUTPUT = 8000;
 
 function pwError(err: unknown): ToolResult {

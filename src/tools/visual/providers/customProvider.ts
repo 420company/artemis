@@ -1,3 +1,4 @@
+import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import os from 'node:os'
 import path from 'node:path'
 import type { VisualModelConfig } from '../../../providers/types.js'
@@ -35,7 +36,7 @@ type CustomVideoJob = {
   error?: { message?: string }
 }
 
-const OUTPUT_DIR = path.join(os.homedir(), '.artemis', 'assets', 'generated')
+const OUTPUT_DIR = path.join(resolveArtemisHomeDir(), 'assets', 'generated')
 const DEFAULT_POLL_INTERVAL_MS = 10_000
 // 420 polls × 10s = 70 min hard cap per attempt. Empirically, dreamina-seedance
 // processes long (800+ char) NSFW-with-anatomy-constraints prompts in 15-25 min;

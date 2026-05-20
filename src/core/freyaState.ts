@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 export interface FreyaSessionState {
@@ -11,7 +12,7 @@ export interface FreyaSessionState {
 }
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
-const SESSION_SUSPEND_FILE = path.join(os.homedir(), '.artemis', 'session_suspend.json')
+const SESSION_SUSPEND_FILE = path.join(resolveArtemisHomeDir(), 'session_suspend.json')
 
 // ─── FREYA STATE MANAGER ─────────────────────────────────────────────────────
 

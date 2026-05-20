@@ -1,3 +1,4 @@
+import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import os from 'node:os';
 import path from 'node:path';
 import type { VisualModelConfig } from '../../../providers/types.js';
@@ -34,7 +35,7 @@ type OpenAIVideoJob = {
   error?: { message?: string };
 };
 
-const IMAGE_OUTPUT_DIR = path.join(os.homedir(), '.artemis', 'assets', 'generated');
+const IMAGE_OUTPUT_DIR = path.join(resolveArtemisHomeDir(), 'assets', 'generated');
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_MAX_POLLS = 90;
 

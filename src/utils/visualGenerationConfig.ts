@@ -209,11 +209,11 @@ export function defaultVisualModelForProvider(
         ? 'stable-diffusion-xl'
         : 'stable-video-diffusion';
     case 'gemini':
-      return assetKind === 'image' ? 'gemini-2.5-flash-image' : 'none';
+      return assetKind === 'image' ? 'gemini-3-pro-image-preview' : 'none';
     case 'google':
       return assetKind === 'image'
-        ? 'gemini-2.5-flash-image'
-        : 'veo-3.0-generate-preview';
+        ? 'gemini-3-pro-image-preview'
+        : 'veo-3.1-generate-preview';
     case 'grok':
       return assetKind === 'image' ? 'grok-v1' : 'grok-video';
     case 'mock':

@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
 import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
+import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveVideoModelLimits } from './videoModelLimits.js';
 import { resolveVideoModelCapabilities } from './videoCapabilities.js';
 import type { ImageAttachment } from '../../providers/types.js';
@@ -92,6 +93,7 @@ type SagaWorkflowState = {
   prefilledDuration?: number;
   targetDuration?: number;
   subtitleMode?: SubtitleMode;
+  aiScreenwriterMode?: boolean;
   // ── Three-step menu state ─────────────────────────────────────────────────
   // identitySource: how the character identity enters the pipeline (user picks
   //   via the three-step menu after "开始生成"). When unset, downstream falls
@@ -116,6 +118,7 @@ const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok
 const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
 const ABSTRACT_RE = /^(?:无主角|纯视觉|纯风景|抽象视觉|abstract|no lead|no character|没有主角)$/i;
 const STORY_DIRECTIVE_RE = /(?:剧情|剧本|分镜|故事|镜头|场景|情节|你来创造|你来安排|你来写|自由发挥|按.*(?:拍|生成)|create the story|write the story|story|script|shot|scene)/i;
+const STORY_ENHANCE_RE = /^(?:剧情增强|增强剧情|story\s*enhance|enhance\s*story)$/i;
 const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发送分镜|storyboard|storyboard image|shot board)$/i;
 
 
@@ -395,6 +398,35 @@ function stripRefTokens(text: string): string {
   return compact(stripped);
 }
 
+function imageReferenceLabel(state: SagaWorkflowState, ref: string, offset: number): string {
+  const existingCount = state.referenceImagePaths.length + state.referenceImageUrls.length;
+  const number = existingCount + offset + 1;
+  const kind = state.identitySource === 'direct_image'
+    ? 'direct video material image'
+    : state.identitySource === 'turnaround'
+      ? 'turnaround / identity image'
+      : state.identitySource === 'character_image'
+        ? 'character source image'
+        : 'reference image';
+  return `Image reference ${number} (${kind}): ${ref}`;
+}
+
+function maybeRememberImageReferenceNotes(state: SagaWorkflowState, refs: ExtractedReferences, text: string): boolean {
+  const imageRefs = [...refs.imagePaths, ...refs.imageUrls];
+  if (imageRefs.length === 0) return false;
+  const caption = stripRefTokens(text);
+  if (!caption || START_RE.test(caption) || CANCEL_RE.test(caption) || CONFIRM_DEFAULT_RE.test(caption) || STORY_ENHANCE_RE.test(caption) || STORYBOARD_RE.test(caption)) {
+    return false;
+  }
+  const notes = imageRefs.map((ref, idx) => {
+    const label = imageReferenceLabel(state, ref, idx);
+    return `${label}. User caption/instruction for this exact image: ${caption}`;
+  });
+  state.referenceNotes = unique([...state.referenceNotes, ...notes]).slice(-16);
+  state.updatedAt = Date.now();
+  return true;
+}
+
 function maybeAccumulateStory(state: SagaWorkflowState, text: string): boolean {
   const compacted = compact(text);
   if (!compacted) return false;
@@ -454,6 +486,7 @@ function buildRefAckMessage(state: SagaWorkflowState): string {
     if (storyCount > 0) lines.push('剧本已归档，生成时会严格按你的版本来。');
     if (storyboardImgs > 0) lines.push('分镜图已归档，生成前会先解析成镜头段落。');
     lines.push('如果下一张图片是完整分镜剧本，请先回复 "分镜图"。');
+    lines.push('如果没有剧本灵感，回复 "剧情增强"，我会基于已锁定身份和素材自动补完整剧情。');
     lines.push('💡 如果是纯风景或纯视觉素材，请回复 "无主角" 或 "纯视觉"。');
     lines.push('可以继续补充，或回复 "开始生成" 进入下一步。');
     return lines.join('\n');
@@ -463,6 +496,7 @@ function buildRefAckMessage(state: SagaWorkflowState): string {
   if (storyCount > 0) lines.push('Script archived — generation will follow your version exactly.');
   if (storyboardImgs > 0) lines.push('Storyboard image archived — it will be parsed into shot segments before generation.');
   lines.push('If your next image is a complete storyboard script, reply "storyboard" first.');
+  lines.push('If you have no script idea, reply "story enhance" and I will build a full story from the locked identity/materials.');
   lines.push('💡 Reply "abstract" or "no lead" if this is a pure landscape or visual piece.');
   lines.push('Send more if you like, or reply "start" to proceed.');
   return lines.join('\n');
@@ -534,6 +568,7 @@ function buildRefIntroMessage(state: SagaWorkflowState): string {
       '  · 分镜图：先回复 "分镜图"，再发一张完整分镜剧本图',
       '  · 剧本 / 设定 / 场景描述：直接打字发就行',
       '  · 视频 / 音频参考：发 URL 或本地路径',
+      '  · 没有剧本灵感：回复 "剧情增强"，我会基于已锁定身份和素材补成完整剧情',
       '',
       '补充完回复 "开始生成"；不想加直接回复 "开始生成"；中途想停回复 "取消"。',
     ].join('\n'),
@@ -544,6 +579,7 @@ function buildRefIntroMessage(state: SagaWorkflowState): string {
       '  · Storyboard: reply "storyboard" first, then send the storyboard image',
       '  · Script / setting / scene description: just type it',
       '  · Video / audio reference: send a URL or local path',
+      '  · No script idea: reply "story enhance" and I will expand the locked identity/materials into a full story',
       '',
       'Reply "start" when done (or right now if you don\'t want extras). Reply "cancel" to stop.',
     ].join('\n'),
@@ -712,14 +748,36 @@ function buildDirectImageUploadMessage(state: SagaWorkflowState): string {
     zh: [
       '📤 请发送你想用作视频素材的图片。',
       '图片会直接作为视频模型的参考帧，跳过三视图生成。',
+      '建议每次只发一张图，并在同条消息写清楚这张图的用途 / 出现时机 / 剧情作用；我会把每张图和它的文字说明配对归档。',
       '发完后回复 "开始生成" 或 "完成"。',
     ].join('\n'),
     en: [
       '📤 Please send the image(s) you want to use as video reference frames.',
       'They will be passed directly to the video model, bypassing turnaround generation.',
+      'Best practice: send one image per message, with that image\'s purpose / timing / story role in the same message; I will archive each image with its paired caption.',
       'Reply "start" or "done" when finished.',
     ].join('\n'),
   })
+}
+
+function buildDirectImageAckMessage(state: SagaWorkflowState, pairedCaption: boolean): string {
+  const count = state.referenceImagePaths.length + state.referenceImageUrls.length;
+  return pickLocale(state.locale, {
+    zh: [
+      `已收到 ${count} 张视频素材图。`,
+      pairedCaption
+        ? '这张图的同条文字说明已配对归档，会作为它的用途 / 出现时机 / 剧情作用进入后续分析。'
+        : '如果这张图有特定用途 / 出现时机 / 剧情作用，可以继续补一句说明；建议后续每次一张图并同条写说明。',
+      '可以继续发下一张图，或回复 "完成" / "开始生成" 进入下一步。',
+    ].join('\n'),
+    en: [
+      `Got ${count} direct video material image(s).`,
+      pairedCaption
+        ? 'The text sent with this image has been paired and archived as its purpose / timing / story role for later analysis.'
+        : 'If this image has a specific purpose / timing / story role, you can add one note; best practice is one image per message with its caption in the same message.',
+      'Send the next image, or reply "done" / "start" to continue.',
+    ].join('\n'),
+  });
 }
 
 function buildProtagonistAskMessage(state: SagaWorkflowState): string {
@@ -850,16 +908,26 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   const ratio = extractRatio(fullStory) ?? '16:9';
   const projectId = `saga-${Date.now()}`;
   const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
-  const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated);
+  const aiScreenwriterSeed = state.aiScreenwriterMode === true;
+  const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated) && !aiScreenwriterSeed;
   const cleanDirect = wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
-  const userScriptBlock = sanitizedAccumulated.length > 0
-    ? [
+  const creativeSeedSegments = sanitizedAccumulated.length > 0 ? sanitizedAccumulated : [fullStory].filter(Boolean);
+  const userScriptBlock = (sanitizedAccumulated.length > 0 || aiScreenwriterSeed)
+    ? (aiScreenwriterSeed
+      ? [
+        '',
+        '[USER CREATIVE SEED — AI SCREENWRITER MODE]',
+        'The user gave partial inspiration and explicitly wants AI to act as screenwriter/director. Treat these lines as anchors and constraints, NOT as a finished authoritative script. Create a coherent cinematic plot with setup, escalation, payoff, shot-ready actions, and continuity. Preserve every concrete user anchor, but invent missing connective tissue, scene beats, emotions, and visual actions.',
+        ...creativeSeedSegments.map((segment, idx) => `--- Creative seed ${idx + 1} ---\n${segment}`),
+        '',
+      ].join('\n')
+      : [
         '',
         '[USER-SUPPLIED SCRIPT — AUTHORITATIVE]',
         'The user provided the following story text. Use it AS-IS as the controlling narrative; do not invent or substitute a different story. Distribute it across shots so the storyBeats follow this script faithfully:',
         ...sanitizedAccumulated.map((segment, idx) => `--- Story segment ${idx + 1} ---\n${segment}`),
         '',
-      ].join('\n')
+      ].join('\n'))
     : '';
   const narrativeBlock = state.narrative
     ? [
@@ -910,6 +978,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     'generateAudio: true',
     `subtitleMode: ${JSON.stringify(state.subtitleMode ?? 'auto')}`,
     preserveUserScript ? 'preserveUserScript: true' : '',
+    aiScreenwriterSeed ? 'aiScreenwriterMode: true' : '',
     cleanDirect ? 'cleanDirect: true' : '',
   ];
 
@@ -927,6 +996,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     'Before calling the tool, act as the Saga producer with cinematic-director discipline:',
     '0. USER REFERENCE IMAGE RULE — If the user supplied an image and described it as a character/person/form/avatar/image/形象/角色/人物, treat that image as the GLOBAL CHARACTER IDENTITY reference, not merely as a first-frame scene. Extract the subject identity from the image and carry it through every shot. Do not replace the subject with unrelated real people.',
     '1. CHARACTER IDENTITY LOCK — Character/person consistency is a GLOBAL HARD RULE. If a person, character, mascot, user-provided new image, or recurring subject appears in this long video, lock their face, age, ethnicity/species, build, hair, distinguishing features, silhouette, and wardrobe/material cues across every shot unless the user explicitly asks for transformation or multiple different identities.',
+    aiScreenwriterSeed ? '1a. AI SCREENWRITER MODE — The user explicitly asked Artemis/AI to create the story from partial inspiration. Expand sparse notes into a complete cinematic plot with clear beginning, development, climax/payoff, and shot-level visible action. Preserve concrete anchors; do not treat the seed as a finished script.' : '',
     '1b. INTENT-AWARE NARRATIVE EXPANSION — You MUST prioritize user-specified anchors (scene changes, wardrobe, specific events). If the user provided script segments, use them as hard visual anchors. If the user is silent about a duration, you are ENCOURAGED to "hallucinate" and expand the story logically, but do NOT execute unauthorized teleportation (scene jumps) unless it serves a thematic or specified purpose. Your "imagination" should fill the non-specified gaps (background activity, physics, secondary actions) while respecting the primary scene continuity established by the user.',
     '2. CONTINUITY MODE — Saga auto-selects strong-vision (image-ref capable) vs text-only based on the configured model. You do not configure this.',
     preserveUserScript
@@ -1008,7 +1078,7 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
   // checks this file first and uses its content as the authoritative story,
   // so a multi-KB user script always round-trips intact.
   try {
-    const dir = path.join(os.homedir(), '.artemis', 'saga-pending');
+    const dir = path.join(resolveArtemisHomeDir(), 'saga-pending');
     mkdirSync(dir, { recursive: true });
     const sourcePath = path.join(dir, `${projectId}-source-story.txt`);
     writeFileSync(sourcePath, fullStory, 'utf8');
@@ -1129,8 +1199,21 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
     if (state.stage === 'collecting_refs') {
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
+
+      // Explicit menu command only. Handle before remembering notes/story so
+      // the control phrase never becomes part of the final generation prompt.
+      if (STORY_ENHANCE_RE.test(text)) {
+        state.aiScreenwriterMode = true;
+        state.updatedAt = Date.now();
+        return { handled: true, reply: pickLocale(state.locale, {
+          zh: '已开启「剧情增强」。我会把已锁定身份、素材、参考说明当作创作锚点，自动补完整剧情。你还可以继续补充一句风格/场景；如果不补，直接回复 "开始生成"。',
+          en: 'Story Enhance enabled. I will use the locked identity, materials, and reference notes as creative anchors and expand them into a complete story. Add one more style/scene note if you want, or reply "start" now.',
+        }) };
+      }
+
+      const rememberedImageNote = maybeRememberImageReferenceNotes(state, refs, text);
       mergeRefs(state, refs);
-      maybeRememberReferenceNote(state, text);
+      if (!rememberedImageNote) maybeRememberReferenceNote(state, text);
       maybeAccumulateStory(state, text);
 
       if (STORYBOARD_RE.test(text)) {
@@ -1284,6 +1367,9 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       // bug fix: missing classifyReferences call made "完成"/"开始生成" loop
       // forever because no image ever landed in state.referenceImage*.
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
+      const pairedDirectImageCaption = state.identitySource === 'direct_image'
+        ? maybeRememberImageReferenceNotes(state, refs, text)
+        : false;
       mergeRefs(state, refs);
       if (START_RE.test(text) || DONE_RE.test(text)) {
         if (!hasCollectedAnyImage(state)) {
@@ -1299,6 +1385,9 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       }
       state.updatedAt = Date.now();
       if (hasCollectedAnyImage(state)) {
+        if (state.identitySource === 'direct_image') {
+          return { handled: true, reply: buildDirectImageAckMessage(state, pairedDirectImageCaption) };
+        }
         return { handled: true, reply: pickLocale(state.locale, {
           zh: `已收到 ${state.referenceImagePaths.length + state.referenceImageUrls.length} 张图。继续追加或回复 "完成" 进入下一步。`,
           en: `Got ${state.referenceImagePaths.length + state.referenceImageUrls.length} image(s). Keep adding, or reply "done" to continue.`,

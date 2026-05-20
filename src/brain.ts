@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { release as osRelease } from 'node:os';
 import { ProviderStore } from './providers/store.js';
+import { resolveArtemisHomeDir } from './utils/fs.js';
 import { annotateProviderResponse, createTrackedProviderFromConfig, recordProviderProfileTelemetry, } from './providers/telemetry.js';
 import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
@@ -443,12 +444,12 @@ async function loadProvider(cwd: string = process.cwd()) {
     _compressionThresholdOverride = data.setup?.agent.compression.threshold;
     // 2. Fallback: try global ~/.artemis/providers.json
     if (!config) {
-        const { homedir } = await import('node:os');
-        const globalStore = new ProviderStore(homedir());
+        const artemisHome = resolveArtemisHomeDir();
+        const globalStore = new ProviderStore(artemisHome);
         const globalData = await globalStore.load();
         config = globalStore.getDefaultMainProfile(globalData);
         if (config) {
-            telemetryCwd = homedir();
+            telemetryCwd = artemisHome;
             _compressionThresholdOverride = globalData.setup?.agent.compression.threshold;
         }
     }
@@ -525,11 +526,11 @@ async function loadWorkerProvider(cwd: string = providerCwd ?? process.cwd()): P
 
     if (!workerCfg) {
         // Try global
-        const { homedir } = await import('node:os');
-        const globalStore = new ProviderStore(homedir());
+        const artemisHome = resolveArtemisHomeDir();
+        const globalStore = new ProviderStore(artemisHome);
         const globalData = await globalStore.load();
         workerCfg = globalStore.getProfile(globalData, globalData.specialistProfileId);
-        telemetryCwd = homedir();
+        telemetryCwd = artemisHome;
     }
 
     if (!workerCfg) {
@@ -1432,7 +1433,7 @@ type DirectToolContextOutput = {
 const TOOL_CONTEXT_INLINE_CHAR_LIMIT = 12_000;
 const TOOL_CONTEXT_HEAD_CHAR_BUDGET = 4_000;
 const TOOL_CONTEXT_TAIL_CHAR_BUDGET = 3_000;
-const TOOL_ARTIFACT_DIR = path.join(process.env.HOME || process.cwd(), '.artemis', 'tmp', 'tool-results');
+const TOOL_ARTIFACT_DIR = path.join(resolveArtemisHomeDir(), 'tmp', 'tool-results');
 
 function extractJsonEnvelopeOutput(text: string): { parsed: any; output: string } | null {
     try {

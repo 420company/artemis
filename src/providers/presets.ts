@@ -112,6 +112,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     // Endpoint: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     suggestedModels: [
+      'gemini-3.5',
+      'gemini-3.5-flash',
       'gemini-3.1-pro-preview',
       'gemini-3-pro-preview',
       'gemini-3-flash-preview',
@@ -341,7 +343,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     defaultAlias: { zh: 'Gemini OAuth 模型', en: 'Gemini OAuth model' },
     protocol: 'openai',
     baseUrl: 'cloudcode-pa://google',
-    suggestedModels: ['gemini-3.1-pro-preview', 'gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro'],
+    suggestedModels: ['gemini-3.5', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro'],
     notes: {
       zh: ['Google Gemini OAuth + Code Assist，可享免费额度。'],
       en: ['Google Gemini OAuth + Code Assist, free tier available.'],
@@ -360,6 +362,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'gpt-5.1-codex',
       'claude-opus-4.7',
       'claude-sonnet-4.6',
+      'gemini-3.5',
+      'gemini-3.5-flash',
       'gemini-3.1-pro-preview',
       'gemini-3-pro-preview',
       'grok-code-fast-1',

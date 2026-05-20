@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveArtemisHomeDir } from '../utils/fs.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -104,7 +105,7 @@ async function resolveWhisperCppModel(options: LocalSttOptions): Promise<string>
     options.modelPath,
     process.env.ARTEMIS_WHISPER_MODEL,
     path.join(options.cwd ?? process.cwd(), '.artemis', 'models', `ggml-${options.model ?? 'base'}.bin`),
-    path.join(os.homedir(), '.artemis', 'models', `ggml-${options.model ?? 'base'}.bin`),
+    path.join(resolveArtemisHomeDir(), 'models', `ggml-${options.model ?? 'base'}.bin`),
     path.join(os.homedir(), 'models', `ggml-${options.model ?? 'base'}.bin`),
   ].filter((value): value is string => Boolean(value?.trim()));
 

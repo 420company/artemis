@@ -14,8 +14,8 @@
 
 import { copyFile, writeFile, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
 import path from 'node:path'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 import {
   appendDreamIndex,
   appendLearnedPrompt,
@@ -399,7 +399,7 @@ function formatDreamFileName(filePath: string): string {
 }
 
 async function gatherMemoryDigest(): Promise<string[]> {
-  const memoryFile = path.join(homedir(), '.artemis', 'enhanced-memory.json')
+  const memoryFile = path.join(resolveArtemisHomeDir(), 'enhanced-memory.json')
   if (!existsSync(memoryFile)) return []
   try {
     const raw = JSON.parse(await readFile(memoryFile, 'utf8'))

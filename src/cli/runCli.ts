@@ -55,7 +55,7 @@ import { SecurityAuditSystem } from '../core/securityAuditSystem.js'
 import { executeAction } from '../tools/index.js'
 import { getToolDefinition, toolDefs, validateToolRegistryIntegrity } from '../tools/registry.js'
 import { getVisualProviderSupportNote } from '../tools/visual/providers/interface.js'
-import { resolveDataRootDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { splitCommandArgs } from './commandArgs.js'
 
 export async function runCli(argv: string[]): Promise<void> {
@@ -381,7 +381,7 @@ export async function runCli(argv: string[]): Promise<void> {
   // Bridges are managed exclusively by the background gateway daemon.
   // The CLI monitors the daemon's log file in real-time and mirrors
   // inbound/outbound bridge messages to the terminal.
-  const gatewayLogPath = path.join(os.homedir(), '.artemis', 'gateway.log')
+  const gatewayLogPath = path.join(resolveArtemisHomeDir(), 'gateway.log')
   let logWatchAbort: AbortController | undefined
   void (async () => {
     try {

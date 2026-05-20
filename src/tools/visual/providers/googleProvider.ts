@@ -1,8 +1,8 @@
 /**
  * Google Veo (video) + Gemini (image) provider.
  *
- * Image: gemini-2.5-flash-image via :generateContent with responseModalities=["IMAGE"]
- * Video: veo-3.0-generate-preview via :predictLongRunning, then poll operations
+ * Image: gemini-3-pro-image-preview via :generateContent with responseModalities=["IMAGE"]
+ * Video: veo-3.1-generate-preview via :predictLongRunning, then poll operations
  */
 
 import { writeFile } from 'node:fs/promises'
@@ -75,7 +75,7 @@ export class GoogleProvider implements VisualProvider {
 
   async generateImage(params: VisualGenerationParams): Promise<GenerationResult> {
     const startTime = Date.now()
-    const model = params.model || this.config.image.model || 'gemini-2.5-flash-image'
+    const model = params.model || this.config.image.model || 'gemini-3-pro-image-preview'
     try {
       const apiKey = ensureApiKey(this.config, 'image')
       const baseUrl = resolveBaseUrl(this.config, 'image')
@@ -128,7 +128,7 @@ export class GoogleProvider implements VisualProvider {
 
   async generateVideo(params: VideoGenerationParams): Promise<GenerationResult> {
     const startTime = Date.now()
-    const model = params.model || this.config.video.model || 'veo-3.0-generate-preview'
+    const model = params.model || this.config.video.model || 'veo-3.1-generate-preview'
     try {
       const apiKey = ensureApiKey(this.config, 'video')
       const baseUrl = resolveBaseUrl(this.config, 'video')

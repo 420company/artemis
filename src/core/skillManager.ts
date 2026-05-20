@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SkillAdapterManager } from './externalSkillAdapter.js';
+import { resolveArtemisHomeDir } from '../utils/fs.js';
 
 /**
  * Per-skill cache entry. Keyed by absolute skill directory path.
@@ -24,7 +25,7 @@ interface SkillCacheEntry {
   def: any;
 }
 
-const SKILL_CACHE_FILE = path.join(os.homedir(), '.artemis', 'skills.cache.json');
+const SKILL_CACHE_FILE = path.join(resolveArtemisHomeDir(), 'skills.cache.json');
 
 async function loadSkillCache(): Promise<Record<string, SkillCacheEntry>> {
   try {

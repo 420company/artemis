@@ -1,11 +1,10 @@
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 import { BragiStore } from './store.js'
 import { broadcastToBridges, listRegisteredBridges } from '../services/bridgeNotifier.js'
 import type { BridgePlatform } from '../services/bridgeNotifier.js'
 import type { BragiPlatformId } from './types.js'
-import { resolveDataRootDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 
 export type BridgeImagePlatform = BragiPlatformId | 'all'
 export type BridgeMediaKind = 'image' | 'video'
@@ -73,7 +72,7 @@ async function resolveImagePath(inputPath: string, cwd: string): Promise<string>
     : uniq([
         resolve(cwd, trimmed),
         resolve(resolveDataRootDir(cwd), trimmed),
-        resolve(homedir(), '.artemis', trimmed),
+        resolve(resolveArtemisHomeDir(), trimmed),
         resolve(process.cwd(), trimmed),
       ])
 
@@ -95,7 +94,7 @@ async function resolveVideoPath(inputPath: string, cwd: string): Promise<string>
     : uniq([
         resolve(cwd, trimmed),
         resolve(resolveDataRootDir(cwd), trimmed),
-        resolve(homedir(), '.artemis', trimmed),
+        resolve(resolveArtemisHomeDir(), trimmed),
         resolve(process.cwd(), trimmed),
       ])
 
@@ -113,7 +112,7 @@ async function loadWechatStoreCandidates(cwd: string) {
   // native tools run with the active workspace cwd. Try the daemon/global store
   // as a fallback so bridge_send_image can reuse the live WeChat credentials and
   // context tokens without requiring duplicated per-workspace setup.
-  const globalCwd = resolve(homedir(), '.artemis')
+  const globalCwd = resolve(resolveArtemisHomeDir())
   if (resolve(cwd) !== globalCwd) {
     const globalStore = new WeChatStore(globalCwd)
     candidates.push({ store: globalStore, data: await globalStore.load() })
@@ -123,7 +122,7 @@ async function loadWechatStoreCandidates(cwd: string) {
 }
 
 async function loadTelegramFallback(cwd: string) {
-  const globalCwd = resolve(homedir(), '.artemis')
+  const globalCwd = resolve(resolveArtemisHomeDir())
   const candidates = uniq([
     cwd,
     globalCwd,
@@ -147,7 +146,7 @@ async function loadTelegramFallback(cwd: string) {
 }
 
 async function loadDiscordFallbackTargets(cwd: string): Promise<string[]> {
-  const globalCwd = resolve(homedir(), '.artemis')
+  const globalCwd = resolve(resolveArtemisHomeDir())
   const candidates = uniq([
     cwd,
     globalCwd,
@@ -194,7 +193,7 @@ export async function sendBragiImageBroadcast(options: {
 
   const store = new BragiStore(options.cwd)
   const data = await store.load()
-  const globalCwd = resolve(homedir(), '.artemis')
+  const globalCwd = resolve(resolveArtemisHomeDir())
   const globalData = resolve(options.cwd) === globalCwd
     ? undefined
     : await new BragiStore(globalCwd).load().catch(() => undefined)
@@ -373,7 +372,7 @@ export async function sendBragiVideoBroadcast(options: {
 
   const store = new BragiStore(options.cwd)
   const data = await store.load()
-  const globalCwd = resolve(homedir(), '.artemis')
+  const globalCwd = resolve(resolveArtemisHomeDir())
   const globalData = resolve(options.cwd) === globalCwd
     ? undefined
     : await new BragiStore(globalCwd).load().catch(() => undefined)
