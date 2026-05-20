@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -176,13 +177,6 @@ function hasLongVideoIntent(text: string): boolean {
     /\b(?:long[-\s]?form|long|full|complete)\b[\s\S]{0,80}\b(?:video|movie|clip)\b/i,
     /\b(?:generate|create|make|produce|turn)\b[\s\S]{0,80}\b(?:long|full|complete)\b[\s\S]{0,80}\b(?:video|movie|clip)\b/i,
   ].some((pattern) => pattern.test(normalized));
-}
-
-function hasExplicitLongVideoPhrase(text: string): boolean {
-  const normalized = compact(text);
-  if (!normalized) return false;
-  return /(?:长视频|长片|完整视频|完整短片|完整影片|一整条视频|视频解决方案|生产链|剪辑链|剪成|剪辑成片)/i.test(normalized)
-    || /\b(?:long[-\s]?form|long|full|complete)\b[\s\S]{0,80}\b(?:video|movie|clip)\b/i.test(normalized);
 }
 
 function isSagaWorkflowSupportDiscussion(text: string): boolean {
@@ -983,12 +977,10 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
   // checks this file first and uses its content as the authoritative story,
   // so a multi-KB user script always round-trips intact.
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fsSync = require('node:fs');
     const dir = path.join(os.homedir(), '.artemis', 'saga-pending');
-    fsSync.mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     const sourcePath = path.join(dir, `${projectId}-source-story.txt`);
-    fsSync.writeFileSync(sourcePath, fullStory, 'utf8');
+    writeFileSync(sourcePath, fullStory, 'utf8');
   } catch {
     // Best-effort; if the write fails the agent flow still has the (possibly
     // truncated) story field and continues.
