@@ -9,12 +9,13 @@ import { annotateProviderResponse, createTrackedProviderFromConfig, recordProvid
 import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
-import { compressMessages } from './core/contextCompressor.js';
+import { compressMessages, type CompressResult } from './core/contextCompressor.js';
 import {
   recordCollapse,
   getOrCreateLedger,
   buildPostCompactRecoveryMessages,
   createFileStateSnapshot,
+  saveFileArtifact,
   recordCompressionFailure,
   recordCompressionSuccess,
   recordCompressionTriggered,
@@ -1184,7 +1185,7 @@ async function compressSessionMessagesForProvider(
     }
     const currentFocus = extractCurrentUserFocus(conversationMessages)
 
-    let compression: { messages: SessionMessage[]; summaryText?: string; compressed: boolean; tokensBefore: number; tokensAfter: number }
+    let compression: CompressResult
     try {
       compression = await compressMessages(conversationMessages, summarizeOnce, {
         tokenLimit: availableLimit,
@@ -1221,7 +1222,7 @@ async function compressSessionMessagesForProvider(
           tokensAfter: compression.tokensAfter ?? Math.ceil(compression.messages.reduce((s: number, m: SessionMessage) => s + m.content.length / 4, 0)),
           compressedMessageIds: compressedIds,
           summaryText: compression.summaryText,
-          mode: tokensBefore >= 700_000 ? 'full_compact' : 'microcompact',
+          mode: compression.mode === 'full_compact' || compression.summaryText ? 'full_compact' : 'microcompact',
         }
 
         // Capture current file states and tool context for recovery
@@ -1272,7 +1273,12 @@ async function compressSessionMessagesForProvider(
             const { readFile: rf, stat: st } = await import('node:fs/promises')
             const content = await rf(fp, 'utf-8')
             const stats = await st(fp)
-            fileStates.push(createFileStateSnapshot(fp, content, stats.mtimeMs, ref.ts))
+            const snapshot = createFileStateSnapshot(fp, content, stats.mtimeMs, ref.ts)
+            // Persist full readable file content as an artifact so post-compact
+            // recovery can restore actionable snippets for long coding tasks
+            // instead of only the 800-char ledger head.
+            snapshot.artifactPath = await saveFileArtifact(sessionId, fp, content)
+            fileStates.push(snapshot)
           } catch {
             // File may have been deleted or is binary — create a minimal snapshot
             fileStates.push({
@@ -1298,7 +1304,10 @@ async function compressSessionMessagesForProvider(
         })
 
         // ── Post-compact recovery: re-inject critical context ───────────────
-        const ledger = await getOrCreateLedger(sessionId)
+        // Full compaction always gets recovery. Microcompact normally does not,
+        // unless it degraded old read_file outputs into skeletons while an
+        // in-flight action exists; that combination is where losing concrete
+        // file state most often causes "what was I doing?" loops.
         const pendingActionStored = activeSession.getContext('pendingActionIntent') as
           | {
               text: string
@@ -1306,13 +1315,22 @@ async function compressSessionMessagesForProvider(
               lastTool?: { name: string; target?: string; outcome: 'success' | 'failure' | 'pending' }
             }
           | undefined
-        const recoveryMessages = await buildPostCompactRecoveryMessages(ledger, {
-          pendingAction: pendingActionStored,
-        })
+        const shouldInjectRecovery = entry.mode === 'full_compact' || (
+          entry.mode === 'microcompact' &&
+          (compression.readFileSkeletonsExtracted ?? 0) > 0 &&
+          Boolean(pendingActionStored)
+        )
+        if (shouldInjectRecovery) {
+          const ledger = await getOrCreateLedger(sessionId)
+          const recoveryMessages = await buildPostCompactRecoveryMessages(ledger, {
+            pendingAction: pendingActionStored,
+          })
 
-        if (recoveryMessages.length > 0) {
-          compression.messages = [...compression.messages, ...recoveryMessages]
-          onInfo?.(`[恢复] 已注入 ${recoveryMessages.length} 条压缩恢复消息（进行中状态/文件状态/工具）`)
+          if (recoveryMessages.length > 0) {
+            compression.messages = [...compression.messages, ...recoveryMessages]
+            const modeLabel = entry.mode === 'full_compact' ? '压缩' : '微压缩'
+            onInfo?.(`[恢复] 已为${modeLabel}注入 ${recoveryMessages.length} 条恢复消息（进行中状态/文件状态/工具）`)
+          }
         }
 
         // Record success in circuit breaker
@@ -1330,7 +1348,7 @@ async function compressSessionMessagesForProvider(
         })
         updatedBreaker = churnUpdate.state
         if (churnUpdate.churnDetected) {
-          onInfo?.(`[压缩] 检测到鬼打墙（5分钟内 ${updatedBreaker.recentCompressionTimestamps.length} 次压缩、零 Edit 进展），下次触发阈值×${updatedBreaker.thresholdMultiplier.toFixed(2)}`)
+          onInfo?.(`[压缩] 检测到上下文迭代振荡（5分钟内已触发 ${updatedBreaker.recentCompressionTimestamps.length} 次压缩且无实质修改），启动自适应防振荡保护，全压缩阈值已动态上调为原来的 ${updatedBreaker.thresholdMultiplier.toFixed(2)} 倍`)
         }
         sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
       } catch (ledgerError: any) {

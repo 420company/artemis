@@ -39,6 +39,14 @@ import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
 import { compressMessages, getCompressionTriggerTokens, getMicrocompactTriggerTokens } from '../src/core/contextCompressor.js'
+import {
+  buildPostCompactRecoveryMessages,
+  createLedger,
+  createFileStateSnapshot,
+  saveFileArtifact,
+  saveLedger,
+  cleanupLedger,
+} from '../src/core/collapse/index.js'
 import { resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
@@ -1008,6 +1016,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
     cwd: tmpDir,
     text: '帮我生成一段长视频',
     locale: 'zh-CN',
+    forceIntent: true,
   })
   const second = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
@@ -1451,9 +1460,190 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     `trigger=${getCompressionTriggerTokens(1_000_000)}`,
   )
   assert(
-    'context compression: 1M-token models still microcompact tool output at 40K',
-    getMicrocompactTriggerTokens(1_000_000) === 40_000,
+    'context compression: 1M-token models still microcompact tool output at 250K',
+    getMicrocompactTriggerTokens(1_000_000) === 250_000,
     `trigger=${getMicrocompactTriggerTokens(1_000_000)}`,
+  )
+}
+
+{
+  const sessionId = `runtime-smoke-recovery-artifact-${Date.now()}`
+  const filePath = path.join(os.tmpdir(), `artemis-recovery-artifact-${Date.now()}.ts`)
+  const marker = 'RECOVERY_ARTIFACT_MARKER_BEYOND_HEAD_800_CHARS'
+  const content = `${'header filler\n'.repeat(90)}export function recoveredFromArtifact() { return '${marker}' }\n`
+  fs.writeFileSync(filePath, content)
+  const ledger = await createLedger(sessionId)
+  const snapshot = createFileStateSnapshot(filePath, content, Date.now(), Date.now())
+  snapshot.artifactPath = await saveFileArtifact(sessionId, filePath, content)
+  ledger.fileStates = [snapshot]
+  await saveLedger(ledger)
+
+  const recovery = await buildPostCompactRecoveryMessages(ledger, {
+    pendingAction: { text: 'continue editing recovered artifact file', capturedAt: new Date().toISOString() },
+  })
+  assert(
+    'context recovery: file artifact restores actionable content beyond ledger head',
+    recovery.length === 1 &&
+      recovery[0]?.content.includes('recoveredFromArtifact') &&
+      recovery[0]?.content.includes(marker),
+    recovery[0]?.content.slice(0, 1200),
+  )
+
+  fs.rmSync(filePath, { force: true })
+  await cleanupLedger(sessionId)
+}
+
+{
+  const now = new Date().toISOString()
+  const mustKeep = 'USER_CONSTRAINT_DO_NOT_DELETE_TOKEN_8H_LONG_TASK'
+  const messages: SessionMessage[] = []
+  for (let i = 0; i < 80; i += 1) {
+    messages.push({
+      id: `lt-u${i}`,
+      role: 'user',
+      content: i === 7
+        ? `关键用户约束：${mustKeep}。不要改发布流程，不要丢验证结果。`
+        : `long task user checkpoint ${i} ${'constraint '.repeat(400)}`,
+      createdAt: now,
+    })
+    messages.push({
+      id: `lt-a${i}`,
+      role: 'assistant',
+      content: `assistant progress ${i} ${'analysis '.repeat(2_000)}`,
+      createdAt: now,
+    })
+    messages.push({
+      id: `lt-t${i}`,
+      role: 'tool',
+      name: i % 5 === 0 ? 'read_file' : 'run_command',
+      content: JSON.stringify({
+        ok: true,
+        path: `src/long-${i}.ts`,
+        output: i % 5 === 0
+          ? `import x from 'y'\nexport function longTask${i}() { return true }\ntest('keeps assertion ${i}', () => expect(true).toBe(true))\n`.repeat(1_000)
+          : `log ${i}\n`.repeat(5_000),
+      }),
+      createdAt: now,
+    })
+  }
+  messages.push({ id: 'lt-tail', role: 'user', content: 'latest long task tail marker', createdAt: now })
+
+  let promptSeen = ''
+  const result = await compressMessages(messages, async (prompt) => {
+    promptSeen = prompt
+    return `\`\`\`json
+{"goal":"8h long task","current_task":"latest long task tail marker","completed":[],"in_progress":["continue"],"key_decisions":["${mustKeep}"],"relevant_files":["src/long-0.ts"],"modified_files":[],"tools_and_commands":["read_file","run_command"],"validation":["synthetic long task compact"],"risks":["do not forget user constraints"],"next_steps":["continue"],"critical_context":"${mustKeep}"}
+\`\`\``
+  }, {
+    tokenLimit: 140_000,
+    protectTailTokens: 10_000,
+    currentFocus: 'latest long task tail marker',
+  })
+
+  assert(
+    'context compression: full compact summary input preserves old user constraints during long tasks',
+    result.mode === 'full_compact' &&
+      promptSeen.includes(mustKeep) &&
+      result.summaryText?.includes(mustKeep) === true &&
+      result.messages.some(m => m.content.includes('latest long task tail marker')),
+    `mode=${result.mode} promptHas=${promptSeen.includes(mustKeep)} summary=${result.summaryText?.slice(0, 300)}`,
+  )
+}
+
+{
+  const now = new Date().toISOString()
+  const messages: SessionMessage[] = []
+  for (let i = 0; i < 12; i += 1) {
+    messages.push({ id: `fc-u${i}`, role: 'user', content: `user turn ${i} ${'intent '.repeat(20_000)}`, createdAt: now })
+    messages.push({ id: `fc-a${i}`, role: 'assistant', content: `assistant turn ${i} ${'analysis '.repeat(20_000)}`, createdAt: now })
+    messages.push({
+      id: `fc-t${i}`,
+      role: 'tool',
+      name: 'read_file',
+      content: JSON.stringify({
+        ok: true,
+        path: `src/full-${i}.ts`,
+        output: `export function f${i}() { return 1 }\n`.repeat(20_000),
+      }),
+      createdAt: now,
+    })
+  }
+  messages.push({ id: 'fc-tail', role: 'user', content: 'latest full compact task marker', createdAt: now })
+
+  let summarizerCalled = 0
+  const result = await compressMessages(messages, async () => {
+    summarizerCalled += 1
+    return `\`\`\`json
+{"goal":"test full compact","current_task":"latest full compact task marker","completed":[],"in_progress":["continue full compact test"],"key_decisions":[],"relevant_files":["src/full-0.ts"],"modified_files":[],"tools_and_commands":["read_file"],"validation":["synthetic full compact"],"risks":[],"next_steps":["assert result"],"critical_context":"keep marker"}
+\`\`\``
+  }, {
+    tokenLimit: 120_000,
+    protectTailTokens: 8_000,
+    currentFocus: 'latest full compact task marker',
+  })
+
+  assert(
+    'context compression: full compact emits summary mode and preserves recent tail',
+    result.compressed === true &&
+      result.mode === 'full_compact' &&
+      summarizerCalled === 1 &&
+      Boolean(result.summaryText) &&
+      result.tokensAfter < result.tokensBefore &&
+      result.messages.some(m => m.content.includes('[对话摘要]')) &&
+      result.messages.some(m => m.content.includes('latest full compact task marker')),
+    `mode=${result.mode} called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
+  )
+}
+
+{
+  const now = new Date().toISOString()
+  const messages: SessionMessage[] = []
+  messages.push({ id: 'a-read', role: 'assistant', content: 'read old file', createdAt: now })
+  messages.push({
+    id: 't-read',
+    role: 'tool',
+    name: 'read_file',
+    content: JSON.stringify({
+      ok: true,
+      path: 'src/old-context.ts',
+      output: [
+        "import fs from 'node:fs'",
+        'export function keepImportantShape() {',
+        `  return '${'x'.repeat(1_100_000)}'`,
+        '}',
+      ].join('\n'),
+    }),
+    createdAt: now,
+  })
+  messages.push({ id: 'u-tail', role: 'user', content: 'latest task should stay raw', createdAt: now })
+
+  let summarizerCalled = false
+  const result = await compressMessages(messages, async () => {
+    summarizerCalled = true
+    return '[summary]'
+  }, {
+    tokenLimit: 1_000_000,
+    churnMultiplier: 4,
+    protectTailTokens: 1,
+  })
+
+  const readFileMsg = result.messages.find(m => m.id === 't-read')
+  assert(
+    'context compression: churn protection does not delay deterministic microcompact',
+    result.compressed === true &&
+      result.mode === 'microcompact' &&
+      summarizerCalled === false &&
+      result.tokensAfter < result.tokensBefore,
+    `mode=${result.mode} called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
+  )
+  assert(
+    'context compression: old read_file output degrades to file skeleton with metadata',
+    result.readFileSkeletonsExtracted === 1 &&
+      typeof readFileMsg?.content === 'string' &&
+      readFileMsg.content.includes('contextSkeletonExtracted') &&
+      readFileMsg.content.includes('src/old-context.ts') &&
+      readFileMsg.content.includes('keepImportantShape'),
+    readFileMsg?.content.slice(0, 500),
   )
 }
 

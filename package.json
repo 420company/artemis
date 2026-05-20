@@ -47,7 +47,7 @@
     "lint:fix": "node node_modules/eslint/bin/eslint.js 'src/**/*.ts' --fix",
     "test:system": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/systemSmoke.ts",
     "test:prompt": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/promptSmoke.ts",
-    "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/windowsInputSmoke.ts",
+    "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/windowsInputSmoke.ts && npm run test:contextReplay",
     "test:queryEngine": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/queryEngineSmoke.ts",
     "test:features": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/featureSmoke.ts",
     "test:all": "npm run test:system && npm run test:prompt && npm run test:runtime && npm run test:queryEngine && npm run test:features && npm run test:workspaceIntent && npm run test:workflowIntent",
@@ -62,7 +62,8 @@
     "docker:logs": "./docker.sh logs",
     "docker:status": "./docker.sh status",
     "test:workspaceIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workspaceIntentSmoke.ts",
-    "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/superVisualGoldenPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/dreamLocaleSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaExplicitBriefLockSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaPollTimeoutSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/seedanceVideoDirectorSmoke.ts"
+    "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/superVisualGoldenPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/dreamLocaleSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaExplicitBriefLockSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaPollTimeoutSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/seedanceVideoDirectorSmoke.ts",
+    "test:contextReplay": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextLongTaskReplay.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

@@ -153,8 +153,173 @@ function isCompactableToolMessage(msg: SessionMessage): boolean {
   return msg.content.length > 4_000
 }
 
-function pruneToolResults(messages: SessionMessage[], protectedFromIdx: number): SessionMessage[] {
-  return messages.map((msg, i) => {
+function generateFileSkeleton(filePath: string, content: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
+  const lines = content.split('\n')
+  const skeleton: string[] = []
+  const imports: string[] = []
+  const exportsList: string[] = []
+  const anchors: string[] = []
+  const assertionAnchors: string[] = []
+
+  const pushLimited = (arr: string[], value: string, max = 40) => {
+    if (arr.length < max) arr.push(value)
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? ''
+    const line = raw.trim()
+    if (/^import\s/.test(line) || /^from\s+['"]/.test(line) || /^const\s+\w+\s*=\s*require\(/.test(line)) {
+      pushLimited(imports, `  L${i + 1}: ${line.slice(0, 180)}`)
+    }
+    if (/^export\s/.test(line)) {
+      pushLimited(exportsList, `  L${i + 1}: ${line.replace(/\{.*/, '').replace(/=.*/, '').trim().slice(0, 180)}`)
+    }
+    if (/TODO|FIXME|HACK|XXX|IMPORTANT|WARNING|deprecated|@deprecated|throw new Error|process\.exit|assert\(|expect\(|it\(|test\(/i.test(line)) {
+      const target = /assert\(|expect\(|it\(|test\(/.test(line) ? assertionAnchors : anchors
+      pushLimited(target, `  L${i + 1}: ${line.slice(0, 220)}`, 60)
+    }
+  }
+
+  if (['ts', 'tsx', 'js', 'jsx'].includes(ext)) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!.trim()
+      if (
+        line.startsWith('export class ') ||
+        line.startsWith('class ') ||
+        line.startsWith('export interface ') ||
+        line.startsWith('interface ') ||
+        line.startsWith('export type ') ||
+        line.startsWith('type ') ||
+        line.startsWith('export function ') ||
+        line.startsWith('function ') ||
+        line.startsWith('export const ') ||
+        line.startsWith('async function ') ||
+        line.startsWith('export async function ')
+      ) {
+        let display = line
+          .replace(/\{.*/, '')
+          .replace(/=.*/, '')
+          .trim()
+        if (display.endsWith('(')) display += '...'
+        skeleton.push(`  L${i + 1}: ${display}`)
+      } else if (line.match(/^(public|private|protected|async|get|set)?\s+\w+\s*\(.*\)\s*\{?/) && !line.startsWith('if') && !line.startsWith('for') && !line.startsWith('while') && !line.startsWith('switch')) {
+        const display = line.replace(/\{.*/, '').trim()
+        skeleton.push(`    L${i + 1}: ${display}`)
+      }
+    }
+  } else if (ext === 'py') {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!
+      const trimmed = line.trim()
+      if (trimmed.startsWith('class ') || trimmed.startsWith('def ')) {
+        const indent = line.length - line.trimStart().length
+        skeleton.push(`${' '.repeat(indent)}L${i + 1}: ${trimmed.replace(/:.*/, '')}`)
+      }
+    }
+  } else if (ext === 'json') {
+    try {
+      const parsed = JSON.parse(content) as Record<string, unknown>
+      const keys = Object.keys(parsed)
+      skeleton.push(`  Top-level keys: ${keys.slice(0, 30).join(', ')}${keys.length > 30 ? '...' : ''}`)
+    } catch {
+      skeleton.push(`  [Invalid JSON file]`)
+    }
+  } else if (ext === 'md') {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!.trim()
+      if (line.startsWith('#')) {
+        skeleton.push(`  L${i + 1}: ${line}`)
+      }
+    }
+  }
+
+  if (skeleton.length === 0) {
+    if (filePath === 'file' || ext === '') {
+      return `[旧工具输出已清除以节省上下文]`
+    }
+
+    const headLines = lines.slice(0, 15).map((l, idx) => `  L${idx + 1}: ${l.length > 100 ? l.slice(0, 100) + '...' : l}`)
+    const tailLines = lines.length > 30
+      ? lines.slice(-15).map((l, idx) => `  L${lines.length - 15 + idx + 1}: ${l.length > 100 ? l.slice(0, 100) + '...' : l}`)
+      : []
+
+    return [
+      `[旧工具输出已清除，已提取结构摘要以节省上下文]`,
+      `文件路径: ${filePath}`,
+      `总长度: ${content.length} 字符, 行数: ${lines.length}`,
+      `--- 文件开头首 15 行 ---`,
+      ...headLines,
+      lines.length > 30 ? `... [已省略 ${lines.length - 30} 行] ...` : undefined,
+      ...tailLines
+    ].filter((l): l is string => l !== undefined).join('\n')
+  }
+
+  return [
+    `[旧工具输出已清除，已提取代码大纲以节省上下文，可通过重新读取来获取完整内容]`,
+    `文件路径: ${filePath}`,
+    `总长度: ${content.length} 字符, 行数: ${lines.length}`,
+    imports.length ? `--- imports / requires ---` : undefined,
+    ...imports,
+    exportsList.length ? `--- exports ---` : undefined,
+    ...exportsList,
+    `--- 代码大纲与结构骨架 ---`,
+    ...skeleton.slice(0, 120),
+    skeleton.length > 120 ? `  ... [已省略 ${skeleton.length - 120} 个大纲项] ...` : undefined,
+    assertionAnchors.length ? `--- 测试/断言锚点 ---` : undefined,
+    ...assertionAnchors,
+    anchors.length ? `--- 风险/TODO/错误锚点 ---` : undefined,
+    ...anchors,
+  ].filter((l): l is string => l !== undefined).join('\n')
+}
+
+function extractFileSkeletonFromToolResult(msg: SessionMessage): string {
+  let content = msg.content
+  let isEnvelope = false
+  let parsedEnvelope: any = null
+
+  try {
+    const parsed = JSON.parse(msg.content)
+    if (parsed && typeof parsed === 'object' && typeof parsed.output === 'string') {
+      content = parsed.output
+      isEnvelope = true
+      parsedEnvelope = parsed
+    }
+  } catch {
+    // Not a JSON envelope
+  }
+
+  let filePath = 'file'
+  if (isEnvelope && typeof parsedEnvelope.path === 'string') {
+    filePath = parsedEnvelope.path
+  } else if (isEnvelope && typeof parsedEnvelope.filePath === 'string') {
+    filePath = parsedEnvelope.filePath
+  } else {
+    try {
+      if (isEnvelope && parsedEnvelope.args && typeof parsedEnvelope.args.path === 'string') {
+        filePath = parsedEnvelope.args.path
+      } else if (isEnvelope && parsedEnvelope.action && parsedEnvelope.action.input && typeof parsedEnvelope.action.input.path === 'string') {
+        filePath = parsedEnvelope.action.input.path
+      }
+    } catch { /* ignored */ }
+  }
+
+  const skeletonText = generateFileSkeleton(filePath, content)
+
+  if (isEnvelope) {
+    return JSON.stringify({
+      ...parsedEnvelope,
+      output: skeletonText,
+      contextSkeletonExtracted: true,
+    }, null, 2)
+  }
+
+  return skeletonText
+}
+
+function pruneToolResults(messages: SessionMessage[], protectedFromIdx: number): { messages: SessionMessage[]; readFileSkeletonsExtracted: number } {
+  let readFileSkeletonsExtracted = 0
+  const pruned = messages.map((msg, i) => {
     if (msg.role !== 'tool') return msg
     if (i >= protectedFromIdx) return msg
     if (msg.content.length <= TOOL_RESULT_KEEP_CHARS) return msg
@@ -169,8 +334,17 @@ function pruneToolResults(messages: SessionMessage[], protectedFromIdx: number):
           : truncateToolFailureContent(msg.content),
       }
     }
+    // High-tier AST/skeleton extraction for read_file tools
+    if (msg.name === 'read_file' || msg.name === 'readfile') {
+      readFileSkeletonsExtracted += 1
+      return {
+        ...msg,
+        content: extractFileSkeletonFromToolResult(msg),
+      }
+    }
     return { ...msg, content: TOOL_RESULT_PLACEHOLDER }
   })
+  return { messages: pruned, readFileSkeletonsExtracted }
 }
 
 // ─── assistant-tool / tool-result pairing guard ──────────────────────────────
@@ -203,81 +377,52 @@ function isSafeBoundary(messages: SessionMessage[], i: number): boolean {
   return true
 }
 
-// ─── Phase 5: Semantic-Aware Importance Filtering ────────────────────────────
+// ─── Phase 5: Evidence-preserving overflow handling ─────────────────────────
 
-interface SemanticMessage {
-  msg: SessionMessage
-  score: number
-  category: 'core' | 'supporting' | 'boilerplate' | 'unknown'
-}
+const LONG_MESSAGE_SUMMARY_HEAD_CHARS = 1_200
+const LONG_MESSAGE_SUMMARY_TAIL_CHARS = 800
+const LONG_MESSAGE_SUMMARY_LIMIT = 2_800
 
-/**
- * Heuristically scores message importance based on semantic signals.
- * Core logic, key decisions, and file-write operations get higher scores.
- */
-function scoreMessageSemanticImportance(msg: SessionMessage): number {
-  let score = 50 // Base score
-  const content = msg.content.toLowerCase()
+function compactLongMessageForSummary(msg: SessionMessage): SessionMessage {
+  if (msg.content.length <= LONG_MESSAGE_SUMMARY_LIMIT) return msg
+  if (msg.role === 'tool') return msg
 
-  // 1. Core Logic & Implementation (High Score)
-  if (content.includes('function') || content.includes('class ') || content.includes('export ')) score += 30
-  if (content.includes('implement') || content.includes('refactor') || content.includes('logic')) score += 20
-  
-  // 2. File Writes & Changes (High Score)
-  if (msg.role === 'tool' && (
-    content.includes('write_file') || content.includes('replace_in_file') ||
-    content.includes('apply_patch') || content.includes('insert_in_file') ||
-    content.includes('writefile') || content.includes('searchreplace')  // legacy aliases
-  )) score += 40
-  
-  // 3. Key Decisions & Conclusions (High Score)
-  if (content.includes('decision') || content.includes('conclude') || content.includes('finalized')) score += 25
-  
-  // 4. Errors & Debugging (Supporting)
-  if (content.includes('error:') || content.includes('failed') || content.includes('exception')) score += 15
-  
-  // 5. Boilerplate & Repetitive Outputs (Penalty)
-  if (content.includes('npm install') || content.includes('compiling...') || content.includes('successfully build')) score -= 30
-  if (msg.role === 'tool' && content.length > 5000) score -= 10 // Huge tool outputs are usually logs
-
-  return Math.max(0, Math.min(100, score))
-}
-
-function filterSemanticImportance(messages: SessionMessage[], targetReduction: number): SessionMessage[] {
-  if (messages.length < 10) return messages
-  
-  const scored = messages.map((m, index) => ({
-    msg: m,
-    index,
-    score: scoreMessageSemanticImportance(m),
-  }))
-
-  // Sort by importance but preserve original order for the final list.
-  // Keep assistant tool-call messages and their immediately following tool
-  // results together; dropping either side can make OpenAI/Anthropic reject the
-  // compressed request or deprive the summarizer of the failure evidence.
-  const sorted = [...scored].sort((a, b) => b.score - a.score)
-  const keepCount = Math.max(1, Math.floor(messages.length * (1 - targetReduction)))
-  const threshold = sorted[keepCount]?.score ?? 0
-  const keep = new Set<number>()
-
-  for (const item of scored) {
-    if (item.score >= threshold || item.msg.role === 'user') {
-      keep.add(item.index)
-    }
-    if (assistantNeedsToolResults(item.msg)) {
-      keep.add(item.index)
-      if (messages[item.index + 1]?.role === 'tool') keep.add(item.index + 1)
-    }
-    if (item.msg.role === 'tool' && item.index > 0 && assistantNeedsToolResults(messages[item.index - 1]!)) {
-      keep.add(item.index - 1)
-      keep.add(item.index)
-    }
+  const head = msg.content.slice(0, LONG_MESSAGE_SUMMARY_HEAD_CHARS).trimEnd()
+  const tail = msg.content.slice(-LONG_MESSAGE_SUMMARY_TAIL_CHARS).trimStart()
+  return {
+    ...msg,
+    content: [
+      `[长${msg.role}消息已为摘要阶段保留首尾，原始长度 ${msg.content.length} chars]`,
+      '--- head ---',
+      head,
+      '--- tail ---',
+      tail,
+    ].join('\n'),
   }
+}
 
-  return scored
-    .filter(s => keep.has(s.index))
-    .map(s => s.msg)
+function prepareMiddleForStructuredSummary(messages: SessionMessage[], tokenLimit: number): SessionMessage[] {
+  let prepared = messages.map(compactLongMessageForSummary)
+  const maxSummaryInputTokens = Math.max(24_000, Math.floor(tokenLimit * 0.35))
+  if (estimateMsgListTokens(prepared) <= maxSummaryInputTokens) return prepared
+
+  // If the middle is still too large, keep all user/tool-pair structure and
+  // deterministically thin old assistant prose only. This is not a semantic
+  // deletion pass: every user constraint, tool evidence, and tool-call pair
+  // remains visible to the summarizer. The assistant prose that is thinned is
+  // replaced with a breadcrumb rather than silently dropped.
+  prepared = prepared.map((msg, index) => {
+    if (msg.role !== 'assistant') return msg
+    if (assistantNeedsToolResults(msg)) return msg
+    const keepRecent = index >= messages.length - 12
+    if (keepRecent) return msg
+    return {
+      ...msg,
+      content: `[旧 assistant 推理/进度文本已压缩为面包屑，原始长度 ${msg.content.length} chars；用户约束、工具调用和工具结果仍保留] ${msg.content.slice(0, 400)}`,
+    }
+  })
+
+  return prepared
 }
 
 // ─── Phase 3: structured summarization ───────────────────────────────────────
@@ -435,6 +580,8 @@ export interface CompressResult {
   summaryText?: string
   tokensBefore: number
   tokensAfter: number
+  mode?: 'none' | 'microcompact' | 'full_compact'
+  readFileSkeletonsExtracted?: number
 }
 
 /**
@@ -461,10 +608,23 @@ export function getCompressionTriggerTokens(tokenLimit: number, threshold?: numb
 
 export function getMicrocompactTriggerTokens(tokenLimit: number): number {
   const safeLimit = Number.isFinite(tokenLimit) && tokenLimit > 0 ? tokenLimit : 180_000
-  const proportional = safeLimit * MICROCOMPACT_TRIGGER_FRACTION
+
+  let fraction = MICROCOMPACT_TRIGGER_FRACTION
+  let ceil = MICROCOMPACT_TRIGGER_CEIL
+
+  // Scale triggers and ceilings dynamically for larger context windows
+  if (safeLimit >= 500_000) {
+    fraction = 0.25 // Allow larger live buffer for 1M+ models
+    ceil = 300_000  // Generous ceiling for large models
+  } else if (safeLimit >= 250_000) {
+    fraction = 0.20
+    ceil = 100_000
+  }
+
+  const proportional = safeLimit * fraction
   return Math.max(
     MICROCOMPACT_TRIGGER_FLOOR,
-    Math.min(Math.floor(proportional), MICROCOMPACT_TRIGGER_CEIL),
+    Math.min(Math.floor(proportional), ceil),
   )
 }
 
@@ -475,10 +635,23 @@ export function getMicrocompactTriggerTokens(tokenLimit: number): number {
  */
 export function getTailProtectTokens(tokenLimit: number): number {
   const safeLimit = Number.isFinite(tokenLimit) && tokenLimit > 0 ? tokenLimit : 180_000
-  const proportional = safeLimit * TAIL_PROTECT_FRACTION
+
+  let fraction = TAIL_PROTECT_FRACTION
+  let ceil = TAIL_PROTECT_CEIL
+
+  // Generous tail protection for larger context windows
+  if (safeLimit >= 500_000) {
+    fraction = 0.20 // Protect 20% of context (e.g. 200K tokens for 1M limit)
+    ceil = 250_000  // High ceiling so large file reads survive
+  } else if (safeLimit >= 250_000) {
+    fraction = 0.12
+    ceil = 120_000
+  }
+
+  const proportional = safeLimit * fraction
   return Math.max(
     TAIL_PROTECT_FLOOR,
-    Math.min(Math.floor(proportional), TAIL_PROTECT_CEIL),
+    Math.min(Math.floor(proportional), ceil),
   )
 }
 
@@ -524,10 +697,15 @@ export function maybeTimeBasedMicrocompact(
   const clearSet = new Set(clearIndices)
   const tokensBefore = estimateMsgListTokens(messages)
 
+  let readFileSkeletonsExtracted = 0
   const pruned = messages.map((msg, i) => {
     if (!clearSet.has(i)) return msg
     if (looksLikeToolFailure(msg.content)) {
       return { ...msg, content: msg.content.length <= TOOL_ERROR_KEEP_CHARS ? msg.content : truncateToolFailureContent(msg.content) }
+    }
+    if (msg.name === 'read_file' || msg.name === 'readfile') {
+      readFileSkeletonsExtracted += 1
+      return { ...msg, content: extractFileSkeletonFromToolResult(msg) }
     }
     return { ...msg, content: TOOL_RESULT_PLACEHOLDER }
   })
@@ -536,7 +714,7 @@ export function maybeTimeBasedMicrocompact(
   if (tokensAfter >= tokensBefore) return null
 
   onInfo?.(`[时间微压缩] 距上次回复 ${Math.round(gapMinutes)}min > ${TIME_BASED_MC_GAP_MINUTES}min 阈值，清理 ${clearIndices.length} 条旧工具输出 (~${Math.round((tokensBefore - tokensAfter) / 1000)}K tokens)，保留最近 ${keepSet.size} 条`)
-  return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
+  return { messages: pruned, compressed: true, tokensBefore, tokensAfter, mode: 'microcompact', readFileSkeletonsExtracted }
 }
 
 export async function compressMessages(
@@ -548,7 +726,7 @@ export async function compressMessages(
   const threshold        = opts.threshold        ?? getAdaptiveCompressionThreshold(tokenLimit)
   const protectHead      = opts.protectHead      ?? 3
   // Tail protection now scales with context window. 1M-context sessions get
-  // up to 100K tokens of tail safe-zone so freshly-read large files survive.
+  // up to 250K tokens of tail safe-zone so freshly-read large files survive.
   const protectTailTok   = opts.protectTailTokens ?? getTailProtectTokens(tokenLimit)
   const previousSummary  = opts.previousSummary
   const onInfo           = opts.onInfo
@@ -566,8 +744,9 @@ export async function compressMessages(
 
   const triggerAt = Math.floor(getCompressionTriggerTokens(tokenLimit, threshold) * churnMul)
   if (tokensBefore < triggerAt) {
-    // Keep deterministic tool-output cleanup at its normal threshold even
-    // when full summarizing compression is delayed by churn protection.
+    // Keep deterministic tool-output cleanup independent from churn protection.
+    // Churn raises full summarization thresholds, but stale tool output pruning
+    // should still happen at the model-window-aware microcompact trigger.
     const microcompactAt = getMicrocompactTriggerTokens(tokenLimit)
     if (tokensBefore >= microcompactAt) {
       // Protect tail by token budget instead of fixed message count.
@@ -580,15 +759,21 @@ export async function compressMessages(
         if (tailProtectTokens > tailBudget) { protectedFromIdx = i + 1; break }
       }
       protectedFromIdx = Math.max(0, protectedFromIdx)
-      const pruned = pruneToolResults(messages, protectedFromIdx)
-      const tokensAfter = estimateMsgListTokens(pruned)
+      const prunedResult = pruneToolResults(messages, protectedFromIdx)
+      const tokensAfter = estimateMsgListTokens(prunedResult.messages)
       if (tokensAfter < tokensBefore) {
-        const churnNote = churnMul > 1 ? `（churn×${churnMul.toFixed(1)}）` : ''
-        onInfo?.(`[微压缩]${churnNote} 清理旧工具输出：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ~${Math.round(tailProtectTokens / 1000)}K 对话原文`)
-        return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
+        onInfo?.(`[微压缩] 清理旧工具输出：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ~${Math.round(tailProtectTokens / 1000)}K 对话原文`)
+        return {
+          messages: prunedResult.messages,
+          compressed: true,
+          tokensBefore,
+          tokensAfter,
+          mode: 'microcompact',
+          readFileSkeletonsExtracted: prunedResult.readFileSkeletonsExtracted,
+        }
       }
     }
-    return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore }
+    return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore, mode: 'none' }
   }
 
   // Compression triggered — surface to user. Without this, the previous
@@ -623,22 +808,30 @@ export async function compressMessages(
 
   if (middle.length === 0) {
     // Not enough middle to compress — Phase 1 only (prune tool results)
-    const pruned = pruneToolResults(messages, tailStart)
-    const tokensAfter = estimateMsgListTokens(pruned)
+    const prunedResult = pruneToolResults(messages, tailStart)
+    const tokensAfter = estimateMsgListTokens(prunedResult.messages)
     onInfo?.(`[压缩] 中段不足，仅修剪工具结果：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
-    return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
+    return {
+      messages: prunedResult.messages,
+      compressed: true,
+      tokensBefore,
+      tokensAfter,
+      mode: 'microcompact',
+      readFileSkeletonsExtracted: prunedResult.readFileSkeletonsExtracted,
+    }
   }
 
   // ── Phase 1 on middle: prune tool results ─────────────────────────────────
-  let prunedMiddle = pruneToolResults(middle, middle.length)
+  const prunedMiddleResult = pruneToolResults(middle, middle.length)
+  let prunedMiddle = prunedMiddleResult.messages
   onInfo?.(`[压缩] Phase 1: 修剪 ${middle.length} 条中段消息的工具结果`)
 
-  // ── Phase 5: Semantic-Aware Importance Filtering ──────────────────────────
-  // If the middle is still huge after pruning tool results, drop low-importance messages.
-  if (estimateMsgListTokens(prunedMiddle) > tokenLimit * 0.15) {
-    const beforeFilter = prunedMiddle.length
-    prunedMiddle = filterSemanticImportance(prunedMiddle, 0.4) // Drop 40% of low-value messages
-    onInfo?.(`[压缩] Phase 5: 按语义重要性过滤 ${beforeFilter} → ${prunedMiddle.length} 条`)
+  // ── Phase 5: prepare summary input without dropping critical evidence ──────
+  const beforeSummaryTokens = estimateMsgListTokens(prunedMiddle)
+  prunedMiddle = prepareMiddleForStructuredSummary(prunedMiddle, tokenLimit)
+  const afterSummaryTokens = estimateMsgListTokens(prunedMiddle)
+  if (afterSummaryTokens < beforeSummaryTokens) {
+    onInfo?.(`[压缩] Phase 5: 保真压缩摘要输入 ${Math.round(beforeSummaryTokens / 1000)}K → ${Math.round(afterSummaryTokens / 1000)}K（不删除用户约束/工具证据）`)
   }
 
   // ── Phase 3: LLM summarize ────────────────────────────────────────────────
@@ -651,10 +844,17 @@ export async function compressMessages(
     // user can debug (was silent before, often masking provider auth errors).
     const msg = err instanceof Error ? err.message : String(err)
     onInfo?.(`[压缩] Phase 3 失败 → 退回 Phase 1: ${msg}`)
-    const pruned = pruneToolResults(messages, tailStart)
-    const tokensAfter = estimateMsgListTokens(pruned)
+    const prunedResult = pruneToolResults(messages, tailStart)
+    const tokensAfter = estimateMsgListTokens(prunedResult.messages)
     onInfo?.(`[压缩] 结果（仅修剪）：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
-    return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
+    return {
+      messages: prunedResult.messages,
+      compressed: true,
+      tokensBefore,
+      tokensAfter,
+      mode: 'microcompact',
+      readFileSkeletonsExtracted: prunedResult.readFileSkeletonsExtracted,
+    }
   }
 
   // ── Phase 4: assemble ─────────────────────────────────────────────────────
@@ -675,5 +875,7 @@ export async function compressMessages(
     summaryText,
     tokensBefore,
     tokensAfter,
+    mode: 'full_compact',
+    readFileSkeletonsExtracted: prunedMiddleResult.readFileSkeletonsExtracted,
   }
 }

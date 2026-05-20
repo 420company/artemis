@@ -235,8 +235,9 @@ export async function saveFileArtifact(
 ): Promise<string> {
   const dir = artifactDir(sessionId)
   await ensureDir(dir)
-  const safeName = filePath.replace(/[^a-zA-Z0-9._-]/g, '_')
-  const artifactPath = path.join(dir, `${safeName}.artifact`)
+  const safeName = filePath.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-120)
+  const pathHash = createHash('sha256').update(filePath).digest('hex').slice(0, 12)
+  const artifactPath = path.join(dir, `${pathHash}-${safeName}.artifact`)
   await writeFile(artifactPath, content, 'utf-8')
   return artifactPath
 }
