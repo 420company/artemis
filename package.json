@@ -1,6 +1,6 @@
 {
   "name": "artemis-code",
-  "version": "0.2.63",
+  "version": "0.2.68",
   "description": "An uncompromising AI coding agent that executes tasks autonomously and beautifully.",
   "main": "./dist/index.js",
   "type": "module",
@@ -62,7 +62,7 @@
     "docker:logs": "./docker.sh logs",
     "docker:status": "./docker.sh status",
     "test:workspaceIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workspaceIntentSmoke.ts",
-    "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/superVisualGoldenPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/dreamLocaleSmoke.ts"
+    "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/superVisualGoldenPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/dreamLocaleSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaExplicitBriefLockSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaPollTimeoutSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/seedanceVideoDirectorSmoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",
@@ -75,6 +75,7 @@
     "emoji-regex": "^10.6.0",
     "fast-json-stringify": "^5.0.0",
     "get-east-asian-width": "^1.5.0",
+    "heic-convert": "^2.1.0",
     "lru-cache": "^10.4.3",
     "openai": "^6.34.0",
     "pg": "^8.13.1",

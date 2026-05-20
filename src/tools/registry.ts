@@ -596,6 +596,8 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateEnumString(action?.assemblyMode, 'assemblyMode', ['auto', 'ffmpeg', 'hyperframes', 'saga'] as const, errors);
   validateBooleanValue(action?.resume, 'resume', errors);
+  validateBooleanValue(action?.preserveUserScript, 'preserveUserScript', errors);
+  validateBooleanValue(action?.cleanDirect, 'cleanDirect', errors);
   validateEnumString(action?.chainReferenceFrames, 'chainReferenceFrames', ['auto', 'always', 'off'] as const, errors);
   validateEnumString(action?.continuityMode, 'continuityMode', ['auto', 'strong-vision', 'text-only'] as const, errors);
   validatePositiveInteger(action?.crossfadeMs, 'crossfadeMs', errors);

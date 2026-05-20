@@ -130,6 +130,13 @@ export type SagaRenderResult = {
   ffmpegArgs: string[];
   encoderUsed: string;
   appliedTransitions: SagaTransitionPlan[];
+  reviewFrames?: {
+    ok: boolean;
+    reviewDir: string;
+    framePaths: string[];
+    contactSheetPath?: string;
+    error?: string;
+  };
   diagnostics: {
     lint: SagaLintReport;
     inspect: SagaInspectReport;

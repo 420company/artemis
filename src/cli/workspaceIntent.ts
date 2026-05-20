@@ -33,6 +33,31 @@ const STRONG_PATH_INTENT_PREFIXES = [
   'change workspace to',
 ] as const
 
+/**
+ * Media / archive / document file extensions. When a path ends with one of
+ * these and the user gave no explicit "switch workspace" prefix, treat it as
+ * "here's a file for you to look at" — not a workspace switch request.
+ *
+ * Without this guard, a message like `"/Users/me/Desktop/x.jpg 这是角色图"`
+ * would resolve to the file's parent dir (`/Users/me/Desktop`) and silently
+ * switch the workspace mid-session, breaking flows like /saga that keep a
+ * cwd-keyed state machine.
+ *
+ * Boundary uses negative lookahead `(?!\w)` instead of an explicit punctuation
+ * set: a previous design enumerated `(?:\s|$|[?#,;，。；])` which missed
+ * "/x.jpg中文" (no space, Chinese char follows) and "/x.jpg!" (other ASCII
+ * punctuation). Since `\w` is `[A-Za-z0-9_]`, the lookahead correctly allows
+ * Chinese, every kind of punctuation, and end-of-string as boundaries, while
+ * still rejecting things like "/x.jpga" (the trailing `a` IS a word char).
+ *
+ * Note: this filter is intentionally NOT applied inside `normalizeCandidate`.
+ * Callers that come from a strong-intent extractor (e.g. "切换到 /x.jpg")
+ * should be respected — `findNearestExistingWorkspaceRoot` falls back to the
+ * file's parent dir, which is exactly what a user typing an explicit switch
+ * command would expect. The filter belongs on implicit/leading paths only.
+ */
+const MEDIA_EXTENSION_RE = /\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg|pdf|docx?|xlsx?|pptx?|zip|tar|gz|rar|7z)(?!\w)/i
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -68,6 +93,10 @@ function normalizeCandidate(raw: string, currentCwd: string, homeDir: string): s
   // (e.g., "/y" from "/yes" should not be treated as a workspace path)
   if (candidate.length < 3 || !/[/\\]/.test(candidate)) return null
 
+  // Media-extension filtering is intentionally NOT done here — it would
+  // also kill explicit user intent like "切换到 /Users/me/Desktop/x.jpg".
+  // The filter is applied only to implicit/leading paths in their extractors.
+
   // On native Windows, a leading POSIX-style slash such as `/foo` is not a
   // user workspace path. Node resolves it against the current drive
   // (`C:\foo`), and if that child is missing our nearest-parent fallback can
@@ -90,10 +119,16 @@ function extractQuotedPath(input: string): string | null {
   const strongQuoted = input.match(
     new RegExp(`^\\s*(?:${strongPrefixPattern})(?:\\s+|[:：]\\s*)${quoteChars}${pathCapture}${endQuoteChars}`, 'i'),
   )
+  // Strong prefix path — respect explicit intent, do NOT filter media exts.
   if (strongQuoted?.[1]?.trim()) return strongQuoted[1].trim()
 
+  // Leading quoted path with no strong prefix is implicit intent — same class
+  // as extractLeadingPath. Apply media-extension filter so quoted file paths
+  // don't trigger an unwanted workspace switch either.
   const leadingQuoted = input.trimStart().match(new RegExp(`^${quoteChars}${pathCapture}${endQuoteChars}`))
-  return leadingQuoted?.[1]?.trim() ?? null
+  const candidate = leadingQuoted?.[1]?.trim() ?? null
+  if (candidate && MEDIA_EXTENSION_RE.test(candidate)) return null
+  return candidate
 }
 
 function extractPrefixedPath(input: string): string | null {
@@ -138,10 +173,26 @@ function extractLeadingPath(input: string): string | null {
       'i',
     ),
   )
-  return match?.[1]?.trim() ?? null
+  const candidate = match?.[1]?.trim() ?? null
+  // A leading path ending in a media/archive extension is almost certainly
+  // "here is a file for you to look at" rather than "switch my workspace".
+  // Reject it to prevent the workspace from jumping to the file's parent dir.
+  if (candidate && MEDIA_EXTENSION_RE.test(candidate)) return null
+  return candidate
 }
 
 function aliasPathFromText(input: string, homeDir: string): WorkspaceIntentResolution['source'] | null {
+  // If input starts with an absolute filesystem path, alias keywords like
+  // "Downloads" / "Desktop" / "Documents" inside that path are folder-name
+  // segments — not intent expressions. Otherwise we'd see this user case:
+  //   `/Users/goat/Downloads/artemis.png`
+  // matching the bare "Downloads" sub-pattern and switching the workspace to
+  // ~/Downloads, exactly the bug we fixed for `extractLeadingPath`. Let the
+  // path-based extractors handle absolute-path inputs (they apply the
+  // MEDIA_EXTENSION_RE filter to reject pure file-sends).
+  if (/^\s*(?:~|\/|[A-Za-z]:[\\/])/.test(input)) {
+    return null
+  }
   if (/(?:在|到|进入|切换到|保存到|写到|放到)?\s*桌面(?:上|里|下)?/u.test(input)) {
     return 'desktop-alias'
   }

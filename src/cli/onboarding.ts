@@ -1137,6 +1137,43 @@ export async function runVisualModelSetup(
   await persistVisualProfile(cwd, visualProfile)
   await awakenDreamSystemForVisualProfile(visualProfile)
 
+  // ── NSFW capability toggle ────────────────────────────────────────────
+  // Allow the user to opt-in to NSFW mode for image/video providers that
+  // accept real-person or mature content. This skips the illustrated
+  // safety-derivative step in Super Visual and bypasses the real-person
+  // safety gate in generateLongVideo.
+  const currentNsfw = {
+    image: visualProfile.image?.nsfw ?? false,
+    video: visualProfile.video?.nsfw ?? false,
+  };
+  if (currentNsfw.image || currentNsfw.video) {
+    console.log(c(`    🔷 NSFW: image=${currentNsfw.image ? 'on' : 'off'} video=${currentNsfw.video ? 'on' : 'off'}`, A.dim));
+  }
+  const enableNsfw = await chooseInteractiveOption<'both' | 'video-only' | 'off'>({
+    title: t('NSFW 模式（允许写实/成人内容直传，跳过安全衍生步骤）', 'NSFW mode (allow photoreal/mature content through, skip safety-derivative)'),
+    initialIndex: currentNsfw.image && currentNsfw.video ? 0 : currentNsfw.video ? 1 : 2,
+    choices: [
+      { label: t('图片+视频都启用', 'Image + Video enabled'), value: 'both' },
+      { label: t('仅视频启用', 'Video only'), value: 'video-only' },
+      { label: t('关闭（默认安全模式）', 'Off (default safe mode)'), value: 'off' },
+    ],
+  });
+
+  const updatedProfile: VisualModelConfig = {
+    ...visualProfile,
+    image: {
+      ...visualProfile.image,
+      nsfw: enableNsfw === 'both',
+    },
+    video: {
+      ...visualProfile.video,
+      nsfw: enableNsfw === 'both' || enableNsfw === 'video-only',
+    },
+  };
+  if (updatedProfile.image.nsfw !== visualProfile.image?.nsfw || updatedProfile.video.nsfw !== visualProfile.video?.nsfw) {
+    await persistVisualProfile(cwd, updatedProfile);
+  }
+
   console.log(c('  ' + t('当前已保存的视觉配置', 'Saved visual configuration'), A.bold))
   for (const line of buildVisualProfileSummaryLines(visualProfile, t)) {
     console.log(c(`    ${line}`, A.dim))

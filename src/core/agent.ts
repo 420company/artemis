@@ -4439,6 +4439,25 @@ async function executeAgentAction(
     case 'spawn_background_workflow': {
       try {
         const { spawnDetachedWorkflow } = await import('../services/detachedWorkflow.js');
+        // Prefer the user's configured main profile (their actual relay +
+        // model) over a hardcoded 'gpt-4o' that may not exist on their relay.
+        // Env vars still win when explicitly set — useful for ops overrides.
+        let fallbackProtocol = 'openai';
+        let fallbackModel = '';
+        let fallbackBaseUrl = '';
+        let fallbackApiKey = '';
+        try {
+          const { ProviderStore } = await import('../providers/store.js');
+          const store = await new ProviderStore(options.cwd).load();
+          const mainId = store?.defaultMainProfileId ?? 'main';
+          const main = store?.profiles?.find((p) => p.id === mainId) ?? store?.profiles?.[0];
+          if (main) {
+            if (main.protocol) fallbackProtocol = main.protocol;
+            if (main.model) fallbackModel = main.model;
+            if (main.baseUrl) fallbackBaseUrl = main.baseUrl;
+            if (main.apiKey) fallbackApiKey = main.apiKey;
+          }
+        } catch { /* providers store unavailable — fall through to env-only */ }
         const result = await spawnDetachedWorkflow({
           cwd: options.cwd,
           sessionStore: options.sessionStore,
@@ -4448,10 +4467,10 @@ async function executeAgentAction(
           permissionMode: options.permissionManager.getMode() as any,
           permissionModeExplicit: false,
           providerConfig: {
-            protocol: (process.env.ARTEMIS_PROVIDER_PROTOCOL || 'openai') as any,
-            model: process.env.ARTEMIS_MODEL || 'gpt-4o',
-            baseUrl: process.env.ARTEMIS_BASE_URL || '',
-            apiKey: process.env.ARTEMIS_API_KEY || ''
+            protocol: (process.env.ARTEMIS_PROVIDER_PROTOCOL || fallbackProtocol) as any,
+            model: process.env.ARTEMIS_MODEL || fallbackModel,
+            baseUrl: process.env.ARTEMIS_BASE_URL || fallbackBaseUrl,
+            apiKey: process.env.ARTEMIS_API_KEY || fallbackApiKey,
           },
         });
         return {

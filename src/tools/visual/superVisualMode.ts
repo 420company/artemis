@@ -15,9 +15,9 @@ import { createVisualProvider } from './providers/interface.js';
 // Visual mode for `RELAY_SICK_COOLDOWN_MS` to avoid burning ~13 minutes per
 // long-video run. Reset on daemon restart.
 const RELAY_SICK_COOLDOWN_MS = 10 * 60 * 1000;
-const IMAGE_EDIT_TOTAL_TIMEOUT_MS = 4 * 60 * 1000;
+const IMAGE_EDIT_TOTAL_TIMEOUT_MS = 7 * 60 * 1000;
 const SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS = IMAGE_EDIT_TOTAL_TIMEOUT_MS + 15_000;
-const SAFE_BRIDGE_IMAGE_EDIT_TIMEOUT_MS = 90_000;
+const SAFE_BRIDGE_IMAGE_EDIT_TIMEOUT_MS = 3 * 60 * 1000;
 const IMAGE_EDIT_SINGLE_FILE_COMPRESS_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const IMAGE_EDIT_TOTAL_FORM_COMPRESS_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const IMAGE_EDIT_FORCED_COMPRESS_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024;
@@ -964,12 +964,28 @@ export async function describeUserImageWithVision(options: {
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
   let chatModel: string | undefined;
+  // Fallback chain for the vision-capable chat model. Some relays don't
+  // serve `gpt-4o` (e.g. Codex-backed gateways return 503 for it). Order is
+  // quality-first: gpt-5.5 → gpt-5.4 → gpt-5.4-mini → gpt-4o-mini → gpt-4o.
+  // The user can skip this guessing entirely by setting
+  // `visualProfile.image.visionModel` in providers.json.
+  const VISION_MODEL_FALLBACKS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'];
+  let visionFallbacks: string[] = [];
   // ── Priority 1: image provider's relay (OpenAI-compatible, supports vision)
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (imageConfigured) {
     apiKey = imageConfigured.config.image.apiKey?.trim();
     baseUrl = imageConfigured.config.image.baseUrl?.trim();
-    chatModel = 'gpt-4o'; // OpenAI relay — use a known vision-capable model
+    // Prefer an explicit user-configured visionModel; otherwise iterate the
+    // fallback chain. Filter out anything matching image-generation patterns
+    // (`*-image-*` or DALL-E variants) since those won't work on /chat/completions.
+    const explicit = imageConfigured.config.image.visionModel?.trim();
+    if (explicit && !/image|dall[\-_]?e/i.test(explicit)) {
+      chatModel = explicit;
+    } else {
+      visionFallbacks = [...VISION_MODEL_FALLBACKS];
+      chatModel = visionFallbacks.shift()!;
+    }
   }
   // ── Priority 2: main LLM profile (may not support vision, but worth trying)
   if (!apiKey || !baseUrl) {
@@ -998,7 +1014,7 @@ export async function describeUserImageWithVision(options: {
 
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const body = {
-    model: chatModel || 'gpt-4o',
+    model: chatModel || 'gpt-5.5',
     messages: [
       {
         role: 'system',
@@ -1016,13 +1032,14 @@ export async function describeUserImageWithVision(options: {
     max_tokens: 600,
   } as Record<string, unknown>;
 
-  // Up to 2 attempts — relays can return transient 502/429 that self-heal
-  // on a quick retry. Previously a single failure silently killed VISUAL
-  // TRUTH, cascading into missing identity descriptions in turnaround &
-  // keyframe prompts, which then caused BytePlus real-person filter rejections.
+  // Up to 2 attempts per model — relays can return transient 502/429 that
+  // self-heal on a quick retry. Beyond that, walk the visionFallbacks chain
+  // (gpt-5.4-mini → gpt-5.4 → gpt-5.5 → gpt-4o-mini → gpt-4o) so a relay
+  // that doesn't serve one specific model still produces a description.
   const maxAttempts = 2;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
+      body.model = chatModel || 'gpt-5.4-mini';
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -1030,7 +1047,18 @@ export async function describeUserImageWithVision(options: {
       });
       if (!res.ok) {
         const errBody = await res.text().catch(() => '');
-        toolWarn(`⚠️ Super Visual: vision-describe 失败（HTTP ${res.status}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
+        toolWarn(`⚠️ Super Visual: vision-describe 失败（HTTP ${res.status}，model=${body.model}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
+        // 404 / 400 with model-not-found / 503 from a model-missing relay
+        // means THIS model isn't served — try the next fallback in the chain.
+        const looksLikeModelMissing = res.status === 404
+          || (res.status === 400 && /model|not\s*found|not\s*supported/i.test(errBody))
+          || (res.status === 503 && visionFallbacks.length > 0)
+        if (looksLikeModelMissing && visionFallbacks.length > 0) {
+          const nextModel = visionFallbacks.shift()!;
+          toolWarn(`⚠️ Super Visual: 切换到下一个 vision 候选模型: ${nextModel}`);
+          chatModel = nextModel;
+          continue;  // retry immediately with new model, same attempt counter
+        }
         if (attempt < maxAttempts - 1 && (res.status === 429 || res.status >= 500)) {
           await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
           continue;
@@ -1126,7 +1154,6 @@ export async function maybeGenerateSuperVisualReference(options: {
         'utf8',
       );
     }
-    const providedLooksRealPerson = visionDescription ? looksLikeRealPersonDescription(visionDescription) : true;
     const photorealOutputRequested = wantsPhotorealVideoOutput({
       story: options.story,
       prompt: options.action.prompt,
@@ -1134,88 +1161,6 @@ export async function maybeGenerateSuperVisualReference(options: {
       referenceNotes: options.action.referenceNotes,
       superVisualStyle: options.action.superVisualStyle,
     });
-
-    const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
-    const imageProviderName = imageConfigured?.config.image.provider;
-    const imageModel = imageConfigured?.model ?? imageConfigured?.config.image.model;
-    const ineligible = getSuperVisualModeIneligibilityReason({
-      imageProvider: imageProviderName,
-      imageModel,
-      videoReferenceInputs: options.videoLimits.referenceInputs,
-    });
-
-    if (providedLooksRealPerson) {
-      if (!imageConfigured || ineligible) {
-        return {
-          enabled: false,
-          reason: `provided turnaround appears photoreal/real-person and no provider-safe illustrated derivative can be generated: ${ineligible ?? 'image generation provider is not configured'}`,
-          inputIsRealPerson: true,
-          resolvedUserImagePaths: userInputs,
-        };
-      }
-      const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
-      const safePrompt = buildSuperVisualCharacterTurnaroundPrompt({
-        title: options.title,
-        story: buildProvidedTurnaroundSafetyDerivativeStory({
-          story: options.story,
-          visionDescription,
-          referenceNotes: options.action.referenceNotes,
-        }),
-        ratio: options.ratio,
-        referenceNotes: options.action.referenceNotes,
-        continuity: options.action.continuity,
-        withUserImageInput: true,
-        visionDescription: visionDescription ?? undefined,
-        style: 'illustrated',
-        inputLooksRealPerson: true,
-      });
-      await writeFile(promptPath, safePrompt, 'utf8');
-      const apiKey = imageConfigured.config.image.apiKey?.trim();
-      const baseUrl = imageConfigured.config.image.baseUrl?.trim();
-      if (apiKey && baseUrl) {
-        toolLog(`🎨 Super Visual: 用户三视图疑似真人/照片质感，先生成 provider-safe 插画化身份锚。`);
-        const edit = await postOpenAIImageEdit({
-          baseUrl,
-          apiKey,
-          model: resolvedImageModel,
-          prompt: safePrompt,
-          inputImagePaths: [providedTurnaroundByPath],
-          size: '1536x1024',
-          quality: 'high',
-        });
-        if (edit.ok) {
-          const safeReferencePath = imageReferenceArtifactPath(options.projectDir, '.png');
-          await writeFile(safeReferencePath, edit.buffer);
-          toolLog(`✅ Super Visual: 已从用户三视图派生 provider-safe 身份锚 → ${safeReferencePath}`);
-          return {
-            enabled: true,
-            provider: describeVisualProvider(imageConfigured.config, 'image'),
-            model: resolvedImageModel,
-            referenceImagePath: safeReferencePath,
-            promptPath,
-            sourceAssetPath: originalReferencePath,
-            mode: 'provided-turnaround-safe-derivative',
-            userImagesUsed: 1,
-            reason: `generated provider-safe illustrated derivative from provided turnaround: ${providedTurnaroundByPath}`,
-            inputIsRealPerson: true,
-            resolvedUserImagePaths: userInputs,
-          };
-        }
-        if (/HTTP 5\d\d|upstream_error|rate.?limit|429|timeout|timed out|aborted/i.test(edit.error)) markRelaySick(edit.error);
-        return {
-          enabled: false,
-          reason: `provided turnaround appears photoreal/real-person but safe derivative generation failed: ${edit.error.slice(0, 200)}`,
-          inputIsRealPerson: true,
-          resolvedUserImagePaths: userInputs,
-        };
-      }
-      return {
-        enabled: false,
-        reason: 'provided turnaround appears photoreal/real-person but image edit credentials are unavailable; refusing to send the original directly to the video provider',
-        inputIsRealPerson: true,
-        resolvedUserImagePaths: userInputs,
-      };
-    }
 
     const referenceImagePath = imageReferenceArtifactPath(options.projectDir, providedTurnaroundByPath);
     if (path.resolve(providedTurnaroundByPath) !== path.resolve(referenceImagePath)) {
@@ -1274,6 +1219,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     return { enabled: false, reason: ineligible };
   }
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
+  const imageNsfw = imageConfigured.nsfw === true || imageConfigured.config.image.nsfw === true;
 
   // Relay-health short-circuit. The retry inside postOpenAIImageEdit /
   // generateImage already burns ~30s per attempt × 3 attempts × 2 modes ≈
@@ -1313,7 +1259,12 @@ export async function maybeGenerateSuperVisualReference(options: {
   // wrong "illustrated" call (slightly stylized output) is much lower than a
   // wrong "photoreal" call (downstream privacy filter rejection).
   const visionRealHit = looksLikeRealPersonDescription(visionDescription);
-  const inputLooksRealPerson = useEditMode && !visionDescription ? true : visionRealHit;
+  // When the image provider is nsfw-capable, real-person input does NOT need
+  // the illustrated safety-derivative bypass — treat it the same as non-real
+  // so the prompt and style selection allow photoreal output.
+  const inputLooksRealPerson = imageNsfw
+    ? false
+    : (useEditMode && !visionDescription ? true : visionRealHit);
   const userStyle = (options.action as { superVisualStyle?: 'illustrated' | 'photoreal' | 'auto' }).superVisualStyle;
   const prompt = buildSuperVisualCharacterTurnaroundPrompt({
     title: options.title,
@@ -1329,10 +1280,11 @@ export async function maybeGenerateSuperVisualReference(options: {
   if (useEditMode) {
     const effectiveStyle = userStyle === 'photoreal' ? 'photoreal'
       : userStyle === 'illustrated' ? 'illustrated'
+      : imageNsfw && visionRealHit ? (userStyle === 'auto' ? 'photoreal' : userStyle ?? 'photoreal')
       : visionDescription
         ? (visionRealHit ? 'illustrated' : 'photoreal')
         : 'illustrated';
-    toolLog(`🎨 Super Visual: 角色三视图风格 = ${effectiveStyle}`);
+    toolLog(`🎨 Super Visual: 角色三视图风格 = ${effectiveStyle}${imageNsfw ? '（NSFW provider，允许写实）' : ''}`);
   }
   await writeFile(promptPath, prompt, 'utf8');
 

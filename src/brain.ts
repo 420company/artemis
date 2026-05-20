@@ -17,6 +17,8 @@ import {
   createFileStateSnapshot,
   recordCompressionFailure,
   recordCompressionSuccess,
+  recordCompressionTriggered,
+  getThresholdMultiplier,
   isCircuitBreakerTripped,
   createCircuitBreakerState,
   recordTurnCompleted,
@@ -926,6 +928,209 @@ function getCircuitBreaker(sessionId: string): CircuitBreakerState {
   return state
 }
 
+// Tool names that count as "real progress" between compressions. If the
+// compressor keeps firing but none of these appear in the messages since
+// the last compression, it's a rumination loop and the circuit breaker
+// will escalate the compression threshold.
+const COMPRESSION_PROGRESS_TOOLS = new Set([
+  'write_file',
+  'insert_in_file',
+  'replace_in_file',
+  'apply_patch',
+  'create_file',
+  'delete_file',
+])
+
+interface ExtractedPendingIntent {
+  text: string
+  lastTool?: {
+    name: string
+    target?: string
+    toolUseId?: string
+    outcome: 'success' | 'failure' | 'pending'
+  }
+}
+
+function extractTextFromAssistant(m: SessionMessage): string {
+  let text = typeof m.content === 'string' ? m.content : ''
+  if (!text && Array.isArray(m.contentBlocks)) {
+    const textBlocks: string[] = []
+    for (const block of m.contentBlocks as unknown[]) {
+      if (block && typeof block === 'object') {
+        const b = block as { type?: string; text?: string }
+        if (b.type === 'text' && typeof b.text === 'string') textBlocks.push(b.text)
+      }
+    }
+    text = textBlocks.join('\n')
+  }
+  return text.trim()
+}
+
+/**
+ * Extract a "target hint" from a tool call's input. Different tools store
+ * the operand under different keys (file_path, path, command, …) — we try
+ * a small ordered list and fall back to the first 120 chars of stringified
+ * input. Never throws.
+ */
+function extractToolTarget(toolName: string, input: unknown): string | undefined {
+  if (input == null) return undefined
+  let parsed: Record<string, unknown> | null = null
+  if (typeof input === 'string') {
+    try { parsed = JSON.parse(input) as Record<string, unknown> } catch { return input.slice(0, 120) }
+  } else if (typeof input === 'object') {
+    parsed = input as Record<string, unknown>
+  }
+  if (!parsed) return undefined
+  for (const key of ['file_path', 'filePath', 'path', 'target', 'targetFile', 'src', 'source']) {
+    const v = parsed[key]
+    if (typeof v === 'string' && v.length > 0) return v
+  }
+  if (typeof parsed.command === 'string') return parsed.command.slice(0, 120)
+  if (typeof parsed.cmd === 'string') return parsed.cmd.slice(0, 120)
+  // Last resort: stringify the smallest sensible field
+  try {
+    const s = JSON.stringify(parsed)
+    return s.length > 160 ? s.slice(0, 160) + '…' : s
+  } catch { return undefined }
+}
+
+/**
+ * Inspect an assistant message for its most recent tool call (Anthropic
+ * tool_use block OR OpenAI-style toolCalls). Returns the tool name + a
+ * "target" hint + the tool_use id so we can later match a tool_result.
+ */
+function extractLastToolCall(m: SessionMessage): { name: string; target?: string; toolUseId?: string } | null {
+  // Anthropic contentBlocks path
+  if (Array.isArray(m.contentBlocks)) {
+    for (let i = m.contentBlocks.length - 1; i >= 0; i--) {
+      const block = m.contentBlocks[i]
+      if (block && typeof block === 'object') {
+        const b = block as { type?: string; name?: string; input?: unknown; id?: string }
+        if (b.type === 'tool_use' && typeof b.name === 'string') {
+          return {
+            name: b.name,
+            target: extractToolTarget(b.name, b.input),
+            toolUseId: typeof b.id === 'string' ? b.id : undefined,
+          }
+        }
+      }
+    }
+  }
+  // OpenAI toolCalls path
+  if (Array.isArray(m.toolCalls) && m.toolCalls.length > 0) {
+    const tc = m.toolCalls[m.toolCalls.length - 1]!
+    return {
+      name: tc.name,
+      target: extractToolTarget(tc.name, tc.arguments),
+      toolUseId: tc.id,
+    }
+  }
+  return null
+}
+
+/**
+ * Determine outcome of a tool_use by scanning subsequent messages for a
+ * matching tool_result. Heuristics for failure detection mirror
+ * looksLikeToolFailure in contextCompressor.ts.
+ */
+function classifyToolOutcome(
+  messages: SessionMessage[],
+  fromIdx: number,
+  toolUseId: string | undefined,
+): 'success' | 'failure' | 'pending' {
+  for (let j = fromIdx + 1; j < messages.length; j++) {
+    const r = messages[j]!
+    if (r.role !== 'tool') continue
+    if (toolUseId && r.toolUseId && r.toolUseId !== toolUseId) continue
+    const content = (r.content ?? '').toLowerCase()
+    if (
+      content.includes('"ok": false') ||
+      content.includes('tool_invalid_arguments') ||
+      content.includes('execution error') ||
+      content.includes('error:') ||
+      content.includes('failed')
+    ) return 'failure'
+    return 'success'
+  }
+  return 'pending'
+}
+
+/**
+ * Extract the last substantive assistant text from the conversation tail
+ * AND, if present, structured information about the tool the model was
+ * invoking. Both halves are useful: text gives intent in natural language,
+ * lastTool gives the concrete operation (file path / command / outcome).
+ */
+function extractLastAssistantIntent(messages: SessionMessage[]): ExtractedPendingIntent | null {
+  let text: string | null = null
+  let lastTool: ExtractedPendingIntent['lastTool'] | undefined
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role !== 'assistant') continue
+
+    if (!text) {
+      const t = extractTextFromAssistant(m)
+      if (t.length >= 20) text = t
+    }
+    if (!lastTool) {
+      const tool = extractLastToolCall(m)
+      if (tool) {
+        lastTool = {
+          name: tool.name,
+          target: tool.target,
+          toolUseId: tool.toolUseId,
+          outcome: classifyToolOutcome(messages, i, tool.toolUseId),
+        }
+      }
+    }
+    if (text && lastTool) break
+  }
+  if (!text && !lastTool) return null
+  return { text: text ?? '', lastTool }
+}
+
+/**
+ * Extract the latest user message content as "current focus" — passed to the
+ * worker summarizer so it can drop stale topics (e.g. "artemix read-only mode")
+ * that no longer apply to the current task. Without this, previousSummary
+ * propagates dead task lines indefinitely.
+ */
+function extractCurrentUserFocus(messages: SessionMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role !== 'user') continue
+    const text = typeof m.content === 'string' ? m.content.trim() : ''
+    if (text.length < 5) continue
+    // Skip system-style markers used for compression summary or recovery
+    if (text.startsWith('[系统：') || text.startsWith('═══')) continue
+    return text.length > 800 ? text.slice(0, 800) : text
+  }
+  return null
+}
+
+function countProgressOpsSince(
+  messages: SessionMessage[],
+  sinceMs: number,
+): number {
+  // If no prior compression timestamp, fall back to scanning the recent tail
+  // so we don't escalate spuriously on the first compression of a session.
+  const useTimestamp = sinceMs > 0
+  let count = 0
+  const start = useTimestamp ? 0 : Math.max(0, messages.length - 30)
+  for (let i = start; i < messages.length; i++) {
+    const m = messages[i]!
+    if (m.role !== 'tool' || !m.name) continue
+    if (!COMPRESSION_PROGRESS_TOOLS.has(m.name)) continue
+    if (useTimestamp) {
+      const t = m.createdAt ? new Date(m.createdAt).getTime() : 0
+      if (t && t < sinceMs) continue
+    }
+    count += 1
+  }
+  return count
+}
+
 async function compressSessionMessagesForProvider(
     activeSession: Session,
     conversationMessages: SessionMessage[],
@@ -950,12 +1155,43 @@ async function compressSessionMessagesForProvider(
     const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
     const tokensBefore = Math.ceil(conversationMessages.reduce((s, m) => s + m.content.length / 4, 0))
 
+    // ── Churn detection: pre-flight threshold escalation ───────────────────
+    // If this session has been rumination-looping (compressions firing
+    // without any Edit/Write progress in between), the breaker raised the
+    // threshold multiplier on the previous compression. Apply it here so
+    // microcompact triggers later this turn too.
+    const churnMultiplier = getThresholdMultiplier(breaker)
+
+    // ── Capture pending action + current focus BEFORE compression ──────────
+    // The last assistant text+toolcall becomes pendingAction so
+    // postCompactRecovery can replay it. The latest user message becomes
+    // currentFocus so the worker summarizer can drop stale topics.
+    const pendingIntent = extractLastAssistantIntent(conversationMessages)
+    if (pendingIntent) {
+      const pendingPayload: Record<string, unknown> = {
+        text: pendingIntent.text,
+        capturedAt: new Date().toISOString(),
+      }
+      if (pendingIntent.lastTool) {
+        // Drop toolUseId before storing — it's only useful at extraction time
+        pendingPayload.lastTool = {
+          name: pendingIntent.lastTool.name,
+          target: pendingIntent.lastTool.target,
+          outcome: pendingIntent.lastTool.outcome,
+        }
+      }
+      activeSession.setContext('pendingActionIntent', pendingPayload)
+    }
+    const currentFocus = extractCurrentUserFocus(conversationMessages)
+
     let compression: { messages: SessionMessage[]; summaryText?: string; compressed: boolean; tokensBefore: number; tokensAfter: number }
     try {
       compression = await compressMessages(conversationMessages, summarizeOnce, {
         tokenLimit: availableLimit,
         previousSummary,
         threshold: _compressionThresholdOverride,
+        churnMultiplier,
+        currentFocus: currentFocus ?? undefined,
         onInfo,
       });
     } catch (e: any) {
@@ -994,10 +1230,20 @@ async function compressSessionMessagesForProvider(
         const sessionSkills = (activeSession.getContext('activeSkills') as string[]) ?? []
 
         // Extract file paths from tool messages in the conversation history.
-        // This gives postCompactRecovery actual data to restore after compression.
-        const fileStates: import('./core/collapse/ledger.js').FileStateSnapshot[] = []
-        const seenPaths = new Set<string>()
-        for (const msg of conversationMessages) {
+        // Two fixes vs the original loop:
+        //   (1) Track the LATEST reference timestamp per path, not the first.
+        //       Old loop did seenPaths.add() + continue, so first occurrence
+        //       won — meaning a file read 200 messages ago dominated over a
+        //       fresh re-read.
+        //   (2) Drop entries whose last reference is older than a sliding
+        //       cutoff so stale files don't keep getting reinjected.
+        const STALE_MSG_DISTANCE = 100   // skip files whose last ref is >100 messages back
+        const MAX_FILE_STATES = 8        // hard cap on snapshots stored
+        const latestRefByPath = new Map<string, { ts: number; msgIndex: number }>()
+        const latestMsgIndex = conversationMessages.length - 1
+
+        for (let mi = 0; mi < conversationMessages.length; mi++) {
+          const msg = conversationMessages[mi]!
           if (msg.role !== 'tool' || !msg.name) continue
           if (msg.name !== 'read_file' && msg.name !== 'write_file' && msg.name !== 'apply_patch') continue
           try {
@@ -1005,34 +1251,47 @@ async function compressSessionMessagesForProvider(
             const fp = typeof parsed.path === 'string' ? parsed.path
                      : typeof parsed.filePath === 'string' ? parsed.filePath
                      : null
-            if (!fp || seenPaths.has(fp)) continue
-            seenPaths.add(fp)
-            // Try to read the current file to create a state snapshot
-            try {
-              const { readFile: rf, stat: st } = await import('node:fs/promises')
-              const content = await rf(fp, 'utf-8')
-              const stats = await st(fp)
-              fileStates.push(createFileStateSnapshot(fp, content, stats.mtimeMs))
-            } catch {
-              // File may have been deleted or is binary — create a minimal snapshot
-              fileStates.push({
-                filePath: fp,
-                contentHash: 'unavailable',
-                headContent: `[文件不可读: ${fp}]`,
-                mtimeMs: 0,
-              })
+            if (!fp) continue
+            const ts = msg.createdAt ? new Date(msg.createdAt).getTime() : Date.now()
+            const existing = latestRefByPath.get(fp)
+            if (!existing || ts >= existing.ts) {
+              latestRefByPath.set(fp, { ts, msgIndex: mi })
             }
           } catch { /* not JSON — skip */ }
         }
 
-        // Build plan snapshot from compression summary (the best context we have)
-        const planSnapshot = compression.summaryText
-          ? { content: compression.summaryText, status: 'active' }
-          : undefined
+        // Apply TTL: drop files not referenced in the recent window
+        const survivors = [...latestRefByPath.entries()]
+          .filter(([, ref]) => (latestMsgIndex - ref.msgIndex) <= STALE_MSG_DISTANCE)
+          .sort((a, b) => b[1].ts - a[1].ts)
+          .slice(0, MAX_FILE_STATES)
+
+        const fileStates: import('./core/collapse/ledger.js').FileStateSnapshot[] = []
+        for (const [fp, ref] of survivors) {
+          try {
+            const { readFile: rf, stat: st } = await import('node:fs/promises')
+            const content = await rf(fp, 'utf-8')
+            const stats = await st(fp)
+            fileStates.push(createFileStateSnapshot(fp, content, stats.mtimeMs, ref.ts))
+          } catch {
+            // File may have been deleted or is binary — create a minimal snapshot
+            fileStates.push({
+              filePath: fp,
+              contentHash: 'unavailable',
+              headContent: `[文件不可读: ${fp}]`,
+              mtimeMs: 0,
+              lastReferencedAt: ref.ts,
+            })
+          }
+        }
 
         await recordCollapse(sessionId, entry, {
-          fileStates: fileStates.slice(0, 8), // Limit to 8 most relevant files
-          planSnapshot,
+          // Already TTL-filtered and sorted by recency above
+          fileStates,
+          // Do not persist compression summaries as plans. Old behavior stored
+          // generic conversation summaries here, then post-compact recovery
+          // re-injected stale cross-project tasks as "current plan".
+          planSnapshot: undefined,
           activeTools: sessionTools,
           activeMcpServers: sessionMcp,
           activeSkills: sessionSkills,
@@ -1040,15 +1299,39 @@ async function compressSessionMessagesForProvider(
 
         // ── Post-compact recovery: re-inject critical context ───────────────
         const ledger = await getOrCreateLedger(sessionId)
-        const recoveryMessages = await buildPostCompactRecoveryMessages(ledger)
+        const pendingActionStored = activeSession.getContext('pendingActionIntent') as
+          | {
+              text: string
+              capturedAt: string
+              lastTool?: { name: string; target?: string; outcome: 'success' | 'failure' | 'pending' }
+            }
+          | undefined
+        const recoveryMessages = await buildPostCompactRecoveryMessages(ledger, {
+          pendingAction: pendingActionStored,
+        })
 
         if (recoveryMessages.length > 0) {
           compression.messages = [...compression.messages, ...recoveryMessages]
-          onInfo?.(`[恢复] 已注入 ${recoveryMessages.length} 条压缩恢复消息（文件状态/计划/工具）`)
+          onInfo?.(`[恢复] 已注入 ${recoveryMessages.length} 条压缩恢复消息（进行中状态/文件状态/工具）`)
         }
 
         // Record success in circuit breaker
-        const updatedBreaker = recordCompressionSuccess(breaker)
+        let updatedBreaker = recordCompressionSuccess(breaker)
+        // ── Churn detection: did we see Edit/Write ops since last compression? ──
+        // If not, escalate the threshold multiplier so the next compression
+        // fires later and the model has more headroom to actually act.
+        const editsSinceLast = countProgressOpsSince(
+          conversationMessages,
+          updatedBreaker.lastCompressionAt,
+        )
+        const churnUpdate = recordCompressionTriggered(updatedBreaker, {
+          editsSinceLast,
+          now: Date.now(),
+        })
+        updatedBreaker = churnUpdate.state
+        if (churnUpdate.churnDetected) {
+          onInfo?.(`[压缩] 检测到鬼打墙（5分钟内 ${updatedBreaker.recentCompressionTimestamps.length} 次压缩、零 Edit 进展），下次触发阈值×${updatedBreaker.thresholdMultiplier.toFixed(2)}`)
+        }
         sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
       } catch (ledgerError: any) {
         // Ledger failure should never block the main compression flow
@@ -2200,7 +2483,7 @@ export async function think(
     let unresolvedDirectToolFailure: DirectToolFailureState | null = null;
     let previousResponseId: string | undefined;
     let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
-    let emptyFinalReplyRetryUsed = false;
+    let emptyFinalReplyRetryCount = 0;
     const absorbRunningUserMessages = (): number => {
         const updates = pollRunningUserMessages?.() ?? [];
         let accepted = 0;
@@ -2269,9 +2552,11 @@ export async function think(
         1,
         Math.floor(rawMaxNativeToolRounds ?? MAX_DIRECT_NATIVE_TOOL_ROUNDS),
     );
+    const maxEmptyFinalReplyRetries = 2;
+    const maxProviderRounds = maxNativeToolRounds + maxEmptyFinalReplyRetries;
 
     nativeRoundLoop:
-    for (let round = 1; round <= maxNativeToolRounds; round += 1) {
+    for (let round = 1; round <= maxProviderRounds; round += 1) {
         absorbRunningUserMessages();
         if (round > 1) {
             providerCompression = await compressSessionMessagesForProvider(
@@ -2351,7 +2636,7 @@ export async function think(
                 cumulativeUsage = accumulateProviderUsage(cumulativeUsage, forcedCompletion.usage);
                 const forcedReply = (forcedCompletion.text ?? '').trim() || [
                     '我已经停止继续调用工具。',
-                    '目前还没有足够的最终文本可返回；请发送“继续”让我基于当前上下文接着处理，或把任务拆成更小的一步。',
+                    '目前还没有足够的最终文本可返回；运行时未把本轮标记为任务完成。请直接重试上一条请求或发送更具体的下一步指令。',
                 ].join('\n');
                 finalResult = {
                     ...forcedCompletion,
@@ -2497,10 +2782,10 @@ export async function think(
 
         let reply = completion.text ?? '';
         if (supportsNativeTools && !plainChat && !reply.trim()) {
-            if (!emptyFinalReplyRetryUsed && round < maxNativeToolRounds) {
-                emptyFinalReplyRetryUsed = true;
+            if (emptyFinalReplyRetryCount < maxEmptyFinalReplyRetries && round < maxProviderRounds) {
+                emptyFinalReplyRetryCount += 1;
                 onToolLog?.(
-                    'Provider returned an empty final reply; requesting a no-tool final reply.',
+                    `Provider returned an empty final reply; requesting a no-tool final reply (retry ${emptyFinalReplyRetryCount}/${maxEmptyFinalReplyRetries}).`,
                     'warn',
                 );
                 const guardMessage = buildEmptyFinalReplyGuardMessage(latestUserText);
@@ -2512,7 +2797,7 @@ export async function think(
             }
             reply = [
                 '本轮模型没有返回可见的最终文本。',
-                '运行时已停止把空回复当作任务完成；请发送“继续”，我会基于当前上下文继续处理，或把任务拆成更小的一步重试。',
+                '运行时已自动重试但提供商仍返回空文本；本轮未标记为任务完成。请直接重试上一条请求或发送更具体的下一步指令。',
             ].join('\n');
         }
         if (supportsNativeTools && !plainChat && reply.trim()) {

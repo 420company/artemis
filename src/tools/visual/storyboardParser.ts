@@ -108,7 +108,17 @@ export async function parseStoryboardImageWithVision(options: {
   const imageApiKey = imageConfigured?.config.image.apiKey?.trim();
   const imageBaseUrl = imageConfigured?.config.image.baseUrl?.trim();
   if (imageApiKey && imageBaseUrl) {
-    candidates.push({ apiKey: imageApiKey, baseUrl: imageBaseUrl, chatModel: 'gpt-4o', label: 'image-provider-vision' });
+    // Fallback chain matches the one in superVisualMode.describeUserImageWithVision.
+    // The user can override by setting `visualProfile.image.visionModel` to whatever
+    // their relay actually serves. Filter out image-generation aliases so they
+    // don't end up sent to /chat/completions (where they'd 400/503).
+    const explicitVision = imageConfigured?.config.image.visionModel?.trim();
+    const visionCandidates = explicitVision && !/image|dall[\-_]?e/i.test(explicitVision)
+      ? [explicitVision]
+      : ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'];
+    for (const m of visionCandidates) {
+      candidates.push({ apiKey: imageApiKey, baseUrl: imageBaseUrl, chatModel: m, label: `image-provider-vision[${m}]` });
+    }
   }
   try {
     const { ProviderStore } = await import('../../providers/store.js');

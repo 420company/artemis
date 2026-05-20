@@ -15,6 +15,7 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
 import { toolLog, toolWarn } from '../../utils/log.js';
+import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 
 export type ProtagonistType = 'character' | 'product' | 'environment';
 export type ProtagonistMode = ProtagonistType | 'mixed' | 'unclear';
@@ -178,7 +179,7 @@ export type ShotViolation = {
   reasons: string[];
 };
 
-const NARRATIVE_LIBRARY_FILE = 'generated-media/long-videos/saga-narrative-library.jsonl';
+const NARRATIVE_LIBRARY_FILE = 'long-videos/saga-narrative-library.jsonl';
 
 // ─── Layer 1 — multimodal LLM extraction ──────────────────────────────────
 
@@ -1028,7 +1029,7 @@ export async function appendNarrativeLibraryEntry(options: {
   cwd: string;
   entry: NarrativeLibraryEntry;
 }): Promise<void> {
-  const target = path.join(options.cwd, NARRATIVE_LIBRARY_FILE);
+  const target = path.join(getMediaOutputRoot(), NARRATIVE_LIBRARY_FILE);
   try {
     await mkdir(path.dirname(target), { recursive: true });
     await appendFile(target, JSON.stringify(options.entry) + '\n', 'utf8');
@@ -1042,7 +1043,7 @@ export async function loadRecentLibraryExamples(options: {
   protagonistType: ProtagonistType;
   limit?: number;
 }): Promise<NarrativeLibraryEntry[]> {
-  const target = path.join(options.cwd, NARRATIVE_LIBRARY_FILE);
+  const target = path.join(getMediaOutputRoot(), NARRATIVE_LIBRARY_FILE);
   try {
     const raw = await readFile(target, 'utf8');
     const entries: NarrativeLibraryEntry[] = [];

@@ -960,6 +960,7 @@ function buildAvailabilitySummary(data: Awaited<ReturnType<ProviderStore['load']
   lines.push(`${secondary ? '✓' : '✗'} Secondary provider${secondary ? `: ${secondary.model}` : ': not configured'}`)
   lines.push(`${visual?.enabled ? '✓' : '✗'} Image generation${visual?.enabled ? `: ${visual.image.provider}/${visual.image.model}` : ': disabled'}`)
   lines.push(`${visual?.video.enabled ? '✓' : '✗'} Video generation${visual?.video.enabled ? `: ${visual.video.provider}/${visual.video.model}` : ': disabled'}`)
+  if (visual?.image?.nsfw || visual?.video?.nsfw) lines.push(`🔞 NSFW mode: image=${visual?.image?.nsfw ? 'on' : 'off'} video=${visual?.video?.nsfw ? 'on' : 'off'}`)
   lines.push(`${data.memoryProfile?.enabled ? '✓' : '✗'} Memory enhancement${data.memoryProfile?.enabled ? `: ${data.memoryProfile.provider}` : ': disabled'}`)
   lines.push(`${setup?.tools.enabled.tts ? '✓' : '✗'} Text-to-speech${setup?.tools.enabled.tts ? `: ${setup.voice.tts.provider}/${setup.voice.tts.voice ?? 'default'}` : ': disabled'}`)
   lines.push(`${setup?.tools.enabled.stt ? '✓' : '✗'} Speech-to-text${setup?.tools.enabled.stt ? `: ${setup.voice.stt.provider}/${setup.voice.stt.engine ?? 'auto'}/${setup.voice.stt.localModel ?? 'base'}` : ': disabled'}`)

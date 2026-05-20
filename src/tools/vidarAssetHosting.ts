@@ -6,6 +6,7 @@ import { ProviderStore } from '../providers/store.js';
 import type { ProviderStoreData, VidarAssetHostingConfig } from '../providers/types.js';
 import type { ToolExecutionContext } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
+import { toolLog, toolWarn } from '../utils/log.js';
 
 export type HostedReferenceKind = 'video' | 'audio' | 'image';
 
@@ -61,6 +62,10 @@ function inferContentType(filePath: string, kind: HostedReferenceKind): string {
     if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
     if (ext === '.webp') return 'image/webp';
     if (ext === '.gif') return 'image/gif';
+    if (ext === '.heic') return 'image/heic';
+    if (ext === '.heif') return 'image/heif';
+    if (ext === '.bmp') return 'image/bmp';
+    if (ext === '.tiff' || ext === '.tif') return 'image/tiff';
     return 'image/png';
   }
   if (ext === '.wav') return 'audio/wav';
@@ -232,10 +237,63 @@ export async function uploadLocalReferenceAssets(
     if (info.size > config.maxUploadBytes) {
       throw new Error(`generate_video: local ${kind} reference is too large for Vidar asset upload (${Math.round(info.size / 1024 / 1024)} MB > ${Math.round(config.maxUploadBytes / 1024 / 1024)} MB): ${rawPath}`);
     }
-    const body = await readFile(resolved.absolute);
-    const objectKey = buildObjectKey(config, resolved.absolute, kind);
-    await putS3Object(config, objectKey, body, inferContentType(resolved.absolute, kind));
+    let body: Buffer = Buffer.from(await readFile(resolved.absolute));
+    let uploadPath = resolved.absolute;
+    // HEIC / HEIF auto-conversion. Apple devices export HEIC by default;
+    // downstream video providers' image classifiers either fail to parse it
+    // (some treat it as PNG due to content-type mislabel) or treat the iPhone
+    // photo signal as "definitely real-person" and reject for deepfake
+    // privacy. Converting to JPG in-memory before upload sidesteps both.
+    // Pure-JS heic-convert keeps this working on Windows where sharp's
+    // prebuilt binaries don't bundle libheif.
+    if (kind === 'image' && isHeicFile(resolved.absolute, body)) {
+      try {
+        const converted = await convertHeicToJpeg(body);
+        toolLog(`🖼️ HEIC 自动转 JPG: ${path.basename(resolved.absolute)} (${Math.round(body.length / 1024)}KB → ${Math.round(converted.length / 1024)}KB)`);
+        body = converted;
+        // Rename for the storage key so the uploaded object reflects the
+        // actual content. The original local file is untouched.
+        uploadPath = resolved.absolute.replace(/\.(heic|heif)$/i, '.jpg');
+      } catch (error) {
+        toolWarn(`⚠️ HEIC 转换失败，将按原始 HEIC 上传: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const objectKey = buildObjectKey(config, uploadPath, kind);
+    await putS3Object(config, objectKey, body, inferContentType(uploadPath, kind));
     urls.push(buildPublicUrl(config, objectKey));
   }
   return urls;
+}
+
+function isHeicFile(filePath: string, body: Buffer): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.heic' || ext === '.heif') return true;
+  // Magic-bytes check: HEIC/HEIF use the ISO BMFF container. Bytes 4-11 are
+  // 'ftyp' + brand. Common brands: heic, heix, hevc, mif1, msf1, heim, heis,
+  // hevm, hevs. This catches misnamed files (e.g., user renames .heic to
+  // .jpg manually without conversion).
+  if (body.length < 12) return false;
+  if (body.toString('ascii', 4, 8) !== 'ftyp') return false;
+  const brand = body.toString('ascii', 8, 12).toLowerCase();
+  return ['heic', 'heix', 'hevc', 'hevm', 'hevs', 'heim', 'heis', 'mif1', 'msf1'].includes(brand);
+}
+
+async function convertHeicToJpeg(heicBuffer: Buffer): Promise<Buffer> {
+  // Dynamic import keeps the heic-convert WASM payload out of the cold-start
+  // path; only loaded when an HEIC file actually appears.
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore — heic-convert has no shipped TypeScript types
+  const mod = await import('heic-convert');
+  const convert: unknown = (mod as { default?: unknown }).default ?? mod;
+  if (typeof convert !== 'function') {
+    throw new Error('heic-convert module did not export a callable default');
+  }
+  // heic-convert expects a Node Buffer (or Uint8Array) directly; passing a
+  // pre-sliced ArrayBuffer breaks heic-decode's internal magic-bytes check.
+  const result: Uint8Array = await (convert as (opts: { buffer: Buffer; format: string; quality: number }) => Promise<Uint8Array>)({
+    buffer: heicBuffer,
+    format: 'JPEG',
+    quality: 0.92,
+  });
+  return Buffer.from(result);
 }

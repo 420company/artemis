@@ -171,6 +171,7 @@ function getEmptyStore(): ProviderStoreData {
         apiKey: '',
         baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
         model: 'seedream-5-0-260128',
+        nsfw: false,
         defaultParams: {
           size: '2K',
           quality: 'standard',
@@ -184,6 +185,7 @@ function getEmptyStore(): ProviderStoreData {
         apiKey: '',
         baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
         model: 'seedance-1-5-pro-251215',
+        nsfw: false,
         defaultParams: {
           duration: '10s',
           resolution: '1080p',

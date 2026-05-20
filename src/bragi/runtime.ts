@@ -10,7 +10,7 @@
  */
 
 import { think, resetSession, getMessages, restoreSessionStateForCwd } from '../brain.js'
-import { open, readFile, unlink } from 'node:fs/promises'
+import { open, readFile, unlink, writeFile, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { hostname, homedir } from 'node:os'
 import path from 'node:path'
@@ -45,6 +45,7 @@ import { executeAction } from '../tools/index.js'
 import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
 import { broadcastToBridges } from '../services/bridgeNotifier.js'
+import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -233,8 +234,18 @@ type BridgeProviderRuntime = {
   provider: ChatProvider
 }
 
-async function resolveBridgeProviderRuntime(cwd: string): Promise<BridgeProviderRuntime> {
-  const config = await resolveMainProviderConfig({ cwd, config: {} })
+async function resolveBridgeProviderRuntime(_cwd: string): Promise<BridgeProviderRuntime> {
+  // SECURITY / CONSISTENCY: messaging bridges (telegram / discord / wechat)
+  // ALWAYS resolve the AI provider from the GLOBAL ~/.artemis/providers.json,
+  // never from a workspace-local .artemis/providers.json that happens to sit
+  // under the session's cwd. The bridge is a system service that processes
+  // remote IM messages — its provider choice should not be hijackable by any
+  // file the agent edits or any stale .artemis subdir left over from an old
+  // install in any directory the agent's cwd ever pointed to. The session
+  // cwd remains correct for tool-execution context (file edits, etc.) — only
+  // provider resolution is hardened here.
+  const globalCwd = homedir()
+  const config = await resolveMainProviderConfig({ cwd: globalCwd, config: {} })
   const trackedProfileId =
     typeof (config as unknown as { id?: unknown }).id === 'string'
       ? (config as unknown as { id: string }).id
@@ -244,7 +255,7 @@ async function resolveBridgeProviderRuntime(cwd: string): Promise<BridgeProvider
       ? (config as unknown as { label: string }).label
       : trackedProfileId
   const provider = createTrackedProviderFromConfig(config, {
-    cwd,
+    cwd: globalCwd,
     profileId: trackedProfileId,
     profileLabel: trackedProfileLabel,
   })
@@ -287,9 +298,17 @@ async function rebaseBridgeBindingToLatestMainSession(options: {
   if (latest.kind && latest.kind !== 'main') {
     return options.binding
   }
-  if (!sameBridgeWorkspacePath(latest.cwd, options.cwd)) {
-    return options.binding
-  }
+  // PREVIOUS behavior: skipped rebase when the latest main session's cwd
+  // did not match the bridge's bound cwd. That left the bridge stuck on an
+  // old session whenever the user moved to a new workspace on the desktop —
+  // the bridge would no longer mirror the user's current conversation.
+  //
+  // NEW behavior: always rebase to the latest main session regardless of
+  // workspace path. The IM bridge mirrors whatever the user is actively
+  // working on at the desktop, so the messaging session stays in sync with
+  // the desktop CLI session at all times. (Provider resolution is now
+  // global per resolveBridgeProviderRuntime, so workspace path no longer
+  // controls model selection — only tool-execution context.)
 
   const latestUpdatedAt = parseSessionTime(latest.updatedAt)
   const boundUpdatedAt = parseSessionTime(options.binding.storedSession.updatedAt)
@@ -297,7 +316,7 @@ async function rebaseBridgeBindingToLatestMainSession(options: {
     return options.binding
   }
 
-  options.onInfo?.(`[bridge] attached remote chat to latest main session ${latest.id} (was ${options.binding.storedSession.id})`)
+  options.onInfo?.(`[bridge] attached remote chat to latest main session ${latest.id} (was ${options.binding.storedSession.id}); cwd=${latest.cwd ?? 'unset'}`)
   return {
     ...options.binding,
     storedSession: latest,
@@ -694,12 +713,46 @@ export async function runRemoteCommand(
             `🔧 正在直接运行工具：generate_long_video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
             `🔧 Running tool directly: generate_long_video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
           ), 'info')
-          const result = await executeAction(directSagaAction, {
-            cwd: commandCwd,
-            locale,
-            permissionMode: mapPermissionModeToToolAccess(binding.permissionMode),
-            sessionId: binding.storedSession.id,
-          })
+
+          // Pipe toolLog/toolWarn/toolError to the bridge so users on Telegram
+          // (or other bridges) see real-time progress. Without this, the
+          // 7-15 minute generation looks like a hang. Heartbeat every 30s as
+          // a fallback for sub-tool awaits that don't log themselves.
+          const longRunStartMs = Date.now()
+          const sinkToBridge = (entry: RuntimeLogEntry) => {
+            const elapsed = Math.round((Date.now() - longRunStartMs) / 1000)
+            const text = `${entry.message}  (+${elapsed}s)`
+            void opts.onProgress?.(text, entry.level === 'error' ? 'warn' : entry.level)
+          }
+          const HEARTBEAT_INTERVAL_MS = 30_000
+          const HEARTBEAT_MAX_TICKS = 80
+          let heartbeatTicks = 0
+          const heartbeatTimer = setInterval(() => {
+            heartbeatTicks += 1
+            if (heartbeatTicks > HEARTBEAT_MAX_TICKS) {
+              clearInterval(heartbeatTimer)
+              return
+            }
+            const elapsed = Math.round((Date.now() - longRunStartMs) / 1000)
+            void opts.onProgress?.(t(
+              `⏱ 长视频生成进行中 · 已耗时 ${elapsed}s · 心跳 #${heartbeatTicks}`,
+              `⏱ Long-video generation running · elapsed ${elapsed}s · heartbeat #${heartbeatTicks}`,
+            ), 'info')
+          }, HEARTBEAT_INTERVAL_MS)
+
+          let result: Awaited<ReturnType<typeof executeAction>>
+          try {
+            result = await withRuntimeLogSink(sinkToBridge, () =>
+              executeAction(directSagaAction, {
+                cwd: commandCwd,
+                locale,
+                permissionMode: mapPermissionModeToToolAccess(binding.permissionMode),
+                sessionId: binding.storedSession.id,
+              }),
+            )
+          } finally {
+            clearInterval(heartbeatTimer)
+          }
           const msg = t(
             `${result.ok ? '✅' : '⚠️'} 工具${result.ok ? '完成' : '失败'}：generate_long_video${summarizeToolOutput(result.output)}`,
             `${result.ok ? '✅' : '⚠️'} Tool ${result.ok ? 'completed' : 'failed'}: generate_long_video${summarizeToolOutput(result.output)}`,
@@ -992,6 +1045,22 @@ type PollBatch<TCheckpoint> = {
   checkpoint?: TCheckpoint
 }
 
+type BridgeInboxEntry<TCheckpoint> = {
+  message: BragiInboundMessage
+  checkpoint?: TCheckpoint
+  capturedAt: string
+}
+
+function bridgeInboxMessageKey(message: BragiInboundMessage): string {
+  return message.sourceMessageId
+    ? `${message.targetId}:${message.sourceMessageId}`
+    : `${message.targetId}:${message.text}`
+}
+
+function bridgeInboxEntryKey(entry: BridgeInboxEntry<unknown>): string {
+  return bridgeInboxMessageKey(entry.message)
+}
+
 type AuthorizationResult = {
   allowed: boolean
   preReplies?: string[]
@@ -1241,6 +1310,40 @@ async function tryAcquireBridgeLock(
   return undefined
 }
 
+function bridgeInboxPath(cwd: string, channelLabel: string, identity?: string): string {
+  const identityHash = createHash('sha256').update(identity || channelLabel).digest('hex').slice(0, 16)
+  return path.join(resolveDataRootDir(cwd), 'bridge-inbox', `${channelLabel.toLowerCase()}-${identityHash}.json`)
+}
+
+async function loadBridgeInbox<TCheckpoint>(
+  cwd: string,
+  channelLabel: string,
+  identity?: string,
+): Promise<BridgeInboxEntry<TCheckpoint>[]> {
+  try {
+    const raw = await readFile(bridgeInboxPath(cwd, channelLabel, identity), 'utf-8')
+    const parsed = JSON.parse(raw) as { entries?: BridgeInboxEntry<TCheckpoint>[] }
+    return Array.isArray(parsed.entries) ? parsed.entries : []
+  } catch {
+    return []
+  }
+}
+
+async function saveBridgeInbox<TCheckpoint>(
+  cwd: string,
+  channelLabel: string,
+  identity: string | undefined,
+  entries: BridgeInboxEntry<TCheckpoint>[],
+): Promise<void> {
+  const filePath = bridgeInboxPath(cwd, channelLabel, identity)
+  await ensureDir(path.dirname(filePath))
+  await writeFile(filePath, JSON.stringify({ version: 1, entries }, null, 2), 'utf-8')
+}
+
+async function clearBridgeInbox(cwd: string, channelLabel: string, identity?: string): Promise<void> {
+  await rm(bridgeInboxPath(cwd, channelLabel, identity), { force: true })
+}
+
 export async function runBragiMessagePump<TCheckpoint>(
   options: RunBragiMessagePumpOptions<TCheckpoint>
 ): Promise<void> {
@@ -1291,13 +1394,39 @@ export async function runBragiMessagePump<TCheckpoint>(
         continue
       }
 
-      // Commit checkpoint immediately after receiving the batch so that a crash
-      // during processing does not re-deliver the same messages on the next run.
+      const polledEntries: BridgeInboxEntry<TCheckpoint>[] = batch.messages.map((message) => ({
+        message,
+        checkpoint: batch.checkpoint,
+        capturedAt: new Date().toISOString(),
+      }))
+      let inboxEntries = await loadBridgeInbox<TCheckpoint>(options.cwd, options.channelLabel, options.bridgeIdentity)
+      if (polledEntries.length > 0) {
+        const merged = new Map<string, BridgeInboxEntry<TCheckpoint>>()
+        for (const entry of inboxEntries) merged.set(bridgeInboxEntryKey(entry), entry)
+        for (const entry of polledEntries) merged.set(bridgeInboxEntryKey(entry), entry)
+        inboxEntries = [...merged.values()]
+        await saveBridgeInbox(options.cwd, options.channelLabel, options.bridgeIdentity, inboxEntries)
+      }
+
+      // Commit the remote checkpoint only after the inbound batch has been
+      // durably captured in a local inbox. If the process crashes during AI
+      // handling, restart will replay the inbox instead of losing phone input.
       if (batch.checkpoint !== undefined) {
         await options.commitCheckpoint?.(batch.checkpoint)
       }
 
-      for (const message of batch.messages) {
+      const acknowledgeInboxEntry = async (key: string): Promise<void> => {
+        inboxEntries = inboxEntries.filter((entry) => bridgeInboxEntryKey(entry) !== key)
+        if (inboxEntries.length > 0) {
+          await saveBridgeInbox(options.cwd, options.channelLabel, options.bridgeIdentity, inboxEntries)
+        } else {
+          await clearBridgeInbox(options.cwd, options.channelLabel, options.bridgeIdentity)
+        }
+      }
+
+      for (const inboxEntry of inboxEntries) {
+        const message = inboxEntry.message
+        const inboxKey = bridgeInboxEntryKey(inboxEntry)
         // Bridge inbound message counts as user activity → reset dream-system
         // idle clock so we don't dream while a chat conversation is happening.
         void (async () => {
@@ -1311,7 +1440,14 @@ export async function runBragiMessagePump<TCheckpoint>(
           ? `${message.targetId}:${message.sourceMessageId}`
           : undefined
         if (dedupeKey) {
-          if (recentlyProcessed.has(dedupeKey)) continue
+          if (recentlyProcessed.has(dedupeKey)) {
+            // If the original task is still running, keep the inbox entry on
+            // disk so a crash can replay it. It will be acknowledged by the
+            // original task's finally block after safe completion.
+            if (activeTargets.has(message.targetId)) continue
+            await acknowledgeInboxEntry(inboxKey)
+            continue
+          }
           recentlyProcessed.add(dedupeKey)
           recentlyProcessedOrder.push(dedupeKey)
           while (recentlyProcessedOrder.length > 500) {
@@ -1348,6 +1484,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             options.onInfo?.(`[${options.channelLabel.toLowerCase()}] failed to send confirmation ack: ${err instanceof Error ? err.message : String(err)}`)
           }
           pendingConfirmation.resolve(allowed)
+          await acknowledgeInboxEntry(inboxKey)
           continue
         }
 
@@ -1366,6 +1503,7 @@ export async function runBragiMessagePump<TCheckpoint>(
                 en: interrupted > 0 ? `✓ Interrupt signal sent (${interrupted} active runtime(s)).` : '✓ Stop request received; the current task will stop as soon as possible.',
               }),
             )
+            await acknowledgeInboxEntry(inboxKey)
             continue
           }
 
@@ -1389,6 +1527,7 @@ export async function runBragiMessagePump<TCheckpoint>(
                 : '✓ Interjection received and injected into the current running chat.',
             }),
           )
+          await acknowledgeInboxEntry(inboxKey)
           continue
         }
 
@@ -1397,6 +1536,7 @@ export async function runBragiMessagePump<TCheckpoint>(
           for (const reply of auth.preReplies ?? []) {
             await options.sendMessage(message.targetId, reply)
           }
+          await acknowledgeInboxEntry(inboxKey)
           continue
         }
 
@@ -1566,6 +1706,7 @@ export async function runBragiMessagePump<TCheckpoint>(
           if (activeTargets.get(message.targetId) === activeTask) {
             activeTargets.delete(message.targetId)
           }
+          await acknowledgeInboxEntry(inboxKey)
         }
         })()
       }

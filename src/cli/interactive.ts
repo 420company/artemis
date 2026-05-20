@@ -288,6 +288,7 @@ import { stringWidth } from '../input/stringWidth.js'
 import { getDirectToolCount } from '../tools/directTools.js'
 import type { WorkspaceSwitchRequest } from '../tools/types.js'
 import { resolveDataRootDir } from '../utils/fs.js'
+import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
 import {
   detectVisualGenerationNeed,
   describeVisualProvider,
@@ -4339,12 +4340,56 @@ async function handleTurn(
         en: 'Running tool directly: generate_long_video',
       }))
     }
-    const result = await executeAction(sagaWorkflow.action, {
-      cwd: cwd ?? process.cwd(),
-      locale,
-      permissionMode: mapPermissionModeToToolAccess(permissionMode ?? 'GHOSTWRITER'),
-      sessionId: 'cli',
-    })
+
+    // ── Pipe toolLog/toolWarn/toolError → viewport in real time ───────────
+    // Without a sink, every progress line in generateLongVideo.ts (which can
+    // run 10+ minutes) is silently dropped by emitRuntimeLog. That made
+    // long-running saga jobs look "frozen with no reaction" while they were
+    // actually working. The sink + heartbeat fixes that user-visible black-out.
+    const longRunStartMs = Date.now()
+    const sinkToViewport = (entry: RuntimeLogEntry) => {
+      const icon = entry.level === 'error' ? '❌' : entry.level === 'warn' ? '⚠️' : '·'
+      const elapsed = Math.round((Date.now() - longRunStartMs) / 1000)
+      const text = `${icon} ${entry.message}  (+${elapsed}s)`
+      if (viewport) viewport.appendScrollBlock({ kind: 'system', text })
+      else console.log(text)
+    }
+
+    // Heartbeat: every 30s emit "still working" so user knows the run is alive
+    // even during sub-tool calls that don't log (e.g. fetch awaits with no
+    // intermediate logging). Capped at 40 minutes as a sanity ceiling.
+    const HEARTBEAT_INTERVAL_MS = 30_000
+    const HEARTBEAT_MAX_TICKS = 80   // 40 minutes
+    let heartbeatTicks = 0
+    const heartbeatTimer = setInterval(() => {
+      heartbeatTicks += 1
+      if (heartbeatTicks > HEARTBEAT_MAX_TICKS) {
+        clearInterval(heartbeatTimer)
+        return
+      }
+      const elapsed = Math.round((Date.now() - longRunStartMs) / 1000)
+      const beat = pickLocale(locale, {
+        zh: `⏱ 长视频生成仍在进行 · 已耗时 ${elapsed}s · 第 ${heartbeatTicks} 次心跳`,
+        en: `⏱ Long-video generation still running · elapsed ${elapsed}s · heartbeat #${heartbeatTicks}`,
+      })
+      if (viewport) viewport.appendScrollBlock({ kind: 'system', text: beat })
+      else console.log(beat)
+    }, HEARTBEAT_INTERVAL_MS)
+
+    let result: Awaited<ReturnType<typeof executeAction>>
+    try {
+      result = await withRuntimeLogSink(sinkToViewport, () =>
+        executeAction(sagaWorkflow.action!, {
+          cwd: cwd ?? process.cwd(),
+          locale,
+          permissionMode: mapPermissionModeToToolAccess(permissionMode ?? 'GHOSTWRITER'),
+          sessionId: 'cli',
+        }),
+      )
+    } finally {
+      clearInterval(heartbeatTimer)
+    }
+
     const text = pickLocale(locale, {
       zh: `${result.ok ? '✅' : '⚠️'} 长视频${result.ok ? '生成完成' : '生成失败'}：\n${String(result.output).slice(0, 1600)}`,
       en: `${result.ok ? '✅' : '⚠️'} Long video ${result.ok ? 'generation completed' : 'generation failed'}:\n${String(result.output).slice(0, 1600)}`,

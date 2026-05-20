@@ -18,7 +18,20 @@ import type { SessionMessage } from './types.js'
 const TOOL_RESULT_KEEP_CHARS = 200
 const TOOL_ERROR_KEEP_CHARS = 1_500
 const TOOL_RESULT_PLACEHOLDER = '[旧工具输出已清除以节省上下文]'
-const MICROCOMPACT_SOFT_TRIGGER_TOKENS = 40_000
+
+// Microcompact trigger: deterministic old tool-output cleanup. Keep the
+// ceiling low even on large-window models; full summarizing compression scales
+// with context size, but stale tool output pruning should still happen early.
+const MICROCOMPACT_TRIGGER_FRACTION = 0.15  // 15% of context
+const MICROCOMPACT_TRIGGER_FLOOR    = 8_000
+const MICROCOMPACT_TRIGGER_CEIL     = 40_000
+
+// Tail protection during microcompact: how many tokens of recent conversation
+// are exempt from being replaced with placeholder. Must be large enough that
+// a freshly-read file survives long enough to be acted on.
+const TAIL_PROTECT_FRACTION = 0.05  // 5% of context
+const TAIL_PROTECT_FLOOR    = 20_000
+const TAIL_PROTECT_CEIL     = 100_000
 
 /**
  * Time-based microcompact: if the last assistant message is older than this
@@ -276,7 +289,7 @@ const SUMMARY_PROMPT = `\
 
 目标：压缩后接手的 AI 必须能继续当前任务，不误改文件、不丢工具链、不忘验证。
 
-对话历史：
+{CURRENT_FOCUS}对话历史：
 {HISTORY}
 
 ---
@@ -303,12 +316,14 @@ const SUMMARY_PROMPT = `\
 - 如果对话中出现明确路径、文件名、命令、工具名、错误信息、验证结果，尽量原样保留。
 - 如果用户最新要求改变了任务方向，必须写入 current_task。
 - 如果存在未完成的修改或尚未验证的改动，必须写入 in_progress、modified_files、validation 或 risks。
-- 不要编造未执行的工具结果或验证结论。`
+- 不要编造未执行的工具结果或验证结论。
+- **如果"当前焦点"部分存在，且历史中出现的某些任务线、文件、模块与当前焦点明显无关（例如属于早已结束的另一项工作），把它们从 current_task/in_progress/next_steps 中移除，只在 critical_context 简短记一笔即可。优先保证当前焦点干净。**`
 
 async function buildStructuredSummary(
   messages: SessionMessage[],
   previousSummary: string | undefined,
   summarize: SummarizeFn,
+  currentFocus?: string,
 ): Promise<string> {
   const history = messages
     .map((m) => {
@@ -321,9 +336,14 @@ async function buildStructuredSummary(
     ? `已有摘要（在此基础上更新，不要从头重写）：\n${previousSummary}\n\n`
     : ''
 
+  const focusSection = currentFocus
+    ? `当前焦点（用户最新消息原文，作为过滤旧任务线的锚点）：\n${currentFocus}\n\n`
+    : ''
+
   const prompt = SUMMARY_PROMPT
     .replace('{HISTORY}', history)
     .replace('{PREV_SUMMARY}', prevSection)
+    .replace('{CURRENT_FOCUS}', focusSection)
 
   const raw = await summarize(prompt)
 
@@ -393,6 +413,20 @@ export interface CompressionOptions {
    * compression activity to the user (was previously silent).
    */
   onInfo?: (message: string) => void
+  /**
+   * Multiplier applied to both microcompact and full-compression triggers,
+   * intended to be raised by the circuit breaker when it detects compression
+   * churn (3+ compactions with no Edit progress in between). Default 1.0
+   * means use the proportional thresholds unchanged. Capped externally.
+   */
+  churnMultiplier?: number
+  /**
+   * Latest user message text (truncated). Threaded into the summarizer prompt
+   * so the worker model can drop stale task lines that no longer relate to
+   * the current focus — solves the "ghost task" problem where previousSummary
+   * persists topics indefinitely across many compaction cycles.
+   */
+  currentFocus?: string
 }
 
 export interface CompressResult {
@@ -427,7 +461,25 @@ export function getCompressionTriggerTokens(tokenLimit: number, threshold?: numb
 
 export function getMicrocompactTriggerTokens(tokenLimit: number): number {
   const safeLimit = Number.isFinite(tokenLimit) && tokenLimit > 0 ? tokenLimit : 180_000
-  return Math.max(8_000, Math.floor(Math.min(safeLimit * 0.10, MICROCOMPACT_SOFT_TRIGGER_TOKENS)))
+  const proportional = safeLimit * MICROCOMPACT_TRIGGER_FRACTION
+  return Math.max(
+    MICROCOMPACT_TRIGGER_FLOOR,
+    Math.min(Math.floor(proportional), MICROCOMPACT_TRIGGER_CEIL),
+  )
+}
+
+/**
+ * Tail-protect budget: tokens of recent conversation that microcompact must
+ * preserve verbatim. Sized so a typical large file read (e.g. 60K tokens)
+ * survives at least one round of microcompact on 1M-context models.
+ */
+export function getTailProtectTokens(tokenLimit: number): number {
+  const safeLimit = Number.isFinite(tokenLimit) && tokenLimit > 0 ? tokenLimit : 180_000
+  const proportional = safeLimit * TAIL_PROTECT_FRACTION
+  return Math.max(
+    TAIL_PROTECT_FLOOR,
+    Math.min(Math.floor(proportional), TAIL_PROTECT_CEIL),
+  )
 }
 
 /**
@@ -495,11 +547,14 @@ export async function compressMessages(
   const tokenLimit       = opts.tokenLimit       ?? 180_000
   const threshold        = opts.threshold        ?? getAdaptiveCompressionThreshold(tokenLimit)
   const protectHead      = opts.protectHead      ?? 3
-  // Shrink the uncompressed tail from 20K → 12K tokens so the compressor
-  // can reclaim more space during multi-agent workflows.
-  const protectTailTok   = opts.protectTailTokens ?? 12_000
+  // Tail protection now scales with context window. 1M-context sessions get
+  // up to 100K tokens of tail safe-zone so freshly-read large files survive.
+  const protectTailTok   = opts.protectTailTokens ?? getTailProtectTokens(tokenLimit)
   const previousSummary  = opts.previousSummary
   const onInfo           = opts.onInfo
+  const churnMul         = Number.isFinite(opts.churnMultiplier) && (opts.churnMultiplier ?? 1) >= 1
+    ? Math.min(opts.churnMultiplier!, 4.0)
+    : 1.0
 
   const tokensBefore = estimateMsgListTokens(messages)
 
@@ -509,23 +564,27 @@ export async function compressMessages(
   const timeBased = maybeTimeBasedMicrocompact(messages, onInfo)
   if (timeBased) return timeBased
 
-  const triggerAt = getCompressionTriggerTokens(tokenLimit, threshold)
+  const triggerAt = Math.floor(getCompressionTriggerTokens(tokenLimit, threshold) * churnMul)
   if (tokensBefore < triggerAt) {
+    // Keep deterministic tool-output cleanup at its normal threshold even
+    // when full summarizing compression is delayed by churn protection.
     const microcompactAt = getMicrocompactTriggerTokens(tokenLimit)
     if (tokensBefore >= microcompactAt) {
       // Protect tail by token budget instead of fixed message count.
-      // Walk backward until we've accumulated ~12K tokens of tail protection.
+      // Tail size is proportional to context window (see getTailProtectTokens).
+      const tailBudget = protectTailTok
       let tailProtectTokens = 0
       let protectedFromIdx = messages.length
       for (let i = messages.length - 1; i >= 0; i--) {
         tailProtectTokens += estimateTokens(messages[i]!.content)
-        if (tailProtectTokens > 12_000) { protectedFromIdx = i + 1; break }
+        if (tailProtectTokens > tailBudget) { protectedFromIdx = i + 1; break }
       }
       protectedFromIdx = Math.max(0, protectedFromIdx)
       const pruned = pruneToolResults(messages, protectedFromIdx)
       const tokensAfter = estimateMsgListTokens(pruned)
       if (tokensAfter < tokensBefore) {
-        onInfo?.(`[微压缩] 清理旧工具输出：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ~${Math.round(tailProtectTokens / 1000)}K 对话原文`)
+        const churnNote = churnMul > 1 ? `（churn×${churnMul.toFixed(1)}）` : ''
+        onInfo?.(`[微压缩]${churnNote} 清理旧工具输出：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ~${Math.round(tailProtectTokens / 1000)}K 对话原文`)
         return { messages: pruned, compressed: true, tokensBefore, tokensAfter }
       }
     }
@@ -586,7 +645,7 @@ export async function compressMessages(
   let summaryText: string
   try {
     onInfo?.(`[压缩] Phase 3: 调用 worker 模型生成结构化摘要…`)
-    summaryText = await buildStructuredSummary(prunedMiddle, previousSummary, summarize)
+    summaryText = await buildStructuredSummary(prunedMiddle, previousSummary, summarize, opts.currentFocus)
   } catch (err) {
     // If summarization fails, fall back to Phase 1 only — surface why so
     // user can debug (was silent before, often masking provider auth errors).

@@ -115,24 +115,196 @@ function shortenDisplayPath(cwd: string): string {
 }
 
 // ─── Gradient engine ──────────────────────────────────────────────────────────
+//
+// Per-startup palette rotation: instead of one hardcoded purple gradient, the
+// hero logo picks one of N hand-tuned palettes when the process starts.
+// Curated (not procedurally generated) so every choice has been color-checked
+// for readability and aesthetic. Set ARTEMIS_LOGO_PALETTE=<name> to pin one.
 
-const GRADIENT_STOPS: [number, number, number][] = [
-  [ 82, 196, 255],  // sky cyan
-  [100, 130, 255],  // periwinkle
-  [148,  82, 255],  // violet
-  [210,  72, 255],  // purple-pink
-  [255,  82, 195],  // hot pink
-  [255, 120, 155],  // rose
+interface LogoPalette {
+  name: string
+  stops: [number, number, number][]
+}
+
+const LOGO_PALETTES: LogoPalette[] = [
+  // ── Original (kept as default option) ─────────────────────────────────────
+  {
+    name: 'violet-dream',
+    stops: [
+      [ 82, 196, 255],  // sky cyan
+      [100, 130, 255],  // periwinkle
+      [148,  82, 255],  // violet
+      [210,  72, 255],  // purple-pink
+      [255,  82, 195],  // hot pink
+      [255, 120, 155],  // rose
+    ],
+  },
+  // ── Cool family ───────────────────────────────────────────────────────────
+  {
+    name: 'aurora',
+    stops: [
+      [120, 255, 200],  // mint
+      [ 80, 230, 180],  // sea green
+      [ 60, 200, 220],  // teal
+      [ 80, 170, 255],  // azure
+      [140, 130, 255],  // periwinkle
+      [200, 100, 255],  // amethyst
+    ],
+  },
+  {
+    name: 'ocean',
+    stops: [
+      [180, 240, 255],  // ice
+      [120, 200, 255],  // sky
+      [ 80, 160, 255],  // azure
+      [ 60, 120, 230],  // royal blue
+      [ 60,  90, 200],  // deep blue
+      [ 80,  60, 180],  // indigo
+    ],
+  },
+  {
+    name: 'ice',
+    stops: [
+      [255, 255, 255],  // pure white
+      [220, 240, 255],  // ice white
+      [180, 220, 255],  // pale ice
+      [140, 200, 255],  // cyan-ice
+      [100, 170, 240],  // blue-ice
+      [ 80, 130, 220],  // deep ice
+    ],
+  },
+  {
+    name: 'matrix',
+    stops: [
+      [200, 255, 200],  // pale green
+      [150, 255, 150],  // light green
+      [ 90, 240, 100],  // matrix green
+      [ 50, 200,  80],  // emerald
+      [ 30, 160,  70],  // deep green
+      [ 20, 100,  60],  // dark forest
+    ],
+  },
+  // ── Warm family ───────────────────────────────────────────────────────────
+  {
+    name: 'sunset',
+    stops: [
+      [255, 200, 100],  // gold
+      [255, 150,  80],  // amber
+      [255,  90,  90],  // coral
+      [240,  70, 130],  // pink-red
+      [200,  60, 180],  // magenta
+      [150,  70, 220],  // purple
+    ],
+  },
+  {
+    name: 'inferno',
+    stops: [
+      [255, 240, 150],  // pale gold
+      [255, 200,  60],  // amber
+      [255, 130,  40],  // orange
+      [240,  70,  50],  // red
+      [200,  40,  80],  // crimson
+      [140,  30, 100],  // wine
+    ],
+  },
+  {
+    name: 'plasma',
+    stops: [
+      [255, 220, 100],  // gold
+      [255, 130,  80],  // orange-red
+      [240,  70, 120],  // pink-red
+      [200,  60, 180],  // magenta
+      [140,  60, 220],  // purple
+      [ 80,  60, 200],  // deep purple
+    ],
+  },
+  {
+    name: 'rose-gold',
+    stops: [
+      [255, 230, 200],  // cream
+      [255, 200, 170],  // peach
+      [255, 170, 160],  // rose
+      [240, 130, 150],  // pink
+      [220, 100, 140],  // mauve
+      [180,  90, 130],  // dusty rose
+    ],
+  },
+  // ── High contrast / "loud" family ─────────────────────────────────────────
+  {
+    name: 'cyberpunk',
+    stops: [
+      [ 80, 255, 230],  // electric cyan
+      [120, 200, 255],  // sky
+      [200, 130, 255],  // purple
+      [255,  90, 200],  // hot pink
+      [255, 180,  80],  // neon orange
+      [255, 240,  90],  // electric yellow
+    ],
+  },
+  {
+    name: 'synthwave',
+    stops: [
+      [255,  80, 220],  // magenta
+      [200,  60, 240],  // purple
+      [120,  80, 255],  // violet
+      [ 80, 130, 255],  // azure
+      [ 60, 200, 255],  // cyan
+      [100, 255, 240],  // teal
+    ],
+  },
+  {
+    name: 'forest',
+    stops: [
+      [240, 255, 180],  // pale yellow-green
+      [180, 240, 120],  // lime
+      [120, 220,  90],  // grass
+      [ 80, 180,  90],  // green
+      [ 60, 140, 100],  // forest
+      [ 50, 100, 110],  // deep teal
+    ],
+  },
 ]
 
+/**
+ * Selected palette for this process lifetime. Picked lazily on first call
+ * so command-line invocations that don't render the logo pay zero cost.
+ * Override at startup with `ARTEMIS_LOGO_PALETTE=<name>` (e.g. aurora, sunset).
+ */
+let _activePalette: LogoPalette | null = null
+
+function pickActivePalette(): LogoPalette {
+  if (_activePalette) return _activePalette
+  const override = (process.env.ARTEMIS_LOGO_PALETTE ?? '').toLowerCase().trim()
+  if (override) {
+    const matched = LOGO_PALETTES.find(p => p.name === override)
+    if (matched) {
+      _activePalette = matched
+      return matched
+    }
+  }
+  _activePalette = LOGO_PALETTES[Math.floor(Math.random() * LOGO_PALETTES.length)]!
+  return _activePalette
+}
+
+/** Exposed for tests / diagnostics — name of palette this process is using. */
+export function getActiveLogoPaletteName(): string {
+  return pickActivePalette().name
+}
+
+/** Exposed for tests / diagnostics — list of all known palette names. */
+export function listLogoPaletteNames(): string[] {
+  return LOGO_PALETTES.map(p => p.name)
+}
+
 function lerpColor(t: number): [number, number, number] {
+  const stops = pickActivePalette().stops
   const clamped = Math.max(0, Math.min(1, t))
-  const scaled  = clamped * (GRADIENT_STOPS.length - 1)
+  const scaled  = clamped * (stops.length - 1)
   const lo = Math.floor(scaled)
-  const hi = Math.min(GRADIENT_STOPS.length - 1, lo + 1)
+  const hi = Math.min(stops.length - 1, lo + 1)
   const frac = scaled - lo
-  const a = GRADIENT_STOPS[lo]!
-  const b = GRADIENT_STOPS[hi]!
+  const a = stops[lo]!
+  const b = stops[hi]!
   return [
     Math.round(a[0] + (b[0] - a[0]) * frac),
     Math.round(a[1] + (b[1] - a[1]) * frac),
@@ -191,6 +363,11 @@ function buildLogoSection(): string {
   updateBreathePhase()  // Update breathing phase for each render
   const gradientRows = LOGO_LINES.map(line => gradientLine(line))
   const version = dim(`v${APP_VERSION}`)
+  // Pick a representative color from the middle of the active palette so the
+  // publisher domain line harmonizes with the logo gradient instead of being
+  // a fixed violet against an unrelated palette.
+  const palette = pickActivePalette()
+  const mid = palette.stops[Math.floor(palette.stops.length / 2)]!
   const tagLine = APP_PUBLISHER
     ? (() => {
         const domain = APP_PUBLISHER
@@ -198,7 +375,7 @@ function buildLogoSection(): string {
         const spacer = Math.max(1, LOGO_WIDTH - domainPad - domain.length - stripAnsi(version).length)
         return (
           ' '.repeat(domainPad) +
-          rgb(148, 82, 255, domain) +
+          rgb(mid[0]!, mid[1]!, mid[2]!, domain) +
           ' '.repeat(spacer) +
           version
         )

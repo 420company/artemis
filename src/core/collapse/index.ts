@@ -52,6 +52,8 @@ export {
   recordCompressionFailure,
   recordCompressionSuccess,
   recordTurnCompleted,
+  recordCompressionTriggered,
+  getThresholdMultiplier,
   isCircuitBreakerTripped,
   getCircuitBreakerStatus,
 } from './circuitBreaker.js'

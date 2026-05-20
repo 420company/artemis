@@ -1119,6 +1119,8 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           outputPath: optionalStringSchema('Optional final MP4 output path. Omit this unless the user explicitly requested a location; Saga otherwise creates a unique searchable filename.'),
           assemblyMode: optionalStringSchema('Optional renderer mode: auto | ffmpeg | hyperframes | saga.'),
           resume: { type: 'boolean', description: 'Reuse previously generated segments when true (default true).' },
+          preserveUserScript: { type: 'boolean', description: 'When true, Saga may still lint the planned shots but must not use the critic/rewriter to alter user-authored story beats. Automatically implied for timestamped scripts.' },
+          cleanDirect: { type: 'boolean', description: 'When true, use raw Seedance-style per-segment prompts: no Saga aesthetic/style locks, no critic rewrite, no generated keyframes, no previous-frame chaining. Best for cleaner less-filtered texture; trades off continuity.' },
           chainReferenceFrames: optionalStringSchema('Frame chaining policy: auto (default) | always | off.'),
           continuityMode: optionalStringSchema('Continuity mode: auto (default) | strong-vision | text-only.'),
           crossfadeMs: integerSchema('Default transition duration in milliseconds.'),

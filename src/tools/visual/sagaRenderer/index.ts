@@ -3,6 +3,7 @@ import { writeSagaComposition, ratioToSize } from './composition.js';
 import { lintSagaComposition, formatLintReport, manifestPathFor } from './lint.js';
 import { inspectSagaComposition } from './inspect.js';
 import { concatWithSagaRenderer, ensureFfmpegAvailable, ensureSegmentReadable } from './concat.js';
+import { generateSagaReviewFrames } from './reviewFrames.js';
 import type {
   SagaCompositionSpec,
   SagaEncodeOptions,
@@ -106,6 +107,12 @@ export async function renderSagaProject(request: SagaRenderRequest): Promise<Sag
     ffmpegArgs: concatResult.ffmpegArgs,
     encoderUsed: concatResult.encoderName,
     appliedTransitions: concatResult.appliedTransitions,
+    reviewFrames: await generateSagaReviewFrames({
+      videoPath: request.outputPath,
+      projectDir: request.workDir,
+      segments: request.segments,
+      totalSeconds: concatResult.durationSeconds,
+    }),
     diagnostics: {
       lint: lintReport,
       inspect: inspectReport,

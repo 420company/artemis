@@ -223,10 +223,21 @@ function codeFenceLabel(lang: string): string | undefined {
 function applyInlineStyles(line: string): string {
   if (!useAnsi()) return line
   return linkLocalPaths(line)
-    // **bold** or __bold__
-    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => color(a ?? b, ANSI.bold + ANSI.white))
-    // *italic* or _italic_
-    .replace(/\*([^*]+?)\*|_([^_]+?)_/g, (_, a, b) => color(a ?? b, ANSI.italic))
+    // **bold** — `*` never appears in filesystem paths so no boundary
+    // protection needed for the asterisk form.
+    .replace(/\*\*(.+?)\*\*/g, (_, t) => color(t, ANSI.bold + ANSI.white))
+    // __bold__ — must NOT be adjacent to path / identifier characters,
+    // otherwise filenames like `__init__.py` or path fragments like
+    // `2026-05-19__draft__.md` get false-matched as bold.
+    .replace(/(?<![A-Za-z0-9/.\-])__(.+?)__(?![A-Za-z0-9/.\-])/g, (_, t) => color(t, ANSI.bold + ANSI.white))
+    // *italic* — `*` never appears in paths so no boundary protection.
+    .replace(/\*([^*]+?)\*/g, (_, t) => color(t, ANSI.italic))
+    // _italic_ — REQUIRES word-boundary on both sides. Without this, filenames
+    // like `2026-05-19_dawn_0918.md` get `_dawn_` matched as italic, leaving
+    // visible `3mdawn23m_0918.md` artifacts on terminals that don't fully
+    // render ANSI italic. The lookbehind/ahead reject any path/identifier
+    // character (letters, digits, slash, dot, hyphen) adjacent to the `_`.
+    .replace(/(?<![A-Za-z0-9/_.\-])_([^_\n]+?)_(?![A-Za-z0-9/_.\-])/g, (_, t) => color(t, ANSI.italic))
     // `inline code` — emphasize with foreground color only; background blocks are visually noisy in chat text.
     .replace(/`([^`]+?)`/g, (_, code) => color(code, ANSI.cyan))
     // ~~strikethrough~~

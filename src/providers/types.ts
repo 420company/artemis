@@ -275,6 +275,15 @@ export type VisualModelConfig = {
     baseUrl: string;
     model: string;
     defaultParams: ImageGenerationParams;
+    /** When true, this image model accepts NSFW/adult content (nudity, erotica).
+     *  Artemis will skip safety-derivative turnaround generation and pass
+     *  user images directly, trusting the provider's own policy. */
+    nsfw?: boolean;
+    /** Chat+vision model name on this relay used for "vision-describe"
+     *  (read an image, produce a text description). Different from `model`,
+     *  which is for image GENERATION (e.g. gpt-image-2). When omitted,
+     *  Artemis tries `gpt-5.4-mini` first, then `gpt-5.4`, then `gpt-4o`. */
+    visionModel?: string;
   };
   video: {
     enabled: boolean;
@@ -283,6 +292,10 @@ export type VisualModelConfig = {
     baseUrl: string;
     model: string;
     defaultParams: VideoGenerationParams;
+    /** When true, this video model accepts NSFW/adult content (nudity, erotica).
+     *  Artemis will pass user reference images directly without illustrated
+     *  safety-derivative intermediaries. */
+    nsfw?: boolean;
   };
   assetHosting?: VidarAssetHostingConfig;
 };

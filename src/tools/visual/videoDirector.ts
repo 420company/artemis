@@ -9,6 +9,8 @@ export type VideoDirectorInput = {
   referenceImageCount?: number;
   referenceVideoCount?: number;
   referenceAudioCount?: number;
+  firstFrameImageCount?: number;
+  lastFrameImageCount?: number;
 };
 
 export type VideoDirectorResult = {
@@ -39,6 +41,11 @@ const PERSON_HINTS = [
   'body',
   'human',
   '人物',
+  '角色',
+  '主角',
+  '主人公',
+  '女主',
+  '男主',
   '女孩',
   '男孩',
   '女人',
@@ -95,7 +102,9 @@ const ENVIRONMENT_HINTS = [
 function cleanPrompt(prompt: string): string {
   return prompt
     .replace(/\s+/g, ' ')
-    .replace(/["'`]+/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/`+/g, '')
     .trim()
     .slice(0, MAX_SOURCE_PROMPT_CHARS);
 }
@@ -292,23 +301,53 @@ function buildSeedanceTechnicalSpec(duration: number, ratio?: string): string {
 
 function buildSeedanceReferencePlan(input: VideoDirectorInput): string {
   const parts: string[] = [];
-  if ((input.referenceImageCount ?? 0) > 0) {
-    parts.push(`Use reference images as identity, product, scene, first-frame, or style anchors; preserve exact subject silhouette, materials, palette, and composition cues.`);
+  const referenceImageCount = Math.max(0, input.referenceImageCount ?? 0);
+  const firstFrameImageCount = Math.max(0, input.firstFrameImageCount ?? 0);
+  const lastFrameImageCount = Math.max(0, input.lastFrameImageCount ?? 0);
+  const referenceVideoCount = Math.max(0, input.referenceVideoCount ?? 0);
+  const referenceAudioCount = Math.max(0, input.referenceAudioCount ?? 0);
+  if (referenceImageCount > 0) {
+    parts.push(`Reference declaration: Image 1-${referenceImageCount} are reference images for character identity, product materials, scene anchors, or visual style; preserve exact subject silhouette, materials, palette, and composition cues.`);
   }
-  if ((input.referenceVideoCount ?? 0) > 0) {
-    parts.push('Use reference videos only for camera motion, action rhythm, transitions, pacing, and continuity; do not randomly copy unrelated subjects.');
+  if (firstFrameImageCount > 0) {
+    parts.push(`Keyframe declaration: First Frame Image 1-${firstFrameImageCount} pins the literal opening frame; animate only the requested motion and match lighting, color temperature, and depth of field.`);
   }
-  if ((input.referenceAudioCount ?? 0) > 0) {
-    parts.push('Use reference audio for music tempo, voice tone, ambience, and beat-synced motion.');
+  if (lastFrameImageCount > 0) {
+    parts.push(`Keyframe declaration: Last Frame Image 1-${lastFrameImageCount} pins the target closing frame; make the middle motion a single physically plausible arc toward it.`);
+  }
+  if (referenceVideoCount > 0) {
+    parts.push(`Reference declaration: reference videos / Video Clip 1-${referenceVideoCount} control camera motion, action rhythm, transitions, pacing, and continuity; do not randomly copy unrelated subjects.`);
+  }
+  if (referenceAudioCount > 0) {
+    parts.push(`Reference declaration: reference audio / Audio Clip 1-${referenceAudioCount} controls music tempo, voice tone, ambience, Foley texture, and beat-synced motion.`);
   }
   return parts.length > 0
     ? parts.join(' ')
-    : 'No external references: create a self-contained scene with one subject, one action chain, and one continuous camera idea.';
+    : 'No external references: AI must still follow the full Seedance 2.0 production spec — create a self-contained scene with one named protagonist or hero object, one explicit identity lock, one coherent action chain, one continuous camera idea, intentional sound design, and a stable final frame.';
+}
+
+function buildSeedanceAutoCreativeSpec(prompt: string, kind: SceneKind): string {
+  const asksForAiCreation = /自己|自动|AI|ai|创造|创作|编|故事|剧情|角色|随便|发挥|脑补|generate|invent|create/i.test(prompt);
+  const identity = kind === 'portrait'
+    ? 'Invent exactly one primary protagonist if the user did not name one; give them stable age range, face shape, hair, wardrobe, body proportions, emotional state, and one memorable visual motif. Keep face, hair, clothing, accessories, and body scale identical across every shot.'
+    : kind === 'product'
+      ? 'Invent or refine exactly one hero product if the user did not specify details; lock silhouette, material, logo/text absence, color palette, scale, and surface behavior across every shot.'
+      : kind === 'environment'
+        ? 'Invent exactly one dominant environment focal point if the user did not specify details; lock geography, time of day, weather, light direction, scale, and atmospheric physics across every shot.'
+        : 'Invent exactly one central subject if the user did not specify details; lock its silhouette, palette, scale, and symbolic role across the whole clip.';
+  const story = asksForAiCreation
+    ? 'AI-created story rule: build a compact three-beat micro-story — setup, motion/change, payoff — inside the requested duration. Do not introduce extra protagonists, unrelated subplots, sudden genre swaps, or random visual gags.'
+    : 'Completion rule: only add implied details that strengthen the user brief; preserve every explicit user condition and never replace the requested subject, mood, scene, or action.';
+  return `Auto creative spec: ${identity} ${story} Every invented detail must serve subject + action + scene + style + emotion; write the result as if directing Seedance 2.0, not as generic decoration.`;
 }
 
 function buildSeedanceSoundPlan(prompt: string, referenceAudioCount: number): string {
+  const quotedDialogue = /["“”][^"“”]{2,}["“”]/.test(prompt);
   const hasDialogue = /dialogue|line|quote|台词|对白|旁白|说|讲|念|voice/i.test(prompt);
   const hasMusic = /music|beat|song|mv|音乐|卡点|节拍|旋律|配乐/i.test(prompt);
+  if (quotedDialogue) {
+    return 'Sound design: generated audio enabled; treat quoted text as verbatim dialogue or voice-over, preserve the quotation content exactly, explicitly lip-sync mouth movement to the spoken language phonemes, and add matching room tone/Foley.';
+  }
   if (referenceAudioCount > 0 || hasMusic) {
     return 'Sound design: generated audio enabled; sync movement cuts, impacts, ambience, and camera emphasis to the music or reference rhythm.';
   }
@@ -357,6 +396,7 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
   const spatial = buildSpatialDepth(kind, originalPrompt);
   const extension = buildIntelligentExtension(originalPrompt);
   const referencePlan = buildSeedanceReferencePlan(input);
+  const autoCreative = buildSeedanceAutoCreativeSpec(originalPrompt, kind);
   const soundPlan = buildSeedanceSoundPlan(originalPrompt, input.referenceAudioCount ?? 0);
   const scenario = buildSeedanceScenarioStrategy(originalPrompt, kind);
   const negative = buildSeedanceNegativePrompt(kind);
@@ -367,7 +407,9 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
     `Source brief: ${originalPrompt}.`,
     `Director profile: ${profile}.`,
     scenario,
-    extension,
+    `Reference usage: ${referencePlan}`,
+    autoCreative,
+    soundPlan,
     `single clear focal point: ${focalPoint}.`,
     `Timestamp storyboard: ${timeline}.`,
     `Camera language: ${camera}.`,
@@ -375,8 +417,7 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
     `Lighting and texture: ${lighting}.`,
     `Motion physics: ${physics}.`,
     `Spatial depth & scale: ${spatial}.`,
-    `Reference usage: ${referencePlan}`,
-    soundPlan,
+    extension,
     negative,
     `Final frame: stable, cinematic, visually coherent, with physically plausible continuity.`,
   ].join(' '));
@@ -384,7 +425,7 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
 
 function truncateDirectedPrompt(prompt: string): string {
   if (prompt.length <= MAX_DIRECTED_PROMPT_CHARS) return prompt;
-  return `${prompt.slice(0, MAX_DIRECTED_PROMPT_CHARS - 80).trim()} Final frame remains stable, coherent, and cinematic.`;
+  return `${prompt.slice(0, MAX_DIRECTED_PROMPT_CHARS - 160).trim()} Negative constraints: no subtitles, no text overlays, no logos, no watermark, no random morphing, no flicker. Final frame remains physically plausible, stable, coherent, and cinematic.`;
 }
 
 export function buildDirectedVideoPrompt(input: VideoDirectorInput): VideoDirectorResult {

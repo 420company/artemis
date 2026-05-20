@@ -10,6 +10,8 @@ export type ConfiguredVisualProvider = {
   provider: string;
   model: string;
   source: string;
+  /** When true, this provider accepts NSFW/adult content without filtering. */
+  nsfw?: boolean;
 };
 
 export type VisualFallbackCandidate = ConfiguredVisualProvider & {
@@ -318,6 +320,7 @@ export async function resolveConfiguredVisualProvider(
       provider: slot.provider,
       model: slot.model || defaultVisualModelForProvider(slot.provider, assetKind),
       source,
+      nsfw: slot.nsfw === true,
     };
   }
 

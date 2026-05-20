@@ -25,17 +25,27 @@ async function main(): Promise<void> {
     text: '帮我生成一段长视频',
   });
   assert.equal(naturalLongVideo.handled, true, 'explicit natural-language long-video wording should enter Saga');
-  assert.match(naturalLongVideo.reply, /final stitched video duration|最终成片的总时长|目标总时长/i, 'Saga should ask for total stitched duration before collecting refs');
+  assert.match(naturalLongVideo.reply, /这段视频里|In this video/i, 'Saga should ask subject mode before duration so materials come first');
 
-  const afterDuration = await handleSagaLongVideoWorkflow({
+  const afterSubjectMode = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
     locale: 'zh',
-    text: '20秒',
+    text: '1',
   });
-  assert.equal(afterDuration.handled, true, 'after total duration confirmation Saga should continue to reference collection');
-  assert.match(afterDuration.reply, /Target total duration: 20s|目标总时长：20 秒/, 'duration confirmation should be treated as total duration, not per-segment duration');
+  assert.equal(afterSubjectMode.handled, true, 'after subject-mode choice Saga should continue to identity source');
+  assert.match(afterSubjectMode.reply, /角色身份来源|Character identity source/, 'Saga should ask identity source before reference collection');
+
+  const afterTextOnlyIdentity = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '4',
+  });
+  assert.equal(afterTextOnlyIdentity.handled, true, 'text-only identity should enter reference collection');
+  assert.match(afterTextOnlyIdentity.reply, /补充其它素材|add other materials/i, 'Saga should collect script/materials before asking final duration');
 
   const shortDirectorNote = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
@@ -46,6 +56,71 @@ async function main(): Promise<void> {
   });
   assert.equal(shortDirectorNote.handled, true, 'short director/story directive should remain in Saga reference collection');
   assert.match(shortDirectorNote.reply, /剧本段 1|1 script segments/, 'short director/story directive should be counted as a script segment');
+
+  const afterStart = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '开始生成',
+  });
+  assert.equal(afterStart.handled, true, 'after materials are done Saga should ask final duration before generating');
+  assert.match(afterStart.reply, /最后确认一下总时长|confirm the total length|确认.*主角|confirm the lead/i, 'Saga may clarify protagonist before final duration');
+
+  const afterOptionalClarification = /确认.*主角|confirm the lead/i.test(afterStart.reply)
+    ? await handleSagaLongVideoWorkflow({
+        scope: 'bridge',
+        key: `${key}-natural-long`,
+        cwd,
+        locale: 'zh',
+        text: 'B 梦幻海滩女主角',
+      })
+    : afterStart;
+  assert.equal(afterOptionalClarification.handled, true, 'after optional protagonist clarification Saga should ask final duration');
+  assert.match(afterOptionalClarification.reply, /最后确认一下总时长|confirm the total length/i, 'duration must be confirmed after script/material collection');
+
+  const afterFinalDuration = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '20秒',
+  });
+  assert.equal(afterFinalDuration.handled, false, 'after final duration Saga should emit generate_long_video action');
+  assert.equal(afterFinalDuration.action?.totalDuration, 20, 'final duration should be treated as total stitched duration');
+
+  const scriptedKey = `${key}-scripted`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: scriptedKey,
+    cwd,
+    locale: 'zh',
+    text: '[0-5秒] 镜头1：女孩推开旧影院的门，尘埃在光束里漂浮。 [5-10秒] 镜头2：她走到银幕前，银幕上映出海浪。',
+  });
+  const scriptedStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '开始生成' });
+  if (scriptedStart.handled && /确认.*主角|confirm the lead/i.test(scriptedStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: 'B 旧影院里的女孩' });
+  }
+  const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '10秒' });
+  assert.equal(scriptedFinal.handled, false, 'scripted Saga should emit generate_long_video action');
+  assert.equal(scriptedFinal.action?.preserveUserScript, true, 'explicit user script must be preserved through generate_long_video action');
+  assert.match(scriptedFinal.action?.prompt ?? '', /preserveUserScript: true/, 'workflow prompt should tell the model to pass preserveUserScript');
+
+  const cleanKey = `${key}-clean-direct`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频，使用旧版质感，不要滤镜，raw seedance' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '纯风景：海边黄昏，风吹过草地。' });
+  const cleanStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '开始生成' });
+  if (cleanStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(cleanStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: 'X' });
+  }
+  const cleanFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '10秒' });
+  assert.equal(cleanFinal.handled, false, 'clean-direct Saga should emit generate_long_video action');
+  assert.equal(cleanFinal.action?.cleanDirect, true, 'clean/direct wording should enable cleanDirect mode');
+  assert.match(cleanFinal.action?.prompt ?? '', /cleanDirect: true/, 'workflow prompt should tell the model to pass cleanDirect');
 
   const pastedLog = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
@@ -101,6 +176,33 @@ async function main(): Promise<void> {
     text: '这只是一句普通补充，不应该还在视频向导里',
   });
   assert.equal(afterExit.handled, false, 'workflow should remain cleared after support/debug question');
+
+  const cyberScriptKey = `${key}-cyber-script`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh', text: '4' });
+  const cyberScript = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: cyberScriptKey,
+    cwd,
+    locale: 'zh',
+    text: [
+      'Artemis AI Agent 30秒宣传片剧本（全女声·Cyber情欲风）',
+      '时长：30秒',
+      '风格：高端赛博朋克 + 极致性感，霓虹光影、湿润光泽、未来感爆棚',
+      '场景总描述：一个未来虚拟空间，充满流动的紫粉色霓虹光线、闪烁的全息数据流和漂浮的代码粒子。',
+      '[0-5秒]',
+      '镜头：漆黑赛博空间突然被紫粉霓虹点亮。女主角从全息屏幕中缓缓浮现。',
+      '女主角： “嘿……你终于把我唤醒了。我是Artemis，你的专属AI Agent。”',
+      '[5-10秒]',
+      '她身体微微前倾，手指在空气中轻点，全息键盘亮起Artemis界面。',
+      '女主角： “想跟我一起玩吗？那就快把我安装到你电脑里。”',
+      '[25-30秒]',
+      '屏幕定格在Artemis LOGO + 下载按钮 + 二维码。',
+    ].join('\n'),
+  });
+  assert.equal(cyberScript.handled, true, 'active Saga must keep pasted scripts inside collecting_refs even when they mention 系统/代码/生成/视频/吗');
+  assert.match(cyberScript.reply, /剧本段 1|1 script segments/, 'cyber promo script should be archived as a script segment, not fall through to brain');
 
   console.log('saga workflow explicit-trigger guard ok');
 }

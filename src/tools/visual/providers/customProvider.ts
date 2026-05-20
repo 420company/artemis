@@ -13,6 +13,12 @@ import {
   VIDEO_POLL_TIMEOUT_MS,
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js'
+import { toolLog } from '../../../utils/log.js'
+
+// Emit a progress line every Nth poll so the user can see the provider is
+// being talked to (not hanging). Default 6 polls × 10s = one line per minute.
+// Tunable upper bound on the chattiness inside the silent-poll loop.
+const POLL_LOG_EVERY = 6
 
 type CustomImageResponse = {
   data?: Array<{
@@ -31,7 +37,11 @@ type CustomVideoJob = {
 
 const OUTPUT_DIR = path.join(os.homedir(), '.artemis', 'assets', 'generated')
 const DEFAULT_POLL_INTERVAL_MS = 10_000
-const DEFAULT_MAX_POLLS = 90
+// 420 polls × 10s = 70 min hard cap per attempt. Empirically, dreamina-seedance
+// processes long (800+ char) NSFW-with-anatomy-constraints prompts in 15-25 min;
+// the prior 120-poll cap was too tight for those and cut off real generations
+// that were still in 'processing'. The per-poll status log keeps long waits visible.
+const DEFAULT_MAX_POLLS = 420
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
@@ -173,8 +183,8 @@ export class CustomProvider implements VisualProvider {
       // ─── Seedance / Wan protocol branch ───────────────────────────
       // Seedance uses POST /videos/generations + JSON content[] format.
       // Wan uses POST /videos/generations + JSON input format.
-      // Both are supported by proxy services (router.ai / OpenCrow) and
-      // native BytePlus endpoints. The original /videos + FormData path
+      // Both are supported by OpenAI-compatible proxy relays and native
+      // BytePlus endpoints. The original /videos + FormData path
       // (generateVideoCustom) is for generic non-Seedance/Wan models only.
       if (isSeedanceModel(model)) {
         return this.generateVideoSeedance(params, apiKey, baseUrl, model, startedAt)
@@ -258,7 +268,7 @@ export class CustomProvider implements VisualProvider {
           ratio,
           duration: durationNum,
           prompt_extend: (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false,
-          watermark: params.watermark !== false,
+          watermark: params.watermark === true,
         },
       }
 
@@ -323,6 +333,13 @@ export class CustomProvider implements VisualProvider {
         if (maybeUrl && (lastStatus === 'succeeded' || lastStatus === 'completed' || lastStatus === 'success' || lastStatus === '')) {
           videoUrl = maybeUrl
           break
+        }
+        // Visibility: emit a status line every minute so the user knows the
+        // provider is being talked to. Without this, a silent 'processing'
+        // queue makes the whole tool look hung.
+        if ((attempt + 1) % POLL_LOG_EVERY === 0) {
+          const elapsedMin = Math.round(((attempt + 1) * pollIntervalMs) / 60_000)
+          toolLog(`⏳ Custom video ${taskId}: poll ${attempt + 1}/${maxPolls} · status=${lastStatus || 'unknown'} · ${elapsedMin}min elapsed`)
         }
       }
 
@@ -448,6 +465,7 @@ export class CustomProvider implements VisualProvider {
         content.push({
           type: 'audio_url',
           audio_url: { url },
+          role: 'reference_audio',
         })
       }
 
@@ -457,7 +475,7 @@ export class CustomProvider implements VisualProvider {
         duration: durationNum,
         resolution: videoConfig.defaultParams.resolution || '720p',
         ratio,
-        generate_audio: params.generateAudio === true && /^dreamina-seedance-2/i.test(model.trim()),
+        generate_audio: params.generateAudio !== false && /^dreamina-seedance-2/i.test(model.trim()),
         watermark: params.watermark === true,
       }
 
@@ -529,6 +547,13 @@ export class CustomProvider implements VisualProvider {
         if (maybeUrl && (lastStatus === 'succeeded' || lastStatus === 'completed' || lastStatus === 'success')) {
           videoUrl = maybeUrl
           break
+        }
+        // Per-poll progress: one line per minute so silent 'processing'
+        // queues no longer make the call look hung. This is the Seedance
+        // path (dreamina-seedance-2-0-*) that the user is actively using.
+        if ((attempt + 1) % POLL_LOG_EVERY === 0) {
+          const elapsedMin = Math.round(((attempt + 1) * pollIntervalMs) / 60_000)
+          toolLog(`⏳ 视频任务 ${taskId.slice(0, 12)}…: poll ${attempt + 1}/${maxPolls} · status=${lastStatus || 'unknown'} · ${elapsedMin}min elapsed`)
         }
       }
 
@@ -642,6 +667,10 @@ export class CustomProvider implements VisualProvider {
           throw new Error(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`)
         }
         currentJob = parseVideoJob(pollRaw)
+        if ((attempt + 1) % POLL_LOG_EVERY === 0) {
+          const elapsedMin = Math.round(((attempt + 1) * pollIntervalMs) / 60_000)
+          toolLog(`⏳ Custom video ${videoId}: poll ${attempt + 1}/${maxPolls} · status=${currentJob.status ?? 'unknown'} · ${elapsedMin}min elapsed`)
+        }
       }
 
       const finalStatus = (currentJob.status ?? '').toLowerCase()
@@ -785,4 +814,3 @@ function parseVideoJob(raw: string): CustomVideoJob {
     throw new Error(`Custom video response was invalid JSON: ${raw.slice(0, 500)}`)
   }
 }
-

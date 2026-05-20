@@ -47,6 +47,13 @@ export interface FileStateSnapshot {
   artifactPath?: string
   /** Last modified time */
   mtimeMs: number
+  /**
+   * Wall-clock ms when this file path was most recently referenced in the
+   * conversation (read/write/patch). Used to demote stale snapshots so
+   * recovery messages don't keep replaying files the user has moved on from.
+   * Optional for backward compat with older ledger entries.
+   */
+  lastReferencedAt?: number
 }
 
 export interface PlanSnapshot {
@@ -172,8 +179,12 @@ export async function recordCollapse(
   if (snapshot.fileStates) {
     ledger.fileStates = snapshot.fileStates
   }
-  if (snapshot.planSnapshot) {
-    ledger.planSnapshot = snapshot.planSnapshot
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'planSnapshot')) {
+    if (snapshot.planSnapshot) {
+      ledger.planSnapshot = snapshot.planSnapshot
+    } else {
+      delete ledger.planSnapshot
+    }
   }
   if (snapshot.activeTools) {
     ledger.activeTools = snapshot.activeTools
@@ -201,12 +212,14 @@ export function createFileStateSnapshot(
   filePath: string,
   content: string,
   mtimeMs: number,
+  lastReferencedAt?: number,
 ): FileStateSnapshot {
   return {
     filePath,
     contentHash: hashContent(content),
     headContent: content.slice(0, FILE_HEAD_CHARS),
     mtimeMs,
+    lastReferencedAt,
   }
 }
 

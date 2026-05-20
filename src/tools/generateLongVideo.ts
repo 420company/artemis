@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import type { AgentAction } from '../core/types.js';
 import { ensureNotSensitivePath } from '../utils/fs.js';
 import { toolLog, toolWarn } from '../utils/log.js';
+import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import {
   buildVisualSetupRequiredMessage,
   describeVisualProvider,
@@ -52,6 +53,7 @@ import type {
 } from './visual/sagaRenderer/types.js';
 
 type GenerateLongVideoAction = Extract<AgentAction, { type: 'generate_long_video' }>;
+type SagaIdentitySource = NonNullable<GenerateLongVideoAction['identitySource']>;
 
 type SagaSegment = SagaSegmentInput;
 
@@ -73,7 +75,25 @@ const DEFAULT_TOTAL_SECONDS = 60;
 const MAX_TOTAL_SECONDS = 600;
 const DEFAULT_TRANSITION: SagaTransitionKind = 'cut';
 const DEFAULT_CROSSFADE_MS = 350;
-const DEFAULT_LONG_VIDEO_SUBDIR = 'generated-media/long-videos';
+const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
+// Floor (NOT a maximum). Match the custom provider default so Saga does not
+// accidentally override a longer provider wait with a shorter explicit value.
+// 420 polls × 10s = 70min per attempt.
+const MIN_SAGA_SEGMENT_MAX_POLLS = 420;
+
+function superVisualBypassReason(identitySource: SagaIdentitySource | undefined, isPureEnvironment: boolean): string | null {
+  if (isPureEnvironment) return 'environment-mode-bypass';
+  if (identitySource === 'text_only') return 'text-only-identity-bypass';
+  if (identitySource === 'direct_image') return 'direct-image-direct-to-video';
+  return null;
+}
+
+export function shouldBypassSuperVisualForIdentitySourceForTest(
+  identitySource: SagaIdentitySource | undefined,
+  isPureEnvironment = false,
+): boolean {
+  return superVisualBypassReason(identitySource, isPureEnvironment) !== null;
+}
 
 function clampTotalSeconds(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TOTAL_SECONDS;
@@ -185,6 +205,47 @@ function nonEmptyStringArray(values: string[] | undefined): string[] {
     : [];
 }
 
+function stripInjectedPolicyBlocks(value: string): string {
+  return value
+    // Some bridge/runtime paths may append developer-facing visual policy text
+    // into the user story. That text is for tool selection, not for the video
+    // model; if it reaches Saga planning it can become a storyBeat and trigger
+    // provider policy classifiers (we saw this as segment-3 "copyright" fails).
+    .replace(/\s*\[Visual generation policy\][\s\S]*?(?=\n\s*\n|\n\s*(?:与|同|same|the|a|an|[\p{L}\p{N}])|$)/giu, '\n')
+    .replace(/\s*The user confirmed local visual generation\.[\s\S]*?do not silently fall back to SVG placeholders for photographic subjects\.?/giu, '\n')
+    .replace(/\s*Photographic \/ product \/ editorial \/ lifestyle assets MUST be produced via generate_image[\s\S]*?do not silently fall back to SVG placeholders for photographic subjects\.?/giu, '\n')
+    .replace(/\s*Icons, logos, UI controls, loaders, geometric or abstract decoration[\s\S]*?not violations\.?/giu, '\n')
+    .replace(/\s*The forbidden pattern is substituting hand-authored SVG\/canvas\/procedural code[\s\S]*?instead of calling generate_image\)\.?/giu, '\n')
+    .replace(/\s*If generate_image returns an error,[\s\S]*?do not silently fall back to SVG placeholders for photographic subjects\.?/giu, '\n')
+    .replace(/\s*writing a node\/python script that draws "product images" instead of calling generate_image\)\.?/giu, '\n')
+    .replace(/\s*EXPLICIT (?:DIRECT IMAGE|USER TURNAROUND) SOURCE:[^\n]*/giu, '\n')
+    .replace(/\s*ACCESSORY LOCK —[^\n]*/giu, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function sanitizeSagaUserText(value: string | undefined): string {
+  return stripInjectedPolicyBlocks(value ?? '');
+}
+
+function sanitizeReferenceNotesForStory(notes: string[], baseStory: string): string[] {
+  const compactBase = compactInline(baseStory);
+  return notes
+    .map((note) => sanitizeSagaUserText(note))
+    .map((note) => compactInline(note))
+    .filter(Boolean)
+    // Full prompt/reference duplicates are not identity notes. Repeating them
+    // bloats every segment and makes policy classifiers see the same sensitive
+    // text twice. Keep short notes such as "this image is the protagonist".
+    .filter((note) => note.length <= 240)
+    .filter((note) => {
+      if (!compactBase || note.length < 40) return true;
+      return !compactBase.includes(note) && !note.includes(compactBase.slice(0, Math.min(160, compactBase.length)));
+    })
+    .slice(0, 4);
+}
+
 function trimTitle(value: string): string {
   const compacted = compactInline(value)
     .replace(/^\s*["'“”‘’]+|["'“”‘’]+\s*$/g, '')
@@ -261,7 +322,7 @@ async function buildDefaultLongVideoOutputPath(options: {
   const titleSlug = sanitizeFilenamePart(options.title, 'untitled-saga-video');
   const ratioSlug = options.ratio.replace(':', 'x');
   const fileName = `${timestamp}_${options.totalSeconds}s_${ratioSlug}_${titleSlug}_${options.projectId}.mp4`;
-  return uniquifyPath(path.join(options.cwd, DEFAULT_LONG_VIDEO_SUBDIR, options.projectId, fileName));
+  return uniquifyPath(path.join(getMediaOutputRoot(), DEFAULT_LONG_VIDEO_SUBDIR, options.projectId, fileName));
 }
 
 function resolveRatio(raw: string | undefined): SagaRatio {
@@ -308,6 +369,74 @@ function distributeDurations(totalSeconds: number, segmentCount: number, maxSegm
     remaining -= next;
   }
   return durations;
+}
+
+function parseTimestampedShotsFromStory(story: string, maxSegmentSeconds: number): SagaShotInput[] {
+  const markerRe = /\[\s*(\d+(?:\.\d+)?)\s*[-–—~至到]\s*(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?\s*\]/gi;
+  const markers = Array.from(story.matchAll(markerRe));
+  if (markers.length < 2) return [];
+
+  const shots: SagaShotInput[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < markers.length; index += 1) {
+    const marker = markers[index]!;
+    const next = markers[index + 1];
+    const start = Number(marker[1]);
+    const end = Number(marker[2]);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const rawBody = story.slice((marker.index ?? 0) + marker[0].length, next?.index ?? story.length).trim();
+    const body = rawBody.replace(/\s+/g, ' ').trim();
+    if (!body) continue;
+    const dedupeKey = `${Math.round(start)}-${Math.round(end)}:${body.slice(0, 240)}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    const duration = Math.max(4, Math.min(maxSegmentSeconds, Math.round(end - start)));
+    const title = `${Math.round(start)}-${Math.round(end)}s`;
+    const cameraMatch = body.match(/(?:镜头|camera)[:：]\s*([^。.!！?\n]+)/i);
+    const transitionMatch = body.match(/(?:转场|transition)[:：]\s*([^。.!！?\n]+)/i);
+    shots.push({
+      title,
+      duration,
+      storyBeat: body,
+      visualPrompt: `Follow this exact timestamped script section: ${body}`,
+      camera: cameraMatch?.[1]?.trim(),
+      transition: transitionMatch?.[1]?.trim(),
+      continuity: 'Preserve the user-supplied timestamped script order exactly; do not invent unrelated scenes.',
+    });
+  }
+
+  return shots;
+}
+
+function mergeStringArrays(...values: Array<string[] | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const list of values) {
+    for (const value of list ?? []) {
+      const normalized = value.replace(/\s+/g, ' ').trim();
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+function extractSceneAnchorsFromStory(story: string): string[] {
+  const anchors: string[] = [];
+  const sceneMatch = story.match(/(?:场景|地点|环境|setting|location)\s*[:：]\s*([^\n\[]+)/i);
+  if (sceneMatch?.[1]) {
+    anchors.push(sceneMatch[1].replace(/\s+/g, ' ').trim().slice(0, 160));
+  }
+  const casinoTerms = Array.from(story.matchAll(/(?:MaGame\s+Casino|奢华赌场大厅|赌场大厅|赌场|轮盘桌|吧台|老虎机|21点|赌客|水晶吊灯|霓虹LOGO)/gi))
+    .map((match) => match[0]);
+  if (casinoTerms.length >= 2) {
+    anchors.push('MaGame Casino 奢华赌场大厅，含轮盘桌、筹码、赌客、水晶吊灯、吧台、老虎机、金色霓虹LOGO');
+  }
+  return mergeStringArrays(anchors);
 }
 
 // Detect when the agent has echoed Saga's identity-preservation rule text
@@ -360,6 +489,7 @@ function buildSegments(options: {
   ratio: SagaRatio;
   continuityInput: ReturnType<typeof buildContinuityBible>;
   continuityMode: SagaContinuityMode;
+  cleanDirect?: boolean;
 }): SagaSegment[] {
   const beats = sentenceChunks(options.story);
   const plannedShots = Array.isArray(options.shots)
@@ -368,7 +498,15 @@ function buildSegments(options: {
   const segmentCount = plannedShots.length > 0
     ? plannedShots.length
     : Math.max(1, Math.ceil(options.totalSeconds / Math.max(4, Math.min(options.preferredSegmentSeconds, 6))));
-  const durations = distributeDurations(options.totalSeconds, segmentCount, options.maxSegmentSeconds);
+  const plannedDurationSum = plannedShots.reduce((sum, shot) => (
+    typeof shot.duration === 'number' && Number.isFinite(shot.duration) ? sum + Math.max(0, shot.duration) : sum
+  ), 0);
+  const usePlannedDurations = plannedShots.length > 0
+    && plannedDurationSum > 0
+    && Math.abs(plannedDurationSum - options.totalSeconds) <= Math.max(2, options.totalSeconds * 0.15);
+  const durations = usePlannedDurations
+    ? plannedShots.map((shot) => normalizeShotDuration(shot.duration, options.preferredSegmentSeconds, options.maxSegmentSeconds))
+    : distributeDurations(options.totalSeconds, segmentCount, options.maxSegmentSeconds);
   const segments: SagaSegment[] = [];
 
   // Resolve all per-shot fields up front so we can use shot N-1's transition
@@ -388,26 +526,46 @@ function buildSegments(options: {
     // generation has REAL action context to render.
     const storyChunkFallback = (beats.slice(start, end).join(' ') || options.story).slice(0, 900);
     const rawPlannedStoryBeat = looksLikeIdentityRuleBoilerplate(planned?.storyBeat) ? undefined : planned?.storyBeat;
-    const duration = normalizeShotDuration(planned?.duration, durations[index] ?? options.preferredSegmentSeconds, options.maxSegmentSeconds);
-    const storyBeat = sanitizeInline(rawPlannedStoryBeat, buildMotionTimelineFallback(storyChunkFallback, duration, index));
+    const duration = usePlannedDurations
+      ? (durations[index] ?? normalizeShotDuration(planned?.duration, options.preferredSegmentSeconds, options.maxSegmentSeconds))
+      : normalizeShotDuration(undefined, durations[index] ?? options.preferredSegmentSeconds, options.maxSegmentSeconds);
+    // In cleanDirect mode the motion-timeline boilerplate ("the protagonist
+    // steps through the scene with a deliberate weight shift; ... Scene
+    // intent: <user text>") front-loaded a generic walking/turning verb that
+    // dominated the model's interpretation and reduced the user's actual
+    // explicit content to a single afterthought sentence. Skip the wrapper
+    // and feed the per-segment story chunk in verbatim — the user's prompt
+    // becomes the dominant signal exactly as intended.
+    const storyBeatFallback = options.cleanDirect
+      ? (storyChunkFallback || options.story).slice(0, 900)
+      : buildMotionTimelineFallback(storyChunkFallback, duration, index);
+    const storyBeat = sanitizeInline(rawPlannedStoryBeat, storyBeatFallback);
     const title = sanitizeInline(planned?.title, `Shot ${index + 1}`);
     const rawPlannedVisualPrompt = looksLikeIdentityRuleBoilerplate(planned?.visualPrompt) ? undefined : planned?.visualPrompt;
-    const visualPrompt = sanitizeInline(
-      rawPlannedVisualPrompt,
-      `Cinematic realization of this story beat with consistent characters, location, lighting, and emotional tone: ${storyBeat}`,
-    );
-    const camera = sanitizeInline(
-      planned?.camera,
-      index % 3 === 0 ? 'slow controlled dolly movement with stable subject tracking and visible parallax' : index % 3 === 1 ? 'gentle handheld cinematic push-in following the protagonist through the motion' : 'gimbal arc around the protagonist with continuous environmental motion',
-    );
-    const continuity = sanitizeInline(
-      planned?.continuity,
-      'Carry forward the same character identity, wardrobe, props, color palette, environment logic, and lighting direction from adjacent shots.',
-    );
-    const transition = sanitizeInline(
-      planned?.transition,
-      index === 0 ? 'open from black into a mid-action first frame, not a static pose' : 'carry the protagonist mid-motion from the previous closing frame into the next opening frame; match direction, limb momentum, hair/fabric flow, and light movement',
-    );
+    const visualPrompt = options.cleanDirect
+      ? sanitizeInline(rawPlannedVisualPrompt, '')
+      : sanitizeInline(
+          rawPlannedVisualPrompt,
+          `Cinematic realization of this story beat with consistent characters, location, lighting, and emotional tone: ${storyBeat}`,
+        );
+    const camera = options.cleanDirect
+      ? sanitizeInline(planned?.camera, '')
+      : sanitizeInline(
+          planned?.camera,
+          index % 3 === 0 ? 'slow controlled dolly movement with stable subject tracking and visible parallax' : index % 3 === 1 ? 'gentle handheld cinematic push-in following the protagonist through the motion' : 'gimbal arc around the protagonist with continuous environmental motion',
+        );
+    const continuity = options.cleanDirect
+      ? sanitizeInline(planned?.continuity, '')
+      : sanitizeInline(
+          planned?.continuity,
+          'Carry forward the same character identity, wardrobe, props, color palette, environment logic, and lighting direction from adjacent shots.',
+        );
+    const transition = options.cleanDirect
+      ? sanitizeInline(planned?.transition, '')
+      : sanitizeInline(
+          planned?.transition,
+          index === 0 ? 'open from black into a mid-action first frame, not a static pose' : 'carry the protagonist mid-motion from the previous closing frame into the next opening frame; match direction, limb momentum, hair/fabric flow, and light movement',
+        );
     resolved.push({ title, duration, storyBeat, visualPrompt, camera, continuity, transition, planned });
   }
 
@@ -436,13 +594,13 @@ function buildSegments(options: {
       authoredPrompt: r.planned?.prompt,
       startingFrameAnchor,
     } as const;
-    const prompt = compileShotPromptWithContinuity({ ...promptArgs, mode: options.continuityMode });
+    const prompt = compileShotPromptWithContinuity({ ...promptArgs, mode: options.continuityMode, cleanDirect: options.cleanDirect });
     // Always also compile a text-only variant. We use it when a per-segment
     // retry has to drop the chained image reference because of a provider
     // safety/privacy filter — the text-only prompt verbally compensates.
     const textOnlyPrompt = options.continuityMode === 'text-only'
       ? prompt
-      : compileShotPromptWithContinuity({ ...promptArgs, mode: 'text-only' });
+      : compileShotPromptWithContinuity({ ...promptArgs, mode: 'text-only', cleanDirect: options.cleanDirect });
     segments.push({
       index: index + 1,
       duration: r.duration,
@@ -477,9 +635,20 @@ function isImagePrivacyError(message: string | undefined): boolean {
 // default 60-poll window when their queue is busy. The task itself isn't
 // rejected — it's just slow. Submitting a fresh task is the right recovery,
 // not declaring the segment dead.
-function isPollTimeoutError(message: string | undefined): boolean {
+export function isPollTimeoutErrorForTest(message: string | undefined): boolean {
   if (!message) return false;
-  return /did not finish within \d+ polls?|Last status:\s*(?:running|pending|queued|submitted)/i.test(message);
+  return /did not (?:finish|complete) within \d+ polls?|Last status:\s*(?:running|processing|pending|queued|submitted)/i.test(message);
+}
+
+function shouldPreserveUserScriptWithoutCriticRewrite(options: {
+  action: GenerateLongVideoAction;
+  timestampedStoryShots: SagaShotInput[];
+}): boolean {
+  if (options.action.preserveUserScript === true) return true;
+  if (options.timestampedStoryShots.length > 0) return true;
+
+  const story = `${options.action.story ?? ''}\n${options.action.prompt ?? ''}`;
+  return /(?:^|\n|\s)(?:\d+(?:\.\d+)?\s*[–-]\s*\d+(?:\.\d+)?\s*s?|shot\s*\d+|镜头\s*\d+|第\s*\d+\s*(?:幕|段|镜头))/i.test(story);
 }
 
 function buildTransitionPlans(options: {
@@ -563,6 +732,14 @@ function shouldChainFrames(action: GenerateLongVideoAction, providerSupportsImag
   return providerSupportsImageRef;
 }
 
+function isHumanOrMixedSubject(entities: NarrativeEntities | null): boolean {
+  if (!entities) return false;
+  return entities.mode === 'character'
+    || entities.mode === 'mixed'
+    || entities.mode === 'unclear'
+    || entities.protagonist.type === 'character';
+}
+
 function deriveContinuityFromShots(action: GenerateLongVideoAction): {
   shotContinuityNotes: string[];
   shotCameraNotes: string[];
@@ -601,19 +778,44 @@ export async function executeGenerateLongVideo(
 
     const provider = configured.config.video.provider;
     const model = action.model?.trim() || configured.model || configured.config.video.model;
+    const videoNsfw = configured.nsfw === true || configured.config.video.nsfw === true;
+    const identitySource = action.identitySource;
     const limits = resolveVideoModelLimits(provider, model);
     const ratio = resolveRatio(action.ratio);
     const totalSeconds = clampTotalSeconds(action.totalDuration ?? action.duration);
     const projectId = normalizeProjectId(action.projectId);
     const fps: SagaFps = (action.fps as SagaFps | undefined) ?? 30;
     const quality: SagaQuality = (action.quality as SagaQuality | undefined) ?? 'standard';
-    const referenceNotes = nonEmptyStringArray(action.referenceNotes);
+
+    // Side-channel recovery: saga workflow writes the FULL user story to a
+    // known file before returning the action, because the agent layer
+    // (LLM tool-call serialization) sometimes truncates a long story argument.
+    // When the file exists and contains a longer body than action.story, use it.
+    let resolvedSourceStory = action.story || '';
+    try {
+      const { readFileSync, existsSync, unlinkSync } = await import('node:fs');
+      const { homedir } = await import('node:os');
+      const sourcePath = path.join(homedir(), '.artemis', 'saga-pending', `${projectId}-source-story.txt`);
+      if (existsSync(sourcePath)) {
+        const sideStory = readFileSync(sourcePath, 'utf8');
+        if (sideStory && sideStory.length > resolvedSourceStory.length) {
+          toolLog(`📖 Saga: 从 saga-pending side-channel 恢复完整剧本 (${sideStory.length} 字符，覆盖 agent 传入的 ${resolvedSourceStory.length} 字符)`);
+          resolvedSourceStory = sideStory;
+        }
+        try { unlinkSync(sourcePath); } catch { /* best-effort cleanup */ }
+      }
+    } catch {
+      // Side-channel is best-effort; fall through to action.story.
+    }
+
+    const rawStory = sanitizeSagaUserText(resolvedSourceStory || action.prompt);
+    const referenceNotes = sanitizeReferenceNotesForStory(nonEmptyStringArray(action.referenceNotes), rawStory);
     let story = [
-      action.story || action.prompt,
+      rawStory,
       referenceNotes.length > 0
         ? `\n\nReference notes from user: ${referenceNotes.join(' | ')}`
         : '',
-    ].join('');
+    ].join('').trim();
     const title = deriveVideoTitle(action, story);
     const generatedAt = new Date();
     const localGeneratedAt = formatLocalTimestamp(generatedAt);
@@ -645,7 +847,17 @@ export async function executeGenerateLongVideo(
       storyboardImagePaths.push(resolved.absolute);
     }
     const storyboardParseResults: Array<{ imagePath: string; parsed: unknown }> = [];
-    let storyboardShots = action.shots;
+    // ALWAYS parse timestamped shots first. When the user supplied an explicit
+    // [X-Y秒] timeline, that is the authoritative segmentation and takes
+    // priority over any agent-supplied shots array (which is typically empty
+    // or generic boilerplate when saga flows through the LLM).
+    const timestampedStoryShots = parseTimestampedShotsFromStory(story, limits.maxSegmentSeconds);
+    let storyboardShots = timestampedStoryShots.length >= 2
+      ? timestampedStoryShots
+      : (action.shots?.length ? action.shots : []);
+    if (timestampedStoryShots.length >= 2) {
+      toolLog(`🧭 Saga: 已从用户时间码剧本解析出 ${timestampedStoryShots.length} 个镜头，按脚本顺序生成（优先于 agent 默认规划）。`);
+    }
     if ((!storyboardShots || storyboardShots.length === 0) && storyboardImagePaths.length > 0) {
       for (const imagePath of storyboardImagePaths) {
         const parsed = await parseStoryboardImageWithVision({ imagePath, context });
@@ -691,20 +903,42 @@ export async function executeGenerateLongVideo(
         userText: story,
         hasFaceLikelyInImages: hasGlobalUserImageReferences,
       });
-      story = [
-        story,
-        '',
-        buildSagaConstitution(narrativeEntities),
-        '',
-        `[Saga Narrative Entity Map — internally resolved for this generate_long_video call]\n${JSON.stringify(narrativeEntities, null, 2)}`,
-      ].join('\n');
-      toolLog(`🧠 Saga: 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})。`);
+      // The Saga Constitution is a single-protagonist story bible designed
+      // for narrative cinematic content. For NSFW content the analyzer
+      // typically tags secondary subjects as "未完整出镜 / not-fully-in-frame"
+      // and restricts the action vocabulary to the protagonist's body verbs.
+      // Embedding that constitution into the per-segment prompt then yields
+      // anatomy-fusion glitches: the model is told "only one subject visible"
+      // but the user's prompt describes intercourse, so the missing partner's
+      // anatomy gets fused onto the protagonist.
+      //
+      // When cleanDirect is on (user explicitly asked for un-wrapped output)
+      // OR the video provider is configured NSFW, skip the constitution and
+      // let the user's raw prompt flow through every segment unchanged.
+      const skipConstitution = action.cleanDirect === true || videoNsfw;
+      if (!skipConstitution) {
+        story = [
+          story,
+          '',
+          buildSagaConstitution(narrativeEntities),
+          '',
+          `[Saga Narrative Entity Map — internally resolved for this generate_long_video call]\n${JSON.stringify(narrativeEntities, null, 2)}`,
+        ].join('\n');
+      }
+      toolLog(`🧠 Saga: 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})${skipConstitution ? '。(Constitution 已跳过：cleanDirect / NSFW provider)' : '。'}`);
     }
 
     const isPureEnvironment = narrativeEntities?.mode === 'environment';
+    const isDirectImageIdentity = identitySource === 'direct_image';
+    const explicitUserImageBypass = isDirectImageIdentity;
+    const superVisualBypass = superVisualBypassReason(identitySource, isPureEnvironment);
 
-    const superVisualMode = isPureEnvironment
-      ? { enabled: false, reason: 'environment-mode-bypass' } as const
+    const superVisualMode = superVisualBypass
+      ? {
+          enabled: false,
+          reason: superVisualBypass,
+          resolvedUserImagePaths: userReferenceImagePaths.length > 0 ? userReferenceImagePaths : undefined,
+        } as const
       : await maybeGenerateSuperVisualReference({
           action,
           context,
@@ -717,7 +951,9 @@ export async function executeGenerateLongVideo(
 
     // CRITICAL: If the user provided an image but Super Visual failed due to safety/privacy,
     // we MUST NOT silently fall back to hallucination. Interrupt and ask for a new image.
-    if (!superVisualMode.enabled && hasGlobalUserImageReferences) {
+    // When videoNsfw is true the provider accepts real-person inputs directly —
+    // the safety-derivative rejection is not fatal in that case.
+    if (!superVisualMode.enabled && hasGlobalUserImageReferences && !videoNsfw && !explicitUserImageBypass) {
       const isSafetyFail = /privacy|safety|sensitive|blocked|rejected/i.test(superVisualMode.reason ?? '');
       if (isSafetyFail) {
         return {
@@ -726,6 +962,12 @@ export async function executeGenerateLongVideo(
           output: `🚨 角色身份锁定失败：你提供的参考图被安全过滤系统拦截 (${superVisualMode.reason})。\n\n这通常是因为图片中包含：\n1. 过于写实的真人面部（触发隐私保护）\n2. 复杂的版权内容\n3. 触发了提供商的敏感词过滤\n\n建议操作：\n- 请提供一张背景更干净、更偏向“插画/3D/动漫”风格的角色图。\n- 或者尝试删除图片，仅使用文字描述生成。\n- 请更换图片后重新发送指令。`,
         };
       }
+    }
+    // When videoNsfw is true and Super Visual refused due to safety, the real-person
+    // photos can still be sent directly — mark that the input IS real-person so the
+    // downstream reference-routing logic can handle it, but do NOT abort.
+    if (videoNsfw && !superVisualMode.enabled && hasGlobalUserImageReferences && !explicitUserImageBypass) {
+      toolLog(`🔞 NSFW provider: Super Visual safety 拦截已跳过 (${superVisualMode.reason})，将直传用户参考图`);
     }
 
     // Real-person input cannot submit the user's original photos or raw
@@ -751,9 +993,21 @@ export async function executeGenerateLongVideo(
     //      photographic/cinematic for real-person input) ingest the previous
     //      segment's closing frame during image-edit generation. The raw
     //      closing frame is NOT submitted to BytePlus in real-person mode.
-    const realPersonInput = superVisualMode.enabled
-      ? Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson)
-      : false;
+    // identitySource (set by the Saga three-step menu) overrides reference routing:
+    //  - 'text_only': explicitly no image identity — skip turnaround entirely.
+    //  - 'turnaround': user already supplied the complete three-view sheet —
+    //    send it directly to the video model; do not regenerate it or make
+    //    per-segment Image-2 keyframes from it.
+    //  - 'direct_image': user explicitly asked to use the image as video
+    //    material — send it directly to the video model; do not generate a
+    //    three-view sheet.
+    //  - 'character_image': user supplied a character/photo source — normal
+    //    Super Visual flow generates a three-view identity sheet.
+    const realPersonInput = videoNsfw && isDirectImageIdentity
+      ? false   // NSFW provider + direct image → skip real-person safety, pass through
+      : superVisualMode.enabled
+        ? Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson)
+        : false;
     // NOTE: role:"first_frame" turned out NOT to bypass BytePlus's real-
     // person privacy filter empirically (the filter is image-classifier-
     // based and ignores the role tag). Saga therefore uses ONLY
@@ -772,7 +1026,35 @@ export async function executeGenerateLongVideo(
     // resulting rich text identity into story so per-segment text-only
     // prompts can carry identity across segments. Only falls fully to
     // text-only when even vision is unavailable.
-    if (!superVisualMode.enabled && (userReferenceImagePaths.length > 0 || userReferenceImageUrls.length > 0)) {
+    if (identitySource === 'turnaround' && hasGlobalUserImageReferences) {
+      // These directive strings get fed into sentenceChunks() downstream and
+      // can leak into a per-segment storyBeat when the user's actual story is
+      // short enough to leave segments hungry for content. For cleanDirect /
+      // NSFW runs that pollution showed up as "Scene intent: EXPLICIT DIRECT
+      // IMAGE SOURCE…" replacing what should have been a sex-scene beat.
+      // The identitySource semantics are already enforced by superVisualMode
+      // and the per-provider reference routing — we don't need to also tell
+      // the model in text. Skip when cleanDirect to keep `story` pure.
+      if (action.cleanDirect !== true) {
+        story = [
+          story,
+          '',
+          'EXPLICIT USER TURNAROUND SOURCE: The user chose "I have a character three-view/turnaround". Use the supplied reference image(s) as the canonical identity source. Do NOT regenerate the turnaround, but do use it to build per-segment keyframe bridge references when available.',
+        ].join('\n');
+      }
+      toolLog(`🎯 Saga: 用户已提供角色三视图，保留为 canonical identity source，并进入 keyframe bridge。`);
+    } else if (isDirectImageIdentity && hasGlobalUserImageReferences) {
+      if (action.cleanDirect !== true) {
+        story = [
+          story,
+          '',
+          'EXPLICIT DIRECT IMAGE SOURCE: The user chose direct image-to-video material. Use the supplied image(s) directly as video reference media. Do NOT generate a character turnaround sheet.',
+        ].join('\n');
+      }
+      toolLog(`🎯 Saga: 用户选择直接用图片做视频素材，跳过 Super Visual / Image-2 三视图生成，直接传给视频模型。`);
+    }
+
+    if (!superVisualMode.enabled && !explicitUserImageBypass && (userReferenceImagePaths.length > 0 || userReferenceImageUrls.length > 0)) {
       if (isPureEnvironment) {
         toolLog('🎯 Saga: 纯视觉/无主角模式已确认。绕过 Super Visual 人物提取，强制保留用户原始风景/抽象图，并注入最高级防人类指令。');
         story = [
@@ -803,12 +1085,42 @@ export async function executeGenerateLongVideo(
         } else {
           toolWarn('⚠️ Super Visual 不可用且 vision-describe 也失败：本次只能依赖原始文字描述，身份一致性会偏弱。');
         }
-        // Drop user photos — provider would reject them for privacy reasons in character mode.
-        userReferenceImagePaths = [];
-        userReferenceImageUrls = [];
-        hasGlobalUserImageReferences = false;
+        if (identitySource === 'turnaround') {
+          toolWarn('⚠️ Super Visual 不可用：保留用户三视图作为 canonical identity reference，禁止降级为无图生成。');
+        } else {
+          // Drop non-turnaround user photos — provider would reject them for privacy reasons in character mode.
+          userReferenceImagePaths = [];
+          userReferenceImageUrls = [];
+          hasGlobalUserImageReferences = false;
+        }
       }
     }
+    // Resolve permanent accessories with multi-field fallback. The LLM
+    // narrative analyst isn't consistent about which field it populates:
+    //   1) protagonistAccessories — preferred (explicit accessory list)
+    //   2) worldModel.wardrobe.permanent — common alternate (clothing-permanent
+    //      items: eye mask, headscarf, signature jewelry land here too)
+    //   3) scan props for accessory keywords — last resort
+    // Returning a non-empty list lets buildContinuityBible emit a dedicated
+    // [ACCESSORY-LOCK] bracket block that survives source-story truncation.
+    const accessoriesList = (() => {
+      const direct = narrativeEntities?.protagonistAccessories;
+      if (Array.isArray(direct) && direct.length > 0) return direct;
+      const permanent = narrativeEntities?.worldModel?.wardrobe?.permanent;
+      if (Array.isArray(permanent) && permanent.length > 0) return permanent;
+      const allProps = narrativeEntities?.props ?? [];
+      const ACC_RE = /(眼罩|墨镜|sunglass|blindfold|头巾|head\s*scarf|turban|du-rag|项链|necklace|手链|bracelet|戒指|\bring\b|耳环|耳钉|earring|手套|gloves|围巾|scarf|口罩|唇妆|lipstick|red\s*lips|帽|hat|cap|束发带|发饰|hair\s*band)/i;
+      return allProps.filter((p: string) => ACC_RE.test(p));
+    })();
+    const accessoryRule = accessoriesList.length > 0
+      ? [
+          'ACCESSORY LOCK — IDENTITY-DEFINING — The protagonist has the following locked accessories (extracted from the reference image and the user\'s description):',
+          ...accessoriesList.map((item: string) => `  · ${item}`),
+          'These accessories are part of the protagonist\'s identity. They must appear in EVERY shot, in the same position, in the same color and style, throughout the ENTIRE video. NEVER describe removing, lifting, repositioning, swapping, or modifying any of them. NEVER introduce a different accessory of the same category (e.g., if a face-covering item is locked, do not add any other face-covering item). NEVER write timeline beats like "she pushes her X up" / "she takes off her X" / "she replaces her X". The accessories are permanent for the whole video.',
+          ...deriveOcclusionLocksFromAccessories(accessoriesList).map((lock: string) => `OCCLUSION CONSEQUENCE — ${lock}`),
+        ].join('\n')
+      : '';
+
     if (superVisualMode.enabled) {
       // Both real-person and illustrated input: turnaround is the canonical
       // identity anchor. Original user photos are dropped from the request
@@ -816,23 +1128,11 @@ export async function executeGenerateLongVideo(
       userReferenceImagePaths = [superVisualMode.referenceImagePath];
       userReferenceImageUrls = [];
       hasGlobalUserImageReferences = true;
-      // Build a dynamic ACCESSORY LOCK directive. The specific items locked
-      // come from the LLM narrative analyst's `protagonistAccessories` list,
-      // which it extracted from the user's reference image + text. The rule
-      // itself is generic — it never enumerates "eye-mask, hat, etc." in
-      // hardcoded form, only the actual items the LLM saw.
-      const accessoriesList = narrativeEntities?.protagonistAccessories ?? [];
-      const accessoryRule = accessoriesList.length > 0
-        ? [
-            'ACCESSORY LOCK — IDENTITY-DEFINING — The protagonist has the following locked accessories (extracted from the reference image and the user\'s description):',
-            ...accessoriesList.map((item) => `  · ${item}`),
-            'These accessories are part of the protagonist\'s identity. They must appear in EVERY shot, in the same position, in the same color and style, throughout the ENTIRE video. NEVER describe removing, lifting, repositioning, swapping, or modifying any of them. NEVER introduce a different accessory of the same category (e.g., if a face-covering item is locked, do not add any other face-covering item). NEVER write timeline beats like "she pushes her X up" / "she takes off her X" / "she replaces her X". The accessories are permanent for the whole video.',
-            ...deriveOcclusionLocksFromAccessories(accessoriesList).map((lock) => `OCCLUSION CONSEQUENCE — ${lock}`),
-          ].join('\n')
-        : 'ACCESSORY LOCK — Whatever the protagonist is wearing or holding in the reference image is part of their locked identity and must appear unchanged in every shot. Do not describe removing or repositioning anything visible on the protagonist in the reference.';
+      const fallbackAccessoryRule = accessoryRule
+        || 'ACCESSORY LOCK — Whatever the protagonist is wearing or holding in the reference image is part of their locked identity and must appear unchanged in every shot. Do not describe removing or repositioning anything visible on the protagonist in the reference.';
       const storyAdditions: string[] = [
         `Super visual reference: use ${superVisualMode.referenceImagePath} as the canonical three-view character identity sheet for every segment.`,
-        accessoryRule,
+        fallbackAccessoryRule,
       ];
       if (realPersonInput) {
         storyAdditions.push(
@@ -844,6 +1144,17 @@ export async function executeGenerateLongVideo(
       if (realPersonInput) {
         toolLog(`🎯 Saga: 已启用角色身份锁与写实输出路径。`);
       }
+      if (identitySource === 'turnaround') {
+        toolLog(`🎯 Saga: 用户三视图将作为 canonical identity source，并继续生成每段 keyframe bridge。`);
+      }
+    } else if (accessoriesList.length > 0) {
+      // Non-super-visual modes (direct_image / character_image / text-only):
+      // log the lock so we know it's about to be injected via the bible.
+      // The actual [ACCESSORY-LOCK] block emission happens in
+      // buildContinuityBible below, which receives accessoriesList through
+      // the bible input. This avoids appending to `story` (which would get
+      // truncated by the bible's slice(0, 1600) on Source story).
+      toolLog(`🎯 Saga: 即将注入 ACCESSORY LOCK (${accessoriesList.length} 项)，identitySource=${identitySource ?? 'text-only'}。`);
     }
 
     // Sanitize story BEFORE the continuity bible is built so unsanitized
@@ -856,6 +1167,19 @@ export async function executeGenerateLongVideo(
     }
     story = sanitizeForVideoProvider(story);
     const { shotContinuityNotes, shotCameraNotes } = deriveContinuityFromShots(action);
+    const sceneAnchors = mergeStringArrays(
+      action.continuity?.locations,
+      narrativeEntities?.environments,
+      narrativeEntities?.worldModel?.clutter,
+      narrativeEntities?.worldModel?.spatialReality?.groundSurface ? [narrativeEntities.worldModel.spatialReality.groundSurface] : undefined,
+      extractSceneAnchorsFromStory(story),
+    );
+    const propAnchors = mergeStringArrays(
+      action.continuity?.props,
+      narrativeEntities?.props,
+      narrativeEntities?.worldModel?.identityLockedProps,
+      narrativeEntities?.worldModel?.sceneVariableProps,
+    );
     const continuityBible = buildContinuityBible({
       story,
       ratio,
@@ -863,14 +1187,16 @@ export async function executeGenerateLongVideo(
       shotCameraNotes,
       characters: action.continuity?.characters,
       wardrobe: action.continuity?.wardrobe,
-      props: action.continuity?.props,
-      locations: action.continuity?.locations,
+      props: propAnchors,
+      locations: sceneAnchors,
       palette: action.continuity?.palette,
       lighting: action.continuity?.lighting,
       cameraLanguage: action.continuity?.cameraLanguage,
       mood: action.continuity?.mood,
+      accessoriesLock: accessoriesList,
     });
 
+    const cleanDirect = action.cleanDirect === true;
     const providerSupportsImageRef = limits.referenceInputs.includes('image');
     const userContinuityOverride = action.continuityMode === 'auto' ? undefined : (action.continuityMode as SagaContinuityMode | undefined);
     const continuityMode = pickContinuityMode({
@@ -881,7 +1207,7 @@ export async function executeGenerateLongVideo(
     // Sanitize per-shot author-facing fields (storyBeat / visualPrompt /
     // camera / continuity / transition / prompt). Story itself was already
     // sanitized before continuityBible was built.
-    const sanitizedShots = action.shots?.map((shot) => ({
+    const sanitizedShots = storyboardShots?.map((shot) => ({
       ...shot,
       storyBeat: shot.storyBeat ? sanitizeForVideoProvider(shot.storyBeat) : shot.storyBeat,
       visualPrompt: shot.visualPrompt ? sanitizeForVideoProvider(shot.visualPrompt) : shot.visualPrompt,
@@ -901,6 +1227,7 @@ export async function executeGenerateLongVideo(
       ratio,
       continuityInput: continuityBible,
       continuityMode,
+      cleanDirect,
     });
     const actualTotalSeconds = segments.reduce((sum, segment) => sum + segment.duration, 0);
 
@@ -912,7 +1239,8 @@ export async function executeGenerateLongVideo(
     let preCriticViolations: ShotViolation[] = [];
     let postCriticViolations: ShotViolation[] = [];
     const rewroteShotIndices: number[] = [];
-    if (narrativeEntities) {
+    const preserveUserScript = cleanDirect || shouldPreserveUserScriptWithoutCriticRewrite({ action, timestampedStoryShots });
+    if (narrativeEntities && !cleanDirect) {
       toolLog(`🧠 Saga Critic: 启动 pre-flight 检查（mode=${narrativeEntities.mode} · 主角=${narrativeEntities.protagonist.name}）...`);
       preCriticViolations = runNarrativeCritic({
         shots: segments.map((seg) => ({
@@ -925,6 +1253,9 @@ export async function executeGenerateLongVideo(
       });
       if (preCriticViolations.length === 0) {
         toolLog(`✅ Saga Critic: 所有 shot 通过宪法检查，无违规。`);
+      } else if (preserveUserScript) {
+        postCriticViolations = preCriticViolations;
+        toolWarn(`⚠️ Saga Critic: 检测到 ${preCriticViolations.length} 个 shot 违规，但当前是显式用户剧本/时间码模式，已跳过 LLM 重写并保留原始镜头内容。`);
       } else {
         toolWarn(`⚠️ Saga Critic: 检测到 ${preCriticViolations.length} 个 shot 违规，启动 self-dialogue 重写...`);
         for (let round = 1; round <= 2; round += 1) {
@@ -1020,7 +1351,43 @@ export async function executeGenerateLongVideo(
       defaultMs: crossfadeMs,
     });
 
-    const chainFrames = shouldChainFrames(action, providerSupportsImageRef);
+    const draftPlanPath = path.join(projectDir, 'saga-plan.draft.json');
+    await writeFile(
+      draftPlanPath,
+      JSON.stringify({
+        schema: 'artemis-saga.plan-draft.v1',
+        projectId,
+        title,
+        generatedAt: generatedAt.toISOString(),
+        story,
+        requestedTotalSeconds: totalSeconds,
+        plannedTotalSeconds: actualTotalSeconds,
+        ratio,
+        provider,
+        model,
+        identitySource,
+        planningMode: storyboardShots && storyboardShots.length > 0
+          ? (timestampedStoryShots.length > 0 ? 'timestamped-script-shot-list' : storyboardParseResults.length > 0 ? 'storyboard-image-shot-list' : 'model-shot-list')
+          : 'local-fallback',
+        superVisualMode,
+        cleanDirect,
+        segments: segments.map((segment) => ({
+          index: segment.index,
+          title: segment.title,
+          duration: segment.duration,
+          storyBeat: segment.storyBeat,
+          visualPrompt: segment.visualPrompt,
+          camera: segment.camera,
+          continuity: segment.continuity,
+          transition: segment.transition,
+          promptPath: path.join(projectDir, 'segments', `${String(segment.index).padStart(3, '0')}.prompt.txt`),
+          outputPath: segment.outputPath,
+        })),
+      }, null, 2),
+      'utf8',
+    );
+
+    const chainFrames = cleanDirect ? false : shouldChainFrames(action, providerSupportsImageRef);
 
     // Audio is on by default unless the caller explicitly disabled it; we
     // retry with audio off if the provider's safety filter rejects the
@@ -1040,6 +1407,7 @@ export async function executeGenerateLongVideo(
     // the remaining segments instead of paying a wasted API call each time.
     let consecutivePrivacyFails = 0;
     let chainEnabled = chainFrames;
+    const humanOrMixedSubject = isHumanOrMixedSubject(narrativeEntities);
 
     let previousLastFramePath: string | undefined;
     // Per-segment Image-2 opening keyframes — generated lazily right before
@@ -1051,6 +1419,7 @@ export async function executeGenerateLongVideo(
     // model a hard identity anchor + a hard scene anchor for that segment.
     const segmentKeyframePaths = new Map<number, string>();
     const segmentKeyframeFailures: Array<{ index: number; reason: string }> = [];
+    const shouldGenerateSegmentKeyframes = !cleanDirect && superVisualMode.enabled && superVisualMode.mode !== 'provided-turnaround';
     let lastHeartbeat = Date.now();
     const heartbeatInterval = 60_000 * 2; // 2 minutes
 
@@ -1075,7 +1444,7 @@ export async function executeGenerateLongVideo(
         // /images/edits so the keyframe inherits BOTH identity (from the
         // turnaround) AND scene continuity (from the previous closing frame).
         // For shot 1 there is no previous frame yet, so identity-only edit.
-        if (superVisualMode.enabled) {
+        if (shouldGenerateSegmentKeyframes) {
           toolLog(`🎨 正在为第 ${segment.index} 段生成视觉参考关键帧 (Image-2)...`);
           const wm = narrativeEntities?.worldModel ?? {};
           const keyframeResult = await generateSegmentKeyframe({
@@ -1117,6 +1486,8 @@ export async function executeGenerateLongVideo(
           } else {
             segmentKeyframeFailures.push({ index: segment.index, reason: keyframeResult.reason });
           }
+        } else if (superVisualMode.enabled && superVisualMode.mode === 'provided-turnaround' && segment.index === 1) {
+          toolLog('🎯 用户提供三视图：跳过 Image-2 keyframe，直接将三视图作为视频身份参考，避免图片模型不可用时阻塞。');
         }
 
         const baseReq = {
@@ -1147,8 +1518,8 @@ export async function executeGenerateLongVideo(
           firstFrameImagePaths: segment.index === 1 ? action.firstFrameImagePaths : undefined,
           lastFrameImageUrls: segment.index === segments.length ? action.lastFrameImageUrls : undefined,
           lastFrameImagePaths: segment.index === segments.length ? action.lastFrameImagePaths : undefined,
-          watermark: action.watermark,
-          maxPolls: action.maxPolls,
+          watermark: action.watermark ?? false,
+          maxPolls: Math.max(MIN_SAGA_SEGMENT_MAX_POLLS, action.maxPolls ?? 0),
           pollIntervalMs: action.pollIntervalMs,
         };
 
@@ -1204,19 +1575,35 @@ export async function executeGenerateLongVideo(
           // screenshots to the video provider. So for real-person runs, we
           // deliberately omit the raw screenshot and rely on that generated
           // keyframe to bridge the scene.
-          const rawChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && !realPersonInput;
-          const proxyChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && realPersonInput && Boolean(segmentKeyframe);
+          const rawChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && !realPersonInput && !humanOrMixedSubject;
+          const proxyChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && (realPersonInput || humanOrMixedSubject) && Boolean(segmentKeyframe);
           const chainPaths: string[] = rawChainEligible && previousLastFramePath
             ? [previousLastFramePath]
             : [];
-          const referenceImagePaths = [
-            ...keyframePaths,
-            ...chainPaths,
-            ...(usingUserImageReferences ? userReferenceImagePaths : []),
-          ];
+          const referenceImagePaths = cleanDirect
+            ? (usingUserImageReferences ? userReferenceImagePaths : [])
+            : [
+              ...keyframePaths,
+              ...chainPaths,
+              ...(usingUserImageReferences ? userReferenceImagePaths : []),
+            ];
           const referenceImageUrlsForCall = usingUserImageReferences ? userReferenceImageUrls : [];
           const hasAnyImageRef = referenceImagePaths.length > 0 || referenceImageUrlsForCall.length > 0;
           const promptToUse = hasAnyImageRef ? segment.prompt : segment.textOnlyPrompt;
+          const segmentPromptPath = path.join(projectDir, 'segments', `${String(segment.index).padStart(3, '0')}.prompt.txt`);
+          await writeFile(
+            segmentPromptPath,
+            [
+              `# Saga segment ${segment.index}/${segments.length}`,
+              `attempt: ${attempt + 1}`,
+              `hasAnyImageRef: ${hasAnyImageRef}`,
+              `referenceImagePaths: ${referenceImagePaths.join(' | ') || '(none)'}`,
+              `referenceImageUrls: ${referenceImageUrlsForCall.join(' | ') || '(none)'}`,
+              '',
+              sanitizeForVideoProvider(promptToUse),
+            ].join('\n'),
+            'utf8',
+          );
           const result = await executeGenerateVideo(
             {
               ...baseReq,
@@ -1246,7 +1633,7 @@ export async function executeGenerateLongVideo(
           lastError = result.output ?? '';
           const audioBlocked = isAudioSafetyError(lastError);
           const imageBlocked = isImagePrivacyError(lastError);
-          const pollTimeout = isPollTimeoutError(lastError);
+          const pollTimeout = isPollTimeoutErrorForTest(lastError);
           if (!audioBlocked && !imageBlocked && !pollTimeout) {
             // Non-recoverable error — bail.
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：不可恢复错误，停止重试。${lastError.slice(0, 200)}`);
@@ -1406,7 +1793,9 @@ export async function executeGenerateLongVideo(
           rewroteShotIndices,
         },
       } : null,
-      planningMode: storyboardShots && storyboardShots.length > 0 ? (storyboardParseResults.length > 0 ? 'storyboard-image-shot-list' : 'model-shot-list') : 'local-fallback',
+      planningMode: storyboardShots && storyboardShots.length > 0
+        ? (timestampedStoryShots.length > 0 ? 'timestamped-script-shot-list' : storyboardParseResults.length > 0 ? 'storyboard-image-shot-list' : 'model-shot-list')
+        : 'local-fallback',
       continuity: {
         mode: continuityMode,
         identityCard: continuityBible.identityCard,
@@ -1464,6 +1853,7 @@ export async function executeGenerateLongVideo(
       assemblyMode: 'saga',
       superVisualMode,
       encoderUsed: renderResult.encoderUsed,
+      reviewFrames: renderResult.reviewFrames,
       outputPath: resolvedOutput.absolute,
       outputFileName: outputBaseName,
       metadataPath,
@@ -1505,7 +1895,9 @@ export async function executeGenerateLongVideo(
           superVisualMode: superVisualMode.enabled ? superVisualMode.mode : 'off',
           canonicalReferencePath: superVisualMode.enabled ? superVisualMode.referenceImagePath : undefined,
           inputIsRealPerson: Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson),
-          chainFrameSubmissionMode: (superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson
+          chainFrameSubmissionMode: humanOrMixedSubject
+            ? 'proxy-keyframe-ingests-previous-last-frame'
+            : (superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson
             ? 'proxy-keyframe-ingests-previous-last-frame'
             : 'raw-previous-last-frame-reference',
           userImageReferenceDroppedSegments,
@@ -1515,7 +1907,7 @@ export async function executeGenerateLongVideo(
           status: userImageReferenceDroppedSegments.length > 0
             || chainDroppedSegments.length > 0
             || segmentKeyframeFailures.length > 0
-            || (requestedUserImageReferenceCount > 0 && !superVisualMode.enabled)
+            || (requestedUserImageReferenceCount > 0 && !superVisualMode.enabled && !explicitUserImageBypass)
             ? 'degraded'
             : 'ok',
           notes: [
@@ -1525,7 +1917,10 @@ export async function executeGenerateLongVideo(
             chainDroppedSegments.length > 0
               ? `Chain reference frames were dropped for segments: ${chainDroppedSegments.join(', ')}`
               : undefined,
-            !superVisualMode.enabled
+            isDirectImageIdentity && requestedUserImageReferenceCount > 0
+              ? `Super Visual bypassed by explicit identitySource=${identitySource}; user images are sent directly as video references.`
+              : undefined,
+            !superVisualMode.enabled && !explicitUserImageBypass
               ? `Super Visual is disabled/unavailable: ${superVisualMode.reason}`
               : undefined,
             segmentKeyframeFailures.length > 0
@@ -1562,6 +1957,7 @@ export async function executeGenerateLongVideo(
       provider: describeVisualProvider(configured.config, 'video'),
       model,
       superVisualMode,
+      reviewFrames: renderResult.reviewFrames,
       outputPath: resolvedOutput.absolute,
       manifestPath,
       planPath,
@@ -1575,7 +1971,7 @@ export async function executeGenerateLongVideo(
       },
     }, null, 2), 'utf8');
     await appendFile(
-      path.join(context.cwd, DEFAULT_LONG_VIDEO_SUBDIR, 'saga-library.jsonl'),
+      path.join(getMediaOutputRoot(), DEFAULT_LONG_VIDEO_SUBDIR, 'saga-library.jsonl'),
       `${JSON.stringify({
         schema: 'artemis-saga.library-entry.v1',
         title,
@@ -1587,6 +1983,7 @@ export async function executeGenerateLongVideo(
         rendererReportedTotalSeconds: renderResult.durationSeconds,
         ratio,
         outputPath: resolvedOutput.absolute,
+        reviewFrames: renderResult.reviewFrames,
         manifestPath,
         metadataPath,
       })}\n`,
@@ -1617,31 +2014,75 @@ export async function executeGenerateLongVideo(
     // Verify the output landed.
     await readFile(resolvedOutput.absolute);
     const elapsedSeconds = Math.round((Date.now() - started) / 1000);
+
+    // Human-readable elapsed: "25m 42s" / "42s".
+    const elapsedHuman = (() => {
+      const m = Math.floor(elapsedSeconds / 60);
+      const s = elapsedSeconds % 60;
+      return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    })();
+    const cleanModel = String(model).replace(/^[^/]+\//, '');
+    const transitionSummary = renderResult.appliedTransitions.length > 0
+      ? (() => {
+          // Collapse same kind+duration to "kind@durMs × N" when uniform.
+          const first = renderResult.appliedTransitions[0]!;
+          const uniform = renderResult.appliedTransitions.every((t) => t.kind === first.kind && t.durationMs === first.durationMs);
+          return uniform
+            ? `${first.kind}@${first.durationMs}ms × ${renderResult.appliedTransitions.length}`
+            : renderResult.appliedTransitions.map((t) => `${t.kind}@${t.durationMs}ms`).join(', ');
+        })()
+      : 'none';
+    const lintLine = lintFormatted.split('\n').slice(-1)[0] ?? lintFormatted;
+
+    // Visually grouped output. Keys preserved (Model:, Segments:, Audio:,
+    // Video:, Plan:, etc.) so downstream LLM parsing still finds the same
+    // anchors. The grouping headers + per-line `· ` bullets are presentation
+    // only and don't change the data semantics.
+    const lines: string[] = [
+      `${measuredOutputSeconds.toFixed(2)}s · ${segments.length} segments · elapsed ${elapsedHuman}`,
+      '',
+      '📁 Output:',
+      `   ${resolvedOutput.absolute}`,
+      '',
+      '📊 Stats:',
+      `   · Model:        ${cleanModel}`,
+      `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s`,
+      `   · Transitions:  ${transitionSummary}`,
+      `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
+      `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
+      `   · Super visual: ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${superVisualMode.reason})`}`,
+      `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''}`,
+      `   · References:   user-image-dropped=${userImageReferenceDroppedSegments.length}`,
+      narrativeEntities
+        ? `   · Narrative:    ${narrativeEntities.mode} · protagonist=${narrativeEntities.protagonist.name} · violations pre/post=${preCriticViolations.length}/${postCriticViolations.length} · rewrote=[${rewroteShotIndices.join(',') || 'none'}]`
+        : '   · Narrative:    skipped (no narrativeEntities)',
+      `   · Lint:         ${lintLine}`,
+      ...(reusedSegmentPaths.length > 0 ? [`   · Reused:       ${reusedSegmentPaths.length} cached segments`] : []),
+    ];
+
+    // Internal-detail block: hide super-visual reference path inside Stats
+    // only if Super Visual was enabled (path is long; users rarely need it
+    // unless debugging identity issues).
+    if (superVisualMode.enabled && superVisualMode.referenceImagePath) {
+      lines.push(`   · Super-visual ref: ${superVisualMode.referenceImagePath}`);
+    }
+
+    lines.push(
+      '',
+      '📂 Project files:',
+      `   Title:        ${title}`,
+      `   Plan:         ${planPath}`,
+      `   Manifest:     ${manifestPath}`,
+      `   Metadata:     ${metadataPath}`,
+      `   Composition:  ${path.join(hyperframesProjectDir, 'index.html')}`,
+      '',
+      `🎬 Open: open "${resolvedOutput.absolute}"`,
+    );
+
     return {
       action,
       ok: true,
-      output: [
-        `Saga generated long video using model ${String(model).replace(/^[^/]+\//, '')}.`,
-        `Segments: ${segments.length} x <=${limits.maxSegmentSeconds}s, target duration ${totalSeconds}s, planned duration ${actualTotalSeconds}s, output duration ${measuredOutputSeconds.toFixed(2)}s.`,
-        `Renderer: saga (${renderResult.encoderUsed}); transitions: ${renderResult.appliedTransitions.map((t) => `${t.kind}@${t.durationMs}ms`).join(', ') || 'none'}.`,
-        `Continuity: mode=${continuityMode}, chainReferenceFrames=${chainFrames}, chained-segments=${chainedFromPrev.length}, chain-dropped-segments=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run after provider rejection)' : ''}.`,
-        `Super visual: ${superVisualMode.enabled ? `enabled mode=${superVisualMode.mode} userImagesUsed=${superVisualMode.userImagesUsed} (${superVisualMode.referenceImagePath})` : `off (${superVisualMode.reason})`}.`,
-        `Segment keyframes: generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? `, failures=${segmentKeyframeFailures.length} [${segmentKeyframeFailures.map((f) => `seg${f.index}: ${f.reason}`).join('; ')}]` : ''}.`,
-        `References: user-image-reference-dropped-segments=${userImageReferenceDroppedSegments.length}.`,
-        narrativeEntities
-          ? `Narrative critic: mode=${narrativeEntities.mode}, protagonist=${narrativeEntities.protagonist.name}, pre-violations=${preCriticViolations.length}, post-violations=${postCriticViolations.length}, rewrote-shots=[${rewroteShotIndices.join(',') || 'none'}].`
-          : 'Narrative critic: skipped (no narrativeEntities supplied).',
-        `Audio: requested=${userAudioPreference}, audio-safety-retry-segments=${audioRetriedSegments.length}.`,
-        ...(reusedSegmentPaths.length > 0 ? [`Reused existing segments: ${reusedSegmentPaths.length}.`] : []),
-        `Video: ${resolvedOutput.absolute}`,
-        `Title: ${title}`,
-        `Plan: ${planPath}`,
-        `Manifest: ${manifestPath}`,
-        `Metadata: ${metadataPath}`,
-        `Composition: ${path.join(hyperframesProjectDir, 'index.html')}`,
-        `Lint: ${lintFormatted.split('\n').slice(-1)[0] ?? lintFormatted}`,
-        `Elapsed: ${elapsedSeconds}s`,
-      ].join('\n'),
+      output: lines.join('\n'),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

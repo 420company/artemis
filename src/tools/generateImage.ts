@@ -20,10 +20,11 @@ import {
     ASSET_DOWNLOAD_TIMEOUT_MS,
     IMAGE_GENERATION_TIMEOUT_MS,
 } from './visual/providers/timeouts.js';
+import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 
 const DEFAULT_MODEL = 'seedream-5-0-260128';
 const DEFAULT_SIZE = '2K';
-const DEFAULT_SUBDIR = 'generated-media/images';
+const DEFAULT_SUBDIR = 'images';
 
 function allowWebFallback(action: any): boolean {
     return action?.allowWebFallback === true;
@@ -40,10 +41,10 @@ function sanitizeCount(raw: unknown): number {
     return n;
 }
 
-function buildDefaultOutputPath(cwd: string, index: number, total: number, extension = '.png'): string {
+function buildDefaultOutputPath(_cwd: string, index: number, total: number, extension = '.png'): string {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const suffix = total > 1 ? `-${index + 1}` : '';
-    return path.join(cwd, DEFAULT_SUBDIR, `${ts}${suffix}${extension}`);
+    return path.join(getMediaOutputRoot(), DEFAULT_SUBDIR, `${ts}${suffix}${extension}`);
 }
 
 async function downloadUrl(url: string): Promise<Buffer> {

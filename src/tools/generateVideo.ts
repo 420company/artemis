@@ -33,10 +33,11 @@ import {
   VIDEO_CREATE_TIMEOUT_MS,
   VIDEO_POLL_TIMEOUT_MS,
 } from './visual/providers/timeouts.js';
+import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 
 const DEFAULT_MODEL = 'seedance-1-5-pro-251215';
 const DEFAULT_RATIO = '16:9';
-const DEFAULT_SUBDIR = 'generated-media/videos';
+const DEFAULT_SUBDIR = 'videos';
 // 120 polls × 5s = 10 minutes. BytePlus 6-15s segments occasionally take
 // 5-7 minutes when the provider's queue is busy; 60-poll cap (5 min) was
 // causing false-negative timeouts. The Saga retry layer will submit a fresh
@@ -69,9 +70,9 @@ type TaskStatusResponse = {
   error?: { message?: string };
 };
 
-function buildDefaultOutputPath(cwd: string): string {
+function buildDefaultOutputPath(_cwd: string): string {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  return path.join(cwd, DEFAULT_SUBDIR, `${ts}.mp4`);
+  return path.join(getMediaOutputRoot(), DEFAULT_SUBDIR, `${ts}.mp4`);
 }
 
 async function downloadUrl(url: string, signal?: AbortSignal): Promise<Buffer> {
@@ -245,6 +246,8 @@ export async function executeGenerateVideo(
       referenceImageCount: action.referenceImageUrls?.length ?? 0,
       referenceVideoCount: (action.referenceVideoUrls?.length ?? 0) + (action.referenceVideoPaths?.length ?? 0),
       referenceAudioCount: (action.referenceAudioUrls?.length ?? 0) + (action.referenceAudioPaths?.length ?? 0),
+      firstFrameImageCount: (action.firstFrameImageUrls?.length ?? 0) + (action.firstFrameImagePaths?.length ?? 0),
+      lastFrameImageCount: (action.lastFrameImageUrls?.length ?? 0) + (action.lastFrameImagePaths?.length ?? 0),
     });
     toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
@@ -521,16 +524,30 @@ async function generateVideoWithVisualProvider(
     ...nonEmptyValues(action.lastFrameImageUrls),
     ...await localImagePathsToProviderUrls(action.lastFrameImagePaths, context, videoConfig.provider, model),
   ];
-  const directed = buildDirectedVideoPrompt({
-    prompt: action.prompt,
-    provider: videoConfig.provider,
-    model,
-    duration,
-    ratio,
-    referenceImageCount: referenceImageUrls.length + firstFrameImageUrls.length,
-    referenceVideoCount: referenceVideoUrls.length,
-    referenceAudioCount: referenceAudioUrls.length,
-  });
+  // NSFW providers are configured by the user precisely BECAUSE they accept
+  // explicit content. Wrapping the user's prompt in the Director's cinematic
+  // spec (focal point / Fibonacci composition / "stable, cinematic final
+  // frame" / negative constraints) reliably dilutes explicit intent into
+  // generic tasteful imagery. Skip the Director and pass the user's prompt
+  // verbatim so the provider can render exactly what was asked for.
+  const bypassDirector = videoConfig.nsfw === true;
+  const directed = bypassDirector
+    ? {
+        directedPrompt: action.prompt,
+        providerProfile: 'NSFW provider: Director bypassed, prompt passed verbatim',
+      }
+    : buildDirectedVideoPrompt({
+        prompt: action.prompt,
+        provider: videoConfig.provider,
+        model,
+        duration,
+        ratio,
+        referenceImageCount: referenceImageUrls.length,
+        referenceVideoCount: referenceVideoUrls.length,
+        referenceAudioCount: referenceAudioUrls.length,
+        firstFrameImageCount: firstFrameImageUrls.length,
+        lastFrameImageCount: lastFrameImageUrls.length,
+      });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({
     prompt: directed.directedPrompt,

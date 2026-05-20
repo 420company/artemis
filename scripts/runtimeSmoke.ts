@@ -1013,7 +1013,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
     scope: 'bridge',
     key,
     cwd: tmpDir,
-    text: '20s',
+    text: '2',
     locale: 'zh-CN',
   })
   const third = await handleSagaLongVideoWorkflow({
@@ -1030,16 +1030,23 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
     text: 'start',
     locale: 'zh-CN',
   })
+  const fifth = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key,
+    cwd: tmpDir,
+    text: '20s',
+    locale: 'zh-CN',
+  })
 
   assert(
-    'Saga workflow: confirmed bridge start returns direct generate_long_video action',
-    first.handled && second.handled && third.handled &&
-      !fourth.handled &&
-      fourth.action?.type === 'generate_long_video' &&
-      fourth.action.totalDuration === 20 &&
-      fourth.action.prompt.includes('[Artemis Saga long video workflow]') &&
-      fourth.action.story?.includes('VJ素材'),
-    JSON.stringify(fourth),
+    'Saga workflow: confirmed bridge duration returns direct generate_long_video action',
+    first.handled && second.handled && third.handled && fourth.handled &&
+      !fifth.handled &&
+      fifth.action?.type === 'generate_long_video' &&
+      fifth.action.totalDuration === 20 &&
+      fifth.action.prompt.includes('[Artemis Saga long video workflow]') &&
+      fifth.action.story?.includes('VJ素材'),
+    JSON.stringify(fifth),
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })

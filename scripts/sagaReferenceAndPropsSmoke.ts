@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { isLikelyProvidedTurnaroundReferenceForTest } from '../src/tools/visual/superVisualMode.js';
 import { buildSagaConstitution } from '../src/tools/visual/sagaNarrative.js';
+import { shouldBypassSuperVisualForIdentitySourceForTest } from '../src/tools/generateLongVideo.js';
 
 async function main(): Promise<void> {
   assert.equal(
@@ -12,6 +13,21 @@ async function main(): Promise<void> {
     isLikelyProvidedTurnaroundReferenceForTest('/tmp/sv-user-inputs/0001.png', 'this is the canonical three-view character turnaround sheet'),
     true,
     'cached generic image path should still be recognized when reference notes describe a turnaround',
+  );
+  assert.equal(
+    shouldBypassSuperVisualForIdentitySourceForTest('turnaround'),
+    false,
+    'explicit user-supplied turnaround should enter Super Visual bridge mode without regenerating the turnaround',
+  );
+  assert.equal(
+    shouldBypassSuperVisualForIdentitySourceForTest('direct_image'),
+    true,
+    'direct image mode should bypass Super Visual generation',
+  );
+  assert.equal(
+    shouldBypassSuperVisualForIdentitySourceForTest('character_image'),
+    false,
+    'character photo mode should still use Super Visual to build a turnaround',
   );
 
   const constitution = buildSagaConstitution({

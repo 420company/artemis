@@ -99,8 +99,22 @@ export async function awaitUpdateCheckOutcome(
   ])
 }
 
-function getNpmCommand(): string {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm'
+function getUpdateInstallCommand(): { command: string; args: string[]; shell: boolean } {
+  const npmArgs = ['install', '-g', `${PACKAGE_NAME}@latest`]
+  if (process.platform !== 'win32') {
+    return { command: 'npm', args: npmArgs, shell: false }
+  }
+
+  // Windows npm is normally exposed through npm.cmd. Spawning npm.cmd
+  // directly is fragile across Node/PowerShell/ConPTY combinations and can
+  // throw spawn EINVAL before the child process is even created. Run through
+  // cmd.exe explicitly so PATHEXT and the npm shim are resolved by Windows'
+  // native command processor.
+  return {
+    command: process.env.ComSpec || 'cmd.exe',
+    args: ['/d', '/s', '/c', ['npm', ...npmArgs].join(' ')],
+    shell: false,
+  }
 }
 
 function installLatestVersion(locale: UiLocale): Promise<boolean> {
@@ -111,9 +125,11 @@ function installLatestVersion(locale: UiLocale): Promise<boolean> {
   console.log()
 
   return new Promise((resolve) => {
-    const child = spawn(getNpmCommand(), ['install', '-g', `${PACKAGE_NAME}@latest`], {
+    const install = getUpdateInstallCommand()
+    const child = spawn(install.command, install.args, {
       stdio: 'inherit',
-      shell: false,
+      shell: install.shell,
+      windowsHide: false,
     })
     child.on('error', () => resolve(false))
     child.on('close', (code) => resolve(code === 0))

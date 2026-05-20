@@ -45,6 +45,14 @@ export type SagaBibleInput = {
   lighting?: string;
   cameraLanguage?: string;
   mood?: string;
+  /**
+   * Permanent accessories that must appear on the protagonist in EVERY shot
+   * (eye mask, sunglasses, headscarf, signature jewelry, etc.). Emitted as
+   * a dedicated [ACCESSORY-LOCK] bracket block in the bible, BEFORE
+   * LOCKED-PROPS, so it survives the source-story 1600-char truncation and
+   * gets stronger weight than a generic prop mention.
+   */
+  accessoriesLock?: string[];
 };
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
@@ -74,6 +82,7 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   const props = uniqueStrings(input.props ?? []);
   const locations = uniqueStrings(input.locations ?? []);
   const palette = uniqueStrings(input.palette ?? []);
+  const accessoriesLock = uniqueStrings(input.accessoriesLock ?? []);
   const lighting = pickFirstSentence(input.lighting, 'consistent natural cinematic lighting with stable key direction');
   const cameraLanguage = pickFirstSentence(
     input.cameraLanguage ?? input.shotCameraNotes?.join('. '),
@@ -86,6 +95,13 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     characters.length > 0
       ? `[LOCKED-CHARACTERS: ${characters.join(' | ')}]`
       : '[CHARACTERS: same exact recurring identity as the previous shot — same face, hair, body, age, ethnicity/species, silhouette, and distinguishing features]',
+    // Dedicated permanent-accessory lock — emitted BEFORE wardrobe/props so
+    // it gets visual priority. Items here are part of the protagonist's
+    // identity (eye mask, sunglasses, signature jewelry) and must persist
+    // across every shot regardless of costume changes.
+    accessoriesLock.length > 0
+      ? `[ACCESSORY-LOCK — IDENTITY-DEFINING — these items are part of the protagonist's identity and MUST appear unchanged in every single shot, same position, same color, same style, NEVER removed, NEVER lifted, NEVER swapped, NEVER repositioned: ${accessoriesLock.join(' | ')}]`
+      : '',
     wardrobe.length > 0
       ? `[LOCKED-WARDROBE: ${wardrobe.join(' | ')}]`
       : '[WARDROBE: same clothing/material cues for recurring characters unless the story explicitly changes costume]',
@@ -109,7 +125,7 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     identityLines.splice(1, 0, `[SHARED-CONTINUITY-NOTES: ${sharedNotes.slice(0, 6).join(' || ')}]`);
   }
 
-  const identityCard = identityLines.join('\n');
+  const identityCard = identityLines.filter(Boolean).join('\n');
 
   const bible = [
     'Saga long-form video continuity bible.',
@@ -133,26 +149,59 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   };
 }
 
-// Aesthetic-Lock — production-quality anchors appended to every shot's
-// prompt tail. Distilled from cinematic-prompting practice on DiT-class
-// video models (BytePlus Seedance, Kling, Veo, Runway Gen-3, Sora).
-// These tokens do double duty:
-//   • positive anchors push the model toward photoreal/UE5/IMAX render
-//     targets and physically grounded motion
-//   • physics-explicit failure-mode anchors ("no morphing / no flickering /
-//     no melting / no extra limbs / anatomically correct") guard against
-//     the model's most common video artifacts. DiT models are not as
-//     responsive to a separate "negative_prompt" channel as SD-class
-//     models, so we encode the guards as positive constraints.
-const SAGA_AESTHETIC_LOCK_BLOCK = [
-  '[AESTHETIC-LOCK]',
-  'render: photoreal cinematic image, ultra-high fidelity, UE5 cinematic / Unreal Lumen / Octane render quality, ray-traced reflections, global illumination, subsurface scattering on skin, volumetric atmospheric light',
-  'medium: 35mm or 50mm cinematic lens feel, anamorphic-friendly framing, IMAX 70mm film grain texture, Arri Alexa-class color science, shallow depth of field where appropriate',
-  'physics: physically accurate gravity, realistic momentum, weight-aware motion, fluid dynamics for liquids, wind influence on hair and fabric, no time-warp, no frame-skipping artifacts',
-  'integrity: anatomically correct human structure, stable hand and finger count, identity-locked recurring face and silhouette, stable wardrobe/material cues for recurring characters and locked props',
-  'forbidden: no morphing, no melting, no flickering, no jittering, no extra limbs, no fused or warped fingers, no facial deformation, no garbled text, no readable subtitles, no logos, no UI overlays, no watermarks',
+// Aesthetic-Lock — production-quality anchors appended to every shot's prompt
+// tail. Select by subject type: render-engine words help products/props/spaces,
+// but can push people toward waxy/CG mannequin skin in chained long-video runs.
+const HUMAN_AESTHETIC_LOCK_BLOCK = [
+  '[AESTHETIC-LOCK: HUMAN-EDITORIAL]',
+  'render: cinematic editorial photography look, natural facial material, organic skin micro-texture, subtle facial texture, realistic makeup texture, practical cinematic lighting, soft but natural skin highlights',
+  'medium: 35mm or 50mm cinematic lens feel, Arri Alexa-class color science, subtle film grain, shallow depth of field where appropriate',
+  'skin: preserve natural skin variation, avoid overly uniform smoothing, avoid porcelain-smooth surfaces, avoid synthetic CG skin',
+  'physics: physically accurate gravity, realistic momentum, weight-aware motion, wind influence on hair and fabric, no time-warp, no frame-skipping artifacts',
+  'integrity: anatomically coherent face and body, stable identity, natural eyes, stable hand and finger count, stable wardrobe/material cues for recurring characters and locked props',
+  'forbidden: no waxy skin, no plastic skin, no mannequin face, no porcelain doll face, no rubber skin, no over-smoothed beauty filter, no CG-character look, no morphing, no melting, no flickering, no jittering, no extra limbs, no fused or warped fingers, no facial deformation, no garbled text, no readable subtitles, no logos, no UI overlays, no watermarks',
   '[/AESTHETIC-LOCK]',
 ].join('\n');
+
+const PRODUCT_AESTHETIC_LOCK_BLOCK = [
+  '[AESTHETIC-LOCK: PRODUCT-CINEMATIC]',
+  'render: premium cinematic product imagery, ultra-high fidelity, UE5 cinematic / Unreal Lumen / Octane render quality, ray-traced reflections, global illumination, volumetric atmospheric light',
+  'materials: physically based materials, accurate metal, glass, fabric, liquid, plastic, leather, gemstone, screen glow, polished surfaces, and reflective non-skin materials',
+  'lighting: controlled studio lighting, luxury commercial highlights, precise shadow falloff, realistic caustics where appropriate',
+  'medium: 50mm / 85mm product lens feel, macro detail, crisp edges, high-end advertising composition, subtle film grain where appropriate',
+  'physics: physically accurate gravity, realistic momentum, weight-aware motion, fluid dynamics for liquids, no time-warp, no frame-skipping artifacts',
+  'integrity: stable object geometry, accurate product/prop shape, stable material cues, no warped text, no melting objects, no flicker, no garbled text, no subtitles, no unrelated logos, no UI overlays, no watermarks',
+  '[/AESTHETIC-LOCK]',
+].join('\n');
+
+const MIXED_HUMAN_COMMERCIAL_AESTHETIC_LOCK_BLOCK = [
+  '[AESTHETIC-LOCK: MIXED-HUMAN-COMMERCIAL]',
+  'human subject: cinematic editorial photography look, natural facial material, organic skin micro-texture, subtle facial texture, realistic makeup texture, soft practical lighting, no waxy skin, no plastic skin, no porcelain doll face, no CG-character skin',
+  'environment and props: premium luxury commercial lighting, realistic glass and metal reflections, cinematic neon glow, physically plausible reflections on non-skin materials such as tables, chips, screens, jewelry, signage, vehicles, packaging, and polished surfaces',
+  'medium: 35mm or 50mm cinematic lens feel, Arri Alexa-class color science, subtle film grain, shallow depth of field where appropriate',
+  'physics: physically accurate gravity, realistic momentum, weight-aware motion, fluid dynamics for liquids, wind influence on hair and fabric, no time-warp, no frame-skipping artifacts',
+  'integrity: anatomically coherent human structure, stable face identity, natural eyes, stable hand and finger count, stable wardrobe/material cues, stable prop geometry',
+  'forbidden: no mannequin face, no doll-like skin, no rubber skin, no over-smoothed beauty filter, no CG-character look, no morphing, no melting, no flickering, no jittering, no extra limbs, no fused or warped fingers, no facial deformation, no garbled text, no random logos, no UI overlays, no watermarks',
+  '[/AESTHETIC-LOCK]',
+].join('\n');
+
+type SagaAestheticSubject = 'human' | 'product' | 'mixed';
+
+function detectAestheticSubject(text: string, bible: SagaContinuityBible): SagaAestheticSubject {
+  const haystack = [text, bible.characters.join(' '), bible.wardrobe.join(' ')].join(' ').toLowerCase();
+  const hasHuman = /(?:\b(?:person|people|human|woman|women|man|men|girl|boy|female|male|actor|actress|model|character|protagonist|portrait|face|skin|body|hair|eyes|lips|hands|dancer|host|hostess)\b|人物|真人|人像|女人|男人|女孩|男孩|女主|男主|角色|模特|演员|美女|脸|面部|皮肤|身体|头发|眼神|红唇|美腿|手指|胸口|锁骨)/i.test(haystack);
+  const hasProduct = /(?:\b(?:product|object|prop|vehicle|car|watch|jewelry|gemstone|bottle|perfume|package|packaging|logo|signage|screen|phone|ui|interface|casino|roulette|chips?|cards?|slot|machine|architecture|building|room|interior|bar|table|glass|metal|neon|screen glow)\b|产品|物体|道具|汽车|手表|珠宝|宝石|瓶|香水|包装|标志|logo|招牌|屏幕|手机|界面|赌场|轮盘|筹码|纸牌|老虎机|建筑|室内|吧台|桌|玻璃|金属|霓虹)/i.test(haystack);
+  if (hasHuman && hasProduct) return 'mixed';
+  if (hasHuman) return 'human';
+  return 'product';
+}
+
+function aestheticLockBlock(text: string, bible: SagaContinuityBible): string {
+  const subject = detectAestheticSubject(text, bible);
+  if (subject === 'human') return HUMAN_AESTHETIC_LOCK_BLOCK;
+  if (subject === 'mixed') return MIXED_HUMAN_COMMERCIAL_AESTHETIC_LOCK_BLOCK;
+  return PRODUCT_AESTHETIC_LOCK_BLOCK;
+}
 
 // Style-Lock — a compact restatement of the most lens-shaping anchors. Sits
 // near the top of the prompt and is repeated near the tail so the model
@@ -213,8 +262,19 @@ export function compileShotPromptWithContinuity(options: {
   transition: string;
   authoredPrompt?: string;
   startingFrameAnchor?: string | null;
+  cleanDirect?: boolean;
 }): string {
   const authored = options.authoredPrompt?.replace(/\s+/g, ' ').trim();
+  if (options.cleanDirect) {
+    const source = authored || options.storyBeat || options.visualPrompt;
+    return [
+      source,
+      options.visualPrompt && options.visualPrompt !== source ? options.visualPrompt : '',
+      options.camera ? `Camera: ${options.camera}` : '',
+      options.transition ? `Final frame: ${options.transition}` : '',
+      'no watermark',
+    ].filter(Boolean).join('\n');
+  }
   const styleLock = styleLockBlock(options.bible);
 
   // SCENE-PRIORITY block — fixes the "stable final close frame on the phone
@@ -243,6 +303,36 @@ export function compileShotPromptWithContinuity(options: {
     head.push(options.startingFrameAnchor);
   }
 
+  const sourceShotText = [authored, options.storyBeat, options.visualPrompt, options.continuity, options.camera, options.title]
+    .filter(Boolean)
+    .join(' ');
+  const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
+  // Dialogue extraction — ONLY match quoted text that is preceded by an
+  // explicit dialogue marker. Prior versions used a naive any-quoted-string
+  // regex which grabbed random phrases like brand names ("Parts Unknown"),
+  // quoted concepts ("中国街道"), or product names — none of which are
+  // dialogue — and emitted them as "Quoted dialogue extracted ... preserve
+  // verbatim" instructions to the model. The model then attempted to
+  // lip-sync brand names, tripping the provider's audio content filter
+  // and burying the real dialogue lines.
+  //
+  // New rule: a quoted string is treated as dialogue ONLY when it follows
+  // a Chinese or English dialogue marker within ~20 characters:
+  //   对白:  /  对白（...）:  /  台词:  /  旁白:  /  dialogue:  /  she says:  /  voiceover:
+  // Allow surrounding markdown asterisks (**对白（...）**:) and trailing **
+  // before the colon, which is how the user script formats annotation labels.
+  const dialogueRe = /(?:\*{0,2})(?:对白|台词|旁白|dialogue|spoken\s*line|voiceover|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs))\s*(?:[（(][^）)]*[）)])?\s*(?:\*{0,2})\s*[:：][^"“]{0,30}["“]([^"“”]{1,120})["”]/gi;
+  const quotedText = Array.from(sourceShotText.matchAll(dialogueRe))
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+  const hasQuotedDialogue = quotedText.length > 0;
+  const hasBrandOrReadableText = /(?:logo|brand|wordmark|signage|screen|ui|interface|caption|title card|on[- ]screen text|readable text|品牌|商标|标志|招牌|屏幕|界面|字幕|标题卡|展示文字|可读文字|中文|英文|文字)/i.test(sourceShotText);
+  const dynamicLockLines = [
+    options.bible.locations.length > 0 ? `Explicit location anchors extracted from this brief: ${options.bible.locations.join(' | ')}.` : '',
+    options.bible.props.length > 0 ? `Explicit prop anchors extracted from this brief: ${options.bible.props.join(' | ')}.` : '',
+    options.bible.characters.length > 0 ? `Explicit character / brand-name anchors extracted from this brief: ${options.bible.characters.join(' | ')}.` : '',
+    quotedText.length > 0 ? `Quoted dialogue extracted from this brief, preserve verbatim: ${quotedText.map((value) => `“${value}”`).join(' | ')}.` : '',
+  ].filter(Boolean);
   const middle: string[] = [];
   if (authored) {
     middle.push(authored);
@@ -250,8 +340,30 @@ export function compileShotPromptWithContinuity(options: {
     middle.push(`Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`);
     middle.push(`Visual direction: ${options.visualPrompt}`);
   }
+  middle.push(
+    [
+      '[EXPLICIT USER BRIEF LOCK — highest priority]',
+      'Preserve every explicit location, prop, action, wardrobe, brand name, and quoted dialogue from the storyBeat / visual direction exactly; do not replace them with a generic room, bedroom, cafe, office, or unrelated interior unless the user explicitly asked for that environment.',
+      ...dynamicLockLines,
+      hasQuotedDialogue ? 'Dialogue rule: quoted text / 对白 is verbatim spoken audio. Keep the original line in quotes for lip-sync; do not translate, summarize, subtitle, or drop it.' : '',
+      hasBrandOrReadableText ? 'Brand/text exception: preserve user-specified brand names, screen UI, logo, and requested Chinese display text when the brief explicitly asks for them; avoid only unrelated/random text.' : '',
+      '[/EXPLICIT USER BRIEF LOCK]',
+    ].filter(Boolean).join('\n'),
+  );
   middle.push(`Continuity requirements: ${options.continuity}`);
   middle.push(`Camera and motion: ${options.camera}`);
+
+  if (options.mode === 'strong-vision') {
+    middle.push(
+      [
+        '[REFERENCE-ROLE-SEPARATION]',
+        'Use previous-frame references only for spatial continuity, pose momentum, camera direction, lighting direction, and environment layout.',
+        'Do not inherit waxy skin, plastic highlights, over-smoothed facial material, mannequin faces, or CG-character surface quality from previous generated frames.',
+        'When user-supplied reference images are present, treat them as the authority for recurring identity, wardrobe cues, and natural facial/material character.',
+        '[/REFERENCE-ROLE-SEPARATION]',
+      ].join('\n'),
+    );
+  }
 
   // FRAME-OUT block — explicitly declared as low-priority closing hint, not
   // a subject directive.
@@ -292,12 +404,18 @@ export function compileShotPromptWithContinuity(options: {
   }
 
   tail.push(
-    'Write one coherent video generation prompt in polished English. The storyBeat is the subject for the entire clip. The frame-out hints describe only the final ~0.5 s. Avoid subtitles, readable text, logos, UI, and watermarks.',
+    [
+      'Write one coherent video generation prompt. English direction is fine, but preserve any quoted dialogue, brand names, and requested on-screen Chinese text in the original language exactly.',
+      'The storyBeat is the subject for the entire clip. The frame-out hints describe only the final ~0.5 s.',
+      hasBrandOrReadableText
+        ? 'Avoid subtitles, watermarks, and unrelated random text; user-specified logo/UI/readable text is allowed and must remain accurate.'
+        : 'Avoid subtitles, readable text, logos, UI, and watermarks.',
+    ].join(' '),
   );
 
   // Aesthetic lock is the very last block so it survives token truncation
   // on lower-context providers and serves as the visual quality anchor.
-  tail.push(SAGA_AESTHETIC_LOCK_BLOCK);
+  tail.push(aestheticLock);
 
   return [...head, ...middle, ...tail].join('\n');
 }

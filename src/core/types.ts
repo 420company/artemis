@@ -480,6 +480,8 @@ export type AgentAction =
       outputPath?: string;
       assemblyMode?: 'auto' | 'ffmpeg' | 'hyperframes' | 'saga';
       resume?: boolean;
+      preserveUserScript?: boolean;
+      cleanDirect?: boolean;
       chainReferenceFrames?: 'auto' | 'always' | 'off';
       crossfadeMs?: number;
       defaultTransition?:
@@ -546,6 +548,9 @@ export type AgentAction =
       maxPolls?: number;
       pollIntervalMs?: number;
       runInBackground?: boolean;
+      // How character identity enters the pipeline. Set by the Saga three-step
+      // menu so that generateLongVideo can route identity handling correctly.
+      identitySource?: 'turnaround' | 'character_image' | 'direct_image' | 'text_only';
       narrativeEntities?: {
         protagonist?: { name?: string; type?: 'character' | 'product' | 'environment'; confidence?: number; evidence?: string; aliases?: string[] };
         supportingCharacters?: string[];
