@@ -17,6 +17,15 @@ async function main(): Promise<void> {
   });
   assert.equal(genericTimedVideo.handled, false, 'generic timed video must not auto-enter Saga without explicit long-video wording');
 
+  const genericImageVideoKeywords = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-keywords`,
+    cwd,
+    locale: 'zh',
+    text: '图片 视频 长视频',
+  });
+  assert.equal(genericImageVideoKeywords.handled, false, 'plain chat keywords like 图片/视频/长视频 must not enter Saga');
+
   const naturalLongVideo = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-natural-long`,
@@ -24,8 +33,18 @@ async function main(): Promise<void> {
     locale: 'zh',
     text: '帮我生成一段长视频',
   });
-  assert.equal(naturalLongVideo.handled, true, 'explicit natural-language long-video wording should enter Saga');
-  assert.match(naturalLongVideo.reply, /这段视频里|In this video/i, 'Saga should ask subject mode before duration so materials come first');
+  assert.equal(naturalLongVideo.handled, false, 'natural-language long-video wording must not enter Saga without /saga');
+
+  const explicitNaturalLongVideo = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    forceIntent: true,
+    text: '帮我生成一段长视频',
+  });
+  assert.equal(explicitNaturalLongVideo.handled, true, 'explicit /saga entry should enter Saga');
+  assert.match(explicitNaturalLongVideo.reply, /这段视频里|In this video/i, 'Saga should ask subject mode before duration so materials come first');
 
   const afterSubjectMode = await handleSagaLongVideoWorkflow({
     scope: 'bridge',

@@ -1325,14 +1325,11 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   }
 
   // ─── fresh request ──────────────────────────────────────────────────
-  // Starting Saga from plain chat is allowed only for explicit long-video
-  // wording ("长视频", "完整视频", "long video", etc.). Generic requests like
-  // "生成30秒视频" still fall through to the normal video workflow so pasted
-  // logs and short-clip requests do not hijack the chat.
-  const shouldStartSaga = input.forceIntent
-    ? hasLongVideoIntent(text)
-    : hasExplicitLongVideoPhrase(text);
-  if (isSagaWorkflowSupportDiscussion(text) || !shouldStartSaga) {
+  // Saga must never start from ordinary chat keywords ("图片", "视频",
+  // "长视频", "long video", etc.). Fresh Saga entry is command-gated by the
+  // caller: only an explicit /saga command sets forceIntent=true. Once a Saga
+  // workflow is active, follow-up replies above can continue the wizard.
+  if (!input.forceIntent || isSagaWorkflowSupportDiscussion(text)) {
     return { handled: false };
   }
   const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');
