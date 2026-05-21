@@ -28,6 +28,9 @@ npmrc
 .DS_Store
 Thumbs.db
 
+# Saga A/B debug captures (may contain real user paths and reference media)
+.artemis-tmp/
+
 # Test artifacts
 test-output/
 test-*/
