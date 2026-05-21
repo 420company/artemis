@@ -369,11 +369,11 @@
 <div class="shell">
 
 <header class="hero">
-  <span class="eyebrow"><span class="dot"></span>Artemis Saga · Authoring Guide v1.0</span>
+  <span class="eyebrow"><span class="dot"></span>Artemis Saga · Authoring Guide v1.1</span>
   <h1>剧本提示词<br><span class="accent">万能说明书</span></h1>
   <p class="tagline">教你（和你的 AI）写出 Artemis Saga 长视频工作流能完美识别的剧本提示词。适用<strong>任何题材</strong>、<strong>任何故事</strong>、<strong>任何 AI 协作伙伴</strong>。</p>
   <div class="meta">
-    <span>Artemis ≥ 0.2.70</span>
+    <span>Artemis ≥ 0.2.71</span>
     <span>Seedance 2.x 兼容</span>
     <span>gpt-image-2 三视图</span>
     <span>www.420.company</span>
@@ -428,7 +428,7 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
 5. 段落顺序就是视频顺序，每段时间码内的内容是该段的完整说明
 6. 写中文剧本不要把镜头、地点、动作翻译成英文 — Artemis 自己会处理多语言
 7. 不要假设字幕会被渲染 — 字幕渲染是 Artemis 自动按用户字幕模式控制的
-8. 单段时长 ≤ 15 秒（Seedance 模型上限）
+8. 单段时长按当前视频模型动态上限控制：Seedance 2.x ≤ 15 秒，Seedance 1.5 ≤ 12 秒，其它模型以 Artemis 显示的单段上限为准
 9. 不要重复写 "防塑料感 / 防变形 / 防多手指" — Artemis 自动加更专业的版本
 
 请基于这些约定，根据我下面给出的题材/构思写完整剧本：
@@ -442,7 +442,11 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
   <h2><span class="num">§ 1</span>Artemis Saga 工作流速览</h2>
 
   <div class="pipe">
-<span class="step">用户给 Brief</span> <span class="note">(这份说明书指导写)</span>
+<span class="step">用户给 Brief / 素材</span> <span class="note">(这份说明书指导写)</span>
+   <span class="arrow">↓</span>
+<span class="step">Artemis 先确认主体模式</span> <span class="note">(有主角 / 纯视觉)</span>
+   <span class="arrow">↓</span>
+<span class="step">如有主角，确认身份来源</span> <span class="note">(三视图 / 角色图 / 直接图片 / 纯文字；模型不支持多模态时自动降级纯文字)</span>
    <span class="arrow">↓</span>
 <span class="step">Artemis 结构识别器</span> <span class="note">(regex / 启发式)</span> 提取：
    • <span class="hi">段落时间码</span> → 分段计划
@@ -450,6 +454,7 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
    • <span class="hi">角色/服装/道具/场景/镜头/调性</span> → continuity bible
    • <span class="hi">锁机位关键词</span> → 强制 [CAMERA: locked-off]
    • <span class="hi">后期音频意图</span> → 自动注入 [AUDIO-LOCK]
+   • <span class="hi">字幕模式</span> → 自动 / 带字幕 / 无字幕，写入最终 generate_long_video action
    <span class="arrow">↓</span>
 <span class="step">Artemis 构造每段独立的 prompt</span> <span class="note">(含导演级模块)</span>
    <span class="arrow">↓</span>
@@ -457,7 +462,7 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
 
   <div class="callout">
     <span class="tag">关键观念</span>
-    你写的 Brief <strong>不是</strong> video 模型最终读的 prompt。Artemis 会在你的 Brief 之上<strong>自动增加</strong>一整层导演级模块（角色锁、调色锁、负面词锁、参考图角色分离、美学锁等）。所以你只需要专心写<strong>故事和镜头意图</strong>。
+    你写的 Brief <strong>不是</strong> video 模型最终读的 prompt。Artemis 会在你的 Brief 之上<strong>自动增加</strong>一整层导演级模块（角色锁、主体/纯视觉模式、调色锁、负面词锁、参考图角色分离、美学锁、字幕模式等）。所以你只需要专心写<strong>故事和镜头意图</strong>。
   </div>
 </section>
 
@@ -515,7 +520,7 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td>中文场景标记</td><td><code>镜头 1</code> <code>第 1 段</code> <code>段 1</code></td><td>无时间码时（平均分配）</td></tr>
     </tbody>
   </table>
-  <div class="callout warn"><span class="tag">上限</span>单段最长 <strong>15 秒</strong>（受 Seedance 视频模型限制）。超过会被自动截到 15s。</div>
+  <div class="callout warn"><span class="tag">上限</span>单段上限由当前视频模型决定：<strong>Seedance 2.x 为 15 秒，Seedance 1.5 为 12 秒，其它 provider 由 Artemis 的模型限制表动态计算（通常最高 30 秒）</strong>。超过上限会被自动截断到该模型允许的 maxSegmentSeconds；为了稳定，建议每段 6-10 秒。</div>
 
   <h3>3.2 对白 marker（必须带 marker 才识别为对白）</h3>
   <table class="tbl">
@@ -570,16 +575,16 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
   </table>
   <div class="callout">
     <span class="tag">为什么</span>
-    现代视频模型（Seedance、Sora 等）<strong>默认生成音频，包括音乐</strong>。如果你打算后期自己叠 BGM，<strong>一定要写明</strong> AI 阶段只出环境音，否则模型自己 hallucinate 一段 BGM 跟你后期 BGM 打架。
+    现代视频模型（Seedance、Veo/Sora 类等）<strong>可能默认生成音频，包括音乐</strong>。如果你打算后期自己叠 BGM，<strong>一定要写明</strong> AI 阶段只出环境音，否则模型自己 hallucinate 一段 BGM 跟你后期 BGM 打架。
   </div>
 
   <h3>3.5 字幕模式（在工作流里选）</h3>
   <table class="tbl">
     <thead><tr><th>模式</th><th>行为</th></tr></thead>
     <tbody>
-      <tr><td><span class="tag-inline cyan">自动</span></td><td>只有你 brief 明确说"加字幕"才渲染</td></tr>
-      <tr><td><span class="tag-inline magenta">带字幕</span></td><td>渲染对白/旁白为可读字幕</td></tr>
-      <tr><td><span class="tag-inline lime">无字幕（推荐）</span></td><td>硬挡所有屏幕文字（包括误把歌词/品牌名渲染成字幕）</td></tr>
+      <tr><td><span class="tag-inline lime">自动（推荐）</span></td><td>只有你 brief 明确要求字幕/屏幕文字时才渲染；这是当前工作流默认推荐项</td></tr>
+      <tr><td><span class="tag-inline magenta">带字幕</span></td><td>把对白/旁白渲染为可读字幕，原文保留不翻译</td></tr>
+      <tr><td><span class="tag-inline cyan">无字幕</span></td><td>对白只走音频/口型，不主动渲染成屏幕文字；适合怕模型把歌词/品牌名误渲染时使用</td></tr>
     </tbody>
   </table>
 </section>
@@ -604,6 +609,8 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td><code>[EXPLICIT USER BRIEF LOCK]</code></td><td>自动提取的具体地点/道具/对白锚</td></tr>
       <tr><td><code>[REFERENCE-ROLE-SEPARATION]</code></td><td>参考图职责分离（身份用 / 不要继承塑料皮肤）</td></tr>
       <tr><td><code>[AESTHETIC-LOCK: HUMAN-EDITORIAL]</code> 或 <code>PRODUCT-CINEMATIC</code></td><td>美学锁</td></tr>
+      <tr><td><code>[Saga Narrative Entity Map]</code></td><td>主角/商品/环境“上帝实体”地图，传给 Saga Critic 防跑题</td></tr>
+      <tr><td><code>cleanDirect</code>（显式关键词才启用）</td><td>原始/少滤镜模式，跳过关键帧与部分导演脚手架以保留更自然质感</td></tr>
     </tbody>
   </table>
   <div class="callout">
@@ -650,7 +657,7 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
     </div>
     <div class="card bad">
       <div class="label">✗ DON'T</div>
-      <h4>不要把参考照片背景写进剧本</h4>
+      <h4>不要把角色参考照片的偶发背景写进剧本</h4>
 <pre><code>我上传的参考照片里有黄色座椅，
 把它放进每段背景
 <span class="tok-cmt">↑ Artemis 会自动过滤这条</span></code></pre>
@@ -801,13 +808,13 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
   </div>
   <p><strong>原因</strong>：Artemis 已经自动过滤"参考图中"开头的道具，但不要自己手动写出来诱导。</p>
 
-  <h3>错误 6 · 单段超过 15 秒</h3>
+  <h3>错误 6 · 单段超过当前模型上限</h3>
   <div class="diff">
-<pre><span class="minus">- [0-20秒] 段 1（20 秒长镜头）</span>
+<pre><span class="minus">- [0-20秒] 段 1（20 秒长镜头；若当前模型上限为 15 秒会被截断）</span>
 <span class="plus">+ [0-15秒] 段 1（前 15 秒）</span>
 <span class="plus">+ [15-30秒] 段 2（继续，同场景）</span></pre>
   </div>
-  <p><strong>原因</strong>：Seedance / Sora 等主流 video 模型单次 render 上限 15s。</p>
+  <p><strong>原因</strong>：Saga 会读取当前 provider/model 的 maxSegmentSeconds；Seedance 2.x 是 15s，Seedance 1.5 是 12s，其它模型可能不同。超过上限会被截断，所以最好主动拆成 6-10s 小段。</p>
 
   <h3>错误 7 · 要求过于抽象</h3>
   <div class="diff">
@@ -830,8 +837,8 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
     <li>如果不要 AI 生成音乐，brief 至少出现一次「只出环境音」或「后期叠加」</li>
     <li>没有把英文歌词引号写在段标题里</li>
     <li>没有写 Artemis 自动会加的"防塑料感、防多手指"等套话</li>
-    <li>单段时长 ≤ 15 秒</li>
-    <li>选了正确的字幕模式（不想要屏幕字幕 → 选「无字幕」）</li>
+    <li>单段时长不超过当前模型上限；不确定时按 6-10 秒拆段（Seedance 2.x ≤ 15 秒，Seedance 1.5 ≤ 12 秒）</li>
+    <li>选了正确的字幕模式：默认选「自动」；明确要烧录字幕才选「带字幕」；完全不要屏幕文字才选「无字幕」</li>
   </ul>
 </section>
 
@@ -862,6 +869,17 @@ A 走进画面，B 从右边出现拥抱她。C 在远处看。</code></pre>
   <h3>9.4 INSTANT HARD CUT 显式标注</h3>
 <pre><code>· 2 秒（INSTANT HARD CUT，背景切到东京）</code></pre>
   <p>帮 Artemis 内部规划帧 chain 时知道这里是硬切而不是渐变。</p>
+
+  <h3>9.5 主体模式 / 身份来源显式备注</h3>
+<pre><code>主体模式：纯视觉 / 无主角。
+
+主体模式：有主角。身份来源：三视图参考图；不要继承参考图背景。</code></pre>
+  <p>当前 Saga 会在工作流里询问「有主角 / 纯视觉」以及身份来源；brief 里提前写清楚可以减少澄清轮次。</p>
+
+  <h3>9.6 原始质感 / 少滤镜模式（cleanDirect）</h3>
+<pre><code>请用原始质感 / 少滤镜 / raw-seedance / clean-direct。
+保留自然纹理，不要过度导演包装。</code></pre>
+  <p>这些显式关键词会启用 <code>cleanDirect</code>：跳过 Super Visual 关键帧、帧链和部分美学脚手架，换取更干净自然的模型原始质感；代价是跨段一致性和导演级保护会弱一些。</p>
 </section>
 
 <!-- ========== Section 10 ========== -->
@@ -870,10 +888,10 @@ A 走进画面，B 从右边出现拥抱她。C 在远处看。</code></pre>
   <p>如果你（AI）是被用户拿来代写 Artemis brief 的：</p>
   <ol>
     <li>你的产出是一份 <strong>结构化 Markdown 剧本</strong>，不是已经渲染好的 video prompt</li>
-    <li>每个 <code>[X-Y秒]</code> 段都会被 Artemis 作为<strong>独立的 video 模型调用</strong>，所以每段要<strong>自包含</strong>关键信息</li>
+    <li>每个 <code>[X-Y秒]</code> 段通常会被 Artemis 作为<strong>独立的 video 模型调用</strong>，再由 Saga 拼接；所以每段要<strong>自包含</strong>关键信息</li>
     <li>对白<strong>必须</strong>带 marker（<code>**对白**:</code>），不带就被忽略</li>
     <li>不要试图"帮"用户加导演术语堆砌——Artemis 自动加更专业的</li>
-    <li>用户的字数预算大概是 8000-15000 字 brief 跑 40-60 秒视频，写得越具体出片越精确</li>
+    <li>40-60 秒视频通常不需要堆到 8000 字；更推荐每 6-10 秒写 120-250 字具体镜头信息。长片可以扩展到多千字，但每段必须清晰自包含</li>
     <li>输出剧本前自查一遍 §8 的 checklist</li>
   </ol>
   <p>写完后告诉用户：<em>"这份剧本可直接发给 Artemis /saga，预期分段数：N，预计渲染时长：X 分钟。"</em></p>
@@ -883,7 +901,7 @@ A 走进画面，B 从右边出现拥抱她。C 在远处看。</code></pre>
 </div>
 
 <footer class="foot">
-  <p><span class="brand">Artemis Saga</span> · Authoring Guide v1.0 · 配套 Artemis ≥ 0.2.70</p>
+  <p><span class="brand">Artemis Saga</span> · Authoring Guide v1.1 · 配套 Artemis ≥ 0.2.71</p>
   <p>Made by <a href="https://www.420.company">420.company</a> · Have a nice trip <span style="opacity:0.6">(⌐■-■)</span></p>
 </footer>
 
