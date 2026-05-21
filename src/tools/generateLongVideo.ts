@@ -30,6 +30,7 @@ import {
   type ShotViolation,
 } from './visual/sagaNarrative.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { buildEnsembleContactSheet } from './visual/contactSheet.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import {
   buildContinuityBible,
@@ -44,6 +45,7 @@ import {
   renderSagaProject,
 } from './visual/sagaRenderer/index.js';
 import type { SagaContinuityMode } from './visual/sagaRenderer/continuity.js';
+import { detectsLockOffCamera } from './visual/sagaRenderer/continuity.js';
 import type {
   SagaFps,
   SagaQuality,
@@ -372,18 +374,51 @@ function distributeDurations(totalSeconds: number, segmentCount: number, maxSegm
   return durations;
 }
 
-function parseTimestampedShotsFromStory(story: string, maxSegmentSeconds: number): SagaShotInput[] {
-  const markerRe = /\[\s*(\d+(?:\.\d+)?)\s*[-–—~至到]\s*(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?\s*\]/gi;
-  const markers = Array.from(story.matchAll(markerRe));
-  if (markers.length < 2) return [];
+// Convert a [H:]MM:SS / MM:SS / SS time-token into seconds. Returns NaN for
+// junk. Used by parseTimestampedShotsFromStory to support both decimal-second
+// markers ([0-8秒]) and clock-style markers ([0:00-0:08], [1:30-1:38]).
+function parseTimeTokenToSeconds(token: string): number {
+  const parts = token.split(':').map((p) => Number(p));
+  if (parts.some((p) => !Number.isFinite(p))) return NaN;
+  if (parts.length === 1) return parts[0]!;
+  if (parts.length === 2) return parts[0]! * 60 + parts[1]!;
+  if (parts.length === 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+  return NaN;
+}
+
+function parseTimestampedShotsFromStory(
+  story: string,
+  maxSegmentSeconds: number,
+  totalSeconds?: number,
+): SagaShotInput[] {
+  // Time-range markers in many user-formats:
+  //   [0-8秒]  [0-8]  [0-8s]  [0.5-8.5秒]
+  //   [0:00-0:08]  [1:30-1:38]
+  //   [00:00:00-00:00:08]
+  // Token = digits with optional ":mm" or ":mm:ss"
+  const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
+  const markerRe = new RegExp(
+    `\\[\\s*(${TIME_TOKEN})\\s*[-–—~至到]\\s*(${TIME_TOKEN})\\s*(?:秒|s|sec|seconds)?\\s*\\]`,
+    'gi',
+  );
+  let markers = Array.from(story.matchAll(markerRe));
+
+  // Fallback A: timecode without brackets at line-head, e.g. "0:00-0:08:" or "0-8s:"
+  if (markers.length < 2) {
+    const looseRe = new RegExp(
+      `(?:^|\\n)\\s*(${TIME_TOKEN})\\s*[-–—~至到]\\s*(${TIME_TOKEN})\\s*(?:秒|s|sec|seconds)?\\s*[:：]`,
+      'gi',
+    );
+    markers = Array.from(story.matchAll(looseRe));
+  }
 
   const shots: SagaShotInput[] = [];
   const seen = new Set<string>();
   for (let index = 0; index < markers.length; index += 1) {
     const marker = markers[index]!;
     const next = markers[index + 1];
-    const start = Number(marker[1]);
-    const end = Number(marker[2]);
+    const start = parseTimeTokenToSeconds(String(marker[1]));
+    const end = parseTimeTokenToSeconds(String(marker[2]));
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
     const rawBody = story.slice((marker.index ?? 0) + marker[0].length, next?.index ?? story.length).trim();
     const body = rawBody.replace(/\s+/g, ' ').trim();
@@ -407,7 +442,55 @@ function parseTimestampedShotsFromStory(story: string, maxSegmentSeconds: number
     });
   }
 
-  return shots;
+  if (shots.length >= 2) return shots;
+
+  // Fallback B: structural markers WITHOUT explicit times, e.g.
+  //   "Scene 1", "Shot 3", "镜头 4", "第 5 段", "段 1 ·", "Segment 2"
+  // We distribute totalSeconds evenly across the detected scenes.
+  if (totalSeconds && totalSeconds >= 8) {
+    const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?(\d+)|第\s*(\d+)\s*段)[\s.·:：、,。\-—–]/gi;
+    const sceneMarkers = Array.from(story.matchAll(sceneRe));
+    if (sceneMarkers.length >= 2) {
+      const distributed: SagaShotInput[] = [];
+      const perScene = Math.max(4, Math.min(maxSegmentSeconds, Math.floor(totalSeconds / sceneMarkers.length)));
+      for (let index = 0; index < sceneMarkers.length; index += 1) {
+        const marker = sceneMarkers[index]!;
+        const next = sceneMarkers[index + 1];
+        const rawBody = story.slice((marker.index ?? 0) + marker[0].length, next?.index ?? story.length).trim();
+        const body = rawBody.replace(/\s+/g, ' ').trim();
+        if (!body) continue;
+        const cameraMatch = body.match(/(?:镜头|camera)[:：]\s*([^。.!！?\n]+)/i);
+        const transitionMatch = body.match(/(?:转场|transition)[:：]\s*([^。.!！?\n]+)/i);
+        distributed.push({
+          title: `Scene ${index + 1}`,
+          duration: perScene,
+          storyBeat: body,
+          visualPrompt: `Follow this exact scripted scene: ${body}`,
+          camera: cameraMatch?.[1]?.trim(),
+          transition: transitionMatch?.[1]?.trim(),
+          continuity: 'Preserve the user-supplied scene order exactly; do not invent unrelated scenes.',
+        });
+      }
+      if (distributed.length >= 2) return distributed;
+    }
+  }
+
+  return [];
+}
+
+// Public: does this brief contain explicit structural markers? Used by the
+// LLM-rewrite gate to skip rewrite (which would otherwise destroy timecodes
+// and per-segment specificity) when the user has already structured their brief.
+export function hasStructuredBriefMarkers(text: string): boolean {
+  if (!text) return false;
+  const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
+  const bracketTimeRe = new RegExp(`\\[\\s*${TIME_TOKEN}\\s*[-–—~至到]\\s*${TIME_TOKEN}\\s*(?:秒|s|sec|seconds)?\\s*\\]`, 'i');
+  if (bracketTimeRe.test(text)) return true;
+  const looseTimeRe = new RegExp(`(?:^|\\n)\\s*${TIME_TOKEN}\\s*[-–—~至到]\\s*${TIME_TOKEN}\\s*(?:秒|s|sec|seconds)?\\s*[:：]`, 'i');
+  if (looseTimeRe.test(text)) return true;
+  const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?\d+|第\s*\d+\s*段)[\s.·:：、,。\-—–]/i;
+  if (sceneRe.test(text)) return true;
+  return false;
 }
 
 function mergeStringArrays(...values: Array<string[] | undefined>): string[] {
@@ -549,12 +632,24 @@ function buildSegments(options: {
           rawPlannedVisualPrompt,
           `Cinematic realization of this story beat with consistent characters, location, lighting, and emotional tone: ${storyBeat}`,
         );
+    // Per-segment camera default. If user's storyBeat OR the global brief
+    // requests a locked-off camera (锁死机位 / locked-off tripod / NO pan
+    // tilt zoom dolly), force the per-segment default to lock-off too —
+    // otherwise the rotating "slow controlled dolly / handheld push-in /
+    // gimbal arc" defaults contradict the [CAMERA: locked-off] block in
+    // the continuity bible, and the model gets conflicting signals.
+    // Generic — reuses the same detector as the bible-level CAMERA block.
+    const segmentLockOff = detectsLockOffCamera(storyBeat) || detectsLockOffCamera(options.story);
+    const cameraDefault = segmentLockOff
+      ? 'absolutely locked-off tripod, no camera movement whatsoever — no pan, no tilt, no zoom, no dolly, no handheld shake'
+      : (index % 3 === 0
+        ? 'slow controlled dolly movement with stable subject tracking and visible parallax'
+        : index % 3 === 1
+          ? 'gentle handheld cinematic push-in following the protagonist through the motion'
+          : 'gimbal arc around the protagonist with continuous environmental motion');
     const camera = options.cleanDirect
       ? sanitizeInline(planned?.camera, '')
-      : sanitizeInline(
-          planned?.camera,
-          index % 3 === 0 ? 'slow controlled dolly movement with stable subject tracking and visible parallax' : index % 3 === 1 ? 'gentle handheld cinematic push-in following the protagonist through the motion' : 'gimbal arc around the protagonist with continuous environmental motion',
-        );
+      : sanitizeInline(planned?.camera, cameraDefault);
     const continuity = options.cleanDirect
       ? sanitizeInline(planned?.continuity, '')
       : sanitizeInline(
@@ -817,21 +912,25 @@ export async function executeGenerateLongVideo(
         ? `\n\nReference notes from user: ${referenceNotes.join(' | ')}`
         : '',
     ].join('').trim();
+    // Gate LLM rewrite: when the user has explicitly structured their brief
+    // (timecodes [X-Y秒], MM:SS ranges, Scene/Shot/镜头/段 markers, or
+    // explicit dialogue markers), skip the rewrite entirely. Rewrite
+    // condenses the brief into a generic English paragraph, which destroys
+    // timecodes, per-segment specificity (locations / props / actions),
+    // camera lock instructions, and audio-intent clauses. The downstream
+    // planner reads structured markers directly. Generic — protects any
+    // user whose brief is already well-structured.
+    const briefIsStructured = hasStructuredBriefMarkers(story);
     const languageNormalized = await normalizeSagaPromptForVideoGeneration({
       cwd: context.cwd,
       text: story,
-      enableLlmRewrite: !action.cleanDirect,
+      enableLlmRewrite: !action.cleanDirect && !briefIsStructured,
       subtitleMode: action.subtitleMode ?? 'auto',
     });
-    story = [
-      languageNormalized.generationText,
-      '',
-      '[Original user brief — semantic source only; do not render as separate on-screen text]',
-      languageNormalized.originalText,
-      languageNormalized.dialogueLines.length > 0
-        ? `\n[Dialogue map — exact original text and detected language]\n${JSON.stringify(languageNormalized.dialogueLines, null, 2)}`
-        : '',
-    ].filter(Boolean).join('\n');
+    if (briefIsStructured) {
+      toolLog('📐 Saga: 检测到结构化 brief（时间码/镜头标记），跳过 LLM 改写以保留用户原文的所有具体地点/动作/约束。');
+    }
+    story = languageNormalized.generationText;
     toolLog(`🌐 Saga Visual Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     const title = deriveVideoTitle(action, story);
     const generatedAt = new Date();
@@ -868,7 +967,13 @@ export async function executeGenerateLongVideo(
     // [X-Y秒] timeline, that is the authoritative segmentation and takes
     // priority over any agent-supplied shots array (which is typically empty
     // or generic boilerplate when saga flows through the LLM).
-    const timestampedStoryShots = parseTimestampedShotsFromStory(story, limits.maxSegmentSeconds);
+    // CRITICAL: parse timecodes from the ORIGINAL user text (before LLM
+    // rewrite). LLM rewrite condenses the brief into a paragraph and strips
+    // out [X-Y秒] markers, which would force the planner to default to its
+    // own segment count (totalSeconds / preferred) instead of honouring the
+    // user's intended segmentation. Generic — works for any user format.
+    const timecodeSource = languageNormalized.originalText || story;
+    const timestampedStoryShots = parseTimestampedShotsFromStory(timecodeSource, limits.maxSegmentSeconds, totalSeconds);
     let storyboardShots = timestampedStoryShots.length >= 2
       ? timestampedStoryShots
       : (action.shots?.length ? action.shots : []);
@@ -1191,11 +1296,24 @@ export async function executeGenerateLongVideo(
       narrativeEntities?.worldModel?.spatialReality?.groundSurface ? [narrativeEntities.worldModel.spatialReality.groundSurface] : undefined,
       extractSceneAnchorsFromStory(story),
     );
+    // Filter out props that the narrative analyser harvested from the
+    // user's reference photo's incidental background — e.g. "黄色汽车座椅
+    // (from reference image)", "in the reference: black seat belt". These
+    // were never meant to be recurring scene anchors; the reference photo
+    // exists to lock IDENTITY (face / wardrobe), not to seed background
+    // furniture. Locking them as global props makes the model try to
+    // render car interior elements in every shot. Generic — protects any
+    // user uploading a reference photo with an unrelated background.
+    const referenceImagePropPattern = /(?:参考图(?:中|里|上|内)|reference\s+(?:image|photo|picture)|in\s+the\s+reference|from\s+the\s+reference)/i;
+    const filterReferenceImageProps = (props: string[] | undefined): string[] | undefined => {
+      if (!props) return props;
+      return props.filter((p) => !referenceImagePropPattern.test(p));
+    };
     const propAnchors = mergeStringArrays(
       action.continuity?.props,
-      narrativeEntities?.props,
-      narrativeEntities?.worldModel?.identityLockedProps,
-      narrativeEntities?.worldModel?.sceneVariableProps,
+      filterReferenceImageProps(narrativeEntities?.props),
+      filterReferenceImageProps(narrativeEntities?.worldModel?.identityLockedProps),
+      filterReferenceImageProps(narrativeEntities?.worldModel?.sceneVariableProps),
     );
     const continuityBible = buildContinuityBible({
       story,
@@ -1211,6 +1329,7 @@ export async function executeGenerateLongVideo(
       cameraLanguage: action.continuity?.cameraLanguage,
       mood: action.continuity?.mood,
       accessoriesLock: accessoriesList,
+      subtitleMode: action.subtitleMode,
     });
 
     const cleanDirect = action.cleanDirect === true;
@@ -1425,6 +1544,31 @@ export async function executeGenerateLongVideo(
     let consecutivePrivacyFails = 0;
     let chainEnabled = chainFrames;
     const humanOrMixedSubject = isHumanOrMixedSubject(narrativeEntities);
+
+    // Ensemble contact sheet: when the user supplies multiple reference photos
+    // for a real-person / human-subject shoot, the old code sent every photo
+    // on every segment, which (a) repeatedly hit privacy review on each
+    // segment and (b) gave the model N disjoint references rather than one
+    // coherent multi-character identity board. Compose them once into a tiled
+    // N-cell sheet (N inputs -> N tiles, smart grid) and use that single sheet
+    // as the per-segment identity anchor.
+    if (
+      userReferenceImagePaths.length > 1
+      && (realPersonInput || humanOrMixedSubject)
+    ) {
+      const sheetOutputPath = path.join(projectDir, 'super-visual', 'ensemble-cast-sheet.png');
+      const sheet = await buildEnsembleContactSheet({
+        imagePaths: userReferenceImagePaths,
+        outputPath: sheetOutputPath,
+      });
+      if (sheet.ok && !sheet.isPassThrough) {
+        toolLog(`🧩 Saga: 已生成 ${sheet.inputCount} 角色 ensemble contact sheet（${sheet.grid.cols}×${sheet.grid.rows}），后续每段只发这一张 → ${sheet.path}`);
+        userReferenceImagePaths = [sheet.path];
+        userReferenceImageUrls = [];
+      } else if (!sheet.ok) {
+        toolWarn(`⚠️ Saga: ensemble contact sheet 生成失败，回退为按原方式逐张发送参考图（${sheet.reason.slice(0, 200)}）。`);
+      }
+    }
 
     let previousLastFramePath: string | undefined;
     // Per-segment Image-2 opening keyframes — generated lazily right before

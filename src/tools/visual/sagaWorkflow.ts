@@ -1062,11 +1062,14 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
   const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
   const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
   const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated);
-  // When user supplies an explicit script (timestamped, shot-numbered, or
-  // substantial narrative), force cleanDirect mode so the per-segment story
-  // chunk goes verbatim into storyBeat — without the motion-timeline boilerplate
-  // wrapper that previously dominated the model's interpretation.
-  const cleanDirect = preserveUserScript || wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
+  // cleanDirect is opt-in via explicit keywords (raw-seedance / 原始质感 / etc.).
+  // It used to be auto-forced whenever preserveUserScript was true, but those
+  // two concerns are independent: preserveUserScript means "don't rewrite my
+  // text", whereas cleanDirect means "strip ALL directorial scaffolding"
+  // (Super Visual keyframes, chain frames, STYLE-LOCK, AESTHETIC-LOCK,
+  // NEGATIVE, EXPLICIT USER BRIEF LOCK, etc.). Coupling them silently broke
+  // detailed timecoded briefs by removing every quality lock.
+  const cleanDirect = wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
   const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
   const ratio = extractRatio(fullStory) ?? '16:9';
   const projectIdMatch = prompt.match(/^projectId:\s*"([^"]+)"/m);

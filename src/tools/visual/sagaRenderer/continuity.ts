@@ -53,7 +53,84 @@ export type SagaBibleInput = {
    * gets stronger weight than a generic prop mention.
    */
   accessoriesLock?: string[];
+  /**
+   * User's subtitle preference. When 'off' the NEGATIVE block is hardened
+   * with extra constraints (no rendered text of quoted phrases, no song
+   * lyric overlay, no on-screen English text labels) to prevent the video
+   * model from spontaneously rendering quoted prompt fragments as on-screen
+   * text. When 'always' the default "no subtitles" entry is removed so the
+   * model is allowed to render dialogue captions.
+   */
+  subtitleMode?: 'auto' | 'always' | 'off';
 };
+
+// Build the NEGATIVE block, hardened against the on-screen-text failure mode
+// when the user explicitly said "no subtitles" (and conversely loosened when
+// they want subtitles rendered).
+function buildNegativeBlock(subtitleMode: 'auto' | 'always' | 'off' | undefined): string {
+  const baseEntries = [
+    'no character identity drift',
+    'no unintended wardrobe drift for recurring characters',
+    'no accidental jump cuts inside continuous scenes',
+    'no flicker',
+    'no warped anatomy',
+    'no melting objects',
+    'no logos',
+    'no UI',
+    'no watermark',
+  ];
+  const subtitleEntries = subtitleMode === 'always'
+    // User wants subtitles — keep "no readable text" off the list so dialogue
+    // captions can render; the AESTHETIC-LOCK still discourages garbled text.
+    ? []
+    : subtitleMode === 'off'
+      // Defense in depth: explicitly forbid the failure mode where the model
+      // renders quoted prompt fragments (section headers, song lyrics, brand
+      // names) as on-screen text.
+      ? [
+        'no readable text',
+        'no subtitles',
+        'no captions of any quoted phrase',
+        'no rendered song lyrics',
+        'no on-screen English text labels',
+        'no section headers rendered as text',
+      ]
+      : ['no readable text', 'no subtitles'];
+  return `[NEGATIVE: ${[...baseEntries, ...subtitleEntries].join(', ')}]`;
+}
+
+// Heuristic: does the brief explicitly request a locked-off / no-motion
+// camera? Honoured to override the default cameraLanguage so the [CAMERA]
+// directive in the continuity bible doesn't contradict the user's intent.
+export function detectsLockOffCamera(story: string | undefined): boolean {
+  if (!story) return false;
+  const text = story.toLowerCase();
+  if (/locked[-\s]?off\s*tripod|no\s+(?:pan|tilt|zoom|dolly|handheld)/i.test(text)) return true;
+  if (/锁死.{0,6}(?:机位|三脚架|镜头)|完全锁死|镜头钉死|无任何镜头运动|no\s+camera\s+movement/i.test(story)) return true;
+  return false;
+}
+
+// Heuristic: does the brief say "AI should generate environmental audio only"?
+// Triggered by post-production music intent statements. When true, emit an
+// [AUDIO-LOCK] block to stop the video model from hallucinating BGM / music /
+// vocals — those are user's post-production overlays, NOT for AI to invent.
+// Generic — works for any brief that signals "music is post, not AI".
+export function detectsEnvironmentalAudioOnly(story: string | undefined): boolean {
+  if (!story) return false;
+  // Chinese signals
+  if (/(?:音乐|BGM|配乐|soundtrack)[^。\n]{0,30}(?:后期|后期叠加|后期叠|post[-\s]?prod)/i.test(story)) return true;
+  if (/(?:后期|后期叠加|post[-\s]?prod)[^。\n]{0,30}(?:音乐|BGM|配乐|soundtrack)/i.test(story)) return true;
+  if (/只出环境音|仅环境音|只生成环境音|AI[^。\n]{0,20}(?:只出|仅出|只生成)[^。\n]{0,10}环境音/i.test(story)) return true;
+  if (/不要\s*(?:BGM|配乐|背景音乐|音乐)|无\s*(?:BGM|背景音乐|配乐)|no\s+(?:bgm|music|soundtrack|instrumental)/i.test(story)) return true;
+  // English signals
+  if (/environmental\s+(?:audio|sound)s?\s+only|ambient\s+(?:audio|sound)s?\s+only/i.test(story)) return true;
+  if (/(?:music|score|soundtrack)\s+(?:is|are)\s+(?:added|overlaid|applied)\s+(?:in\s+)?post/i.test(story)) return true;
+  return false;
+}
+
+function buildAudioLockBlock(): string {
+  return '[AUDIO-LOCK — strict: emit environmental / diegetic sounds only (footsteps, wind, traffic, water, ambient room tone, voice if dialogue is present). Do NOT synthesize music, songs, instrumental backing tracks, scores, melodies, humming, or vocal performance. The user is overlaying music in post-production; AI-generated music here would conflict with the planned soundtrack.]';
+}
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   const seen = new Set<string>();
@@ -84,9 +161,18 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   const palette = uniqueStrings(input.palette ?? []);
   const accessoriesLock = uniqueStrings(input.accessoriesLock ?? []);
   const lighting = pickFirstSentence(input.lighting, 'consistent natural cinematic lighting with stable key direction');
+  const lockOffCamera = detectsLockOffCamera(input.story);
+  const cameraDefault = lockOffCamera
+    ? 'absolutely locked-off tripod, no camera movement whatsoever — no pan, no tilt, no zoom, no dolly, no handheld shake'
+    : 'controlled cinematic camera with stable handheld push-ins, locked establishing frames, and gentle dollies';
   const cameraLanguage = pickFirstSentence(
-    input.cameraLanguage ?? input.shotCameraNotes?.join('. '),
-    'controlled cinematic camera with stable handheld push-ins, locked establishing frames, and gentle dollies',
+    // When the brief explicitly locks the camera, the default wins over
+    // user.continuity.cameraLanguage too — directorial defaults shouldn't
+    // override a hard user motion lock.
+    lockOffCamera
+      ? cameraDefault
+      : (input.cameraLanguage ?? input.shotCameraNotes?.join('. ')),
+    cameraDefault,
   );
   const mood = pickFirstSentence(input.mood, 'grounded cinematic, emotionally consistent across every shot');
 
@@ -117,7 +203,8 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     `[LIGHTING: ${lighting}]`,
     `[CAMERA: ${cameraLanguage}]`,
     `[MOOD: ${mood}]`,
-    '[NEGATIVE: no character identity drift, no unintended wardrobe drift for recurring characters, no accidental jump cuts inside continuous scenes, no flicker, no warped anatomy, no melting objects, no readable text, no subtitles, no logos, no UI, no watermark]',
+    buildNegativeBlock(input.subtitleMode),
+    detectsEnvironmentalAudioOnly(input.story) ? buildAudioLockBlock() : '',
   ];
 
   const sharedNotes = uniqueStrings(input.shotContinuityNotes ?? []);
