@@ -58,7 +58,10 @@ function classifyDialogueUse(marker: string | undefined): SagaDialogueUse {
 
 export function extractSagaDialogueLines(text: string): SagaDialogueLine[] {
   const lines: SagaDialogueLine[] = [];
-  const markerRe = /(?:^|[\n\r。；;.!?\s])(?<marker>对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))\s*(?:[（(][^）)]{0,40}[）)])?\s*[:：]\s*[“"'‘](?<line>[^”"'’]{1,240})[”"'’]/giu;
+  // Marker pass: explicit "对白/台词/旁白/dialogue/..." preceding quoted text.
+  // The optional [*_]* before/after the marker accommodates markdown emphasis
+  // like **对白（…）**: which is common in detailed briefs.
+  const markerRe = /(?:^|[\n\r。；;.!?\s])[*_]*(?<marker>对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*[“"'‘](?<line>[^”"'’]{1,240})[”"'’]/giu;
   for (const match of text.matchAll(markerRe)) {
     const line = match.groups?.line?.trim();
     if (!line) continue;
@@ -66,14 +69,20 @@ export function extractSagaDialogueLines(text: string): SagaDialogueLine[] {
     lines.push({ text: line, language: detectTextLanguage(line), use: classifyDialogueUse(marker), marker });
   }
 
-  // Default dialogue convention: any quoted Chinese/Japanese/Korean/etc. line is
-  // treated as spoken dialogue unless it was already captured with an explicit
-  // subtitle/voiceover marker. Plain quoted English is left alone to avoid
-  // turning titles, style names, and filenames into dialogue too aggressively.
+  // Greedy fallback: bare quoted text without a marker is only treated as
+  // dialogue when it LOOKS LIKE a spoken sentence — i.e. ends in a
+  // sentence-final mark (。！？!?…/...). This prevents design-concept refs
+  // (e.g. "中国街道", "霓虹城市"), brand names (e.g. "Parts Unknown"), and
+  // section-header song lyrics (e.g. "It was just two lovers / sittin' in
+  // the car") from being mis-classified as spoken dialogue — which would
+  // otherwise trigger audio safety rejection at the provider and pollute the
+  // dialogue language map.
   const quoteRe = /[“"'‘](?<line>[^”"'’]{2,240})[”"'’]/gu;
+  const sentenceEndRe = /(?:[。！？!?…]|\.{3,})\s*$/u;
   for (const match of text.matchAll(quoteRe)) {
     const line = match.groups?.line?.trim();
     if (!line) continue;
+    if (!sentenceEndRe.test(line)) continue;
     const language = detectTextLanguage(line);
     if (language === 'English' && !/[。！？：，、]/.test(line)) continue;
     lines.push({ text: line, language, use: 'spoken_dialogue' });
@@ -83,34 +92,22 @@ export function extractSagaDialogueLines(text: string): SagaDialogueLine[] {
 
 function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: SagaSubtitleMode = 'auto'): string {
   const subtitlePolicy = subtitleMode === 'always'
-    ? '- User selected subtitles: render readable on-screen subtitles/captions for spoken dialogue and voiceover, preserving exact original dialogue text and language.'
+    ? '- Render readable on-screen subtitles/captions for spoken dialogue and voiceover, preserving the exact original characters.'
     : subtitleMode === 'off'
-      ? '- User selected no subtitles: do not render dialogue as on-screen text; keep dialogue/voiceover as audio only unless the user explicitly wrote a subtitle/caption line.'
-      : '- Subtitle mode is automatic: only create on-screen subtitles/captions when the user explicitly requested subtitles or visible text.';
+      ? '- Keep dialogue/voiceover as audio only; do not render as on-screen text unless the brief explicitly marks a line as subtitle/caption.'
+      : '- Only render on-screen subtitles/captions when the brief explicitly marks a line as subtitle/caption.';
   if (dialogueLines.length === 0) {
     return [
       'Dialogue handling:',
-      '- If the user supplied quoted dialogue, treat it as spoken audio by default.',
-      '- Detect the dialogue language from the quoted text and preserve the exact original characters.',
-      '- Handle multilingual dialogue such as Mandarin Chinese, Japanese, Korean, English, French, Italian, Spanish, and other detected languages; do not assume everything is English.',
-      '- Do not translate quoted dialogue unless the user explicitly requested translation.',
+      '- Treat any quoted text in the brief as spoken dialogue in its original language; do not translate.',
       subtitlePolicy,
     ].join('\n');
   }
+  const languages = Array.from(new Set(dialogueLines.map((line) => line.language))).filter(Boolean).join(', ');
   return [
-    'Dialogue handling — preserve exact text and language:',
-    ...dialogueLines.map((line, index) => {
-      const use = line.use === 'voiceover'
-        ? 'voiceover narration'
-        : line.use === 'subtitle'
-          ? 'on-screen subtitle/caption'
-          : 'spoken dialogue, spoken aloud with matching lip movement';
-      return `${index + 1}. ${use}; language: ${line.language}; exact text: “${line.text}”`;
-    }),
-    '- Keep quoted dialogue exactly as written, including Chinese/Japanese/Korean and Latin-script non-English dialogue if present.',
-    '- The language map is global: every extracted spoken line, voiceover, and subtitle must carry its detected language for the downstream video/audio model.',
-    '- Do not translate quoted dialogue unless the user explicitly requested translation.',
-    '- For spoken dialogue, ask for audio/lip-sync in the detected language; do not render it merely as a subtitle.',
+    'Dialogue handling:',
+    `- Quoted text in the brief is spoken dialogue (or voiceover/subtitle if explicitly marked). Detected languages: ${languages || 'as-written'}.`,
+    '- Render speech in the original language with matching lip-sync; do not translate or romanize.',
     subtitlePolicy,
   ].join('\n');
 }
@@ -122,19 +119,12 @@ export function buildDeterministicEnglishVisualPrompt(input: {
 }): string {
   const dialogueLines = input.dialogueLines ?? extractSagaDialogueLines(input.originalText);
   return [
-    '[Saga Visual Director Language Normalization v1]',
     'Generation instruction language: English.',
-    'Preserve the user\'s original semantic intent, character identity, ethnicity, nationality, wardrobe, setting, props, actions, relationships, pacing, duration, aspect ratio, audio intent, and all constraints.',
-    'If the user describes Asian, Chinese, Japanese, Korean, or any other ethnicity/nationality, state that identity explicitly in English; do not westernize the characters.',
+    'Preserve identity, ethnicity, wardrobe, setting, props, actions, relationships, pacing, duration, aspect ratio, audio intent, and all constraints. If the user describes Asian/Chinese/Japanese/Korean characters, state that identity explicitly; do not westernize.',
+    'Convert abstract emotion into visible cinematic behavior (facial micro-expressions, posture, breathing, gaze, movement). Use concrete visual language over metaphor. Avoid safety boilerplate, logos, captions unless requested.',
     buildDialogueBlock(dialogueLines, input.subtitleMode),
-    'Rewrite objective for the video model:',
-    '- Convert abstract emotion into visible cinematic behavior: facial micro-expressions, body posture, breathing, gesture, gaze direction, and movement continuity.',
-    '- Convert plot summary into shot-ready visual action with clear subject, environment, camera framing, camera motion, lighting, texture, and temporal continuity.',
-    '- Prefer concrete visual language over literary metaphor.',
-    '- Keep explicit user-provided actions and scene order; do not replace them with unrelated content.',
-    '- Avoid unnecessary safety boilerplate, logos, captions, or extra text unless requested.',
     '',
-    'Original user brief, preserved for semantic grounding:',
+    'User brief (source material to render):',
     input.originalText.trim(),
   ].join('\n');
 }
