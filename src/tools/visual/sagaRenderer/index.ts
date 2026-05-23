@@ -301,6 +301,20 @@ export async function renderSagaProject(request: SagaRenderRequest): Promise<Sag
     }
   }
 
+  // hyperframes/ is the legacy browser-preview artifact (HTML player + a
+  // duplicate copy of every segment mp4). The final ffmpeg renderer reads
+  // segments/ directly, so once lint + concat have validated the
+  // composition, the hyperframes/ tree adds no value but doubles the disk
+  // footprint. Tear it down after a successful render. The lint / inspect
+  // reports were captured above and remain in the returned diagnostics.
+  try {
+    const { rm } = await import('node:fs/promises');
+    await rm(request.hyperframesProjectDir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup; if the dir is locked or partially gone, leave the
+    // remnants — they're inert and won't affect playback of outputPath.
+  }
+
   return {
     ok: true,
     outputPath: request.outputPath,

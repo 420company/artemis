@@ -1720,6 +1720,12 @@ export async function executeGenerateLongVideo(
             perspectiveCues: wm.spatialReality?.perspectiveCues,
             physicsRules: wm.spatialReality?.physicsRules,
             forbiddenSpatialErrors: wm.spatialReality?.forbiddenSpatialErrors,
+            // Full user brief — sagaFraming reads this to recover position /
+            // direction cues that the per-segment storyBeat dropped, then
+            // injects an OPENING FRAMING block at the top of the Image-2
+            // keyframe prompt so the opening pose stops flipping facing
+            // direction between runs.
+            sourceStory: story,
           });
           if (keyframeResult.ok) {
             segmentKeyframePaths.set(segment.index, keyframeResult.framePath);

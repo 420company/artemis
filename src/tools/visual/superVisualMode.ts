@@ -40,6 +40,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 }
 import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
+import { extractOpeningFraming } from './sagaFraming.js';
 
 // ─── Result types ─────────────────────────────────────────────────────────
 
@@ -387,6 +388,12 @@ export function buildSegmentKeyframePrompt(input: {
   // that contradicts the long-video OUTPUT-STYLE OVERRIDE and makes later
   // video segments drift away from the desired live-action result.
   realPersonInput?: boolean;
+  // High-priority opening-frame positional / directional directive block
+  // assembled by sagaFraming.extractOpeningFraming(). Spliced directly under
+  // the IDENTITY LOCK so Image-2 reads it before the long PROJECT CONTINUITY
+  // RULES list. Optional; when absent the keyframe falls back to whatever
+  // cues exist in the broader bible.
+  openingFraming?: string;
 }): string {
   const shot = input.shot;
   const styleIdentityRule = input.realPersonInput
@@ -478,6 +485,7 @@ export function buildSegmentKeyframePrompt(input: {
 
   return [
     identitySection,
+    input.openingFraming ? `\n${input.openingFraming}` : '',
     visionTruth,
     locksSection,
     `This is the opening keyframe for shot ${input.shotIndex} of ${input.shotCount} in a long-form video.`,
@@ -1456,6 +1464,11 @@ export async function generateSegmentKeyframe(options: {
   perspectiveCues?: string;
   physicsRules?: string[];
   forbiddenSpatialErrors?: string[];
+  // Full user-supplied source story. Used by sagaFraming to recover opening
+  // framing cues when the per-segment storyBeat is generic boilerplate (the
+  // planner's fallback storyBeat contains no position / direction info, so
+  // Image-2 has to guess and frequently flips facing direction between runs).
+  sourceStory?: string;
 }): Promise<SegmentKeyframeResult> {
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (!imageConfigured) return { ok: false, reason: 'image provider not configured' };
@@ -1504,6 +1517,13 @@ export async function generateSegmentKeyframe(options: {
   }
   const withPreviousLastFrame = turnaroundExists && prevLastExists;
 
+  const openingFraming = await extractOpeningFraming({
+    storyBeat: options.shot.storyBeat ?? '',
+    sourceStory: options.sourceStory,
+    shotIndex: options.shotIndex,
+    shotCount: options.shotCount,
+  });
+
   const prompt = buildSegmentKeyframePrompt({
     shotIndex: options.shotIndex,
     shotCount: options.shotCount,
@@ -1524,6 +1544,7 @@ export async function generateSegmentKeyframe(options: {
     physicsRules: options.physicsRules,
     forbiddenSpatialErrors: options.forbiddenSpatialErrors,
     realPersonInput: options.realPersonInput,
+    openingFraming,
   });
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-keyframe.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');
