@@ -75,6 +75,40 @@ function compactSourceStoryForBible(story: string | undefined): string {
   return `${head} … [SOURCE STORY CONTINUES; middle compacted only for continuity-bible size, segment storyBeats remain authoritative] … ${tail}`;
 }
 
+// Trim per-segment material out of the source story before it gets embedded
+// in every per-segment prompt's continuity bible. The bible should carry
+// GLOBAL context — overall narrative, picture specs, global tone, character
+// lock, audio intent — not segment 17's dialogue or segment 6's bullet-time
+// description, because those leak into segments 1/2/3 and the video model
+// happily renders them where they don't belong (dialogue in segment 1,
+// "slow motion" mood inside a brisk-pace shot, etc.). The per-segment
+// storyBeat is already the authoritative spec for what to render IN this
+// segment; the bible only needs the global wrapper.
+//
+// Strategy: keep everything before the FIRST `[N-M秒]` / `[N:NN-N:NN]` /
+// `Scene N` / `段 N` style segment marker. That's where users put global
+// notes. Everything after the first marker is per-segment material that
+// belongs in its own segment's storyBeat (which already carries it). If
+// the brief has no separating markers at all, fall back to the full text
+// (legacy behaviour for unstructured briefs).
+function extractGlobalContextFromStory(story: string | undefined): string {
+  const raw = story ?? '';
+  if (!raw) return '';
+  const markerRe = /(?:\[\s*\d+(?::\d{2})?\s*[-–—~至到]\s*\d+(?::\d{2})?\s*(?:秒|s|sec|seconds)?\s*\])|(?:(?:^|\n)\s*(?:scene|shot|segment)\s*#?\d+\b)|(?:(?:^|\n)\s*(?:镜头|段)\s*\d+\s*[·.、:：\-])|(?:(?:^|\n)\s*第\s*\d+\s*段)/i;
+  const match = raw.match(markerRe);
+  if (!match || typeof match.index !== 'number') {
+    // No per-segment markers — brief is unstructured, fall back to the full
+    // story so narrative context still reaches the bible (legacy behaviour).
+    return raw;
+  }
+  const prefix = raw.slice(0, match.index).trim();
+  // Even if the global prefix is tiny, prefer it over the full story: the
+  // whole point of this trim is to stop per-segment material from leaking,
+  // and bible.bible is allowed to be sparse — the identity card and per-
+  // segment storyBeat carry the rest.
+  return prefix;
+}
+
 // Build the NEGATIVE block, hardened against the on-screen-text failure mode
 // when the user explicitly said "no subtitles" (and conversely loosened when
 // they want subtitles rendered).
@@ -230,7 +264,7 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     `Aspect ratio: ${input.ratio}.`,
     'Maintain character/person identity as a global hard rule across generated clips. Preserve face, silhouette, body traits, hair, and recurring wardrobe/material cues unless the user explicitly asks for transformation or multiple identities.',
     'Use selective scene continuity: when a story beat changes location, let the scene change happen deliberately; when the beat continues the same place, preserve the relevant location/environment anchors and visual through-line.',
-    `Source story: ${compactSourceStoryForBible(input.story)}`,
+    `Source story: ${compactSourceStoryForBible(extractGlobalContextFromStory(input.story))}`,
   ].join(' ');
 
   return {

@@ -178,6 +178,46 @@ async function main(): Promise<void> {
   assert.match(fullPrompt, /\[REFERENCE-ROLE-SEPARATION\]/, 'non-cleanDirect should keep REFERENCE-ROLE-SEPARATION');
   assert.match(fullPrompt, /\[FRAME-OUT/, 'non-cleanDirect should keep FRAME-OUT');
 
+  // --- 9) Continuity bible must not leak per-segment material (regression) ---
+  // saga-1779573257467 produced segment 1 video that started lip-syncing
+  // segment 7 / 14 / 17 dialogue. Root cause: bible.bible embedded the FULL
+  // source story (compactSourceStoryForBible(input.story)) into every
+  // segment's prompt, so the dialogue + tempo cues from late segments
+  // leaked into the early-segment video model prompt. The fix trims the
+  // source story to the GLOBAL prefix (text before the first [N-M秒] /
+  // Scene N / 段 N marker); per-segment storyBeats stay authoritative.
+  const polluterStory = [
+    '【整片叙事】 她戴着黑色墨镜，从画面左边缘走进来。世界在她身后一站一站地变换。',
+    '【全局基调】 锁死三脚架。中景全身。前 16 段侧面 profile。',
+    '',
+    '[0-4秒] 段 1 · 成都太古里',
+    '女主侧面剪影位于画面左边缘 5%，自然 stride 穿行。无台词。',
+    '',
+    '[24-28秒] 段 7 · 马拉喀什香料市集',
+    '**对白（约 3 秒）**: "我一直在找一个人。"',
+    '',
+    '[64-72秒] 段 17 · 巴厘岛',
+    '女主缓慢转身，缓慢朝镜头走来。',
+    '**对白（约 65 秒）**: "穿过了所有地方..."',
+    '**对白（约 67.5 秒）**: "原来你一直在这里。"',
+    '**对白（约 70.5 秒）**: "终于，我们停在了各自的地方。"',
+  ].join('\n');
+  const polluterBible = buildContinuityBible({ story: polluterStory, ratio: '1:1' });
+  assert.match(polluterBible.bible, /整片叙事|她戴着黑色墨镜/, 'bible must keep the global prefix narrative');
+  assert.match(polluterBible.bible, /锁死三脚架|侧面 profile/, 'bible must keep global tone notes');
+  // The KEY assertion: bible must NOT carry per-segment dialogue / tempo.
+  assert.doesNotMatch(polluterBible.bible, /我一直在找一个人/, 'bible must NOT leak segment 7 dialogue into the global continuity slot');
+  assert.doesNotMatch(polluterBible.bible, /穿过了所有地方/, 'bible must NOT leak segment 17 dialogue into the global continuity slot');
+  assert.doesNotMatch(polluterBible.bible, /原来你一直在这里/, 'bible must NOT leak segment 17 dialogue into the global continuity slot');
+  assert.doesNotMatch(polluterBible.bible, /缓慢转身|缓慢朝镜头/, 'bible must NOT leak segment 17 tempo cues into the global continuity slot');
+  assert.doesNotMatch(polluterBible.bible, /\[0-4秒\]|\[24-28秒\]|\[64-72秒\]/, 'bible must not carry any per-segment timecode brackets');
+
+  // Briefs WITHOUT per-segment markers fall back to the legacy full-story
+  // dump so unstructured briefs still get narrative context in the bible.
+  const unstructured = 'A short story about a woman walking through a single park at dusk, looking for something.';
+  const unstructuredBible = buildContinuityBible({ story: unstructured, ratio: '16:9' });
+  assert.match(unstructuredBible.bible, /walking through a single park/, 'unstructured briefs without timecode markers must still embed the full story (legacy behaviour)');
+
   console.log('saga cleanDirect/CAMERA/NEGATIVE decoupling smoke ok');
 }
 
