@@ -105,6 +105,12 @@ type SuperVisualActionInput = {
   };
   superVisualMode?: 'auto' | 'on' | 'off';
   superVisualStyle?: 'illustrated' | 'photoreal' | 'auto';
+  // User's pick in the Saga identity-source menu:
+  //   'turnaround'      → option 1: user uploaded a turnaround sheet — bypass Image-2 generation
+  //   'character_image' → option 2: user uploaded a photo, system runs Image-2 to make a turnaround
+  //   'direct_image'    → option 3: user's image goes straight to the video model, no turnaround at all
+  //   'text_only'       → option 4: no image, identity comes from text
+  identitySource?: 'turnaround' | 'character_image' | 'direct_image' | 'text_only';
 };
 
 function wantsPhotorealVideoOutput(input: {
@@ -934,7 +940,19 @@ function isLikelyProvidedTurnaroundPath(filePath: string): boolean {
     || /三视图|三面图|转面图|角色设定/.test(path.basename(filePath));
 }
 
-function findProvidedTurnaroundInput(userInputs: string[], originalPaths?: string[], referenceNotes?: string[]): string | undefined {
+function findProvidedTurnaroundInput(
+  userInputs: string[],
+  originalPaths?: string[],
+  referenceNotes?: string[],
+  // The user's explicit pick in the Saga identity-source menu (option 1 =
+  // "I have a turnaround"). When the user said so, that intent overrides
+  // every other heuristic — the workflow guarantee is "menu pick = behaviour",
+  // not "menu pick if and only if the filename also matches a keyword".
+  identitySource?: string,
+): string | undefined {
+  if (identitySource === 'turnaround' && userInputs.length > 0) {
+    return userInputs[0];
+  }
   for (let i = 0; i < userInputs.length; i += 1) {
     const cachedPath = userInputs[i];
     const originalPath = originalPaths?.[i];
@@ -958,6 +976,15 @@ function isLikelyTurnaroundDescription(description: string | null | undefined): 
 
 export function isLikelyProvidedTurnaroundReferenceForTest(filePath: string, description?: string | null): boolean {
   return isLikelyProvidedTurnaroundPath(filePath) || isLikelyTurnaroundDescription(description);
+}
+
+export function findProvidedTurnaroundInputForTest(
+  userInputs: string[],
+  originalPaths?: string[],
+  referenceNotes?: string[],
+  identitySource?: string,
+): string | undefined {
+  return findProvidedTurnaroundInput(userInputs, originalPaths, referenceNotes, identitySource);
 }
 
 export async function describeUserImageWithVision(options: {
@@ -1138,6 +1165,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     userInputs,
     options.action.referenceImagePaths,
     options.action.referenceNotes,
+    options.action.identitySource,
   );
   if (providedTurnaroundByPath) {
     if (!options.videoLimits.referenceInputs.includes('image')) {
