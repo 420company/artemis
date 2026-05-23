@@ -363,17 +363,6 @@ export function compileShotPromptWithContinuity(options: {
   cleanDirect?: boolean;
 }): string {
   const authored = options.authoredPrompt?.replace(/\s+/g, ' ').trim();
-  if (options.cleanDirect) {
-    const source = authored || options.storyBeat || options.visualPrompt;
-    return [
-      source,
-      options.visualPrompt && options.visualPrompt !== source ? options.visualPrompt : '',
-      options.camera ? `Camera: ${options.camera}` : '',
-      options.transition ? `Final frame: ${options.transition}` : '',
-      'no watermark',
-    ].filter(Boolean).join('\n');
-  }
-  const styleLock = styleLockBlock(options.bible);
 
   // SCENE-PRIORITY block — fixes the "stable final close frame on the phone
   // glow" hijack we observed in v1: the model would treat the closing-frame
@@ -386,25 +375,9 @@ export function compileShotPromptWithContinuity(options: {
     '[/SCENE-PRIORITY]',
   ].join('\n');
 
-  const head = [
-    options.bible.identityCard,
-    options.bible.bible,
-    styleLock,
-    scenePriority,
-    `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`,
-  ];
-
-  // For text-only providers, repeat the most identity-critical line near
-  // the top AND near the bottom. Plus inject the starting-frame anchor
-  // (which is the planner's previous-shot transition field).
-  if (options.mode === 'text-only' && options.startingFrameAnchor) {
-    head.push(options.startingFrameAnchor);
-  }
-
   const sourceShotText = [authored, options.storyBeat, options.visualPrompt, options.continuity, options.camera, options.title]
     .filter(Boolean)
     .join(' ');
-  const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
   // Dialogue extraction — ONLY match quoted text that is preceded by an
   // explicit dialogue marker. Prior versions used a naive any-quoted-string
   // regex which grabbed random phrases like brand names ("Parts Unknown"),
@@ -431,6 +404,62 @@ export function compileShotPromptWithContinuity(options: {
     options.bible.characters.length > 0 ? `Explicit character / brand-name anchors extracted from this brief: ${options.bible.characters.join(' | ')}.` : '',
     quotedText.length > 0 ? `Quoted dialogue extracted from this brief, preserve verbatim: ${quotedText.map((value) => `“${value}”`).join(' | ')}.` : '',
   ].filter(Boolean);
+  const explicitBriefLock = [
+    '[EXPLICIT USER BRIEF LOCK — highest priority]',
+    'Preserve every explicit location, prop, action, wardrobe, brand name, and quoted dialogue from the storyBeat / visual direction exactly; do not replace them with a generic room, bedroom, cafe, office, or unrelated interior unless the user explicitly asked for that environment.',
+    ...dynamicLockLines,
+    hasQuotedDialogue ? 'Dialogue rule: quoted text / 对白 is verbatim spoken audio. Keep the original line in quotes for lip-sync; do not translate, summarize, subtitle, or drop it.' : '',
+    hasBrandOrReadableText ? 'Brand/text exception: preserve user-specified brand names, screen UI, logo, and requested Chinese display text when the brief explicitly asks for them; avoid only unrelated/random text.' : '',
+    '[/EXPLICIT USER BRIEF LOCK]',
+  ].filter(Boolean).join('\n');
+
+  if (options.cleanDirect) {
+    // cleanDirect strips DIRECTORIAL/AESTHETIC scaffolding (style lock,
+    // aesthetic lock, reference-role-separation, default camera/continuity
+    // boilerplate, frame-out hint) so the model gets a "raw" prompt.
+    // It must NOT drop the hard CONTINUITY locks (identity card, bible,
+    // character/accessory/prop/location anchors, explicit user brief lock,
+    // scene-priority) — those are correctness rules, not aesthetic dressing,
+    // and stripping them caused character/wardrobe/location drift across
+    // long-video segments.
+    const cleanMiddle: string[] = [];
+    if (authored) {
+      cleanMiddle.push(authored);
+    } else {
+      cleanMiddle.push(`Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`);
+      cleanMiddle.push(`Visual direction: ${options.visualPrompt}`);
+    }
+    cleanMiddle.push(explicitBriefLock);
+    if (options.continuity) cleanMiddle.push(`Continuity requirements: ${options.continuity}`);
+    if (options.camera) cleanMiddle.push(`Camera and motion: ${options.camera}`);
+    return [
+      options.bible.identityCard,
+      options.bible.bible,
+      scenePriority,
+      `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`,
+      ...cleanMiddle,
+      'no watermark',
+    ].filter(Boolean).join('\n');
+  }
+
+  const styleLock = styleLockBlock(options.bible);
+
+  const head = [
+    options.bible.identityCard,
+    options.bible.bible,
+    styleLock,
+    scenePriority,
+    `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`,
+  ];
+
+  // For text-only providers, repeat the most identity-critical line near
+  // the top AND near the bottom. Plus inject the starting-frame anchor
+  // (which is the planner's previous-shot transition field).
+  if (options.mode === 'text-only' && options.startingFrameAnchor) {
+    head.push(options.startingFrameAnchor);
+  }
+
+  const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
   const middle: string[] = [];
   if (authored) {
     middle.push(authored);
@@ -438,16 +467,7 @@ export function compileShotPromptWithContinuity(options: {
     middle.push(`Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`);
     middle.push(`Visual direction: ${options.visualPrompt}`);
   }
-  middle.push(
-    [
-      '[EXPLICIT USER BRIEF LOCK — highest priority]',
-      'Preserve every explicit location, prop, action, wardrobe, brand name, and quoted dialogue from the storyBeat / visual direction exactly; do not replace them with a generic room, bedroom, cafe, office, or unrelated interior unless the user explicitly asked for that environment.',
-      ...dynamicLockLines,
-      hasQuotedDialogue ? 'Dialogue rule: quoted text / 对白 is verbatim spoken audio. Keep the original line in quotes for lip-sync; do not translate, summarize, subtitle, or drop it.' : '',
-      hasBrandOrReadableText ? 'Brand/text exception: preserve user-specified brand names, screen UI, logo, and requested Chinese display text when the brief explicitly asks for them; avoid only unrelated/random text.' : '',
-      '[/EXPLICIT USER BRIEF LOCK]',
-    ].filter(Boolean).join('\n'),
-  );
+  middle.push(explicitBriefLock);
   middle.push(`Continuity requirements: ${options.continuity}`);
   middle.push(`Camera and motion: ${options.camera}`);
 

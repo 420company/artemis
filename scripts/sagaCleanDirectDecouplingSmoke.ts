@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildContinuityBible } from '../src/tools/visual/sagaRenderer/continuity.js';
+import { buildContinuityBible, compileShotPromptWithContinuity } from '../src/tools/visual/sagaRenderer/continuity.js';
 import { extractSagaDialogueLines } from '../src/tools/visual/sagaLanguageDirector.js';
 
 // Representative excerpt from the user's JVKE golden-hour travel brief.
@@ -123,6 +123,60 @@ async function main(): Promise<void> {
   });
   assert.doesNotMatch(bibleAlwaysSubs.identityCard, /no readable text/);
   assert.doesNotMatch(bibleAlwaysSubs.identityCard, /no subtitles/);
+
+  // --- 7) cleanDirect keeps hard continuity locks, only strips style/aesthetic scaffolding ---
+  const cleanStory = `【整片叙事】男主角穿过东京新宿狭窄霓虹小巷，雨夜潮湿。
+· 特效启用: 原始质感 / 少滤镜 / clean-direct，保留皮肤真实纹理
+· 主角: 戴着白色棒球帽，蓝白配色运动鞋
+[0-10秒] 段 1 · 东京迷失。镜头从男主角正后方低机位慢速跟拍。两侧霓虹招牌。
+**对白（约 6 秒，低沉克制）**: "我走过无数条街道。"`;
+  const cleanBible = buildContinuityBible({ story: cleanStory, ratio: '16:9' });
+  const cleanPrompt = compileShotPromptWithContinuity({
+    bible: cleanBible,
+    mode: 'strong-vision',
+    shotIndex: 1,
+    shotCount: 6,
+    duration: 10,
+    title: '0-10s',
+    storyBeat: '段 1 · 东京迷失。镜头从男主角正后方低机位慢速跟拍。两侧霓虹招牌。',
+    visualPrompt: 'Follow this exact timestamped script section: 段 1 · 东京迷失。',
+    camera: '',
+    continuity: '',
+    transition: '',
+    cleanDirect: true,
+  });
+  // Hard correctness locks MUST survive cleanDirect:
+  assert.match(cleanPrompt, /\[SAGA-CONTINUITY-POLICY/, 'cleanDirect must keep SAGA-CONTINUITY-POLICY');
+  assert.match(cleanPrompt, /\[CHARACTERS|\[LOCKED-CHARACTERS/, 'cleanDirect must keep character lock');
+  assert.match(cleanPrompt, /\[WARDROBE|\[LOCKED-WARDROBE/, 'cleanDirect must keep wardrobe lock');
+  assert.match(cleanPrompt, /Saga long-form video continuity bible/, 'cleanDirect must keep the continuity bible body');
+  assert.match(cleanPrompt, /\[SCENE-PRIORITY\]/, 'cleanDirect must keep the scene-priority block');
+  assert.match(cleanPrompt, /\[EXPLICIT USER BRIEF LOCK/, 'cleanDirect must keep the explicit-user-brief lock');
+  // Aesthetic / style scaffolding MUST be stripped in cleanDirect:
+  assert.doesNotMatch(cleanPrompt, /\[STYLE-LOCK\]/, 'cleanDirect must drop STYLE-LOCK');
+  assert.doesNotMatch(cleanPrompt, /\[AESTHETIC-LOCK/, 'cleanDirect must drop AESTHETIC-LOCK');
+  assert.doesNotMatch(cleanPrompt, /\[REFERENCE-ROLE-SEPARATION\]/, 'cleanDirect must drop REFERENCE-ROLE-SEPARATION');
+  assert.doesNotMatch(cleanPrompt, /\[FRAME-OUT/, 'cleanDirect must drop FRAME-OUT');
+
+  // --- 8) Non-cleanDirect prompt keeps the full scaffolding for parity ---
+  const fullPrompt = compileShotPromptWithContinuity({
+    bible: cleanBible,
+    mode: 'strong-vision',
+    shotIndex: 1,
+    shotCount: 6,
+    duration: 10,
+    title: '0-10s',
+    storyBeat: '段 1 · 东京迷失。镜头从男主角正后方低机位慢速跟拍。两侧霓虹招牌。',
+    visualPrompt: 'Follow this exact timestamped script section: 段 1 · 东京迷失。',
+    camera: 'slow controlled dolly movement with stable subject tracking and visible parallax',
+    continuity: 'Carry forward the same character identity, wardrobe, props.',
+    transition: 'open from black into a mid-action first frame, not a static pose',
+    cleanDirect: false,
+  });
+  assert.match(fullPrompt, /\[STYLE-LOCK\]/, 'non-cleanDirect should keep STYLE-LOCK');
+  assert.match(fullPrompt, /\[AESTHETIC-LOCK/, 'non-cleanDirect should keep AESTHETIC-LOCK');
+  assert.match(fullPrompt, /\[REFERENCE-ROLE-SEPARATION\]/, 'non-cleanDirect should keep REFERENCE-ROLE-SEPARATION');
+  assert.match(fullPrompt, /\[FRAME-OUT/, 'non-cleanDirect should keep FRAME-OUT');
 
   console.log('saga cleanDirect/CAMERA/NEGATIVE decoupling smoke ok');
 }
