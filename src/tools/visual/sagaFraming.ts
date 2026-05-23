@@ -55,10 +55,51 @@ export type FramingDirective = {
 
 const HEADER_ZH = '🎯 OPENING FRAMING (highest priority — opening keyframe must obey these positional / directional rules):';
 
+// Scope the source story to the slice that actually belongs to the current
+// segment, so cues from a later segment (e.g. segment 5's "正面朝镜头 / 极近
+// 特写") do not bleed back and override segment 1-4's intended "侧面 / 中景
+// 全身". We split on whichever per-segment marker the brief uses ([N-M秒],
+// Scene N, 段 N, Shot N, Segment N) and return the slice from the Nth marker
+// to the (N+1)th — N = shotIndex. If the brief has fewer markers than
+// segments, the slice extraction degrades gracefully to the full story.
+function extractSegmentSlice(story: string, shotIndex: number): string | undefined {
+  if (!story || shotIndex < 1) return undefined;
+  // Try bracket time markers first — they are the strongest segmentation
+  // signal in saga briefs ("[0-8秒] / [8-16秒]" etc).
+  const bracketRe = /\[\s*\d+(?::\d{2})?\s*[-–—~至到]\s*\d+(?::\d{2})?\s*(?:秒|s|sec|seconds)?\s*\]/g;
+  let markers: Array<{ index: number }> = [];
+  for (const match of story.matchAll(bracketRe)) {
+    if (typeof match.index === 'number') markers.push({ index: match.index });
+  }
+  // Fall back to structural scene markers ("Scene 1 / 段 1 / 镜头 1 / 第 1 段")
+  // ONLY when the brief lacks bracket markers. Mixing both pollutes the
+  // segment boundary count and shreds each segment's slice into useless
+  // fragments (a "[0-8秒] 段 1 · 东亚四连穿越" line would otherwise yield two
+  // markers two characters apart).
+  if (markers.length < 2) {
+    const sceneRe = /(?:(?:scene|shot|segment)\s*#?\d+)|(?:(?:镜头|段)\s*\d+(?!\s*秒))|(?:第\s*\d+\s*段)/gi;
+    markers = [];
+    for (const match of story.matchAll(sceneRe)) {
+      if (typeof match.index === 'number') markers.push({ index: match.index });
+    }
+  }
+  if (markers.length < 2) return undefined;
+  const idx = shotIndex - 1;
+  if (idx < 0 || idx >= markers.length) return undefined;
+  const start = markers[idx]!.index;
+  const end = idx + 1 < markers.length ? markers[idx + 1]!.index : story.length;
+  return story.slice(start, end);
+}
+
 function pickCombinedText(args: FramingArgs): string {
   const beat = args.storyBeat ?? '';
   const story = args.sourceStory ?? '';
-  return `${beat}\n${story}`;
+  // storyBeat is always segment-specific (planner-extracted), so it goes
+  // first. Source story falls back to a per-segment slice when one can be
+  // recovered from the brief's own time markers; otherwise we use the full
+  // story (legacy behaviour) so single-marker briefs still get cues.
+  const scopedStory = extractSegmentSlice(story, args.shotIndex) ?? story;
+  return `${beat}\n${scopedStory}`;
 }
 
 function extractHorizontalPosition(text: string): FramingDirective | undefined {
