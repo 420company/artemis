@@ -1253,6 +1253,7 @@ async function runConfig(options: { cwd: string; locale: UiLocale }): Promise<vo
     lines.push(`    背景: ${visualProfile.image.defaultParams.background}`)
   }
   lines.push(`    水印: ${visualProfile.image.defaultParams.watermark ? '是' : '否'}`)
+  lines.push(`    NSFW: ${visualProfile.image.nsfw ? t('支持 / 已启用', 'supported / enabled') : t('不支持 / 安全模式', 'not supported / safe mode')}`)
   
   lines.push(c('  视频生成:', A.cyan))
   lines.push(`    启用: ${visualProfile.video.enabled ? c('✓', A.green) : c('✗', A.red)}`)
@@ -1269,6 +1270,7 @@ async function runConfig(options: { cwd: string; locale: UiLocale }): Promise<vo
   lines.push(`    风格: ${visualProfile.video.defaultParams.style}`)
   lines.push(`    格式: ${visualProfile.video.defaultParams.format}`)
   lines.push(`    帧率: ${visualProfile.video.defaultParams.framerate}`)
+  lines.push(`    NSFW: ${visualProfile.video.nsfw ? t('支持 / 已启用', 'supported / enabled') : t('不支持 / 安全模式', 'not supported / safe mode')}`)
 
   const visualNotes = new Set<string>()
   if (visualProfile.enabled) {

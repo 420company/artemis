@@ -531,6 +531,13 @@ export type AgentAction =
       storyboardImagePaths?: string[];
       referenceVideoPaths?: string[];
       referenceAudioPaths?: string[];
+      soundtrackPath?: string;
+      soundtrackUrl?: string;
+      soundtrackStartSec?: number;
+      soundtrackVolumeDb?: number;
+      environmentVolumeDb?: number;
+      soundtrackFadeInSec?: number;
+      soundtrackFadeOutSec?: number;
       // Literal "first frame of the video" image input. role:"first_frame"
       // in the BytePlus / Seedance request — pins the exact opening frame.
       // Provider may still apply content moderation; does NOT reliably

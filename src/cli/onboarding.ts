@@ -177,6 +177,39 @@ async function askYesNo(
   }
 }
 
+async function askNsfwCapability(
+  t: (zh: string, en: string) => string,
+  kind: 'image' | 'video',
+  defaultYes = false,
+  ui?: VisualModelSetupUi,
+): Promise<boolean> {
+  return chooseVisualSetupOption<boolean>({
+    title: kind === 'image'
+      ? t('这个图片生成 API 是否支持 NSFW / 成人内容？', 'Does this image generation API support NSFW / adult content?')
+      : t('这个视频生成 API 是否支持 NSFW / 成人内容？', 'Does this video generation API support NSFW / adult content?'),
+    hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+    initialIndex: defaultYes ? 0 : 1,
+    choices: [
+      {
+        label: t('支持，启用 NSFW 全链路', 'Yes, enable NSFW end-to-end'),
+        value: true,
+        description: t(
+          '写入 providers.json；后续会启用成人模式改写、跳过不必要的安全衍生限制，并关闭 provider 黑盒安全扩写。',
+          'Persisted to providers.json; later enables adult-aware rewriting, skips unnecessary safety-derivative restrictions, and disables provider-side black-box safety expansion.',
+        ),
+      },
+      {
+        label: t('不支持，使用默认安全模式', 'No, use default safe mode'),
+        value: false,
+        description: t(
+          '保持默认安全链路；适合官方或受限 API。',
+          'Keeps the default safe pipeline; suitable for official or restricted APIs.',
+        ),
+      },
+    ],
+  }, ui)
+}
+
 function sectionHeader(step: string, title: string, subtitle: string): void {
   console.log()
   console.log(c(`  ${step}  ${title}`, A.bold + A.cyan))
@@ -485,9 +518,11 @@ function buildVisualProfileSummaryLines(
 ): string[] {
   const lines = [
     `${t('图片', 'Image')}: ${visualProfile.image.provider}/${visualProfile.image.model}`,
+    `${t('图片 NSFW', 'Image NSFW')}: ${visualProfile.image.nsfw ? t('支持 / 已启用', 'supported / enabled') : t('不支持 / 安全模式', 'not supported / safe mode')}`,
   ]
   if (visualProfile.video.enabled) {
     lines.push(`${t('视频', 'Video')}: ${visualProfile.video.provider}/${visualProfile.video.model}`)
+    lines.push(`${t('视频 NSFW', 'Video NSFW')}: ${visualProfile.video.nsfw ? t('支持 / 已启用', 'supported / enabled') : t('不支持 / 安全模式', 'not supported / safe mode')}`)
     lines.push(`${t('本地视频/音频参考托管', 'Local video/audio reference hosting')}: ${visualProfile.assetHosting?.enabled ? visualProfile.assetHosting.provider : t('未配置', 'not configured')}`)
   } else {
     lines.push(`${t('视频', 'Video')}: ${t('未启用', 'disabled')}`)
@@ -692,6 +727,8 @@ async function configureVisualModel(
     return null
   }
   const imageModel = await askOptional(c('  ' + t(`模型名称（留空使用默认 ${imageDefaultModel}）: `, `Model name (blank = ${imageDefaultModel}): `), A.bold + A.yellow))
+  console.log()
+  const imageNsfw = await askNsfwCapability(t, 'image', false, options.ui)
 
   // 
   console.log()
@@ -744,12 +781,15 @@ async function configureVisualModel(
               return null
             }
 
+            const videoNsfw = await askNsfwCapability(t, 'video', false, options.ui)
+
             videoConfig = {
               enabled: true,
               provider: videoProvider,
               apiKey: videoApiKey,
               baseUrl: videoBaseUrl,
               model: videoModel,
+              nsfw: videoNsfw,
               defaultParams: bytePlusDefaultVideoParams(preset),
             }
             break providerLoop
@@ -769,6 +809,8 @@ async function configureVisualModel(
         return null
       }
       const videoModel = await askOptional(c('  ' + t(`模型名称（留空使用默认 ${videoDefaultModel}）: `, `Model name (blank = ${videoDefaultModel}): `), A.bold + A.yellow))
+      console.log()
+      const videoNsfw = await askNsfwCapability(t, 'video', false, options.ui)
 
       videoConfig = {
         enabled: true,
@@ -776,6 +818,7 @@ async function configureVisualModel(
         apiKey: videoApiKey,
         baseUrl: videoBaseUrl || videoDefaultBaseUrl,
         model: videoModel || videoDefaultModel,
+        nsfw: videoNsfw,
         defaultParams: {
           duration: '10s',
           resolution: '1080p',
@@ -795,6 +838,7 @@ async function configureVisualModel(
       apiKey: '',
       baseUrl: defaultVisualBaseUrlForProvider('byteplus'),
       model: defaultVisualModelForProvider('byteplus', 'video'),
+      nsfw: false,
       defaultParams: {
         duration: '10s',
         resolution: '1080p',
@@ -817,6 +861,7 @@ async function configureVisualModel(
       apiKey: imageApiKey,
       baseUrl: imageBaseUrl || imageDefaultBaseUrl,
       model: imageModel || imageDefaultModel,
+      nsfw: imageNsfw,
       defaultParams: imageProvider === 'openai'
         ? {
             size: '1024x1024',
@@ -1136,43 +1181,6 @@ export async function runVisualModelSetup(
 
   await persistVisualProfile(cwd, visualProfile)
   await awakenDreamSystemForVisualProfile(visualProfile)
-
-  // ── NSFW capability toggle ────────────────────────────────────────────
-  // Allow the user to opt-in to NSFW mode for image/video providers that
-  // accept real-person or mature content. This skips the illustrated
-  // safety-derivative step in Super Visual and bypasses the real-person
-  // safety gate in generateLongVideo.
-  const currentNsfw = {
-    image: visualProfile.image?.nsfw ?? false,
-    video: visualProfile.video?.nsfw ?? false,
-  };
-  if (currentNsfw.image || currentNsfw.video) {
-    console.log(c(`    🔷 NSFW: image=${currentNsfw.image ? 'on' : 'off'} video=${currentNsfw.video ? 'on' : 'off'}`, A.dim));
-  }
-  const enableNsfw = await chooseInteractiveOption<'both' | 'video-only' | 'off'>({
-    title: t('NSFW 模式（允许写实/成人内容直传，跳过安全衍生步骤）', 'NSFW mode (allow photoreal/mature content through, skip safety-derivative)'),
-    initialIndex: currentNsfw.image && currentNsfw.video ? 0 : currentNsfw.video ? 1 : 2,
-    choices: [
-      { label: t('图片+视频都启用', 'Image + Video enabled'), value: 'both' },
-      { label: t('仅视频启用', 'Video only'), value: 'video-only' },
-      { label: t('关闭（默认安全模式）', 'Off (default safe mode)'), value: 'off' },
-    ],
-  });
-
-  const updatedProfile: VisualModelConfig = {
-    ...visualProfile,
-    image: {
-      ...visualProfile.image,
-      nsfw: enableNsfw === 'both',
-    },
-    video: {
-      ...visualProfile.video,
-      nsfw: enableNsfw === 'both' || enableNsfw === 'video-only',
-    },
-  };
-  if (updatedProfile.image.nsfw !== visualProfile.image?.nsfw || updatedProfile.video.nsfw !== visualProfile.video?.nsfw) {
-    await persistVisualProfile(cwd, updatedProfile);
-  }
 
   console.log(c('  ' + t('当前已保存的视觉配置', 'Saved visual configuration'), A.bold))
   for (const line of buildVisualProfileSummaryLines(visualProfile, t)) {

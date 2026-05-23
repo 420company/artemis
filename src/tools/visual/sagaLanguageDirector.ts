@@ -116,12 +116,16 @@ export function buildDeterministicEnglishVisualPrompt(input: {
   originalText: string;
   dialogueLines?: SagaDialogueLine[];
   subtitleMode?: SagaSubtitleMode;
+  adultMode?: boolean;
 }): string {
   const dialogueLines = input.dialogueLines ?? extractSagaDialogueLines(input.originalText);
   return [
     'Generation instruction language: English.',
     'Preserve identity, ethnicity, wardrobe, setting, props, actions, relationships, pacing, duration, aspect ratio, audio intent, and all constraints. If the user describes Asian/Chinese/Japanese/Korean characters, state that identity explicitly; do not westernize.',
     'Convert abstract emotion into visible cinematic behavior (facial micro-expressions, posture, breathing, gaze, movement). Use concrete visual language over metaphor. Avoid safety boilerplate, logos, captions unless requested.',
+    input.adultMode
+      ? 'Adult-content mode: preserve the user\'s adult/explicit intent instead of softening it into non-explicit romance. Do not add safe-for-work phrasing, moral disclaimers, censorship language, or negative constraints such as avoiding nudity/genitals/sex acts when the user asked for them.'
+      : '',
     buildDialogueBlock(dialogueLines, input.subtitleMode),
     '',
     'User brief (source material to render):',
@@ -166,16 +170,25 @@ Hard rules:
 8. Do not add unrelated characters, locations, props, moralizing text, disclaimers, subtitles, watermarks, logos, or extra on-screen text.
 9. Return JSON only: {"generationText":"...", "dialogueLines":[{"text":"...","language":"...","use":"spoken_dialogue|voiceover|subtitle"}]}.`;
 
+const VISUAL_DIRECTOR_ADULT_REWRITE_SYSTEM_PROMPT = `${VISUAL_DIRECTOR_REWRITE_SYSTEM_PROMPT}
+
+Adult-content mode is enabled because the user configured an unrestricted/NSFW-capable video provider.
+Additional hard rules:
+10. Preserve the user's adult/explicit intent; do not convert explicit material into non-explicit romance, tasteful implication, lingerie-only framing, or censored erotica.
+11. Do not add phrases such as "non-explicit", "avoid visible genitalia", "avoid sex acts", "avoid penetration", "implied only", "covered nudity", "censored", "safe", or similar negative constraints unless the user explicitly requested those limits.
+12. You may improve pacing, shot order, visual clarity, consent/age-neutral wording, camera language, lighting, continuity, and anatomy/physics clarity, but you must not reverse the requested content category.`;
+
 export async function normalizeSagaPromptForVideoGeneration(options: {
   cwd: string;
   text: string;
   enableLlmRewrite?: boolean;
   subtitleMode?: SagaSubtitleMode;
+  adultMode?: boolean;
 }): Promise<SagaGenerationLanguageResult> {
   const originalText = options.text.trim();
   const dialogueLines = extractSagaDialogueLines(originalText);
   const subtitleMode = options.subtitleMode ?? 'auto';
-  const fallback = buildDeterministicEnglishVisualPrompt({ originalText, dialogueLines, subtitleMode });
+  const fallback = buildDeterministicEnglishVisualPrompt({ originalText, dialogueLines, subtitleMode, adultMode: options.adultMode });
   if (!options.enableLlmRewrite) {
     return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
   }
@@ -191,7 +204,7 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
   const body = {
     model: chat.model,
     messages: [
-      { role: 'system', content: VISUAL_DIRECTOR_REWRITE_SYSTEM_PROMPT },
+      { role: 'system', content: options.adultMode ? VISUAL_DIRECTOR_ADULT_REWRITE_SYSTEM_PROMPT : VISUAL_DIRECTOR_REWRITE_SYSTEM_PROMPT },
       { role: 'user', content: JSON.stringify(userPayload, null, 2) },
     ],
     temperature: 0.35,

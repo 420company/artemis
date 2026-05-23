@@ -90,6 +90,7 @@ export class CustomProvider implements VisualProvider {
       }
 
       const model = params.model || imageConfig.model || 'custom-image'
+
       const body: Record<string, unknown> = {
         model,
         prompt: params.prompt,
@@ -222,6 +223,9 @@ export class CustomProvider implements VisualProvider {
       const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
       const durationNum = Math.max(1, Math.min(60, Math.floor(duration)))
       const ratio = params.ratio || '16:9'
+      const promptExtend = videoConfig.nsfw === true
+        ? false
+        : (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false
 
       // Local file paths are resolved and uploaded by generateVideo before the
       // provider is called. Provider protocol code should only send public URLs.
@@ -268,7 +272,7 @@ export class CustomProvider implements VisualProvider {
           resolution: (videoConfig.defaultParams.resolution || '720p').toUpperCase(),
           ratio,
           duration: durationNum,
-          prompt_extend: (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false,
+          prompt_extend: promptExtend,
           watermark: params.watermark === true,
         },
       }
@@ -400,6 +404,9 @@ export class CustomProvider implements VisualProvider {
       const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
       const durationNum = Math.max(1, Math.min(15, Math.floor(duration)))
       const ratio = params.ratio || '16:9'
+      const promptExtend = videoConfig.nsfw === true
+        ? false
+        : (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false
 
       // Local file paths are resolved and uploaded by generateVideo before the
       // provider is called. Seedance/Dreamina rejects data: URIs, so only public
@@ -477,6 +484,7 @@ export class CustomProvider implements VisualProvider {
         resolution: videoConfig.defaultParams.resolution || '720p',
         ratio,
         generate_audio: params.generateAudio !== false && /^dreamina-seedance-2/i.test(model.trim()),
+        prompt_extend: promptExtend,
         watermark: params.watermark === true,
       }
 

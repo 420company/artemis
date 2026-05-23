@@ -337,6 +337,11 @@ function resolveRatio(raw: string | undefined): SagaRatio {
 function sentenceChunks(story: string): string[] {
   const normalized = story.replace(/\s+/g, ' ').trim();
   if (!normalized) return [];
+  const sceneParts = normalized
+    .split(/(?=\bScene\s+\d+\s*[—:-]|\bShot\s+\d+\s*[—:-]|镜头\s*\d+\s*[：:—-]|场景\s*\d+\s*[：:—-])/gi)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (sceneParts.length > 1) return sceneParts;
   const parts = normalized
     .split(/(?<=[。！？!?.])\s+|[\n\r]+/g)
     .map((part) => part.trim())
@@ -348,6 +353,64 @@ function sentenceChunks(story: string): string[] {
     chunks.push(normalized.slice(index, index + 220).trim());
   }
   return chunks.filter(Boolean);
+}
+
+function trimToSentenceBoundary(value: string, maxChars: number): string {
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(0, maxChars);
+  const boundary = Math.max(
+    slice.lastIndexOf('. '),
+    slice.lastIndexOf('。'),
+    slice.lastIndexOf('！'),
+    slice.lastIndexOf('？'),
+    slice.lastIndexOf('! '),
+    slice.lastIndexOf('? '),
+    slice.lastIndexOf('; '),
+    slice.lastIndexOf('；'),
+  );
+  if (boundary > Math.floor(maxChars * 0.55)) return slice.slice(0, boundary + 1).trim();
+  const comma = Math.max(slice.lastIndexOf(', '), slice.lastIndexOf('，'), slice.lastIndexOf(': '), slice.lastIndexOf('：'));
+  if (comma > Math.floor(maxChars * 0.65)) return slice.slice(0, comma + 1).trim();
+  return slice.trim();
+}
+
+function extractLocalPromptReferencePaths(text: string): string[] {
+  const paths = new Set<string>();
+  const re = /(?:^|[\s"'“”‘’(（])(?<path>\/(?:[^\s"'“”‘’()（）]+\/)*[^\s"'“”‘’()（）]+\.prompt\.txt)\b/g;
+  for (const match of text.matchAll(re)) {
+    const p = match.groups?.path?.trim();
+    if (p) paths.add(p);
+  }
+  return Array.from(paths);
+}
+
+async function expandLocalPromptReferencesInStory(story: string): Promise<string> {
+  const refs = extractLocalPromptReferencePaths(story);
+  if (refs.length === 0) return story;
+  const blocks: string[] = [];
+  for (const ref of refs.slice(0, 8)) {
+    try {
+      const body = await readFile(ref, 'utf8');
+      const useful = body
+        .replace(/^# Saga segment.*$/gmi, '')
+        .replace(/^attempt:.*$/gmi, '')
+        .replace(/^hasAnyImageRef:.*$/gmi, '')
+        .replace(/^referenceImagePaths:.*$/gmi, '')
+        .replace(/^referenceImageUrls:.*$/gmi, '')
+        .trim();
+      blocks.push([
+        `[DIRECTOR REFERENCE FROM LOCAL PROMPT: ${ref}]`,
+        trimToSentenceBoundary(useful, 3600),
+        '[/DIRECTOR REFERENCE]',
+      ].join('\n'));
+    } catch (error) {
+      toolWarn(`⚠️ Saga: 无法读取本地 prompt 引用 ${ref}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (blocks.length === 0) return story;
+  toolLog(`📎 Saga: 已展开 ${blocks.length} 个本地 .prompt.txt 导演参考。`);
+  return [story, '', blocks.join('\n\n')].join('\n');
 }
 
 function sanitizeInline(value: string | undefined, fallback: string): string {
@@ -608,7 +671,7 @@ function buildSegments(options: {
     // into storyBeat / visualPrompt instead of writing actual scene content.
     // When detected, fall back to the story-derived chunk so the keyframe
     // generation has REAL action context to render.
-    const storyChunkFallback = (beats.slice(start, end).join(' ') || options.story).slice(0, 900);
+    const storyChunkFallback = trimToSentenceBoundary(beats.slice(start, end).join(' ') || options.story, 1800);
     const rawPlannedStoryBeat = looksLikeIdentityRuleBoilerplate(planned?.storyBeat) ? undefined : planned?.storyBeat;
     const duration = usePlannedDurations
       ? (durations[index] ?? normalizeShotDuration(planned?.duration, options.preferredSegmentSeconds, options.maxSegmentSeconds))
@@ -621,7 +684,7 @@ function buildSegments(options: {
     // and feed the per-segment story chunk in verbatim — the user's prompt
     // becomes the dominant signal exactly as intended.
     const storyBeatFallback = options.cleanDirect
-      ? (storyChunkFallback || options.story).slice(0, 900)
+      ? trimToSentenceBoundary(storyChunkFallback || options.story, 1800)
       : buildMotionTimelineFallback(storyChunkFallback, duration, index);
     const storyBeat = sanitizeInline(rawPlannedStoryBeat, storyBeatFallback);
     const title = sanitizeInline(planned?.title, `Shot ${index + 1}`);
@@ -912,6 +975,7 @@ export async function executeGenerateLongVideo(
         ? `\n\nReference notes from user: ${referenceNotes.join(' | ')}`
         : '',
     ].join('').trim();
+    story = await expandLocalPromptReferencesInStory(story);
     // Gate LLM rewrite: when the user has explicitly structured their brief
     // (timecodes [X-Y秒], MM:SS ranges, Scene/Shot/镜头/段 markers, or
     // explicit dialogue markers), skip the rewrite entirely. Rewrite
@@ -926,8 +990,11 @@ export async function executeGenerateLongVideo(
       text: story,
       enableLlmRewrite: !action.cleanDirect && !briefIsStructured,
       subtitleMode: action.subtitleMode ?? 'auto',
+      adultMode: videoNsfw,
     });
-    if (briefIsStructured) {
+    if (videoNsfw) {
+      toolLog(`🔞 Saga Visual Director: NSFW video provider detected; using adult-aware ${languageNormalized.usedLlmRewrite ? 'LLM rewrite' : 'deterministic rewrite'} without safe-for-work dilution.`);
+    } else if (briefIsStructured) {
       toolLog('📐 Saga: 检测到结构化 brief（时间码/镜头标记），跳过 LLM 改写以保留用户原文的所有具体地点/动作/约束。');
     }
     story = languageNormalized.generationText;
@@ -1580,7 +1647,19 @@ export async function executeGenerateLongVideo(
     // model a hard identity anchor + a hard scene anchor for that segment.
     const segmentKeyframePaths = new Map<number, string>();
     const segmentKeyframeFailures: Array<{ index: number; reason: string }> = [];
-    const shouldGenerateSegmentKeyframes = !cleanDirect && superVisualMode.enabled && superVisualMode.mode !== 'provided-turnaround';
+    // Per-segment Image-2 keyframes are what carry visual continuity between
+    // segments — the keyframe call composites the canonical turnaround
+    // (identity anchor) WITH the previous segment's last frame (scene
+    // handoff). Without keyframes the proxyChainEligible guard at ~:1740
+    // also fails (chain requires a keyframe for human subjects), so every
+    // segment ends up generated independently with only the static
+    // turnaround as reference — which loses character identity across cuts.
+    // A previous version skipped keyframes for provided-turnaround mode
+    // to avoid blocking when gpt-image-2 was down; but generateSegmentKeyframe
+    // already collects failures into segmentKeyframeFailures and degrades
+    // gracefully (each segment still proceeds with the turnaround alone),
+    // so the gate cost continuity for no real benefit.
+    const shouldGenerateSegmentKeyframes = !cleanDirect && superVisualMode.enabled;
     let lastHeartbeat = Date.now();
     const heartbeatInterval = 60_000 * 2; // 2 minutes
 
@@ -1647,8 +1726,6 @@ export async function executeGenerateLongVideo(
           } else {
             segmentKeyframeFailures.push({ index: segment.index, reason: keyframeResult.reason });
           }
-        } else if (superVisualMode.enabled && superVisualMode.mode === 'provided-turnaround' && segment.index === 1) {
-          toolLog('🎯 用户提供三视图：跳过 Image-2 keyframe，直接将三视图作为视频身份参考，避免图片模型不可用时阻塞。');
         }
 
         const baseReq = {
@@ -1902,6 +1979,15 @@ export async function executeGenerateLongVideo(
       // segments that failed the audio retry).
       hasAudio: userAudioPreference && audioRetriedSegments.length < segments.length,
       colorMatch: action.colorMatch ?? false,
+      soundtrack: action.soundtrackPath || action.soundtrackUrl ? {
+        path: action.soundtrackPath,
+        url: action.soundtrackUrl,
+        startSec: action.soundtrackStartSec,
+        volumeDb: action.soundtrackVolumeDb,
+        environmentVolumeDb: action.environmentVolumeDb,
+        fadeInSec: action.soundtrackFadeInSec,
+        fadeOutSec: action.soundtrackFadeOutSec,
+      } : undefined,
       encode: {
         quality,
         fps,
@@ -2210,6 +2296,7 @@ export async function executeGenerateLongVideo(
       `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s`,
       `   · Transitions:  ${transitionSummary}`,
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
+      `   · Soundtrack:   ${renderResult.soundtrackApplied ? `mixed · ${renderResult.soundtrackPath ?? 'provided'}` : 'none'}`,
       `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
       `   · Super visual: ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${superVisualMode.reason})`}`,
       `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''}`,

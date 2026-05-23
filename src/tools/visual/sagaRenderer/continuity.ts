@@ -64,6 +64,17 @@ export type SagaBibleInput = {
   subtitleMode?: 'auto' | 'always' | 'off';
 };
 
+function compactSourceStoryForBible(story: string | undefined): string {
+  const normalized = (story ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  const maxChars = 12000;
+  if (normalized.length <= maxChars) return normalized;
+
+  const head = normalized.slice(0, Math.floor(maxChars * 0.72));
+  const tail = normalized.slice(-Math.floor(maxChars * 0.24));
+  return `${head} … [SOURCE STORY CONTINUES; middle compacted only for continuity-bible size, segment storyBeats remain authoritative] … ${tail}`;
+}
+
 // Build the NEGATIVE block, hardened against the on-screen-text failure mode
 // when the user explicitly said "no subtitles" (and conversely loosened when
 // they want subtitles rendered).
@@ -219,7 +230,7 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     `Aspect ratio: ${input.ratio}.`,
     'Maintain character/person identity as a global hard rule across generated clips. Preserve face, silhouette, body traits, hair, and recurring wardrobe/material cues unless the user explicitly asks for transformation or multiple identities.',
     'Use selective scene continuity: when a story beat changes location, let the scene change happen deliberately; when the beat continues the same place, preserve the relevant location/environment anchors and visual through-line.',
-    `Source story: ${input.story.replace(/\s+/g, ' ').trim().slice(0, 1600)}`,
+    `Source story: ${compactSourceStoryForBible(input.story)}`,
   ].join(' ');
 
   return {

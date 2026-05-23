@@ -128,6 +128,8 @@ export type SagaRenderResult = {
   outputPath: string;
   durationSeconds: number;
   ffmpegArgs: string[];
+  soundtrackApplied?: boolean;
+  soundtrackPath?: string;
   encoderUsed: string;
   appliedTransitions: SagaTransitionPlan[];
   reviewFrames?: {

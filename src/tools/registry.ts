@@ -186,6 +186,14 @@ function validateStringArray(
   }
 }
 
+function validateOptionalNumber(value: unknown, label: string, errors: string[]): void {
+  if (value === undefined) return;
+  const num = typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value.trim()) : value;
+  if (typeof num !== 'number' || !Number.isFinite(num)) {
+    errors.push(`${label} must be a number.`);
+  }
+}
+
 function validateAgentRoleValue(value: unknown, errors: string[]): void {
   validateEnumString(value, 'role', AGENT_ROLE_VALUES, errors);
 }
@@ -624,6 +632,13 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateStringArray(action?.referenceImagePaths, 'referenceImagePaths', errors);
   validateStringArray(action?.referenceVideoPaths, 'referenceVideoPaths', errors);
   validateStringArray(action?.referenceAudioPaths, 'referenceAudioPaths', errors);
+  validateOptionalNonEmptyString(action?.soundtrackPath, 'soundtrackPath', errors);
+  validateOptionalNonEmptyString(action?.soundtrackUrl, 'soundtrackUrl', errors);
+  validateOptionalNumber(action?.soundtrackStartSec, 'soundtrackStartSec', errors);
+  validateOptionalNumber(action?.soundtrackVolumeDb, 'soundtrackVolumeDb', errors);
+  validateOptionalNumber(action?.environmentVolumeDb, 'environmentVolumeDb', errors);
+  validateOptionalNumber(action?.soundtrackFadeInSec, 'soundtrackFadeInSec', errors);
+  validateOptionalNumber(action?.soundtrackFadeOutSec, 'soundtrackFadeOutSec', errors);
   validateBooleanValue(action?.generateAudio, 'generateAudio', errors);
   validateBooleanValue(action?.watermark, 'watermark', errors);
   validatePositiveInteger(action?.maxPolls, 'maxPolls', errors);

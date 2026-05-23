@@ -578,6 +578,22 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
     现代视频模型（Seedance、Veo/Sora 类等）<strong>可能默认生成音频，包括音乐</strong>。如果你打算后期自己叠 BGM，<strong>一定要写明</strong> AI 阶段只出环境音，否则模型自己 hallucinate 一段 BGM 跟你后期 BGM 打架。
   </div>
 
+
+  <h3>3.4b 本地 BGM / Soundtrack 后期混音</h3>
+  <p>在 Saga 工作流中，用户确认总时长后会出现 BGM 菜单。BGM 是<strong>最终 FFmpeg 后期混音</strong>，不是让视频模型临场生成音乐。</p>
+  <table class="tbl">
+    <thead><tr><th>参数/输入</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>soundtrackPath</code></td><td>本地音频文件路径，如 <code>/Users/me/music/song.mp3</code></td></tr>
+      <tr><td><code>soundtrackUrl</code></td><td>可直接下载的音频文件 URL，必须是 mp3/wav/m4a/aac/flac/ogg 等真实音频直链</td></tr>
+      <tr><td><code>soundtrackStartSec</code></td><td>从音乐第几秒开始裁剪，例如 <code>79</code> 表示从 1:19 开始</td></tr>
+      <tr><td><code>soundtrackVolumeDb</code></td><td>BGM 混音音量，默认约 <code>-12dB</code></td></tr>
+      <tr><td><code>environmentVolumeDb</code></td><td>视频原环境音/对白音量，默认约 <code>-18dB</code></td></tr>
+      <tr><td><code>soundtrackFadeInSec</code> / <code>soundtrackFadeOutSec</code></td><td>BGM 淡入/淡出秒数</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn"><span class="tag">边界</span>Spotify / Apple Music / YouTube Music 等<strong>播放页链接</strong>不是音频文件直链，Artemis 不会绕过平台授权去抓取下载。请提供本地音频文件，或可直接下载的音频 URL。</div>
+
   <h3>3.5 字幕模式（在工作流里选）</h3>
   <table class="tbl">
     <thead><tr><th>模式</th><th>行为</th></tr></thead>
@@ -724,7 +740,8 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
             NO pan, NO tilt, NO zoom, NO dolly, NO handheld shake]
 · CHARACTER LOCK: [主角永久不变的服装、配饰、发型、妆容]
 · 声音层级:
-  - 背景音乐: [是 AI 生成 / 后期叠加]
+  - 背景音乐: [不加 BGM / 后期叠加本地 BGM / 使用直接音频 URL]
+  - BGM 参数（可选）: 本地路径或音频直链、从第几秒开始、BGM 音量、环境音音量、淡入淡出
   - 环境音: [描述每段的环境音风格]
   - 对白: [描述对白整体音量、口吻、几句话]
   - <span class="tok-str">AI 生成阶段只出环境音；音乐和对白都是后期叠加</span>

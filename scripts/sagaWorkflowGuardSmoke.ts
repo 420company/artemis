@@ -115,10 +115,19 @@ async function main(): Promise<void> {
     locale: 'zh',
     text: '20秒',
   });
-  assert.equal(afterFinalDuration.handled, false, 'after final duration Saga should emit generate_long_video action');
-  assert.equal(afterFinalDuration.action?.totalDuration, 20, 'final duration should be treated as total stitched duration');
-  assert.equal(afterFinalDuration.action?.subtitleMode, 'always', 'subtitle menu choice should be carried into generate_long_video action');
-  assert.match(afterFinalDuration.action?.prompt ?? '', /subtitleMode: "always"/, 'workflow prompt should tell the model to pass subtitleMode');
+  assert.equal(afterFinalDuration.handled, true, 'after final duration Saga should ask BGM mode');
+  assert.match(afterFinalDuration.reply, /是否添加本地 BGM|Add local BGM/i, 'BGM menu should appear after duration confirmation');
+  const afterBgmSkip = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '不加 BGM',
+  });
+  assert.equal(afterBgmSkip.handled, false, 'after BGM choice Saga should emit generate_long_video action');
+  assert.equal(afterBgmSkip.action?.totalDuration, 20, 'final duration should be treated as total stitched duration');
+  assert.equal(afterBgmSkip.action?.subtitleMode, 'always', 'subtitle menu choice should be carried into generate_long_video action');
+  assert.match(afterBgmSkip.action?.prompt ?? '', /subtitleMode: "always"/, 'workflow prompt should tell the model to pass subtitleMode');
 
   const scriptedKey = `${key}-scripted`;
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频' });
@@ -136,8 +145,10 @@ async function main(): Promise<void> {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: 'B 旧影院里的女孩' });
   }
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '自动' });
-  const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '10秒' });
-  assert.equal(scriptedFinal.handled, false, 'scripted Saga should emit generate_long_video action');
+  const scriptedBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '10秒' });
+  assert.equal(scriptedBgm.handled, true, 'scripted Saga should ask BGM after duration');
+  const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '不加' });
+  assert.equal(scriptedFinal.handled, false, 'scripted Saga should emit generate_long_video action after BGM choice');
   assert.equal(scriptedFinal.action?.preserveUserScript, true, 'explicit user script must be preserved through generate_long_video action');
   assert.match(scriptedFinal.action?.prompt ?? '', /preserveUserScript: true/, 'workflow prompt should tell the model to pass preserveUserScript');
 
@@ -150,8 +161,10 @@ async function main(): Promise<void> {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: 'X' });
   }
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '无字幕' });
-  const cleanFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '10秒' });
-  assert.equal(cleanFinal.handled, false, 'clean-direct Saga should emit generate_long_video action');
+  const cleanBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '10秒' });
+  assert.equal(cleanBgm.handled, true, 'clean-direct Saga should ask BGM after duration');
+  const cleanFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '不加' });
+  assert.equal(cleanFinal.handled, false, 'clean-direct Saga should emit generate_long_video action after BGM choice');
   assert.equal(cleanFinal.action?.cleanDirect, true, 'clean/direct wording should enable cleanDirect mode');
   assert.match(cleanFinal.action?.prompt ?? '', /cleanDirect: true/, 'workflow prompt should tell the model to pass cleanDirect');
 

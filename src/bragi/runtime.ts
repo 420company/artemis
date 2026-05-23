@@ -46,6 +46,7 @@ import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
 import { broadcastToBridges } from '../services/bridgeNotifier.js'
 import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
+import { existsSync, statSync } from 'node:fs'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
 
@@ -95,6 +96,36 @@ function summarizeToolOutput(output: unknown): string {
   if (typeof output !== 'string') return ''
   const compact = output.replace(/\s+/g, ' ').trim()
   return compact ? ` · ${truncate(compact, 160)}` : ''
+}
+
+function formatBytesCompact(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const digits = value >= 10 || unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+function buildLongVideoMobileCompletionReply(output: unknown, locale: UiLocale): string {
+  const videoPath = extractVideoPathsFromToolOutput('generate_long_video', output)[0]
+  let detail = ''
+  if (videoPath) {
+    const name = path.basename(videoPath)
+    let size = ''
+    try {
+      if (existsSync(videoPath)) size = formatBytesCompact(statSync(videoPath).size)
+    } catch { /* ignore size lookup */ }
+    detail = size ? `${name} · ${size}` : name
+  }
+  return pickLocale(locale, {
+    zh: ['✅ 长视频生成完成', '🎬 已自动发送视频附件到当前聊天。', detail ? `📎 ${detail}` : ''].filter(Boolean).join('\n'),
+    en: ['✅ Long video is ready', '🎬 Sent the video attachment to this chat automatically.', detail ? `📎 ${detail}` : ''].filter(Boolean).join('\n'),
+  })
 }
 
 function normalizeBridgeWorkspacePath(value: string | undefined): string | null {
@@ -181,7 +212,7 @@ function extractMediaPathsFromToolOutput(
   // The generic scanner above intentionally stops at whitespace, so handle
   // these explicit media-path lines separately.
   const labeledLineRe = new RegExp(
-    `(?:^|\\n)\\s*(?:(?:Video|Image|Output|Path|File)\\s*[:：]|Generated\\s+(?:image|video)[^\\n]*?\\bsaved\\s+to\\b)\\s*(.+?\\.(?:${extensionPattern}))\\s*$`,
+    `(?:^|\\n)\\s*(?:(?:Video|Image|Output|Path|File)\\s*[:：]|Generated\\s+(?:image|video)[^\\n]*?\\bsaved\\s+to\\b)\\s*(.+?\\.(?:${extensionPattern}))\\s*(?=\\n|$)`,
     'gi',
   )
   while ((match = labeledLineRe.exec(text)) !== null) {
@@ -189,6 +220,24 @@ function extractMediaPathsFromToolOutput(
       ?.trim()
       .replace(/[),，。]+$/g, '')
     if (candidate && extensionRe.test(candidate)) {
+      found.add(candidate)
+    }
+  }
+
+  const openLineRe = new RegExp(`\\bopen\\s+["'](.+?\\.(?:${extensionPattern}))["']`, 'gi')
+  while ((match = openLineRe.exec(text)) !== null) {
+    const candidate = match[1]?.trim()
+    if (candidate && extensionRe.test(candidate)) {
+      found.add(candidate)
+    }
+  }
+
+  for (const line of text.split('\n')) {
+    const candidate = line
+      .trim()
+      .replace(/^open\s+["]?/, '')
+      .replace(/[")，。]+$/g, '')
+    if ((candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate)) && extensionRe.test(candidate)) {
       found.add(candidate)
     }
   }
@@ -781,7 +830,7 @@ export async function runRemoteCommand(
           await store.save(updated)
           return {
             replies: [result.ok
-              ? t(`长视频生成完成。\n${truncate(result.output, 1200)}`, `Long video generation completed.\n${truncate(result.output, 1200)}`)
+              ? buildLongVideoMobileCompletionReply(result.output, locale)
               : t(`长视频生成失败：\n${truncate(result.output, 1200)}`, `Long video generation failed:\n${truncate(result.output, 1200)}`)],
             storedSession: updated,
             permissionMode: binding.permissionMode,
