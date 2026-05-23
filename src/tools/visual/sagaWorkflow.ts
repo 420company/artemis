@@ -62,7 +62,8 @@ type SagaWorkflowStage =
   | 'awaiting_subtitle_mode'
   | 'awaiting_ratio'
   | 'awaiting_duration'
-  | 'awaiting_bgm';
+  | 'awaiting_bgm'
+  | 'awaiting_bgm_asset';
 
 type IdentitySource = 'turnaround' | 'character_image' | 'direct_image' | 'text_only';
 type SubtitleMode = 'auto' | 'always' | 'off';
@@ -172,6 +173,8 @@ const RATIO_HORIZONTAL_RE    = /^(?:2|二|②|16\s*[:：xX]\s*9|横屏|横向|la
 const RATIO_SQUARE_RE        = /^(?:3|三|③|1\s*[:：xX]\s*1|方屏|方形|正方形|square)$/i;
 const BGM_OFF_RE             = /^(?:1|一|①|不加(?:\s*(?:BGM|音乐|配乐))?|不要(?:\s*(?:BGM|音乐|配乐))?|无(?:\s*(?:BGM|音乐|配乐))?|跳过(?:\s*(?:BGM|音乐|配乐))?|不用(?:\s*(?:BGM|音乐|配乐))?|no(?:\s*(?:bgm|music|soundtrack))?|none|skip(?:\s*(?:bgm|music|soundtrack))?)$/i;
 const BGM_ADD_RE             = /^(?:2|二|②|添加|加|有|要|bgm|music|soundtrack|add)$/i;
+const BGM_ASSET_PROMPT_ZH    = '请发送本地音频路径，或直接音频文件 URL（mp3/wav/m4a/flac 等）；不加 BGM 回复 “不加”。';
+const BGM_ASSET_PROMPT_EN    = 'Please send a local audio path or a direct audio-file URL (mp3/wav/m4a/flac, etc.); reply “no BGM” to skip.';
 // "DONE_RE" handles "I'm finished uploading" inside the upload sub-stages.
 const DONE_RE                = /^(?:完成|好了|发完了|上传完成|就这些|结束|done|finished)$/i;
 
@@ -217,6 +220,15 @@ function directAudioUrlsFromText(text: string): string[] {
 
 async function applyBgmReplyToState(state: SagaWorkflowState, text: string): Promise<{ ok: boolean; reply?: string }> {
   if (BGM_OFF_RE.test(text) || CONFIRM_DEFAULT_RE.test(text)) return { ok: true };
+  if (BGM_ADD_RE.test(text)) {
+    return {
+      ok: false,
+      reply: pickLocale(state.locale, {
+        zh: BGM_ASSET_PROMPT_ZH,
+        en: BGM_ASSET_PROMPT_EN,
+      }),
+    };
+  }
   const urls = extractHttpUrls(text);
   const directUrls = directAudioUrlsFromText(text);
   if (urls.some(looksLikePlatformMusicPage) && directUrls.length === 0) {
@@ -330,7 +342,7 @@ function extractHttpUrls(text: string): string[] {
 
 function extractLocalMediaPathCandidates(text: string): string[] {
   const values: string[] = [];
-  const pattern = /(?:file:\/\/|~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)[^\n"'`，。；、)）]+?\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
+  const pattern = /(?:file:\/\/|~\/|\.\.?\/|\/|[A-Za-z0-9_.-]+\/)[^\n"'`，。；、]+?\.(?:png|jpe?g|webp|gif|bmp|svg|heic|heif|mp4|mov|webm|m4v|mp3|wav|m4a|aac|flac|ogg)/gi;
   for (const match of text.matchAll(pattern)) {
     values.push(match[0].replace(/[),.;，。]+$/g, '').replace(/\\(.)/g, '$1'));
   }
@@ -1629,10 +1641,26 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
 
     if (state.stage === 'awaiting_bgm') {
+      if (BGM_ADD_RE.test(text)) {
+        state.stage = 'awaiting_bgm_asset';
+        state.updatedAt = Date.now();
+        return { handled: true, reply: pickLocale(state.locale, { zh: BGM_ASSET_PROMPT_ZH, en: BGM_ASSET_PROMPT_EN }) };
+      }
       const applied = await applyBgmReplyToState(state, text);
       if (!applied.ok) {
         state.updatedAt = Date.now();
         return { handled: true, reply: applied.reply ?? buildBgmAskMessage(state) };
+      }
+      WORKFLOWS.delete(key);
+      const action = buildGenerationAction(state);
+      return { handled: false, prompt: action.prompt, action };
+    }
+
+    if (state.stage === 'awaiting_bgm_asset') {
+      const applied = await applyBgmReplyToState(state, text);
+      if (!applied.ok) {
+        state.updatedAt = Date.now();
+        return { handled: true, reply: applied.reply ?? pickLocale(state.locale, { zh: BGM_ASSET_PROMPT_ZH, en: BGM_ASSET_PROMPT_EN }) };
       }
       WORKFLOWS.delete(key);
       const action = buildGenerationAction(state);

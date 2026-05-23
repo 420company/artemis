@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
@@ -181,6 +181,26 @@ async function main(): Promise<void> {
   assert.equal(cleanFinal.handled, false, 'clean-direct Saga should emit generate_long_video action after BGM choice');
   assert.equal(cleanFinal.action?.cleanDirect, true, 'clean/direct wording should enable cleanDirect mode');
   assert.match(cleanFinal.action?.prompt ?? '', /cleanDirect: true/, 'workflow prompt should tell the model to pass cleanDirect');
+
+  const bgmKey = `${key}-bgm-path`;
+  const bgmPath = path.join(cwd, 'Camel Power Club - Oboe (SPOTISAVER).mp3');
+  await writeFile(bgmPath, Buffer.alloc(128, 1));
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '纯视觉：暴雨中的东京街道，霓虹倒影。' });
+  const bgmStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '开始生成' });
+  if (bgmStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(bgmStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '60秒' });
+  const bgmChoice = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '2' });
+  assert.equal(bgmChoice.handled, true, 'BGM option 2 should ask for an audio asset instead of repeating the full menu');
+  assert.match(bgmChoice.reply, /发送本地音频路径|local audio path/i, 'BGM option 2 should enter asset-collection flow');
+  const bgmFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: bgmPath });
+  assert.equal(bgmFinal.handled, false, 'valid local BGM path with parentheses should emit generate_long_video action');
+  assert.equal(bgmFinal.action?.soundtrackPath, bgmPath, 'local BGM path should be passed to generate_long_video');
 
   const pastedLog = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
