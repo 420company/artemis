@@ -83,8 +83,8 @@ async function main(): Promise<void> {
     locale: 'zh',
     text: '开始生成',
   });
-  assert.equal(afterStart.handled, true, 'after materials are done Saga should ask subtitle mode or optional protagonist before final duration');
-  assert.match(afterStart.reply, /是否携带字幕|include subtitles|确认.*主角|confirm the lead/i, 'Saga may clarify protagonist before subtitle mode');
+  assert.equal(afterStart.handled, true, 'after materials are done Saga should ask ratio mode or optional protagonist before final duration');
+  assert.match(afterStart.reply, /请选择视频画幅比例|Choose video aspect ratio|确认.*主角|confirm the lead/i, 'Saga may clarify protagonist before ratio mode');
 
   const afterOptionalClarification = /确认.*主角|confirm the lead/i.test(afterStart.reply)
     ? await handleSagaLongVideoWorkflow({
@@ -95,8 +95,18 @@ async function main(): Promise<void> {
         text: 'B 梦幻海滩女主角',
       })
     : afterStart;
-  assert.equal(afterOptionalClarification.handled, true, 'after optional protagonist clarification Saga should ask subtitle mode');
-  assert.match(afterOptionalClarification.reply, /是否携带字幕|include subtitles/i, 'subtitle mode must be selected before final duration');
+  assert.equal(afterOptionalClarification.handled, true, 'after optional protagonist clarification Saga should ask ratio mode');
+  assert.match(afterOptionalClarification.reply, /请选择视频画幅比例|Choose video aspect ratio/i, 'ratio mode must be selected before subtitle mode');
+
+  const afterRatioMode = await handleSagaLongVideoWorkflow({
+    scope: 'bridge',
+    key: `${key}-natural-long`,
+    cwd,
+    locale: 'zh',
+    text: '9:16',
+  });
+  assert.equal(afterRatioMode.handled, true, 'after ratio mode Saga should ask subtitle mode');
+  assert.match(afterRatioMode.reply, /是否携带字幕|include subtitles/i, 'subtitle mode must be selected after ratio selection');
 
   const afterSubtitleMode = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
@@ -126,7 +136,9 @@ async function main(): Promise<void> {
   });
   assert.equal(afterBgmSkip.handled, false, 'after BGM choice Saga should emit generate_long_video action');
   assert.equal(afterBgmSkip.action?.totalDuration, 20, 'final duration should be treated as total stitched duration');
+  assert.equal(afterBgmSkip.action?.ratio, '9:16', 'ratio menu choice should be carried into generate_long_video action');
   assert.equal(afterBgmSkip.action?.subtitleMode, 'always', 'subtitle menu choice should be carried into generate_long_video action');
+  assert.match(afterBgmSkip.action?.prompt ?? '', /ratio: "9:16"/, 'workflow prompt should tell the model to pass ratio');
   assert.match(afterBgmSkip.action?.prompt ?? '', /subtitleMode: "always"/, 'workflow prompt should tell the model to pass subtitleMode');
 
   const scriptedKey = `${key}-scripted`;
@@ -145,6 +157,7 @@ async function main(): Promise<void> {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: 'B 旧影院里的女孩' });
   }
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '自动' });
   const scriptedBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '10秒' });
   assert.equal(scriptedBgm.handled, true, 'scripted Saga should ask BGM after duration');
   const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '不加' });
@@ -160,6 +173,7 @@ async function main(): Promise<void> {
   if (cleanStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(cleanStart.reply)) {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: 'X' });
   }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '自动' });
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '无字幕' });
   const cleanBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '10秒' });
   assert.equal(cleanBgm.handled, true, 'clean-direct Saga should ask BGM after duration');
