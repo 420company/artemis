@@ -202,6 +202,24 @@ async function main(): Promise<void> {
   assert.equal(bgmFinal.handled, false, 'valid local BGM path with parentheses should emit generate_long_video action');
   assert.equal(bgmFinal.action?.soundtrackPath, bgmPath, 'local BGM path should be passed to generate_long_video');
 
+  const bgmSkipNumKey = `${key}-bgm-skip-num`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '纯视觉：雪山黄昏远景。' });
+  const bgmSkipNumStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '开始生成' });
+  if (bgmSkipNumStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(bgmSkipNumStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '60秒' });
+  const bgmSkipNum = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '1' });
+  assert.equal(bgmSkipNum.handled, false, 'BGM option 1 (numeric) should emit generate_long_video action without re-asking the menu');
+  assert.equal(bgmSkipNum.action?.soundtrackPath, undefined, 'BGM option 1 must not attach a soundtrack path');
+  assert.equal(bgmSkipNum.action?.soundtrackUrl, undefined, 'BGM option 1 must not attach a soundtrack URL');
+  assert.equal(bgmSkipNum.action?.totalDuration, 60, 'BGM-skip flow should preserve the user-chosen total duration');
+  assert.equal(bgmSkipNum.action?.ratio, '16:9', 'BGM-skip flow should preserve the user-chosen ratio');
+
   const pastedLog = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-paste`,
