@@ -130,6 +130,16 @@ export type SagaRenderResult = {
   ffmpegArgs: string[];
   soundtrackApplied?: boolean;
   soundtrackPath?: string;
+  // Path to the additional "BGM sits under dialogue" mp4 produced alongside
+  // the legacy cover mix when a soundtrack is supplied.
+  soundtrackDuckedPath?: string;
+  // Concatenated original-audio (no BGM) mp4. Already written during concat
+  // when a soundtrack is supplied; surfaced as a deliverable so callers can
+  // list all three variants instead of treating it as an internal scratch.
+  soundtrackOriginalPath?: string;
+  // Dialogue zones used by the ducked mix (cumulative seconds from the start
+  // of the assembled video). Empty when no segment carries a dialogue marker.
+  soundtrackDuckZones?: Array<{ start: number; end: number }>;
   encoderUsed: string;
   appliedTransitions: SagaTransitionPlan[];
   reviewFrames?: {

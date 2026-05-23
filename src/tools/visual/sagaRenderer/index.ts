@@ -61,6 +61,47 @@ async function resolveSoundtrackPath(soundtrack: SagaRenderRequest['soundtrack']
   return out;
 }
 
+export type SagaDuckZone = { start: number; end: number };
+
+// Compute timecode windows where dialogue is present. Each window covers an
+// entire saga segment whose storyBeat contains an explicit dialogue marker
+// (对白/旁白/台词/dialogue/voiceover/...). Used by the ducked BGM mix to drop
+// the music underneath the voice; segment-level granularity keeps the filter
+// simple and survives planner drift (the model rarely respects sub-segment
+// dialogue start/end seconds exactly).
+export function computeDialogueDuckZones(segments: SagaSegmentInput[]): SagaDuckZone[] {
+  const markerRe = /[*_]*(?:对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*[“"'‘][^”"'’]{1,240}[”"'’]/iu;
+  const zones: SagaDuckZone[] = [];
+  let cursor = 0;
+  for (const segment of segments) {
+    const duration = Math.max(0, segment.duration);
+    if (markerRe.test(segment.storyBeat)) {
+      zones.push({ start: cursor, end: cursor + duration });
+    }
+    cursor += duration;
+  }
+  // Merge contiguous zones so the per-frame volume expression has fewer
+  // between() branches.
+  const merged: SagaDuckZone[] = [];
+  for (const zone of zones) {
+    const last = merged[merged.length - 1];
+    if (last && Math.abs(zone.start - last.end) < 0.05) {
+      last.end = zone.end;
+    } else {
+      merged.push({ ...zone });
+    }
+  }
+  return merged;
+}
+
+function buildDuckVolumeExpression(zones: SagaDuckZone[], duckGain: number, baseGain: number): string {
+  if (zones.length === 0) return baseGain.toString();
+  const conditions = zones
+    .map((zone) => `between(t,${zone.start.toFixed(3)},${zone.end.toFixed(3)})`)
+    .join('+');
+  return `if(gt(${conditions}\\,0)\\,${duckGain}\\,${baseGain})`;
+}
+
 async function mixSoundtrackIntoVideo(options: {
   inputVideoPath: string;
   outputVideoPath: string;
@@ -71,6 +112,10 @@ async function mixSoundtrackIntoVideo(options: {
   environmentVolumeDb?: number;
   fadeInSec?: number;
   fadeOutSec?: number;
+  // When set, the BGM is mixed at a quieter base level and further reduced
+  // inside each duck zone so dialogue stays clearly audible underneath. The
+  // original "cover" mix (no duckZones) keeps the old volume relationship.
+  duckZones?: SagaDuckZone[];
 }): Promise<string[]> {
   const ffmpeg = await resolveFfmpegBinaryPath();
   const ffprobe = await resolveFfprobeBinaryPath();
@@ -86,14 +131,21 @@ async function mixSoundtrackIntoVideo(options: {
   }
   const start = Math.max(0, options.startSec ?? 0);
   const duration = Math.max(0.1, options.durationSeconds);
-  const musicDb = options.volumeDb ?? -12;
-  const envDb = options.environmentVolumeDb ?? -18;
+  const duckMode = Array.isArray(options.duckZones);
+  // Ducked mix: env at original level so dialogue stays present, BGM at a
+  // quieter base so it sits underneath, and an extra ~-10 dB drop inside
+  // each dialogue zone. Cover mix keeps the legacy ratio (BGM 6 dB above env).
+  const musicDb = options.volumeDb ?? (duckMode ? -16 : -12);
+  const envDb = options.environmentVolumeDb ?? (duckMode ? 0 : -18);
   const fadeIn = Math.max(0, options.fadeInSec ?? 0.3);
   const fadeOut = Math.max(0, options.fadeOutSec ?? 1.0);
   const fadeOutStart = Math.max(0, duration - fadeOut);
+  const duckExpr = duckMode
+    ? buildDuckVolumeExpression(options.duckZones ?? [], 0.32, 1)
+    : '1';
   const filter = [
     `${inputHasAudio ? '[0:a]' : '[2:a]'}aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=${envDb}dB,atrim=duration=${duration.toFixed(3)},asetpts=N/SR/TB[env]`,
-    `[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atrim=start=${start.toFixed(3)}:duration=${duration.toFixed(3)},asetpts=N/SR/TB,volume=${musicDb}dB${fadeIn > 0 ? `,afade=t=in:st=0:d=${fadeIn.toFixed(3)}` : ''}${fadeOut > 0 ? `,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOut.toFixed(3)}` : ''},apad=whole_dur=${duration.toFixed(3)}[bgm]`,
+    `[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atrim=start=${start.toFixed(3)}:duration=${duration.toFixed(3)},asetpts=N/SR/TB,volume=${musicDb}dB${fadeIn > 0 ? `,afade=t=in:st=0:d=${fadeIn.toFixed(3)}` : ''}${fadeOut > 0 ? `,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOut.toFixed(3)}` : ''}${duckMode && (options.duckZones?.length ?? 0) > 0 ? `,volume=${duckExpr}:eval=frame` : ''},apad=whole_dur=${duration.toFixed(3)}[bgm]`,
     `[env][bgm]amix=inputs=2:duration=first:dropout_transition=0,loudnorm=I=-16:TP=-1.5:LRA=11[outa]`,
   ].join(';');
   const args = [
@@ -113,6 +165,12 @@ async function mixSoundtrackIntoVideo(options: {
   ];
   await execFileAsync(ffmpeg, args, { timeout: 30 * 60_000 });
   return args;
+}
+
+function buildDuckedOutputPath(outputPath: string): string {
+  const ext = path.extname(outputPath);
+  const base = outputPath.slice(0, outputPath.length - ext.length);
+  return `${base}_bgm_ducked${ext}`;
 }
 
 export async function renderSagaProject(request: SagaRenderRequest): Promise<SagaRenderResult> {
@@ -192,9 +250,14 @@ export async function renderSagaProject(request: SagaRenderRequest): Promise<Sag
   let finalFfmpegArgs = concatResult.ffmpegArgs;
   let soundtrackApplied = false;
   let soundtrackPath: string | undefined;
+  let soundtrackDuckedPath: string | undefined;
+  let soundtrackOriginalPath: string | undefined;
+  let duckZones: SagaDuckZone[] | undefined;
   if (request.soundtrack?.path || request.soundtrack?.url) {
     soundtrackPath = await resolveSoundtrackPath(request.soundtrack, request.workDir);
     if (soundtrackPath) {
+      // Variant 1 — legacy cover mix: BGM louder than env (kept for users who
+      // want the music-forward soundtrack).
       finalFfmpegArgs = await mixSoundtrackIntoVideo({
         inputVideoPath: concatTargetPath,
         outputVideoPath: request.outputPath,
@@ -207,6 +270,29 @@ export async function renderSagaProject(request: SagaRenderRequest): Promise<Sag
         fadeOutSec: request.soundtrack.fadeOutSec,
       });
       soundtrackApplied = true;
+      // Variant 2 — ducked mix: BGM sits under the env mix, drops further
+      // inside the dialogue zones detected from the script.
+      duckZones = computeDialogueDuckZones(request.segments);
+      const duckedOutputPath = buildDuckedOutputPath(request.outputPath);
+      await mixSoundtrackIntoVideo({
+        inputVideoPath: concatTargetPath,
+        outputVideoPath: duckedOutputPath,
+        soundtrackPath,
+        durationSeconds: concatResult.durationSeconds,
+        startSec: request.soundtrack.startSec,
+        // Intentionally do NOT forward volumeDb / environmentVolumeDb here:
+        // the ducked variant uses its own quieter base levels regardless of
+        // the cover-mix levels the user picked.
+        fadeInSec: request.soundtrack.fadeInSec,
+        fadeOutSec: request.soundtrack.fadeOutSec,
+        duckZones,
+      });
+      soundtrackDuckedPath = duckedOutputPath;
+      // Variant 0 — concatenated original audio mix (no BGM), already written
+      // by concat above as concatTargetPath. Surface it so the caller can
+      // list all three deliverables instead of treating it as an internal
+      // intermediate.
+      soundtrackOriginalPath = concatTargetPath;
     }
   }
 
@@ -217,6 +303,9 @@ export async function renderSagaProject(request: SagaRenderRequest): Promise<Sag
     ffmpegArgs: finalFfmpegArgs,
     soundtrackApplied,
     soundtrackPath,
+    soundtrackDuckedPath,
+    soundtrackOriginalPath,
+    soundtrackDuckZones: duckZones,
     encoderUsed: concatResult.encoderName,
     appliedTransitions: concatResult.appliedTransitions,
     reviewFrames: await generateSagaReviewFrames({

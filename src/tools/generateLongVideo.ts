@@ -2285,18 +2285,31 @@ export async function executeGenerateLongVideo(
     // Video:, Plan:, etc.) so downstream LLM parsing still finds the same
     // anchors. The grouping headers + per-line `· ` bullets are presentation
     // only and don't change the data semantics.
+    const duckZoneCount = renderResult.soundtrackDuckZones?.length ?? 0;
+    const soundtrackLine = renderResult.soundtrackApplied
+      ? renderResult.soundtrackDuckedPath
+        ? `3 variants · cover=${renderResult.soundtrackPath ?? 'provided'} · ducked(${duckZoneCount} dialogue zones)=${renderResult.soundtrackDuckedPath} · original=${renderResult.soundtrackOriginalPath ?? 'n/a'}`
+        : `mixed · ${renderResult.soundtrackPath ?? 'provided'}`
+      : 'none';
+    const outputBlock = renderResult.soundtrackApplied && renderResult.soundtrackDuckedPath && renderResult.soundtrackOriginalPath
+      ? [
+          '📁 Output (3 audio variants):',
+          `   · BGM cover (music-forward): ${resolvedOutput.absolute}`,
+          `   · BGM ducked under dialogue: ${renderResult.soundtrackDuckedPath}`,
+          `   · Original audio (no BGM):   ${renderResult.soundtrackOriginalPath}`,
+        ]
+      : ['📁 Output:', `   ${resolvedOutput.absolute}`];
     const lines: string[] = [
       `${measuredOutputSeconds.toFixed(2)}s · ${segments.length} segments · elapsed ${elapsedHuman}`,
       '',
-      '📁 Output:',
-      `   ${resolvedOutput.absolute}`,
+      ...outputBlock,
       '',
       '📊 Stats:',
       `   · Model:        ${cleanModel}`,
       `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s`,
       `   · Transitions:  ${transitionSummary}`,
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
-      `   · Soundtrack:   ${renderResult.soundtrackApplied ? `mixed · ${renderResult.soundtrackPath ?? 'provided'}` : 'none'}`,
+      `   · Soundtrack:   ${soundtrackLine}`,
       `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
       `   · Super visual: ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${superVisualMode.reason})`}`,
       `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''}`,
