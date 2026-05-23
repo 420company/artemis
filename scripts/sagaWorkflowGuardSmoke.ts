@@ -198,9 +198,84 @@ async function main(): Promise<void> {
   const bgmChoice = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '2' });
   assert.equal(bgmChoice.handled, true, 'BGM option 2 should ask for an audio asset instead of repeating the full menu');
   assert.match(bgmChoice.reply, /发送本地音频路径|local audio path/i, 'BGM option 2 should enter asset-collection flow');
-  const bgmFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: bgmPath });
-  assert.equal(bgmFinal.handled, false, 'valid local BGM path with parentheses should emit generate_long_video action');
+  const bgmAfterPath = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: bgmPath });
+  assert.equal(bgmAfterPath.handled, true, 'path-only BGM reply should open the mix-settings follow-up, not start generation');
+  assert.match(bgmAfterPath.reply ?? '', /BGM 已收到|BGM received|混音参数|customize the mix/, 'mix-settings follow-up should reference defaults and the captured BGM');
+  const bgmFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: 'default' });
+  assert.equal(bgmFinal.handled, false, 'default reply in mix-settings step should emit generate_long_video');
   assert.equal(bgmFinal.action?.soundtrackPath, bgmPath, 'local BGM path should be passed to generate_long_video');
+  assert.equal(bgmFinal.action?.soundtrackStartSec, undefined, 'mix-settings defaults must keep startSec undefined (renderer applies 0s)');
+  assert.equal(bgmFinal.action?.soundtrackVolumeDb, undefined, 'mix-settings defaults must keep music volume undefined (renderer applies -12dB)');
+
+  const bgmInlineKey = `${key}-bgm-inline`;
+  const bgmInlinePath = path.join(cwd, 'inline-bgm.mp3');
+  await writeFile(bgmInlinePath, Buffer.alloc(128, 1));
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
+  const bgmInlineStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '开始生成' });
+  if (bgmInlineStart.handled && /确认.*主角|confirm the lead/i.test(bgmInlineStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '60秒' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '2' });
+  const bgmInlineFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: `${bgmInlinePath} 从1:19开始 音量-15dB 淡出2秒` });
+  assert.equal(bgmInlineFinal.handled, false, 'inline mix params with the path should skip the follow-up and emit generate_long_video');
+  assert.equal(bgmInlineFinal.action?.soundtrackPath, bgmInlinePath, 'inline-params flow must keep the BGM path');
+  assert.equal(bgmInlineFinal.action?.soundtrackStartSec, 79, 'inline 从1:19开始 should set soundtrackStartSec to 79');
+  assert.equal(bgmInlineFinal.action?.soundtrackVolumeDb, -15, 'inline 音量-15dB should set soundtrackVolumeDb to -15');
+  assert.equal(bgmInlineFinal.action?.soundtrackFadeOutSec, 2, 'inline 淡出2秒 should set soundtrackFadeOutSec to 2');
+
+  const bgmTuneKey = `${key}-bgm-tune`;
+  const bgmTunePath = path.join(cwd, 'tune-bgm.mp3');
+  await writeFile(bgmTunePath, Buffer.alloc(128, 1));
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '纯视觉：雪山远景。' });
+  const bgmTuneStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '开始生成' });
+  if (bgmTuneStart.handled && /确认.*主角|confirm the lead/i.test(bgmTuneStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '60秒' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '2' });
+  const bgmTuneAsk = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: bgmTunePath });
+  assert.equal(bgmTuneAsk.handled, true, 'plain path reply should open the mix-settings follow-up');
+  const bgmTuneGarbage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: 'asdf qwerty hello' });
+  assert.equal(bgmTuneGarbage.handled, true, 'unparseable mix-settings reply should re-ask, not auto-default');
+  assert.match(bgmTuneGarbage.reply ?? '', /没识别|Could not parse|混音参数|customize the mix/, 'mix-settings re-ask should explain why and reprint the menu');
+  const bgmTuneFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '从45秒开始 淡入1秒' });
+  assert.equal(bgmTuneFinal.handled, false, 'recognised mix params in the settings step should emit generate_long_video');
+  assert.equal(bgmTuneFinal.action?.soundtrackPath, bgmTunePath, 'settings-step adjustments must keep the captured BGM path');
+  assert.equal(bgmTuneFinal.action?.soundtrackStartSec, 45, 'settings 从45秒开始 should set startSec to 45');
+  assert.equal(bgmTuneFinal.action?.soundtrackFadeInSec, 1, 'settings 淡入1秒 should set fadeInSec to 1');
+
+  const bgmEnKey = `${key}-bgm-en`;
+  const bgmEnPath = path.join(cwd, 'en-bgm.mp3');
+  await writeFile(bgmEnPath, Buffer.alloc(128, 1));
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', forceIntent: true, text: 'help me generate a long video' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: 'Pure visual: neon Tokyo street at night, rain reflections.' });
+  const bgmEnStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: 'start' });
+  if (bgmEnStart.handled && /confirm the lead|Need you to confirm the lead/i.test(bgmEnStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: 'no subtitles' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: '60s' });
+  const bgmEnChoice = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: '2' });
+  assert.equal(bgmEnChoice.handled, true, 'EN locale: BGM option 2 should not repeat the full menu');
+  assert.match(bgmEnChoice.reply, /local audio path/i, 'EN locale: BGM option 2 should enter the asset-collection prompt');
+  assert.doesNotMatch(bgmEnChoice.reply, /Add local BGM\?/, 'EN locale: BGM option 2 must not echo the full menu');
+  const bgmEnAfterPath = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: bgmEnPath });
+  assert.equal(bgmEnAfterPath.handled, true, 'EN locale: path-only reply should open the mix-settings follow-up');
+  assert.match(bgmEnAfterPath.reply ?? '', /BGM received|mix|default/i, 'EN locale: settings ask should mention defaults');
+  const bgmEnFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: 'default' });
+  assert.equal(bgmEnFinal.handled, false, 'EN locale: default reply should emit generate_long_video');
+  assert.equal(bgmEnFinal.action?.soundtrackPath, bgmEnPath, 'EN locale: BGM path must be carried into generate_long_video');
 
   const bgmSkipNumKey = `${key}-bgm-skip-num`;
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });

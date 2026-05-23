@@ -63,7 +63,8 @@ type SagaWorkflowStage =
   | 'awaiting_ratio'
   | 'awaiting_duration'
   | 'awaiting_bgm'
-  | 'awaiting_bgm_asset';
+  | 'awaiting_bgm_asset'
+  | 'awaiting_bgm_settings';
 
 type IdentitySource = 'turnaround' | 'character_image' | 'direct_image' | 'text_only';
 type SubtitleMode = 'auto' | 'always' | 'off';
@@ -175,6 +176,7 @@ const BGM_OFF_RE             = /^(?:1|一|①|不加(?:\s*(?:BGM|音乐|配乐))
 const BGM_ADD_RE             = /^(?:2|二|②|添加|加|有|要|bgm|music|soundtrack|add)$/i;
 const BGM_ASSET_PROMPT_ZH    = '请发送本地音频路径，或直接音频文件 URL（mp3/wav/m4a/flac 等）；不加 BGM 回复 “不加”。';
 const BGM_ASSET_PROMPT_EN    = 'Please send a local audio path or a direct audio-file URL (mp3/wav/m4a/flac, etc.); reply “no BGM” to skip.';
+const BGM_SETTINGS_DEFAULT_RE = /^(?:默认|缺省|跳过|继续|确认|开始|好(?:了|的)?|可以|没问题|default(?:s)?|auto|skip|ok(?:ay)?|confirm|continue|go|proceed|use\s*defaults?)$/i;
 // "DONE_RE" handles "I'm finished uploading" inside the upload sub-stages.
 const DONE_RE                = /^(?:完成|好了|发完了|上传完成|就这些|结束|done|finished)$/i;
 
@@ -218,7 +220,46 @@ function directAudioUrlsFromText(text: string): string[] {
   return extractHttpUrls(text).filter((url) => /\.(?:mp3|wav|m4a|aac|flac|ogg)(?:[?#].*)?$/i.test(url));
 }
 
-async function applyBgmReplyToState(state: SagaWorkflowState, text: string): Promise<{ ok: boolean; reply?: string }> {
+type BgmParamDiff = {
+  startSec?: number;
+  musicVolumeDb?: number;
+  environmentVolumeDb?: number;
+  fadeInSec?: number;
+  fadeOutSec?: number;
+};
+
+function extractBgmParamUpdates(text: string): BgmParamDiff {
+  const result: BgmParamDiff = {};
+  const start = parseTimeExpressionSeconds(text);
+  if (typeof start === 'number' && Number.isFinite(start) && start >= 0) result.startSec = start;
+  const music = parseDbAfter(text, /(?:bgm|音乐|音量|volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  if (music !== undefined) result.musicVolumeDb = music;
+  const env = parseDbAfter(text, /(?:环境音|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  if (env !== undefined) result.environmentVolumeDb = env;
+  const fadeOut = text.match(/(?:淡出|fade\s*out)[^\n\d]{0,12}(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?/i);
+  if (fadeOut) result.fadeOutSec = Number(fadeOut[1]);
+  const fadeIn = text.match(/(?:淡入|fade\s*in)[^\n\d]{0,12}(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?/i);
+  if (fadeIn) result.fadeInSec = Number(fadeIn[1]);
+  return result;
+}
+
+function applyBgmParamsToState(state: SagaWorkflowState, params: BgmParamDiff): void {
+  if (params.startSec !== undefined) state.soundtrackStartSec = params.startSec;
+  if (params.musicVolumeDb !== undefined) state.soundtrackVolumeDb = params.musicVolumeDb;
+  if (params.environmentVolumeDb !== undefined) state.environmentVolumeDb = params.environmentVolumeDb;
+  if (params.fadeInSec !== undefined) state.soundtrackFadeInSec = params.fadeInSec;
+  if (params.fadeOutSec !== undefined) state.soundtrackFadeOutSec = params.fadeOutSec;
+}
+
+function hasBgmParamUpdates(params: BgmParamDiff): boolean {
+  return params.startSec !== undefined
+    || params.musicVolumeDb !== undefined
+    || params.environmentVolumeDb !== undefined
+    || params.fadeInSec !== undefined
+    || params.fadeOutSec !== undefined;
+}
+
+async function applyBgmReplyToState(state: SagaWorkflowState, text: string): Promise<{ ok: boolean; reply?: string; inlineParams?: BgmParamDiff }> {
   if (BGM_OFF_RE.test(text) || CONFIRM_DEFAULT_RE.test(text)) return { ok: true };
   if (BGM_ADD_RE.test(text)) {
     return {
@@ -246,15 +287,9 @@ async function applyBgmReplyToState(state: SagaWorkflowState, text: string): Pro
   if (!state.soundtrackPath && !state.soundtrackUrl) {
     return { ok: false, reply: buildBgmAskMessage(state) };
   }
-  const start = parseTimeExpressionSeconds(text);
-  if (typeof start === 'number' && Number.isFinite(start) && start >= 0) state.soundtrackStartSec = start;
-  state.soundtrackVolumeDb = parseDbAfter(text, /(?:bgm|音乐|音量|volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i) ?? state.soundtrackVolumeDb;
-  state.environmentVolumeDb = parseDbAfter(text, /(?:环境音|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i) ?? state.environmentVolumeDb;
-  const fadeOut = text.match(/(?:淡出|fade\s*out)[^\n\d]{0,12}(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?/i);
-  if (fadeOut) state.soundtrackFadeOutSec = Number(fadeOut[1]);
-  const fadeIn = text.match(/(?:淡入|fade\s*in)[^\n\d]{0,12}(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?/i);
-  if (fadeIn) state.soundtrackFadeInSec = Number(fadeIn[1]);
-  return { ok: true };
+  const inlineParams = extractBgmParamUpdates(text);
+  applyBgmParamsToState(state, inlineParams);
+  return { ok: true, inlineParams };
 }
 
 
@@ -711,6 +746,35 @@ function buildBgmAskMessage(state: SagaWorkflowState): string {
       'Optional example: /Users/me/song.mp3 start 1:19 volume -12dB ambience -20dB fadeout 1.2s',
       '',
       'Reply with a number, path, or URL. Reply "cancel" to stop.',
+    ].join('\n'),
+  });
+}
+
+function buildBgmSettingsAskMessage(state: SagaWorkflowState): string {
+  const source = state.soundtrackPath ?? state.soundtrackUrl ?? '';
+  const label = source ? path.basename(source.split(/[?#]/)[0] || source) : 'BGM';
+  return pickLocale(state.locale, {
+    zh: [
+      `🎚️ BGM 已收到：${label}`,
+      '想自定义混音参数吗？直接发一条消息，多个参数可写在同一行：',
+      '  · 起点：从 1:19 开始 / start 90s',
+      '  · 音乐音量：音量 -15dB / volume -10dB（默认 -12dB）',
+      '  · 环境音音量：环境音 -20dB / ambience -18dB（默认 -18dB）',
+      '  · 淡入：淡入 0.5 秒 / fade in 1s（默认 0.3s）',
+      '  · 淡出：淡出 2 秒 / fade out 1.5s（默认 1.0s）',
+      '',
+      '不需要调整直接回复 “默认” 即可继续生成。回复 "取消" 退出整个流程。',
+    ].join('\n'),
+    en: [
+      `🎚️ BGM received: ${label}`,
+      'Want to customize the mix? Send one message; multiple options can share the same line:',
+      '  · Start: start 1:19 / start 90s',
+      '  · Music volume: volume -15dB (default -12dB)',
+      '  · Ambience volume: ambience -20dB (default -18dB)',
+      '  · Fade in: fade in 0.5s (default 0.3s)',
+      '  · Fade out: fade out 2s (default 1.0s)',
+      '',
+      'Reply "default" to proceed with the defaults. Reply "cancel" to exit the whole flow.',
     ].join('\n'),
   });
 }
@@ -1651,6 +1715,11 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
         state.updatedAt = Date.now();
         return { handled: true, reply: applied.reply ?? buildBgmAskMessage(state) };
       }
+      if ((state.soundtrackPath || state.soundtrackUrl) && !hasBgmParamUpdates(applied.inlineParams ?? {})) {
+        state.stage = 'awaiting_bgm_settings';
+        state.updatedAt = Date.now();
+        return { handled: true, reply: buildBgmSettingsAskMessage(state) };
+      }
       WORKFLOWS.delete(key);
       const action = buildGenerationAction(state);
       return { handled: false, prompt: action.prompt, action };
@@ -1662,9 +1731,35 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
         state.updatedAt = Date.now();
         return { handled: true, reply: applied.reply ?? pickLocale(state.locale, { zh: BGM_ASSET_PROMPT_ZH, en: BGM_ASSET_PROMPT_EN }) };
       }
+      if ((state.soundtrackPath || state.soundtrackUrl) && !hasBgmParamUpdates(applied.inlineParams ?? {})) {
+        state.stage = 'awaiting_bgm_settings';
+        state.updatedAt = Date.now();
+        return { handled: true, reply: buildBgmSettingsAskMessage(state) };
+      }
       WORKFLOWS.delete(key);
       const action = buildGenerationAction(state);
       return { handled: false, prompt: action.prompt, action };
+    }
+
+    if (state.stage === 'awaiting_bgm_settings') {
+      const trimmed = text.trim();
+      if (BGM_SETTINGS_DEFAULT_RE.test(trimmed)) {
+        WORKFLOWS.delete(key);
+        const action = buildGenerationAction(state);
+        return { handled: false, prompt: action.prompt, action };
+      }
+      const params = extractBgmParamUpdates(text);
+      if (hasBgmParamUpdates(params)) {
+        applyBgmParamsToState(state, params);
+        WORKFLOWS.delete(key);
+        const action = buildGenerationAction(state);
+        return { handled: false, prompt: action.prompt, action };
+      }
+      state.updatedAt = Date.now();
+      return { handled: true, reply: pickLocale(state.locale, {
+        zh: ['❓ 没识别到混音参数，也不是 “默认”。请按下方提示重新输入，或回复 “默认”。', '', buildBgmSettingsAskMessage(state)].join('\n'),
+        en: ['❓ Could not parse any mix options, and the reply was not "default". Use the formats below, or reply "default" to proceed.', '', buildBgmSettingsAskMessage(state)].join('\n'),
+      }) };
     }
   }
 
