@@ -44,6 +44,7 @@ import {
   planTransition,
   renderSagaProject,
 } from './visual/sagaRenderer/index.js';
+import { extractOpeningFramingRegex, formatOpeningFramingBlock } from './visual/sagaFraming.js';
 import type { SagaContinuityMode } from './visual/sagaRenderer/continuity.js';
 import { detectsLockOffCamera } from './visual/sagaRenderer/continuity.js';
 import type {
@@ -739,6 +740,22 @@ function buildSegments(options: {
         })
       : null;
     const number = String(index + 1).padStart(3, '0');
+    // OPENING FRAMING — extract per-segment position / orientation / motion /
+    // shot size / camera cues from this segment's storyBeat + the wider source
+    // story (scoped to this segment's slice). The block is spliced near the
+    // top of the video-model prompt so the model attends to "画面左 5% /
+    // PROFILE / RIGHTWARD / 中景全身 / locked-off tripod" instead of defaulting
+    // to a centered, half-body, walking-treadmill shot. Without this, the
+    // brief's framing cues are buried deep in the storyBeat where the model
+    // discounts them.
+    const framingDirectives = extractOpeningFramingRegex({
+      storyBeat: r.storyBeat,
+      sourceStory: options.story,
+      shotIndex: index + 1,
+      shotCount: segmentCount,
+    });
+    const openingFraming = formatOpeningFramingBlock(framingDirectives);
+
     const promptArgs = {
       bible: options.continuityInput,
       shotIndex: index + 1,
@@ -752,6 +769,7 @@ function buildSegments(options: {
       transition: r.transition,
       authoredPrompt: r.planned?.prompt,
       startingFrameAnchor,
+      openingFraming,
     } as const;
     const prompt = compileShotPromptWithContinuity({ ...promptArgs, mode: options.continuityMode, cleanDirect: options.cleanDirect });
     // Always also compile a text-only variant. We use it when a per-segment

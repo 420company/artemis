@@ -395,6 +395,16 @@ export function compileShotPromptWithContinuity(options: {
   authoredPrompt?: string;
   startingFrameAnchor?: string | null;
   cleanDirect?: boolean;
+  // High-priority positional / directional directive block assembled by
+  // sagaFraming.extractOpeningFraming. Used to be only spliced into the
+  // Image-2 KEYFRAME prompt (superVisualMode.buildSegmentKeyframePrompt),
+  // but the video model also needs it: without this, the model defaults to
+  // "subject centered + walking treadmill + half-body crop" regardless of
+  // the brief's `画面左 5% / 中景全身 / RIGHTWARD` instructions buried in
+  // the long storyBeat. We surface it at the very top of the per-segment
+  // prompt so the video model attends to position / orientation / motion /
+  // shot size / camera at the strongest weight.
+  openingFraming?: string;
 }): string {
   const authored = options.authoredPrompt?.replace(/\s+/g, ' ').trim();
 
@@ -468,6 +478,7 @@ export function compileShotPromptWithContinuity(options: {
     if (options.camera) cleanMiddle.push(`Camera and motion: ${options.camera}`);
     return [
       options.bible.identityCard,
+      options.openingFraming ? `\n${options.openingFraming}` : '',
       options.bible.bible,
       scenePriority,
       `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`,
@@ -480,6 +491,7 @@ export function compileShotPromptWithContinuity(options: {
 
   const head = [
     options.bible.identityCard,
+    options.openingFraming ? `\n${options.openingFraming}` : '',
     options.bible.bible,
     styleLock,
     scenePriority,

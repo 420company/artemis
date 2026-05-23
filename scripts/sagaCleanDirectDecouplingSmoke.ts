@@ -178,6 +178,70 @@ async function main(): Promise<void> {
   assert.match(fullPrompt, /\[REFERENCE-ROLE-SEPARATION\]/, 'non-cleanDirect should keep REFERENCE-ROLE-SEPARATION');
   assert.match(fullPrompt, /\[FRAME-OUT/, 'non-cleanDirect should keep FRAME-OUT');
 
+  // --- 9-pre) openingFraming block must reach the VIDEO model prompt ---
+  // saga-1779576466406 produced segment 1 video with the character
+  // centered + half-body + walking treadmill, ignoring the brief's
+  // "left edge 5% / RIGHTWARD / medium wide full-body" directives.
+  // Root cause: openingFraming was only injected into Image-2 keyframe
+  // prompts (buildSegmentKeyframePrompt), not into the video model prompt
+  // (compileShotPromptWithContinuity). Without the block at the top of the
+  // video prompt, the model defaults to centered / half-body / treadmill.
+  const framingBlock = '🎯 OPENING FRAMING (highest priority — opening keyframe must obey these positional / directional rules):\n  · Subject horizontal position in frame: LEFT ~5% (positioned near the left edge, NOT centred).';
+  const framedPrompt = compileShotPromptWithContinuity({
+    bible: cleanBible,
+    mode: 'strong-vision',
+    shotIndex: 1,
+    shotCount: 5,
+    duration: 8,
+    title: '0-8s',
+    storyBeat: '段 1 · 东亚四城连穿。女主侧面剪影位于画面左边缘 5%。',
+    visualPrompt: 'Follow this exact timestamped script section: 段 1.',
+    camera: 'absolutely locked-off tripod',
+    continuity: '',
+    transition: 'open from black',
+    cleanDirect: false,
+    openingFraming: framingBlock,
+  });
+  assert.match(framedPrompt, /OPENING FRAMING/, 'video-model prompt must contain the OPENING FRAMING block when supplied');
+  assert.match(framedPrompt, /LEFT\s*~?5%/, 'video-model prompt must inline the literal position cue');
+
+  const framedCleanPrompt = compileShotPromptWithContinuity({
+    bible: cleanBible,
+    mode: 'strong-vision',
+    shotIndex: 1,
+    shotCount: 5,
+    duration: 8,
+    title: '0-8s',
+    storyBeat: '段 1.',
+    visualPrompt: 'segment 1.',
+    camera: '',
+    continuity: '',
+    transition: '',
+    cleanDirect: true,
+    openingFraming: framingBlock,
+  });
+  assert.match(framedCleanPrompt, /OPENING FRAMING/, 'cleanDirect video-model prompt must also carry openingFraming when supplied');
+
+  // When openingFraming is omitted, the prompt builder must still work
+  // (it stays the only required signal — falling back to the legacy
+  // behaviour preserves compatibility with callers that have not been
+  // updated yet).
+  const noFramingPrompt = compileShotPromptWithContinuity({
+    bible: cleanBible,
+    mode: 'strong-vision',
+    shotIndex: 1,
+    shotCount: 5,
+    duration: 8,
+    title: '0-8s',
+    storyBeat: '段 1.',
+    visualPrompt: 'segment 1.',
+    camera: '',
+    continuity: '',
+    transition: '',
+    cleanDirect: false,
+  });
+  assert.doesNotMatch(noFramingPrompt, /OPENING FRAMING/, 'no openingFraming → no block (caller compatibility)');
+
   // --- 9) Continuity bible must not leak per-segment material (regression) ---
   // saga-1779573257467 produced segment 1 video that started lip-syncing
   // segment 7 / 14 / 17 dialogue. Root cause: bible.bible embedded the FULL
