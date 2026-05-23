@@ -126,7 +126,7 @@ async function main(): Promise<void> {
     text: '20秒',
   });
   assert.equal(afterFinalDuration.handled, true, 'after final duration Saga should ask BGM mode');
-  assert.match(afterFinalDuration.reply, /是否添加本地 BGM|Add local BGM/i, 'BGM menu should appear after duration confirmation');
+  assert.match(afterFinalDuration.reply, /是否添加背景音乐|Add background music/i, 'BGM menu should appear after duration confirmation');
   const afterBgmSkip = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-natural-long`,
@@ -200,7 +200,7 @@ async function main(): Promise<void> {
   assert.match(bgmChoice.reply, /发送本地音频路径|local audio path/i, 'BGM option 2 should enter asset-collection flow');
   const bgmAfterPath = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: bgmPath });
   assert.equal(bgmAfterPath.handled, true, 'path-only BGM reply should open the mix-settings follow-up, not start generation');
-  assert.match(bgmAfterPath.reply ?? '', /BGM 已收到|BGM received|混音参数|customize the mix/, 'mix-settings follow-up should reference defaults and the captured BGM');
+  assert.match(bgmAfterPath.reply ?? '', /已接收音乐|Music received|调整混音参数|Adjust the mix/, 'mix-settings follow-up should reference defaults and the captured music file');
   const bgmFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: 'default' });
   assert.equal(bgmFinal.handled, false, 'default reply in mix-settings step should emit generate_long_video');
   assert.equal(bgmFinal.action?.soundtrackPath, bgmPath, 'local BGM path should be passed to generate_long_video');
@@ -246,7 +246,7 @@ async function main(): Promise<void> {
   assert.equal(bgmTuneAsk.handled, true, 'plain path reply should open the mix-settings follow-up');
   const bgmTuneGarbage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: 'asdf qwerty hello' });
   assert.equal(bgmTuneGarbage.handled, true, 'unparseable mix-settings reply should re-ask, not auto-default');
-  assert.match(bgmTuneGarbage.reply ?? '', /没识别|Could not parse|混音参数|customize the mix/, 'mix-settings re-ask should explain why and reprint the menu');
+  assert.match(bgmTuneGarbage.reply ?? '', /没识别|Could not parse|调整混音参数|Adjust the mix/, 'mix-settings re-ask should explain why and reprint the menu');
   const bgmTuneFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '从45秒开始 淡入1秒' });
   assert.equal(bgmTuneFinal.handled, false, 'recognised mix params in the settings step should emit generate_long_video');
   assert.equal(bgmTuneFinal.action?.soundtrackPath, bgmTunePath, 'settings-step adjustments must keep the captured BGM path');
@@ -272,7 +272,7 @@ async function main(): Promise<void> {
   assert.doesNotMatch(bgmEnChoice.reply, /Add local BGM\?/, 'EN locale: BGM option 2 must not echo the full menu');
   const bgmEnAfterPath = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: bgmEnPath });
   assert.equal(bgmEnAfterPath.handled, true, 'EN locale: path-only reply should open the mix-settings follow-up');
-  assert.match(bgmEnAfterPath.reply ?? '', /BGM received|mix|default/i, 'EN locale: settings ask should mention defaults');
+  assert.match(bgmEnAfterPath.reply ?? '', /Music received|Adjust the mix|default/i, 'EN locale: settings ask should mention defaults');
   const bgmEnFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmEnKey, cwd, locale: 'en', text: 'default' });
   assert.equal(bgmEnFinal.handled, false, 'EN locale: default reply should emit generate_long_video');
   assert.equal(bgmEnFinal.action?.soundtrackPath, bgmEnPath, 'EN locale: BGM path must be carried into generate_long_video');

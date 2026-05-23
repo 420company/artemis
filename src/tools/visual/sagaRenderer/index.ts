@@ -94,10 +94,15 @@ export function computeDialogueDuckZones(segments: SagaSegmentInput[]): SagaDuck
   return merged;
 }
 
-function buildDuckVolumeExpression(zones: SagaDuckZone[], duckGain: number, baseGain: number): string {
+export function buildDuckVolumeExpression(zones: SagaDuckZone[], duckGain: number, baseGain: number): string {
   if (zones.length === 0) return baseGain.toString();
+  // EVERY comma inside the expression must be escaped — when embedded in
+  // -filter_complex, ffmpeg's outer parser eats unescaped commas as filter
+  // separators long before the volume filter's expression evaluator sees
+  // them. Without the escapes inside between(t,X,Y) the volume call
+  // fragments into bogus filters and the whole graph fails to parse.
   const conditions = zones
-    .map((zone) => `between(t,${zone.start.toFixed(3)},${zone.end.toFixed(3)})`)
+    .map((zone) => `between(t\\,${zone.start.toFixed(3)}\\,${zone.end.toFixed(3)})`)
     .join('+');
   return `if(gt(${conditions}\\,0)\\,${duckGain}\\,${baseGain})`;
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { computeDialogueDuckZones } from '../src/tools/visual/sagaRenderer/index.js';
+import { computeDialogueDuckZones, buildDuckVolumeExpression } from '../src/tools/visual/sagaRenderer/index.js';
 import type { SagaSegmentInput } from '../src/tools/visual/sagaRenderer/types.js';
 
 function makeSegment(index: number, duration: number, storyBeat: string): SagaSegmentInput {
@@ -70,6 +70,26 @@ async function main(): Promise<void> {
     makeSegment(1, 10, '设计参考："中国街道" 的霓虹质感与积水反射。'),
   ];
   assert.deepEqual(computeDialogueDuckZones(bareQuotes), [], 'bare design-concept quotes must not trigger ducking');
+
+  // Duck-volume expression must escape EVERY comma — including the inner
+  // between(t,X,Y) commas — otherwise -filter_complex eats them as filter
+  // separators and the render fails. Regression: ffmpeg "Error parsing
+  // option" when only the outer if/gt commas were escaped.
+  const expr = buildDuckVolumeExpression(
+    [
+      { start: 8, end: 16 },
+      { start: 24, end: 40 },
+    ],
+    0.32,
+    1,
+  );
+  assert.equal(
+    expr,
+    'if(gt(between(t\\,8.000\\,16.000)+between(t\\,24.000\\,40.000)\\,0)\\,0.32\\,1)',
+    'duck volume expression must escape every comma so ffmpeg filter_complex parses correctly',
+  );
+  // Empty zones → no expression evaluator needed, just emit the base gain.
+  assert.equal(buildDuckVolumeExpression([], 0.32, 1), '1', 'no duck zones → constant base gain, no eval');
 
   console.log('saga bgm variants duck-zone smoke ok');
 }
