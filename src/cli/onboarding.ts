@@ -697,7 +697,8 @@ async function configureVisualModel(
     hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
     choices: [
       { label: 'BytePlus', value: 'byteplus' },
-      { label: 'Google Gemini Image (gemini-3-pro-image-preview)', value: 'google' },
+      { label: 'Google Nano Banana Pro (gemini-3-pro-image-preview)', value: 'google:gemini-3-pro-image-preview' },
+      { label: 'Google Nano Banana (gemini-2.5-flash-image)', value: 'google:gemini-2.5-flash-image' },
       { label: 'OpenAI GPT Image 2 (gpt-image-2)', value: 'openai:gpt-image-2' },
       { label: 'OpenAI GPT Image 1.5 (gpt-image-1.5)', value: 'openai:gpt-image-1.5' },
       { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
