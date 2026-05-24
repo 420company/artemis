@@ -442,6 +442,17 @@ export function compileShotPromptWithContinuity(options: {
     .filter((value): value is string => Boolean(value));
   const hasQuotedDialogue = quotedText.length > 0;
   const hasBrandOrReadableText = /(?:logo|brand|wordmark|signage|screen|ui|interface|caption|title card|on[- ]screen text|readable text|品牌|商标|标志|招牌|屏幕|界面|字幕|标题卡|展示文字|可读文字|中文|英文|文字)/i.test(sourceShotText);
+  const hasWalkingMotion = /(?:walk|walking|stride|striding|step|stepping|move\s+right|rightward|向右|行走|走路|步态|迈步|穿行)/i.test(sourceShotText);
+  const hasPoseConsistencyLanguage = /(?:same\s+pose|same\s+posture|identical\s+pose|hold\s+pose|保持同一姿势|同一姿势|姿势不变|始终保持|不变|locked\s+pose)/i.test(sourceShotText);
+  const motionContinuityGuard = hasWalkingMotion && hasPoseConsistencyLanguage
+    ? [
+        '[MOTION-CONTINUITY DISAMBIGUATION — do not freeze the body]',
+        'When the brief says the protagonist keeps the same posture / same gait while walking, interpret it as a continuous natural walking gait cycle with subtle limb swing, weight shift, hip/shoulder counter-rotation, hair/fabric motion, and footfalls across the full shot.',
+        'It does NOT mean a still mannequin pose, frozen limbs, a static cutout, or the body locked in one exact frame while only the background changes.',
+        'The camera may remain locked-off; the subject must still animate naturally in place/across frame according to the storyBeat.',
+        '[/MOTION-CONTINUITY DISAMBIGUATION]',
+      ].join('\n')
+    : '';
   const dynamicLockLines = [
     options.bible.locations.length > 0 ? `Explicit location anchors extracted from this brief: ${options.bible.locations.join(' | ')}.` : '',
     options.bible.props.length > 0 ? `Explicit prop anchors extracted from this brief: ${options.bible.props.join(' | ')}.` : '',
@@ -513,6 +524,7 @@ export function compileShotPromptWithContinuity(options: {
     middle.push(`Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`);
     middle.push(`Visual direction: ${options.visualPrompt}`);
   }
+  if (motionContinuityGuard) middle.push(motionContinuityGuard);
   middle.push(explicitBriefLock);
   middle.push(`Continuity requirements: ${options.continuity}`);
   middle.push(`Camera and motion: ${options.camera}`);
