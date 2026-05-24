@@ -2,6 +2,10 @@
  * telegram/client.ts — Telegram Bot API client (long-polling)
  */
 
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
+
 type TelegramApiResponse<T> = {
   ok: boolean
   result: T
@@ -30,6 +34,46 @@ function guessMimeType(filename: string): string {
   if (lower.endsWith('.bmp')) return 'image/bmp'
   if (lower.endsWith('.svg')) return 'image/svg+xml'
   return 'application/octet-stream'
+}
+
+function mimeToExtension(mimeType?: string, fallbackName?: string): string {
+  const lower = mimeType?.toLowerCase() ?? ''
+  if (lower.includes('jpeg')) return '.jpg'
+  if (lower.includes('png')) return '.png'
+  if (lower.includes('gif')) return '.gif'
+  if (lower.includes('webp')) return '.webp'
+  if (lower.includes('bmp')) return '.bmp'
+  if (lower.includes('svg')) return '.svg'
+  if (lower.includes('mp3')) return '.mp3'
+  if (lower.includes('wav')) return '.wav'
+  if (lower.includes('m4a')) return '.m4a'
+  if (lower.includes('aac')) return '.aac'
+  if (lower.includes('flac')) return '.flac'
+  if (lower.includes('ogg')) return '.ogg'
+  if (lower.includes('mp4')) return '.mp4'
+  if (lower.includes('quicktime') || lower.includes('mov')) return '.mov'
+  if (lower.includes('webm')) return '.webm'
+  if (lower.includes('mpeg')) return '.mp3'
+  const match = fallbackName?.toLowerCase().match(/\.(png|jpe?g|gif|webp|bmp|svg|mp3|wav|m4a|aac|flac|ogg|mp4|mov|webm)$/)
+  return match ? `.${match[1].replace('jpeg', 'jpg')}` : ''
+}
+
+async function saveTelegramMediaFile(options: {
+  chatId: string
+  updateId: number
+  label: string
+  buffer: ArrayBuffer
+  mimeType?: string
+  fileName?: string
+}): Promise<string> {
+  const ext = mimeToExtension(options.mimeType, options.fileName) || path.extname(options.fileName ?? '') || '.bin'
+  const dir = path.join(resolveArtemisHomeDir(), 'tmp', 'bridge-attachments', 'telegram', options.chatId)
+  await mkdir(dir, { recursive: true })
+  const safeLabel = options.label.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'media'
+  const fileName = `${options.updateId}-${safeLabel}${ext}`
+  const filePath = path.join(dir, fileName)
+  await writeFile(filePath, Buffer.from(options.buffer))
+  return filePath
 }
 
 function formatTelegramApiFailure(options: {
@@ -99,6 +143,7 @@ export type TelegramUpdate = {
   message?: {
     message_id: number
     text?: string
+    caption?: string
     chat: {
       id: number
       type: string
@@ -120,6 +165,33 @@ export type TelegramUpdate = {
       width: number
       height: number
     }>
+    audio?: {
+      file_id: string
+      file_unique_id: string
+      file_name?: string
+      mime_type?: string
+      file_size?: number
+      duration?: number
+      performer?: string
+      title?: string
+    }
+    video?: {
+      file_id: string
+      file_unique_id: string
+      file_name?: string
+      mime_type?: string
+      file_size?: number
+      duration?: number
+      width?: number
+      height?: number
+    }
+    voice?: {
+      file_id: string
+      file_unique_id: string
+      mime_type?: string
+      file_size?: number
+      duration?: number
+    }
     document?: {
       file_id: string
       file_unique_id: string
@@ -309,7 +381,7 @@ export async function extractTelegramTextMessages(client: TelegramBotClient, upd
   const messages: TelegramTextMessage[] = []
   
   for (const update of updates) {
-    const text = update.message?.text?.trim()
+    const text = (update.message?.text ?? update.message?.caption)?.trim()
     const chat = update.message?.chat
     if (!chat) continue
     
@@ -319,6 +391,7 @@ export async function extractTelegramTextMessages(client: TelegramBotClient, upd
       || String(chat.id)
     
     const images: import('../providers/types.ts').ImageAttachment[] = []
+    const mediaPaths: string[] = []
     
     // 处理照片
     if (update.message?.photo && update.message.photo.length > 0) {
@@ -354,13 +427,49 @@ export async function extractTelegramTextMessages(client: TelegramBotClient, upd
         console.error(`Failed to download document: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+
+    const mediaCandidates = [
+      { kind: 'audio', item: update.message?.audio },
+      { kind: 'video', item: update.message?.video },
+      { kind: 'voice', item: update.message?.voice },
+      { kind: 'document-audio', item: update.message?.document && update.message.document.mime_type?.startsWith('audio/') ? update.message.document : undefined },
+      { kind: 'document-video', item: update.message?.document && update.message.document.mime_type?.startsWith('video/') ? update.message.document : undefined },
+    ] as const
+
+    for (const candidate of mediaCandidates) {
+      const item = candidate.item
+      if (!item) continue
+      try {
+        const fileInfo = await client.getFile(item.file_id)
+        const fileData = await client.downloadFile(fileInfo.file_path)
+        const filePath = await saveTelegramMediaFile({
+          chatId: String(chat.id),
+          updateId: update.update_id,
+          label: candidate.kind,
+          buffer: fileData,
+          mimeType: 'mime_type' in item ? item.mime_type : undefined,
+          fileName: 'file_name' in item ? item.file_name : undefined,
+        })
+        mediaPaths.push(filePath)
+      } catch (error) {
+        console.error(`Failed to download ${candidate.kind}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     
-    // 确保消息至少有文本或图片；纯图片消息也要进入 AI，不能静默丢弃。
-    if (text || images.length > 0) {
+    // 确保消息至少有文本、图片或音视频附件；附件会以本地路径拼进文本，交给 Saga 继续识别。
+    if (text || images.length > 0 || mediaPaths.length > 0) {
+      const attachmentHint = mediaPaths.length > 0
+        ? mediaPaths.join('\n')
+        : ''
       messages.push({
         updateId: update.update_id,
         chatId: String(chat.id),
-        text: text || '[用户发送了一张图片，请识别并分析图片内容。]',
+        text: [
+          text || (images.length > 0
+            ? '[用户发送了一张图片，请识别并分析图片内容。]'
+            : '[用户发送了音频或视频附件，请识别并处理。]'),
+          attachmentHint,
+        ].filter(Boolean).join('\n'),
         chatLabel,
         images: images.length > 0 ? images : undefined,
       })

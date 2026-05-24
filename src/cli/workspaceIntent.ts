@@ -193,16 +193,16 @@ function aliasPathFromText(input: string, homeDir: string): WorkspaceIntentResol
   if (/^\s*(?:~|\/|[A-Za-z]:[\\/])/.test(input)) {
     return null
   }
-  if (/(?:在|到|进入|切换到|保存到|写到|放到)?\s*桌面(?:上|里|下)?/u.test(input)) {
+  if (/(?:^|[\s,，。；;:：])(?:在|到|进入|切换到|保存到|写到|放到)?\s*桌面(?:上|里|下)?/u.test(input)) {
     return 'desktop-alias'
   }
-  if (/\b(?:on|in|inside|under|to)\s+(?:the\s+)?desktop\b/i.test(input) || /\bdesktop\s+(?:folder|directory)\b/i.test(input)) {
+  if (/\b(?:on|in|inside|under|to)\s+(?:the\s+)?desktop\b/i.test(input) || /(?:^|[\s,，。；;:：])desktop\s+(?:folder|directory)\b/i.test(input)) {
     return 'desktop-alias'
   }
-  if (/(?:在|到|进入|切换到|保存到|写到|放到)?\s*(?:文档|Documents)(?:里|下)?/iu.test(input)) {
+  if (/(?:^|[\s,，。；;:：])(?:在|到|进入|切换到|保存到|写到|放到)?\s*(?:文档|Documents)(?:里|下)?/iu.test(input)) {
     return 'documents-alias'
   }
-  if (/(?:在|到|进入|切换到|保存到|写到|放到)?\s*(?:下载|Downloads)(?:里|下)?/iu.test(input)) {
+  if (/(?:^|[\s,，。；;:：])(?:在|到|进入|切换到|保存到|写到|放到)?\s*(?:下载|Downloads)(?:里|下)?/iu.test(input)) {
     return 'downloads-alias'
   }
   return null

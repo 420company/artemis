@@ -5,6 +5,9 @@
  */
 
 import type { ImageAttachment, ImageMediaType } from '../providers/types.js'
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { resolveArtemisHomeDir } from '../utils/fs.js'
 
 type DiscordApiFailureOptions = {
   path: string; status?: number; statusText?: string; body?: string
@@ -104,9 +107,53 @@ function toImageMediaType(contentType: string | undefined, filename: string | un
   return undefined
 }
 
+function isAudioOrVideoAttachment(attachment: DiscordGatewayAttachment): boolean {
+  const contentType = attachment.content_type?.toLowerCase() ?? ''
+  const lowerName = attachment.filename?.toLowerCase() ?? ''
+  return contentType.startsWith('audio/') || contentType.startsWith('video/') || /\.(mp3|wav|m4a|aac|flac|ogg|mp4|mov|webm|m4v)$/i.test(lowerName)
+}
+
+function mimeToExtension(mimeType?: string, fallbackName?: string): string {
+  const lower = mimeType?.toLowerCase() ?? ''
+  if (lower.includes('mp3') || lower.includes('mpeg')) return '.mp3'
+  if (lower.includes('wav')) return '.wav'
+  if (lower.includes('m4a')) return '.m4a'
+  if (lower.includes('aac')) return '.aac'
+  if (lower.includes('flac')) return '.flac'
+  if (lower.includes('ogg')) return '.ogg'
+  if (lower.includes('mp4')) return '.mp4'
+  if (lower.includes('quicktime') || lower.includes('mov')) return '.mov'
+  if (lower.includes('webm')) return '.webm'
+  const match = fallbackName?.toLowerCase().match(/\.(mp3|wav|m4a|aac|flac|ogg|mp4|mov|webm|m4v)$/)
+  return match ? `.${match[1]}` : ''
+}
+
+async function saveDiscordMediaFile(options: {
+  channelId: string
+  messageId: string
+  attachmentId: string
+  buffer: ArrayBuffer
+  mimeType?: string
+  fileName?: string
+}): Promise<string> {
+  const ext = mimeToExtension(options.mimeType, options.fileName) || path.extname(options.fileName ?? '') || '.bin'
+  const dir = path.join(resolveArtemisHomeDir(), 'tmp', 'bridge-attachments', 'discord', options.channelId)
+  await mkdir(dir, { recursive: true })
+  const safeId = options.attachmentId.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'media'
+  const filePath = path.join(dir, `${options.messageId}-${safeId}${ext}`)
+  await writeFile(filePath, Buffer.from(options.buffer))
+  return filePath
+}
+
 function imageAttachmentsFromPayload(payload: DiscordGatewayMessagePayload): DiscordGatewayAttachment[] {
   return (payload.attachments ?? []).filter((attachment) =>
     Boolean((attachment.url || attachment.proxy_url) && toImageMediaType(attachment.content_type, attachment.filename)),
+  )
+}
+
+function mediaAttachmentsFromPayload(payload: DiscordGatewayMessagePayload): DiscordGatewayAttachment[] {
+  return (payload.attachments ?? []).filter((attachment) =>
+    Boolean((attachment.url || attachment.proxy_url) && isAudioOrVideoAttachment(attachment)),
   )
 }
 
@@ -114,12 +161,13 @@ function toDiscordTextMessage(payload: DiscordGatewayMessagePayload): DiscordTex
   const text = payload.content?.trim()
   const authorId = payload.author?.id
   const imageAttachments = imageAttachmentsFromPayload(payload)
-  if ((!text && imageAttachments.length === 0) || !authorId) return undefined
+  const mediaAttachments = mediaAttachmentsFromPayload(payload)
+  if ((!text && imageAttachments.length === 0 && mediaAttachments.length === 0) || !authorId) return undefined
   return {
     messageId: payload.id,
     targetId: payload.channel_id,
     targetLabel: payload.guild_id ? `channel:${payload.channel_id}` : `dm:${payload.channel_id}`,
-    text: text || '[用户发送了一张图片，请识别并分析图片内容。]', authorId,
+    text: text || (imageAttachments.length > 0 ? '[用户发送了一张图片，请识别并分析图片内容。]' : '[用户发送了音频或视频附件，请识别并处理。]'), authorId,
     authorLabel: deriveAuthorLabel(payload.author),
     guildId: payload.guild_id,
   }
@@ -147,6 +195,31 @@ async function downloadDiscordImages(payload: DiscordGatewayMessagePayload): Pro
     }
   }
   return images.length > 0 ? images : undefined
+}
+
+async function downloadDiscordMediaPaths(payload: DiscordGatewayMessagePayload): Promise<string[]> {
+  const attachments = mediaAttachmentsFromPayload(payload)
+  const paths: string[] = []
+  for (const attachment of attachments) {
+    const url = attachment.url || attachment.proxy_url
+    if (!url) continue
+    try {
+      const response = await fetch(url)
+      if (!response.ok) continue
+      const filePath = await saveDiscordMediaFile({
+        channelId: payload.channel_id,
+        messageId: payload.id,
+        attachmentId: attachment.id,
+        buffer: await response.arrayBuffer(),
+        mimeType: attachment.content_type,
+        fileName: attachment.filename,
+      })
+      paths.push(filePath)
+    } catch {
+      // Keep the message flowing even if a CDN media attachment has expired or fails.
+    }
+  }
+  return paths
 }
 
 export class DiscordBotClient {
@@ -354,8 +427,11 @@ export class DiscordGatewayBridge {
           const payload = packet.d as DiscordGatewayMessagePayload
           const msg = toDiscordTextMessage(payload)
           if (!msg || msg.authorId === this.botUserId) return
-          void downloadDiscordImages(payload)
-            .then((images) => { this.enqueue(images ? { ...msg, images } : msg) })
+          void Promise.all([downloadDiscordImages(payload), downloadDiscordMediaPaths(payload)])
+            .then(([images, mediaPaths]) => {
+              const text = mediaPaths.length > 0 ? [msg.text, mediaPaths.join('\n')].join('\n') : msg.text
+              this.enqueue({ ...msg, text, images })
+            })
             .catch(() => { this.enqueue(msg) })
         }
       }

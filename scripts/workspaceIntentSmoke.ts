@@ -118,6 +118,11 @@ assert.equal(
   null,
   'bare /Users/.../Downloads/x.png must not be misread as downloads-alias',
 )
+assert.equal(
+  await resolveWorkspaceIntent(`${downloadsImage} 从00:42开始 音量-3dB 环境音 0`, cwd),
+  null,
+  'absolute media path followed by bgm parameters must still not trigger workspace switch',
+)
 const documentsImage = path.join(homedir(), 'Documents', 'notes', 'screenshot.png')
 assert.equal(
   await resolveWorkspaceIntent(documentsImage, cwd),
