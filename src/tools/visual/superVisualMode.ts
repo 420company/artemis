@@ -987,6 +987,44 @@ export function findProvidedTurnaroundInputForTest(
   return findProvidedTurnaroundInput(userInputs, originalPaths, referenceNotes, identitySource);
 }
 
+async function describeUserImageWithGeminiVision(options: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  mime: string;
+  imageBase64: string;
+}): Promise<string | null> {
+  const endpoint = `${options.baseUrl.replace(/\/+$/, '')}/models/${encodeURIComponent(options.model)}:generateContent?key=${encodeURIComponent(options.apiKey)}`;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: 'Describe this character in one concise paragraph under 200 words. Focus only on identity, face, hair, body proportions, outfit, accessories, and palette. No bullets.' },
+            { inlineData: { mimeType: options.mime, data: options.imageBase64 } },
+          ],
+        }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 600 },
+      }),
+    });
+    const raw = await res.text();
+    if (!res.ok) {
+      toolWarn(`⚠️ Super Visual: Gemini vision-describe 失败（HTTP ${res.status}，model=${options.model}）— ${raw.slice(0, 200)}`);
+      return null;
+    }
+    type GeminiPart = { text?: unknown };
+    const parsed = JSON.parse(raw) as { candidates?: Array<{ content?: { parts?: GeminiPart[] } }> };
+    const text = parsed.candidates?.[0]?.content?.parts?.map((part) => typeof part.text === 'string' ? part.text : '').join(' ').replace(/\s+/g, ' ').trim();
+    return text || null;
+  } catch (err) {
+    toolWarn(`⚠️ Super Visual: Gemini vision-describe 网络/解析异常 — ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+    return null;
+  }
+}
+
 export async function describeUserImageWithVision(options: {
   imagePath: string;
   context: ToolExecutionContext;
@@ -999,6 +1037,7 @@ export async function describeUserImageWithVision(options: {
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
   let chatModel: string | undefined;
+  let imageProviderName: string | undefined;
   // Fallback chain for the vision-capable chat model. Some relays don't
   // serve `gpt-4o` (e.g. Codex-backed gateways return 503 for it). Order is
   // quality-first: gpt-5.5 → gpt-5.4 → gpt-5.4-mini → gpt-4o-mini → gpt-4o.
@@ -1009,6 +1048,7 @@ export async function describeUserImageWithVision(options: {
   // ── Priority 1: image provider's relay (OpenAI-compatible, supports vision)
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (imageConfigured) {
+    imageProviderName = imageConfigured.provider;
     apiKey = imageConfigured.config.image.apiKey?.trim();
     baseUrl = imageConfigured.config.image.baseUrl?.trim();
     // Prefer an explicit user-configured visionModel; otherwise iterate the
@@ -1045,7 +1085,18 @@ export async function describeUserImageWithVision(options: {
   }
   const ext = path.extname(options.imagePath).slice(1).toLowerCase();
   const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/png';
-  const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
+  const imageBase64 = buffer.toString('base64');
+  const dataUrl = `data:${mime};base64,${imageBase64}`;
+
+  if (/^(google|gemini)$/i.test(imageProviderName ?? '')) {
+    return describeUserImageWithGeminiVision({
+      apiKey,
+      baseUrl,
+      model: chatModel || 'gemini-2.5-flash',
+      mime,
+      imageBase64,
+    });
+  }
 
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const body = {
