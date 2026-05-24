@@ -207,9 +207,10 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   const accessoriesLock = uniqueStrings(input.accessoriesLock ?? []);
   const lighting = pickFirstSentence(input.lighting, 'consistent natural cinematic lighting with stable key direction');
   const lockOffCamera = detectsLockOffCamera(input.story);
-  const cameraDefault = lockOffCamera
+  const multiCityWalking = /(?:background\s+environment\s+seamlessly\s+cycles\s+through|背景\s*(?:会)?\s*连续穿过\s*4\s*个城市|四城连穿|多城连穿)/i.test(input.story ?? '');
+  const cameraDefault = lockOffCamera || multiCityWalking
     ? 'absolutely locked-off tripod, no camera movement whatsoever — no pan, no tilt, no zoom, no dolly, no handheld shake'
-    : 'controlled cinematic camera with stable handheld push-ins, locked establishing frames, and gentle dollies';
+    : 'controlled cinematic camera with subtle natural motion appropriate to the scene';
   const cameraLanguage = pickFirstSentence(
     // When the brief explicitly locks the camera, the default wins over
     // user.continuity.cameraLanguage too — directorial defaults shouldn't
@@ -533,7 +534,7 @@ export function compileShotPromptWithContinuity(options: {
     middle.push(
       [
         '[REFERENCE-ROLE-SEPARATION]',
-        'Use previous-frame references only for spatial continuity, pose momentum, camera direction, lighting direction, and environment layout.',
+        'Use previous-frame references only for spatial continuity, lighting direction, and environment layout. Do not carry a previous scene subject into a new location unless the new storyBeat explicitly keeps that same subject visible. For multi-city walking scenes, preserve the subject identity and general walking rhythm, but let the body travel forward in frame instead of freezing at one position.',
         'Do not inherit waxy skin, plastic highlights, over-smoothed facial material, mannequin faces, or CG-character surface quality from previous generated frames.',
         'When user-supplied reference images are present, treat them as the authority for recurring identity, wardrobe cues, and natural facial/material character.',
         '[/REFERENCE-ROLE-SEPARATION]',

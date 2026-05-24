@@ -88,8 +88,8 @@ async function main(): Promise<void> {
   });
   assert.match(
     bibleFree.identityCard,
-    /\[CAMERA: controlled cinematic camera with stable handheld push-ins/,
-    'CAMERA block should fall back to the default when brief does not lock motion',
+    /\[CAMERA: controlled cinematic camera with subtle natural motion appropriate to the scene/,
+    'CAMERA block should fall back to the new default when brief does not lock motion',
   );
 
   // --- 4) NEGATIVE block reinforces under subtitleMode='off' ---

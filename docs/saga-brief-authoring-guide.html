@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Artemis Saga · 剧本提示词万能说明书</title>
+<title>Artemis Saga · 剧本提示词万能说明书 / Brief Authoring Guide</title>
 <meta name="description" content="教你（和你的 AI）写出 Artemis Saga 工作流能完美识别的视频剧本提示词。适用任何题材、任何故事。">
 <style>
   :root {
@@ -363,19 +363,76 @@
   /* ── Smooth scroll ── */
   html { scroll-behavior: smooth; }
   section { scroll-margin-top: 24px; }
+
+  /* ── Bilingual visibility (toggle on <html data-lang>) ── */
+  html[data-lang="zh"] [data-i18n="en"] { display: none; }
+  html[data-lang="en"] [data-i18n="zh"] { display: none; }
+  /* Inline / phrase-level variants — keep flow when hidden */
+  html[data-lang="zh"] span[data-i18n="en"],
+  html[data-lang="zh"] strong[data-i18n="en"],
+  html[data-lang="zh"] em[data-i18n="en"],
+  html[data-lang="zh"] code[data-i18n="en"] { display: none; }
+  html[data-lang="en"] span[data-i18n="zh"],
+  html[data-lang="en"] strong[data-i18n="zh"],
+  html[data-lang="en"] em[data-i18n="zh"],
+  html[data-lang="en"] code[data-i18n="zh"] { display: none; }
+
+  /* Language toggle button (top-right, fixed) */
+  .lang-toggle {
+    position: fixed;
+    top: 18px;
+    right: 22px;
+    z-index: 100;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px;
+    box-shadow: var(--shadow);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .lang-toggle button {
+    background: transparent;
+    border: 0;
+    color: var(--fg-2);
+    padding: 6px 14px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    transition: color 0.15s, background 0.15s;
+  }
+  .lang-toggle button:hover { color: var(--fg-0); }
+  .lang-toggle button.active {
+    color: var(--bg-0);
+    background: var(--accent);
+  }
 </style>
 </head>
 <body>
+
+<div class="lang-toggle" role="group" aria-label="Language toggle">
+  <button type="button" data-lang-btn="zh" class="active">中文</button>
+  <button type="button" data-lang-btn="en">EN</button>
+</div>
+
 <div class="shell">
 
 <header class="hero">
-  <span class="eyebrow"><span class="dot"></span>Artemis Saga · Authoring Guide v1.1</span>
-  <h1>剧本提示词<br><span class="accent">万能说明书</span></h1>
-  <p class="tagline">教你（和你的 AI）写出 Artemis Saga 长视频工作流能完美识别的剧本提示词。适用<strong>任何题材</strong>、<strong>任何故事</strong>、<strong>任何 AI 协作伙伴</strong>。</p>
+  <span class="eyebrow"><span class="dot"></span>Artemis Saga · Authoring Guide v1.2</span>
+  <h1 data-i18n="zh">剧本提示词<br><span class="accent">万能说明书</span></h1>
+  <h1 data-i18n="en">Brief Authoring<br><span class="accent">Master Guide</span></h1>
+  <p class="tagline" data-i18n="zh">教你（和你的 AI）写出 Artemis Saga 长视频工作流能完美识别的剧本提示词。适用<strong>任何题材</strong>、<strong>任何故事</strong>、<strong>任何 AI 协作伙伴</strong>。</p>
+  <p class="tagline" data-i18n="en">Teach yourself (and your AI assistant) how to write video briefs the Artemis Saga long-video workflow can parse perfectly. Works for <strong>any genre</strong>, <strong>any story</strong>, with <strong>any AI collaborator</strong>.</p>
   <div class="meta">
     <span>Artemis ≥ 0.2.71</span>
-    <span>Seedance 2.x 兼容</span>
-    <span>gpt-image-2 三视图</span>
+    <span data-i18n="zh">视频 / 图像模型兼容</span>
+    <span data-i18n="en">Video / image model agnostic</span>
+    <span data-i18n="zh">中英双语识别</span>
+    <span data-i18n="en">Recognises Chinese &amp; English</span>
     <span>www.420.company</span>
   </div>
 </header>
@@ -384,32 +441,35 @@
 
 <nav class="toc" id="toc">
   <div class="toc-title">Contents</div>
-  <a href="#sec-0">0 · 元提示词（直接复制）</a>
-  <a href="#sec-1">1 · Artemis 工作流速览</a>
-  <a href="#sec-2">2 · Brief 标准骨架</a>
-  <a href="#sec-3">3 · 识别参考表</a>
-  <a href="#sec-4">4 · 自动生成的模块</a>
-  <a href="#sec-5">5 · Do &amp; Don't</a>
-  <a href="#sec-6">6 · 完整模板</a>
-  <a href="#sec-7">7 · 常见错误</a>
-  <a href="#sec-8">8 · 自查 Checklist</a>
-  <a href="#sec-9">9 · 高级用法</a>
-  <a href="#sec-10">10 · 给写剧本 AI 的提醒</a>
+  <a href="#sec-0"><span data-i18n="zh">0 · 元提示词（直接复制）</span><span data-i18n="en">0 · Meta-prompt (copy &amp; paste)</span></a>
+  <a href="#sec-1"><span data-i18n="zh">1 · Artemis 工作流速览</span><span data-i18n="en">1 · Workflow overview</span></a>
+  <a href="#sec-2"><span data-i18n="zh">2 · Brief 标准骨架</span><span data-i18n="en">2 · Standard brief skeleton</span></a>
+  <a href="#sec-3"><span data-i18n="zh">3 · 识别参考表</span><span data-i18n="en">3 · Recognition reference</span></a>
+  <a href="#sec-4"><span data-i18n="zh">4 · 自动生成的模块</span><span data-i18n="en">4 · Auto-generated modules</span></a>
+  <a href="#sec-5"><span data-i18n="zh">5 · Do &amp; Don't</span><span data-i18n="en">5 · Do &amp; Don't</span></a>
+  <a href="#sec-6"><span data-i18n="zh">6 · 完整模板</span><span data-i18n="en">6 · Full template</span></a>
+  <a href="#sec-7"><span data-i18n="zh">7 · 常见错误</span><span data-i18n="en">7 · Common mistakes</span></a>
+  <a href="#sec-8"><span data-i18n="zh">8 · 自查 Checklist</span><span data-i18n="en">8 · Self-check checklist</span></a>
+  <a href="#sec-9"><span data-i18n="zh">9 · 高级用法</span><span data-i18n="en">9 · Advanced</span></a>
+  <a href="#sec-10"><span data-i18n="zh">10 · 给写剧本 AI 的提醒</span><span data-i18n="en">10 · Final note to brief-writing AIs</span></a>
 </nav>
 
 <main>
 
 <!-- ========== Section 0 ========== -->
 <section id="sec-0">
-  <h2><span class="num">§ 0</span>给「帮我写剧本」的 AI 的元提示词</h2>
-  <p>把这段话直接复制粘贴给 <strong>ChatGPT / Claude / Gemini / DeepSeek</strong> 或任何在线大模型，它就能为你写出 Artemis 兼容的剧本：</p>
+  <h2 data-i18n="zh"><span class="num">§ 0</span>给「帮我写剧本」的 AI 的元提示词</h2>
+  <h2 data-i18n="en"><span class="num">§ 0</span>Meta-prompt for the AI that writes your brief</h2>
+  <p data-i18n="zh">把这段话直接复制粘贴给 <strong>ChatGPT / Claude / Gemini / DeepSeek</strong> 或任何在线大模型，它就能为你写出 Artemis 兼容的剧本：</p>
+  <p data-i18n="en">Copy and paste the block below to <strong>ChatGPT / Claude / Gemini / DeepSeek</strong> or any chat LLM. It will then produce briefs that Artemis can parse cleanly.</p>
 
   <div class="copy-block">
     <div class="head">
       <span><span class="dot"></span>META-PROMPT.md</span>
-      <button onclick="navigator.clipboard.writeText(document.getElementById('meta-prompt').innerText)">复制</button>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('meta-prompt-' + (document.documentElement.getAttribute('data-lang') || 'zh')).innerText)" data-i18n="zh">复制</button>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('meta-prompt-' + (document.documentElement.getAttribute('data-lang') || 'zh')).innerText)" data-i18n="en">Copy</button>
     </div>
-<pre id="meta-prompt"><code>你正在为我撰写一份 Artemis Saga 长视频工作流的剧本提示词。
+<pre id="meta-prompt-zh" data-i18n="zh"><code>你正在为我撰写一份 Artemis Saga 长视频工作流的剧本提示词。
 
 Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 video 模型。
 我需要的是「Artemis 能识别的结构化 brief」，而不是「video 模型直接读的 prompt」。
@@ -428,20 +488,58 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
 5. 段落顺序就是视频顺序，每段时间码内的内容是该段的完整说明
 6. 写中文剧本不要把镜头、地点、动作翻译成英文 — Artemis 自己会处理多语言
 7. 不要假设字幕会被渲染 — 字幕渲染是 Artemis 自动按用户字幕模式控制的
-8. 单段时长按当前视频模型动态上限控制：Seedance 2.x ≤ 15 秒，Seedance 1.5 ≤ 12 秒，其它模型以 Artemis 显示的单段上限为准
-9. 不要重复写 "防塑料感 / 防变形 / 防多手指" — Artemis 自动加更专业的版本
+8. 单段时长按当前视频模型动态上限控制，以 Artemis 工作流提示的单段上限为准（通常每段 6-10 秒最稳定）
+9. 明确画幅比例 / ratio：16:9 横屏、9:16 竖屏、1:1 方屏；构图与运动必须匹配画幅
+10. 对白长度必须匹配时间码：中文约 4-5 字/秒，英文约 2-3 词/秒；5 秒镜头不要塞超过约 20 个中文字
+11. 避免复杂物理交互、近身格斗、精细手部特写、吃东西、递接小物件；改写为走位、眼神、情绪、简单手势
+12. 如果同一个长镜头被拆成多段，后一段开头必须承接上一段结尾状态：同机位、同动作方向、同人物姿态
+13. 如果没有参考图，CHARACTER LOCK 必须写成角色卡：年龄、人种/肤色、脸型、发型发色、标志性服装、固定配饰/痣/疤
+14. 不要堆垃圾画质词或模型站套话，例如 "8K / masterpiece / best quality / photorealistic / ultra detailed"；只写真实摄影、光线、镜头、材质和故事意图
+15. 不要重复写 "防塑料感 / 防变形 / 防多手指" — Artemis 自动加更专业的版本
 
 请基于这些约定，根据我下面给出的题材/构思写完整剧本：
 
 [在这里写你的具体题材]</code></pre>
+<pre id="meta-prompt-en" data-i18n="en"><code>You are writing a brief for the Artemis Saga long-video workflow.
+
+Artemis will parse the brief, build all director-level prompt blocks automatically, and drive the video model.
+What I need from you is a STRUCTURED BRIEF that Artemis can parse — not a raw prompt the video model reads directly.
+
+Strict rules:
+
+1. Tag each segment with [X-Ysec] or [MM:SS-MM:SS], e.g. [0-8sec] / [0:00-0:08]
+2. Every spoken line MUST be wrapped in one of the following markers (bare quotes are NOT recognised as dialogue):
+     **dialogue (note)**: "actual line"
+     **line**: "actual line"
+     voiceover: "actual narration"
+     subtitle: "actual subtitle"
+     对白: "..." / 旁白: "..." (Chinese equivalents)
+3. To lock the camera, use explicit keywords: "locked-off tripod / NO pan/tilt/zoom/dolly/handheld"
+4. To prevent AI music generation, write: "AI generation outputs ambience only" or "all music is added in post"
+5. Segment order = video order; the contents inside each timestamp ARE that segment's full spec
+6. If writing in Chinese, do NOT translate shots / locations / actions to English — Artemis handles multilingual content
+7. Do NOT assume subtitles will render — subtitle rendering is controlled by Artemis's subtitle-mode flag set by the user
+8. Per-segment duration is bound by the current video model's max — follow whatever cap Artemis surfaces in the workflow (6-10 sec per segment is the safest default)
+9. State the aspect ratio explicitly: 16:9 landscape / 9:16 portrait / 1:1 square; composition and motion MUST match
+10. Dialogue length MUST match its timecode: ~4-5 Chinese chars/sec, ~2-3 English words/sec; a 5-sec shot should not carry more than ~20 Chinese chars
+11. Avoid complex physical interactions, hand-to-hand combat, fine hand close-ups, eating, passing small objects; rewrite as blocking, eye contact, emotion, simple gestures
+12. If a long take is split across segments, the next segment MUST continue: same camera, same motion vector, same body pose at the seam
+13. Without a reference image, CHARACTER LOCK MUST be a full character card: age, ethnicity / skin tone, face shape, hair style and colour, signature wardrobe, fixed accessories / moles / scars
+14. Do NOT stuff prompt-engineering filler such as "8K / masterpiece / best quality / photorealistic / ultra detailed" — only describe real photography, light, lenses, materials, and story intent
+15. Do NOT repeat "no plastic skin / no distortion / no extra fingers" — Artemis adds more professional versions automatically
+
+Now write the full brief from the topic / concept below:
+
+[your topic goes here]</code></pre>
   </div>
 </section>
 
 <!-- ========== Section 1 ========== -->
 <section id="sec-1">
-  <h2><span class="num">§ 1</span>Artemis Saga 工作流速览</h2>
+  <h2 data-i18n="zh"><span class="num">§ 1</span>Artemis Saga 工作流速览</h2>
+  <h2 data-i18n="en"><span class="num">§ 1</span>Artemis Saga workflow overview</h2>
 
-  <div class="pipe">
+  <div class="pipe" data-i18n="zh">
 <span class="step">用户给 Brief / 素材</span> <span class="note">(这份说明书指导写)</span>
    <span class="arrow">↓</span>
 <span class="step">Artemis 先确认主体模式</span> <span class="note">(有主角 / 纯视觉)</span>
@@ -460,29 +558,51 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
    <span class="arrow">↓</span>
 <span class="step">逐段调 video 模型生成视频</span> → 拼接成最终成片</div>
 
+  <div class="pipe" data-i18n="en">
+<span class="step">You write a Brief / supply assets</span> <span class="note">(this guide tells you how)</span>
+   <span class="arrow">↓</span>
+<span class="step">Artemis asks the subject mode</span> <span class="note">(has protagonist / pure visual)</span>
+   <span class="arrow">↓</span>
+<span class="step">If a protagonist exists, pick identity source</span> <span class="note">(turnaround sheet / character photo / direct image / text-only; the workflow falls back to text-only when the model is not multimodal)</span>
+   <span class="arrow">↓</span>
+<span class="step">Artemis structural parser</span> <span class="note">(regex / heuristics)</span> extracts:
+   • <span class="hi">Segment timecodes</span> → segment plan
+   • <span class="hi">Dialogue markers</span> → lip-sync + language detection
+   • <span class="hi">Character / wardrobe / props / scene / camera / tone</span> → continuity bible
+   • <span class="hi">Camera-lock keywords</span> → forces [CAMERA: locked-off]
+   • <span class="hi">Post-audio intent</span> → injects [AUDIO-LOCK] automatically
+   • <span class="hi">Subtitle mode</span> → auto / on / off, written into the final generate_long_video action
+   <span class="arrow">↓</span>
+<span class="step">Artemis builds a per-segment prompt</span> <span class="note">(with director-level modules)</span>
+   <span class="arrow">↓</span>
+<span class="step">Each segment calls the video model</span> → segments are stitched into the final video</div>
+
   <div class="callout">
-    <span class="tag">关键观念</span>
-    你写的 Brief <strong>不是</strong> video 模型最终读的 prompt。Artemis 会在你的 Brief 之上<strong>自动增加</strong>一整层导演级模块（角色锁、主体/纯视觉模式、调色锁、负面词锁、参考图角色分离、美学锁、字幕模式等）。所以你只需要专心写<strong>故事和镜头意图</strong>。
+    <span class="tag" data-i18n="zh">关键观念</span><span class="tag" data-i18n="en">Key idea</span>
+    <span data-i18n="zh">你写的 Brief <strong>不是</strong> video 模型最终读的 prompt。Artemis 会在你的 Brief 之上<strong>自动增加</strong>一整层导演级模块（角色锁、主体/纯视觉模式、调色锁、负面词锁、参考图角色分离、美学锁、字幕模式等）。所以你只需要专心写<strong>故事和镜头意图</strong>。</span>
+    <span data-i18n="en">Your brief is <strong>not</strong> what the video model finally reads. Artemis layers a full set of director-level modules on top of it (character lock, subject / pure-visual mode, palette lock, negative-prompt lock, reference-image role separation, aesthetic lock, subtitle mode, and more). All you need to focus on is <strong>story and shot intent</strong>.</span>
   </div>
 </section>
 
 <!-- ========== Section 2 ========== -->
 <section id="sec-2">
-  <h2><span class="num">§ 2</span>Brief 标准骨架</h2>
-  <p>每份 Brief 推荐按这个骨架写：</p>
-<pre><code><span class="tok-mk">【整片叙事】</span>
+  <h2 data-i18n="zh"><span class="num">§ 2</span>Brief 标准骨架</h2>
+  <h2 data-i18n="en"><span class="num">§ 2</span>Standard brief skeleton</h2>
+  <p data-i18n="zh">每份 Brief 推荐按这个骨架写：</p>
+  <p data-i18n="en">Use this skeleton for every brief:</p>
+<pre data-i18n="zh"><code><span class="tok-mk">【整片叙事】</span>
 <span class="tok-cmt">（200-500 字写清楚整片讲什么、主角是谁、最终高潮是什么、情绪走向）</span>
 
 ═════════════════════════════════════════════
 
 <span class="tok-mk">【画质规格】</span>
-<span class="tok-cmt">（参考画质等级、摄影机感、镜头、色彩、光照风格、绝对禁止项）</span>
+<span class="tok-cmt">（画幅比例 / ratio、参考画质等级、摄影机感、镜头、色彩、光照风格、绝对禁止项）</span>
 
 <span class="tok-mk">【全局基调】</span>
 · VIBE: ...
 · 镜头机位: ...  <span class="tok-cmt">← 「锁死三脚架机位 / NO pan/tilt/zoom/dolly」</span>
-· CHARACTER LOCK: 主角永久不变的外貌特征
-· 声音层级: 写明 AI 生成阶段输出什么，哪些是后期叠加
+· CHARACTER LOCK: 主角永久不变的外貌特征；无参考图时写成完整角色卡
+· 声音层级: 写明 AI 生成阶段输出什么，哪些是后期叠加；对白长度匹配时间码
 
 ═════════════════════════════════════════════
 
@@ -498,19 +618,50 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
 
 <span class="tok-mk">【附录：对白回顾】</span>（可选 · 仅供人类参考）
 <span class="tok-mk">【附录：地点清单】</span>（可选）</code></pre>
+<pre data-i18n="en"><code><span class="tok-mk">[Story]</span>
+<span class="tok-cmt">(200-500 chars: what the video is about, who the protagonist is, what the final beat is, emotional arc)</span>
+
+═════════════════════════════════════════════
+
+<span class="tok-mk">[Picture specs]</span>
+<span class="tok-cmt">(aspect ratio, reference quality tier, camera feel, lens, palette, lighting style, hard exclusions)</span>
+
+<span class="tok-mk">[Global tone]</span>
+· VIBE: ...
+· Camera position: ...  <span class="tok-cmt">← "locked-off tripod / NO pan/tilt/zoom/dolly"</span>
+· CHARACTER LOCK: permanent appearance of the protagonist; write a full character card when no reference image is supplied
+· Audio layers: what the AI stage outputs, what is layered in post; dialogue length must match its timecode
+
+═════════════════════════════════════════════
+
+<span class="tok-key">[0-8sec]</span> Segment 1 · title
+<span class="tok-cmt">(segment specifics: camera angle, character actions, background details, pacing, transition)</span>
+[Sound] ...
+<span class="tok-mk">**dialogue (~N sec, note)**:</span> <span class="tok-str">"actual spoken line in original language"</span>
+
+<span class="tok-key">[8-16sec]</span> Segment 2 · ...
+...
+
+═════════════════════════════════════════════
+
+<span class="tok-mk">[Appendix: dialogue recap]</span> (optional · for human reference only)
+<span class="tok-mk">[Appendix: location list]</span> (optional)</code></pre>
 
   <div class="callout">
-    <span class="tag">注意</span>
-    Artemis 自动去重对白——同一句出现在主时间码里和附录里，<strong>只算 1 次</strong>，不会污染 prompt。
+    <span class="tag" data-i18n="zh">注意</span><span class="tag" data-i18n="en">Note</span>
+    <span data-i18n="zh">Artemis 自动去重对白——同一句出现在主时间码里和附录里，<strong>只算 1 次</strong>，不会污染 prompt。</span>
+    <span data-i18n="en">Artemis dedupes dialogue automatically — the same line appearing in both the main timeline and the appendix is counted <strong>once</strong> and will not pollute the prompt.</span>
   </div>
 </section>
 
 <!-- ========== Section 3 ========== -->
 <section id="sec-3">
-  <h2><span class="num">§ 3</span>Artemis 识别的所有结构标记</h2>
+  <h2 data-i18n="zh"><span class="num">§ 3</span>Artemis 识别的所有结构标记</h2>
+  <h2 data-i18n="en"><span class="num">§ 3</span>Every structural marker Artemis recognises</h2>
 
-  <h3>3.1 时间码（用来分段）</h3>
-  <table class="tbl">
+  <h3 data-i18n="zh">3.1 时间码（用来分段）</h3>
+  <h3 data-i18n="en">3.1 Timecodes (used for segmentation)</h3>
+  <table class="tbl" data-i18n="zh">
     <thead><tr><th>格式</th><th>例子</th><th>适用</th></tr></thead>
     <tbody>
       <tr><td>整数秒 + 中文/英文单位</td><td><code>[0-8秒]</code> <code>[8-16s]</code> <code>[0-8]</code></td><td>短视频 (≤180s)</td></tr>
@@ -520,10 +671,30 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td>中文场景标记</td><td><code>镜头 1</code> <code>第 1 段</code> <code>段 1</code></td><td>无时间码时（平均分配）</td></tr>
     </tbody>
   </table>
-  <div class="callout warn"><span class="tag">上限</span>单段上限由当前视频模型决定：<strong>Seedance 2.x 为 15 秒，Seedance 1.5 为 12 秒，其它 provider 由 Artemis 的模型限制表动态计算（通常最高 30 秒）</strong>。超过上限会被自动截断到该模型允许的 maxSegmentSeconds；为了稳定，建议每段 6-10 秒。</div>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Format</th><th>Example</th><th>When to use</th></tr></thead>
+    <tbody>
+      <tr><td>Integer seconds + unit</td><td><code>[0-8秒]</code> <code>[8-16s]</code> <code>[0-8]</code></td><td>Short videos (≤180s)</td></tr>
+      <tr><td>MM:SS clock</td><td><code>[0:00-0:08]</code> <code>[1:30-1:38]</code></td><td>Long videos / finer granularity</td></tr>
+      <tr><td>Loose line-leading form</td><td><code>0-8s:</code> <code>0:00-0:08:</code></td><td>No brackets</td></tr>
+      <tr><td>English scene marker</td><td><code>Scene 1</code> <code>Shot 1</code> <code>Segment 1</code></td><td>When no timecodes exist (durations split evenly)</td></tr>
+      <tr><td>Chinese scene marker</td><td><code>镜头 1</code> <code>第 1 段</code> <code>段 1</code></td><td>When no timecodes exist (durations split evenly)</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <span class="tag" data-i18n="zh">上限</span><span class="tag" data-i18n="en">Cap</span>
+    <span data-i18n="zh">单段上限由当前视频模型决定，Artemis 会在工作流里显示该模型允许的单段最大秒数；超过上限会被自动截断。为了稳定，建议每段 <strong>6-10 秒</strong>。</span>
+    <span data-i18n="en">The per-segment cap is set by the current video model. Artemis shows the allowed max in the workflow; anything longer is auto-truncated. For stability, keep each segment at <strong>6-10 seconds</strong>.</span>
+  </div>
+  <div class="callout">
+    <span class="tag" data-i18n="zh">字数密度</span><span class="tag" data-i18n="en">Word density</span>
+    <span data-i18n="zh">这不是硬上限：每个 6-10 秒段落建议写 <strong>120-250 个中文字</strong> 的有效镜头信息；复杂段落可以到约 <strong>420 字</strong>。太短容易让模型自由发挥，太长或堆无效套话容易让模型忽略后半段。对白字数另按语速约束计算。</span>
+    <span data-i18n="en">Not a hard cap: each 6-10 second segment should carry <strong>120-250 effective Chinese characters</strong> (or ~80-160 English words) of real shot information; complex segments can go to ~420 chars. Too short leaves the model to improvise; too long with filler causes the back half to be ignored. Dialogue length follows the speech-rate rule separately.</span>
+  </div>
 
-  <h3>3.2 对白 marker（必须带 marker 才识别为对白）</h3>
-  <table class="tbl">
+  <h3 data-i18n="zh">3.2 对白 marker（必须带 marker 才识别为对白）</h3>
+  <h3 data-i18n="en">3.2 Dialogue markers (only marked lines count as dialogue)</h3>
+  <table class="tbl" data-i18n="zh">
     <thead><tr><th>写法</th><th>用途</th></tr></thead>
     <tbody>
       <tr><td><code>**对白（说明）**: "台词"</code></td><td>口语对白（带说明）</td></tr>
@@ -536,22 +707,58 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td><code>she says: "..."</code> / <code>他低声说: "..."</code></td><td>自然语言变体</td></tr>
     </tbody>
   </table>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Form</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>**dialogue (note)**: "line"</code></td><td>Spoken dialogue with a note</td></tr>
+      <tr><td><code>**dialogue**: "line"</code></td><td>Spoken dialogue, no note</td></tr>
+      <tr><td><code>dialogue: "line"</code></td><td>Same as above, no markdown</td></tr>
+      <tr><td><code>**voiceover**: "..."</code></td><td>Voiceover (no lip-sync)</td></tr>
+      <tr><td><code>**subtitle**: "..."</code></td><td>On-screen subtitle (rendered per subtitle mode)</td></tr>
+      <tr><td><code>**对白**: "..."</code> / <code>**旁白**: "..."</code></td><td>Chinese equivalents</td></tr>
+      <tr><td><code>she says: "..."</code> / <code>he whispers: "..."</code></td><td>Natural-language variants</td></tr>
+    </tbody>
+  </table>
 
-  <div class="callout danger">
-    <span class="tag">⚠ 重要</span>
-    以下<strong>不会</strong>被识别为对白，会被当成普通文本：
-    <ul style="margin-top:8px;">
-      <li><code>"歌词引用"</code> — 段落副标题里的歌词</li>
-      <li><code>"品牌名"</code> — <em>"Parts Unknown"</em> 这种节目引用</li>
-      <li><code>"设计概念"</code> — <em>"中国街道"</em> <em>"霓虹城市"</em> 这种引号包裹的概念</li>
-    </ul>
-    这是<strong>故意</strong>的——避免错把英文歌词当对白做口型同步，导致音频审核拦截。
+  <div class="callout warn">
+    <span class="tag" data-i18n="zh">对白时长</span><span class="tag" data-i18n="en">Dialogue length</span>
+    <span data-i18n="zh">对白 marker 里的“约 N 秒”要和真实语速匹配：中文正常约 <strong>4-5 字/秒</strong>，英文约 <strong>2-3 词/秒</strong>。例如 <code>[0-5秒]</code> 镜头里，中文对白建议不超过约 20 个字；否则 lip-sync 容易失败、被截断或强行拉伸。</span>
+    <span data-i18n="en">The "~N seconds" in a dialogue marker must match real speech rate: <strong>~4-5 Chinese chars/sec</strong>, <strong>~2-3 English words/sec</strong>. In a <code>[0-5sec]</code> shot, keep Chinese dialogue under ~20 chars; otherwise lip-sync fails, gets truncated, or is forcibly stretched.</span>
   </div>
 
-  <h3>3.3 镜头锁定关键词</h3>
-  <p>Brief 任意位置出现以下任一关键词，Artemis 自动把 CAMERA 块和每段 camera 字段都改为锁死：</p>
+  <div class="callout danger">
+    <span class="tag" data-i18n="zh">⚠ 重要</span><span class="tag" data-i18n="en">⚠ Important</span>
+    <div data-i18n="zh">
+      以下<strong>不会</strong>被识别为对白，会被当成普通文本：
+      <ul style="margin-top:8px;">
+        <li><code>"歌词引用"</code> — 段落副标题里的歌词</li>
+        <li><code>"品牌名"</code> — <em>"Parts Unknown"</em> 这种节目引用</li>
+        <li><code>"设计概念"</code> — <em>"中国街道"</em> <em>"霓虹城市"</em> 这种引号包裹的概念</li>
+      </ul>
+      这是<strong>故意</strong>的——避免错把英文歌词当对白做口型同步，导致音频审核拦截。
+    </div>
+    <div data-i18n="en">
+      The following are <strong>not</strong> treated as dialogue — they are kept as plain text:
+      <ul style="margin-top:8px;">
+        <li><code>"quoted lyrics"</code> — song lyrics inside a sub-heading</li>
+        <li><code>"brand name"</code> — references like <em>"Parts Unknown"</em></li>
+        <li><code>"design concepts"</code> — quoted ideas like <em>"Chinese street"</em> or <em>"neon city"</em></li>
+      </ul>
+      This is <strong>intentional</strong> — it stops English lyrics from being lip-synced as dialogue, which would otherwise hit the audio-safety filter.
+    </div>
+  </div>
+
+  <h3 data-i18n="zh">3.3 镜头锁定关键词</h3>
+  <h3 data-i18n="en">3.3 Camera-lock keywords</h3>
+  <p data-i18n="zh">Brief 任意位置出现以下任一关键词，Artemis 自动把 CAMERA 块和每段 camera 字段都改为锁死：</p>
+  <p data-i18n="en">Any of the following keywords anywhere in the brief flips the CAMERA block and each segment's camera field to locked-off:</p>
   <table class="tbl">
-    <thead><tr><th>中文</th><th>英文</th></tr></thead>
+    <thead>
+      <tr>
+        <th data-i18n="zh">中文</th><th data-i18n="en">Chinese</th>
+        <th data-i18n="zh">英文</th><th data-i18n="en">English</th>
+      </tr>
+    </thead>
     <tbody>
       <tr><td>锁死三脚架 / 锁死机位 / 完全锁死</td><td><code>locked-off tripod</code></td></tr>
       <tr><td>镜头钉死 / 无任何镜头运动</td><td><code>no camera movement (whatsoever)</code></td></tr>
@@ -559,9 +766,11 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
     </tbody>
   </table>
 
-  <h3>3.4 音频意图关键词（自动触发 [AUDIO-LOCK]）</h3>
-  <p>出现以下任一关键词，Artemis 强制 video 模型 <strong>只生成环境音、绝不合成音乐</strong>：</p>
-  <table class="tbl">
+  <h3 data-i18n="zh">3.4 音频意图关键词（自动触发 [AUDIO-LOCK]）</h3>
+  <h3 data-i18n="en">3.4 Audio-intent keywords (auto-trigger [AUDIO-LOCK])</h3>
+  <p data-i18n="zh">出现以下任一关键词，Artemis 强制 video 模型 <strong>只生成环境音、绝不合成音乐</strong>：</p>
+  <p data-i18n="en">When any of these appear, Artemis forces the video model to <strong>output ambience only — never synthesise music</strong>:</p>
+  <table class="tbl" data-i18n="zh">
     <thead><tr><th>关键词模式</th></tr></thead>
     <tbody>
       <tr><td>音乐 + 后期叠加（任一组合）</td></tr>
@@ -573,29 +782,79 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td><code>music/score/soundtrack is added/overlaid in post(-production)</code></td></tr>
     </tbody>
   </table>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Keyword pattern</th></tr></thead>
+    <tbody>
+      <tr><td>"music" + "added/overlaid in post" (any combination)</td></tr>
+      <tr><td>"environmental audio only" / "ambient sounds only"</td></tr>
+      <tr><td>"no music" / "no BGM" / "no soundtrack" / "no instrumental"</td></tr>
+      <tr><td>"music/score/soundtrack is added/overlaid in post(-production)"</td></tr>
+      <tr><td>Chinese equivalents such as <code>只出环境音</code>, <code>不要 BGM</code>, <code>AI 生成阶段只出环境音</code></td></tr>
+    </tbody>
+  </table>
   <div class="callout">
-    <span class="tag">为什么</span>
-    现代视频模型（Seedance、Veo/Sora 类等）<strong>可能默认生成音频，包括音乐</strong>。如果你打算后期自己叠 BGM，<strong>一定要写明</strong> AI 阶段只出环境音，否则模型自己 hallucinate 一段 BGM 跟你后期 BGM 打架。
+    <span class="tag" data-i18n="zh">为什么</span><span class="tag" data-i18n="en">Why</span>
+    <span data-i18n="zh">现代视频模型<strong>可能默认生成音频，包括音乐</strong>。如果你打算后期自己叠 BGM，<strong>一定要写明</strong> AI 阶段只出环境音，否则模型自己 hallucinate 一段 BGM 跟你后期 BGM 打架。</span>
+    <span data-i18n="en">Modern video models <strong>can default to generating audio — including music</strong>. If you plan to overlay your own BGM later, <strong>state explicitly</strong> that the AI stage outputs ambience only; otherwise the model will hallucinate a soundtrack that fights your post BGM.</span>
   </div>
 
 
-  <h3>3.4b 本地 BGM / Soundtrack 后期混音</h3>
-  <p>在 Saga 工作流中，用户确认总时长后会出现 BGM 菜单。BGM 是<strong>最终 FFmpeg 后期混音</strong>，不是让视频模型临场生成音乐。</p>
-  <table class="tbl">
-    <thead><tr><th>参数/输入</th><th>说明</th></tr></thead>
+  <h3 data-i18n="zh">3.4b 本地 BGM / Soundtrack 后期混音</h3>
+  <h3 data-i18n="en">3.4b Local BGM / soundtrack post-mix</h3>
+  <p data-i18n="zh">在 Saga 工作流中，用户确认总时长后会出现 BGM 菜单。BGM 是<strong>最终 FFmpeg 后期混音</strong>，不是让视频模型临场生成音乐。典型流程是：先选“添加 / 不添加”，再发送本地音频路径或直接音频 URL；如果要调参数，可以和路径写在同一行，也可以在后续混音参数步骤里补充。提供 BGM 后<strong>自动输出三个版本</strong>：</p>
+  <p data-i18n="en">After you confirm total duration, the Saga workflow shows the BGM menu. BGM is a <strong>final FFmpeg post-mix step</strong> — never the video model improvising music. The usual flow is: choose add / no add first, then send a local audio path or direct audio URL; if you want to adjust parameters, you may put them on the same line as the path or provide them in the later mix-settings step. Providing a BGM produces <strong>three output variants automatically</strong>:</p>
+  <table class="tbl" data-i18n="zh">
+    <thead><tr><th>输出文件</th><th>音轨内容</th><th>适用场景</th></tr></thead>
     <tbody>
-      <tr><td><code>soundtrackPath</code></td><td>本地音频文件路径，如 <code>/Users/me/music/song.mp3</code></td></tr>
-      <tr><td><code>soundtrackUrl</code></td><td>可直接下载的音频文件 URL，必须是 mp3/wav/m4a/aac/flac/ogg 等真实音频直链</td></tr>
-      <tr><td><code>soundtrackStartSec</code></td><td>从音乐第几秒开始裁剪，例如 <code>79</code> 表示从 1:19 开始</td></tr>
-      <tr><td><code>soundtrackVolumeDb</code></td><td>BGM 混音音量，默认约 <code>-12dB</code></td></tr>
-      <tr><td><code>environmentVolumeDb</code></td><td>视频原环境音/对白音量，默认约 <code>-18dB</code></td></tr>
-      <tr><td><code>soundtrackFadeInSec</code> / <code>soundtrackFadeOutSec</code></td><td>BGM 淡入/淡出秒数</td></tr>
+      <tr><td><code>pre-soundtrack-*.mp4</code></td><td>原声版（只有视频环境音 + 对白，不混 BGM）</td><td>需要纯净对白做后期再叠混音</td></tr>
+      <tr><td><code>*.mp4</code>（主交付文件）</td><td>BGM 全程混音版（音乐持续在前景）</td><td>纯音乐 vibe 的氛围片，对白少或不重要</td></tr>
+      <tr><td><code>*_bgm_ducked.mp4</code></td><td>智能避让版：BGM 在对白/旁白时间码自动降到约 32% 音量，对白结束自动恢复</td><td><strong>推荐</strong>。任何有对白的剧本都用这个</td></tr>
     </tbody>
   </table>
-  <div class="callout warn"><span class="tag">边界</span>Spotify / Apple Music / YouTube Music 等<strong>播放页链接</strong>不是音频文件直链，Artemis 不会绕过平台授权去抓取下载。请提供本地音频文件，或可直接下载的音频 URL。</div>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>File</th><th>Audio content</th><th>When to use</th></tr></thead>
+    <tbody>
+      <tr><td><code>pre-soundtrack-*.mp4</code></td><td>Original-audio version (video ambience + dialogue only, no BGM)</td><td>You want clean dialogue to mix yourself in post</td></tr>
+      <tr><td><code>*.mp4</code> (primary deliverable)</td><td>BGM mixed throughout, music in the foreground</td><td>Pure mood / vibe pieces where dialogue is minor or absent</td></tr>
+      <tr><td><code>*_bgm_ducked.mp4</code></td><td>Intelligent ducking: BGM drops to ~32% during dialogue / voiceover timecodes and restores when speech ends</td><td><strong>Recommended</strong>. Use this for any brief with dialogue.</td></tr>
+    </tbody>
+  </table>
+  <p data-i18n="zh">可选参数与音频路径可以写在同一行（中英文都识别）；如果先只发路径，后面也会再问一次混音参数：</p>
+  <p data-i18n="en">Optional parameters may go on the same line as the audio path (Chinese and English are both recognised); if you only send the path first, the workflow will ask again for mix parameters later:</p>
+  <table class="tbl" data-i18n="zh">
+    <thead><tr><th>参数</th><th>写法</th><th>默认</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>起点</td><td><code>从 1:19 开始</code> / <code>start 1:19</code> / <code>start 90s</code></td><td>0</td><td>音乐从第几秒开始播</td></tr>
+      <tr><td>音乐音量</td><td><code>音量 -12dB</code> / <code>volume -12dB</code></td><td>cover -12dB / ducked -16dB</td><td>BGM 自身音量</td></tr>
+      <tr><td>环境音音量</td><td><code>环境音 -18dB</code> / <code>ambience -18dB</code></td><td>cover -18dB / ducked 0dB</td><td>视频原声音量</td></tr>
+      <tr><td>淡入</td><td><code>淡入 0.5 秒</code> / <code>fade in 0.5s</code></td><td>0.3s</td><td>开头淡入秒数</td></tr>
+      <tr><td>淡出</td><td><code>淡出 1.2 秒</code> / <code>fadeout 1.2s</code></td><td>1.0s</td><td>结尾淡出秒数</td></tr>
+    </tbody>
+  </table>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Parameter</th><th>Syntax</th><th>Default</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Start offset</td><td><code>start 1:19</code> / <code>start 90s</code> / <code>从 1:19 开始</code></td><td>0</td><td>Where in the track the music begins</td></tr>
+      <tr><td>Music volume</td><td><code>volume -12dB</code> / <code>音量 -12dB</code></td><td>cover -12dB / ducked -16dB</td><td>BGM gain</td></tr>
+      <tr><td>Ambience volume</td><td><code>ambience -18dB</code> / <code>环境音 -18dB</code></td><td>cover -18dB / ducked 0dB</td><td>Original video audio level</td></tr>
+      <tr><td>Fade in</td><td><code>fade in 0.5s</code> / <code>淡入 0.5 秒</code></td><td>0.3s</td><td>Fade-in seconds at the head</td></tr>
+      <tr><td>Fade out</td><td><code>fadeout 1.2s</code> / <code>淡出 1.2 秒</code></td><td>1.0s</td><td>Fade-out seconds at the tail</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <span class="tag" data-i18n="zh">dB 参考</span><span class="tag" data-i18n="en">dB reference</span>
+    <span data-i18n="zh">dB 是对数刻度。<strong>数字越接近 0 越响</strong>：<code>-3dB</code> 较响，<code>-12dB</code> 适中（默认垫底音量），<code>-20dB</code> 很轻，<code>-30dB</code> 以下基本听不到。<strong>不是「-1 代表最小音量」</strong>——恰好相反，<code>-1dB</code> 几乎等于原音量。</span>
+    <span data-i18n="en">dB is logarithmic. <strong>Closer to 0 means louder</strong>: <code>-3dB</code> is fairly loud, <code>-12dB</code> sits as a comfortable underscore (default), <code>-20dB</code> is quiet, below <code>-30dB</code> is almost inaudible. <strong>It is NOT "-1 = quietest"</strong> — the opposite: <code>-1dB</code> is essentially original volume.</span>
+  </div>
+  <div class="callout warn">
+    <span class="tag" data-i18n="zh">边界</span><span class="tag" data-i18n="en">Limit</span>
+    <span data-i18n="zh">Spotify / Apple Music / YouTube Music 等<strong>播放页链接</strong>不是音频文件直链，Artemis 不会绕过平台授权去抓取下载。请提供本地音频文件，或可直接下载的音频 URL。</span>
+    <span data-i18n="en">Spotify / Apple Music / YouTube Music <strong>player-page links</strong> are NOT direct audio files; Artemis will not bypass platform authorisation to download them. Provide a local audio file or a directly downloadable audio URL.</span>
+  </div>
 
-  <h3>3.5 字幕模式（在工作流里选）</h3>
-  <table class="tbl">
+  <h3 data-i18n="zh">3.5 字幕模式（在工作流里选）</h3>
+  <h3 data-i18n="en">3.5 Subtitle mode (chosen in the workflow)</h3>
+  <table class="tbl" data-i18n="zh">
     <thead><tr><th>模式</th><th>行为</th></tr></thead>
     <tbody>
       <tr><td><span class="tag-inline lime">自动（推荐）</span></td><td>只有你 brief 明确要求字幕/屏幕文字时才渲染；这是当前工作流默认推荐项</td></tr>
@@ -603,13 +862,101 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td><span class="tag-inline cyan">无字幕</span></td><td>对白只走音频/口型，不主动渲染成屏幕文字；适合怕模型把歌词/品牌名误渲染时使用</td></tr>
     </tbody>
   </table>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Mode</th><th>Behaviour</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag-inline lime">Auto (recommended)</span></td><td>Renders subtitles / on-screen text only when the brief explicitly asks; this is the default the workflow recommends.</td></tr>
+      <tr><td><span class="tag-inline magenta">With subtitles</span></td><td>Renders dialogue / voiceover as readable subtitles, preserving the original language without translation.</td></tr>
+      <tr><td><span class="tag-inline cyan">No subtitles</span></td><td>Dialogue stays audio / lip-sync only; nothing is rendered as on-screen text. Use this when worried the model might misrender lyrics or brand names.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 data-i18n="zh">3.6 首帧定位关键词（让人物朝向 / 位置 / 运动方向稳定可控）</h3>
+  <h3 data-i18n="en">3.6 Opening-frame keywords (lock orientation / position / motion direction reliably)</h3>
+  <p data-i18n="zh">每段开头明确写出人物在画面里的<strong>位置、身体朝向、运动方向、取景、机位</strong>，Artemis 会把它们锁成首帧的硬规则。不写或写得模糊时，每次生成可能出现「人物朝向左右翻」「位置漂移到中央」之类的不稳定结果。</p>
+  <p data-i18n="en">At the top of each segment, state the subject's <strong>frame position, body orientation, motion direction, shot size, and camera</strong> explicitly. Artemis then locks them as hard rules for the opening keyframe. Without these cues — or with vague ones — every run risks left/right facing flips or position drift to centre.</p>
+  <table class="tbl" data-i18n="zh">
+    <thead><tr><th>维度</th><th>怎么写（中文）</th><th>怎么写（英文）</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>横向位置</td>
+        <td><code>画面左边缘 5%</code> / <code>画面右边缘 10%</code> / <code>画面 30% 处</code> / <code>画面中央</code></td>
+        <td><code>left edge 5%</code> / <code>30% horizontal</code> / <code>centred in the frame</code></td>
+      </tr>
+      <tr>
+        <td>身体朝向</td>
+        <td><code>侧面</code> / <code>正面朝镜头</code> / <code>背影</code> / <code>3/4 侧背</code></td>
+        <td><code>profile</code> / <code>facing camera</code> / <code>back to camera</code> / <code>three-quarter back</code></td>
+      </tr>
+      <tr>
+        <td>运动方向</td>
+        <td><code>向画面右侧走</code> / <code>向左移动</code> / <code>朝镜头走来</code></td>
+        <td><code>moving rightward</code> / <code>drifting left</code> / <code>walking toward the camera</code></td>
+      </tr>
+      <tr>
+        <td>取景</td>
+        <td><code>中景全身</code> / <code>中景</code> / <code>特写</code> / <code>极近特写</code> / <code>大远景</code></td>
+        <td><code>medium wide</code> / <code>medium shot</code> / <code>close-up</code> / <code>extreme close-up</code> / <code>long shot</code></td>
+      </tr>
+      <tr>
+        <td>机位</td>
+        <td><code>锁死三脚架</code> / <code>推镜</code></td>
+        <td><code>locked-off tripod</code> / <code>slow dolly-in</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Dimension</th><th>How to write (Chinese)</th><th>How to write (English)</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Horizontal position</td>
+        <td><code>画面左边缘 5%</code> / <code>画面右边缘 10%</code> / <code>画面 30% 处</code> / <code>画面中央</code></td>
+        <td><code>left edge 5%</code> / <code>30% horizontal</code> / <code>centred in the frame</code></td>
+      </tr>
+      <tr>
+        <td>Body orientation</td>
+        <td><code>侧面</code> / <code>正面朝镜头</code> / <code>背影</code> / <code>3/4 侧背</code></td>
+        <td><code>profile</code> / <code>facing camera</code> / <code>back to camera</code> / <code>three-quarter back</code></td>
+      </tr>
+      <tr>
+        <td>Motion direction</td>
+        <td><code>向画面右侧走</code> / <code>向左移动</code> / <code>朝镜头走来</code></td>
+        <td><code>moving rightward</code> / <code>drifting left</code> / <code>walking toward the camera</code></td>
+      </tr>
+      <tr>
+        <td>Shot size</td>
+        <td><code>中景全身</code> / <code>中景</code> / <code>特写</code> / <code>极近特写</code> / <code>大远景</code></td>
+        <td><code>medium wide</code> / <code>medium shot</code> / <code>close-up</code> / <code>extreme close-up</code> / <code>long shot</code></td>
+      </tr>
+      <tr>
+        <td>Camera</td>
+        <td><code>锁死三脚架</code> / <code>推镜</code></td>
+        <td><code>locked-off tripod</code> / <code>slow dolly-in</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p data-i18n="zh">推荐写法：在每段的<strong>第一句</strong>用「首帧定位」整理这 5 类信息，再写场景细节。这样首帧画面方向不会再翻车。</p>
+  <p data-i18n="en">Recommended pattern: open each segment with an "Opening framing" line that consolidates these 5 cues, then describe the scene. The opening frame will stop flipping direction across runs.</p>
+<pre data-i18n="zh"><code><span class="tok-key">[0-8秒]</span> 段 1 · 东京迷失
+<span class="tok-mk">**首帧定位**</span>：女主<span class="tok-str">侧面剪影</span>位于<span class="tok-str">画面左边缘 5%</span>，<span class="tok-str">向画面右侧</span>缓慢迈步；<span class="tok-str">中景全身</span>，<span class="tok-str">锁死三脚架</span>。
+（接下来正文场景细节...）</code></pre>
+<pre data-i18n="en"><code><span class="tok-key">[0-8sec]</span> Segment 1 · Tokyo lost
+<span class="tok-mk">**Opening framing**</span>: the protagonist is in <span class="tok-str">profile</span>, positioned at <span class="tok-str">left edge ~5%</span>, <span class="tok-str">moving rightward</span> in a slow stride; <span class="tok-str">medium wide / full body</span>; <span class="tok-str">locked-off tripod</span>.
+(then continue with scene specifics...)</code></pre>
+  <div class="callout">
+    <span class="tag" data-i18n="zh">注意</span><span class="tag" data-i18n="en">Note</span>
+    <span data-i18n="zh">一段里同时出现「向右走」和「朝镜头走」时，Artemis 会优先取横向方向。如果某段确实要从横向走切换为朝镜头走（比如转身的高潮段），把「朝镜头走来」写在<strong>该段自己的段落内</strong>，不要全片混着写。</span>
+    <span data-i18n="en">When a segment mentions both "moving rightward" and "walking toward camera", Artemis picks the horizontal vector first. If a segment really does switch from horizontal travel to walking toward the camera (e.g. the turn-around climax), put "walking toward camera" <strong>inside that segment's own paragraph</strong> — do not mix the two across the whole brief.</span>
+  </div>
 </section>
 
 <!-- ========== Section 4 ========== -->
 <section id="sec-4">
-  <h2><span class="num">§ 4</span>Artemis 自动为你生成的导演级模块</h2>
-  <p>你 <strong>不需要在 brief 里写</strong> 下列任何东西，Artemis 会自动加上：</p>
-  <table class="tbl">
+  <h2 data-i18n="zh"><span class="num">§ 4</span>Artemis 自动为你生成的导演级模块</h2>
+  <h2 data-i18n="en"><span class="num">§ 4</span>Director-level modules Artemis generates for you</h2>
+  <p data-i18n="zh">你 <strong>不需要在 brief 里写</strong> 下列任何东西，Artemis 会自动加上：</p>
+  <p data-i18n="en">You do <strong>not</strong> need to write any of the following in your brief — Artemis adds them automatically:</p>
+  <table class="tbl" data-i18n="zh">
     <thead><tr><th>自动模块</th><th>作用</th></tr></thead>
     <tbody>
       <tr><td><code>[SAGA-CONTINUITY-POLICY]</code></td><td>全片角色身份一致性硬规则</td></tr>
@@ -626,98 +973,176 @@ Artemis 会自动分析剧本、自动构造导演级 prompt 块、自动驱动 
       <tr><td><code>[REFERENCE-ROLE-SEPARATION]</code></td><td>参考图职责分离（身份用 / 不要继承塑料皮肤）</td></tr>
       <tr><td><code>[AESTHETIC-LOCK: HUMAN-EDITORIAL]</code> 或 <code>PRODUCT-CINEMATIC</code></td><td>美学锁</td></tr>
       <tr><td><code>[Saga Narrative Entity Map]</code></td><td>主角/商品/环境“上帝实体”地图，传给 Saga Critic 防跑题</td></tr>
-      <tr><td><code>cleanDirect</code>（显式关键词才启用）</td><td>原始/少滤镜模式，跳过关键帧与部分导演脚手架以保留更自然质感</td></tr>
+      <tr><td>首帧定位锁</td><td>从你 brief 里自动提取每段的位置 / 朝向 / 运动方向 / 取景 / 机位，固化为首帧硬规则（详见 §3.6）</td></tr>
+      <tr><td>BGM 三版本输出</td><td>提供 BGM 后自动生成原声、混音、智能避让对白三个最终文件（详见 §3.4b）</td></tr>
+      <tr><td><code>cleanDirect</code>（显式关键词才启用）</td><td>原始/少滤镜模式，去掉美学修饰；角色、配饰、服装、场景、字幕防护这些一致性锁仍然保留，可以放心使用</td></tr>
+    </tbody>
+  </table>
+  <table class="tbl" data-i18n="en">
+    <thead><tr><th>Auto module</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>[SAGA-CONTINUITY-POLICY]</code></td><td>Whole-film character-identity hard rule</td></tr>
+      <tr><td><code>[CHARACTERS]</code> / <code>[LOCKED-CHARACTERS]</code></td><td>Character lock</td></tr>
+      <tr><td><code>[ACCESSORY-LOCK]</code></td><td>Permanent accessories (sunglasses, headscarf, bracelets — auto-extracted from the brief)</td></tr>
+      <tr><td><code>[WARDROBE]</code> / <code>[LOCKED-WARDROBE]</code></td><td>Wardrobe lock</td></tr>
+      <tr><td><code>[LOCKED-PROPS]</code></td><td>Prop lock (incidental reference-photo backgrounds are auto-filtered)</td></tr>
+      <tr><td><code>[LOCKED-LOCATIONS]</code></td><td>Scene / location lock</td></tr>
+      <tr><td><code>[PALETTE]</code> <code>[LIGHTING]</code> <code>[CAMERA]</code> <code>[MOOD]</code></td><td>Palette / lighting / camera / mood</td></tr>
+      <tr><td><code>[NEGATIVE]</code></td><td>Negative constraints (subtitle-mode aware)</td></tr>
+      <tr><td><code>[AUDIO-LOCK]</code></td><td>Audio lock (added automatically based on brief intent)</td></tr>
+      <tr><td><code>[STYLE-LOCK]</code> <code>[SCENE-PRIORITY]</code></td><td>Cross-segment style / storyBeat priority</td></tr>
+      <tr><td><code>[EXPLICIT USER BRIEF LOCK]</code></td><td>Auto-extracted concrete location / prop / dialogue anchors</td></tr>
+      <tr><td><code>[REFERENCE-ROLE-SEPARATION]</code></td><td>Reference-image role separation (identity only / do not inherit plastic skin)</td></tr>
+      <tr><td><code>[AESTHETIC-LOCK: HUMAN-EDITORIAL]</code> or <code>PRODUCT-CINEMATIC</code></td><td>Aesthetic lock</td></tr>
+      <tr><td><code>[Saga Narrative Entity Map]</code></td><td>"God-entity" map of protagonist / product / environment, fed to Saga Critic to prevent drift</td></tr>
+      <tr><td>Opening-frame lock</td><td>Auto-extracts each segment's position / orientation / motion / shot size / camera from your brief and hard-locks them for the opening keyframe (see §3.6)</td></tr>
+      <tr><td>3-variant BGM output</td><td>When a BGM is supplied, three final files are produced: original, mixed, intelligent-ducking (see §3.4b)</td></tr>
+      <tr><td><code>cleanDirect</code> (explicit keyword only)</td><td>Raw / low-filter mode: removes aesthetic dressing; character, accessory, wardrobe, scene, and subtitle-protection locks all stay in place — safe to use</td></tr>
     </tbody>
   </table>
   <div class="callout">
-    <span class="tag">结论</span>
-    你写 brief 时，<strong>只要专心写故事 + 镜头意图 + 场景细节</strong>。所有"画质术语 / 防 AI 塑料感 / 防变形 / 防多手指"等等都不用写——Artemis 默认全套加好。
+    <span class="tag" data-i18n="zh">结论</span><span class="tag" data-i18n="en">Bottom line</span>
+    <span data-i18n="zh">你写 brief 时，<strong>只要专心写故事 + 镜头意图 + 场景细节</strong>。所有"画质术语 / 防 AI 塑料感 / 防变形 / 防多手指"等等都不用写——Artemis 默认全套加好。</span>
+    <span data-i18n="en">When writing a brief, <strong>just focus on story + shot intent + scene specifics</strong>. All the "quality terms / anti-plastic skin / anti-distortion / anti-extra-fingers" boilerplate is unnecessary — Artemis adds the professional versions for you.</span>
   </div>
 </section>
 
 <!-- ========== Section 5 ========== -->
 <section id="sec-5">
-  <h2><span class="num">§ 5</span>Do &amp; Don't</h2>
+  <h2 data-i18n="zh"><span class="num">§ 5</span>Do &amp; Don't</h2>
+  <h2 data-i18n="en"><span class="num">§ 5</span>Do &amp; Don't</h2>
 
   <div class="grid-2">
     <div class="card good">
       <div class="label">✓ DO</div>
-      <h4>把时间码写在段落起始的方括号里</h4>
+      <h4 data-i18n="zh">把时间码写在段落起始的方括号里</h4>
+      <h4 data-i18n="en">Put the timecode in brackets at the start of each segment</h4>
 <pre><code><span class="tok-key">[8-16秒]</span> 段 2 · 段标题</code></pre>
     </div>
     <div class="card bad">
       <div class="label">✗ DON'T</div>
-      <h4>不要把对白写成裸引号</h4>
-<pre><code>她说"我来了"
+      <h4 data-i18n="zh">不要把对白写成裸引号</h4>
+      <h4 data-i18n="en">Do NOT use bare quotes for dialogue</h4>
+<pre data-i18n="zh"><code>她说"我来了"
 <span class="tok-cmt">↑ Artemis 不会识别为对白</span></code></pre>
+<pre data-i18n="en"><code>She said "I'm here"
+<span class="tok-cmt">↑ Artemis will not recognise this as dialogue</span></code></pre>
     </div>
 
     <div class="card good">
       <div class="label">✓ DO</div>
-      <h4>对白必须用 marker 包裹</h4>
+      <h4 data-i18n="zh">对白必须用 marker 包裹</h4>
+      <h4 data-i18n="en">Wrap every line with an explicit dialogue marker</h4>
 <pre><code><span class="tok-mk">**对白**:</span> <span class="tok-str">"我来了"</span></code></pre>
     </div>
     <div class="card bad">
       <div class="label">✗ DON'T</div>
-      <h4>不要在 brief 中重复 Artemis 自动加的套话</h4>
-<pre><code>NO waxy skin, NO plastic skin,
+      <h4 data-i18n="zh">不要在 brief 中重复 Artemis 自动加的套话</h4>
+      <h4 data-i18n="en">Don't repeat boilerplate Artemis already adds</h4>
+<pre data-i18n="zh"><code>NO waxy skin, NO plastic skin,
 no AI smoothing, anatomically coherent...
 <span class="tok-cmt">↑ Artemis 自动加更专业版本</span></code></pre>
+<pre data-i18n="en"><code>NO waxy skin, NO plastic skin,
+no AI smoothing, anatomically coherent...
+<span class="tok-cmt">↑ Artemis adds a more professional version automatically</span></code></pre>
     </div>
 
     <div class="card good">
       <div class="label">✓ DO</div>
-      <h4>锁机位用明确关键词，不要绕</h4>
-<pre><code>完全锁死的三脚架机位
+      <h4 data-i18n="zh">锁机位用明确关键词，不要绕</h4>
+      <h4 data-i18n="en">Use direct camera-lock keywords; don't paraphrase</h4>
+<pre data-i18n="zh"><code>完全锁死的三脚架机位
+NO pan, NO tilt, NO zoom, NO dolly</code></pre>
+<pre data-i18n="en"><code>locked-off tripod, no camera movement whatsoever
 NO pan, NO tilt, NO zoom, NO dolly</code></pre>
     </div>
     <div class="card bad">
       <div class="label">✗ DON'T</div>
-      <h4>不要把角色参考照片的偶发背景写进剧本</h4>
-<pre><code>我上传的参考照片里有黄色座椅，
+      <h4 data-i18n="zh">不要把角色参考照片的偶发背景写进剧本</h4>
+      <h4 data-i18n="en">Don't bring incidental background from the reference photo into the brief</h4>
+<pre data-i18n="zh"><code>我上传的参考照片里有黄色座椅，
 把它放进每段背景
 <span class="tok-cmt">↑ Artemis 会自动过滤这条</span></code></pre>
+<pre data-i18n="en"><code>The reference photo I uploaded has yellow seats —
+put them in every background
+<span class="tok-cmt">↑ Artemis filters this kind of injection automatically</span></code></pre>
     </div>
 
     <div class="card good">
       <div class="label">✓ DO</div>
-      <h4>想用后期 BGM 时写明环境音意图</h4>
-<pre><code>AI 生成阶段只出环境音；
+      <h4 data-i18n="zh">想用后期 BGM 时写明环境音意图</h4>
+      <h4 data-i18n="en">State ambience-only intent when you plan to overlay BGM in post</h4>
+<pre data-i18n="zh"><code>AI 生成阶段只出环境音；
 音乐和对白都是后期叠加</code></pre>
+<pre data-i18n="en"><code>AI stage outputs ambience only;
+music and dialogue are layered in post</code></pre>
     </div>
     <div class="card bad">
       <div class="label">✗ DON'T</div>
-      <h4>不要要求生成特定品牌 BGM</h4>
-<pre><code>用 JVKE Golden Hour 当 BGM
+      <h4 data-i18n="zh">不要要求生成特定品牌 BGM</h4>
+      <h4 data-i18n="en">Don't ask the model to generate a specific licensed track</h4>
+<pre data-i18n="zh"><code>用 JVKE Golden Hour 当 BGM
 <span class="tok-cmt">↑ AI 不会用，且会触发版权问题</span></code></pre>
+<pre data-i18n="en"><code>Use JVKE "golden hour" as BGM
+<span class="tok-cmt">↑ The model will not match it and may trigger copyright issues</span></code></pre>
     </div>
 
     <div class="card good">
       <div class="label">✓ DO</div>
-      <h4>引用真实地标 + 标志性细节</h4>
-<pre><code>成都太古里街头，远处可见
+      <h4 data-i18n="zh">引用真实地标 + 标志性细节</h4>
+      <h4 data-i18n="en">Reference real landmarks plus signature details</h4>
+<pre data-i18n="zh"><code>成都太古里街头，远处可见
 成都IFS熊猫爬楼雕塑</code></pre>
+<pre data-i18n="en"><code>Sino-Ocean Taikoo Li in Chengdu, with the
+IFS climbing-panda sculpture visible in the distance</code></pre>
     </div>
     <div class="card bad">
       <div class="label">✗ DON'T</div>
-      <h4>不要在节标题里加英文歌词引号</h4>
-<pre><code>段 1 · "It was just two lovers"
+      <h4 data-i18n="zh">不要在节标题里加英文歌词引号</h4>
+      <h4 data-i18n="en">Don't put quoted English lyrics into section titles</h4>
+<pre data-i18n="zh"><code>段 1 · "It was just two lovers"
 <span class="tok-cmt">↑ 会被渲染成屏幕字幕</span></code></pre>
+<pre data-i18n="en"><code>Segment 1 · "It was just two lovers"
+<span class="tok-cmt">↑ Risks being rendered as on-screen text</span></code></pre>
+    </div>
+
+    <div class="card good">
+      <div class="label">✓ DO</div>
+      <h4 data-i18n="zh">把动作拆成稳定、可生成的物理状态</h4>
+      <h4 data-i18n="en">Break action into stable, generatable physical states</h4>
+<pre data-i18n="zh"><code>她停在门口，抬眼看向对方，
+手指轻触门框，风吹动头发</code></pre>
+<pre data-i18n="en"><code>She pauses at the doorway, lifts her gaze,
+fingertip brushing the doorframe, wind in her hair</code></pre>
+    </div>
+    <div class="card bad">
+      <div class="label">✗ DON'T</div>
+      <h4 data-i18n="zh">不要设计复杂交互或手部特写</h4>
+      <h4 data-i18n="en">Don't design complex interactions or fine hand close-ups</h4>
+<pre data-i18n="zh"><code>两人近身格斗并交换硬币；
+主角用筷子精准夹起花生米
+<span class="tok-cmt">↑ 容易肢体融合、手指错乱、物体漂浮</span></code></pre>
+<pre data-i18n="en"><code>Two characters fighting and exchanging a coin;
+protagonist picking up a peanut with chopsticks
+<span class="tok-cmt">↑ Causes limb merging, broken finger counts, floating props</span></code></pre>
     </div>
   </div>
 </section>
 
 <!-- ========== Section 6 ========== -->
 <section id="sec-6">
-  <h2><span class="num">§ 6</span>完整剧本模板（拿来即用）</h2>
-  <p>所有 <code>[填入...]</code> 都要替换成你自己的内容。</p>
+  <h2 data-i18n="zh"><span class="num">§ 6</span>完整剧本模板（拿来即用）</h2>
+  <h2 data-i18n="en"><span class="num">§ 6</span>Full brief template (copy &amp; fill)</h2>
+  <p data-i18n="zh">所有 <code>[填入...]</code> 都要替换成你自己的内容。</p>
+  <p data-i18n="en">Replace every <code>[fill in...]</code> with your own content.</p>
 
   <div class="copy-block">
     <div class="head">
       <span><span class="dot"></span>SAGA-BRIEF-TEMPLATE.md</span>
-      <button onclick="navigator.clipboard.writeText(document.getElementById('full-template').innerText)">复制</button>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('full-template-' + (document.documentElement.getAttribute('data-lang') || 'zh')).innerText)" data-i18n="zh">复制</button>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('full-template-' + (document.documentElement.getAttribute('data-lang') || 'zh')).innerText)" data-i18n="en">Copy</button>
     </div>
-<pre id="full-template"><code><span class="tok-mk">【整片叙事】</span>
+<pre id="full-template-zh" data-i18n="zh"><code><span class="tok-mk">【整片叙事】</span>
 
 [填入 200-500 字整片故事：主角是谁、视觉风格、整体节奏、最终高潮]
 
@@ -725,11 +1150,14 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
 
 <span class="tok-mk">【画质规格】</span>
 
+· 画幅比例 / ratio: [16:9 横屏 / 9:16 竖屏 / 1:1 方屏]
 · 参考画质等级: [填入参考片名 / 风格]
 · 摄影机感: [填入摄影机品牌 / 大画幅 / iPhone 等]
 · 镜头: [35mm / 50mm 定焦 / 鱼眼 / 长焦 / etc]
 · 色彩: [teal-orange / 高饱和暖色 / 低饱和冷调 / etc]
 · 光照: [自然光 / 实拍灯位 / 霓虹 / 烛光 / etc]
+· 运动强度: [微幅 / 舒缓 / 中等 / 剧烈 / 爆发]
+· 高级摄影质感（可选）: [anamorphic flare / volumetric light / 35mm film grain / halation / practical lighting]
 
 ═══════════════════════════════════════════════════════════════
 
@@ -738,10 +1166,10 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
 · VIBE: [一句话概括整片调性]
 · 镜头机位: [如果要锁机位，写：完全锁死的三脚架机位 (locked-off tripod);
             NO pan, NO tilt, NO zoom, NO dolly, NO handheld shake]
-· CHARACTER LOCK: [主角永久不变的服装、配饰、发型、妆容]
+· CHARACTER LOCK: [主角永久不变的年龄、人种/肤色、脸型、发型发色、服装、配饰、妆容；无参考图时必须写成完整角色卡]
 · 声音层级:
   - 背景音乐: [不加 BGM / 后期叠加本地 BGM / 使用直接音频 URL]
-  - BGM 参数（可选）: 本地路径或音频直链、从第几秒开始、BGM 音量、环境音音量、淡入淡出
+  - BGM 参数（可选）: 本地路径或音频直链、从第几秒开始、BGM 音量、环境音音量、淡入淡出；也可先只发路径，后续再补参数
   - 环境音: [描述每段的环境音风格]
   - 对白: [描述对白整体音量、口吻、几句话]
   - <span class="tok-str">AI 生成阶段只出环境音；音乐和对白都是后期叠加</span>
@@ -778,153 +1206,411 @@ NO pan, NO tilt, NO zoom, NO dolly</code></pre>
 | 时间 | 段 | 对白 | 情绪 |
 |---|---|---|---|
 | ~Ns | 段 X | "[对白]" | [情绪] |</code></pre>
+<pre id="full-template-en" data-i18n="en"><code><span class="tok-mk">[Story]</span>
+
+[Fill in 200-500 chars of overall story: who the protagonist is, the visual style, the pacing, the final beat]
+
+═══════════════════════════════════════════════════════════════
+
+<span class="tok-mk">[Picture specs]</span>
+
+· Aspect ratio: [16:9 landscape / 9:16 portrait / 1:1 square]
+· Reference quality tier: [film / show name / style label]
+· Camera feel: [camera body / large format / iPhone / etc.]
+· Lens: [35mm / 50mm prime / fisheye / telephoto / etc.]
+· Palette: [teal-orange / saturated warm / desaturated cool / etc.]
+· Lighting: [natural / practical lamps / neon / candlelight / etc.]
+· Motion intensity: [micro / smooth / medium / intense / explosive]
+· Advanced look (optional): [anamorphic flare / volumetric light / 35mm film grain / halation / practical lighting]
+
+═══════════════════════════════════════════════════════════════
+
+<span class="tok-mk">[Global tone]</span>
+
+· VIBE: [one-sentence tone summary]
+· Camera position: [If locked, write: "locked-off tripod;
+            NO pan, NO tilt, NO zoom, NO dolly, NO handheld shake"]
+· CHARACTER LOCK: [Permanent age / ethnicity-skin / face shape / hair / wardrobe / accessories / makeup; if no reference image, write a full character card]
+· Audio layers:
+  - Background music: [no BGM / overlay local BGM in post / direct audio URL]
+  - BGM params (optional): local path or direct audio URL, start offset, music volume, ambience volume, fade in / out; you can send the path first and add params later
+  - Ambience: [per-segment ambience styles]
+  - Dialogue: [overall volume, tone, number of lines]
+  - <span class="tok-str">AI generation outputs ambience only; music and dialogue are layered in post</span>
+
+═══════════════════════════════════════════════════════════════
+
+<span class="tok-key">[0-Nsec]</span> Segment 1 · [title]
+
+[Fill in shot details:
+- camera position
+- character position in frame, action
+- background specifics (real landmark + signature feature)
+- pacing (cuts every X sec / sustained / slowed)
+- transition (INSTANT HARD CUT / cross-fade / etc.)]
+
+[Sound] [Specific ambience cues for this segment]
+
+<span class="tok-mk">**dialogue (~N sec, [emotion])**:</span> <span class="tok-str">"[actual line in original language]"</span>
+
+═══════════════════════════════════════════════════════════════
+
+<span class="tok-key">[N-Msec]</span> Segment 2 · [title]
+
+[same structure]
+
+═══════════════════════════════════════════════════════════════
+
+... repeat for as many segments as you need ...
+
+═══════════════════════════════════════════════════════════════
+
+<span class="tok-mk">[Appendix: dialogue recap]</span> (optional · for human reference only)
+
+| Time | Seg | Line | Emotion |
+|---|---|---|---|
+| ~Ns | Seg X | "[line]" | [emotion] |</code></pre>
   </div>
 </section>
 
 <!-- ========== Section 7 ========== -->
 <section id="sec-7">
-  <h2><span class="num">§ 7</span>常见错误示例（带注释）</h2>
+  <h2 data-i18n="zh"><span class="num">§ 7</span>常见错误示例（带注释）</h2>
+  <h2 data-i18n="en"><span class="num">§ 7</span>Common mistakes (annotated)</h2>
 
-  <h3>错误 1 · 对白没 marker</h3>
+  <h3 data-i18n="zh">错误 1 · 对白没 marker</h3>
+  <h3 data-i18n="en">Mistake 1 · Dialogue without a marker</h3>
   <div class="diff">
-<pre><span class="minus">- 这时候她轻声说："我等了你好久。"</span>
+<pre data-i18n="zh"><span class="minus">- 这时候她轻声说："我等了你好久。"</span>
 <span class="plus">+ **对白（约 12 秒，温柔低语）**: "我等了你好久。"</span></pre>
+<pre data-i18n="en"><span class="minus">- Then she whispered: "I've waited so long."</span>
+<span class="plus">+ **dialogue (~12 sec, soft whisper)**: "I've waited so long."</span></pre>
   </div>
-  <p><strong>原因</strong>：裸引号不会被识别为对白，模型不会做口型同步，音频也不会带出来。</p>
+  <p data-i18n="zh"><strong>原因</strong>：裸引号不会被识别为对白，模型不会做口型同步，音频也不会带出来。</p>
+  <p data-i18n="en"><strong>Why</strong>: bare quotes are not recognised as dialogue. The model won't lip-sync and no audio will be emitted.</p>
 
-  <h3>错误 2 · 在节标题里加英文歌词引号</h3>
+  <h3 data-i18n="zh">错误 2 · 在节标题里加英文歌词引号</h3>
+  <h3 data-i18n="en">Mistake 2 · Putting quoted English lyrics in a section title</h3>
   <div class="diff">
-<pre><span class="minus">- [8-16秒] 段 2 · "Listenin' to Blonde / fallin' for each other"</span>
+<pre data-i18n="zh"><span class="minus">- [8-16秒] 段 2 · "Listenin' to Blonde / fallin' for each other"</span>
 <span class="plus">+ [8-16秒] 段 2 · 中东北非四连穿越（对应副歌 1:24-1:32）</span></pre>
+<pre data-i18n="en"><span class="minus">- [8-16sec] Segment 2 · "Listenin' to Blonde / fallin' for each other"</span>
+<span class="plus">+ [8-16sec] Segment 2 · Middle East &amp; North Africa quadruple cut (aligns with chorus 1:24-1:32)</span></pre>
   </div>
-  <p><strong>原因</strong>：节标题里的英文引号会被 video 模型当成"屏幕字幕指令"，渲染到画面上变成花字。</p>
+  <p data-i18n="zh"><strong>原因</strong>：节标题里的英文引号会被 video 模型当成"屏幕字幕指令"，渲染到画面上变成花字。</p>
+  <p data-i18n="en"><strong>Why</strong>: quoted English in a section title is treated as a "render this on-screen" instruction by the video model and ends up as decorative typography on the frame.</p>
 
-  <h3>错误 3 · 要求 AI 生成特定 BGM</h3>
+  <h3 data-i18n="zh">错误 3 · 要求 AI 生成特定 BGM</h3>
+  <h3 data-i18n="en">Mistake 3 · Asking the model to generate a specific licensed track</h3>
   <div class="diff">
-<pre><span class="minus">- AI 在段 5 高潮处加入 JVKE - golden hour 副歌</span>
+<pre data-i18n="zh"><span class="minus">- AI 在段 5 高潮处加入 JVKE - golden hour 副歌</span>
 <span class="plus">+ AI 生成阶段只出环境音（海浪 + 棕榈叶风）；BGM 后期 DaVinci 中叠加</span></pre>
+<pre data-i18n="en"><span class="minus">- AI adds the JVKE "golden hour" chorus at the climax of segment 5</span>
+<span class="plus">+ AI stage outputs ambience only (surf + palm-frond wind); BGM is layered in DaVinci in post</span></pre>
   </div>
-  <p><strong>原因</strong>：AI 视频模型不会版权安全地"重现"具体歌曲，且写明音乐名反而让模型 hallucinate 一段不像的音乐。</p>
+  <p data-i18n="zh"><strong>原因</strong>：AI 视频模型不会版权安全地"重现"具体歌曲，且写明音乐名反而让模型 hallucinate 一段不像的音乐。</p>
+  <p data-i18n="en"><strong>Why</strong>: video models can't reproduce a specific licensed track safely, and naming one tends to make the model hallucinate a poor imitation.</p>
 
-  <h3>错误 4 · 混用时间码格式</h3>
+  <h3 data-i18n="zh">错误 4 · 混用时间码格式</h3>
+  <h3 data-i18n="en">Mistake 4 · Mixing timecode formats</h3>
   <div class="diff">
-<pre><span class="minus">- [0-8秒] 段 1</span>
+<pre data-i18n="zh"><span class="minus">- [0-8秒] 段 1</span>
 <span class="minus">- Scene 2: 8-16s</span>
 <span class="minus">- [16-24] 段 3</span>
 <span class="plus">+ [0-8秒] 段 1</span>
 <span class="plus">+ [8-16秒] 段 2</span>
 <span class="plus">+ [16-24秒] 段 3</span></pre>
+<pre data-i18n="en"><span class="minus">- [0-8sec] Segment 1</span>
+<span class="minus">- Scene 2: 8-16s</span>
+<span class="minus">- [16-24] Segment 3</span>
+<span class="plus">+ [0-8sec] Segment 1</span>
+<span class="plus">+ [8-16sec] Segment 2</span>
+<span class="plus">+ [16-24sec] Segment 3</span></pre>
   </div>
-  <p><strong>原因</strong>：Artemis 优先按方括号时间码解析，混用会让某些段被误识别为场景标记从而错误平均分配时长。</p>
+  <p data-i18n="zh"><strong>原因</strong>：Artemis 优先按方括号时间码解析，混用会让某些段被误识别为场景标记从而错误平均分配时长。</p>
+  <p data-i18n="en"><strong>Why</strong>: Artemis parses bracketed timecodes first; mixing formats causes some segments to fall through to the scene-marker fallback and be reassigned wrong durations.</p>
 
-  <h3>错误 5 · 把"参考照片背景"写进剧本</h3>
+  <h3 data-i18n="zh">错误 5 · 把"参考照片背景"写进剧本</h3>
+  <h3 data-i18n="en">Mistake 5 · Carrying reference-photo backgrounds into the brief</h3>
   <div class="diff">
-<pre><span class="minus">- 我上传的参考照片里有一辆黄色座椅的车，把它放进每段背景</span>
+<pre data-i18n="zh"><span class="minus">- 我上传的参考照片里有一辆黄色座椅的车，把它放进每段背景</span>
 <span class="plus">+ [删掉这条] — 角色参考照只用于身份提取（脸 / 服装 / 配饰），</span>
 <span class="plus">+             不要把照片里的偶发背景元素带进视频</span></pre>
+<pre data-i18n="en"><span class="minus">- The reference photo I uploaded has a car with yellow seats — put it in every background</span>
+<span class="plus">+ [delete this line] — reference photos are for identity only (face / wardrobe / accessories);</span>
+<span class="plus">+             do NOT pull incidental background elements from the photo into the video</span></pre>
   </div>
-  <p><strong>原因</strong>：Artemis 已经自动过滤"参考图中"开头的道具，但不要自己手动写出来诱导。</p>
+  <p data-i18n="zh"><strong>原因</strong>：Artemis 已经自动过滤"参考图中"开头的道具，但不要自己手动写出来诱导。</p>
+  <p data-i18n="en"><strong>Why</strong>: Artemis already filters props tagged "from the reference image" automatically — don't manually write them in.</p>
 
-  <h3>错误 6 · 单段超过当前模型上限</h3>
+  <h3 data-i18n="zh">错误 6 · 单段超过当前模型上限</h3>
+  <h3 data-i18n="en">Mistake 6 · Single segment exceeds the current model's cap</h3>
   <div class="diff">
-<pre><span class="minus">- [0-20秒] 段 1（20 秒长镜头；若当前模型上限为 15 秒会被截断）</span>
+<pre data-i18n="zh"><span class="minus">- [0-20秒] 段 1（20 秒长镜头；若当前模型上限为 15 秒会被截断）</span>
 <span class="plus">+ [0-15秒] 段 1（前 15 秒）</span>
-<span class="plus">+ [15-30秒] 段 2（继续，同场景）</span></pre>
+<span class="plus">+ [15-30秒] 段 2（紧接上文：同机位、同场景、主角延续上一段结尾动作）</span></pre>
+<pre data-i18n="en"><span class="minus">- [0-20sec] Segment 1 (20-sec long take — will be truncated if the model cap is 15 sec)</span>
+<span class="plus">+ [0-15sec] Segment 1 (first 15 sec)</span>
+<span class="plus">+ [15-30sec] Segment 2 (continues from above: same camera, same scene, protagonist resumes the previous ending action)</span></pre>
   </div>
-  <p><strong>原因</strong>：Saga 会读取当前 provider/model 的 maxSegmentSeconds；Seedance 2.x 是 15s，Seedance 1.5 是 12s，其它模型可能不同。超过上限会被截断，所以最好主动拆成 6-10s 小段。</p>
+  <p data-i18n="zh"><strong>原因</strong>：Artemis 会读取当前视频模型允许的单段最大秒数（工作流会提示具体数值），超过会被截断。所以同一长镜头建议主动拆成 6-10 秒小段。拆分时后一段必须写清"紧接上文"的机位、姿态和动作方向，否则模型可能换机位或重置动作。</p>
+  <p data-i18n="en"><strong>Why</strong>: Artemis reads the current video model's per-segment cap (shown in the workflow); anything longer is truncated. Split long takes into 6-10 sec segments yourself; each follow-up segment must restate the continued camera, pose, and motion direction, or the model may reset.</p>
 
-  <h3>错误 7 · 要求过于抽象</h3>
+  <h3 data-i18n="zh">错误 7 · 要求过于抽象</h3>
+  <h3 data-i18n="en">Mistake 7 · Asking for something too abstract</h3>
   <div class="diff">
-<pre><span class="minus">- 拍出"自由"的感觉</span>
+<pre data-i18n="zh"><span class="minus">- 拍出"自由"的感觉</span>
 <span class="plus">+ 镜头跟随主角向画面右上 45° 仰角奔跑，长发被风吹起，</span>
 <span class="plus">+ 背景从城市灰色渐变为开阔金色麦田，光斑闪烁</span></pre>
+<pre data-i18n="en"><span class="minus">- Capture the feeling of "freedom"</span>
+<span class="plus">+ Camera tracks the protagonist running upward to frame-right at a 45° low angle, long hair lifted by the wind,</span>
+<span class="plus">+ background fades from grey cityscape to an open golden wheat field with shimmering bokeh</span></pre>
   </div>
-  <p><strong>原因</strong>：Artemis 把 storyBeat 原文丢给 video 模型，越具体的视觉描述出片越准。</p>
+  <p data-i18n="zh"><strong>原因</strong>：Artemis 把 storyBeat 原文丢给 video 模型，越具体的视觉描述出片越准。</p>
+  <p data-i18n="en"><strong>Why</strong>: Artemis passes the storyBeat to the video model verbatim — the more concrete the visual description, the more accurate the output.</p>
 </section>
 
 <!-- ========== Section 8 ========== -->
 <section id="sec-8">
-  <h2><span class="num">§ 8</span>自查 Checklist</h2>
-  <p>写完 brief 后逐条对照：</p>
-  <ul class="check-list">
+  <h2 data-i18n="zh"><span class="num">§ 8</span>自查 Checklist</h2>
+  <h2 data-i18n="en"><span class="num">§ 8</span>Self-check checklist</h2>
+  <p data-i18n="zh">写完 brief 后逐条对照：</p>
+  <p data-i18n="en">Run through every item after finishing your brief:</p>
+  <ul class="check-list" data-i18n="zh">
     <li>每段有时间码（<code>[X-Y秒]</code> 或 <code>[MM:SS-MM:SS]</code> 或 <code>Scene N</code>）</li>
-    <li>所有对白都有 <code>**对白**:</code> / <code>对白:</code> / <code>dialogue:</code> 等 marker</li>
-    <li>CHARACTER LOCK 段已写明主角永久外观</li>
+    <li>已明确画幅比例 / ratio；横屏、竖屏、方屏的构图和运动方式没有互相打架</li>
+    <li>所有对白都有 <code>**对白**:</code> / <code>对白:</code> / <code>dialogue:</code> 等 marker，且字数与时间码匹配</li>
+    <li>CHARACTER LOCK 段已写明主角永久外观；无参考图时已写成完整角色卡</li>
     <li>如果要锁机位，brief 至少出现一次「锁死三脚架」或「locked-off tripod」</li>
     <li>如果不要 AI 生成音乐，brief 至少出现一次「只出环境音」或「后期叠加」</li>
     <li>没有把英文歌词引号写在段标题里</li>
     <li>没有写 Artemis 自动会加的"防塑料感、防多手指"等套话</li>
-    <li>单段时长不超过当前模型上限；不确定时按 6-10 秒拆段（Seedance 2.x ≤ 15 秒，Seedance 1.5 ≤ 12 秒）</li>
+    <li>单段时长不超过当前模型上限（工作流会提示）；不确定时按 6-10 秒拆段最稳</li>
+    <li>如果把同一长镜头拆成多段，后一段开头写明紧接上文的机位、姿态、动作方向</li>
+    <li>没有设计复杂物理交互、精细手部特写、近身格斗、递接小物件、吃东西等高翻车动作</li>
     <li>选了正确的字幕模式：默认选「自动」；明确要烧录字幕才选「带字幕」；完全不要屏幕文字才选「无字幕」</li>
+  </ul>
+  <ul class="check-list" data-i18n="en">
+    <li>Every segment has a timecode (<code>[X-Ysec]</code> or <code>[MM:SS-MM:SS]</code> or <code>Scene N</code>)</li>
+    <li>Aspect ratio is stated; composition and motion match the chosen ratio (landscape / portrait / square)</li>
+    <li>Every spoken line uses an explicit marker (<code>**dialogue**:</code> / <code>dialogue:</code> / <code>对白:</code>) and its length matches the timecode</li>
+    <li>CHARACTER LOCK describes the protagonist's permanent appearance; without a reference image, a full character card is written out</li>
+    <li>If the camera should be locked, the brief contains at least one "locked-off tripod" or 锁死三脚架 keyword</li>
+    <li>If AI music must be suppressed, the brief contains at least one "ambience only" or "added in post" phrase</li>
+    <li>No quoted English lyrics in section titles</li>
+    <li>No quality-prompt boilerplate Artemis adds automatically (anti-plastic, anti-extra-fingers, etc.)</li>
+    <li>Per-segment duration stays under the current model's cap (shown in the workflow); when in doubt, 6-10 sec is safest</li>
+    <li>If a long take is split across segments, the next segment restates the continued camera, pose, and motion direction</li>
+    <li>No complex interactions, fine hand close-ups, hand-to-hand combat, object hand-offs, or eating shots</li>
+    <li>Subtitle mode is correct: default to Auto; choose "With subtitles" only when subtitles must burn in; choose "No subtitles" when you want zero on-screen text</li>
   </ul>
 </section>
 
 <!-- ========== Section 9 ========== -->
 <section id="sec-9">
-  <h2><span class="num">§ 9</span>高级用法</h2>
+  <h2 data-i18n="zh"><span class="num">§ 9</span>高级用法</h2>
+  <h2 data-i18n="en"><span class="num">§ 9</span>Advanced usage</h2>
 
-  <h3>9.1 多角色身份锁</h3>
-  <p>Brief 里直接列：</p>
-<pre><code>· CHARACTER LOCK:
+  <h3 data-i18n="zh">9.1 多角色身份锁</h3>
+  <h3 data-i18n="en">9.1 Multi-character identity locks</h3>
+  <p data-i18n="zh">Brief 里直接列：</p>
+  <p data-i18n="en">List them directly in the brief:</p>
+<pre data-i18n="zh"><code>· CHARACTER LOCK:
   A（女主 1）: 黑长直、白皮、红裙
   B（女主 2）: 金发短发、橄榄肤、黑色皮夹克
   C（男主）: 棕色卷发、络腮胡、亚麻色衬衫</code></pre>
-  <p>每段引用时用 A / B / C 即可：</p>
-<pre><code><span class="tok-key">[0-8秒]</span> 段 1
+<pre data-i18n="en"><code>· CHARACTER LOCK:
+  A (lead 1): long straight black hair, fair skin, red dress
+  B (lead 2): short blonde hair, olive skin, black leather jacket
+  C (lead 3, male): curly brown hair, full beard, linen shirt</code></pre>
+  <p data-i18n="zh">每段引用时用 A / B / C 即可：</p>
+  <p data-i18n="en">Reference them as A / B / C in every segment:</p>
+<pre data-i18n="zh"><code><span class="tok-key">[0-8秒]</span> 段 1
 A 走进画面，B 从右边出现拥抱她。C 在远处看。</code></pre>
+<pre data-i18n="en"><code><span class="tok-key">[0-8sec]</span> Segment 1
+A walks into frame, B appears from the right and hugs her. C watches from afar.</code></pre>
 
-  <h3>9.2 子弹时间（局部慢放）</h3>
-<pre><code>· 11–11.4 秒（0.3 秒丝滑慢放 · 子弹时间）:
+  <h3 data-i18n="zh">9.2 子弹时间（局部慢放）</h3>
+  <h3 data-i18n="en">9.2 Bullet time (localised slow motion)</h3>
+<pre data-i18n="zh"><code>· 11–11.4 秒（0.3 秒丝滑慢放 · 子弹时间）:
   时间丝滑降至 25%，她的步态、长发、衣摆都在缓慢流动。
   NOT a freeze, motion smoothly slowed only.</code></pre>
+<pre data-i18n="en"><code>· 11–11.4 sec (0.3-sec silky slow motion · bullet time):
+  time slows smoothly to 25%; her stride, long hair, and hemline still flow.
+  NOT a freeze frame, motion smoothly slowed only.</code></pre>
 
-  <h3>9.3 多语言对白混用</h3>
+  <h3 data-i18n="zh">9.3 多语言对白混用</h3>
+  <h3 data-i18n="en">9.3 Mixed-language dialogue</h3>
 <pre><code><span class="tok-mk">**对白（中文，温柔）**:</span> <span class="tok-str">"我等你很久了。"</span>
 <span class="tok-mk">**对白（French, intimate）**:</span> <span class="tok-str">"Je t'ai attendu si longtemps."</span></code></pre>
-  <p>Artemis 自动检测每句语言，分别送 lip-sync 引擎。</p>
+  <p data-i18n="zh">Artemis 自动检测每句语言，分别送 lip-sync 引擎。</p>
+  <p data-i18n="en">Artemis detects the language of each line and routes them to lip-sync separately.</p>
 
-  <h3>9.4 INSTANT HARD CUT 显式标注</h3>
-<pre><code>· 2 秒（INSTANT HARD CUT，背景切到东京）</code></pre>
-  <p>帮 Artemis 内部规划帧 chain 时知道这里是硬切而不是渐变。</p>
+  <h3 data-i18n="zh">9.4 非语言发声 / 歌唱意图</h3>
+  <h3 data-i18n="en">9.4 Non-verbal vocalisations / singing intent</h3>
+<pre data-i18n="zh"><code>【声音】
+- 非语言发声：她短促叹气，随后压低声音啜泣。
+- 歌唱/哼唱意图：她用很轻的气声哼唱旋律；不要当成普通对白节奏。</code></pre>
+<pre data-i18n="en"><code>[Sound]
+- Non-verbal: she sighs briefly, then suppresses a soft sob.
+- Singing / humming: she hums a melody in a light breathy voice; do not treat it as ordinary dialogue rhythm.</code></pre>
+  <p data-i18n="zh">这类内容建议写在【声音】里，不要冒充对白 marker。唱歌/哼唱对不同视频模型和 lip-sync 能力要求更高，必须明确写成声音意图，而不是默认当普通说话处理。</p>
+  <p data-i18n="en">Put this kind of content under the [Sound] block, not under a dialogue marker. Singing / humming pushes lip-sync harder across video models and must be flagged as a sound intent, not treated as normal speech by default.</p>
 
-  <h3>9.5 主体模式 / 身份来源显式备注</h3>
-<pre><code>主体模式：纯视觉 / 无主角。
+  <h3 data-i18n="zh">9.5 INSTANT HARD CUT 显式标注</h3>
+  <h3 data-i18n="en">9.5 Mark INSTANT HARD CUT explicitly</h3>
+<pre data-i18n="zh"><code>· 2 秒（INSTANT HARD CUT，背景切到东京）</code></pre>
+<pre data-i18n="en"><code>· 2 sec (INSTANT HARD CUT, background switches to Tokyo)</code></pre>
+  <p data-i18n="zh">帮 Artemis 内部规划帧 chain 时知道这里是硬切而不是渐变。</p>
+  <p data-i18n="en">Helps Artemis's internal frame-chain planner know the boundary is a hard cut rather than a fade.</p>
+
+  <h3 data-i18n="zh">9.6 主体模式 / 身份来源显式备注</h3>
+  <h3 data-i18n="en">9.6 Declare subject mode and identity source up front</h3>
+<pre data-i18n="zh"><code>主体模式：纯视觉 / 无主角。
 
 主体模式：有主角。身份来源：三视图参考图；不要继承参考图背景。</code></pre>
-  <p>当前 Saga 会在工作流里询问「有主角 / 纯视觉」以及身份来源；brief 里提前写清楚可以减少澄清轮次。</p>
+<pre data-i18n="en"><code>Subject mode: pure visual / no protagonist.
 
-  <h3>9.6 原始质感 / 少滤镜模式（cleanDirect）</h3>
-<pre><code>请用原始质感 / 少滤镜 / raw-seedance / clean-direct。
+Subject mode: has protagonist. Identity source: turnaround reference sheet; do not inherit reference-photo backgrounds.</code></pre>
+  <p data-i18n="zh">当前 Saga 会在工作流里询问「有主角 / 纯视觉」以及身份来源；brief 里提前写清楚可以减少澄清轮次。</p>
+  <p data-i18n="en">The workflow currently asks "has protagonist / pure visual" and the identity source; stating them in the brief skips clarification rounds.</p>
+
+  <h3 data-i18n="zh">9.7 同场景续写 / 长镜头拆分</h3>
+  <h3 data-i18n="en">9.7 Continuing the same scene / splitting a long take</h3>
+<pre data-i18n="zh"><code><span class="tok-key">[0-8秒]</span> 段 1 · 走廊奔跑前半段
+机位锁死在走廊尽头，主角从画面左侧向右前方奔跑，右手扶过墙面。
+
+<span class="tok-key">[8-16秒]</span> 段 2 · 走廊奔跑后半段
+紧接上文：机位保持锁死，走廊、光线、服装完全一致；主角延续上一段结尾的向右前方奔跑姿态，右手刚离开墙面。</code></pre>
+<pre data-i18n="en"><code><span class="tok-key">[0-8sec]</span> Segment 1 · Hallway sprint, first half
+Camera locked at the end of the hallway; protagonist sprints from frame-left toward frame upper-right, right hand brushing the wall.
+
+<span class="tok-key">[8-16sec]</span> Segment 2 · Hallway sprint, second half
+Continues from above: camera stays locked; hallway, lighting, wardrobe identical; protagonist resumes the upper-right sprint from the previous segment, right hand having just left the wall.</code></pre>
+  <p data-i18n="zh">如果只是把长镜头按时间切开，后一段容易换机位或重置动作。续写段开头必须明确承接上一段的<strong>机位、场景、姿态、动作方向</strong>。</p>
+  <p data-i18n="en">If you simply slice a long take by time, the next segment tends to switch cameras or reset the pose. Continuation segments must restate the inherited <strong>camera, scene, pose, and motion direction</strong> up front.</p>
+
+  <h3 data-i18n="zh">9.8 无参考图时的纯文本角色卡</h3>
+  <h3 data-i18n="en">9.8 Text-only character card (no reference image)</h3>
+<pre data-i18n="zh"><code>主体模式：有主角。身份来源：纯文字。
+
+· CHARACTER LOCK:
+  25 岁亚洲男性，冷白肤色，窄长脸，下颌线分明；
+  黑色寸头，左眼角一颗小泪痣；
+  始终穿黑色高领毛衣、银色细项链、深灰长风衣；
+  表情克制，眼神疲惫但清醒。</code></pre>
+<pre data-i18n="en"><code>Subject mode: has protagonist. Identity source: text only.
+
+· CHARACTER LOCK:
+  25-year-old East Asian male, cool fair skin, narrow long face, sharp jawline;
+  black crew cut, a tiny tear-shaped mole at the outer corner of the left eye;
+  always in a black turtleneck, a slim silver chain, and a charcoal long trench coat;
+  restrained expression, tired but clear-eyed gaze.</code></pre>
+  <p data-i18n="zh">不要只写“帅哥 / 美女 / 老人”。纯文本驱动时，角色卡越具体，跨段一致性越稳。</p>
+  <p data-i18n="en">Avoid generic labels like "handsome guy / pretty girl / old man". With text-only drive, the more specific the character card, the more stable the cross-segment identity.</p>
+
+  <h3 data-i18n="zh">9.9 时空锚点 / WORLD ANCHOR（长视频）</h3>
+  <h3 data-i18n="en">9.9 World anchor (for long videos)</h3>
+<pre data-i18n="zh"><code>【时空锚点 / WORLD ANCHOR】
+[锚点·黄昏大雨 | 50-120秒]
+从第 50 秒到第 120 秒，所有相关段落都继承：
+- 地面湿滑，雨水反光
+- 角色头发贴在额头，外套边缘被雨打湿
+- 远处车灯在雨幕中散开
+- 整体光线保持冷蓝 + 暖车灯反差</code></pre>
+<pre data-i18n="en"><code>[World anchor]
+[Anchor · Dusk in heavy rain | 50-120 sec]
+From sec 50 to sec 120, every related segment inherits:
+- wet, reflective ground
+- character's hair clings to the forehead, jacket edge soaked
+- distant car headlights diffuse through the rain
+- overall lighting stays cool blue with warm headlight contrast</code></pre>
+  <p data-i18n="zh">用于超长视频里的长期环境状态提醒。把它当作写剧本 AI 的全局记忆锚，不要依赖单个段落临时重复。</p>
+  <p data-i18n="en">Use this as a long-running environmental memory anchor for the brief-writing AI in very long videos, rather than repeating the state in every single segment.</p>
+
+  <h3 data-i18n="zh">9.10 原始质感 / 少滤镜模式（cleanDirect）</h3>
+  <h3 data-i18n="en">9.10 Raw look / low-filter mode (cleanDirect)</h3>
+<pre data-i18n="zh"><code>请用原始质感 / 少滤镜 / raw-seedance / clean-direct。
 保留自然纹理，不要过度导演包装。</code></pre>
-  <p>这些显式关键词会启用 <code>cleanDirect</code>：跳过 Super Visual 关键帧、帧链和部分美学脚手架，换取更干净自然的模型原始质感；代价是跨段一致性和导演级保护会弱一些。</p>
+<pre data-i18n="en"><code>Use raw look / low filter / raw-seedance / clean-direct.
+Keep natural texture; do not over-package with director-grade dressing.</code></pre>
+  <p data-i18n="zh">这些显式关键词启用 <code>cleanDirect</code>：去掉美学修饰层，换取更干净自然的模型原始质感。</p>
+  <p data-i18n="en">These explicit keywords enable <code>cleanDirect</code>: aesthetic dressing is removed in exchange for a cleaner, more natural raw look from the model.</p>
+  <div class="callout">
+    <span class="tag" data-i18n="zh">可以放心用</span><span class="tag" data-i18n="en">Safe to use</span>
+    <span data-i18n="zh">启用 cleanDirect 时，角色一致性、配饰、服装、场景锁定、字幕防护这些<strong>硬规则全都保留</strong>，只把美学修饰去掉。你能拿到"原始/少滤镜"质感，不会出现人物外形漂移或段标题被渲染成屏幕字幕这类问题。</span>
+    <span data-i18n="en">When cleanDirect is on, the <strong>hard rules</strong> for character consistency, accessories, wardrobe, scene lock, and subtitle protection all stay in place — only the aesthetic dressing is removed. You get the "raw / low-filter" look without character drift or section titles being rendered as on-screen text.</span>
+  </div>
 </section>
 
 <!-- ========== Section 10 ========== -->
 <section id="sec-10">
-  <h2><span class="num">§ 10</span>给写剧本 AI 的最终提醒</h2>
-  <p>如果你（AI）是被用户拿来代写 Artemis brief 的：</p>
-  <ol>
+  <h2 data-i18n="zh"><span class="num">§ 10</span>给写剧本 AI 的最终提醒</h2>
+  <h2 data-i18n="en"><span class="num">§ 10</span>Final note to the AI writing the brief</h2>
+  <p data-i18n="zh">如果你（AI）是被用户拿来代写 Artemis brief 的：</p>
+  <p data-i18n="en">If you (the AI) are being used to ghost-write an Artemis brief:</p>
+  <ol data-i18n="zh">
     <li>你的产出是一份 <strong>结构化 Markdown 剧本</strong>，不是已经渲染好的 video prompt</li>
     <li>每个 <code>[X-Y秒]</code> 段通常会被 Artemis 作为<strong>独立的 video 模型调用</strong>，再由 Saga 拼接；所以每段要<strong>自包含</strong>关键信息</li>
     <li>对白<strong>必须</strong>带 marker（<code>**对白**:</code>），不带就被忽略</li>
     <li>不要试图"帮"用户加导演术语堆砌——Artemis 自动加更专业的</li>
-    <li>40-60 秒视频通常不需要堆到 8000 字；更推荐每 6-10 秒写 120-250 字具体镜头信息。长片可以扩展到多千字，但每段必须清晰自包含</li>
+    <li>40-60 秒视频通常不需要堆到 8000 字；更推荐每 6-10 秒写 120-250 个中文字的有效镜头信息，复杂段落可到约 420 字。长片可以扩展到多千字，但每段必须清晰自包含，避免无效画质词占用提示空间</li>
     <li>输出剧本前自查一遍 §8 的 checklist</li>
   </ol>
-  <p>写完后告诉用户：<em>"这份剧本可直接发给 Artemis /saga，预期分段数：N，预计渲染时长：X 分钟。"</em></p>
+  <ol data-i18n="en">
+    <li>Your output is a <strong>structured Markdown brief</strong>, NOT a ready-to-render video prompt.</li>
+    <li>Each <code>[X-Ysec]</code> segment is usually a <strong>separate video-model call</strong>, then stitched by Saga, so every segment must be <strong>self-contained</strong> with its critical info.</li>
+    <li>Dialogue <strong>must</strong> have a marker (<code>**dialogue**:</code>); unmarked quotes are ignored.</li>
+    <li>Do NOT pad with director jargon — Artemis adds better, more professional versions.</li>
+    <li>A 40-60 sec video rarely needs 8000 characters; aim for 120-250 effective Chinese chars (or ~80-160 English words) per 6-10 sec segment, up to ~420 for complex shots. Long-form can run into thousands of chars, but every segment must stay self-contained without quality-prompt filler.</li>
+    <li>Run the §8 checklist before handing the brief over.</li>
+  </ol>
+  <p data-i18n="zh">写完后告诉用户：<em>"这份剧本可直接发给 Artemis /saga，预期分段数：N，预计渲染时长：X 分钟。"</em></p>
+  <p data-i18n="en">When done, tell the user: <em>"This brief is ready for Artemis /saga; expected segments: N; estimated render time: X minutes."</em></p>
 </section>
 
 </main>
 </div>
 
 <footer class="foot">
-  <p><span class="brand">Artemis Saga</span> · Authoring Guide v1.1 · 配套 Artemis ≥ 0.2.71</p>
-  <p>Made by <a href="https://www.420.company">420.company</a> · Have a nice trip <span style="opacity:0.6">(⌐■-■)</span></p>
+  <p>
+    <span class="brand">Artemis Saga</span> · Authoring Guide v1.2
+    <span data-i18n="zh"> · 配套 Artemis ≥ 0.2.71（含 BGM 三变体 / 首帧定位锁 / cleanDirect 一致性保留）</span>
+    <span data-i18n="en"> · For Artemis ≥ 0.2.71 (with 3-variant BGM output, opening-frame lock, and cleanDirect consistency preservation)</span>
+  </p>
+  <p>
+    <span data-i18n="zh">由 </span><span data-i18n="en">Made by </span><a href="https://www.420.company">420.company</a> · <span data-i18n="zh">一路顺风</span><span data-i18n="en">Have a nice trip</span> <span style="opacity:0.6">(⌐■-■)</span>
+  </p>
 </footer>
 
 </div>
 
 <script>
+  // ── Language toggle ──
+  (function () {
+    const root = document.documentElement;
+    const stored = (() => { try { return localStorage.getItem('artemis-saga-guide-lang'); } catch (_) { return null; } })();
+    const initial = stored === 'en' || stored === 'zh' ? stored : 'zh';
+    root.setAttribute('data-lang', initial);
+    const buttons = document.querySelectorAll('.lang-toggle button[data-lang-btn]');
+    const sync = (lang) => {
+      buttons.forEach((btn) => {
+        const isActive = btn.getAttribute('data-lang-btn') === lang;
+        btn.classList.toggle('active', isActive);
+      });
+      try { localStorage.setItem('artemis-saga-guide-lang', lang); } catch (_) { /* private mode etc. */ }
+    };
+    sync(initial);
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const lang = btn.getAttribute('data-lang-btn');
+        if (!lang) return;
+        root.setAttribute('data-lang', lang);
+        sync(lang);
+      });
+    });
+  })();
+
   // TOC active-link highlighting on scroll
   const tocLinks = document.querySelectorAll('#toc a');
   const sections = Array.from(tocLinks).map(a => document.querySelector(a.getAttribute('href')));

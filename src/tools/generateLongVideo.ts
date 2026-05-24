@@ -696,21 +696,16 @@ function buildSegments(options: {
           rawPlannedVisualPrompt,
           `Cinematic realization of this story beat with consistent characters, location, lighting, and emotional tone: ${storyBeat}`,
         );
-    // Per-segment camera default. If user's storyBeat OR the global brief
-    // requests a locked-off camera (锁死机位 / locked-off tripod / NO pan
-    // tilt zoom dolly), force the per-segment default to lock-off too —
-    // otherwise the rotating "slow controlled dolly / handheld push-in /
-    // gimbal arc" defaults contradict the [CAMERA: locked-off] block in
-    // the continuity bible, and the model gets conflicting signals.
+    // Per-segment camera default. If the user's storyBeat or global brief
+    // requests a locked-off camera, force the per-segment default to lock-off.
+    // Otherwise use a conservative, non-directional cinematic motion note that
+    // does not inject a specific gimbal/dolly/handheld path into the prompt.
     // Generic — reuses the same detector as the bible-level CAMERA block.
     const segmentLockOff = detectsLockOffCamera(storyBeat) || detectsLockOffCamera(options.story);
-    const cameraDefault = segmentLockOff
+    const multiCityWalking = /(?:background\s+environment\s+seamlessly\s+cycles\s+through|背景\s*(?:会)?\s*连续穿过\s*4\s*个城市|四城连穿|多城连穿)/i.test(storyBeat + '\n' + options.story);
+    const cameraDefault = segmentLockOff || multiCityWalking
       ? 'absolutely locked-off tripod, no camera movement whatsoever — no pan, no tilt, no zoom, no dolly, no handheld shake'
-      : (index % 3 === 0
-        ? 'slow controlled dolly movement with stable subject tracking and visible parallax'
-        : index % 3 === 1
-          ? 'gentle handheld cinematic push-in following the protagonist through the motion'
-          : 'gimbal arc around the protagonist with continuous environmental motion');
+      : 'controlled cinematic camera with subtle natural motion appropriate to the scene';
     const camera = options.cleanDirect
       ? sanitizeInline(planned?.camera, '')
       : sanitizeInline(planned?.camera, cameraDefault);

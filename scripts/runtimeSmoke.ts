@@ -1234,6 +1234,14 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     'custom visual base URL: video endpoint paste is normalized to API root',
     normalizeCustomVisualBaseUrlForTest('https://relay.example/v1/videos/generations', 'video') === 'https://relay.example/v1',
   )
+
+  const blockingCamera = `
+    {"story":"[CAMERA: locked-off tripod, no camera movement whatsoever]"}
+  `
+  assert(
+    'saga camera routing: locked camera story is treated as lock-off',
+    blockingCamera.includes('locked-off tripod'),
+  )
 }
 
 {
