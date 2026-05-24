@@ -1045,21 +1045,38 @@ export async function describeUserImageWithVision(options: {
   // `visualProfile.image.visionModel` in providers.json.
   const VISION_MODEL_FALLBACKS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'];
   let visionFallbacks: string[] = [];
-  // ── Priority 1: image provider's relay (OpenAI-compatible, supports vision)
+  // ── Priority 1: image provider's vision endpoint, when that provider
+  // actually has one. Do NOT blindly reuse image-generation endpoints for
+  // vision-describe: Google uses native Gemini generateContent, while
+  // OpenAI-compatible relays use /chat/completions. BytePlus/Seedream and
+  // other image-only providers are skipped unless the user explicitly sets a
+  // visionModel; otherwise we fall back to the main LLM profile below.
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (imageConfigured) {
-    imageProviderName = imageConfigured.provider;
-    apiKey = imageConfigured.config.image.apiKey?.trim();
-    baseUrl = imageConfigured.config.image.baseUrl?.trim();
-    // Prefer an explicit user-configured visionModel; otherwise iterate the
-    // fallback chain. Filter out anything matching image-generation patterns
-    // (`*-image-*` or DALL-E variants) since those won't work on /chat/completions.
+    const providerLower = imageConfigured.provider.toLowerCase();
     const explicit = imageConfigured.config.image.visionModel?.trim();
-    if (explicit && !/image|dall[-_]?e/i.test(explicit)) {
-      chatModel = explicit;
-    } else {
-      visionFallbacks = [...VISION_MODEL_FALLBACKS];
-      chatModel = visionFallbacks.shift()!;
+    const explicitLooksUsable = Boolean(explicit && !/image|dall[-_]?e/i.test(explicit));
+    const isGoogleVision = providerLower === 'google' || providerLower === 'gemini';
+    const isOpenAiCompatibleVision = providerLower === 'openai' || providerLower === 'custom' || explicitLooksUsable;
+
+    if (isGoogleVision || isOpenAiCompatibleVision) {
+      imageProviderName = imageConfigured.provider;
+      apiKey = imageConfigured.config.image.apiKey?.trim();
+      baseUrl = imageConfigured.config.image.baseUrl?.trim();
+    }
+
+    if (isGoogleVision) {
+      // Model is resolved later by describeUserImageWithGeminiVision. Never let
+      // GPT fallback names leak into Google's /models/{model}:generateContent.
+      chatModel = undefined;
+      visionFallbacks = [];
+    } else if (isOpenAiCompatibleVision) {
+      if (explicitLooksUsable) {
+        chatModel = explicit;
+      } else {
+        visionFallbacks = [...VISION_MODEL_FALLBACKS];
+        chatModel = visionFallbacks.shift()!;
+      }
     }
   }
   // ── Priority 2: main LLM profile (may not support vision, but worth trying)
@@ -1089,10 +1106,14 @@ export async function describeUserImageWithVision(options: {
   const dataUrl = `data:${mime};base64,${imageBase64}`;
 
   if (/^(google|gemini)$/i.test(imageProviderName ?? '')) {
+    const explicitGeminiVision = imageConfigured?.config.image.visionModel?.trim();
+    const geminiVisionModel = explicitGeminiVision && /^gemini-/i.test(explicitGeminiVision) && !/image/i.test(explicitGeminiVision)
+      ? explicitGeminiVision
+      : 'gemini-2.5-flash';
     return describeUserImageWithGeminiVision({
       apiKey,
       baseUrl,
-      model: chatModel || 'gemini-2.5-flash',
+      model: geminiVisionModel,
       mime,
       imageBase64,
     });
