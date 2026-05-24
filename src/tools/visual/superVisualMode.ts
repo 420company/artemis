@@ -987,6 +987,25 @@ export function findProvidedTurnaroundInputForTest(
   return findProvidedTurnaroundInput(userInputs, originalPaths, referenceNotes, identitySource);
 }
 
+export function resolveVisionDescribeRouteForTest(input: {
+  provider: string;
+  explicitVisionModel?: string;
+}): { protocol: 'gemini-generate-content' | 'openai-chat-completions' | 'main-profile-fallback'; model?: string } {
+  const providerLower = input.provider.toLowerCase();
+  const explicit = input.explicitVisionModel?.trim();
+  const explicitLooksUsable = Boolean(explicit && !/image|dall[-_]?e/i.test(explicit));
+  if (providerLower === 'google' || providerLower === 'gemini') {
+    const model = explicit && /^gemini-/i.test(explicit) && !/image/i.test(explicit)
+      ? explicit
+      : 'gemini-2.5-flash';
+    return { protocol: 'gemini-generate-content', model };
+  }
+  if (providerLower === 'openai' || providerLower === 'custom' || explicitLooksUsable) {
+    return { protocol: 'openai-chat-completions', model: explicitLooksUsable ? explicit : 'gpt-5.5' };
+  }
+  return { protocol: 'main-profile-fallback' };
+}
+
 async function describeUserImageWithGeminiVision(options: {
   apiKey: string;
   baseUrl: string;

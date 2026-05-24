@@ -74,6 +74,7 @@ import {
   isLikelyProvidedTurnaroundReferenceForTest,
   isSuperVisualModeEligible,
   shouldCompressImageForUploadForTest,
+  resolveVisionDescribeRouteForTest,
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
@@ -116,6 +117,7 @@ import {
 } from '../src/core/instructionFile.js'
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
 import { detectVisualGenerationNeed } from '../src/utils/visualGenerationConfig.js'
+import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -1195,6 +1197,43 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 
   const videoNeed = detectVisualGenerationNeed('Create a short product video clip for the landing page.')
   assert('visual intent: explicit English video generation is detected', videoNeed.video)
+
+  const googleVision = resolveVisionDescribeRouteForTest({ provider: 'google' })
+  assert(
+    'visual provider routing: Google vision-describe uses Gemini model, not GPT fallback',
+    googleVision.protocol === 'gemini-generate-content' && googleVision.model === 'gemini-2.5-flash',
+    JSON.stringify(googleVision),
+  )
+
+  const googleExplicitImageModel = resolveVisionDescribeRouteForTest({ provider: 'google', explicitVisionModel: 'gemini-3-pro-image-preview' })
+  assert(
+    'visual provider routing: Google image-generation model is not reused for vision-describe',
+    googleExplicitImageModel.protocol === 'gemini-generate-content' && googleExplicitImageModel.model === 'gemini-2.5-flash',
+    JSON.stringify(googleExplicitImageModel),
+  )
+
+  const openaiVision = resolveVisionDescribeRouteForTest({ provider: 'openai' })
+  assert(
+    'visual provider routing: OpenAI vision-describe uses chat completions fallback',
+    openaiVision.protocol === 'openai-chat-completions' && openaiVision.model === 'gpt-5.5',
+    JSON.stringify(openaiVision),
+  )
+
+  const byteplusVision = resolveVisionDescribeRouteForTest({ provider: 'byteplus' })
+  assert(
+    'visual provider routing: BytePlus image-generation endpoint is not reused for vision-describe',
+    byteplusVision.protocol === 'main-profile-fallback',
+    JSON.stringify(byteplusVision),
+  )
+
+  assert(
+    'custom visual base URL: image endpoint paste is normalized to API root',
+    normalizeCustomVisualBaseUrlForTest('https://relay.example/v1/images/generations', 'image') === 'https://relay.example/v1',
+  )
+  assert(
+    'custom visual base URL: video endpoint paste is normalized to API root',
+    normalizeCustomVisualBaseUrlForTest('https://relay.example/v1/videos/generations', 'video') === 'https://relay.example/v1',
+  )
 }
 
 {
