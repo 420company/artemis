@@ -21,6 +21,7 @@
     "mcp-packages/package-lock.json",
     "defaults/mcp-servers.json",
     "docs/*.md",
+    "docs/*.html",
     "assets/**",
     "README.md",
     "LICENSE",

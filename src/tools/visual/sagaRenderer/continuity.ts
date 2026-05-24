@@ -94,7 +94,7 @@ function compactSourceStoryForBible(story: string | undefined): string {
 function extractGlobalContextFromStory(story: string | undefined): string {
   const raw = story ?? '';
   if (!raw) return '';
-  const markerRe = /(?:\[\s*\d+(?::\d{2})?\s*[-–—~至到]\s*\d+(?::\d{2})?\s*(?:秒|s|sec|seconds)?\s*\])|(?:(?:^|\n)\s*(?:scene|shot|segment)\s*#?\d+\b)|(?:(?:^|\n)\s*(?:镜头|段)\s*\d+\s*[·.、:：\-])|(?:(?:^|\n)\s*第\s*\d+\s*段)/i;
+  const markerRe = /(?:\[\s*\d+(?::\d{2})?\s*[-–—~至到]\s*\d+(?::\d{2})?\s*(?:秒|s|sec|seconds)?\s*\])|(?:(?:^|\n)\s*(?:scene|shot|segment)\s*#?\d+\b)|(?:(?:^|\n)\s*(?:镜头|段)\s*\d+\s*[·.、:：-])|(?:(?:^|\n)\s*第\s*\d+\s*段)/i;
   const match = raw.match(markerRe);
   if (!match || typeof match.index !== 'number') {
     // No per-segment markers — brief is unstructured, fall back to the full
