@@ -726,9 +726,16 @@ export class CustomProvider implements VisualProvider {
 }
 
 function normalizeRequiredBaseUrl(raw: string | undefined, assetKind: 'image' | 'video'): string {
-  const base = raw?.trim().replace(/\/+$/, '')
+  let base = raw?.trim().replace(/\/+$/, '')
   if (!base) {
     throw new Error(`Custom ${assetKind} base URL is required.`)
+  }
+  if (assetKind === 'video') {
+    // Users often paste the full OpenAI-compatible video creation endpoint
+    // (…/videos/generations) into the setup wizard. The custom Seedance/Wan
+    // protocol appends /videos/generations itself, so normalize it back to the
+    // API root to avoid …/videos/generations/videos/generations -> 404.
+    base = base.replace(/\/videos\/generations$/i, '')
   }
   return base
 }
