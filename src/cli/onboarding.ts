@@ -697,10 +697,8 @@ async function configureVisualModel(
     hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
     choices: [
       { label: 'BytePlus', value: 'byteplus' },
-      { label: 'Google Nano Banana Pro (gemini-3-pro-image-preview)', value: 'google:gemini-3-pro-image-preview' },
-      { label: 'Google Nano Banana (gemini-2.5-flash-image)', value: 'google:gemini-2.5-flash-image' },
-      { label: 'OpenAI GPT Image 2 (gpt-image-2)', value: 'openai:gpt-image-2' },
-      { label: 'OpenAI GPT Image 1.5 (gpt-image-1.5)', value: 'openai:gpt-image-1.5' },
+      { label: 'Google Gemini / Nano Banana', value: 'google' },
+      { label: 'OpenAI GPT Image', value: 'openai' },
       { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
       { label: t('取消', 'Cancel'), value: '__cancel__' },
     ],
@@ -710,10 +708,33 @@ async function configureVisualModel(
     return null
   }
 
-  // Split provider:model hint (e.g. 'openai:gpt-image-2' → provider='openai', preselectedModel='gpt-image-2')
-  const [imageProvider, preselectedImageModel] = imageProviderChoice.includes(':')
-    ? imageProviderChoice.split(':') as [string, string]
-    : [imageProviderChoice, undefined]
+  const imageProvider = imageProviderChoice
+  let preselectedImageModel: string | undefined
+  if (imageProvider === 'google') {
+    const googleImageModel = await chooseVisualSetupOption<string>({
+      title: t('选择 Google 图片模型', 'Choose Google image model'),
+      hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+      choices: [
+        { label: 'Nano Banana Pro (gemini-3-pro-image-preview)', value: 'gemini-3-pro-image-preview' },
+        { label: 'Nano Banana (gemini-2.5-flash-image)', value: 'gemini-2.5-flash-image' },
+        { label: t('返回', 'Back'), value: '__back__' },
+      ],
+    }, options.ui)
+    if (googleImageModel === '__back__') return null
+    preselectedImageModel = googleImageModel
+  } else if (imageProvider === 'openai') {
+    const openaiImageModel = await chooseVisualSetupOption<string>({
+      title: t('选择 OpenAI 图片模型', 'Choose OpenAI image model'),
+      hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+      choices: [
+        { label: 'GPT Image 2 (gpt-image-2)', value: 'gpt-image-2' },
+        { label: 'GPT Image 1.5 (gpt-image-1.5)', value: 'gpt-image-1.5' },
+        { label: t('返回', 'Back'), value: '__back__' },
+      ],
+    }, options.ui)
+    if (openaiImageModel === '__back__') return null
+    preselectedImageModel = openaiImageModel
+  }
 
   printVisualProviderSupportNote(imageProvider, zh)
 
