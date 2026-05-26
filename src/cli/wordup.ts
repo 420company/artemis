@@ -94,11 +94,14 @@ export async function loadResumeSession(opts: {
   let session: SessionRecord | undefined
 
   if (sessionId) {
-    session = await store.load(sessionId)
+    session = await store.load(sessionId).catch(() => undefined)
     if (!session) {
       // Try prefix match
       const all = await store.list()
       session = all.find(s => s.id.startsWith(sessionId))
+      if (session) {
+        session = await store.load(session.id).catch(() => undefined)
+      }
     }
     if (!session) {
       console.log()

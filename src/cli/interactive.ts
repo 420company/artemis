@@ -3134,19 +3134,31 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       if (!id) {
         appendSystemPanel(t('用法', 'Usage'), ['/resume <session_id>'])
       } else {
-        const loaded = await sessionStore.load(id)
-        if (loaded) {
-          storedSession = loaded
-          restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary }, workspaceRoot)
-          hud.sessionMessageCount = loaded.messages.length
-          hud.sessionTotalTokens = 0
-          rebuildScrollBlocksFromMessages()
-          appendSystemPanel(t('会话已恢复', 'Session resumed'), [
-            `ID: ${loaded.id.slice(0, 8)}`,
-            `Title: ${loaded.title}`,
-          ])
-        } else {
-          appendSystemPanel(t('未找到会话', 'Session not found'), [t(`找不到 ID 为 "${id}" 的会话。`, `Could not find session with ID "${id}".`)])
+        try {
+          let loaded = await sessionStore.load(id).catch(() => null)
+          // If exact match failed, try prefix match
+          if (!loaded) {
+            const all = await sessionStore.list()
+            const match = all.find(s => s.id.startsWith(id))
+            if (match) {
+              loaded = await sessionStore.load(match.id).catch(() => null)
+            }
+          }
+          if (loaded) {
+            storedSession = loaded
+            restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary }, workspaceRoot)
+            hud.sessionMessageCount = loaded.messages.length
+            hud.sessionTotalTokens = 0
+            rebuildScrollBlocksFromMessages()
+            appendSystemPanel(t('会话已恢复', 'Session resumed'), [
+              `ID: ${loaded.id.slice(0, 8)}`,
+              `Title: ${loaded.title}`,
+            ])
+          } else {
+            appendSystemPanel(t('未找到会话', 'Session not found'), [t(`找不到 ID 为 "${id}" 的会话。`, `Could not find session with ID "${id}".`)])
+          }
+        } catch (err: unknown) {
+          appendSystemPanel(t('恢复失败', 'Resume failed'), [err instanceof Error ? err.message : String(err)])
         }
       }
       continue
