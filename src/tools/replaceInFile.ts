@@ -10,6 +10,7 @@ import {
 } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
+import { runEditGuards } from './editGuards.js';
 
 function countMatches(content: string, needle: string): number {
   if (!needle) {
@@ -71,6 +72,7 @@ export async function executeReplaceInFile(
   }
 
   invalidateWalkFilesCache(effectiveCwd);
+  const guards = await runEditGuards(absolute, content, nextContent);
 
   return {
     action,
@@ -81,6 +83,6 @@ export async function executeReplaceInFile(
       'verified_write: true',
       'replacement preview:',
       truncate(action.replace, 500),
-    ].join('\n'),
+    ].join('\n') + guards,
   };
 }

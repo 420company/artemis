@@ -4,6 +4,7 @@ import type { AgentAction } from '../core/types.js';
 import { ensureNotSensitivePath, readTextFileSafe } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
+import { noteFileRead } from './editGuards.js';
 
 const LARGE_FILE_WARNING_LINES = 500;
 const MAX_READ_LINES = 2_000;
@@ -106,6 +107,7 @@ export async function executeReadFile(
   
   try {
     const content = await readTextFileSafe(absolute);
+    noteFileRead(absolute, content);
     const lines = splitLines(content);
     const totalLines = lines.length;
     const warnings: string[] = [];

@@ -9,6 +9,7 @@ import {
 } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
+import { runEditGuards } from './editGuards.js';
 
 type PatchOperation =
   | {
@@ -524,7 +525,8 @@ async function executePlan(plan: PlannedWrite[]): Promise<string[]> {
       }
     }
 
-    summaries.push(`${step.summary} verified_write=true`);
+    const guards = await runEditGuards(step.outputPath, null, step.content);
+    summaries.push(`${step.summary} verified_write=true${guards}`);
   }
 
   return summaries;

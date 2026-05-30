@@ -11,6 +11,7 @@ import {
 } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
+import { runEditGuards } from './editGuards.js';
 
 export async function executeWriteFile(
   action: Extract<AgentAction, { type: 'write_file' }>,
@@ -25,9 +26,7 @@ export async function executeWriteFile(
     ensureNotSensitivePath(absolute, action.path);
   }
   const existed = await pathExists(absolute);
-  if (existed) {
-    await readTextFileSafe(absolute);
-  }
+  const preContent = existed ? await readTextFileSafe(absolute) : null;
   await ensureDir(path.dirname(absolute));
   await writeFile(absolute, action.content, 'utf8');
   const confirmed = await readTextFileSafe(absolute);
@@ -37,6 +36,7 @@ export async function executeWriteFile(
   }
 
   invalidateWalkFilesCache(effectiveCwd);
+  const guards = await runEditGuards(absolute, preContent, action.content);
 
   return {
     action: {
@@ -49,6 +49,6 @@ export async function executeWriteFile(
       `verified_write: true${existed ? ' (overwrote existing file)' : ''}`,
       'preview:',
       truncate(action.content, 500),
-    ].join('\n'),
+    ].join('\n') + guards,
   };
 }

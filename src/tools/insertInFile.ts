@@ -10,6 +10,7 @@ import {
 } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
+import { runEditGuards } from './editGuards.js';
 
 function hasUsableAnchor(value: unknown): boolean {
   if (typeof value === 'string') {
@@ -95,6 +96,7 @@ export async function executeInsertInFile(
   }
 
   invalidateWalkFilesCache(effectiveCwd);
+  const guards = await runEditGuards(absolute, content, nextContent);
 
   return {
     action,
@@ -104,6 +106,6 @@ export async function executeInsertInFile(
       'verified_write: true',
       'insert preview:',
       truncate(action.content, 500),
-    ].join('\n'),
+    ].join('\n') + guards,
   };
 }
