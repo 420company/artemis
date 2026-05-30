@@ -5765,6 +5765,20 @@ export async function runAgent(
   userInput: string,
   options: RunAgentOptions,
 ): Promise<RunResult> {
+  // /stop（App UI 里是 @stop）——取消正在运行的后台生成，不调模型、不写历史。
+  // 整条消息精确等于才触发，粘贴文本里夹带 /stop 不会误触发。
+  {
+    const stopCmd = userInput.trim().toLowerCase();
+    if (stopCmd === '/stop' || stopCmd === '@stop') {
+      const stopped = getBackgroundTaskRegistry().cancelAll();
+      return {
+        reply: stopped > 0
+          ? `已请求停止 ${stopped} 个后台任务（生成将在下一次轮询时中断）。`
+          : '没有正在运行的后台任务。',
+        turns: 0,
+      };
+    }
+  }
   if (options.appendUserMessage !== false) {
     options.sessionStore.appendMessage(session, 'user', userInput);
     await options.sessionStore.save(session);
