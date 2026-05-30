@@ -274,22 +274,23 @@ function extractReplacementLines(hunk: PatchHunk): string[] {
     .map((line) => line.slice(1));
 }
 
-function findAllMatchIndexes(lines: string[], needle: string[]): number[] {
-  if (needle.length === 0) {
+function findMatchesWith(
+  lines: string[],
+  needle: string[],
+  normalize: (s: string) => string,
+): number[] {
+  if (needle.length === 0 || needle.length > lines.length) {
     return [];
   }
 
-  if (needle.length > lines.length) {
-    return [];
-  }
-
+  const nNeedle = needle.map(normalize);
   const indexes: number[] = [];
 
   for (let start = 0; start <= lines.length - needle.length; start += 1) {
     let matched = true;
 
     for (let offset = 0; offset < needle.length; offset += 1) {
-      if (lines[start + offset] !== needle[offset]) {
+      if (normalize(lines[start + offset]) !== nNeedle[offset]) {
         matched = false;
         break;
       }
@@ -301,6 +302,10 @@ function findAllMatchIndexes(lines: string[], needle: string[]): number[] {
   }
 
   return indexes;
+}
+
+function findAllMatchIndexes(lines: string[], needle: string[]): number[] {
+  return findMatchesWith(lines, needle, (s) => s);
 }
 
 function findHunkStart(
@@ -316,25 +321,36 @@ function findHunkStart(
     );
   }
 
-  const allMatches = findAllMatchIndexes(lines, needle);
+  // Fuzz 阶梯：严格 → 忽略行尾空白 → 忽略首尾缩进。更松的层只在更严的层
+  // 一处都没匹配到时才运行——所以干净补丁的行为和以前完全一致。每一层都保留
+  // 唯一匹配安全（多处歧义照样报错）；万一打歪，改后语法守卫会当场抓住。
+  const normalizers: Array<(s: string) => string> = [
+    (s) => s,
+    (s) => s.replace(/[ \t]+$/, ''),
+    (s) => s.trim(),
+  ];
 
-  if (allMatches.length === 0) {
-    throw new Error(`Patch hunk ${hunkIndex + 1} for ${filePath} did not match the file.`);
+  for (const normalize of normalizers) {
+    const allMatches = findMatchesWith(lines, needle, normalize);
+    if (allMatches.length === 0) {
+      continue;
+    }
+
+    const nextMatch = allMatches.find((match) => match >= cursor);
+    if (nextMatch !== undefined) {
+      return nextMatch;
+    }
+
+    if (allMatches.length === 1) {
+      return allMatches[0];
+    }
+
+    throw new Error(
+      `Patch hunk ${hunkIndex + 1} for ${filePath} matched multiple locations. Add more context.`,
+    );
   }
 
-  const nextMatch = allMatches.find((match) => match >= cursor);
-
-  if (nextMatch !== undefined) {
-    return nextMatch;
-  }
-
-  if (allMatches.length === 1) {
-    return allMatches[0];
-  }
-
-  throw new Error(
-    `Patch hunk ${hunkIndex + 1} for ${filePath} matched multiple locations. Add more context.`,
-  );
+  throw new Error(`Patch hunk ${hunkIndex + 1} for ${filePath} did not match the file.`);
 }
 
 function applyHunksToFile(
