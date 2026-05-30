@@ -5085,10 +5085,12 @@ function startBackgroundAction(
   const kind = hydratedAction.type as BackgroundTaskKind;
   const label = describeBackgroundTaskLabel(hydratedAction);
 
+  const abortController = new AbortController();
   const taskId = registry.start({
     kind,
     label,
-    runner: () => executeAgentAction(session, hydratedAction, options),
+    abortController,
+    runner: () => executeAgentAction(session, hydratedAction, options, abortController.signal),
     isFailureResult: (result) => result.ok !== true,
     onComplete: async (result, record) => {
       const elapsedSec = Math.max(

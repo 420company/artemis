@@ -68,10 +68,16 @@ export interface StartTaskOptions<T> {
    * never re-throws — caller must handle inside this callback.
    */
   onError: (error: Error, record: BackgroundTaskRecord) => void | Promise<void>;
+  /**
+   * Optional AbortController so the task can be cancelled (e.g. user /stop).
+   * When aborted, the runner's in-flight work (fetch/poll) is cancelled.
+   */
+  abortController?: AbortController;
 }
 
 export class BackgroundTaskRegistry {
   private readonly tasks = new Map<string, BackgroundTaskRecord>();
+  private readonly abortControllers = new Map<string, AbortController>();
   private readonly emitter = new EventEmitter();
 
   /**
@@ -89,6 +95,7 @@ export class BackgroundTaskRegistry {
       status: 'running',
     };
     this.tasks.set(id, record);
+    if (options.abortController) this.abortControllers.set(id, options.abortController);
     this.emitter.emit('change');
 
     // Defer to next tick so callers see `start` return before any callback fires.
@@ -136,6 +143,25 @@ export class BackgroundTaskRegistry {
     return this.tasks.get(id);
   }
 
+  /** Abort a running task by id. Returns true if a running task was aborted. */
+  cancel(id: string): boolean {
+    const record = this.tasks.get(id);
+    if (!record || record.status !== 'running') return false;
+    const controller = this.abortControllers.get(id);
+    if (!controller || controller.signal.aborted) return false;
+    controller.abort();
+    return true;
+  }
+
+  /** Abort all running tasks. Returns the number aborted. */
+  cancelAll(): number {
+    let n = 0;
+    for (const t of this.listActive()) {
+      if (this.cancel(t.id)) n += 1;
+    }
+    return n;
+  }
+
   /** All tasks currently in `running` state, sorted oldest first. */
   listActive(): BackgroundTaskRecord[] {
     const out: BackgroundTaskRecord[] = [];
@@ -170,6 +196,7 @@ export class BackgroundTaskRegistry {
         now - t.completedAtMs > maxAgeMs
       ) {
         this.tasks.delete(id);
+        this.abortControllers.delete(id);
         mutated = true;
       }
     }

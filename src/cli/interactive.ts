@@ -1799,6 +1799,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/hud',        hint: t('显示 HUD 状态栏',           'Show HUD status bar') },
     // ── 对话管理 ──
     { value: '/clear',      hint: t('重置对话历史',               'Reset conversation') },
+    { value: '/stop',       hint: t('停止正在运行的后台生成',     'Stop running background generation') },
     { value: '/save',       hint: t('保存当前会话',               'Save current session') },
     { value: '/sessions',   hint: t('列出已保存会话',             'List saved sessions') },
     { value: '/search',     hint: t('跨会话全文搜索',             'Full-text search across sessions') },
@@ -2271,6 +2272,18 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       hud.sessionTotalTokens = 0
       hud.turnsWithUsage = 0
       redrawViewportFromState()
+      continue
+    }
+
+    if (isExactSlashCommand(trimmed, '/stop')) {
+      const registry = getBackgroundTaskRegistry()
+      const running = registry.listActive()
+      if (running.length === 0) {
+        appendSystemText(t('没有正在运行的后台任务。', 'No running background tasks to stop.'))
+      } else {
+        const n = registry.cancelAll()
+        appendSystemText(t(`已请求停止 ${n} 个后台任务（生成将在下一次轮询时中断）。`, `Requested stop for ${n} background task(s) (cancels at the next poll).`))
+      }
       continue
     }
 
