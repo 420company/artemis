@@ -1133,6 +1133,34 @@ function countProgressOpsSince(
   return count
 }
 
+// ── 机械兜底截断（不依赖模型）─────────────────────────────────────────────
+// 智能摘要失败 / 断路器跳闸时，保证发给模型的永远 ≤ 窗口（留 15% 余量）。
+// 保留[上次成功摘要] + [最近能塞下的若干轮]，并避开 tool_use/tool_result 配对断裂。
+function mechanicalTruncateToFit(
+    messages: SessionMessage[],
+    summaryText: string | undefined,
+    availableLimit: number,
+): SessionMessage[] {
+    const est = (m: SessionMessage) => Math.ceil((m?.content?.length ?? 0) / 4);
+    const budget = Math.floor(Math.max(8_000, availableLimit) * 0.85);
+    const summaryMsg: SessionMessage[] = summaryText
+        ? [{ id: 'mech-summary', role: 'user', content: '[早期对话已压缩为摘要]\n' + summaryText, createdAt: new Date().toISOString() } as SessionMessage]
+        : [];
+    let used = summaryMsg.reduce((s, m) => s + est(m), 0);
+    const kept: SessionMessage[] = [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const t = est(messages[i]!);
+        if (kept.length > 0 && used + t > budget) break;
+        kept.unshift(messages[i]!);
+        used += t;
+    }
+    // 避免开头是孤儿 tool_result（其 assistant 工具调用已被截掉），否则 provider 会 400
+    while (kept.length > 1 && ((kept[0]!.role as string) === 'tool' || (kept[0]!.role as string) === 'tool_result')) {
+        kept.shift();
+    }
+    return [...summaryMsg, ...kept];
+}
+
 async function compressSessionMessagesForProvider(
     activeSession: Session,
     conversationMessages: SessionMessage[],
@@ -1148,8 +1176,9 @@ async function compressSessionMessagesForProvider(
     // ── Circuit breaker: skip compression if tripped ────────────────────────
     const breaker = getCircuitBreaker(activeSession.getWorkingDirectory())
     if (isCircuitBreakerTripped(breaker)) {
-      onInfo?.('[压缩] 断路器已触发，跳过本次压缩（连续失败过多）')
-      return { messages: conversationMessages };
+      onInfo?.('[压缩] 断路器触发，回退机械截断')
+      const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength) - Math.max(0, Math.round(reservedTokens)));
+      return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, mtLimit) };
     }
 
     const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
@@ -1200,8 +1229,8 @@ async function compressSessionMessagesForProvider(
       // Record failure in circuit breaker
       const updatedBreaker = recordCompressionFailure(breaker, e.message)
       sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
-      onInfo?.(`[压缩] 压缩失败（${updatedBreaker.consecutiveFailures}/${3}）: ${e.message}`)
-      return { messages: conversationMessages };
+      onInfo?.(`[压缩] 摘要失败 ${updatedBreaker.consecutiveFailures}/3，回退机械截断`)
+      return { messages: mechanicalTruncateToFit(conversationMessages, previousSummary, availableLimit) };
     }
 
     if (compression.summaryText) {

@@ -185,12 +185,9 @@ export function renderHud(state: HudState): string {
   const pct    = ctx > 0 ? Math.min(100, Math.round(ctx / limit * 100)) : 0
   const firstLatency = formatLatencyCompact(state.lastFirstResponseMs)
   const totalLatency = formatLatencyCompact(state.lastDurationMs)
-  const telemetryLabel = state.lastProfileLabel
-    ? truncatePlainText(state.lastProfileLabel, 14)
-    : undefined
   const latencyStr =
     firstLatency || totalLatency
-      ? `${telemetryLabel ? `${telemetryLabel} ` : ''}${firstLatency ? `${firstLatency}→` : ''}${totalLatency ?? firstLatency}`
+      ? `${firstLatency ? `${firstLatency}→` : ''}${totalLatency ?? firstLatency}`
       : undefined
 
   // ── non-TTY fallback ──────────────────────────────────────────────────────
