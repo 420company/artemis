@@ -1240,7 +1240,9 @@ async function compressSessionMessagesForProvider(
     reservedTokens = 0,
     onInfo?: (message: string) => void,
     forceShrink?: number,
+    locale: 'en' | 'zh' = 'zh',
 ): Promise<{ messages: SessionMessage[]; summaryText?: string }> {
+    const t = (zh: string, en: string): string => (locale === 'en' ? en : zh);
     if (!model) {
         return { messages: conversationMessages };
     }
@@ -1250,14 +1252,16 @@ async function compressSessionMessagesForProvider(
     if (forceShrink && forceShrink > 0) {
         const fullLimit = getConfiguredContextLimit(model, contextLength);
         const small = Math.max(16_000, Math.floor(fullLimit * forceShrink) - Math.max(0, Math.round(reservedTokens)));
-        onInfo?.(`[压缩] 空返回保护：强制压到约 ${Math.round(forceShrink * 100)}% 窗口后重试`);
+        onInfo?.(t(
+            `[压缩] 空返回急救：压到约 ${Math.round(forceShrink * 100)}% 窗口后重试`,
+            `[Compact] Empty-reply rescue: shrunk to ~${Math.round(forceShrink * 100)}% of window, retrying`));
         return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, small) };
     }
 
     // ── Circuit breaker: skip compression if tripped ────────────────────────
     const breaker = getCircuitBreaker(activeSession.getWorkingDirectory())
     if (isCircuitBreakerTripped(breaker)) {
-      onInfo?.('[压缩] 断路器触发，回退机械截断')
+      onInfo?.(t('[压缩] 断路器触发，改用机械截断', '[Compact] Circuit breaker tripped; using mechanical truncation'))
       const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength) - Math.max(0, Math.round(reservedTokens)));
       return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, mtLimit) };
     }
@@ -1296,21 +1300,37 @@ async function compressSessionMessagesForProvider(
     }
     const currentFocus = extractCurrentUserFocus(conversationMessages)
 
+    // ── Summarizer window: the summary prompt goes to the worker model, so
+    // size its INPUT by the worker's context window — not the lead's. A
+    // small-window worker handed a prompt sized for a 1M lead would overflow.
+    // Falls back to the lead window when no distinct worker is configured.
+    let summarizerTokenLimit = availableLimit;
+    try {
+      const { config: workerCfg } = await loadWorkerProvider(activeSession.getWorkingDirectory());
+      if (workerCfg && workerCfg !== providerConfig) {
+        summarizerTokenLimit = getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength);
+      }
+    } catch { /* worker unavailable — fall back to lead window */ }
+
     let compression: CompressResult
     try {
       compression = await compressMessages(conversationMessages, summarizeOnce, {
         tokenLimit: availableLimit,
+        summarizerTokenLimit,
         previousSummary,
         threshold: _compressionThresholdOverride,
         churnMultiplier,
         currentFocus: currentFocus ?? undefined,
+        locale,
         onInfo,
       });
     } catch (e: any) {
       // Record failure in circuit breaker
       const updatedBreaker = recordCompressionFailure(breaker, e.message)
       sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
-      onInfo?.(`[压缩] 摘要失败 ${updatedBreaker.consecutiveFailures}/3，回退机械截断`)
+      onInfo?.(t(
+        `[压缩] 摘要连续失败 ${updatedBreaker.consecutiveFailures}/3，改用机械截断`,
+        `[Compact] Summary failed ${updatedBreaker.consecutiveFailures}/3; using mechanical truncation`))
       return { messages: mechanicalTruncateToFit(conversationMessages, previousSummary, availableLimit) };
     }
 
@@ -1467,12 +1487,16 @@ async function compressSessionMessagesForProvider(
         })
         updatedBreaker = churnUpdate.state
         if (churnUpdate.churnDetected) {
-          onInfo?.(`[压缩] 检测到上下文迭代振荡（5分钟内已触发 ${updatedBreaker.recentCompressionTimestamps.length} 次压缩且无实质修改），启动自适应防振荡保护，全压缩阈值已动态上调为原来的 ${updatedBreaker.thresholdMultiplier.toFixed(2)} 倍`)
+          onInfo?.(t(
+            `[压缩] 检测到压缩振荡（5min 内 ${updatedBreaker.recentCompressionTimestamps.length} 次且无实质修改），阈值上调至 ${updatedBreaker.thresholdMultiplier.toFixed(2)}× 抑制空转`,
+            `[Compact] Compaction thrash detected (${updatedBreaker.recentCompressionTimestamps.length}× in 5min with no real edits); threshold raised to ${updatedBreaker.thresholdMultiplier.toFixed(2)}× to suppress churn`))
         }
         sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
       } catch (ledgerError: any) {
         // Ledger failure should never block the main compression flow
-        onInfo?.(`[Ledger] 压缩记录写入失败（不影响当前压缩）: ${ledgerError.message}`)
+        onInfo?.(t(
+          `[压缩] 历史记录写入失败（不影响本次压缩）：${ledgerError.message}`,
+          `[Compact] Ledger write failed (does not affect this compaction): ${ledgerError.message}`))
       }
     }
 
@@ -2631,6 +2655,8 @@ export async function think(
         // (was previously silent — long sessions had no visibility into
         // when/why the compressor fired or whether it succeeded).
         onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
+        undefined,
+        locale,
     );
     if (providerCompression.summaryText) {
         onCompressionSummary?.(providerCompression.summaryText);
@@ -2755,6 +2781,7 @@ export async function think(
                 reservedSystemTokens,
                 onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
                 forceCompactFraction,
+                locale,
             );
             forceCompactFraction = undefined;
             if (providerCompression.summaryText) {

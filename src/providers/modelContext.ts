@@ -111,8 +111,10 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   // Other common provider presets
   'deepseek-chat': 128_000,
   'deepseek-reasoner': 128_000,
-  'deepseek-v4-pro': 128_000,
-  'deepseek-v4-flash': 128_000,
+  // DeepSeek-V4 series (Pro + Flash) ship a 1,048,576-token window per DeepSeek
+  // official spec. Earlier hardcoded 128K choked the worker summarizer.
+  'deepseek-v4-pro': 1_000_000,
+  'deepseek-v4-flash': 1_000_000,
   'codestral-latest': 256_000,
   'mistral-large-latest': 128_000,
   'mistral-medium-latest': 128_000,
@@ -170,6 +172,9 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('gemini')) return 1_000_000
 
   // ── DeepSeek ─────────────────────────────────────────────────────────────
+  // V4 series (incl. -pro / -flash) = 1,048,576-token window; V3 and chat/
+  // reasoner remain 128K.
+  if (m.includes('deepseek-v4') || m.includes('deepseek-v5')) return 1_000_000
   if (m.includes('deepseek')) return 128_000
 
   // ── Kimi / Moonshot ──────────────────────────────────────────────────────

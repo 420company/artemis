@@ -75,6 +75,15 @@ function estimateMsgListTokens(msgs: SessionMessage[]): number {
   return msgs.reduce((s, m) => s + estimateTokens(m.content), 0)
 }
 
+// ─── progress-message localization ────────────────────────────────────────────
+// Compression progress lines are surfaced to the user via onInfo. They follow
+// the active UI locale (same bilingual approach as the CLI buttons). Default
+// to Chinese when locale is unspecified.
+export type CompressLocale = 'en' | 'zh'
+function tr(locale: CompressLocale | undefined, zh: string, en: string): string {
+  return locale === 'en' ? en : zh
+}
+
 // ─── Phase 1: lossless tool-result pruning ────────────────────────────────────
 
 function looksLikeToolFailure(content: string): boolean {
@@ -544,6 +553,14 @@ function formatSummary(obj: Record<string, unknown>): string {
 export interface CompressionOptions {
   /** Estimated token limit of the model. Default: 180_000 */
   tokenLimit?: number
+  /**
+   * Context window of the model that actually receives the summarization
+   * prompt (the worker/specialist model in dual-model setups). The summary
+   * INPUT is sized to this, not to the lead model's window — otherwise a
+   * small-window worker could be handed a prompt sized for a 1M lead and
+   * overflow. Defaults to tokenLimit (single-model: lead == summarizer).
+   */
+  summarizerTokenLimit?: number
   /** Compress when token usage exceeds this fraction of limit. Default: adaptive, usually 0.70 */
   threshold?: number
   /** Number of messages to protect at the head. Default: 3 */
@@ -572,6 +589,8 @@ export interface CompressionOptions {
    * persists topics indefinitely across many compaction cycles.
    */
   currentFocus?: string
+  /** Active UI locale for progress messages. Defaults to 'zh'. */
+  locale?: CompressLocale
 }
 
 export interface CompressResult {
@@ -668,6 +687,7 @@ export function getTailProtectTokens(tokenLimit: number): number {
 export function maybeTimeBasedMicrocompact(
   messages: SessionMessage[],
   onInfo?: (message: string) => void,
+  locale?: CompressLocale,
 ): CompressResult | null {
   // Find the last assistant message and check the time gap
   let lastAssistantIdx = -1
@@ -713,7 +733,9 @@ export function maybeTimeBasedMicrocompact(
   const tokensAfter = estimateMsgListTokens(pruned)
   if (tokensAfter >= tokensBefore) return null
 
-  onInfo?.(`[时间微压缩] 距上次回复 ${Math.round(gapMinutes)}min > ${TIME_BASED_MC_GAP_MINUTES}min 阈值，清理 ${clearIndices.length} 条旧工具输出 (~${Math.round((tokensBefore - tokensAfter) / 1000)}K tokens)，保留最近 ${keepSet.size} 条`)
+  onInfo?.(tr(locale,
+    `[微压缩·缓存过期] 距上次回复 ${Math.round(gapMinutes)}min，清理 ${clearIndices.length} 条旧工具输出 −${Math.round((tokensBefore - tokensAfter) / 1000)}K，保留最近 ${keepSet.size} 条`,
+    `[Micro-compact · cache expired] ${Math.round(gapMinutes)}min since last reply; cleared ${clearIndices.length} old tool outputs −${Math.round((tokensBefore - tokensAfter) / 1000)}K, kept latest ${keepSet.size}`))
   return { messages: pruned, compressed: true, tokensBefore, tokensAfter, mode: 'microcompact', readFileSkeletonsExtracted }
 }
 
@@ -723,6 +745,11 @@ export async function compressMessages(
   opts: CompressionOptions = {},
 ): Promise<CompressResult> {
   const tokenLimit       = opts.tokenLimit       ?? 180_000
+  // Window of the model that receives the summary prompt. Falls back to the
+  // lead window for single-model setups.
+  const summarizerLimit  = Number.isFinite(opts.summarizerTokenLimit) && (opts.summarizerTokenLimit ?? 0) > 0
+    ? opts.summarizerTokenLimit!
+    : tokenLimit
   const threshold        = opts.threshold        ?? getAdaptiveCompressionThreshold(tokenLimit)
   const protectHead      = opts.protectHead      ?? 3
   // Tail protection now scales with context window. 1M-context sessions get
@@ -730,6 +757,8 @@ export async function compressMessages(
   const protectTailTok   = opts.protectTailTokens ?? getTailProtectTokens(tokenLimit)
   const previousSummary  = opts.previousSummary
   const onInfo           = opts.onInfo
+  const locale           = opts.locale
+  const t = (zh: string, en: string): string => tr(locale, zh, en)
   const churnMul         = Number.isFinite(opts.churnMultiplier) && (opts.churnMultiplier ?? 1) >= 1
     ? Math.min(opts.churnMultiplier!, 4.0)
     : 1.0
@@ -739,7 +768,7 @@ export async function compressMessages(
   // ── Time-based microcompact: runs first, short-circuits ───────────────
   // If the gap since the last assistant message exceeds the threshold,
   // the provider-side cache has expired — clear old tool results now.
-  const timeBased = maybeTimeBasedMicrocompact(messages, onInfo)
+  const timeBased = maybeTimeBasedMicrocompact(messages, onInfo, locale)
   if (timeBased) return timeBased
 
   const triggerAt = Math.floor(getCompressionTriggerTokens(tokenLimit, threshold) * churnMul)
@@ -762,7 +791,9 @@ export async function compressMessages(
       const prunedResult = pruneToolResults(messages, protectedFromIdx)
       const tokensAfter = estimateMsgListTokens(prunedResult.messages)
       if (tokensAfter < tokensBefore) {
-        onInfo?.(`[微压缩] 清理旧工具输出：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ~${Math.round(tailProtectTokens / 1000)}K 对话原文`)
+        onInfo?.(t(
+          `[微压缩] 清理旧工具输出 ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，保留近期 ${Math.round(tailProtectTokens / 1000)}K 原文`,
+          `[Micro-compact] Cleared old tool outputs ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K, kept recent ${Math.round(tailProtectTokens / 1000)}K verbatim`))
         return {
           messages: prunedResult.messages,
           compressed: true,
@@ -779,7 +810,9 @@ export async function compressMessages(
   // Compression triggered — surface to user. Without this, the previous
   // silent operation made it look like long sessions never compressed.
   const triggerPct = Math.round((tokensBefore / tokenLimit) * 100)
-  onInfo?.(`[压缩] 上下文 ${Math.round(tokensBefore / 1000)}K (${triggerPct}% 限制)，开始压缩…`)
+  onInfo?.(t(
+    `[压缩] 上下文 ${Math.round(tokensBefore / 1000)}K（已占 ${triggerPct}% 窗口），开始压缩…`,
+    `[Compact] Context ${Math.round(tokensBefore / 1000)}K (${triggerPct}% of window); starting…`))
 
   // ── Phase 2: determine boundaries ────────────────────────────────────────
   let headEnd = Math.min(protectHead, messages.length)
@@ -810,7 +843,9 @@ export async function compressMessages(
     // Not enough middle to compress — Phase 1 only (prune tool results)
     const prunedResult = pruneToolResults(messages, tailStart)
     const tokensAfter = estimateMsgListTokens(prunedResult.messages)
-    onInfo?.(`[压缩] 中段不足，仅修剪工具结果：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
+    onInfo?.(t(
+      `[压缩] 历史较短，仅清理工具输出 ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`,
+      `[Compact] Short history; pruned tool outputs only ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`))
     return {
       messages: prunedResult.messages,
       compressed: true,
@@ -824,29 +859,40 @@ export async function compressMessages(
   // ── Phase 1 on middle: prune tool results ─────────────────────────────────
   const prunedMiddleResult = pruneToolResults(middle, middle.length)
   let prunedMiddle = prunedMiddleResult.messages
-  onInfo?.(`[压缩] Phase 1: 修剪 ${middle.length} 条中段消息的工具结果`)
+  onInfo?.(t(
+    `[压缩] 整理历史中段（${middle.length} 条消息）…`,
+    `[Compact] Consolidating mid-history (${middle.length} messages)…`))
 
   // ── Phase 5: prepare summary input without dropping critical evidence ──────
   const beforeSummaryTokens = estimateMsgListTokens(prunedMiddle)
-  prunedMiddle = prepareMiddleForStructuredSummary(prunedMiddle, tokenLimit)
+  // Size the summary input to the SUMMARIZER's window, not the lead's.
+  prunedMiddle = prepareMiddleForStructuredSummary(prunedMiddle, summarizerLimit)
   const afterSummaryTokens = estimateMsgListTokens(prunedMiddle)
   if (afterSummaryTokens < beforeSummaryTokens) {
-    onInfo?.(`[压缩] Phase 5: 保真压缩摘要输入 ${Math.round(beforeSummaryTokens / 1000)}K → ${Math.round(afterSummaryTokens / 1000)}K（不删除用户约束/工具证据）`)
+    onInfo?.(t(
+      `[压缩] 精简摘要输入 ${Math.round(beforeSummaryTokens / 1000)}K → ${Math.round(afterSummaryTokens / 1000)}K（保留用户约束与工具证据）`,
+      `[Compact] Trimmed summary input ${Math.round(beforeSummaryTokens / 1000)}K → ${Math.round(afterSummaryTokens / 1000)}K (kept user constraints & tool evidence)`))
   }
 
   // ── Phase 3: LLM summarize ────────────────────────────────────────────────
   let summaryText: string
   try {
-    onInfo?.(`[压缩] Phase 3: 调用 worker 模型生成结构化摘要…`)
+    onInfo?.(t(
+      `[压缩] 副模型生成结构化摘要…`,
+      `[Compact] Worker model generating structured summary…`))
     summaryText = await buildStructuredSummary(prunedMiddle, previousSummary, summarize, opts.currentFocus)
   } catch (err) {
     // If summarization fails, fall back to Phase 1 only — surface why so
     // user can debug (was silent before, often masking provider auth errors).
     const msg = err instanceof Error ? err.message : String(err)
-    onInfo?.(`[压缩] Phase 3 失败 → 退回 Phase 1: ${msg}`)
+    onInfo?.(t(
+      `[压缩] 摘要失败，改为清理工具输出：${msg}`,
+      `[Compact] Summary failed; falling back to tool-output pruning: ${msg}`))
     const prunedResult = pruneToolResults(messages, tailStart)
     const tokensAfter = estimateMsgListTokens(prunedResult.messages)
-    onInfo?.(`[压缩] 结果（仅修剪）：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`)
+    onInfo?.(t(
+      `[压缩] 已清理 ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`,
+      `[Compact] Pruned ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K`))
     return {
       messages: prunedResult.messages,
       compressed: true,
@@ -868,7 +914,9 @@ export async function compressMessages(
   const result = [...head, summaryMsg, ...tail]
   const tokensAfter = estimateMsgListTokens(result)
   const reductionPct = Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 100)
-  onInfo?.(`[压缩] ✓ 完成：${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K (省 ${reductionPct}%)`)
+  onInfo?.(t(
+    `[压缩] ✓ 完成 ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，节省 ${reductionPct}%`,
+    `[Compact] ✓ Done ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K, saved ${reductionPct}%`))
   return {
     messages: result,
     compressed: true,
