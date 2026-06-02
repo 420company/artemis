@@ -19,6 +19,38 @@ export type ProviderPreset = {
 }
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
+  // ── Luna Station (house aggregator — 100+ models, one key) ─────────────────
+  {
+    id: 'luna',
+    label:        { zh: 'Luna Station', en: 'Luna Station' },
+    defaultAlias: { zh: 'Luna 模型', en: 'Luna model' },
+    protocol: 'openai',
+    baseUrl: 'https://api.router.ai/v1',
+    suggestedModels: [
+      'gpt-5.5',
+      'gpt-5.4-pro',
+      'gpt-5.4',
+      'o3-pro',
+      'o3',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5-20251001',
+      'gemini-3.1-pro-preview',
+      'gemini-3-flash-preview',
+      'gemini-2.5-pro',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+      'qwen3.7-max',
+      'qwen3.6-max-preview',
+      'gpt-5.1-codex-max',
+    ],
+    notes: {
+      zh: ['Luna API。', '选择推荐模型，或直接输入模型名。'],
+      en: ['Luna API.', 'Choose a recommended model, or type a model id directly.'],
+    },
+  },
+
   // ── Anthropic ─────────────────────────────────────────────────────────────
   {
     id: 'messages',

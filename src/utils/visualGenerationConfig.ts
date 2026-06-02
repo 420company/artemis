@@ -198,6 +198,9 @@ export function defaultVisualModelForProvider(
   assetKind: VisualAssetKind,
 ): string {
   switch (provider.toLowerCase()) {
+    case 'luna':
+    case 'router':
+      return assetKind === 'image' ? 'gpt-image-2' : 'seedance-1-5-pro-251215';
     case 'openai':
       return assetKind === 'image' ? 'gpt-image-2' : 'sora-2';
     case 'byteplus':
@@ -229,6 +232,9 @@ export function defaultVisualBaseUrlForProvider(provider: string): string {
       return OPENAI_BASE_URL;
     case 'byteplus':
       return BYTEPLUS_VISUAL_BASE_URL;
+    case 'luna':
+    case 'router':
+      return 'https://api.router.ai/v1';
     case 'google':
     case 'gemini':
       return 'https://generativelanguage.googleapis.com/v1beta';

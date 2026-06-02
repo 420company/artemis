@@ -57,6 +57,7 @@ export interface ComposeDreamResult {
   reason?: string
   entry?: DreamEntry
   bridgesPushed?: number
+  imageNote?: string
 }
 
 const DREAM_SYSTEM_PROMPTS: Record<UiLocale, string> = {
@@ -323,7 +324,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     }
   }
 
-  const result = { ok: true, entry, bridgesPushed }
+  const result = { ok: true, entry, bridgesPushed, imageNote }
   return result
 }
 

@@ -90,32 +90,51 @@ export class CustomProvider implements VisualProvider {
       }
 
       const model = params.model || imageConfig.model || 'custom-image'
-
-      const body: Record<string, unknown> = {
-        model,
-        prompt: params.prompt,
-        n: Math.max(1, Math.min(4, Math.floor(params.count ?? 1))),
-        size: mapImageSize(params.size || imageConfig.defaultParams.size),
-      }
+      const isDalle3 = /dall-?e-?3/i.test(String(model))
 
       const quality = mapImageQuality(params.quality || imageConfig.defaultParams.quality)
-      if (quality) {
-        body.quality = quality
-      }
-      if (params.style || imageConfig.defaultParams.style) {
-        body.style = params.style || imageConfig.defaultParams.style
+
+      // The gpt-image-2 relay returns HTTP 502 (upstream_error) when the request
+      // carries a `style` field (or a non-square size such as 2K → 1536x1024).
+      // Only dall-e-3 accepts `style`/`quality`, so gate them on the model; for any
+      // other model we omit them and, on a gateway error, fall back to a minimal
+      // square body.
+      const buildBody = (minimal: boolean): Record<string, unknown> => {
+        const b: Record<string, unknown> = {
+          model,
+          prompt: params.prompt,
+          n: Math.max(1, Math.min(4, Math.floor(params.count ?? 1))),
+          size: minimal ? '1024x1024' : mapImageSize(params.size || imageConfig.defaultParams.size),
+        }
+        if (!minimal && isDalle3 && quality) {
+          b.quality = quality
+        }
+        if (!minimal && isDalle3 && (params.style || imageConfig.defaultParams.style)) {
+          b.style = params.style || imageConfig.defaultParams.style
+        }
+        return b
       }
 
-      const res = await fetch(`${baseUrl}/images/generations`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
-      })
-      const raw = await res.text()
+      const sendImageRequest = (requestBody: Record<string, unknown>) =>
+        fetch(`${baseUrl}/images/generations`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(requestBody),
+          signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
+        })
+
+      let body = buildBody(false)
+      let res = await sendImageRequest(body)
+      let raw = await res.text()
+      // Retry once with a minimal square body if the relay rejects with a gateway error.
+      if (!res.ok && (res.status === 502 || res.status === 503 || res.status === 504)) {
+        body = buildBody(true)
+        res = await sendImageRequest(body)
+        raw = await res.text()
+      }
       if (!res.ok) {
         throw new Error(`Custom image generation failed (HTTP ${res.status}): ${raw.slice(0, 800)}`)
       }

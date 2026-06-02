@@ -593,6 +593,26 @@ async function configureProviderProfile(options: {
   return profile
 }
 
+/**
+ * Drop any saved specialist (secondary) profile + its reference. Called when the
+ * user declines configuring a secondary this round, so a previously configured
+ * dual-model pair does not linger in providers.json (and the HUD).
+ */
+async function clearSpecialistFromTargets(cwd: string): Promise<void> {
+  const targets = cwd === HOME_DIR ? [cwd] : [cwd, HOME_DIR]
+  for (const target of targets) {
+    const store = new ProviderStore(target)
+    const data = await store.load()
+    const staleId = data.specialistProfileId
+    if (!staleId) continue
+    data.specialistProfileId = undefined
+    if (staleId !== data.defaultMainProfileId) {
+      data.profiles = data.profiles.filter((entry) => entry.id !== staleId)
+    }
+    await store.save(data)
+  }
+}
+
 async function configureModelProvider(options: { cwd: string; locale: UiLocale; quick?: boolean }): Promise<void> {
   const { cwd, locale } = options
   sectionTitle(tr(locale, '推理模型 Provider', 'Inference Provider'), [
@@ -617,7 +637,11 @@ async function configureModelProvider(options: { cwd: string; locale: UiLocale; 
     const secondary = await configureProviderProfile({ cwd, locale, role: 'secondary' })
     if (secondary) {
       console.log(`  ✓ ${tr(locale, '副模型', 'Secondary')}: ${secondary.model} (${secondary.label ?? secondary.id})`)
+    } else {
+      await clearSpecialistFromTargets(cwd)
     }
+  } else {
+    await clearSpecialistFromTargets(cwd)
   }
 }
 

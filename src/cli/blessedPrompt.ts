@@ -161,6 +161,74 @@ function padRight(text: string, width: number): string {
   return text + ' '.repeat(width - visible)
 }
 
+// Live syntax colouring for the input line. Wraps recognised tokens in ANSI
+// (zero visible width), so cursor/layout maths — which run on the plain text —
+// are untouched. One single pass over the plain string: matching never sees the
+// escapes it inserts (important, since ANSI itself contains '[').
+const HL_RESET = '\x1b[0m'
+// "Heavy" tokens always glow wherever they appear — names and forces that carry
+// weight. Whole-word (boundary) for latin/numbers; substring for CJK so 爱 lights
+// up even inside 可爱. Edit these two lists to add more.
+// Tier 1 — your words. Bright warm gradient (glowHeavy). Private weight.
+const HEAVY_PHRASES = ['我爱你', '\\bi\\s+love\\s+you\\b']  // whole phrases — matched before single words
+const HEAVY_WORD_BOUNDARY = ['niko', 'love', '224', '420', 'artemis']
+const HEAVY_ANYWHERE = ['爱']
+// Tier 2 — a curated lexicon of universally heavy words. A softer single tint so it
+// never out-shines the tier-1 glow. Chinese entries are multi-char on purpose
+// (死亡 not 死) to avoid lighting up technical words like 光标 / 死机 / 中心.
+const LEXICON_EN = ['hope', 'dream', 'dreams', 'forever', 'always', 'eternity', 'memory', 'remember', 'home', 'soul', 'alive', 'death', 'goodbye', 'faith', 'believe', 'freedom', 'brave', 'courage', 'alone', 'lonely', 'heart', 'together', 'beloved', 'grief', 'healing', 'fear', 'peace', 'promise', 'miss', 'family']
+const LEXICON_ZH = ['希望', '梦想', '永远', '永恒', '回忆', '记得', '思念', '想念', '故乡', '家人', '灵魂', '活着', '死亡', '离别', '告别', '失去', '自由', '勇气', '勇敢', '孤独', '寂寞', '陪伴', '温柔', '信念', '力量', '心愿', '遗憾', '治愈', '想你']
+const INPUT_HIGHLIGHT_RE = new RegExp(
+  '(https?:\\/\\/\\S+)' +                                                       // URL
+  '|(\\[[^\\]\\n]*\\])' +                                                       // [Image #N] / refs
+  '|(@[\\w-]+)' +                                                               // @mentions / @stop
+  '|^(\\s*\\/[a-zA-Z][\\w-]*)' +                                                // leading /command
+  `|(${HEAVY_PHRASES.join('|')}|\\b(?:${HEAVY_WORD_BOUNDARY.join('|')})\\b|${HEAVY_ANYWHERE.join('|')})` + // tier1 personal
+  `|(\\b(?:${LEXICON_EN.join('|')})\\b|${LEXICON_ZH.join('|')})`,               // tier2 lexicon
+  'gi',
+)
+// Tier-1 tokens get a moving shine: an indigo→cyan base gradient with a bright
+// glint that sweeps across the chars, then a short pause. GLOW_PHASE is advanced
+// by the prompt's animation timer. Per-char colour keeps visible width unchanged,
+// so the cursor maths (run on plain text) stay correct.
+const HEAVY_TIER1_RE = new RegExp(
+  `${HEAVY_PHRASES.join('|')}|\\b(?:${HEAVY_WORD_BOUNDARY.join('|')})\\b|${HEAVY_ANYWHERE.join('|')}`,
+  'i',
+)
+const GLOW_BASE = [213, 177, 141, 105, 75, 80]  // 玫粉 → 兰紫 → 紫 → 靛蓝 → 蓝 → 青
+let GLOW_PHASE = 0
+function advanceGlow(): void { GLOW_PHASE = (GLOW_PHASE + 1) % 100000 }
+function glowHeavy(word: string): string {
+  const chars = Array.from(word)
+  const n = chars.length
+  const shine = GLOW_PHASE % (n + 5)  // glint position; the +5 gap is a pause between sweeps
+  let out = ''
+  for (let i = 0; i < n; i++) {
+    const d = i - shine
+    let color: number
+    if (d === 0) color = 231                    // the glint — bright white
+    else if (d === -1 || d === 1) color = 225   // soft halo beside the glint
+    else color = GLOW_BASE[n === 1 ? 0 : Math.round((i / (n - 1)) * (GLOW_BASE.length - 1))]
+    out += `\x1b[1;38;5;${color}m${chars[i]}`
+  }
+  return out + HL_RESET
+}
+
+// Live syntax colouring for the input line. Wraps recognised tokens in ANSI (zero
+// visible width), so cursor/layout maths — which run on the plain text — are
+// untouched. One single pass: matching never sees the escapes it inserts.
+function highlightInput(text: string): string {
+  return text.replace(INPUT_HIGHLIGHT_RE, (match, url, bracket, at, slash, heavy, lexicon) => {
+    if (url) return `\x1b[4;38;5;75m${url}${HL_RESET}`        // URL — underlined blue
+    if (bracket) return `\x1b[38;5;114m${bracket}${HL_RESET}` // [Image #N] / refs — green
+    if (at) return `\x1b[38;5;215m${at}${HL_RESET}`           // @mentions / @stop — peach
+    if (slash) return `\x1b[1;38;5;177m${slash}${HL_RESET}`   // leading /command — bold mauve
+    if (heavy) return glowHeavy(heavy)                        // tier1 — your words, warm gradient glow
+    if (lexicon) return `\x1b[38;5;138m${lexicon}${HL_RESET}` // tier2 — universal heavy words, soft tint
+    return match
+  })
+}
+
 function wrapPlain(text: string, width: number): string[] {
   const safeWidth = Math.max(1, width)
   const sourceLines = text.split('\n')
@@ -205,6 +273,7 @@ class TerminalPrompt implements BlessedPromptHandle {
   private bottomZoneTopRow = 1
   private bottomZoneTransientHeight = 0
   private cursorOffsetFromZoneTop = 0
+  private glowTimer: ReturnType<typeof setInterval> | null = null
   private menuItems: SlashMenuItem[] = []
   private menuIndex = 0
   private submittedQueue: Array<string | null> = []
@@ -454,6 +523,17 @@ class TerminalPrompt implements BlessedPromptHandle {
 
     process.stdin.on('data', this.dataHandler)
     process.stdout.on('resize', this.resizeHandler)
+
+    // Animate the tier-1 "heavy word" shine. Idle ticks are just a cheap regex
+    // test (no redraw, no CPU); we only repaint while a glow token is present.
+    if (!this.cookedLineInput) {
+      this.glowTimer = setInterval(() => {
+        if (!this.started || !process.stdout.isTTY) return
+        if (!HEAVY_TIER1_RE.test(this.inputValue)) return
+        advanceGlow()
+        this.render()
+      }, 110)
+    }
   }
 
   private shutdown(): void {
@@ -463,9 +543,11 @@ class TerminalPrompt implements BlessedPromptHandle {
     if (this.dataHandler) process.stdin.removeListener('data', this.dataHandler)
     if (this.resizeHandler) process.stdout.removeListener('resize', this.resizeHandler)
     if (this.resizeTimer) clearTimeout(this.resizeTimer)
+    if (this.glowTimer) clearInterval(this.glowTimer)
     this.dataHandler = null
     this.resizeHandler = null
     this.resizeTimer = null
+    this.glowTimer = null
     this.parseState = INITIAL_STATE
 
     process.stdout.write(DISABLE_BRACKETED_PASTE)
@@ -1109,7 +1191,7 @@ class TerminalPrompt implements BlessedPromptHandle {
     const inputLines = visibleInput.map((line, index) => {
       const isFirstVisibleInputRow = index === padCount
       const prefix = isFirstVisibleInputRow ? '\x1b[1;38;5;117m›\x1b[0m ' : '  '
-      return `│ ${prefix}${padRight(line, inputContentWidth)} │`
+      return `│ ${prefix}${highlightInput(padRight(line, inputContentWidth))} │`
     })
     const footer = truncateToWidth(this.footerHint, cols)
 

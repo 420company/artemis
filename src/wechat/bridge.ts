@@ -10,6 +10,7 @@
 import { BragiStore } from '../bragi/store.js'
 import { appendFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
+import os from 'node:os'
 import { buildBridgeIdentity, runBragiMessagePump } from '../bragi/runtime.js'
 import { registerBridge } from '../services/bridgeNotifier.js'
 import type { BragiSessionBinding } from '../bragi/runtime.js'
@@ -27,7 +28,7 @@ import { WeChatGatewayClient } from './client.js'
 import { WeChatStore } from './store.js'
 import { runWeixinQRLogin } from './setup.js'
 
-const WECHAT_MEDIA_DEBUG_DIR = '/Users/goat/AntiClaude/MyLaude Code Update/debug'
+const WECHAT_MEDIA_DEBUG_DIR = path.join(os.homedir(), '.artemis', 'wechat-media-debug')
 const WECHAT_MEDIA_DEBUG_FILE = path.join(WECHAT_MEDIA_DEBUG_DIR, 'wechat-media-items.ndjson')
 const WECHAT_MEDIA_DOWNLOAD_DIR = path.join(WECHAT_MEDIA_DEBUG_DIR, 'wechat-media')
 

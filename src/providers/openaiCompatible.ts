@@ -485,7 +485,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
 
     if (!response.ok) {
       const errBody = await response.text()
-      throw new Error(buildProviderErrorMessage(response, errBody, this.config, options?.locale))
+      { const __e = new Error(buildProviderErrorMessage(response, errBody, this.config, options?.locale)); (__e as any).status = response.status; throw __e }
     }
 
     // Some OpenAI-compatible endpoints accept `stream: true` in the request but
@@ -761,7 +761,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(buildProviderErrorMessage(response, body, this.config, options?.locale));
+      { const __e = new Error(buildProviderErrorMessage(response, body, this.config, options?.locale)); (__e as any).status = response.status; throw __e; }
     }
 
     type OpenAIToolCall = { id: string; type: string; function: { name: string; arguments: string } };

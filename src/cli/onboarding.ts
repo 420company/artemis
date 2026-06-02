@@ -697,6 +697,7 @@ async function configureVisualModel(
     hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
     choices: [
       { label: 'BytePlus', value: 'byteplus' },
+      { label: 'Luna API', value: 'luna' },
       { label: 'Google Gemini / Nano Banana', value: 'google' },
       { label: 'OpenAI GPT Image', value: 'openai' },
       { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
@@ -734,6 +735,22 @@ async function configureVisualModel(
     }, options.ui)
     if (openaiImageModel === '__back__') return null
     preselectedImageModel = openaiImageModel
+  } else if (imageProvider === 'luna') {
+    const lunaImageModel = await chooseVisualSetupOption<string>({
+      title: t('选择 Luna 图片模型', 'Choose a Luna image model'),
+      hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+      choices: [
+        { label: 'GPT Image 2 (gpt-image-2)', value: 'gpt-image-2' },
+        { label: 'GPT Image 1.5 (gpt-image-1.5)', value: 'gpt-image-1.5' },
+        { label: 'Seedream 5.0 Lite (seedream-5-0-lite-260128)', value: 'seedream-5-0-lite-260128' },
+        { label: 'Seedream 4.5 (seedream-4-5-251128)', value: 'seedream-4-5-251128' },
+        { label: 'Qwen Image Max (qwen-image-max)', value: 'qwen-image-max' },
+        { label: 'Nano Banana Pro (gemini-3-pro-image-preview)', value: 'gemini-3-pro-image-preview' },
+        { label: t('返回', 'Back'), value: '__back__' },
+      ],
+    }, options.ui)
+    if (lunaImageModel === '__back__') return null
+    preselectedImageModel = lunaImageModel
   }
 
   printVisualProviderSupportNote(imageProvider, zh)
@@ -772,6 +789,7 @@ async function configureVisualModel(
         hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
         choices: [
           { label: 'BytePlus Seedance', value: 'byteplus' },
+          { label: 'Luna API', value: 'luna' },
           { label: 'Google Veo 3 (veo-3.1-generate-preview)', value: 'google' },
           { label: buildVisualProviderChoiceLabel('custom', 'Custom API', zh), value: 'custom' },
           { label: t('取消', 'Cancel'), value: '__cancel__' },
@@ -783,6 +801,25 @@ async function configureVisualModel(
       }
 
       printVisualProviderSupportNote(videoProvider, zh)
+
+      let preselectedVideoModel: string | undefined
+      if (videoProvider === 'luna') {
+        const lunaVideoModel = await chooseVisualSetupOption<string>({
+          title: t('选择 Luna 视频模型', 'Choose a Luna video model'),
+          hint: t('↑↓ 移动  Enter 确认', '↑↓ move  Enter confirm'),
+          choices: [
+            { label: 'Seedance 1.5 Pro (seedance-1-5-pro-251215)', value: 'seedance-1-5-pro-251215' },
+            { label: 'Seedance 2.0 (dreamina-seedance-2-0-260128)', value: 'dreamina-seedance-2-0-260128' },
+            { label: 'Veo 3.1 (veo-3.1-generate-preview)', value: 'veo-3.1-generate-preview' },
+            { label: 'Wan 2.7 T2V (wan2.7-t2v)', value: 'wan2.7-t2v' },
+            { label: 'Wan 2.7 I2V (wan2.7-i2v)', value: 'wan2.7-i2v' },
+            { label: 'HappyHorse T2V (happyhorse-1.0-t2v)', value: 'happyhorse-1.0-t2v' },
+            { label: t('返回', 'Back'), value: '__back__' },
+          ],
+        }, options.ui)
+        if (lunaVideoModel === '__back__') continue providerLoop
+        preselectedVideoModel = lunaVideoModel
+      }
 
       if (videoProvider === 'byteplus') {
         for (;;) {
@@ -837,10 +874,10 @@ async function configureVisualModel(
 
       videoConfig = {
         enabled: true,
-        provider: videoProvider,
+        provider: videoProvider === 'luna' ? 'custom' : videoProvider,
         apiKey: videoApiKey,
         baseUrl: videoBaseUrl || videoDefaultBaseUrl,
-        model: videoModel || videoDefaultModel,
+        model: videoModel || preselectedVideoModel || videoDefaultModel,
         nsfw: videoNsfw,
         defaultParams: {
           duration: '10s',
@@ -880,7 +917,7 @@ async function configureVisualModel(
   const visualConfig: VisualModelConfig = {
     enabled: true,
     image: {
-      provider: imageProvider,
+      provider: imageProvider === 'luna' ? 'custom' : imageProvider,
       apiKey: imageApiKey,
       baseUrl: imageBaseUrl || imageDefaultBaseUrl,
       model: imageModel || imageDefaultModel,
@@ -1414,13 +1451,20 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
 
     for (const store of targets) {
       const data = await store.load()
-      // Remove old profiles with same ids before inserting
-      const idsToReplace = [enrichedPrimary.id, enrichedSecondary?.id].filter(Boolean) as string[]
+      // When the user declines a secondary this round, drop the previously
+      // saved specialist too — otherwise the HUD keeps showing a stale
+      // dual-model pair (e.g. "gpt-5.5 ⇄ deepseek") for a brain that is no
+      // longer configured. Capture the old id BEFORE we overwrite it.
+      const staleSpecialistId = enrichedSecondary ? null : data.specialistProfileId
+      // Remove old profiles with same ids before inserting (and the orphaned
+      // specialist when it was declined).
+      const idsToReplace = [enrichedPrimary.id, enrichedSecondary?.id, staleSpecialistId].filter(Boolean) as string[]
       data.profiles = data.profiles.filter(p => !idsToReplace.includes(p.id))
       data.profiles.push(enrichedPrimary)
       if (enrichedSecondary) data.profiles.push(enrichedSecondary)
       data.defaultMainProfileId = enrichedPrimary.id
       if (enrichedSecondary) data.specialistProfileId = enrichedSecondary.id
+      else data.specialistProfileId = undefined
       await store.save(data)
     }
 

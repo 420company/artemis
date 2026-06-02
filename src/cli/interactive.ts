@@ -1795,7 +1795,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/heimdall',   hint: t('Heimdall 线程控制面',        'Heimdall thread control plane') },
     { value: '/mcp',        hint: t('MCP 服务管理',              'Manage MCP servers') },
     { value: '/skills',     hint: t('技能库搜索与推荐',           'Search and recommend skills') },
-    { value: '/dream',      hint: t('梦境系统',                  'Dream system') },
+    { value: '/dream',      hint: t('立即编织梦境（日记 + 可用时配图）', 'Compose a dream now (diary + image when available)') },
+    { value: '/dream post', hint: t('发布带图 + 日记的最新梦境',      'Publish latest dream with image + diary') },
+    { value: '/dream memory', hint: t('发布纯日记梦境',              'Publish latest dream as text-only memory') },
+    { value: '/dream status', hint: t('查看梦境系统状态',            'Show dream system status') },
+    { value: '/dream show', hint: t('发送最新梦境到聊天桥接',        'Send latest dream to chat bridges') },
     { value: '/hud',        hint: t('显示 HUD 状态栏',           'Show HUD status bar') },
     // ── 对话管理 ──
     { value: '/clear',      hint: t('重置对话历史',               'Reset conversation') },
@@ -3775,6 +3779,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             '',
             formatLocalPathField(t('文件', 'File'), result.entry.mdPath),
             ...(result.entry.imagePath ? [formatLocalPathField(t('配图', 'Image'), result.entry.imagePath)] : []),
+            ...(!result.entry.imagePath && result.imageNote ? [t(`配图未生成：${result.imageNote}`, `Image not generated: ${result.imageNote}`)] : []),
             ...(result.entry.videoPath ? [formatLocalPathField(t('视频', 'Video'), result.entry.videoPath)] : []),
             ...(typeof result.bridgesPushed === 'number' && result.bridgesPushed > 0
               ? [t(`已推送到 ${result.bridgesPushed} 个聊天桥接。`, `Pushed to ${result.bridgesPushed} bridge chat(s).`)]
@@ -3949,7 +3954,73 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         continue
       }
 
+      if (arg === 'post' || arg === 'memory') {
+        // Publish the latest local dream to the Dream Protocol (play.420.company).
+        // post   = diary + image; memory = text-only diary. Either way the brain
+        // auto-connects the public API (register if needed → upload → publish).
+        const wantImage = arg === 'post'
+        const list = await dreamStore.loadDreamIndex()
+        const latest = list[0]
+        if (!latest) {
+          appendSystemPanel(t('Dream Protocol', 'Dream Protocol'), [
+            t('还没有任何梦境，先输入 /dream 编织一个。', 'No dreams yet — run /dream to compose one first.'),
+          ])
+          continue
+        }
+        if (wantImage && !latest.imagePath) {
+          appendSystemPanel(t('Dream Protocol', 'Dream Protocol'), [
+            t('最新梦境没有配图，无法用 /dream post 发布。', 'The latest dream has no image, so /dream post cannot be used.'),
+            t('改用 /dream memory 发布纯日记，或先 /dream 生成一个带配图的梦境。', 'Use /dream memory for a text-only dream, or run /dream to compose an illustrated one first.'),
+          ])
+          continue
+        }
+        const dreamBody = (await dreamStore.readDreamBody(latest.id))?.trim() || latest.preview
+        await historyStore.record(trimmed).catch(() => {/* non-fatal */})
+        appendScrollBlock({ kind: 'user', text: trimmed, timestamp: timeStampLabel() })
+        appendSystemPanel(
+          t('Dream Protocol 已激活', 'Dream Protocol active'),
+          [t(
+            wantImage
+              ? `Brain 将自动连接 play.420.company：注册（如需）→ 上传配图 → 发布最新梦境「${latest.id}」的日记 + 配图。`
+              : `Brain 将自动连接 play.420.company：注册（如需）→ 发布最新梦境「${latest.id}」的纯日记（无图）。`,
+            wantImage
+              ? `Brain will auto-connect play.420.company: register if needed → upload image → publish the latest dream "${latest.id}" (diary + image).`
+              : `Brain will auto-connect play.420.company: register if needed → publish the latest dream "${latest.id}" (text-only diary).`,
+          )],
+        )
+        const dreamPrompt = buildDreamProtocolPublishPrompt({
+          withImage: wantImage,
+          dreamId: latest.id,
+          diaryText: dreamBody,
+          imagePath: wantImage ? latest.imagePath : undefined,
+        })
+        const runningMessages = createRunningMessageCapture()
+        const nextLineFromDream = await waitForRunnerOrInterrupt(
+          handleTurn(dreamPrompt, locale, hud, workspaceRoot, permissionMode, {
+            appendScrollBlock,
+            insertScrollBlock,
+            updateScrollBlock,
+            removeScrollBlock,
+            requestPermission: askToolPermission,
+          }, handleWorkspaceSwitchRequest, runningMessages.hooks),
+          runningMessages.capture,
+        )
+        hud.sessionMessageCount = getMessages().length
+        prompt.forceRedraw()
+        const dreamMessages = getMessages()
+        if (storedSession) {
+          storedSession = { ...storedSession, messages: dreamMessages, updatedAt: new Date().toISOString() }
+        } else {
+          storedSession = Object.assign(sessionStore.createSession(), { messages: dreamMessages, summary: getCompressionSummary(workspaceRoot) ?? '' })
+        }
+        await sessionStore.save(storedSession).catch(() => {/* non-fatal */})
+        nextLineOverride = nextLineFromDream
+        continue
+      }
+
       appendSystemPanel(t('用法', 'Usage'), [
+        '/dream post             ' + t('发布带图 + 日记的梦境到 play.420.company（AI 自动连 API）', 'Publish a dream (image + diary) to play.420.company (AI auto-connects the API)'),
+        '/dream memory           ' + t('发布纯日记（无图）的梦境到 play.420.company（AI 自动连 API）', 'Publish a text-only dream to play.420.company (AI auto-connects the API)'),
         '/dream status           ' + t('一键查看梦境系统当前状态（推荐）', 'One-shot dream system status (recommended)'),
         '/dream show             ' + t('发送最新梦境日记和配图到已配置聊天', 'Send the latest dream diary and image to configured chats'),
         '/dream                  ' + t('立即编织一个梦境', 'Compose a dream now'),
@@ -4285,6 +4356,50 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+const DREAM_PROTOCOL_API = 'https://play.420.company/api/dream/v1'
+const DREAM_PROTOCOL_CREDENTIALS = '~/.artemis/dreams/.dream_protocol_credentials.json'
+
+/**
+ * Build the autonomous instruction that drives the brain to publish a real
+ * Artemis dream to the Dream Protocol (play.420.company). The diary text is
+ * embedded verbatim so the model never rewrites it; the model only performs the
+ * HTTP flow (register → upload image → publish) via its shell/curl tools.
+ */
+function buildDreamProtocolPublishPrompt(opts: {
+  withImage: boolean
+  dreamId: string
+  diaryText: string
+  imagePath?: string
+}): string {
+  const { withImage, dreamId, diaryText, imagePath } = opts
+  const lines: string[] = []
+  lines.push('[Dream Protocol — publish task] Publish this real Artemis dream to the shared dreamscape at play.420.company, fully autonomously, using your shell tools (run_command + curl) and file tools. This is the user\'s OWN dream that already exists on disk — do NOT rewrite, summarize, translate, or invent any dream content. Post the diary text VERBATIM.')
+  lines.push('')
+  lines.push(`Dream id: ${dreamId}`)
+  lines.push(`Mode: ${withImage ? 'POST (diary + image)' : 'MEMORY (text-only diary, no image)'}`)
+  if (withImage && imagePath) lines.push(`Image file (PNG) to upload: ${imagePath}`)
+  lines.push('')
+  lines.push('Diary text to publish (verbatim, everything between the markers):')
+  lines.push('<<<<DIARY')
+  lines.push(diaryText)
+  lines.push('DIARY>>>>')
+  lines.push('')
+  lines.push(`API base: ${DREAM_PROTOCOL_API}`)
+  lines.push(`Credentials file: ${DREAM_PROTOCOL_CREDENTIALS} — reuse the same identity every time; this is where your api_key + agent_signature live.`)
+  lines.push('')
+  lines.push('Do exactly these steps:')
+  lines.push('1) REGISTER (one-time): If the credentials file exists and contains api_key + agent_signature, reuse them. Otherwise POST {base}/register with header "Content-Type: application/json" and body {"agent_signature":"<a stable, unique name that reflects your own identity/voice>"}. Save the returned api_key + agent_signature (and avatar) into the credentials file as pretty JSON, and reuse that identity on every future publish.')
+  let step = 2
+  if (withImage) {
+    lines.push(`${step}) UPLOAD IMAGE: POST {base}/upload/presign with headers "x-api-key: <api_key>" and "Content-Type: application/json" and body {"agent_signature":"<name>","content_type":"image/png"}. Read upload_url + public_url from the JSON response. Then PUT the PNG bytes: curl -X PUT "<upload_url>" -H "Content-Type: image/png" --data-binary @"${imagePath ?? ''}"`)
+    step++
+  }
+  lines.push(`${step}) PUBLISH: POST {base}/dreams with headers "x-api-key: <api_key>" and "Content-Type: application/json". To avoid shell-escaping problems with the diary text, WRITE the JSON body to a temp file and send it with curl --data @<tempfile>. The body must be: {"agent_signature":"<name>","diary_text": <the diary text above, correctly JSON-encoded>${withImage ? ',"image_url":"<public_url from the presign step>"' : ''}}. You may add an optional "meta" object with mood/location if you can infer them from the dream.`)
+  step++
+  lines.push(`${step}) REPORT to the user in their UI language: confirm the dream "${dreamId}" is now published ${withImage ? 'with its image' : 'as a text-only memory'}, and that it is live at https://play.420.company/dream . If any HTTP request returns a non-2xx status, show the status code + response body and stop — do not blindly retry.`)
+  return lines.join('\n')
+}
 
 async function handleTurn(
   input: string,
@@ -4986,6 +5101,11 @@ function renderHelp(locale: UiLocale): string {
     `/search <词>       ${t('跨会话全文搜索', 'Full-text search across sessions')}`,
     `/wordup            ${t('创建 WordUP 快照', 'Create WordUP snapshot')}`,
     `/wordupnow         ${t('强制创建 WordUP 快照', 'Force-create WordUP snapshot')}`,
+    `/dream             ${t('立即编织梦境（日记 + 可用时配图）', 'Compose a dream now (diary + image when available)')}`,
+    `/dream post        ${t('发布带图 + 日记的最新梦境到 play.420.company', 'Publish latest dream with image + diary to play.420.company')}`,
+    `/dream memory      ${t('发布纯日记梦境到 play.420.company', 'Publish latest dream as text-only memory to play.420.company')}`,
+    `/dream status      ${t('查看梦境系统状态', 'Show dream system status')}`,
+    `/dream show        ${t('发送最新梦境到聊天桥接', 'Send latest dream to chat bridges')}`,
     `/history           ${t('显示提示历史', 'Show prompt history')}`,
     `/resume <ID>       ${t('恢复指定会话', 'Resume a session')}`,
     `/undo              ${t('撤回上一步操作', 'Undo last turn')}`,

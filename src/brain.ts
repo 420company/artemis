@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { release as osRelease } from 'node:os';
 import { ProviderStore } from './providers/store.js';
@@ -242,12 +242,31 @@ void (async () => {
     } catch { /* ignore */ }
 })();
 
+function buildCheckpointInstruction(locale = 'zh'): string {
+    if (locale === 'en') {
+        return [
+            '',
+            '[Task checkpoint / anti-amnesia]',
+            '- Artemis writes your FULL task state to a local checkpoint file under ~/.artemis/checkpoints/ every time the context is compressed.',
+            "- If you have just been compressed and are unsure of the task state, list that directory and read the most recent .md (its 当前状态 / current-state block) to recover the goal, progress, and next step BEFORE continuing.",
+            '- Never restart a task from scratch when a checkpoint exists — recover from it.',
+        ].join('\n');
+    }
+    return [
+        '',
+        '[任务存档 / 防失忆]',
+        '- 每次上下文被压缩时，Artemis 都会把你完整的任务状态写进本地存档文件（~/.artemis/checkpoints/ 目录下，按工作区命名）。',
+        '- 如果你刚被压缩、对当前任务状态不确定，先列出该目录、读取最新的 .md（看它的「📍 当前状态」段），恢复目标、进度、下一步，再继续。',
+        '- 有存档就别从头重做任务——从存档里恢复。',
+    ].join('\n');
+}
+
 function buildSystemPromptText(locale: 'en' | 'zh' = 'zh') {
     const env = buildHostEnvironmentBlock();
     const learned = learnedDreamSuffix
         ? `\n\n[Long-term style accumulated from dreams]\n${learnedDreamSuffix}`
         : '';
-    const base = `${env}${BASE_SYSTEM_PROMPT}\n${buildLocaleInstruction(locale)}${learned}`;
+    const base = `${env}${BASE_SYSTEM_PROMPT}\n${buildLocaleInstruction(locale)}\n${buildCheckpointInstruction(locale)}${learned}`;
     return systemPromptSuffix
         ? `${base}\n${systemPromptSuffix}`
         : base;
@@ -1161,6 +1180,58 @@ function mechanicalTruncateToFit(
     return [...summaryMsg, ...kept];
 }
 
+// ── 防失忆存档日志（CHECKPOINT）─────────────────────────────────────────────
+// 每次真正压缩时，把完整任务状态写进本地 md（带时间戳、可追加历史）。它只躺在
+// 硬盘上、按需读取，所以正常运行几乎不耗 token；上下文被压缩/清理后，agent 可以
+// 读它恢复「目标 / 进度 / 下一步」，避免失忆。两层结构：精简「当前状态」+ 追加历史。
+function checkpointJournalPath(cwd: string): string {
+    const key = createHash('sha1').update(cwd).digest('hex').slice(0, 12);
+    return path.join(resolveArtemisHomeDir(), 'checkpoints', `${key}.md`);
+}
+
+async function writeCheckpointJournal(
+    cwd: string,
+    summaryText: string | undefined,
+    pendingNext: string | undefined,
+    currentFocus: string | undefined,
+): Promise<void> {
+    try {
+        const file = checkpointJournalPath(cwd);
+        await mkdir(path.dirname(file), { recursive: true });
+        const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        // 保留追加式历史（最近 40 个压缩点）。
+        let history = '';
+        try {
+            const prev = await readFile(file, 'utf8');
+            const marker = '## 🗂 历史存档';
+            const idx = prev.indexOf(marker);
+            if (idx >= 0) history = prev.slice(prev.indexOf('\n', idx) + 1).trim();
+        } catch { /* 无旧文件 */ }
+        const clean = (v: string | undefined, n: number): string =>
+            (v ?? '—').replace(/\s+/g, ' ').slice(0, n);
+        const entry = `- [${ts}] 压缩存档 · 焦点: ${clean(currentFocus, 80)} · 下一步: ${clean(pendingNext, 120)}`;
+        const histLines = [entry, ...history.split('\n').filter((l) => l.trim().startsWith('- ['))].slice(0, 40);
+        const content = [
+            '# Artemis 任务存档 · CHECKPOINT',
+            '',
+            '> 防「失忆」存档。如果你刚经历上下文压缩、对当前任务不确定，先读「📍 当前状态」恢复记忆；需要细节再翻「🗂 历史存档」。',
+            '',
+            `## 📍 当前状态 (更新于 ${ts})`,
+            `- 工作区: ${cwd}`,
+            `- 当前焦点: ${currentFocus ?? '—'}`,
+            `- 下一步(待执行): ${pendingNext ?? '—'}`,
+            '',
+            '### 任务摘要',
+            (summaryText && summaryText.trim()) ? summaryText.trim() : '(尚无摘要)',
+            '',
+            '## 🗂 历史存档 (最近 40 个压缩点)',
+            histLines.join('\n'),
+            '',
+        ].join('\n');
+        await writeFile(file, content, 'utf8');
+    } catch { /* 存档绝不能拖垮主流程 */ }
+}
+
 async function compressSessionMessagesForProvider(
     activeSession: Session,
     conversationMessages: SessionMessage[],
@@ -1168,9 +1239,19 @@ async function compressSessionMessagesForProvider(
     contextLength?: number,
     reservedTokens = 0,
     onInfo?: (message: string) => void,
+    forceShrink?: number,
 ): Promise<{ messages: SessionMessage[]; summaryText?: string }> {
     if (!model) {
         return { messages: conversationMessages };
+    }
+
+    // ── 空返回急救：调用方强制把上下文压到很小，让噎住的模型拿到干净小 payload 重试。
+    //    恢复记忆由硬盘上的 checkpoint 存档兜底，所以这里丢掉大量历史是安全的。
+    if (forceShrink && forceShrink > 0) {
+        const fullLimit = getConfiguredContextLimit(model, contextLength);
+        const small = Math.max(16_000, Math.floor(fullLimit * forceShrink) - Math.max(0, Math.round(reservedTokens)));
+        onInfo?.(`[压缩] 空返回保护：强制压到约 ${Math.round(forceShrink * 100)}% 窗口后重试`);
+        return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, small) };
     }
 
     // ── Circuit breaker: skip compression if tripped ────────────────────────
@@ -1235,6 +1316,14 @@ async function compressSessionMessagesForProvider(
 
     if (compression.summaryText) {
         activeSession.setContext('compressionSummary', compression.summaryText);
+        if (compression.compressed) {
+            void writeCheckpointJournal(
+                activeSession.getWorkingDirectory(),
+                compression.summaryText,
+                pendingIntent?.text,
+                currentFocus ?? undefined,
+            );
+        }
     }
 
     // ── Persistent Collapse Ledger: record the event ────────────────────────
@@ -2369,6 +2458,34 @@ function estimateResponseUsage(
     };
 }
 
+const PROVIDER_MAX_RETRIES = 5;
+function sleepMs(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) { reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); return; }
+        const onAbort = (): void => { clearTimeout(timer); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); };
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
+// Retry transient provider faults (429 / 5xx / network) with exponential backoff
+// so an unattended long run rides out rate-limits and blips instead of dying.
+// Permanent faults (400/401/403) and user aborts are NOT retried.
+function providerRetryDelayMs(err: unknown, attempt: number): number | null {
+    if (isAbortLikeError(err)) return null;
+    const e = err as { status?: number; statusCode?: number; response?: { status?: number }; code?: unknown; message?: unknown };
+    const status = e?.status ?? e?.statusCode ?? e?.response?.status;
+    let retryable = false;
+    if (typeof status === 'number') {
+        retryable = status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
+    } else {
+        const blob = `${String(e?.message ?? '')} ${String(e?.code ?? '')}`;
+        retryable = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|socket hang up|fetch failed|timed out|timeout|network|overloaded|rate.?limit|\u9650\u901f|\u9650\u6d41|\u989d\u5ea6|\u8d85\u65f6|\u7e41\u5fd9|502|503|504/i.test(blob);
+    }
+    if (!retryable || attempt >= PROVIDER_MAX_RETRIES) return null;
+    const base = Math.min(30_000, 2_000 * Math.pow(2, attempt - 1));
+    return base + Math.floor(Math.random() * 500);
+}
+
 async function completeWithOptionalStream(
     provider: ChatProvider,
     messages: SessionMessage[],
@@ -2378,14 +2495,35 @@ async function completeWithOptionalStream(
     const auditRole = options?.auditRole === 'worker' || options?.auditRole === 'compression'
         ? options.auditRole
         : 'main';
-    let result: ProviderResponse;
-    if (onDelta && typeof provider.completeStream === 'function') {
-        result = estimateResponseUsage(await provider.completeStream(messages, onDelta, options), messages);
-    } else {
-        result = estimateResponseUsage(await provider.complete(messages, options), messages);
+    const onRetryLog: ((m: string) => void) | undefined = typeof options?.onRetryLog === 'function' ? options.onRetryLog : undefined;
+    const abortSignal: AbortSignal | undefined = options?.abortSignal;
+    let attempt = 0;
+    while (true) {
+        attempt += 1;
+        let emitted = false;
+        const guardedDelta = onDelta ? (d: string): void => { emitted = true; onDelta(d); } : undefined;
+        try {
+            let result: ProviderResponse;
+            if (guardedDelta && typeof provider.completeStream === 'function') {
+                result = estimateResponseUsage(await provider.completeStream(messages, guardedDelta, options), messages);
+            } else {
+                result = estimateResponseUsage(await provider.complete(messages, options), messages);
+            }
+            recordBifrostAudit(auditRole, result, messages);
+            return result;
+        } catch (err) {
+            if (emitted || isAbortLikeError(err)) throw err;
+            const delay = providerRetryDelayMs(err, attempt);
+            if (delay === null) throw err;
+            const short = String((err as { message?: unknown })?.message ?? err).split('\n')[0].slice(0, 80);
+            onRetryLog?.(`[\u91cd\u8bd5] \u6a21\u578b\u8c03\u7528\u5931\u8d25\uff08${short}\uff09\u2014 \u7b2c ${attempt}/${PROVIDER_MAX_RETRIES} \u6b21\uff0c${Math.round(delay / 1000)}s \u540e\u91cd\u8bd5\u2026`);
+            try {
+                await sleepMs(delay, abortSignal);
+            } catch {
+                throw err;
+            }
+        }
     }
-    recordBifrostAudit(auditRole, result, messages);
-    return result;
 }
 
 function buildProviderIncompatibilityMessage(): string {
@@ -2532,6 +2670,7 @@ export async function think(
     let previousResponseId: string | undefined;
     let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
     let emptyFinalReplyRetryCount = 0;
+    let forceCompactFraction: number | undefined;
     const absorbRunningUserMessages = (): number => {
         const updates = pollRunningUserMessages?.() ?? [];
         let accepted = 0;
@@ -2583,6 +2722,7 @@ export async function think(
                 {
                     ...completionOptions,
                     abortSignal: controller.signal,
+                    onRetryLog: onToolLog ? (m: string): void => onToolLog(m, 'warn') : undefined,
                 },
             );
             return { interrupted: false, completion };
@@ -2614,7 +2754,9 @@ export async function think(
                 providerConfigVal?.contextLength,
                 reservedSystemTokens,
                 onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
+                forceCompactFraction,
             );
+            forceCompactFraction = undefined;
             if (providerCompression.summaryText) {
                 onCompressionSummary?.(providerCompression.summaryText);
             }
@@ -2832,6 +2974,9 @@ export async function think(
         if (supportsNativeTools && !plainChat && !reply.trim()) {
             if (emptyFinalReplyRetryCount < maxEmptyFinalReplyRetries && round < maxProviderRounds) {
                 emptyFinalReplyRetryCount += 1;
+                // 空返回 = 模型多半被臃肿上下文噎住了。重试前强制狠压一刀，
+                // 让它拿到又小又干净的 payload（记忆由 checkpoint 存档保住）。
+                forceCompactFraction = emptyFinalReplyRetryCount >= 2 ? 0.2 : 0.35;
                 onToolLog?.(
                     `Provider returned an empty final reply; requesting a no-tool final reply (retry ${emptyFinalReplyRetryCount}/${maxEmptyFinalReplyRetries}).`,
                     'warn',

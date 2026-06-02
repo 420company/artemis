@@ -379,9 +379,9 @@ ${styleCatalog}
             "创建响应式布局",
             "添加SVG和logo设计"
           ],
-          targetPath: "/Users/goat/Desktop/Artemis"
+          targetPath: "~/Desktop/Artemis"
         },
-        reply: `网站设计完成。已在 /Users/goat/Desktop/Artemis 目录中创建包含流体半透明毛玻璃质感的高级Geek风格网站。`
+        reply: `网站设计完成。已在 ~/Desktop/Artemis 目录中创建包含流体半透明毛玻璃质感的高级Geek风格网站。`
       };
       
     } catch (error) {

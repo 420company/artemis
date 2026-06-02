@@ -185,7 +185,7 @@ function aliasPathFromText(input: string, homeDir: string): WorkspaceIntentResol
   // If input starts with an absolute filesystem path, alias keywords like
   // "Downloads" / "Desktop" / "Documents" inside that path are folder-name
   // segments — not intent expressions. Otherwise we'd see this user case:
-  //   `/Users/goat/Downloads/artemis.png`
+  //   `~/Downloads/artemis.png`
   // matching the bare "Downloads" sub-pattern and switching the workspace to
   // ~/Downloads, exactly the bug we fixed for `extractLeadingPath`. Let the
   // path-based extractors handle absolute-path inputs (they apply the
