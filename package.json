@@ -1,6 +1,6 @@
 {
   "name": "artemis-code",
-  "version": "0.2.75",
+  "version": "0.2.76",
   "description": "Local-first AI engineering, visual generation, long-video production, memory, tools, and mobile automation in one command-line workspace.",
   "main": "./dist/index.js",
   "type": "module",
