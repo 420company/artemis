@@ -128,6 +128,8 @@ let systemPromptSuffix: string = '';
 let _modelOverride: any;
 let _apiKeyOverride: any;
 let _baseUrlOverride: any;
+// Effort override from /effort. undefined = no override; null = force API default.
+let _effortOverride: any;
 let _lastPromptTokens = 0;
 let _compressionThresholdOverride: number | undefined;
 // ── Dual-model worker provider ──────────────────────────────────────────────
@@ -168,6 +170,19 @@ export function switchModel(model: any) {
     provider = null;
     providerCwd = null;
     // Worker provider stays — switching the lead doesn't invalidate the specialist.
+}
+
+/** Switch reasoning effort mid-session (e.g. from /effort). Pass undefined to reset to API default. */
+export function switchEffort(effort: any) {
+    _effortOverride = effort ?? null;
+    provider = null;
+    providerCwd = null;
+}
+
+/** Current effective effort level, or undefined when running on the API default. */
+export function getCurrentEffort(): string | undefined {
+    if (_effortOverride === null) return undefined;
+    return _effortOverride ?? providerConfig?.effort;
 }
 
 /** Return the current system prompt suffix (ARTEMIS.md content etc.). */
@@ -494,6 +509,7 @@ async function loadProvider(cwd: string = process.cwd()) {
     if (_modelOverride) finalConfig = { ...finalConfig, model: _modelOverride };
     if (_apiKeyOverride) finalConfig = { ...finalConfig, apiKey: _apiKeyOverride };
     if (_baseUrlOverride) finalConfig = { ...finalConfig, baseUrl: _baseUrlOverride ?? undefined };
+    if (_effortOverride !== undefined) finalConfig = { ...finalConfig, effort: _effortOverride ?? undefined };
     providerConfig = finalConfig;
     providerTelemetryContext =
         'id' in config

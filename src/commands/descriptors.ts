@@ -390,6 +390,14 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     desc: { zh: 'Reopen the API setup wizard', en: 'Reopen the API setup wizard' },
   },
   {
+    id: 'effort',
+    group: 'models',
+    slash: '/effort',
+    autocomplete: true,
+    quickValue: '/effort',
+    desc: { zh: 'Switch reasoning effort (low/medium/high/xhigh/max)', en: 'Switch reasoning effort (low/medium/high/xhigh/max)' },
+  },
+  {
     id: 'mind',
     group: 'models',
     slash: '/mind',

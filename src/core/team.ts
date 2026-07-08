@@ -45,7 +45,9 @@ const VALID_CHOICES: ReadonlySet<WorkflowMode> = new Set<WorkflowMode>([
   'contest',
 ]);
 
-const ROUTER_TIMEOUT_MS = 60_000;
+// Routing is a one-line JSON classification on a cheap provider; the
+// deterministic keyword fallback below covers timeouts, so keep this short.
+const ROUTER_TIMEOUT_MS = 20_000;
 
 type DeterministicRoute = TeamRoute & {
   score: number;

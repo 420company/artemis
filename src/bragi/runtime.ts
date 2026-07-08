@@ -29,6 +29,7 @@ import {
   type WorkflowResolution,
 } from '../core/workflowDispatcher.js'
 import { resolveMainProviderConfig } from '../providers/onboarding.js'
+import { ProviderStore } from '../providers/store.js'
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
@@ -309,6 +310,35 @@ async function resolveBridgeProviderRuntime(_cwd: string): Promise<BridgeProvide
     profileLabel: trackedProfileLabel,
   })
   return { config, provider }
+}
+
+/**
+ * Provider for the /team routing call only. Same GLOBAL-only hardening as
+ * resolveBridgeProviderRuntime, but prefers the cheaper specialist (worker)
+ * profile and forces low effort — routing is a one-line JSON classification
+ * that doesn't deserve the lead model's cost or thinking depth.
+ */
+async function resolveBridgeRouterProviderRuntime(): Promise<BridgeProviderRuntime> {
+  let baseConfig: Record<string, unknown> | undefined
+  try {
+    const store = new ProviderStore(resolveArtemisHomeDir())
+    const data = await store.load()
+    const specialist = store.getProfile(data, data.specialistProfileId)
+    if (specialist) baseConfig = specialist as unknown as Record<string, unknown>
+  } catch { /* fall back to the main profile */ }
+  const config = (baseConfig
+    ?? await resolveMainProviderConfig({ cwd: homedir(), config: {} })) as Parameters<typeof createTrackedProviderFromConfig>[0]
+  const routerConfig = { ...config, effort: 'low' as const }
+  const trackedProfileId =
+    typeof (config as unknown as { id?: unknown }).id === 'string'
+      ? (config as unknown as { id: string }).id
+      : undefined
+  const provider = createTrackedProviderFromConfig(routerConfig, {
+    cwd: homedir(),
+    profileId: trackedProfileId,
+    profileLabel: trackedProfileId,
+  })
+  return { config: routerConfig as BridgeProviderRuntime['config'], provider }
 }
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -664,11 +694,13 @@ export async function runRemoteCommand(
         const slashMatch = detectExplicitWorkflowIntent(command.body)
         let workflowResolution: WorkflowResolution | undefined
         let providerRuntime: BridgeProviderRuntime | undefined
+        let routerRuntime: BridgeProviderRuntime | undefined
         if (slashMatch.command) {
           if (slashMatch.command === '/team') {
-            // /team needs a provider for routing — use the workspace's default main provider.
+            // /team routing runs on the cheap router provider (specialist
+            // profile at low effort); the actual task still uses the lead.
             try {
-              providerRuntime = await resolveBridgeProviderRuntime(commandCwd)
+              routerRuntime = await resolveBridgeRouterProviderRuntime()
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               await opts.onProgress?.(t(
@@ -682,7 +714,7 @@ export async function runRemoteCommand(
             workflowResolution = await resolveWorkflow(slashMatch, {
               cwd: commandCwd,
               locale,
-              provider: providerRuntime?.provider,
+              provider: routerRuntime?.provider,
               nonInteractive: true,
               onProgress: opts.onProgress,
             })

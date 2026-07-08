@@ -200,7 +200,7 @@ function renderLiveWorkflowViewport(state: LiveWorkflowRenderState): void {
 import path from 'node:path'
 import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
-import { think, resetSession, getMessages, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
+import { think, resetSession, getMessages, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
@@ -1815,6 +1815,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/retry',      hint: t('重试上一步操作',             'Retry last turn') },
     // ── 配置 ──
     { value: '/model',      hint: t('切换模型',                   'Switch model') },
+    { value: '/effort',     hint: t('切换推理强度',               'Switch reasoning effort') },
     { value: '/swap',       hint: t('互换执行/思维模型',          'Swap main/brain models') },
     { value: '/permission', hint: t('设置权限模式',               'Set permission mode') },
     { value: '/cd',         hint: t('切换工作区根目录',           'Switch workspace root') },
@@ -2134,6 +2135,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         return undefined
       }
       const provConfig = await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })
+      // Nidhogg is the correctness-over-cost workflow — run the detached
+      // harness at max effort unless the user pinned one on the profile.
+      const detachedConfig =
+        command === 'nidhogg' && (provConfig as { effort?: string }).effort === undefined && getCurrentEffort() === undefined
+          ? { ...provConfig, effort: 'max' as const }
+          : provConfig
       const result = await spawnDetachedWorkflow({
         cwd: workspaceRoot,
         sessionStore,
@@ -2142,7 +2149,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         maxTurns: opts.maxTurns,
         permissionMode,
         permissionModeExplicit: false,
-        providerConfig: provConfig,
+        providerConfig: detachedConfig,
       })
       appendSystemPanel(
         command === 'nidhogg'
@@ -2980,6 +2987,58 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         hud.contextLimit = modelContextLimit
         appendSystemPanel(t('模型已切换', 'Model switched'), [`→ ${arg}`])
         prompt.forceRedraw()
+      }
+      continue
+    }
+
+    // ── /effort [low|medium|high|xhigh|max|default] ───────────────────────────
+    if (isSlashCommand(trimmed, '/effort')) {
+      const arg = trimmed.slice('/effort'.length).trim().toLowerCase()
+      const levels = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+      if (!arg) {
+        const current = getCurrentEffort()
+        appendSystemPanel(t('推理强度', 'Reasoning effort'), [
+          t(`当前: ${current ?? '（API 默认，Claude 相当于 high）'}`, `Current: ${current ?? '(API default — high on Claude)'}`),
+          '',
+          t('用法: /effort <等级>', 'Usage: /effort <level>'),
+          '  low     ' + t('最省最快，简单任务', 'fastest/cheapest, simple tasks'),
+          '  medium  ' + t('成本与质量均衡', 'balanced cost/quality'),
+          '  high    ' + t('API 默认档', 'the API default'),
+          '  xhigh   ' + t('写码/agent 推荐档（Claude 4.7+/Sonnet 5/Fable 5）', 'recommended for coding/agents (Claude 4.7+/Sonnet 5/Fable 5)'),
+          '  max     ' + t('不惜代价要正确性', 'correctness over cost'),
+          '  default ' + t('清除设置，回到 API 默认', 'clear the setting, back to API default'),
+          '',
+          t('不支持该等级的模型会自动降到 high；不支持 effort 的模型忽略此设置。', 'Models missing a level clamp to high; models without effort support ignore it.'),
+          t('工作流会自动抬档：/nidhogg→max，/niko /athena /design→xhigh，/contest→high；你手动设置过则不覆盖。', 'Workflows auto-bump: /nidhogg→max, /niko /athena /design→xhigh, /contest→high; your explicit setting always wins.'),
+        ])
+      } else if (arg !== 'default' && !(levels as readonly string[]).includes(arg)) {
+        appendSystemPanel(t('无效等级', 'Invalid level'), [
+          t(`"${arg}" 不是有效等级。可选: low / medium / high / xhigh / max / default`, `"${arg}" is not a valid level. Choose: low / medium / high / xhigh / max / default`),
+        ])
+      } else {
+        const nextEffort = arg === 'default' ? undefined : arg as (typeof levels)[number]
+        switchEffort(nextEffort)
+        // Persist onto the active profile (cwd-local first, then global) so it
+        // survives restarts. Mirrors brain.ts provider-resolution order.
+        let persisted = false
+        try {
+          for (const root of [workspaceRoot, resolveArtemisHomeDir()]) {
+            const effortStore = new ProviderStore(root)
+            const effortData = await effortStore.load()
+            const activeProfile = effortStore.getDefaultMainProfile(effortData)
+            if (activeProfile && 'id' in activeProfile) {
+              await effortStore.upsertProfile({ ...activeProfile, effort: nextEffort })
+              persisted = true
+              break
+            }
+          }
+        } catch { /* non-fatal: runtime override still applies */ }
+        appendSystemPanel(t('推理强度已切换', 'Effort switched'), [
+          `→ ${nextEffort ?? t('API 默认', 'API default')}`,
+          persisted
+            ? t('已写入当前 API 配置，重启后仍生效。', 'Saved to the active API profile; persists across restarts.')
+            : t('仅本次会话生效（没有找到可保存的 API 配置）。', 'Session-only (no saved API profile found).'),
+        ])
       }
       continue
     }
@@ -4090,7 +4149,24 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
       let route: Awaited<ReturnType<typeof routeTeamRequest>>
       try {
-        const provConfig = await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })
+        // Routing is a one-line JSON classification — prefer the cheaper
+        // specialist (worker) profile when configured, and force low effort
+        // so the decision is fast regardless of the user's effort setting.
+        let routerBaseConfig: Record<string, unknown> | undefined
+        for (const root of [workspaceRoot, resolveArtemisHomeDir()]) {
+          try {
+            const routerStore = new ProviderStore(root)
+            const routerData = await routerStore.load()
+            const specialist = routerStore.getProfile(routerData, routerData.specialistProfileId)
+            if (specialist) {
+              routerBaseConfig = specialist as unknown as Record<string, unknown>
+              break
+            }
+          } catch { /* try next root */ }
+        }
+        const provConfig = (routerBaseConfig
+          ?? await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })) as Parameters<typeof createTrackedProviderFromConfig>[0]
+        const routerConfig = { ...provConfig, effort: 'low' as const }
         const trackedProfileId =
           typeof (provConfig as unknown as { id?: unknown }).id === 'string'
             ? (provConfig as unknown as { id: string }).id
@@ -4099,7 +4175,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           typeof (provConfig as unknown as { label?: unknown }).label === 'string'
             ? (provConfig as unknown as { label: string }).label
             : trackedProfileId
-        const provider = createTrackedProviderFromConfig(provConfig, {
+        const provider = createTrackedProviderFromConfig(routerConfig, {
           cwd: workspaceRoot,
           profileId: trackedProfileId,
           profileLabel: trackedProfileLabel,
@@ -4977,6 +5053,33 @@ async function handleTurn(
  * The brain decides when to call tools, when to spawn sub-agents, when to
  * generate images — all in a single Artemis conversation.
  */
+// Workflow ↔ effort coupling: each workflow implies a reasoning-effort level
+// matching its quality/cost positioning. Applied only when the user hasn't
+// pinned an effort themselves (via /effort or the profile); providers clamp
+// levels the model doesn't support, so this is always safe to send.
+const WORKFLOW_EFFORT: Partial<Record<WorkflowMode, 'low' | 'medium' | 'high' | 'xhigh' | 'max'>> = {
+  niko: 'xhigh',
+  athena: 'xhigh',
+  design: 'xhigh',
+  contest: 'high',
+  nidhogg: 'max',
+}
+
+async function userPinnedEffort(cwd: string): Promise<boolean> {
+  if (getCurrentEffort() !== undefined) return true
+  // Provider may not be loaded yet — mirror brain.ts resolution (cwd → global)
+  // to check whether the active profile carries an explicit effort.
+  try {
+    for (const root of [cwd, resolveArtemisHomeDir()]) {
+      const store = new ProviderStore(root)
+      const data = await store.load()
+      const profile = store.getDefaultMainProfile(data)
+      if (profile) return (profile as { effort?: string }).effort !== undefined
+    }
+  } catch { /* assume not pinned */ }
+  return false
+}
+
 async function runHintedWorkflowTurn(
   mode: WorkflowMode,
   userPrompt: string,
@@ -4991,6 +5094,10 @@ async function runHintedWorkflowTurn(
   const previousSuffix = getSystemPromptSuffix()
   const hint = buildWorkflowHint(mode, { cwd, userPrompt })
   setSystemPromptSuffix(previousSuffix ? `${previousSuffix}\n\n${hint}` : hint)
+
+  const suggestedEffort = WORKFLOW_EFFORT[mode]
+  const appliedEffort = suggestedEffort && !(await userPinnedEffort(cwd)) ? suggestedEffort : undefined
+  if (appliedEffort) switchEffort(appliedEffort)
 
   const msgIndexBefore = getMessages().length
 
@@ -5039,6 +5146,9 @@ async function runHintedWorkflowTurn(
     // Restore suffix to baseline + append a completion note so subsequent
     // free-form turns know where the workflow's output lives.
     setSystemPromptSuffix(previousSuffix + buildWorkflowCompletionNote(mode, outputDir))
+    // Drop the workflow's temporary effort bump; free-form turns go back to
+    // the user's own setting (API default when they never pinned one).
+    if (appliedEffort) switchEffort(undefined)
   }
 }
 

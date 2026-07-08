@@ -570,6 +570,7 @@ export async function spawnDetachedWorkflow(options: {
       ARTEMIS_MODEL: options.providerConfig.model,
       ARTEMIS_BASE_URL: options.providerConfig.baseUrl,
       ARTEMIS_API_KEY: options.providerConfig.apiKey,
+      ...(options.providerConfig.effort ? { ARTEMIS_EFFORT: options.providerConfig.effort } : {}),
     },
   });
 
@@ -667,7 +668,7 @@ export async function runDetachedWorkflowWorker(
   process.once('SIGINT', () => shutdownForSignal('SIGINT'));
 
   try {
-    const providerConfig = await resolveMainProviderConfig({
+    const resolvedProviderConfig = await resolveMainProviderConfig({
       cwd,
       config: {
         protocol: normalizeProviderProtocol(process.env.ARTEMIS_PROVIDER_PROTOCOL),
@@ -677,6 +678,11 @@ export async function runDetachedWorkflowWorker(
       },
       onInfo: (message) => console.error(message),
     });
+    // Effort rides along from the launcher (e.g. nidhogg runs at max).
+    const envEffort = process.env.ARTEMIS_EFFORT;
+    const providerConfig = envEffort && ['low', 'medium', 'high', 'xhigh', 'max'].includes(envEffort)
+      ? { ...resolvedProviderConfig, effort: envEffort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
+      : resolvedProviderConfig;
     const trackedProfileId =
       typeof (providerConfig as unknown as { id?: unknown }).id === 'string'
         ? (providerConfig as unknown as { id: string }).id

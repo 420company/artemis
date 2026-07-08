@@ -4,12 +4,23 @@ import type { UiLocale } from '../cli/locale.js';
 export type ProviderProtocol = 'openai' | 'messages' | 'responses';
 export type ProviderApiKeyHeader = 'authorization' | 'api-key' | 'x-api-key';
 
+/**
+ * Reasoning effort level, mirroring Anthropic's output_config.effort scale.
+ * Providers translate per protocol: Anthropic sends output_config.effort
+ * (clamping levels the model doesn't support), OpenAI-protocol reasoning
+ * models get reasoning_effort (xhigh/max clamp to high), everything else
+ * silently ignores it.
+ */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export type ProviderConfig = {
   protocol: ProviderProtocol;
   baseUrl: string;
   apiKey: string;
   model: string;
   apiKeyHeader?: ProviderApiKeyHeader;
+  /** Optional reasoning effort. Unset = provider/API default (Anthropic: high). */
+  effort?: EffortLevel;
 };
 
 export type ProviderProfileTelemetry = {

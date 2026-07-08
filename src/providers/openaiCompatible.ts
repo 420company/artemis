@@ -218,6 +218,17 @@ function getReasoningContentMode(model: string | undefined): ReasoningContentMod
   return 'preserve';
 }
 
+// OpenAI reasoning models that accept the `reasoning_effort` request field
+// (o-series and the gpt-5 family). Anthropic-scale levels the OpenAI API
+// doesn't know (xhigh/max) clamp to 'high'; other models drop the field.
+const OPENAI_REASONING_EFFORT_MODELS = /^(o[134](-|\.|$)|gpt-5)/i;
+
+function resolveReasoningEffort(model: string, effort: string | undefined): string | undefined {
+  if (!effort) return undefined;
+  if (!OPENAI_REASONING_EFFORT_MODELS.test(model)) return undefined;
+  return effort === 'xhigh' || effort === 'max' ? 'high' : effort;
+}
+
 interface MapMessageOptions {
   /** Per-model handling of reasoning_content in assistant messages. */
   reasoningMode?: ReasoningContentMode;
@@ -451,6 +462,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
       stream_options: { include_usage: true },
       messages: mapped,
     }
+    const streamReasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort)
+    if (streamReasoningEffort) body['reasoning_effort'] = streamReasoningEffort
     if (options?.nativeFunctionTools?.length) {
       body['tools'] = options.nativeFunctionTools.map((t) => ({
         type: 'function',
@@ -725,6 +738,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
       model: this.config.model,
       messages: mapped,
     };
+    const reasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort);
+    if (reasoningEffort) body['reasoning_effort'] = reasoningEffort;
 
     // Attach function tools when provided
     if (options?.nativeFunctionTools?.length) {
