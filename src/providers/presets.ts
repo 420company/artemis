@@ -59,16 +59,17 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     protocol: 'messages',
     baseUrl: 'https://api.anthropic.com',
     suggestedModels: [
+      'claude-opus-4-8',
+      'claude-sonnet-5',
+      'claude-fable-5',
       'claude-opus-4-7',
       'claude-sonnet-4-6',
-      'claude-haiku-4-5-20251001',
+      'claude-haiku-4-5',
       'claude-opus-4-1-20250805',
-      'claude-opus-4-20250514',
-      'claude-sonnet-4-20250514',
     ],
     notes: {
-      zh: ['Anthropic 官方 Messages API。', '推荐 Claude Opus 4.7（旗舰，1M 上下文）或 Sonnet 4.6（速度与智能兼优，1M 上下文）。', 'Haiku 4.5 为轻量模型（200K 上下文）。早期 Opus 4.1 / Opus 4 / Sonnet 4 仍可用。'],
-      en: ['Official Anthropic Messages API.', 'Recommended: Claude Opus 4.7 (flagship, 1M context) or Sonnet 4.6 (best speed-intelligence balance, 1M context).', 'Haiku 4.5 is the lightweight model (200K context). Earlier Opus 4.1 / Opus 4 / Sonnet 4 still available.'],
+      zh: ['Anthropic 官方 Messages API。', '推荐 Claude Opus 4.8（旗舰，1M 上下文）或 Sonnet 5（速度与智能兼优，1M 上下文）。', 'Fable 5 为最强模型（价格高于 Opus）。Haiku 4.5 为轻量模型（200K 上下文）。'],
+      en: ['Official Anthropic Messages API.', 'Recommended: Claude Opus 4.8 (flagship, 1M context) or Sonnet 5 (best speed-intelligence balance, 1M context).', 'Fable 5 is the most capable model (priced above Opus). Haiku 4.5 is the lightweight model (200K context).'],
     },
   },
 

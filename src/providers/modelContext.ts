@@ -28,10 +28,18 @@ function readNestedNumber(obj: unknown, path: string[]): number | undefined {
 
 const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   // Anthropic Claude
+  'claude-fable-5': 1_000_000,
+  'claude-mythos-5': 1_000_000,
+  'claude-opus-4-8': 1_000_000,
+  'claude-opus-4.8': 1_000_000,
   'claude-opus-4-7': 1_000_000,
   'claude-opus-4.7': 1_000_000,
+  'claude-opus-4-6': 1_000_000,
+  'claude-opus-4.6': 1_000_000,
+  'claude-sonnet-5': 1_000_000,
   'claude-sonnet-4-6': 1_000_000,
   'claude-sonnet-4.6': 1_000_000,
+  'claude-haiku-4-5': 200_000,
   'claude-haiku-4-5-20251001': 200_000,
   'claude-opus-4-1-20250805': 200_000,
   'claude-opus-4-20250514': 200_000,
