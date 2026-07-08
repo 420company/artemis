@@ -67,66 +67,54 @@ export function selectSearchBackend(preferredBackend?: SearchBackend): SearchBac
 export async function searchWithDuckDuckGo(query: string, limit: number = 5): Promise<SearchResponse> {
   try {
     const encodedQuery = encodeURIComponent(query);
-    const url = `https://duckduckgo.com/html/?q=${encodedQuery}`;
-    
+    // html.duckduckgo.com 是官方的纯 HTML 端点，比主站 /html/ 更少触发人机挑战
+    const url = `https://html.duckduckgo.com/html/?q=${encodedQuery}`;
+
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8',
       }
     });
-    
+
     if (!response.ok) {
       throw new Error(`DuckDuckGo search failed: ${response.status}`);
     }
-    
+
     const html = await response.text();
-    
-    // 使用正则表达式解析 HTML，提取搜索结果
+
+    // cheerio 解析（旧的正则缺 s 标志，跨行结果块永远匹配不上）
+    const cheerio = await import('cheerio');
+    const $ = cheerio.load(html);
     const results: SearchResult[] = [];
-    
-    // 查找结果块
-    const resultBlockRegex = /<div class="result__body">(.*?)<\/div>/g;
-    let match;
-    
-    while ((match = resultBlockRegex.exec(html)) && results.length < limit) {
-      const resultBlock = match[1];
-      
-      // 提取标题和链接
-      const linkRegex = /<a class="result__a" href="([^"]+)"[^>]*>([^<]+)<\/a>/;
-      const linkMatch = resultBlock.match(linkRegex);
-      
-      if (linkMatch) {
-        let url = linkMatch[1];
-        let title = linkMatch[2];
-        
-        // 处理 DuckDuckGo 的链接格式
-        if (url.startsWith('/l/')) {
-          const redirectMatch = url.match(/\/l\/\?uddg=(.*)/);
-          if (redirectMatch) {
-            url = decodeURIComponent(redirectMatch[1]);
-          }
-        }
-        
-        // 提取描述
-        const snippetRegex = /<a class="result__snippet"[^>]*>([^<]+)<\/a>/;
-        const snippetMatch = resultBlock.match(snippetRegex);
-        const description = snippetMatch ? snippetMatch[1].trim() : '';
-        
-        // 清理标题和描述中的HTML标签
-        title = title.replace(/<[^>]*>/g, '').trim();
-        
-        // 只添加有效的结果
-        if (url && title) {
-          results.push({
-            title,
-            url,
-            description,
-            position: results.length + 1
-          });
-        }
+
+    $('.result').each((_i, el) => {
+      if (results.length >= limit) return false;
+      const anchor = $(el).find('a.result__a').first();
+      let href = anchor.attr('href') ?? '';
+      const title = anchor.text().replace(/\s+/g, ' ').trim();
+      const description = $(el).find('.result__snippet').first().text().replace(/\s+/g, ' ').trim();
+
+      // 解开 DuckDuckGo 的跳转链接（//duckduckgo.com/l/?uddg=<encoded>&rut=…）
+      const uddgMatch = href.match(/[?&]uddg=([^&]+)/);
+      if (uddgMatch) {
+        try { href = decodeURIComponent(uddgMatch[1]!); } catch { /* keep raw */ }
+      } else if (href.startsWith('//')) {
+        href = `https:${href}`;
       }
-    }
-    
+
+      if (href && title && /^https?:\/\//i.test(href)) {
+        results.push({
+          title,
+          url: href,
+          description,
+          position: results.length + 1,
+        });
+      }
+      return undefined;
+    });
+
     return {
       success: true,
       data: {
@@ -150,26 +138,33 @@ export async function searchWithDuckDuckGo(query: string, limit: number = 5): Pr
 export async function searchWithWikipedia(query: string, limit: number = 5): Promise<SearchResponse> {
   try {
     const encodedQuery = encodeURIComponent(query);
-    const url = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodedQuery}&limit=${limit}&format=json&origin=*`;
-    
+    // list=search 是全文检索；旧的 action=opensearch 只做标题前缀匹配，
+    // 自然语言查询（多词短语）几乎总是返回空。
+    const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodedQuery}&srlimit=${limit}&format=json&origin=*`;
+
     const response = await fetch(url);
-    
+
     if (!response.ok) {
       throw new Error(`Wikipedia search failed: ${response.status}`);
     }
-    
-    const [, titles, descriptions, urls] = await response.json();
-    
+
+    const json = await response.json() as {
+      query?: { search?: Array<{ title?: string; snippet?: string }> };
+    };
+    const entries = json.query?.search ?? [];
+
     const results: SearchResult[] = [];
-    for (let i = 0; i < titles.length && i < limit; i++) {
+    for (let i = 0; i < entries.length && i < limit; i++) {
+      const title = entries[i]?.title ?? '';
+      if (!title) continue;
       results.push({
-        title: titles[i],
-        url: urls[i],
-        description: descriptions[i],
-        position: i + 1
+        title,
+        url: `https://en.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`,
+        description: (entries[i]?.snippet ?? '').replace(/<[^>]*>/g, ''),
+        position: results.length + 1
       });
     }
-    
+
     return {
       success: true,
       data: {
@@ -304,9 +299,38 @@ export async function searchWeb(
   limit: number = 5, 
   backend: SearchBackend = 'auto'
 ): Promise<SearchResponse> {
-  const selectedBackend = backend === 'auto' ? selectSearchBackend() : backend;
-  
-  switch (selectedBackend) {
+  if (backend !== 'auto') {
+    return await runSearchBackend(backend, query, limit);
+  }
+
+  // auto：按优先级尝试，失败或 0 结果时穿透到下一个后端。
+  // 旧实现只挑一个后端就返回——DDG 被风控/解析为空时整个搜索直接空手。
+  const chain: SearchBackend[] = ['duckduckgo', 'bing', 'google', 'wikipedia'];
+  let lastError: string | undefined;
+  for (const candidate of chain) {
+    try {
+      const result = await runSearchBackend(candidate, query, limit);
+      if (result.success && result.data.web.length > 0) {
+        return result;
+      }
+      if (result.error) lastError = result.error;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return {
+    success: false,
+    data: { web: [] },
+    error: lastError ?? 'All search backends returned no results.',
+  };
+}
+
+async function runSearchBackend(
+  backend: SearchBackend,
+  query: string,
+  limit: number,
+): Promise<SearchResponse> {
+  switch (backend) {
     case 'bing':
       return await searchWithBing(query, limit);
     case 'google':

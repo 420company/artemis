@@ -4,6 +4,7 @@ import {
   formatGeminiDeepResearchReport,
   runGeminiDeepResearch,
 } from '../research/geminiDeepResearch.js';
+import { runLocalDeepResearch } from '../research/localDeepResearch.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import type { AgentAction } from '../core/types.js';
 
@@ -20,16 +21,43 @@ export async function executeDeepResearch(
       process.env.GEMINI_API_KEY ||
       settings.geminiApiKey,
     );
-    if (settings.researchEngine !== 'gemini-deep-research' && !hasGeminiApiKey) {
+
+    // Gemini Deep Research when configured (explicit engine choice or key
+    // present) — it is the deeper engine. Otherwise fall back to the builtin
+    // local loop (worker provider + web search) instead of erroring out.
+    const useGemini = settings.researchEngine === 'gemini-deep-research' || hasGeminiApiKey;
+
+    if (!useGemini) {
+      const local = await runLocalDeepResearch({
+        prompt: action.query,
+        cwd: context.cwd,
+        locale,
+        systemInstruction: action.systemInstruction,
+      });
+      if (local.status !== 'completed') {
+        return {
+          action,
+          ok: false,
+          output: pickLocale(locale, {
+            zh: `本地深度研究失败：${local.error ?? '未知原因'}\n（配置 Gemini Deep Research 可获得更强的研究能力：artemis setup docs）`,
+            en: `Local deep research failed: ${local.error ?? 'unknown reason'}\n(Configure Gemini Deep Research for a deeper engine: artemis setup docs)`,
+          }),
+        };
+      }
       return {
         action,
-        ok: false,
-        output: pickLocale(locale, {
-          zh: 'Gemini Deep Research 尚未配置。请运行 `artemis setup docs` 并选择 Gemini Deep Research，或设置 ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY。',
-          en: 'Gemini Deep Research is not configured. Run `artemis setup docs` and choose Gemini Deep Research, or set ARTEMIS_GEMINI_API_KEY / GEMINI_API_KEY.',
-        }),
+        ok: true,
+        output: [
+          pickLocale(locale, {
+            zh: `[本地研究引擎] 轮次: ${local.roundsRun} · 读取页面: ${local.pagesRead} · 来源: ${local.sources.length}`,
+            en: `[Local research engine] rounds: ${local.roundsRun} · pages read: ${local.pagesRead} · sources: ${local.sources.length}`,
+          }),
+          '',
+          local.reportMarkdown ?? '',
+        ].join('\n'),
       };
     }
+
     const result = await runGeminiDeepResearch({
       prompt: action.query,
       settings,
@@ -52,8 +80,8 @@ export async function executeDeepResearch(
       action,
       ok: false,
       output: pickLocale(locale, {
-        zh: `Gemini Deep Research 执行失败：${message}`,
-        en: `Gemini Deep Research failed: ${message}`,
+        zh: `Deep Research 执行失败：${message}`,
+        en: `Deep Research failed: ${message}`,
       }),
     };
   }
