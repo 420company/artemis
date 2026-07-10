@@ -1777,6 +1777,36 @@ const capabilityToolDefs: ToolDefinition[] = [
     },
     execute: executeRequestUserConfirmation as any,
   },
+
+  // ── Long-term memory (Mnemosyne v2) ─────────────────────────────────────
+  {
+    type: 'memory',
+    description: '长期记忆读写。用户说"记住/以后都/别再"这类跨会话偏好或关键事实时立即 save；发现记忆过时用 update；用户推翻时 delete；list 查看全部。scope: global=跨项目, project=仅本项目。save/update 需要 name(短横线slug)、description(一句话钩子)、content(Markdown 正文)。',
+    kind: 'code',
+    permissionCategory: 'write',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      if (!['save', 'update', 'delete', 'list'].includes(a?.action)) {
+        errs.push("action must be one of save | update | delete | list");
+      }
+      if (a?.action === 'save' || a?.action === 'update') {
+        validateRequiredNonEmptyString(a?.content, 'content', errs);
+      }
+      if (a?.action === 'delete') {
+        validateRequiredNonEmptyString(a?.name, 'name', errs);
+      }
+      if (a?.scope !== undefined && !['global', 'project'].includes(a.scope)) {
+        errs.push("scope must be 'global' or 'project'");
+      }
+      return errs;
+    },
+    execute: (async (action: any, context: any) => {
+      const { executeMemoryTool } = await import('./memoryTool.js');
+      return executeMemoryTool(action, context);
+    }) as any,
+  },
 ];
 
 export const toolDefs: ToolDefinition[] = [

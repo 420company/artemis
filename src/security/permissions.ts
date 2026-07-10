@@ -211,6 +211,8 @@ function describeAction(action: AgentAction): string {
       return `bridge: send video ${action.videoPath}${action.platform ? ` to ${action.platform}` : ''}`;
     case 'request_user_confirmation':
       return `confirmation: ${action.question}`;
+    case 'memory':
+      return `memory: ${action.action}${action.name ? ` ${action.name}` : ''}`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

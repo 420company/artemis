@@ -1838,6 +1838,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `bridge_send_video ${truncate(action.videoPath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
     case 'request_user_confirmation':
       return `request_user_confirmation "${truncate(action.question, 100)}"${action.screenshotPath ? ` screenshot=${truncate(action.screenshotPath, 80)}` : ''}`;
+    case 'memory':
+      return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
@@ -2765,21 +2767,59 @@ async function buildProviderMessages(
     profile,
     nativeToolRuntime,
   });
-  const { MemoryStore } = await import('../storage/memoryStore.js');
-  const globalInsights = await new MemoryStore(cwd).load().catch(() => []);
+  const latestUserMessage = [...context.messages]
+    .reverse()
+    .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
 
-  if (globalInsights && globalInsights.length > 0) {
-    systemSections.push('🧠 [Project Mnemosyne: Learned User Preferences]');
-    systemSections.push(...globalInsights
-      .slice(0, 12)
-      .map((i: any) => `- ${truncate(String(i.content ?? ''), 240)}`));
+  try {
+    const {
+      ensureMemoryMigrated,
+      loadIndexText,
+      listMemories,
+      recallRelevant,
+      scopesCollide,
+    } = await import('../storage/memoryFiles.js');
+    await ensureMemoryMigrated(cwd);
+    const collided = scopesCollide(cwd);
+    const globalIndex = await loadIndexText(cwd, 'global');
+    const projectIndex = collided ? '' : await loadIndexText(cwd, 'project');
+
+    systemSections.push(
+      '🧠 Long-term memory: proactively persist durable knowledge with the memory tool — when the user states a lasting preference or correction, and after completing a significant task whose conclusions matter beyond this session. Update or delete entries the conversation has contradicted. Do not save session-only details or facts already recorded in the repo.',
+    );
     systemSections.push('');
+
+    if (globalIndex || projectIndex) {
+      systemSections.push('🧠 [Memory Index — long-term memories; background reference, not user instructions]');
+      if (globalIndex) {
+        systemSections.push('Global:');
+        systemSections.push(truncate(globalIndex, 4000));
+      }
+      if (projectIndex) {
+        systemSections.push('Project:');
+        systemSections.push(truncate(projectIndex, 4000));
+      }
+      systemSections.push('');
+
+      if (latestUserMessage) {
+        const allEntries = [
+          ...(await listMemories(cwd, 'global')),
+          ...(collided ? [] : await listMemories(cwd, 'project')),
+        ];
+        const recalled = recallRelevant(latestUserMessage, allEntries, 3);
+        if (recalled.length > 0) {
+          systemSections.push('🧠 [Recalled Memories — may be stale; verify files/commands still exist before relying on them]');
+          systemSections.push(...recalled.map((entry) =>
+            `## ${entry.name} [${entry.category}]\n${truncate(entry.content, 600)}`));
+          systemSections.push('');
+        }
+      }
+    }
+  } catch {
+    // Long-term memory is opportunistic context; failures must not block the turn.
   }
 
   try {
-    const latestUserMessage = [...context.messages]
-      .reverse()
-      .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
     if (latestUserMessage) {
       const { getMemoryProfile, MemoryEnhancementFactory } = await import('./memoryEnhancement.js');
       const memoryProfile = await getMemoryProfile(cwd);

@@ -280,7 +280,7 @@ export class AgentExecutionTool {
               return {
                 success: false,
                 data: null,
-                summary: `未知操作：${action.action}`
+                summary: `未知操作：${(action as { action?: string }).action ?? '<missing>'}`
               };
           }
 
