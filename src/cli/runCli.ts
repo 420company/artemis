@@ -50,7 +50,6 @@ import {
 } from './updateCheck.js'
 import { createInteractivePromptIO } from './prompt.js'
 import { APP_VERSION } from '../appMeta.js'
-import { QueryEngine } from '../core/queryEngine.js'
 import { SecurityAuditSystem } from '../core/securityAuditSystem.js'
 import { executeAction } from '../tools/index.js'
 import { getToolDefinition, toolDefs, validateToolRegistryIntegrity } from '../tools/registry.js'
@@ -316,10 +315,12 @@ export async function runCli(argv: string[]): Promise<void> {
   // ── analyze / execute ──────────────────────────────────────────────────────
   if (options.command === 'analyze' || options.command === 'execute') {
     await runQueryCommand({
+      cwd: options.cwd,
       locale,
       prompt: options.prompt,
       mode: options.command,
       model: options.model,
+      maxTurns: options.maxTurnsExplicit ? options.maxTurns : undefined,
     })
     return
   }
@@ -654,12 +655,14 @@ async function runToolCommand(options: { cwd: string; locale: UiLocale; args: st
 }
 
 async function runQueryCommand(options: {
+  cwd: string
   locale: UiLocale
   prompt?: string
   mode: 'analyze' | 'execute'
   model?: string
+  maxTurns?: number
 }): Promise<void> {
-  const { locale, prompt, mode, model } = options
+  const { cwd, locale, prompt, mode, model } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
   if (!prompt?.trim()) {
     console.log()
@@ -669,23 +672,25 @@ async function runQueryCommand(options: {
     console.log()
     return
   }
-  const engine = new QueryEngine({
-    enableDebug: mode === 'analyze',
-    enableStreaming: false,
-  })
-  const result = await engine.executeQuery(prompt, {
+  // Real agent loop (headless). analyze = read-only tools, execute = full access.
+  const { runHeadlessAgent } = await import('../services/headlessAgent.js')
+  const finalPrompt = mode === 'analyze'
+    ? `${t('只分析不修改：调研以下问题并给出结论，不要改动任何文件或执行有副作用的命令。', 'Analysis only: investigate the question and report conclusions without modifying files or running side-effectful commands.')}\n\n${prompt}`
+    : prompt
+  const result = await runHeadlessAgent(cwd, finalPrompt, {
+    permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
     model,
-    thinkingMode: mode === 'analyze',
+    maxTurns: options.maxTurns,
+    sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
+    onInfo: (message) => console.error(message),
   })
-  const responseText = typeof result.response?.text === 'string'
-    ? result.response.text
-    : JSON.stringify(result.response, null, 2)
   console.log()
   console.log(buildPanel(mode === 'analyze' ? t('分析结果', 'Analysis result') : t('执行结果', 'Execution result'), [
-    responseText,
+    result.reply,
+    '',
     `Session: ${result.sessionId}`,
+    `Turns: ${result.turns}`,
     `Duration: ${result.durationMs}ms`,
-    `Tokens: ${result.usage?.total_tokens ?? 0}`,
   ]))
   console.log()
 }

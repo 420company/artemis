@@ -174,40 +174,11 @@ export async function runGoalTick(
   goal: GoalRecord,
   opts: { onInfo?: (message: string) => void } = {},
 ): Promise<TickResult> {
-  const { resolveMainProviderConfig } = await import('../providers/onboarding.js')
-  const { createTrackedProviderFromConfig } = await import('../providers/telemetry.js')
-  const { createProviderRouter } = await import('../providers/router.js')
-  const { PermissionManager } = await import('../security/permissions.js')
-  const { SessionStore } = await import('../storage/sessions.js')
-  const { runAgent } = await import('../core/agent.js')
-
-  const providerConfig = await resolveMainProviderConfig({
-    cwd,
-    config: {},
-    onInfo: opts.onInfo ?? (() => undefined),
-  })
-  const provider = createTrackedProviderFromConfig(providerConfig, { cwd })
-  const permissionManager = new PermissionManager('PRODUCER', false)
-  const providerRouter = await createProviderRouter({
-    cwd,
-    mainProvider: provider,
-    onInfo: opts.onInfo ?? (() => undefined),
-  })
-  const sessionStore = new SessionStore(cwd)
-  const session = sessionStore.createSession({
-    title: `Goal ${goal.id}: ${goal.title.slice(0, 40)} · tick ${goal.iterations.length + 1}`,
-  })
-
-  const result = await runAgent(session, buildTickPrompt(goal), {
-    cwd,
-    provider,
-    sessionStore,
-    permissionManager,
+  const { runHeadlessAgent } = await import('./headlessAgent.js')
+  const result = await runHeadlessAgent(cwd, buildTickPrompt(goal), {
+    permissionMode: 'PRODUCER',
     maxTurns: TICK_MAX_TURNS,
-    profile: 'main',
-    appendUserMessage: true,
-    ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
-    resolveProvider: providerRouter.resolveProvider,
+    sessionTitle: `Goal ${goal.id}: ${goal.title.slice(0, 40)} · tick ${goal.iterations.length + 1}`,
     onInfo: opts.onInfo,
   })
 
