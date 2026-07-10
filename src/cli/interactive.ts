@@ -2995,7 +2995,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // ── /effort [low|medium|high|xhigh|max|default] ───────────────────────────
     if (isSlashCommand(trimmed, '/effort')) {
       const arg = trimmed.slice('/effort'.length).trim().toLowerCase()
-      const levels = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+      const levels = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
       if (!arg) {
         const current = getCurrentEffort()
         appendSystemPanel(t('推理强度', 'Reasoning effort'), [
@@ -3007,6 +3007,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '  high    ' + t('API 默认档', 'the API default'),
           '  xhigh   ' + t('写码/agent 推荐档（Claude 4.7+/Sonnet 5/Fable 5）', 'recommended for coding/agents (Claude 4.7+/Sonnet 5/Fable 5)'),
           '  max     ' + t('不惜代价要正确性', 'correctness over cost'),
+          '  ultra   ' + t('多 agent 并行模式（gpt-5.6+ Responses 协议；token 消耗极大）', 'parallel multi-agent mode (gpt-5.6+ Responses protocol; very token-hungry)'),
           '  default ' + t('清除设置，回到 API 默认', 'clear the setting, back to API default'),
           '',
           t('不支持该等级的模型会自动降到 high；不支持 effort 的模型忽略此设置。', 'Models missing a level clamp to high; models without effort support ignore it.'),

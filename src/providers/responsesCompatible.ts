@@ -307,14 +307,25 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       model: this.config.model,
     };
 
-    // Responses API reasoning effort (o-series / gpt-5 family). gpt-5.6+ takes
-    // xhigh/max natively (GA 2026-07-09); older models clamp them to 'high'.
+    // Responses API reasoning (o-series / gpt-5 family). gpt-5.6+ takes
+    // xhigh/max natively (GA 2026-07-09). 'ultra' is a MODE, not an effort
+    // level (4 parallel agents + synthesis, gpt-5.6+ Responses only); OpenAI
+    // docs still call it 'pro', so on a 400 we retry with the alternate name
+    // and finally fall back to plain max effort.
+    const fullScaleModel = /^gpt-5\.[6-9]/i.test(this.config.model);
+    let reasoningCandidates: Array<Record<string, unknown> | undefined> = [undefined];
     if (this.config.effort && /^(o[134](-|\.|$)|gpt-5)/i.test(this.config.model)) {
-      payload.reasoning = {
-        effort: /^gpt-5\.[6-9]/i.test(this.config.model)
-          ? this.config.effort
-          : this.config.effort === 'xhigh' || this.config.effort === 'max' ? 'high' : this.config.effort,
-      };
+      if (this.config.effort === 'ultra') {
+        reasoningCandidates = fullScaleModel
+          ? [{ mode: 'ultra' }, { mode: 'pro' }, { effort: 'max' }]
+          : [{ effort: 'high' }];
+      } else {
+        reasoningCandidates = [{
+          effort: fullScaleModel
+            ? this.config.effort
+            : this.config.effort === 'xhigh' || this.config.effort === 'max' ? 'high' : this.config.effort,
+        }];
+      }
     }
 
     if (options?.previousResponseId) {
@@ -334,27 +345,34 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       payload.tools = options?.nativeFunctionTools as ProviderNativeFunctionTool[];
     }
 
-    try {
-      response = await fetch(`${this.config.baseUrl.replace(/\/$/, '')}/responses`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${this.config.apiKey}`,
-        },
-        body: JSON.stringify(payload),
-        signal: options?.abortSignal,
-      });
-    } catch (error) {
-      if (options?.abortSignal?.aborted) {
-        throw error;
+    let attemptResponse: Response | undefined;
+    for (let attempt = 0; attempt < reasoningCandidates.length; attempt++) {
+      const reasoning = reasoningCandidates[attempt];
+      if (reasoning) payload.reasoning = reasoning;
+      else delete payload.reasoning;
+      try {
+        attemptResponse = await fetch(`${this.config.baseUrl.replace(/\/$/, '')}/responses`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.config.apiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: options?.abortSignal,
+        });
+      } catch (error) {
+        if (options?.abortSignal?.aborted) {
+          throw error;
+        }
+        throw new Error(buildProviderTransportErrorMessage(error, this.config, locale));
       }
-      throw new Error(buildProviderTransportErrorMessage(error, this.config, locale));
+      if (attemptResponse.ok) break;
+      const body = await attemptResponse.text();
+      // Only parameter rejections are worth a downgrade retry.
+      if (attemptResponse.status === 400 && attempt < reasoningCandidates.length - 1) continue;
+      throw new Error(buildProviderErrorMessage(attemptResponse, body, this.config, locale));
     }
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(buildProviderErrorMessage(response, body, this.config, locale));
-    }
+    response = attemptResponse!;
 
     const json = (await response.json()) as Record<string, unknown>;
     const text = extractText(json);

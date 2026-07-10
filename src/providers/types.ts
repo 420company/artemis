@@ -11,7 +11,7 @@ export type ProviderApiKeyHeader = 'authorization' | 'api-key' | 'x-api-key';
  * models get reasoning_effort (xhigh/max clamp to high), everything else
  * silently ignores it.
  */
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 export type ProviderConfig = {
   protocol: ProviderProtocol;

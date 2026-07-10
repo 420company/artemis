@@ -123,6 +123,7 @@ const EFFORT_XHIGH_MODELS = /^claude-(fable-5|mythos-5|sonnet-5|opus-4[.-][78])/
 function resolveEffortParam(model: string, effort: string | undefined): string | undefined {
   if (!effort) return undefined;
   if (!EFFORT_MODELS.test(model)) return undefined;
+  if (effort === 'ultra') effort = 'max'; // ultra is OpenAI-only; Anthropic tops out at max
   if (effort === 'xhigh' && !EFFORT_XHIGH_MODELS.test(model)) return 'high';
   if (effort === 'max' && !EFFORT_MAX_MODELS.test(model)) return 'high';
   return effort;

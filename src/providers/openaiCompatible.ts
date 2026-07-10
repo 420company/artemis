@@ -229,8 +229,11 @@ const OPENAI_EFFORT_FULL_SCALE_MODELS = /^gpt-5\.[6-9]/i;
 function resolveReasoningEffort(model: string, effort: string | undefined): string | undefined {
   if (!effort) return undefined;
   if (!OPENAI_REASONING_EFFORT_MODELS.test(model)) return undefined;
-  if (OPENAI_EFFORT_FULL_SCALE_MODELS.test(model)) return effort;
-  return effort === 'xhigh' || effort === 'max' ? 'high' : effort;
+  if (OPENAI_EFFORT_FULL_SCALE_MODELS.test(model)) {
+    // ultra mode only exists on the Responses API; best chat/completions can do is max.
+    return effort === 'ultra' ? 'max' : effort;
+  }
+  return effort === 'xhigh' || effort === 'max' || effort === 'ultra' ? 'high' : effort;
 }
 
 interface MapMessageOptions {

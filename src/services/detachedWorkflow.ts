@@ -680,8 +680,8 @@ export async function runDetachedWorkflowWorker(
     });
     // Effort rides along from the launcher (e.g. nidhogg runs at max).
     const envEffort = process.env.ARTEMIS_EFFORT;
-    const providerConfig = envEffort && ['low', 'medium', 'high', 'xhigh', 'max'].includes(envEffort)
-      ? { ...resolvedProviderConfig, effort: envEffort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
+    const providerConfig = envEffort && ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(envEffort)
+      ? { ...resolvedProviderConfig, effort: envEffort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' }
       : resolvedProviderConfig;
     const trackedProfileId =
       typeof (providerConfig as unknown as { id?: unknown }).id === 'string'
