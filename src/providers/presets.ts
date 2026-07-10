@@ -68,8 +68,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'claude-opus-4-1-20250805',
     ],
     notes: {
-      zh: ['Anthropic 官方 Messages API。', '推荐 Claude Opus 4.8（旗舰，1M 上下文）或 Sonnet 5（速度与智能兼优，1M 上下文）。', 'Fable 5 为最强模型（价格高于 Opus）。Haiku 4.5 为轻量模型（200K 上下文）。'],
-      en: ['Official Anthropic Messages API.', 'Recommended: Claude Opus 4.8 (flagship, 1M context) or Sonnet 5 (best speed-intelligence balance, 1M context).', 'Fable 5 is the most capable model (priced above Opus). Haiku 4.5 is the lightweight model (200K context).'],
+      zh: ['Anthropic 官方 Messages API。', '推荐 Claude Opus 4.8 或 Sonnet 5。'],
+      en: ['Official Anthropic Messages API.', 'Recommended: Claude Opus 4.8 or Sonnet 5.'],
     },
   },
 
@@ -82,6 +82,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     // Endpoint: https://api.openai.com/v1/chat/completions
     baseUrl: 'https://api.openai.com/v1',
     suggestedModels: [
+      'gpt-5.6-sol',
       'gpt-5.5',
       'gpt-5.5-pro',
       'gpt-5.5-mini',
@@ -110,12 +111,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     notes: {
       zh: [
         'OpenAI 官方文本模型接口，适合作为 Artemis 主/副执行模型。',
-        '推荐 gpt-5.5-pro（旗舰）或 gpt-5.5（日常）。',
+        '推荐 gpt-5.6-sol 或 gpt-5.5。',
         '图像、语音、嵌入模型请在对应的视觉、TTS/STT 或记忆/RAG 配置中单独设置。',
       ],
       en: [
         'Official OpenAI text-model API for Artemis primary/secondary execution models.',
-        'Recommended: gpt-5.5-pro (flagship) or gpt-5.5 (everyday).',
+        'Recommended: gpt-5.6-sol or gpt-5.5.',
         'Configure image, audio, and embedding models in their dedicated visual, TTS/STT, or memory/RAG settings.',
       ],
     },
@@ -623,12 +624,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     notes: {
       zh: [
         'Mistral AI 官方文本模型接口，OpenAI-compatible。',
-        '推荐 mistral-large-latest（旗舰）或 mistral-small-latest（日常）。',
+        '推荐 mistral-large-latest 或 mistral-small-latest。',
         '嵌入或语音模型请在对应的记忆/RAG 或 TTS/STT 配置中单独设置。',
       ],
       en: [
         'Official Mistral AI text-model API, OpenAI-compatible.',
-        'Recommended: mistral-large-latest (flagship) or mistral-small-latest (everyday).',
+        'Recommended: mistral-large-latest or mistral-small-latest.',
         'Configure embedding or audio models in their dedicated memory/RAG or TTS/STT settings.',
       ],
     },

@@ -46,6 +46,7 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'claude-sonnet-4-20250514': 200_000,
 
   // OpenAI family
+  'gpt-5.6-sol': 1_000_000,
   'gpt-5.5': 1_000_000,
   'gpt-5.5-pro': 1_000_000,
   'gpt-5.5-mini': 1_000_000,
@@ -161,6 +162,7 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('claude')) return 200_000
 
   // ── OpenAI GPT ───────────────────────────────────────────────────────────
+  if (m.includes('gpt-5.6')) return 1_000_000
   if (m.includes('gpt-5.5')) return 1_000_000
   if (m.includes('gpt-5.4')) return 1_000_000
   if (m.includes('gpt-5.1') || m.includes('gpt-5.2')) return 1_000_000
