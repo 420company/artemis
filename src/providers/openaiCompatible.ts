@@ -230,8 +230,10 @@ function resolveReasoningEffort(model: string, effort: string | undefined): stri
   if (!effort) return undefined;
   if (!OPENAI_REASONING_EFFORT_MODELS.test(model)) return undefined;
   if (OPENAI_EFFORT_FULL_SCALE_MODELS.test(model)) {
-    // ultra mode only exists on the Responses API; best chat/completions can do is max.
-    return effort === 'ultra' ? 'max' : effort;
+    // Upstream-verified (2026-07-10): reasoning_effort tops out at xhigh —
+    // 'max' does not exist as an effort value, and ultra is a Responses-only
+    // mode. Best chat/completions can do for either is xhigh.
+    return effort === 'ultra' || effort === 'max' ? 'xhigh' : effort;
   }
   return effort === 'xhigh' || effort === 'max' || effort === 'ultra' ? 'high' : effort;
 }

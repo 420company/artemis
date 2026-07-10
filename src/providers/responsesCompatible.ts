@@ -317,12 +317,14 @@ export class ResponsesCompatibleProvider implements ChatProvider {
     if (this.config.effort && /^(o[134](-|\.|$)|gpt-5)/i.test(this.config.model)) {
       if (this.config.effort === 'ultra') {
         reasoningCandidates = fullScaleModel
-          ? [{ mode: 'ultra' }, { mode: 'pro' }, { effort: 'max' }]
+          ? [{ mode: 'ultra' }, { mode: 'pro' }, { effort: 'xhigh' }]
           : [{ effort: 'high' }];
       } else {
+        // Upstream-verified (2026-07-10): effort tops out at xhigh; 'max' is
+        // not a real effort value even on gpt-5.6.
         reasoningCandidates = [{
           effort: fullScaleModel
-            ? this.config.effort
+            ? (this.config.effort === 'max' ? 'xhigh' : this.config.effort)
             : this.config.effort === 'xhigh' || this.config.effort === 'max' ? 'high' : this.config.effort,
         }];
       }
