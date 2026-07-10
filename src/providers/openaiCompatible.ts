@@ -223,9 +223,13 @@ function getReasoningContentMode(model: string | undefined): ReasoningContentMod
 // doesn't know (xhigh/max) clamp to 'high'; other models drop the field.
 const OPENAI_REASONING_EFFORT_MODELS = /^(o[134](-|\.|$)|gpt-5)/i;
 
+// gpt-5.6+ accepts xhigh/max natively (GA 2026-07-09); older gpt-5.x clamp to high.
+const OPENAI_EFFORT_FULL_SCALE_MODELS = /^gpt-5\.[6-9]/i;
+
 function resolveReasoningEffort(model: string, effort: string | undefined): string | undefined {
   if (!effort) return undefined;
   if (!OPENAI_REASONING_EFFORT_MODELS.test(model)) return undefined;
+  if (OPENAI_EFFORT_FULL_SCALE_MODELS.test(model)) return effort;
   return effort === 'xhigh' || effort === 'max' ? 'high' : effort;
 }
 

@@ -307,11 +307,13 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       model: this.config.model,
     };
 
-    // Responses API reasoning effort (o-series / gpt-5 family). Anthropic-scale
-    // levels the OpenAI API doesn't know (xhigh/max) clamp to 'high'.
+    // Responses API reasoning effort (o-series / gpt-5 family). gpt-5.6+ takes
+    // xhigh/max natively (GA 2026-07-09); older models clamp them to 'high'.
     if (this.config.effort && /^(o[134](-|\.|$)|gpt-5)/i.test(this.config.model)) {
       payload.reasoning = {
-        effort: this.config.effort === 'xhigh' || this.config.effort === 'max' ? 'high' : this.config.effort,
+        effort: /^gpt-5\.[6-9]/i.test(this.config.model)
+          ? this.config.effort
+          : this.config.effort === 'xhigh' || this.config.effort === 'max' ? 'high' : this.config.effort,
       };
     }
 
