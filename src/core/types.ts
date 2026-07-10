@@ -233,6 +233,7 @@ export type AgentAction =
       type: 'list_files';
       pattern?: string;
       maxResults?: number;
+      includeHidden?: boolean;
     }
   | {
       type: 'read_file';

@@ -738,7 +738,7 @@ const systemToolDef: ToolDefinition = {
 const actionToolDefs: ToolDefinition[] = [
   {
     type: 'list_files',
-    description: '列出目录中的文件',
+    description: '列出目录中的文件。默认跳过点开头的隐藏文件；找 .env.example/.github 这类时传 includeHidden: true（.git/.artemis 等凭证目录始终不列）。',
     kind: 'read',
     permissionCategory: 'read',
     executionMode: 'blocking',

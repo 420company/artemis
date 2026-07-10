@@ -7,7 +7,7 @@ export async function executeListFiles(
   action: Extract<AgentAction, { type: 'list_files' }>,
   context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
-  const files = await walkFiles(context.cwd);
+  const files = await walkFiles(context.cwd, { includeHidden: action.includeHidden === true });
   const pattern = action.pattern?.toLowerCase();
   const maxResults = Math.min(Math.max(action.maxResults ?? 100, 1), 500);
 
