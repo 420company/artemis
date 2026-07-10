@@ -168,30 +168,105 @@ async function initContext(): Promise<BrowserContext> {
   _initPromise = (async () => {
     const { chromium } = await import('playwright');
     const headless = process.env.ARTEMIS_BROWSER_HEADLESS === '1';
+    // Platform-consistent UA — a Mac UA on a Windows host is itself a bot signal.
+    const uaPlatform = process.platform === 'win32'
+      ? 'Windows NT 10.0; Win64; x64'
+      : process.platform === 'darwin'
+        ? 'Macintosh; Intel Mac OS X 14_5_0'
+        : 'X11; Linux x86_64';
     const contextOptions = {
       viewport: { width: 1280, height: 800 },
       locale: 'zh-CN',
       timezoneId: 'Asia/Bangkok',
       userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36`,
     } as const;
     const launchArgs = ['--disable-blink-features=AutomationControlled'];
 
-    const launch = (profileDir: string): Promise<BrowserContext> => chromium.launchPersistentContext(profileDir, {
-      headless,
-      ...contextOptions,
-      // Realistic UA — avoids some bot fingerprinting
-      args: launchArgs,
-    });
+    // ARTEMIS_BROWSER_CDP_URL: attach to a real, already-running Chrome/Edge/Brave
+    // started with --remote-debugging-port. Drives the user's actual browser —
+    // real tabs, real logins. NOTE: Chrome 136+ refuses remote debugging on the
+    // DEFAULT profile; start Chrome with a dedicated --user-data-dir. Example:
+    //   /Applications/Google\ Chrome.app/.../Google\ Chrome \
+    //     --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-artemis"
+    const cdpUrl = process.env.ARTEMIS_BROWSER_CDP_URL?.trim();
+    if (cdpUrl) {
+      const browser = await chromium.connectOverCDP(cdpUrl);
+      _ephemeralBrowser = browser;
+      const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
+      ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      attachContextListeners(ctx);
+      _context = ctx;
+      return ctx;
+    }
 
-    const launchEphemeral = async (): Promise<BrowserContext> => {
-      const browser = await chromium.launch({
+    // Browser engine selection. Default: prefer the REAL installed Chrome
+    // (better anti-bot fingerprint, no 300MB Playwright download); fall back to
+    // the bundled Playwright Chromium when Chrome isn't installed.
+    // ARTEMIS_BROWSER_CHANNEL overrides: 'chrome' | 'msedge' | 'chrome-beta' …
+    // or 'chromium' to force the bundled engine.
+    const channelEnv = process.env.ARTEMIS_BROWSER_CHANNEL?.trim();
+    const channelCandidates: (string | undefined)[] =
+      channelEnv === 'chromium' ? [undefined]
+      : channelEnv ? [channelEnv, undefined]
+      : ['chrome', undefined];
+
+    // Separate profile dir per engine — a profile written by a newer bundled
+    // Chromium can refuse to open in an older installed Chrome (and vice versa).
+    const profileDirFor = (channel: string | undefined): string =>
+      channel ? `${PROFILE_DIR}-${channel}` : PROFILE_DIR;
+
+    const isMissingBrowserError = (err: unknown): boolean => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return /Executable doesn't exist|browser was not found|Please install|Chromium distribution '.+' is not found|channel/i.test(msg);
+    };
+
+    const launchWith = (channel: string | undefined, profileDir: string): Promise<BrowserContext> =>
+      chromium.launchPersistentContext(profileDir, {
         headless,
+        channel,
+        ...contextOptions,
+        // Realistic UA — avoids some bot fingerprinting
         args: launchArgs,
       });
-      _ephemeralBrowser = browser;
-      return browser.newContext(contextOptions);
+
+    let activeChannel: string | undefined;
+    const launch = async (profileDirBase: string): Promise<BrowserContext> => {
+      let lastErr: unknown;
+      for (const channel of channelCandidates) {
+        try {
+          const ctx = await launchWith(channel, profileDirBase === PROFILE_DIR ? profileDirFor(channel) : profileDirBase);
+          activeChannel = channel;
+          return ctx;
+        } catch (err) {
+          lastErr = err;
+          // Profile lock errors must bubble up so the temp-profile fallback runs.
+          if (!isMissingBrowserError(err)) throw err;
+        }
+      }
+      throw lastErr;
     };
+
+    const launchEphemeral = async (): Promise<BrowserContext> => {
+      let lastErr: unknown;
+      for (const channel of channelCandidates) {
+        try {
+          const browser = await chromium.launch({
+            headless,
+            channel,
+            args: launchArgs,
+          });
+          _ephemeralBrowser = browser;
+          activeChannel = channel;
+          return browser.newContext(contextOptions);
+        } catch (err) {
+          lastErr = err;
+          if (!isMissingBrowserError(err)) throw err;
+        }
+      }
+      throw lastErr;
+    };
+    void activeChannel;
 
     let ctx: BrowserContext;
     try {
@@ -359,10 +434,9 @@ export function describePlaywrightError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (/Executable doesn't exist|browser was not found|Please install/i.test(msg)) {
     return [
-      'Playwright Chromium 浏览器二进制未安装。',
-      '在 Artemis 项目目录跑一次：',
-      '  npx playwright install chromium',
-      '装完（~300MB）就能用了。',
+      'Playwright Chromium 浏览器二进制未安装。两个解决办法任选：',
+      '1) 在 Artemis 项目目录跑一次：npx playwright install chromium（~300MB）',
+      '2) 设环境变量 ARTEMIS_BROWSER_CHANNEL=chrome 直接用系统里已安装的 Chrome（msedge 也行）',
     ].join('\n');
   }
   if (isPersistentProfileLockError(err)) {
