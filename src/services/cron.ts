@@ -71,6 +71,15 @@ export class CronScheduler {
         name: 'Daily Repository Audit',
         schedule: 'daily',
         task: async (cwd) => this.runRepoAudit(cwd)
+      },
+      {
+        id: 'goal-tick',
+        name: 'Goal Mode Auto-Tick',
+        schedule: 'hourly',
+        task: async (cwd) => {
+          const { runAutoTickGoals } = await import('./goalRunner.js')
+          return runAutoTickGoals(cwd)
+        }
       }
     ]
   }

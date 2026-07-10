@@ -43,6 +43,7 @@ export type CliCommand =
   | 'odin'
   | 'heimdall'
   | 'memory'
+  | 'goal'
 
 export interface ParsedArgs {
   command: CliCommand
@@ -68,7 +69,7 @@ const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
   'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
-  'wordup', 'bragi', 'gateway', 'mcp', 'odin', 'heimdall', 'memory'
+  'wordup', 'bragi', 'gateway', 'mcp', 'odin', 'heimdall', 'memory', 'goal'
 ])
 
 function isCliCommand(value: string | undefined): value is CliCommand {

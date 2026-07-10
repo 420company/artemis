@@ -1816,6 +1816,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // ── 配置 ──
     { value: '/model',      hint: t('切换模型',                   'Switch model') },
     { value: '/effort',     hint: t('切换推理强度',               'Switch reasoning effort') },
+    { value: '/goal',       hint: t('长期目标：创建/推进/管理',    'Long-horizon goals: create/advance/manage') },
     { value: '/swap',       hint: t('互换执行/思维模型',          'Swap main/brain models') },
     { value: '/permission', hint: t('设置权限模式',               'Set permission mode') },
     { value: '/cd',         hint: t('切换工作区根目录',           'Switch workspace root') },
@@ -3039,6 +3040,98 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             ? t('已写入当前 API 配置，重启后仍生效。', 'Saved to the active API profile; persists across restarts.')
             : t('仅本次会话生效（没有找到可保存的 API 配置）。', 'Session-only (no saved API profile found).'),
         ])
+      }
+      continue
+    }
+
+    // ── /goal —— 长期目标：创建/推进/管理（状态持久化，跨会话自主推进） ────────
+    if (isSlashCommand(trimmed, '/goal')) {
+      const goalArgRaw = trimmed.slice('/goal'.length).trim()
+      try {
+        const { GoalStore, runGoalLoop } = await import('../services/goalRunner.js')
+        const store = new GoalStore(workspaceRoot)
+        const goalArgs = goalArgRaw.split(/\s+/).filter(Boolean)
+        const goalSub = goalArgs[0]?.toLowerCase()
+        const goalIcon = (s: string) => s === 'active' ? '🟢' : s === 'done' ? '✅' : s === 'blocked' ? '🔴' : '⏸'
+
+        if (!goalArgRaw || goalSub === 'list') {
+          const goals = await store.load()
+          appendSystemPanel(t('🎯 长期目标', '🎯 Goals'), goals.length
+            ? [
+                ...goals.map((g) => `${goalIcon(g.status)} [${g.id}] ${g.title.slice(0, 50)}  ${g.iterations.length}/${g.maxIterations}${g.autoTick ? ' ⏰' : ''}`),
+                '',
+                t('/goal run <id> 推进 · /goal <描述> 新建 · pause|resume|auto|rm <id>', '/goal run <id> · /goal <text> to create · pause|resume|auto|rm <id>'),
+              ]
+            : [t('还没有目标。/goal <目标描述> 创建；加 --auto 让 cron 每小时自动推进。', 'No goals. /goal <text> to create; --auto rides hourly cron.')])
+          continue
+        }
+
+        if (['run', 'pause', 'resume', 'auto', 'rm', 'show'].includes(goalSub)) {
+          const goal = await store.get(goalArgs[1] ?? '')
+          if (!goal) {
+            appendSystemPanel(t('🎯 目标', '🎯 Goal'), [t(`没找到 "${goalArgs[1]}"`, `No goal "${goalArgs[1]}"`)])
+            continue
+          }
+          if (goalSub === 'pause' || goalSub === 'resume') {
+            goal.status = goalSub === 'pause' ? 'paused' : 'active'
+            if (goalSub === 'resume') goal.statusReason = undefined
+            await store.update(goal)
+            appendSystemPanel(t('🎯 目标', '🎯 Goal'), [`[${goal.id}] → ${goal.status}`])
+          } else if (goalSub === 'auto') {
+            goal.autoTick = !goal.autoTick
+            await store.update(goal)
+            appendSystemPanel(t('🎯 目标', '🎯 Goal'), [t(`[${goal.id}] autoTick → ${goal.autoTick ? '开' : '关'}`, `[${goal.id}] autoTick → ${goal.autoTick}`)])
+          } else if (goalSub === 'rm') {
+            await store.remove(goal.id)
+            appendSystemPanel(t('🎯 目标', '🎯 Goal'), [t(`[${goal.id}] 已删除`, `[${goal.id}] removed`)])
+          } else if (goalSub === 'show') {
+            const last = goal.iterations[goal.iterations.length - 1]
+            appendSystemPanel(`${goalIcon(goal.status)} [${goal.id}] ${goal.title}`, [
+              goal.goal,
+              '',
+              `${goal.status}${goal.statusReason ? ` — ${goal.statusReason}` : ''} · ${goal.iterations.length}/${goal.maxIterations}`,
+              ...goal.iterations.slice(-5).map((it) => `· [${it.at.slice(5, 16)}] ${it.progress}`),
+              ...(last?.next ? [t(`下一步: ${last.next}`, `Next: ${last.next}`)] : []),
+            ])
+          } else {
+            if (goal.status === 'paused' || goal.status === 'blocked') {
+              goal.status = 'active'
+              goal.statusReason = undefined
+              await store.update(goal)
+            }
+            const ticks = Number.parseInt(goalArgs[2] ?? '', 10) || 5
+            appendSystemPanel(t('🎯 开始推进', '🎯 Advancing'), [
+              `[${goal.id}] ${goal.title}`,
+              t(`最多 ${ticks} 步，每步进度实时落盘，中断不丢。`, `Up to ${ticks} ticks; progress persisted per tick.`),
+            ])
+            const finalGoal = await runGoalLoop(workspaceRoot, goal.id, {
+              maxTicks: ticks,
+              onTick: (g, tick) => {
+                appendSystemPanel(t(`🎯 第 ${g.iterations.length} 步 (${tick.iteration.turns} turns)`, `🎯 Tick ${g.iterations.length} (${tick.iteration.turns} turns)`), [
+                  tick.iteration.progress,
+                  ...(tick.iteration.next && g.status === 'active' ? [t(`↳ 下一步: ${tick.iteration.next}`, `↳ next: ${tick.iteration.next}`)] : []),
+                ])
+              },
+            })
+            appendSystemPanel(t('🎯 本轮结束', '🎯 Run finished'), [
+              `${goalIcon(finalGoal.status)} ${finalGoal.status}${finalGoal.statusReason ? ` — ${finalGoal.statusReason}` : ''} · ${finalGoal.iterations.length} 步`,
+            ])
+          }
+          continue
+        }
+
+        // 其余内容 = 新目标描述
+        const autoTick = goalArgs.includes('--auto')
+        const goalText = goalArgRaw.replace(/--auto\s*/g, '').trim()
+        const record = await store.add(goalText, { autoTick })
+        appendSystemPanel(t('🎯 目标已创建', '🎯 Goal created'), [
+          `[${record.id}] ${record.title}`,
+          autoTick
+            ? t('autoTick 开启：cron 每小时自动推进。', 'autoTick on: hourly cron advances it.')
+            : t(`/goal run ${record.id} 立即开始推进`, `/goal run ${record.id} to start`),
+        ])
+      } catch (err) {
+        appendSystemPanel(t('🎯 Goal 错误', '🎯 Goal error'), [err instanceof Error ? err.message : String(err)])
       }
       continue
     }

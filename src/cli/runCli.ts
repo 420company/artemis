@@ -299,6 +299,12 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
+  // ── goal (long-horizon autonomous goals) ────────────────────────────────────
+  if (options.command === 'goal') {
+    await runGoalCliCommand({ cwd: options.cwd, locale, args: options.promptArgs ?? splitCommandArgs(options.prompt) })
+    return
+  }
+
   const commandArgs = options.promptArgs ?? splitCommandArgs(options.prompt)
 
   // ── tool ───────────────────────────────────────────────────────────────────
@@ -1925,4 +1931,140 @@ async function runHeimdallCommand(options: { cwd: string; locale: UiLocale; args
     console.log(buildPanel(t('Heimdall 错误', 'Heimdall error'), [msg]))
     console.log()
   }
+}
+
+async function runGoalCliCommand(options: { cwd: string; locale: UiLocale; args: string[] }): Promise<void> {
+  const { cwd, locale } = options
+  const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
+  const { GoalStore, runGoalLoop } = await import('../services/goalRunner.js')
+  const store = new GoalStore(cwd)
+
+  const flags = new Set(options.args.filter((a) => a.startsWith('--')))
+  const args = options.args.filter((a) => !a.startsWith('--'))
+  const sub = args[0]?.toLowerCase()
+
+  const statusIcon = (s: string): string =>
+    s === 'active' ? '🟢' : s === 'done' ? '✅' : s === 'blocked' ? '🔴' : '⏸'
+
+  if (sub === 'add') {
+    const text = args.slice(1).join(' ').trim()
+    if (!text) { console.log(t('用法：artemis goal add [--auto] <目标描述>', 'Usage: artemis goal add [--auto] <goal>')); return }
+    const record = await store.add(text, { autoTick: flags.has('--auto') })
+    console.log()
+    console.log(buildPanel(t('🎯 目标已创建', '🎯 Goal created'), [
+      `[${record.id}] ${record.title}`,
+      record.autoTick
+        ? t('autoTick 已开启：cron 每小时自动推进一步。', 'autoTick on: cron advances it hourly.')
+        : t(`立即推进：artemis goal run ${record.id}`, `Advance now: artemis goal run ${record.id}`),
+    ]))
+    console.log()
+    return
+  }
+
+  if (!sub || sub === 'list' || sub === 'ls') {
+    const goals = await store.load()
+    if (goals.length === 0) {
+      console.log()
+      console.log(buildPanel(t('🎯 长期目标', '🎯 Goals'), [
+        t('还没有目标。artemis goal add <描述> 创建一个。', 'No goals yet. Create one: artemis goal add <text>'),
+      ]))
+      console.log()
+      return
+    }
+    const rows = goals.map((g) =>
+      `${statusIcon(g.status)} [${g.id}] ${g.title.slice(0, 48).padEnd(48)} ${String(g.iterations.length).padStart(3)}/${g.maxIterations} 步${g.autoTick ? '  ⏰auto' : ''}`)
+    console.log()
+    console.log(buildPanel(t(`🎯 长期目标（${goals.length}）`, `🎯 Goals (${goals.length})`), rows))
+    console.log(t('\n  artemis goal show|run|pause|resume|rm <id>；add --auto 开启 cron 自动推进', '\n  artemis goal show|run|pause|resume|rm <id>; add --auto for cron auto-tick'))
+    console.log()
+    return
+  }
+
+  if (sub === 'show') {
+    const goal = await store.get(args[1] ?? '')
+    if (!goal) { console.log(t(`没找到目标 "${args[1]}"`, `No goal "${args[1]}"`)); return }
+    const recent = goal.iterations.slice(-10).map((it, i) =>
+      `${goal.iterations.length - Math.min(10, goal.iterations.length) + i + 1}. [${it.at.slice(0, 16)}] (${it.status}) ${it.progress}`)
+    console.log()
+    console.log(buildPanel(`${statusIcon(goal.status)} [${goal.id}] ${goal.title}`, [
+      goal.goal,
+      '',
+      t(`状态: ${goal.status}${goal.statusReason ? ` — ${goal.statusReason}` : ''}`, `Status: ${goal.status}${goal.statusReason ? ` — ${goal.statusReason}` : ''}`),
+      t(`进度: ${goal.iterations.length}/${goal.maxIterations} 步${goal.autoTick ? '，cron 自动推进中' : ''}`, `Progress: ${goal.iterations.length}/${goal.maxIterations}${goal.autoTick ? ', auto-tick on' : ''}`),
+      ...(recent.length ? ['', t('最近进展:', 'Recent progress:'), ...recent] : []),
+      ...(goal.iterations.length && goal.iterations[goal.iterations.length - 1].next
+        ? ['', t(`下一步: ${goal.iterations[goal.iterations.length - 1].next}`, `Next: ${goal.iterations[goal.iterations.length - 1].next}`)]
+        : []),
+    ]))
+    console.log()
+    return
+  }
+
+  if (sub === 'run') {
+    const goal = await store.get(args[1] ?? '')
+    if (!goal) { console.log(t(`没找到目标 "${args[1]}"`, `No goal "${args[1]}"`)); return }
+    if (goal.status === 'paused' || goal.status === 'blocked') {
+      goal.status = 'active'
+      goal.statusReason = undefined
+      await store.update(goal)
+    }
+    const maxTicks = Number.parseInt(args[2] ?? '', 10) || 10
+    console.log()
+    console.log(t(`🎯 [${goal.id}] ${goal.title} — 开始推进（最多 ${maxTicks} 步，Ctrl+C 可中断，进度已持久化）`,
+      `🎯 [${goal.id}] ${goal.title} — advancing (up to ${maxTicks} ticks, Ctrl+C safe, progress persisted)`))
+    console.log()
+    const final = await runGoalLoop(cwd, goal.id, {
+      maxTicks,
+      onTick: (g, tick) => {
+        console.log(`  ${statusIcon(g.status)} #${g.iterations.length} (${tick.iteration.turns} turns) ${tick.iteration.progress}`)
+        if (tick.iteration.next && g.status === 'active') console.log(t(`     ↳ 下一步: ${tick.iteration.next}`, `     ↳ next: ${tick.iteration.next}`))
+      },
+      onInfo: () => undefined,
+    })
+    console.log()
+    console.log(buildPanel(t('🎯 本轮推进结束', '🎯 Run finished'), [
+      t(`状态: ${final.status}${final.statusReason ? ` — ${final.statusReason}` : ''}`, `Status: ${final.status}${final.statusReason ? ` — ${final.statusReason}` : ''}`),
+      t(`累计: ${final.iterations.length} 步`, `Total: ${final.iterations.length} iterations`),
+    ]))
+    console.log()
+    return
+  }
+
+  if (sub === 'pause' || sub === 'resume') {
+    const goal = await store.get(args[1] ?? '')
+    if (!goal) { console.log(t(`没找到目标 "${args[1]}"`, `No goal "${args[1]}"`)); return }
+    goal.status = sub === 'pause' ? 'paused' : 'active'
+    if (sub === 'resume') goal.statusReason = undefined
+    await store.update(goal)
+    console.log(t(`[${goal.id}] 已${sub === 'pause' ? '暂停' : '恢复'}`, `[${goal.id}] ${sub}d`))
+    return
+  }
+
+  if (sub === 'auto') {
+    const goal = await store.get(args[1] ?? '')
+    if (!goal) { console.log(t(`没找到目标 "${args[1]}"`, `No goal "${args[1]}"`)); return }
+    goal.autoTick = !goal.autoTick
+    await store.update(goal)
+    console.log(t(`[${goal.id}] autoTick → ${goal.autoTick ? '开（cron 每小时推进）' : '关'}`, `[${goal.id}] autoTick → ${goal.autoTick}`))
+    return
+  }
+
+  if (sub === 'rm' || sub === 'remove') {
+    const removed = await store.remove(args[1] ?? '')
+    console.log(removed ? t('已删除', 'Removed') : t(`没找到目标 "${args[1]}"`, `No goal "${args[1]}"`))
+    return
+  }
+
+  console.log()
+  console.log(buildPanel(t('🎯 Goal 命令', '🎯 Goal commands'), [
+    '  artemis goal add [--auto] <目标描述>',
+    '  artemis goal list',
+    '  artemis goal show <id>',
+    '  artemis goal run <id> [ticks]',
+    '  artemis goal pause|resume|auto|rm <id>',
+    '',
+    t('目标状态存在 goals.json，跨会话/重启持续推进；--auto 挂到 cron 每小时自动走一步。',
+      'Goal state lives in goals.json and survives restarts; --auto rides cron hourly.'),
+  ]))
+  console.log()
 }
