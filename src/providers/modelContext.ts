@@ -47,6 +47,8 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
 
   // OpenAI family
   'gpt-5.6-sol': 1_000_000,
+  'gpt-5.6-luna': 1_000_000,
+  'gpt-5.6-terra': 1_000_000,
   'gpt-5.5': 1_000_000,
   'gpt-5.5-pro': 1_000_000,
   'gpt-5.5-mini': 1_000_000,
