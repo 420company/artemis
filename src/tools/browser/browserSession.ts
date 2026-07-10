@@ -30,6 +30,112 @@ let _activePage: Page | null = null;
 let _initPromise: Promise<BrowserContext> | null = null;
 let _ephemeralBrowser: Browser | null = null;
 
+// ── console / network event buffers ────────────────────────────────────────
+// Ring buffers so the brain can debug pages ("what did the console say?",
+// "which request 404'd?") without us re-running anything.
+
+export interface ConsoleEntry {
+  time: string;
+  level: string;
+  text: string;
+  pageUrl: string;
+}
+
+export interface NetworkEntry {
+  time: string;
+  method: string;
+  url: string;
+  status: number | null;
+  resourceType: string;
+  failure?: string;
+}
+
+const EVENT_BUFFER_MAX = 300;
+const _consoleBuffer: ConsoleEntry[] = [];
+const _networkBuffer: NetworkEntry[] = [];
+
+function pushRing<T>(buffer: T[], entry: T): void {
+  buffer.push(entry);
+  if (buffer.length > EVENT_BUFFER_MAX) buffer.splice(0, buffer.length - EVENT_BUFFER_MAX);
+}
+
+function attachPageListeners(page: Page): void {
+  page.on('console', (msg) => {
+    pushRing(_consoleBuffer, {
+      time: new Date().toISOString().slice(11, 19),
+      level: msg.type(),
+      text: msg.text().slice(0, 500),
+      pageUrl: page.url(),
+    });
+  });
+  page.on('pageerror', (err) => {
+    pushRing(_consoleBuffer, {
+      time: new Date().toISOString().slice(11, 19),
+      level: 'pageerror',
+      text: String(err?.message ?? err).slice(0, 500),
+      pageUrl: page.url(),
+    });
+  });
+}
+
+function attachContextListeners(ctx: BrowserContext): void {
+  for (const page of ctx.pages()) attachPageListeners(page);
+  ctx.on('page', (page) => attachPageListeners(page));
+  ctx.on('response', (response) => {
+    const req = response.request();
+    pushRing(_networkBuffer, {
+      time: new Date().toISOString().slice(11, 19),
+      method: req.method(),
+      url: response.url().slice(0, 300),
+      status: response.status(),
+      resourceType: req.resourceType(),
+    });
+  });
+  ctx.on('requestfailed', (req) => {
+    pushRing(_networkBuffer, {
+      time: new Date().toISOString().slice(11, 19),
+      method: req.method(),
+      url: req.url().slice(0, 300),
+      status: null,
+      resourceType: req.resourceType(),
+      failure: req.failure()?.errorText ?? 'failed',
+    });
+  });
+}
+
+export function readConsoleBuffer(pattern?: string, limit = 50): ConsoleEntry[] {
+  let entries = _consoleBuffer;
+  if (pattern) {
+    try {
+      const re = new RegExp(pattern, 'i');
+      entries = entries.filter((e) => re.test(e.text) || re.test(e.level));
+    } catch {
+      const needle = pattern.toLowerCase();
+      entries = entries.filter((e) => e.text.toLowerCase().includes(needle));
+    }
+  }
+  return entries.slice(-Math.max(1, Math.min(200, limit)));
+}
+
+export function readNetworkBuffer(pattern?: string, limit = 50): NetworkEntry[] {
+  let entries = _networkBuffer;
+  if (pattern) {
+    try {
+      const re = new RegExp(pattern, 'i');
+      entries = entries.filter((e) => re.test(e.url) || re.test(String(e.status ?? '')));
+    } catch {
+      const needle = pattern.toLowerCase();
+      entries = entries.filter((e) => e.url.toLowerCase().includes(needle));
+    }
+  }
+  return entries.slice(-Math.max(1, Math.min(200, limit)));
+}
+
+export function clearEventBuffers(kind: 'console' | 'network' | 'all' = 'all'): void {
+  if (kind !== 'network') _consoleBuffer.length = 0;
+  if (kind !== 'console') _networkBuffer.length = 0;
+}
+
 function isPersistentProfileLockError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /ProcessSingleton|profile directory|SingletonLock|already in use|user data directory is already in use/i.test(msg);
@@ -113,6 +219,7 @@ async function initContext(): Promise<BrowserContext> {
       }
     }
     ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+    attachContextListeners(ctx);
     _context = ctx;
     return ctx;
   })().catch((err) => {
@@ -158,6 +265,65 @@ export async function getActivePage(): Promise<Page> {
 /** Replace the active page reference (e.g. after explicit new tab open). */
 export function setActivePage(page: Page): void {
   _activePage = page;
+}
+
+// ── tab management ──────────────────────────────────────────────────────────
+
+export interface TabInfo {
+  index: number;
+  url: string;
+  title: string;
+  active: boolean;
+}
+
+export async function listTabs(): Promise<TabInfo[]> {
+  const ctx = await initContext();
+  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const out: TabInfo[] = [];
+  for (let i = 0; i < pages.length; i++) {
+    let title = '';
+    try {
+      title = await pages[i].title();
+    } catch { /* page navigating */ }
+    out.push({ index: i, url: pages[i].url(), title, active: pages[i] === _activePage });
+  }
+  return out;
+}
+
+export async function openTab(url?: string): Promise<TabInfo> {
+  const ctx = await initContext();
+  const page = await ctx.newPage();
+  _activePage = page;
+  if (url) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  }
+  const pages = ctx.pages().filter((p) => !p.isClosed());
+  return { index: pages.indexOf(page), url: page.url(), title: await page.title().catch(() => ''), active: true };
+}
+
+export async function switchTab(index: number): Promise<TabInfo> {
+  const ctx = await initContext();
+  const pages = ctx.pages().filter((p) => !p.isClosed());
+  if (index < 0 || index >= pages.length) {
+    throw new Error(`tab index ${index} out of range (0-${pages.length - 1})`);
+  }
+  const page = pages[index];
+  _activePage = page;
+  await page.bringToFront().catch(() => undefined);
+  return { index, url: page.url(), title: await page.title().catch(() => ''), active: true };
+}
+
+export async function closeTab(index?: number): Promise<number> {
+  const ctx = await initContext();
+  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const target = index === undefined
+    ? (_activePage && !_activePage.isClosed() ? _activePage : pages[pages.length - 1])
+    : pages[index];
+  if (!target) throw new Error(`tab index ${index ?? '(active)'} not found`);
+  const wasActive = target === _activePage;
+  await target.close().catch(() => undefined);
+  if (wasActive) _activePage = null;
+  return ctx.pages().filter((p) => !p.isClosed()).length;
 }
 
 /**

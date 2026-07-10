@@ -18,7 +18,18 @@
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
-import { getActivePage, closeActivePage, describePlaywrightError } from './browserSession.js';
+import {
+  getActivePage,
+  closeActivePage,
+  describePlaywrightError,
+  readConsoleBuffer,
+  readNetworkBuffer,
+  clearEventBuffers,
+  listTabs,
+  openTab,
+  switchTab,
+  closeTab,
+} from './browserSession.js';
 import type { Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 
@@ -264,31 +275,220 @@ export interface BrowserClickAction {
   type: 'browser_click';
   selector?: string; // CSS selector
   text?: string; // alternatively, clickable text content
+  x?: number; // alternatively, viewport coordinates (e.g. from a screenshot)
+  y?: number;
 }
 
 export async function executeBrowserClick(action: BrowserClickAction): Promise<ToolResult> {
-  if (!action.selector && !action.text) {
+  const hasCoords = typeof action.x === 'number' && typeof action.y === 'number';
+  if (!action.selector && !action.text && !hasCoords) {
     return {
       ok: false,
-      output: '需要 selector 或 text 至少一个',
-      error: { code: 'invalid_input', message: 'selector or text required' },
+      output: '需要 selector、text 或 x+y 坐标至少一种',
+      error: { code: 'invalid_input', message: 'selector, text, or x+y required' },
     };
   }
   try {
     return await withPageRetry(async (page) => {
+      let target: string;
       if (action.selector) {
         await page.locator(action.selector).first().click({ timeout: 10_000 });
+        target = action.selector;
       } else if (action.text) {
         // Match by visible text (Playwright's getByText)
         await page.getByText(action.text, { exact: false }).first().click({ timeout: 10_000 });
+        target = action.text;
+      } else {
+        // Coordinate fallback — pairs with browser_screenshot for elements no
+        // selector reaches (canvas, shadow DOM, custom widgets).
+        await page.mouse.click(action.x!, action.y!);
+        target = `(${action.x}, ${action.y})`;
       }
       // Wait briefly for any navigation/reaction
       await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
       return {
         ok: true,
-        output: `🖱  已点击：${action.selector ?? action.text}\n   当前 URL: ${page.url()}`,
+        output: `🖱  已点击：${target}\n   当前 URL: ${page.url()}`,
       };
     }, { restoreUrlOnRetry: true });
+  } catch (err) {
+    return pwError(err);
+  }
+}
+
+// ── browser_form_input ──────────────────────────────────────────────────
+
+export interface BrowserFormInputAction {
+  type: 'browser_form_input';
+  selector: string;
+  /** For <select>: option value or visible label. For text inputs: the text. */
+  value?: string;
+  /** For multi-select: several option values/labels. */
+  values?: string[];
+  /** For checkbox / radio: desired checked state (default true). */
+  checked?: boolean;
+}
+
+export async function executeBrowserFormInput(action: BrowserFormInputAction): Promise<ToolResult> {
+  if (!action.selector) {
+    return {
+      ok: false,
+      output: 'selector 必填',
+      error: { code: 'invalid_input', message: 'selector required' },
+    };
+  }
+  try {
+    return await withPageRetry(async (page) => {
+      const el = page.locator(action.selector).first();
+      const kind = await el.evaluate((node) => {
+        const tag = node.tagName.toLowerCase();
+        if (tag === 'select') return 'select';
+        const type = (node as HTMLInputElement).type?.toLowerCase?.() ?? '';
+        if (tag === 'input' && (type === 'checkbox' || type === 'radio')) return type;
+        if (tag === 'input' || tag === 'textarea' || (node as HTMLElement).isContentEditable) return 'text';
+        return tag;
+      }, undefined, { timeout: 10_000 });
+
+      if (kind === 'select') {
+        const wanted = action.values ?? (action.value !== undefined ? [action.value] : []);
+        if (wanted.length === 0) {
+          return { ok: false, output: '<select> 需要 value 或 values', error: { code: 'invalid_input', message: 'value(s) required for select' } };
+        }
+        // Try by value first, fall back to visible label — the model usually
+        // knows the label it saw on screen, not the option's value attribute.
+        let selected: string[];
+        try {
+          selected = await el.selectOption(wanted.map((v) => ({ value: v })), { timeout: 10_000 });
+        } catch {
+          selected = await el.selectOption(wanted.map((v) => ({ label: v })), { timeout: 10_000 });
+        }
+        return { ok: true, output: `☑️ 下拉框 ${action.selector} 已选择：${selected.join(', ') || wanted.join(', ')}` };
+      }
+
+      if (kind === 'checkbox' || kind === 'radio') {
+        const desired = action.checked ?? true;
+        await el.setChecked(desired, { timeout: 10_000 });
+        return { ok: true, output: `☑️ ${kind} ${action.selector} → ${desired ? '选中' : '取消选中'}` };
+      }
+
+      if (action.value === undefined) {
+        return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
+      }
+      await el.fill(action.value, { timeout: 10_000 });
+      return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
+    }, { restoreUrlOnRetry: true });
+  } catch (err) {
+    return pwError(err);
+  }
+}
+
+// ── browser_evaluate ────────────────────────────────────────────────────
+
+export interface BrowserEvaluateAction {
+  type: 'browser_evaluate';
+  /** JS expression or IIFE, evaluated in the page. Return value is JSON-serialized. */
+  script: string;
+}
+
+export async function executeBrowserEvaluate(action: BrowserEvaluateAction): Promise<ToolResult> {
+  if (!action.script || !action.script.trim()) {
+    return {
+      ok: false,
+      output: 'script 必填',
+      error: { code: 'invalid_input', message: 'script required' },
+    };
+  }
+  try {
+    return await withPageRetry(async (page) => {
+      const result = await page.evaluate(action.script);
+      let rendered: string;
+      try {
+        rendered = result === undefined ? 'undefined' : JSON.stringify(result, null, 2) ?? String(result);
+      } catch {
+        rendered = String(result);
+      }
+      return { ok: true, output: `🧪 evaluate 结果：\n${truncate(rendered, 4000)}` };
+    }, { restoreUrlOnRetry: true });
+  } catch (err) {
+    return pwError(err);
+  }
+}
+
+// ── browser_console / browser_requests ──────────────────────────────────
+
+export interface BrowserConsoleAction {
+  type: 'browser_console';
+  pattern?: string;
+  limit?: number;
+  clear?: boolean;
+}
+
+export async function executeBrowserConsole(action: BrowserConsoleAction): Promise<ToolResult> {
+  try {
+    const entries = readConsoleBuffer(action.pattern, action.limit ?? 50);
+    if (action.clear) clearEventBuffers('console');
+    if (entries.length === 0) {
+      return { ok: true, output: action.pattern ? `没有匹配 "${action.pattern}" 的 console 输出` : 'console 缓冲区为空' };
+    }
+    const lines = entries.map((e) => `[${e.time}] ${e.level.padEnd(9)} ${e.text}`);
+    return { ok: true, output: truncate(lines.join('\n'), 6000) };
+  } catch (err) {
+    return pwError(err);
+  }
+}
+
+export interface BrowserRequestsAction {
+  type: 'browser_requests';
+  pattern?: string;
+  limit?: number;
+  clear?: boolean;
+}
+
+export async function executeBrowserRequests(action: BrowserRequestsAction): Promise<ToolResult> {
+  try {
+    const entries = readNetworkBuffer(action.pattern, action.limit ?? 50);
+    if (action.clear) clearEventBuffers('network');
+    if (entries.length === 0) {
+      return { ok: true, output: action.pattern ? `没有匹配 "${action.pattern}" 的网络请求` : '网络请求缓冲区为空' };
+    }
+    const lines = entries.map((e) =>
+      `[${e.time}] ${String(e.status ?? 'FAIL').padEnd(4)} ${e.method.padEnd(6)} ${e.resourceType.padEnd(10)} ${e.url}${e.failure ? `  ⚠ ${e.failure}` : ''}`);
+    return { ok: true, output: truncate(lines.join('\n'), 6000) };
+  } catch (err) {
+    return pwError(err);
+  }
+}
+
+// ── browser_tabs ────────────────────────────────────────────────────────
+
+export interface BrowserTabsAction {
+  type: 'browser_tabs';
+  action: 'list' | 'new' | 'switch' | 'close';
+  index?: number;
+  url?: string;
+}
+
+export async function executeBrowserTabs(action: BrowserTabsAction): Promise<ToolResult> {
+  try {
+    if (action.action === 'list') {
+      const tabs = await listTabs();
+      if (tabs.length === 0) return { ok: true, output: '当前没有打开的标签页' };
+      const lines = tabs.map((t) => `${t.active ? '▶' : ' '} [${t.index}] ${t.title || '(untitled)'} — ${t.url}`);
+      return { ok: true, output: lines.join('\n') };
+    }
+    if (action.action === 'new') {
+      const tab = await openTab(action.url);
+      return { ok: true, output: `🆕 新标签页 [${tab.index}] ${tab.url || 'about:blank'}` };
+    }
+    if (action.action === 'switch') {
+      if (action.index === undefined) {
+        return { ok: false, output: 'switch 需要 index', error: { code: 'invalid_input', message: 'index required' } };
+      }
+      const tab = await switchTab(action.index);
+      return { ok: true, output: `▶ 已切换到标签页 [${tab.index}] ${tab.title || ''} — ${tab.url}` };
+    }
+    const remaining = await closeTab(action.index);
+    return { ok: true, output: `🚪 标签页已关闭，剩余 ${remaining} 个` };
   } catch (err) {
     return pwError(err);
   }

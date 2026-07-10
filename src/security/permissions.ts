@@ -164,9 +164,19 @@ function describeAction(action: AgentAction): string {
     case 'browser_extract_text':
       return `browser: extract text${action.selector ? ` from ${action.selector}` : ''}`;
     case 'browser_click':
-      return `browser: click ${action.selector ?? action.text ?? '?'}`;
+      return `browser: click ${action.selector ?? action.text ?? `(${action.x},${action.y})`}`;
     case 'browser_type':
       return `browser: type into ${action.selector}`;
+    case 'browser_form_input':
+      return `browser: form input ${action.selector}`;
+    case 'browser_evaluate':
+      return `browser: evaluate script`;
+    case 'browser_console':
+      return `browser: read console`;
+    case 'browser_requests':
+      return `browser: read network requests`;
+    case 'browser_tabs':
+      return `browser: tabs ${action.action}`;
     case 'browser_wait_for':
       return `browser: wait for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':

@@ -670,8 +670,13 @@ export type AgentAction =
   | { type: 'browser_navigate'; url: string; waitFor?: 'load' | 'domcontentloaded' | 'networkidle'; extractText?: boolean }
   | { type: 'browser_screenshot'; fullPage?: boolean; width?: number; height?: number }
   | { type: 'browser_extract_text'; selector?: string }
-  | { type: 'browser_click'; selector?: string; text?: string }
+  | { type: 'browser_click'; selector?: string; text?: string; x?: number; y?: number }
   | { type: 'browser_type'; selector: string; text: string; pressEnter?: boolean }
+  | { type: 'browser_form_input'; selector: string; value?: string; values?: string[]; checked?: boolean }
+  | { type: 'browser_evaluate'; script: string }
+  | { type: 'browser_console'; pattern?: string; limit?: number; clear?: boolean }
+  | { type: 'browser_requests'; pattern?: string; limit?: number; clear?: boolean }
+  | { type: 'browser_tabs'; action: 'list' | 'new' | 'switch' | 'close'; index?: number; url?: string }
   | { type: 'browser_wait_for'; selector?: string; text?: string; timeoutMs?: number }
   | { type: 'browser_close' }
   // ── Computer / desktop automation (macOS + Windows best effort) ──────
@@ -762,6 +767,11 @@ export const ALL_AGENT_ACTION_TYPES = [
   'browser_extract_text',
   'browser_click',
   'browser_type',
+  'browser_form_input',
+  'browser_evaluate',
+  'browser_console',
+  'browser_requests',
+  'browser_tabs',
   'browser_wait_for',
   'browser_close',
   // ── Computer / desktop automation ───────────────────────────────────

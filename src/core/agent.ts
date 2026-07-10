@@ -1791,9 +1791,19 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'browser_extract_text':
       return `browser_extract_text${action.selector ? ` selector=${truncate(action.selector, 60)}` : ''}`;
     case 'browser_click':
-      return `browser_click ${action.selector ? `selector=${truncate(action.selector, 60)}` : `text=${truncate(action.text ?? '', 60)}`}`;
+      return `browser_click ${action.selector ? `selector=${truncate(action.selector, 60)}` : action.text ? `text=${truncate(action.text, 60)}` : `xy=(${action.x},${action.y})`}`;
     case 'browser_type':
       return `browser_type into=${truncate(action.selector, 50)} text=${truncate(action.text, 50)}`;
+    case 'browser_form_input':
+      return `browser_form_input ${truncate(action.selector, 60)}${action.value !== undefined ? ` value=${truncate(action.value, 40)}` : ''}${action.checked !== undefined ? ` checked=${action.checked}` : ''}`;
+    case 'browser_evaluate':
+      return `browser_evaluate ${truncate(action.script, 80)}`;
+    case 'browser_console':
+      return `browser_console${action.pattern ? ` pattern=${truncate(action.pattern, 40)}` : ''}`;
+    case 'browser_requests':
+      return `browser_requests${action.pattern ? ` pattern=${truncate(action.pattern, 40)}` : ''}`;
+    case 'browser_tabs':
+      return `browser_tabs ${action.action}${action.index !== undefined ? ` index=${action.index}` : ''}${action.url ? ` url=${truncate(action.url, 60)}` : ''}`;
     case 'browser_wait_for':
       return `browser_wait_for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':

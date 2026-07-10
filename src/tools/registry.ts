@@ -1512,18 +1512,96 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'browser_click',
-    description: '点击当前页面元素。提供 selector（CSS）或 text（按可见文字匹配）至少一个。',
+    description: '点击当前页面元素。提供 selector（CSS）、text（按可见文字匹配）或 x+y 视口坐标（配合 browser_screenshot 用于 canvas/shadow DOM 等选择器点不到的元素）至少一种。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: (a: any) => {
-      if (!a?.selector && !a?.text) return ['need selector or text'];
+      const hasCoords = typeof a?.x === 'number' && typeof a?.y === 'number';
+      if (!a?.selector && !a?.text && !hasCoords) return ['need selector, text, or x+y'];
       return [];
     },
     execute: (async (a: any) => {
       const { executeBrowserClick } = await import('./browser/browserTools.js');
       return executeBrowserClick(a);
+    }) as any,
+  },
+  {
+    type: 'browser_form_input',
+    description: '设置表单控件的值，自动识别控件类型：<select> 下拉框传 value/values（选项值或可见文字都行）；checkbox/radio 传 checked；文本输入传 value。比 browser_click 组合拳更可靠。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.selector, 'selector', errs);
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserFormInput } = await import('./browser/browserTools.js');
+      return executeBrowserFormInput(a);
+    }) as any,
+  },
+  {
+    type: 'browser_evaluate',
+    description: '在当前页面执行 JavaScript 并返回 JSON 序列化结果。用于读取页面状态、操作选择器够不到的元素、调试。script 是表达式或 IIFE。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.script, 'script', errs);
+      return errs;
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserEvaluate } = await import('./browser/browserTools.js');
+      return executeBrowserEvaluate(a);
+    }) as any,
+  },
+  {
+    type: 'browser_console',
+    description: '读取浏览器 console 输出（含 pageerror），调试网页必备。可选 pattern（正则过滤）、limit（默认50）、clear（读后清空）。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (a: any) => {
+      const { executeBrowserConsole } = await import('./browser/browserTools.js');
+      return executeBrowserConsole(a);
+    }) as any,
+  },
+  {
+    type: 'browser_requests',
+    description: '读取页面网络请求记录（method/status/url，含失败原因），排查 404/CORS/接口报错。可选 pattern、limit、clear。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: () => [],
+    execute: (async (a: any) => {
+      const { executeBrowserRequests } = await import('./browser/browserTools.js');
+      return executeBrowserRequests(a);
+    }) as any,
+  },
+  {
+    type: 'browser_tabs',
+    description: '多标签页管理：list 列出全部标签、new（可带 url）开新标签、switch 按 index 切换、close 关闭指定/当前标签。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      if (!['list', 'new', 'switch', 'close'].includes(a?.action)) return ['action must be list | new | switch | close'];
+      if (a?.action === 'switch' && typeof a?.index !== 'number') return ['switch needs index'];
+      return [];
+    },
+    execute: (async (a: any) => {
+      const { executeBrowserTabs } = await import('./browser/browserTools.js');
+      return executeBrowserTabs(a);
     }) as any,
   },
   {
