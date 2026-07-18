@@ -313,20 +313,111 @@ function tokenize(text: string): Set<string> {
   return tokens
 }
 
-/** Zero-dependency keyword recall over name+description. Returns top-k entries. */
+/** Leading slice of content that participates in recall scoring. */
+const RECALL_CONTENT_CHARS = 2000
+/** MMR balance: λ·relevance − (1−λ)·max Jaccard similarity to already-selected. */
+const RECALL_MMR_LAMBDA = 0.7
+/** Half-life for time decay of non-evergreen entries, in days. */
+const RECALL_HALF_LIFE_DAYS = 14
+/** Durable categories exempt from time decay. */
+const RECALL_EVERGREEN = new Set<string>(['preference', 'feedback', 'project', 'reference', 'profile'])
+/** Widest candidate pool handed to MMR (keeps re-ranking O(pool²)). */
+const RECALL_MMR_POOL = 12
+
+/** Exponential decay on updatedAt age for transient categories; evergreen → 1. */
+function recallRecencyMultiplier(entry: MemoryEntry, nowMs: number): number {
+  if (RECALL_EVERGREEN.has(entry.category)) return 1
+  const stamp = Date.parse(entry.updatedAt || entry.createdAt || '')
+  if (!Number.isFinite(stamp)) return 1
+  const ageDays = Math.max(0, (nowMs - stamp) / 86_400_000)
+  return Math.exp((-Math.LN2 / RECALL_HALF_LIFE_DAYS) * ageDays)
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1
+  if (a.size === 0 || b.size === 0) return 0
+  let intersection = 0
+  for (const t of a) if (b.has(t)) intersection++
+  const union = a.size + b.size - intersection
+  return union === 0 ? 0 : intersection / union
+}
+
+interface RecallCandidate {
+  entry: MemoryEntry
+  tokens: Set<string>
+  score: number
+}
+
+/**
+ * Greedy MMR selection: each round picks the candidate maximizing
+ * λ·normalizedRelevance − (1−λ)·maxSimilarityToSelected, so near-duplicate
+ * entries about one topic can't crowd out the whole result set.
+ */
+function mmrSelect(candidates: RecallCandidate[], k: number, lambda: number): RecallCandidate[] {
+  if (candidates.length <= 1) return candidates.slice(0, k)
+  let maxScore = -Infinity
+  for (const c of candidates) {
+    if (c.score > maxScore) maxScore = c.score
+  }
+  // Ratio normalization (score/max), not min-max: keyword scores cluster in a
+  // narrow band, and min-max would collapse the weakest candidate to 0 —
+  // making the diversity penalty unable to ever promote it.
+  const scale = maxScore > 0 ? maxScore : Number.EPSILON
+
+  const selected: RecallCandidate[] = []
+  const remaining = [...candidates]
+  while (remaining.length > 0 && selected.length < k) {
+    let bestPos = 0
+    let bestMmr = -Infinity
+    for (let pos = 0; pos < remaining.length; pos++) {
+      const candidate = remaining[pos]!
+      const normalized = candidate.score / scale
+      let maxSim = 0
+      for (const sel of selected) {
+        const sim = jaccard(candidate.tokens, sel.tokens)
+        if (sim > maxSim) maxSim = sim
+      }
+      const mmrScore = lambda * normalized - (1 - lambda) * maxSim
+      if (mmrScore > bestMmr || (mmrScore === bestMmr && candidate.score > remaining[bestPos]!.score)) {
+        bestMmr = mmrScore
+        bestPos = pos
+      }
+    }
+    selected.push(remaining.splice(bestPos, 1)[0]!)
+  }
+  return selected
+}
+
+/**
+ * Zero-dependency keyword recall over name+description+content head, with
+ * time decay for transient categories and MMR diversity re-ranking. Returns
+ * up to max(k, 5) entries, most relevant first.
+ */
 export function recallRelevant(query: string, entries: MemoryEntry[], k = 3): MemoryEntry[] {
   const queryTokens = tokenize(query)
   if (queryTokens.size === 0) return []
-  const scored = entries
-    .map((entry) => {
-      const entryTokens = tokenize(`${entry.name} ${entry.description}`)
-      let hits = 0
-      for (const t of entryTokens) if (queryTokens.has(t)) hits++
-      return { entry, score: entryTokens.size ? hits / Math.sqrt(entryTokens.size) : 0 }
-    })
-    .filter((s) => s.score > 0.15)
-    .sort((a, b) => b.score - a.score)
-  return scored.slice(0, k).map((s) => s.entry)
+  const now = Date.now()
+  const scored: RecallCandidate[] = []
+  for (const entry of entries) {
+    const headTokens = tokenize(`${entry.name} ${entry.description}`)
+    const bodyTokens = tokenize(entry.content.slice(0, RECALL_CONTENT_CHARS))
+    let headHits = 0
+    for (const t of headTokens) if (queryTokens.has(t)) headHits++
+    let bodyHits = 0
+    for (const t of bodyTokens) if (queryTokens.has(t) && !headTokens.has(t)) bodyHits++
+    const relevance =
+      (headTokens.size ? headHits / Math.sqrt(headTokens.size) : 0) +
+      0.5 * (bodyTokens.size ? bodyHits / Math.sqrt(bodyTokens.size) : 0)
+    const score = relevance * recallRecencyMultiplier(entry, now)
+    if (score <= 0.1) continue
+    const tokens = new Set(headTokens)
+    for (const t of bodyTokens) tokens.add(t)
+    scored.push({ entry, tokens, score })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  const limit = Math.max(k, 5)
+  const pool = scored.slice(0, Math.max(limit, RECALL_MMR_POOL))
+  return mmrSelect(pool, limit, RECALL_MMR_LAMBDA).map((s) => s.entry)
 }
 
 // ── legacy migration ────────────────────────────────────────────────────────

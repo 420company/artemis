@@ -23,6 +23,11 @@ import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
 import { buildProviderNativeFunctionTools } from '../src/core/providerNativeTools.js'
 import { probeProviderNativeToolCalls } from '../src/providers/health.js'
+import {
+  GPT_5_6_CONTEXT_LENGTH,
+  inferKnownModelContextLength,
+  resolveEffectiveModelContextLength,
+} from '../src/providers/modelContext.js'
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
@@ -39,6 +44,7 @@ import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
 import { compressMessages, getCompressionTriggerTokens, getMicrocompactTriggerTokens } from '../src/core/contextCompressor.js'
+import { estimateContextLimit } from '../src/cli/hud.js'
 import {
   buildPostCompactRecoveryMessages,
   createLedger,
@@ -1523,6 +1529,25 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  assert(
+    'model context: GPT-5.6 variants use the reduced 272K window',
+    inferKnownModelContextLength('gpt-5.6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      inferKnownModelContextLength('openai/gpt-5.6-luna-20260709') === GPT_5_6_CONTEXT_LENGTH &&
+      inferKnownModelContextLength('gpt-5.6-terra') === GPT_5_6_CONTEXT_LENGTH,
+  )
+  assert(
+    'model context: stale GPT-5.6 metadata and cached values are capped at 272K',
+    resolveEffectiveModelContextLength('gpt-5.6-sol', 372_000) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-5.6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH,
+  )
+  assert(
+    'context compression: GPT-5.6 auto-compaction follows the reduced window',
+    getCompressionTriggerTokens(GPT_5_6_CONTEXT_LENGTH) === 217_600,
+    `trigger=${getCompressionTriggerTokens(GPT_5_6_CONTEXT_LENGTH)}`,
+  )
 }
 
 {

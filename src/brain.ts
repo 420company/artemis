@@ -11,6 +11,7 @@ import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { compressMessages, type CompressResult } from './core/contextCompressor.js';
+import { estimateTokens, estimateMessageTokens, estimateMessagesTokens } from './core/tokenEstimation.js';
 import {
   recordCollapse,
   getOrCreateLedger,
@@ -27,6 +28,7 @@ import {
 } from './core/collapse/index.js';
 import type { CircuitBreakerState, CollapseEntry } from './core/collapse/index.js';
 import {
+    isRecoveryMessage,
     projectDirectToolNames,
     widenProjectedDirectToolNames,
 } from './core/directToolProjection.js';
@@ -857,7 +859,7 @@ function messageRoleBreakdown(messages: SessionMessage[]): Record<string, number
 function recordBifrostAudit(role: BifrostAuditSample['role'], result: ProviderResponse, messages: SessionMessage[]) {
     const usage = result.usage ?? {};
     const promptTokens = Math.round(usage.promptTokens ?? estimateConversationTokens(messages));
-    const completionTokens = Math.round(usage.completionTokens ?? String(result.text ?? '').length / 4);
+    const completionTokens = Math.round(usage.completionTokens ?? estimateTokens(String(result.text ?? '')));
     bifrostAuditSamples.push({
         at: new Date().toISOString(),
         role,
@@ -919,7 +921,8 @@ function buildBudgetNote(promptTokens: any, model: any, contextLength?: number) 
 }
 
 function estimateConversationTokens(messages: SessionMessage[]): number {
-    return messages.reduce((sum, msg) => sum + String(msg.content ?? '').length, 0) / 4;
+    // 统一走 core/tokenEstimation（UTF-8 字节/4 + 图片常数），中文不再低估。
+    return estimateMessagesTokens(messages);
 }
 
 async function buildRuntimeSystemMessages(
@@ -1176,7 +1179,7 @@ function mechanicalTruncateToFit(
     summaryText: string | undefined,
     availableLimit: number,
 ): SessionMessage[] {
-    const est = (m: SessionMessage) => Math.ceil((m?.content?.length ?? 0) / 4);
+    const est = (m: SessionMessage) => estimateMessageTokens(m);
     const budget = Math.floor(Math.max(8_000, availableLimit) * 0.85);
     const summaryMsg: SessionMessage[] = summaryText
         ? [{ id: 'mech-summary', role: 'user', content: '[早期对话已压缩为摘要]\n' + summaryText, createdAt: new Date().toISOString() } as SessionMessage]
@@ -1248,6 +1251,40 @@ async function writeCheckpointJournal(
     } catch { /* 存档绝不能拖垮主流程 */ }
 }
 
+// ── 活动状态 reminder ────────────────────────────────────────────────────────
+// full compact 重建结构时注入 tail 之前的独立小消息（非垫尾）。只在压缩前确实
+// 存在进行中动作/运行中后台任务时才生成，替代旧的 postCompactRecovery 垫尾回放。
+function buildActiveStateReminder(pendingIntent: ExtractedPendingIntent | null): string | undefined {
+    const sections: string[] = [];
+    if (pendingIntent && (pendingIntent.text.trim().length >= 10 || pendingIntent.lastTool)) {
+        const lines = ['## 进行中动作'];
+        if (pendingIntent.lastTool) {
+            const tool = pendingIntent.lastTool;
+            lines.push(`- 最近调用工具：${tool.name}${tool.target ? `（${tool.target}）` : ''}，结果：${tool.outcome}`);
+        }
+        if (pendingIntent.text.trim().length >= 10) {
+            lines.push(`- 压缩前你的原话：${pendingIntent.text.replace(/\s+/g, ' ').slice(0, 600)}`);
+        }
+        sections.push(lines.join('\n'));
+    }
+    try {
+        const running = getBackgroundTaskRegistry().listActive();
+        if (running.length > 0) {
+            sections.push([
+                '## 运行中后台任务',
+                ...running.slice(0, 8).map((task) =>
+                    `- ${task.id} [${task.kind}] ${task.label}（已运行 ${Math.round((Date.now() - task.startedAtMs) / 1000)}s）`),
+            ].join('\n'));
+        }
+    } catch { /* 后台任务注册表不可用时静默跳过 */ }
+    if (sections.length === 0) return undefined;
+    return [
+        '[系统：压缩后活动状态提醒——以下动作/任务在压缩前仍在进行，若已完成或用户已改方向请忽略]',
+        '',
+        ...sections,
+    ].join('\n');
+}
+
 async function compressSessionMessagesForProvider(
     activeSession: Session,
     conversationMessages: SessionMessage[],
@@ -1285,7 +1322,7 @@ async function compressSessionMessagesForProvider(
     const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
     const fullLimit = getConfiguredContextLimit(model, contextLength);
     const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
-    const tokensBefore = Math.ceil(conversationMessages.reduce((s, m) => s + m.content.length / 4, 0))
+    const tokensBefore = estimateMessagesTokens(conversationMessages)
 
     // ── Churn detection: pre-flight threshold escalation ───────────────────
     // If this session has been rumination-looping (compressions firing
@@ -1315,6 +1352,22 @@ async function compressSessionMessagesForProvider(
       activeSession.setContext('pendingActionIntent', pendingPayload)
     }
     const currentFocus = extractCurrentUserFocus(conversationMessages)
+    const activeStateReminder = buildActiveStateReminder(pendingIntent)
+
+    // ── 真实 prompt token 优先 ─────────────────────────────────────────────
+    // provider 上一轮 usage（_lastPromptTokens）是权威用量，但它覆盖到最后一条
+    // assistant 消息为止且包含系统段：扣掉系统段预留，再把之后新增消息的估算
+    // 增量叠加上去。首轮没有 usage 时交给 compressMessages 用估算兜底。
+    let realPromptTokens: number | undefined
+    if (_lastPromptTokens > 0) {
+      let lastAssistantIdx = -1
+      for (let i = conversationMessages.length - 1; i >= 0; i--) {
+        if (conversationMessages[i]!.role === 'assistant') { lastAssistantIdx = i; break }
+      }
+      const newSinceLastCall = conversationMessages.slice(lastAssistantIdx + 1)
+      realPromptTokens = Math.max(0, _lastPromptTokens - Math.max(0, Math.round(reservedTokens)))
+        + estimateMessagesTokens(newSinceLastCall)
+    }
 
     // ── Summarizer window: the summary prompt goes to the worker model, so
     // size its INPUT by the worker's context window — not the lead's. A
@@ -1337,6 +1390,8 @@ async function compressSessionMessagesForProvider(
         threshold: _compressionThresholdOverride,
         churnMultiplier,
         currentFocus: currentFocus ?? undefined,
+        lastPromptTokens: realPromptTokens,
+        activeStateReminder,
         locale,
         onInfo,
       });
@@ -1374,7 +1429,7 @@ async function compressSessionMessagesForProvider(
           id: `collapse-${Date.now()}`,
           collapsedAt: new Date().toISOString(),
           tokensBefore: compression.tokensBefore ?? tokensBefore,
-          tokensAfter: compression.tokensAfter ?? Math.ceil(compression.messages.reduce((s: number, m: SessionMessage) => s + m.content.length / 4, 0)),
+          tokensAfter: compression.tokensAfter ?? estimateMessagesTokens(compression.messages),
           compressedMessageIds: compressedIds,
           summaryText: compression.summaryText,
           mode: compression.mode === 'full_compact' || compression.summaryText ? 'full_compact' : 'microcompact',
@@ -1477,12 +1532,31 @@ async function compressSessionMessagesForProvider(
         )
         if (shouldInjectRecovery) {
           const ledger = await getOrCreateLedger(sessionId)
+          // full compact 的进行中状态已由 activeStateReminder 在重建结构时注入
+          // （tail 之前的独立小消息），这里不再重复；微压缩不重建结构，仍由
+          // 恢复消息携带 pendingAction（保持 7/14 补丁的行为）。
           const recoveryMessages = await buildPostCompactRecoveryMessages(ledger, {
-            pendingAction: pendingActionStored,
+            pendingAction: entry.mode === 'full_compact' && activeStateReminder
+              ? undefined
+              : pendingActionStored,
           })
 
           if (recoveryMessages.length > 0) {
-            compression.messages = [...compression.messages, ...recoveryMessages]
+            // 结构性修复：full compact 返回 tailStartIndex 时，恢复消息插到
+            // tail 近期原文之前——摘要/恢复内容永远不能垫在最新用户话语后面
+            // （7/14「恢复消息垫尾遮蔽真实请求」的结构性根治）。没有
+            // tailStartIndex（微压缩等）时保持旧的追加行为，isRecoveryMessage
+            // 仍会让 getLatestUserText 跳过它们。
+            const insertAt = typeof compression.tailStartIndex === 'number'
+              && compression.tailStartIndex >= 0
+              && compression.tailStartIndex <= compression.messages.length
+              ? compression.tailStartIndex
+              : compression.messages.length
+            compression.messages = [
+              ...compression.messages.slice(0, insertAt),
+              ...recoveryMessages,
+              ...compression.messages.slice(insertAt),
+            ]
             const modeLabel = entry.mode === 'full_compact' ? '压缩' : '微压缩'
             onInfo?.(`[恢复] 已为${modeLabel}注入 ${recoveryMessages.length} 条恢复消息（进行中状态/文件状态/工具）`)
           }
@@ -2288,7 +2362,7 @@ function startDirectBackgroundTool(
 function getLatestUserText(messages: SessionMessage[]): string {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
-        if (message?.role === 'user') {
+        if (message?.role === 'user' && !isRecoveryMessage(message)) {
             return message.content.trim();
         }
     }
@@ -2397,7 +2471,10 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
     const hasProviderPrompt = typeof usage.promptTokens === 'number' && usage.promptTokens > 0;
     _lastPromptTokens = usage.promptTokens ?? _lastPromptTokens;
     return {
-        contextLimit: normalizeContextLimit(providerConfig?.contextLength) ?? estimateContextLimit(result.model ?? providerConfig?.model ?? ''),
+        contextLimit: estimateContextLimit(
+            result.model ?? providerConfig?.model ?? '',
+            normalizeContextLimit(providerConfig?.contextLength),
+        ),
         promptTokens: usage.promptTokens ?? 0,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
@@ -2485,7 +2562,7 @@ function estimateResponseUsage(
     const promptTokens = Math.max(1, Math.round(estimateConversationTokens(messages)));
     const completionTokens = hasProviderCompletion
         ? usage.completionTokens
-        : Math.max(0, Math.round(String(result.text ?? '').length / 4));
+        : Math.max(0, estimateTokens(String(result.text ?? '')));
     return {
         ...result,
         usage: {
@@ -2692,6 +2769,12 @@ export async function think(
             [],
         )
         : [];
+    // Persist the active tool surface so the collapse ledger can restore a
+    // truthful "可用工具" section after compaction (previously never written,
+    // so recovery always rendered an empty tool list).
+    if (projectedToolNames.length > 0) {
+        tSession.setContext('activeToolNames', projectedToolNames);
+    }
     const widenProjectedTools = (): void => {
         if (!supportsNativeTools || plainChat) {
             return;
@@ -2703,6 +2786,9 @@ export async function think(
             toolProjectionWidenAttempt,
             projectedToolNames,
         );
+        if (projectedToolNames.length > 0) {
+            tSession.setContext('activeToolNames', projectedToolNames);
+        }
     };
     const hasImageAttachments = imageAttachments.length > 0;
     let finalResult: ProviderResponse | null = null;

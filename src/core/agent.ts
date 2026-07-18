@@ -57,6 +57,15 @@ import {
   updateTaskRuntime,
 } from './taskRuntime.js';
 import {
+  INTERJECTION_MESSAGE_NAME,
+  abortSubagentRuns,
+  formatInterjection,
+  getInterjectionQueue,
+  registerSubagentRun,
+  releaseInterjectionQueueIfEmpty,
+  releaseSubagentRun,
+} from './interjectionQueue.js';
+import {
   createDelegatedChildPermissionManager,
   getDelegatedChildPermissionMode,
 } from './delegatedPermissions.js';
@@ -1850,6 +1859,10 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `request_user_confirmation "${truncate(action.question, 100)}"${action.screenshotPath ? ` screenshot=${truncate(action.screenshotPath, 80)}` : ''}`;
     case 'memory':
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
+    case 'task_output':
+      return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
+    case 'kill_task':
+      return `kill_task ${action.taskId}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
@@ -3137,6 +3150,25 @@ function summarizeToolFailureOutcome(
   };
 }
 
+// A heavyweight, self-contained visual-generation tool (saga long video / single
+// video / image) that failed is a hard blocker the agent cannot resolve by poking
+// around the workspace. Treat its unresolved failure as an accepted blocker so the
+// agent reports the failure and stops — instead of being pushed by the completion
+// guards into freelancing list_files / run_command / whoami and then drifting into
+// small talk. (blockerAccepted only ALLOWS finishing; a real retry action still works
+// because the guards require actions.length === 0, and a later success clears the
+// unresolvedToolFailure.)
+function isTerminalVisualGenerationFailureBlocker(
+  failure: RuntimeCompletionChecklist['unresolvedToolFailure'],
+): boolean {
+  return (
+    !!failure &&
+    (failure.actionType === 'generate_long_video' ||
+      failure.actionType === 'generate_video' ||
+      failure.actionType === 'generate_image')
+  );
+}
+
 function getFreshChangedFiles(
   session: SessionRecord,
   baselineChangedFiles: Set<string>,
@@ -3465,11 +3497,24 @@ export type RunAgentOptions = {
   }) => Promise<boolean>;
   pollRunningUserMessages?: () => string[];
   onRunningUserMessageAccepted?: (text: string) => void;
+  /**
+   * Explicit cancellation signal for this run (parent-driven abort of a child
+   * agent, host-level Esc). Checked at the turn-loop top and forwarded to tool
+   * execution. This is cancellation, not interjection — mid-turn user messages
+   * never abort in-flight work.
+   */
+  abortSignal?: AbortSignal;
 };
 
 const RUNNING_INTERJECTION_POLL_MS = 750;
 const RUNNING_INTERJECTION_RESTART_TEXT = '__ARTEMIS_RUNNING_INTERJECTION_RESTART__';
 
+/**
+ * Retained for compatibility with external references. Interjections no longer
+ * abort running work, so nothing in this module throws it anymore; mid-turn
+ * user messages are buffered in the InterjectionQueue and injected at safe
+ * points instead.
+ */
 class RunningInterjectionAbortError extends Error {
   constructor() {
     super(RUNNING_INTERJECTION_RESTART_TEXT);
@@ -3502,6 +3547,48 @@ type SpecialistRun = {
   session: SessionRecord;
   result: RunResult;
 };
+
+/**
+ * Options patch applied to every child-agent run spawned under a parent:
+ * a dedicated abort signal (registered in the central subagent registry and
+ * chained to the parent's own signal) plus stripped interjection poll hooks —
+ * the parent run stays the single consumer of the host's poll source, so
+ * mid-turn user messages reach the model at the parent's next safe point
+ * instead of leaking into an arbitrary child conversation.
+ */
+type SubagentCoordination = {
+  abortSignal: AbortSignal;
+  pollRunningUserMessages: undefined;
+  onRunningUserMessageAccepted: undefined;
+};
+
+async function withSubagentCoordination<T>(
+  parentSession: SessionRecord,
+  options: RunAgentOptions,
+  run: (coordination: SubagentCoordination) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  registerSubagentRun(parentSession.id, controller);
+  const parentSignal = options.abortSignal;
+  const onParentAbort = (): void => controller.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort();
+    } else {
+      parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+  }
+  try {
+    return await run({
+      abortSignal: controller.signal,
+      pollRunningUserMessages: undefined,
+      onRunningUserMessageAccepted: undefined,
+    });
+  } finally {
+    parentSignal?.removeEventListener('abort', onParentAbort);
+    releaseSubagentRun(parentSession.id, controller);
+  }
+}
 
 function buildBuilderProposalTask(task: string): string {
   return [
@@ -3654,19 +3741,22 @@ export async function runBuilderProposalAgent(
   options.onInfo?.('[agent:builder] proposal running');
 
   try {
-    const result = await runAgent(
-      childSession,
-      buildBuilderProposalTask(task),
-      {
-        ...options,
-        permissionManager: childPermissionManager,
-        maxTurns: childMaxTurns,
-        profile: 'builder',
-        delegationDepth: delegationDepth + 1,
-        maxDelegationDepth,
-        appendUserMessage: true,
-        onInfo: (message) => options.onInfo?.(`[agent:builder] ${message}`),
-      },
+    const result = await withSubagentCoordination(parentSession, options, (coordination) =>
+      runAgent(
+        childSession,
+        buildBuilderProposalTask(task),
+        {
+          ...options,
+          ...coordination,
+          permissionManager: childPermissionManager,
+          maxTurns: childMaxTurns,
+          profile: 'builder',
+          delegationDepth: delegationDepth + 1,
+          maxDelegationDepth,
+          appendUserMessage: true,
+          onInfo: (message) => options.onInfo?.(`[agent:builder] ${message}`),
+        },
+      ),
     );
 
     await syncSessionRecordInPlace(parentSession, options.sessionStore);
@@ -3848,21 +3938,24 @@ export async function approveBuilderExecution(
 
   let result;
   try {
-    result = await runAgent(
-      childSession,
-      buildBuilderExecutionTask(delegatedTask, action.summary),
-      {
-        ...options,
-        permissionManager: createDelegatedChildPermissionManager(
-          options.permissionManager,
-          'builder',
-          'execution',
-        ),
-        maxTurns: clampTurns(action.maxTurns ?? Math.max(options.maxTurns, 15)),
-        profile: 'builder',
-        appendUserMessage: true,
-        onInfo: (message) => options.onInfo?.(`[agent:builder] ${message}`),
-      },
+    result = await withSubagentCoordination(parentSession, options, (coordination) =>
+      runAgent(
+        childSession,
+        buildBuilderExecutionTask(delegatedTask, action.summary),
+        {
+          ...options,
+          ...coordination,
+          permissionManager: createDelegatedChildPermissionManager(
+            options.permissionManager,
+            'builder',
+            'execution',
+          ),
+          maxTurns: clampTurns(action.maxTurns ?? Math.max(options.maxTurns, 15)),
+          profile: 'builder',
+          appendUserMessage: true,
+          onInfo: (message) => options.onInfo?.(`[agent:builder] ${message}`),
+        },
+      ),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -4020,16 +4113,19 @@ export async function runSpecialistAgent(
   options.onInfo?.(`[agent:${role}] running`);
 
   try {
-    const result = await runAgent(childSession, task, {
-      ...options,
-      permissionManager: childPermissionManager,
-      maxTurns: childMaxTurns,
-      profile: role,
-      delegationDepth: delegationDepth + 1,
-      maxDelegationDepth,
-      appendUserMessage: options.appendUserMessage ?? true,
-      onInfo: (message) => options.onInfo?.(`[agent:${role}] ${message}`),
-    });
+    const result = await withSubagentCoordination(parentSession, options, (coordination) =>
+      runAgent(childSession, task, {
+        ...options,
+        ...coordination,
+        permissionManager: childPermissionManager,
+        maxTurns: childMaxTurns,
+        profile: role,
+        delegationDepth: delegationDepth + 1,
+        maxDelegationDepth,
+        appendUserMessage: options.appendUserMessage ?? true,
+        onInfo: (message) => options.onInfo?.(`[agent:${role}] ${message}`),
+      }),
+    );
 
     await syncSessionRecordInPlace(parentSession, options.sessionStore);
     if (!managedByParent) {
@@ -5245,7 +5341,15 @@ async function executeAuthorizedAction(
 ): Promise<ActionOutcome> {
   try {
     if (abortSignal?.aborted) {
-      throw new RunningInterjectionAbortError();
+      const message = 'Action skipped: the run was cancelled before this tool started.';
+      return {
+        action,
+        ok: false,
+        output: message,
+        error: buildToolError('tool_run_cancelled', message, {
+          retryable: false,
+        }),
+      };
     }
     const hydratedAction = await hydrateRuntimeManagedAction(action, options.cwd);
     const profile = options.profile ?? 'main';
@@ -5395,12 +5499,11 @@ async function executeAuthorizedAction(
 }
 
 /**
- * Wraps executeAuthorizedAction with a 750ms poll for inbound user messages.
- * If the user interjects while the tool is running, the polled messages are
- * appended to the session, the tool's abort signal is fired so the underlying
- * fetch/sleep can short-circuit, and a RunningInterjectionAbortError is thrown
- * for the caller to translate into a turn restart. Without a polling provider
- * this degrades to a plain executeAuthorizedAction call.
+ * Executes an action without any interjection-driven interruption. Mid-turn
+ * user messages accumulate in the session's InterjectionQueue while the tool
+ * runs and are injected at the next safe point of the turn loop — in-flight
+ * work is never aborted by an interjection. Only the run's explicit
+ * cancellation signal (options.abortSignal) is forwarded to the tool.
  */
 async function executeWithRunningInterjectionCheck(
   session: SessionRecord,
@@ -5408,63 +5511,13 @@ async function executeWithRunningInterjectionCheck(
   options: RunAgentOptions,
   preAuthorized = false,
 ): Promise<ActionOutcome> {
-  const poll = options.pollRunningUserMessages;
-  if (!poll) {
-    return executeAuthorizedAction(session, action, options, preAuthorized);
-  }
-
-  const controller = new AbortController();
-  let interrupted = false;
-  let polling = false;
-
-  const checkOnce = async (): Promise<void> => {
-    if (polling || controller.signal.aborted) return;
-    polling = true;
-    try {
-      const messages = poll() ?? [];
-      let accepted = 0;
-      for (const raw of messages) {
-        const cleanMessage = raw.trim();
-        if (!cleanMessage) continue;
-        session.messages.push({
-          id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-          role: 'user',
-          content: cleanMessage,
-          createdAt: new Date().toISOString(),
-        });
-        options.onRunningUserMessageAccepted?.(cleanMessage);
-        accepted += 1;
-      }
-      if (accepted > 0) {
-        await options.sessionStore.save(session);
-        interrupted = true;
-        controller.abort();
-      }
-    } finally {
-      polling = false;
-    }
-  };
-
-  const timer = setInterval(() => {
-    void checkOnce();
-  }, RUNNING_INTERJECTION_POLL_MS);
-
-  try {
-    return await executeAuthorizedAction(
-      session,
-      action,
-      options,
-      preAuthorized,
-      controller.signal,
-    );
-  } catch (error) {
-    if (interrupted) {
-      throw new RunningInterjectionAbortError();
-    }
-    throw error;
-  } finally {
-    clearInterval(timer);
-  }
+  return executeAuthorizedAction(
+    session,
+    action,
+    options,
+    preAuthorized,
+    options.abortSignal,
+  );
 }
 
 async function resolveActionPermissions<TAction extends AgentAction>(
@@ -5810,11 +5863,21 @@ async function executeActionBatch(
   return outcomes;
 }
 
+/**
+ * RunResult extended with interjections that arrived too late to be injected
+ * into the loop (turn budget exhausted). The texts are already persisted into
+ * the session as marked user messages; a caller that wants to answer them
+ * immediately should start a new round with appendUserMessage: false.
+ */
+export type AgentRunResult = RunResult & {
+  pendingInterjections?: string[];
+};
+
 export async function runAgent(
   session: SessionRecord,
   userInput: string,
   options: RunAgentOptions,
-): Promise<RunResult> {
+): Promise<AgentRunResult> {
   // /stop（App UI 里是 @stop）——取消正在运行的后台生成，不调模型、不写历史。
   // 整条消息精确等于才触发，粘贴文本里夹带 /stop 不会误触发。
   {
@@ -5928,6 +5991,35 @@ export async function runAgent(
   let readOnlyOnlyTurnsWithoutWrites = 0;
   let readOnlyTurnsNudgeSent = false;
   let pendingTrimmedActionFollowup = false;
+  // Push-based mid-turn interjection buffer. Any input surface can push into
+  // the session's queue at any time; legacy pollRunningUserMessages callers are
+  // bridged in via attachPollSource so they keep working unchanged. Entries are
+  // drained at safe points (turn-loop top, pre-return double drain) and
+  // injected as synthetic user messages — in-flight tools are never aborted.
+  const interjectionQueue = getInterjectionQueue(session.id);
+  const detachInterjectionPollSource = options.pollRunningUserMessages
+    ? interjectionQueue.attachPollSource(options.pollRunningUserMessages)
+    : undefined;
+  const drainPendingInterjections = async (): Promise<string[]> => {
+    interjectionQueue.harvestPollSources();
+    const entries = interjectionQueue.drainAll();
+    const accepted: string[] = [];
+    for (const entry of entries) {
+      session.messages.push({
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        role: 'user',
+        name: INTERJECTION_MESSAGE_NAME,
+        content: formatInterjection(entry.text),
+        createdAt: entry.receivedAt,
+      });
+      options.onRunningUserMessageAccepted?.(entry.text);
+      accepted.push(entry.text);
+    }
+    if (accepted.length > 0) {
+      await options.sessionStore.save(session);
+    }
+    return accepted;
+  };
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
   const odinRuntimeSection = await buildOdinRuntimeSection({
     cwd: options.cwd,
@@ -6143,24 +6235,11 @@ export async function runAgent(
           continue;
         }
 
-        let outcome: ActionOutcome;
-        try {
-          outcome = await executeWithRunningInterjectionCheck(
-            session,
-            mapped.action,
-            options,
-          );
-        } catch (error) {
-          if (error instanceof RunningInterjectionAbortError) {
-            return {
-              text: RUNNING_INTERJECTION_RESTART_TEXT,
-              raw: null,
-              nativeToolCalls: [],
-              streamed: false,
-            };
-          }
-          throw error;
-        }
+        const outcome = await executeWithRunningInterjectionCheck(
+          session,
+          mapped.action,
+          options,
+        );
         outcomes.push(outcome);
         toolOutputs.push({
           callId: call.callId,
@@ -6178,7 +6257,7 @@ export async function runAgent(
         await options.sessionStore.save(session);
       }
 
-      const nextCompletion = await completeWithRunningInterjectionCheck(
+      currentCompletion = await completeProviderTurn(
         provider,
         providerMessages,
         {
@@ -6187,15 +6266,6 @@ export async function runAgent(
           nativeFunctionTools,
         },
       );
-      if (nextCompletion.interrupted) {
-        return {
-          text: RUNNING_INTERJECTION_RESTART_TEXT,
-          raw: null,
-          nativeToolCalls: [],
-          streamed: false,
-        };
-      }
-      currentCompletion = nextCompletion.completion;
     }
 
     throw new Error(
@@ -6203,77 +6273,42 @@ export async function runAgent(
     );
   }
 
-  const absorbRunningUserMessages = async (): Promise<number> => {
-    const runningUserMessages = options.pollRunningUserMessages?.() ?? [];
-    let accepted = 0;
-    for (const runningUserMessage of runningUserMessages) {
-      const cleanMessage = runningUserMessage.trim();
-      if (!cleanMessage) {
-        continue;
-      }
-      session.messages.push({
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-        role: 'user',
-        content: cleanMessage,
-        createdAt: new Date().toISOString(),
-      });
-      options.onRunningUserMessageAccepted?.(cleanMessage);
-      accepted += 1;
-    }
-    if (accepted > 0) {
-      await options.sessionStore.save(session);
-    }
-    return accepted;
-  };
-
-  const completeWithRunningInterjectionCheck = async (
+  const completeProviderTurn = async (
     provider: ChatProvider,
     providerMessages: SessionMessage[],
     requestOptions: ProviderRequestOptions,
     onChunk?: (delta: string) => void,
-  ): Promise<{ interrupted: true } | { interrupted: false; completion: ProviderResponse }> => {
-    const controller = new AbortController();
-    let interrupted = false;
-    let polling = false;
-    const poll = async (): Promise<void> => {
-      if (polling || controller.signal.aborted) return;
-      polling = true;
-      try {
-        if ((await absorbRunningUserMessages()) > 0) {
-          interrupted = true;
-          controller.abort();
-        }
-      } finally {
-        polling = false;
-      }
-    };
-    const timer = setInterval(() => {
-      void poll();
-    }, RUNNING_INTERJECTION_POLL_MS);
-    try {
-      const completion = onChunk && typeof provider.completeStream === 'function'
-        ? await provider.completeStream(providerMessages, onChunk, {
-          ...requestOptions,
-          abortSignal: controller.signal,
-        })
-        : await provider.complete(providerMessages, {
-          ...requestOptions,
-          abortSignal: controller.signal,
-        });
-      return { interrupted: false, completion };
-    } catch (error) {
-      if (interrupted && isAbortLikeError(error)) {
-        return { interrupted: true };
-      }
-      throw error;
-    } finally {
-      clearInterval(timer);
-    }
+  ): Promise<ProviderResponse> => {
+    // Interjections never abort a running completion; they wait in the queue
+    // for the next safe drain point. Only the run's explicit cancellation
+    // signal is forwarded to the provider.
+    return onChunk && typeof provider.completeStream === 'function'
+      ? provider.completeStream(providerMessages, onChunk, {
+        ...requestOptions,
+        abortSignal: options.abortSignal,
+      })
+      : provider.complete(providerMessages, {
+        ...requestOptions,
+        abortSignal: options.abortSignal,
+      });
   };
 
   for (let turn = 1; turn <= options.maxTurns; turn += 1) {
+    if (options.abortSignal?.aborted) {
+      throw new AgentRuntimeInterruptedError(
+        options.rootRuntimeId ?? session.id,
+        'run aborted by the parent runtime',
+      );
+    }
     await processDelegatedRuntimeCommands(session, runOptions);
-    await absorbRunningUserMessages();
+    {
+      const drained = await drainPendingInterjections();
+      if (drained.length > 0) {
+        options.onInfo?.(
+          `[interjection] profile=${profile} turn=${turn} injected ${drained.length} mid-turn user message(s) at loop top`,
+        );
+      }
+    }
 
     if (turn === 1) {
       await recordHeimdallStage(
@@ -6420,7 +6455,7 @@ export async function runAgent(
         const onInfoCallback = options.onInfo;
         onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
         try {
-          const streamedAttempt = await completeWithRunningInterjectionCheck(
+          completion = await completeProviderTurn(
             activeProvider,
             providerMessages,
             {
@@ -6434,23 +6469,13 @@ export async function runAgent(
               );
             },
           );
-          if (streamedAttempt.interrupted) {
-            options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted; restarting with latest user message`);
-            continue;
-          }
-          completion = streamedAttempt.completion;
         } finally {
           onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
         }
     } else {
-      const completionAttempt = await completeWithRunningInterjectionCheck(activeProvider, providerMessages, {
+      completion = await completeProviderTurn(activeProvider, providerMessages, {
         ...providerCallOptions,
       });
-      if (completionAttempt.interrupted) {
-        options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted; restarting with latest user message`);
-        continue;
-      }
-      completion = completionAttempt.completion;
     }
     completion = await runNativeToolLoop(
       activeProvider,
@@ -6458,10 +6483,6 @@ export async function runAgent(
       completion,
       nativeToolRuntime,
     );
-    if (completion.text === RUNNING_INTERJECTION_RESTART_TEXT) {
-      options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted during native tool continuation; restarting with latest user message`);
-      continue;
-    }
     // Surface per-turn token usage so the workflow progress UI can attribute
     // tokens to the currently-active stage (researcher / reviewer / synthesis
     // / execute). The string format is what applyWorkflowProgressInfo parses.
@@ -6594,7 +6615,8 @@ export async function runAgent(
       (session.verificationCommands?.length ?? 0) > baselineVerificationCount;
     completionChecklist.blockerAccepted =
       completionChecklist.blockerAccepted ||
-      replyLooksLikeExecutionBlocker(envelope.reply);
+      replyLooksLikeExecutionBlocker(envelope.reply) ||
+      isTerminalVisualGenerationFailureBlocker(completionChecklist.unresolvedToolFailure);
     const replyIsPureIntent = replyLooksLikeIntentWithoutCompletion(envelope.reply);
     const unresolvedToolFailure = completionChecklist.unresolvedToolFailure;
     const deterministicChecklistUnresolvedToolFailure =
@@ -6960,21 +6982,11 @@ export async function runAgent(
           options.onInfo?.(
             `[agent] synthesizing ${fallbackReadActions.length} fallback read_file action(s) from the active task context`,
           );
-          let fallbackOutcomes: ActionOutcome[];
-          try {
-            fallbackOutcomes = await executeActionBatch(
-              session,
-              fallbackReadActions,
-              runOptions,
-            );
-          } catch (error) {
-            if (error instanceof RunningInterjectionAbortError) {
-              options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted during fallback reads; restarting`);
-              await options.sessionStore.save(session);
-              continue;
-            }
-            throw error;
-          }
+          const fallbackOutcomes = await executeActionBatch(
+            session,
+            fallbackReadActions,
+            runOptions,
+          );
           await recordOutcomes(fallbackOutcomes);
           await options.sessionStore.save(session);
           continue;
@@ -7111,6 +7123,24 @@ export async function runAgent(
         continue;
       }
 
+      // Double drain before finishing the turn: the first drain catches
+      // interjections that arrived during the last tool batch/completion; the
+      // second closes the bookkeeping window opened by the first drain's
+      // session save. Anything drained means the turn is not over — the model
+      // must see the user's message before this run can end.
+      if ((await drainPendingInterjections()).length > 0) {
+        options.onInfo?.(
+          `[interjection] profile=${profile} turn=${turn} drained mid-turn message(s) before completion; continuing`,
+        );
+        continue;
+      }
+      if ((await drainPendingInterjections()).length > 0) {
+        options.onInfo?.(
+          `[interjection] profile=${profile} turn=${turn} drained late message(s) during turn-end bookkeeping; continuing`,
+        );
+        continue;
+      }
+
       return {
         reply: finalReply,
         turns: turn,
@@ -7144,17 +7174,7 @@ export async function runAgent(
       );
     }
 
-    let outcomes: ActionOutcome[];
-    try {
-      outcomes = await executeActionBatch(session, actions, runOptions);
-    } catch (error) {
-      if (error instanceof RunningInterjectionAbortError) {
-        options.onInfo?.(`[interjection] profile=${profile} turn=${turn} accepted during tool batch; restarting`);
-        await options.sessionStore.save(session);
-        continue;
-      }
-      throw error;
-    }
+    const outcomes = await executeActionBatch(session, actions, runOptions);
     await recordOutcomes(outcomes);
     await recordOutcomeWorkflowEntry(session, options, turn, outcomes);
 
@@ -7165,11 +7185,42 @@ export async function runAgent(
       finalReply ||
       `Stopped after reaching max turns (${options.maxTurns}) without a final answer.`;
 
+    // The turn budget is exhausted, so leftover interjections cannot be
+    // injected into another loop iteration. They are persisted to the session
+    // (drainPendingInterjections appends them as marked user messages) and
+    // surfaced to the caller so it can start a fresh round immediately. Since
+    // the messages are already in the session, a follow-up round should use
+    // appendUserMessage: false instead of re-sending the text.
+    const strandedInterjections = await drainPendingInterjections();
+
     return {
       reply: maxTurnReply,
       turns: options.maxTurns,
+      ...(strandedInterjections.length > 0
+        ? { pendingInterjections: strandedInterjections }
+        : {}),
     };
   } finally {
+    detachInterjectionPollSource?.();
+    // Stranded-interjection safety net: anything that arrived after the last
+    // in-loop drain (or on an early-return path) is persisted into the session
+    // as a marked user message so it is never silently dropped — the next run
+    // on this session drains/sees it.
+    try {
+      const stranded = await drainPendingInterjections();
+      if (stranded.length > 0) {
+        options.onInfo?.(
+          `[interjection] ${stranded.length} message(s) arrived after the run ended; persisted to the session for the next round`,
+        );
+      }
+    } catch {
+      /* never let interjection flushing mask the run's own result */
+    }
+    releaseInterjectionQueueIfEmpty(session.id);
+    // Broadcast abort to any child agent still registered under this run —
+    // e.g. parallel delegate siblings orphaned when one of them threw.
+    abortSubagentRuns(session.id);
+
     try {
       const { compressTrajectory } = await import('./memory.js');
       compressTrajectory(options.cwd, session, '').catch(() => {});

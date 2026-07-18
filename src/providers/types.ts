@@ -112,6 +112,11 @@ export type ProviderRequestOptions = {
    * in-flight model request as soon as the user sends a correction/interjection.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Invoked when the transport layer schedules an automatic retry, so
+   * interactive runtimes can surface a "retrying" indicator.
+   */
+  onRetry?: (attempt: number, delayMs: number, reason: string) => void;
 };
 
 export type ProviderTarget = 'main' | AgentRole;

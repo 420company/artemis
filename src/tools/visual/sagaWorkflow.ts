@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
@@ -440,6 +440,33 @@ async function saveImageAttachmentsToLocalPaths(_cwd: string, imageAttachments?:
   return unique(out);
 }
 
+// Dedup image references by FILE CONTENT (not path string). The desktop app embeds
+// attachment paths into the message text ("Attached paths: - /x.png") AND sends the
+// same image as an attachment (which we copy into saga-refs). Those are two different
+// path strings for the SAME image, so plain unique() counts one upload as two (and
+// two as four). Hashing the bytes collapses the original + its copy back to one.
+async function dedupImagePathsByContent(paths: string[]): Promise<string[]> {
+  const refsDir = path.join(getMediaOutputRoot(), 'saga-refs');
+  // Prefer the stable saga-refs copy over a transient user path on a content collision.
+  const ordered = unique(paths).sort(
+    (a, b) => (b.startsWith(refsDir) ? 1 : 0) - (a.startsWith(refsDir) ? 1 : 0),
+  );
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of ordered) {
+    let key: string;
+    try {
+      key = 'h:' + createHash('sha256').update(await readFile(p)).digest('hex');
+    } catch {
+      key = 'p:' + p;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
 type ExtractedReferences = {
   imageUrls: string[];
   videoUrls: string[];
@@ -482,7 +509,7 @@ async function classifyReferences(
     imageUrls: unique(imageUrls),
     videoUrls: unique(videoUrls),
     audioUrls: unique(audioUrls),
-    imagePaths: unique(imagePaths),
+    imagePaths: await dedupImagePathsByContent(imagePaths),
     videoPaths: unique(videoPaths),
     audioPaths: unique(audioPaths),
   };

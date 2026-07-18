@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { redactText } from '../utils/redact.js';
 import { createProviderFromConfig } from './factory.js';
 import { ProviderStore } from './store.js';
 import type {
@@ -31,7 +32,7 @@ function sanitizeMs(value: number | undefined): number | undefined {
 
 function sanitizeMessage(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  const singleLine = value.replace(/\s+/g, ' ').trim();
+  const singleLine = redactText(value.replace(/\s+/g, ' ').trim());
   if (!singleLine) return undefined;
   return singleLine.slice(0, 240);
 }

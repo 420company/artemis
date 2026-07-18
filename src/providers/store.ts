@@ -12,7 +12,7 @@ import type {
   VisualModelConfig,
 } from './types.js';
 import { ensureDir, pathExists } from '../utils/fs.js';
-import { detectModelContextLength } from './modelContext.js';
+import { capKnownModelContextLength, detectModelContextLength } from './modelContext.js';
 
 function getDefaultSetupConfig(): ArtemisSetupConfig {
   return {
@@ -298,6 +298,15 @@ export class ProviderStore {
     const raw = await readFile(this.filePath, 'utf8');
     const loaded = parseProviderStoreJson(raw, this.filePath);
     const parsed = loaded.data;
+    let repairedContextLength = false;
+
+    const capStoredContextLength = <T extends { model: string; contextLength?: number }>(entry: T): T => {
+      if (entry.contextLength === undefined) return entry;
+      const capped = capKnownModelContextLength(entry.model, entry.contextLength);
+      if (capped === undefined || capped === entry.contextLength) return entry;
+      repairedContextLength = true;
+      return { ...entry, contextLength: capped };
+    };
 
     const empty = getEmptyStore();
     const customProviders = Array.isArray(parsed.customProviders)
@@ -306,7 +315,7 @@ export class ProviderStore {
           typeof entry?.label === 'string' &&
           typeof entry?.baseUrl === 'string' &&
           typeof entry?.model === 'string'
-        )
+        ).map(capStoredContextLength)
       : [];
     const auxiliaryModels =
       typeof parsed.auxiliaryModels === 'object' && parsed.auxiliaryModels !== null
@@ -321,6 +330,7 @@ export class ProviderStore {
       profiles: Array.isArray(parsed.profiles)
         ? parsed.profiles
             .filter((entry): entry is ProviderProfile => typeof entry?.id === 'string')
+            .map(capStoredContextLength)
             .map((entry) => ({
               ...entry,
               protocol: normalizeProviderProtocol(entry.protocol),
@@ -340,7 +350,7 @@ export class ProviderStore {
       setup,
       visualProfile: parsed.visualProfile || empty.visualProfile,
     };
-    if (loaded.repairedTrailingJunk) {
+    if (loaded.repairedTrailingJunk || repairedContextLength) {
       await this.save(data);
     }
     return data;

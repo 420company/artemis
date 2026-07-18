@@ -1,6 +1,12 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
+import {
+  createStreamIdleGuard,
+  retryFetch,
+  StreamIdleTimeoutError,
+  StreamInterruptedError,
+} from './retryFetch.js';
 import type {
   ChatProvider,
   ProviderApiKeyHeader,
@@ -416,6 +422,50 @@ function injectImagesIntoMessages(
   }
 }
 
+const IMAGE_OMITTED_PLACEHOLDER = '[image omitted due to request size]';
+
+const INLINE_IMAGE_MARKDOWN = /!\[image\]\(data:[^)]*\)/g;
+
+function stripImagesFromChatBody(
+  body: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return null;
+  let strippedAny = false;
+  const nextMessages = messages.map((message) => {
+    const record = message as Record<string, unknown>;
+    const content = record.content;
+    // DeepSeek variant: base64 image embedded as inline markdown in a string.
+    if (typeof content === 'string' && INLINE_IMAGE_MARKDOWN.test(content)) {
+      INLINE_IMAGE_MARKDOWN.lastIndex = 0;
+      strippedAny = true;
+      return { ...record, content: content.replace(INLINE_IMAGE_MARKDOWN, IMAGE_OMITTED_PLACEHOLDER) };
+    }
+    INLINE_IMAGE_MARKDOWN.lastIndex = 0;
+    // Gemini variant: parts array with inlineData entries.
+    const parts = record.parts;
+    if (Array.isArray(parts) && parts.some((p) => isRecord(p) && 'inlineData' in p)) {
+      strippedAny = true;
+      return {
+        ...record,
+        parts: parts.map((p) => (isRecord(p) && 'inlineData' in p ? { text: IMAGE_OMITTED_PLACEHOLDER } : p)),
+      };
+    }
+    if (!Array.isArray(content)) return message;
+    let changed = false;
+    const nextContent = content.map((block) => {
+      if (!isRecord(block)) return block;
+      if (block.type !== 'image_url' && block.type !== 'image') return block;
+      changed = true;
+      return { type: 'text', text: IMAGE_OMITTED_PLACEHOLDER };
+    });
+    if (!changed) return message;
+    strippedAny = true;
+    return { ...record, content: nextContent };
+  });
+  return strippedAny ? { ...body, messages: nextMessages } : null;
+}
+
 function extractText(content: unknown): string {
   if (typeof content === 'string') {
     return content;
@@ -484,9 +534,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
       }))
     }
 
+    // Idle guard: aborts the underlying request when the stream stays open
+    // but stops delivering meaningful deltas. Its signal wraps the caller's
+    // abort signal so both cancellation paths reach the socket.
+    const idleGuard = createStreamIdleGuard({ externalSignal: options?.abortSignal })
     let response: Response
     try {
-      response = await fetch(
+      response = await retryFetch(
         `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`,
         {
           method: 'POST',
@@ -495,10 +549,19 @@ export class OpenAICompatibleProvider implements ChatProvider {
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
           },
           body: JSON.stringify(body),
-          signal: options?.abortSignal,
+          signal: idleGuard.signal,
+        },
+        {
+          signal: idleGuard.signal,
+          onRetry: options?.onRetry,
+          onPayloadTooLarge: () => {
+            const stripped = stripImagesFromChatBody(body)
+            return stripped ? JSON.stringify(stripped) : null
+          },
         },
       )
     } catch (error) {
+      idleGuard.dispose()
       if (options?.abortSignal?.aborted) {
         throw error
       }
@@ -506,6 +569,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     }
 
     if (!response.ok) {
+      idleGuard.dispose()
       const errBody = await response.text()
       { const __e = new Error(buildProviderErrorMessage(response, errBody, this.config, options?.locale)); (__e as any).status = response.status; throw __e }
     }
@@ -519,10 +583,15 @@ export class OpenAICompatibleProvider implements ChatProvider {
     // user sees them.
     const contentType = response.headers.get('content-type') ?? ''
     if (!contentType.includes('text/event-stream')) {
-      return await this.parseNonStreamingBody(response, startedAt)
+      try {
+        return await this.parseNonStreamingBody(response, startedAt)
+      } finally {
+        idleGuard.dispose()
+      }
     }
 
     if (!response.body) {
+      idleGuard.dispose()
       throw new Error('Provider returned no response body for streaming request.')
     }
 
@@ -561,100 +630,126 @@ export class OpenAICompatibleProvider implements ChatProvider {
       }
     }
 
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed || trimmed === 'data: [DONE]') continue
-        if (!trimmed.startsWith('data: ')) continue
-
-        let parsed: unknown
+    try {
+      for (;;) {
+        let step: Awaited<ReturnType<typeof reader.read>>
         try {
-          parsed = JSON.parse(trimmed.slice(6))
-        } catch {
-          continue
+          step = await idleGuard.race(reader.read())
+        } catch (error) {
+          if (error instanceof StreamIdleTimeoutError) throw error
+          if (options?.abortSignal?.aborted) throw error
+          // Mid-stream disconnects are never auto-resent: the consumed prefix
+          // would be duplicated. Surface an explicit error instead.
+          throw new StreamInterruptedError(error)
         }
+        const { done, value } = step
+        if (done) break
 
-        const p = parsed as Record<string, unknown>
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
 
-        const choices = p['choices'] as Array<Record<string, unknown>> | undefined
-        const deltaObj = choices?.[0]?.['delta'] as Record<string, unknown> | undefined
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || trimmed === 'data: [DONE]') continue
+          if (!trimmed.startsWith('data: ')) continue
 
-        const contentDelta = deltaObj?.['content']
-        if (typeof contentDelta === 'string' && contentDelta) {
-          fullText += contentDelta
-          if (releasedGuardText) {
-            emitVisibleText(contentDelta)
-          } else {
-            pendingGuardText += contentDelta
-          }
-        }
-
-        // DeepSeek-reasoner (and other reasoning models) emit `reasoning_content`
-        // deltas before any visible `content` arrives. Accumulate the full chain
-        // so it can be stored in the session and echoed back on the next turn —
-        // DeepSeek's API requires it and returns HTTP 400 without it.
-        const reasoningDelta = deltaObj?.['reasoning_content']
-        if (typeof reasoningDelta === 'string' && reasoningDelta) {
-          fullReasoningContent += reasoningDelta
-          firstResponseMs ??= Math.max(Date.now() - startedAt, 0)
-          if (options?.onReasoning) {
-            options.onReasoning(reasoningDelta)
-          }
-        }
-
-        const toolCallsDelta = deltaObj?.['tool_calls'] as Array<Record<string, unknown>> | undefined
-        if (Array.isArray(toolCallsDelta)) {
-          if (toolCallsDelta.length > 0) {
-            firstResponseMs ??= Math.max(Date.now() - startedAt, 0)
-            releaseGuardedText()
+          let parsed: unknown
+          try {
+            parsed = JSON.parse(trimmed.slice(6))
+          } catch {
+            continue
           }
 
-          for (const tcDelta of toolCallsDelta) {
-            // Do NOT use the index field. It is broken on DeepSeek, Qwen, Anthropic, OpenRouter.
-            // All providers send tool deltas in exact order. We always append to the last open slot.
-            let idx: number
-            if (typeof tcDelta['index'] === 'number') {
-              idx = tcDelta['index'] as number
+          const p = parsed as Record<string, unknown>
+
+          const choices = p['choices'] as Array<Record<string, unknown>> | undefined
+          const deltaObj = choices?.[0]?.['delta'] as Record<string, unknown> | undefined
+
+          const contentDelta = deltaObj?.['content']
+          if (typeof contentDelta === 'string' && contentDelta) {
+            fullText += contentDelta
+            if (releasedGuardText) {
+              emitVisibleText(contentDelta)
             } else {
-              // Missing index = append to last existing slot, or create new if last has name already
-              if (toolSlots.length === 0 || toolSlots[toolSlots.length - 1].name) {
-                idx = toolSlots.length
+              pendingGuardText += contentDelta
+            }
+          }
+
+          // DeepSeek-reasoner (and other reasoning models) emit `reasoning_content`
+          // deltas before any visible `content` arrives. Accumulate the full chain
+          // so it can be stored in the session and echoed back on the next turn —
+          // DeepSeek's API requires it and returns HTTP 400 without it.
+          const reasoningDelta = deltaObj?.['reasoning_content']
+          if (typeof reasoningDelta === 'string' && reasoningDelta) {
+            fullReasoningContent += reasoningDelta
+            firstResponseMs ??= Math.max(Date.now() - startedAt, 0)
+            if (options?.onReasoning) {
+              options.onReasoning(reasoningDelta)
+            }
+          }
+
+          const toolCallsDelta = deltaObj?.['tool_calls'] as Array<Record<string, unknown>> | undefined
+          if (Array.isArray(toolCallsDelta)) {
+            if (toolCallsDelta.length > 0) {
+              firstResponseMs ??= Math.max(Date.now() - startedAt, 0)
+              releaseGuardedText()
+            }
+
+            for (const tcDelta of toolCallsDelta) {
+              // Do NOT use the index field. It is broken on DeepSeek, Qwen, Anthropic, OpenRouter.
+              // All providers send tool deltas in exact order. We always append to the last open slot.
+              let idx: number
+              if (typeof tcDelta['index'] === 'number') {
+                idx = tcDelta['index'] as number
               } else {
-                idx = toolSlots.length - 1
+                // Missing index = append to last existing slot, or create new if last has name already
+                if (toolSlots.length === 0 || toolSlots[toolSlots.length - 1].name) {
+                  idx = toolSlots.length
+                } else {
+                  idx = toolSlots.length - 1
+                }
+              }
+
+              while (toolSlots.length <= idx) {
+                toolSlots.push({ id: '', name: '', arguments: '' })
+              }
+
+              const slot = toolSlots[idx]!
+
+              if (typeof tcDelta['id'] === 'string') slot.id = tcDelta['id'] as string
+              const fn = tcDelta['function'] as Record<string, unknown> | undefined
+              if (fn) {
+                if (typeof fn['name'] === 'string' && fn['name']) slot.name = fn['name'] as string
+                if (typeof fn['arguments'] === 'string') slot.arguments += fn['arguments'] as string
               }
             }
+          }
 
-            while (toolSlots.length <= idx) {
-              toolSlots.push({ id: '', name: '', arguments: '' })
-            }
+          if (typeof p['model'] === 'string') responseModel = p['model']
 
-            const slot = toolSlots[idx]!
+          const usage = p['usage'] as Record<string, unknown> | undefined
+          if (usage) {
+            promptTokens    = (usage['prompt_tokens']     as number | undefined) ?? promptTokens
+            completionTokens = (usage['completion_tokens'] as number | undefined) ?? completionTokens
+            totalTokens     = (usage['total_tokens']      as number | undefined) ?? totalTokens
+          }
 
-            if (typeof tcDelta['id'] === 'string') slot.id = tcDelta['id'] as string
-            const fn = tcDelta['function'] as Record<string, unknown> | undefined
-            if (fn) {
-              if (typeof fn['name'] === 'string' && fn['name']) slot.name = fn['name'] as string
-              if (typeof fn['arguments'] === 'string') slot.arguments += fn['arguments'] as string
-            }
+          // Meaningful increments reset the idle deadline; keep-alive comments
+          // and blank lines never reach this point.
+          const finishReason = choices?.[0]?.['finish_reason']
+          if (
+            (typeof contentDelta === 'string' && contentDelta) ||
+            (typeof reasoningDelta === 'string' && reasoningDelta) ||
+            (Array.isArray(toolCallsDelta) && toolCallsDelta.length > 0) ||
+            usage || finishReason
+          ) {
+            idleGuard.touch()
           }
         }
-
-        if (typeof p['model'] === 'string') responseModel = p['model']
-
-        const usage = p['usage'] as Record<string, unknown> | undefined
-        if (usage) {
-          promptTokens    = (usage['prompt_tokens']     as number | undefined) ?? promptTokens
-          completionTokens = (usage['completion_tokens'] as number | undefined) ?? completionTokens
-          totalTokens     = (usage['total_tokens']      as number | undefined) ?? totalTokens
-        }
       }
+    } finally {
+      idleGuard.dispose()
     }
 
     // Filter out completely empty tool slots that the model sometimes emits as separators
@@ -764,7 +859,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
 
     let response: Response;
     try {
-      response = await fetch(
+      response = await retryFetch(
         `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`,
         {
           method: 'POST',
@@ -774,6 +869,14 @@ export class OpenAICompatibleProvider implements ChatProvider {
           },
           body: JSON.stringify(body),
           signal: options?.abortSignal,
+        },
+        {
+          signal: options?.abortSignal,
+          onRetry: options?.onRetry,
+          onPayloadTooLarge: () => {
+            const stripped = stripImagesFromChatBody(body);
+            return stripped ? JSON.stringify(stripped) : null;
+          },
         },
       );
     } catch (error) {

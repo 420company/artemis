@@ -12,6 +12,11 @@
  */
 
 import type { SessionMessage } from './types.js'
+import {
+  estimateMessageTokens,
+  estimateMessagesTokens,
+  exceedsTokenBudget,
+} from './tokenEstimation.js'
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -43,6 +48,13 @@ const TIME_BASED_MC_GAP_MINUTES = 42
 const TIME_BASED_MC_KEEP_RECENT = 4
 
 /**
+ * 收益闸：full compact 后总 token 必须降到压缩前的 (1 - 0.20) = 80% 以下，
+ * 否则丢弃本次压缩结果（参考 grok intra_compaction max_reduction_ratio 0.8）。
+ */
+const MIN_COMPACTION_REDUCTION = 0.20
+const LAST_USER_INJECT_MAX_CHARS = 4000
+
+/**
  * Only microcompact tool outputs from these tool types. Write operations
  * (write_file, apply_patch, insert_in_file) are preserved because they
  * serve as execution evidence the model may need for correctness checks.
@@ -66,13 +78,9 @@ const COMPACTABLE_TOOL_NAMES = new Set([
   'readfile',
 ])
 
-/** Rough token estimate: 1 token ≈ 4 chars */
-function estimateTokens(content: string): number {
-  return Math.ceil(content.length / 4)
-}
-
+// Token 估算统一走 core/tokenEstimation（UTF-8 字节/4 + 图片常数）。
 function estimateMsgListTokens(msgs: SessionMessage[]): number {
-  return msgs.reduce((s, m) => s + estimateTokens(m.content), 0)
+  return estimateMessagesTokens(msgs)
 }
 
 // ─── progress-message localization ────────────────────────────────────────────
@@ -386,6 +394,29 @@ function isSafeBoundary(messages: SessionMessage[], i: number): boolean {
   return true
 }
 
+// ─── real user request lookup ────────────────────────────────────────────────
+// 重建结构时要注入的是「最后一条真实用户请求」，压缩摘要/恢复/运行时护栏这类
+// 合成 user 消息不算。
+
+function isSyntheticUserMessage(msg: SessionMessage): boolean {
+  if (msg.id.startsWith('recovery-') || msg.id.startsWith('ctx-summary-') || msg.id.startsWith('mech-summary')) {
+    return true
+  }
+  const c = msg.content
+  return c.startsWith('[系统：') || c.startsWith('═══') || c.startsWith('[tool:runtime_guard]')
+}
+
+function findLastRealUserMessageIndex(messages: SessionMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role !== 'user') continue
+    if (isSyntheticUserMessage(m)) continue
+    if (m.content.trim().length < 2) continue
+    return i
+  }
+  return -1
+}
+
 // ─── Phase 5: Evidence-preserving overflow handling ─────────────────────────
 
 const LONG_MESSAGE_SUMMARY_HEAD_CHARS = 1_200
@@ -437,6 +468,107 @@ function prepareMiddleForStructuredSummary(messages: SessionMessage[], tokenLimi
 // ─── Phase 3: structured summarization ───────────────────────────────────────
 
 export type SummarizeFn = (prompt: string) => Promise<string>
+
+// ── 摘要输出清洗（参考 grok summary.rs format_compact_summary）────────────────
+// 剥离前导 <analysis>/<thinking> 草稿块（含未闭合截断情形），并对正文里回显的
+// 控制标记插零宽空格去毒，防止摘要喂回上下文后自激污染下一轮输出。
+
+const SUMMARY_DRAFT_TAGS = ['analysis', 'thinking'] as const
+const MIN_SUMMARY_CHARS = 200
+
+function stripLeadingDraftBlocks(text: string): string {
+  let result = text
+  for (;;) {
+    const trimmed = result.trimStart()
+    const tag = SUMMARY_DRAFT_TAGS.find((t) => trimmed.startsWith(`<${t}>`))
+    if (!tag) break
+    const open = `<${tag}>`
+    const close = `</${tag}>`
+    const start = result.indexOf(open)
+    const closeIdx = result.indexOf(close, start + open.length)
+    if (closeIdx >= 0) {
+      result = result.slice(0, start) + result.slice(closeIdx + close.length)
+      continue
+    }
+    // 未闭合的前导草稿块：若后面还有 JSON 代码块或 <summary>，保留其后内容；
+    // 否则整段都是被截断的草稿，丢弃。
+    const rest = result.slice(start + open.length)
+    const salvageIdx = Math.min(
+      ...['```json', '<summary>']
+        .map((marker) => rest.indexOf(marker))
+        .filter((i) => i >= 0)
+        .concat([Number.POSITIVE_INFINITY]),
+    )
+    result = Number.isFinite(salvageIdx)
+      ? result.slice(0, start) + rest.slice(salvageIdx)
+      : result.slice(0, start)
+    break
+  }
+  return result
+}
+
+function neutralizeSummaryControlTokens(text: string): string {
+  // 先替换闭合标记，插入的零宽空格不会被后续替换再次命中。
+  const zw = '\u200b'
+  return text
+    .replace(/<\/summary>/g, `<${zw}/summary>`)
+    .replace(/<summary>/g, `<${zw}summary>`)
+    .replace(/<\/analysis>/g, `<${zw}/analysis>`)
+    .replace(/<analysis>/g, `<${zw}analysis>`)
+    .replace(/<\/thinking>/g, `<${zw}/thinking>`)
+    .replace(/<thinking>/g, `<${zw}thinking>`)
+}
+
+/** 清洗后正文低于最小字符数 → 摘要退化，按瞬时失败重试。 */
+function isDegenerateSummary(summaryText: string): boolean {
+  return summaryText.replace(/^\[对话摘要\]\s*/, '').trim().length < MIN_SUMMARY_CHARS
+}
+
+// ── 摘要失败分类（参考 grok failure.rs）──────────────────────────────────────
+// deterministic：重发同一 payload 必然再失败，不重试。
+// context_overflow：缩小摘要输入后再试一次。
+// transient：5xx/429/408/网络抖动，原样重试一次。
+
+type SummaryFailureKind = 'deterministic' | 'transient' | 'context_overflow'
+
+function isContextLengthError(message: string): boolean {
+  const m = message.toLowerCase()
+  return m.includes('too long for this model') ||
+    m.includes('prompt is too long') ||
+    m.includes('maximum prompt length') ||
+    m.includes('maximum context length') ||
+    m.includes('context_length_exceeded') ||
+    m.includes('context window') && m.includes('exceed')
+}
+
+function classifySummaryFailure(err: unknown): SummaryFailureKind {
+  const message = err instanceof Error ? err.message : String(err)
+  if (isContextLengthError(message)) return 'context_overflow'
+  const e = err as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } } | null
+  let status: number | undefined
+  for (const candidate of [e?.status, e?.statusCode, e?.response?.status]) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) { status = candidate; break }
+  }
+  if (status === undefined) {
+    const match = message.match(/\b([45]\d\d)\b/)
+    if (match) status = Number(match[1])
+  }
+  if (status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    return 'deterministic'
+  }
+  return 'transient'
+}
+
+/** context-overflow 重试前的输入收缩：逐条截头，保留角色结构与开头证据。 */
+function shrinkSummaryInputForOverflow(messages: SessionMessage[]): SessionMessage[] {
+  return messages.map((msg) => {
+    if (msg.content.length <= 400) return msg
+    return {
+      ...msg,
+      content: `${msg.content.slice(0, 280)}\n...[context-overflow 收缩：原始 ${msg.content.length} chars]`,
+    }
+  })
+}
 
 const SUMMARY_PROMPT = `\
 请将以下对话历史压缩为结构化摘要。
@@ -501,15 +633,59 @@ async function buildStructuredSummary(
 
   const raw = await summarize(prompt)
 
+  // 先剥离前导草稿块，再提取 JSON；两条路径的产物都过控制标记去毒。
+  const cleaned = stripLeadingDraftBlocks(String(raw ?? ''))
+
   // Extract JSON from code block
-  const match = raw.match(/```json\s*([\s\S]*?)```/)
+  const match = cleaned.match(/```json\s*([\s\S]*?)```/)
   if (match?.[1]) {
     try {
-      return formatSummary(JSON.parse(match[1]) as Record<string, unknown>)
+      return neutralizeSummaryControlTokens(formatSummary(JSON.parse(match[1]) as Record<string, unknown>))
     } catch { /* fall through to raw */ }
   }
 
-  return `[对话摘要]\n${raw.slice(0, 2000)}`
+  return neutralizeSummaryControlTokens(`[对话摘要]\n${cleaned.slice(0, 2000)}`)
+}
+
+/**
+ * buildStructuredSummary 的单次质量守卫（断路器管跨次，这层管单次）：
+ * - 退化拒收：清洗后摘要过短 → 按瞬时失败重试一次
+ * - 失败分类：4xx（除 408/429）不重试；瞬时失败重试一次；
+ *   context-overflow → 收缩摘要输入再试一次
+ * 共计最多一次重试；重试后仍不合格则抛给调用方走机械兜底。
+ */
+async function buildGuardedStructuredSummary(
+  messages: SessionMessage[],
+  previousSummary: string | undefined,
+  summarize: SummarizeFn,
+  currentFocus: string | undefined,
+  onGuardInfo?: (reason: 'degenerate-retry' | 'transient-retry' | 'overflow-shrink') => void,
+): Promise<string> {
+  let attemptInput = messages
+  let retried = false
+  for (;;) {
+    let summaryText: string
+    try {
+      summaryText = await buildStructuredSummary(attemptInput, previousSummary, summarize, currentFocus)
+    } catch (err) {
+      const kind = classifySummaryFailure(err)
+      if (kind === 'deterministic' || retried) throw err
+      retried = true
+      if (kind === 'context_overflow') {
+        attemptInput = shrinkSummaryInputForOverflow(attemptInput)
+        onGuardInfo?.('overflow-shrink')
+      } else {
+        onGuardInfo?.('transient-retry')
+      }
+      continue
+    }
+    if (!isDegenerateSummary(summaryText)) return summaryText
+    if (retried) {
+      throw new Error(`摘要退化：清洗后不足 ${MIN_SUMMARY_CHARS} 字符（重试后仍然过短）`)
+    }
+    retried = true
+    onGuardInfo?.('degenerate-retry')
+  }
 }
 
 function formatSummary(obj: Record<string, unknown>): string {
@@ -591,6 +767,17 @@ export interface CompressionOptions {
   currentFocus?: string
   /** Active UI locale for progress messages. Defaults to 'zh'. */
   locale?: CompressLocale
+  /**
+   * Provider 上一次请求返回的真实 prompt token 数（已扣除系统段预留、叠加了
+   * 本轮新增消息的估算增量）。触发判断优先用真实值，估算只做首轮兜底。
+   */
+  lastPromptTokens?: number
+  /**
+   * 压缩前仍在进行的活动状态提醒文本（pendingAction / 运行中后台任务等），
+   * 由调用方组装。仅在 full compact 重建结构时作为独立小消息注入 tail 之前，
+   * 而不是事后垫尾——摘要/提醒永远不能成为模型看到的“最新用户话语”。
+   */
+  activeStateReminder?: string
 }
 
 export interface CompressResult {
@@ -601,6 +788,12 @@ export interface CompressResult {
   tokensAfter: number
   mode?: 'none' | 'microcompact' | 'full_compact'
   readFileSkeletonsExtracted?: number
+  /**
+   * full compact 重建结构后，tail 近期原文段在 messages 里的起始下标。
+   * 调用方若需追加恢复类消息，应插入到该下标之前（tail 保持在最后），
+   * 而不是垫在整个列表末尾。
+   */
+  tailStartIndex?: number
 }
 
 /**
@@ -764,6 +957,12 @@ export async function compressMessages(
     : 1.0
 
   const tokensBefore = estimateMsgListTokens(messages)
+  // 触发判断优先用 provider 上一次请求的真实 prompt token（调用方已叠加本轮
+  // 新增消息的估算增量），估算 tokensBefore 只在首轮没有 usage 时兜底。
+  // 缩减率核算（tokensBefore/tokensAfter）保持估算口径，前后一致可比。
+  const usedTokens = Number.isFinite(opts.lastPromptTokens) && (opts.lastPromptTokens ?? 0) > 0
+    ? opts.lastPromptTokens!
+    : tokensBefore
 
   // ── Time-based microcompact: runs first, short-circuits ───────────────
   // If the gap since the last assistant message exceeds the threshold,
@@ -772,19 +971,19 @@ export async function compressMessages(
   if (timeBased) return timeBased
 
   const triggerAt = Math.floor(getCompressionTriggerTokens(tokenLimit, threshold) * churnMul)
-  if (tokensBefore < triggerAt) {
+  if (!exceedsTokenBudget(usedTokens, triggerAt)) {
     // Keep deterministic tool-output cleanup independent from churn protection.
     // Churn raises full summarization thresholds, but stale tool output pruning
     // should still happen at the model-window-aware microcompact trigger.
     const microcompactAt = getMicrocompactTriggerTokens(tokenLimit)
-    if (tokensBefore >= microcompactAt) {
+    if (exceedsTokenBudget(usedTokens, microcompactAt)) {
       // Protect tail by token budget instead of fixed message count.
       // Tail size is proportional to context window (see getTailProtectTokens).
       const tailBudget = protectTailTok
       let tailProtectTokens = 0
       let protectedFromIdx = messages.length
       for (let i = messages.length - 1; i >= 0; i--) {
-        tailProtectTokens += estimateTokens(messages[i]!.content)
+        tailProtectTokens += estimateMessageTokens(messages[i]!)
         if (tailProtectTokens > tailBudget) { protectedFromIdx = i + 1; break }
       }
       protectedFromIdx = Math.max(0, protectedFromIdx)
@@ -809,10 +1008,10 @@ export async function compressMessages(
 
   // Compression triggered — surface to user. Without this, the previous
   // silent operation made it look like long sessions never compressed.
-  const triggerPct = Math.round((tokensBefore / tokenLimit) * 100)
+  const triggerPct = Math.round((usedTokens / tokenLimit) * 100)
   onInfo?.(t(
-    `[压缩] 上下文 ${Math.round(tokensBefore / 1000)}K（已占 ${triggerPct}% 窗口），开始压缩…`,
-    `[Compact] Context ${Math.round(tokensBefore / 1000)}K (${triggerPct}% of window); starting…`))
+    `[压缩] 上下文 ${Math.round(usedTokens / 1000)}K（已占 ${triggerPct}% 窗口），开始压缩…`,
+    `[Compact] Context ${Math.round(usedTokens / 1000)}K (${triggerPct}% of window); starting…`))
 
   // ── Phase 2: determine boundaries ────────────────────────────────────────
   let headEnd = Math.min(protectHead, messages.length)
@@ -820,7 +1019,7 @@ export async function compressMessages(
   let tailStart = messages.length
   let tailTokens = 0
   for (let i = messages.length - 1; i >= headEnd; i--) {
-    const t = estimateTokens(messages[i]!.content)
+    const t = estimateMessageTokens(messages[i]!)
     if (tailTokens + t > protectTailTok) { tailStart = i + 1; break }
     tailTokens += t
     tailStart = i
@@ -880,7 +1079,21 @@ export async function compressMessages(
     onInfo?.(t(
       `[压缩] 副模型生成结构化摘要…`,
       `[Compact] Worker model generating structured summary…`))
-    summaryText = await buildStructuredSummary(prunedMiddle, previousSummary, summarize, opts.currentFocus)
+    summaryText = await buildGuardedStructuredSummary(
+      prunedMiddle,
+      previousSummary,
+      summarize,
+      opts.currentFocus,
+      (reason) => {
+        if (reason === 'degenerate-retry') {
+          onInfo?.(t('[压缩] 摘要过短疑似退化，重试一次…', '[Compact] Summary degenerate (too short); retrying once…'))
+        } else if (reason === 'overflow-shrink') {
+          onInfo?.(t('[压缩] 摘要输入超窗，收缩后重试一次…', '[Compact] Summary input overflowed; shrinking and retrying once…'))
+        } else {
+          onInfo?.(t('[压缩] 摘要瞬时失败，重试一次…', '[Compact] Summary hit a transient failure; retrying once…'))
+        }
+      },
+    )
   } catch (err) {
     // If summarization fails, fall back to Phase 1 only — surface why so
     // user can debug (was silent before, often masking provider auth errors).
@@ -903,7 +1116,11 @@ export async function compressMessages(
     }
   }
 
-  // ── Phase 4: assemble ─────────────────────────────────────────────────────
+  // ── Phase 4: assemble fixed structure ────────────────────────────────────
+  // [head 保留段, 摘要, 最后一条真实用户请求原文（若落在 middle）,
+  //  活动状态 reminder, tail 近期原文]
+  // 原则：摘要永远不能是模型看到的“最新用户话语”。最后一条真实用户请求以
+  // 原文消息注入（不依赖摘要转述）；若它已在 head/tail 保留段里则不重复注入。
   const summaryMsg: SessionMessage = {
     id:        `ctx-summary-${Date.now()}`,
     role:      'user',
@@ -911,8 +1128,49 @@ export async function compressMessages(
     createdAt: new Date().toISOString(),
   }
 
-  const result = [...head, summaryMsg, ...tail]
+  const assembled: SessionMessage[] = [...head, summaryMsg]
+
+  const lastUserIdx = findLastRealUserMessageIndex(messages)
+  if (lastUserIdx >= headEnd && lastUserIdx < tailStart) {
+    // 原文注入设体量上限：超长的用户消息保头尾+截断标记，否则单条巨型消息
+    // 会吃掉全部压缩收益，被下方收益闸整体否决，压缩永远白做。
+    const original = messages[lastUserIdx]!
+    const content = typeof original.content === 'string' ? original.content : ''
+    if (content.length > LAST_USER_INJECT_MAX_CHARS) {
+      const half = Math.floor(LAST_USER_INJECT_MAX_CHARS / 2)
+      assembled.push({
+        ...original,
+        content: `${content.slice(0, half)}\n[…原文过长已截断，完整内容见上方摘要…]\n${content.slice(-half)}`,
+      })
+    } else {
+      assembled.push({ ...original })
+    }
+  }
+
+  const reminderText = opts.activeStateReminder?.trim()
+  if (reminderText) {
+    assembled.push({
+      id: `recovery-state-${Date.now()}`,
+      role: 'user',
+      content: reminderText,
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  const tailStartIndex = assembled.length
+  const result = [...assembled, ...tail]
   const tokensAfter = estimateMsgListTokens(result)
+
+  // ── 收益闸（参考 grok max_reduction_ratio = 0.8）─────────────────────────
+  // 压缩后达不到压缩前 80% 以下（缩减 < 20%）说明本次压缩不值得：丢弃结果、
+  // 维持原历史并记录。断路器管跨次失败，这道闸管单次收益。
+  if (tokensAfter > tokensBefore * (1 - MIN_COMPACTION_REDUCTION)) {
+    onInfo?.(t(
+      `[压缩] 收益不足（${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，缩减 <${Math.round(MIN_COMPACTION_REDUCTION * 100)}%），丢弃本次压缩结果`,
+      `[Compact] Insufficient reduction (${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K, <${Math.round(MIN_COMPACTION_REDUCTION * 100)}%); discarding this compaction`))
+    return { messages, compressed: false, tokensBefore, tokensAfter: tokensBefore, mode: 'none' }
+  }
+
   const reductionPct = Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 100)
   onInfo?.(t(
     `[压缩] ✓ 完成 ${Math.round(tokensBefore / 1000)}K → ${Math.round(tokensAfter / 1000)}K，节省 ${reductionPct}%`,
@@ -925,5 +1183,6 @@ export async function compressMessages(
     tokensAfter,
     mode: 'full_compact',
     readFileSkeletonsExtracted: prunedMiddleResult.readFileSkeletonsExtracted,
+    tailStartIndex,
   }
 }

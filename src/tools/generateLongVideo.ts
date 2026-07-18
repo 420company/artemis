@@ -643,13 +643,22 @@ function buildSegments(options: {
   const plannedShots = Array.isArray(options.shots)
     ? options.shots.filter((shot) => shot && typeof shot === 'object')
     : [];
-  const segmentCount = plannedShots.length > 0
+  // Cap segment count so the per-shot 4s floor can never push the total past the
+  // requested duration: a 5s request with 3 script sub-beats must NOT become 3×4s=12s.
+  // floor(total/4) = the most shots that fit at the 4s minimum; merge beyond that.
+  const maxSegmentsByTotal = Math.max(1, Math.floor(options.totalSeconds / 4));
+  const requestedSegmentCount = plannedShots.length > 0
     ? plannedShots.length
     : Math.max(1, Math.ceil(options.totalSeconds / Math.max(4, Math.min(options.preferredSegmentSeconds, 6))));
+  const segmentCount = Math.min(requestedSegmentCount, maxSegmentsByTotal);
   const plannedDurationSum = plannedShots.reduce((sum, shot) => (
     typeof shot.duration === 'number' && Number.isFinite(shot.duration) ? sum + Math.max(0, shot.duration) : sum
   ), 0);
+  // Only honor the per-shot planned durations when we kept every planned shot;
+  // if we merged shots (segmentCount < plannedShots.length) we must re-distribute
+  // the total instead, otherwise the per-shot 4s floor re-inflates the total.
   const usePlannedDurations = plannedShots.length > 0
+    && segmentCount === plannedShots.length
     && plannedDurationSum > 0
     && Math.abs(plannedDurationSum - options.totalSeconds) <= Math.max(2, options.totalSeconds * 0.15);
   const durations = usePlannedDurations

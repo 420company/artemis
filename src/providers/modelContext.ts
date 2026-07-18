@@ -3,6 +3,11 @@ import type { ProviderApiKeyHeader, ProviderProfile } from './types.js'
 
 type ModelMetadata = Record<string, unknown>
 
+// OpenAI reduced the effective GPT-5.6 context window to 272K. Keep this as a
+// hard runtime cap so stale provider metadata or cached profile values cannot
+// make Artemis wait for the old 372K/1M boundary before compacting.
+export const GPT_5_6_CONTEXT_LENGTH = 272_000
+
 export type ModelContextLengthSource = 'models-api' | 'known-model' | 'manual' | 'unknown'
 
 export type ModelContextDetectionResult = {
@@ -46,9 +51,9 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'claude-sonnet-4-20250514': 200_000,
 
   // OpenAI family
-  'gpt-5.6-sol': 1_000_000,
-  'gpt-5.6-luna': 1_000_000,
-  'gpt-5.6-terra': 1_000_000,
+  'gpt-5.6-sol': GPT_5_6_CONTEXT_LENGTH,
+  'gpt-5.6-luna': GPT_5_6_CONTEXT_LENGTH,
+  'gpt-5.6-terra': GPT_5_6_CONTEXT_LENGTH,
   'gpt-5.5': 1_000_000,
   'gpt-5.5-pro': 1_000_000,
   'gpt-5.5-mini': 1_000_000,
@@ -164,7 +169,7 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('claude')) return 200_000
 
   // ── OpenAI GPT ───────────────────────────────────────────────────────────
-  if (m.includes('gpt-5.6')) return 1_000_000
+  if (m.includes('gpt-5.6')) return GPT_5_6_CONTEXT_LENGTH
   if (m.includes('gpt-5.5')) return 1_000_000
   if (m.includes('gpt-5.4')) return 1_000_000
   if (m.includes('gpt-5.1') || m.includes('gpt-5.2')) return 1_000_000
@@ -229,6 +234,23 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('llama')) return 128_000
 
   return undefined
+}
+
+export function capKnownModelContextLength(model: string, contextLength: unknown): number | undefined {
+  const normalized = normalizeContextLength(contextLength)
+  if (!normalized) return undefined
+  const m = normalizeKnownModelName(model)
+  return m.includes('gpt-5.6')
+    ? Math.min(normalized, GPT_5_6_CONTEXT_LENGTH)
+    : normalized
+}
+
+export function resolveEffectiveModelContextLength(
+  model: string,
+  configuredLength?: number,
+): number | undefined {
+  return capKnownModelContextLength(model, configuredLength)
+    ?? inferKnownModelContextLength(model)
 }
 
 function buildModelsUrl(baseUrl: string): string | undefined {
@@ -334,7 +356,11 @@ export async function detectModelContextLength(
   if (metadata) {
     const fromMetadata = extractModelContextLength(metadata)
     if (fromMetadata) {
-      return { contextLength: fromMetadata, source: 'models-api', checkedAt }
+      return {
+        contextLength: capKnownModelContextLength(profile.model, fromMetadata) ?? fromMetadata,
+        source: 'models-api',
+        checkedAt,
+      }
     }
   }
 
@@ -353,6 +379,7 @@ export async function enrichProfileContextLength<T extends Pick<ProviderProfile,
   if (options?.preserveManual && profile.contextLength) {
     return {
       ...profile,
+      contextLength: capKnownModelContextLength(profile.model, profile.contextLength) ?? profile.contextLength,
       contextLengthSource: 'manual',
       contextLengthCheckedAt: new Date().toISOString(),
     }

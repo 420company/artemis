@@ -4,6 +4,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { inspect } from 'node:util'
+import { redactText } from './redact.js'
 
 export type RuntimeLogLevel = 'info' | 'warn' | 'error'
 
@@ -35,7 +36,7 @@ export async function withRuntimeLogSink<T>(
 }
 
 export function emitRuntimeLog(level: RuntimeLogLevel, ...args: unknown[]): void {
-  const message = formatLogArgs(args).trim()
+  const message = redactText(formatLogArgs(args).trim())
   if (!message) return
 
   const sink = runtimeLogSink.getStore()

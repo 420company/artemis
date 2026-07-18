@@ -7,7 +7,7 @@
  */
 
 import { stringWidth } from '../input/stringWidth.js'
-import { inferKnownModelContextLength } from '../providers/modelContext.js'
+import { resolveEffectiveModelContextLength } from '../providers/modelContext.js'
 
 const A = {
   reset:   '\x1b[0m',
@@ -62,9 +62,7 @@ export function normalizeContextLimit(value: unknown): number | undefined {
 }
 
 export function estimateContextLimit(model: string, configuredLimit?: number): number {
-  const explicit = normalizeContextLimit(configuredLimit)
-  if (explicit) return explicit
-  return inferKnownModelContextLength(model) ?? 128_000
+  return resolveEffectiveModelContextLength(model, normalizeContextLimit(configuredLimit)) ?? 128_000
 }
 
 export function fmtTok(n: number): string {

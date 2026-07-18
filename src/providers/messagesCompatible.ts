@@ -1,5 +1,11 @@
 import type { SessionMessage } from '../core/types.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
+import {
+  createStreamIdleGuard,
+  retryFetch,
+  StreamIdleTimeoutError,
+  StreamInterruptedError,
+} from './retryFetch.js';
 import type {
   ChatProvider,
   ProviderConfig,
@@ -149,67 +155,35 @@ function resolveMaxTokens(model: string, streaming: boolean): number {
   return 8_192;
 }
 
-// ── Retry with backoff ────────────────────────────────────────────────────────
+// ── 413 image stripping ───────────────────────────────────────────────────────
 
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 529;
-}
+const IMAGE_OMITTED_PLACEHOLDER = '[image omitted due to request size]';
 
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason instanceof Error ? signal.reason : new Error('Request aborted'));
-      return;
-    }
-    let onAbort: (() => void) | undefined;
-    const timer = setTimeout(() => {
-      if (onAbort && signal) signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer);
-        reject(signal.reason instanceof Error ? signal.reason : new Error('Request aborted'));
+function stripImagesFromMessagesBody(
+  body: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return null;
+  let strippedAny = false;
+  const nextMessages = messages.map((message) => {
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) return message;
+    let changed = false;
+    const nextContent = content.map((block) => {
+      if ((block as { type?: unknown } | null)?.type !== 'image') return block;
+      changed = true;
+      const cacheControl = (block as { cache_control?: unknown }).cache_control;
+      return {
+        type: 'text',
+        text: IMAGE_OMITTED_PLACEHOLDER,
+        ...(cacheControl ? { cache_control: cacheControl } : {}),
       };
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
+    });
+    if (!changed) return message;
+    strippedAny = true;
+    return { ...(message as Record<string, unknown>), content: nextContent };
   });
-}
-
-const MAX_ATTEMPTS = 3;
-const MAX_RETRY_DELAY_MS = 30_000;
-
-async function fetchWithRetry(
-  url: string,
-  init: RequestInit,
-  abortSignal?: AbortSignal,
-): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    let response: Response;
-    try {
-      response = await fetch(url, init);
-    } catch (error) {
-      if (abortSignal?.aborted) throw error;
-      lastError = error;
-      if (attempt === MAX_ATTEMPTS) throw error;
-      await abortableSleep(Math.min(1000 * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS), abortSignal);
-      continue;
-    }
-    if (!isRetryableStatus(response.status) || attempt === MAX_ATTEMPTS) {
-      return response;
-    }
-    // Honor retry-after (seconds) when the server sends one; otherwise back off
-    // exponentially. Drain the failed body so the socket is released.
-    const retryAfterHeader = response.headers.get('retry-after');
-    const retryAfterSec = retryAfterHeader ? Number.parseFloat(retryAfterHeader) : NaN;
-    const delayMs = Number.isFinite(retryAfterSec) && retryAfterSec >= 0
-      ? Math.min(retryAfterSec * 1000, MAX_RETRY_DELAY_MS)
-      : Math.min(1000 * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
-    try { await response.text(); } catch { /* ignore */ }
-    await abortableSleep(delayMs, abortSignal);
-  }
-  throw lastError ?? new Error('Request failed after retries.');
+  return strippedAny ? { ...body, messages: nextMessages } : null;
 }
 
 // ── Message mapping ───────────────────────────────────────────────────────────
@@ -445,10 +419,12 @@ export class MessagesCompatibleProvider implements ChatProvider {
   private async postMessages(
     body: Record<string, unknown>,
     options?: ProviderRequestOptions,
+    signal?: AbortSignal,
   ): Promise<Response> {
+    const effectiveSignal = signal ?? options?.abortSignal;
     let response: Response;
     try {
-      response = await fetchWithRetry(
+      response = await retryFetch(
         `${this.config.baseUrl.replace(/\/$/, '')}/v1/messages`,
         {
           method: 'POST',
@@ -458,9 +434,16 @@ export class MessagesCompatibleProvider implements ChatProvider {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify(body),
-          signal: options?.abortSignal,
+          signal: effectiveSignal,
         },
-        options?.abortSignal,
+        {
+          signal: effectiveSignal,
+          onRetry: options?.onRetry,
+          onPayloadTooLarge: () => {
+            const stripped = stripImagesFromMessagesBody(body);
+            return stripped ? JSON.stringify(stripped) : null;
+          },
+        },
       );
     } catch (error) {
       if (options?.abortSignal?.aborted) {
@@ -532,17 +515,32 @@ export class MessagesCompatibleProvider implements ChatProvider {
   ): Promise<ProviderResponse> {
     const startedAt = Date.now();
     const body = this.buildRequestBody(messages, options, true);
-    const response = await this.postMessages(body, options);
+    // Idle guard: aborts the underlying request when the stream stays open
+    // but stops delivering meaningful events. Its signal wraps the caller's
+    // abort signal so both cancellation paths reach the socket.
+    const idleGuard = createStreamIdleGuard({ externalSignal: options?.abortSignal });
+    let response: Response;
+    try {
+      response = await this.postMessages(body, options, idleGuard.signal);
+    } catch (error) {
+      idleGuard.dispose();
+      throw error;
+    }
 
     // Some gateways accept `stream: true` but reply with plain JSON. Fall back
     // to non-streaming parsing; streamed=false tells the caller it still owns
     // text emission (deflection guards etc. rely on this).
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream')) {
-      const json = (await response.json()) as Parameters<typeof parseMessageJson>[0];
-      return this.finishResponse(parseMessageJson(json), options, startedAt, undefined, false);
+      try {
+        const json = (await response.json()) as Parameters<typeof parseMessageJson>[0];
+        return this.finishResponse(parseMessageJson(json), options, startedAt, undefined, false);
+      } finally {
+        idleGuard.dispose();
+      }
     }
     if (!response.body) {
+      idleGuard.dispose();
       throw new Error('Provider returned no response body for streaming request.');
     }
 
@@ -565,6 +563,9 @@ export class MessagesCompatibleProvider implements ChatProvider {
 
     const handleEvent = (payload: Record<string, unknown>): void => {
       const type = payload.type;
+      // Real events reset the idle deadline; ping/keep-alive events do not
+      // (SSE comment lines never reach here — they carry no `data:` field).
+      if (type && type !== 'ping') idleGuard.touch();
       if (type === 'error') {
         const errInfo = payload.error as { message?: string } | undefined;
         throw new Error(errInfo?.message || 'Provider returned a stream error event.');
@@ -670,14 +671,24 @@ export class MessagesCompatibleProvider implements ChatProvider {
 
     try {
       for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        let step: Awaited<ReturnType<typeof reader.read>>;
+        try {
+          step = await idleGuard.race(reader.read());
+        } catch (error) {
+          if (error instanceof StreamIdleTimeoutError) throw error;
+          if (options?.abortSignal?.aborted) throw error;
+          // Mid-stream disconnects are never auto-resent: the consumed prefix
+          // would be duplicated. Surface an explicit error instead.
+          throw new StreamInterruptedError(error);
+        }
+        if (step.done) break;
+        buffer += decoder.decode(step.value, { stream: true });
         processBuffer(false);
       }
       buffer += decoder.decode();
       processBuffer(true);
     } finally {
+      idleGuard.dispose();
       try { reader.releaseLock(); } catch { /* ignore */ }
     }
 

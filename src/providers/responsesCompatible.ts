@@ -1,5 +1,6 @@
 import type { SessionMessage } from '../core/types.js';
 import { normalizeUiLocale, type UiLocale } from '../cli/locale.js';
+import { retryFetch } from './retryFetch.js';
 import type {
   ChatProvider,
   ProviderConfig,
@@ -50,6 +51,27 @@ type ResponsesFunctionCallOutputItem = {
   call_id: string;
   output: string;
 };
+
+const IMAGE_OMITTED_PLACEHOLDER = '[image omitted due to request size]';
+
+function stripImagesFromResponsesInput(input: unknown): unknown[] | null {
+  if (!Array.isArray(input)) return null;
+  let strippedAny = false;
+  const nextInput = input.map((item) => {
+    const content = (item as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) return item;
+    let changed = false;
+    const nextContent = content.map((block) => {
+      if ((block as { type?: unknown } | null)?.type !== 'input_image') return block;
+      changed = true;
+      return { type: 'input_text', text: IMAGE_OMITTED_PLACEHOLDER };
+    });
+    if (!changed) return item;
+    strippedAny = true;
+    return { ...(item as Record<string, unknown>), content: nextContent };
+  });
+  return strippedAny ? nextInput : null;
+}
 
 function buildProviderErrorMessage(
   response: Response,
@@ -353,7 +375,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       if (reasoning) payload.reasoning = reasoning;
       else delete payload.reasoning;
       try {
-        attemptResponse = await fetch(`${this.config.baseUrl.replace(/\/$/, '')}/responses`, {
+        attemptResponse = await retryFetch(`${this.config.baseUrl.replace(/\/$/, '')}/responses`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -361,6 +383,15 @@ export class ResponsesCompatibleProvider implements ChatProvider {
           },
           body: JSON.stringify(payload),
           signal: options?.abortSignal,
+        }, {
+          signal: options?.abortSignal,
+          onRetry: options?.onRetry,
+          onPayloadTooLarge: () => {
+            const strippedInput = stripImagesFromResponsesInput(payload.input);
+            if (!strippedInput) return null;
+            payload.input = strippedInput;
+            return JSON.stringify(payload);
+          },
         });
       } catch (error) {
         if (options?.abortSignal?.aborted) {
