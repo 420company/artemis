@@ -30,6 +30,11 @@ import { executeLookupDocs } from './lookupDocs.js';
 import { executeReadFile } from './readFile.js';
 import { executeReplaceInFile } from './replaceInFile.js';
 import { executeRunCommand } from './runCommand.js';
+import {
+  appendPendingTaskReminders,
+  executeKillTask,
+  executeTaskOutput,
+} from './taskManager.js';
 import { executeSearchFiles } from './searchFiles.js';
 import { executeSearchWeb } from './searchWeb.js';
 import { executeWriteFile } from './writeFile.js';
@@ -201,11 +206,13 @@ function validateAgentRoleValue(value: unknown, errors: string[]): void {
 function validateReadFileAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.path, 'path', errors);
-  validatePositiveInteger(action?.startLine, 'startLine', errors);
+  // startLine accepts negative values: -N reads the last N lines of the file.
+  validateIntegerRange(action?.startLine, 'startLine', -10_000_000, 10_000_000, errors);
   validatePositiveInteger(action?.endLine, 'endLine', errors);
   if (
     Number.isInteger(action?.startLine) &&
     Number.isInteger(action?.endLine) &&
+    Number(action.startLine) > 0 &&
     Number(action.endLine) < Number(action.startLine)
   ) {
     errors.push('endLine must be greater than or equal to startLine.');
@@ -225,6 +232,18 @@ function validateSearchFilesAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.pattern, 'pattern', errors);
   validateOptionalNonEmptyString(action?.query, 'query', errors);
   validatePositiveInteger(action?.maxResults, 'maxResults', errors);
+  validateBooleanValue(action?.literal, 'literal', errors);
+  validateBooleanValue(action?.multiline, 'multiline', errors);
+  validateOptionalNonEmptyString(action?.glob, 'glob', errors);
+  validateOptionalNonEmptyString(action?.fileType ?? action?.file_type, 'fileType', errors);
+  validateEnumString(
+    action?.outputMode ?? action?.output_mode,
+    'outputMode',
+    ['content', 'files_with_matches', 'count'] as const,
+    errors,
+  );
+  validateIntegerRange(action?.context, 'context', 0, 20, errors);
+  validatePositiveInteger(action?.headLimit ?? action?.head_limit, 'headLimit', errors);
   addError(
     errors,
     !isNonEmptyString(action?.pattern) && !isNonEmptyString(action?.query),
@@ -363,6 +382,21 @@ function validateRunCommandAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.command, 'command', errors);
   validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
+  validateBooleanValue(action?.background, 'background', errors);
+  validateBooleanValue(action?.killOnTimeout, 'killOnTimeout', errors);
+  return errors;
+}
+
+function validateTaskOutputAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.taskId, 'taskId', errors);
+  validatePositiveInteger(action?.tail, 'tail', errors);
+  return errors;
+}
+
+function validateKillTaskAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.taskId, 'taskId', errors);
   return errors;
 }
 
@@ -748,7 +782,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'read_file',
-    description: '读取文件内容',
+    description: '读取文件内容（带行号）。startLine 可为负：-N 表示从倒数第 N 行读到文件尾，适合看日志尾部。单次输出约 25K token 封顶，超限用 startLine/endLine 分段。',
     kind: 'read',
     permissionCategory: 'read',
     executionMode: 'blocking',
@@ -758,7 +792,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'search_files',
-    description: '搜索文件内容',
+    description: '搜索文件内容（ripgrep）。基础：query（内容搜索）+ pattern（路径子串过滤）+ maxResults。进阶参数（带任一即启用，此时 query 按正则解析）：literal=true 按字面量匹配；glob 如 "*.ts"；fileType 如 ts/py/js（rg --type）；outputMode=content|files_with_matches|count；context=匹配行前后 N 行；headLimit=结果行数上限（content 默认 200）；multiline=true 跨行匹配。',
     kind: 'search',
     permissionCategory: 'read',
     executionMode: 'blocking',
@@ -845,7 +879,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'replace_in_file',
-    description: '替换文件内容',
+    description: '替换文件内容（精确匹配优先；找不到时自动尝试 CRLF 归一化与智能引号/破折号等 Unicode 混淆字符归一化回退，歧义即拒改并报出所在行）。',
     kind: 'write',
     permissionCategory: 'write',
     executionMode: 'blocking',
@@ -865,13 +899,33 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'run_command',
-    description: '执行系统命令',
+    description: '执行系统命令。background: true 立即返回 task_id 并让命令留在后台跑（dev server、长构建等）；启动后台任务后不要用 sleep 轮询等它，先做别的事，任务完成会以 system-reminder 通知。前台命令超时不再被杀，而是自动转后台并返回 task_id（结果带 auto_backgrounded: true）；确要到点即杀传 killOnTimeout: true。超长输出只内联首尾片段，全量落盘到 log_file 可用 read_file/search_files 回查。',
     kind: 'shell',
     permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateRunCommandAction,
     execute: executeRunCommand as any,
+  },
+  {
+    type: 'task_output',
+    description: '查询后台任务的状态与输出（taskId 来自 run_command 的 background/auto_backgrounded 结果）。可选 tail=N 只取日志最后 N 行。任务完成会自动收到 system-reminder，不要为等待而反复轮询本工具。',
+    kind: 'shell',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: validateTaskOutputAction,
+    execute: executeTaskOutput as any,
+  },
+  {
+    type: 'kill_task',
+    description: '终止指定后台任务：对整个进程组先 SIGTERM，宽限后 SIGKILL。返回任务最终状态与输出尾部。',
+    kind: 'shell',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateKillTaskAction,
+    execute: executeKillTask as any,
   },
   {
     type: 'delegate_task',
@@ -1887,6 +1941,25 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
 ];
 
+// Every direct executor is wrapped so that pending background-task completion
+// notices (queued by the TaskManager when a backgrounded run_command finishes)
+// are flushed into the next tool result the model sees, whichever tool that
+// happens to be. This covers all dispatch paths (brain, agent loop, skills)
+// because they all invoke the registry's execute functions.
+function withTaskCompletionReminders(def: ToolDefinition): ToolDefinition {
+  const execute = def.execute;
+  if (!execute) {
+    return def;
+  }
+  return {
+    ...def,
+    execute: (async (action: any, context: any) => {
+      const result = await execute(action, context);
+      return appendPendingTaskReminders(result);
+    }) as any,
+  };
+}
+
 export const toolDefs: ToolDefinition[] = [
   fileToolDef,
   systemToolDef,
@@ -1894,7 +1967,7 @@ export const toolDefs: ToolDefinition[] = [
   securityAuditToolDef,
   ...actionToolDefs,
   ...capabilityToolDefs,
-];
+].map(withTaskCompletionReminders);
 
 export function getToolDefinition(toolType: string): ToolDefinition | undefined {
   return toolDefs.find((def) => def.type === toolType);

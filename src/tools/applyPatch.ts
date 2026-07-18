@@ -10,6 +10,7 @@ import {
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { runEditGuards } from './editGuards.js';
+import { normalizeConfusables } from './unicodeConfusables.js';
 
 type PatchOperation =
   | {
@@ -321,13 +322,16 @@ function findHunkStart(
     );
   }
 
-  // Fuzz 阶梯：严格 → 忽略行尾空白 → 忽略首尾缩进。更松的层只在更严的层
-  // 一处都没匹配到时才运行——所以干净补丁的行为和以前完全一致。每一层都保留
-  // 唯一匹配安全（多处歧义照样报错）；万一打歪，改后语法守卫会当场抓住。
+  // Fuzz 阶梯：严格 → 忽略行尾空白 → 忽略首尾缩进 → Unicode 混淆字符归一化
+  // （智能引号/破折号/省略号/nbsp 折成 ASCII）→ 归一化+去缩进。更松的层只在
+  // 更严的层一处都没匹配到时才运行——所以干净补丁的行为和以前完全一致。每一层
+  // 都保留唯一匹配安全（多处歧义照样报错）；万一打歪，改后语法守卫会当场抓住。
   const normalizers: Array<(s: string) => string> = [
     (s) => s,
     (s) => s.replace(/[ \t]+$/, ''),
     (s) => s.trim(),
+    (s) => normalizeConfusables(s),
+    (s) => normalizeConfusables(s).trim(),
   ];
 
   for (const normalize of normalizers) {

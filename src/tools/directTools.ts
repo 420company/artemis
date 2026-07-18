@@ -17,6 +17,8 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'replace_in_file',
   'apply_patch',
   'run_command',
+  'task_output',
+  'kill_task',
   'generate_image',
   'generate_video',
   'generate_long_video',

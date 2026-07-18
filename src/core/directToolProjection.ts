@@ -30,6 +30,8 @@ const EDIT_TOOLS = [
 
 const SHELL_VERIFY_TOOLS = [
   'run_command',
+  'task_output',
+  'kill_task',
   'npm_run',
   'which_command',
   'get_system_info',
@@ -177,7 +179,7 @@ const ENV_TIME_REQUEST_RE =
   /(?:\b(env|environment|variable|variables|date|time|timestamp|timezone)\b|环境变量|日期|时间|时区)/i;
 
 const MEDIA_REQUEST_RE =
-  /(?:\b(image|png|jpg|jpeg|gif|svg|icon|logo|banner|poster|screenshot|video|mp4|animation)\b|图片|图像|截图|视频|图标|标志|海报)/i;
+  /(?:\b(image|png|jpg|jpeg|gif|svg|icon|logo|banner|poster|screenshot|video|mp4|animation|avatar|illustration|wallpaper|artwork|generate_image|generate_video|generate_long_video)\b|图片|图像|截图|视频|图标|标志|海报|画图|画一张|插画|头像|形象|封面|配图|壁纸|表情包)/i;
 
 const BROWSER_REQUEST_RE =
   /(?:\b(browser|browse|navigate|click|type|screenshot|extract text|web page|webpage|page automation)\b|浏览器|网页自动化|打开网页|点击|输入到|网页截图|提取网页)/i;
@@ -219,10 +221,22 @@ const CODING_FALLBACK_TOOLS = [
   ...ENV_TIME_TOOLS,
 ] as const;
 
+// Post-compact recovery messages are injected with role 'user' and appended
+// AFTER the real user request (see collapse/postCompactRecovery.ts). They must
+// never be treated as "what the user asked for" — otherwise the projection
+// keys off the recovery blob and drops the tools the actual request needs.
+const RECOVERY_MESSAGE_ID_PREFIX = 'recovery-';
+const RECOVERY_MESSAGE_HEADER = '═══ 压缩后上下文恢复 ═══';
+
+export function isRecoveryMessage(message: SessionMessage): boolean {
+  return message.id.startsWith(RECOVERY_MESSAGE_ID_PREFIX)
+    || message.content.startsWith(RECOVERY_MESSAGE_HEADER);
+}
+
 function getLatestUserInput(messages: SessionMessage[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.role === 'user') {
+    if (message?.role === 'user' && !isRecoveryMessage(message)) {
       return message.content.trim();
     }
   }
@@ -272,6 +286,20 @@ function addRecentTools(target: Set<string>, recentToolNames: string[]): void {
   }
 }
 
+// If the user names a tool verbatim ("你直接调用generate_image啊"), that tool
+// must be projected no matter what the category regexes say. Underscored tool
+// names never match \b-anchored keyword regexes (underscore is a word char),
+// so without this rule an explicit request for a tool can fail to expose it.
+function addVerbatimToolMentions(target: Set<string>, latestUserInput: string): void {
+  if (!latestUserInput) return;
+  const lowerInput = latestUserInput.toLowerCase();
+  for (const name of ALL_DIRECT_TOOL_NAMES) {
+    if (lowerInput.includes(name)) {
+      target.add(name);
+    }
+  }
+}
+
 export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   const latestUserInput = getLatestUserInput(messages);
   if (!latestUserInput) {
@@ -282,6 +310,7 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   const selected = new Set<string>();
 
   addTools(selected, CORE_INSPECT_TOOLS);
+  addVerbatimToolMentions(selected, latestUserInput);
 
   if (CONTINUATION_REQUEST_RE.test(latestUserInput) && recentToolNames.length > 0) {
     addRecentTools(selected, recentToolNames);
@@ -387,7 +416,7 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   // Generic code work nearly always benefits from at least one verification
   // path, but we keep the shell surface compact unless the prompt asks for more.
   if (looksCoding && !wantsShell) {
-    addTools(selected, ['run_command', 'git_status']);
+    addTools(selected, ['run_command', 'task_output', 'kill_task', 'git_status']);
   }
 
   if (!looksCoding && recentToolNames.length > 0) {
@@ -428,6 +457,7 @@ export function widenProjectedDirectToolNames(
   }
 
   const latestUserInput = getLatestUserInput(messages);
+  addVerbatimToolMentions(widened, latestUserInput);
   if (MEDIA_REQUEST_RE.test(latestUserInput)) {
     addTools(widened, MEDIA_TOOLS);
   }

@@ -697,7 +697,11 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         required: ['path'],
         properties: {
           path: nonEmptyStringSchema('Repository-relative UTF-8 text file path.'),
-          startLine: integerSchema('Optional 1-based starting line.'),
+          startLine: {
+            type: 'integer',
+            description:
+              'Optional 1-based starting line. Negative -N reads the last N lines of the file (tail), useful for logs.',
+          },
           endLine: integerSchema('Optional 1-based ending line, inclusive.'),
         },
       };
@@ -707,8 +711,32 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         properties: {
           pattern: optionalStringSchema('Optional filename/path pattern filter.'),
-          query: optionalStringSchema('Optional text query to search file contents.'),
+          query: optionalStringSchema(
+            'Optional text query to search file contents. Treated as a regex when any advanced parameter (literal/glob/fileType/outputMode/context/headLimit/multiline) is provided; plain substring otherwise.',
+          ),
           maxResults: integerSchema('Optional limit for returned matches.'),
+          literal: {
+            type: 'boolean',
+            description: 'Match the query literally instead of as a regex.',
+          },
+          glob: optionalStringSchema('Optional file glob filter, e.g. "*.ts" or "src/**/*.json".'),
+          fileType: optionalStringSchema('Optional ripgrep file type filter, e.g. ts, py, js, rust.'),
+          outputMode: {
+            type: 'string',
+            enum: ['content', 'files_with_matches', 'count'],
+            description: 'Result shape: matching lines (default), file paths only, or per-file match counts.',
+          },
+          context: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 20,
+            description: 'Show N lines of context before/after each match (content mode).',
+          },
+          headLimit: integerSchema('Cap on returned result lines (content mode defaults to 200).'),
+          multiline: {
+            type: 'boolean',
+            description: 'Allow patterns to span line boundaries (ripgrep --multiline).',
+          },
         },
       };
     case 'lookup_docs':
@@ -839,7 +867,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         required: ['path', 'find', 'replace'],
         properties: {
           path: nonEmptyStringSchema('Repository-relative file path to update.'),
-          find: nonEmptyStringSchema('Exact text to find.'),
+          find: nonEmptyStringSchema(
+            'Exact text to find. Exact match is tried first; CRLF and Unicode-confusable (smart quotes/dashes) normalization fallbacks apply automatically, and ambiguous multi-matches are rejected with the offending line numbers.',
+          ),
           replace: {
             type: 'string',
             description: 'Replacement text.',
@@ -868,7 +898,40 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         required: ['command'],
         properties: {
           command: nonEmptyStringSchema('Shell command to execute inside the workspace.'),
-          timeoutMs: integerSchema('Optional timeout in milliseconds.'),
+          timeoutMs: integerSchema(
+            'Optional foreground budget in milliseconds. When it expires the command is moved to the background (task_id returned) instead of being killed, unless killOnTimeout is true.',
+          ),
+          background: {
+            type: 'boolean',
+            description:
+              'Run in the background (dev servers, long builds): returns a task_id immediately while the command keeps running. Do not poll or sleep-wait for it — you are notified via a system-reminder on completion; use task_output / kill_task to inspect or stop it.',
+          },
+          killOnTimeout: {
+            type: 'boolean',
+            description:
+              'Kill the process when the timeout fires instead of moving it to the background. Default false.',
+          },
+        },
+      };
+    case 'task_output':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['taskId'],
+        properties: {
+          taskId: nonEmptyStringSchema(
+            'Background task id returned by run_command (background: true or auto_backgrounded results).',
+          ),
+          tail: integerSchema('Optional: return only the last N lines of the task log.'),
+        },
+      };
+    case 'kill_task':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['taskId'],
+        properties: {
+          taskId: nonEmptyStringSchema('Background task id to terminate (SIGTERM, then SIGKILL after a grace period).'),
         },
       };
     case 'delegate_task':

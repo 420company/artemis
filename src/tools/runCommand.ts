@@ -1,11 +1,19 @@
 import { randomBytes } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
-import { readFileSync } from 'node:fs';
-import { join as joinPath } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join as joinPath } from 'node:path';
+import type { Readable, Writable } from 'node:stream';
 import type { AgentAction } from '../core/types.js';
 import { invalidateWalkFilesCache, resolveArtemisHomeDir, truncate } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
+import {
+  appendCaptureChunk,
+  closeCaptureLog,
+  createCommandCapture,
+  discardCaptureLogIfComplete,
+  taskManager,
+} from './taskManager.js';
 import {
   isPathInsideWorkspace,
   resolveWorkspaceCandidatePath,
@@ -149,8 +157,6 @@ function commandMatchesDangerousPattern(cmd: string): string | null {
   return null
 }
 
-const STDOUT_PREVIEW_CHARS = 6_000;
-const STDERR_PREVIEW_CHARS = 6_000;
 const TIMEOUT_PREVIEW_CHARS = 4_000;
 // 30s used to be the default, but it tripped commands like `find`, recursive
 // `grep`, slow `git status`, and any command misclassified by the long-running
@@ -161,9 +167,10 @@ const TIMEOUT_PREVIEW_CHARS = 4_000;
 const DEFAULT_TIMEOUT_MS = 90_000;
 const EXTENDED_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 600_000;
-// Hard cap on in-memory accumulation per stream. Prevents `yes` / `cat /dev/urandom`
-// from exhausting node heap when the model runs an unbounded command.
-const MAX_STREAM_BYTES = 5_000_000;
+// How long an explicit background start waits before returning, so instant
+// failures (bad binary, syntax error) are reported inline instead of forcing a
+// task_output round-trip.
+const BACKGROUND_START_GRACE_MS = 1_200;
 
 const LONG_RUNNING_COMMAND_PATTERNS = [
   /\b(?:npm|pnpm|yarn|bun)\b[\s\S]{0,80}\b(?:create|install|add|ci|init|dlx|exec|update|upgrade|audit)\b/i,
@@ -234,6 +241,239 @@ export function resolveRunCommandTimeoutMs(
     Math.max(requestedTimeoutMs ?? fallbackTimeoutMs, 1_000),
     MAX_TIMEOUT_MS,
   );
+}
+
+// ── persistent shell state (fd 3/4) ──────────────────────────────────────────
+// Each command still runs in a fresh process, but on POSIX the wrapper replays
+// a serialized snapshot of the previous command's shell state (env vars,
+// options, functions, aliases) from fd 3 before running the user command, and
+// dumps the new state to fd 4 afterwards. Dump traffic never touches
+// stdout/stderr. Any failure in this machinery degrades silently to the
+// cwd-only persistence provided by the EXIT-trap markers.
+
+type ShellKind = 'bash' | 'zsh';
+
+type SessionShellState = {
+  shell: ShellKind;
+  snapshot: string;
+};
+
+const SHELL_STATE_START_MARKER = '__ARTEMIS_SHELL_STATE_START__';
+const SHELL_STATE_END_MARKER = '__ARTEMIS_SHELL_STATE_END__';
+// Keep runaway snapshots (huge functions, giant exported blobs) from growing
+// per-command memory and spawn cost without bound.
+const MAX_SHELL_SNAPSHOT_CHARS = 400_000;
+const SHELL_STATE_SESSION_CAP = 32;
+
+// Env lines whose *name* suggests credentials are filtered out of the dump so
+// a secret exported by one command is not replayed into every later command.
+// Session/desktop plumbing vars are excluded because replaying stale values
+// breaks agents (ssh, dbus) more often than it helps.
+const SHELL_STATE_ENV_EXCLUDE_GREP =
+  "command grep -viE '_proxy=|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' | " +
+  "command grep -viE '^[^=]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[^=]*='";
+
+const DUMP_BASH_STATE_SCRIPT = `
+dump_artemis_bash_state() {
+  if ! command -v base64 >/dev/null 2>&1; then return 1; fi
+  _artemis_emit() { builtin printf '%s\\n' "$1"; }
+  _artemis_emit_encoded() {
+    local content="$1"; local var_name="$2"
+    if [[ -n "$content" ]]; then
+      builtin printf 'artemis_snap_%s=$(command base64 -d <<'"'"'ARTEMIS_SNAP_EOF_%s'"'"'\\n' "$var_name" "$var_name"
+      command base64 <<<"$content" | command tr -d '\\n'
+      builtin printf '\\nARTEMIS_SNAP_EOF_%s\\n' "$var_name"
+      builtin printf ')\\n'
+      builtin printf 'builtin eval "$artemis_snap_%s"\\n' "$var_name"
+    fi
+  }
+  _artemis_emit "${SHELL_STATE_START_MARKER}"
+  _artemis_emit "$PWD"
+  local env_vars
+  env_vars=$(builtin export -p 2>/dev/null | ${SHELL_STATE_ENV_EXCLUDE_GREP} || true)
+  _artemis_emit_encoded "$env_vars" "ENV_VARS_B64"
+  local posix_opts
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -v 'nounset' || true)
+  _artemis_emit_encoded "$posix_opts" "POSIX_OPTS_B64"
+  local bash_opts
+  bash_opts=$(builtin shopt -p 2>/dev/null || true)
+  _artemis_emit_encoded "$bash_opts" "BASH_OPTS_B64"
+  local all_functions
+  all_functions=$(builtin declare -f 2>/dev/null || true)
+  _artemis_emit_encoded "$all_functions" "FUNCTIONS_B64"
+  local aliases
+  aliases=$(builtin alias -p 2>/dev/null || true)
+  _artemis_emit_encoded "$aliases" "ALIASES_B64"
+  _artemis_emit "${SHELL_STATE_END_MARKER}"
+}
+`;
+
+const DUMP_ZSH_STATE_SCRIPT = `
+function dump_artemis_zsh_state() {
+  builtin zmodload -F zsh/parameter p:parameters p:options p:functions p:aliases 2>/dev/null || true
+  _artemis_emit() { builtin print -r -- "$1"; }
+  _artemis_emit_encoded() {
+    local content="$1"; local var_name="$2"
+    if [[ -n "$content" ]]; then
+      builtin printf 'artemis_snap_%s=$(command base64 -d <<'"'"'ARTEMIS_SNAP_EOF_%s'"'"'\\n' "$var_name" "$var_name"
+      command base64 <<<"$content" | command tr -d '\\n'
+      builtin printf '\\nARTEMIS_SNAP_EOF_%s\\n' "$var_name"
+      builtin printf ')\\n'
+      builtin printf 'builtin eval "$artemis_snap_%s"\\n' "$var_name"
+    fi
+  }
+  _artemis_emit "${SHELL_STATE_START_MARKER}"
+  _artemis_emit "$PWD"
+  local env_vars
+  env_vars=$(builtin typeset -xp 2>/dev/null | ${SHELL_STATE_ENV_EXCLUDE_GREP} || true)
+  _artemis_emit_encoded "$env_vars" "ENV_VARS_B64"
+  local zsh_opts
+  zsh_opts=$(setopt 2>/dev/null | command grep -v '^nounset$' | command awk '{printf "builtin setopt %s 2>/dev/null || true\\n", $0}' || true)
+  _artemis_emit_encoded "$zsh_opts" "ZSH_OPTS_B64"
+  local all_functions
+  all_functions=$(builtin typeset -f 2>/dev/null || true)
+  _artemis_emit_encoded "$all_functions" "FUNCTIONS_B64"
+  local aliases
+  aliases=$(builtin alias -L 2>/dev/null || true)
+  _artemis_emit_encoded "$aliases" "ALIASES_B64"
+  _artemis_emit "${SHELL_STATE_END_MARKER}"
+}
+`;
+
+const shellStatesBySession = new Map<string, SessionShellState>();
+
+function detectShellKind(): ShellKind {
+  const shellPath = process.env.SHELL ?? '';
+  return basename(shellPath) === 'zsh' ? 'zsh' : 'bash';
+}
+
+function resolveShellBinary(kind: ShellKind): string | null {
+  const fromEnv = process.env.SHELL;
+  if (fromEnv && basename(fromEnv) === kind && existsSync(fromEnv)) {
+    return fromEnv;
+  }
+  const fallback = kind === 'zsh' ? '/bin/zsh' : '/bin/bash';
+  return existsSync(fallback) ? fallback : null;
+}
+
+function buildStatefulWrapper(kind: ShellKind): string {
+  const dumpFn = kind === 'zsh' ? 'dump_artemis_zsh_state' : 'dump_artemis_bash_state';
+  const dumpScript = kind === 'zsh' ? DUMP_ZSH_STATE_SCRIPT : DUMP_BASH_STATE_SCRIPT;
+  if (kind === 'zsh') {
+    return (
+      `${dumpScript}\n` +
+      `__artemis_snap=$(command cat <&3 2>/dev/null) || __artemis_snap=''\n` +
+      `builtin unsetopt aliases 2>/dev/null\n` +
+      `builtin unalias -m '*' 2>/dev/null || true\n` +
+      `if [ -n "$__artemis_snap" ]; then builtin eval "$__artemis_snap" 2>/dev/null || true; fi\n` +
+      `builtin unsetopt nounset 2>/dev/null || true\n` +
+      `builtin setopt nonomatch 2>/dev/null || true\n` +
+      `builtin setopt aliases 2>/dev/null\n` +
+      `builtin export PWD="$(builtin pwd)"\n` +
+      `builtin eval "$1"\n` +
+      `__artemis_cmd_rc=$?\n` +
+      `${dumpFn} >&4 2>/dev/null || true\n` +
+      `builtin exit $__artemis_cmd_rc`
+    );
+  }
+  return (
+    `${dumpScript}\n` +
+    `__artemis_snap=$(command cat <&3 2>/dev/null) || __artemis_snap=''\n` +
+    `if [ -n "$__artemis_snap" ]; then builtin eval -- "$__artemis_snap" 2>/dev/null || true; fi\n` +
+    `builtin set +u 2>/dev/null || true\n` +
+    `builtin export PWD="$(builtin pwd)"\n` +
+    `builtin shopt -s expand_aliases 2>/dev/null || true\n` +
+    `builtin eval "$1"\n` +
+    `__artemis_cmd_rc=$?\n` +
+    `${dumpFn} >&4 2>/dev/null || true\n` +
+    `builtin exit $__artemis_cmd_rc`
+  );
+}
+
+function getSessionShellState(sessionKey: string, kind: ShellKind): SessionShellState {
+  let state = shellStatesBySession.get(sessionKey);
+  if (!state || state.shell !== kind) {
+    if (shellStatesBySession.size >= SHELL_STATE_SESSION_CAP && !shellStatesBySession.has(sessionKey)) {
+      const oldest = shellStatesBySession.keys().next().value;
+      if (oldest !== undefined) shellStatesBySession.delete(oldest);
+    }
+    state = { shell: kind, snapshot: '' };
+    shellStatesBySession.set(sessionKey, state);
+  }
+  return state;
+}
+
+/** Parse a fd-4 dump; returns the replayable snapshot (cwd line discarded —
+ *  cwd persistence stays with the EXIT-trap marker machinery). */
+function parseShellStateDump(raw: string): string | null {
+  const startIdx = raw.indexOf(`${SHELL_STATE_START_MARKER}\n`);
+  const endIdx = raw.lastIndexOf(SHELL_STATE_END_MARKER);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
+  const body = raw.slice(startIdx + SHELL_STATE_START_MARKER.length + 1, endIdx);
+  const newlinePos = body.indexOf('\n');
+  if (newlinePos === -1) return null;
+  const snapshot = body.slice(newlinePos + 1);
+  if (snapshot.length > MAX_SHELL_SNAPSHOT_CHARS) return null;
+  return snapshot;
+}
+
+type StatefulSpawnHandle = {
+  child: ChildProcess;
+  /** Resolves with the raw fd-4 dump text once available (empty on failure). */
+  readDump: () => string;
+  sessionState: SessionShellState;
+};
+
+/**
+ * Spawn the user's shell directly with fd 3/4 wired for state replay/dump.
+ * Returns null when the persistent-state path is unavailable (Windows, missing
+ * shell binary, spawn failure) so the caller can use the plain path.
+ */
+function spawnWithShellState(
+  wrappedCommand: string,
+  options: { cwd: string; env: NodeJS.ProcessEnv; sessionKey: string },
+): StatefulSpawnHandle | null {
+  if (process.platform === 'win32') return null;
+  try {
+    const kind = detectShellKind();
+    const binary = resolveShellBinary(kind);
+    if (!binary) return null;
+    const sessionState = getSessionShellState(options.sessionKey, kind);
+    const wrapper = buildStatefulWrapper(kind);
+    const args = kind === 'bash'
+      ? ['-O', 'extglob', '-c', wrapper, '--', wrappedCommand]
+      : ['-c', wrapper, '--', wrappedCommand];
+    const child = spawn(binary, args, {
+      cwd: options.cwd,
+      env: options.env,
+      windowsHide: true,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
+    });
+
+    const stateIn = child.stdio[3] as Writable | null;
+    const stateOut = child.stdio[4] as Readable | null;
+    let dumpText = '';
+    if (stateIn) {
+      stateIn.on('error', () => { /* EPIPE when the child exits early */ });
+      stateIn.end(sessionState.snapshot);
+    }
+    if (stateOut) {
+      stateOut.on('error', () => { /* ignore */ });
+      stateOut.on('data', (chunk: Buffer) => {
+        if (dumpText.length < MAX_SHELL_SNAPSHOT_CHARS * 2) {
+          dumpText += String(chunk);
+        }
+      });
+    }
+    return {
+      child,
+      readDump: () => dumpText,
+      sessionState,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function executeRunCommand(
@@ -357,7 +597,16 @@ export async function executeRunCommand(
   const spawnEnv = buildSpawnEnv(action.command);
 
   return new Promise<ToolExecutionResult>((resolve) => {
-    const child = spawn(wrappedCommand, {
+    const sessionKey = context.sessionId?.trim() || 'default';
+    // Prefer the persistent-shell-state spawn (fd 3/4 replay/dump) on POSIX;
+    // fall back to the plain `shell: true` spawn on Windows or when the
+    // user's shell binary is unavailable.
+    const stateHandle = spawnWithShellState(wrappedCommand, {
+      cwd: context.cwd,
+      env: spawnEnv,
+      sessionKey,
+    });
+    const child = stateHandle?.child ?? spawn(wrappedCommand, {
       cwd: context.cwd,
       shell: true,
       windowsHide: true,
@@ -368,11 +617,12 @@ export async function executeRunCommand(
       detached: !isWindows,
     });
 
-    let stdout = '';
-    let stderr = '';
+    const capture = createCommandCapture();
+    const wantsBackground = action.background === true;
+    const killOnTimeout = action.killOnTimeout === true;
     let resolved = false;
-    let overflowKilled = false;
     let aborted = false;
+    let adoptedTaskId: string | null = null;
 
     const killChild = (signal: NodeJS.Signals = 'SIGTERM'): void => {
       if (child.killed) return;
@@ -426,43 +676,133 @@ export async function executeRunCommand(
       };
     };
 
-    const timer = setTimeout(() => {
-      killChild('SIGTERM');
-      if (resolved) {
-        return;
-      }
-      resolved = true;
-      cleanupAbortListener();
-      resolve({
-        action,
-        ok: false,
-        output: `Command timed out after ${timeoutMs}ms.\nstdout:\n${truncate(stdout, TIMEOUT_PREVIEW_CHARS)}\nstderr:\n${truncate(stderr, TIMEOUT_PREVIEW_CHARS)}`,
-      });
-    }, timeoutMs);
+    child.stdout?.on('data', (chunk) => {
+      appendCaptureChunk(capture, 'stdout', chunk);
+    });
 
-    const appendBounded = (current: string, chunk: Buffer | string): string => {
-      if (current.length >= MAX_STREAM_BYTES) return current;
-      const remaining = MAX_STREAM_BYTES - current.length;
-      const text = String(chunk);
-      const next = text.length > remaining ? current + text.slice(0, remaining) : current + text;
-      if (next.length >= MAX_STREAM_BYTES && !overflowKilled) {
-        overflowKilled = true;
-        killChild('SIGTERM');
-      }
-      return next;
+    child.stderr?.on('data', (chunk) => {
+      appendCaptureChunk(capture, 'stderr', chunk);
+    });
+
+    const adoptToBackground = (reason: 'explicit' | 'foreground-timeout'): string => {
+      const task = taskManager.adopt({
+        child,
+        capture,
+        command: action.command,
+        cwd: context.cwd,
+        reason,
+      });
+      adoptedTaskId = task.id;
+      return task.id;
     };
 
-    child.stdout.on('data', (chunk) => {
-      stdout = appendBounded(stdout, chunk);
-    });
+    const backgroundNote =
+      'note: the task keeps running in the background. Do NOT sleep-poll or busy-wait for it — ' +
+      'continue with other work; a system-reminder will notify you when it completes. ' +
+      'Use task_output to inspect progress and kill_task to stop it.';
 
-    child.stderr.on('data', (chunk) => {
-      stderr = appendBounded(stderr, chunk);
-    });
+    // ── explicit background start ────────────────────────────────────────────
+    if (wantsBackground) {
+      cleanupAbortListener();
+      if (!taskManager.hasCapacity()) {
+        killChild('SIGKILL');
+        resolved = true;
+        resolve({
+          action,
+          ok: false,
+          output: 'Too many background tasks are already running. Use task_output to review them and kill_task to stop stale ones before starting more.',
+        });
+        return;
+      }
+      const taskId = adoptToBackground('explicit');
+      const finishStart = (): void => {
+        if (resolved) return;
+        resolved = true;
+        const task = taskManager.get(taskId);
+        const running = !task || task.status === 'running';
+        if (!running && task) {
+          // Completed within the start grace window — report inline and drop
+          // the queued completion reminder (it would be redundant).
+          taskManager.consumeReminder(taskId);
+        }
+        resolve({
+          action,
+          ok: running ? true : task!.exitCode === 0,
+          output: [
+            `command: ${action.command}`,
+            'background: true',
+            `task_id: ${taskId}`,
+            running
+              ? `status: running${typeof child.pid === 'number' ? ` (pid ${child.pid})` : ''}`
+              : `status: ${task!.status} (exit_code: ${task!.exitCode ?? -1})`,
+            `log_file: ${capture.logPath}`,
+            'initial stdout:',
+            capture.stdout.render(capture.logPath),
+            'initial stderr:',
+            capture.stderr.render(capture.logPath),
+            ...(running ? [backgroundNote] : []),
+          ].join('\n'),
+        });
+      };
+      const graceTimer = setTimeout(finishStart, BACKGROUND_START_GRACE_MS);
+      graceTimer.unref?.();
+      void taskManager.waitForCompletion(taskId, BACKGROUND_START_GRACE_MS + 200).then(() => {
+        clearTimeout(graceTimer);
+        finishStart();
+      });
+    }
+
+    // ── foreground timeout: move to background instead of killing ────────────
+    const timer = wantsBackground
+      ? null
+      : setTimeout(() => {
+          if (resolved) {
+            return;
+          }
+          if (!killOnTimeout && taskManager.hasCapacity()) {
+            const taskId = adoptToBackground('foreground-timeout');
+            resolved = true;
+            cleanupAbortListener();
+            resolve({
+              action,
+              ok: true,
+              output: [
+                `command: ${action.command}`,
+                'auto_backgrounded: true',
+                `task_id: ${taskId}`,
+                `reason: command exceeded the ${timeoutMs}ms foreground budget and was moved to the background instead of being killed`,
+                `log_file: ${capture.logPath}`,
+                'partial stdout:',
+                capture.stdout.render(capture.logPath),
+                'partial stderr:',
+                capture.stderr.render(capture.logPath),
+                backgroundNote,
+              ].join('\n'),
+            });
+            return;
+          }
+          killChild('SIGTERM');
+          setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              killChild('SIGKILL');
+            }
+          }, 1_500).unref?.();
+          resolved = true;
+          cleanupAbortListener();
+          resolve({
+            action,
+            ok: false,
+            output: `Command timed out after ${timeoutMs}ms and was killed (killOnTimeout).\nstdout:\n${truncate(capture.stdout.render(capture.logPath), TIMEOUT_PREVIEW_CHARS)}\nstderr:\n${truncate(capture.stderr.render(capture.logPath), TIMEOUT_PREVIEW_CHARS)}`,
+          });
+        }, timeoutMs);
 
     child.on('error', (error) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       cleanupAbortListener();
+      closeCaptureLog(capture);
+      if (adoptedTaskId) {
+        taskManager.finalize(adoptedTaskId, -1, null);
+      }
       if (resolved) {
         return;
       }
@@ -474,14 +814,33 @@ export async function executeRunCommand(
       });
     });
 
-    child.on('close', (code) => {
-      clearTimeout(timer);
+    child.on('close', (code, signal) => {
+      if (timer) clearTimeout(timer);
       cleanupAbortListener();
+      if (adoptedTaskId) {
+        // Backgrounded (explicitly or by foreground-timeout adoption): the
+        // TaskManager owns finalization and completion reminders. Skip cwd /
+        // shell-state persistence — the session moved on while this ran.
+        taskManager.finalize(adoptedTaskId, code, signal ?? null);
+        return;
+      }
+      closeCaptureLog(capture);
       if (resolved) {
         return;
       }
       (async () => {
         resolved = true;
+
+        // Harvest the fd-4 shell state dump (env/options/functions/aliases)
+        // for the next command in this session. Missing or malformed dumps
+        // silently keep the previous snapshot (cwd-only degradation).
+        if (stateHandle && !aborted) {
+          const snapshot = parseShellStateDump(stateHandle.readDump());
+          if (snapshot !== null) {
+            stateHandle.sessionState.snapshot = snapshot;
+          }
+        }
+
         if (aborted) {
           resolve({
             action,
@@ -491,24 +850,26 @@ export async function executeRunCommand(
               'interrupted: true',
               'reason: user correction received while command was running',
               'stdout:',
-              truncate(stdout, TIMEOUT_PREVIEW_CHARS),
+              truncate(capture.stdout.render(capture.logPath), TIMEOUT_PREVIEW_CHARS),
               'stderr:',
-              truncate(stderr, TIMEOUT_PREVIEW_CHARS),
+              truncate(capture.stderr.render(capture.logPath), TIMEOUT_PREVIEW_CHARS),
             ].join('\n'),
           });
           return;
         }
         const warnings: string[] = [];
-        if (overflowKilled) {
+        if (capture.logCapped) {
           warnings.push(
-            `Command output exceeded ${MAX_STREAM_BYTES} bytes and was killed. Re-run with a narrower filter (head/tail, --max-count, grep) to avoid OOM.`,
+            `Output exceeded the 512MB on-disk log cap; the log at ${capture.logPath} is incomplete. Re-run with a narrower filter if you need the omitted output.`,
           );
         }
 
         // Peel the marker lines off and persist any cwd change before building
         // the model-facing output. Only do this when the process exited cleanly
         // via the wrapper (not a kill), which we detect by the marker's presence.
-        const { cleaned: cleanedStdout, newCwd } = extractCwdFromOutput(stdout);
+        const renderedStdout = capture.stdout.render(capture.logPath);
+        const renderedStderr = capture.stderr.render(capture.logPath);
+        const { cleaned: cleanedStdout, newCwd } = extractCwdFromOutput(renderedStdout);
         let cwdChangeNote: string | null = null;
         if (newCwd && newCwd !== context.cwd) {
           let allowCwdChange = true;
@@ -541,19 +902,17 @@ export async function executeRunCommand(
           }
         }
 
-        if (cleanedStdout.length > STDOUT_PREVIEW_CHARS) {
+        if (capture.stdout.truncated || capture.stderr.truncated) {
           warnings.push(
-            `stdout was truncated to ${STDOUT_PREVIEW_CHARS} characters. Re-run with narrower scope if you need the omitted output.`,
-          );
-        }
-        if (stderr.length > STDERR_PREVIEW_CHARS) {
-          warnings.push(
-            `stderr was truncated to ${STDERR_PREVIEW_CHARS} characters. Re-run with narrower scope if you need the omitted output.`,
+            `Only the first/last portions of the output are shown inline. The complete output is on disk at ${capture.logPath} — inspect it with read_file (negative startLine reads the tail) or search_files.`,
           );
         }
         if (code === 0) {
           invalidateWalkFilesCache();
         }
+        // Nothing was truncated → the message already carries the full output,
+        // so drop the on-disk copy to avoid tmp litter.
+        discardCaptureLogIfComplete(capture);
         resolve({
           action,
           ok: code === 0,
@@ -565,9 +924,9 @@ export async function executeRunCommand(
               ? ['warnings:', ...warnings.map((warning) => `- ${warning}`)]
               : []),
             'stdout:',
-            truncate(cleanedStdout, STDOUT_PREVIEW_CHARS),
+            cleanedStdout,
             'stderr:',
-            truncate(stderr, STDERR_PREVIEW_CHARS),
+            renderedStderr,
           ].join('\n'),
         });
       })().catch((error) => {

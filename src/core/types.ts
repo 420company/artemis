@@ -316,6 +316,17 @@ export type AgentAction =
       type: 'run_command';
       command: string;
       timeoutMs?: number;
+      background?: boolean;
+      killOnTimeout?: boolean;
+    }
+  | {
+      type: 'task_output';
+      taskId: string;
+      tail?: number;
+    }
+  | {
+      type: 'kill_task';
+      taskId: string;
     }
   | {
       type: 'delegate_task';
@@ -722,6 +733,8 @@ export const ALL_AGENT_ACTION_TYPES = [
   'replace_in_file',
   'apply_patch',
   'run_command',
+  'task_output',
+  'kill_task',
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',

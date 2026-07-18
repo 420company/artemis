@@ -223,6 +223,10 @@ function describeAction(action: AgentAction): string {
       return `confirmation: ${action.question}`;
     case 'memory':
       return `memory: ${action.action}${action.name ? ` ${action.name}` : ''}`;
+    case 'task_output':
+      return `read background task output ${action.taskId}`;
+    case 'kill_task':
+      return `kill background task ${action.taskId}`;
     default: {
       const exhaustive: never = action;
       return exhaustive;
