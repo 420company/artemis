@@ -11,7 +11,8 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
-import { platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { resolveProfileContextLength } from './modelContext.js';
 
 type ResponsesInputContent =
   | { type: 'input_text'; text: string }
@@ -407,11 +408,14 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       payload.tools = options?.nativeFunctionTools as ProviderNativeFunctionTool[];
     }
     // Only a caller's per-request limit is sent (bounded by the platform's
-    // maxOutputTokens); ordinary turns keep the endpoint default.
+    // maxOutputTokens and the room left in the window); ordinary turns keep
+    // the endpoint default.
     if (options?.maxOutputTokens && options.maxOutputTokens > 0) {
       const platformMax = platformMaxOutputTokens(this.config);
-      payload.max_output_tokens = Math.floor(
-        platformMax !== undefined ? Math.min(platformMax, options.maxOutputTokens) : options.maxOutputTokens,
+      payload.max_output_tokens = fitOutputTokensToWindow(
+        Math.floor(platformMax !== undefined ? Math.min(platformMax, options.maxOutputTokens) : options.maxOutputTokens),
+        resolveProfileContextLength(this.config),
+        estimateRequestPromptTokens(messages, options),
       );
     }
 

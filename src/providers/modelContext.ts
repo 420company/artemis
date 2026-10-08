@@ -1,6 +1,6 @@
 import { buildApiKeyHeaders } from './openaiCompatible.js'
 import type { ProviderApiKeyHeader, ProviderProfile } from './types.js'
-import { hasPlatformCapabilities, platformContextLength, type ModelCapabilityConfig } from './capabilities.js'
+import { hasPlatformCapabilities, type ModelCapabilityConfig } from './capabilities.js'
 
 type ModelMetadata = Record<string, unknown>
 
@@ -435,8 +435,8 @@ export async function enrichProfileContextLength<T extends Pick<ProviderProfile,
   profile: T,
   options?: { preserveManual?: boolean },
 ): Promise<T & { contextLength?: number; contextLengthSource?: Exclude<ModelContextLengthSource, 'unknown'>; contextLengthCheckedAt?: string }> {
-  // Platform values are authoritative: never replace them with detection.
-  if (platformContextLength(profile as ModelCapabilityConfig)) return profile
+  // Platform profiles belong to the agent server: never replace their values.
+  if (hasPlatformCapabilities(profile as ModelCapabilityConfig)) return profile
   if (options?.preserveManual && profile.contextLength) {
     return {
       ...profile,

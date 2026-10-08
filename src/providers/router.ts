@@ -423,6 +423,9 @@ export async function createProviderRouter(
         get supportsImages() {
           return buildCandidates().some((candidate) => candidate.provider.supportsImages === true);
         },
+        get primarySupportsImages() {
+          return rankForTarget(buildCandidates())[0]?.provider.supportsImages === true;
+        },
         // The window of the provider this target tries first.
         get contextLength() {
           return rankForTarget(buildCandidates())[0]?.provider.contextLength;

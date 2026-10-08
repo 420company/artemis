@@ -13,7 +13,7 @@ import type {
 } from './types.js';
 import { ensureDir, pathExists } from '../utils/fs.js';
 import { capKnownModelContextLength, detectModelContextLength } from './modelContext.js';
-import { platformContextLength } from './capabilities.js';
+import { hasPlatformCapabilities } from './capabilities.js';
 
 function getDefaultSetupConfig(): ArtemisSetupConfig {
   return {
@@ -331,8 +331,8 @@ export class ProviderStore {
 
     const capStoredContextLength = <T extends { model: string; contextLength?: number }>(entry: T): T => {
       if (entry.contextLength === undefined) return entry;
-      // Platform values are authoritative; the model name may be an alias.
-      if (platformContextLength(entry)) return entry;
+      // Platform profiles belong to the agent server: never cap them by name.
+      if (hasPlatformCapabilities(entry)) return entry;
       const capped = capKnownModelContextLength(entry.model, entry.contextLength);
       if (capped === undefined || capped === entry.contextLength) return entry;
       repairedContextLength = true;
@@ -419,7 +419,9 @@ export class ProviderStore {
     if (index < 0) return undefined;
 
     const profile = data.profiles[index]!;
-    if (platformContextLength(profile)) return profile;
+    // Platform profiles belong to the agent server: never overwrite them.
+    // Without a platform contextLength the runtime falls back to name rules.
+    if (hasPlatformCapabilities(profile)) return profile;
     const detected = await detectModelContextLength(profile);
     if (!detected.contextLength || detected.source === 'unknown') {
       return profile;
@@ -455,7 +457,7 @@ export class ProviderStore {
     const refreshedByKey = new Map<string, ProviderProfile>();
 
     const refreshProfile = async (profile: ProviderProfile): Promise<ProviderProfile> => {
-      if (platformContextLength(profile)) return profile;
+      if (hasPlatformCapabilities(profile)) return profile;
       const detected = await detectModelContextLength(profile);
       if (!detected.contextLength || detected.source === 'unknown') return profile;
       const refreshed: ProviderProfile = {

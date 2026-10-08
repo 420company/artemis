@@ -77,6 +77,7 @@ import {
   loadVisionHelper,
   memoizeVisionHelper,
   prepareUserImagesForModel,
+  resolveImageRoute,
   type VisionHelper,
 } from './visionHelper.js';
 import { buildContextWindow } from './context.js';
@@ -6037,11 +6038,14 @@ export async function runAgent(
     options.visionHelper !== undefined
       ? options.visionHelper ?? undefined
       : loadVisionHelper(options.cwd, { onInfo: options.onInfo }));
+  const userImageRoute = options.imageAttachments?.length
+    ? await resolveImageRoute(options.resolveProvider?.(options.profile ?? 'main') ?? options.provider, getVisionHelper)
+    : { native: true };
   const userImages = await prepareUserImagesForModel({
     userText: userInput,
     images: options.imageAttachments,
-    modelSeesImages: (options.resolveProvider?.(options.profile ?? 'main') ?? options.provider).supportsImages === true,
-    getHelper: getVisionHelper,
+    modelSeesImages: userImageRoute.native,
+    getHelper: async () => userImageRoute.helper,
     locale: options.locale,
     onInfo: options.onInfo,
   });
@@ -6533,9 +6537,10 @@ export async function runAgent(
     // view_image needs a model that can see images or a vision helper that
     // describes them; otherwise it is left out of the native tools, the
     // prompt says it is unavailable, and the tool itself fails.
-    const modelSeesImages = activeProvider.supportsImages === true;
+    const imageRoute = await resolveImageRoute(activeProvider, getVisionHelper);
+    const modelSeesImages = imageRoute.native;
     viewedImages.acceptsImages = modelSeesImages;
-    const imageHelper = modelSeesImages ? undefined : await getVisionHelper();
+    const imageHelper = imageRoute.helper;
     viewedImages.describeImage = imageHelper
       ? (image) => describeSingleImage(imageHelper, image, { userText: userInput, locale: options.locale })
       : undefined;

@@ -310,6 +310,25 @@ export async function prepareUserImagesForModel(input: {
   return { note: blocks.join('\n\n'), images: [] };
 }
 
+/**
+ * How a run shows images to its provider. The candidate tried first (the
+ * worker, for a sub-agent) sees them directly when it can; otherwise the
+ * vision helper describes them; otherwise, when another routed candidate (the
+ * main profile) can see them, the images go natively and the router sends
+ * that request to it. A text-only model never receives image parts.
+ */
+export async function resolveImageRoute(
+  provider: Pick<ChatProvider, 'supportsImages' | 'primarySupportsImages'>,
+  getHelper: () => Promise<VisionHelper | undefined>,
+): Promise<{ native: boolean; helper?: VisionHelper }> {
+  const anySees = provider.supportsImages === true;
+  const primarySees = provider.primarySupportsImages ?? anySees;
+  if (primarySees) return { native: true };
+  const helper = await getHelper();
+  if (helper) return { native: false, helper };
+  return { native: anySees };
+}
+
 /** One image's description for view_image; rejects with the reason when the helper failed. */
 export async function describeSingleImage(
   helper: VisionHelper,

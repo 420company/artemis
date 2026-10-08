@@ -430,6 +430,12 @@ export interface ChatProvider {
   /** True if the provider accepts image attachments via ProviderRequestOptions.imageAttachments. */
   readonly supportsImages?: boolean;
   /**
+   * Routed providers only: whether the candidate tried first (e.g. the worker
+   * for a sub-agent) can see images. supportsImages is true when any
+   * candidate can. Undefined on a plain provider, where both are the same.
+   */
+  readonly primarySupportsImages?: boolean;
+  /**
    * The model's context window in tokens, reported only when it is
    * authoritative (a profile with capabilitiesSource 'platform'). Undefined
    * means callers fall back to their own estimates.

@@ -15,7 +15,8 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
-import { platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { resolveProfileContextLength } from './modelContext.js';
 
 function buildProviderErrorMessage(
   response: Response,
@@ -249,17 +250,23 @@ function resolveReasoningEffort(model: string, effort: string | undefined): stri
 /**
  * Sets an output limit only when a caller asks for one for this request (for
  * example the vision helper); ordinary turns keep the endpoint default. The
- * platform's maxOutputTokens bounds it. OpenAI reasoning models take
- * max_completion_tokens instead of max_tokens.
+ * platform's maxOutputTokens and the room left in the context window bound
+ * it. OpenAI reasoning models take max_completion_tokens instead of max_tokens.
  */
 function applyRequestOutputLimit(
   body: Record<string, unknown>,
   config: ProviderConfig,
-  requestLimit: number | undefined,
+  messages: SessionMessage[],
+  options: ProviderRequestOptions | undefined,
 ): void {
+  const requestLimit = options?.maxOutputTokens;
   if (!requestLimit || requestLimit <= 0) return;
   const platformMax = platformMaxOutputTokens(config);
-  const limit = Math.floor(platformMax !== undefined ? Math.min(platformMax, requestLimit) : requestLimit);
+  const limit = fitOutputTokensToWindow(
+    Math.floor(platformMax !== undefined ? Math.min(platformMax, requestLimit) : requestLimit),
+    resolveProfileContextLength(config),
+    estimateRequestPromptTokens(messages, options),
+  );
   body[OPENAI_REASONING_EFFORT_MODELS.test(config.model) ? 'max_completion_tokens' : 'max_tokens'] = limit;
 }
 
@@ -509,7 +516,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     }
     const streamReasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort)
     if (streamReasoningEffort) body['reasoning_effort'] = streamReasoningEffort
-    applyRequestOutputLimit(body, this.config, options?.maxOutputTokens)
+    applyRequestOutputLimit(body, this.config, messages, options)
     if (options?.nativeFunctionTools?.length) {
       body['tools'] = options.nativeFunctionTools.map((t) => ({
         type: 'function',
@@ -831,7 +838,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     };
     const reasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort);
     if (reasoningEffort) body['reasoning_effort'] = reasoningEffort;
-    applyRequestOutputLimit(body, this.config, options?.maxOutputTokens);
+    applyRequestOutputLimit(body, this.config, messages, options);
 
     // Attach function tools when provided
     if (options?.nativeFunctionTools?.length) {

@@ -13,7 +13,8 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
-import { platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { resolveProfileContextLength } from './modelContext.js';
 
 function cleanProviderBody(body: string): string {
   return body.trim();
@@ -440,7 +441,12 @@ export class MessagesCompatibleProvider implements ChatProvider {
 
     return {
       model: this.config.model,
-      max_tokens: resolveRequestMaxTokens(this.config, streaming, options?.maxOutputTokens),
+      // Bounded so prompt + output fits the window (see fitOutputTokensToWindow).
+      max_tokens: fitOutputTokensToWindow(
+        resolveRequestMaxTokens(this.config, streaming, options?.maxOutputTokens),
+        resolveProfileContextLength(this.config),
+        estimateRequestPromptTokens(messages, options),
+      ),
       ...(streaming ? { stream: true } : {}),
       ...(thinking ? { thinking } : {}),
       ...(effort ? { output_config: { effort } } : {}),

@@ -8992,6 +8992,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         { ...platformAlias, id: 'platform-main', supportsImages: false },
         { ...platformAlias, id: 'platform-vision', model: 'vision-alias', supportsImages: true, maxOutputTokens: 'lots', capabilitiesSource: 'server' },
         { ...nonPlatform, id: 'byok' },
+        { ...platformAlias, id: 'platform-no-window', contextLength: undefined },
       ],
     }), 'utf8')
     const store = new ProviderStore(tmpDir)
@@ -9002,6 +9003,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const vision = store.getProfile(reloaded, 'platform-vision')
     const byok = store.getProfile(reloaded, 'byok')
     const refreshed = await store.refreshProfileContextLength('platform-main')
+    const noWindow = await store.refreshProfileContextLength('platform-no-window')
     assert(
       'platform capabilities: profile fields and visionProfileId survive load and save',
       reloaded.visionProfileId === 'platform-vision' &&
@@ -9013,8 +9015,10 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         vision?.supportsImages === true &&
         vision.maxOutputTokens === undefined &&
         vision.capabilitiesSource === undefined &&
-        byok?.contextLength === GPT_5_6_CONTEXT_LENGTH,
-      JSON.stringify({ visionProfileId: reloaded.visionProfileId, main, vision, byok }),
+        byok?.contextLength === GPT_5_6_CONTEXT_LENGTH &&
+        noWindow?.contextLength === undefined &&
+        resolveProfileContextLength(noWindow) === GPT_5_6_CONTEXT_LENGTH,
+      JSON.stringify({ visionProfileId: reloaded.visionProfileId, main, vision, byok, noWindow }),
     )
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -9378,6 +9382,121 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     applyProviderOverrides({})
     await new Promise<void>((resolve) => server.close(() => resolve()))
     fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sub-agents: a text-only worker never receives image parts. view_image goes
+  // through the vision helper when one exists, otherwise through the main
+  // profile (which can see images).
+  const runSubAgent = async (helper: VisionHelper | null) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-subagent-'))
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      specialistProfileId: 'worker',
+      profiles: [{ id: 'worker', protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model: 'text-worker', supportsImages: false }],
+    }), 'utf8')
+    const workerImages: number[] = []
+    const mainImages: number[] = []
+    let workerCalls = 0
+    const worker: ChatProvider = {
+      supportsImages: false,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        workerCalls += 1
+        workerImages.push(requestOptions?.imageAttachments?.length ?? 0)
+        if (workerCalls === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'Reviewed.', done: true }), raw: null }
+      },
+    }
+    const main: ChatProvider = {
+      supportsImages: true,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        mainImages.push(requestOptions?.imageAttachments?.length ?? 0)
+        return { text: JSON.stringify({ reply: 'Reviewed with the image.', done: true }), raw: null }
+      },
+    }
+    const router = await createProviderRouter({ cwd: tmpDir, mainProvider: main, createProviderFromProfile: () => worker })
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'vision sub-agent smoke' })
+    await store.save(session)
+    await runAgent(session, 'Review the screenshot.', {
+      cwd: tmpDir,
+      provider: main,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'reviewer',
+      resolveProvider: router.resolveProvider,
+      visionHelper: helper,
+    })
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { workerImages, mainImages, toolText }
+  }
+  const helperCalls: number[] = []
+  const withHelper = await runSubAgent(createVisionHelper({
+    supportsImages: true,
+    async complete(_messages, requestOptions): Promise<ProviderResponse> {
+      helperCalls.push(requestOptions?.imageAttachments?.length ?? 0)
+      return { text: 'A dashboard with a red error banner.', raw: null }
+    },
+  }))
+  assert(
+    'vision helper (sub-agent): a text-only worker uses the helper, and neither worker nor main gets image parts',
+    helperCalls.length === 1 &&
+      withHelper.toolText.includes('red error banner') &&
+      withHelper.workerImages.every((n) => n === 0) &&
+      withHelper.mainImages.every((n) => n === 0),
+    JSON.stringify({ helperCalls, worker: withHelper.workerImages, main: withHelper.mainImages }),
+  )
+  const withoutHelper = await runSubAgent(null)
+  assert(
+    'vision helper (sub-agent): without a helper the viewed image goes to the main profile, never to the text-only worker',
+    withoutHelper.workerImages.every((n) => n === 0) &&
+      withoutHelper.mainImages.includes(1),
+    JSON.stringify({ worker: withoutHelper.workerImages, main: withoutHelper.mainImages }),
+  )
+}
+
+{
+  // max_tokens is bounded by the room left in the context window, because
+  // some providers reject prompt + max_tokens above the window.
+  const bodies: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      bodies.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      // One reply that both the Messages and the chat/completions parsers accept.
+      res.end(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], choices: [{ message: { content: 'ok' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock window server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const big = { id: 'u1', role: 'user' as const, content: 'x'.repeat(32_000), createdAt: new Date().toISOString() }
+    const small = { ...big, content: 'hi' }
+    const platform = { baseUrl, apiKey: 'k', model: 'gpt-6-sol', contextLength: 20_000, maxOutputTokens: 128_000, capabilitiesSource: 'platform' as const }
+    await new MessagesCompatibleProvider({ ...platform, protocol: 'messages' }).completeStream([big], () => {})
+    await new MessagesCompatibleProvider({ ...platform, protocol: 'messages' }).completeStream([small], () => {})
+    await new OpenAICompatibleProvider({ ...platform, protocol: 'openai' }).complete([big], { maxOutputTokens: 128_000 })
+    const [bigMessages, smallMessages, bigOpenAI] = bodies.map((b) => Number(b.max_tokens))
+    assert(
+      'platform capabilities: max_tokens = min(maxOutputTokens, window − estimated prompt − margin)',
+      bigMessages! >= 256 && bigMessages! <= 20_000 - 8_000 - 1_024 &&
+        smallMessages! <= 20_000 - 1_024 && smallMessages! > bigMessages! &&
+        bigOpenAI === bigMessages,
+      JSON.stringify({ bigMessages, smallMessages, bigOpenAI }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 }
 
