@@ -783,6 +783,13 @@ function segmentStartSeconds(entries: Array<{ duration: number; timecodeStart?: 
   return starts;
 }
 
+/** Run-wide settings every segment prompt is compiled with. */
+type SegmentPromptOptions = {
+  subtitleMode?: 'auto' | 'always' | 'off';
+  rawPassthrough?: boolean;
+  referenceNote?: string;
+};
+
 /**
  * The per-segment blocks a compiled prompt carries besides the shot itself:
  * the opening framing, the world anchors covering the segment, the global
@@ -797,7 +804,8 @@ function segmentPromptExtras(options: {
   duration: number;
   briefGlobals?: SagaBriefGlobals;
   maxChars?: number;
-}): { openingFraming?: string; worldAnchor?: string; globalExcerpt?: string; globalExcerptCompact?: string; maxChars?: number } {
+  promptOptions?: SegmentPromptOptions;
+}): { openingFraming?: string; worldAnchor?: string; worldAnchorCompact?: string; globalExcerpt?: string; globalExcerptCompact?: string; maxChars?: number } & SegmentPromptOptions {
   // OPENING FRAMING — extract per-segment position / orientation / motion /
   // shot size / camera cues from this segment's storyBeat + the wider source
   // story (scoped to this segment's slice). The block is spliced near the
@@ -815,10 +823,12 @@ function segmentPromptExtras(options: {
     openingFraming: formatOpeningFramingBlock(framingDirectives),
     ...(globals ? {
       worldAnchor: worldAnchorLinesFor(globals, options.startSeconds, options.startSeconds + options.duration) || undefined,
+      worldAnchorCompact: worldAnchorLinesFor(globals, options.startSeconds, options.startSeconds + options.duration, true) || undefined,
       globalExcerpt: formatGlobalBriefExcerpt(globals) || undefined,
       globalExcerptCompact: formatGlobalBriefExcerpt(globals, 240) || undefined,
     } : {}),
     ...(options.maxChars ? { maxChars: options.maxChars } : {}),
+    ...options.promptOptions,
   };
 }
 
@@ -838,6 +848,7 @@ function buildSegments(options: {
   briefGlobals?: SagaBriefGlobals;
   /** Longest compiled segment prompt (the model limit less what generate_video adds). */
   promptMaxChars?: number;
+  promptOptions?: SegmentPromptOptions;
 }): SagaSegment[] {
   const beats = sentenceChunks(options.story);
   const plannedShots = Array.isArray(options.shots)
@@ -957,6 +968,7 @@ function buildSegments(options: {
       duration: r.duration,
       briefGlobals: options.briefGlobals,
       maxChars: options.promptMaxChars,
+      promptOptions: options.promptOptions,
     });
 
     const promptArgs = {
@@ -1265,6 +1277,7 @@ export async function executeGenerateLongVideo(
       cwd: context.cwd,
       text: story,
       enableLlmRewrite: !verbatimSegments && !briefIsStructured,
+      markedDialogueOnly: true,
       subtitleMode: action.subtitleMode ?? 'auto',
       adultMode: videoNsfw,
       knownSpeakers: [
@@ -1277,7 +1290,10 @@ export async function executeGenerateLongVideo(
     } else if (briefIsStructured) {
       toolLog('📐 Saga: 检测到结构化 brief（时间码/镜头标记），跳过 LLM 改写以保留用户原文的所有具体地点/动作/约束。');
     }
-    story = languageNormalized.generationText;
+    // The whole brief's dialogue note stays out of the story: each segment
+    // gets a note with its own lines, and the bible must not list every line
+    // of the film as one segment's speech.
+    story = languageNormalized.bodyText;
     toolLog(`🌐 Saga Visual Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     // ALWAYS parse timestamped shots first. When the user supplied an explicit
     // [X-Y秒] timeline, that is the authoritative segmentation and takes
@@ -1701,6 +1717,13 @@ export async function executeGenerateLongVideo(
     // cleanDirect / raw passthrough segments go to the model as written;
     // otherwise generate_video adds the Director's lines and the rendering
     // rules, so the compiled prompt leaves room for them.
+    const segmentPromptOptions: SegmentPromptOptions = {
+      subtitleMode: action.subtitleMode ?? 'auto',
+      ...(rawPassthrough ? {
+        rawPassthrough: true,
+        ...(hasGlobalUserImageReferences ? { referenceNote: 'Reference image: the attached image is the identity reference for the subject.' } : {}),
+      } : {}),
+    };
     const segmentPromptMaxChars = verbatimSegments
       ? limits.maxPromptChars
       : Math.max(1200, limits.maxPromptChars - sagaSegmentPromptReserve());
@@ -1736,6 +1759,7 @@ export async function executeGenerateLongVideo(
       cleanDirect: verbatimSegments,
       briefGlobals,
       promptMaxChars: segmentPromptMaxChars,
+      promptOptions: segmentPromptOptions,
     });
     superVisualImageBudget.raiseLimit(superVisualImageLimit(segments.length));
     const segmentStarts = segmentStartSeconds(segments.map((segment, index) => ({ duration: segment.duration, timecodeStart: sanitizedShots?.[index]?.timecodeStart })));
@@ -1823,6 +1847,7 @@ export async function executeGenerateLongVideo(
                   duration: seg.duration,
                   briefGlobals,
                   maxChars: segmentPromptMaxChars,
+                  promptOptions: segmentPromptOptions,
                 }),
               } as const;
               seg.prompt = compileShotPromptWithContinuity({ ...promptArgs, mode: continuityMode, cleanDirect: verbatimSegments });

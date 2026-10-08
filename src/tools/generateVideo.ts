@@ -638,7 +638,11 @@ async function generateVideoWithVisualProvider(
         firstFrameImageCount: firstFrameImageUrls.length,
         lastFrameImageCount: lastFrameImageUrls.length,
         maxPromptChars: directorPromptBudget(action, videoConfig.provider, model),
-        subtitleMode: action.subtitleMode,
+        // Guide §3.5: on "auto", a line the brief marks as a subtitle asks
+        // for on-screen text, so the Director must not forbid it.
+        subtitleMode: (action.subtitleMode ?? 'auto') === 'auto' && languageNormalized?.dialogueLines.some((line) => line.use === 'subtitle')
+          ? 'always'
+          : action.subtitleMode,
       });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({

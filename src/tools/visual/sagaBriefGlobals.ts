@@ -163,11 +163,12 @@ export function formatGlobalBriefExcerpt(globals: SagaBriefGlobals, maxChars = 3
 }
 
 /** World-anchor lines for a segment spanning [startSeconds, endSeconds). */
-export function worldAnchorLinesFor(globals: SagaBriefGlobals, startSeconds: number, endSeconds: number): string {
+export function worldAnchorLinesFor(globals: SagaBriefGlobals, startSeconds: number, endSeconds: number, compact = false): string {
   const active = globals.worldAnchors.filter((anchor) => anchor.startSeconds < endSeconds && anchor.endSeconds > startSeconds);
   if (active.length === 0) return '';
+  // The compact form keeps each anchor's name and its first two lines.
   return active
-    .map((anchor) => `[WORLD ANCHOR · ${anchor.name}: ${anchor.lines.join('; ')}]`)
+    .map((anchor) => `[WORLD ANCHOR · ${anchor.name}: ${(compact ? anchor.lines.slice(0, 2).map((line) => clip(line, 60)) : anchor.lines).join('; ')}]`)
     .join('\n');
 }
 

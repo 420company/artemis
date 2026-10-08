@@ -21,6 +21,7 @@ import { appendRenderingGuardrails, SAGA_VIDEO_RENDERING_GUARDRAILS } from '../s
 import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
 import { buildContinuityBible, compileShotPromptWithContinuity, IDENTITY_CARD_MAX_CHARS } from '../src/tools/visual/sagaRenderer/continuity.js';
 import { normalizeSagaPromptForVideoGeneration } from '../src/tools/visual/sagaLanguageDirector.js';
+import { parseSagaBriefGlobals, worldAnchorLinesFor } from '../src/tools/visual/sagaBriefGlobals.js';
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js';
 import { renderingGuardrailsLength } from '../src/tools/visual/renderingGuardrails.js';
 
@@ -219,6 +220,18 @@ async function rawModeChecks(): Promise<void> {
   assert.equal(imageBodies(raw.requests).length, 0, 'raw mode generates no turnaround or keyframes');
   assert.ok(tasks.every((body) => !promptText(body).includes('Rendering rules:')), 'raw mode never gets the rendering rules');
   assert.ok(tasks.every((body) => promptText(body).length <= 4000), 'raw prompts fit the model prompt limit');
+  // "[原样直传]" is the script as written: no identity card, negatives or bible.
+  for (const body of tasks) {
+    const text = promptText(body);
+    assert.doesNotMatch(text, /\[NEGATIVE|SAGA-CONTINUITY-POLICY|CHARACTERS|SCENE-PRIORITY|continuity bible|Shot \d+ of/, `raw passthrough sends only the script: ${text}`);
+    assert.ok(text.length < 400, `raw passthrough sends only the segment text: ${text.length} chars`);
+  }
+  const rawTimecoded = '[原样直传]\n画幅比例：9:16\n[0-5秒] 一只橘猫跳上窗台，阳光洒在毛上。\n[5-10秒] 橘猫打了个哈欠，**对白**: "喵。"';
+  const rawRun = await runHermeticSaga({ prompt: rawTimecoded, story: rawTimecoded, totalDuration: 10, ratio: '9:16', generateAudio: false, rawPassthrough: true });
+  const [rawFirst, rawSecond] = videoTaskBodies(rawRun.requests).map(promptText);
+  assert.equal(rawFirst, '一只橘猫跳上窗台，阳光洒在毛上。', 'segment 1 goes exactly as written');
+  assert.match(rawSecond ?? '', /^Dialogue handling:\n- Only these marked lines are spoken: “喵。”/, 'a raw segment carries its own dialogue note');
+  assert.match(rawSecond ?? '', /橘猫打了个哈欠，\*\*对白\*\*: "喵。"$/);
 
   // cleanDirect (guide §9.10) only drops the aesthetic dressing: the
   // narrative analysis and the Super Visual turnaround still run.
@@ -323,6 +336,57 @@ async function silentShortClipChecks(): Promise<void> {
   }
 }
 
+async function plainVideoDialogueChecks(): Promise<void> {
+  // A plain generate_video prompt (no Saga, no LLM) keeps quoted speech as dialogue.
+  for (const prompt of ['A tired soldier looks into the camera and says "We made it home."', '一个女孩对着镜头笑着说“我们回家吧！”']) {
+    await withHermeticWorkspace({}, async (cwd, requests) => {
+      const result = await executeGenerateVideo({ type: 'generate_video', prompt, outputPath: path.join(cwd, 'v.mp4') } as any, { cwd, permissionMode: 'full-access' } as any);
+      assert.equal(result.ok, true, result.output);
+      const text = videoTaskBodies(requests).map((body) => (body.content ?? []).filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n')).join('\n');
+      assert.match(text, /Quoted text in the brief is spoken dialogue|Treat quoted speech in the brief as spoken dialogue/, prompt);
+      assert.doesNotMatch(text, /not speech/, prompt);
+    });
+  }
+}
+
+async function segmentDialogueAndCutChecks(): Promise<void> {
+  // cleanDirect: each segment lists only its own marked lines, never the
+  // whole brief's (the bible no longer carries the brief's dialogue note).
+  const brief = '请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n[0-8秒] 段 1 · 地铁站\n他从地铁站出口走出。\n[8-16秒] 段 2 · 窗边\n他坐在窗边。\n**对白（约 2 秒）**: "终于到了。"';
+  const clean = await runHermeticSaga({ prompt: brief, story: brief, totalDuration: 16, ratio: '16:9', generateAudio: false, cleanDirect: true, identitySource: 'text_only' });
+  assert.equal(clean.result.ok, true, clean.result.output);
+  const textOf = (body: Record<string, any>) => (body.content ?? []).filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n');
+  const [first, second] = videoTaskBodies(clean.requests).map(textOf);
+  assert.ok(!first!.includes('终于到了'), `segment 1 has no dialogue of its own: ${first}`);
+  assert.match(second!, /^Dialogue handling:\n- Only these marked lines are spoken: “终于到了。”/, 'segment 2 lists its own line');
+
+  // A written INSTANT HARD CUT starts a new picture: no tail frame crosses it.
+  const cut = '[0-5秒] 段 1 · 女孩在雨夜街头停下。结尾 INSTANT HARD CUT。\n[5-10秒] 段 2 · 东京的早晨，女孩推开窗。';
+  const cutRun = await runHermeticSaga({ prompt: cut, story: cut, totalDuration: 10, ratio: '9:16', generateAudio: false, identitySource: 'text_only' });
+  assert.equal(cutRun.result.ok, true, cutRun.result.output);
+  const images = (body: Record<string, any>) => (body.content ?? []).filter((item: any) => item.type === 'image_url').length;
+  assert.equal(images(videoTaskBodies(cutRun.requests)[1]!), 0, 'no tail frame across a hard cut');
+  const flow = cut.replace('结尾 INSTANT HARD CUT。', '');
+  const flowRun = await runHermeticSaga({ prompt: flow, story: flow, totalDuration: 10, ratio: '9:16', generateAudio: false, identitySource: 'text_only' });
+  assert.equal(images(videoTaskBodies(flowRun.requests)[1]!), 1, 'without a cut the tail frame is chained');
+
+  // Subtitles on "auto": a segment that marks a subtitle line may show it.
+  const bible = buildContinuityBible({ story: '雨夜的城市。', ratio: '9:16', subtitleMode: 'auto' });
+  const compile = (storyBeat: string, subtitleMode: 'auto' | 'off') => compileShotPromptWithContinuity({
+    bible, mode: 'strong-vision', shotIndex: 1, shotCount: 1, duration: 8, title: '0-8s', storyBeat, visualPrompt: '', camera: '', continuity: '', transition: '', subtitleMode,
+  });
+  const withSubtitle = compile('他推门进来。**字幕**: "成都 · 2019"', 'auto');
+  assert.doesNotMatch(withSubtitle.match(/\[NEGATIVE[^\]]*\]/)?.[0] ?? '', /no readable text|no subtitles/);
+  assert.doesNotMatch(withSubtitle, /no (?:readable )?subtitles(?=[,\n\]])/);
+  assert.match(compile('他推门进来。', 'auto'), /no readable text, no subtitles/);
+  const offBible = buildContinuityBible({ story: '雨夜的城市。', ratio: '9:16', subtitleMode: 'off' });
+  assert.match(compileShotPromptWithContinuity({ bible: offBible, mode: 'strong-vision', shotIndex: 1, shotCount: 1, duration: 8, title: '0-8s', storyBeat: '**字幕**: "成都"', visualPrompt: '', camera: '', continuity: '', transition: '', subtitleMode: 'off' }), /no subtitles/);
+
+  // A world anchor that does not fit in full keeps its name and first lines.
+  const globals = parseSagaBriefGlobals('【时空锚点 / WORLD ANCHOR】\n[锚点·黄昏大雨 | 0-24秒]\n- 地面湿滑，雨水反光\n- 角色头发贴在额头\n- 远处车灯在雨幕中散开\n\n[0-8秒] 段 1 · x');
+  assert.equal(worldAnchorLinesFor(globals, 0, 8, true), '[WORLD ANCHOR · 黄昏大雨: 地面湿滑，雨水反光; 角色头发贴在额头]');
+}
+
 async function richBibleBudgetChecks(): Promise<void> {
   // A rich continuity bible (many locked characters, wardrobe, props,
   // locations) must not crowd the shot or the dialogue rules out of a
@@ -382,6 +446,8 @@ async function richBibleBudgetChecks(): Promise<void> {
 seedreamSizeChecks();
 titleChecks();
 await richBibleBudgetChecks();
+await segmentDialogueAndCutChecks();
+await plainVideoDialogueChecks();
 await silentShortClipChecks();
 eligibilityChecks();
 budgetChecks();

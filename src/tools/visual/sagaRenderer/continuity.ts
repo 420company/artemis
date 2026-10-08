@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { SagaContinuityBible, SagaSegmentInput } from './types.js';
 import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
-import { DIALOGUE_MARKER_SOURCE, QUOTED_LINE_SOURCE } from '../sagaLanguageDirector.js';
+import { buildSagaDialogueNote, extractSagaDialogueLines } from '../sagaLanguageDirector.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -566,11 +566,22 @@ export function compileShotPromptWithContinuity(options: {
   globalExcerptCompact?: string;
   /** World-anchor lines (guide §9.9) whose time range covers this segment. */
   worldAnchor?: string;
+  /** A shorter world-anchor block (name and first lines), used when the full one does not fit. */
+  worldAnchorCompact?: string;
   /**
    * Longest prompt to produce. Lower-priority blocks are shortened or left
    * out to fit; without it every block is emitted in full.
    */
   maxChars?: number;
+  /** The user's subtitle choice; with "auto", a segment's own subtitle line may render. */
+  subtitleMode?: 'auto' | 'always' | 'off';
+  /**
+   * "[原样直传]": the segment's text goes as written with only its own
+   * dialogue note, no identity card or bible.
+   */
+  rawPassthrough?: boolean;
+  /** One line saying the attached image is the identity reference (raw passthrough). */
+  referenceNote?: string;
 }): string {
   const authored = options.authoredPrompt?.replace(/\s+/g, ' ').trim();
 
@@ -589,13 +600,10 @@ export function compileShotPromptWithContinuity(options: {
   const sourceShotText = [authored, options.storyBeat, options.visualPrompt, options.continuity, options.camera, options.title]
     .filter(Boolean)
     .join(' ');
-  // Dialogue extraction — ONLY quoted text preceded by an explicit dialogue
-  // marker (对白 / 台词 / 旁白 / dialogue / line / voiceover / she says …).
-  // Bare quotes are brand names, concepts, signs or lyrics, never speech.
-  const dialogueRe = new RegExp(`(?:\\*{0,2})(?:${DIALOGUE_MARKER_SOURCE})\\s*(?:[（(][^）)]*[）)])?\\s*(?:\\*{0,2})\\s*[:：]\\s*(?:[（(][^）)\\n]{0,60}[）)]\\s*)?${QUOTED_LINE_SOURCE}`, 'giu');
-  const quotedText = Array.from(sourceShotText.matchAll(dialogueRe))
-    .map((match) => (match.groups?.q1 ?? match.groups?.q2 ?? match.groups?.q3 ?? match.groups?.q4)?.trim())
-    .filter((value): value is string => Boolean(value));
+  // Dialogue: only marked lines (guide §3.2). Bare quotes are brand names,
+  // concepts, signs or lyrics, never speech.
+  const shotLines = extractSagaDialogueLines(sourceShotText);
+  const quotedText = shotLines.filter((line) => line.use !== 'subtitle').map((line) => line.text);
   const hasQuotedDialogue = quotedText.length > 0;
   const hasBrandOrReadableText = /(?:logo|brand|wordmark|signage|screen|ui|interface|caption|title card|on[- ]screen text|readable text|品牌|商标|标志|招牌|屏幕|界面|字幕|标题卡|展示文字|可读文字|中文|英文|文字)/i.test(sourceShotText);
   const hasWalkingMotion = /(?:walk|walking|stride|striding|step|stepping|move\s+right|rightward|向右|行走|走路|步态|迈步|穿行)/i.test(sourceShotText);
@@ -641,8 +649,18 @@ export function compileShotPromptWithContinuity(options: {
         { text: `Story beat (the dominant subject for the entire ${options.duration}s): ${storyBeatText}` },
         { text: visualDirection, keep: 72 },
       ];
-  const cardBlock: PromptBlock = { text: options.bible.identityCard };
-  const refitCard = options.bible.fitIdentityCard ? { block: cardBlock, fit: options.bible.fitIdentityCard } : undefined;
+  // Guide §3.5: with subtitles on "auto", a segment that marks a subtitle
+  // line asks for that text on screen, so its negatives must not forbid it.
+  const segmentShowsSubtitle = (options.subtitleMode ?? 'auto') === 'auto' && shotLines.some((line) => line.use === 'subtitle');
+  const cardText = (card: string) => (segmentShowsSubtitle ? card.replace(/, no readable text|, no subtitles(?=[,\]])/g, '') : card);
+  const cardBlock: PromptBlock = { text: cardText(options.bible.identityCard) };
+  const fitCard = options.bible.fitIdentityCard;
+  const refitCard = fitCard ? { block: cardBlock, fit: (room: number) => cardText(fitCard(room)) } : undefined;
+  // cleanDirect and raw passthrough skip generate_video's dialogue note, so
+  // the segment carries its own (this segment's lines only).
+  const dialogueNote = options.cleanDirect || options.rawPassthrough
+    ? buildSagaDialogueNote(options.storyBeat ?? '', options.subtitleMode)
+    : '';
   const lockedCamera = /locked-off|no camera movement|锁死/i.test(options.camera ?? '');
   // The identity card's [CAMERA] already spells a locked camera out in full.
   const cameraLineCompact = lockedCamera && options.camera
@@ -650,11 +668,21 @@ export function compileShotPromptWithContinuity(options: {
     : undefined;
   const globalBlocks: PromptBlock[] = [
     { text: options.openingFraming ? `\n${options.openingFraming}` : '', compact: options.openingFraming ? `\n${compactOpeningFraming(options.openingFraming)}` : undefined, keep: 90 },
-    { text: options.worldAnchor ?? '', keep: 88 },
+    { text: options.worldAnchor ?? '', compact: options.worldAnchorCompact, keep: 88 },
     { text: options.globalExcerpt ?? '', compact: options.globalExcerptCompact, keep: 80 },
   ];
   const bibleBlock: PromptBlock = { text: options.bible.bible, keep: 5, clip: true };
   const finish = (blocks: PromptBlock[]) => (options.maxChars ? fitPromptBlocks(blocks, options.maxChars, refitCard) : renderBlocks(blocks));
+
+  if (options.rawPassthrough) {
+    // The script as written: the segment's own text, its dialogue note and,
+    // when the user attached one, a line naming the identity reference.
+    return finish([
+      { text: dialogueNote, keep: 95 },
+      { text: options.referenceNote ?? '', keep: 90 },
+      { text: authored ?? (options.storyBeat ?? '').trim() },
+    ]);
+  }
 
   if (options.cleanDirect) {
     // cleanDirect strips DIRECTORIAL/AESTHETIC scaffolding (style lock,
@@ -666,6 +694,7 @@ export function compileShotPromptWithContinuity(options: {
     // and stripping them caused character/wardrobe/location drift across
     // long-video segments.
     return finish([
+      { text: dialogueNote, keep: 95 },
       { text: shotHeader },
       ...shotContent,
       cardBlock,
@@ -680,8 +709,9 @@ export function compileShotPromptWithContinuity(options: {
   }
 
   const styleLock = styleLockBlock(options.bible);
-  const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
-  const aestheticCompact = COMPACT_AESTHETIC_LOCKS[detectAestheticSubject(sourceShotText, options.bible)];
+  const withoutSubtitleBans = (text: string) => (segmentShowsSubtitle ? text.replace(/, no (?:readable )?subtitles(?=[,\n\]])/g, '') : text);
+  const aestheticLock = withoutSubtitleBans(aestheticLockBlock(sourceShotText, options.bible));
+  const aestheticCompact = withoutSubtitleBans(COMPACT_AESTHETIC_LOCKS[detectAestheticSubject(sourceShotText, options.bible)]);
 
   const blocks: PromptBlock[] = [
     { text: shotHeader },
