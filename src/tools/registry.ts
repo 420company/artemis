@@ -41,6 +41,7 @@ import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
 import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
+import { executeViewImage } from './viewImage.js';
 
 export type { ToolDefinition };
 
@@ -916,6 +917,20 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: true,
     validate: validateTaskOutputAction,
     execute: executeTaskOutput as any,
+  },
+  {
+    type: 'view_image',
+    description: '查看一张图片（PNG/JPEG/GIF/WebP，最大 8 MB）：图片会附在你的下一步里，你能直接看到内容。用来检查截图、生成的图片、用户上传的图片；path 相对工作目录。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.path, 'path', errs);
+      return errs;
+    },
+    execute: executeViewImage as any,
   },
   {
     type: 'kill_task',

@@ -70,6 +70,7 @@ import {
   getDelegatedChildPermissionMode,
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
+import { MAX_IMAGES_PER_REQUEST, takeQueuedImages } from './imageInput.js';
 import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
@@ -673,6 +674,13 @@ function buildActionFromLooseArgs(
         engine,
         command: getLooseStringArg(args, 'command', 'cmd'),
       };
+    }
+    case 'view_image':
+    case 'look_at_image':
+    case 'see_image': {
+      const imagePath = getLooseStringArg(args, 'path', 'file', 'image', 'imagePath', 'image_path');
+      if (!imagePath?.trim()) return null;
+      return { type: 'view_image', path: imagePath };
     }
     default:
       return null;
@@ -1861,6 +1869,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
     case 'task_output':
       return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
+    case 'view_image':
+      return `view_image ${truncate(action.path, 120)}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
     default: {
@@ -6439,12 +6449,19 @@ export async function runAgent(
       );
     }
     const nativeFunctionTools = nativeToolRuntime?.tools;
+    // The user's images go with the first request; images the agent chose
+    // to look at (view_image) go with the request right after.
+    const viewedImages = takeQueuedImages(session.id);
+    const requestImages = [
+      ...(turn === 1 ? options.imageAttachments ?? [] : []),
+      ...viewedImages,
+    ].slice(-MAX_IMAGES_PER_REQUEST);
+    if (requestImages.length && !activeProvider.supportsImages) {
+      options.onInfo?.(`[images] this model cannot take images; ${requestImages.length} dropped`);
+    }
     const providerCallOptions = {
       nativeFunctionTools,
-      imageAttachments:
-        turn === 1 && options.imageAttachments?.length && activeProvider.supportsImages
-          ? options.imageAttachments
-          : undefined,
+      imageAttachments: requestImages.length && activeProvider.supportsImages ? requestImages : undefined,
     };
     // Stream the model output live to the workflow UI when the provider
     // supports it. We forward each delta as a `[stream-chunk]` info line,

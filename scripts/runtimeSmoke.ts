@@ -1268,6 +1268,39 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 }
 
 {
+  // The agent looks at an image mid-run: view_image attaches it to the next request.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  let calls = 0
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      calls += 1
+      seen.push(options?.imageAttachments?.length)
+      if (calls === 1) {
+        return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+      }
+      return { text: JSON.stringify({ reply: 'It is a login page.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'What does the screenshot show?', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  assert('view_image: the image reaches the request after the tool call, and only that one', seen[0] === undefined && seen[1] === 1 && seen.slice(2).every((n) => n === undefined), JSON.stringify(seen))
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
   const tmpDir = path.join(os.tmpdir(), `artemis-visual-required-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   await configureMockImageProfile(tmpDir)

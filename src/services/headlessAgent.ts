@@ -23,6 +23,8 @@ export interface HeadlessAgentOptions {
   maxTurns?: number
   /** Continue this existing session (its history becomes context) instead of creating a new one. */
   sessionId?: string
+  /** Images attached to the prompt; the model sees them with its first request. */
+  imagePaths?: string[]
   sessionTitle?: string
   onInfo?: (message: string) => void
 }
@@ -76,6 +78,12 @@ export async function runHeadlessAgent(
       title: opts.sessionTitle ?? `Headless: ${prompt.slice(0, 48)}`,
     })
 
+  // A missing or unreadable image fails the run: the user expects it to be seen.
+  const { loadImageForModel, MAX_IMAGES_PER_REQUEST } = await import('../core/imageInput.js')
+  const paths = opts.imagePaths ?? []
+  if (paths.length > MAX_IMAGES_PER_REQUEST) throw new Error(`At most ${MAX_IMAGES_PER_REQUEST} images per message`)
+  const imageAttachments = await Promise.all(paths.map((p) => loadImageForModel(p, cwd)))
+
   const started = Date.now()
   const result = await runAgent(session, prompt, {
     cwd,
@@ -88,6 +96,7 @@ export async function runHeadlessAgent(
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
     onInfo: opts.onInfo,
+    ...(imageAttachments.length ? { imageAttachments } : {}),
   })
 
   return {
