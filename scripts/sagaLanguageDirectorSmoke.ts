@@ -51,6 +51,10 @@ async function spokenLineCleanup(): Promise<void> {
   // Abbreviations never split a speaker; a direction after a sentence ends is removed anywhere.
   assert.equal(relocateDialogueCues('dialogue: "Dr. Smith: (sighs) We are out of time."'), 'dialogue: (Dr. Smith, sighs) "We are out of time."');
   assert.equal(relocateDialogueCues('"Yes! (laughs) Absolutely! (smiles)"'), '(laughs, smiles) "Yes! Absolutely!"');
+  // Conservative cases stay as written.
+  assert.equal(relocateDialogueCues('"I met Dr. (Jane) Smith yesterday."'), '"I met Dr. (Jane) Smith yesterday."');
+  assert.equal(relocateDialogueCues('“快跑！注意：（压低声音）别回头。”'), '“快跑！注意：（压低声音）别回头。”', '注意 is not a speaker');
+  assert.equal(relocateDialogueCues('他在墙上写下“（未完待续）”。'), '他在墙上写下“（未完待续）”。', 'on-screen text keeps its quotes');
   // 「」 quotes, and kana / Hangul speaker names.
   assert.equal(relocateDialogueCues('「田中：（笑）行こう！」'), '（田中，笑）「行こう！」');
   assert.equal(relocateDialogueCues('“ミク：（笑顔）ありがとう！”'), '（ミク，笑顔）“ありがとう！”');

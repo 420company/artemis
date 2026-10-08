@@ -78,12 +78,24 @@ const SPEAKER_NAME_SOURCE = "[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Kata
 const SPEAKER_PREFIX_RE = new RegExp(`^[*_]*(?<name>${SPEAKER_NAME_SOURCE})[*_]*[ \\t]*[:：][ \\t]*`, 'u');
 // A later speaker inside the same quote: after a sentence ends, "Name：（cue）".
 // ASCII "." is left out so "Dr. Smith:" or "Mr. O'Brien:" never splits.
-const MID_SPEAKER_RE = new RegExp(`(?<=[。！？!?…~～])[ \\t]*(?=(?:${SPEAKER_NAME_SOURCE})[ \\t]*[:：][ \\t]*[（(][^（）()\\n]{1,40}[）)])`, 'gu');
+const MID_SPEAKER_RE = new RegExp(`(?<=[。！？!?…~～])[ \\t]*(?=(?<name>${SPEAKER_NAME_SOURCE})[ \\t]*[:：][ \\t]*[（(][^（）()\\n]{1,40}[）)])`, 'gu');
+// Words that label what follows rather than name a speaker ("注意：（压低声音）…").
+const NOT_A_SPEAKER = new Set([
+  '注意', '提示', '警告', '小心', '听着', '记住', '说明', '备注', '旁白', '字幕', '画外音', '等等', '快', '喂',
+  'note', 'warning', 'caution', 'listen', 'look', 'wait', 'remember', 'hey', 'narrator', 'caption', 'subtitle',
+]);
+
+function isSpeakerName(name: string): boolean {
+  return !NOT_A_SPEAKER.has(name.trim().toLowerCase());
+}
 const LEADING_CUE_RE = /^[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*/u;
 // A direction right after a sentence ends, anywhere in the line ("Yes! (laughs) Absolutely!").
-const AFTER_SENTENCE_CUE_RE = /(?<=[。！？!?…~～.])[ \t]*[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*/gu;
+// ASCII "." only counts at the end of the line, so "Dr. (Jane) Smith" is left alone.
+const AFTER_SENTENCE_CUE_RE = /(?<=[。！？!?…~～])[ \t]*[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*|(?<=\.)[ \t]*[（(](?<endCue>[^（）()\n]{1,40})[）)][ \t]*$/gu;
 // Single quotes are left out: they collide with English apostrophes.
 const QUOTED_SPAN_RE = /(?<open>“)(?<inner>[^“”\n]{1,240})(?<close>”)|(?<open2>「)(?<inner2>[^「」\n]{1,240})(?<close2>」)|(?<open3>")(?<inner3>[^"\s\n](?:[^"\n]{0,238}[^"\s\n])?)(?<close3>")/gu;
+
+const ON_SCREEN_TEXT_LEAD_RE = /(?:写下|写着|写道|写了|显示|显示着|印着|标着|字幕|标题|招牌|屏幕上|黑板上|reads|says on|shows|caption|title card)[:：]?\s*$/iu;
 
 type QuotedSpan = { whole: string; index: number; open: string; inner: string; close: string };
 
@@ -126,7 +138,7 @@ function parseSingleSpeakerLine(raw: string, knownSpeakers: ReadonlySet<string>)
   if (prefix?.groups?.name) {
     const name = prefix.groups.name.trim();
     const afterName = rest.slice(prefix[0].length);
-    if (knownSpeakers.has(name) || LEADING_CUE_RE.test(afterName)) {
+    if (knownSpeakers.has(name) || (isSpeakerName(name) && LEADING_CUE_RE.test(afterName))) {
       speaker = name;
       rest = afterName;
     }
@@ -135,8 +147,9 @@ function parseSingleSpeakerLine(raw: string, knownSpeakers: ReadonlySet<string>)
     cues.push(leading.groups.cue.trim());
     rest = rest.slice(leading[0].length);
   }
-  rest = rest.replace(AFTER_SENTENCE_CUE_RE, (_whole, cue: string) => {
-    cues.push(cue.trim());
+  rest = rest.replace(AFTER_SENTENCE_CUE_RE, (...args) => {
+    const groups = args[args.length - 1] as { cue?: string; endCue?: string };
+    cues.push((groups.cue ?? groups.endCue ?? '').trim());
     return ' ';
   }).replace(/(?<=[。！？…～])[ \t]+/gu, '');
   return { spoken: rest.trim(), ...(speaker ? { speaker } : {}), cues };
@@ -149,8 +162,16 @@ function parseSingleSpeakerLine(raw: string, knownSpeakers: ReadonlySet<string>)
  */
 export function parseSpokenLines(raw: string, knownSpeakers: ReadonlySet<string> = new Set()): ParsedSpokenLine[] {
   const original = raw.replace(/\s+/g, ' ').trim();
-  return original
-    .split(MID_SPEAKER_RE)
+  const pieces: string[] = [];
+  let start = 0;
+  for (const match of original.matchAll(MID_SPEAKER_RE)) {
+    if (!isSpeakerName(match.groups?.name ?? '')) continue;
+    const at = match.index ?? 0;
+    pieces.push(original.slice(start, at));
+    start = at + match[0].length;
+  }
+  pieces.push(original.slice(start));
+  return pieces
     .map((piece) => parseSingleSpeakerLine(piece, knownSpeakers))
     .filter((piece) => piece.spoken || piece.speaker || piece.cues.length > 0);
 }
@@ -194,6 +215,8 @@ export function relocateDialogueCues(text: string, options: { knownSpeakers?: re
     const pieces = parseSpokenLines(span.inner, known);
     const changed = pieces.length > 1 || pieces.some((piece) => piece.speaker || piece.cues.length > 0);
     if (!changed) continue;
+    // A quote after "写下 / 显示 / 字幕 …" is text shown on screen, not speech: keep it as written.
+    if (pieces.every((piece) => !piece.spoken) && ON_SCREEN_TEXT_LEAD_RE.test(text.slice(Math.max(0, span.index - 12), span.index))) continue;
     const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(span.inner) || span.open !== '"';
     const rendered = pieces.map((piece) => {
       const notes = [piece.speaker, ...piece.cues].filter((part): part is string => Boolean(part));
