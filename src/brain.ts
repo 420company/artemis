@@ -1,15 +1,23 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { release as osRelease } from 'node:os';
 import { ProviderStore, createGlobalProviderStore } from './providers/store.js';
-import { resolveArtemisHomeDir } from './utils/fs.js';
+import { resolveArtemisHomeDir, resolveDataRootDir } from './utils/fs.js';
 import { annotateProviderResponse, createTrackedProviderFromConfig, recordProviderProfileTelemetry, } from './providers/telemetry.js';
 import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
+import { hasPlatformCapabilities } from './providers/capabilities.js';
+import {
+    appendImageNote,
+    loadVisionHelper,
+    memoizeVisionHelper,
+    prepareUserImagesForModel,
+    type VisionHelper,
+} from './core/visionHelper.js';
 import { compressMessages, type CompressResult } from './core/contextCompressor.js';
 import { estimateTokens, estimateMessageTokens, estimateMessagesTokens } from './core/tokenEstimation.js';
 import {
@@ -124,6 +132,8 @@ let provider: any = null;
 let providerConfig: any = null;
 let providerTelemetryContext: any = null;
 let providerCwd: string | null = null;
+// mtimes of the provider stores the cached lead provider was built from.
+let providerStoreStamp: string | null = null;
 let session: any = null;
 let systemPromptSuffix: string = '';
 // Model used when no provider profile exists and only ANTHROPIC_API_KEY is
@@ -477,10 +487,36 @@ function resolveProjectedDirectToolNames(
 }
 
 // ── provider ──────────────────────────────────────────────────────────────────
+/**
+ * Modification times of the cwd-local and global providers.json. A long-lived
+ * bridge re-reads its provider when either changes (for example the platform
+ * rewrote the profile after a plan change, flipping supportsImages).
+ */
+async function readProviderStoreStamp(cwd: string): Promise<string> {
+    const files = [
+        path.join(resolveDataRootDir(cwd), 'providers.json'),
+        path.join(resolveArtemisHomeDir(), 'providers.json'),
+    ];
+    const times = await Promise.all(files.map(async (file) => {
+        try {
+            return String((await stat(file)).mtimeMs);
+        } catch {
+            return '-';
+        }
+    }));
+    return times.join('|');
+}
+
 async function loadProvider(cwd: string = process.cwd()) {
     const requestedCwd = path.resolve(cwd);
-    if (provider && providerCwd === requestedCwd)
-        return provider;
+    if (provider && providerCwd === requestedCwd) {
+        if (providerStoreStamp === await readProviderStoreStamp(requestedCwd))
+            return provider;
+        // The stores changed: rebuild the lead and the worker from them.
+        workerProvider = null;
+        workerProviderConfig = null;
+        workerProviderCwd = null;
+    }
     // 1. Try cwd-local .artemis/providers.json
     const currentCwd = requestedCwd;
     const store = new ProviderStore(currentCwd);
@@ -518,7 +554,18 @@ async function loadProvider(cwd: string = process.cwd()) {
     }
     // Apply CLI overrides
     let finalConfig = { ...config };
-    if (_modelOverride) finalConfig = { ...finalConfig, model: _modelOverride };
+    if (_modelOverride) {
+        // Platform capabilities describe the profile's own model, not an
+        // override: drop all four so the override model gets the name rules.
+        const dropPlatformCapabilities = _modelOverride !== config.model && hasPlatformCapabilities(config);
+        finalConfig = {
+            ...finalConfig,
+            model: _modelOverride,
+            ...(dropPlatformCapabilities
+                ? { supportsImages: undefined, contextLength: undefined, maxOutputTokens: undefined, capabilitiesSource: undefined }
+                : {}),
+        };
+    }
     if (_apiKeyOverride) finalConfig = { ...finalConfig, apiKey: _apiKeyOverride };
     if (_baseUrlOverride) finalConfig = { ...finalConfig, baseUrl: _baseUrlOverride ?? undefined };
     if (_effortOverride !== undefined) finalConfig = { ...finalConfig, effort: _effortOverride ?? undefined };
@@ -537,6 +584,8 @@ async function loadProvider(cwd: string = process.cwd()) {
         ...(providerTelemetryContext ?? {}),
     });
     providerCwd = currentCwd;
+    // Taken after loading: load() itself may rewrite a store it repaired.
+    providerStoreStamp = await readProviderStoreStamp(currentCwd);
     return provider;
 }
 
@@ -910,14 +959,18 @@ export function getBifrostContextAuditReport(): string[] {
     return lines;
 }
 
-function getConfiguredContextLimit(model: string | undefined, contextLength?: number): number {
-    return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength));
+/**
+ * `authoritative` marks a platform-written contextLength (capabilitiesSource
+ * "platform"): it is used as-is, never capped or replaced by name rules.
+ */
+function getConfiguredContextLimit(model: string | undefined, contextLength?: number, authoritative = false): number {
+    return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength), authoritative);
 }
 
-function buildBudgetNote(promptTokens: any, model: any, contextLength?: number) {
+function buildBudgetNote(promptTokens: any, model: any, contextLength?: number, authoritative = false) {
     if (promptTokens <= 0)
         return '';
-    const limit = getConfiguredContextLimit(model, contextLength);
+    const limit = getConfiguredContextLimit(model, contextLength, authoritative);
     const pct = promptTokens / limit;
     if (pct < BUDGET_WARN_PCT)
         return '';
@@ -940,6 +993,7 @@ async function buildRuntimeSystemMessages(
     conversationMessages: SessionMessage[],
     model?: string,
     contextLength?: number,
+    contextAuthoritative = false,
 ): Promise<SessionMessage[]> {
     const runtimeMessages = [makeSessionMessage('system', systemPrompt)];
     if (!model) {
@@ -959,7 +1013,7 @@ async function buildRuntimeSystemMessages(
     }
 
     const estimatedTokens = Math.round(estimateConversationTokens(conversationMessages));
-    const budgetNote = buildBudgetNote(estimatedTokens, model, contextLength).trim();
+    const budgetNote = buildBudgetNote(estimatedTokens, model, contextLength, contextAuthoritative).trim();
     if (budgetNote) {
         runtimeMessages.push(makeSessionMessage('system', budgetNote));
     }
@@ -1304,6 +1358,7 @@ async function compressSessionMessagesForProvider(
     onInfo?: (message: string) => void,
     forceShrink?: number,
     locale: 'en' | 'zh' = 'zh',
+    contextAuthoritative = false,
 ): Promise<{ messages: SessionMessage[]; summaryText?: string }> {
     const t = (zh: string, en: string): string => (locale === 'en' ? en : zh);
     if (!model) {
@@ -1313,7 +1368,7 @@ async function compressSessionMessagesForProvider(
     // ── 空返回急救：调用方强制把上下文压到很小，让噎住的模型拿到干净小 payload 重试。
     //    恢复记忆由硬盘上的 checkpoint 存档兜底，所以这里丢掉大量历史是安全的。
     if (forceShrink && forceShrink > 0) {
-        const fullLimit = getConfiguredContextLimit(model, contextLength);
+        const fullLimit = getConfiguredContextLimit(model, contextLength, contextAuthoritative);
         const small = Math.max(16_000, Math.floor(fullLimit * forceShrink) - Math.max(0, Math.round(reservedTokens)));
         onInfo?.(t(
             `[压缩] 空返回急救：压到约 ${Math.round(forceShrink * 100)}% 窗口后重试`,
@@ -1325,12 +1380,12 @@ async function compressSessionMessagesForProvider(
     const breaker = getCircuitBreaker(activeSession.getWorkingDirectory())
     if (isCircuitBreakerTripped(breaker)) {
       onInfo?.(t('[压缩] 断路器触发，改用机械截断', '[Compact] Circuit breaker tripped; using mechanical truncation'))
-      const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength) - Math.max(0, Math.round(reservedTokens)));
+      const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength, contextAuthoritative) - Math.max(0, Math.round(reservedTokens)));
       return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, mtLimit) };
     }
 
     const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
-    const fullLimit = getConfiguredContextLimit(model, contextLength);
+    const fullLimit = getConfiguredContextLimit(model, contextLength, contextAuthoritative);
     const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
     const tokensBefore = estimateMessagesTokens(conversationMessages)
 
@@ -1387,7 +1442,7 @@ async function compressSessionMessagesForProvider(
     try {
       const { config: workerCfg } = await loadWorkerProvider(activeSession.getWorkingDirectory());
       if (workerCfg && workerCfg !== providerConfig) {
-        summarizerTokenLimit = getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength);
+        summarizerTokenLimit = getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength, hasPlatformCapabilities(workerCfg));
       }
     } catch { /* worker unavailable — fall back to lead window */ }
 
@@ -2484,7 +2539,9 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
         contextLimit: estimateContextLimit(
             result.model ?? providerConfig?.model ?? '',
             normalizeContextLimit(providerConfig?.contextLength),
+            hasPlatformCapabilities(providerConfig),
         ),
+        contextLimitAuthoritative: hasPlatformCapabilities(providerConfig),
         promptTokens: usage.promptTokens ?? 0,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
@@ -2676,6 +2733,11 @@ export interface ThinkOptions {
     onStream?: (delta: string) => void;
     onReasoning?: (delta: string) => void;
     imageAttachments?: ImageAttachment[];
+    /**
+     * Describes images when the model cannot see them. Undefined: resolved from
+     * the provider store's visionProfileId when needed; null: none.
+     */
+    visionHelper?: VisionHelper | null;
     onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
     onUserConfirmationRequest?: (request: { question: string; screenshotPath?: string; timeoutMs?: number }) => Promise<boolean>;
     maxNativeToolRounds?: number;
@@ -2721,6 +2783,7 @@ export async function think(
         locale = 'zh',
         disableNativeTools = false,
         imageAttachments = [],
+        visionHelper,
         onWorkspaceSwitchRequest,
         onUserConfirmationRequest,
         maxNativeToolRounds: rawMaxNativeToolRounds,
@@ -2735,6 +2798,25 @@ export async function think(
     if (initialCompressionSummary?.trim() && !tSession.getContext('compressionSummary')) {
         tSession.setContext('compressionSummary', initialCompressionSummary);
     }
+    // A model that cannot see images gets bridge/pasted images as text: the
+    // vision helper's descriptions, or a note when there is no helper.
+    let requestImageAttachments = imageAttachments;
+    if (imageAttachments.length > 0) {
+        const imageProvider = await loadProvider(cwd);
+        const preparedImages = await prepareUserImagesForModel({
+            userText: input,
+            images: imageAttachments,
+            modelSeesImages: imageProvider.supportsImages === true,
+            getHelper: memoizeVisionHelper(async () =>
+                visionHelper !== undefined
+                    ? visionHelper ?? undefined
+                    : loadVisionHelper(cwd, { onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined })),
+            locale,
+            onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined,
+        });
+        input = appendImageNote(input, preparedImages.note);
+        requestImageAttachments = preparedImages.images;
+    }
     tSession.addUser(input);
 
     const p = await loadProvider(cwd);
@@ -2746,6 +2828,7 @@ export async function think(
         rawMessages,
         providerConfigVal?.model,
         providerConfigVal?.contextLength,
+        hasPlatformCapabilities(providerConfigVal),
     );
     const reservedSystemTokens = Math.round(estimateConversationTokens(systemMessages));
     let providerCompression = await compressSessionMessagesForProvider(
@@ -2760,6 +2843,7 @@ export async function think(
         onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
         undefined,
         locale,
+        hasPlatformCapabilities(providerConfigVal),
     );
     if (providerCompression.summaryText) {
         onCompressionSummary?.(providerCompression.summaryText);
@@ -2800,7 +2884,7 @@ export async function think(
             tSession.setContext('activeToolNames', projectedToolNames);
         }
     };
-    const hasImageAttachments = imageAttachments.length > 0;
+    const hasImageAttachments = requestImageAttachments.length > 0;
     let finalResult: ProviderResponse | null = null;
     let cumulativeUsage: ProviderResponse['usage'] | undefined;
     let emittedFinalText = false;
@@ -2894,6 +2978,7 @@ export async function think(
                 onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
                 forceCompactFraction,
                 locale,
+                hasPlatformCapabilities(providerConfigVal),
             );
             forceCompactFraction = undefined;
             if (providerCompression.summaryText) {
@@ -2922,7 +3007,7 @@ export async function think(
                 // tool capability. Do not drop them just because the setup "vision"
                 // tool group was disabled; providers that cannot handle images will
                 // ignore/fail explicitly in their own adapter path.
-                imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
+                imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
                 onReasoning,
                 guardStreamingText: supportsNativeTools && !plainChat,
             },
