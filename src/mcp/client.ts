@@ -127,10 +127,71 @@ const CLI_MCP_PACKAGES_DIR = existsSync(path.join(USER_MCP_PACKAGES_DIR, 'node_m
 const DEFAULT_TIMEOUT_MS = 4_000;
 /**
  * Tool calls, resource reads and prompt fetches do real work (search, scrape,
- * render, query) that routinely takes longer than a probe, and a stdio server
- * may need a moment to start. The short default stays for probes/discovery.
+ * render, query) that routinely takes longer than a probe. The short default
+ * stays for probes.
  */
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+/**
+ * Connecting (spawn + initialize + list) before a call: long enough for an
+ * npx/uvx server to start, short enough that a dead server fails in time.
+ */
+const DEFAULT_SETUP_TIMEOUT_MS = 30_000;
+
+/** The run was cancelled while an MCP request was in flight. */
+export class McpCallCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+/** Budgets for one call: connecting is capped at 30 s, never above the call's own budget. */
+export function resolveMcpRequestTimeouts(timeoutMs: number | undefined): {
+  callTimeoutMs: number;
+  setupTimeoutMs: number;
+} {
+  const callTimeoutMs = timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+  return {
+    callTimeoutMs,
+    setupTimeoutMs: Math.min(callTimeoutMs, DEFAULT_SETUP_TIMEOUT_MS),
+  };
+}
+
+/**
+ * Settles with `work`, or rejects when `timeoutMs` passes or `signal` aborts,
+ * whichever comes first. The caller then invalidates the client, which kills
+ * the stdio server or aborts the HTTP request still behind `work`.
+ */
+async function withDeadline<T>(
+  work: Promise<T>,
+  options: { timeoutMs: number; label: string; signal?: AbortSignal },
+): Promise<T> {
+  // The losing side may still reject later; it must not become unhandled.
+  work.catch(() => undefined);
+  if (options.signal?.aborted) {
+    throw new McpCallCancelledError(`${options.label} cancelled.`);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${options.label} timed out after ${options.timeoutMs}ms.`)),
+      options.timeoutMs,
+    );
+    if (options.signal) {
+      onAbort = () => reject(new McpCallCancelledError(`${options.label} cancelled.`));
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) {
+      options.signal?.removeEventListener('abort', onAbort);
+    }
+  }
+}
 const CLIENT_PROTOCOL_VERSION = '2024-11-05';
 const CLIENT_INFO = {
   name: APP_NAME,
@@ -1576,6 +1637,22 @@ class SseRpcTransport implements RpcTransport {
   }
 }
 
+type StdioFraming = 'newline' | 'content-length';
+
+/**
+ * How long `initialize` waits for a reply before the auto framing detection
+ * tries the other wire format. Servers on the official SDKs answer within
+ * milliseconds; a slow-starting server still gets the full timeout on the
+ * final attempt.
+ */
+const STDIO_FRAMING_PROBE_MS = 3_000;
+/** Framing that answered `initialize`, per server command, for later spawns. */
+const detectedStdioFraming = new Map<string, StdioFraming>();
+const STDIO_DIAGNOSTIC_MAX_CHARS = 64 * 1024;
+
+/** No reply in time, or the server exited before replying: worth another framing. */
+class StdioNoReplyError extends Error {}
+
 class StdioRpcTransport implements RpcTransport {
   private readonly server: McpServerConfig;
   private readonly cwd: string;
@@ -1597,11 +1674,34 @@ class StdioRpcTransport implements RpcTransport {
   private stderr = '';
   private clientInfo?: RpcClientInfo;
   private listChangedHandler?: (kind: McpListChangedKind) => void;
+  /**
+   * Wire format. The MCP stdio transport is newline-delimited JSON; older
+   * servers that only read LSP-style `Content-Length` frames are detected
+   * at `initialize` (or pinned with `stdioFraming` in the server config).
+   */
+  private framing: StdioFraming;
+  private framingSettled: boolean;
+  private readonly framingKey: string;
 
   constructor(server: McpServerConfig, cwd: string, timeoutMs: number) {
     this.server = server;
     this.cwd = cwd;
     this.timeoutMs = timeoutMs;
+    this.framingKey = JSON.stringify([server.id, server.command ?? '', server.commandArgs ?? []]);
+    const configured = server.stdioFraming;
+    const known = configured === 'newline' || configured === 'content-length'
+      ? configured
+      : detectedStdioFraming.get(this.framingKey);
+    this.framing = known ?? 'newline';
+    this.framingSettled = known !== undefined;
+  }
+
+  /** Keeps the tail of what the server wrote to stderr (and stray stdout lines) for error messages. */
+  private appendDiagnostic(text: string): void {
+    this.stderr += text;
+    if (this.stderr.length > STDIO_DIAGNOSTIC_MAX_CHARS) {
+      this.stderr = this.stderr.slice(-STDIO_DIAGNOSTIC_MAX_CHARS);
+    }
   }
 
   private resolveArg(value: string): string {
@@ -1647,7 +1747,11 @@ class StdioRpcTransport implements RpcTransport {
       },
     });
     this.child = child;
+    // Handlers ignore a process that was replaced by a framing restart.
     child.stdout.on('data', (chunk: Buffer) => {
+      if (this.child !== child) {
+        return;
+      }
       this.buffer = Buffer.concat([this.buffer, chunk]);
       if (this.buffer.length > StdioRpcTransport.MAX_BUFFER_BYTES) {
         this.rejectPending(new Error(
@@ -1659,21 +1763,41 @@ class StdioRpcTransport implements RpcTransport {
       this.drainFrames();
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      this.stderr += String(chunk);
+      if (this.child !== child) {
+        return;
+      }
+      this.appendDiagnostic(String(chunk));
     });
     child.on('error', (error) => {
+      if (this.child !== child) {
+        return;
+      }
       this.rejectPending(
         new Error(`Failed to start stdio server: ${error.message}`),
       );
     });
     child.on('close', (code) => {
+      if (this.child !== child) {
+        return;
+      }
       const message =
         this.stderr.trim() ||
         `stdio server exited${typeof code === 'number' ? ` with code ${code}` : ''}.`;
-      this.rejectPending(new Error(message));
+      this.rejectPending(new StdioNoReplyError(message));
       this.child = undefined;
       this.initialized = false;
     });
+  }
+
+  /** Kills the current process so the next send spawns a fresh one. */
+  private restartProcess(): void {
+    const child = this.child;
+    this.child = undefined;
+    this.initialized = false;
+    this.buffer = Buffer.alloc(0);
+    this.stderr = '';
+    this.rejectPending(new Error('stdio MCP transport restarted.'));
+    child?.kill();
   }
 
   private rejectPending(error: Error): void {
@@ -1684,44 +1808,79 @@ class StdioRpcTransport implements RpcTransport {
     this.pending.clear();
   }
 
-  private drainFrames(): void {
-    while (this.buffer.length > 0) {
+  /**
+   * Takes the next complete message off the buffer, or undefined when more
+   * bytes are needed. The MCP stdio transport is newline-delimited JSON;
+   * LSP-style `Content-Length` frames are still accepted from servers that
+   * use them.
+   */
+  private nextMessage():
+    | { body: string; framed: boolean }
+    | { error: string }
+    | undefined {
+    const head = this.buffer.subarray(0, 64).toString('utf8').trimStart();
+    if (/^content-length:/i.test(head)) {
       const separatorIndex = this.buffer.indexOf('\r\n\r\n');
       if (separatorIndex < 0) {
-        return;
+        return undefined;
       }
-
-      const headerText = this.buffer
-        .subarray(0, separatorIndex)
-        .toString('utf8');
-      const contentLengthMatch = headerText.match(/Content-Length:\s*(\d+)/i);
-      if (!contentLengthMatch) {
-        this.rejectPending(
-          new Error('stdio server returned a frame without Content-Length.'),
-        );
-        this.buffer = Buffer.alloc(0);
-        return;
+      const headerText = this.buffer.subarray(0, separatorIndex).toString('utf8');
+      const lengthText = headerText.match(/Content-Length:[ \t]*(\d+)[ \t]*(?:\r?\n|$)/i)?.[1];
+      const contentLength = lengthText === undefined ? Number.NaN : Number(lengthText);
+      if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+        return { error: 'stdio server returned a frame without a valid Content-Length.' };
       }
-
-      const contentLength = Number.parseInt(contentLengthMatch[1] ?? '', 10);
       const bodyStart = separatorIndex + 4;
       const bodyEnd = bodyStart + contentLength;
       if (this.buffer.length < bodyEnd) {
-        return;
+        return undefined;
       }
-
       const body = this.buffer.subarray(bodyStart, bodyEnd).toString('utf8');
       this.buffer = this.buffer.subarray(bodyEnd);
+      return { body, framed: true };
+    }
+
+    const newline = this.buffer.indexOf(0x0a);
+    if (newline < 0) {
+      return undefined;
+    }
+    const body = this.buffer.subarray(0, newline).toString('utf8').replace(/\r$/, '');
+    this.buffer = this.buffer.subarray(newline + 1);
+    return { body, framed: false };
+  }
+
+  private drainFrames(): void {
+    while (this.buffer.length > 0) {
+      const message = this.nextMessage();
+      if (!message) {
+        return;
+      }
+      if ('error' in message) {
+        // Unparseable frame header: the rest of the buffer cannot be framed.
+        this.rejectPending(new Error(message.error));
+        this.buffer = Buffer.alloc(0);
+        return;
+      }
+      if (!message.body.trim()) {
+        continue;
+      }
 
       let payload: unknown;
       try {
-        payload = JSON.parse(body) as unknown;
+        payload = JSON.parse(message.body) as unknown;
       } catch (error) {
-        this.rejectPending(
-          new Error(
-            `stdio server returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
+        // A framed message must be JSON. A stray non-JSON line is a server
+        // logging to stdout by mistake: skip it rather than fail the call.
+        if (message.framed) {
+          this.rejectPending(
+            new Error(
+              `stdio server returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        } else {
+          // Kept with stderr so a later failure shows what the server printed.
+          this.appendDiagnostic(`[stdout, not JSON-RPC] ${message.body.slice(0, 500)}\n`);
+        }
         continue;
       }
 
@@ -1760,6 +1919,7 @@ class StdioRpcTransport implements RpcTransport {
     method: string,
     params: object = {},
     expectResponse = true,
+    timeoutMs = this.timeoutMs,
   ): Promise<JsonRecord> {
     this.ensureProcess();
     const child = this.child;
@@ -1770,7 +1930,12 @@ class StdioRpcTransport implements RpcTransport {
     const body = expectResponse
       ? buildRpcRequest(++this.requestId, method, params)
       : buildRpcNotification(method, params);
-    const frame = `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`;
+    // MCP stdio transport: one JSON-RPC message per line (JSON.stringify
+    // never emits a raw newline inside the message). Content-Length frames
+    // only for servers detected or configured to need them.
+    const frame = this.framing === 'content-length'
+      ? `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`
+      : `${body}\n`;
 
     if (!expectResponse) {
       child.stdin.write(frame, 'utf8');
@@ -1781,8 +1946,8 @@ class StdioRpcTransport implements RpcTransport {
       const id = this.requestId;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`stdio MCP ${method} timed out after ${this.timeoutMs}ms.`));
-      }, this.timeoutMs);
+        reject(new StdioNoReplyError(`stdio MCP ${method} timed out after ${timeoutMs}ms.`));
+      }, timeoutMs);
 
       this.pending.set(id, {
         resolve,
@@ -1799,11 +1964,14 @@ class StdioRpcTransport implements RpcTransport {
       return this.clientInfo;
     }
 
-    const result = await this.send('initialize', {
+    const initializeParams = {
       protocolVersion: CLIENT_PROTOCOL_VERSION,
       clientInfo: CLIENT_INFO,
       capabilities: {},
-    });
+    };
+    const result = this.framingSettled
+      ? await this.send('initialize', initializeParams)
+      : await this.initializeDetectingFraming(initializeParams);
     this.clientInfo = isRecord(result.serverInfo)
       ? {
           name:
@@ -1819,6 +1987,41 @@ class StdioRpcTransport implements RpcTransport {
     await this.send('notifications/initialized', {}, false);
     this.initialized = true;
     return this.clientInfo ?? {};
+  }
+
+  /**
+   * Auto framing: newline-delimited JSON first (the MCP spec), then
+   * `Content-Length` frames for servers that only read those, then newline
+   * again with the full timeout for a server that was merely slow to start.
+   * Moves on when a probe gets no reply or the server exits; a spawn failure
+   * is final. The framing that answers is remembered for later spawns.
+   */
+  private async initializeDetectingFraming(params: object): Promise<JsonRecord> {
+    const probeMs = Math.min(this.timeoutMs, STDIO_FRAMING_PROBE_MS);
+    const attempts: Array<[StdioFraming, number]> = [
+      ['newline', probeMs],
+      ['content-length', probeMs],
+      ['newline', this.timeoutMs],
+    ];
+    let lastError: unknown;
+    for (const [index, [framing, timeoutMs]] of attempts.entries()) {
+      if (index > 0) {
+        this.restartProcess();
+      }
+      this.framing = framing;
+      try {
+        const result = await this.send('initialize', params, true, timeoutMs);
+        this.framingSettled = true;
+        detectedStdioFraming.set(this.framingKey, framing);
+        return result;
+      } catch (error) {
+        if (!(error instanceof StdioNoReplyError)) {
+          throw error;
+        }
+        lastError = error;
+      }
+    }
+    throw lastError;
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
@@ -2088,23 +2291,60 @@ export async function discoverMcpServerSurface(options: {
   );
 }
 
-export async function callMcpServerTool(options: {
+type ManagedRequestOptions = {
   server: McpServerConfig;
   cwd: string;
+  timeoutMs?: number;
+  /** Cancels the wait (and, via invalidation, the request) when the run is cancelled. */
+  abortSignal?: AbortSignal;
+};
+
+/**
+ * Connects (cached) within the setup budget, then runs `request` within the
+ * call budget; both waits end early when the run is cancelled.
+ */
+async function requestWithManagedClient<T>(
+  options: ManagedRequestOptions,
+  label: string,
+  request: (client: RpcTransport) => Promise<T>,
+): Promise<{ result: T; surface: McpDiscoveryResult }> {
+  const { callTimeoutMs, setupTimeoutMs } = resolveMcpRequestTimeouts(options.timeoutMs);
+  // The cached client outlives this call, so its own per-request timer must
+  // not be shorter than a later call's budget; the deadlines here enforce
+  // this call's limits.
+  const clientTimeoutMs = Math.max(callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS);
+  const surface = await withDeadline(
+    discoverManagedSurface({
+      server: options.server,
+      cwd: options.cwd,
+      timeoutMs: clientTimeoutMs,
+    }),
+    {
+      timeoutMs: setupTimeoutMs,
+      label: `MCP server ${options.server.id} initialize`,
+      signal: options.abortSignal,
+    },
+  );
+  const client = await getManagedClient(options.server, options.cwd, clientTimeoutMs);
+  const result = await withDeadline(request(client), {
+    timeoutMs: callTimeoutMs,
+    label,
+    signal: options.abortSignal,
+  });
+  return { result, surface };
+}
+
+export async function callMcpServerTool(options: ManagedRequestOptions & {
   toolName: string;
   args?: Record<string, unknown>;
-  timeoutMs?: number;
 }): Promise<McpToolCallResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
-      const surface = await discoverManagedSurface({
-        server: options.server,
-        cwd: options.cwd,
-        timeoutMs,
-      });
-      const client = await getManagedClient(options.server, options.cwd, timeoutMs);
-      const result = await client.callTool(options.toolName, options.args ?? {});
+      const { result, surface } = await requestWithManagedClient(
+        options,
+        `MCP tool ${options.toolName}`,
+        (client) => client.callTool(options.toolName, options.args ?? {}),
+      );
       return {
         output: serializeResult(result),
         raw: result,
@@ -2114,6 +2354,9 @@ export async function callMcpServerTool(options: {
       };
     } catch (error) {
       await invalidateManagedClient(options.server, options.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
       }
@@ -2136,22 +2379,16 @@ export async function callMcpServerTool(options: {
   throw new Error('MCP tool call retry loop exited unexpectedly.');
 }
 
-export async function readMcpServerResource(options: {
-  server: McpServerConfig;
-  cwd: string;
+export async function readMcpServerResource(options: ManagedRequestOptions & {
   uri: string;
-  timeoutMs?: number;
 }): Promise<McpResourceReadResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
-      const surface = await discoverManagedSurface({
-        server: options.server,
-        cwd: options.cwd,
-        timeoutMs,
-      });
-      const client = await getManagedClient(options.server, options.cwd, timeoutMs);
-      const result = await client.readResource(options.uri);
+      const { result, surface } = await requestWithManagedClient(
+        options,
+        `MCP resource ${options.uri}`,
+        (client) => client.readResource(options.uri),
+      );
       return {
         output: serializeResult(result),
         raw: result,
@@ -2161,6 +2398,9 @@ export async function readMcpServerResource(options: {
       };
     } catch (error) {
       await invalidateManagedClient(options.server, options.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
       }
@@ -2215,25 +2455,16 @@ export function extractMcpPromptSessionMessages(
   return results;
 }
 
-export async function getMcpServerPrompt(options: {
-  server: McpServerConfig;
-  cwd: string;
+export async function getMcpServerPrompt(options: ManagedRequestOptions & {
   promptName: string;
   args?: Record<string, unknown>;
-  timeoutMs?: number;
 }): Promise<McpPromptGetResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
-      const surface = await discoverManagedSurface({
-        server: options.server,
-        cwd: options.cwd,
-        timeoutMs,
-      });
-      const client = await getManagedClient(options.server, options.cwd, timeoutMs);
-      const result = await client.getPrompt(
-        options.promptName,
-        options.args ?? {},
+      const { result, surface } = await requestWithManagedClient(
+        options,
+        `MCP prompt ${options.promptName}`,
+        (client) => client.getPrompt(options.promptName, options.args ?? {}),
       );
       return {
         output: serializePromptResult(options.promptName, result),
@@ -2244,6 +2475,9 @@ export async function getMcpServerPrompt(options: {
       };
     } catch (error) {
       await invalidateManagedClient(options.server, options.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
       }
