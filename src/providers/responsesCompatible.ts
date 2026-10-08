@@ -11,6 +11,8 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, hasTrustedContextLength, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { resolveProfileContextLength } from './modelContext.js';
 
 type ResponsesInputContent =
   | { type: 'input_text'; text: string }
@@ -340,6 +342,7 @@ function asNumber(value: unknown): number | undefined {
 export class ResponsesCompatibleProvider implements ChatProvider {
   readonly supportsNativeToolCalls = true;
   readonly supportsImages: boolean;
+  readonly contextLength?: number;
 
   private readonly config: ProviderConfig;
   readonly model: string;
@@ -351,6 +354,10 @@ export class ResponsesCompatibleProvider implements ChatProvider {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
     this.model = config.model;
+    this.contextLength = platformContextLength(config);
+    // Only a platform profile states its output limit; otherwise the budget
+    // reserves a default (requests send no max_tokens unless asked).
+    this.maxOutputTokens = platformMaxOutputTokens(config);
   }
 
   async complete(
@@ -408,8 +415,21 @@ export class ResponsesCompatibleProvider implements ChatProvider {
     if ((options?.nativeFunctionTools?.length ?? 0) > 0) {
       payload.tools = options?.nativeFunctionTools as ProviderNativeFunctionTool[];
     }
+    // Only a caller's per-request limit is sent (bounded by the platform's
+    // maxOutputTokens and the room left in the window); ordinary turns keep
+    // the endpoint default.
+    if (options?.maxOutputTokens && options.maxOutputTokens > 0) {
+      const platformMax = platformMaxOutputTokens(this.config);
+      payload.max_output_tokens = fitOutputTokensToWindow(
+        Math.floor(platformMax !== undefined ? Math.min(platformMax, options.maxOutputTokens) : options.maxOutputTokens),
+        resolveProfileContextLength(this.config),
+        estimateRequestPromptTokens(messages, options),
+        hasTrustedContextLength(this.config),
+      );
+    }
 
     let attemptResponse: Response | undefined;
+    let imagesOmitted = false;
     for (let attempt = 0; attempt < reasoningCandidates.length; attempt++) {
       const reasoning = reasoningCandidates[attempt];
       if (reasoning) payload.reasoning = reasoning;
@@ -429,6 +449,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
           onPayloadTooLarge: () => {
             const strippedInput = stripImagesFromResponsesInput(payload.input);
             if (!strippedInput) return null;
+            imagesOmitted = true;
             payload.input = strippedInput;
             return JSON.stringify(payload);
           },
@@ -481,6 +502,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       model: typeof json.model === 'string' ? json.model : this.config.model,
       responseId: typeof json.id === 'string' ? json.id : undefined,
       nativeToolCalls,
+      ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens,
         ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),

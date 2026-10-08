@@ -89,6 +89,16 @@ import {
   type SummarizeFn,
 } from './compaction/index.js';
 import { estimateTokens, estimateToolSchemaTokens } from './tokenEstimation.js';
+import {
+  appendImageNote,
+  describeSingleImage,
+  loadVisionHelper,
+  memoizeVisionHelper,
+  prepareUserImagesForModel,
+  anyAbortSignal,
+  resolveImageRoute,
+  type VisionHelper,
+} from './visionHelper.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
   McpCallCancelledError,
@@ -2897,7 +2907,8 @@ async function buildStableSystemContent(input: {
   autonomyMode: SessionAutonomyMode;
   profile: 'main' | AgentRole;
   nativeToolRuntime: boolean;
-  modelSeesImages: boolean;
+  /** Note for models that cannot see images (helper available or not); none when they can. */
+  imageSection?: string;
 }): Promise<string> {
   const systemSections = await buildStableProviderSystemSections({
     cwd: input.cwd,
@@ -2960,8 +2971,8 @@ async function buildStableSystemContent(input: {
   }
 
   systemSections.push(CONTEXT_COMPACTION_SYSTEM_NOTE);
-  if (!input.modelSeesImages) {
-    systemSections.push(VIEW_IMAGE_UNAVAILABLE_SECTION);
+  if (input.imageSection) {
+    systemSections.push(input.imageSection);
   }
   return systemSections.join('\n\n');
 }
@@ -3640,6 +3651,9 @@ const CHILD_RUN_IMAGE_RESET = {
 /** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
 const VIEW_IMAGE_UNAVAILABLE_SECTION =
   'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+/** Prompt note for a text-only model whose view_image goes through the vision helper. */
+const VIEW_IMAGE_HELPER_SECTION =
+  'Image input: the current model cannot see images. view_image still works: it returns a detailed text description of the image written by a vision helper model.';
 
 export type RunAgentOptions = {
   cwd: string;
@@ -3679,6 +3693,11 @@ export type RunAgentOptions = {
    * images never outlive the run or reach another session.
    */
   viewedImages?: ViewedImageQueue;
+  /**
+   * Describes images for a model that cannot see them. Undefined: resolved
+   * from the provider store's visionProfileId when first needed; null: none.
+   */
+  visionHelper?: VisionHelper | null;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -5957,8 +5976,29 @@ export async function runAgent(
       };
     }
   }
+  // A model that cannot see images gets the user's images as text: the
+  // vision helper's descriptions, or a note when there is no helper.
+  const getVisionHelper = memoizeVisionHelper(async () =>
+    options.visionHelper !== undefined
+      ? options.visionHelper ?? undefined
+      : loadVisionHelper(options.cwd, { onInfo: options.onInfo }));
+  const userImageRoute = options.imageAttachments?.length
+    ? await resolveImageRoute(options.resolveProvider?.(options.profile ?? 'main') ?? options.provider, getVisionHelper)
+    : { native: true };
+  const userImages = await prepareUserImagesForModel({
+    userText: userInput,
+    images: options.imageAttachments,
+    modelSeesImages: userImageRoute.native,
+    getHelper: async () => userImageRoute.helper,
+    locale: options.locale,
+    onInfo: options.onInfo,
+    signal: options.abortSignal,
+  });
   if (options.appendUserMessage !== false) {
-    options.sessionStore.appendMessage(session, 'user', userInput);
+    options.sessionStore.appendMessage(session, 'user', appendImageNote(userInput, userImages.note));
+    await options.sessionStore.save(session);
+  } else if (userImages.note) {
+    options.sessionStore.appendMessage(session, 'user', userImages.note);
     await options.sessionStore.save(session);
   }
 
@@ -6106,10 +6146,16 @@ export async function runAgent(
     options.locale === 'zh-CN' ? 'zh' : 'en',
   );
   const budgetFor = (provider: ChatProvider): ContextBudget => {
+    // A platform-written window (capabilitiesSource "platform") is
+    // authoritative and wins; otherwise the smaller of the caller's window
+    // and the provider's best-known one.
     const windows = [options.contextLength, provider.contextWindow]
       .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    const authoritative = typeof provider.contextLength === 'number' && provider.contextLength > 0
+      ? provider.contextLength
+      : undefined;
     return resolveContextBudget({
-      contextWindow: windows.length > 0 ? Math.min(...windows) : undefined,
+      contextWindow: authoritative ?? (windows.length > 0 ? Math.min(...windows) : undefined),
       maxOutputTokens: provider.maxOutputTokens,
       thresholdRatio: options.compaction?.thresholdRatio,
       maxContextTokens: options.compaction?.maxContextTokens,
@@ -6129,10 +6175,10 @@ export async function runAgent(
   };
   // Stable system content, rebuilt only when what it depends on changes.
   let systemCache: { key: string; content: string } | undefined;
-  const getSystemContent = async (nativeTools: boolean, modelSeesImages: boolean): Promise<string> => {
+  const getSystemContent = async (nativeTools: boolean, imageSection: string | undefined): Promise<string> => {
     const permissionMode = options.permissionManager.getMode();
     const autonomyMode = session.autonomyMode ?? 'standard';
-    const key = JSON.stringify([options.cwd, permissionMode, autonomyMode, profile, nativeTools, modelSeesImages]);
+    const key = JSON.stringify([options.cwd, permissionMode, autonomyMode, profile, nativeTools, imageSection ?? '']);
     if (systemCache?.key !== key) {
       systemCache = {
         key,
@@ -6142,7 +6188,7 @@ export async function runAgent(
           autonomyMode,
           profile,
           nativeToolRuntime: nativeTools,
-          modelSeesImages,
+          imageSection,
         }),
       };
     }
@@ -6600,11 +6646,21 @@ export async function runAgent(
     }
     const activeProvider =
       options.resolveProvider?.(profile) ?? options.provider;
-    // view_image only exists for models that can see images: it is left out
-    // of the native tools, the prompt says it is unavailable, and the tool
-    // itself fails while the flag is off.
-    const modelSeesImages = activeProvider.supportsImages === true;
+    // view_image needs a model that can see images or a vision helper that
+    // describes them; otherwise it is left out of the native tools, the
+    // prompt says it is unavailable, and the tool itself fails.
+    const imageRoute = await resolveImageRoute(activeProvider, getVisionHelper);
+    const modelSeesImages = imageRoute.native;
     viewedImages.acceptsImages = modelSeesImages;
+    const imageHelper = imageRoute.helper;
+    viewedImages.describeImage = imageHelper
+      ? (image, signal) => describeSingleImage(imageHelper, image, {
+        userText: userInput,
+        locale: options.locale,
+        signal: anyAbortSignal(signal, options.abortSignal),
+      })
+      : undefined;
+    const canViewImages = modelSeesImages || imageHelper !== undefined;
     const latestUserRequest = extractLatestUserRequest(
       session.messages.filter((message) => !isSyntheticUserMessage(message)),
     );
@@ -6633,7 +6689,7 @@ export async function runAgent(
           allowedActionTypes: getNativeAllowedActionTypesForRuntime(
             profile,
             options.permissionManager.getMode(),
-          ).filter((type) => modelSeesImages || type !== 'view_image'),
+          ).filter((type) => canViewImages || type !== 'view_image'),
           allowReadOnlyMcpToolCalls: true,
         })
         : undefined;
@@ -6680,7 +6736,7 @@ export async function runAgent(
     const nativeFunctionTools = nativeToolRuntime?.tools;
     const systemContent = await getSystemContent(
       activeProvider.supportsNativeToolCalls === true,
-      modelSeesImages,
+      modelSeesImages ? undefined : canViewImages ? VIEW_IMAGE_HELPER_SECTION : VIEW_IMAGE_UNAVAILABLE_SECTION,
     );
     let prepared = await prepareRequestMessages({
       provider: activeProvider,
@@ -6692,7 +6748,7 @@ export async function runAgent(
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
     const requestImages = takeRequestImages(
-      turn === 1 ? options.imageAttachments ?? [] : [],
+      turn === 1 ? userImages.images : [],
       activeProvider,
     );
     const providerCallOptions = {

@@ -346,6 +346,7 @@ export function createTrackedProviderFromConfig(
     model: provider.model,
     contextWindow: provider.contextWindow,
     maxOutputTokens: provider.maxOutputTokens,
+    contextLength: provider.contextLength,
     async complete(messages, options) {
       const startedAt = Date.now();
       try {

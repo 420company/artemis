@@ -1,5 +1,6 @@
 import { buildApiKeyHeaders } from './openaiCompatible.js'
 import type { ProviderApiKeyHeader, ProviderProfile } from './types.js'
+import { hasPlatformCapabilities, type ModelCapabilityConfig } from './capabilities.js'
 
 type ModelMetadata = Record<string, unknown>
 
@@ -293,9 +294,22 @@ export function capKnownModelContextLength(model: string, contextLength: unknown
 export function resolveEffectiveModelContextLength(
   model: string,
   configuredLength?: number,
+  options?: { authoritative?: boolean },
 ): number | undefined {
-  return capKnownModelContextLength(model, configuredLength)
+  // An authoritative (platform) length is used as-is: the model name may be a
+  // gateway alias, so name-based caps and inference do not apply to it.
+  const authoritative = options?.authoritative ? normalizeContextLength(configuredLength) : undefined
+  return authoritative
+    ?? capKnownModelContextLength(model, configuredLength)
     ?? inferKnownModelContextLength(model)
+}
+
+/** Context window for a profile: the platform value when present, else the name-based rules. */
+export function resolveProfileContextLength(config: ModelCapabilityConfig | null | undefined): number | undefined {
+  if (!config) return undefined
+  return resolveEffectiveModelContextLength(config.model ?? '', config.contextLength, {
+    authoritative: hasPlatformCapabilities(config),
+  })
 }
 
 function buildModelsUrl(baseUrl: string): string | undefined {
@@ -421,6 +435,8 @@ export async function enrichProfileContextLength<T extends Pick<ProviderProfile,
   profile: T,
   options?: { preserveManual?: boolean },
 ): Promise<T & { contextLength?: number; contextLengthSource?: Exclude<ModelContextLengthSource, 'unknown'>; contextLengthCheckedAt?: string }> {
+  // Platform profiles belong to the agent server: never replace their values.
+  if (hasPlatformCapabilities(profile as ModelCapabilityConfig)) return profile
   if (options?.preserveManual && profile.contextLength) {
     return {
       ...profile,

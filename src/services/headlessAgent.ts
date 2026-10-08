@@ -23,7 +23,7 @@ export interface HeadlessAgentOptions {
   maxTurns?: number
   /** Continue this existing session (its history becomes context) instead of creating a new one. */
   sessionId?: string
-  /** Images attached to the prompt; the model sees them with its first request. */
+  /** Images attached to the prompt: sent with the first request, or described by the vision helper for a text-only model. */
   imagePaths?: string[]
   sessionTitle?: string
   onInfo?: (message: string) => void
@@ -104,15 +104,13 @@ export async function runHeadlessAgent(
       title: opts.sessionTitle ?? `Headless: ${prompt.slice(0, 48)}`,
     })
 
-  // A missing, unreadable or oversized image, or a model that cannot see
-  // images, fails the run: the user expects every image to be seen.
+  // A missing, unreadable or oversized image fails the run. A model that
+  // cannot see images does not: runAgent hands the images to the vision
+  // helper, or tells the model the plan cannot read them.
   const { loadPromptImages } = await import('../core/imageInput.js')
-  const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd, {
-    supportsImages: provider.supportsImages,
-    name: providerConfig.model,
-  })
+  const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
 
-  const { resolveEffectiveModelContextLength } = await import('../providers/modelContext.js')
+  const { resolveProfileContextLength } = await import('../providers/modelContext.js')
   const contextNotices: string[] = []
   const started = Date.now()
   const result = await runAgent(session, prompt, {
@@ -125,7 +123,7 @@ export async function runHeadlessAgent(
     appendUserMessage: true,
     // The main model's window; specialists with a smaller window are capped
     // further by their own provider metadata inside runAgent.
-    contextLength: resolveEffectiveModelContextLength(providerConfig.model, providerConfig.contextLength),
+    contextLength: resolveProfileContextLength(providerConfig),
     compaction: await loadCompactionSettings(cwd),
     // Nobody reviews a headless turn as it runs: memories the model saves
     // without naming a scope stay in this workspace.

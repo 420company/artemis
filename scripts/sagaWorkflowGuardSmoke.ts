@@ -2,10 +2,40 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { ProviderStore } from '../src/providers/store.js';
 import { handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
+import { BYTEPLUS_SEEDANCE_2_PRO_MODEL } from '../src/tools/visual/videoCapabilities.js';
+
+// Explicit /saga entry only starts the wizard when a video provider is
+// configured (resolveConfiguredVisualProvider). Configure one in the temp
+// workspace so the smoke is hermetic: it must not depend on whatever the
+// machine running it has in ~/.artemis/providers.json. The workspace store
+// is checked before the home store, so a real home key is never used here.
+async function configureVideoProfile(cwd: string): Promise<void> {
+  const store = new ProviderStore(cwd);
+  const data = await store.load();
+  data.visualProfile = {
+    enabled: true,
+    image: {
+      provider: 'byteplus',
+      apiKey: 'smoke-key',
+      baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+      model: 'seedream-5-0-260128',
+    },
+    video: {
+      enabled: true,
+      provider: 'byteplus',
+      apiKey: 'smoke-key',
+      baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
+      model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+    },
+  };
+  await store.save(data);
+}
 
 async function main(): Promise<void> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'artemis-saga-guard-'));
+  await configureVideoProfile(cwd);
   const key = `guard-${Date.now()}`;
 
   const genericTimedVideo = await handleSagaLongVideoWorkflow({

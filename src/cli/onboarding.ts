@@ -25,6 +25,7 @@ import { ensureGatewayAutoStart } from './gatewayService.js'
 import { DiscordBotClient } from '../discord/client.js'
 import { promptForVerifiedProviderProfile } from '../providers/onboarding.js'
 import { detectModelContextLength } from '../providers/modelContext.js'
+import { hasPlatformCapabilities } from '../providers/capabilities.js'
 import type { ProviderProfile, VisualModelConfig } from '../providers/types.js'
 import type { BragiPlatformId } from '../bragi/types.js'
 import {
@@ -243,6 +244,8 @@ async function enrichProviderContextLengths(
 
   const nextProfiles = [...profiles]
   for (const profile of profiles) {
+    // Platform profiles belong to the agent server; never overwrite them.
+    if (hasPlatformCapabilities(profile)) continue
     console.log(c(`  ${t('正在检测', 'Detecting')}: ${profile.label ?? profile.id} (${profile.model})`, A.dim))
     const detected = await detectModelContextLength(profile)
     if (!detected.contextLength) {

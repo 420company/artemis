@@ -15,6 +15,8 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, hasTrustedContextLength, hasPlatformCapabilities, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { resolveProfileContextLength } from './modelContext.js';
 
 /**
  * Cached-input counter of an OpenAI-style usage object. OpenAI reports it in
@@ -258,6 +260,34 @@ function resolveReasoningEffort(model: string, effort: string | undefined): stri
   return effort === 'xhigh' || effort === 'max' || effort === 'ultra' ? 'high' : effort;
 }
 
+/**
+ * Sets an output limit only when a caller asks for one for this request (for
+ * example the vision helper); ordinary turns keep the endpoint default. The
+ * platform's maxOutputTokens and the room left in the context window bound
+ * it. OpenAI reasoning models take max_completion_tokens instead of max_tokens.
+ */
+function applyRequestOutputLimit(
+  body: Record<string, unknown>,
+  config: ProviderConfig,
+  messages: SessionMessage[],
+  options: ProviderRequestOptions | undefined,
+): void {
+  const requestLimit = options?.maxOutputTokens;
+  if (!requestLimit || requestLimit <= 0) return;
+  const platformMax = platformMaxOutputTokens(config);
+  const limit = fitOutputTokensToWindow(
+    Math.floor(platformMax !== undefined ? Math.min(platformMax, requestLimit) : requestLimit),
+    resolveProfileContextLength(config),
+    estimateRequestPromptTokens(messages, options),
+    hasTrustedContextLength(config),
+  );
+  // A platform profile's model name is a gateway alias, so it says nothing
+  // about the upstream API: send plain max_tokens and let the gateway
+  // translate it. Elsewhere OpenAI reasoning models take max_completion_tokens.
+  const useCompletionTokens = !hasPlatformCapabilities(config) && OPENAI_REASONING_EFFORT_MODELS.test(config.model);
+  body[useCompletionTokens ? 'max_completion_tokens' : 'max_tokens'] = limit;
+}
+
 interface MapMessageOptions {
   /** Per-model handling of reasoning_content in assistant messages. */
   reasoningMode?: ReasoningContentMode;
@@ -473,6 +503,7 @@ function extractText(content: unknown): string {
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly supportsNativeToolCalls = true;
+  readonly contextLength?: number;
   private readonly config: ProviderConfig;
   readonly model: string;
   /** Set by the provider factory from the profile's context length or known-model rules. */
@@ -483,6 +514,10 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
     this.model = config.model;
+    this.contextLength = platformContextLength(config);
+    // Only a platform profile states its output limit; otherwise the budget
+    // reserves a default (requests send no max_tokens unless asked).
+    this.maxOutputTokens = platformMaxOutputTokens(config);
   }
 
   // ── Streaming (SSE) ───────────────────────────────────────────────────────
@@ -507,6 +542,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     }
     const streamReasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort)
     if (streamReasoningEffort) body['reasoning_effort'] = streamReasoningEffort
+    applyRequestOutputLimit(body, this.config, messages, options)
     if (options?.nativeFunctionTools?.length) {
       body['tools'] = options.nativeFunctionTools.map((t) => ({
         type: 'function',
@@ -834,6 +870,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     };
     const reasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort);
     if (reasoningEffort) body['reasoning_effort'] = reasoningEffort;
+    applyRequestOutputLimit(body, this.config, messages, options);
 
     // Attach function tools when provided
     if (options?.nativeFunctionTools?.length) {
@@ -848,6 +885,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     }
 
     let response: Response;
+    let imagesOmitted = false;
     try {
       response = await retryFetch(
         `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`,
@@ -865,6 +903,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           onRetry: options?.onRetry,
           onPayloadTooLarge: () => {
             const stripped = stripImagesFromChatBody(body);
+            if (stripped) imagesOmitted = true;
             return stripped ? JSON.stringify(stripped) : null;
           },
         },
@@ -913,6 +952,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       model: typeof json.model === 'string' ? json.model : this.config.model,
       nativeToolCalls,
       reasoningContent,
+      ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens: json.usage?.prompt_tokens,
         ...(readOpenAICachedPromptTokens(json.usage) !== undefined

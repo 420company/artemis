@@ -8,7 +8,8 @@
  * agent views ride on the request right after the tool call. Viewed images are
  * held in a queue owned by one run (see ViewedImageQueue), so nothing outlives
  * the run or reaches another session. Models that cannot see images never get
- * them: the tool fails and `--image` is rejected instead.
+ * them: a vision helper describes them instead (core/visionHelper.ts), or,
+ * without one, the model gets a note and view_image is not offered.
  */
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -129,21 +130,15 @@ export async function loadImageForModel(filePath: string, cwd: string): Promise<
 
 /**
  * Loads the images a user attached to a prompt (`--image`). Fails before the
- * run starts when the model cannot see images or the images do not fit in one
- * request, because the user expects every one of them to be seen.
+ * run starts when a file is missing or not an image, or the images do not fit
+ * in one request. Whether the model can see them is decided by the run: a
+ * text-only model gets a vision helper's description or a note instead.
  */
 export async function loadPromptImages(
   paths: readonly string[],
   cwd: string,
-  model: { supportsImages?: boolean; name?: string },
 ): Promise<ImageAttachment[]> {
   if (paths.length === 0) return [];
-  if (model.supportsImages !== true) {
-    throw new ImageInputError(
-      `The model${model.name ? ` ${model.name}` : ''} cannot see images, so --image cannot be used with it. ` +
-        'Use a vision model, or set "supportsImages": true on its provider profile if it does accept images.',
-    );
-  }
   if (paths.length > MAX_IMAGES_PER_REQUEST) {
     throw new ImageInputError(`At most ${MAX_IMAGES_PER_REQUEST} images per message (got ${paths.length})`);
   }
@@ -188,6 +183,12 @@ export class ViewedImageQueue {
    * every turn; view_image fails while it is false.
    */
   acceptsImages = true;
+  /**
+   * Set by the run when the model cannot see images but a vision helper can:
+   * view_image then returns this description instead of queueing the image.
+   * Resolves to the description; rejects when the helper failed.
+   */
+  describeImage?: (image: ImageAttachment, signal?: AbortSignal) => Promise<string>;
 
   /**
    * Queues an image for the next request. When the queue would exceed the

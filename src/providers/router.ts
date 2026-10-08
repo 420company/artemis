@@ -446,6 +446,13 @@ export async function createProviderRouter(
             .filter((value): value is number => typeof value === 'number' && value > 0);
           return outputs.length > 0 ? Math.max(...outputs) : undefined;
         },
+        get primarySupportsImages() {
+          return rankForTarget(buildCandidates())[0]?.provider.supportsImages === true;
+        },
+        // The window of the provider this target tries first.
+        get contextLength() {
+          return rankForTarget(buildCandidates())[0]?.provider.contextLength;
+        },
         async complete(
           messages: SessionMessage[],
           requestOptions?: ProviderRequestOptions,

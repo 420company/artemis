@@ -61,8 +61,13 @@ export function normalizeContextLimit(value: unknown): number | undefined {
   return rounded > 0 ? rounded : undefined
 }
 
-export function estimateContextLimit(model: string, configuredLimit?: number): number {
-  return resolveEffectiveModelContextLength(model, normalizeContextLimit(configuredLimit)) ?? 128_000
+/**
+ * The context window to show and budget against. `authoritative` marks a
+ * platform-supplied limit (capabilitiesSource "platform"), which is used as-is
+ * instead of being capped or inferred from a model name that may be an alias.
+ */
+export function estimateContextLimit(model: string, configuredLimit?: number, authoritative = false): number {
+  return resolveEffectiveModelContextLength(model, normalizeContextLimit(configuredLimit), { authoritative }) ?? 128_000
 }
 
 export function fmtTok(n: number): string {
@@ -77,6 +82,8 @@ export interface HudState {
   defaultModel: string
   lastModel: string
   contextLimit?: number
+  /** contextLimit came from the platform and is not re-capped by model name. */
+  contextLimitAuthoritative?: boolean
   brainModel?: string   // specialist/brain model when dual-model is active
   lastProfileLabel?: string
   permissionMode: string
@@ -102,6 +109,7 @@ export interface HudState {
 export interface HudUsage {
   model?: string
   contextLimit?: number
+  contextLimitAuthoritative?: boolean
   promptTokens?: number
   completionTokens?: number
   totalTokens?: number
@@ -111,11 +119,12 @@ export interface HudUsage {
   tokenUsageSource?: 'provider' | 'estimated'
 }
 
-export function createHudState(defaultModel: string, contextLimit?: number): HudState {
+export function createHudState(defaultModel: string, contextLimit?: number, contextLimitAuthoritative = false): HudState {
   return {
     defaultModel,
     lastModel: defaultModel,
     contextLimit: normalizeContextLimit(contextLimit),
+    contextLimitAuthoritative,
     permissionMode: 'full-access',
     sessionMessageCount: 0,
     changedFilesCount: 0,
@@ -138,7 +147,11 @@ export function updateHudState(state: HudState, usage: HudUsage): void {
   const model = usage.model?.trim() || state.defaultModel
   const total = usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0))
   state.lastModel = model
-  state.contextLimit = normalizeContextLimit(usage.contextLimit) ?? state.contextLimit
+  const usageLimit = normalizeContextLimit(usage.contextLimit)
+  if (usageLimit !== undefined) {
+    state.contextLimit = usageLimit
+    state.contextLimitAuthoritative = usage.contextLimitAuthoritative === true
+  }
   state.lastProfileLabel = usage.profileLabel?.trim() || state.lastProfileLabel
   state.lastPromptTokens = usage.promptTokens ?? 0
   state.lastCompletionTokens = usage.completionTokens ?? 0
@@ -179,7 +192,7 @@ export function renderHud(state: HudState): string {
   const model  = state.lastModel || state.defaultModel
   const brain  = state.brainModel && state.brainModel !== model ? state.brainModel : undefined
   const ctx    = state.lastPromptTokens  // current context window usage
-  const limit  = estimateContextLimit(model, state.contextLimit)
+  const limit  = estimateContextLimit(model, state.contextLimit, state.contextLimitAuthoritative)
   const pct    = ctx > 0 ? Math.min(100, Math.round(ctx / limit * 100)) : 0
   const firstLatency = formatLatencyCompact(state.lastFirstResponseMs)
   const totalLatency = formatLatencyCompact(state.lastDurationMs)

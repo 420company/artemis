@@ -13,9 +13,11 @@ import {
   CliSettingsStore,
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
 } from '../src/cli/settings.js'
-import { applyProviderOverrides, getLastPromptTokens, resetSession, think } from '../src/brain.js'
+import { applyProviderOverrides, getLastPromptTokens, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
+import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
+import { runHeadlessAgent } from '../src/services/headlessAgent.js'
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
 import {
@@ -38,6 +40,7 @@ import {
   GPT_5_6_CONTEXT_LENGTH,
   inferKnownModelContextLength,
   resolveEffectiveModelContextLength,
+  resolveProfileContextLength,
 } from '../src/providers/modelContext.js'
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
@@ -77,7 +80,7 @@ import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
-import { estimateContextLimit } from '../src/cli/hud.js'
+import { createHudState, estimateContextLimit, renderHud, updateHudState } from '../src/cli/hud.js'
 import {
   buildPostCompactRecoveryMessages,
   createLedger,
@@ -144,6 +147,7 @@ import { ALL_AGENT_ACTION_TYPES, RUNTIME_MANAGED_AGENT_ACTION_TYPES } from '../s
 import { resolveDataRootDir } from '../src/utils/fs.js'
 import type {
   ChatProvider,
+  ImageAttachment,
   ProviderNativeToolOutput,
   ProviderResponse,
 } from '../src/providers/types.js'
@@ -10126,6 +10130,695 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     )
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Platform capabilities: values the agent server wrote into the profile
+  // (capabilitiesSource "platform") beat every model-name rule, because the
+  // name can be a gateway alias (gpt-6-sol serving a GLM model).
+  const platformAlias = {
+    protocol: 'openai' as const,
+    baseUrl: 'http://127.0.0.1:9',
+    apiKey: 'k',
+    model: 'gpt-6-sol',
+    contextLength: 1_000_000,
+    maxOutputTokens: 12_345,
+    capabilitiesSource: 'platform' as const,
+  }
+  assert(
+    'platform capabilities: contextLength beats the GPT-6 cap for an alias named gpt-6-sol',
+    resolveProfileContextLength(platformAlias) === 1_000_000 &&
+      resolveProfileContextLength({ ...platformAlias, contextLength: 131_072 }) === 131_072 &&
+      estimateContextLimit('gpt-6-sol', 1_000_000, true) === 1_000_000 &&
+      new OpenAICompatibleProvider(platformAlias).contextLength === 1_000_000 &&
+      new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages' }).contextLength === 1_000_000 &&
+      new ResponsesCompatibleProvider({ ...platformAlias, protocol: 'responses' }).contextLength === 1_000_000,
+  )
+  const { capabilitiesSource: _source, ...nonPlatform } = platformAlias
+  assert(
+    'platform capabilities: non-platform profiles keep the GPT-6 / GPT-5.6 caps',
+    resolveProfileContextLength(nonPlatform) === GPT_5_6_CONTEXT_LENGTH &&
+      resolveProfileContextLength({ ...nonPlatform, model: 'gpt-5.6-sol' }) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH &&
+      new OpenAICompatibleProvider(nonPlatform).contextLength === undefined,
+  )
+
+  const hud = createHudState('gpt-6-sol')
+  updateHudState(hud, { model: 'gpt-6-sol', contextLimit: 1_000_000, contextLimitAuthoritative: true, promptTokens: 500_000 })
+  const platformHud = renderHud(hud)
+  updateHudState(hud, { model: 'gpt-6-sol', contextLimit: 1_000_000, promptTokens: 200_000 })
+  const cappedHud = renderHud(hud)
+  assert(
+    'platform capabilities: the HUD shows the platform window and still caps a non-platform one',
+    platformHud.includes('1.0M') && cappedHud.includes('272.0K') && !cappedHud.includes('1.0M'),
+    `${platformHud} | ${cappedHud}`,
+  )
+
+  // Store: the fields survive load and save; platform windows are not capped
+  // or re-detected; malformed values are dropped; visionProfileId is kept.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-caps-'))
+  try {
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { ...platformAlias, id: 'platform-main', supportsImages: false },
+        { ...platformAlias, id: 'platform-vision', model: 'vision-alias', supportsImages: true, maxOutputTokens: 'lots', capabilitiesSource: 'server' },
+        { ...nonPlatform, id: 'byok' },
+        { ...platformAlias, id: 'platform-no-window', contextLength: undefined },
+      ],
+    }), 'utf8')
+    const store = new ProviderStore(tmpDir)
+    const loaded = await store.load()
+    await store.save(loaded)
+    const reloaded = await store.load()
+    const main = store.getProfile(reloaded, 'platform-main')
+    const vision = store.getProfile(reloaded, 'platform-vision')
+    const byok = store.getProfile(reloaded, 'byok')
+    const refreshed = await store.refreshProfileContextLength('platform-main')
+    const noWindow = await store.refreshProfileContextLength('platform-no-window')
+    assert(
+      'platform capabilities: profile fields and visionProfileId survive load and save',
+      reloaded.visionProfileId === 'platform-vision' &&
+        main?.contextLength === 1_000_000 &&
+        main.maxOutputTokens === 12_345 &&
+        main.capabilitiesSource === 'platform' &&
+        main.supportsImages === false &&
+        refreshed?.contextLength === 1_000_000 &&
+        vision?.supportsImages === true &&
+        vision.maxOutputTokens === undefined &&
+        vision.capabilitiesSource === undefined &&
+        byok?.contextLength === GPT_5_6_CONTEXT_LENGTH &&
+        noWindow?.contextLength === undefined &&
+        resolveProfileContextLength(noWindow) === GPT_5_6_CONTEXT_LENGTH,
+      JSON.stringify({ visionProfileId: reloaded.visionProfileId, main, vision, byok, noWindow }),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+
+  // max output: the platform's maxOutputTokens replaces the name-based
+  // max_tokens on the Messages API, and a per-request limit only lowers it.
+  const bodies: Array<Record<string, unknown>> = []
+  let reply: unknown = {}
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      bodies.push(raw ? JSON.parse(raw) as Record<string, unknown> : {})
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(reply))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock max-output server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const userMessage = { id: 'u1', role: 'user' as const, content: 'hi', createdAt: new Date().toISOString() }
+    reply = { content: [{ type: 'text', text: 'ok' }], usage: {} }
+    await new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages', baseUrl }).complete([userMessage])
+    await new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages', baseUrl }).complete([userMessage], { maxOutputTokens: 1500 })
+    await new MessagesCompatibleProvider({ ...nonPlatform, protocol: 'messages', baseUrl }).complete([userMessage])
+    reply = { choices: [{ message: { content: 'ok' } }], usage: {} }
+    await new OpenAICompatibleProvider({ ...platformAlias, baseUrl }).complete([userMessage])
+    await new OpenAICompatibleProvider({ ...platformAlias, baseUrl, maxOutputTokens: 1000 }).complete([userMessage], { maxOutputTokens: 1500 })
+    assert(
+      'platform capabilities: maxOutputTokens replaces the name-based max_tokens and bounds per-request limits',
+      bodies[0]?.max_tokens === 12_345 &&
+        bodies[1]?.max_tokens === 1500 &&
+        bodies[2]?.max_tokens === 8_192 &&
+        bodies[3]?.max_tokens === undefined && bodies[3]?.max_completion_tokens === undefined &&
+        bodies[4]?.max_tokens === 1000,
+      JSON.stringify(bodies.map((b) => ({ max_tokens: b.max_tokens, max_completion_tokens: b.max_completion_tokens }))),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // runAgent sizes its context window from the active provider's platform
+  // window: a 1M-token platform model keeps more history than the default.
+  const runWithWindow = async (contextLength: number | undefined) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-window-'))
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'platform window smoke' })
+    // ~120K tokens: over the default window's threshold, far under 1M.
+    for (let i = 0; i < 60; i += 1) {
+      session.messages.push({ id: `h${i}`, role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'x '.repeat(4_000)}`, createdAt: new Date().toISOString() })
+    }
+    await store.save(session)
+    const info: string[] = []
+    const provider: ChatProvider = {
+      contextLength,
+      async complete(): Promise<ProviderResponse> {
+        return { text: JSON.stringify({ reply: 'ok', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'continue', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 1,
+      profile: 'main',
+      onInfo: (message) => info.push(message),
+    })
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    const line = info.find((m) => m.startsWith('[context] tokens~')) ?? ''
+    return {
+      window: Number(/tokens~\d+\/(\d+)/.exec(line)?.[1] ?? NaN),
+      kept: Number(/messages=(\d+)/.exec(line)?.[1] ?? NaN),
+    }
+  }
+  const byDefault = await runWithWindow(undefined)
+  const byPlatform = await runWithWindow(1_000_000)
+  assert(
+    'platform capabilities: runAgent budgets its context by the platform window',
+    byDefault.window === 128_000 && byPlatform.window === 1_000_000 && byPlatform.kept > byDefault.kept,
+    `default=${JSON.stringify(byDefault)} platform=${JSON.stringify(byPlatform)}`,
+  )
+}
+
+{
+  // Vision helper on the runAgent path (headless, web, workflows): a model
+  // that cannot see images gets a description from the vision profile.
+  const pngBytes = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const userImage = { data: pngBytes.toString('base64'), mediaType: 'image/png' as const, label: 'Image: screenshot.png' }
+  type MainCall = { images?: number; tools: string[]; messages: SessionMessage[] }
+  const runVision = async (options: {
+    helper: VisionHelper | null
+    images?: ImageAttachment[]
+    viewImage?: boolean
+    prompt?: string
+  }) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-helper-'))
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), pngBytes)
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'vision helper smoke' })
+    await store.save(session)
+    const mainCalls: MainCall[] = []
+    const provider: ChatProvider = {
+      supportsImages: false,
+      supportsNativeToolCalls: true,
+      async complete(messages, requestOptions): Promise<ProviderResponse> {
+        mainCalls.push({
+          images: requestOptions?.imageAttachments?.length,
+          tools: (requestOptions?.nativeFunctionTools ?? []).map((t) => t.name),
+          messages,
+        })
+        if (options.viewImage && mainCalls.length === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'It is a sign-in page.', done: true }), raw: null }
+      },
+    }
+    const result = await runAgent(session, options.prompt ?? 'What does this screenshot show?', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+      visionHelper: options.helper,
+      ...(options.images ? { imageAttachments: options.images } : {}),
+    })
+    const userText = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { result, mainCalls, userText, toolText }
+  }
+  const makeHelper = (behaviour: 'ok' | 'fail') => {
+    const calls: Array<{ images: number; maxOutputTokens?: number; prompt: string }> = []
+    const visionProvider: ChatProvider = {
+      supportsImages: true,
+      async complete(messages, requestOptions): Promise<ProviderResponse> {
+        calls.push({
+          images: requestOptions?.imageAttachments?.length ?? 0,
+          maxOutputTokens: requestOptions?.maxOutputTokens,
+          prompt: messages.map((m) => m.content).join('\n'),
+        })
+        if (behaviour === 'fail') throw new Error('vision gateway unavailable')
+        return { text: 'A sign-in form. Visible text: "Sign in", "Forgot password?". Blue button.', raw: null }
+      },
+    }
+    return { calls, helper: createVisionHelper(visionProvider, { label: 'platform-vision' }) }
+  }
+  const mainRequestHasImageParts = (calls: MainCall[]) => calls.some((call) => (call.images ?? 0) > 0)
+
+  {
+    const { calls, helper } = makeHelper('ok')
+    const run = await runVision({ helper, images: [userImage] })
+    const firstUser = run.mainCalls[0]?.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n') ?? ''
+    assert(
+      'vision helper: supportsImages:false with a vision profile calls the helper once and injects the description',
+      calls.length === 1 &&
+        calls[0]!.images === 1 &&
+        calls[0]!.maxOutputTokens === 1500 &&
+        calls[0]!.prompt.includes('What does this screenshot show?') &&
+        /verbatim/.test(calls[0]!.prompt) &&
+        firstUser.includes('[Image 1 description by vision helper — the main model cannot see images]') &&
+        firstUser.includes('"Forgot password?"') &&
+        run.result.reply.includes('sign-in page'),
+      JSON.stringify({ calls: calls.map((c) => ({ images: c.images, max: c.maxOutputTokens })), firstUser: firstUser.slice(0, 300) }),
+    )
+    assert(
+      'vision helper: the main request carries no image parts',
+      !mainRequestHasImageParts(run.mainCalls),
+      JSON.stringify(run.mainCalls.map((c) => c.images)),
+    )
+  }
+
+  {
+    // The user attaches screenshot.png and the agent then views the same file:
+    // the second look is a cache hit, and view_image returns the description.
+    const { calls, helper } = makeHelper('ok')
+    const run = await runVision({ helper, images: [userImage], viewImage: true })
+    assert(
+      'vision helper: view_image is offered and returns the description instead of queueing the image',
+      run.mainCalls[0]?.tools.includes('view_image') === true &&
+        run.toolText.includes('description by vision helper') &&
+        run.toolText.includes('Forgot password?') &&
+        run.toolText.includes('<image_description n=') &&
+        run.toolText.includes('</image_description>') &&
+        run.toolText.includes('transcribed from an image by a vision helper') &&
+        !run.toolText.includes('attached to your next step') &&
+        !mainRequestHasImageParts(run.mainCalls),
+      JSON.stringify({ tools: run.mainCalls[0]?.tools.includes('view_image'), tool: run.toolText.slice(0, 300) }),
+    )
+    assert(
+      'vision helper: the same image is described once per run (cache hit by content hash)',
+      calls.length === 1,
+      `helper calls=${calls.length}`,
+    )
+  }
+
+  {
+    const { calls, helper } = makeHelper('fail')
+    const run = await runVision({ helper, images: [userImage] })
+    assert(
+      'vision helper: a helper failure leaves a clear note and the run continues',
+      calls.length === 1 &&
+        run.userText.includes('the attached image could not be read') &&
+        run.result.reply.includes('sign-in page') &&
+        !mainRequestHasImageParts(run.mainCalls),
+      run.userText.slice(0, 300),
+    )
+  }
+
+  {
+    const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
+    assert(
+      'vision helper: without a helper the model gets a graceful note and the run succeeds',
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg) but this plan cannot read images. Tell the user briefly and continue with the text.') &&
+        run.result.reply.includes('sign-in page') &&
+        !mainRequestHasImageParts(run.mainCalls) &&
+        run.mainCalls.every((call) => !call.tools.includes('view_image')),
+      run.userText.slice(0, 300),
+    )
+  }
+
+  {
+    // Two images in one batch: one helper call, one labelled part per image.
+    const calls: number[] = []
+    const helper = createVisionHelper({
+      supportsImages: true,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        calls.push(requestOptions?.imageAttachments?.length ?? 0)
+        return { text: '### Image 1\nA bar chart of sales.\n\n### Image 2\nA photo of a cat.', raw: null }
+      },
+    })
+    const run = await runVision({ helper, images: [userImage, { data: 'R0lGODlh', mediaType: 'image/gif', label: 'Image: cat.gif' }] })
+    assert(
+      'vision helper: a batch of images is described in one call and labelled per image',
+      calls.length === 1 && calls[0] === 2 &&
+        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper">\nA bar chart of sales\.\n<\/image_description>/.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper">\nA photo of a cat\.\n<\/image_description>/.test(run.userText),
+      run.userText.slice(0, 400),
+    )
+  }
+}
+
+{
+  // End to end through the provider store: `artemis execute --image` on a
+  // text-only platform model with visionProfileId -> platform-vision.
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      requests.push(body)
+      const content = body.model === 'vision-alias'
+        ? 'A terminal window showing the text "build passed".'
+        : 'The screenshot shows a passing build.'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: body.model, choices: [{ message: { content } }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-headless-'))
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock vision server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, contextLength: 200_000, maxOutputTokens: 8192, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }), 'utf8')
+    fs.writeFileSync(path.join(tmpDir, 'build.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    const result = await runHeadlessAgent(tmpDir, 'Did the build pass?', {
+      permissionMode: 'read-only',
+      maxTurns: 1,
+      imagePaths: ['build.png'],
+    })
+    const visionRequests = requests.filter((r) => r.model === 'vision-alias')
+    const mainRequests = requests.filter((r) => r.model === 'gpt-6-sol')
+    const mainRaw = JSON.stringify(mainRequests)
+    assert(
+      'vision helper (--image, headless/web): resolved from visionProfileId, called once, main request text-only with the description',
+      visionRequests.length === 1 &&
+        JSON.stringify(visionRequests[0]).includes('image_url') &&
+        visionRequests[0]?.max_tokens === 1500 &&
+        mainRequests.length >= 1 &&
+        !mainRaw.includes('image_url') &&
+        !mainRaw.includes('omitted: this model cannot see images') &&
+        mainRaw.includes('Image 1 description by vision helper') &&
+        mainRaw.includes('build passed') &&
+        result.reply.includes('passing build'),
+      JSON.stringify({ vision: visionRequests.length, main: mainRequests.length, reply: result.reply, raw: mainRaw.slice(0, 300) }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Bridge / pasted images go through think(): the same vision helper turns
+  // them into text for a text-only main model.
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      requests.push(body)
+      const content = body.model === 'vision-alias'
+        ? '一张收据，文字：“合计 42 元”。'
+        : '收据上的合计是 42 元。'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: body.model, choices: [{ message: { content } }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-bridge-'))
+  const originalCwd = process.cwd()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock vision bridge server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }), 'utf8')
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+    const result = await think('这张收据合计多少？', () => {}, {
+      cwd: tmpDir,
+      permissionMode: 'accept-all',
+      disableNativeTools: true,
+      imageAttachments: [{ data: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64'), mediaType: 'image/png' }],
+    })
+    const visionRequests = requests.filter((r) => r.model === 'vision-alias')
+    const mainRaw = JSON.stringify(requests.filter((r) => r.model === 'gpt-6-sol'))
+    assert(
+      'vision helper (bridge think()): the helper describes the pasted image and the main request is text-only',
+      visionRequests.length === 1 &&
+        JSON.stringify(visionRequests[0]).includes('image_url') &&
+        JSON.stringify(visionRequests[0]).includes('这张收据合计多少') &&
+        !mainRaw.includes('image_url') &&
+        mainRaw.includes('Image 1 description by vision helper') &&
+        mainRaw.includes('合计 42 元') &&
+        result.reply.includes('42'),
+      JSON.stringify({ vision: visionRequests.length, reply: result.reply, raw: mainRaw.slice(0, 300) }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sub-agents: a text-only worker never receives image parts. view_image goes
+  // through the vision helper when one exists, otherwise through the main
+  // profile (which can see images).
+  const runSubAgent = async (helper: VisionHelper | null) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-subagent-'))
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      specialistProfileId: 'worker',
+      profiles: [{ id: 'worker', protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model: 'text-worker', supportsImages: false }],
+    }), 'utf8')
+    const workerImages: number[] = []
+    const mainImages: number[] = []
+    let workerCalls = 0
+    const worker: ChatProvider = {
+      supportsImages: false,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        workerCalls += 1
+        workerImages.push(requestOptions?.imageAttachments?.length ?? 0)
+        if (workerCalls === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'Reviewed.', done: true }), raw: null }
+      },
+    }
+    const main: ChatProvider = {
+      supportsImages: true,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        mainImages.push(requestOptions?.imageAttachments?.length ?? 0)
+        return { text: JSON.stringify({ reply: 'Reviewed with the image.', done: true }), raw: null }
+      },
+    }
+    const router = await createProviderRouter({ cwd: tmpDir, mainProvider: main, createProviderFromProfile: () => worker })
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'vision sub-agent smoke' })
+    await store.save(session)
+    await runAgent(session, 'Review the screenshot.', {
+      cwd: tmpDir,
+      provider: main,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'reviewer',
+      resolveProvider: router.resolveProvider,
+      visionHelper: helper,
+    })
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { workerImages, mainImages, toolText }
+  }
+  const helperCalls: number[] = []
+  const withHelper = await runSubAgent(createVisionHelper({
+    supportsImages: true,
+    async complete(_messages, requestOptions): Promise<ProviderResponse> {
+      helperCalls.push(requestOptions?.imageAttachments?.length ?? 0)
+      return { text: 'A dashboard with a red error banner.', raw: null }
+    },
+  }))
+  assert(
+    'vision helper (sub-agent): a text-only worker uses the helper, and neither worker nor main gets image parts',
+    helperCalls.length === 1 &&
+      withHelper.toolText.includes('red error banner') &&
+      withHelper.workerImages.every((n) => n === 0) &&
+      withHelper.mainImages.every((n) => n === 0),
+    JSON.stringify({ helperCalls, worker: withHelper.workerImages, main: withHelper.mainImages }),
+  )
+  const withoutHelper = await runSubAgent(null)
+  assert(
+    'vision helper (sub-agent): without a helper the viewed image goes to the main profile, never to the text-only worker',
+    withoutHelper.workerImages.every((n) => n === 0) &&
+      withoutHelper.mainImages.includes(1),
+    JSON.stringify({ worker: withoutHelper.workerImages, main: withoutHelper.mainImages }),
+  )
+}
+
+{
+  // max_tokens is bounded by the room left in the context window, because
+  // some providers reject prompt + max_tokens above the window.
+  const bodies: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      bodies.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      // One reply that both the Messages and the chat/completions parsers accept.
+      res.end(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], choices: [{ message: { content: 'ok' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock window server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const big = { id: 'u1', role: 'user' as const, content: 'x'.repeat(32_000), createdAt: new Date().toISOString() }
+    const small = { ...big, content: 'hi' }
+    const platform = { baseUrl, apiKey: 'k', model: 'gpt-6-sol', contextLength: 20_000, maxOutputTokens: 128_000, capabilitiesSource: 'platform' as const }
+    await new MessagesCompatibleProvider({ ...platform, protocol: 'messages' }).completeStream([big], () => {})
+    await new MessagesCompatibleProvider({ ...platform, protocol: 'messages' }).completeStream([small], () => {})
+    await new OpenAICompatibleProvider({ ...platform, protocol: 'openai' }).complete([big], { maxOutputTokens: 128_000 })
+    const [bigMessages, smallMessages, bigOpenAI] = bodies.map((b) => Number(b.max_tokens))
+    assert(
+      'platform capabilities: max_tokens = min(maxOutputTokens, window − estimated prompt − margin)',
+      bigMessages! >= 256 && bigMessages! <= 20_000 - 8_000 - 1_024 &&
+        smallMessages! <= 20_000 - 1_024 && smallMessages! > bigMessages! &&
+        bigOpenAI === bigMessages,
+      JSON.stringify({ bigMessages, smallMessages, bigOpenAI }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Platform profiles always send plain max_tokens (the gateway translates it
+  // per upstream); other profiles keep the name rule for OpenAI reasoning models.
+  const bodies: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock output-param server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const userMessage = { id: 'u1', role: 'user' as const, content: 'hi', createdAt: new Date().toISOString() }
+    await new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-5.4', capabilitiesSource: 'platform' }).complete([userMessage], { maxOutputTokens: 1500 })
+    await new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-5.4' }).complete([userMessage], { maxOutputTokens: 1500 })
+    assert(
+      'platform capabilities: platform profiles send plain max_tokens even for a reasoning-model alias',
+      bodies[0]?.max_tokens === 1500 && bodies[0]?.max_completion_tokens === undefined &&
+        bodies[1]?.max_completion_tokens === 1500 && bodies[1]?.max_tokens === undefined,
+      JSON.stringify(bodies.map((b) => ({ max_tokens: b.max_tokens, max_completion_tokens: b.max_completion_tokens }))),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // A 413 makes the provider retry without the images; the helper must not
+  // use (or cache) a description of a request whose images were dropped.
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      requests += 1
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (raw.includes('image_url')) {
+        res.writeHead(413, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'request too large' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'I cannot see any image.' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock 413 server failed to bind.')
+    const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: `http://127.0.0.1:${address.port}`, apiKey: 'k', model: 'vision-alias', supportsImages: true })
+    const helper = createVisionHelper(provider)
+    const image = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const }
+    const first = await helper.describe([image], { userText: 'what is it?' })
+    const second = await helper.describe([image], { userText: 'what is it?' })
+    assert(
+      'vision helper: a reply after a 413 image strip is a failure and is never cached',
+      first[0]?.ok === false && /too large/.test(first[0].error) && second[0]?.ok === false && requests === 4,
+      JSON.stringify({ first, second, requests }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // brain: a --model override drops all four platform fields, and a cached
+  // lead provider is rebuilt when providers.json changes (a long-lived bridge
+  // sees a plan change that flips supportsImages).
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-brain-platform-'))
+  const originalCwd = process.cwd()
+  const providersPath = path.join(tmpDir, '.artemis', 'providers.json')
+  const writeProviders = (supportsImages: boolean, mtime: Date) => {
+    fs.writeFileSync(providersPath, JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      profiles: [{ id: 'platform-main', protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model: 'gpt-6-sol', supportsImages, contextLength: 1_000_000, maxOutputTokens: 32_000, capabilitiesSource: 'platform' }],
+    }), 'utf8')
+    fs.utimesSync(providersPath, mtime, mtime)
+  }
+  try {
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    writeProviders(true, new Date(Date.now() - 60_000))
+    process.chdir(tmpDir)
+    switchModel(undefined)
+    applyProviderOverrides({ model: 'deepseek-chat' })
+    const overridden = await getLeadProvider()
+    switchModel(undefined)
+    applyProviderOverrides({})
+    const before = await getLeadProvider()
+    writeProviders(false, new Date())
+    const after = await getLeadProvider()
+    assert(
+      'platform capabilities: a --model override clears supportsImages, contextLength, maxOutputTokens and capabilitiesSource',
+      overridden.config.model === 'deepseek-chat' &&
+        overridden.config.supportsImages === undefined &&
+        overridden.config.contextLength === undefined &&
+        overridden.config.maxOutputTokens === undefined &&
+        overridden.config.capabilitiesSource === undefined &&
+        overridden.provider.supportsImages === false,
+      JSON.stringify(overridden.config),
+    )
+    assert(
+      'platform capabilities: brain re-reads its provider when providers.json changes (stale supportsImages)',
+      before.provider.supportsImages === true && after.provider.supportsImages === false && before.provider !== after.provider,
+      `before=${before.provider.supportsImages} after=${after.provider.supportsImages}`,
+    )
+  } finally {
+    process.chdir(originalCwd)
+    switchModel(undefined)
+    resetSession()
+    applyProviderOverrides({})
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }
