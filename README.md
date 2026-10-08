@@ -73,7 +73,7 @@ The goal is simple: you describe the outcome; Artemis does the operational work.
 
 Long work often fails because the assistant forgets. Artemis is built to preserve continuity.
 
-It maintains local memory, session state, collapse ledgers, tool evidence, and recovery context so long tasks can continue without losing the important parts. Your preferences, project conventions, workflow habits, and recurring constraints can become part of the way Artemis works with you.
+It maintains local memory, session state, compacted history with a full archive, tool evidence, and recovery context so long tasks can continue without losing the important parts. Your preferences, project conventions, workflow habits, and recurring constraints can become part of the way Artemis works with you.
 
 Useful for:
 
@@ -83,6 +83,18 @@ Useful for:
 - Repeated project maintenance
 - Returning to a task after interruption
 - Keeping your personal style and rules consistent
+
+##### How context compaction works
+
+Every conversation (web sessions, chat bridges, the CLI) goes through the same context manager (`src/core/compaction`):
+
+- **Budget.** The limit is the model's context window minus the reply reserve and a safety margin. Before each request, Artemis measures the context: the provider-reported size of the last request (cache reads and writes included) plus an estimate of what was added since. The estimate counts one token per Chinese/Japanese/Korean character.
+- **Large tool output** is written to `sessions/<id>/tool-results/`. The history keeps a preview of the head and tail with the file path, and newlines are never removed.
+- **At about 78% of the budget**, old tool results outside the recent part of the conversation become one-line placeholders that name the tool, its arguments, the size and the file to re-read. If that is not enough, everything before the most recent ~25% is summarized by the worker model (or the main model), in the conversation's language. The summary has eight sections: goals and latest instructions, decisions, files, facts and errors, preferences, completed work, pending tasks, and things to remember. The stored history becomes a "[Context compacted]" message plus the recent messages. Removed messages are appended to `sessions/<id>/transcript.jsonl`, which the agent can read.
+- **Rolling summaries.** The next compaction folds only the new messages into the previous summary. After compacting, Artemis re-attaches the task board, fresh copies of the files being worked on, and the in-flight action. If the summarizer fails, a mechanical summary that always fits is used instead.
+- **Overflow recovery.** If the provider still rejects a request as too long, Artemis compacts harder, retries once, and saves the result, so a chat bridge never repeats the same overflow.
+- **Prompt caching.** The system prompt stays byte-identical between requests. Per-request context (recalled memories, activated skills, evidence) goes in a message next to your request instead.
+- **Settings** (`setup.agent.compression`): `enabled: false` turns off proactive compaction, `threshold` changes the 78% trigger, and `maxContextTokens` caps the context below the model window to control cost.
 
 #### 4. Visual generation system
 
@@ -304,7 +316,7 @@ Artemis 可以处理日常和复杂的软件工程任务：
 
 很多 AI 工具在长任务中会遗忘前文。Artemis 的设计目标是让任务可以持续推进。
 
-它会把记忆、会话状态、工具证据、压缩账本和恢复上下文保存在本地，让长时间工作不会因为中断、折叠或会话变长而失去关键线索。你的偏好、项目规则、语言风格和长期约束也可以被保留下来。
+它会把记忆、会话状态、压缩后的历史与完整归档、工具证据和恢复上下文保存在本地，让长时间工作不会因为中断、折叠或会话变长而失去关键线索。你的偏好、项目规则、语言风格和长期约束也可以被保留下来。
 
 适合用于：
 
@@ -314,6 +326,18 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - 长期项目维护
 - 中断后继续任务
 - 保持个人工作习惯和审美一致
+
+##### 上下文压缩是怎么工作的
+
+网页会话、聊天桥接和命令行都使用同一个上下文管理器（`src/core/compaction`）：
+
+- **预算**：上限是模型的上下文窗口，减去回复预留和安全余量。每次请求前，Artemis 用上一次请求由服务商报告的实际大小（包含缓存读写），加上之后新增内容的估算，来衡量当前上下文。估算时每个中日韩字符按 1 个 token 计。
+- **大的工具输出**会写入 `sessions/<id>/tool-results/`。历史中只保留开头和结尾的预览，以及文件路径；换行永远不会被删除。
+- **达到预算的约 78% 时**，最近对话之外的旧工具结果会被替换成一行占位符，写明工具、参数、大小和可以重新读取的文件。如果仍然不够，最近约 25% 之前的全部内容会由副模型（没有则用主模型）按对话所用的语言总结。摘要分为八个小节：目标与最新指令、决策、文件、事实与错误、偏好、已完成工作、待办和需要记住的事项。保存的历史变为一条「[上下文已压缩]」消息加上最近的消息。被移除的消息会追加到 `sessions/<id>/transcript.jsonl`，代理可以读取它。
+- **滚动摘要**：下一次压缩只把新消息合并进上一次的摘要。压缩后，Artemis 会重新附上任务清单、正在处理的文件的最新内容和进行中的动作。摘要模型失败时，改用一定能放进窗口的机械摘要。
+- **超窗恢复**：如果服务商仍然因为过长拒绝请求，Artemis 会更大力度地压缩、重试一次并保存结果，聊天桥接不会反复撞上同一个超窗错误。
+- **提示缓存**：系统提示在各次请求之间保持字节完全一致。每次请求相关的上下文（召回的记忆、激活的技能、证据）放在你的请求旁边的消息里。
+- **设置**（`setup.agent.compression`）：`enabled: false` 关闭主动压缩，`threshold` 调整 78% 的触发点，`maxContextTokens` 把上下文限制在模型窗口以下以控制成本。
 
 #### 4. 视觉生成系统
 

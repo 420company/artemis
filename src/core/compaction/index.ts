@@ -1,7 +1,7 @@
 /**
  * core/compaction — context management shared by both runtimes.
- * See manager.ts for the overall flow and docs/context-compaction.md (or the
- * README section "How context compaction works") for the design.
+ * See manager.ts for the overall flow and the README section "How context
+ * compaction works" for a summary of the design.
  */
 
 export * from './accounting.js'
