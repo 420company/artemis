@@ -594,7 +594,7 @@ export async function repairVisualModelSetup(
         model: current.video.model || defaultVisualModelForProvider(current.video.provider || 'byteplus', 'video'),
         defaultParams: {
           duration: current.video.defaultParams?.duration || '10s',
-          resolution: current.video.defaultParams?.resolution || '1080p',
+          resolution: current.video.defaultParams?.resolution || '720p',
           quality: current.video.defaultParams?.quality || 'standard',
           style: current.video.defaultParams?.style || 'realistic',
           format: current.video.defaultParams?.format || 'mp4',
@@ -881,7 +881,7 @@ async function configureVisualModel(
         nsfw: videoNsfw,
         defaultParams: {
           duration: '10s',
-          resolution: '1080p',
+          resolution: '720p',
           quality: 'standard',
           style: 'realistic',
           format: 'mp4',
@@ -901,7 +901,7 @@ async function configureVisualModel(
       nsfw: false,
       defaultParams: {
         duration: '10s',
-        resolution: '1080p',
+        resolution: '720p',
         quality: 'standard',
         style: 'realistic',
         format: 'mp4',

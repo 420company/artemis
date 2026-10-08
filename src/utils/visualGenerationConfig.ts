@@ -78,7 +78,7 @@ export const BYTEPLUS_VIDEO_PRESETS: readonly BytePlusVideoPreset[] = [
     model: 'seedance-1-5-pro-251215',
     baseUrl: BYTEPLUS_VISUAL_BASE_URL,
     endpoint: BYTEPLUS_VIDEO_TASKS_ENDPOINT,
-    defaultParams: { duration: '10s', resolution: '1080p', framerate: '24fps' },
+    defaultParams: { duration: '10s', resolution: '720p', framerate: '24fps' },
   },
 ];
 
@@ -182,7 +182,7 @@ function visualConfigFromProviderProfile(profile: ProviderProfile, assetKind: Vi
       model: assetKind === 'video' ? model : defaultVisualModelForProvider(provider, 'video'),
       defaultParams: {
         duration: '10s',
-        resolution: '1080p',
+        resolution: '720p',
         quality: 'standard',
         style: 'realistic',
         format: 'mp4',
