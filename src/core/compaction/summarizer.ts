@@ -170,8 +170,16 @@ export function capText(text: string, tokens: number): string {
   return `${head}\n… [${(text.length - head.length - tail.length).toLocaleString('en-US')} chars omitted] …\n${tail}`
 }
 
-function readCleared(message: SessionMessage): string | undefined {
+/** Paths that may be read back: files this session's storage spilled itself. */
+export type SavedPathCheck = (filePath: string) => boolean
+
+function trustedSavedPath(message: SessionMessage, isTrusted?: SavedPathCheck): string | undefined {
   const savedTo = message.contextCleared?.savedTo
+  return savedTo && isTrusted?.(savedTo) ? savedTo : undefined
+}
+
+function readCleared(message: SessionMessage, isTrusted?: SavedPathCheck): string | undefined {
+  const savedTo = trustedSavedPath(message, isTrusted)
   if (!savedTo) return undefined
   try {
     if (statSync(savedTo).size > CLEARED_REHYDRATE_MAX_BYTES) return undefined
@@ -191,18 +199,20 @@ export function serializeMessageForSummary(
   message: SessionMessage,
   ordinal: number,
   callIndex: Map<string, ToolCallInfo>,
+  isTrustedSavedPath?: SavedPathCheck,
 ): string {
   const time = formatTime(message.createdAt)
   if (message.role === 'tool') {
     const { name, args } = describeToolResult(message, callIndex)
     // Cleared results are re-read from disk so the summarizer still sees them.
-    const original = readCleared(message)
+    const original = readCleared(message, isTrustedSavedPath)
     const content = original ?? message.content ?? ''
     const parsed = parseToolContent(content)
     const status = parsed.ok === false ? ' · FAILED' : ''
     const error = parsed.ok === false && parsed.errorMessage ? `\nerror: ${parsed.errorMessage}` : ''
     const body = capText(parsed.envelope ? parsed.output : content, original ? CLEARED_RESULT_CAP_TOKENS : TOOL_RESULT_CAP_TOKENS)
-    const savedNote = message.contextCleared?.savedTo ? `\n(full output: ${message.contextCleared.savedTo})` : ''
+    const trusted = trustedSavedPath(message, isTrustedSavedPath)
+    const savedNote = trusted ? `\n(full output: ${trusted})` : ''
     // Tool output is data from outside the conversation; the tag marks it so.
     return `--- #${ordinal} tool result · ${name}${args ? ` ${args}` : ''}${status} ---\n` +
       `<tool_result name="${name.replace(/[^\w.-]/g, '_')}" untrusted="true">${escapeToolResultTags(`${error}\n${body}${savedNote}`)}\n</tool_result>`
@@ -345,6 +355,11 @@ export type SummarizeHistoryInput = {
   maxInputTokens?: number
   /** All history messages, used to resolve tool-call arguments for results. */
   allMessages?: readonly SessionMessage[]
+  /**
+   * Which saved tool-output paths may be read back for the summarizer
+   * (the storage's own spill files). Without it nothing is read from disk.
+   */
+  isTrustedSavedPath?: SavedPathCheck
 }
 
 /**
@@ -353,7 +368,7 @@ export type SummarizeHistoryInput = {
  */
 export async function summarizeHistory(input: SummarizeHistoryInput): Promise<SummaryResult> {
   const callIndex = buildToolCallIndex(input.allMessages ?? input.messages)
-  const serialized = input.messages.map((message, i) => serializeMessageForSummary(message, i + 1, callIndex))
+  const serialized = input.messages.map((message, i) => serializeMessageForSummary(message, i + 1, callIndex, input.isTrustedSavedPath))
   const system = buildSystemPrompt(input.language)
   const latest = input.latestUserMessage ? capText(input.latestUserMessage, 2_000) : undefined
 
@@ -372,7 +387,10 @@ export async function summarizeHistory(input: SummarizeHistoryInput): Promise<Su
   // when given, by the total input budget (leaving room for one retry).
   let sendable = maxCalls * chunkTokens
   if (input.maxInputTokens !== undefined) {
-    sendable = Math.min(sendable, Math.max(chunkTokens, Math.floor(input.maxInputTokens * 0.75) - perCallOverhead * maxCalls))
+    // Per-call overhead only for the calls this history actually needs.
+    const totalTokens = serialized.reduce((sum, text) => sum + estimateTokens(text) + 2, 0)
+    const callsNeeded = Math.min(maxCalls, Math.max(1, Math.ceil(totalTokens / chunkTokens)))
+    sendable = Math.min(sendable, Math.max(chunkTokens, Math.floor(input.maxInputTokens * 0.75) - perCallOverhead * callsNeeded))
   }
 
   let previous = input.previousSummary?.trim() || undefined
@@ -454,6 +472,82 @@ export function collectReferencedPaths(messages: readonly SessionMessage[]): str
   return ordered
 }
 
+/** Head and tail of one line within `tokens` (no minimum length, unlike capText). */
+function shortenLine(text: string, tokens: number): string {
+  const size = estimateTokens(text)
+  if (size <= tokens) return text
+  const keep = Math.max(8, Math.floor(tokens * (text.length / Math.max(1, size))))
+  const head = Math.ceil(keep * 0.75)
+  return `${text.slice(0, head)} … ${text.slice(text.length - (keep - head))}`
+}
+
+const USER_LINE_MAX_TOKENS = 220
+const USER_LINE_MIN_TOKENS = 40
+/** Per-line overhead: bullet, timestamp, newline. */
+const USER_LINE_OVERHEAD = 10
+
+/**
+ * The user-message section of a mechanical summary or legacy digest. Goals
+ * and constraints live in user messages, so every one gets a line, cut to a
+ * per-line cap that shrinks (down to a short floor) to fit `budget`. When
+ * even that does not fit, the earliest and the latest messages are kept and
+ * the middle is sampled evenly, and the section says so. Linear in the
+ * number of messages.
+ */
+function renderUserDigest(messages: readonly SessionMessage[], budget: number, zh: boolean): string {
+  if (messages.length === 0 || budget <= 0) return ''
+  // Token size of each message, measured once (capped: only the cap matters).
+  const sizes = messages.map((message) => estimateTokens(message.content.length > 4_000 ? message.content.slice(0, 4_000) : message.content))
+  const costAt = (cap: number): number => sizes.reduce((sum, size) => sum + Math.min(size, cap) + USER_LINE_OVERHEAD, 0)
+  // Largest cap that fits, by bisection between the floor and the ceiling.
+  let cap = USER_LINE_MIN_TOKENS
+  if (costAt(USER_LINE_MAX_TOKENS) <= budget) {
+    cap = USER_LINE_MAX_TOKENS
+  } else {
+    let lo = USER_LINE_MIN_TOKENS
+    let hi = USER_LINE_MAX_TOKENS
+    while (hi - lo > 4) {
+      const mid = Math.floor((lo + hi) / 2)
+      if (costAt(mid) <= budget) lo = mid
+      else hi = mid
+    }
+    cap = lo
+  }
+
+  let chosen = messages.map((_, i) => i)
+  let note = ''
+  if (costAt(cap) > budget) {
+    // Even short lines do not all fit: keep the earliest quarter and the
+    // latest half of what fits, and sample the middle evenly.
+    const lineCost = Math.max(1, Math.ceil(costAt(cap) / messages.length))
+    const fits = Math.max(3, Math.floor(budget / lineCost))
+    const head = Math.max(1, Math.floor(fits * 0.25))
+    const tail = Math.max(1, Math.floor(fits * 0.5))
+    const middleSlots = Math.max(0, fits - head - tail)
+    const middleFrom = head
+    const middleTo = messages.length - tail
+    const middle: number[] = []
+    if (middleSlots > 0 && middleTo > middleFrom) {
+      const step = (middleTo - middleFrom) / middleSlots
+      for (let k = 0; k < middleSlots; k += 1) middle.push(middleFrom + Math.floor(k * step + step / 2))
+    }
+    chosen = [
+      ...Array.from({ length: head }, (_, i) => i),
+      ...middle,
+      ...Array.from({ length: tail }, (_, i) => messages.length - tail + i),
+    ].filter((index, i, all) => index >= 0 && index < messages.length && all.indexOf(index) === i)
+    note = zh
+      ? `\n（共 ${messages.length} 条用户消息，只列出 ${chosen.length} 条：最早的 ${head} 条、最近的 ${tail} 条，以及从中间均匀抽取的 ${middle.length} 条；完整内容见归档。）`
+      : `\n(${chosen.length} of ${messages.length} user messages shown: the first ${head}, the last ${tail}, and ${middle.length} sampled evenly from the middle; the archive has all of them.)`
+  }
+  const lines = chosen.map((index) => {
+    const message = messages[index]!
+    return `- [${formatTime(message.createdAt)}] ${shortenLine(message.content.trim().replace(/\s*\n\s*/g, ' ⏎ '), cap)}`
+  })
+  const title = zh ? '## 用户消息（按时间顺序，每条已截短）' : '## User messages (oldest first, each shortened)'
+  return `${title}${note}\n${lines.join('\n')}`
+}
+
 export type MechanicalSummaryInput = {
   messages: readonly SessionMessage[]
   previousSummary?: string
@@ -486,14 +580,16 @@ export function buildMechanicalSummary(input: MechanicalSummaryInput): string {
   }
 
   const userMessages: SessionMessage[] = []
-  const assistantLines: string[] = []
+  const assistantMessages: SessionMessage[] = []
   for (const message of input.messages) {
     if (message.role === 'user' && !isSyntheticUserMessage(message) && message.content?.trim()) {
       userMessages.push(message)
     } else if (message.role === 'assistant' && message.content?.trim()) {
-      assistantLines.push(`- ${capText(message.content.trim(), 160).replace(/\s*\n\s*/g, ' ⏎ ')}`)
+      assistantMessages.push(message)
     }
   }
+  const assistantLines = assistantMessages.slice(-3)
+    .map((message) => `- ${capText(message.content.trim(), 160).replace(/\s*\n\s*/g, ' ⏎ ')}`)
   const paths = collectReferencedPaths(input.messages)
 
   // Newest paths first within a fifth of the budget, listed oldest first.
@@ -508,47 +604,14 @@ export function buildMechanicalSummary(input: MechanicalSummaryInput): string {
   const pathsBlock = keptPaths.length > 0
     ? `${zh ? '## 涉及的文件' : '## Files referenced'}\n${keptPaths.map((p) => `- ${p}`).join('\n')}`
     : ''
-  const lastNotes = assistantLines.slice(-3)
-  const notesBlock = lastNotes.length > 0
-    ? `${zh ? '## 最近的助手进展' : '## Last assistant notes'}\n${lastNotes.join('\n')}`
+  const notesBlock = assistantLines.length > 0
+    ? `${zh ? '## 最近的助手进展' : '## Last assistant notes'}\n${assistantLines.join('\n')}`
     : ''
-  const reserved = estimateTokens(pathsBlock) + estimateTokens(notesBlock) + 60
+  const reserved = estimateTokens(pathsBlock) + estimateTokens(notesBlock) + 80
   const userBudget = Math.max(0, budget - used - reserved)
 
-  // Goals and constraints live in user messages, so every one of them gets
-  // a line: the per-line cap shrinks (down to a short floor) before any
-  // message is left out.
-  const renderUsers = (cap: number): string[] => userMessages.map((message) =>
-    `- [${formatTime(message.createdAt)}] ${capText(message.content.trim(), cap).replace(/\s*\n\s*/g, ' ⏎ ')}`)
-  let lineCap = 220
-  let userLines = renderUsers(lineCap)
-  const linesCost = (lines: string[]): number => lines.reduce((sum, line) => sum + estimateTokens(line) + 1, 0)
-  while (lineCap > 40 && linesCost(userLines) > userBudget) {
-    lineCap = Math.max(40, Math.floor(lineCap * 0.7))
-    userLines = renderUsers(lineCap)
-  }
-
-  // The opening messages usually state the goal and standing constraints;
-  // they are pinned. The rest is filled newest first, then put in order.
-  const pinned = userLines.slice(0, 2)
-  let userUsed = pinned.reduce((sum, line) => sum + estimateTokens(line) + 1, 0)
-  const newest: string[] = []
-  for (let i = userLines.length - 1; i >= pinned.length; i -= 1) {
-    const cost = estimateTokens(userLines[i]!) + 1
-    if (userUsed + cost > userBudget) break
-    newest.unshift(userLines[i]!)
-    userUsed += cost
-  }
-  const gap = userLines.length - pinned.length - newest.length
-  const keptUsers = gap > 0
-    ? [...pinned, zh ? `- …（中间 ${gap} 条未列出）` : `- … (${gap} messages in between not listed)`, ...newest]
-    : [...pinned, ...newest]
-  if (keptUsers.length > 0) {
-    const omitted = Math.max(0, gap)
-    const title = zh ? '## 用户消息（按时间顺序，已截断）' : '## User messages (oldest first, truncated)'
-    const note = omitted > 0 ? (zh ? `\n（共省略 ${omitted} 条）` : `\n(${omitted} messages omitted)`) : ''
-    parts.push(`${title}${note}\n${keptUsers.join('\n')}`)
-  }
+  const userSection = renderUserDigest(userMessages, userBudget, zh)
+  if (userSection) parts.push(userSection)
   if (pathsBlock && estimateTokens(parts.join('\n\n')) + estimateTokens(pathsBlock) <= budget) parts.push(pathsBlock)
   if (notesBlock && estimateTokens(parts.join('\n\n')) + estimateTokens(notesBlock) <= budget) parts.push(notesBlock)
   return capText(parts.join('\n\n'), budget)

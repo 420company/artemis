@@ -62,6 +62,12 @@ export type CompactionBoundaryInfo = {
   archivePath?: string;
   /** Messages folded into the summary by this compaction (cumulative). */
   summarizedMessages: number;
+  /**
+   * The current run's request when it is no longer in the live history:
+   * carried (shortened if huge) by the boundary, and forward by the next
+   * boundary while the same run goes on.
+   */
+  request?: { id: string; text: string };
   createdAt: string;
 };
 

@@ -69,9 +69,11 @@ export type ManageContextInput = {
   proactive?: boolean
   language?: ConversationLanguage
   /**
-   * Messages that must stay in the live history (the request that started
-   * the current run). They are never archived; an oversized one is shortened
-   * in the middle with a note instead.
+   * The request that started the current run. Its text is pinned, not its
+   * position: when it falls out of the recent tail it is archived like any
+   * other message and the boundary carries it verbatim (shortened in the
+   * middle, with a note, if huge), so the model never loses the task.
+   * Defaults to the latest real user message.
    */
   pinnedIds?: readonly string[]
 }
@@ -293,6 +295,7 @@ function renderBoundary(input: {
   archivePath?: string
   toolResultsDir?: string
   latestUserVerbatim?: string
+  requestVerbatim?: string
   restoration: RestorationSection[]
   createdAt: string
 }): string {
@@ -319,6 +322,13 @@ function renderBoundary(input: {
   lines.push(`<conversation_summary source="archive" kind="data">`)
   lines.push(escapeSummaryTags(input.summary.trim()))
   lines.push('</conversation_summary>')
+  if (input.requestVerbatim) {
+    lines.push('')
+    lines.push(zh
+      ? '## 当前任务的用户请求（原文，仍然有效）'
+      : "## The user's request for the current task (verbatim, still in effect)")
+    lines.push(input.requestVerbatim)
+  }
   if (input.latestUserVerbatim) {
     lines.push('')
     lines.push(zh ? '## 用户最新消息（原文）' : '## Latest user message (verbatim)')
@@ -396,6 +406,13 @@ function minimumSummaryGain(budget: ContextBudget): number {
 }
 
 export async function manageContext(input: ManageContextInput): Promise<ManageContextResult> {
+  const result = await manageContextInner(input)
+  // Tool-result files the history still points to are kept by pruning.
+  input.storage?.setReferencedToolResults?.(result.messages)
+  return result
+}
+
+async function manageContextInner(input: ManageContextInput): Promise<ManageContextResult> {
   const reason = input.reason ?? 'proactive'
   const { budget, state } = input
   const language = input.language ?? detectConversationLanguage(input.messages)
@@ -491,15 +508,21 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
   const body = hadBoundary ? messages.slice(1) : messages
   // A provider overflow means the estimate was too low: keep a smaller tail.
   const tailTokens = reason === 'overflow' ? Math.floor(tailBudget / 2) : tailBudget
+  // The tail is chosen by size alone; the run's request is pinned by text
+  // (see requestText below), so a long run stays compactable.
   let tailStart = selectTailStart(body, tailTokens, 1)
-  // The run's own request stays live, however large.
-  const firstPinned = body.findIndex((message) => pinned.has(message.id))
-  if (firstPinned >= 0 && firstPinned < tailStart) {
-    tailStart = firstPinned
-    while (tailStart > 0 && !isSafeCut(body, tailStart)) tailStart -= 1
+  // The request stays live when the tail from it on still fits well within
+  // the room (the common case: a large request at the start of a run).
+  // Otherwise (a long run) the boundary carries its text.
+  const requestAt = body.findIndex((message) => pinned.has(message.id))
+  if (requestAt >= 0 && requestAt < tailStart &&
+    estimateMessagesTokens(body.slice(requestAt)) <= Math.max(tailTokens, Math.floor(room * 0.6))) {
+    let cut = requestAt
+    while (cut > 0 && !isSafeCut(body, cut)) cut -= 1
+    tailStart = cut
   }
-  // Something has to be summarized; never everything when a safe cut exists.
-  if (tailStart <= 0) tailStart = Math.min(body.length, firstPinned === 0 ? 0 : 1)
+  // Something has to be summarized.
+  if (tailStart <= 0) tailStart = Math.min(body.length, 1)
   const middle = body.slice(0, tailStart)
   let tail = body.slice(tailStart)
 
@@ -507,8 +530,18 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
     // Nothing older than the tail: only tool clearing (and shrinking) is possible.
     if (sizeOf(messages) > budget.effective) {
       const roomEach = Math.max(300, Math.floor((Math.floor(budget.effective / calibration) - input.fixedTokens) / Math.max(1, messages.length)))
-      messages = messages.map((message) => estimateMessageTokens(message) > roomEach
-        ? shrinkMessage(message, roomEach, undefined, language)
+      const shrinking = messages.filter((message) => !isCompactionBoundary(message) && estimateMessageTokens(message) > roomEach)
+      // The originals go to the archive first, so `session show` still has
+      // the full text and the shortened copies can point to it.
+      let originalsArchived = false
+      if (input.storage && shrinking.length > 0) {
+        try {
+          await input.storage.archiveMessages(shrinking, { compaction: state.compactions })
+          originalsArchived = true
+        } catch { /* best effort */ }
+      }
+      messages = messages.map((message) => !isCompactionBoundary(message) && estimateMessageTokens(message) > roomEach
+        ? shrinkMessage(message, roomEach, originalsArchived ? input.storage?.transcriptPath : undefined, language)
         : message)
       changed = true
       invalidateUsageAnchor(state)
@@ -531,7 +564,18 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
 
   const userIdx = lastRealUserIndex(body)
   const latestUserText = userIdx >= 0 ? body[userIdx]!.content : undefined
-  let latestUserVerbatim = userIdx >= 0 && userIdx < tailStart
+  // The run's request: in the history (by id), or carried by the previous
+  // boundary while the same run goes on.
+  const requestCap = Math.max(500, Math.floor(room * 0.35))
+  const requestIdx = requestAt
+  const carried = previous?.compaction?.request
+  let request: { id: string; text: string } | undefined
+  if (requestIdx >= 0 && requestIdx < tailStart) {
+    request = { id: body[requestIdx]!.id, text: capText(body[requestIdx]!.content ?? '', requestCap) }
+  } else if (requestIdx < 0 && carried && (input.pinnedIds ? pinned.has(carried.id) : userIdx < 0)) {
+    request = { id: carried.id, text: capText(carried.text, requestCap) }
+  }
+  let latestUserVerbatim = userIdx >= 0 && userIdx < tailStart && body[userIdx]!.id !== request?.id
     ? capText(latestUserText ?? '', Math.max(500, Math.floor(tailBudget / 2)))
     : undefined
 
@@ -542,9 +586,12 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
   let summarizerInputTokens = 0
   let summarizerError: string | undefined
   // A crashed compaction of the same range already paid for its summary.
-  const middleIds = new Set(middle.map((message) => message.id))
+  // Only for exactly the same range: a crash followed by new messages
+  // gives a different range, which needs a new summary.
+  const archivedIds = new Set(archived.map((message) => message.id))
   const reusable = pending && pending.index === compactionIndex &&
-    pending.archivedIds.length > 0 && pending.archivedIds.every((id) => middleIds.has(id) || id === previous?.id)
+    pending.archivedIds.length === archivedIds.size &&
+    pending.archivedIds.every((id) => archivedIds.has(id))
   const middleTokens = estimateMessagesTokens(middle)
   const worthSummarizing = reason !== 'proactive' || middleTokens - summaryTokens >= minimumSummaryGain(budget)
   if (reusable) {
@@ -564,6 +611,7 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
         maxSummaryTokens: summaryTokens,
         maxInputTokens: budget.window * 2,
         allMessages: messages,
+        isTrustedSavedPath: input.storage ? (filePath) => input.storage!.isOwnToolResult(filePath) : undefined,
       })
       summary = result.summary
       summarizerCalls = result.calls
@@ -600,7 +648,8 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
   // Archive after summarizing (nothing is archived for a cancelled run), and
   // record the compaction so a crash before the session is saved neither
   // re-archives these messages nor pays for the summary again.
-  const alreadyArchived = new Set(reusable ? pending.archivedIds : [])
+  // Messages a crashed attempt of this compaction already wrote are not written twice.
+  const alreadyArchived = new Set(pending && pending.index === compactionIndex ? pending.archivedIds : [])
   if (input.storage) {
     try {
       await input.storage.archiveMessages(archived, { compaction: compactionIndex, skipIds: alreadyArchived })
@@ -644,6 +693,7 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
       archivePath,
       toolResultsDir: input.storage?.toolResultsDir,
       latestUserVerbatim,
+      requestVerbatim: request?.text,
       restoration,
       createdAt,
     }),
@@ -656,13 +706,15 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
       language,
       ...(archivePath ? { archivePath } : {}),
       summarizedMessages: summarizedTotal,
+      ...(request ? { request } : {}),
       createdAt,
     },
   })
 
   // ── Guaranteed fit ────────────────────────────────────────────────────────
   // Aim at postTarget so the next request does not compact again at once;
-  // drop optional parts first, then trim the tail (never the pinned request).
+  // drop optional parts first, then trim the tail (a dropped request moves
+  // into the boundary).
   const fitLimit = Math.max(1_000, Math.min(postTarget, budget.effective - 1_000))
   let boundary = makeBoundary()
   let result = [boundary, ...tail]
@@ -681,10 +733,10 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
       : message)
     result = [boundary, ...tail]
     const dropped: SessionMessage[] = []
-    while (sizeOf(result) > fitLimit && tail.length > 1 && !pinned.has(tail[0]!.id)) {
+    while (sizeOf(result) > fitLimit && tail.length > 1) {
       let cut = 1
       while (cut < tail.length && !isSafeCut(tail, cut)) cut += 1
-      if (cut >= tail.length || tail.slice(0, cut).some((message) => pinned.has(message.id))) break
+      if (cut >= tail.length) break
       dropped.push(...tail.slice(0, cut))
       tail = tail.slice(cut)
       result = [boundary, ...tail]
@@ -693,17 +745,19 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
       if (input.storage) {
         try { await input.storage.archiveMessages(dropped, { compaction: compactionIndex }) } catch { /* best effort */ }
       }
+      const droppedRequest = dropped.find((message) => pinned.has(message.id))
+      if (droppedRequest) request = { id: droppedRequest.id, text: capText(droppedRequest.content ?? '', requestCap) }
       const droppedUserIdx = lastRealUserIndex(dropped)
-      if (droppedUserIdx >= 0 && lastRealUserIndex(tail) < 0) {
+      if (droppedUserIdx >= 0 && lastRealUserIndex(tail) < 0 && dropped[droppedUserIdx]!.id !== request?.id) {
         latestUserVerbatim = capText(dropped[droppedUserIdx]!.content ?? '', Math.max(500, Math.floor(tailBudget / 2)))
-        boundary = makeBoundary()
-        result = [boundary, ...tail]
       }
+      boundary = makeBoundary()
+      result = [boundary, ...tail]
     }
   }
   if (sizeOf(result) > fitLimit) {
-    // Last resort: shorten oversized messages in the middle (the pinned
-    // request included, with a note), then the summary.
+    // Last resort: shorten oversized messages in the tail (with a note),
+    // then the summary.
     const roomTotal = Math.max(500, Math.floor(fitLimit / calibration) - input.fixedTokens - estimateMessageTokens(boundary))
     const roomEach = Math.max(300, Math.floor(roomTotal / Math.max(1, tail.length)))
     const shrinking = tail.filter((message) => estimateMessageTokens(message) > roomEach)
@@ -721,6 +775,7 @@ export async function manageContext(input: ManageContextInput): Promise<ManageCo
       summary = capText(summary, summaryRoom)
       restoration = []
       latestUserVerbatim = latestUserVerbatim ? capText(latestUserVerbatim, 600) : undefined
+      if (request) request = { id: request.id, text: capText(request.text, 600) }
       boundary = makeBoundary()
       result = [boundary, ...tail]
     }

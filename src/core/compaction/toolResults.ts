@@ -235,19 +235,32 @@ export function buildPreview(text: string, tokens: number): { preview: string; h
   return { preview: parts.join('\n'), headLines: head.length, tailLines: tail.length }
 }
 
+/** The path a spill header (or envelope) claims, without trusting it. */
+function claimedSavedPath(content: string, parsed: ParsedToolContent): string | undefined {
+  if (parsed.envelope) {
+    const fromEnvelope = parsed.envelope.outputSavedTo
+    return typeof fromEnvelope === 'string' && fromEnvelope && parsed.output.startsWith(SPILL_MARKER)
+      ? fromEnvelope
+      : undefined
+  }
+  if (!content.startsWith(SPILL_MARKER)) return undefined
+  const header = content.split('\n').slice(0, 3).join('\n')
+  const match = header.match(/Full original output saved at: ([^\n"\\]+)/)
+  return match?.[1]?.trim()
+}
+
 /**
- * True only for results Artemis itself spilled: the content starts with the
- * spill header, or is an Artemis envelope whose output starts with it and
- * that records where the output went. Output that merely mentions the marker
- * (a search over old transcripts) is not mistaken for a spilled result.
+ * True only for results Artemis itself spilled: the content has the spill
+ * shape AND the file it names is one this session's storage wrote (its
+ * index records it and it really lives in the tool-results directory).
+ * Tool output that imitates the header (a web page, a search over old
+ * transcripts) is not mistaken for a spilled result, and without storage
+ * nothing is.
  */
-export function isSpilledToolContent(content: string): boolean {
-  if (content.startsWith(SPILL_MARKER)) return true
-  if (!content.trimStart().startsWith('{')) return false
-  const parsed = parseToolContent(content)
-  return Boolean(parsed.envelope) &&
-    typeof parsed.envelope?.outputSavedTo === 'string' &&
-    parsed.output.startsWith(SPILL_MARKER)
+export function isSpilledToolContent(content: string, storage?: Pick<ContextStorage, 'isOwnToolResult'>): boolean {
+  if (!storage) return false
+  const claimed = claimedSavedPath(content, parseToolContent(content))
+  return Boolean(claimed && storage.isOwnToolResult(claimed))
 }
 
 export type SpillOptions = {
@@ -275,7 +288,7 @@ export function spillToolResultIfLarge(content: string, options: SpillOptions): 
   const limit = FILE_READ_TOOLS.has(name)
     ? Math.max(options.inlineTokens, options.inlineReadTokens ?? options.inlineTokens)
     : options.inlineTokens
-  if (estimateTokens(content) <= limit || isSpilledToolContent(content)) return { content }
+  if (estimateTokens(content) <= limit || isSpilledToolContent(content, options.storage)) return { content }
 
   const output = parsed.output
   const savedTo = options.storage.writeToolResult(name, output)
@@ -302,14 +315,11 @@ export function spillToolResultIfLarge(content: string, options: SpillOptions): 
   return { content: body, savedTo }
 }
 
-/** Where Artemis saved the full output of a result it spilled, if it did. */
-function extractSavedPath(content: string, parsed: ParsedToolContent): string | undefined {
-  if (!isSpilledToolContent(content)) return undefined
-  const fromEnvelope = parsed.envelope?.outputSavedTo
-  if (typeof fromEnvelope === 'string' && fromEnvelope) return fromEnvelope
-  const header = content.split('\n').slice(0, 3).join('\n')
-  const match = header.match(/Full original output saved at: ([^\n"\\]+)/)
-  return match?.[1]?.trim()
+/** Where Artemis saved the full output of a result it spilled, if it did (verified by storage). */
+function extractSavedPath(content: string, parsed: ParsedToolContent, storage?: ContextStorage): string | undefined {
+  if (!storage) return undefined
+  const claimed = claimedSavedPath(content, parsed)
+  return claimed && storage.isOwnToolResult(claimed) ? claimed : undefined
 }
 
 export function isClearedToolResult(message: SessionMessage): boolean {
@@ -336,7 +346,7 @@ export function clearToolResult(
   const content = message.content ?? ''
   const parsed = parseToolContent(content)
   const { name, args } = describeToolResult(message, options.callIndex)
-  let savedTo = extractSavedPath(content, parsed)
+  let savedTo = extractSavedPath(content, parsed, options.storage)
   if (!savedTo && options.storage) {
     try {
       savedTo = options.storage.writeToolResult(name, parsed.envelope ? content : parsed.output)
