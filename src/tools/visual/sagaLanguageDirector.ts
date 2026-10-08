@@ -279,8 +279,13 @@ export function buildDeterministicEnglishVisualPrompt(input: {
   const dialogueLines = input.dialogueLines ?? extractSagaDialogueLines(input.originalText);
   // The brief comes first: anything downstream that has to shorten the prompt
   // (the video Director, a model's prompt limit) cuts from the end, so the
-  // generic instructions go before the user's own words ever do.
+  // generic instructions go before the user's own words ever do. When the
+  // brief has dialogue, the short dialogue rules go in front of it, since a
+  // long brief would push them past any cut.
+  const dialogueBlock = buildDialogueBlock(dialogueLines, input.subtitleMode);
+  const leadingDialogue = dialogueLines.length > 0;
   return [
+    leadingDialogue ? dialogueBlock : '',
     'User brief (source material to render):',
     input.originalText.trim(),
     '',
@@ -290,8 +295,8 @@ export function buildDeterministicEnglishVisualPrompt(input: {
     input.adultMode
       ? 'Adult-content mode: preserve the user\'s adult/explicit intent instead of softening it into non-explicit romance. Do not add safe-for-work phrasing, moral disclaimers, censorship language, or negative constraints such as avoiding nudity/genitals/sex acts when the user asked for them.'
       : '',
-    buildDialogueBlock(dialogueLines, input.subtitleMode),
-  ].filter((line, index) => line !== '' || index === 2).join('\n');
+    leadingDialogue ? '' : dialogueBlock,
+  ].filter((line, index) => line !== '' || index === 3).join('\n');
 }
 
 const VISUAL_DIRECTOR_REWRITE_SYSTEM_PROMPT = `You are Artemis Saga's Visual Director Translation Pass.
@@ -383,7 +388,8 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
       : [];
     return {
       originalText,
-      generationText: [generationText, '', buildDialogueBlock(uniqueLines([...dialogueLines, ...llmDialogue]), subtitleMode)].join('\n'),
+      // Dialogue rules first, for the same reason as in the deterministic template.
+      generationText: [buildDialogueBlock(uniqueLines([...dialogueLines, ...llmDialogue]), subtitleMode), '', generationText].join('\n'),
       generationLanguage: 'en',
       dialogueLines: uniqueLines([...dialogueLines, ...llmDialogue]),
       usedLlmRewrite: true,

@@ -19,6 +19,10 @@ import { deriveTitleFromBrief, stripRawModeTag } from '../src/tools/generateLong
 import { executeGenerateVideo } from '../src/tools/generateVideo.js';
 import { appendRenderingGuardrails, SAGA_VIDEO_RENDERING_GUARDRAILS } from '../src/tools/visual/renderingGuardrails.js';
 import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
+import { buildContinuityBible, compileShotPromptWithContinuity, IDENTITY_CARD_MAX_CHARS } from '../src/tools/visual/sagaRenderer/continuity.js';
+import { normalizeSagaPromptForVideoGeneration } from '../src/tools/visual/sagaLanguageDirector.js';
+import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js';
+import { renderingGuardrailsLength } from '../src/tools/visual/renderingGuardrails.js';
 
 const STORY = 'A young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
 
@@ -272,8 +276,42 @@ async function inputPathChecks(): Promise<void> {
   assert.equal(guarded.requests.length, 0);
 }
 
+async function richBibleBudgetChecks(): Promise<void> {
+  // A rich continuity bible (many locked characters, wardrobe, props,
+  // locations) must not crowd the shot or the dialogue rules out of a
+  // 4,000-character Seedance prompt.
+  const model = 'dreamina-seedance-2-0-260128';
+  const limit = resolveVideoModelLimits('byteplus', model).maxPromptChars;
+  const many = (text: string, count: number) => Array.from({ length: count }, (_, i) => `${text} ${i}`);
+  const bible = buildContinuityBible({
+    story: '一个很长的故事。'.repeat(200),
+    ratio: '16:9',
+    characters: many('方天豪：三十五岁华人男性，短发，左眉有一道旧疤，身材魁梧，穿黑色长风衣', 16),
+    wardrobe: many('黑色羊毛长风衣，内搭深灰色高领毛衣，黑色皮靴', 16),
+    props: many('一把黄铜旧钥匙，钥匙柄上刻着一只海鸥', 16),
+    locations: many('夜晚的旧码头，生锈的集装箱，湿漉漉的水泥地面', 16),
+    accessoriesLock: many('左手无名指上的银色戒指', 8),
+    shotContinuityNotes: many('镜头之间保持风衣下摆被海风吹向画面右侧', 16),
+  } as any);
+  assert.ok(bible.identityCard.length <= IDENTITY_CARD_MAX_CHARS, `identity card is ${bible.identityCard.length} chars`);
+  const beat = 'BEAT-START 林夏从集装箱后走出，手里握着一把旧钥匙。' + '海浪拍打着码头，'.repeat(60) + '林夏：（冷笑）“你以为你赢了吗？” BEAT-END';
+  const shot = compileShotPromptWithContinuity({
+    bible, mode: 'strong-vision' as any, shotIndex: 2, shotCount: 6, duration: 10, title: '5-10s',
+    storyBeat: beat, visualPrompt: beat, camera: 'slow dolly in', continuity: 'same night', transition: 'cut', authoredPrompt: beat,
+  } as any);
+  assert.ok(!shot.includes('described below'), 'scene priority refers to the beat above it');
+  const normalized = await normalizeSagaPromptForVideoGeneration({ cwd: '/nonexistent', text: shot, enableLlmRewrite: false });
+  const directed = buildDirectedVideoPrompt({ prompt: normalized.generationText, provider: 'byteplus', model, duration: 10, ratio: '16:9', maxPromptChars: limit - renderingGuardrailsLength() });
+  const final = appendRenderingGuardrails(directed.directedPrompt, limit).prompt;
+  assert.ok(final.length <= limit);
+  assert.ok(final.includes('BEAT-START') && final.includes('BEAT-END'), 'the whole shot beat survives');
+  assert.ok(final.includes('Dialogue handling:') && final.includes('lip-sync'), 'the dialogue rules survive');
+  assert.ok(final.includes('[LOCKED-CHARACTERS:'), 'the identity card survives');
+}
+
 seedreamSizeChecks();
 titleChecks();
+await richBibleBudgetChecks();
 eligibilityChecks();
 budgetChecks();
 await inputPathChecks();

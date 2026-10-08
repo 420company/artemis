@@ -174,7 +174,45 @@ export function detectsEnvironmentalAudioOnly(story: string | undefined): boolea
 }
 
 function buildAudioLockBlock(): string {
-  return '[AUDIO-LOCK — strict: emit environmental / diegetic sounds only (footsteps, wind, traffic, water, ambient room tone, voice if dialogue is present). Do NOT synthesize music, songs, instrumental backing tracks, scores, melodies, humming, or vocal performance. The user is overlaying music in post-production; AI-generated music here would conflict with the planned soundtrack.]';
+  return '[AUDIO-LOCK — environmental / diegetic sounds only (footsteps, wind, water, room tone, dialogue). Do NOT synthesize music, songs, scores or humming: the soundtrack is added in post-production.]';
+}
+
+/** Longest identity card a segment prompt carries. */
+export const IDENTITY_CARD_MAX_CHARS = 1200;
+
+type IdentityCardEntry = { text: string; dropRank?: number };
+
+function clipText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+/** "[LABEL: a | b | …]" within maxChars, dropping items from the end and saying how many. */
+function lockLine(label: string, items: string[], maxChars: number, separator = ' | '): string {
+  const kept: string[] = [];
+  for (const item of items) {
+    const next = [...kept, item];
+    const more = items.length - next.length;
+    const candidate = `[${label}: ${next.join(separator)}${more > 0 ? ` (+${more} more)` : ''}]`;
+    if (candidate.length > maxChars && kept.length > 0) break;
+    kept.push(item);
+  }
+  const more = items.length - kept.length;
+  const line = `[${label}: ${kept.join(separator)}${more > 0 ? ` (+${more} more)` : ''}]`;
+  return line.length <= maxChars ? line : `${line.slice(0, maxChars - 2).trimEnd()}…]`;
+}
+
+function fitIdentityCard(entries: IdentityCardEntry[], maxChars: number): string {
+  let active = [...entries];
+  const render = () => active.map((entry) => entry.text).join('\n');
+  const droppable = entries
+    .filter((entry): entry is IdentityCardEntry & { dropRank: number } => entry.dropRank !== undefined)
+    .sort((a, b) => a.dropRank - b.dropRank);
+  for (const entry of droppable) {
+    if (render().length <= maxChars) break;
+    active = active.filter((candidate) => candidate !== entry);
+  }
+  const card = render();
+  return card.length <= maxChars ? card : `${card.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
@@ -222,43 +260,41 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   );
   const mood = pickFirstSentence(input.mood, 'grounded cinematic, emotionally consistent across every shot');
 
-  const identityLines = [
-    '[SAGA-CONTINUITY-POLICY: character/person identity is globally locked across the long video; scene/location continuity is selective and follows the user request/story logic]',
-    characters.length > 0
-      ? `[LOCKED-CHARACTERS: ${characters.join(' | ')}]`
-      : '[CHARACTERS: same exact recurring identity as the previous shot — same face, hair, body, age, ethnicity/species, silhouette, and distinguishing features]',
+  // The identity card leads every segment prompt, so it is kept within
+  // IDENTITY_CARD_MAX_CHARS: each lock list has its own cap, and optional
+  // lines (palette, mood, camera, lighting, shared notes, props, locations)
+  // are dropped, lowest priority first, when the card is still too long.
+  const sharedNotes = uniqueStrings(input.shotContinuityNotes ?? []);
+  const identityEntries: IdentityCardEntry[] = [
+    { text: '[SAGA-CONTINUITY-POLICY: character/person identity is globally locked across the long video; scene/location continuity is selective and follows the user request/story logic]' },
+    sharedNotes.length > 0 ? { text: lockLine('SHARED-CONTINUITY-NOTES', sharedNotes.slice(0, 6), 180, ' || '), dropRank: 5 } : undefined,
+    {
+      text: characters.length > 0
+        ? lockLine('LOCKED-CHARACTERS', characters, 300)
+        : '[CHARACTERS: same exact recurring identity as the previous shot — same face, hair, body, age, ethnicity/species, silhouette, and distinguishing features]',
+    },
     // Dedicated permanent-accessory lock — emitted BEFORE wardrobe/props so
     // it gets visual priority. Items here are part of the protagonist's
     // identity (eye mask, sunglasses, signature jewelry) and must persist
     // across every shot regardless of costume changes.
     accessoriesLock.length > 0
-      ? `[ACCESSORY-LOCK — IDENTITY-DEFINING — these items are part of the protagonist's identity and MUST appear unchanged in every single shot, same position, same color, same style, NEVER removed, NEVER lifted, NEVER swapped, NEVER repositioned: ${accessoriesLock.join(' | ')}]`
-      : '',
-    wardrobe.length > 0
-      ? `[LOCKED-WARDROBE: ${wardrobe.join(' | ')}]`
-      : '[WARDROBE: same clothing/material cues for recurring characters unless the story explicitly changes costume]',
-    props.length > 0
-      ? `[LOCKED-PROPS: ${props.join(' | ')}]`
-      : '[PROPS: no global prop lock; preserve only props that the story treats as recurring]',
-    locations.length > 0
-      ? `[LOCKED-LOCATIONS: ${locations.join(' | ')}]`
-      : '[LOCATIONS: no global scene lock; maintain scene continuity only when a shot is meant to continue the same place]',
-    palette.length > 0
-      ? `[PALETTE: ${palette.join(' | ')}]`
-      : '[PALETTE: cohesive cinematic color design, but not identical colors in every shot unless requested]',
-    `[LIGHTING: ${lighting}]`,
-    `[CAMERA: ${cameraLanguage}]`,
-    `[MOOD: ${mood}]`,
-    buildNegativeBlock(input.subtitleMode),
-    detectsEnvironmentalAudioOnly(input.story) ? buildAudioLockBlock() : '',
-  ];
-
-  const sharedNotes = uniqueStrings(input.shotContinuityNotes ?? []);
-  if (sharedNotes.length > 0) {
-    identityLines.splice(1, 0, `[SHARED-CONTINUITY-NOTES: ${sharedNotes.slice(0, 6).join(' || ')}]`);
-  }
-
-  const identityCard = identityLines.filter(Boolean).join('\n');
+      ? { text: lockLine('ACCESSORY-LOCK — identity-defining, same item, position and color in every shot, never removed, lifted or swapped', accessoriesLock, 300) }
+      : undefined,
+    {
+      text: wardrobe.length > 0
+        ? lockLine('LOCKED-WARDROBE', wardrobe, 160)
+        : '[WARDROBE: same clothing/material cues for recurring characters unless the story explicitly changes costume]',
+    },
+    { text: props.length > 0 ? lockLine('LOCKED-PROPS', props, 140) : '[PROPS: no global prop lock; preserve only props that the story treats as recurring]', dropRank: 6 },
+    { text: locations.length > 0 ? lockLine('LOCKED-LOCATIONS', locations, 140) : '[LOCATIONS: no global scene lock; maintain scene continuity only when a shot is meant to continue the same place]', dropRank: 7 },
+    { text: palette.length > 0 ? lockLine('PALETTE', palette, 100) : '[PALETTE: cohesive cinematic color design, but not identical colors in every shot unless requested]', dropRank: 1 },
+    { text: `[LIGHTING: ${clipText(lighting, 120)}]`, dropRank: 4 },
+    { text: `[CAMERA: ${clipText(cameraLanguage, 120)}]`, dropRank: 3 },
+    { text: `[MOOD: ${clipText(mood, 100)}]`, dropRank: 2 },
+    { text: buildNegativeBlock(input.subtitleMode) },
+    detectsEnvironmentalAudioOnly(input.story) ? { text: buildAudioLockBlock() } : undefined,
+  ].filter((entry): entry is IdentityCardEntry => Boolean(entry));
+  const identityCard = fitIdentityCard(identityEntries, IDENTITY_CARD_MAX_CHARS);
 
   const bible = [
     'Saga long-form video continuity bible.',
@@ -414,7 +450,7 @@ export function compileShotPromptWithContinuity(options: {
   // instruction as the dominant subject for the entire clip.
   const scenePriority = [
     '[SCENE-PRIORITY]',
-    `The storyBeat described below dominates ${options.duration} seconds of the clip — full duration.`,
+    `The storyBeat given above dominates ${options.duration} seconds of the clip — full duration.`,
     'The frame-out / transition instructions are LOW-PRIORITY hints describing only the final ~0.5 seconds of the clip.',
     'Do NOT make the closing-frame description the subject of the whole clip. The subject is the storyBeat.',
     '[/SCENE-PRIORITY]',
@@ -469,10 +505,10 @@ export function compileShotPromptWithContinuity(options: {
     '[/EXPLICIT USER BRIEF LOCK]',
   ].filter(Boolean).join('\n');
 
-  // The shot's own content goes right after the identity card and opening
-  // framing, before the continuity bible (which repeats the whole source
-  // story). A prompt that has to be shortened downstream is cut from the
-  // end, so the part that differs from shot to shot must come first.
+  // The shot's own content opens the prompt, ahead of the identity card and
+  // the continuity bible (which repeats the whole source story). A prompt
+  // that has to be shortened downstream is cut from the end, so the part
+  // that differs from shot to shot must come first.
   const shotHeader = `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`;
   const shotContent: string[] = authored
     ? [authored]
@@ -495,10 +531,10 @@ export function compileShotPromptWithContinuity(options: {
     if (options.continuity) cleanMiddle.push(`Continuity requirements: ${options.continuity}`);
     if (options.camera) cleanMiddle.push(`Camera and motion: ${options.camera}`);
     return [
-      options.bible.identityCard,
-      options.openingFraming ? `\n${options.openingFraming}` : '',
       shotHeader,
       ...shotContent,
+      options.openingFraming ? `\n${options.openingFraming}` : '',
+      options.bible.identityCard,
       options.bible.bible,
       scenePriority,
       ...cleanMiddle,
@@ -509,10 +545,10 @@ export function compileShotPromptWithContinuity(options: {
   const styleLock = styleLockBlock(options.bible);
 
   const head = [
-    options.bible.identityCard,
-    options.openingFraming ? `\n${options.openingFraming}` : '',
     shotHeader,
     ...shotContent,
+    options.openingFraming ? `\n${options.openingFraming}` : '',
+    options.bible.identityCard,
     options.bible.bible,
     styleLock,
     scenePriority,
