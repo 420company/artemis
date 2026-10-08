@@ -4,7 +4,70 @@ import {
   detectTextLanguage,
   extractSagaDialogueLines,
   normalizeSagaPromptForVideoGeneration,
+  parseSpokenLine,
+  relocateDialogueCues,
 } from '../src/tools/visual/sagaLanguageDirector.js';
+
+function spokenOf(text: string, knownSpeakers?: string[]): string[] {
+  return extractSagaDialogueLines(text, { knownSpeakers }).map((line) => line.text);
+}
+
+async function spokenLineCleanup(): Promise<void> {
+  // Speaker names and stage directions inside the quotes are not spoken.
+  assert.deepEqual(spokenOf('他大喊:"方天豪：（豪迈大笑）今天谁也别想走！"'), ['今天谁也别想走！']);
+  assert.deepEqual(spokenOf('对白：“方天豪：（豪迈大笑）今天谁也别想走！”'), ['今天谁也别想走！']);
+  assert.deepEqual(spokenOf('**对白（低沉）**：“林夏:(轻声) 我等你很久了。”'), ['我等你很久了。']);
+  // Multi-word Latin names.
+  assert.deepEqual(spokenOf('dialogue: "Cold Moon: (whispering) We leave at dawn!"'), ['We leave at dawn!']);
+  // Plain lines are unchanged.
+  assert.deepEqual(spokenOf('旁白：“很多年以后，他才明白。”'), ['很多年以后，他才明白。']);
+  // Over-strip cases: none of these prefixes or parentheticals is a speaker or a direction.
+  assert.deepEqual(spokenOf('对白：“注意：前方有危险！”'), ['注意：前方有危险！']);
+  assert.deepEqual(spokenOf('对白：“10:30 我们出发！”'), ['10:30 我们出发！']);
+  assert.deepEqual(spokenOf('She says: "Listen: the bridge is out!"'), ['Listen: the bridge is out!']);
+  assert.deepEqual(spokenOf('对白：“我（们）一起走吧。”'), ['我（们）一起走吧。']);
+  assert.deepEqual(spokenOf('dialogue: "I will be there (I promise)!"'), ['I will be there (I promise)!']);
+  // A known name is removed even without a direction; an unknown one is kept.
+  assert.deepEqual(spokenOf('对白：“方天豪：走吧！”', ['方天豪']), ['走吧！']);
+  assert.deepEqual(spokenOf('对白：“方天豪：走吧！”'), ['方天豪：走吧！']);
+  // A name seen once as "Name: (direction)" is known for the rest of the brief.
+  assert.deepEqual(
+    spokenOf('对白：“方天豪：（冷笑）你来了。” 对白：“方天豪：走吧！”'),
+    ['你来了。', '走吧！'],
+  );
+  // A trailing direction after the sentence ends, and a direction between the colon and the quote.
+  assert.deepEqual(spokenOf('对白：“今天谁也别想走！（拍桌）”'), ['今天谁也别想走！']);
+  assert.deepEqual(spokenOf('对白：（低声）“你终于来了。”'), ['你终于来了。']);
+  // A quote that is only a direction is left alone rather than emptied.
+  assert.equal(parseSpokenLine('（沉默）').spoken, '（沉默）');
+  assert.deepEqual(parseSpokenLine('方天豪：（豪迈大笑）今天谁也别想走！'), {
+    spoken: '今天谁也别想走！',
+    speaker: '方天豪',
+    cues: ['豪迈大笑'],
+  });
+
+  // The brief itself keeps the speaker and the direction, outside the quotes.
+  assert.equal(
+    relocateDialogueCues('[0-5秒] 码头。对白：“方天豪：（豪迈大笑）今天谁也别想走！”'),
+    '[0-5秒] 码头。对白：（方天豪，豪迈大笑）“今天谁也别想走！”',
+  );
+  assert.equal(
+    relocateDialogueCues('dialogue: "Cold Moon: (whispering) We leave at dawn!"'),
+    'dialogue: (Cold Moon, whispering) "We leave at dawn!"',
+  );
+  const untouched = '对白：“注意：前方有危险！” 对白：“10:30 我们出发！” 参考 "Parts Unknown"';
+  assert.equal(relocateDialogueCues(untouched), untouched);
+
+  const normalized = await normalizeSagaPromptForVideoGeneration({
+    cwd: process.cwd(),
+    text: '[0-5秒] 码头夜景。对白：“方天豪：（豪迈大笑）今天谁也别想走！”',
+    enableLlmRewrite: false,
+  });
+  assert.deepEqual(normalized.dialogueLines.map((line) => line.text), ['今天谁也别想走！']);
+  assert.match(normalized.originalText, /（方天豪，豪迈大笑）“今天谁也别想走！”/);
+  assert.doesNotMatch(normalized.generationText, /“方天豪：/);
+  assert.match(normalized.originalText, /^\[0-5秒\]/, 'timecodes must survive the relocation');
+}
 
 async function main(): Promise<void> {
   assert.equal(detectTextLanguage('你终于来了'), 'Mandarin Chinese');
@@ -78,6 +141,8 @@ async function main(): Promise<void> {
   const ellipsisLines = extractSagaDialogueLines(ellipsisSnippet);
   assert.equal(ellipsisLines.length, 1);
   assert.equal(ellipsisLines[0].text, '走了好远好远...');
+
+  await spokenLineCleanup();
 
   console.log('saga language director smoke ok');
 }

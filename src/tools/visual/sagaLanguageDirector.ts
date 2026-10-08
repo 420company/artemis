@@ -11,6 +11,7 @@ export type SagaDialogueLine = {
 };
 
 export type SagaGenerationLanguageResult = {
+  /** The brief, with speaker names and stage directions moved outside quoted dialogue. */
   originalText: string;
   generationText: string;
   generationLanguage: 'en';
@@ -56,14 +57,117 @@ function classifyDialogueUse(marker: string | undefined): SagaDialogueUse {
   return 'quoted_dialogue';
 }
 
-export function extractSagaDialogueLines(text: string): SagaDialogueLine[] {
+// ─── Spoken-line cleanup ──────────────────────────────────────────────────
+// Briefs often write a quoted line with its speaker and a stage direction
+// inside the quotes: “方天豪：（豪迈大笑）今天谁也别想走！”. Video models
+// speak everything inside the quotes, so the name and the direction were read
+// aloud. The rules below separate them, and they are deliberately narrow so
+// real speech is never cut:
+//   - a speaker prefix is a name (Han characters, or one to four capitalized
+//     Latin words) followed by a colon, with no digits ("10:30" stays);
+//   - it is only removed when the name is known (passed in, or seen elsewhere
+//     in the brief as "Name: (direction)") or a parenthetical follows it, so
+//     "注意：前方有危险！" and "Listen: the bridge is out!" stay intact;
+//   - only a leading parenthetical, or a trailing one after sentence-final
+//     punctuation, counts as a stage direction; "我（们）一起走吧。" stays.
+
+const SPEAKER_NAME_SOURCE = "[\\p{Script=Han}·]{1,8}|[A-Z][A-Za-z'’.-]*(?:[ \\t]+[A-Z][A-Za-z'’.-]*){0,3}";
+const SPEAKER_PREFIX_RE = new RegExp(`^[*_]*(?<name>${SPEAKER_NAME_SOURCE})[*_]*[ \\t]*[:：][ \\t]*`, 'u');
+const LEADING_CUE_RE = /^[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*/u;
+const TRAILING_CUE_RE = /(?<=[。！？!?…~～.])[ \t]*[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*$/u;
+// Double-quoted spans only: single quotes collide with English apostrophes.
+const QUOTED_SPAN_RE = /(?<open>[“"])(?<inner>[^“”"\n]{1,240})(?<close>[”"])/gu;
+
+export type ParsedSpokenLine = {
+  /** Only the words to be spoken. */
+  spoken: string;
+  speaker?: string;
+  /** Stage directions removed from the line, e.g. "豪迈大笑". */
+  cues: string[];
+};
+
+/** Splits a quoted line into the words spoken, its speaker and its stage directions. */
+export function parseSpokenLine(raw: string, knownSpeakers: ReadonlySet<string> = new Set()): ParsedSpokenLine {
+  const original = raw.replace(/\s+/g, ' ').trim();
+  let rest = original;
+  let speaker: string | undefined;
+  const cues: string[] = [];
+  const prefix = SPEAKER_PREFIX_RE.exec(rest);
+  if (prefix?.groups?.name) {
+    const name = prefix.groups.name.trim();
+    const afterName = rest.slice(prefix[0].length);
+    if (knownSpeakers.has(name) || LEADING_CUE_RE.test(afterName)) {
+      speaker = name;
+      rest = afterName;
+    }
+  }
+  for (let leading = LEADING_CUE_RE.exec(rest); leading?.groups?.cue; leading = LEADING_CUE_RE.exec(rest)) {
+    cues.push(leading.groups.cue.trim());
+    rest = rest.slice(leading[0].length);
+  }
+  const trailing = TRAILING_CUE_RE.exec(rest);
+  if (trailing?.groups?.cue) {
+    cues.push(trailing.groups.cue.trim());
+    rest = rest.slice(0, trailing.index);
+  }
+  const spoken = rest.trim();
+  // Never reduce a line to nothing: a quote that is only a direction is left alone.
+  if (!spoken) return { spoken: original, cues: [] };
+  return { spoken, ...(speaker ? { speaker } : {}), cues };
+}
+
+/** Names written as "Name: (direction)" inside any quoted line of the brief. */
+function speakersWithDirections(text: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of text.matchAll(QUOTED_SPAN_RE)) {
+    const inner = match.groups?.inner ?? '';
+    const prefix = SPEAKER_PREFIX_RE.exec(inner.trim());
+    if (prefix?.groups?.name && LEADING_CUE_RE.test(inner.trim().slice(prefix[0].length))) {
+      names.add(prefix.groups.name.trim());
+    }
+  }
+  return names;
+}
+
+function knownSpeakerSet(text: string, extra: readonly string[] | undefined): Set<string> {
+  const names = speakersWithDirections(text);
+  for (const name of extra ?? []) {
+    const trimmed = name.trim();
+    if (trimmed) names.add(trimmed);
+  }
+  return names;
+}
+
+/**
+ * Moves speaker names and stage directions out of quoted dialogue so only the
+ * spoken words stay inside the quotes: “方天豪：（豪迈大笑）今天谁也别想走！”
+ * becomes （方天豪，豪迈大笑）“今天谁也别想走！”. Quotes without such cues are
+ * left byte-for-byte unchanged.
+ */
+export function relocateDialogueCues(text: string, options: { knownSpeakers?: readonly string[] } = {}): string {
+  const known = knownSpeakerSet(text, options.knownSpeakers);
+  return text.replace(QUOTED_SPAN_RE, (whole, ...args) => {
+    const groups = args[args.length - 1] as { open: string; inner: string; close: string };
+    const parsed = parseSpokenLine(groups.inner, known);
+    if (!parsed.speaker && parsed.cues.length === 0) return whole;
+    const notes = [parsed.speaker, ...parsed.cues].filter((part): part is string => Boolean(part));
+    const cjk = /\p{Script=Han}/u.test(groups.inner);
+    const note = cjk ? `（${notes.join('，')}）` : `(${notes.join(', ')}) `;
+    return `${note}${groups.open}${parsed.spoken}${groups.close}`;
+  });
+}
+
+export function extractSagaDialogueLines(text: string, options: { knownSpeakers?: readonly string[] } = {}): SagaDialogueLine[] {
   const lines: SagaDialogueLine[] = [];
+  const known = knownSpeakerSet(text, options.knownSpeakers);
+  const spokenText = (raw: string | undefined): string => (raw ? parseSpokenLine(raw, known).spoken : '');
   // Marker pass: explicit "对白/台词/旁白/dialogue/..." preceding quoted text.
   // The optional [*_]* before/after the marker accommodates markdown emphasis
-  // like **对白（…）**: which is common in detailed briefs.
-  const markerRe = /(?:^|[\n\r。；;.!?\s])[*_]*(?<marker>对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*[“"'‘](?<line>[^”"'’]{1,240})[”"'’]/giu;
+  // like **对白（…）**: which is common in detailed briefs. A direction may also
+  // sit between the colon and the quote: 对白：（低声）“…”.
+  const markerRe = /(?:^|[\n\r。；;.!?\s])[*_]*(?<marker>对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*(?:[（(][^）)\n]{0,60}[）)]\s*)?[“"'‘](?<line>[^”"'’]{1,240})[”"'’]/giu;
   for (const match of text.matchAll(markerRe)) {
-    const line = match.groups?.line?.trim();
+    const line = spokenText(match.groups?.line);
     if (!line) continue;
     const marker = match.groups?.marker?.trim();
     lines.push({ text: line, language: detectTextLanguage(line), use: classifyDialogueUse(marker), marker });
@@ -80,7 +184,7 @@ export function extractSagaDialogueLines(text: string): SagaDialogueLine[] {
   const quoteRe = /[“"'‘](?<line>[^”"'’]{2,240})[”"'’]/gu;
   const sentenceEndRe = /(?:[。！？!?…]|\.{3,})\s*$/u;
   for (const match of text.matchAll(quoteRe)) {
-    const line = match.groups?.line?.trim();
+    const line = spokenText(match.groups?.line);
     if (!line) continue;
     if (!sentenceEndRe.test(line)) continue;
     const language = detectTextLanguage(line);
@@ -184,9 +288,14 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
   enableLlmRewrite?: boolean;
   subtitleMode?: SagaSubtitleMode;
   adultMode?: boolean;
+  /** Character names whose "Name:" prefix inside a quote is never spoken. */
+  knownSpeakers?: readonly string[];
 }): Promise<SagaGenerationLanguageResult> {
-  const originalText = options.text.trim();
-  const dialogueLines = extractSagaDialogueLines(originalText);
+  // Speaker names and stage directions move outside the quotes before
+  // anything else reads the brief, so neither the rewrite nor the video model
+  // treats them as words to speak.
+  const originalText = relocateDialogueCues(options.text.trim(), { knownSpeakers: options.knownSpeakers });
+  const dialogueLines = extractSagaDialogueLines(originalText, { knownSpeakers: options.knownSpeakers });
   const subtitleMode = options.subtitleMode ?? 'auto';
   const fallback = buildDeterministicEnglishVisualPrompt({ originalText, dialogueLines, subtitleMode, adultMode: options.adultMode });
   if (!options.enableLlmRewrite) {

@@ -1013,6 +1013,10 @@ export async function executeGenerateLongVideo(
       enableLlmRewrite: !action.cleanDirect && !briefIsStructured,
       subtitleMode: action.subtitleMode ?? 'auto',
       adultMode: videoNsfw,
+      knownSpeakers: [
+        action.narrativeEntities?.protagonist?.name,
+        ...(action.narrativeEntities?.supportingCharacters ?? []),
+      ].filter((name): name is string => typeof name === 'string' && name.trim().length > 0),
     });
     if (videoNsfw) {
       toolLog(`🔞 Saga Visual Director: NSFW video provider detected; using adult-aware ${languageNormalized.usedLlmRewrite ? 'LLM rewrite' : 'deterministic rewrite'} without safe-for-work dilution.`);
