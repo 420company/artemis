@@ -390,7 +390,7 @@ function buildSeedanceSoundPlan(prompt: string, referenceAudioCount: number): st
   const hasDialogue = /dialogue|line|quote|台词|对白|旁白|说|讲|念|voice/i.test(prompt);
   const hasMusic = /music|beat|song|mv|音乐|卡点|节拍|旋律|配乐/i.test(prompt);
   if (quotedDialogue) {
-    return 'Sound design: generated audio enabled; treat quoted text as verbatim dialogue or voice-over, preserve the quotation content exactly, explicitly lip-sync mouth movement to the spoken language phonemes, and add matching room tone/Foley.';
+    return 'Sound design: generated audio enabled; speak marked dialogue and voice-over lines verbatim, lip-sync mouth movement to the spoken language phonemes, and add matching room tone/Foley.';
   }
   if (referenceAudioCount > 0 || hasMusic) {
     return 'Sound design: generated audio enabled; sync movement cuts, impacts, ambience, and camera emphasis to the music or reference rhythm.';

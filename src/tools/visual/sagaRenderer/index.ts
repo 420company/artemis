@@ -7,6 +7,7 @@ import { concatWithSagaRenderer, ensureFfmpegAvailable, ensureSegmentReadable } 
 import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
 import { generateSagaReviewFrames } from './reviewFrames.js';
 import { downloadGuardedUrl } from '../safeDownload.js';
+import { DIALOGUE_MARKER_SOURCE, QUOTED_LINE_SOURCE } from '../sagaLanguageDirector.js';
 import type {
   SagaCompositionSpec,
   SagaEncodeOptions,
@@ -79,12 +80,13 @@ export type SagaDuckZone = { start: number; end: number };
 
 // Compute timecode windows where dialogue is present. Each window covers an
 // entire saga segment whose storyBeat contains an explicit dialogue marker
-// (对白/旁白/台词/dialogue/voiceover/...). Used by the ducked BGM mix to drop
+// (对白/旁白/台词/dialogue/line/voiceover/...). Used by the ducked BGM mix to drop
 // the music underneath the voice; segment-level granularity keeps the filter
 // simple and survives planner drift (the model rarely respects sub-segment
 // dialogue start/end seconds exactly).
 export function computeDialogueDuckZones(segments: SagaSegmentInput[]): SagaDuckZone[] {
-  const markerRe = /[*_]*(?:对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*[“"'‘][^”"'’]{1,240}[”"'’]/iu;
+  // The same markers and quote pairs the dialogue extractor reads, 「」 included.
+  const markerRe = new RegExp(`[*_]*(?:${DIALOGUE_MARKER_SOURCE})[*_]*\\s*(?:[（(][^）)]{0,40}[）)])?\\s*[*_]*\\s*[:：]\\s*(?:[（(][^）)\\n]{0,60}[）)]\\s*)?${QUOTED_LINE_SOURCE}`, 'iu');
   const zones: SagaDuckZone[] = [];
   let cursor = 0;
   for (const segment of segments) {

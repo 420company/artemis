@@ -17,7 +17,7 @@ const dialogue = buildDirectedVideoPrompt({
 });
 
 assertIncludes(dialogue.directedPrompt, '"今天的阳光很好。"');
-assertIncludes(dialogue.directedPrompt, 'treat quoted text as verbatim dialogue or voice-over');
+assertIncludes(dialogue.directedPrompt, 'speak marked dialogue and voice-over lines verbatim');
 assertIncludes(dialogue.directedPrompt, 'lip-sync mouth movement to the spoken language phonemes');
 
 const multimodal = buildDirectedVideoPrompt({

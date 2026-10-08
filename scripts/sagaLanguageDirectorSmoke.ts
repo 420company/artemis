@@ -116,15 +116,15 @@ async function main(): Promise<void> {
   assert.match(prompt, /Generation instruction language: English/);
   assert.match(prompt, /Chinese/);
   assert.match(prompt, /Dialogue handling:/);
-  assert.match(prompt, /Detected languages: Mandarin Chinese, Spanish, French/);
-  assert.match(prompt, /Render speech in the original language with matching lip-sync/);
+  assert.match(prompt, /Only these marked lines are spoken: “你终于来了。” \(Mandarin Chinese, spoken\); “雨还在下。” \(Mandarin Chinese, voiceover, no lip-sync\); “三年后” \(Mandarin Chinese, on-screen subtitle\); “Estoy aquí, corazón” \(Spanish, spoken\); “Je suis ici, mon amour” \(French, voiceover, no lip-sync\)\. Other quoted text is not speech\./);
+  assert.match(prompt, /Speak each line in its original language with matching lip-sync/);
   assert.match(prompt, /Render readable on-screen subtitles\/captions/);
   assert.match(prompt, /User brief \(source material to render\):/);
-  // Each dialogue line must appear exactly once in the prompt — only inside
-  // the user brief, never re-listed as a numbered "exact text:" map.
+  // Each dialogue line appears in the brief and once in the list of marked
+  // lines, never in a numbered "exact text:" map.
   for (const line of lines) {
     const occurrences = prompt.split(line.text).length - 1;
-    assert.equal(occurrences, 1, `dialogue "${line.text}" should appear exactly once, got ${occurrences}`);
+    assert.equal(occurrences, 2, `dialogue "${line.text}" should appear in the brief and the marked-line list, got ${occurrences}`);
   }
   assert.doesNotMatch(prompt, /exact text:/);
   assert.doesNotMatch(prompt, /matching lip movement;/);
@@ -135,10 +135,10 @@ async function main(): Promise<void> {
   assert.equal(normalized.usedLlmRewrite, false);
   assert.equal(normalized.dialogueLines.length, 5);
   assert.match(normalized.generationText, /Dialogue handling:/);
-  assert.match(normalized.generationText, /Keep dialogue\/voiceover as audio only/);
+  assert.match(normalized.generationText, /Dialogue and voiceover are audio only/);
   for (const line of lines) {
     const occurrences = normalized.generationText.split(line.text).length - 1;
-    assert.equal(occurrences, 1, `normalized: dialogue "${line.text}" should appear exactly once, got ${occurrences}`);
+    assert.equal(occurrences, 2, `normalized: dialogue "${line.text}" should appear in the brief and the marked-line list, got ${occurrences}`);
   }
 
   // --- marker-aware extraction regression tests ---
@@ -157,12 +157,17 @@ async function main(): Promise<void> {
   const designRefLines = extractSagaDialogueLines(designRefSnippet);
   assert.equal(designRefLines.length, 0, `design refs should NOT count as dialogue, got: ${JSON.stringify(designRefLines.map((l) => l.text))}`);
 
-  // Bare quoted CJK sentence WITH sentence-final punct still falls through
-  // greedy fallback (so unmarked Chinese dialogue isn't lost entirely).
-  const bareCJKSentence = '她说道 "我在这里。"';
-  const bareCJKLines = extractSagaDialogueLines(bareCJKSentence);
-  assert.equal(bareCJKLines.length, 1);
-  assert.equal(bareCJKLines[0].text, '我在这里。');
+  // Guide §3.2: a bare quote is not dialogue, even a whole sentence; a
+  // speech verb with a colon is a marker.
+  assert.equal(extractSagaDialogueLines('她回头。"我在这里。"').length, 0, 'a bare quoted sentence is not dialogue');
+  assert.deepEqual(spokenOf('她低声说："我在这里。"'), ['我在这里。']);
+  assert.deepEqual(spokenOf('She whispers: "I\'ve waited, we\'d said so."'), ["I've waited, we'd said so."], 'apostrophes stay inside the line');
+  assert.deepEqual(spokenOf('**对白（French, intimate）**: "Je t\'ai attendu si longtemps."'), ["Je t'ai attendu si longtemps."]);
+  assert.deepEqual(spokenOf('**line**: "I\'m back."'), ["I'm back."]);
+  assert.deepEqual(spokenOf('周屿：“（轻笑）我回来了。”'), ['我回来了。'], 'a speaker name opening a line marks dialogue');
+  assert.deepEqual(spokenOf('歌词：“It was just two lovers”\n招牌写着“霓虹城市”\n标题：“重逢”'), [], 'lyrics, signs and titles are never dialogue');
+  const none = buildDeterministicEnglishVisualPrompt({ originalText: '霓虹招牌写着"霓虹城市"。', subtitleMode: 'auto' });
+  assert.match(none, /There is no dialogue/);
 
   // Ellipsis-terminated lines are recognized as dialogue.
   const ellipsisSnippet = '对白: "走了好远好远..."';

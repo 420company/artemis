@@ -310,7 +310,7 @@ async function richBibleBudgetChecks(): Promise<void> {
     shotContinuityNotes: many('镜头之间保持风衣下摆被海风吹向画面右侧', 16),
   } as any);
   assert.ok(bible.identityCard.length <= IDENTITY_CARD_MAX_CHARS, `identity card is ${bible.identityCard.length} chars`);
-  const beat = 'BEAT-START 林夏从集装箱后走出，手里握着一把旧钥匙。' + '海浪拍打着码头，'.repeat(60) + '林夏：（冷笑）“你以为你赢了吗？” BEAT-END';
+  const beat = 'BEAT-START 林夏从集装箱后走出，手里握着一把旧钥匙。' + '海浪拍打着码头，'.repeat(60) + '。林夏：（冷笑）“你以为你赢了吗？” BEAT-END';
   const shot = compileShotPromptWithContinuity({
     bible, mode: 'strong-vision' as any, shotIndex: 2, shotCount: 6, duration: 10, title: '5-10s',
     storyBeat: beat, visualPrompt: beat, camera: 'slow dolly in', continuity: 'same night', transition: 'cut', authoredPrompt: beat,
