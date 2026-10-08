@@ -287,6 +287,26 @@ function escapeSummaryTags(text: string): string {
   return text.replace(/<\s*(\/?)\s*conversation_summary/gi, (_match, slash: string) => `&lt;${slash}conversation_summary`)
 }
 
+const REQUEST_HEADING_EN = '## The user earlier asked (verbatim)'
+const REQUEST_HEADING_ZH = '## 用户之前的请求（原文）'
+
+/**
+ * For the outgoing request only (never stored): when the boundary carries
+ * the request of the run that is still going, say that it is the current
+ * task. Returns undefined otherwise.
+ */
+export function carriedRequestNote(
+  messages: readonly SessionMessage[],
+  requestId: string | undefined,
+  language: ConversationLanguage,
+): string | undefined {
+  const boundary = messages[0]
+  if (!requestId || !isCompactionBoundary(boundary) || boundary?.compaction?.request?.id !== requestId) return undefined
+  return language === 'zh'
+    ? `[当前任务] 压缩摘要中“${REQUEST_HEADING_ZH.slice(3)}”下引用的请求，就是你现在正在处理的任务，仍然有效。`
+    : `[Current task] The request quoted in the compacted summary under "${REQUEST_HEADING_EN.slice(3)}" is the task you are working on now; it is still in effect.`
+}
+
 function renderBoundary(input: {
   language: ConversationLanguage
   index: number
@@ -323,10 +343,11 @@ function renderBoundary(input: {
   lines.push(escapeSummaryTags(input.summary.trim()))
   lines.push('</conversation_summary>')
   if (input.requestVerbatim) {
+    // Stored as history. While the run that made this request is still
+    // going, the per-request runtime context says it is the current task
+    // (carriedRequestNote); a later run sees it only as an earlier request.
     lines.push('')
-    lines.push(zh
-      ? '## 当前任务的用户请求（原文，仍然有效）'
-      : "## The user's request for the current task (verbatim, still in effect)")
+    lines.push(zh ? REQUEST_HEADING_ZH : REQUEST_HEADING_EN)
     lines.push(input.requestVerbatim)
   }
   if (input.latestUserVerbatim) {
@@ -531,17 +552,17 @@ async function manageContextInner(input: ManageContextInput): Promise<ManageCont
     if (sizeOf(messages) > budget.effective) {
       const roomEach = Math.max(300, Math.floor((Math.floor(budget.effective / calibration) - input.fixedTokens) / Math.max(1, messages.length)))
       const shrinking = messages.filter((message) => !isCompactionBoundary(message) && estimateMessageTokens(message) > roomEach)
-      // The originals go to the archive first, so `session show` still has
-      // the full text and the shortened copies can point to it.
+      // The originals are kept first (originals.jsonl), so `session show`
+      // still has the full text and the shortened copies can point to it.
       let originalsArchived = false
       if (input.storage && shrinking.length > 0) {
         try {
-          await input.storage.archiveMessages(shrinking, { compaction: state.compactions })
+          await input.storage.archiveOriginals(shrinking)
           originalsArchived = true
         } catch { /* best effort */ }
       }
       messages = messages.map((message) => !isCompactionBoundary(message) && estimateMessageTokens(message) > roomEach
-        ? shrinkMessage(message, roomEach, originalsArchived ? input.storage?.transcriptPath : undefined, language)
+        ? shrinkMessage(message, roomEach, originalsArchived ? input.storage?.originalsPath : undefined, language)
         : message)
       changed = true
       invalidateUsageAnchor(state)
@@ -761,13 +782,17 @@ async function manageContextInner(input: ManageContextInput): Promise<ManageCont
     const roomTotal = Math.max(500, Math.floor(fitLimit / calibration) - input.fixedTokens - estimateMessageTokens(boundary))
     const roomEach = Math.max(300, Math.floor(roomTotal / Math.max(1, tail.length)))
     const shrinking = tail.filter((message) => estimateMessageTokens(message) > roomEach)
-    // The originals go to the archive first, so the shortened copies can
-    // point to the full text.
+    // The originals are kept first, so the shortened copies can point to
+    // the full text.
+    let originalsKept = false
     if (input.storage && shrinking.length > 0) {
-      try { await input.storage.archiveMessages(shrinking, { compaction: compactionIndex }) } catch { /* best effort */ }
+      try {
+        await input.storage.archiveOriginals(shrinking)
+        originalsKept = true
+      } catch { /* best effort */ }
     }
     tail = tail.map((message) => estimateMessageTokens(message) > roomEach
-      ? shrinkMessage(message, roomEach, archivePath, language)
+      ? shrinkMessage(message, roomEach, originalsKept ? input.storage?.originalsPath : undefined, language)
       : message)
     result = [boundary, ...tail]
     if (sizeOf(result) > fitLimit) {

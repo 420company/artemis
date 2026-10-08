@@ -2,7 +2,10 @@
  * On-disk companions of a session's context:
  *
  *   <dir>/transcript.jsonl         append-only archive of every message removed
- *                                  from the live history by compaction
+ *                                  from the live history by compaction, in
+ *                                  order, each id at most once
+ *   <dir>/originals.jsonl          full text of messages that were shortened
+ *                                  to fit while still live
  *   <dir>/tool-results/            full tool outputs that were spilled on intake
  *                                  or cleared later, one file per result
  *   <dir>/pending-compaction.json  crash marker: a compaction whose archive was
@@ -42,15 +45,23 @@ export type PendingCompaction = {
 export type ContextStorage = {
   readonly dir: string
   readonly transcriptPath: string
+  readonly originalsPath: string
   readonly toolResultsDir: string
   /**
    * Append messages to the transcript archive. Never rewrites earlier lines.
-   * Messages whose id is in `skipIds` were archived already and are skipped.
+   * Idempotent: a message whose id is already in the transcript (or in
+   * `skipIds`) is not written again, so a crash and retry cannot archive a
+   * block twice.
    */
   archiveMessages(
     messages: readonly SessionMessage[],
     meta: { compaction: number; skipIds?: ReadonlySet<string> },
   ): Promise<void>
+  /**
+   * Keep the full text of messages about to be shortened in place (they stay
+   * live, so they are not part of the chronological transcript yet).
+   */
+  archiveOriginals(messages: readonly SessionMessage[]): Promise<void>
   /** Write a full tool output to its own file and return the path. Synchronous so intake stays simple. */
   writeToolResult(label: string, content: string): string
   /**
@@ -102,6 +113,10 @@ export function createContextStorage(
 ): ContextStorage {
   const resolved = path.resolve(dir)
   const transcriptPath = path.join(resolved, 'transcript.jsonl')
+  const originalsPath = path.join(resolved, 'originals.jsonl')
+  // Ids already in each archive file, read once per process.
+  let transcriptIds: Set<string> | undefined
+  let originalIds: Set<string> | undefined
   const toolResultsDir = path.join(resolved, 'tool-results')
   const pendingPath = path.join(resolved, 'pending-compaction.json')
   const capBytes = options.toolResultsCapBytes ?? DEFAULT_TOOL_RESULTS_CAP_BYTES
@@ -217,18 +232,41 @@ export function createContextStorage(
     writtenSinceScan.clear()
   }
 
+  const appendUnique = async (
+    filePath: string,
+    known: Set<string>,
+    messages: readonly SessionMessage[],
+    compaction: number,
+  ): Promise<void> => {
+    const fresh: SessionMessage[] = []
+    for (const message of messages) {
+      if (known.has(message.id)) continue
+      known.add(message.id)
+      fresh.push(message)
+    }
+    if (fresh.length === 0) return
+    await mkdir(resolved, { recursive: true, mode: DIR_MODE })
+    const archivedAt = new Date().toISOString()
+    const lines = fresh.map((message) =>
+      JSON.stringify({ id: message.id, archivedAt, compaction, message: sanitizeMessageForArchive(message) }))
+    await appendFile(filePath, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: FILE_MODE })
+  }
+
   return {
     dir: resolved,
     transcriptPath,
+    originalsPath,
     toolResultsDir,
     async archiveMessages(messages, meta) {
       const toWrite = meta.skipIds ? messages.filter((message) => !meta.skipIds!.has(message.id)) : messages
       if (toWrite.length === 0) return
-      await mkdir(resolved, { recursive: true, mode: DIR_MODE })
-      const archivedAt = new Date().toISOString()
-      const lines = toWrite.map((message) =>
-        JSON.stringify({ archivedAt, compaction: meta.compaction, message: sanitizeMessageForArchive(message) }))
-      await appendFile(transcriptPath, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: FILE_MODE })
+      transcriptIds ??= await readArchivedIds(transcriptPath)
+      await appendUnique(transcriptPath, transcriptIds, toWrite, meta.compaction)
+    },
+    async archiveOriginals(messages) {
+      if (messages.length === 0) return
+      originalIds ??= await readArchivedIds(originalsPath)
+      await appendUnique(originalsPath, originalIds, messages, 0)
     },
     writeToolResult(label, content) {
       mkdirSync(toolResultsDir, { recursive: true, mode: DIR_MODE })
@@ -266,12 +304,60 @@ export function createContextStorage(
   }
 }
 
+/** Id of one archive line: the top-level `id` (cheap), else the message's. */
+function archivedLineId(line: string): string | undefined {
+  if (line.startsWith('{"id":"')) {
+    let end = 7
+    while (end < line.length && (line[end] !== '"' || line[end - 1] === '\\')) end += 1
+    try {
+      return JSON.parse(line.slice(6, end + 1)) as string
+    } catch { /* fall through */ }
+  }
+  return parseArchivedLine(line)?.id
+}
+
+/** Ids present in an archive file (empty when it does not exist). */
+async function readArchivedIds(filePath: string): Promise<Set<string>> {
+  const ids = new Set<string>()
+  let raw = ''
+  try {
+    raw = await readFile(filePath, 'utf8')
+  } catch {
+    return ids
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    const id = archivedLineId(line)
+    if (id) ids.add(id)
+  }
+  return ids
+}
+
+/** Full text of shortened messages (originals.jsonl), by id. */
+async function readOriginals(dir: string): Promise<Map<string, SessionMessage>> {
+  const originals = new Map<string, SessionMessage>()
+  let raw = ''
+  try {
+    raw = await readFile(path.join(path.resolve(dir), 'originals.jsonl'), 'utf8')
+  } catch {
+    return originals
+  }
+  for (const line of raw.split('\n')) {
+    const message = parseArchivedLine(line)
+    if (message && !originals.has(message.id)) originals.set(message.id, message)
+  }
+  return originals
+}
+
 /**
  * Every message the conversation ever had, in order: archived messages from
  * the transcript followed by the live history. Synthetic entries (the
- * compaction boundary, per-run runtime context) are left out, and a message
- * archived twice appears once. A live message that was shortened to fit
- * (its original was archived first) is shown with its original text.
+ * compaction boundary, per-run runtime context) are left out.
+ *
+ * Ordering rule, shared with readHistoryPage: a message appears once, at the
+ * position of its newest copy (a live message wins over archived copies);
+ * its text is the original (originals.jsonl, else the oldest copy that was
+ * not shortened). Older transcripts could hold a message twice.
  */
 export async function readFullHistory(
   dir: string,
@@ -279,36 +365,40 @@ export async function readFullHistory(
   isSynthetic: (message: SessionMessage) => boolean,
 ): Promise<{ messages: SessionMessage[]; archived: number }> {
   const liveIds = new Set(live.map((message) => message.id))
-  const seen = new Set<string>()
-  const archived: SessionMessage[] = []
-  const originals = new Map<string, SessionMessage>()
+  const originals = await readOriginals(dir)
   let raw = ''
   try {
     raw = await readFile(path.join(path.resolve(dir), 'transcript.jsonl'), 'utf8')
   } catch {
     raw = ''
   }
+  const copies: SessionMessage[] = []
   for (const line of raw.split('\n')) {
-    if (!line.trim()) continue
-    let message: SessionMessage | undefined
-    try {
-      message = (JSON.parse(line) as { message?: SessionMessage }).message
-    } catch {
-      continue // a torn last line after a crash
-    }
-    if (!message || typeof message !== 'object' || typeof message.id !== 'string') continue
-    if (liveIds.has(message.id)) {
-      if (!originals.has(message.id)) originals.set(message.id, message)
-      continue
-    }
-    if (seen.has(message.id) || isSynthetic(message)) continue
-    seen.add(message.id)
-    archived.push(message)
+    const message = parseArchivedLine(line)
+    if (message) copies.push(message)
   }
+  // Oldest unshortened copy of each id, for the text.
+  for (const message of copies) {
+    if (!originals.has(message.id) && !SHRUNK_NOTE.test(message.content ?? '')) originals.set(message.id, message)
+  }
+  const placed = new Set<string>(liveIds)
+  const archived: SessionMessage[] = []
+  for (let i = copies.length - 1; i >= 0; i -= 1) {
+    const message = copies[i]!
+    if (placed.has(message.id)) continue
+    placed.add(message.id)
+    if (!isSynthetic(message)) archived.push(withOriginalText(message, originals))
+  }
+  archived.reverse()
   const visibleLive = live
     .filter((message) => !isSynthetic(message))
-    .map((message) => originals.get(message.id) ?? message)
+    .map((message) => withOriginalText(message, originals))
   return { messages: [...archived, ...visibleLive], archived: archived.length }
+}
+
+function withOriginalText(message: SessionMessage, originals: ReadonlyMap<string, SessionMessage>): SessionMessage {
+  if (!SHRUNK_NOTE.test(message.content ?? '')) return message
+  return originals.get(message.id) ?? message
 }
 
 export type HistoryPageOptions = {
@@ -352,7 +442,7 @@ async function* readLinesBackward(filePath: string, chunkBytes = 1 << 20): Async
       position -= size
       const chunk = Buffer.alloc(size)
       await handle.read(chunk, 0, size, position)
-      let buffer = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk
+      const buffer = carry.length > 0 ? Buffer.concat([chunk, carry]) : chunk
       let end = buffer.length
       for (let i = buffer.length - 1; i >= 0; i -= 1) {
         if (buffer[i] !== 0x0a) continue
@@ -360,7 +450,6 @@ async function* readLinesBackward(filePath: string, chunkBytes = 1 << 20): Async
         end = i
       }
       carry = Buffer.from(buffer.subarray(0, end))
-      buffer = Buffer.alloc(0)
     }
     if (carry.length > 0) yield carry.toString('utf8')
   } finally {
@@ -381,8 +470,10 @@ function parseArchivedLine(line: string): SessionMessage | undefined {
 /**
  * One page of the user-visible history, newest last, read from the end of
  * the transcript archive without reading all of it (a long-lived session's
- * archive can be tens of megabytes). Same ordering and dedup rules as
- * readFullHistory.
+ * archive can be tens of megabytes). Same rule as readFullHistory: each id
+ * once, at its newest copy. The scan from the end passes every id at or
+ * after the cursor first, so all copies of those ids are skipped and each
+ * page strictly moves back; a cursor that is not found ends the paging.
  */
 export async function readHistoryPage(
   dir: string,
@@ -391,61 +482,63 @@ export async function readHistoryPage(
   options: HistoryPageOptions,
 ): Promise<HistoryPage> {
   const transcriptPath = path.join(path.resolve(dir), 'transcript.jsonl')
-  const liveIds = new Set(live.map((message) => message.id))
   const project = options.project ?? ((message: SessionMessage) => message)
+  const originals = await readOriginals(dir)
+  const limit = Math.max(1, options.limit)
 
-  // Live messages shortened to fit were archived whole first: show the
-  // original (the nearest archived copy that is not itself shortened).
-  const shrunk = new Set(live.filter((message) => SHRUNK_NOTE.test(message.content ?? '')).map((message) => message.id))
-  const originals = new Map<string, SessionMessage>()
-  if (shrunk.size > 0) {
-    for await (const line of readLinesBackward(transcriptPath)) {
-      if (originals.size === shrunk.size) break
-      if (![...shrunk].some((id) => line.includes(JSON.stringify(id)))) continue
-      const message = parseArchivedLine(line)
-      if (message && shrunk.has(message.id) && !originals.has(message.id) && !SHRUNK_NOTE.test(message.content ?? '')) {
-        originals.set(message.id, message)
-      }
-    }
-  }
-
-  // Newest to oldest: live (non-synthetic), then the archive from its end.
+  const placed = new Set<string>() // ids whose position (newest copy) was passed
   const collected: SessionMessage[] = []
-  const position = new Map<string, number>()
   let passedCursor = options.before === undefined
   let hasMore = false
-  const consider = (message: SessionMessage): boolean => {
+  let done = false
+  const consider = (message: SessionMessage): void => {
+    if (placed.has(message.id)) {
+      // An older copy of a message already placed: only its text may help.
+      const at = collected.findIndex((entry) => entry.id === message.id)
+      if (at >= 0 && SHRUNK_NOTE.test(collected[at]!.content ?? '') && !SHRUNK_NOTE.test(message.content ?? '')) {
+        collected[at] = message
+      }
+      return
+    }
+    placed.add(message.id)
     if (!passedCursor) {
       if (message.id === options.before) passedCursor = true
-      return false
+      return
     }
-    if (isSynthetic(message) || !options.include(message)) return false
-    const seen = position.get(message.id)
-    if (seen !== undefined) {
-      // Archived twice: the older copy marks its place.
-      collected.splice(seen, 1)
-      for (const [id, index] of position) if (index > seen) position.set(id, index - 1)
-    } else if (collected.length >= options.limit) {
+    if (isSynthetic(message) || !options.include(message)) return
+    if (collected.length >= limit) {
       hasMore = true
-      return true
+      done = true
+      return
     }
-    position.set(message.id, collected.length)
     collected.push(message)
-    return false
   }
 
-  let done = false
-  for (let i = live.length - 1; i >= 0 && !done; i -= 1) {
-    done = consider(originals.get(live[i]!.id) ?? live[i]!)
-  }
+  for (let i = live.length - 1; i >= 0 && !done; i -= 1) consider(live[i]!)
   if (!done) {
     for await (const line of readLinesBackward(transcriptPath)) {
       const message = parseArchivedLine(line)
-      if (!message || liveIds.has(message.id)) continue
-      if (consider(message)) break
+      if (message) consider(message)
+      if (done) break
     }
   }
-  const messages = collected.reverse().map(project)
+  if (!passedCursor) return { messages: [], hasMore: false }
+
+  // Shortened messages show their full text.
+  const shrunkIds = collected.filter((message) => SHRUNK_NOTE.test(message.content ?? '') && !originals.has(message.id)).map((m) => m.id)
+  if (shrunkIds.length > 0) {
+    const wanted = new Set(shrunkIds)
+    for await (const line of readLinesBackward(transcriptPath)) {
+      if (wanted.size === 0) break
+      if (![...wanted].some((id) => line.includes(JSON.stringify(id)))) continue
+      const message = parseArchivedLine(line)
+      if (message && wanted.has(message.id) && !SHRUNK_NOTE.test(message.content ?? '')) {
+        originals.set(message.id, message)
+        wanted.delete(message.id)
+      }
+    }
+  }
+  const messages = collected.reverse().map((message) => project(withOriginalText(message, originals)))
   return {
     messages,
     hasMore,
