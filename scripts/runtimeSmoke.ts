@@ -261,6 +261,33 @@ assert(
 }
 
 {
+  // Native tool calls from chat-completions providers arrive as <toolcall name="...">JSON</toolcall>.
+  // MCP calls carry the called tool's arguments under "args": they must survive, with the server id.
+  const recovered = parseAssistantEnvelopeForSmoke(
+    '<toolcall name="mcp_call_tool">{"serverId":"artemis_online","toolName":"schedule_create","args":{"title":"Brief","cron":"0 8 * * *"}}</toolcall>\n' +
+      '<toolcall name="mcp_get_prompt">{"type":"mcp_get_prompt","serverId":"docs","promptName":"summarize","args":{"topic":"x"}}</toolcall>\n' +
+      '<toolcall name="mcp_read_resource">{"serverId":"docs","uri":"file:///readme.md"}</toolcall>',
+  )
+  const [call, prompt, resource] = (recovered.actions ?? []) as any[]
+  assert(
+    'text tool-call recovery: MCP actions keep their server, tool and arguments',
+    recovered.actions?.length === 3 &&
+      call?.type === 'mcp_call_tool' &&
+      call.serverId === 'artemis_online' &&
+      call.toolName === 'schedule_create' &&
+      call.args?.title === 'Brief' &&
+      call.args?.cron === '0 8 * * *' &&
+      prompt?.type === 'mcp_get_prompt' &&
+      prompt.promptName === 'summarize' &&
+      prompt.args?.topic === 'x' &&
+      resource?.type === 'mcp_read_resource' &&
+      resource.uri === 'file:///readme.md' &&
+      recovered.done === false,
+    JSON.stringify(recovered),
+  )
+}
+
+{
   const recovered = parseAssistantEnvelopeForSmoke(`
 <actions>
 <action name="write_file">
