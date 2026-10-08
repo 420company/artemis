@@ -86,11 +86,14 @@ function json(status: number, payload: unknown): Response {
   return new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-/** Runs generate_long_video with every HTTP call mocked; returns the result and the requests made. */
-export async function runHermeticSaga(
-  action: Record<string, unknown>,
-  options: HermeticOptions = {},
-): Promise<{ result: Awaited<ReturnType<typeof executeGenerateLongVideo>>; requests: RecordedRequest[]; logs: string[] }> {
+/**
+ * A configured temporary workspace with every HTTP call answered by the mock;
+ * `run` receives the workspace and the list the requests are recorded in.
+ */
+export async function withHermeticWorkspace<T>(
+  options: HermeticOptions,
+  run: (cwd: string, requests: RecordedRequest[]) => Promise<T>,
+): Promise<T> {
   const cwd = mkdtempSync(path.join(root, 'ws-'));
   await configure(cwd, options);
   const requests: RecordedRequest[] = [];
@@ -123,9 +126,21 @@ export async function runHermeticSaga(
     if (url === 'https://cdn.example.test/still.png') return new Response(pngBytes, { status: 200, headers: { 'Content-Type': 'image/png' } });
     return new Response(`unexpected request ${method} ${url}`, { status: 500 });
   }) as typeof fetch;
-  const logs: string[] = [];
-  const { withRuntimeLogSink } = await import('../src/utils/log.js');
   try {
+    return await run(cwd, requests);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+/** Runs generate_long_video with every HTTP call mocked; returns the result, the requests made and the log lines. */
+export async function runHermeticSaga(
+  action: Record<string, unknown>,
+  options: HermeticOptions = {},
+): Promise<{ result: Awaited<ReturnType<typeof executeGenerateLongVideo>>; requests: RecordedRequest[]; logs: string[] }> {
+  const { withRuntimeLogSink } = await import('../src/utils/log.js');
+  return withHermeticWorkspace(options, async (cwd, requests) => {
+    const logs: string[] = [];
     const result = await withRuntimeLogSink(
       (entry) => { logs.push(entry.message); },
       () => executeGenerateLongVideo(
@@ -134,9 +149,7 @@ export async function runHermeticSaga(
       ),
     );
     return { result, requests, logs };
-  } finally {
-    globalThis.fetch = original;
-  }
+  });
 }
 
 /** The video task bodies sent to ModelArk, in order. */

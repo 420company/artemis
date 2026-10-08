@@ -42,6 +42,9 @@ import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
 import { extractOpeningFraming } from './sagaFraming.js';
 import { postSagaChatCompletion, resolveSagaChatEndpoint, SAGA_CHAT_TIMEOUT_MS } from './sagaChat.js';
+import { bytePlusImageModelReferenceLimit, checkBytePlusReferenceSupport, localImagesToReferenceDataUris, MAX_REFERENCE_IMAGES } from './referenceImages.js';
+import { seedreamAspectForRatio, seedreamImageSize, type SeedreamAspect } from './seedreamSizes.js';
+import { baseUrlIsLoopback, downloadGuardedUrl, downloadProviderAsset } from './safeDownload.js';
 
 // ─── Result types ─────────────────────────────────────────────────────────
 
@@ -135,13 +138,31 @@ export function isOpenAIGptImage2(provider: string | undefined, model: string | 
   return provider?.trim().toLowerCase() === 'openai' && (model ?? '').trim().toLowerCase().includes('gpt-image-2');
 }
 
+/**
+ * How the configured image model turns input images into a new image:
+ * OpenAI gpt-image-2 through /images/edits, or a BytePlus Seedream 4.x/5.x
+ * model through the provider's `referenceImages` (the ModelArk `image`
+ * field). Undefined when the model cannot do image-to-image with at least
+ * two inputs (a turnaround sheet plus the previous segment's frame).
+ */
+export type SuperVisualImageRoute = 'openai-edits' | 'reference-images';
+
+export function superVisualImageRoute(provider: string | undefined, model: string | undefined): SuperVisualImageRoute | undefined {
+  if (isOpenAIGptImage2(provider, model)) return 'openai-edits';
+  const id = (model ?? '').trim();
+  if (provider?.trim().toLowerCase() === 'byteplus' && /seedream/i.test(id) && bytePlusImageModelReferenceLimit(id) >= 2) {
+    return 'reference-images';
+  }
+  return undefined;
+}
+
 export function getSuperVisualModeIneligibilityReason(input: SuperVisualEligibilityInput): string | undefined {
   // Note: hasUserImageReference is intentionally NOT a skip condition.
-  // User images become inputs to Image-2 image-to-image, not gate the
-  // entire flow. Universal turnaround is the identity-lock entry point
-  // regardless of whether the user supplied a reference photo.
-  if (!isOpenAIGptImage2(input.imageProvider, input.imageModel)) {
-    return 'OpenAI gpt-image-2 image generation is not configured';
+  // User images become inputs to image-to-image, not gate the entire flow.
+  // Universal turnaround is the identity-lock entry point regardless of
+  // whether the user supplied a reference photo.
+  if (!superVisualImageRoute(input.imageProvider, input.imageModel)) {
+    return 'the image model cannot generate from reference images (needs OpenAI gpt-image-2 or a BytePlus Seedream 4.x/5.x model)';
   }
   if (!input.videoReferenceInputs.includes('image') || !input.videoReferenceInputs.includes('video')) {
     return 'video model does not support both image and video references';
@@ -562,17 +583,15 @@ export async function generateSafeBridgeKeyframe(options: {
   shotIndex: number;
   sourceFramePath: string;
   sourceKind?: 'segment-keyframe' | 'previous-last-frame';
+  imageBudget?: SuperVisualImageBudget;
 }): Promise<SegmentKeyframeResult> {
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (!imageConfigured) return { ok: false, reason: 'image provider not configured' };
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
-  if (!isOpenAIGptImage2(imageConfigured.config.image.provider, resolvedImageModel)) {
-    return { ok: false, reason: 'image provider is not OpenAI gpt-image-2' };
+  if (!superVisualImageRoute(imageConfigured.config.image.provider, resolvedImageModel)) {
+    return { ok: false, reason: 'image model cannot generate from reference images' };
   }
-
-  const apiKey = imageConfigured.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured.config.image.baseUrl?.trim();
-  if (!apiKey || !baseUrl) return { ok: false, reason: 'image edit credentials not configured' };
+  if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
   if (!await fileExists(options.sourceFramePath)) return { ok: false, reason: 'source frame not found' };
 
   const superVisualDir = path.join(options.projectDir, 'super-visual');
@@ -585,14 +604,12 @@ export async function generateSafeBridgeKeyframe(options: {
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-safe-bridge.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');
 
-  const edit = await postOpenAIImageEdit({
-    baseUrl,
-    apiKey,
+  const edit = await generateImageFromImages({
+    imageConfigured,
     model: resolvedImageModel,
     prompt,
     inputImagePaths: [options.sourceFramePath],
-    size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
-    quality: 'high',
+    aspect: seedreamAspectForRatio(options.ratio),
     timeoutMs: SAFE_BRIDGE_IMAGE_EDIT_TIMEOUT_MS,
     attempts: 1,
   }).catch((error) => ({
@@ -600,6 +617,7 @@ export async function generateSafeBridgeKeyframe(options: {
     error: error instanceof Error ? error.message : String(error),
   }));
   if (!edit.ok) return { ok: false, reason: `safe bridge generation failed: ${edit.error}` };
+  options.imageBudget?.record(options.shotIndex);
 
   const framePath = safeBridgeKeyframePath(options.projectDir, options.shotIndex);
   await writeFile(framePath, edit.buffer);
@@ -828,10 +846,15 @@ async function postOpenAIImageEdit(options: {
       }
       if (item.b64_json) return { ok: true, buffer: Buffer.from(item.b64_json, 'base64') };
       if (item.url) {
-        const downloaded = await fetch(item.url, { signal: AbortSignal.timeout(60_000) });
-        if (!downloaded.ok) return { ok: false, error: `download failed: ${downloaded.status}` };
-        const ab = await downloaded.arrayBuffer();
-        return { ok: true, buffer: Buffer.from(ab) };
+        try {
+          const buffer = await downloadProviderAsset(item.url, {
+            timeoutMs: 60_000,
+            allowLoopback: baseUrlIsLoopback(options.baseUrl),
+          });
+          return { ok: true, buffer };
+        } catch (error) {
+          return { ok: false, error: `download failed: ${error instanceof Error ? error.message : String(error)}` };
+        }
       }
       return { ok: false, error: 'images/edits response had neither b64_json nor url' };
     } catch {
@@ -846,6 +869,126 @@ async function postOpenAIImageEdit(options: {
   return { ok: false, error: lastError || 'unknown failure' };
 }
 
+/**
+ * Caps the Super Visual images one Saga run generates. Every image is billed,
+ * so a long video gets one turnaround sheet, one keyframe per segment and a
+ * small allowance for safe-bridge re-renders, never an unbounded number.
+ * Only generated images count; a request that fails produced nothing.
+ */
+export class SuperVisualImageBudget {
+  private generated = 0;
+  private readonly perSegment = new Map<number, number>();
+
+  constructor(private limit: number) {}
+
+  /** Raises the cap once the segment count is known. */
+  raiseLimit(limit: number): void {
+    this.limit = Math.max(this.limit, limit);
+  }
+
+  canGenerate(): boolean {
+    return this.generated < this.limit;
+  }
+
+  record(segment?: number): void {
+    this.generated += 1;
+    if (segment !== undefined) this.perSegment.set(segment, (this.perSegment.get(segment) ?? 0) + 1);
+  }
+
+  get used(): number {
+    return this.generated;
+  }
+
+  get max(): number {
+    return this.limit;
+  }
+
+  usedFor(segment: number): number {
+    return this.perSegment.get(segment) ?? 0;
+  }
+}
+
+/** The images one Saga run may generate: a turnaround, a keyframe per segment, and up to two safe-bridge re-renders. */
+export function superVisualImageLimit(segmentCount: number): number {
+  return 1 + segmentCount + Math.min(2, segmentCount);
+}
+
+const BUDGET_REACHED = 'Super Visual image cap for this run reached';
+
+type ConfiguredImageProvider = NonNullable<Awaited<ReturnType<typeof resolveConfiguredVisualProvider>>>;
+
+function openAIEditSize(aspect: SeedreamAspect): string {
+  if (aspect === '9:16' || aspect === '3:4') return '1024x1536';
+  if (aspect === '1:1') return '1024x1024';
+  return '1536x1024';
+}
+
+/**
+ * One image generated from input images, on whichever route the configured
+ * model supports. Seedream receives the inputs as data URIs through the
+ * provider's referenceImages and downloads its result through the guarded
+ * download; gpt-image-2 goes through /images/edits as before.
+ */
+async function generateImageFromImages(options: {
+  imageConfigured: ConfiguredImageProvider;
+  model: string;
+  prompt: string;
+  inputImagePaths: string[];
+  aspect: SeedreamAspect;
+  timeoutMs?: number;
+  attempts?: number;
+}): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
+  const config = options.imageConfigured.config;
+  const route = superVisualImageRoute(config.image.provider, options.model);
+  if (route === 'openai-edits') {
+    const apiKey = config.image.apiKey?.trim();
+    const baseUrl = config.image.baseUrl?.trim();
+    if (!apiKey || !baseUrl) return { ok: false, error: 'image edit credentials not configured' };
+    return postOpenAIImageEdit({
+      baseUrl,
+      apiKey,
+      model: options.model,
+      prompt: options.prompt,
+      inputImagePaths: options.inputImagePaths,
+      size: openAIEditSize(options.aspect),
+      quality: 'high',
+      timeoutMs: options.timeoutMs,
+      attempts: options.attempts,
+    });
+  }
+  if (route !== 'reference-images') return { ok: false, error: `image model ${options.model} cannot generate from reference images` };
+
+  const referenceError = checkBytePlusReferenceSupport(options.model, options.inputImagePaths.length);
+  if (referenceError) return { ok: false, error: referenceError };
+  const provider = await createVisualProvider(config, 'image');
+  if (provider.supportsImageReferences !== true) {
+    return { ok: false, error: `image provider ${provider.name} does not accept reference images` };
+  }
+  let referenceImages: string[];
+  try {
+    referenceImages = await localImagesToReferenceDataUris(options.inputImagePaths);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const generation = provider.generateImage({
+    prompt: options.prompt,
+    model: options.model,
+    size: seedreamImageSize(options.model, options.aspect),
+    count: 1,
+    watermark: false,
+    referenceImages,
+  });
+  const result = options.timeoutMs
+    ? await withTimeout(generation, options.timeoutMs, 'reference image generation').catch((error) => ({
+        success: false as const,
+        error: error instanceof Error ? error.message : String(error),
+        assetPath: undefined,
+      }))
+    : await generation;
+  if (!result.success || !result.assetPath) return { ok: false, error: result.error ?? 'no image returned' };
+  return { ok: true, buffer: await readFile(result.assetPath) };
+}
+
 // ─── User image resolution (paths + URLs → local files) ───────────────────
 
 async function fileExists(p: string): Promise<boolean> {
@@ -858,12 +1001,12 @@ async function fileExists(p: string): Promise<boolean> {
   }
 }
 
+// A user-supplied image URL: downloaded through the same guard as provider
+// results (no private, link-local or loopback targets, redirects included).
 async function downloadUrlToLocal(url: string, destPath: string): Promise<boolean> {
   try {
-    const res = await fetch(url);
-    if (!res.ok) return false;
-    const ab = await res.arrayBuffer();
-    await writeFile(destPath, Buffer.from(ab));
+    const { body } = await downloadGuardedUrl(url, { timeoutMs: 60_000 });
+    await writeFile(destPath, body);
     return true;
   } catch {
     return false;
@@ -1228,6 +1371,7 @@ export async function maybeGenerateSuperVisualReference(options: {
   title: string;
   ratio: string;
   videoLimits: VideoModelLimits;
+  imageBudget?: SuperVisualImageBudget;
 }): Promise<SuperVisualModeResult> {
   if (options.action.superVisualMode === 'off') {
     return { enabled: false, reason: 'disabled by request' };
@@ -1413,21 +1557,22 @@ export async function maybeGenerateSuperVisualReference(options: {
   }
   await writeFile(promptPath, prompt, 'utf8');
 
-  const apiKey = imageConfigured.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured.config.image.baseUrl?.trim();
+  if (options.imageBudget && !options.imageBudget.canGenerate()) {
+    return { enabled: false, reason: BUDGET_REACHED, resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined };
+  }
 
-  // Mode A: image-to-image via /images/edits when user provided images.
-  if (useEditMode && apiKey && baseUrl) {
-    const edit = await postOpenAIImageEdit({
-      baseUrl,
-      apiKey,
+  // Mode A: image-to-image (gpt-image-2 /images/edits or Seedream reference
+  // images) when the user provided images.
+  if (useEditMode) {
+    const edit = await generateImageFromImages({
+      imageConfigured,
       model: resolvedImageModel,
       prompt,
-      inputImagePaths: userInputs,
-      size: '1536x1024',
-      quality: 'high',
+      inputImagePaths: userInputs.slice(0, MAX_REFERENCE_IMAGES),
+      aspect: '16:9',
     });
     if (edit.ok) {
+      options.imageBudget?.record();
       const referenceImagePath = imageReferenceArtifactPath(options.projectDir, '.png');
       await writeFile(referenceImagePath, edit.buffer);
       toolLog(`✅ Super Visual: 角色三视图就绪（image-to-image，基于 ${userInputs.length} 张用户图）→ ${referenceImagePath}`);
@@ -1439,7 +1584,7 @@ export async function maybeGenerateSuperVisualReference(options: {
         promptPath,
         mode: 'image-to-image',
         userImagesUsed: userInputs.length,
-        reason: `generated character turnaround from ${userInputs.length} user image(s) via ${describeVisualProvider(imageConfigured.config, 'image')} image edit`,
+        reason: `generated character turnaround from ${userInputs.length} user image(s) via ${describeVisualProvider(imageConfigured.config, 'image')} image-to-image`,
         inputIsRealPerson: inputLooksRealPerson,
       };
     }
@@ -1512,6 +1657,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
     };
   }
+  options.imageBudget?.record();
   const referenceImagePath = imageReferenceArtifactPath(options.projectDir, result.assetPath);
   await writeFile(referenceImagePath, await readFile(result.assetPath));
   toolLog(`✅ Super Visual: 角色三视图就绪（text-to-image fallback）→ ${referenceImagePath}`);
@@ -1586,13 +1732,15 @@ export async function generateSegmentKeyframe(options: {
   // planner's fallback storyBeat contains no position / direction info, so
   // Image-2 has to guess and frequently flips facing direction between runs).
   sourceStory?: string;
+  imageBudget?: SuperVisualImageBudget;
 }): Promise<SegmentKeyframeResult> {
   const imageConfigured = await resolveConfiguredVisualProvider(options.context.cwd, 'image');
   if (!imageConfigured) return { ok: false, reason: 'image provider not configured' };
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
-  if (!isOpenAIGptImage2(imageConfigured.config.image.provider, resolvedImageModel)) {
-    return { ok: false, reason: 'image provider is not OpenAI gpt-image-2' };
+  if (!superVisualImageRoute(imageConfigured.config.image.provider, resolvedImageModel)) {
+    return { ok: false, reason: 'image model cannot generate from reference images' };
   }
+  if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
 
   const superVisualDir = path.join(options.projectDir, 'super-visual');
   await mkdir(superVisualDir, { recursive: true });
@@ -1666,10 +1814,7 @@ export async function generateSegmentKeyframe(options: {
   const promptPath = path.join(superVisualDir, `segment-${String(options.shotIndex).padStart(3, '0')}-keyframe.prompt.txt`);
   await writeFile(promptPath, prompt, 'utf8');
 
-  const apiKey = imageConfigured.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured.config.image.baseUrl?.trim();
-
-  if (apiKey && baseUrl && turnaroundExists) {
+  if (turnaroundExists) {
     // Order matters — turnaround first (identity), prev-last-frame second
     // (scene handoff). The prompt explicitly references this order.
     // When skipPrevFrame is true, only turnaround is fed — no photoreal
@@ -1678,22 +1823,21 @@ export async function generateSegmentKeyframe(options: {
       ? [options.turnaroundPath, options.previousLastFramePath!]
       : [options.turnaroundPath];
     const edit = await withTimeout(
-      postOpenAIImageEdit({
-        baseUrl,
-        apiKey,
+      generateImageFromImages({
+        imageConfigured,
         model: resolvedImageModel,
         prompt,
         inputImagePaths,
-        size: options.ratio === '9:16' ? '1024x1536' : options.ratio === '1:1' ? '1024x1024' : '1536x1024',
-        quality: 'high',
+        aspect: seedreamAspectForRatio(options.ratio),
       }),
       SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS,
-      'segment keyframe image edit',
+      'segment keyframe image-to-image',
     ).catch((error) => ({
       ok: false as const,
       error: error instanceof Error ? error.message : String(error),
     }));
     if (edit.ok) {
+      options.imageBudget?.record(options.shotIndex);
       const framePath = segmentKeyframePath(options.projectDir, options.shotIndex);
       await writeFile(framePath, edit.buffer);
       return { ok: true, framePath, promptPath, mode: 'image-to-image' };
@@ -1715,6 +1859,7 @@ export async function generateSegmentKeyframe(options: {
   if (!result.success || !result.assetPath) {
     return { ok: false, reason: `keyframe generation failed: ${result.error ?? 'no image returned'}` };
   }
+  options.imageBudget?.record(options.shotIndex);
   const framePath = segmentKeyframePath(options.projectDir, options.shotIndex);
   await writeFile(framePath, await readFile(result.assetPath));
   return { ok: true, framePath, promptPath, mode: 'text-to-image' };

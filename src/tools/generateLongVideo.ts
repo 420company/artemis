@@ -22,7 +22,14 @@ import {
   type VideoGenerationFailure,
 } from './visual/videoGenerationFailure.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
-import { describeUserImageWithVision, generateSafeBridgeKeyframe, generateSegmentKeyframe, maybeGenerateSuperVisualReference } from './visual/superVisualMode.js';
+import {
+  describeUserImageWithVision,
+  generateSafeBridgeKeyframe,
+  generateSegmentKeyframe,
+  maybeGenerateSuperVisualReference,
+  SuperVisualImageBudget,
+  superVisualImageLimit,
+} from './visual/superVisualMode.js';
 import { parseStoryboardImageWithVision } from './visual/storyboardParser.js';
 import {
   analyzeNarrative,
@@ -1162,6 +1169,9 @@ export async function executeGenerateLongVideo(
     const explicitUserImageBypass = isDirectImageIdentity;
     const superVisualBypass = superVisualBypassReason(identitySource, isPureEnvironment);
 
+    // Every Super Visual image is billed: one turnaround now, and once the
+    // segments are planned, one keyframe per segment plus a small allowance.
+    const superVisualImageBudget = new SuperVisualImageBudget(1);
     const superVisualMode = superVisualBypass
       ? {
           enabled: false,
@@ -1176,6 +1186,7 @@ export async function executeGenerateLongVideo(
           title,
           ratio,
           videoLimits: limits,
+          imageBudget: superVisualImageBudget,
         });
 
     // CRITICAL: If the user provided an image but Super Visual failed due to safety/privacy,
@@ -1472,6 +1483,7 @@ export async function executeGenerateLongVideo(
       continuityMode,
       cleanDirect,
     });
+    superVisualImageBudget.raiseLimit(superVisualImageLimit(segments.length));
     const actualTotalSeconds = segments.reduce((sum, segment) => sum + segment.duration, 0);
 
     // ─── Saga Narrative Critic & Rewriter ──────────────────────────────
@@ -1725,7 +1737,7 @@ export async function executeGenerateLongVideo(
         // turnaround) AND scene continuity (from the previous closing frame).
         // For shot 1 there is no previous frame yet, so identity-only edit.
         if (shouldGenerateSegmentKeyframes) {
-          toolLog(`🎨 正在为第 ${segment.index} 段生成视觉参考关键帧 (Image-2)...`);
+          toolLog(`🎨 正在为第 ${segment.index} 段生成视觉参考关键帧 (Super Visual)…`);
           const wm = narrativeEntities?.worldModel ?? {};
           const keyframeResult = await generateSegmentKeyframe({
             context,
@@ -1766,12 +1778,14 @@ export async function executeGenerateLongVideo(
             // keyframe prompt so the opening pose stops flipping facing
             // direction between runs.
             sourceStory: story,
+            imageBudget: superVisualImageBudget,
           });
           if (keyframeResult.ok) {
             segmentKeyframePaths.set(segment.index, keyframeResult.framePath);
           } else {
             segmentKeyframeFailures.push({ index: segment.index, reason: keyframeResult.reason });
           }
+          toolLog(`🎨 Super Visual: 第 ${segment.index}/${segments.length} 段生成图片 ${superVisualImageBudget.usedFor(segment.index)} 张；全片累计 ${superVisualImageBudget.used}/${superVisualImageBudget.max} 张。`);
         }
 
         const baseReq = {
@@ -1948,6 +1962,7 @@ export async function executeGenerateLongVideo(
               shotIndex: segment.index,
               sourceFramePath: segmentKeyframe,
               sourceKind: 'segment-keyframe',
+              imageBudget: superVisualImageBudget,
             });
             if (safeBridge.ok) {
               segmentKeyframePaths.set(segment.index, safeBridge.framePath);
@@ -2369,7 +2384,7 @@ export async function executeGenerateLongVideo(
       `   · Soundtrack:   ${soundtrackLine}`,
       `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
       `   · Super visual: ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${superVisualMode.reason})`}`,
-      `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''}`,
+      `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''} · images=${superVisualImageBudget.used}/${superVisualImageBudget.max}`,
       `   · References:   user-image-dropped=${userImageReferenceDroppedSegments.length}`,
       narrativeEntities
         ? `   · Narrative:    ${narrativeEntities.mode} · protagonist=${narrativeEntities.protagonist.name} · violations pre/post=${preCriticViolations.length}/${postCriticViolations.length} · rewrote=[${rewroteShotIndices.join(',') || 'none'}]`

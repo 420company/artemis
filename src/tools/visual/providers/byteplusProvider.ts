@@ -19,6 +19,7 @@ import {
   resolveVideoModelCapabilities,
 } from '../videoCapabilities.js'
 import { checkBytePlusReferenceSupport } from '../referenceImages.js'
+import { seedreamSizeFromKeyword } from '../seedreamSizes.js'
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
@@ -79,7 +80,8 @@ export class BytePlusProvider implements VisualProvider {
     try {
       const { apiKey, baseUrl } = await this.resolveCredentials()
       const model = params.model || this.config.image.model || 'seedream-5-0-260128'
-      const size = params.size || this.config.image.defaultParams.size || '2K'
+      // OpenAI-style size words are not ModelArk sizes; give Seedream explicit pixels.
+      const size = seedreamSizeFromKeyword(model, params.size || this.config.image.defaultParams.size || '2K')
       const count = params.count || 1
       const referenceImages = params.referenceImages ?? []
       const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length)
