@@ -505,7 +505,7 @@ function validateGenerateVideoAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.ratio, 'ratio', errors);
   validatePositiveInteger(action?.duration, 'duration', errors);
   if (action?.resolution !== undefined && normalizeVideoResolution(action.resolution) === undefined) {
-    errors.push('resolution must be one of 480p, 720p, 1080p, 4k');
+    errors.push('resolution must be one of 480p, 720p, 1080p');
   }
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateStringArray(

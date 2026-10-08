@@ -38,6 +38,7 @@ import {
   isDirectlyExecutableTool,
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
+  validateToolAction,
 } from '../src/tools/registry.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
@@ -2783,7 +2784,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
           model: 'dreamina-seedance-2-0-260128',
           defaultParams: {
             duration: '10s',
-            resolution: '720p',
+            // What older onboarding wrote for every BytePlus user.
+            resolution: '1080p',
             quality: 'standard',
             style: 'realistic',
             format: 'mp4',
@@ -2817,8 +2819,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       JSON.stringify(createBody),
     )
     assert(
-      'ModelArk visual provider: sends the configured default resolution when none is asked for',
-      createBody?.resolution === '720p',
+      'ModelArk visual provider: does not bill the configured 1080p default when no resolution is asked for',
+      createBody !== undefined && !('resolution' in createBody),
       JSON.stringify(createBody),
     )
     await provider.generateVideo({ prompt: 'hd product film', model: 'dreamina-seedance-2-0-260128', resolution: '1080P' })
@@ -2834,14 +2836,64 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
 {
   assert(
-    'video resolution: canonical values from loose spellings; unknown values rejected',
+    'video resolution: canonical values from loose spellings; unknown and 4k (no provider renders it) rejected',
     normalizeVideoResolution('1080P') === '1080p' &&
       normalizeVideoResolution(' 720 ') === '720p' &&
-      normalizeVideoResolution('4K') === '4k' &&
+      normalizeVideoResolution('480') === '480p' &&
+      normalizeVideoResolution('4K') === undefined &&
       normalizeVideoResolution('8k') === undefined &&
       normalizeVideoResolution('') === undefined &&
       normalizeVideoResolution(undefined) === undefined,
   )
+  assert(
+    'video resolution: generate_video validation rejects 4k before any provider is called',
+    validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '4k' } as any).some((e) => e.includes('resolution')) &&
+      validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '1080p' } as any).length === 0,
+  )
+}
+
+{
+  // OpenAI (Sora) receives the requested resolution as a size; one it cannot
+  // render fails before the create request instead of silently changing.
+  const originalFetch = globalThis.fetch
+  const sizes: string[] = []
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (init?.body instanceof FormData) sizes.push(String(init.body.get('size')))
+    return new Response('{"error":{"message":"stop here"}}', { status: 400 })
+  }) as typeof fetch
+  const soraProvider = (model: string) => new OpenAIProvider({
+    enabled: true,
+    image: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model: 'gpt-image-2',
+      defaultParams: { size: '1024x1024', quality: 'medium', style: 'realistic', watermark: false, outputFormat: 'png', background: 'auto' },
+    },
+    video: {
+      enabled: true,
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model,
+      defaultParams: { duration: '8s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false },
+    },
+  })
+  try {
+    await soraProvider('sora-2-pro').generateVideo({ prompt: 'hd', model: 'sora-2-pro', ratio: '16:9', resolution: '1080p' })
+    const rejected480 = await soraProvider('sora-2').generateVideo({ prompt: 'small', model: 'sora-2', resolution: '480p' })
+    const rejected1080 = await soraProvider('sora-2').generateVideo({ prompt: 'hd', model: 'sora-2', resolution: '1080p' })
+    assert(
+      'OpenAI visual provider: passes a requested 1080p to pro models and rejects what Sora cannot render',
+      sizes.length === 1 &&
+        sizes[0] === '1920x1080' &&
+        rejected480.success === false && /cannot render 480p/.test(String(rejected480.error)) &&
+        rejected1080.success === false && /cannot render 1080p/.test(String(rejected1080.error)),
+      `sizes=${JSON.stringify(sizes)} 480=${rejected480.error} 1080=${rejected1080.error}`,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 }
 
 {

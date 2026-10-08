@@ -569,7 +569,7 @@ async function generateVideoWithVisualProvider(
     model,
     ratio,
     duration,
-    // The request's resolution, else the configured default (the provider applies it).
+    // Only what the request asked for; each provider decides its own default.
     resolution: normalizeVideoResolution(action.resolution),
     referenceImageUrls,
     referenceVideoUrls,

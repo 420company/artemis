@@ -167,10 +167,10 @@ export class BytePlusProvider implements VisualProvider {
       const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
       const ratio = params.ratio || '16:9'
       const duration = normalizeVideoDurationForProvider(params.duration, this.name, model)
-      // Sent explicitly so the bill matches what was asked for; unset (or not
-      // a known resolution) leaves the model's own default.
-      const resolution =
-        normalizeVideoResolution(params.resolution) ?? normalizeVideoResolution(this.config.video.defaultParams.resolution)
+      // Only a resolution the request asked for is sent. The configured
+      // default is not: onboarding used to write 1080p there, and sending it
+      // would bill every clip at 1080p; unset leaves the model's own default.
+      const resolution = normalizeVideoResolution(params.resolution)
       const capabilities = resolveVideoModelCapabilities(this.name, model)
       const unsupportedReferences = getUnsupportedVideoReferences(params, capabilities)
       if (unsupportedReferences.length > 0) {

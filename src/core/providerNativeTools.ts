@@ -1089,7 +1089,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           ratio: optionalStringSchema('Optional aspect ratio (e.g., 16:9).'),
           duration: integerSchema('Optional duration in seconds (1-60).'),
           resolution: optionalStringSchema(
-            'Optional output resolution: 480p, 720p or 1080p (4k on models that support it). Omit for the configured default (usually 720p); use 1080p or higher only when the user asks for HD / high resolution, since it costs several times more.',
+            'Optional output resolution: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution, since it costs several times more.',
           ),
           outputPath: optionalStringSchema('Optional local file path to save the generated video.'),
           referenceImageUrls: {

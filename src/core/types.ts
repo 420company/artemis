@@ -393,8 +393,9 @@ export type AgentAction =
       model?: string;
       ratio?: string;
       duration?: number;
-      // Output resolution ("480p" / "720p" / "1080p" / "4k"); defaults to
-      // the configured video default (visualProfile.video.defaultParams).
+      // Output resolution ("480p" / "720p" / "1080p"). Omitted: BytePlus uses
+      // the model's own default; custom/OpenAI providers use
+      // visualProfile.video.defaultParams.resolution.
       resolution?: string;
       outputPath?: string;
       referenceImageUrls?: string[];
