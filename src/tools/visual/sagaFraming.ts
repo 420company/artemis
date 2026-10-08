@@ -126,8 +126,10 @@ function extractHorizontalPosition(text: string): FramingDirective | undefined {
       };
     }
   }
-  // Generic "在画面 X% 位置 / X% horizontal".
-  const generic = text.match(/(?:画面|frame)\s*[~约约]?\s*(\d{1,3})\s*%/);
+  // Generic "在画面 X% 位置 / 画面 30% 处 / 70% horizontal / horizontal ~70%".
+  const generic = text.match(/(?:画面|frame)\s*[~约约]?\s*(\d{1,3})\s*%/)
+    ?? text.match(/[~约]?\s*(\d{1,3})\s*%\s*horizontal(?:ly)?\b/i)
+    ?? text.match(/\bhorizontal(?:\s*position)?\s*[:：]?\s*[~约]?\s*(\d{1,3})\s*%/i);
   if (generic) {
     const pct = Number(generic[1]);
     if (pct >= 0 && pct <= 100) {
@@ -138,7 +140,7 @@ function extractHorizontalPosition(text: string): FramingDirective | undefined {
       };
     }
   }
-  if (/画面中央|画面中间|center(?:ed)? in (?:the )?frame|frame center/i.test(text)) {
+  if (/画面中央|画面中间|画面正中|居中|\bcent(?:er|re)d?\s+(?:in|of)\s+(?:the\s+)?frame\b|\bframe\s+cent(?:er|re)\b|\bcent(?:er|re)d\b/i.test(text)) {
     return {
       kind: 'horizontal-position',
       text: 'Subject horizontal position in frame: CENTRED (≈ 50% horizontal).',
@@ -210,8 +212,18 @@ function extractMotionDirection(text: string): FramingDirective | undefined {
   return undefined;
 }
 
-function extractCameraFraming(text: string): FramingDirective | undefined {
-  if (/极近(?:半身|脸部)?(?:特写|镜头)|extreme close[-\s]?up|ECU/i.test(text)) {
+// "不要特写" / "避免大特写" / "no close-ups" rule a shot size out, never in.
+function withoutNegatedShotSizes(text: string): string {
+  return text
+    .replace(/(?:不要|不用|别用|别|避免|禁止|不能|无需|无)[^。，,；;！!？?\n]{0,10}?(?:特写|近景)/g, ' ')
+    .replace(/\b(?:no|avoid(?:ing)?|without|never|not?\s+a)\s+(?:extreme\s+)?close[-\s]?ups?\b/gi, ' ')
+    .replace(/\b(?:no|avoid(?:ing)?|without|never)\s+ECUs?\b/g, ' ');
+}
+
+function extractCameraFraming(rawText: string): FramingDirective | undefined {
+  const text = withoutNegatedShotSizes(rawText);
+  // "ECU" only as its own upper-case word ("security" is not a shot size).
+  if (/极近(?:半身|脸部)?(?:特写|镜头)|extreme close[-\s]?up/i.test(text) || /\bECU\b/.test(text)) {
     return {
       kind: 'camera-framing',
       text: 'Shot size: EXTREME close-up (head / upper-torso fills the frame).',
