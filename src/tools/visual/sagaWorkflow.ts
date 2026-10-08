@@ -128,7 +128,8 @@ const WORKFLOWS = new Map<string, SagaWorkflowState>();
 const WORKFLOW_TTL_MS = 30 * 60 * 1000;
 
 const CANCEL_RE = /^(?:取消|算了|停止|不要了|cancel|stop)$/i;
-const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok|yes|y|sure|default)$/i;
+// "默认/自动" and "default / auto" are what a menu button labelled with both sends.
+const CONFIRM_DEFAULT_RE = /^(?:默认(?:\s*\/\s*自动)?|自动(?:\s*\/\s*默认)?|建议|你定|可以|好|好的|ok|yes|y|sure|default(?:\s*\/\s*auto)?|auto(?:\s*\/\s*default)?)$/i;
 const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
 const ABSTRACT_RE = /^(?:无主角|纯视觉|纯风景|抽象视觉|abstract|no lead|no character|没有主角)$/i;
 const STORY_DIRECTIVE_RE = /(?:剧情|剧本|分镜|故事|镜头|场景|情节|你来创造|你来安排|你来写|自由发挥|按.*(?:拍|生成)|create the story|write the story|story|script|shot|scene)/i;
@@ -515,19 +516,51 @@ async function classifyReferences(
   };
 }
 
-function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
+async function imageContentKey(imagePath: string): Promise<string> {
+  try {
+    return 'h:' + createHash('sha256').update(await readFile(imagePath)).digest('hex');
+  } catch {
+    return 'p:' + imagePath;
+  }
+}
+
+/**
+ * Appends image paths to an accumulated list, skipping any whose bytes are
+ * already there. Across turns the same image can arrive as a pasted local
+ * path in one message and as an attachment (saved under saga-refs) in another;
+ * string comparison counted it twice. Existing entries keep their order; on a
+ * collision the stable saga-refs copy replaces a transient user path in place.
+ */
+async function appendImagePathsByContent(existing: string[], incoming: string[]): Promise<string[]> {
+  const refsDir = path.join(getMediaOutputRoot(), 'saga-refs');
+  const out: string[] = [];
+  const indexByKey = new Map<string, number>();
+  for (const imagePath of unique([...existing, ...incoming])) {
+    const key = await imageContentKey(imagePath);
+    const seenAt = indexByKey.get(key);
+    if (seenAt === undefined) {
+      indexByKey.set(key, out.length);
+      out.push(imagePath);
+    } else if (imagePath.startsWith(refsDir) && !out[seenAt]!.startsWith(refsDir)) {
+      out[seenAt] = imagePath;
+    }
+  }
+  return out;
+}
+
+async function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): Promise<void> {
   state.referenceImageUrls = unique([...state.referenceImageUrls, ...refs.imageUrls]);
   state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
   state.referenceAudioUrls = unique([...state.referenceAudioUrls, ...refs.audioUrls]);
-  state.referenceImagePaths = unique([...state.referenceImagePaths, ...refs.imagePaths]);
+  state.referenceImagePaths = await appendImagePathsByContent(state.referenceImagePaths, refs.imagePaths);
   state.referenceVideoPaths = unique([...state.referenceVideoPaths, ...refs.videoPaths]);
   state.referenceAudioPaths = unique([...state.referenceAudioPaths, ...refs.audioPaths]);
   state.updatedAt = Date.now();
 }
 
-function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
+async function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): Promise<void> {
   state.storyboardImageUrls = unique([...state.storyboardImageUrls, ...refs.imageUrls]);
-  state.storyboardImagePaths = unique([...state.storyboardImagePaths, ...refs.imagePaths]);
+  state.storyboardImagePaths = await appendImagePathsByContent(state.storyboardImagePaths, refs.imagePaths);
   // Non-image attachments sent while waiting for the storyboard are still useful
   // references, but image attachments are intentionally kept out of identity refs.
   state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
@@ -1510,7 +1543,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       }
 
       const rememberedImageNote = maybeRememberImageReferenceNotes(state, refs, text);
-      mergeRefs(state, refs);
+      await mergeRefs(state, refs);
       if (!rememberedImageNote) maybeRememberReferenceNote(state, text);
       maybeAccumulateStory(state, text);
 
@@ -1632,12 +1665,12 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       // "/path/x.jpg" on its own line never gets registered as an image
       // and the "完成"/"开始生成" branch keeps re-prompting.
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
-      mergeRefs(state, refs);
+      await mergeRefs(state, refs);
       // Move newly-merged reference images into the turnaround bucket so
       // they're tagged correctly for downstream (`identitySource: 'turnaround'`
       // tells generateLongVideo to skip superVisual generation).
       if (state.referenceImagePaths.length > 0 || state.referenceImageUrls.length > 0) {
-        state.turnaroundImagePaths.push(...state.referenceImagePaths);
+        state.turnaroundImagePaths = await appendImagePathsByContent(state.turnaroundImagePaths, state.referenceImagePaths);
         state.turnaroundImageUrls.push(...state.referenceImageUrls);
         state.referenceImagePaths = [];
         state.referenceImageUrls = [];
@@ -1669,7 +1702,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       const pairedDirectImageCaption = state.identitySource === 'direct_image'
         ? maybeRememberImageReferenceNotes(state, refs, text)
         : false;
-      mergeRefs(state, refs);
+      await mergeRefs(state, refs);
       if (START_RE.test(text) || DONE_RE.test(text)) {
         if (!hasCollectedAnyImage(state)) {
           const reply = state.identitySource === 'direct_image'
@@ -1700,7 +1733,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
     if (state.stage === 'awaiting_storyboard_image') {
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
-      mergeStoryboardRefs(state, refs);
+      await mergeStoryboardRefs(state, refs);
       maybeRememberReferenceNote(state, text);
       const storyboardCount = state.storyboardImageUrls.length + state.storyboardImagePaths.length;
       if (storyboardCount === 0) {
@@ -1842,7 +1875,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   // very message (Telegram image / inline URL), we want to capture them.
   if (multimodalCapable) {
     const refs = await classifyReferences(next.cwd, text, input.imageAttachments);
-    mergeRefs(next, refs);
+    await mergeRefs(next, refs);
   }
 
   next.stage = 'awaiting_subject_mode';

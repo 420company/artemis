@@ -425,6 +425,50 @@ async function main(): Promise<void> {
   assert.equal(cyberScript.handled, true, 'active Saga must keep pasted scripts inside collecting_refs even when they mention 系统/代码/生成/视频/吗');
   assert.match(cyberScript.reply, /剧本段 1|1 script segments/, 'cyber promo script should be archived as a script segment, not fall through to brain');
 
+  // The same image sent in two turns, once as an attachment (saved under
+  // saga-refs) and once as a pasted local path, counts as one image.
+  const previousMediaRoot = process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
+  process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = await mkdtemp(path.join(os.tmpdir(), 'artemis-saga-media-'));
+  try {
+    const imageBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(256, 7)]);
+    const localImage = path.join(cwd, 'lead-photo.png');
+    await writeFile(localImage, imageBytes);
+    const dedupKey = `${key}-cross-turn-dedup`;
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: '1' });
+    const askImage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: '3' });
+    assert.equal(askImage.handled, true);
+    const firstImage = await handleSagaLongVideoWorkflow({
+      scope: 'bridge',
+      key: dedupKey,
+      cwd,
+      locale: 'zh',
+      text: '',
+      imageAttachments: [{ data: imageBytes.toString('base64'), mediaType: 'image/png' }],
+    });
+    assert.match(firstImage.reply, /已收到 1 张|Got 1 /, `first upload should count as one image: ${firstImage.reply}`);
+    const samePathAgain = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: localImage });
+    assert.match(samePathAgain.reply, /已收到 1 张|Got 1 /, `the same image pasted as a path in a later turn must not count twice: ${samePathAgain.reply}`);
+  } finally {
+    if (previousMediaRoot === undefined) delete process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
+    else process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = previousMediaRoot;
+  }
+
+  // A menu button labelled "默认/自动" confirms the default, like "默认" alone.
+  const comboKey = `${key}-default-auto-combo`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '剧情你来创造。' });
+  const comboStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '开始生成' });
+  if (/确认.*主角|confirm the lead/i.test(comboStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: 'B 海边的女孩' });
+  }
+  const comboRatio = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认/自动' });
+  assert.match(comboRatio.reply, /是否携带字幕|include subtitles/i, `"默认/自动" should confirm the default ratio: ${comboRatio.reply}`);
+  const comboSubtitle = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认 / 自动' });
+  assert.match(comboSubtitle.reply, /最后确认一下总时长|confirm the total length/i, `"默认 / 自动" should confirm the default subtitle mode: ${comboSubtitle.reply}`);
+
   console.log('saga workflow explicit-trigger guard ok');
 }
 
