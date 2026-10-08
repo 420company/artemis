@@ -142,7 +142,7 @@ const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发�
 
 function wantsCleanDirectMode(segments: string[]): boolean {
   const text = segments.join('\n').toLowerCase();
-  return /(?:clean[-\s]?direct|raw[-\s]?seedance|raw\s*mode|直连\s*seedance|旧版质感|老版本质感|原始质感|不要滤镜|别加滤镜|少滤镜|无滤镜|干净质感|clean prompt|short prompt)/i.test(text);
+  return /(?:clean[-\s]?direct|raw[-\s]?seedance|raw\s*mode|raw[-\s]?直传|原样直传|直连\s*seedance|旧版质感|老版本质感|原始质感|不要滤镜|别加滤镜|少滤镜|无滤镜|干净质感|clean prompt|short prompt)/i.test(text);
 }
 
 function hasExplicitUserScriptText(segments: string[]): boolean {
@@ -948,6 +948,16 @@ const NARRATIVE_CONFIDENCE_THRESHOLD = 0.7;
 async function runNarrativeAnalysis(state: SagaWorkflowState): Promise<NarrativeEntities> {
   const fullStory = combinedStoryText(state);
   const imagePaths = [...state.referenceImagePaths];
+  // Raw mode sends the script and the references to the video model as they
+  // are: no LLM and vision analysis (which would lock props and scenery from
+  // the reference backgrounds) and no "confirm the lead" question. The
+  // keyword pass only feeds downstream routing.
+  if (wantsCleanDirectMode([state.originalText, ...state.accumulatedStory])) {
+    return narrativeKeywordFallback({
+      userText: fullStory,
+      hasFaceLikelyInImages: imagePaths.length > 0,
+    });
+  }
   const llmResult = await analyzeNarrative({
     cwd: state.cwd,
     userText: fullStory,

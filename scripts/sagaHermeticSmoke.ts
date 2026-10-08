@@ -14,6 +14,7 @@ import {
   superVisualImageLimit,
 } from '../src/tools/visual/superVisualMode.js';
 import { seedreamImageSize, seedreamPixelRange } from '../src/tools/visual/seedreamSizes.js';
+import { stripRawModeTag } from '../src/tools/generateLongVideo.js';
 
 const STORY = 'A young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
 
@@ -125,9 +126,46 @@ async function superVisualOnSeedream(): Promise<void> {
   assert.equal(imageBodies(t2i.requests).length, 0);
 }
 
+async function rawModeChecks(): Promise<void> {
+  assert.equal(stripRawModeTag('海边的女孩。\n\n[原样直传]'), '海边的女孩。');
+  assert.equal(stripRawModeTag('【raw直传】 kite story'), 'kite story');
+  assert.equal(stripRawModeTag('原样直传\n风筝'), '风筝');
+  assert.equal(stripRawModeTag('她说要原样直传这段剧本。'), '她说要原样直传这段剧本。', 'the word inside a sentence stays');
+  const rawStory = '[原样直传]\nA young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
+  const raw = await runHermeticSaga({ prompt: rawStory, story: rawStory, totalDuration: 10, ratio: '9:16', generateAudio: false, cleanDirect: true });
+  assert.equal(raw.result.ok, true, raw.result.output);
+  const tasks = videoTaskBodies(raw.requests);
+  assert.equal(tasks.length, 2);
+  const imagesIn = (body: Record<string, any>) => (body.content ?? []).filter((item: any) => item.type === 'image_url');
+  assert.equal(imagesIn(tasks[0]!).length, 0, 'segment 1 has no previous frame');
+  assert.equal(imagesIn(tasks[1]!).length, 1, 'raw mode still passes the previous tail frame to segment 2');
+  assert.match(raw.result.output, /chained=1\/2/);
+  const promptText = (body: Record<string, any>) => (body.content ?? []).filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n');
+  assert.ok(tasks.every((body) => !/原样直传/.test(promptText(body))), 'the raw-mode tag never reaches the video model');
+  assert.ok(tasks.every((body) => !/Artemis Director|Fibonacci|focal point/i.test(promptText(body))), 'raw mode bypasses the Director');
+  assert.equal(raw.requests.filter((r) => r.url.endsWith('/chat/completions')).length, 0, 'raw mode makes no narrative, rewrite or Director LLM calls');
+  assert.equal(imageBodies(raw.requests).filter(Boolean).length <= 1, true, 'raw mode generates no segment keyframes');
+}
+
+async function chainAccountingChecks(): Promise<void> {
+  // Segment 2's first request is rejected for its keyframe; the safe bridge
+  // re-render fails too, so the retry goes out without the keyframe and
+  // without any frame from segment 1. It must not be reported as chained.
+  const run = await runHermeticSaga(
+    { prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] },
+    { rejectVideoCreates: [2], imageFailFrom: 4 },
+  );
+  assert.equal(run.result.ok, true, run.result.output);
+  const tasks = videoTaskBodies(run.requests);
+  assert.equal(tasks.length, 3, 'segment 2 is retried once');
+  assert.match(run.result.output, /chained=0\/2/, run.result.output.split('\n').find((line) => line.includes('Continuity')));
+}
+
 seedreamSizeChecks();
 eligibilityChecks();
 budgetChecks();
 await resolutionChecks();
 await superVisualOnSeedream();
+await rawModeChecks();
+await chainAccountingChecks();
 console.log('saga hermetic smoke ok');

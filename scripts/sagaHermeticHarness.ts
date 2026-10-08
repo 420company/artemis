@@ -26,6 +26,10 @@ export type HermeticOptions = {
   imageProvider?: string;
   /** Answer image generations with this HTTP status instead of an image. */
   imageStatus?: number;
+  /** Image generations from this 1-based request number on fail with HTTP 500. */
+  imageFailFrom?: number;
+  /** 1-based video task creations answered with a privacy rejection of an input image. */
+  rejectVideoCreates?: number[];
 };
 
 const fixtureDir = path.join(root, 'fixtures');
@@ -98,6 +102,8 @@ export async function withHermeticWorkspace<T>(
   await configure(cwd, options);
   const requests: RecordedRequest[] = [];
   let taskCounter = 0;
+  let imageCounter = 0;
+  let createCounter = 0;
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -112,10 +118,16 @@ export async function withHermeticWorkspace<T>(
       return json(400, { error: { message: 'no llm in hermetic smoke' } });
     }
     if (url.endsWith('/images/generations')) {
+      imageCounter += 1;
+      if (options.imageFailFrom && imageCounter >= options.imageFailFrom) return json(500, { error: { message: 'image service down in this test' } });
       if (options.imageStatus) return json(options.imageStatus, { error: { message: 'image generation refused in this test' } });
       return json(200, { data: [{ url: 'https://cdn.example.test/still.png' }] });
     }
     if (method === 'POST' && url.endsWith('/contents/generations/tasks')) {
+      createCounter += 1;
+      if (options.rejectVideoCreates?.includes(createCounter)) {
+        return json(400, { error: { code: 'InputImageSensitiveContentDetected', message: 'The request failed because the input image may contain real person.' } });
+      }
       taskCounter += 1;
       return json(200, { id: `task-${taskCounter}` });
     }

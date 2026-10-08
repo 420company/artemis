@@ -250,7 +250,7 @@ export class CustomProvider implements VisualProvider {
       const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
       const durationNum = Math.max(1, Math.min(60, Math.floor(duration)))
       const ratio = params.ratio || '16:9'
-      const promptExtend = videoConfig.nsfw === true
+      const promptExtend = videoConfig.nsfw === true || params.promptExtend === false
         ? false
         : (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false
 
@@ -426,7 +426,7 @@ export class CustomProvider implements VisualProvider {
       const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
       const durationNum = Math.max(1, Math.min(15, Math.floor(duration)))
       const ratio = params.ratio || '16:9'
-      const promptExtend = videoConfig.nsfw === true
+      const promptExtend = videoConfig.nsfw === true || params.promptExtend === false
         ? false
         : (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false
 

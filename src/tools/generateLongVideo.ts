@@ -100,7 +100,14 @@ const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
 // 420 polls × 10s = 70min per attempt.
 const MIN_SAGA_SEGMENT_MAX_POLLS = 420;
 
-function superVisualBypassReason(identitySource: SagaIdentitySource | undefined, isPureEnvironment: boolean): string | null {
+function superVisualBypassReason(
+  identitySource: SagaIdentitySource | undefined,
+  isPureEnvironment: boolean,
+  rawMode = false,
+): string | null {
+  // Raw mode sends the script and the user's references straight to the
+  // video model: no generated turnaround sheet or keyframes.
+  if (rawMode) return 'raw-mode-direct-to-video';
   if (isPureEnvironment) return 'environment-mode-bypass';
   if (identitySource === 'text_only') return 'text-only-identity-bypass';
   if (identitySource === 'direct_image') return 'direct-image-direct-to-video';
@@ -920,6 +927,20 @@ async function probeSegment(filePath: string): Promise<SegmentProbe> {
   }
 }
 
+/**
+ * Removes the raw-mode switch ("[原样直传]", "【raw直传】", or the keyword alone
+ * on a line) from the story, so the video model never sees it. The word inside
+ * a sentence is left alone.
+ */
+export function stripRawModeTag(text: string): string {
+  return text
+    .replace(/[[【]\s*(?:原样直传|raw[-\s]?直传)\s*[\]】]/gi, ' ')
+    .replace(/^[ \t]*(?:原样直传|raw[-\s]?直传)[ \t]*$/gim, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function shouldChainFrames(action: GenerateLongVideoAction, providerSupportsImageRef: boolean): boolean {
   const mode = action.chainReferenceFrames ?? 'auto';
   if (mode === 'off') return false;
@@ -1010,7 +1031,7 @@ export async function executeGenerateLongVideo(
       // Side-channel is best-effort; fall through to action.story.
     }
 
-    const rawStory = sanitizeSagaUserText(resolvedSourceStory || action.prompt);
+    const rawStory = stripRawModeTag(sanitizeSagaUserText(resolvedSourceStory || action.prompt));
     const referenceNotes = sanitizeReferenceNotesForStory(nonEmptyStringArray(action.referenceNotes), rawStory);
     let story = [
       rawStory,
@@ -1131,11 +1152,13 @@ export async function executeGenerateLongVideo(
       // Saga workflow. Still run the same "god/protagonist" analysis here so
       // every long-video path gets one central subject and world model before
       // shot planning, critic checks, keyframes, and continuity prompts.
-      narrativeEntities = await analyzeNarrative({
+      // Raw mode skips the LLM and vision analysis: the keyword pass is
+      // enough for routing, and nothing from it reaches the prompts.
+      narrativeEntities = (action.cleanDirect === true ? null : await analyzeNarrative({
         cwd: context.cwd,
         userText: story,
         imagePaths: userReferenceImagePaths,
-      }) ?? narrativeKeywordFallback({
+      })) ?? narrativeKeywordFallback({
         userText: story,
         hasFaceLikelyInImages: hasGlobalUserImageReferences,
       });
@@ -1166,8 +1189,9 @@ export async function executeGenerateLongVideo(
 
     const isPureEnvironment = narrativeEntities?.mode === 'environment';
     const isDirectImageIdentity = identitySource === 'direct_image';
-    const explicitUserImageBypass = isDirectImageIdentity;
-    const superVisualBypass = superVisualBypassReason(identitySource, isPureEnvironment);
+    const rawMode = action.cleanDirect === true;
+    const explicitUserImageBypass = isDirectImageIdentity || rawMode;
+    const superVisualBypass = superVisualBypassReason(identitySource, isPureEnvironment, rawMode);
 
     // Every Super Visual image is billed: one turnaround now, and once the
     // segments are planned, one keyframe per segment plus a small allowance.
@@ -1642,7 +1666,9 @@ export async function executeGenerateLongVideo(
       'utf8',
     );
 
-    const chainFrames = cleanDirect ? false : shouldChainFrames(action, providerSupportsImageRef);
+    // Raw mode chains too: it has no keyframes, so the previous segment's
+    // tail frame is the only visual handoff between segments.
+    const chainFrames = shouldChainFrames(action, providerSupportsImageRef);
 
     // Audio is on by default unless the caller explicitly disabled it; we
     // retry with audio off if the provider's safety filter rejects the
@@ -1794,6 +1820,8 @@ export async function executeGenerateLongVideo(
           ratio,
           duration: segment.duration,
           ...(requestedResolution ? { resolution: requestedResolution } : {}),
+          // Raw mode: the segment prompt goes to the model as written.
+          ...(cleanDirect ? { cleanDirect: true } : {}),
           outputPath: segment.outputPath,
           referenceImageUrls: hasGlobalUserImageReferences ? userReferenceImageUrls : undefined,
           referenceVideoUrls: segment.index === 1 ? action.referenceVideoUrls : undefined,
@@ -1875,13 +1903,20 @@ export async function executeGenerateLongVideo(
           // screenshots to the video provider. So for real-person runs, we
           // deliberately omit the raw screenshot and rely on that generated
           // keyframe to bridge the scene.
-          const rawChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && !realPersonInput && !humanOrMixedSubject;
-          const proxyChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && (realPersonInput || humanOrMixedSubject) && Boolean(segmentKeyframe);
+          // Raw mode has no keyframe to carry the handoff, so it sends the
+          // tail frame itself for any subject except a real person's photo;
+          // a privacy rejection strips it and retries like any chain frame.
+          const rawChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && !realPersonInput
+            && (cleanDirect || !humanOrMixedSubject);
+          const proxyChainEligible = !cleanDirect && usingChain && segment.index > 1 && Boolean(previousLastFramePath) && (realPersonInput || humanOrMixedSubject) && Boolean(segmentKeyframe);
           const chainPaths: string[] = rawChainEligible && previousLastFramePath
             ? [previousLastFramePath]
             : [];
           const referenceImagePaths = cleanDirect
-            ? (usingUserImageReferences ? userReferenceImagePaths : [])
+            ? [
+              ...chainPaths,
+              ...(usingUserImageReferences ? userReferenceImagePaths : []),
+            ]
             : [
               ...keyframePaths,
               ...chainPaths,
@@ -1916,7 +1951,10 @@ export async function executeGenerateLongVideo(
           );
           if (result.ok) {
             succeeded = true;
-            if ((rawChainEligible || proxyChainEligible) && segment.index > 1 && previousLastFramePath) chainedFromPrev.push(segment.outputPath);
+            // Chained only when this request really carried the handoff: the
+            // previous tail frame itself, or the keyframe built from it.
+            const carriedHandoff = chainPaths.length > 0 || (proxyChainEligible && keyframePaths.length > 0);
+            if (carriedHandoff) chainedFromPrev.push(segment.outputPath);
             if (!usingChain && chainEnabled && previousLastFramePath) chainDroppedSegments.push(segment.index);
             if (hasGlobalUserImageReferences && !usingUserImageReferences) userImageReferenceDroppedSegments.push(segment.index);
             if (!usingAudio && userAudioPreference) audioRetriedSegments.push(segment.index);

@@ -547,7 +547,9 @@ async function generateVideoWithVisualProvider(
   // frame" / negative constraints) reliably dilutes explicit intent into
   // generic tasteful imagery. Skip the Director and pass the user's prompt
   // verbatim so the provider can render exactly what was asked for.
-  const bypassDirector = videoConfig.nsfw === true;
+  // Saga raw mode asks for the same: the script goes to the model as written.
+  const rawMode = action.cleanDirect === true;
+  const bypassDirector = videoConfig.nsfw === true || rawMode;
   const languageNormalized = bypassDirector
     ? null
     : await normalizeSagaPromptForVideoGeneration({
@@ -563,7 +565,7 @@ async function generateVideoWithVisualProvider(
   const directed = bypassDirector
     ? {
         directedPrompt: action.prompt,
-        providerProfile: 'NSFW provider: Director bypassed, prompt passed verbatim',
+        providerProfile: rawMode ? 'Raw mode: Director bypassed, prompt passed verbatim' : 'NSFW provider: Director bypassed, prompt passed verbatim',
       }
     : buildDirectedVideoPrompt({
         prompt: generationPrompt,
@@ -590,6 +592,7 @@ async function generateVideoWithVisualProvider(
     referenceAudioUrls,
     firstFrameImageUrls,
     lastFrameImageUrls,
+    ...(rawMode ? { promptExtend: false } : {}),
     generateAudio: action.generateAudio,
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,

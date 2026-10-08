@@ -169,6 +169,7 @@ import {
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
 import { detectVisualGenerationNeed, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
 import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
+import { createVisualProvider } from '../src/tools/visual/providers/interface.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -1697,6 +1698,32 @@ async function withMockedFetch<T>(
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
+}
+
+{
+  // Saga raw mode asks providers that rewrite prompts server-side not to.
+  const customVideo = (model: string) => createVisualProvider({
+    enabled: true,
+    image: { provider: 'custom', apiKey: '', baseUrl: '', model: '' },
+    video: { enabled: true, provider: 'custom', apiKey: 'k', baseUrl: 'https://relay.example.test/v1', model, defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false } },
+  } as any, 'video')
+  const promptExtendSent: unknown[] = []
+  await withMockedFetch(
+    () => new Response('{"error":{"message":"stop here"}}', { status: 500 }),
+    async (calls) => {
+      for (const model of ['wan2.5-t2v-preview', 'seedance-1-0-pro-250528']) {
+        const provider = await customVideo(model)
+        await provider.generateVideo!({ prompt: 'a kite over a hill', model, promptExtend: false })
+        await provider.generateVideo!({ prompt: 'a kite over a hill', model })
+      }
+      for (const call of calls) promptExtendSent.push(JSON.parse(call.body ?? '{}').prompt_extend ?? JSON.parse(call.body ?? '{}').parameters?.prompt_extend)
+    },
+  )
+  assert(
+    'custom video provider: promptExtend:false turns off prompt_extend for Wan and Seedance relays; the default stays on',
+    JSON.stringify(promptExtendSent) === JSON.stringify([false, true, false, true]),
+    JSON.stringify(promptExtendSent),
+  )
 }
 
 {

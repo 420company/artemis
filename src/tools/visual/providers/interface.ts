@@ -23,6 +23,8 @@ export interface VideoGenerationParams extends VisualGenerationParams {
   /** "480p" / "720p" / "1080p", only when the request asked for one. */
   resolution?: string
   generateAudio?: boolean
+  /** false asks providers that rewrite prompts server-side (Wan prompt_extend) not to. */
+  promptExtend?: boolean
   referenceImageUrls?: string[]
   referenceVideoUrls?: string[]
   referenceAudioUrls?: string[]

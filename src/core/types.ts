@@ -374,6 +374,9 @@ export type AgentAction =
       // the model's own default; custom/OpenAI providers use
       // visualProfile.video.defaultParams.resolution.
       resolution?: string;
+      // Saga raw mode: the prompt goes to the provider as written (no
+      // Director, no prompt rewrite or provider-side prompt extension).
+      cleanDirect?: boolean;
       outputPath?: string;
       referenceImageUrls?: string[];
       referenceVideoUrls?: string[];

@@ -488,6 +488,31 @@ async function main(): Promise<void> {
   assert.match(hdFinal.action?.prompt ?? '', /resolution: "1080p"/, 'workflow prompt should tell the model to pass resolution');
   assert.equal(afterBgmSkip.action?.resolution, undefined, 'no resolution is set unless the user named one');
 
+  // "[原样直传]" switches on raw mode, and raw mode skips the narrative LLM call.
+  const rawKey = `${key}-raw-tag`;
+  const originalFetch = globalThis.fetch;
+  let chatCalls = 0;
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+    if (String(input).endsWith('/chat/completions')) chatCalls += 1;
+    return new Response('{"error":{"message":"offline"}}', { status: 400 });
+  }) as typeof fetch;
+  try {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频 [原样直传]' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '1' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '4' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
+    const rawStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '开始生成' });
+    assert.doesNotMatch(rawStart.reply, /确认.*主角|confirm the lead/i, 'raw mode never asks to confirm the lead');
+    assert.equal(chatCalls, 0, 'raw mode skips the narrative LLM call');
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '10秒' });
+    const rawFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '不加' });
+    assert.equal(rawFinal.action?.cleanDirect, true, '"[原样直传]" should enable raw mode');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
   console.log('saga workflow explicit-trigger guard ok');
 }
 
