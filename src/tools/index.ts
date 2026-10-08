@@ -12,8 +12,8 @@ import type {
   ToolExecutionResult,
 } from './types.js';
 
-export function getToolManifest(): string {
-  return renderToolManifest();
+export function getToolManifest(allowedToolTypes?: readonly string[]): string {
+  return renderToolManifest(allowedToolTypes);
 }
 
 export function getDetailedToolManifest(): string {

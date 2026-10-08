@@ -306,22 +306,24 @@ export async function searchWeb(
   // auto：按优先级尝试，失败或 0 结果时穿透到下一个后端。
   // 旧实现只挑一个后端就返回——DDG 被风控/解析为空时整个搜索直接空手。
   const chain: SearchBackend[] = ['duckduckgo', 'bing', 'google', 'wikipedia'];
-  let lastError: string | undefined;
+  // Every backend's outcome goes into the error, so the caller can tell
+  // "nothing matched" apart from "no backend is usable on this host".
+  const outcomes: string[] = [];
   for (const candidate of chain) {
     try {
       const result = await runSearchBackend(candidate, query, limit);
       if (result.success && result.data.web.length > 0) {
         return result;
       }
-      if (result.error) lastError = result.error;
+      outcomes.push(`${candidate}: ${result.error ?? 'no results'}`);
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      outcomes.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return {
     success: false,
     data: { web: [] },
-    error: lastError ?? 'All search backends returned no results.',
+    error: `No search backend returned results (${outcomes.join('; ')}).`,
   };
 }
 
