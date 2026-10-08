@@ -342,10 +342,15 @@ export class ResponsesCompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
 
   private readonly config: ProviderConfig;
+  readonly model: string;
+  /** Set by the provider factory from the profile's context length or known-model rules. */
+  contextWindow?: number;
+  maxOutputTokens?: number;
 
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.model = config.model;
   }
 
   async complete(
@@ -458,6 +463,12 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       asNumber(usageRecord?.input_tokens) ?? asNumber(usageRecord?.prompt_tokens);
     const completionTokens =
       asNumber(usageRecord?.output_tokens) ?? asNumber(usageRecord?.completion_tokens);
+    const inputDetails =
+      usageRecord?.input_tokens_details && typeof usageRecord.input_tokens_details === 'object'
+        ? (usageRecord.input_tokens_details as Record<string, unknown>)
+        : undefined;
+    // input_tokens already includes cached tokens on the Responses API.
+    const cacheReadTokens = asNumber(inputDetails?.cached_tokens);
     const totalTokens =
       asNumber(usageRecord?.total_tokens) ??
       (typeof promptTokens === 'number' && typeof completionTokens === 'number'
@@ -472,6 +483,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       nativeToolCalls,
       usage: {
         promptTokens,
+        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
         completionTokens,
         totalTokens,
         durationMs: Math.max(Date.now() - startedAt, 0),

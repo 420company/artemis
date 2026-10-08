@@ -26,6 +26,11 @@ export type ProviderConfig = {
    * name (known vision families yes; DeepSeek and unknown models no).
    */
   supportsImages?: boolean;
+  /**
+   * Context window of the model in tokens, when known (profiles carry it from
+   * /models metadata, known-model rules or manual configuration).
+   */
+  contextLength?: number;
 };
 
 export type ProviderProfileTelemetry = {
@@ -182,9 +187,12 @@ export type AgentSetupConfig = {
   maxIterations: number;
   toolProgress: 'off' | 'new' | 'all' | 'verbose';
   compression: {
+    /** False disables proactive compaction; recovery from a context-overflow error stays on. */
     enabled: boolean;
-    /** Optional manual trigger ratio. When omitted, Artemis uses adaptive 55/65/70% thresholds by model window. */
+    /** Optional trigger ratio of the effective window (window - output reserve - margin). Default 0.78. */
     threshold?: number;
+    /** Optional cap on the context sent per request, below the model window (cost control). */
+    maxContextTokens?: number;
   };
   sessionReset: {
     mode: 'both' | 'idle' | 'daily' | 'never';
@@ -387,7 +395,19 @@ export type ProviderResponse = {
    */
   streamed?: boolean;
   usage?: {
+    /**
+     * Total input tokens of the request as the provider counted them,
+     * INCLUDING cached tokens (cache reads and cache writes). This is the
+     * size of the context that was sent, which is what context management
+     * needs; billing splits are in the fields below.
+     */
     promptTokens?: number;
+    /** Input tokens that were neither read from nor written to the cache, when reported. */
+    inputTokens?: number;
+    /** Input tokens served from the provider's prompt cache, when reported. */
+    cacheReadTokens?: number;
+    /** Input tokens written to the provider's prompt cache, when reported. */
+    cacheCreationTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
     /** Whether token counts came from provider usage or local fallback estimation. */
@@ -402,6 +422,12 @@ export type ProviderResponse = {
 
 export interface ChatProvider {
   readonly supportsNativeToolCalls?: boolean;
+  /** Model id this provider sends requests to, when known. */
+  readonly model?: string;
+  /** Context window (tokens) of the model behind this provider, when known. */
+  readonly contextWindow?: number;
+  /** Output tokens this provider reserves per completion (max_tokens), when known. */
+  readonly maxOutputTokens?: number;
   /** True if the provider accepts image attachments via ProviderRequestOptions.imageAttachments. */
   readonly supportsImages?: boolean;
   complete(

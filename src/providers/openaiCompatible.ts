@@ -16,6 +16,19 @@ import type {
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
 
+/**
+ * Cached-input counter of an OpenAI-style usage object. OpenAI reports it in
+ * prompt_tokens_details.cached_tokens; DeepSeek-style gateways report
+ * prompt_cache_hit_tokens. prompt_tokens already includes cached tokens.
+ */
+export function readOpenAICachedPromptTokens(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== 'object') return undefined
+  const record = usage as Record<string, unknown>
+  const details = record['prompt_tokens_details'] as Record<string, unknown> | undefined
+  const cached = details?.['cached_tokens'] ?? record['prompt_cache_hit_tokens']
+  return typeof cached === 'number' && Number.isFinite(cached) ? cached : undefined
+}
+
 function buildProviderErrorMessage(
   response: Response,
   body: string,
@@ -461,10 +474,15 @@ export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly supportsNativeToolCalls = true;
   private readonly config: ProviderConfig;
+  readonly model: string;
+  /** Set by the provider factory from the profile's context length or known-model rules. */
+  contextWindow?: number;
+  maxOutputTokens?: number;
 
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.model = config.model;
   }
 
   // ── Streaming (SSE) ───────────────────────────────────────────────────────
@@ -569,6 +587,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let promptTokens = 0
     let completionTokens = 0
     let totalTokens = 0
+    let cacheReadTokens: number | undefined
     let firstResponseMs: number | undefined
     let responseModel = this.config.model
     const guardStreamingText = options?.guardStreamingText === true
@@ -699,6 +718,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
             promptTokens    = (usage['prompt_tokens']     as number | undefined) ?? promptTokens
             completionTokens = (usage['completion_tokens'] as number | undefined) ?? completionTokens
             totalTokens     = (usage['total_tokens']      as number | undefined) ?? totalTokens
+            cacheReadTokens = readOpenAICachedPromptTokens(usage) ?? cacheReadTokens
           }
 
           // Meaningful increments reset the idle deadline; keep-alive comments
@@ -738,6 +758,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       streamed: emittedVisibleText,
       usage: {
         promptTokens:     promptTokens || undefined,
+        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
         completionTokens: completionTokens || undefined,
         totalTokens:      totalTokens || undefined,
         durationMs: Math.max(Date.now() - startedAt, 0),
@@ -785,6 +806,9 @@ export class OpenAICompatibleProvider implements ChatProvider {
       streamed: false,
       usage: {
         promptTokens: json.usage?.prompt_tokens,
+        ...(readOpenAICachedPromptTokens(json.usage) !== undefined
+          ? { cacheReadTokens: readOpenAICachedPromptTokens(json.usage) }
+          : {}),
         completionTokens: json.usage?.completion_tokens,
         totalTokens: json.usage?.total_tokens,
         durationMs: Math.max(Date.now() - startedAt, 0),
@@ -891,6 +915,9 @@ export class OpenAICompatibleProvider implements ChatProvider {
       reasoningContent,
       usage: {
         promptTokens: json.usage?.prompt_tokens,
+        ...(readOpenAICachedPromptTokens(json.usage) !== undefined
+          ? { cacheReadTokens: readOpenAICachedPromptTokens(json.usage) }
+          : {}),
         completionTokens: json.usage?.completion_tokens,
         totalTokens: json.usage?.total_tokens,
         durationMs: Math.max(Date.now() - startedAt, 0),

@@ -12,6 +12,7 @@ import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } fr
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { compressMessages, type CompressResult } from './core/contextCompressor.js';
 import { estimateTokens, estimateMessageTokens, estimateMessagesTokens } from './core/tokenEstimation.js';
+import { providerPromptTokens } from './core/compaction/accounting.js';
 import {
   recordCollapse,
   getOrCreateLedger,
@@ -161,8 +162,16 @@ let setupToolCache:
     }
     | null = null;
 
-/** Read last recorded prompt token count (for HUD / compression decisions). */
+/**
+ * Input size of the most recent provider request (cache reads and writes
+ * included): the current context size, for the HUD. Not a sum across rounds.
+ */
 export function getLastPromptTokens() { return _lastPromptTokens; }
+
+function noteRequestPromptTokens(usage: ProviderResponse['usage'] | undefined): void {
+    const tokens = providerPromptTokens(usage) ?? usage?.promptTokens;
+    if (typeof tokens === 'number' && tokens > 0) _lastPromptTokens = tokens;
+}
 
 /** Apply CLI flag overrides. Call once before first think(). */
 export function applyProviderOverrides(opts: any) {
@@ -2479,13 +2488,17 @@ function normalizeThinkArgs(
 function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any> {
     const usage = result.usage ?? {};
     const hasProviderPrompt = typeof usage.promptTokens === 'number' && usage.promptTokens > 0;
-    _lastPromptTokens = usage.promptTokens ?? _lastPromptTokens;
+    // promptTokens here is the turn's cumulative billing total across tool
+    // rounds; the context size is the last request's count (_lastPromptTokens).
     return {
         contextLimit: estimateContextLimit(
             result.model ?? providerConfig?.model ?? '',
             normalizeContextLimit(providerConfig?.contextLength),
         ),
         promptTokens: usage.promptTokens ?? 0,
+        contextTokens: _lastPromptTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
         tokenUsageSource: usage.source ?? (hasProviderPrompt ? 'provider' : 'estimated'),
@@ -2934,6 +2947,7 @@ export async function think(
             continue;
         }
         const completion = completionAttempt.completion;
+        noteRequestPromptTokens(completion.usage);
         cumulativeUsage = accumulateProviderUsage(cumulativeUsage, completion.usage);
         finalResult = completion;
 
@@ -2962,6 +2976,7 @@ export async function think(
                     continue nativeRoundLoop;
                 }
                 const forcedCompletion = forcedAttempt.completion;
+                noteRequestPromptTokens(forcedCompletion.usage);
                 cumulativeUsage = accumulateProviderUsage(cumulativeUsage, forcedCompletion.usage);
                 const forcedReply = (forcedCompletion.text ?? '').trim() || [
                     '我已经停止继续调用工具。',

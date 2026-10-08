@@ -13,7 +13,7 @@ import {
   CliSettingsStore,
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
 } from '../src/cli/settings.js'
-import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
+import { applyProviderOverrides, getLastPromptTokens, resetSession, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
@@ -7263,11 +7263,16 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       artifactPath,
     )
     assert(
-      'provider telemetry: cumulative usage is not double-counted after native tools',
+      'provider telemetry: cumulative (billing) usage is not double-counted after native tools',
       result.tokenStats?.promptTokens === 300 &&
         result.tokenStats?.completionTokens === 30 &&
         result.tokenStats?.totalTokens === 330,
       JSON.stringify(result.tokenStats),
+    )
+    assert(
+      'provider telemetry: context size is the last request (200), not the sum across tool rounds (300)',
+      getLastPromptTokens() === 200 && result.tokenStats?.contextTokens === 200,
+      `last=${getLastPromptTokens()} stats=${JSON.stringify(result.tokenStats)}`,
     )
   } finally {
     process.chdir(originalCwd)

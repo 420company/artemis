@@ -36,6 +36,11 @@ const SPECIALIST_ROLES = new Set<AgentRole>([
 export type ProviderRouter = {
   ensureSpecialistProvider(roles: AgentRole[]): Promise<void>;
   resolveProvider(target: ProviderTarget): ChatProvider;
+  /**
+   * Provider for background summarization (context compaction): the
+   * configured worker/specialist model when there is one, else the main model.
+   */
+  resolveSummarizerProvider(): ChatProvider;
 };
 
 type CreateProviderRouterOptions = {
@@ -328,6 +333,10 @@ export async function createProviderRouter(
       );
     },
 
+    resolveSummarizerProvider(): ChatProvider {
+      return specialistProvider ?? options.mainProvider;
+    },
+
     resolveProvider(target: ProviderTarget, task?: string): ChatProvider {
       const buildCandidates = (): RoutedProviderCandidate[] => {
         const candidates: RoutedProviderCandidate[] = [
@@ -422,6 +431,20 @@ export async function createProviderRouter(
         },
         get supportsImages() {
           return buildCandidates().some((candidate) => candidate.provider.supportsImages === true);
+        },
+        // Any candidate may serve the request (fallback on failure), so the
+        // budget must fit the smallest known window among them.
+        get contextWindow() {
+          const windows = buildCandidates()
+            .map((candidate) => candidate.provider.contextWindow)
+            .filter((value): value is number => typeof value === 'number' && value > 0);
+          return windows.length > 0 ? Math.min(...windows) : undefined;
+        },
+        get maxOutputTokens() {
+          const outputs = buildCandidates()
+            .map((candidate) => candidate.provider.maxOutputTokens)
+            .filter((value): value is number => typeof value === 'number' && value > 0);
+          return outputs.length > 0 ? Math.max(...outputs) : undefined;
         },
         async complete(
           messages: SessionMessage[],

@@ -187,6 +187,14 @@ function stripImagesFromMessagesBody(
   return strippedAny ? { ...body, messages: nextMessages } : null;
 }
 
+function mergeStreamUsage(target: AnthropicUsage, next: AnthropicUsage | undefined): void {
+  if (!next) return;
+  for (const key of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'] as const) {
+    const value = next[key];
+    if (typeof value === 'number' && Number.isFinite(value)) target[key] = value;
+  }
+}
+
 // ── Message mapping ───────────────────────────────────────────────────────────
 
 function mapMessage(message: SessionMessage): { role: 'user' | 'assistant'; content: AnthropicMessageContent } {
@@ -322,14 +330,53 @@ type ParsedMessage = {
   nativeToolCalls?: Array<{ name: string; arguments: string; callId: string }>;
   rawContentBlocks?: AnthropicContentBlockObject[];
   promptTokens?: number;
+  inputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   completionTokens?: number;
 };
+
+type AnthropicUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+};
+
+/**
+ * Anthropic reports uncached input, cache reads and cache writes as three
+ * separate counters. The context actually sent is their sum; reporting only
+ * `input_tokens` makes a cached 150K-token conversation look like a few
+ * hundred tokens and context management never triggers.
+ */
+export function summarizeAnthropicUsage(usage: AnthropicUsage | undefined): {
+  promptTokens?: number;
+  inputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  completionTokens?: number;
+} {
+  if (!usage) return {};
+  const num = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  const inputTokens = num(usage.input_tokens);
+  const cacheReadTokens = num(usage.cache_read_input_tokens);
+  const cacheCreationTokens = num(usage.cache_creation_input_tokens);
+  const anyInput = inputTokens !== undefined || cacheReadTokens !== undefined || cacheCreationTokens !== undefined;
+  return {
+    promptTokens: anyInput ? (inputTokens ?? 0) + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0) : undefined,
+    inputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    completionTokens: num(usage.output_tokens),
+  };
+}
 
 function parseMessageJson(json: {
   model?: string;
   stop_reason?: string;
   stop_details?: { explanation?: string };
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: AnthropicUsage;
   content?: AnthropicContentBlockObject[];
 }): ParsedMessage {
   const text = extractText(json.content);
@@ -357,8 +404,7 @@ function parseMessageJson(json: {
     stopExplanation: typeof json.stop_details?.explanation === 'string' ? json.stop_details.explanation : undefined,
     nativeToolCalls,
     rawContentBlocks,
-    promptTokens: json.usage?.input_tokens,
-    completionTokens: json.usage?.output_tokens,
+    ...summarizeAnthropicUsage(json.usage),
   };
 }
 
@@ -366,10 +412,16 @@ export class MessagesCompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly supportsNativeToolCalls = true;
   private readonly config: ProviderConfig;
+  readonly model: string;
+  /** Set by the provider factory from the profile's context length or known-model rules. */
+  contextWindow?: number;
+  maxOutputTokens?: number;
 
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.model = config.model;
+    this.maxOutputTokens = resolveMaxTokens(config.model, true);
   }
 
   private buildRequestBody(
@@ -496,6 +548,9 @@ export class MessagesCompatibleProvider implements ChatProvider {
       ...(streamed !== undefined ? { streamed } : {}),
       usage: {
         promptTokens: parsed.promptTokens,
+        ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens } : {}),
+        ...(parsed.cacheReadTokens !== undefined ? { cacheReadTokens: parsed.cacheReadTokens } : {}),
+        ...(parsed.cacheCreationTokens !== undefined ? { cacheCreationTokens: parsed.cacheCreationTokens } : {}),
         completionTokens: parsed.completionTokens,
         totalTokens:
           typeof parsed.promptTokens === 'number' && typeof parsed.completionTokens === 'number'
@@ -567,8 +622,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
     let responseModel: string | undefined;
     let stopReason: string | undefined;
     let stopExplanation: string | undefined;
-    let promptTokens: number | undefined;
-    let completionTokens: number | undefined;
+    const streamUsage: AnthropicUsage = {};
     let firstResponseMs: number | undefined;
     let emittedVisibleText = false;
 
@@ -582,9 +636,9 @@ export class MessagesCompatibleProvider implements ChatProvider {
         throw new Error(errInfo?.message || 'Provider returned a stream error event.');
       }
       if (type === 'message_start') {
-        const msg = payload.message as { model?: string; usage?: { input_tokens?: number } } | undefined;
+        const msg = payload.message as { model?: string; usage?: AnthropicUsage } | undefined;
         if (typeof msg?.model === 'string') responseModel = msg.model;
-        if (typeof msg?.usage?.input_tokens === 'number') promptTokens = msg.usage.input_tokens;
+        mergeStreamUsage(streamUsage, msg?.usage);
         return;
       }
       if (type === 'content_block_start') {
@@ -637,10 +691,11 @@ export class MessagesCompatibleProvider implements ChatProvider {
       }
       if (type === 'message_delta') {
         const delta = payload.delta as { stop_reason?: string; stop_details?: { explanation?: string } } | undefined;
-        const usage = payload.usage as { output_tokens?: number } | undefined;
         if (typeof delta?.stop_reason === 'string') stopReason = delta.stop_reason;
         if (typeof delta?.stop_details?.explanation === 'string') stopExplanation = delta.stop_details.explanation;
-        if (typeof usage?.output_tokens === 'number') completionTokens = usage.output_tokens;
+        // message_delta carries cumulative counters; newer API versions also
+        // repeat the input and cache counters here.
+        mergeStreamUsage(streamUsage, payload.usage as AnthropicUsage | undefined);
       }
     };
 
@@ -708,7 +763,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
       model: responseModel,
       stop_reason: stopReason,
       stop_details: stopExplanation ? { explanation: stopExplanation } : undefined,
-      usage: { input_tokens: promptTokens, output_tokens: completionTokens },
+      usage: streamUsage,
       content,
     });
     return this.finishResponse(parsed, options, startedAt, firstResponseMs, emittedVisibleText);
