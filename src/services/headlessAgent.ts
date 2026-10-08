@@ -78,11 +78,13 @@ export async function runHeadlessAgent(
       title: opts.sessionTitle ?? `Headless: ${prompt.slice(0, 48)}`,
     })
 
-  // A missing or unreadable image fails the run: the user expects it to be seen.
-  const { loadImageForModel, MAX_IMAGES_PER_REQUEST } = await import('../core/imageInput.js')
-  const paths = opts.imagePaths ?? []
-  if (paths.length > MAX_IMAGES_PER_REQUEST) throw new Error(`At most ${MAX_IMAGES_PER_REQUEST} images per message`)
-  const imageAttachments = await Promise.all(paths.map((p) => loadImageForModel(p, cwd)))
+  // A missing, unreadable or oversized image, or a model that cannot see
+  // images, fails the run: the user expects every image to be seen.
+  const { loadPromptImages } = await import('../core/imageInput.js')
+  const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd, {
+    supportsImages: provider.supportsImages,
+    name: providerConfig.model,
+  })
 
   const started = Date.now()
   const result = await runAgent(session, prompt, {

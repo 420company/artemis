@@ -4,18 +4,29 @@
  * works (the `view_image` tool: screenshots, generated pictures, uploads it
  * found in the workspace).
  *
- * Attachments ride on the next provider request of the run, the same way
- * the interactive chat sends pasted images. Providers that cannot take
- * images never get them.
+ * User attachments ride on the first provider request of the run; images the
+ * agent views ride on the request right after the tool call. Viewed images are
+ * held in a queue owned by one run (see ViewedImageQueue), so nothing outlives
+ * the run or reaches another session. Models that cannot see images never get
+ * them: the tool fails and `--image` is rejected instead.
  */
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { ImageAttachment, ImageMediaType } from '../providers/types.js';
 
-/** Base64 grows the bytes by a third; providers cap requests near 20 MB. */
-export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/**
+ * Raw bytes per image. Base64 grows the data by a third, and Anthropic rejects
+ * an image whose base64 exceeds 5 MB, so 3.75 MB raw is the largest image every
+ * supported provider accepts.
+ */
+export const MAX_IMAGE_BYTES = (5 * 1024 * 1024 * 3) / 4;
 /** Images attached to one request at most. */
 export const MAX_IMAGES_PER_REQUEST = 8;
+/**
+ * Raw image bytes attached to one request at most (about 20 MB once base64
+ * encoded), well under the request-size caps of the providers (Anthropic 32 MB).
+ */
+export const MAX_REQUEST_IMAGE_BYTES = 15 * 1024 * 1024;
 
 export class ImageInputError extends Error {}
 
@@ -35,41 +46,132 @@ export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
   return undefined;
 }
 
-/** Reads an image for the model. Throws ImageInputError with a reason the model or user can act on. */
-export async function loadImageForModel(filePath: string, cwd: string): Promise<ImageAttachment> {
-  const absolute = path.resolve(cwd, filePath);
+/** Decoded size of an attachment, from its base64 length. */
+export function imageByteSize(image: ImageAttachment): number {
+  const data = image.data;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(2).replace(/\.?0+$/, '')} MB`;
+}
+
+/**
+ * Reads an image for the model. `absolutePath` must already be resolved (and,
+ * for agent tools, checked against the workspace); `displayPath` is what error
+ * messages and the label show. Throws ImageInputError with a reason the model
+ * or user can act on.
+ */
+export async function loadImageFile(absolutePath: string, displayPath: string): Promise<ImageAttachment> {
   let size: number;
   try {
-    const info = await stat(absolute);
-    if (!info.isFile()) throw new ImageInputError(`${filePath} is not a file`);
+    const info = await stat(absolutePath);
+    if (!info.isFile()) throw new ImageInputError(`${displayPath} is not a file`);
     size = info.size;
   } catch (error) {
     if (error instanceof ImageInputError) throw error;
-    throw new ImageInputError(`cannot read ${filePath}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`);
+    throw new ImageInputError(`cannot read ${displayPath}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`);
   }
   if (size > MAX_IMAGE_BYTES) {
-    throw new ImageInputError(`${filePath} is ${(size / 1024 / 1024).toFixed(1)} MB; images up to ${MAX_IMAGE_BYTES / 1024 / 1024} MB can be viewed (make a smaller copy first)`);
+    throw new ImageInputError(`${displayPath} is ${formatMegabytes(size)}; images up to ${formatMegabytes(MAX_IMAGE_BYTES)} can be sent to the model (make a smaller copy first)`);
   }
-  const bytes = await readFile(absolute);
+  const bytes = await readFile(absolutePath);
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    throw new ImageInputError(`${displayPath} is ${formatMegabytes(bytes.length)}; images up to ${formatMegabytes(MAX_IMAGE_BYTES)} can be sent to the model (make a smaller copy first)`);
+  }
   const mediaType = sniffImageType(bytes);
-  if (!mediaType) throw new ImageInputError(`${filePath} is not a PNG, JPEG, GIF or WebP image`);
-  return { data: bytes.toString('base64'), mediaType, label: `Image: ${path.relative(cwd, absolute) || path.basename(absolute)}` };
+  if (!mediaType) throw new ImageInputError(`${displayPath} is not a PNG, JPEG, GIF or WebP image`);
+  return { data: bytes.toString('base64'), mediaType, label: `Image: ${displayPath}` };
 }
 
-/** Images a run queued with view_image, by session, until the next provider request takes them. */
-const queued = new Map<string, ImageAttachment[]>();
-
-export function queueImage(sessionId: string, image: ImageAttachment): number {
-  const list = queued.get(sessionId) ?? [];
-  list.push(image);
-  // Keep the newest few: older ones the model already chose to look past.
-  while (list.length > MAX_IMAGES_PER_REQUEST) list.shift();
-  queued.set(sessionId, list);
-  return list.length;
+/** Reads an image named relative to `cwd`, with no workspace restriction (the user named it on the command line). */
+export async function loadImageForModel(filePath: string, cwd: string): Promise<ImageAttachment> {
+  const absolute = path.resolve(cwd, filePath);
+  return loadImageFile(absolute, path.relative(cwd, absolute) || path.basename(absolute));
 }
 
-export function takeQueuedImages(sessionId: string): ImageAttachment[] {
-  const list = queued.get(sessionId) ?? [];
-  queued.delete(sessionId);
-  return list;
+/**
+ * Loads the images a user attached to a prompt (`--image`). Fails before the
+ * run starts when the model cannot see images or the images do not fit in one
+ * request, because the user expects every one of them to be seen.
+ */
+export async function loadPromptImages(
+  paths: readonly string[],
+  cwd: string,
+  model: { supportsImages?: boolean; name?: string },
+): Promise<ImageAttachment[]> {
+  if (paths.length === 0) return [];
+  if (model.supportsImages !== true) {
+    throw new ImageInputError(
+      `The model${model.name ? ` ${model.name}` : ''} cannot see images, so --image cannot be used with it. ` +
+        'Use a vision model, or set "supportsImages": true on its provider profile if it does accept images.',
+    );
+  }
+  if (paths.length > MAX_IMAGES_PER_REQUEST) {
+    throw new ImageInputError(`At most ${MAX_IMAGES_PER_REQUEST} images per message (got ${paths.length})`);
+  }
+  const images = await Promise.all(paths.map((p) => loadImageForModel(p, cwd)));
+  const total = images.reduce((sum, image) => sum + imageByteSize(image), 0);
+  if (total > MAX_REQUEST_IMAGE_BYTES) {
+    throw new ImageInputError(`The images add up to ${formatMegabytes(total)}; at most ${formatMegabytes(MAX_REQUEST_IMAGE_BYTES)} can go with one message`);
+  }
+  return images;
+}
+
+/**
+ * Keeps the newest images that fit in one request (count and total bytes).
+ * Returns what was kept, in the original order, and what was left out.
+ */
+export function fitImagesToRequest(images: readonly ImageAttachment[]): { kept: ImageAttachment[]; dropped: ImageAttachment[] } {
+  const kept: ImageAttachment[] = [];
+  const dropped: ImageAttachment[] = [];
+  let bytes = 0;
+  for (let i = images.length - 1; i >= 0; i -= 1) {
+    const image = images[i]!;
+    const size = imageByteSize(image);
+    if (kept.length < MAX_IMAGES_PER_REQUEST && bytes + size <= MAX_REQUEST_IMAGE_BYTES) {
+      kept.unshift(image);
+      bytes += size;
+    } else {
+      dropped.unshift(image);
+    }
+  }
+  return { kept, dropped };
+}
+
+/**
+ * Images one agent run queued with view_image, until the next provider request
+ * of that run takes them. Each run creates its own queue, so images never
+ * outlive the run or reach another run, session or sub-agent.
+ */
+export class ViewedImageQueue {
+  private images: ImageAttachment[] = [];
+  /**
+   * Whether the model the run is talking to can see images. The run sets it
+   * every turn; view_image fails while it is false.
+   */
+  acceptsImages = true;
+
+  /**
+   * Queues an image for the next request. When the queue would exceed the
+   * per-request count or byte budget, the oldest queued images are dropped and
+   * returned so the caller can say so.
+   */
+  add(image: ImageAttachment): ImageAttachment[] {
+    const { kept, dropped } = fitImagesToRequest([...this.images, image]);
+    this.images = kept;
+    return dropped;
+  }
+
+  /** Removes and returns everything queued. */
+  take(): ImageAttachment[] {
+    const images = this.images;
+    this.images = [];
+    return images;
+  }
+
+  get size(): number {
+    return this.images.length;
+  }
 }

@@ -70,7 +70,7 @@ import {
   getDelegatedChildPermissionMode,
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
-import { MAX_IMAGES_PER_REQUEST, takeQueuedImages } from './imageInput.js';
+import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
 import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
@@ -3521,6 +3521,19 @@ async function handleVerificationReminder(
   options.onInfo?.('[verification] reminder injected');
 }
 
+/**
+ * Spread into a delegated child run's options: the user's images belong to the
+ * parent's request, and the child run gets its own view_image queue.
+ */
+const CHILD_RUN_IMAGE_RESET = {
+  imageAttachments: undefined,
+  viewedImages: undefined,
+} as const satisfies Partial<RunAgentOptions>;
+
+/** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
+const VIEW_IMAGE_UNAVAILABLE_SECTION =
+  'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+
 export type RunAgentOptions = {
   cwd: string;
   locale?: UiLocale;
@@ -3543,8 +3556,15 @@ export type RunAgentOptions = {
    * Images to attach to the first user turn.
    * Passed directly to the provider if it supports images.
    * Ignored on subsequent turns and by providers without supportsImages.
+   * Not passed on to delegated sub-agents.
    */
   imageAttachments?: import('../providers/types.ts').ImageAttachment[];
+  /**
+   * Internal: the images view_image queued for the next request of this run.
+   * runAgent creates one per run (any value passed in is replaced), so viewed
+   * images never outlive the run or reach another session.
+   */
+  viewedImages?: ViewedImageQueue;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -3825,6 +3845,7 @@ export async function runBuilderProposalAgent(
         {
           ...options,
           ...coordination,
+          ...CHILD_RUN_IMAGE_RESET,
           permissionManager: childPermissionManager,
           maxTurns: childMaxTurns,
           profile: 'builder',
@@ -4022,6 +4043,7 @@ export async function approveBuilderExecution(
         {
           ...options,
           ...coordination,
+          ...CHILD_RUN_IMAGE_RESET,
           permissionManager: createDelegatedChildPermissionManager(
             options.permissionManager,
             'builder',
@@ -4194,6 +4216,7 @@ export async function runSpecialistAgent(
       runAgent(childSession, task, {
         ...options,
         ...coordination,
+        ...CHILD_RUN_IMAGE_RESET,
         permissionManager: childPermissionManager,
         maxTurns: childMaxTurns,
         profile: role,
@@ -4635,6 +4658,7 @@ async function executeAgentAction(
           options.permissionManager.getMode(),
         ),
         sessionId: session.id,
+        viewedImages: options.viewedImages,
         context: {
           profile: options.profile ?? 'main',
           runtimeId: options.rootRuntimeId,
@@ -5985,9 +6009,13 @@ export async function runAgent(
       permissionMode: options.permissionManager.getMode(),
       runtimeId: options.rootRuntimeId,
     }));
+  // Images view_image queues for the next request. Owned by this run alone:
+  // nothing queued here survives the run or reaches another session.
+  const viewedImages = new ViewedImageQueue();
   const runOptions: RunAgentOptions = {
     ...options,
     heimdallThreadState,
+    viewedImages,
   };
   if (shouldOwnHeimdallState) {
     await recordHeimdallStage(
@@ -6254,6 +6282,26 @@ export async function runAgent(
     }
   }
 
+  /**
+   * The images for the next request: `userImages` plus whatever view_image
+   * queued since the last request, trimmed to one request's count and byte
+   * budget. Nothing goes to a model that cannot see images.
+   */
+  function takeRequestImages(
+    userImages: readonly import('../providers/types.ts').ImageAttachment[],
+    provider: ChatProvider,
+  ): import('../providers/types.ts').ImageAttachment[] {
+    const { kept, dropped } = fitImagesToRequest([...userImages, ...viewedImages.take()]);
+    if (dropped.length > 0) {
+      options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
+    }
+    if (kept.length > 0 && provider.supportsImages !== true) {
+      options.onInfo?.(`[images] this model cannot take images; ${kept.length} dropped`);
+      return [];
+    }
+    return kept;
+  }
+
   async function runNativeToolLoop(
     provider: ChatProvider,
     providerMessages: SessionMessage[],
@@ -6323,11 +6371,17 @@ export async function runAgent(
           continue;
         }
 
+        // Same options as before plus this run's image queue; a workspace
+        // switch made by the tool is carried back to `options`.
+        const nativeActionOptions: RunAgentOptions = { ...options, viewedImages };
         const outcome = await executeWithRunningInterjectionCheck(
           session,
           mapped.action,
-          options,
+          nativeActionOptions,
         );
+        if (nativeActionOptions.cwd !== options.cwd) {
+          options.cwd = nativeActionOptions.cwd;
+        }
         outcomes.push(outcome);
         toolOutputs.push({
           callId: call.callId,
@@ -6345,6 +6399,9 @@ export async function runAgent(
         await options.sessionStore.save(session);
       }
 
+      // Images the tools just queued (view_image) go with the continuation,
+      // so the model sees them in the very next round.
+      const continuationImages = takeRequestImages([], provider);
       currentCompletion = await completeProviderTurn(
         provider,
         providerMessages,
@@ -6352,6 +6409,7 @@ export async function runAgent(
           previousResponseId: currentCompletion.responseId,
           toolOutputs,
           nativeFunctionTools,
+          ...(continuationImages.length ? { imageAttachments: continuationImages } : {}),
         },
       );
     }
@@ -6417,6 +6475,11 @@ export async function runAgent(
     }
     const activeProvider =
       options.resolveProvider?.(profile) ?? options.provider;
+    // view_image only exists for models that can see images: it is left out
+    // of the native tools, the prompt says it is unavailable, and the tool
+    // itself fails while the flag is off.
+    const modelSeesImages = activeProvider.supportsImages === true;
+    viewedImages.acceptsImages = modelSeesImages;
     const context = await buildContextWindow(session, profile, {
       cwd: options.cwd,
       contextLength: options.contextLength,
@@ -6454,6 +6517,7 @@ export async function runAgent(
       [
         ...extensionRuntime.sections,
         ...(odinRuntimeSection ? [odinRuntimeSection] : []),
+        ...(modelSeesImages ? [] : [VIEW_IMAGE_UNAVAILABLE_SECTION]),
       ],
     );
     const latestUserRequest = extractLatestUserRequest(context.messages);
@@ -6482,7 +6546,7 @@ export async function runAgent(
           allowedActionTypes: getNativeAllowedActionTypesForRuntime(
             profile,
             options.permissionManager.getMode(),
-          ),
+          ).filter((type) => modelSeesImages || type !== 'view_image'),
           allowReadOnlyMcpToolCalls: true,
         })
         : undefined;
@@ -6529,17 +6593,13 @@ export async function runAgent(
     const nativeFunctionTools = nativeToolRuntime?.tools;
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
-    const viewedImages = takeQueuedImages(session.id);
-    const requestImages = [
-      ...(turn === 1 ? options.imageAttachments ?? [] : []),
-      ...viewedImages,
-    ].slice(-MAX_IMAGES_PER_REQUEST);
-    if (requestImages.length && !activeProvider.supportsImages) {
-      options.onInfo?.(`[images] this model cannot take images; ${requestImages.length} dropped`);
-    }
+    const requestImages = takeRequestImages(
+      turn === 1 ? options.imageAttachments ?? [] : [],
+      activeProvider,
+    );
     const providerCallOptions = {
       nativeFunctionTools,
-      imageAttachments: requestImages.length && activeProvider.supportsImages ? requestImages : undefined,
+      imageAttachments: requestImages.length ? requestImages : undefined,
     };
     // Stream the model output live to the workflow UI when the provider
     // supports it. We forward each delta as a `[stream-chunk]` info line,

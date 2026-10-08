@@ -368,8 +368,15 @@ export async function createProviderRouter(
 
       const tryRankedProviders = async (
         run: (candidate: RoutedProviderCandidate) => Promise<ProviderResponse>,
+        requestOptions?: ProviderRequestOptions,
       ): Promise<ProviderResponse> => {
-        const ranked = rankForTarget(buildCandidates());
+        let ranked = rankForTarget(buildCandidates());
+        // A request with images only goes to models that can see them; the
+        // others would reject it (or silently get a note instead).
+        if (requestOptions?.imageAttachments?.length) {
+          const withImages = ranked.filter((candidate) => candidate.provider.supportsImages === true);
+          if (withImages.length > 0) ranked = withImages;
+        }
         let lastError: unknown;
 
         for (let index = 0; index < ranked.length; index += 1) {
@@ -420,8 +427,9 @@ export async function createProviderRouter(
           messages: SessionMessage[],
           requestOptions?: ProviderRequestOptions,
         ) {
-          return tryRankedProviders((candidate) =>
-            candidate.provider.complete(messages, requestOptions),
+          return tryRankedProviders(
+            (candidate) => candidate.provider.complete(messages, requestOptions),
+            requestOptions,
           );
         },
         async completeStream(
@@ -429,10 +437,12 @@ export async function createProviderRouter(
           onChunk: (delta: string) => void,
           requestOptions?: ProviderRequestOptions,
         ) {
-          return tryRankedProviders((candidate) =>
-            typeof candidate.provider.completeStream === 'function'
-              ? candidate.provider.completeStream(messages, onChunk, requestOptions)
-              : candidate.provider.complete(messages, requestOptions),
+          return tryRankedProviders(
+            (candidate) =>
+              typeof candidate.provider.completeStream === 'function'
+                ? candidate.provider.completeStream(messages, onChunk, requestOptions)
+                : candidate.provider.complete(messages, requestOptions),
+            requestOptions,
           );
         },
       };

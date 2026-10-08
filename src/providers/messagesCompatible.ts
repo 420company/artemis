@@ -12,6 +12,7 @@ import type {
   ProviderRequestOptions,
   ProviderResponse,
 } from './types.js';
+import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
 
 function cleanProviderBody(body: string): string {
   return body.trim();
@@ -228,9 +229,14 @@ function mapMessage(message: SessionMessage): { role: 'user' | 'assistant'; cont
   return { role: 'user', content: message.content };
 }
 
+/**
+ * Attaches images to the newest user message, keeping what it already holds.
+ * Models that cannot see images get a short note instead.
+ */
 function injectImagesIntoMessages(
   mapped: Array<{ role: 'user' | 'assistant'; content: AnthropicMessageContent }>,
   attachments: import('./types.ts').ImageAttachment[],
+  supportsImages: boolean,
 ): void {
   let lastUserIdx = -1;
   for (let i = mapped.length - 1; i >= 0; i -= 1) {
@@ -241,17 +247,21 @@ function injectImagesIntoMessages(
   }
   if (lastUserIdx < 0 || attachments.length === 0) return;
 
-  const existingText = mapped[lastUserIdx]!.content;
-  const textStr = typeof existingText === 'string' ? existingText : '';
-  const imageBlocks = attachments.map((img) => ({
-    type: 'image',
-    source: { type: 'base64', media_type: img.mediaType, data: img.data },
-    ...(img.label ? { _label: img.label } : {}),
-  }));
-  mapped[lastUserIdx] = {
-    role: 'user',
-    content: [...imageBlocks, { type: 'text', text: textStr }],
-  };
+  const existing = mapped[lastUserIdx]!.content;
+  const addedBlocks: AnthropicContentBlockObject[] = supportsImages
+    ? attachments.map((img) => ({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.data },
+    }))
+    : [{ type: 'text', text: describeOmittedImages(attachments.length) }];
+  // Plain text: images go first (the order Anthropic recommends). Block
+  // content: the existing blocks stay first, since tool_result blocks must
+  // lead their message.
+  const content: AnthropicContentBlockObject[] =
+    typeof existing === 'string'
+      ? [...addedBlocks, ...(existing ? [{ type: 'text', text: existing }] : [])]
+      : [...(Array.isArray(existing) ? existing : []), ...addedBlocks];
+  mapped[lastUserIdx] = { role: 'user', content };
 }
 
 // Prompt caching: mark the last block of the newest user message so the whole
@@ -353,12 +363,13 @@ function parseMessageJson(json: {
 }
 
 export class MessagesCompatibleProvider implements ChatProvider {
-  readonly supportsImages = true;
+  readonly supportsImages: boolean;
   readonly supportsNativeToolCalls = true;
   private readonly config: ProviderConfig;
 
   constructor(config: ProviderConfig) {
     this.config = config;
+    this.supportsImages = modelSupportsImages(config);
   }
 
   private buildRequestBody(
@@ -376,7 +387,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
       .map(mapMessage);
 
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(messagesApiMessages, options.imageAttachments);
+      injectImagesIntoMessages(messagesApiMessages, options.imageAttachments, this.supportsImages);
     }
     addConversationCacheBreakpoint(messagesApiMessages);
 
