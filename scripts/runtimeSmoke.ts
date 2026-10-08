@@ -13,14 +13,41 @@ import {
   CliSettingsStore,
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
 } from '../src/cli/settings.js'
-import { applyProviderOverrides, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
+import { applyProviderOverrides, getLastPromptTokens, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
-import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
+import { parseAssistantEnvelopeForSmoke, runAgent as runAgentNow } from '../src/core/agent.js'
+import { settleMemoryCuration } from '../src/core/memory.js'
 import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
-import { runHeadlessAgent } from '../src/services/headlessAgent.js'
+import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
+
+// A finished run starts the memory curator in the background, which reads
+// process state (cwd, ARTEMIS_HOME, provider stores) when it runs. Every run
+// here waits for it, so no curator outlives its test and touches the next
+// test's files.
+const runAgent: typeof runAgentNow = async (...args) => {
+  try {
+    return await runAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
+const runHeadlessAgent: typeof runHeadlessAgentNow = async (...args) => {
+  try {
+    return await runHeadlessAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile, validateProfileAction } from '../src/core/agentProfiles.js'
-import { buildContextWindow } from '../src/core/context.js'
+import {
+  createContextState,
+  isCompactionBoundary,
+  manageContext,
+  resolveContextBudget,
+  summarySectionTitles,
+  type SummarizeFn,
+} from '../src/core/compaction/index.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
@@ -74,7 +101,6 @@ import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
-import { compressMessages, getCompressionTriggerTokens, getMicrocompactTriggerTokens } from '../src/core/contextCompressor.js'
 import { createHudState, estimateContextLimit, renderHud, updateHudState } from '../src/cli/hud.js'
 import {
   buildPostCompactRecoveryMessages,
@@ -205,6 +231,15 @@ function openAIToolCallsRemainPaired(messages: SessionMessage[]): boolean {
     if (messages[i + 1]?.role !== 'tool') return false
   }
   return true
+}
+
+/** Fake summarizer for compaction tests: 8 required sections plus the markers it saw. */
+function sectionSummarizer(onPrompt?: (prompt: string) => void, markers: RegExp = /[A-Z][A-Z0-9_]{12,}|src\/[\w./-]+/g): SummarizeFn {
+  return async ({ prompt }) => {
+    onPrompt?.(prompt)
+    const seen = [...new Set(prompt.match(markers) ?? [])].join(', ') || 'none'
+    return summarySectionTitles('en').map((title, i) => `## ${i + 1}. ${title}\n${seen}`).join('\n')
+  }
 }
 
 console.log('\n  runtimeSmoke')
@@ -2698,7 +2733,8 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     'view_image: hidden from a model that cannot see images, and fails (no image sent) when called anyway',
     textOnly.nativeToolNames.every((names) => !names.includes('view_image')) &&
       textOnly.seen.every((n) => n === undefined) &&
-      /cannot see images/.test(textOnly.toolText) &&
+      /Images cannot be viewed here/.test(textOnly.toolText) &&
+      /Do not mention plans, tiers or models/.test(textOnly.toolText) &&
       !/is attached to your next step/.test(textOnly.toolText),
     JSON.stringify({ seen: textOnly.seen, tool: textOnly.toolText.slice(0, 300) }),
   )
@@ -2801,7 +2837,7 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
       'image wire format: a text-only model (DeepSeek) gets a note instead of the image, never base64 text',
       deepseek.provider.supportsImages === false &&
         typeof deepseek.content === 'string' &&
-        /omitted: this model cannot see images/.test(deepseek.content) &&
+        /not shown: they cannot be read in this request/.test(deepseek.content) &&
         !deepseek.raw.includes(image.data),
       deepseek.raw.slice(0, 300),
     )
@@ -2971,7 +3007,6 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
       defaultMainProfileId: 'mock-openai',
       profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
     }))
-    const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
     const { memoryDirForScope } = await import('../src/storage/memoryFiles.js')
     const result = await runHeadlessAgent(project, 'Remember: deploys go to staging first, and reply in Simplified Chinese.', { maxTurns: 3 })
     const list = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
@@ -3325,7 +3360,6 @@ const ONE_PIXEL_PNG_BASE64 =
   // (b) A headless image request runs generate_image end to end against a mock
   // image endpoint. runInBackground is ignored headless: the file exists when
   // the run returns, and the model saw the tool result before answering.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     configureVisual: true,
     chat: (index) => index === 1
@@ -3370,7 +3404,6 @@ const ONE_PIXEL_PNG_BASE64 =
   // references, headless: the attached photo is described by the helper,
   // view_image returns the description, and generate_image sends the photo
   // as a reference and saves the result before the run returns.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   let mainCalls = 0
   let visionCalls = 0
   await withMockHeadlessHost({
@@ -3432,7 +3465,6 @@ const ONE_PIXEL_PNG_BASE64 =
 {
   // (c) No visual provider configured: the image request ends quickly with an
   // honest "not configured" answer, never a 60-turn checklist loop.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     chat: (index) => index === 1
       ? '<toolcall name="generate_image">{"prompt":"a red fox in the snow"}</toolcall>'
@@ -3601,7 +3633,6 @@ const ONE_PIXEL_PNG_BASE64 =
 {
   // (d) No usable search backend: search_web reports what is missing and the
   // run ends with an honest answer instead of looping.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     chat: (index) => index === 1
       ? '<toolcall name="search_web">{"query":"latest Node.js LTS version"}</toolcall>'
@@ -3845,12 +3876,17 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'user',
     `${'design-detail '.repeat(4_550)}${marker}${' trailing-detail'.repeat(300)}`,
   )
-  const context = await buildContextWindow(session, 'main')
-  const latestUser = context.messages.find((message) => message.role === 'user')?.content ?? ''
+  const managed = await manageContext({
+    messages: session.messages,
+    fixedTokens: 8_000,
+    budget: resolveContextBudget({ contextWindow: 128_000 }),
+    state: createContextState(),
+  })
+  const latestUser = managed.messages.find((message) => message.role === 'user')?.content ?? ''
 
   assert(
     'context window: latest design/workflow handoff preserves content near 65535 chars',
-    latestUser.includes(marker) && latestUser.length > 60_000,
+    latestUser.includes(marker) && latestUser.length > 60_000 && latestUser === session.messages[0]?.content,
     `length=${latestUser.length} marker=${latestUser.includes(marker)}`,
   )
 
@@ -3862,18 +3898,32 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   fs.mkdirSync(tmpDir, { recursive: true })
   const store = new SessionStore(tmpDir)
   const session = store.createSession({ title: 'tool intake truncation smoke' })
+  const rawOutput = `${'line\n'.repeat(5_000)}IMPORTANT_TAIL`
   const rawToolResult = JSON.stringify({
     ok: true,
     action: { type: 'run_command', command: 'npm test' },
-    output: `${'line\n'.repeat(1_400)}IMPORTANT_TAIL`,
+    output: rawOutput,
   })
   store.appendMessage(session, 'tool', rawToolResult, 'run_command')
   const stored = session.messages[0]?.content ?? ''
+  const storedEnvelope = JSON.parse(stored) as { output: string; outputSavedTo?: string }
 
   assert(
-    'session store: tool messages are truncated before entering history',
-    stored.length < rawToolResult.length && stored.includes('IMPORTANT_TAIL') && stored.includes('truncated'),
+    'session store: large tool messages are spilled to a file (preview + path) before entering history',
+    stored.length < rawToolResult.length &&
+      storedEnvelope.output.includes('IMPORTANT_TAIL') &&
+      storedEnvelope.output.includes('line\nline') &&
+      typeof storedEnvelope.outputSavedTo === 'string' &&
+      storedEnvelope.outputSavedTo.startsWith(store.getContextDir(session.id)) &&
+      fs.readFileSync(storedEnvelope.outputSavedTo, 'utf8') === rawOutput,
     `stored=${stored.length} raw=${rawToolResult.length}`,
+  )
+
+  const mediumToolResult = JSON.stringify({ ok: true, action: { type: 'run_command', command: 'npm test' }, output: 'line\n'.repeat(1_400) })
+  store.appendMessage(session, 'tool', mediumToolResult, 'run_command')
+  assert(
+    'session store: medium tool messages are kept whole (no lossy head/tail cut)',
+    session.messages[1]?.content === mediumToolResult,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -3893,12 +3943,19 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     }), 'run_command')
   }
   store.appendMessage(session, 'user', 'latest task')
-  const context = await buildContextWindow(session, 'main')
+  const budget = resolveContextBudget({ contextWindow: 32_000 })
+  const managed = await manageContext({
+    messages: session.messages,
+    fixedTokens: 4_000,
+    budget,
+    state: createContextState(),
+    storage: store.getContextStorage(session),
+  })
 
   assert(
     'context window: compacted main context stays below the send budget',
-    context.stats.approxChars <= 72_000 + 24_000,
-    `approx=${context.stats.approxChars}`,
+    managed.tokensAfter <= budget.threshold && managed.messages.at(-1)?.content === 'latest task',
+    `tokens=${managed.tokensAfter} threshold=${budget.threshold} action=${managed.action}`,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -3956,23 +4013,42 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       estimateContextLimit('anthropic.claude-opus-5-5-v1:0') === 1_000_000 &&
       estimateContextLimit('claude-haiku-4-5') === 200_000,
   )
+  const gpt56 = resolveContextBudget({ contextWindow: estimateContextLimit('gpt-5.6-sol', 1_000_000) })
   assert(
     'context compression: GPT-5.6 auto-compaction follows the reduced window',
-    getCompressionTriggerTokens(GPT_5_6_CONTEXT_LENGTH) === 217_600,
-    `trigger=${getCompressionTriggerTokens(GPT_5_6_CONTEXT_LENGTH)}`,
+    gpt56.window === GPT_5_6_CONTEXT_LENGTH && gpt56.threshold < GPT_5_6_CONTEXT_LENGTH * 0.8 && gpt56.threshold > GPT_5_6_CONTEXT_LENGTH * 0.6,
+    `threshold=${gpt56.threshold}`,
   )
 }
 
 {
+  const large = resolveContextBudget({ contextWindow: 1_000_000 })
   assert(
     'context compression: 1M-token models keep large-window full compaction headroom',
-    getCompressionTriggerTokens(1_000_000) === 700_000,
-    `trigger=${getCompressionTriggerTokens(1_000_000)}`,
+    large.threshold >= 650_000 && large.threshold < 1_000_000 - large.reservedOutput,
+    `threshold=${large.threshold}`,
   )
+  // Clearing old tool output is the first step at the threshold; the
+  // summarizer only runs when clearing is not enough.
+  const now = new Date().toISOString()
+  const messages: SessionMessage[] = [{ id: 'u0', role: 'user', content: 'start', createdAt: now }]
+  for (let i = 0; i < 40; i += 1) {
+    messages.push({ id: `a${i}`, role: 'assistant', content: `step ${i}`, createdAt: now })
+    messages.push({ id: `t${i}`, role: 'tool', name: 'run_command', content: `build log ${i}\n`.repeat(6_000), createdAt: now })
+  }
+  messages.push({ id: 'u-tail', role: 'user', content: 'latest task', createdAt: now })
+  let summarizerCalled = false
+  const result = await manageContext({
+    messages,
+    fixedTokens: 20_000,
+    budget: large,
+    state: createContextState(),
+    summarize: async () => { summarizerCalled = true; return 'x'.repeat(100) },
+  })
   assert(
-    'context compression: 1M-token models still microcompact tool output at 250K',
-    getMicrocompactTriggerTokens(1_000_000) === 250_000,
-    `trigger=${getMicrocompactTriggerTokens(1_000_000)}`,
+    'context compression: 1M-token models clear old tool output before summarizing',
+    result.action === 'clear_tool_results' && !summarizerCalled && result.tokensAfter < large.target,
+    `action=${result.action} before=${result.tokensBefore} after=${result.tokensAfter}`,
   )
 }
 
@@ -4039,24 +4115,23 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   messages.push({ id: 'lt-tail', role: 'user', content: 'latest long task tail marker', createdAt: now })
 
   let promptSeen = ''
-  const result = await compressMessages(messages, async (prompt) => {
-    promptSeen = prompt
-    return `\`\`\`json
-{"goal":"8h long task","current_task":"latest long task tail marker","completed":[],"in_progress":["continue"],"key_decisions":["${mustKeep}"],"relevant_files":["src/long-0.ts"],"modified_files":[],"tools_and_commands":["read_file","run_command"],"validation":["synthetic long task compact"],"risks":["do not forget user constraints"],"next_steps":["continue"],"critical_context":"${mustKeep}"}
-\`\`\``
-  }, {
-    tokenLimit: 140_000,
-    protectTailTokens: 10_000,
-    currentFocus: 'latest long task tail marker',
+  const result = await manageContext({
+    messages,
+    fixedTokens: 10_000,
+    budget: resolveContextBudget({ contextWindow: 140_000 }),
+    state: createContextState(),
+    summarize: sectionSummarizer((prompt) => { promptSeen += prompt }),
+    reason: 'manual',
   })
 
   assert(
     'context compression: full compact summary input preserves old user constraints during long tasks',
-    result.mode === 'full_compact' &&
+    result.action === 'summary' &&
       promptSeen.includes(mustKeep) &&
-      result.summaryText?.includes(mustKeep) === true &&
+      result.summary?.includes(mustKeep) === true &&
+      result.messages[0]!.content.includes(mustKeep) &&
       result.messages.some(m => m.content.includes('latest long task tail marker')),
-    `mode=${result.mode} promptHas=${promptSeen.includes(mustKeep)} summary=${result.summaryText?.slice(0, 300)}`,
+    `action=${result.action} promptHas=${promptSeen.includes(mustKeep)} summary=${result.summary?.slice(0, 300)}`,
   )
 }
 
@@ -4081,27 +4156,27 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   messages.push({ id: 'fc-tail', role: 'user', content: 'latest full compact task marker', createdAt: now })
 
   let summarizerCalled = 0
-  const result = await compressMessages(messages, async () => {
-    summarizerCalled += 1
-    return `\`\`\`json
-{"goal":"test full compact","current_task":"latest full compact task marker","completed":[],"in_progress":["continue full compact test"],"key_decisions":[],"relevant_files":["src/full-0.ts"],"modified_files":[],"tools_and_commands":["read_file"],"validation":["synthetic full compact"],"risks":[],"next_steps":["assert result"],"critical_context":"keep marker"}
-\`\`\``
-  }, {
-    tokenLimit: 120_000,
-    protectTailTokens: 8_000,
-    currentFocus: 'latest full compact task marker',
+  const budget = resolveContextBudget({ contextWindow: 120_000 })
+  const result = await manageContext({
+    messages,
+    fixedTokens: 8_000,
+    budget,
+    state: createContextState(),
+    summarize: sectionSummarizer(() => { summarizerCalled += 1 }),
   })
 
   assert(
     'context compression: full compact emits summary mode and preserves recent tail',
-    result.compressed === true &&
-      result.mode === 'full_compact' &&
-      summarizerCalled === 1 &&
-      Boolean(result.summaryText) &&
+    result.changed === true &&
+      result.action === 'summary' &&
+      summarizerCalled >= 1 &&
+      Boolean(result.summary) &&
       result.tokensAfter < result.tokensBefore &&
-      result.messages.some(m => m.content.includes('[对话摘要]')) &&
+      result.tokensAfter <= budget.threshold &&
+      isCompactionBoundary(result.messages[0]) &&
+      result.messages[0]!.content.includes('## 1. Goals and latest instructions') &&
       result.messages.some(m => m.content.includes('latest full compact task marker')),
-    `mode=${result.mode} called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
+    `action=${result.action} called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
   )
 }
 
@@ -4113,9 +4188,10 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     id: 't-read',
     role: 'tool',
     name: 'read_file',
+    // The real path A envelope: the action that ran, then its output.
     content: JSON.stringify({
       ok: true,
-      path: 'src/old-context.ts',
+      action: { type: 'read_file', path: 'src/old-context.ts' },
       output: [
         "import fs from 'node:fs'",
         'export function keepImportantShape() {',
@@ -4128,33 +4204,34 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   messages.push({ id: 'u-tail', role: 'user', content: 'latest task should stay raw', createdAt: now })
 
   let summarizerCalled = false
-  const result = await compressMessages(messages, async () => {
-    summarizerCalled = true
-    return '[summary]'
-  }, {
-    tokenLimit: 1_000_000,
-    churnMultiplier: 4,
-    protectTailTokens: 1,
+  const contextDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-clear-read-'))
+  const { createContextStorage } = await import('../src/core/compaction/index.js')
+  const result = await manageContext({
+    messages,
+    fixedTokens: 8_000,
+    budget: resolveContextBudget({ contextWindow: GPT_5_6_CONTEXT_LENGTH }),
+    state: createContextState(),
+    storage: createContextStorage(contextDir),
+    summarize: async () => { summarizerCalled = true; return 'x'.repeat(100) },
   })
 
   const readFileMsg = result.messages.find(m => m.id === 't-read')
   assert(
-    'context compression: churn protection does not delay deterministic microcompact',
-    result.compressed === true &&
-      result.mode === 'microcompact' &&
+    'context compression: an oversized old read_file result is cleared deterministically (no summarizer)',
+    result.action === 'clear_tool_results' &&
       summarizerCalled === false &&
       result.tokensAfter < result.tokensBefore,
-    `mode=${result.mode} called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
+    `action=${result.action} called=${summarizerCalled} before=${result.tokensBefore} after=${result.tokensAfter}`,
   )
   assert(
-    'context compression: old read_file output degrades to file skeleton with metadata',
-    result.readFileSkeletonsExtracted === 1 &&
-      typeof readFileMsg?.content === 'string' &&
-      readFileMsg.content.includes('contextSkeletonExtracted') &&
+    'context compression: cleared read_file names the file and keeps the original on disk',
+    typeof readFileMsg?.content === 'string' &&
       readFileMsg.content.includes('src/old-context.ts') &&
-      readFileMsg.content.includes('keepImportantShape'),
+      typeof readFileMsg.contextCleared?.savedTo === 'string' &&
+      fs.readFileSync(readFileMsg.contextCleared.savedTo, 'utf8').includes('keepImportantShape'),
     readFileMsg?.content.slice(0, 500),
   )
+  fs.rmSync(contextDir, { recursive: true, force: true })
 }
 
 {
@@ -4177,16 +4254,17 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   messages.push({ id: 'u-tail', role: 'user', content: 'latest task should stay raw', createdAt: now })
 
   let summarizerCalled = false
-  const result = await compressMessages(messages, async () => {
-    summarizerCalled = true
-    return '[summary]'
-  }, {
-    tokenLimit: 1_000_000,
+  const result = await manageContext({
+    messages,
+    fixedTokens: 8_000,
+    budget: resolveContextBudget({ contextWindow: GPT_5_6_CONTEXT_LENGTH }),
+    state: createContextState(),
+    summarize: async () => { summarizerCalled = true; return 'x'.repeat(100) },
   })
 
   assert(
     'context compression: microcompact prunes old tool output without summarizing large-window conversations',
-    result.compressed === true &&
+    result.changed === true &&
       summarizerCalled === false &&
       result.tokensAfter < result.tokensBefore &&
       result.messages.at(-1)?.content === 'latest task should stay raw',
@@ -4208,12 +4286,20 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     }), 'read_file')
   }
   store.appendMessage(session, 'user', 'latest task')
-  const context = await buildContextWindow(session, 'main', { contextLength: 1_000_000 })
+  // The cost cap is now explicit (setup.agent.compression.maxContextTokens).
+  const budget = resolveContextBudget({ contextWindow: 1_000_000, maxContextTokens: 80_000 })
+  const managed = await manageContext({
+    messages: session.messages,
+    fixedTokens: 8_000,
+    budget,
+    state: createContextState(),
+    storage: store.getContextStorage(session),
+  })
 
   assert(
     'context window: large model metadata does not expand active context past cost cap',
-    context.stats.approxChars <= 320_000,
-    `approx=${context.stats.approxChars}`,
+    budget.window === 80_000 && managed.tokensAfter <= budget.threshold,
+    `tokens=${managed.tokensAfter} threshold=${budget.threshold}`,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -8546,14 +8632,13 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     { id: 'u2', role: 'user', content: 'tail '.repeat(2_000), createdAt: now },
   ]
 
-  await compressMessages(messages, async (prompt) => {
-    summarizePrompt = prompt
-    return '[summary]'
-  }, {
-    tokenLimit: 100,
-    threshold: 0.5,
-    protectHead: 0,
-    protectTailTokens: 0,
+  await manageContext({
+    messages,
+    fixedTokens: 200,
+    budget: resolveContextBudget({ contextWindow: 8_000 }),
+    state: createContextState(),
+    summarize: sectionSummarizer((prompt) => { summarizePrompt += prompt }),
+    reason: 'manual',
   })
 
   assert(
@@ -8565,7 +8650,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 {
   const now = new Date().toISOString()
   const currentTaskMarker = 'CURRENT_TASK_MARKER_keep_latest_requirement_after_compression'
-  const modifiedFile = 'src/core/contextCompressor.ts'
+  const modifiedFile = 'src/core/compaction/manager.ts'
   const messages: SessionMessage[] = [
     { id: 'u1', role: 'user', content: `Please continue the context compression audit. ${currentTaskMarker} ${'x'.repeat(900)}`, createdAt: now },
     { id: 'a1', role: 'assistant', content: `I changed ${modifiedFile} and still need to validate.`, createdAt: now },
@@ -8573,44 +8658,29 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   ]
 
   let summarizePrompt = ''
-  const result = await compressMessages(messages, async (prompt) => {
-    summarizePrompt = prompt
-    return '```json\n' + JSON.stringify({
-      goal: 'Audit context compression safety.',
-      current_task: `Continue the compression audit; preserve ${currentTaskMarker}.`,
-      completed: ['Inspected compressor implementation.'],
-      in_progress: ['Adding regression coverage.'],
-      key_decisions: ['Compression summaries must preserve task core, files, tools, and validation state.'],
-      relevant_files: [modifiedFile],
-      modified_files: [modifiedFile],
-      tools_and_commands: ['read_file', 'apply_patch', 'npm run typecheck'],
-      validation: ['Not yet run in this synthetic case.'],
-      risks: ['Summary may omit the latest requirement or modified files.'],
-      next_steps: ['Run targeted runtime smoke.'],
-      critical_context: 'Do not claim validation results that were not observed.',
-    }) + '\n```'
-  }, {
-    tokenLimit: 100,
-    threshold: 0.5,
-    protectHead: 0,
-    protectTailTokens: 0,
+  const result = await manageContext({
+    messages,
+    fixedTokens: 200,
+    budget: resolveContextBudget({ contextWindow: 8_000 }),
+    state: createContextState(),
+    summarize: sectionSummarizer((prompt) => { summarizePrompt += prompt }, /CURRENT_TASK_MARKER_\w+|src\/[\w./-]+/g),
+    reason: 'manual',
   })
 
   const compactedContent = result.messages.map(m => m.content).join('\n')
   assert(
     'context compression: summary prompt preserves longer latest user task markers',
     summarizePrompt.includes(currentTaskMarker),
-    summarizePrompt,
+    summarizePrompt.slice(0, 500),
   )
   assert(
-    'context compression: structured summary preserves current task, modified files, tools, validation and risks',
-    compactedContent.includes('当前任务：') &&
-      compactedContent.includes(currentTaskMarker) &&
-      compactedContent.includes(`已修改文件：${modifiedFile}`) &&
-      compactedContent.includes('工具与命令：') &&
-      compactedContent.includes('验证：') &&
-      compactedContent.includes('风险/注意：'),
-    compactedContent,
+    'context compression: structured summary preserves current task, modified files, and all required sections',
+    compactedContent.includes(currentTaskMarker) &&
+      compactedContent.includes(modifiedFile) &&
+      summarySectionTitles('en').every((title) => compactedContent.includes(title)) &&
+      summarizePrompt.includes('Pending tasks and next step') &&
+      summarizePrompt.includes('Files and artifacts'),
+    compactedContent.slice(0, 800),
   )
 }
 
@@ -8629,16 +8699,18 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     { id: 'u2', role: 'user', content: 'x'.repeat(2400), createdAt: now },
   ]
 
-  const result = await compressMessages(messages, async () => '[summary]', {
-    tokenLimit: 100,
-    threshold: 0.5,
-    protectHead: 2,
-    protectTailTokens: 0,
+  const result = await manageContext({
+    messages,
+    fixedTokens: 100,
+    budget: resolveContextBudget({ contextWindow: 4_000 }),
+    state: createContextState(),
+    summarize: sectionSummarizer(),
+    reason: 'manual',
   })
 
   assert(
     'context compression: head boundary does not split OpenAI tool_calls from tool results',
-    openAIToolCallsRemainPaired(result.messages),
+    openAIToolCallsRemainPaired(result.messages) && result.messages[0]?.role !== 'tool',
   )
 }
 
@@ -8658,45 +8730,48 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     { id: 'u3', role: 'user', content: 'tail', createdAt: now },
   ]
 
-  const result = await compressMessages(messages, async () => '[summary]', {
-    tokenLimit: 120,
-    threshold: 0.5,
-    protectHead: 1,
-    protectTailTokens: 2,
+  const result = await manageContext({
+    messages,
+    fixedTokens: 100,
+    budget: resolveContextBudget({ contextWindow: 4_000 }),
+    state: createContextState(),
+    summarize: sectionSummarizer(),
+    reason: 'manual',
   })
 
   assert(
     'context compression: tail boundary does not split OpenAI tool_calls from tool results',
-    openAIToolCallsRemainPaired(result.messages),
+    openAIToolCallsRemainPaired(result.messages) && result.messages.every((m, i) => m.role !== 'tool' || i > 0),
   )
 }
 
-// ── Tool-type-aware microcompact ──────────────────────────────────────────────
+// ── Tool-type-aware clearing of old tool results ──────────────────────────────
 
 {
   const now = new Date().toISOString()
   const messages: SessionMessage[] = [
     { id: 'u1', role: 'user', content: 'read and modify file', createdAt: now },
-    // A read_file output — should be compacted (read-only, deterministic)
+    // A read_file output — cleared when old (the file can be read again)
     { id: 't1', role: 'tool', content: 'x'.repeat(20_000), name: 'read_file', createdAt: now },
-    // A write_file output — should be PRESERVED (execution evidence)
+    // A write_file output — PRESERVED (execution evidence)
     { id: 't2', role: 'tool', content: 'y'.repeat(20_000), name: 'write_file', createdAt: now },
     { id: 'u2', role: 'user', content: 'continue', createdAt: now },
   ]
 
-  const result = await compressMessages(messages, async () => '[summary]', {
-    tokenLimit: 5_000, // Trigger microcompact
-    threshold: 0.95,   // Full compact threshold very high — won't trigger
+  const result = await manageContext({
+    messages,
+    fixedTokens: 500,
+    budget: resolveContextBudget({ contextWindow: 16_000 }),
+    state: createContextState(),
   })
 
-  // read_file output should have been replaced with placeholder
   const readFileMsg = result.messages.find(m => m.id === 't1')
   assert(
     'microcompact: read_file tool output is compacted',
-    readFileMsg != null && readFileMsg.content.length < 200,
+    result.action === 'clear_tool_results' && readFileMsg != null && readFileMsg.content.length < 200,
+    `action=${result.action} len=${readFileMsg?.content.length}`,
   )
 
-  // write_file output should still be intact
   const writeFileMsg = result.messages.find(m => m.id === 't2')
   assert(
     'microcompact: write_file tool output is PRESERVED as evidence',
@@ -8704,45 +8779,45 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   )
 }
 
-// ── Time-based microcompact ──────────────────────────────────────────────────
+// ── No idle-time short-circuit ────────────────────────────────────────────────
 
 {
-  const { maybeTimeBasedMicrocompact } = await import('../src/core/contextCompressor.js')
-
-  // Simulate a session where the last assistant message was 10 minutes ago
-  // Need >4 compactable tool messages since KEEP_RECENT=4
-  const pastTime = new Date(Date.now() - 45 * 60_000).toISOString()
-  const now = new Date().toISOString()
-  const messages: SessionMessage[] = [
-    { id: 'u1', role: 'user', content: 'do something', createdAt: pastTime },
-    { id: 'a1', role: 'assistant', content: 'sure', createdAt: pastTime },
-    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: pastTime },
-    { id: 't2', role: 'tool', content: 'w'.repeat(5_000), name: 'run_command', createdAt: pastTime },
-    { id: 't3', role: 'tool', content: 'v'.repeat(5_000), name: 'search', createdAt: pastTime },
-    { id: 't4', role: 'tool', content: 'u'.repeat(5_000), name: 'list_directory', createdAt: pastTime },
-    { id: 't5', role: 'tool', content: 't'.repeat(5_000), name: 'grep', createdAt: pastTime },
-    { id: 't6', role: 'tool', content: 's'.repeat(5_000), name: 'read_file', createdAt: pastTime },
-    { id: 'u2', role: 'user', content: 'continue', createdAt: now },
-  ]
-
-  const result = maybeTimeBasedMicrocompact(messages)
+  // The old time-based microcompact returned early after a 42-minute gap and
+  // skipped full compaction, sending ~405K tokens to a 128K window. An idle
+  // gap must not change whether the history is brought under the window.
+  const old = new Date(Date.now() - 60 * 60_000).toISOString()
+  const messages: SessionMessage[] = []
+  for (let i = 0; i < 300; i += 1) {
+    messages.push({ id: `u${i}`, role: 'user', content: '聊天'.repeat(400), createdAt: old })
+    messages.push({ id: `a${i}`, role: 'assistant', content: 'reply '.repeat(300), createdAt: old })
+    messages.push({ id: `t${i}`, role: 'tool', name: 'run_command', content: 'log '.repeat(300), createdAt: old })
+  }
+  messages.push({ id: 'new', role: 'user', content: 'hi again', createdAt: new Date().toISOString() })
+  const budget = resolveContextBudget({ contextWindow: 128_000 })
+  let calls = 0
+  const result = await manageContext({
+    messages,
+    fixedTokens: 8_000,
+    budget,
+    state: createContextState(),
+    summarize: sectionSummarizer(() => { calls += 1 }),
+  })
   assert(
-    'time-based microcompact: triggers when last assistant is >42min old',
-    result !== null && result.compressed === true,
+    'context compression: an idle gap does not short-circuit compaction; the request fits the window',
+    result.tokensBefore > 128_000 && result.tokensAfter <= budget.threshold && calls >= 1 && result.action === 'summary',
+    `before=${result.tokensBefore} after=${result.tokensAfter} calls=${calls}`,
   )
 
-  // Now with a recent assistant message — should NOT trigger
-  const recentMessages: SessionMessage[] = [
-    { id: 'u1', role: 'user', content: 'do something', createdAt: now },
-    { id: 'a1', role: 'assistant', content: 'sure', createdAt: now },
-    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: now },
-    { id: 'u2', role: 'user', content: 'continue', createdAt: now },
+  const recent: SessionMessage[] = [
+    { id: 'u1', role: 'user', content: 'do something', createdAt: old },
+    { id: 'a1', role: 'assistant', content: 'sure', createdAt: old },
+    { id: 't1', role: 'tool', content: 'z'.repeat(5_000), name: 'read_file', createdAt: old },
+    { id: 'u2', role: 'user', content: 'continue', createdAt: new Date().toISOString() },
   ]
-
-  const recentResult = maybeTimeBasedMicrocompact(recentMessages)
+  const untouched = await manageContext({ messages: recent, fixedTokens: 8_000, budget, state: createContextState() })
   assert(
-    'time-based microcompact: does NOT trigger when last assistant is recent',
-    recentResult === null,
+    'context compression: a small history is left untouched after an idle gap (cache-friendly)',
+    untouched.action === 'none' && untouched.changed === false && untouched.messages[2]?.content.length === 5_000,
   )
 }
 
@@ -9077,8 +9152,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 
     assert(
       'native tool loop: large direct tool result is compacted before provider re-entry',
-      (compactedContent.includes('contextCompacted') ||
-        compactedContent.includes('Artemis tool result compacted for context')) &&
+      compactedContent.includes('[Output too large for context') &&
+        compactedContent.includes('HEAD-LARGE-TOOL-OUTPUT') &&
+        compactedContent.includes('TAIL-LARGE-TOOL-OUTPUT') &&
         compactedContent.includes('Full original output saved at:') &&
         compactedContent.length < 12000,
       `length=${compactedContent.length}`,
@@ -9091,11 +9167,16 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       artifactPath,
     )
     assert(
-      'provider telemetry: cumulative usage is not double-counted after native tools',
+      'provider telemetry: cumulative (billing) usage is not double-counted after native tools',
       result.tokenStats?.promptTokens === 300 &&
         result.tokenStats?.completionTokens === 30 &&
         result.tokenStats?.totalTokens === 330,
       JSON.stringify(result.tokenStats),
+    )
+    assert(
+      'provider telemetry: context size is the last request (200), not the sum across tool rounds (300)',
+      getLastPromptTokens() === 200 && result.tokenStats?.contextTokens === 200,
+      `last=${getLastPromptTokens()} stats=${JSON.stringify(result.tokenStats)}`,
     )
   } finally {
     process.chdir(originalCwd)
@@ -10163,6 +10244,71 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+// ── think(): cancelling while the vision helper reads the images ────────────
+
+{
+  const originalCwd = process.cwd()
+  const tmpDir = path.join(os.tmpdir(), `artemis-think-vision-abort-${Date.now()}`)
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+  let chatRequests = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      chatRequests += 1
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }))
+    })
+  })
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock think-abort server failed to bind.')
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-text',
+      profiles: [{ id: 'mock-text', protocol: 'openai', apiKey: 'k', model: 'mock-text-only', supportsImages: false, baseUrl: `http://127.0.0.1:${address.port}` }],
+    }), 'utf8')
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+    // A helper that only returns when the run is cancelled.
+    let helperSawSignal = false
+    const helper: VisionHelper = {
+      label: 'slow-eye',
+      describe: (images, context) => new Promise((resolve) => {
+        helperSawSignal = context?.signal !== undefined
+        const done = () => resolve(images.map(() => ({ ok: false as const, error: 'the run was cancelled' })))
+        if (!context?.signal) return done()
+        context.signal.addEventListener('abort', done, { once: true })
+      }),
+    }
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 50)
+    let errorName = ''
+    try {
+      await think('what is in this picture?', () => {}, {
+        cwd: tmpDir,
+        permissionMode: 'accept-all',
+        imageAttachments: [{ data: 'iVBORw0KGgo=', mediaType: 'image/png', label: 'Image: a.png' }],
+        visionHelper: helper,
+        abortSignal: controller.signal,
+      })
+    } catch (error) {
+      errorName = error instanceof Error ? error.name : String(error)
+    }
+    assert(
+      'think: the abort signal reaches the vision helper, and a cancelled run sends nothing to the model',
+      helperSawSignal && errorName === 'AbortError' && chatRequests === 0,
+      JSON.stringify({ helperSawSignal, errorName, chatRequests }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
 // ── Tool deflection retry guard ──────────────────────────────────────────────
 
 {
@@ -10896,8 +11042,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-window-'))
     const store = new SessionStore(tmpDir)
     const session = store.createSession({ title: 'platform window smoke' })
+    // ~120K tokens: over the default window's threshold, far under 1M.
     for (let i = 0; i < 60; i += 1) {
-      session.messages.push({ id: `h${i}`, role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'x'.repeat(4_000)}`, createdAt: new Date().toISOString() })
+      session.messages.push({ id: `h${i}`, role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'x '.repeat(4_000)}`, createdAt: new Date().toISOString() })
     }
     await store.save(session)
     const info: string[] = []
@@ -10917,15 +11064,18 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       onInfo: (message) => info.push(message),
     })
     fs.rmSync(tmpDir, { recursive: true, force: true })
-    const line = info.find((m) => m.startsWith('[context] included='))
-    return Number(/included=(\d+)/.exec(line ?? '')?.[1] ?? NaN)
+    const line = info.find((m) => m.startsWith('[context] tokens~')) ?? ''
+    return {
+      window: Number(/tokens~\d+\/(\d+)/.exec(line)?.[1] ?? NaN),
+      kept: Number(/messages=(\d+)/.exec(line)?.[1] ?? NaN),
+    }
   }
-  const defaultIncluded = await runWithWindow(undefined)
-  const platformIncluded = await runWithWindow(1_000_000)
+  const byDefault = await runWithWindow(undefined)
+  const byPlatform = await runWithWindow(1_000_000)
   assert(
     'platform capabilities: runAgent budgets its context by the platform window',
-    platformIncluded > defaultIncluded,
-    `default=${defaultIncluded} platform=${platformIncluded}`,
+    byDefault.window === 128_000 && byPlatform.window === 1_000_000 && byPlatform.kept > byDefault.kept,
+    `default=${JSON.stringify(byDefault)} platform=${JSON.stringify(byPlatform)}`,
   )
 }
 
@@ -10940,6 +11090,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     images?: ImageAttachment[]
     viewImage?: boolean
     prompt?: string
+    /** The main profile points at the platform gateway, which reads images itself. */
+    bridges?: boolean
   }) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-helper-'))
     fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), pngBytes)
@@ -10949,6 +11101,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const mainCalls: MainCall[] = []
     const provider: ChatProvider = {
       supportsImages: false,
+      bridgesImages: options.bridges === true,
       supportsNativeToolCalls: true,
       async complete(messages, requestOptions): Promise<ProviderResponse> {
         mainCalls.push({
@@ -10970,6 +11123,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       maxTurns: 3,
       profile: 'main',
       visionHelper: options.helper,
+      visionRetryDelayMs: 5,
       ...(options.images ? { imageAttachments: options.images } : {}),
     })
     const userText = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
@@ -11006,7 +11160,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         calls[0]!.maxOutputTokens === 1500 &&
         calls[0]!.prompt.includes('What does this screenshot show?') &&
         /verbatim/.test(calls[0]!.prompt) &&
-        firstUser.includes('[Image 1 description by vision helper — the main model cannot see images]') &&
+        firstUser.includes('[Image 1 description by vision helper]') &&
         firstUser.includes('"Forgot password?"') &&
         run.result.reply.includes('sign-in page'),
       JSON.stringify({ calls: calls.map((c) => ({ images: c.images, max: c.maxOutputTokens })), firstUser: firstUser.slice(0, 300) }),
@@ -11029,7 +11183,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         run.toolText.includes('description by vision helper') &&
         run.toolText.includes('Forgot password?') &&
         run.toolText.includes('<image_description n=') &&
-        run.toolText.includes('</image_description>') &&
+        /<\/image_description id=\\?"[0-9a-f]{12}\\?">/.test(run.toolText) &&
         run.toolText.includes('transcribed from an image by a vision helper') &&
         !run.toolText.includes('attached to your next step') &&
         !mainRequestHasImageParts(run.mainCalls),
@@ -11046,9 +11200,11 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const { calls, helper } = makeHelper('fail')
     const run = await runVision({ helper, images: [userImage] })
     assert(
-      'vision helper: a helper failure leaves a clear note and the run continues',
-      calls.length === 1 &&
-        run.userText.includes('the attached image could not be read') &&
+      'vision helper: a helper failure is retried once, then leaves a "temporarily unreadable" note and the run continues',
+      calls.length === 2 &&
+        run.userText.includes('the attached image is temporarily unreadable') &&
+        run.userText.includes('Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models.') &&
+        !/plan|tier|model/i.test(run.userText.replace('Do not mention plans, tiers or models.', '')) &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls),
       run.userText.slice(0, 300),
@@ -11056,10 +11212,36 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 
   {
+    // The helper fails twice; the main profile goes through the platform gateway,
+    // so the image is sent to it as an image and the gateway reads it.
+    const { calls, helper } = makeHelper('fail')
+    const run = await runVision({ helper, images: [userImage], bridges: true })
+    assert(
+      'vision helper: when the helper fails, a gateway-bridged main model gets the image itself',
+      calls.length === 2 &&
+        run.mainCalls[0]?.images === 1 &&
+        run.userText.includes('[Image 1 (screenshot.png) is attached to this message as an image.]') &&
+        !run.userText.includes('temporarily unreadable') &&
+        run.result.reply.includes('sign-in page'),
+      JSON.stringify({ calls: calls.length, images: run.mainCalls.map((c) => c.images), text: run.userText.slice(0, 300) }),
+    )
+  }
+
+  {
+    // No helper at all, but the gateway reads images: they go to it unchanged.
+    const run = await runVision({ helper: null, images: [userImage], bridges: true })
+    assert(
+      'vision helper: without a helper, a gateway-bridged main model gets the images and no note',
+      run.mainCalls[0]?.images === 1 && !run.userText.includes('unreadable') && run.result.reply.includes('sign-in page'),
+      JSON.stringify({ images: run.mainCalls.map((c) => c.images), text: run.userText.slice(0, 300) }),
+    )
+  }
+
+  {
     const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
     assert(
       'vision helper: without a helper the model gets a graceful note and the run succeeds',
-      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg) but this plan cannot read images. Tell the user briefly and continue with the text.') &&
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg); they are temporarily unreadable. Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models. Continue with the text.') &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls) &&
         run.mainCalls.every((call) => !call.tools.includes('view_image')),
@@ -11081,8 +11263,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     assert(
       'vision helper: a batch of images is described in one call and labelled per image',
       calls.length === 1 && calls[0] === 2 &&
-        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper">\nA bar chart of sales\.\n<\/image_description>/.test(run.userText) &&
-        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper">\nA photo of a cat\.\n<\/image_description>/.test(run.userText),
+        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper" id="([0-9a-f]{12})">\nA bar chart of sales\.\n<\/image_description id="\1">/.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper" id="([0-9a-f]{12})">\nA photo of a cat\.\n<\/image_description id="\1">/.test(run.userText),
       run.userText.slice(0, 400),
     )
   }
@@ -11136,7 +11318,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         visionRequests[0]?.max_tokens === 1500 &&
         mainRequests.length >= 1 &&
         !mainRaw.includes('image_url') &&
-        !mainRaw.includes('omitted: this model cannot see images') &&
+        !mainRaw.includes('not shown: they cannot be read in this request') &&
         mainRaw.includes('Image 1 description by vision helper') &&
         mainRaw.includes('build passed') &&
         result.reply.includes('passing build'),
@@ -11729,11 +11911,19 @@ process.stdin.on('data', (c) => {
     workflowError === undefined && workflowReply.includes('Done without skill hints'),
     workflowError instanceof Error ? workflowError.message : workflowReply,
   )
-  const contextWithCwd = await buildContextWindow(session, 'main', tmpDir)
-  const contextWithoutCwd = await buildContextWindow(session, 'main')
+  // buildContextWindow is gone; the shared context manager must likewise
+  // not depend on the workspace for anything skill-related.
+  const contextInput = {
+    messages: session.messages,
+    fixedTokens: 1_000,
+    budget: resolveContextBudget({ contextWindow: 128_000 }),
+  }
+  const contextWithCwd = await manageContext({ ...contextInput, state: createContextState(), restore: { cwd: tmpDir } })
+  const contextWithoutCwd = await manageContext({ ...contextInput, state: createContextState() })
   assert(
-    'retired skill store: buildContextWindow gives the same result with or without a cwd',
-    eq(contextWithCwd, contextWithoutCwd),
+    'retired skill store: context management gives the same result with or without a cwd',
+    eq(contextWithCwd.messages, contextWithoutCwd.messages) &&
+      contextWithCwd.messages.every((message) => !new RegExp(`\\b${retired}\\b`, 'i').test(message.content)),
   )
   assert(
     'retired skill store: the legacy odin.json is left untouched',

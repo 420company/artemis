@@ -32,6 +32,43 @@ export type SessionMessage = {
    * normalize.
    */
   rawContentBlocks?: any[];
+  /**
+   * Set on the synthetic message that replaces summarized history after a
+   * context compaction (see core/compaction). It always sits at index 0.
+   */
+  compaction?: CompactionBoundaryInfo;
+  /**
+   * Set when an old tool result was replaced by a one-line placeholder to
+   * save context. The original output is kept at `savedTo` when it could be
+   * written to disk.
+   */
+  contextCleared?: {
+    chars: number;
+    savedTo?: string;
+    clearedAt: string;
+  };
+};
+
+export type CompactionBoundaryInfo = {
+  kind: 'boundary';
+  /** 1-based count of compactions this session has gone through. */
+  index: number;
+  /** The rolling summary; the next compaction folds new messages into it. */
+  summary: string;
+  /** 'summary' = written by the summarizer model; 'fallback' = mechanical. */
+  mode: 'summary' | 'fallback';
+  language: 'zh' | 'en';
+  /** Append-only JSONL archive of every message removed from the history. */
+  archivePath?: string;
+  /** Messages folded into the summary by this compaction (cumulative). */
+  summarizedMessages: number;
+  /**
+   * The current run's request when it is no longer in the live history:
+   * carried (shortened if huge) by the boundary, and forward by the next
+   * boundary while the same run goes on.
+   */
+  request?: { id: string; text: string };
+  createdAt: string;
 };
 
 export type VerificationCommandRecord = {

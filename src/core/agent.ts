@@ -1,7 +1,6 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import path from 'node:path';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
-import type { ContextBuildResult } from './context.js';
 import {
   getAllowedActionTypesForProfile,
   validateProfileAction,
@@ -75,6 +74,25 @@ import {
 import { buildStableProviderSystemSections } from './promptCache.js';
 import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
 import {
+  ContextOverflowError,
+  buildContextOverflowMessage,
+  detectConversationLanguage,
+  isContextOverflowError,
+  isSyntheticUserMessage,
+  manageContext,
+  carriedRequestNote,
+  measureContext,
+  normalizeContextState,
+  recordProviderUsage,
+  resolveContextBudget,
+  spillToolResultIfLarge,
+  type ContextBudget,
+  type ContextState,
+  type ManageReason,
+  type SummarizeFn,
+} from './compaction/index.js';
+import { estimateTokens, estimateToolSchemaTokens } from './tokenEstimation.js';
+import {
   appendImageNote,
   describeSingleImage,
   loadVisionHelper,
@@ -84,7 +102,6 @@ import {
   resolveImageRoute,
   type VisionHelper,
 } from './visionHelper.js';
-import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
   McpCallCancelledError,
@@ -2922,32 +2939,35 @@ function normalizePlan(input: unknown): PlanItem[] {
     .filter((entry): entry is PlanItem => entry !== null);
 }
 
-async function buildProviderMessages(
-  context: ContextBuildResult,
-  cwd: string,
-  permissionMode: ReturnType<PermissionManager['getMode']>,
-  autonomyMode: SessionAutonomyMode,
-  profile: 'main' | AgentRole,
-  evidenceDigest?: string,
-  nativeToolRuntime = false,
-  extensionSections: string[] = [],
-): Promise<SessionMessage[]> {
+/**
+ * The system message of a run. It must stay byte-identical between requests
+ * so providers can reuse their prompt cache: only stable sections go here
+ * (prompt, project instructions, MCP sections, the memory index). Anything
+ * that depends on the current request (recalled memories, activated skills,
+ * evidence) goes into the per-run context message instead.
+ */
+async function buildStableSystemContent(input: {
+  cwd: string;
+  permissionMode: ReturnType<PermissionManager['getMode']>;
+  autonomyMode: SessionAutonomyMode;
+  profile: 'main' | AgentRole;
+  nativeToolRuntime: boolean;
+  /** Note for models that cannot see images (helper available or not); none when they can. */
+  imageSection?: string;
+}): Promise<string> {
   const systemSections = await buildStableProviderSystemSections({
-    cwd,
-    permissionMode,
-    autonomyMode,
-    profile,
-    nativeToolRuntime,
+    cwd: input.cwd,
+    permissionMode: input.permissionMode,
+    autonomyMode: input.autonomyMode,
+    profile: input.profile,
+    nativeToolRuntime: input.nativeToolRuntime,
   });
-  const latestUserMessage = [...context.messages]
-    .reverse()
-    .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
 
   // Who the user is and how the agent should sound: the same user profile and
   // soul.md the interactive chat loads, so headless runs (execute, the web
   // product, workflows) know the owner too. Sub-agents work on narrow tasks
   // and do without.
-  if (profile === 'main') {
+  if (input.profile === 'main') {
     try {
       const [{ loadUserProfile, formatProfileForPrompt }, { loadSoul, formatSoulForPrompt }] = await Promise.all([
         import('../memory/userProfile.js'),
@@ -2967,14 +2987,12 @@ async function buildProviderMessages(
     const {
       ensureMemoryMigrated,
       loadIndexText,
-      listMemories,
-      recallRelevant,
       scopesCollide,
     } = await import('../storage/memoryFiles.js');
-    await ensureMemoryMigrated(cwd);
-    const collided = scopesCollide(cwd);
-    const globalIndex = await loadIndexText(cwd, 'global');
-    const projectIndex = collided ? '' : await loadIndexText(cwd, 'project');
+    await ensureMemoryMigrated(input.cwd);
+    const collided = scopesCollide(input.cwd);
+    const globalIndex = await loadIndexText(input.cwd, 'global');
+    const projectIndex = collided ? '' : await loadIndexText(input.cwd, 'project');
 
     systemSections.push(
       '🧠 Long-term memory: proactively persist durable knowledge with the memory tool — when the user states a lasting preference or correction, and after completing a significant task whose conclusions matter beyond this session. Update or delete entries the conversation has contradicted. Do not save session-only details or facts already recorded in the repo.',
@@ -2992,67 +3010,119 @@ async function buildProviderMessages(
         systemSections.push(truncate(projectIndex, 4000));
       }
       systemSections.push('');
-
-      if (latestUserMessage) {
-        const allEntries = [
-          ...(await listMemories(cwd, 'global')),
-          ...(collided ? [] : await listMemories(cwd, 'project')),
-        ];
-        const recalled = recallRelevant(latestUserMessage, allEntries, 3);
-        if (recalled.length > 0) {
-          systemSections.push('🧠 [Recalled Memories — may be stale; verify files/commands still exist before relying on them]');
-          systemSections.push(...recalled.map((entry) =>
-            `## ${entry.name} [${entry.category}]\n${truncate(entry.content, 600)}`));
-          systemSections.push('');
-        }
-      }
     }
   } catch {
     // Long-term memory is opportunistic context; failures must not block the turn.
   }
 
-  try {
-    if (latestUserMessage) {
+  systemSections.push(CONTEXT_COMPACTION_SYSTEM_NOTE);
+  if (input.imageSection) {
+    systemSections.push(input.imageSection);
+  }
+  return systemSections.join('\n\n');
+}
+
+const CONTEXT_COMPACTION_SYSTEM_NOTE =
+  'Context management: long conversations are compacted automatically. When the history starts with a "[Context compacted]" message, it holds a structured summary of the earlier conversation and names the archive file with the full earlier history; read that file when exact earlier details matter. Old tool results may be replaced by one-line placeholders that name the file holding the full output.';
+
+const RUN_CONTEXT_MESSAGE_NAME = 'runtime_context';
+
+/** Task board and plan as plain text, re-attached after a compaction. */
+function renderTaskBoardForRestore(session: SessionRecord): string | undefined {
+  const lines: string[] = [];
+  const tasks = session.tasks ?? [];
+  if (tasks.length > 0) {
+    lines.push('Tasks:');
+    for (const task of tasks) lines.push(`- [${task.status}] ${task.content}`);
+  }
+  const plan = session.plan ?? [];
+  if (plan.length > 0) {
+    lines.push('Plan:');
+    for (const item of plan) lines.push(`- [${item.status}] ${item.content}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+/**
+ * Per-run context, computed once from the request that started the run and
+ * sent as a message just before that request (never in the system prompt),
+ * so the cached prefix of the conversation stays reusable.
+ */
+async function buildRunContextContent(input: {
+  cwd: string;
+  latestUserMessage?: string;
+  extensionSections: string[];
+  evidenceDigest?: string;
+}): Promise<string | undefined> {
+  const sections: string[] = [];
+  const latestUserMessage = input.latestUserMessage?.trim();
+
+  if (latestUserMessage) {
+    try {
+      const {
+        listMemories,
+        recallRelevant,
+        scopesCollide,
+      } = await import('../storage/memoryFiles.js');
+      const collided = scopesCollide(input.cwd);
+      const allEntries = [
+        ...(await listMemories(input.cwd, 'global')),
+        ...(collided ? [] : await listMemories(input.cwd, 'project')),
+      ];
+      const recalled = recallRelevant(latestUserMessage, allEntries, 3);
+      if (recalled.length > 0) {
+        sections.push([
+          '🧠 [Recalled Memories — may be stale; verify files/commands still exist before relying on them]',
+          ...recalled.map((entry) => `## ${entry.name} [${entry.category}]\n${truncate(entry.content, 600)}`),
+        ].join('\n'));
+      }
+    } catch {
+      // Opportunistic context.
+    }
+
+    try {
       const { getMemoryProfile, MemoryEnhancementFactory } = await import('./memoryEnhancement.js');
-      const memoryProfile = await getMemoryProfile(cwd);
+      const memoryProfile = await getMemoryProfile(input.cwd);
       if (memoryProfile.enabled) {
-        const memory = await MemoryEnhancementFactory.create(memoryProfile, cwd);
+        const memory = await MemoryEnhancementFactory.create(memoryProfile, input.cwd);
         await memory.initialize();
         const memories = await memory.searchMemories(latestUserMessage, 5);
         if (memories.length > 0) {
-          systemSections.push('🧠 [Enhanced Memory: Relevant Retrieved Context]');
-          systemSections.push(...memories.map((entry) => `- ${truncate(entry.text, 360)}`));
-          systemSections.push('');
+          sections.push([
+            '🧠 [Enhanced Memory: Relevant Retrieved Context]',
+            ...memories.map((entry) => `- ${truncate(entry.text, 360)}`),
+          ].join('\n'));
         }
       }
+    } catch {
+      // Enhanced memory retrieval failures must not block the turn.
     }
-  } catch {
-    // Enhanced memory is opportunistic context; retrieval failures must not block the turn.
   }
 
-  if (extensionSections.length > 0) {
-    systemSections.push(...extensionSections);
+  sections.push(...input.extensionSections.filter((section) => section.trim()));
+  if (input.evidenceDigest?.trim()) {
+    sections.push(`Repository evidence:\n${input.evidenceDigest.trim()}`);
   }
-
-  if (context.summary) {
-    systemSections.push('Conversation summary:');
-    systemSections.push(context.summary);
-  }
-
-  if (evidenceDigest) {
-    systemSections.push('Repository evidence:');
-    systemSections.push(evidenceDigest);
-  }
-
+  if (sections.length === 0) return undefined;
   return [
-    {
-      id: 'system',
-      role: 'system',
-      content: systemSections.join('\n\n'),
-      createdAt: new Date().toISOString(),
-    },
-    ...context.messages,
-  ];
+    '[Runtime context for this request — supplied by Artemis (skills, memories, evidence); background reference, not written by the user]',
+    ...sections,
+  ].join('\n\n');
+}
+
+/**
+ * Conversation messages for a request: the stored history, then the per-run
+ * context as the LAST message. It is never stored, so placing it anywhere
+ * inside the history would make the next run's history differ from this
+ * run's at that point and cost the provider's prompt cache for everything
+ * after it. At the end, system + history stay a byte-identical prefix
+ * across requests and across runs.
+ */
+function appendRunContext(
+  history: SessionMessage[],
+  runContext: SessionMessage | undefined,
+): SessionMessage[] {
+  return runContext ? [...history, runContext] : history;
 }
 
 function extractLatestUserRequest(
@@ -3194,14 +3264,15 @@ function serializeToolPayload(input: {
   toolName?: string;
   output: string;
   error?: ToolError;
-  maxChars?: number;
+  /** null keeps the whole output (large outputs are spilled to a file instead). */
+  maxChars?: number | null;
 }): string {
   return JSON.stringify(
     {
       ok: input.ok,
       ...(input.action ? { action: input.action } : {}),
       ...(input.toolName ? { toolName: input.toolName } : {}),
-      output: truncate(input.output, input.maxChars ?? 10_000),
+      output: input.maxChars === null ? input.output : truncate(input.output, input.maxChars ?? 10_000),
       ...(input.error ? { error: input.error } : {}),
     },
     null,
@@ -3209,25 +3280,23 @@ function serializeToolPayload(input: {
   );
 }
 
+/**
+ * Tool result as stored in history. The output is kept whole here; results
+ * above the inline budget are spilled to a file (preview + path) by the
+ * caller, so nothing is silently cut.
+ */
 function formatToolResult(
   action: AgentAction,
   ok: boolean,
   output: string,
   error?: ToolError,
 ): string {
-  const maxChars =
-    action.type === 'read_file' ||
-    action.type === 'mcp_read_resource' ||
-    action.type === 'mcp_get_prompt'
-      ? 24_000
-      : 10_000;
-
   return serializeToolPayload({
     action,
     ok,
     output,
     error,
-    maxChars,
+    maxChars: null,
   });
 }
 
@@ -3710,10 +3779,10 @@ const CHILD_RUN_IMAGE_RESET = {
 
 /** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
 const VIEW_IMAGE_UNAVAILABLE_SECTION =
-  'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+  'Image input: view_image is unavailable in this session. Do not call it; learn about image files with other tools instead. Do not mention plans, tiers or models.';
 /** Prompt note for a text-only model whose view_image goes through the vision helper. */
 const VIEW_IMAGE_HELPER_SECTION =
-  'Image input: the current model cannot see images. view_image still works: it returns a detailed text description of the image written by a vision helper model.';
+  'Image input: view_image returns a detailed text description of the image, written by a vision helper.';
 
 export type RunAgentOptions = {
   cwd: string;
@@ -3764,6 +3833,8 @@ export type RunAgentOptions = {
    * from the provider store's visionProfileId when first needed; null: none.
    */
   visionHelper?: VisionHelper | null;
+  /** Pause before the automatic retry of images the vision helper could not describe (tests); default 3 s. */
+  visionRetryDelayMs?: number;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -3800,6 +3871,22 @@ export type RunAgentOptions = {
    * never abort in-flight work.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Provider for compaction summaries: the worker/specialist model when one
+   * is configured, else the main model. Defaults to the active provider.
+   */
+  resolveSummarizerProvider?: () => ChatProvider;
+  /** Context-management settings (setup.agent.compression). */
+  compaction?: {
+    /** False disables proactive compaction; overflow recovery stays on. */
+    enabled?: boolean;
+    /** Proactive trigger as a fraction of the effective window. */
+    thresholdRatio?: number;
+    /** Optional cap below the model window, for cost control. */
+    maxContextTokens?: number;
+  };
+  /** Called with a short user-facing line whenever the history is compacted. */
+  onContextCompaction?: (notice: string) => void;
 };
 
 const RUNNING_INTERJECTION_POLL_MS = 750;
@@ -5357,7 +5444,10 @@ function describeBackgroundTaskLabel(action: AgentAction): string {
 /**
  * Fork a background-eligible action into the registry and synthesize an
  * immediate "started" outcome so the agent loop can proceed. The real result
- * is appended to the session as a `system` message when the runner resolves.
+ * is appended to the in-memory session as a `system` message when the runner
+ * resolves. That is only safe for a session nobody else writes (the
+ * interactive CLI): every shared runtime (headless/web, bridge workflow mode)
+ * passes allowBackgroundTools: false.
  */
 function startBackgroundAction(
   session: SessionRecord,
@@ -6040,12 +6130,14 @@ export async function runAgent(
       : loadVisionHelper(options.cwd, { onInfo: options.onInfo }));
   const userImageRoute = options.imageAttachments?.length
     ? await resolveImageRoute(options.resolveProvider?.(options.profile ?? 'main') ?? options.provider, getVisionHelper)
-    : { native: true };
+    : { native: true, bridged: false };
   const userImages = await prepareUserImagesForModel({
     userText: userInput,
     images: options.imageAttachments,
     modelSeesImages: userImageRoute.native,
     getHelper: async () => userImageRoute.helper,
+    mainBridgesImages: userImageRoute.bridged,
+    ...(options.visionRetryDelayMs !== undefined ? { retryDelayMs: options.visionRetryDelayMs } : {}),
     locale: options.locale,
     onInfo: options.onInfo,
     signal: options.abortSignal,
@@ -6206,6 +6298,184 @@ export async function runAgent(
   };
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
 
+  // ── Context management (see core/compaction) ──────────────────────────────
+  // The message that started this run; the per-run context goes right before it.
+  const runUserMessageId = [...session.messages]
+    .reverse()
+    .find((message) => message.role === 'user' && !isSyntheticUserMessage(message))?.id;
+  const contextStorage = options.sessionStore.getContextStorage(session);
+  const contextState: ContextState = normalizeContextState(session.metadata?.context);
+  const persistContextState = (): void => {
+    session.metadata = { ...(session.metadata ?? {}), context: contextState };
+  };
+  const contextLanguage = detectConversationLanguage(
+    session.messages,
+    options.locale === 'zh-CN' ? 'zh' : 'en',
+  );
+  const budgetFor = (provider: ChatProvider): ContextBudget => {
+    // A platform-written window (capabilitiesSource "platform") is
+    // authoritative and wins; otherwise the smaller of the caller's window
+    // and the provider's best-known one.
+    const windows = [options.contextLength, provider.contextWindow]
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    const authoritative = typeof provider.contextLength === 'number' && provider.contextLength > 0
+      ? provider.contextLength
+      : undefined;
+    return resolveContextBudget({
+      contextWindow: authoritative ?? (windows.length > 0 ? Math.min(...windows) : undefined),
+      maxOutputTokens: provider.maxOutputTokens,
+      thresholdRatio: options.compaction?.thresholdRatio,
+      maxContextTokens: options.compaction?.maxContextTokens,
+    });
+  };
+  let currentBudget = budgetFor(options.resolveProvider?.(profile) ?? options.provider);
+  const summarizerProvider = (): ChatProvider =>
+    options.resolveSummarizerProvider?.() ?? options.resolveProvider?.(profile) ?? options.provider;
+  const summarize: SummarizeFn = async ({ system, prompt, attempt }) => {
+    // The retry goes to the main model when a separate worker failed; the
+    // context manager counts both attempts against one input budget.
+    const worker = summarizerProvider();
+    const main = options.resolveProvider?.(profile) ?? options.provider;
+    const provider = (attempt ?? 0) > 0 && worker !== main ? main : worker;
+    const now = new Date().toISOString();
+    const response = await provider.complete([
+      { id: 'compaction-system', role: 'system', content: system, createdAt: now },
+      { id: 'compaction-request', role: 'user', content: prompt, createdAt: now },
+    ], { abortSignal: options.abortSignal });
+    return response.text ?? '';
+  };
+  // Stable system content, rebuilt only when what it depends on changes.
+  let systemCache: { key: string; content: string } | undefined;
+  const getSystemContent = async (nativeTools: boolean, imageSection: string | undefined): Promise<string> => {
+    const permissionMode = options.permissionManager.getMode();
+    const autonomyMode = session.autonomyMode ?? 'standard';
+    const key = JSON.stringify([options.cwd, permissionMode, autonomyMode, profile, nativeTools, imageSection ?? '']);
+    if (systemCache?.key !== key) {
+      systemCache = {
+        key,
+        content: await buildStableSystemContent({
+          cwd: options.cwd,
+          permissionMode,
+          autonomyMode,
+          profile,
+          nativeToolRuntime: nativeTools,
+          imageSection,
+        }),
+      };
+    }
+    return systemCache.content;
+  };
+  // Per-run context: computed once, so every request of the run is identical
+  // up to the newest messages.
+  let runContextMessage: SessionMessage | undefined;
+  let runContextReady = false;
+  const getRunContextMessage = async (): Promise<SessionMessage | undefined> => {
+    if (runContextReady) return runContextMessage;
+    runContextReady = true;
+    const evidenceGraph = await options.sessionStore.loadEvidenceGraph(session.rootSessionId ?? session.id);
+    const scopedEvidenceGraph = scopeEvidenceGraphForSession(evidenceGraph, session);
+    const evidenceDigest = buildEvidenceDigest(
+      scopedEvidenceGraph,
+      profile === 'main' ? 1_800 : 900,
+      profile === 'main' ? 'full' : 'compact',
+    );
+    if (evidenceDigest) {
+      options.onInfo?.(
+        `[evidence] digest claims=${scopedEvidenceGraph.claims.length} edges=${scopedEvidenceGraph.edges.length}`,
+      );
+    }
+    const content = await buildRunContextContent({
+      cwd: options.cwd,
+      latestUserMessage: userInput,
+      extensionSections: extensionRuntime.sections,
+      evidenceDigest,
+    });
+    runContextMessage = content
+      ? {
+        id: `run-context-${session.id}-${runUserMessageId ?? 'start'}`,
+        role: 'user',
+        name: RUN_CONTEXT_MESSAGE_NAME,
+        content,
+        createdAt: new Date().toISOString(),
+      }
+      : undefined;
+    return runContextMessage;
+  };
+  /**
+   * Bring the stored history within budget and build the request messages.
+   * Compaction rewrites `session.messages` and is persisted immediately.
+   */
+  const prepareRequestMessages = async (input: {
+    provider: ChatProvider;
+    system: string;
+    nativeFunctionTools: unknown[] | undefined;
+    reason: ManageReason;
+  }): Promise<{ messages: SessionMessage[]; fixedTokens: number; sentCount: number }> => {
+    currentBudget = budgetFor(input.provider);
+    const runContext = await getRunContextMessage();
+    const fixedTokens =
+      estimateTokens(input.system) +
+      (runContext ? estimateTokens(runContext.content) + 4 : 0) +
+      // Room for the "current task" note when the boundary carries the request.
+      (runUserMessageId ? 80 : 0) +
+      estimateToolSchemaTokens(input.nativeFunctionTools);
+    const managed = await manageContext({
+      messages: session.messages,
+      fixedTokens,
+      budget: currentBudget,
+      state: contextState,
+      storage: contextStorage,
+      summarize,
+      summarizerWindow: summarizerProvider().contextWindow,
+      restore: {
+        cwd: options.cwd,
+        taskBoard: renderTaskBoardForRestore(session),
+        extraPaths: session.changedFiles,
+        // Restored files go through the run's own read permission check.
+        canRead: async (absolutePath) => {
+          if (options.permissionManager.getInteractive()) return false;
+          const decision = await options.permissionManager.authorize({ type: 'read_file', path: absolutePath } as AgentAction);
+          return decision.allowed;
+        },
+      },
+      // The request that started this run always stays in the live history.
+      pinnedIds: runUserMessageId ? [runUserMessageId] : undefined,
+      reason: input.reason,
+      proactive: options.compaction?.enabled !== false,
+      language: contextLanguage,
+    });
+    if (managed.changed) {
+      session.messages = managed.messages;
+      if (managed.summary) session.summary = managed.summary;
+      persistContextState();
+      await options.sessionStore.save(session);
+    }
+    if (managed.notice) {
+      options.onInfo?.(managed.notice);
+      options.onContextCompaction?.(managed.notice);
+    }
+    const measured = measureContext(contextState, session.messages, fixedTokens);
+    options.onInfo?.(
+      `[context] tokens~${measured.tokens}/${currentBudget.window} threshold=${currentBudget.threshold} source=${measured.source} messages=${session.messages.length}`,
+    );
+    // The boundary stores a carried request as history; while this run is
+    // going, the (unsaved) runtime context marks it as the current task.
+    const requestNote = carriedRequestNote(session.messages, runUserMessageId, contextLanguage);
+    const outgoingContext: SessionMessage | undefined = requestNote
+      ? runContext
+        ? { ...runContext, content: `${runContext.content}\n\n${requestNote}` }
+        : { id: `run-context-${session.id}-${runUserMessageId}`, role: 'user', name: RUN_CONTEXT_MESSAGE_NAME, content: requestNote, createdAt: new Date().toISOString() }
+      : runContext;
+    return {
+      messages: [
+        { id: 'system', role: 'system', content: input.system, createdAt: new Date(0).toISOString() },
+        ...appendRunContext(session.messages, outgoingContext),
+      ],
+      fixedTokens,
+      sentCount: session.messages.length,
+    };
+  };
+
   try {
     if (extensionRuntime.activeSkills.length > 0) {
       options.onInfo?.(
@@ -6239,12 +6509,21 @@ export async function runAgent(
       options.sessionStore.appendMessage(
         session,
         'tool',
-        formatToolResult(
-          outcome.action,
-          outcome.ok,
-          outcome.output,
-          outcome.error,
-        ),
+        spillToolResultIfLarge(
+          formatToolResult(
+            outcome.action,
+            outcome.ok,
+            outcome.output,
+            outcome.error,
+          ),
+          {
+            storage: contextStorage,
+            toolName: outcome.action.type,
+            inlineTokens: currentBudget.inlineToolResultTokens,
+            inlineReadTokens: currentBudget.inlineReadTokens,
+            previewTokens: currentBudget.toolPreviewTokens,
+          },
+        ).content,
         outcome.action.type,
       );
 
@@ -6361,16 +6640,20 @@ export async function runAgent(
   function takeRequestImages(
     userImages: readonly import('../providers/types.ts').ImageAttachment[],
     provider: ChatProvider,
-  ): import('../providers/types.ts').ImageAttachment[] {
+    userVisionSkip: readonly string[] = [],
+  ): { images: import('../providers/types.ts').ImageAttachment[]; visionSkip?: string[] } {
     const { kept, dropped } = fitImagesToRequest([...userImages, ...viewedImages.take()]);
+    // Gateway vision models the helper already failed on for these images.
+    const visionSkip = [...new Set([...userVisionSkip, ...viewedImages.takeVisionSkip()])];
     if (dropped.length > 0) {
       options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
     }
-    if (kept.length > 0 && provider.supportsImages !== true) {
+    // A provider whose images reach the platform gateway (which reads them) takes them too.
+    if (kept.length > 0 && provider.supportsImages !== true && provider.bridgesImages !== true) {
       options.onInfo?.(`[images] this model cannot take images; ${kept.length} dropped`);
-      return [];
+      return { images: [] };
     }
-    return kept;
+    return { images: kept, ...(kept.length && visionSkip.length ? { visionSkip } : {}) };
   }
 
   async function runNativeToolLoop(
@@ -6456,12 +6739,22 @@ export async function runAgent(
         outcomes.push(outcome);
         toolOutputs.push({
           callId: call.callId,
-          output: serializeToolPayload({
-            ok: outcome.ok,
-            action: mapped.action,
-            output: outcome.output,
-            error: outcome.error,
-          }),
+          output: spillToolResultIfLarge(
+            serializeToolPayload({
+              ok: outcome.ok,
+              action: mapped.action,
+              output: outcome.output,
+              error: outcome.error,
+              maxChars: null,
+            }),
+            {
+              storage: contextStorage,
+              toolName: mapped.action.type,
+              inlineTokens: currentBudget.inlineToolResultTokens,
+              inlineReadTokens: currentBudget.inlineReadTokens,
+              previewTokens: currentBudget.toolPreviewTokens,
+            },
+          ).content,
         });
       }
 
@@ -6472,7 +6765,8 @@ export async function runAgent(
 
       // Images the tools just queued (view_image) go with the continuation,
       // so the model sees them in the very next round.
-      const continuationImages = takeRequestImages([], provider);
+      const continuation = takeRequestImages([], provider);
+      const continuationImages = continuation.images;
       currentCompletion = await completeProviderTurn(
         provider,
         providerMessages,
@@ -6481,6 +6775,7 @@ export async function runAgent(
           toolOutputs,
           nativeFunctionTools,
           ...(continuationImages.length ? { imageAttachments: continuationImages } : {}),
+          ...(continuation.visionSkip ? { visionSkip: continuation.visionSkip } : {}),
         },
       );
     }
@@ -6552,6 +6847,9 @@ export async function runAgent(
     const imageRoute = await resolveImageRoute(activeProvider, getVisionHelper);
     const modelSeesImages = imageRoute.native;
     viewedImages.acceptsImages = modelSeesImages;
+    viewedImages.bridgesImages = imageRoute.bridged;
+    viewedImages.helperGatewayModel = imageRoute.helper?.gatewayModel;
+    if (options.visionRetryDelayMs !== undefined) viewedImages.retryDelayMs = options.visionRetryDelayMs;
     const imageHelper = imageRoute.helper;
     viewedImages.describeImage = imageHelper
       ? (image, signal) => describeSingleImage(imageHelper, image, {
@@ -6561,47 +6859,9 @@ export async function runAgent(
       })
       : undefined;
     const canViewImages = modelSeesImages || imageHelper !== undefined;
-    const context = await buildContextWindow(session, profile, {
-      cwd: options.cwd,
-      // A platform-written window (capabilitiesSource "platform") wins.
-      contextLength: activeProvider.contextLength ?? options.contextLength,
-    });
-    session.summary = context.summary;
-    options.onInfo?.(
-      `[context] included=${context.stats.includedMessages}/${context.stats.totalMessages} summarized=${context.stats.summarizedMessages} chars~${context.stats.approxChars}`,
+    const latestUserRequest = extractLatestUserRequest(
+      session.messages.filter((message) => !isSyntheticUserMessage(message)),
     );
-    const evidenceGraph = await options.sessionStore.loadEvidenceGraph(
-      session.rootSessionId ?? session.id,
-    );
-    const scopedEvidenceGraph = scopeEvidenceGraphForSession(
-      evidenceGraph,
-      session,
-    );
-    const evidenceDigest = buildEvidenceDigest(
-      scopedEvidenceGraph,
-      profile === 'main' ? 1_800 : 900,
-      profile === 'main' ? 'full' : 'compact',
-    );
-    if (evidenceDigest) {
-      options.onInfo?.(
-        `[evidence] digest claims=${scopedEvidenceGraph.claims.length} edges=${scopedEvidenceGraph.edges.length}`,
-      );
-    }
-
-    const providerMessages = await buildProviderMessages(
-      context,
-      options.cwd,
-      options.permissionManager.getMode(),
-      session.autonomyMode ?? 'standard',
-      profile,
-      evidenceDigest,
-      activeProvider.supportsNativeToolCalls === true,
-      [
-        ...extensionRuntime.sections,
-        ...(modelSeesImages ? [] : [canViewImages ? VIEW_IMAGE_HELPER_SECTION : VIEW_IMAGE_UNAVAILABLE_SECTION]),
-      ],
-    );
-    const latestUserRequest = extractLatestUserRequest(context.messages);
     if (turn === 1) {
       await recordHeimdallStage(
         options.sessionStore,
@@ -6672,28 +6932,41 @@ export async function runAgent(
       );
     }
     const nativeFunctionTools = nativeToolRuntime?.tools;
+    const systemContent = await getSystemContent(
+      activeProvider.supportsNativeToolCalls === true,
+      modelSeesImages ? undefined : canViewImages ? VIEW_IMAGE_HELPER_SECTION : VIEW_IMAGE_UNAVAILABLE_SECTION,
+    );
+    let prepared = await prepareRequestMessages({
+      provider: activeProvider,
+      system: systemContent,
+      nativeFunctionTools,
+      reason: 'proactive',
+    });
+    let providerMessages = prepared.messages;
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
-    const requestImages = takeRequestImages(
+    const { images: requestImages, visionSkip } = takeRequestImages(
       turn === 1 ? userImages.images : [],
       activeProvider,
+      turn === 1 ? userImages.visionSkip : [],
     );
     const providerCallOptions = {
       nativeFunctionTools,
       imageAttachments: requestImages.length ? requestImages : undefined,
+      ...(visionSkip ? { visionSkip } : {}),
     };
     // Stream the model output live to the workflow UI when the provider
     // supports it. We forward each delta as a `[stream-chunk]` info line,
     // which the workflow renderer accumulates into a per-stage live buffer
     // and shows as it arrives in the terminal UI.
-    let completion: ProviderResponse;
-    if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
+    const requestCompletion = async (messages: SessionMessage[]): Promise<ProviderResponse> => {
+      if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
         const onInfoCallback = options.onInfo;
         onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
         try {
-          completion = await completeProviderTurn(
+          return await completeProviderTurn(
             activeProvider,
-            providerMessages,
+            messages,
             {
               ...providerCallOptions,
             },
@@ -6708,17 +6981,76 @@ export async function runAgent(
         } finally {
           onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
         }
-    } else {
-      completion = await completeProviderTurn(activeProvider, providerMessages, {
+      }
+      return completeProviderTurn(activeProvider, messages, {
         ...providerCallOptions,
       });
+    };
+    let completion: ProviderResponse;
+    try {
+      completion = await requestCompletion(providerMessages);
+    } catch (error) {
+      if (!isContextOverflowError(error) || options.abortSignal?.aborted) throw error;
+      // The provider counted more than the estimate allowed for: compact
+      // hard, persist, and retry once.
+      options.onInfo?.(`[context] provider rejected the request as too large; compacting and retrying once`);
+      prepared = await prepareRequestMessages({
+        provider: activeProvider,
+        system: systemContent,
+        nativeFunctionTools,
+        reason: 'overflow',
+      });
+      providerMessages = prepared.messages;
+      try {
+        completion = await requestCompletion(providerMessages);
+      } catch (retryError) {
+        if (!isContextOverflowError(retryError)) throw retryError;
+        const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
+        throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
+      }
     }
-    completion = await runNativeToolLoop(
-      activeProvider,
-      providerMessages,
-      completion,
-      nativeToolRuntime,
+    // The first request of the turn carried exactly the stored history, so
+    // its provider count anchors the next measurement.
+    recordProviderUsage(
+      contextState,
+      completion.usage,
+      session.messages.slice(0, prepared.sentCount),
+      prepared.fixedTokens,
     );
+    persistContextState();
+    try {
+      completion = await runNativeToolLoop(
+        activeProvider,
+        providerMessages,
+        completion,
+        nativeToolRuntime,
+      );
+    } catch (error) {
+      if (!isContextOverflowError(error) || options.abortSignal?.aborted) throw error;
+      // A Responses continuation (previous_response_id) outgrew the window on
+      // the server side. Its tool results are already in the session: compact
+      // and start a fresh request without the continuation, once.
+      options.onInfo?.(`[context] tool-loop continuation rejected as too large; compacting and restarting the request`);
+      prepared = await prepareRequestMessages({
+        provider: activeProvider,
+        system: systemContent,
+        nativeFunctionTools,
+        reason: 'overflow',
+      });
+      providerMessages = prepared.messages;
+      try {
+        completion = await runNativeToolLoop(
+          activeProvider,
+          providerMessages,
+          await requestCompletion(providerMessages),
+          nativeToolRuntime,
+        );
+      } catch (retryError) {
+        if (!isContextOverflowError(retryError)) throw retryError;
+        const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
+        throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
+      }
+    }
     // Surface per-turn token usage so the workflow progress UI can attribute
     // tokens to the currently-active stage (researcher / reviewer / synthesis
     // / execute). The string format is what applyWorkflowProgressInfo parses.
@@ -6726,6 +7058,12 @@ export async function runAgent(
       const usageBits: string[] = [];
       if (typeof completion.usage.promptTokens === 'number') {
         usageBits.push(`prompt=${completion.usage.promptTokens}`);
+      }
+      if (typeof completion.usage.cacheReadTokens === 'number') {
+        usageBits.push(`cache_read=${completion.usage.cacheReadTokens}`);
+      }
+      if (typeof completion.usage.cacheCreationTokens === 'number') {
+        usageBits.push(`cache_write=${completion.usage.cacheCreationTokens}`);
       }
       if (typeof completion.usage.completionTokens === 'number') {
         usageBits.push(`completion=${completion.usage.completionTokens}`);
@@ -7494,8 +7832,8 @@ export async function runAgent(
     abortSubagentRuns(session.id);
 
     try {
-      const { compressTrajectory } = await import('./memory.js');
-      compressTrajectory(options.cwd, session, '').catch(() => {});
+      const { scheduleTrajectoryCuration } = await import('./memory.js');
+      scheduleTrajectoryCuration(options.cwd, session);
     } catch {}
 
     if (shouldOwnHeimdallState) {

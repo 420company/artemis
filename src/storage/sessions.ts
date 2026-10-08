@@ -2,11 +2,15 @@ import {
   appendFile,
   readFile,
   readdir,
+  rename,
+  rm,
   stat,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { removeStaleTempFiles, writeFileAtomic } from './atomicWrite.js';
+import { holdsSessionLock, withSessionLock } from './sessionLock.js';
 import type {
   AgentRole,
   AgentPhase,
@@ -25,7 +29,22 @@ import type {
   VerificationCommandRecord,
 } from '../core/types.js';
 import { isHeimdallEventKind } from '../core/types.js';
-import { smartTruncateToolContent } from '../core/session.js';
+import {
+  createContextStorage,
+  isCompactionBoundary,
+  normalizeContextState,
+  readFullHistory,
+  readHistoryPage,
+  type HistoryPage,
+  resolveContextBudget,
+  spillToolResultIfLarge,
+  type ContextStorage,
+} from '../core/compaction/index.js';
+
+/** Entries the runtime writes into a history that the user never wrote or saw. */
+export function isSyntheticHistoryMessage(message: SessionMessage): boolean {
+  return isCompactionBoundary(message) || message.name === 'runtime_context';
+}
 import {
   canonicalizeClaimStatement,
   synchronizeEvidenceGraph,
@@ -46,6 +65,97 @@ import {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+// Intake safety net for tool results appended without a window-aware budget
+// (runAgent spills with the active model's budget before appending).
+const DEFAULT_INTAKE_BUDGET = resolveContextBudget();
+
+const VALID_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
+
+/**
+ * Bring a stored message to the current shape. Old session files may lack
+ * ids or timestamps, carry non-string content, or use retired roles.
+ */
+function normalizeStoredMessage(
+  raw: unknown,
+  index: number,
+  fallbackCreatedAt: string,
+): { message: SessionMessage | null; mutated: boolean } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { message: null, mutated: true };
+  }
+  const candidate = raw as Record<string, unknown>;
+  let mutated = false;
+  let role = candidate.role;
+  if (role === 'tool_result') {
+    role = 'tool';
+    mutated = true;
+  }
+  if (typeof role !== 'string' || !VALID_ROLES.has(role)) {
+    return { message: null, mutated: true };
+  }
+  let content = candidate.content;
+  if (typeof content !== 'string') {
+    content = content === undefined || content === null
+      ? ''
+      : Array.isArray(content)
+        ? content
+          .map((block) => (block && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string'
+            ? (block as { text: string }).text
+            : ''))
+          .filter(Boolean)
+          .join('\n')
+        : JSON.stringify(content);
+    mutated = true;
+  }
+  let id = candidate.id;
+  if (typeof id !== 'string' || !id) {
+    id = `msg-migrated-${index}-${randomUUID().slice(0, 8)}`;
+    mutated = true;
+  }
+  let createdAt = candidate.createdAt;
+  if (typeof createdAt !== 'string' || !createdAt) {
+    createdAt = fallbackCreatedAt;
+    mutated = true;
+  }
+  // toolCalls must be an array of { id, name, arguments: string }; drop
+  // anything else (old or damaged files held strings and nulls).
+  let toolCalls = candidate.toolCalls;
+  if (toolCalls !== undefined) {
+    const valid = Array.isArray(toolCalls)
+      ? toolCalls
+        .filter((call): call is Record<string, unknown> =>
+          Boolean(call) && typeof call === 'object' && !Array.isArray(call) &&
+          typeof (call as Record<string, unknown>).id === 'string' &&
+          typeof (call as Record<string, unknown>).name === 'string')
+        .map((call) => ({
+          id: call.id as string,
+          name: call.name as string,
+          arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {}),
+        }))
+      : [];
+    if (!Array.isArray(toolCalls) || valid.length !== toolCalls.length ||
+      valid.some((call, i) => (toolCalls as Array<Record<string, unknown>>)[i]?.arguments !== call.arguments)) {
+      mutated = true;
+    }
+    toolCalls = valid.length > 0 ? valid : undefined;
+  }
+  if (!mutated) {
+    return { message: raw as SessionMessage, mutated: false };
+  }
+  const { toolCalls: _rawToolCalls, ...rest } = candidate;
+  return {
+    message: {
+      ...(rest as unknown as SessionMessage),
+      id: id as string,
+      role: role as SessionMessage['role'],
+      content: content as string,
+      createdAt: createdAt as string,
+      ...(toolCalls ? { toolCalls: toolCalls as SessionMessage['toolCalls'] } : {}),
+    },
+    mutated: true,
+  };
 }
 
 function deriveTitle(cwd: string): string {
@@ -262,6 +372,66 @@ function normalizeHeimdallEventCollection(
     .slice(-256);
 }
 
+/** Messages per `session show` page by default. */
+export const DEFAULT_HISTORY_PAGE = 500;
+/** Longest message text `session show` returns by default. */
+const MAX_SHOWN_CHARS = 100_000;
+
+/** A message a chat UI shows: user or assistant text. */
+export function isChatVisibleMessage(message: SessionMessage): boolean {
+  return (message.role === 'user' || message.role === 'assistant') &&
+    typeof message.content === 'string' && message.content.trim().length > 0;
+}
+
+function projectChatMessage(message: SessionMessage): SessionMessage {
+  const {
+    toolCalls: _toolCalls,
+    rawContentBlocks: _raw,
+    contentBlocks: _blocks,
+    reasoningContent: _reasoning,
+    ...rest
+  } = message as SessionMessage & { contentBlocks?: unknown; reasoningContent?: unknown };
+  const content = rest.content ?? '';
+  if (content.length <= MAX_SHOWN_CHARS) return rest as SessionMessage;
+  const head = content.slice(0, Math.floor(MAX_SHOWN_CHARS * 0.7));
+  const tail = content.slice(content.length - Math.floor(MAX_SHOWN_CHARS * 0.3));
+  const omitted = content.length - head.length - tail.length;
+  return {
+    ...rest,
+    content: `${head}\n… [${omitted.toLocaleString('en-US')} chars omitted; full text: artemis session show <id> --full] …\n${tail}`,
+  } as SessionMessage;
+}
+
+/** A session file that still cannot be parsed after retries (read-only load). */
+export class SessionUnreadableError extends Error {
+  readonly code = 'session_unreadable';
+  constructor(sessionId: string, cause: unknown) {
+    super(`Session ${sessionId} could not be read (${cause instanceof Error ? cause.message : String(cause)}).`);
+    this.name = 'SessionUnreadableError';
+  }
+}
+
+type SessionFileRead = { ok: true; record: SessionRecord } | { ok: false; error: unknown };
+
+/** Read and parse a session file, retrying parse errors with a short backoff. ENOENT is thrown. */
+async function readSessionFile(filePath: string, attempts: number): Promise<SessionFileRead> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+    const raw = await readFile(filePath, 'utf8');
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ok: true, record: parsed as SessionRecord };
+      }
+      lastError = new Error('not a session object');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
 export class SessionStore {
   private readonly cwd: string;
   private readonly rootDir: string;
@@ -270,6 +440,10 @@ export class SessionStore {
   private readonly evidenceDir: string;
   private readonly sessionCache = new Map<string, SessionRecord>();
   private readonly evidenceCache = new Map<string, EvidenceGraph>();
+  /** Last serialized form written per session, to skip identical rewrites. */
+  private readonly lastWritten = new Map<string, string>();
+  /** When stale temp files were last swept from the sessions directory. */
+  private lastTempSweep = 0;
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -316,6 +490,20 @@ export class SessionStore {
     return session;
   }
 
+  /** Directory for a session's context files (transcript archive, spilled tool outputs). */
+  getContextDir(sessionId: string): string {
+    return path.join(this.sessionDir, sessionId);
+  }
+
+  /** Advisory lock file for runs on this session (see storage/sessionLock.ts). */
+  getLockPath(sessionId: string): string {
+    return path.join(this.sessionDir, `${sessionId}.lock`);
+  }
+
+  getContextStorage(session: Pick<SessionRecord, 'id'>): ContextStorage {
+    return createContextStorage(this.getContextDir(session.id));
+  }
+
   appendMessage(
     session: SessionRecord,
     role: SessionMessage['role'],
@@ -325,7 +513,17 @@ export class SessionStore {
     const message: SessionMessage = {
       id: randomUUID(),
       role,
-      content: role === 'tool' ? smartTruncateToolContent(content) : content,
+      // Large tool output goes to a file under the session directory; the
+      // history keeps a preview with the path. Nothing is cut silently.
+      content: role === 'tool'
+        ? spillToolResultIfLarge(content, {
+          storage: this.getContextStorage(session),
+          toolName: name,
+          inlineTokens: DEFAULT_INTAKE_BUDGET.inlineToolResultTokens,
+          inlineReadTokens: DEFAULT_INTAKE_BUDGET.inlineReadTokens,
+          previewTokens: DEFAULT_INTAKE_BUDGET.toolPreviewTokens,
+        }).content
+        : content,
       name,
       createdAt: now(),
     };
@@ -387,34 +585,135 @@ export class SessionStore {
     if (normalized.mutated) {
       session = normalized.session;
     }
-    session.updatedAt = now();
     this.sessionCache.set(session.id, session);
-    await writeFile(
+    // Skip the rewrite (and the search-index sync) when nothing changed since
+    // the last write; runAgent saves at many checkpoints per turn.
+    const comparable = JSON.stringify({ ...session, updatedAt: '' });
+    if (this.lastWritten.get(session.id) === comparable) {
+      return;
+    }
+    session.updatedAt = now();
+    // Conversation content: readable by the owner only. Written to a temp
+    // file and renamed into place, so a concurrent reader (the web server
+    // runs `session show` without the lock) never sees half a file.
+    await writeFileAtomic(
       path.join(this.sessionDir, `${session.id}.json`),
       JSON.stringify(session, null, 2),
-      'utf8',
+      { mode: 0o600 },
     );
+    this.lastWritten.set(session.id, comparable);
     invalidateSessionSearchCache(this.cwd);
     await syncSessionSearchIndex(this.cwd, session);
   }
 
-  async load(sessionId: string): Promise<SessionRecord> {
+  /**
+   * Load a session.
+   *
+   * - `fresh`: read from disk even when cached (another process may have
+   *   written it; callers holding the session lock use this).
+   * - `readOnly`: never write anything (`artemis session show`). A file
+   *   that cannot be parsed raises SessionUnreadableError instead of being
+   *   quarantined.
+   *
+   * A parse error is retried a few times first (a writer from an older
+   * version may be mid-write). Only then, and only while holding the
+   * session lock, is the file moved aside.
+   */
+  async load(sessionId: string, options: { fresh?: boolean; readOnly?: boolean } = {}): Promise<SessionRecord> {
     const cached = this.sessionCache.get(sessionId);
-    if (cached) {
+    if (cached && !options.fresh) {
       return cached;
     }
 
-    await this.ensure();
-    const raw = await readFile(
-      path.join(this.sessionDir, `${sessionId}.json`),
-      'utf8',
-    );
-    const normalized = this.normalizeSession(JSON.parse(raw) as SessionRecord);
-    if (normalized.mutated) {
-      await this.save(normalized.session);
+    if (!options.readOnly) {
+      await this.ensure();
+      await this.sweepTempFiles();
     }
+    const filePath = path.join(this.sessionDir, `${sessionId}.json`);
+    const attempt = await readSessionFile(filePath, 4);
+    if (!attempt.ok) {
+      if (options.readOnly) {
+        throw new SessionUnreadableError(sessionId, attempt.error);
+      }
+      const lockPath = this.getLockPath(sessionId);
+      const quarantineUnderLock = async (): Promise<SessionRecord> => {
+        // Re-read under the lock: the writer may have finished meanwhile.
+        const again = await readSessionFile(filePath, 2);
+        if (again.ok) return this.adoptLoaded(sessionId, again.record);
+        return this.quarantine(sessionId, filePath, again.error);
+      };
+      return holdsSessionLock(lockPath)
+        ? quarantineUnderLock()
+        : withSessionLock(lockPath, quarantineUnderLock, { label: `Session ${sessionId}` });
+    }
+    return this.adoptLoaded(sessionId, attempt.record);
+  }
+
+  private adoptLoaded(sessionId: string, record: SessionRecord): SessionRecord {
+    // The file name is the id; a missing or wrong id inside is repaired.
+    if (record.id !== sessionId) record.id = sessionId;
+    // Normalized in memory only: loading never writes (the next save does).
+    const normalized = this.normalizeSession(record);
     this.sessionCache.set(normalized.session.id, normalized.session);
     return normalized.session;
+  }
+
+  /**
+   * An unreadable session file must not brick the session: it is moved
+   * aside to `<id>.json.corrupt-<time>` (kept for inspection) and a fresh,
+   * empty session with the same id takes its place. Called only under the
+   * session lock, after re-reading failed.
+   */
+  private async quarantine(sessionId: string, filePath: string, error: unknown): Promise<SessionRecord> {
+    const aside = `${filePath}.corrupt-${Date.now()}`;
+    await rename(filePath, aside).catch(() => undefined);
+    const reason = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[session] ${sessionId}: the session file could not be read (${reason}); it was moved to ${aside} and a fresh session was started.\n`,
+    );
+    const fresh = this.createSession({ title: 'Recovered session' });
+    this.sessionCache.delete(fresh.id);
+    const recovered: SessionRecord = {
+      ...fresh,
+      id: sessionId,
+      rootSessionId: sessionId,
+      metadata: { recoveredFrom: aside, recoveredAt: now() },
+    };
+    await this.save(recovered);
+    return recovered;
+  }
+
+  /**
+   * Every message of the conversation in order, including the ones moved to
+   * the transcript archive by compaction; the compaction boundary and
+   * runtime-context entries are left out. This is the user-visible history
+   * (`artemis session show`), not what the model is sent.
+   */
+  async loadFullHistory(session: SessionRecord): Promise<{ messages: SessionMessage[]; archived: number }> {
+    return readFullHistory(this.getContextDir(session.id), session.messages, isSyntheticHistoryMessage);
+  }
+
+  /**
+   * One page of what a chat UI renders (user and assistant text, newest
+   * last), read from the end of the archive. Tool messages, tool-call
+   * arguments, raw provider blocks and inline images are left out, and a
+   * very long text is shortened with a note (`session show --full` has it).
+   */
+  async loadHistoryPage(
+    session: SessionRecord,
+    options: { limit?: number; before?: string } = {},
+  ): Promise<HistoryPage> {
+    return readHistoryPage(this.getContextDir(session.id), session.messages, isSyntheticHistoryMessage, {
+      limit: Math.max(1, options.limit ?? DEFAULT_HISTORY_PAGE),
+      before: options.before,
+      include: isChatVisibleMessage,
+      project: projectChatMessage,
+    });
+  }
+
+  /** Remove a session's context directory (archive, spilled tool outputs). */
+  async removeContextDir(sessionId: string): Promise<void> {
+    await rm(this.getContextDir(sessionId), { recursive: true, force: true });
   }
 
   async loadLatest(): Promise<SessionRecord | null> {
@@ -440,8 +739,16 @@ export class SessionStore {
     );
   }
 
+  /** Leftovers of interrupted atomic writes, at most every ten minutes. */
+  private async sweepTempFiles(): Promise<void> {
+    if (Date.now() - this.lastTempSweep < 10 * 60_000) return;
+    this.lastTempSweep = Date.now();
+    await removeStaleTempFiles(this.sessionDir).catch(() => 0);
+  }
+
   async list(): Promise<SessionRecord[]> {
     await this.ensure();
+    await this.sweepTempFiles();
     const entries = await readdir(this.sessionDir);
     const sessions: Array<{ session: SessionRecord; mtimeMs: number }> = [];
 
@@ -459,8 +766,19 @@ export class SessionStore {
         readFile(filePath, 'utf8'),
         stat(filePath),
       ]);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // One damaged file must not hide every other session.
+        process.stderr.write(`[session] skipped unreadable session file ${entry}\n`);
+        continue;
+      }
       sessions.push({
-        session: JSON.parse(raw) as SessionRecord,
+        session: { ...(parsed as SessionRecord), id: (parsed as SessionRecord).id || entry.slice(0, -5) },
         mtimeMs: info.mtimeMs,
       });
     }
@@ -654,12 +972,34 @@ export class SessionStore {
     const normalizedAutonomyMode = normalizeSessionAutonomyMode(
       session.autonomyMode,
     );
+    // Messages: old files may hold malformed entries; keep every usable one.
+    let messagesMutated = !Array.isArray(session.messages);
+    const fallbackCreatedAt =
+      typeof session.createdAt === 'string' && session.createdAt ? session.createdAt : now();
+    const normalizedMessages: SessionMessage[] = [];
+    (Array.isArray(session.messages) ? session.messages : []).forEach((entry, index) => {
+      const result = normalizeStoredMessage(entry, index, fallbackCreatedAt);
+      if (result.mutated) messagesMutated = true;
+      if (result.message) normalizedMessages.push(result.message);
+    });
+    // Context-management state lives in metadata.context; repair it in place.
+    let metadata = session.metadata;
+    if (metadata && typeof metadata === 'object' && 'context' in metadata) {
+      const normalizedContext = normalizeContextState(metadata.context);
+      if (JSON.stringify(normalizedContext) !== JSON.stringify(metadata.context)) {
+        metadata = { ...metadata, context: normalizedContext };
+        mutated = true;
+      }
+    }
+    if (messagesMutated) mutated = true;
     const {
       harnessEvents: _legacyHarnessEvents,
       ...sessionWithoutLegacyHarness
     } = session as unknown as Record<string, unknown>;
     const nextSession: SessionRecord = {
       ...(sessionWithoutLegacyHarness as SessionRecord),
+      messages: messagesMutated ? normalizedMessages : session.messages,
+      ...(metadata !== session.metadata ? { metadata } : {}),
       autonomyMode: normalizedAutonomyMode,
       plan: Array.isArray(session.plan) ? session.plan : [],
       tasks: normalizedTasks,

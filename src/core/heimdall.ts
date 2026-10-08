@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
-import { buildContextWindow } from './context.js';
+import { getCompactionSummary } from './compaction/index.js';
 import type {
   AgentAction,
   AgentPhase,
@@ -841,7 +841,7 @@ const summarySnapshotMiddleware: HeimdallMiddleware = {
   async run(context) {
     const summary =
       context.session.summary?.trim() ||
-      (await buildContextWindow(context.session, 'main')).summary ||
+      getCompactionSummary(context.session.messages) ||
       buildFallbackSummary(context.session);
     context.state.sessionSummary = summary;
     context.state.middlewareScratchpad['heimdall:summaryChars'] = String(

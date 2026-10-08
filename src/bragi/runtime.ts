@@ -9,13 +9,16 @@
  * Only one concurrent task per target ID is allowed.
  */
 
-import { think, resetSession, getMessages, restoreSessionStateForCwd } from '../brain.js'
+import { think, resetSession, getMessages, getActiveContextState, restoreSessionStateForCwd } from '../brain.js'
+import { withSessionLock } from '../storage/sessionLock.js'
 import { open, readFile, unlink, writeFile, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { hostname, homedir } from 'node:os'
 import path from 'node:path'
 import { SessionStore } from '../storage/sessions.js'
-import type { SessionRecord } from '../core/types.js'
+import type { SessionMessage, SessionRecord } from '../core/types.js'
+import { getCompactionSummary, isContextOverflowError } from '../core/compaction/index.js'
+import { loadCompactionSettings } from '../services/compactionSettings.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
@@ -438,9 +441,66 @@ export function parseRemoteCommand(text: string, opts?: { commandSuffixPattern?:
 
 // ─── remote command runner ────────────────────────────────────────────────────
 
+/**
+ * Change a stored session under its lock, starting from what is on disk now
+ * (a web turn may have been saved since this bridge cached the binding), and
+ * return the saved record.
+ */
+/**
+ * The stored session could not be re-read under the lock. The turn fails
+ * instead of continuing from the bridge's cached copy, which could be older
+ * than what another process saved (and saving it would erase that).
+ */
+class BridgeSessionReadError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BridgeSessionReadError'
+  }
+}
+
+async function reloadStoredSession(store: SessionStore, sessionId: string, locale: UiLocale): Promise<SessionRecord> {
+  try {
+    return await store.load(sessionId, { fresh: true })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new BridgeSessionReadError(pickLocale(locale, {
+      zh: `无法从磁盘读取这个对话（${truncate(reason, 160)}），因此没有执行也没有保存任何内容。请稍后重试。`,
+      en: `Could not read this conversation from disk (${truncate(reason, 160)}), so nothing was run or saved. Please try again in a moment.`,
+    }))
+  }
+}
+
+async function updateSessionLocked(
+  store: SessionStore,
+  base: SessionRecord,
+  locale: UiLocale,
+  change: (current: SessionRecord) => SessionRecord,
+): Promise<SessionRecord> {
+  return withSessionLock(store.getLockPath(base.id), async () => {
+    const current = await reloadStoredSession(store, base.id, locale)
+    const next = change(current)
+    await store.save(next)
+    return next
+  })
+}
+
 
 
 export async function runRemoteCommand(
+  command: RemoteCommand,
+  opts: RemoteCommandOptions,
+): Promise<RemoteRuntimeResult> {
+  try {
+    return await runRemoteCommandInner(command, opts)
+  } catch (error) {
+    if (!(error instanceof BridgeSessionReadError)) throw error
+    return { replies: [error.message], storedSession: opts.binding.storedSession, permissionMode: opts.binding.permissionMode }
+  }
+}
+
+type RemoteCommandOptions = Parameters<typeof runRemoteCommandInner>[1]
+
+async function runRemoteCommandInner(
   command: RemoteCommand,
   opts: {
     binding: BragiSessionBinding
@@ -467,6 +527,8 @@ export async function runRemoteCommand(
   }
 ): Promise<RemoteRuntimeResult> {
   let binding = opts.binding
+  // The session saved after a failed turn (compacted history), if any.
+  const savedOnErrorRef: { current?: SessionRecord } = {}
   const { store, locale, cwd } = opts
   const storedCwd = binding.storedSession.cwd
   const fallbackCwd = storedCwd && !isUnsafeBridgeWorkspace(storedCwd)
@@ -479,12 +541,11 @@ export async function runRemoteCommand(
     onInfo: (message) => void Promise.resolve(opts.onProgress?.(message, 'info')).catch(() => {}),
   })
   if (storedCwd && storedCwd !== fallbackCwd && isUnsafeBridgeWorkspace(storedCwd)) {
-    binding.storedSession.cwd = fallbackCwd
-    await store.save({
-      ...binding.storedSession,
+    binding.storedSession = await updateSessionLocked(store, binding.storedSession, locale, (current) => ({
+      ...current,
       cwd: fallbackCwd,
       updatedAt: new Date().toISOString(),
-    })
+    }))
   }
   let commandCwd = fallbackCwd
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
@@ -604,12 +665,12 @@ export async function runRemoteCommand(
       const explicitWorkspace = await resolveWorkspaceIntent(command.body, fallbackCwd, homedir())
       if (explicitWorkspace) {
         commandCwd = explicitWorkspace.workspacePath
-        binding.storedSession.cwd = commandCwd
-        await store.save({
-          ...binding.storedSession,
-          cwd: commandCwd,
+        const pinnedCwd = commandCwd
+        binding.storedSession = await updateSessionLocked(store, binding.storedSession, locale, (current) => ({
+          ...current,
+          cwd: pinnedCwd,
           updatedAt: new Date().toISOString(),
-        })
+        }))
         await opts.onProgress?.(t(
           `📁 已将本轮工作区固定为 ${commandCwd}`,
           `📁 Pinned this turn to workspace ${commandCwd}`,
@@ -749,22 +810,31 @@ export async function runRemoteCommand(
                 mainProvider: providerRuntime.provider,
                 onInfo: (message) => emitProgress(message, 'info'),
               })
-              const result = await runWorkflowMode(
-                workflowResolution.mode,
-                binding.storedSession,
-                workflowResolution.effectivePrompt,
-                {
+              const resolution = workflowResolution
+              const workflowProvider = providerRuntime.provider
+              const workflowCompaction = await loadCompactionSettings(commandCwd, 'hosted')
+              // Same lock as chat turns and web runs; the run starts from the
+              // session as it is on disk now.
+              const result = await withSessionLock(store.getLockPath(binding.storedSession.id), async () => {
+                const current = await reloadStoredSession(store, binding.storedSession.id, locale)
+                binding.storedSession = current
+                return runWorkflowMode(resolution.mode, current, resolution.effectivePrompt, {
                   cwd: commandCwd,
-                  provider: providerRuntime.provider,
+                  provider: workflowProvider,
                   sessionStore: store,
                   permissionManager,
                   maxTurns: opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS,
                   ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
                   resolveProvider: providerRouter.resolveProvider,
                   imageAttachments: command.images,
+                  compaction: workflowCompaction,
+                  // The session is shared with web runs: a background result
+                  // appended after the lock is released would be lost or
+                  // clobber another turn. Slow tools run in the foreground.
+                  allowBackgroundTools: false,
                   onInfo: (message) => emitProgress(message, 'info'),
-                },
-              )
+                })
+              })
               return {
                 replies: [result.reply],
                 storedSession: binding.storedSession,
@@ -854,12 +924,12 @@ export async function runRemoteCommand(
             }
           }
 
-          const updated = {
-            ...binding.storedSession,
-            cwd: commandCwd,
+          const sagaCwd = commandCwd
+          const updated = await updateSessionLocked(store, binding.storedSession, locale, (current) => ({
+            ...current,
+            cwd: sagaCwd,
             updatedAt: new Date().toISOString(),
-          }
-          await store.save(updated)
+          }))
           return {
             replies: [result.ok
               ? buildLongVideoMobileCompletionReply(result.output, locale)
@@ -902,16 +972,15 @@ export async function runRemoteCommand(
         //                denied, leaving the IM user with a dangling intent
         //                line as the only reply.
         //   PRODUCER/GHOSTWRITER/WRITER → enable tools so remote coding via IM works.
-        let latestCompressionSummary = binding.storedSession.summary
-        const result = await withBridgeThinkLock(async () => {
-          restoreSessionStateForCwd({
-            messages: binding.storedSession.messages,
-            summary: binding.storedSession.summary,
-          }, commandCwd)
-          return think(effectiveBody, {
+        // Set only when this turn compacts; otherwise the stored summary is kept.
+        let latestCompressionSummary: string | undefined
+        const thinkForBridge = () =>
+          think(effectiveBody, {
             cwd: commandCwd,
             permissionMode: binding.permissionMode,
-            initialCompressionSummary: binding.storedSession.summary,
+            contextDir: store.getContextDir(binding.storedSession.id),
+            // Bridges are hosted: default 200K-token context cap (cost).
+            contextMode: 'hosted',
             onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
@@ -1083,24 +1152,64 @@ export async function runRemoteCommand(
               ))
             },
           })
-        })
-        reply = result.text
-        // update session
-        const messages = getMessages()
-        const updated = {
-          ...binding.storedSession,
-          cwd: result.cwd ?? binding.storedSession.cwd,
+        // The session file is locked from restore to save, so a web
+        // `artemis execute` on the same session cannot interleave with this
+        // turn. The context state (anchor, breaker, compaction index) is
+        // stored with the session in metadata.context.
+        const sessionWith = (base: SessionRecord, messages: SessionMessage[], extra: Partial<SessionRecord> = {}): SessionRecord => ({
+          ...base,
+          ...extra,
           messages,
-          summary: latestCompressionSummary ?? binding.storedSession.summary ?? '',
+          metadata: {
+            ...(base.metadata ?? {}),
+            ...(getActiveContextState() ? { context: getActiveContextState() } : {}),
+          },
           updatedAt: new Date().toISOString(),
-        }
-        await store.save(updated)
-        return { replies: [reply], storedSession: updated, permissionMode: binding.permissionMode }
+        })
+        const result = await withBridgeThinkLock(() => withSessionLock(store.getLockPath(binding.storedSession.id), async () => {
+          // Start from the session as it is on disk now, not the cached
+          // binding: a web turn may have been saved since.
+          const current = await reloadStoredSession(store, binding.storedSession.id, locale)
+          binding.storedSession = current
+          restoreSessionStateForCwd({
+            messages: current.messages,
+            summary: current.summary,
+            contextState: current.metadata?.context,
+            sessionId: current.id,
+          }, commandCwd)
+          try {
+            const thought = await thinkForBridge()
+            // Captured inside the lock: the active session is shared by all bridges.
+            const after: SessionMessage[] = getMessages()
+            const updated = sessionWith(current, after, {
+              cwd: thought.cwd ?? current.cwd,
+              summary: latestCompressionSummary ?? current.summary ?? '',
+            })
+            await store.save(updated)
+            return { thought, updated }
+          } catch (error) {
+            const after: SessionMessage[] = getMessages()
+            // When think() compacted the history or hit a context overflow, the
+            // compacted history must be saved; otherwise the next message would
+            // restore the old oversized history and fail the same way forever.
+            const compactedDuringThink =
+              getCompactionSummary(after) !== getCompactionSummary(current.messages)
+            if (isContextOverflowError(error) || compactedDuringThink) {
+              savedOnErrorRef.current = sessionWith(current, after, {
+                summary: getCompactionSummary(after) ?? current.summary ?? '',
+              })
+              await store.save(savedOnErrorRef.current).catch(() => undefined)
+            }
+            throw error
+          }
+        }))
+        reply = result.thought.text
+        return { replies: [reply], storedSession: result.updated, permissionMode: binding.permissionMode }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         return {
           replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
-          storedSession: binding.storedSession,
+          storedSession: savedOnErrorRef.current ?? binding.storedSession,
           permissionMode: binding.permissionMode,
         }
       } finally {

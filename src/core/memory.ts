@@ -30,6 +30,27 @@ type CuratorOp = {
   reason?: string
 }
 
+/** Curations started by finished runs and not done yet (see scheduleTrajectoryCuration). */
+const pendingCurations = new Set<Promise<void>>()
+
+/**
+ * Runs the memory curator for a finished run in the background. The run does
+ * not wait for it; settleMemoryCuration() does, for a host (or a test) that
+ * must not change the process state the curator reads (cwd, ARTEMIS_HOME,
+ * provider stores) while it is still running.
+ */
+export function scheduleTrajectoryCuration(cwd: string, session: SessionRecord): void {
+  const curation: Promise<void> = compressTrajectory(cwd, session, '')
+    .catch(() => {})
+    .finally(() => { pendingCurations.delete(curation) })
+  pendingCurations.add(curation)
+}
+
+/** Resolves once every scheduled curation has finished. */
+export async function settleMemoryCuration(): Promise<void> {
+  while (pendingCurations.size > 0) await Promise.allSettled([...pendingCurations])
+}
+
 export async function compressTrajectory(
   cwd: string,
   session: SessionRecord,

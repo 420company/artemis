@@ -1,7 +1,7 @@
 /**
  * collapse/postCompactRecovery.ts — Restore critical context after compaction
  *
- * When contextCompressor runs, it replaces old messages with a summary.
+ * When context compaction runs, it replaces old messages with a summary.
  * But the model loses:
  *   - What files it has read / modified
  *   - What plan it was following

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
+import { splitTrailingRuntimeContext } from './runtimeContext.js'
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
   createStreamIdleGuard,
@@ -17,6 +18,19 @@ import type {
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
 import { estimateRequestPromptTokens, fitOutputTokensToWindow, hasTrustedContextLength, hasPlatformCapabilities, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
 import { resolveProfileContextLength } from './modelContext.js';
+
+/**
+ * Cached-input counter of an OpenAI-style usage object. OpenAI reports it in
+ * prompt_tokens_details.cached_tokens; DeepSeek-style gateways report
+ * prompt_cache_hit_tokens. prompt_tokens already includes cached tokens.
+ */
+export function readOpenAICachedPromptTokens(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== 'object') return undefined
+  const record = usage as Record<string, unknown>
+  const details = record['prompt_tokens_details'] as Record<string, unknown> | undefined
+  const cached = details?.['cached_tokens'] ?? record['prompt_cache_hit_tokens']
+  return typeof cached === 'number' && Number.isFinite(cached) ? cached : undefined
+}
 
 function buildProviderErrorMessage(
   response: Response,
@@ -487,16 +501,33 @@ function extractText(content: unknown): string {
   return '';
 }
 
+/** The x-vision-skip header for a gateway profile sending images (see ProviderRequestOptions.visionSkip). */
+export function visionSkipHeader(bridgesImages: boolean, options?: ProviderRequestOptions): Record<string, string> {
+  const skip = (options?.visionSkip ?? []).filter((model) => /^[\w.:/@+-]+$/.test(model))
+  if (!bridgesImages || !options?.imageAttachments?.length || skip.length === 0) return {}
+  return { 'x-vision-skip': skip.join(',') }
+}
+
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
+  readonly bridgesImages: boolean;
   readonly supportsNativeToolCalls = true;
   readonly contextLength?: number;
   private readonly config: ProviderConfig;
+  readonly model: string;
+  /** Set by the provider factory from the profile's context length or known-model rules. */
+  contextWindow?: number;
+  maxOutputTokens?: number;
 
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.model = config.model;
+    this.bridgesImages = config.gatewayBridgesImages === true;
     this.contextLength = platformContextLength(config);
+    // Only a platform profile states its output limit; otherwise the budget
+    // reserves a default (requests send no max_tokens unless asked).
+    this.maxOutputTokens = platformMaxOutputTokens(config);
   }
 
   // ── Streaming (SSE) ───────────────────────────────────────────────────────
@@ -508,10 +539,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
   ): Promise<ProviderResponse> {
     const startedAt = Date.now()
     const reasoningMode = getReasoningContentMode(this.config.model)
-    const mapped = messages.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
+    const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages)
+    const mapped = conversation.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
+    mapped.push(...(runtimeContext.map((m) => mapMessage(m, { reasoningMode })) as typeof mapped))
 
     const body: Record<string, unknown> = {
       model: this.config.model,
@@ -546,6 +579,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
           signal: idleGuard.signal,
@@ -602,6 +636,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let promptTokens = 0
     let completionTokens = 0
     let totalTokens = 0
+    let cacheReadTokens: number | undefined
     let firstResponseMs: number | undefined
     let responseModel = this.config.model
     const guardStreamingText = options?.guardStreamingText === true
@@ -732,6 +767,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
             promptTokens    = (usage['prompt_tokens']     as number | undefined) ?? promptTokens
             completionTokens = (usage['completion_tokens'] as number | undefined) ?? completionTokens
             totalTokens     = (usage['total_tokens']      as number | undefined) ?? totalTokens
+            cacheReadTokens = readOpenAICachedPromptTokens(usage) ?? cacheReadTokens
           }
 
           // Meaningful increments reset the idle deadline; keep-alive comments
@@ -771,6 +807,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       streamed: emittedVisibleText,
       usage: {
         promptTokens:     promptTokens || undefined,
+        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
         completionTokens: completionTokens || undefined,
         totalTokens:      totalTokens || undefined,
         durationMs: Math.max(Date.now() - startedAt, 0),
@@ -818,6 +855,9 @@ export class OpenAICompatibleProvider implements ChatProvider {
       streamed: false,
       usage: {
         promptTokens: json.usage?.prompt_tokens,
+        ...(readOpenAICachedPromptTokens(json.usage) !== undefined
+          ? { cacheReadTokens: readOpenAICachedPromptTokens(json.usage) }
+          : {}),
         completionTokens: json.usage?.completion_tokens,
         totalTokens: json.usage?.total_tokens,
         durationMs: Math.max(Date.now() - startedAt, 0),
@@ -832,10 +872,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
   ): Promise<ProviderResponse> {
     const startedAt = Date.now();
     const reasoningMode = getReasoningContentMode(this.config.model);
-    const mapped = messages.map((m) => mapMessage(m, { reasoningMode }));
+    const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
+    const mapped = conversation.map((m) => mapMessage(m, { reasoningMode }));
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
+    mapped.push(...runtimeContext.map((m) => mapMessage(m, { reasoningMode })));
 
     const body: Record<string, unknown> = {
       model: this.config.model,
@@ -867,6 +909,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
           signal: options?.abortSignal,
@@ -928,6 +971,9 @@ export class OpenAICompatibleProvider implements ChatProvider {
       ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens: json.usage?.prompt_tokens,
+        ...(readOpenAICachedPromptTokens(json.usage) !== undefined
+          ? { cacheReadTokens: readOpenAICachedPromptTokens(json.usage) }
+          : {}),
         completionTokens: json.usage?.completion_tokens,
         totalTokens: json.usage?.total_tokens,
         durationMs: Math.max(Date.now() - startedAt, 0),

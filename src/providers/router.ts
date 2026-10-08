@@ -36,6 +36,11 @@ const SPECIALIST_ROLES = new Set<AgentRole>([
 export type ProviderRouter = {
   ensureSpecialistProvider(roles: AgentRole[]): Promise<void>;
   resolveProvider(target: ProviderTarget): ChatProvider;
+  /**
+   * Provider for background summarization (context compaction): the
+   * configured worker/specialist model when there is one, else the main model.
+   */
+  resolveSummarizerProvider(): ChatProvider;
 };
 
 type CreateProviderRouterOptions = {
@@ -328,6 +333,10 @@ export async function createProviderRouter(
       );
     },
 
+    resolveSummarizerProvider(): ChatProvider {
+      return specialistProvider ?? options.mainProvider;
+    },
+
     resolveProvider(target: ProviderTarget, task?: string): ChatProvider {
       const buildCandidates = (): RoutedProviderCandidate[] => {
         const candidates: RoutedProviderCandidate[] = [
@@ -371,10 +380,13 @@ export async function createProviderRouter(
         requestOptions?: ProviderRequestOptions,
       ): Promise<ProviderResponse> => {
         let ranked = rankForTarget(buildCandidates());
-        // A request with images only goes to models that can see them; the
-        // others would reject it (or silently get a note instead).
+        // A request with images only goes to models that can take them: those
+        // that see images, and platform gateway profiles, which read them for
+        // the model. The others would reject it (or silently get a note instead).
         if (requestOptions?.imageAttachments?.length) {
-          const withImages = ranked.filter((candidate) => candidate.provider.supportsImages === true);
+          const withImages = ranked.filter(
+            (candidate) => candidate.provider.supportsImages === true || candidate.provider.bridgesImages === true,
+          );
           if (withImages.length > 0) ranked = withImages;
         }
         let lastError: unknown;
@@ -423,8 +435,27 @@ export async function createProviderRouter(
         get supportsImages() {
           return buildCandidates().some((candidate) => candidate.provider.supportsImages === true);
         },
+        // Any candidate may serve the request (fallback on failure), so the
+        // budget must fit the smallest known window among them.
+        get contextWindow() {
+          const windows = buildCandidates()
+            .map((candidate) => candidate.provider.contextWindow)
+            .filter((value): value is number => typeof value === 'number' && value > 0);
+          return windows.length > 0 ? Math.min(...windows) : undefined;
+        },
+        get maxOutputTokens() {
+          const outputs = buildCandidates()
+            .map((candidate) => candidate.provider.maxOutputTokens)
+            .filter((value): value is number => typeof value === 'number' && value > 0);
+          return outputs.length > 0 ? Math.max(...outputs) : undefined;
+        },
         get primarySupportsImages() {
           return rankForTarget(buildCandidates())[0]?.provider.supportsImages === true;
+        },
+        get bridgesImages() {
+          // Any routed candidate that bridges can take the images: the filter
+          // above sends a request with images to it.
+          return buildCandidates().some((candidate) => candidate.provider.bridgesImages === true);
         },
         // The window of the provider this target tries first.
         get contextLength() {

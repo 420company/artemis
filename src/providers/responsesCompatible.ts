@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../core/types.js';
+import { splitTrailingRuntimeContext } from './runtimeContext.js';
 import { normalizeUiLocale, type UiLocale } from '../cli/locale.js';
 import { retryFetch } from './retryFetch.js';
 import type {
@@ -345,11 +346,19 @@ export class ResponsesCompatibleProvider implements ChatProvider {
   readonly contextLength?: number;
 
   private readonly config: ProviderConfig;
+  readonly model: string;
+  /** Set by the provider factory from the profile's context length or known-model rules. */
+  contextWindow?: number;
+  maxOutputTokens?: number;
 
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.model = config.model;
     this.contextLength = platformContextLength(config);
+    // Only a platform profile states its output limit; otherwise the budget
+    // reserves a default (requests send no max_tokens unless asked).
+    this.maxOutputTokens = platformMaxOutputTokens(config);
   }
 
   async complete(
@@ -395,12 +404,14 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       }
       payload.input = continuation;
     } else {
-      const input: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem> = messages
+      const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
+      const input: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem> = conversation
         .map(mapMessage)
         .filter((entry): entry is ResponsesInputItem => entry !== null);
       if (options?.imageAttachments?.length) {
         injectImagesIntoInput(input, options.imageAttachments, this.supportsImages);
       }
+      input.push(...runtimeContext.map(mapMessage).filter((entry): entry is ResponsesInputItem => entry !== null));
       payload.input = input;
     }
 
@@ -476,6 +487,12 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       asNumber(usageRecord?.input_tokens) ?? asNumber(usageRecord?.prompt_tokens);
     const completionTokens =
       asNumber(usageRecord?.output_tokens) ?? asNumber(usageRecord?.completion_tokens);
+    const inputDetails =
+      usageRecord?.input_tokens_details && typeof usageRecord.input_tokens_details === 'object'
+        ? (usageRecord.input_tokens_details as Record<string, unknown>)
+        : undefined;
+    // input_tokens already includes cached tokens on the Responses API.
+    const cacheReadTokens = asNumber(inputDetails?.cached_tokens);
     const totalTokens =
       asNumber(usageRecord?.total_tokens) ??
       (typeof promptTokens === 'number' && typeof completionTokens === 'number'
@@ -491,6 +508,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens,
+        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
         completionTokens,
         totalTokens,
         durationMs: Math.max(Date.now() - startedAt, 0),

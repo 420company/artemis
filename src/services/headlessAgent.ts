@@ -34,6 +34,8 @@ export interface HeadlessAgentResult {
   turns: number
   sessionId: string
   durationMs: number
+  /** One short line per context compaction that happened during the run. */
+  contextNotices: string[]
 }
 
 async function loadExistingSession(sessionStore: SessionStore, sessionId: string): Promise<SessionRecord> {
@@ -57,6 +59,7 @@ export async function runHeadlessAgent(
   const { PermissionManager } = await import('../security/permissions.js')
   const { SessionStore } = await import('../storage/sessions.js')
   const { runAgent } = await import('../core/agent.js')
+  const { loadCompactionSettings } = await import('./compactionSettings.js')
 
   const onInfo = opts.onInfo ?? (() => undefined)
   const providerConfig = await resolveMainProviderConfig({
@@ -80,12 +83,23 @@ export async function runHeadlessAgent(
 
   // A missing, unreadable or oversized image fails the run. A model that
   // cannot see images does not: runAgent hands the images to the vision
-  // helper, or tells the model the plan cannot read them.
+  // helper, or tells the model they could not be read right now.
   const { loadPromptImages } = await import('../core/imageInput.js')
   const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
 
+  const { resolveProfileContextLength } = await import('../providers/modelContext.js')
+  const contextNotices: string[] = []
   const started = Date.now()
-  const result = await runAgent(session, prompt, {
+  // One run per session at a time across processes (a chat bridge may be
+  // working on the same session).
+  const { withSessionLock } = await import('../storage/sessionLock.js')
+  const compaction = await loadCompactionSettings(cwd, 'hosted')
+  const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => runAgent(
+    // Re-read under the lock: another process (a chat bridge) may have saved
+    // a turn between the existence check above and getting the lock.
+    opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session,
+    prompt,
+    {
     cwd,
     provider,
     sessionStore,
@@ -93,6 +107,12 @@ export async function runHeadlessAgent(
     maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
     profile: 'main',
     appendUserMessage: true,
+    // The main model's window; specialists with a smaller window are capped
+    // further by their own provider metadata inside runAgent.
+    contextLength: resolveProfileContextLength(providerConfig),
+    // Hosted runs default to a 200K-token context cap (cost); see
+    // services/compactionSettings.ts for the overrides.
+    compaction,
     // Nobody reviews a headless turn as it runs: memories the model saves
     // without naming a scope stay in this workspace.
     memoryDefaultScope: 'project',
@@ -102,14 +122,17 @@ export async function runHeadlessAgent(
     allowBackgroundTools: false,
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
+    resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
+    onContextCompaction: (notice) => contextNotices.push(notice),
     onInfo: opts.onInfo,
     ...(imageAttachments.length ? { imageAttachments } : {}),
-  })
+  }), { label: `Session ${session.id}` })
 
   return {
     reply: result.reply,
     turns: result.turns,
     sessionId: session.id,
     durationMs: Date.now() - started,
+    contextNotices,
   }
 }

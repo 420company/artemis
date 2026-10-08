@@ -2,6 +2,7 @@ import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { MessagesCompatibleProvider } from './messagesCompatible.js';
 import { OpenAICompatibleProvider } from './openaiCompatible.js';
 import { ResponsesCompatibleProvider } from './responsesCompatible.js';
+import { resolveProfileContextLength } from './modelContext.js';
 import type {
   ChatProvider,
   ProviderConfig,
@@ -49,11 +50,16 @@ export function formatProviderProtocolLabel(
 export function createProviderFromConfig(
   config: ProviderConfig,
 ): ChatProvider {
-  if (config.protocol === 'responses') {
-    return new ResponsesCompatibleProvider(config);
-  }
-
-  return config.protocol === 'messages'
-    ? new MessagesCompatibleProvider(config)
-    : new OpenAICompatibleProvider(config);
+  const provider = config.protocol === 'responses'
+    ? new ResponsesCompatibleProvider(config)
+    : config.protocol === 'messages'
+      ? new MessagesCompatibleProvider(config)
+      : new OpenAICompatibleProvider(config);
+  // The context window drives compaction budgets: a platform-written
+  // contextLength is authoritative (the model name may be a gateway alias);
+  // otherwise the profile value (capped by known-model rules) or the
+  // known-model table. Unknown models stay undefined and callers use a
+  // safe default.
+  provider.contextWindow = resolveProfileContextLength(config);
+  return provider;
 }
