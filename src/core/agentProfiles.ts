@@ -6,6 +6,7 @@ export type ExecutionProfile = 'main' | AgentRole;
 const READ_ONLY_ACTION_TYPES: AgentAction['type'][] = [
   'list_files',
   'read_file',
+  'view_image',
   'search_files',
   'lookup_docs',
   'deep_research',
@@ -149,6 +150,7 @@ export function getAllowedActionTypesForProfile(
     return [
       'list_files',
       'read_file',
+      'view_image',
       'search_files',
       'lookup_docs',
       'deep_research',

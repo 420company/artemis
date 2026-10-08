@@ -35,6 +35,8 @@ import {
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
+import { MessagesCompatibleProvider } from '../src/providers/messagesCompatible.js'
+import { ResponsesCompatibleProvider } from '../src/providers/responsesCompatible.js'
 import { buildDirectNativeFunctionTools, getDirectToolCount } from '../src/tools/directTools.js'
 import {
   detectToolHostEnvironment,
@@ -249,6 +251,11 @@ assert(
   assert(
     'platform tools: spotify is offered on every host, including headless linux',
     [linux, linuxDesktop, windows, mac].every((host) => offersAll(host, spotifyTools)),
+  )
+  assert(
+    'platform tools: view_image is in the agent native tools and manifest on every host, including headless linux',
+    [linux, linuxDesktop, windows, mac].every((host) =>
+      host.nativeNames.includes('view_image') && host.manifestNames.includes('view_image')),
   )
   assert(
     'platform tools: manifest hides executor-less capability placeholders',
@@ -1584,6 +1591,316 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     'saga camera routing: locked camera story is treated as lock-off',
     blockingCamera.includes('locked-off tripod'),
   )
+}
+
+{
+  // The agent looks at an image mid-run: view_image attaches it to the next request.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  let calls = 0
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      calls += 1
+      seen.push(options?.imageAttachments?.length)
+      if (calls === 1) {
+        return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+      }
+      return { text: JSON.stringify({ reply: 'It is a login page.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'What does the screenshot show?', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  assert('view_image: the image reaches the request after the tool call, and only that one', seen[0] === undefined && seen[1] === 1 && seen.slice(2).every((n) => n === undefined), JSON.stringify(seen))
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // A run that ends right after view_image (here: out of turns) must not hand
+  // the image to the next run on the same session, as a long-lived bridge would.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-leak-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image leak smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      seen.push(options?.imageAttachments?.length)
+      return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+    },
+  }
+  const runOnce = (prompt: string) => runAgent(session, prompt, {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 1,
+    profile: 'main',
+  })
+  await runOnce('Look at the screenshot.')
+  await runOnce('Something unrelated.')
+  assert(
+    'view_image: an image queued in the last turn of a run does not reach the next run on the same session',
+    seen.length === 2 && seen[0] === undefined && seen[1] === undefined,
+    JSON.stringify(seen),
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // view_image resolves paths like read_file: outside the workspace needs the
+  // workspace trust prompt (declined here, since the run offers none).
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-ws-${Date.now()}`)
+  const outsideDir = path.join(os.tmpdir(), `artemis-view-image-outside-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.mkdirSync(outsideDir, { recursive: true })
+  const outsideImage = path.join(outsideDir, 'private.png')
+  fs.writeFileSync(outsideImage, Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image workspace smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  let calls = 0
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      calls += 1
+      seen.push(options?.imageAttachments?.length)
+      if (calls === 1) {
+        return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: outsideImage }] }), raw: null }
+      }
+      return { text: JSON.stringify({ reply: 'Could not open it.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'Look at that picture.', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+  assert(
+    'view_image: an image outside the workspace is refused without the workspace trust prompt and never attached',
+    seen.every((n) => n === undefined) && /declined|escapes/i.test(toolText),
+    `${JSON.stringify(seen)} ${toolText.slice(0, 300)}`,
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+  fs.rmSync(outsideDir, { recursive: true, force: true })
+}
+
+{
+  // A model that cannot see images: view_image is not offered as a native
+  // tool, and calling it anyway fails instead of claiming success.
+  const runWith = async (supportsImages: boolean) => {
+    const tmpDir = path.join(os.tmpdir(), `artemis-view-image-novision-${Date.now()}-${supportsImages}`)
+    fs.mkdirSync(tmpDir, { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'view image no-vision smoke' })
+    await store.save(session)
+    const seen: (number | undefined)[] = []
+    const nativeToolNames: string[][] = []
+    let calls = 0
+    const provider: ChatProvider = {
+      supportsImages,
+      supportsNativeToolCalls: true,
+      async complete(_messages, options): Promise<ProviderResponse> {
+        calls += 1
+        seen.push(options?.imageAttachments?.length)
+        nativeToolNames.push((options?.nativeFunctionTools ?? []).map((t) => t.name))
+        if (calls === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'Done.', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'What does the screenshot show?', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+    })
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { seen, nativeToolNames, toolText }
+  }
+  const vision = await runWith(true)
+  const textOnly = await runWith(false)
+  assert(
+    'view_image: offered as a native tool to a vision model and attached on the next request',
+    vision.nativeToolNames[0]?.includes('view_image') === true && vision.seen[1] === 1,
+    JSON.stringify({ tools: vision.nativeToolNames[0]?.includes('view_image'), seen: vision.seen }),
+  )
+  assert(
+    'view_image: hidden from a model that cannot see images, and fails (no image sent) when called anyway',
+    textOnly.nativeToolNames.every((names) => !names.includes('view_image')) &&
+      textOnly.seen.every((n) => n === undefined) &&
+      /cannot see images/.test(textOnly.toolText) &&
+      !/is attached to your next step/.test(textOnly.toolText),
+    JSON.stringify({ seen: textOnly.seen, tool: textOnly.toolText.slice(0, 300) }),
+  )
+}
+
+{
+  // Responses API: native tool calls run inside the native loop, whose
+  // continuation request (previous_response_id) must carry the viewed image.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-responses-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image responses smoke' })
+  await store.save(session)
+  const requests: Array<{ previousResponseId?: string; images?: number; toolOutputs?: number }> = []
+  const provider: ChatProvider = {
+    supportsImages: true,
+    supportsNativeToolCalls: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      requests.push({
+        previousResponseId: options?.previousResponseId,
+        images: options?.imageAttachments?.length,
+        toolOutputs: options?.toolOutputs?.length,
+      })
+      if (requests.length === 1) {
+        return {
+          text: '',
+          raw: null,
+          responseId: 'resp_1',
+          nativeToolCalls: [{ name: 'view_image', arguments: JSON.stringify({ path: 'screenshot.png' }), callId: 'call_1' }],
+        }
+      }
+      return { text: JSON.stringify({ reply: 'It is a login page.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'What does the screenshot show?', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  assert(
+    'view_image (Responses native loop): the continuation request carries the viewed image with the tool output',
+    requests.length === 2 &&
+      requests[0]?.images === undefined &&
+      requests[1]?.previousResponseId === 'resp_1' &&
+      requests[1]?.toolOutputs === 1 &&
+      requests[1]?.images === 1,
+    JSON.stringify(requests),
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // Provider wire formats for images: OpenAI-compatible endpoints always get
+  // image_url blocks (also for Claude and Gemini models behind a gateway),
+  // text-only models get a note and never base64 text, and the Responses
+  // continuation adds the images after the tool outputs.
+  const bodies: Array<Record<string, unknown>> = []
+  let reply: unknown = {}
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      bodies.push(raw ? JSON.parse(raw) as Record<string, unknown> : {})
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(reply))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Mock image wire-format server failed to bind.')
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const image = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const, label: 'Image: shot.png' }
+  const userMessage = { id: 'u1', role: 'user' as const, content: 'What is this?', createdAt: new Date().toISOString() }
+  try {
+    reply = { choices: [{ message: { content: 'ok' } }], usage: {} }
+    const chatImageBlocks = async (model: string) => {
+      bodies.length = 0
+      const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model })
+      await provider.complete([userMessage], { imageAttachments: [image] })
+      const messages = bodies[0]?.messages as Array<{ role?: string; content?: unknown }> | undefined
+      return { provider, content: messages?.find((m) => m.role === 'user')?.content, raw: JSON.stringify(bodies[0] ?? {}) }
+    }
+    const isImageUrlContent = (content: unknown) => Array.isArray(content) &&
+      content.some((b) => (b as { type?: string }).type === 'image_url') &&
+      content.some((b) => (b as { type?: string; text?: string }).type === 'text' && (b as { text?: string }).text === 'What is this?')
+    const claude = await chatImageBlocks('anthropic/claude-sonnet-4.5')
+    const gemini = await chatImageBlocks('gemini-2.5-flash')
+    assert(
+      'image wire format: Claude and Gemini models behind an OpenAI-compatible endpoint get standard image_url blocks',
+      claude.provider.supportsImages && gemini.provider.supportsImages && isImageUrlContent(claude.content) && isImageUrlContent(gemini.content),
+      `${JSON.stringify(claude.content).slice(0, 200)} ${JSON.stringify(gemini.content).slice(0, 200)}`,
+    )
+    const deepseek = await chatImageBlocks('deepseek-chat')
+    assert(
+      'image wire format: a text-only model (DeepSeek) gets a note instead of the image, never base64 text',
+      deepseek.provider.supportsImages === false &&
+        typeof deepseek.content === 'string' &&
+        /omitted: this model cannot see images/.test(deepseek.content) &&
+        !deepseek.raw.includes(image.data),
+      deepseek.raw.slice(0, 300),
+    )
+
+    reply = { id: 'resp_2', output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }], usage: {} }
+    bodies.length = 0
+    const responses = new ResponsesCompatibleProvider({ protocol: 'responses', baseUrl, apiKey: 'k', model: 'gpt-5.4' })
+    await responses.complete([userMessage], {
+      previousResponseId: 'resp_1',
+      toolOutputs: [{ callId: 'call_1', output: '{"ok":true}' }],
+      imageAttachments: [image],
+    })
+    const input = bodies[0]?.input as Array<Record<string, unknown>> | undefined
+    const userItem = input?.[1] as { role?: string; content?: Array<{ type?: string; image_url?: string }> } | undefined
+    assert(
+      'image wire format: a Responses continuation sends the tool output, then a user item with the image',
+      bodies[0]?.previous_response_id === 'resp_1' &&
+        input?.[0]?.type === 'function_call_output' &&
+        userItem?.role === 'user' &&
+        userItem.content?.some((b) => b.type === 'input_image' && b.image_url === `data:image/png;base64,${image.data}`) === true,
+      JSON.stringify(bodies[0]).slice(0, 400),
+    )
+
+    reply = { content: [{ type: 'text', text: 'ok' }], usage: {} }
+    bodies.length = 0
+    const messagesProvider = new MessagesCompatibleProvider({ protocol: 'messages', baseUrl, apiKey: 'k', model: 'claude-sonnet-4-5' })
+    await messagesProvider.complete([
+      userMessage,
+      { id: 'a1', role: 'assistant', content: '', toolCalls: [{ id: 'tu_1', name: 'view_image', arguments: '{"path":"shot.png"}' }], createdAt: new Date().toISOString() },
+      { id: 't1', role: 'tool', content: 'attached', toolUseId: 'tu_1', createdAt: new Date().toISOString() },
+    ], { imageAttachments: [image] })
+    const anthropicMessages = bodies[0]?.messages as Array<{ role?: string; content?: Array<Record<string, unknown>> }> | undefined
+    const lastUser = anthropicMessages?.[anthropicMessages.length - 1]?.content
+    assert(
+      'image wire format: on the Messages API the image follows the tool_result block instead of replacing it',
+      Array.isArray(lastUser) &&
+        lastUser[0]?.type === 'tool_result' &&
+        lastUser.some((b) => b.type === 'image' && !('_label' in b)) &&
+        !lastUser.some((b) => b.type === 'text' && b.text === ''),
+      JSON.stringify(lastUser).slice(0, 400),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
 }
 
 {

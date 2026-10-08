@@ -916,6 +916,15 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    case 'view_image':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path'],
+        properties: {
+          path: nonEmptyStringSchema('Image file (PNG, JPEG, GIF or WebP, up to 8 MB), relative to the workspace. It is attached to your next step so you can see it.'),
+        },
+      };
     case 'task_output':
       return {
         type: 'object',
