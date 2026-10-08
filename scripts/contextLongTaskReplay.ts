@@ -85,9 +85,10 @@ function buildLongSession(): SessionMessage[] {
     messages.push(msg(`a${i}`, 'assistant', `Progress ${i}: inspected files and planned next edit. ${'analysis '.repeat(900)}`))
 
     if (i % 3 === 0) {
+      // The envelope runAgent writes for a read_file action.
       messages.push(msg(`t${i}`, 'tool', JSON.stringify({
         ok: true,
-        path: `/tmp/context-replay/src/file-${i}.ts`,
+        action: { type: 'read_file', path: `/tmp/context-replay/src/file-${i}.ts` },
         output: makeReadFileOutput(i, i === 36 ? invariant : undefined),
       }), { name: 'read_file' }))
     } else {
@@ -152,6 +153,7 @@ let sawCurrentFocus = false
 let sawInvariant = false
 let allFit = true
 let pairsIntact = true
+let focusAfterFirstCompaction = false
 const fixedTokens = 12_000
 
 for (let cycle = 0; cycle < 6; cycle += 1) {
@@ -176,6 +178,12 @@ for (let cycle = 0; cycle < 6; cycle += 1) {
   allFit &&= result.tokensAfter <= budget.threshold
   pairsIntact &&= toolPairsIntact(result.messages)
 
+  if (cycle === 0) {
+    // u219 carries the focus; after the first compaction it must be in the
+    // summarizer input or verbatim in the live tail.
+    focusAfterFirstCompaction = sawCurrentFocus ||
+      result.messages.slice(1).some((m) => m.id === 'u219' && m.content.includes('CURRENT_FOCUS_FIX_CONTEXT_LONG_TASK_REPLAY'))
+  }
   messages = result.messages
   messages.push(msg(`cycle-u${cycle}`, 'user', `Cycle ${cycle} follow-up: CURRENT_FOCUS_FIX_CONTEXT_LONG_TASK_REPLAY and INVARIANT_KEEP_NO_PUBLISH_WITHOUT_TYPECHECK_AND_RUNTIME_SMOKE must remain.`))
   messages.push(msg(`cycle-a${cycle}`, 'assistant', `Cycle ${cycle} continue with validation discipline.`))
@@ -188,7 +196,13 @@ assert('replay generated a large synthetic 8h session', originalCount > 600, `co
 assert('summarizing compaction happened at least once', summaryCompactions >= 1, `summary=${summaryCompactions} clearOnly=${clearOnly}`)
 assert('summarizer was called for full compaction', summaryCalls >= 1, `calls=${summaryCalls}`)
 assert('old critical invariant reached summary prompt', sawInvariant, 'invariant missing from prompt')
-assert('latest current focus reached summary prompt', sawCurrentFocus, 'focus missing from prompt')
+// The focus either went through the summarizer or stayed verbatim in the
+// live tail (it is near the end of the history).
+assert(
+  'latest current focus reached summary prompt or stayed verbatim in the tail',
+  focusAfterFirstCompaction,
+  'focus missing from prompt and tail',
+)
 assert('final compressed context still contains invariant', finalText.includes('INVARIANT_KEEP_NO_PUBLISH_WITHOUT_TYPECHECK_AND_RUNTIME_SMOKE'))
 assert('final compressed context still contains current focus', finalText.includes('CURRENT_FOCUS_FIX_CONTEXT_LONG_TASK_REPLAY'))
 assert('final compressed context still contains restart requirement', finalText.includes('RESTART_RUNNING_PROCESS_AFTER_CODE_CHANGE'))

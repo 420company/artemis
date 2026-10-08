@@ -4091,9 +4091,10 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     id: 't-read',
     role: 'tool',
     name: 'read_file',
+    // The real path A envelope: the action that ran, then its output.
     content: JSON.stringify({
       ok: true,
-      path: 'src/old-context.ts',
+      action: { type: 'read_file', path: 'src/old-context.ts' },
       output: [
         "import fs from 'node:fs'",
         'export function keepImportantShape() {',
