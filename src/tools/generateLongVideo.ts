@@ -1987,6 +1987,7 @@ export async function executeGenerateLongVideo(
 
     toolLog(`🎬 Saga: 开始按段生成 ${segments.length} 段视频（${actualTotalSeconds}s 总时长）。`);
     for (const segment of segments) {
+      const cutsIn = segment.index > 1 && sanitizedShots?.[segment.index - 1]?.transitionKind === 'cut';
       // Manual heartbeat check to keep the bridge alive
       if (Date.now() - lastHeartbeat > heartbeatInterval) {
         toolLog(`💓 Saga 状态：正在处理长视频项目 ${projectId}，当前进度 ${segment.index}/${segments.length} 段...`);
@@ -2023,7 +2024,7 @@ export async function executeGenerateLongVideo(
               continuity: segment.continuity,
             },
             turnaroundPath: superVisualMode.referenceImagePath,
-            previousLastFramePath: segment.index > 1 ? previousLastFramePath : undefined,
+            previousLastFramePath: segment.index > 1 && !cutsIn ? previousLastFramePath : undefined,
             realPersonInput,
             accessoriesLock: narrativeEntities?.protagonistAccessories,
             occlusionLock: [
@@ -2103,7 +2104,9 @@ export async function executeGenerateLongVideo(
         //   3) strip both
         // Each attempt also swaps to the text-only prompt when the chain
         // image is being dropped, so the verbal handoff compensates.
-        let usingChain = chainEnabled && previousLastFramePath !== undefined;
+        // A hard cut written into the brief (INSTANT HARD CUT) starts a new
+        // picture: the previous segment's last frame is not carried over.
+        let usingChain = chainEnabled && previousLastFramePath !== undefined && !cutsIn;
         let usingAudio = userAudioPreference;
         let usingUserImageReferences = hasGlobalUserImageReferences;
         // Per-segment Image-2 keyframes can occasionally become too
@@ -2204,7 +2207,7 @@ export async function executeGenerateLongVideo(
             // previous tail frame itself, or the keyframe built from it.
             const carriedHandoff = chainPaths.length > 0 || (proxyChainEligible && keyframePaths.length > 0);
             if (carriedHandoff) chainedFromPrev.push(segment.outputPath);
-            if (!usingChain && chainEnabled && previousLastFramePath) chainDroppedSegments.push(segment.index);
+            if (!usingChain && chainEnabled && previousLastFramePath && !cutsIn) chainDroppedSegments.push(segment.index);
             if (hasGlobalUserImageReferences && !usingUserImageReferences) userImageReferenceDroppedSegments.push(segment.index);
             if (!usingAudio && userAudioPreference) audioRetriedSegments.push(segment.index);
             if (usingChain) consecutivePrivacyFails = 0;
