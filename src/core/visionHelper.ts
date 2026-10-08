@@ -13,12 +13,13 @@
  * Descriptions travel inside <image_description> blocks after a note that
  * they are data from an image, never instructions (see imageDescription.ts).
  * Each helper call has a timeout and follows the run's cancellation; a failed,
- * timed-out or cut-off image gets a "could not be read" note and the run
- * continues.
+ * timed-out or cut-off image gets a "could not be read right now" note that
+ * has the model tell the user to try again shortly, and the run continues.
  *
  * Without a helper the user's images become a short note asking the model to
- * tell the user, so the run never fails just because the plan cannot read
- * images. One helper instance belongs to one run: its description cache,
+ * tell the user, so the run never fails just because no model here can read
+ * images. No note ever has the model suggest another plan, tier or model:
+ * the platform gives every tier image reading, so a failure is temporary. One helper instance belongs to one run: its description cache,
  * keyed by the image content hash plus a hash of the user's question (see
  * visionCacheKey), never outlives the run.
  *
@@ -409,10 +410,26 @@ export function imageDisplayName(image: ImageAttachment, index: number): string 
   return `image ${index + 1}`;
 }
 
+/** Never suggested to the user when an image cannot be read: image reading is part of every plan. */
+export const NO_SWITCH_ADVICE = 'Do not suggest switching plan, tier or model.';
+
+/** What the model tells the user when an image could not be read for a passing reason (a failure, a timeout). */
+export const READ_LATER_ADVICE = `Tell the user briefly that the image could not be read right now and to try again shortly. ${NO_SWITCH_ADVICE}`;
+
 /** Shown to the main model when no helper exists and the model cannot see images. */
 export function formatNoVisionNote(images: readonly ImageAttachment[]): string {
   const names = images.map(imageDisplayName).join(', ');
-  return `[The user attached ${images.length} image(s) (file names: ${names}) but this plan cannot read images. Tell the user briefly and continue with the text.]`;
+  return `[The user attached ${images.length} image(s) (file names: ${names}), but they could not be read right now. ${READ_LATER_ADVICE} Continue with the text.]`;
+}
+
+/** Shown to the main model for an image the helper could not describe (it failed, timed out or was cut short). */
+export function formatUnreadImageNote(n: number, name: string): string {
+  return `[Image ${n} (${name}): the attached image could not be read right now (the image reader failed or took too long). ${READ_LATER_ADVICE} Continue with the text.]`;
+}
+
+/** Shown to the main model for an image too large to send. */
+export function formatOversizedImageNote(n: number, name: string, why: string): string {
+  return `[Image ${n} (${name}): the attached image could not be read, because ${why}. Tell the user briefly and suggest sending a smaller image or fewer images. ${NO_SWITCH_ADVICE} Continue with the text.]`;
 }
 
 export type PreparedUserImages = {
@@ -462,13 +479,13 @@ export async function prepareUserImagesForModel(input: {
     const name = imageDisplayName(image, index);
     if (!sendable.has(image)) {
       const why = oversized.has(image) ? 'it is larger than the per-image limit' : 'it is over the per-message image limit';
-      return `[Image ${n} (${name}): the attached image could not be read, because ${why}. Tell the user briefly and continue with the text.]`;
+      return formatOversizedImageNote(n, name, why);
     }
     const result = described[kept.indexOf(image)];
     if (result?.ok) {
       return `[Image ${n} description by vision helper — the main model cannot see images]\n${frameImageDescription(n, result.text)}`;
     }
-    return `[Image ${n} (${name}): the attached image could not be read (the vision helper failed). Tell the user briefly and continue with the text.]`;
+    return formatUnreadImageNote(n, name);
   });
   // The fixed data-not-instructions note goes first whenever a block follows.
   const anyDescribed = described.some((result) => result?.ok);

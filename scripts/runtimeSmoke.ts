@@ -2617,7 +2617,8 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     'view_image: hidden from a model that cannot see images, and fails (no image sent) when called anyway',
     textOnly.nativeToolNames.every((names) => !names.includes('view_image')) &&
       textOnly.seen.every((n) => n === undefined) &&
-      /cannot see images/.test(textOnly.toolText) &&
+      /Images cannot be viewed here/.test(textOnly.toolText) &&
+      /Do not suggest switching plan, tier or model/.test(textOnly.toolText) &&
       !/is attached to your next step/.test(textOnly.toolText),
     JSON.stringify({ seen: textOnly.seen, tool: textOnly.toolText.slice(0, 300) }),
   )
@@ -10950,7 +10951,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     assert(
       'vision helper: a helper failure leaves a clear note and the run continues',
       calls.length === 1 &&
-        run.userText.includes('the attached image could not be read') &&
+        run.userText.includes('the attached image could not be read right now') &&
+        run.userText.includes('to try again shortly') &&
+        !/switch(?:ing)? (?:to )?(?:a |another )?(?:plan|tier|model)\b(?! or)/i.test(run.userText.replace('Do not suggest switching plan, tier or model.', '')) &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls),
       run.userText.slice(0, 300),
@@ -10961,7 +10964,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
     assert(
       'vision helper: without a helper the model gets a graceful note and the run succeeds',
-      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg) but this plan cannot read images. Tell the user briefly and continue with the text.') &&
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg), but they could not be read right now. Tell the user briefly that the image could not be read right now and to try again shortly. Do not suggest switching plan, tier or model. Continue with the text.') &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls) &&
         run.mainCalls.every((call) => !call.tools.includes('view_image')),

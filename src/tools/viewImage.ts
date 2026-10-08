@@ -13,6 +13,7 @@
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js'
 import { loadImageFile } from '../core/imageInput.js'
 import { frameImageDescription, IMAGE_DESCRIPTION_DATA_NOTE } from '../core/imageDescription.js'
+import { NO_SWITCH_ADVICE, READ_LATER_ADVICE } from '../core/visionHelper.js'
 import { ensureNotSensitivePath } from '../utils/fs.js'
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js'
 
@@ -30,7 +31,7 @@ export async function executeViewImage(
   if (!queue) return fail('view_image only works inside an agent run, which shows the image on its next step.')
   const describeImage = queue.acceptsImages ? undefined : queue.describeImage
   if (!queue.acceptsImages && !describeImage) {
-    return fail('The current model cannot see images, so view_image is unavailable. Use other tools (for example run_command with `file` or an image metadata tool) to learn about the file.')
+    return fail(`Images cannot be viewed here, so view_image is unavailable. Use other tools (for example run_command with \`file\` or an image metadata tool) to learn about the file. ${NO_SWITCH_ADVICE}`)
   }
   try {
     const { absolute, displayPath } = await resolveToolPathWithWorkspaceAccess({
@@ -49,7 +50,7 @@ export async function executeViewImage(
         description = await describeImage(image, context.abortSignal)
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
-        return fail(`${image.label}: the image could not be read (the vision helper failed: ${reason}). Continue without it.`)
+        return fail(`${image.label}: the image could not be read right now (the image reader failed or took too long: ${reason}). If the user asked about it: ${READ_LATER_ADVICE} Otherwise continue without it.`)
       }
       // Delimited and marked as data: the image may contain text phrased as instructions.
       return {
