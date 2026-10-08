@@ -11,6 +11,13 @@ import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { hasPlatformCapabilities } from './providers/capabilities.js';
+import {
+    appendImageNote,
+    loadVisionHelper,
+    memoizeVisionHelper,
+    prepareUserImagesForModel,
+    type VisionHelper,
+} from './core/visionHelper.js';
 import { compressMessages, type CompressResult } from './core/contextCompressor.js';
 import { estimateTokens, estimateMessageTokens, estimateMessagesTokens } from './core/tokenEstimation.js';
 import {
@@ -2689,6 +2696,11 @@ export interface ThinkOptions {
     onStream?: (delta: string) => void;
     onReasoning?: (delta: string) => void;
     imageAttachments?: ImageAttachment[];
+    /**
+     * Describes images when the model cannot see them. Undefined: resolved from
+     * the provider store's visionProfileId when needed; null: none.
+     */
+    visionHelper?: VisionHelper | null;
     onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
     onUserConfirmationRequest?: (request: { question: string; screenshotPath?: string; timeoutMs?: number }) => Promise<boolean>;
     maxNativeToolRounds?: number;
@@ -2734,6 +2746,7 @@ export async function think(
         locale = 'zh',
         disableNativeTools = false,
         imageAttachments = [],
+        visionHelper,
         onWorkspaceSwitchRequest,
         onUserConfirmationRequest,
         maxNativeToolRounds: rawMaxNativeToolRounds,
@@ -2747,6 +2760,25 @@ export async function think(
     tSession.updateSystemPrompt(buildSystemPromptText(locale));
     if (initialCompressionSummary?.trim() && !tSession.getContext('compressionSummary')) {
         tSession.setContext('compressionSummary', initialCompressionSummary);
+    }
+    // A model that cannot see images gets bridge/pasted images as text: the
+    // vision helper's descriptions, or a note when there is no helper.
+    let requestImageAttachments = imageAttachments;
+    if (imageAttachments.length > 0) {
+        const imageProvider = await loadProvider(cwd);
+        const preparedImages = await prepareUserImagesForModel({
+            userText: input,
+            images: imageAttachments,
+            modelSeesImages: imageProvider.supportsImages === true,
+            getHelper: memoizeVisionHelper(async () =>
+                visionHelper !== undefined
+                    ? visionHelper ?? undefined
+                    : loadVisionHelper(cwd, { onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined })),
+            locale,
+            onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined,
+        });
+        input = appendImageNote(input, preparedImages.note);
+        requestImageAttachments = preparedImages.images;
     }
     tSession.addUser(input);
 
@@ -2815,7 +2847,7 @@ export async function think(
             tSession.setContext('activeToolNames', projectedToolNames);
         }
     };
-    const hasImageAttachments = imageAttachments.length > 0;
+    const hasImageAttachments = requestImageAttachments.length > 0;
     let finalResult: ProviderResponse | null = null;
     let cumulativeUsage: ProviderResponse['usage'] | undefined;
     let emittedFinalText = false;
@@ -2938,7 +2970,7 @@ export async function think(
                 // tool capability. Do not drop them just because the setup "vision"
                 // tool group was disabled; providers that cannot handle images will
                 // ignore/fail explicitly in their own adapter path.
-                imageAttachments: round === 1 && hasImageAttachments ? imageAttachments : undefined,
+                imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
                 onReasoning,
                 guardStreamingText: supportsNativeTools && !plainChat,
             },

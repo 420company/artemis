@@ -71,6 +71,14 @@ import {
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
 import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
+import {
+  appendImageNote,
+  describeSingleImage,
+  loadVisionHelper,
+  memoizeVisionHelper,
+  prepareUserImagesForModel,
+  type VisionHelper,
+} from './visionHelper.js';
 import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
@@ -3533,6 +3541,9 @@ const CHILD_RUN_IMAGE_RESET = {
 /** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
 const VIEW_IMAGE_UNAVAILABLE_SECTION =
   'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+/** Prompt note for a text-only model whose view_image goes through the vision helper. */
+const VIEW_IMAGE_HELPER_SECTION =
+  'Image input: the current model cannot see images. view_image still works: it returns a detailed text description of the image written by a vision helper model.';
 
 export type RunAgentOptions = {
   cwd: string;
@@ -3565,6 +3576,11 @@ export type RunAgentOptions = {
    * images never outlive the run or reach another session.
    */
   viewedImages?: ViewedImageQueue;
+  /**
+   * Describes images for a model that cannot see them. Undefined: resolved
+   * from the provider store's visionProfileId when first needed; null: none.
+   */
+  visionHelper?: VisionHelper | null;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -6015,8 +6031,25 @@ export async function runAgent(
       };
     }
   }
+  // A model that cannot see images gets the user's images as text: the
+  // vision helper's descriptions, or a note when there is no helper.
+  const getVisionHelper = memoizeVisionHelper(async () =>
+    options.visionHelper !== undefined
+      ? options.visionHelper ?? undefined
+      : loadVisionHelper(options.cwd, { onInfo: options.onInfo }));
+  const userImages = await prepareUserImagesForModel({
+    userText: userInput,
+    images: options.imageAttachments,
+    modelSeesImages: (options.resolveProvider?.(options.profile ?? 'main') ?? options.provider).supportsImages === true,
+    getHelper: getVisionHelper,
+    locale: options.locale,
+    onInfo: options.onInfo,
+  });
   if (options.appendUserMessage !== false) {
-    options.sessionStore.appendMessage(session, 'user', userInput);
+    options.sessionStore.appendMessage(session, 'user', appendImageNote(userInput, userImages.note));
+    await options.sessionStore.save(session);
+  } else if (userImages.note) {
+    options.sessionStore.appendMessage(session, 'user', userImages.note);
     await options.sessionStore.save(session);
   }
 
@@ -6497,11 +6530,16 @@ export async function runAgent(
     }
     const activeProvider =
       options.resolveProvider?.(profile) ?? options.provider;
-    // view_image only exists for models that can see images: it is left out
-    // of the native tools, the prompt says it is unavailable, and the tool
-    // itself fails while the flag is off.
+    // view_image needs a model that can see images or a vision helper that
+    // describes them; otherwise it is left out of the native tools, the
+    // prompt says it is unavailable, and the tool itself fails.
     const modelSeesImages = activeProvider.supportsImages === true;
     viewedImages.acceptsImages = modelSeesImages;
+    const imageHelper = modelSeesImages ? undefined : await getVisionHelper();
+    viewedImages.describeImage = imageHelper
+      ? (image) => describeSingleImage(imageHelper, image, { userText: userInput, locale: options.locale })
+      : undefined;
+    const canViewImages = modelSeesImages || imageHelper !== undefined;
     const context = await buildContextWindow(session, profile, {
       cwd: options.cwd,
       // A platform-written window (capabilitiesSource "platform") wins.
@@ -6540,7 +6578,7 @@ export async function runAgent(
       [
         ...extensionRuntime.sections,
         ...(odinRuntimeSection ? [odinRuntimeSection] : []),
-        ...(modelSeesImages ? [] : [VIEW_IMAGE_UNAVAILABLE_SECTION]),
+        ...(modelSeesImages ? [] : [canViewImages ? VIEW_IMAGE_HELPER_SECTION : VIEW_IMAGE_UNAVAILABLE_SECTION]),
       ],
     );
     const latestUserRequest = extractLatestUserRequest(context.messages);
@@ -6569,7 +6607,7 @@ export async function runAgent(
           allowedActionTypes: getNativeAllowedActionTypesForRuntime(
             profile,
             options.permissionManager.getMode(),
-          ).filter((type) => modelSeesImages || type !== 'view_image'),
+          ).filter((type) => canViewImages || type !== 'view_image'),
           allowReadOnlyMcpToolCalls: true,
         })
         : undefined;
@@ -6617,7 +6655,7 @@ export async function runAgent(
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
     const requestImages = takeRequestImages(
-      turn === 1 ? options.imageAttachments ?? [] : [],
+      turn === 1 ? userImages.images : [],
       activeProvider,
     );
     const providerCallOptions = {

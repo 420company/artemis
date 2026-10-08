@@ -16,6 +16,8 @@ import {
 import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
+import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
+import { runHeadlessAgent } from '../src/services/headlessAgent.js'
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
@@ -114,6 +116,7 @@ import { buildDreamBridgeText } from '../src/services/dreamComposer.js'
 import type { SessionMessage } from '../src/core/types.js'
 import type {
   ChatProvider,
+  ImageAttachment,
   ProviderNativeToolOutput,
   ProviderResponse,
 } from '../src/providers/types.js'
@@ -9096,6 +9099,286 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     platformIncluded > defaultIncluded,
     `default=${defaultIncluded} platform=${platformIncluded}`,
   )
+}
+
+{
+  // Vision helper on the runAgent path (headless, web, workflows): a model
+  // that cannot see images gets a description from the vision profile.
+  const pngBytes = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const userImage = { data: pngBytes.toString('base64'), mediaType: 'image/png' as const, label: 'Image: screenshot.png' }
+  type MainCall = { images?: number; tools: string[]; messages: SessionMessage[] }
+  const runVision = async (options: {
+    helper: VisionHelper | null
+    images?: ImageAttachment[]
+    viewImage?: boolean
+    prompt?: string
+  }) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-helper-'))
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), pngBytes)
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'vision helper smoke' })
+    await store.save(session)
+    const mainCalls: MainCall[] = []
+    const provider: ChatProvider = {
+      supportsImages: false,
+      supportsNativeToolCalls: true,
+      async complete(messages, requestOptions): Promise<ProviderResponse> {
+        mainCalls.push({
+          images: requestOptions?.imageAttachments?.length,
+          tools: (requestOptions?.nativeFunctionTools ?? []).map((t) => t.name),
+          messages,
+        })
+        if (options.viewImage && mainCalls.length === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'It is a sign-in page.', done: true }), raw: null }
+      },
+    }
+    const result = await runAgent(session, options.prompt ?? 'What does this screenshot show?', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+      visionHelper: options.helper,
+      ...(options.images ? { imageAttachments: options.images } : {}),
+    })
+    const userText = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { result, mainCalls, userText, toolText }
+  }
+  const makeHelper = (behaviour: 'ok' | 'fail') => {
+    const calls: Array<{ images: number; maxOutputTokens?: number; prompt: string }> = []
+    const visionProvider: ChatProvider = {
+      supportsImages: true,
+      async complete(messages, requestOptions): Promise<ProviderResponse> {
+        calls.push({
+          images: requestOptions?.imageAttachments?.length ?? 0,
+          maxOutputTokens: requestOptions?.maxOutputTokens,
+          prompt: messages.map((m) => m.content).join('\n'),
+        })
+        if (behaviour === 'fail') throw new Error('vision gateway unavailable')
+        return { text: 'A sign-in form. Visible text: "Sign in", "Forgot password?". Blue button.', raw: null }
+      },
+    }
+    return { calls, helper: createVisionHelper(visionProvider, { label: 'platform-vision' }) }
+  }
+  const mainRequestHasImageParts = (calls: MainCall[]) => calls.some((call) => (call.images ?? 0) > 0)
+
+  {
+    const { calls, helper } = makeHelper('ok')
+    const run = await runVision({ helper, images: [userImage] })
+    const firstUser = run.mainCalls[0]?.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n') ?? ''
+    assert(
+      'vision helper: supportsImages:false with a vision profile calls the helper once and injects the description',
+      calls.length === 1 &&
+        calls[0]!.images === 1 &&
+        calls[0]!.maxOutputTokens === 1500 &&
+        calls[0]!.prompt.includes('What does this screenshot show?') &&
+        /verbatim/.test(calls[0]!.prompt) &&
+        firstUser.includes('[Image 1 description by vision helper — the main model cannot see images]') &&
+        firstUser.includes('"Forgot password?"') &&
+        run.result.reply.includes('sign-in page'),
+      JSON.stringify({ calls: calls.map((c) => ({ images: c.images, max: c.maxOutputTokens })), firstUser: firstUser.slice(0, 300) }),
+    )
+    assert(
+      'vision helper: the main request carries no image parts',
+      !mainRequestHasImageParts(run.mainCalls),
+      JSON.stringify(run.mainCalls.map((c) => c.images)),
+    )
+  }
+
+  {
+    // The user attaches screenshot.png and the agent then views the same file:
+    // the second look is a cache hit, and view_image returns the description.
+    const { calls, helper } = makeHelper('ok')
+    const run = await runVision({ helper, images: [userImage], viewImage: true })
+    assert(
+      'vision helper: view_image is offered and returns the description instead of queueing the image',
+      run.mainCalls[0]?.tools.includes('view_image') === true &&
+        run.toolText.includes('description by vision helper') &&
+        run.toolText.includes('Forgot password?') &&
+        !run.toolText.includes('attached to your next step') &&
+        !mainRequestHasImageParts(run.mainCalls),
+      JSON.stringify({ tools: run.mainCalls[0]?.tools.includes('view_image'), tool: run.toolText.slice(0, 300) }),
+    )
+    assert(
+      'vision helper: the same image is described once per run (cache hit by content hash)',
+      calls.length === 1,
+      `helper calls=${calls.length}`,
+    )
+  }
+
+  {
+    const { calls, helper } = makeHelper('fail')
+    const run = await runVision({ helper, images: [userImage] })
+    assert(
+      'vision helper: a helper failure leaves a clear note and the run continues',
+      calls.length === 1 &&
+        run.userText.includes('the attached image could not be read') &&
+        run.result.reply.includes('sign-in page') &&
+        !mainRequestHasImageParts(run.mainCalls),
+      run.userText.slice(0, 300),
+    )
+  }
+
+  {
+    const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
+    assert(
+      'vision helper: without a helper the model gets a graceful note and the run succeeds',
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg) but this plan cannot read images. Tell the user briefly and continue with the text.') &&
+        run.result.reply.includes('sign-in page') &&
+        !mainRequestHasImageParts(run.mainCalls) &&
+        run.mainCalls.every((call) => !call.tools.includes('view_image')),
+      run.userText.slice(0, 300),
+    )
+  }
+
+  {
+    // Two images in one batch: one helper call, one labelled part per image.
+    const calls: number[] = []
+    const helper = createVisionHelper({
+      supportsImages: true,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        calls.push(requestOptions?.imageAttachments?.length ?? 0)
+        return { text: '### Image 1\nA bar chart of sales.\n\n### Image 2\nA photo of a cat.', raw: null }
+      },
+    })
+    const run = await runVision({ helper, images: [userImage, { data: 'R0lGODlh', mediaType: 'image/gif', label: 'Image: cat.gif' }] })
+    assert(
+      'vision helper: a batch of images is described in one call and labelled per image',
+      calls.length === 1 && calls[0] === 2 &&
+        /\[Image 1 description by vision helper[^\]]*\]\nA bar chart of sales\./.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\nA photo of a cat\./.test(run.userText),
+      run.userText.slice(0, 400),
+    )
+  }
+}
+
+{
+  // End to end through the provider store: `artemis execute --image` on a
+  // text-only platform model with visionProfileId -> platform-vision.
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      requests.push(body)
+      const content = body.model === 'vision-alias'
+        ? 'A terminal window showing the text "build passed".'
+        : 'The screenshot shows a passing build.'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: body.model, choices: [{ message: { content } }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-headless-'))
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock vision server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, contextLength: 200_000, maxOutputTokens: 8192, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }), 'utf8')
+    fs.writeFileSync(path.join(tmpDir, 'build.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    const result = await runHeadlessAgent(tmpDir, 'Did the build pass?', {
+      permissionMode: 'read-only',
+      maxTurns: 1,
+      imagePaths: ['build.png'],
+    })
+    const visionRequests = requests.filter((r) => r.model === 'vision-alias')
+    const mainRequests = requests.filter((r) => r.model === 'gpt-6-sol')
+    const mainRaw = JSON.stringify(mainRequests)
+    assert(
+      'vision helper (--image, headless/web): resolved from visionProfileId, called once, main request text-only with the description',
+      visionRequests.length === 1 &&
+        JSON.stringify(visionRequests[0]).includes('image_url') &&
+        visionRequests[0]?.max_tokens === 1500 &&
+        mainRequests.length >= 1 &&
+        !mainRaw.includes('image_url') &&
+        !mainRaw.includes('omitted: this model cannot see images') &&
+        mainRaw.includes('Image 1 description by vision helper') &&
+        mainRaw.includes('build passed') &&
+        result.reply.includes('passing build'),
+      JSON.stringify({ vision: visionRequests.length, main: mainRequests.length, reply: result.reply, raw: mainRaw.slice(0, 300) }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Bridge / pasted images go through think(): the same vision helper turns
+  // them into text for a text-only main model.
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      requests.push(body)
+      const content = body.model === 'vision-alias'
+        ? '一张收据，文字：“合计 42 元”。'
+        : '收据上的合计是 42 元。'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: body.model, choices: [{ message: { content } }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-bridge-'))
+  const originalCwd = process.cwd()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock vision bridge server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }), 'utf8')
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+    const result = await think('这张收据合计多少？', () => {}, {
+      cwd: tmpDir,
+      permissionMode: 'accept-all',
+      disableNativeTools: true,
+      imageAttachments: [{ data: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64'), mediaType: 'image/png' }],
+    })
+    const visionRequests = requests.filter((r) => r.model === 'vision-alias')
+    const mainRaw = JSON.stringify(requests.filter((r) => r.model === 'gpt-6-sol'))
+    assert(
+      'vision helper (bridge think()): the helper describes the pasted image and the main request is text-only',
+      visionRequests.length === 1 &&
+        JSON.stringify(visionRequests[0]).includes('image_url') &&
+        JSON.stringify(visionRequests[0]).includes('这张收据合计多少') &&
+        !mainRaw.includes('image_url') &&
+        mainRaw.includes('Image 1 description by vision helper') &&
+        mainRaw.includes('合计 42 元') &&
+        result.reply.includes('42'),
+      JSON.stringify({ vision: visionRequests.length, reply: result.reply, raw: mainRaw.slice(0, 300) }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────

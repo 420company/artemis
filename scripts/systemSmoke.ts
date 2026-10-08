@@ -126,25 +126,98 @@ test('view_image queue: one per run, taken once, and it reports what it drops to
   assert.deepEqual(fit.dropped.map((i) => i.label), ['Image: big1.png']);
 });
 
-test('--image: rejected for models that cannot see images, over 8 images, or over the request budget', async () => {
+test('--image: loads for any model; rejected over 8 images or over the request budget', async () => {
   const { loadPromptImages, MAX_IMAGE_BYTES } = await import('../src/core/imageInput.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-prompt-images-'));
   try {
     fs.writeFileSync(path.join(dir, 'shot.png'), PNG_HEADER);
-    await assert.rejects(
-      loadPromptImages(['shot.png'], dir, { supportsImages: false, name: 'deepseek-chat' }),
-      /deepseek-chat cannot see images, so --image cannot be used/,
-    );
-    assert.equal((await loadPromptImages(['shot.png'], dir, { supportsImages: true })).length, 1);
-    assert.deepEqual(await loadPromptImages([], dir, { supportsImages: false }), [], 'no images, no vision needed');
-    await assert.rejects(loadPromptImages(Array(9).fill('shot.png'), dir, { supportsImages: true }), /At most 8 images/);
+    // Whether the model can see them is the run's business (vision helper or a note).
+    assert.equal((await loadPromptImages(['shot.png'], dir)).length, 1);
+    assert.deepEqual(await loadPromptImages([], dir), []);
+    await assert.rejects(loadPromptImages(Array(9).fill('shot.png'), dir), /At most 8 images/);
     for (let n = 1; n <= 5; n += 1) writePngOfSize(path.join(dir, `big${n}.png`), MAX_IMAGE_BYTES);
     await assert.rejects(
-      loadPromptImages(['big1.png', 'big2.png', 'big3.png', 'big4.png', 'big5.png'], dir, { supportsImages: true }),
+      loadPromptImages(['big1.png', 'big2.png', 'big3.png', 'big4.png', 'big5.png'], dir),
       /add up to 18\.75 MB; at most 15 MB/,
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('vision helper: per-run cache by content hash, per-image split, notes and size limits', async () => {
+  const { createVisionHelper, hashImage, prepareUserImagesForModel, formatNoVisionNote } = await import('../src/core/visionHelper.js');
+  const { MAX_IMAGE_BYTES } = await import('../src/core/imageInput.js');
+  const a = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const, label: 'Image: a.png' };
+  const b = { data: 'R0lGODlh', mediaType: 'image/gif' as const, sourceUrl: 'https://cdn.example/x/b.gif' };
+  assert.equal(hashImage(a), hashImage({ ...a, label: 'renamed' }), 'the key is the content, not the name');
+  assert.notEqual(hashImage(a), hashImage(b));
+
+  const batches: number[] = [];
+  const helper = createVisionHelper({
+    supportsImages: true,
+    async complete(_messages, options) {
+      const n = options?.imageAttachments?.length ?? 0;
+      batches.push(n);
+      return { text: n === 1 ? 'Only B.' : '### Image 1\nThis is A.\n\n### Image 2\nThis is B.', raw: null };
+    },
+  });
+  assert.deepEqual(await helper.describe([a, b]), [{ ok: true, text: 'This is A.' }, { ok: true, text: 'This is B.' }]);
+  assert.deepEqual(await helper.describe([b, a]), [{ ok: true, text: 'This is B.' }, { ok: true, text: 'This is A.' }]);
+  assert.deepEqual(batches, [2], 'a second look at the same images is served from the cache');
+  const fresh = createVisionHelper({ supportsImages: true, async complete() { batches.push(-1); return { text: 'Only B.', raw: null }; } });
+  await fresh.describe([b]);
+  assert.deepEqual(batches, [2, -1], 'another run (helper) has its own cache');
+
+  assert.equal(
+    formatNoVisionNote([a, b]),
+    '[The user attached 2 image(s) (file names: a.png, b.gif) but this plan cannot read images. Tell the user briefly and continue with the text.]',
+  );
+  const passthrough = await prepareUserImagesForModel({ userText: 'hi', images: [a], modelSeesImages: true, getHelper: async () => helper });
+  assert.deepEqual(passthrough, { images: [a] }, 'a vision model gets the images unchanged');
+
+  const huge = { data: 'A'.repeat(Math.ceil(((MAX_IMAGE_BYTES + 10) * 4) / 3)), mediaType: 'image/png' as const, label: 'Image: huge.png' };
+  const sent: number[] = [];
+  const limited = await prepareUserImagesForModel({
+    userText: 'hi',
+    images: [a, huge],
+    modelSeesImages: false,
+    getHelper: async () => createVisionHelper({ supportsImages: true, async complete(_m, o) { sent.push(o?.imageAttachments?.length ?? 0); return { text: 'A.', raw: null }; } }),
+  });
+  assert.deepEqual(sent, [1], 'an image over the per-image limit never reaches the helper');
+  assert.match(limited.note ?? '', /\[Image 1 description by vision helper — the main model cannot see images\]\nA\./);
+  assert.match(limited.note ?? '', /\[Image 2 \(huge\.png\): the attached image could not be read, because it is larger than the per-image limit/);
+  assert.deepEqual(limited.images, []);
+});
+
+test('vision helper: visionProfileId resolves like specialistProfileId (cwd store, then global) and needs a vision model', async () => {
+  const { resolveVisionProfile } = await import('../src/core/visionHelper.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-profile-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  const writeStore = (dir: string, data: unknown) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'providers.json'), JSON.stringify(data));
+  };
+  const profile = (id: string, model: string, supportsImages?: boolean) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model, ...(supportsImages === undefined ? {} : { supportsImages }) });
+  try {
+    const home = path.join(root, 'home');
+    process.env.ARTEMIS_HOME = home;
+    writeStore(home, { visionProfileId: 'platform-vision', profiles: [profile('platform-vision', 'vision-alias', true)] });
+    const project = path.join(root, 'project');
+    fs.mkdirSync(project, { recursive: true });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'platform-vision', 'falls back to the global store');
+
+    // ARTEMIS_HOME maps a workspace to <home>/workspaces/<hash>; write a local store there.
+    const { resolveDataRootDir } = await import('../src/utils/fs.js');
+    writeStore(resolveDataRootDir(project), { visionProfileId: 'local-vision', profiles: [profile('local-vision', 'gpt-4o')] });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'local-vision', 'the cwd store wins');
+
+    writeStore(resolveDataRootDir(project), { visionProfileId: 'text-only', profiles: [profile('text-only', 'vision-alias', false)] });
+    assert.equal(await resolveVisionProfile(project), undefined, 'a profile that cannot see images is no helper');
+  } finally {
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
