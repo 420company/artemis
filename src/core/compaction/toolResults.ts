@@ -73,7 +73,8 @@ export function parseToolContent(content: string): ParsedToolContent {
         // Only Artemis' own envelopes count: path A always has `action`,
         // failures carry `error`. A tool whose raw output merely happens to
         // be JSON with an `output` field (an HTTP body) stays plain text.
-        const isArtemisEnvelope = Boolean(action) || envelope.error !== undefined || typeof envelope.toolName === 'string'
+        const isArtemisEnvelope = Boolean(action) || envelope.error !== undefined ||
+          typeof envelope.toolName === 'string' || typeof envelope.path === 'string'
         if (typeof envelope.output === 'string' && isArtemisEnvelope) {
           return {
             envelope,
@@ -168,11 +169,12 @@ export function describeToolResult(
     ?? call?.name
     ?? (typeof parsed.action?.type === 'string' ? parsed.action.type : undefined)
     ?? 'tool'
-  const args = call
+  let args = call
     ? summarizeToolArgs(call.args)
     : parsed.action
       ? summarizeToolArgs(Object.fromEntries(Object.entries(parsed.action).filter(([key]) => key !== 'type')))
       : ''
+  if (!args && typeof parsed.envelope?.path === 'string') args = `path=${parsed.envelope.path}`
   return { name, args }
 }
 
@@ -193,29 +195,41 @@ export function buildPreview(text: string, tokens: number): { preview: string; h
   const tailBudget = tokens - headBudget
   const head: string[] = []
   let used = 0
-  for (const line of lines) {
+  // Index of a line only partly shown in the head (its end may go in the tail).
+  let partialHead = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!
     const cost = estimateTokens(line) + 1
     if (used + cost > headBudget) {
-      if (head.length === 0) head.push(line.slice(0, headBudget * 3))
+      // Show the start of an oversized line instead of skipping it.
+      const room = headBudget - used
+      if (room > 40) {
+        head.push(`${line.slice(0, room * 3)} …[line truncated]`)
+        partialHead = i
+      }
       break
     }
     head.push(line)
     used += cost
   }
+  const fullHeadLines = partialHead >= 0 ? head.length - 1 : head.length
   const tail: string[] = []
   used = 0
-  for (let i = lines.length - 1; i >= head.length; i -= 1) {
-    const cost = estimateTokens(lines[i]!) + 1
-    if (used + cost > tailBudget) {
-      if (tail.length === 0 && i > head.length) tail.unshift(lines[i]!.slice(-tailBudget * 3))
+  for (let i = lines.length - 1; i >= fullHeadLines; i -= 1) {
+    const line = lines[i]!
+    const cost = estimateTokens(line) + 1
+    if (used + cost > tailBudget || i === partialHead) {
+      const room = tailBudget - used
+      if (room > 40) tail.unshift(`[line truncated]… ${line.slice(-room * 3)}`)
       break
     }
-    tail.unshift(lines[i]!)
+    tail.unshift(line)
     used += cost
   }
-  const omitted = lines.length - head.length - tail.length
+  const omitted = Math.max(0, lines.length - head.length - tail.length)
   const parts = [head.join('\n')]
   if (omitted > 0) parts.push(`… [${omitted} lines omitted] …`)
+  else if (partialHead >= 0) parts.push('… [middle of a long line omitted] …')
   if (tail.length > 0) parts.push(tail.join('\n'))
   return { preview: parts.join('\n'), headLines: head.length, tailLines: tail.length }
 }

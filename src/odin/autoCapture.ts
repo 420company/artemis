@@ -9,7 +9,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { OdinStore } from './store.js'
-import type { SummarizeFn } from '../core/contextCompressor.js'
+/** One-shot text summarizer (prompt in, text out). */
+type SummarizeFn = (prompt: string) => Promise<string>
 
 export interface ToolCallRecord {
   name: string

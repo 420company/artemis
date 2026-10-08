@@ -46,6 +46,8 @@ import { MessagesCompatibleProvider } from '../src/providers/messagesCompatible.
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
 import type { SessionMessage } from '../src/core/types.js'
 import type { ChatProvider, ProviderResponse } from '../src/providers/types.js'
+import { applyProviderOverrides, getLastPromptTokens, getMessages, resetSession, restoreSessionStateForCwd, think } from '../src/brain.js'
+import { parseRemoteCommand, runRemoteCommand } from '../src/bragi/runtime.js'
 
 let passed = 0
 let failed = 0
@@ -849,6 +851,256 @@ function envelope(reply: string, actions: unknown[] = []): ProviderResponse {
     `action=${result.action} after=${result.tokensAfter}`,
   )
   fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+// ── Path B (think) integration ───────────────────────────────────────────────
+
+type ChatBody = { messages: Array<{ role: string; content: unknown; tool_call_id?: string; tool_calls?: unknown[] }>; tools?: unknown[] }
+
+function bodyChars(body: ChatBody): number {
+  return body.messages.reduce((sum, m) => sum + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content ?? '').length), 0)
+}
+
+function isSummaryRequest(body: ChatBody): boolean {
+  const system = body.messages.find((m) => m.role === 'system')
+  return typeof system?.content === 'string' && /compact a long conversation|压缩一段用户与 AI 代理/.test(system.content)
+}
+
+async function withMockChatServer(
+  handler: (body: ChatBody, res: http.ServerResponse) => void,
+  run: (baseUrl: string) => Promise<void>,
+): Promise<void> {
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c) => chunks.push(c as Buffer))
+    req.on('end', () => handler(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as ChatBody, res))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    await run(`http://127.0.0.1:${(server.address() as { port: number }).port}`)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+function writeProviderProfile(cwd: string, baseUrl: string, contextLength: number): void {
+  fs.mkdirSync(path.join(cwd, '.artemis'), { recursive: true })
+  fs.writeFileSync(path.join(cwd, '.artemis', 'providers.json'), JSON.stringify({
+    defaultMainProfileId: 'mock',
+    profiles: [{ id: 'mock', label: 'Mock', protocol: 'openai', apiKey: 'k', model: 'mock-chat-model', baseUrl, contextLength }],
+  }))
+}
+
+function reply(res: http.ServerResponse, message: Record<string, unknown>, promptTokens = 1_000): void {
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ model: 'mock-chat-model', choices: [{ message }], usage: { prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5 } }))
+}
+
+const summaryText = summarySectionTitles('en').map((t, i) => `## ${i + 1}. ${t}\nGOAL_BRIDGE_TASK and earlier details`).join('\n')
+
+{
+  // Overflow → compaction → retry, with the compacted history written back.
+  const cwd = tmpDir('think-overflow')
+  const originalCwd = process.cwd()
+  let rejected = 0
+  let summaries = 0
+  let lastMainChars = 0
+  try {
+    await withMockChatServer((body, res) => {
+      if (isSummaryRequest(body)) {
+        summaries += 1
+        reply(res, { content: summaryText })
+        return
+      }
+      const chars = bodyChars(body)
+      if (chars > 120_000) {
+        rejected += 1
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: "This model's maximum context length is 30000 tokens.", code: 'context_length_exceeded' } }))
+        return
+      }
+      lastMainChars = chars
+      reply(res, { content: '已恢复，继续处理。' }, Math.ceil(chars / 4))
+    }, async (baseUrl) => {
+      writeProviderProfile(cwd, baseUrl, 100_000)
+      process.chdir(cwd)
+      resetSession()
+      applyProviderOverrides({})
+      const history: SessionMessage[] = [msg('user', 'GOAL_BRIDGE_TASK: 维护这个项目')]
+      for (let i = 0; i < 50; i += 1) history.push(msg(i % 2 ? 'assistant' : 'user', `turn ${i} ${'x'.repeat(4_000)}`))
+      restoreSessionStateForCwd({ messages: history }, cwd)
+      const result = await think('继续', () => {}, { cwd, permissionMode: 'read-only', disableNativeTools: true, contextDir: path.join(cwd, 'ctx') })
+      const after = getMessages()
+      assert(
+        'path B: a context-length 400 triggers compaction and one successful retry',
+        rejected === 1 && summaries >= 1 && result.reply === '已恢复，继续处理。' && lastMainChars <= 120_000,
+        `rejected=${rejected} summaries=${summaries} reply=${result.reply}`,
+      )
+      assert(
+        'path B: the compacted history is written back to the session (bridges persist it)',
+        isCompactionBoundary(after[0]) && after.length < 30 && after.at(-1)?.content === '已恢复，继续处理。' &&
+          fs.existsSync(path.join(cwd, 'ctx', 'transcript.jsonl')),
+        `messages=${after.length}`,
+      )
+      assert(
+        'path B: the context size reported is the last request, not a sum',
+        getLastPromptTokens() === Math.ceil(lastMainChars / 4),
+        `last=${getLastPromptTokens()} expected=${Math.ceil(lastMainChars / 4)}`,
+      )
+      // The next turn starts from the compacted history: no re-summarizing.
+      const before = summaries
+      await think('再继续', () => {}, { cwd, permissionMode: 'read-only', disableNativeTools: true, contextDir: path.join(cwd, 'ctx') })
+      assert(
+        'path B: the next turn does not re-summarize (compaction was persisted, not recomputed per round)',
+        summaries === before && rejected === 1 && isCompactionBoundary(getMessages()[0]),
+        `summaries=${summaries} before=${before}`,
+      )
+    })
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
+{
+  // An interjection that arrives while a tool round runs is kept, after the results.
+  const cwd = tmpDir('think-interject')
+  fs.writeFileSync(path.join(cwd, 'alpha.txt'), 'alpha\n')
+  const originalCwd = process.cwd()
+  const requests: ChatBody[] = []
+  let polls = 0
+  try {
+    await withMockChatServer((body, res) => {
+      requests.push(body)
+      if (requests.length === 1) {
+        reply(res, { content: '', tool_calls: [{ id: 'call_ls', type: 'function', function: { name: 'list_files', arguments: '{"path":"."}' } }] })
+        return
+      }
+      reply(res, { content: '目录里有 alpha.txt；已按新要求处理。' })
+    }, async (baseUrl) => {
+      writeProviderProfile(cwd, baseUrl, 128_000)
+      process.chdir(cwd)
+      resetSession()
+      applyProviderOverrides({})
+      await think('列出当前目录的文件', () => {}, {
+        cwd,
+        permissionMode: 'accept-all',
+        contextDir: path.join(cwd, 'ctx'),
+        pollRunningUserMessages: () => {
+          polls += 1
+          return polls === 2 ? ['INTERJECTION_ALSO_CHECK_BETA'] : []
+        },
+      })
+      const second = requests[1]?.messages ?? []
+      const assistantIdx = second.findIndex((m) => m.role === 'assistant' && Array.isArray(m.tool_calls))
+      const toolIdx = second.findIndex((m) => m.role === 'tool' && m.tool_call_id === 'call_ls')
+      const interjectionIdx = second.findIndex((m) => typeof m.content === 'string' && m.content.includes('INTERJECTION_ALSO_CHECK_BETA'))
+      assert(
+        'path B: an interjection during a tool round is not lost and follows the tool results',
+        assistantIdx >= 0 && toolIdx === assistantIdx + 1 && interjectionIdx > toolIdx &&
+          getMessages().some((m) => m.content.includes('INTERJECTION_ALSO_CHECK_BETA')),
+        `assistant=${assistantIdx} tool=${toolIdx} interjection=${interjectionIdx} polls=${polls}`,
+      )
+    })
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
+{
+  // A long bridge conversation stays under the window across many turns, and
+  // the system prompt is the same on every request.
+  const cwd = tmpDir('think-long')
+  const originalCwd = process.cwd()
+  const systems = new Set<string>()
+  let maxChars = 0
+  let summaries = 0
+  try {
+    await withMockChatServer((body, res) => {
+      if (isSummaryRequest(body)) {
+        summaries += 1
+        reply(res, { content: summaryText })
+        return
+      }
+      systems.add(String(body.messages.find((m) => m.role === 'system')?.content ?? ''))
+      const chars = bodyChars(body)
+      maxChars = Math.max(maxChars, chars)
+      reply(res, { content: `收到。${'说明'.repeat(300)}` }, chars)
+    }, async (baseUrl) => {
+      writeProviderProfile(cwd, baseUrl, 32_000)
+      process.chdir(cwd)
+      resetSession()
+      applyProviderOverrides({})
+      for (let turn = 0; turn < 40; turn += 1) {
+        await think(`第 ${turn} 条消息：${'需求描述'.repeat(400)}`, () => {}, { cwd, permissionMode: 'read-only', disableNativeTools: true, contextDir: path.join(cwd, 'ctx') })
+      }
+      // 32K window; at most ~1 char per CJK token, so chars bound tokens from above.
+      assert(
+        'path B: 40 long Chinese turns on a 32K model never exceed the window',
+        maxChars < 32_000 && summaries >= 2,
+        `maxChars=${maxChars} summaries=${summaries}`,
+      )
+      assert('path B: the system prompt is byte-identical on every request (no budget note)', systems.size === 1, `distinct=${systems.size}`)
+    })
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
+{
+  // Bridges: an overflow that survives the retry still saves the compacted
+  // history, so the next message does not hit the same overflow forever.
+  const cwd = tmpDir('bridge-overflow')
+  const originalCwd = process.cwd()
+  let mainCalls = 0
+  try {
+    await withMockChatServer((body, res) => {
+      if (isSummaryRequest(body)) {
+        reply(res, { content: summaryText })
+        return
+      }
+      mainCalls += 1
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: { type: 'invalid_request_error', message: 'prompt is too long: 999999 tokens > 1000 maximum' } }))
+    }, async (baseUrl) => {
+      writeProviderProfile(cwd, baseUrl, 100_000)
+      process.chdir(cwd)
+      resetSession()
+      applyProviderOverrides({})
+      const store = new SessionStore(cwd)
+      const stored = store.createSession({ title: 'bridge chat' })
+      stored.messages.push(msg('user', 'GOAL_BRIDGE_TASK'))
+      for (let i = 0; i < 40; i += 1) stored.messages.push(msg(i % 2 ? 'assistant' : 'user', 'y'.repeat(4_000)))
+      await store.save(stored)
+      const result = await runRemoteCommand(parseRemoteCommand('hello'), {
+        binding: { storedSession: stored, permissionMode: 'read-only', rolledOver: false },
+        store,
+        locale: 'en',
+        cwd,
+      })
+      const saved = await new SessionStore(cwd).load(stored.id)
+      assert(
+        'bridge: a persistent overflow reports a clear error and saves the compacted history',
+        mainCalls === 2 && /context window/.test(result.replies[0] ?? '') &&
+          isCompactionBoundary(saved.messages[0]) && saved.messages.length < 20 &&
+          isCompactionBoundary(result.storedSession.messages[0]),
+        `calls=${mainCalls} saved=${saved.messages.length} reply=${result.replies[0]?.slice(0, 120)}`,
+      )
+    })
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
 }
 
 if (failed > 0) {

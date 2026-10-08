@@ -15,7 +15,8 @@ import { createHash } from 'node:crypto'
 import { hostname, homedir } from 'node:os'
 import path from 'node:path'
 import { SessionStore } from '../storage/sessions.js'
-import type { SessionRecord } from '../core/types.js'
+import type { SessionMessage, SessionRecord } from '../core/types.js'
+import { getCompactionSummary, isContextOverflowError } from '../core/compaction/index.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
@@ -467,6 +468,8 @@ export async function runRemoteCommand(
   }
 ): Promise<RemoteRuntimeResult> {
   let binding = opts.binding
+  // History of the active session right after think() returned or threw.
+  let messagesAfterThink: SessionMessage[] | undefined
   const { store, locale, cwd } = opts
   const storedCwd = binding.storedSession.cwd
   const fallbackCwd = storedCwd && !isUnsafeBridgeWorkspace(storedCwd)
@@ -903,15 +906,11 @@ export async function runRemoteCommand(
         //                line as the only reply.
         //   PRODUCER/GHOSTWRITER/WRITER → enable tools so remote coding via IM works.
         let latestCompressionSummary = binding.storedSession.summary
-        const result = await withBridgeThinkLock(async () => {
-          restoreSessionStateForCwd({
-            messages: binding.storedSession.messages,
-            summary: binding.storedSession.summary,
-          }, commandCwd)
-          return think(effectiveBody, {
+        const thinkForBridge = () =>
+          think(effectiveBody, {
             cwd: commandCwd,
             permissionMode: binding.permissionMode,
-            initialCompressionSummary: binding.storedSession.summary,
+            contextDir: store.getContextDir(binding.storedSession.id),
             onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,
@@ -1083,10 +1082,21 @@ export async function runRemoteCommand(
               ))
             },
           })
+        const result = await withBridgeThinkLock(async () => {
+          restoreSessionStateForCwd({
+            messages: binding.storedSession.messages,
+            summary: binding.storedSession.summary,
+          }, commandCwd)
+          try {
+            return await thinkForBridge()
+          } finally {
+            // Captured inside the lock: the active session is shared by all bridges.
+            messagesAfterThink = getMessages()
+          }
         })
         reply = result.text
         // update session
-        const messages = getMessages()
+        const messages = messagesAfterThink ?? getMessages()
         const updated = {
           ...binding.storedSession,
           cwd: result.cwd ?? binding.storedSession.cwd,
@@ -1098,6 +1108,25 @@ export async function runRemoteCommand(
         return { replies: [reply], storedSession: updated, permissionMode: binding.permissionMode }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
+        // When think() compacted the history or hit a context overflow, the
+        // compacted history must be saved; otherwise the next message would
+        // restore the old oversized history and fail the same way forever.
+        const compactedDuringThink = Boolean(messagesAfterThink) &&
+          getCompactionSummary(messagesAfterThink ?? []) !== getCompactionSummary(binding.storedSession.messages)
+        if (messagesAfterThink && (isContextOverflowError(err) || compactedDuringThink)) {
+          const saved = {
+            ...binding.storedSession,
+            messages: messagesAfterThink,
+            summary: getCompactionSummary(messagesAfterThink) ?? binding.storedSession.summary ?? '',
+            updatedAt: new Date().toISOString(),
+          }
+          await store.save(saved).catch(() => undefined)
+          return {
+            replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
+            storedSession: saved,
+            permissionMode: binding.permissionMode,
+          }
+        }
         return {
           replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
           storedSession: binding.storedSession,

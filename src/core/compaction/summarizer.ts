@@ -139,6 +139,8 @@ function buildInstructions(language: ConversationLanguage, maxTokens: number, ha
 const USER_MESSAGE_CAP_TOKENS = 8_000
 const ASSISTANT_MESSAGE_CAP_TOKENS = 4_000
 const TOOL_RESULT_CAP_TOKENS = 2_500
+/** Results already cleared from the live history were old; give the summarizer less of each. */
+const CLEARED_RESULT_CAP_TOKENS = 800
 const TOOL_ARGS_CAP_TOKENS = 1_200
 const CLEARED_REHYDRATE_MAX_BYTES = 2_000_000
 
@@ -184,7 +186,7 @@ export function serializeMessageForSummary(
     const parsed = parseToolContent(content)
     const status = parsed.ok === false ? ' · FAILED' : ''
     const error = parsed.ok === false && parsed.errorMessage ? `\nerror: ${parsed.errorMessage}` : ''
-    const body = capText(parsed.envelope ? parsed.output : content, TOOL_RESULT_CAP_TOKENS)
+    const body = capText(parsed.envelope ? parsed.output : content, original ? CLEARED_RESULT_CAP_TOKENS : TOOL_RESULT_CAP_TOKENS)
     const savedNote = message.contextCleared?.savedTo ? `\n(full output: ${message.contextCleared.savedTo})` : ''
     return `--- #${ordinal} tool result · ${name}${args ? ` ${args}` : ''}${status} ---${error}\n${body}${savedNote}`
   }
@@ -370,6 +372,11 @@ export function collectReferencedPaths(messages: readonly SessionMessage[]): str
         try { fromArgs(JSON.parse(call.arguments) as Record<string, unknown>) } catch { /* ignore */ }
       }
     } else if (message.role === 'tool') {
+      if (message.contextCleared) {
+        // Placeholders keep the arguments as `key=value` pairs.
+        for (const match of (message.content ?? '').matchAll(/\b(?:path|file_path|filePath)=([^\s·]+)/g)) add(match[1])
+        continue
+      }
       const parsed = parseToolContent(message.content ?? '')
       const type = typeof parsed.action?.type === 'string' ? parsed.action.type : message.name ?? ''
       if (FILE_TOOL_HINT.test(type)) fromArgs(parsed.action)
@@ -420,31 +427,46 @@ export function buildMechanicalSummary(input: MechanicalSummaryInput): string {
       assistantLines.push(`- ${capText(message.content.trim(), 160).replace(/\s*\n\s*/g, ' ⏎ ')}`)
     }
   }
-  const paths = collectReferencedPaths(input.messages).slice(-40)
+  const paths = collectReferencedPaths(input.messages)
 
-  const pathsBlock = paths.length > 0
-    ? `${zh ? '## 涉及的文件' : '## Files referenced'}\n${paths.map((p) => `- ${p}`).join('\n')}`
+  // Newest paths first within a fifth of the budget, listed oldest first.
+  const keptPaths: string[] = []
+  let pathTokens = 0
+  for (let i = paths.length - 1; i >= 0; i -= 1) {
+    const cost = estimateTokens(paths[i]!) + 2
+    if (pathTokens + cost > budget * 0.2) break
+    keptPaths.unshift(paths[i]!)
+    pathTokens += cost
+  }
+  const pathsBlock = keptPaths.length > 0
+    ? `${zh ? '## 涉及的文件' : '## Files referenced'}\n${keptPaths.map((p) => `- ${p}`).join('\n')}`
     : ''
   const lastNotes = assistantLines.slice(-3)
   const notesBlock = lastNotes.length > 0
     ? `${zh ? '## 最近的助手进展' : '## Last assistant notes'}\n${lastNotes.join('\n')}`
     : ''
-  const reserved = estimateTokens(pathsBlock) + estimateTokens(notesBlock) + 16
+  const reserved = estimateTokens(pathsBlock) + estimateTokens(notesBlock) + 60
   const userBudget = Math.max(0, budget - used - reserved)
 
-  // Newest user messages are the most relevant; keep as many as fit, in order.
-  const keptUsers: string[] = []
-  let userUsed = 0
-  for (let i = userLines.length - 1; i >= 0; i -= 1) {
+  // The opening messages usually state the goal and standing constraints;
+  // they are pinned. The rest is filled newest first, then put in order.
+  const pinned = userLines.slice(0, 2)
+  let userUsed = pinned.reduce((sum, line) => sum + estimateTokens(line) + 1, 0)
+  const newest: string[] = []
+  for (let i = userLines.length - 1; i >= pinned.length; i -= 1) {
     const cost = estimateTokens(userLines[i]!) + 1
     if (userUsed + cost > userBudget) break
-    keptUsers.unshift(userLines[i]!)
+    newest.unshift(userLines[i]!)
     userUsed += cost
   }
+  const gap = userLines.length - pinned.length - newest.length
+  const keptUsers = gap > 0
+    ? [...pinned, zh ? `- …（中间 ${gap} 条未列出）` : `- … (${gap} messages in between not listed)`, ...newest]
+    : [...pinned, ...newest]
   if (keptUsers.length > 0) {
-    const omitted = userLines.length - keptUsers.length
+    const omitted = Math.max(0, gap)
     const title = zh ? '## 用户消息（按时间顺序，已截断）' : '## User messages (oldest first, truncated)'
-    const note = omitted > 0 ? (zh ? `\n（更早的 ${omitted} 条未列出）` : `\n(${omitted} older messages not listed)`) : ''
+    const note = omitted > 0 ? (zh ? `\n（共省略 ${omitted} 条）` : `\n(${omitted} messages omitted)`) : ''
     parts.push(`${title}${note}\n${keptUsers.join('\n')}`)
   }
   if (pathsBlock && estimateTokens(parts.join('\n\n')) + estimateTokens(pathsBlock) <= budget) parts.push(pathsBlock)
