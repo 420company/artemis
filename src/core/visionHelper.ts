@@ -13,13 +13,16 @@
  * Descriptions travel inside <image_description> blocks after a note that
  * they are data from an image, never instructions (see imageDescription.ts).
  * Each helper call has a timeout and follows the run's cancellation; a failed,
- * timed-out or cut-off image gets a "could not be read right now" note that
- * has the model tell the user to try again shortly, and the run continues.
+ * timed-out or cut-off image is tried once more after a short pause. If it
+ * still fails and the main profile points at the platform gateway (which
+ * reads images itself, see gatewayBridgesImages), the image goes with the
+ * request as an image; otherwise it gets a "temporarily unreadable" note that
+ * has the model tell the user it will retry, and the run continues.
  *
- * Without a helper the user's images become a short note asking the model to
- * tell the user, so the run never fails just because no model here can read
- * images. No note ever has the model suggest another plan, tier or model:
- * the platform gives every tier image reading, so a failure is temporary. One helper instance belongs to one run: its description cache,
+ * Without a helper the user's images go to the gateway the same way, or
+ * become that note, so the run never fails just because no model here can
+ * read images. No note mentions plans, tiers or models: the platform gives
+ * every tier image reading, so a failure is temporary. One helper instance belongs to one run: its description cache,
  * keyed by the image content hash plus a hash of the user's question (see
  * visionCacheKey), never outlives the run.
  *
