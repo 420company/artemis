@@ -325,6 +325,11 @@ export type AgentAction =
       tail?: number;
     }
   | {
+      /** Look at an image file: it is attached to the next model request. */
+      type: 'view_image';
+      path: string;
+    }
+  | {
       type: 'kill_task';
       taskId: string;
     }
@@ -393,6 +398,10 @@ export type AgentAction =
       model?: string;
       ratio?: string;
       duration?: number;
+      // Output resolution ("480p" / "720p" / "1080p"). Omitted: BytePlus uses
+      // the model's own default; custom/OpenAI providers use
+      // visualProfile.video.defaultParams.resolution.
+      resolution?: string;
       outputPath?: string;
       referenceImageUrls?: string[];
       referenceVideoUrls?: string[];
@@ -734,6 +743,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'apply_patch',
   'run_command',
   'task_output',
+  'view_image',
   'kill_task',
   'delegate_task',
   'spawn_background_workflow',

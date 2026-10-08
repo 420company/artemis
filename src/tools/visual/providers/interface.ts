@@ -18,6 +18,8 @@ export interface VisualGenerationParams {
 export interface VideoGenerationParams extends VisualGenerationParams {
   duration?: number
   ratio?: string
+  /** "480p" / "720p" / "1080p", only when the request asked for one. */
+  resolution?: string
   generateAudio?: boolean
   referenceImageUrls?: string[]
   referenceVideoUrls?: string[]

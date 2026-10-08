@@ -73,6 +73,11 @@ export type ToolExecutionContext = {
    */
   memoryDefaultScope?: 'global' | 'project';
   /**
+   * The current agent run's queue of images to show the model on its next
+   * request (view_image). Absent outside an agent run.
+   */
+  viewedImages?: import('../core/imageInput.js').ViewedImageQueue;
+  /**
    * Contextual information for the tool execution
    */
   context?: any;

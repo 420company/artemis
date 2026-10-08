@@ -70,6 +70,7 @@ import {
   getDelegatedChildPermissionMode,
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
+import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
 import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
@@ -561,6 +562,7 @@ function buildActionFromLooseArgs(
         prompt,
         model: getLooseStringArg(args, 'model'),
         ratio: getLooseStringArg(args, 'ratio', 'aspectRatio', 'aspect_ratio'),
+        resolution: getLooseStringArg(args, 'resolution', 'rs'),
         duration: getLooseIntegerArg(args, 'duration', 'durationSeconds', 'duration_seconds'),
         outputPath: getLooseStringArg(
           args,
@@ -755,6 +757,13 @@ function buildActionFromLooseArgs(
         category,
         content: getLooseStringArg(args, 'content', 'text', 'body', 'memory'),
       };
+    }
+    case 'view_image':
+    case 'look_at_image':
+    case 'see_image': {
+      const imagePath = getLooseStringArg(args, 'path', 'file', 'image', 'imagePath', 'image_path');
+      if (!imagePath?.trim()) return null;
+      return { type: 'view_image', path: imagePath };
     }
     default:
       return null;
@@ -1946,6 +1955,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
     case 'task_output':
       return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
+    case 'view_image':
+      return `view_image ${truncate(action.path, 120)}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
     default: {
@@ -3549,6 +3560,19 @@ async function handleVerificationReminder(
   options.onInfo?.('[verification] reminder injected');
 }
 
+/**
+ * Spread into a delegated child run's options: the user's images belong to the
+ * parent's request, and the child run gets its own view_image queue.
+ */
+const CHILD_RUN_IMAGE_RESET = {
+  imageAttachments: undefined,
+  viewedImages: undefined,
+} as const satisfies Partial<RunAgentOptions>;
+
+/** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
+const VIEW_IMAGE_UNAVAILABLE_SECTION =
+  'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+
 export type RunAgentOptions = {
   cwd: string;
   locale?: UiLocale;
@@ -3578,8 +3602,15 @@ export type RunAgentOptions = {
    * Images to attach to the first user turn.
    * Passed directly to the provider if it supports images.
    * Ignored on subsequent turns and by providers without supportsImages.
+   * Not passed on to delegated sub-agents.
    */
   imageAttachments?: import('../providers/types.ts').ImageAttachment[];
+  /**
+   * Internal: the images view_image queued for the next request of this run.
+   * runAgent creates one per run (any value passed in is replaced), so viewed
+   * images never outlive the run or reach another session.
+   */
+  viewedImages?: ViewedImageQueue;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -3860,6 +3891,7 @@ export async function runBuilderProposalAgent(
         {
           ...options,
           ...coordination,
+          ...CHILD_RUN_IMAGE_RESET,
           permissionManager: childPermissionManager,
           maxTurns: childMaxTurns,
           profile: 'builder',
@@ -4057,6 +4089,7 @@ export async function approveBuilderExecution(
         {
           ...options,
           ...coordination,
+          ...CHILD_RUN_IMAGE_RESET,
           permissionManager: createDelegatedChildPermissionManager(
             options.permissionManager,
             'builder',
@@ -4229,6 +4262,7 @@ export async function runSpecialistAgent(
       runAgent(childSession, task, {
         ...options,
         ...coordination,
+        ...CHILD_RUN_IMAGE_RESET,
         permissionManager: childPermissionManager,
         maxTurns: childMaxTurns,
         profile: role,
@@ -4671,6 +4705,7 @@ async function executeAgentAction(
         ),
         sessionId: session.id,
         memoryDefaultScope: options.memoryDefaultScope,
+        viewedImages: options.viewedImages,
         context: {
           profile: options.profile ?? 'main',
           runtimeId: options.rootRuntimeId,
@@ -4757,6 +4792,19 @@ You can continue executing your current tasks. The background workflow will run 
       }
     }
     case 'request_freya_visual_asset': {
+      // Legacy interactive flow: it is no longer offered to the model
+      // (generate_image / generate_video / generate_long_video replace it) and
+      // it needs a terminal menu, so without an interactive terminal (e.g.
+      // headless `artemis execute`) it fails fast instead of blocking.
+      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+        return buildRuntimeManagedFailure(
+          'freya_visual_asset_unavailable',
+          'request_freya_visual_asset is not available in this session (it needs an interactive terminal menu). Use generate_image for images, generate_video for short videos, or generate_long_video for long-form video instead.',
+          {
+            retryable: false,
+          },
+        );
+      }
       try {
         const { showFreyaMenu } = await import('../cli/freyaPrompt.js')
         const { FreyaVisualAgent } = await import('../agents/freyaAgent.js')
@@ -4777,9 +4825,18 @@ You can continue executing your current tasks. The background workflow will run 
 
         switch (menuResult.assetPath) {
           case 'configure':
-            options.onInfo?.('[log:info] ✅ Freya: 会话已成功挂起。请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重新启动会话以恢复任务。')
-            process.exit(0)
-            
+            // Never exit the process mid-run: report back so the session
+            // can continue (or the user can configure and retry).
+            options.onInfo?.('[log:info] Freya: 请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重试。')
+            return buildRuntimeManagedFailure(
+              'freya_visual_model_configuration_requested',
+              'The user chose to configure the visual model. Ask them to run /config visual (or artemis config visual) and retry; meanwhile use generate_image or generate_video directly.',
+              {
+                retryable: false,
+              },
+            );
+
+
           case 'generate':
             if (!visualConfig?.enabled) {
               options.onInfo?.('[log:warn] ⚠️ Freya: 视觉模型尚未配置。请运行 /config visual（或 artemis config visual）进行配置。')
@@ -6021,9 +6078,13 @@ export async function runAgent(
       permissionMode: options.permissionManager.getMode(),
       runtimeId: options.rootRuntimeId,
     }));
+  // Images view_image queues for the next request. Owned by this run alone:
+  // nothing queued here survives the run or reaches another session.
+  const viewedImages = new ViewedImageQueue();
   const runOptions: RunAgentOptions = {
     ...options,
     heimdallThreadState,
+    viewedImages,
   };
   if (shouldOwnHeimdallState) {
     await recordHeimdallStage(
@@ -6290,6 +6351,26 @@ export async function runAgent(
     }
   }
 
+  /**
+   * The images for the next request: `userImages` plus whatever view_image
+   * queued since the last request, trimmed to one request's count and byte
+   * budget. Nothing goes to a model that cannot see images.
+   */
+  function takeRequestImages(
+    userImages: readonly import('../providers/types.ts').ImageAttachment[],
+    provider: ChatProvider,
+  ): import('../providers/types.ts').ImageAttachment[] {
+    const { kept, dropped } = fitImagesToRequest([...userImages, ...viewedImages.take()]);
+    if (dropped.length > 0) {
+      options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
+    }
+    if (kept.length > 0 && provider.supportsImages !== true) {
+      options.onInfo?.(`[images] this model cannot take images; ${kept.length} dropped`);
+      return [];
+    }
+    return kept;
+  }
+
   async function runNativeToolLoop(
     provider: ChatProvider,
     providerMessages: SessionMessage[],
@@ -6359,11 +6440,17 @@ export async function runAgent(
           continue;
         }
 
+        // Same options as before plus this run's image queue; a workspace
+        // switch made by the tool is carried back to `options`.
+        const nativeActionOptions: RunAgentOptions = { ...options, viewedImages };
         const outcome = await executeWithRunningInterjectionCheck(
           session,
           mapped.action,
-          options,
+          nativeActionOptions,
         );
+        if (nativeActionOptions.cwd !== options.cwd) {
+          options.cwd = nativeActionOptions.cwd;
+        }
         outcomes.push(outcome);
         toolOutputs.push({
           callId: call.callId,
@@ -6381,6 +6468,9 @@ export async function runAgent(
         await options.sessionStore.save(session);
       }
 
+      // Images the tools just queued (view_image) go with the continuation,
+      // so the model sees them in the very next round.
+      const continuationImages = takeRequestImages([], provider);
       currentCompletion = await completeProviderTurn(
         provider,
         providerMessages,
@@ -6388,6 +6478,7 @@ export async function runAgent(
           previousResponseId: currentCompletion.responseId,
           toolOutputs,
           nativeFunctionTools,
+          ...(continuationImages.length ? { imageAttachments: continuationImages } : {}),
         },
       );
     }
@@ -6453,6 +6544,11 @@ export async function runAgent(
     }
     const activeProvider =
       options.resolveProvider?.(profile) ?? options.provider;
+    // view_image only exists for models that can see images: it is left out
+    // of the native tools, the prompt says it is unavailable, and the tool
+    // itself fails while the flag is off.
+    const modelSeesImages = activeProvider.supportsImages === true;
+    viewedImages.acceptsImages = modelSeesImages;
     const context = await buildContextWindow(session, profile, {
       cwd: options.cwd,
       contextLength: options.contextLength,
@@ -6490,6 +6586,7 @@ export async function runAgent(
       [
         ...extensionRuntime.sections,
         ...(odinRuntimeSection ? [odinRuntimeSection] : []),
+        ...(modelSeesImages ? [] : [VIEW_IMAGE_UNAVAILABLE_SECTION]),
       ],
     );
     const latestUserRequest = extractLatestUserRequest(context.messages);
@@ -6518,7 +6615,7 @@ export async function runAgent(
           allowedActionTypes: getNativeAllowedActionTypesForRuntime(
             profile,
             options.permissionManager.getMode(),
-          ),
+          ).filter((type) => modelSeesImages || type !== 'view_image'),
           allowReadOnlyMcpToolCalls: true,
         })
         : undefined;
@@ -6563,12 +6660,15 @@ export async function runAgent(
       );
     }
     const nativeFunctionTools = nativeToolRuntime?.tools;
+    // The user's images go with the first request; images the agent chose
+    // to look at (view_image) go with the request right after.
+    const requestImages = takeRequestImages(
+      turn === 1 ? options.imageAttachments ?? [] : [],
+      activeProvider,
+    );
     const providerCallOptions = {
       nativeFunctionTools,
-      imageAttachments:
-        turn === 1 && options.imageAttachments?.length && activeProvider.supportsImages
-          ? options.imageAttachments
-          : undefined,
+      imageAttachments: requestImages.length ? requestImages : undefined,
     };
     // Stream the model output live to the workflow UI when the provider
     // supports it. We forward each delta as a `[stream-chunk]` info line,

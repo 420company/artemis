@@ -190,7 +190,7 @@ function getEmptyStore(): ProviderStoreData {
         nsfw: false,
         defaultParams: {
           duration: '10s',
-          resolution: '1080p',
+          resolution: '720p',
           quality: 'standard',
           style: 'realistic',
           format: 'mp4',

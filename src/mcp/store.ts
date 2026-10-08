@@ -111,6 +111,8 @@ export type McpOAuthConfig = {
   lastRefreshAt?: string;
 };
 
+export type McpStdioFraming = 'auto' | 'newline' | 'content-length';
+
 export type McpServerConfig = {
   id: string;
   enabled: boolean;
@@ -119,6 +121,12 @@ export type McpServerConfig = {
   commandArgs?: string[];
   workingDirectory?: string;
   environment?: Record<string, string>;
+  /**
+   * stdio wire format. Omitted / 'auto': newline-delimited JSON (the MCP
+   * spec), falling back to LSP-style Content-Length frames when the server
+   * does not answer `initialize` that way.
+   */
+  stdioFraming?: McpStdioFraming;
   url?: string;
   headers?: Record<string, string>;
   bearerToken?: string;
@@ -566,6 +574,9 @@ function normalizeServer(
     environment:
       normalizeStringRecord(candidate.environment) ??
       normalizeStringRecord(candidate.env),
+    ...(candidate.stdioFraming === 'newline' || candidate.stdioFraming === 'content-length'
+      ? { stdioFraming: candidate.stdioFraming }
+      : {}),
     url,
     headers: normalizeStringRecord(candidate.headers),
     bearerToken: normalizeOptionalString(candidate.bearerToken),

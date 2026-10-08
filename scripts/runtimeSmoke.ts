@@ -17,11 +17,15 @@ import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
+import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
-import { buildProviderNativeFunctionTools } from '../src/core/providerNativeTools.js'
+import {
+  buildProviderNativeFunctionTools,
+  mapProviderNativeToolCallToAction,
+} from '../src/core/providerNativeTools.js'
 import { probeProviderNativeToolCalls } from '../src/providers/health.js'
 import {
   GPT_5_6_CONTEXT_LENGTH,
@@ -31,13 +35,25 @@ import {
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
-import { getDirectToolCount } from '../src/tools/directTools.js'
+import { MessagesCompatibleProvider } from '../src/providers/messagesCompatible.js'
+import { ResponsesCompatibleProvider } from '../src/providers/responsesCompatible.js'
+import { buildDirectNativeFunctionTools, getDirectToolCount } from '../src/tools/directTools.js'
+import {
+  detectToolHostEnvironment,
+  getToolHostKey,
+  parseBooleanEnv,
+  resolveBrowserLaunchMode,
+  withToolHostEnvironment,
+} from '../src/tools/platformSupport.js'
+import { buildAmbientToolsHint } from '../src/tools/ambientHint.js'
 import {
   getToolDefinition,
   getProviderCallableActionTypes,
   isDirectlyExecutableTool,
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
+  validateToolAction,
+  renderDetailedToolManifest,
 } from '../src/tools/registry.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
@@ -84,7 +100,7 @@ import {
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
-import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
+import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../src/tools/visual/videoParams.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
   isPathInsideWorkspace,
@@ -179,6 +195,186 @@ assert(
   eq(providerNativeToolNames, getProviderCallableActionTypes()),
   providerNativeToolNames.join(', '),
 )
+
+{
+  // Platform-aware tool exposure: Linux (headless or desktop) is not offered
+  // macOS-only or desktop-automation tools, Windows keeps desktop automation
+  // but not Apple tools, and macOS keeps the full set. Spotify drives the Web
+  // API, so it is offered on every host.
+  const appleTools = ['calendar_list_today', 'calendar_add_event', 'reminders_list', 'reminders_add']
+  const automationTools = ['computer_screenshot', 'computer_click', 'computer_doctor']
+  const desktopOnlyTools = [...automationTools, ...appleTools]
+  const spotifyTools = ['spotify_play_liked', 'spotify_pause']
+  const coreTools = ['read_file', 'write_file', 'run_command', 'search_files', 'browser_navigate', 'weather_current']
+  const snapshot = () => {
+    const nativeNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
+    const directNames = buildDirectNativeFunctionTools().map((tool) => tool.name)
+    const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
+    const ambientHint = buildAmbientToolsHint()
+    const rejected = mapProviderNativeToolCallToAction({
+      callId: 'smoke-call',
+      name: 'computer_click',
+      arguments: '{"x":1,"y":2}',
+    })
+    return { nativeNames, directNames, manifestNames, ambientHint, rejected }
+  }
+  const linux = withToolHostEnvironment({ platform: 'linux', hasDisplay: false }, snapshot)
+  const linuxDesktop = withToolHostEnvironment({ platform: 'linux', hasDisplay: true }, snapshot)
+  const windows = withToolHostEnvironment({ platform: 'win32', hasDisplay: true }, snapshot)
+  const mac = withToolHostEnvironment({ platform: 'darwin', hasDisplay: true }, snapshot)
+  const lists = (s: ReturnType<typeof snapshot>) => [s.nativeNames, s.directNames, s.manifestNames]
+  const offersAll = (s: ReturnType<typeof snapshot>, tools: string[]) =>
+    lists(s).every((names) => tools.every((name) => names.includes(name)))
+  const offersNone = (s: ReturnType<typeof snapshot>, tools: string[]) =>
+    lists(s).every((names) => tools.every((name) => !names.includes(name)))
+
+  assert(
+    'platform tools: headless linux omits desktop/macOS-only tools from native, direct and manifest lists',
+    lists(linux).every((names) => desktopOnlyTools.every((name) => !names.includes(name))),
+    lists(linux).map((names) => names.filter((name) => desktopOnlyTools.includes(name)).join(',')).join(' | '),
+  )
+  assert(
+    'platform tools: headless linux keeps core tools in native, direct and manifest lists',
+    lists(linux).every((names) => coreTools.every((name) => names.includes(name))),
+  )
+  assert(
+    'platform tools: macOS still offers desktop/macOS tools everywhere',
+    offersAll(mac, desktopOnlyTools),
+  )
+  assert(
+    'platform tools: linux desktop omits Apple and desktop-automation tools, keeps core tools',
+    offersNone(linuxDesktop, desktopOnlyTools) && offersAll(linuxDesktop, coreTools),
+  )
+  assert(
+    'platform tools: windows keeps desktop automation but omits Apple tools',
+    offersAll(windows, automationTools) && offersNone(windows, appleTools) && offersAll(windows, coreTools),
+  )
+  assert(
+    'platform tools: spotify is offered on every host, including headless linux',
+    [linux, linuxDesktop, windows, mac].every((host) => offersAll(host, spotifyTools)),
+  )
+  assert(
+    'platform tools: view_image is in the agent native tools and manifest on every host, including headless linux',
+    [linux, linuxDesktop, windows, mac].every((host) =>
+      host.nativeNames.includes('view_image') && host.manifestNames.includes('view_image')),
+  )
+  assert(
+    'platform tools: manifest hides executor-less capability placeholders',
+    ['http_request', 'search', 'web_scraper', 'user_interaction', 'confirm', 'file', 'system']
+      .every((name) => !linux.manifestNames.includes(name) && !mac.manifestNames.includes(name)),
+  )
+  assert(
+    'platform tools: ambient hint drops Apple Calendar/Reminders on linux only',
+    !linux.ambientHint.includes('calendar_list_today') &&
+      !linux.ambientHint.includes('reminders_add') &&
+      linux.ambientHint.includes('weather_current') &&
+      mac.ambientHint.includes('calendar_list_today') &&
+      mac.ambientHint.includes('reminders_add'),
+  )
+  assert(
+    'platform tools: native call to a hidden desktop tool is rejected as unavailable on linux',
+    !linux.rejected.ok && linux.rejected.error.code === 'tool_unavailable' &&
+      !linuxDesktop.rejected.ok && windows.rejected.ok && mac.rejected.ok,
+  )
+  assert(
+    'platform tools: host cache keys differ per platform and display',
+    new Set([
+      getToolHostKey({ platform: 'linux', hasDisplay: false }),
+      getToolHostKey({ platform: 'linux', hasDisplay: true }),
+      getToolHostKey({ platform: 'win32', hasDisplay: true }),
+      getToolHostKey({ platform: 'darwin', hasDisplay: true }),
+    ]).size === 4,
+  )
+  assert(
+    'platform tools: host override is restored after the forced snapshot',
+    eq(buildProviderNativeFunctionTools().map((tool) => tool.name), providerNativeToolNames),
+  )
+}
+
+{
+  // Host detection: DISPLAY / WAYLAND_DISPLAY are trimmed, macOS and Windows
+  // always count as having a display.
+  assert(
+    'host detection: linux display comes from DISPLAY or WAYLAND_DISPLAY, whitespace ignored',
+    detectToolHostEnvironment('linux', {}).hasDisplay === false &&
+      detectToolHostEnvironment('linux', { DISPLAY: '   ', WAYLAND_DISPLAY: '' }).hasDisplay === false &&
+      detectToolHostEnvironment('linux', { DISPLAY: ' :0 ' }).hasDisplay === true &&
+      detectToolHostEnvironment('linux', { WAYLAND_DISPLAY: 'wayland-0' }).hasDisplay === true &&
+      detectToolHostEnvironment('darwin', {}).hasDisplay === true &&
+      detectToolHostEnvironment('win32', {}).hasDisplay === true,
+  )
+
+  assert(
+    'browser env: ARTEMIS_BROWSER_HEADLESS accepts 1/true/yes and 0/false/no, ignores other values',
+    ['1', 'true', 'YES', ' on '].every((value) => parseBooleanEnv(value) === true) &&
+      ['0', 'false', 'No', 'off'].every((value) => parseBooleanEnv(value) === false) &&
+      [undefined, '', '  ', 'maybe', '2'].every((value) => parseBooleanEnv(value) === undefined),
+  )
+
+  const linuxHeadless = { platform: 'linux', hasDisplay: false } as const
+  const linuxX11 = { platform: 'linux', hasDisplay: true } as const
+  const mac = { platform: 'darwin', hasDisplay: true } as const
+  const mode = (host: { platform: NodeJS.Platform; hasDisplay: boolean }, env: NodeJS.ProcessEnv) =>
+    resolveBrowserLaunchMode(host, env)
+  assert(
+    'browser env: headed with a display, headless without one, overridable either way',
+    mode(mac, {}).headless === false &&
+      mode(linuxX11, { DISPLAY: ':0' }).headless === false &&
+      mode(linuxHeadless, {}).headless === true &&
+      mode(mac, { ARTEMIS_BROWSER_HEADLESS: 'true' }).headless === true &&
+      mode(mac, { ARTEMIS_BROWSER_HEADLESS: 'yes' }).headless === true &&
+      mode(linuxHeadless, { ARTEMIS_BROWSER_HEADLESS: 'false' }).headless === false &&
+      mode(linuxHeadless, { ARTEMIS_BROWSER_HEADLESS: 'bogus' }).headless === true,
+  )
+  assert(
+    'browser env: native Wayland flag only for a headed linux browser without XWayland',
+    eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0' }).extraArgs, ['--ozone-platform=wayland']) &&
+      eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }).extraArgs, []) &&
+      eq(mode(linuxX11, { DISPLAY: ':0' }).extraArgs, []) &&
+      eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0', ARTEMIS_BROWSER_HEADLESS: '1' }).extraArgs, []) &&
+      eq(mode(mac, { WAYLAND_DISPLAY: 'wayland-0' }).extraArgs, []),
+  )
+
+  const previousHeadless = process.env.ARTEMIS_BROWSER_HEADLESS
+  const headedHeading = '浏览器自动化（Playwright Chromium · 本机可见窗口）'
+  const headlessHeading = '浏览器自动化（Playwright Chromium · 无头模式）'
+  try {
+    delete process.env.ARTEMIS_BROWSER_HEADLESS
+    const macDefault = withToolHostEnvironment(mac, buildAmbientToolsHint)
+    const linuxDefault = withToolHostEnvironment(linuxHeadless, buildAmbientToolsHint)
+    process.env.ARTEMIS_BROWSER_HEADLESS = 'true'
+    const macForcedHeadless = withToolHostEnvironment(mac, buildAmbientToolsHint)
+    assert(
+      'browser env: ambient hint heading follows the same headed/headless decision',
+      macDefault.includes(headedHeading) &&
+        linuxDefault.includes(headlessHeading) &&
+        macForcedHeadless.includes(headlessHeading) &&
+        !macForcedHeadless.includes(headedHeading),
+    )
+  } finally {
+    if (previousHeadless === undefined) delete process.env.ARTEMIS_BROWSER_HEADLESS
+    else process.env.ARTEMIS_BROWSER_HEADLESS = previousHeadless
+  }
+}
+
+{
+  // The legacy interactive Freya flow is not offered to the model anywhere.
+  const freya = 'request_freya_visual_asset'
+  const mainNativeNames = buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main'))
+    .map((tool) => tool.name)
+  const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
+  const mainPrompt = buildSystemPrompt(process.cwd(), 'accept-all', 'standard', 'main', false)
+  assert(
+    'freya: request_freya_visual_asset is not offered to main (native, direct, manifest, prompt)',
+    !providerNativeToolNames.includes(freya) &&
+      !mainNativeNames.includes(freya) &&
+      !getProviderCallableActionTypes().includes(freya) &&
+      !buildDirectNativeFunctionTools().some((tool) => tool.name === freya) &&
+      !manifestNames.includes(freya) &&
+      !mainPrompt.includes(freya) &&
+      !mapProviderNativeToolCallToAction({ callId: 'freya-call', name: freya, arguments: '{}' }).ok,
+  )
+}
 
 {
   const generateVideoTool = providerNativeTools.find((tool) => tool.name === 'generate_video')
@@ -629,14 +825,24 @@ assert(
   shellProjection.join(', '),
 )
 
-const ambientProjection = projectDirectToolNames([
+const ambientMessages: SessionMessage[] = [
   {
     id: 'ambient-user',
     role: 'user',
     content: '明天上午提醒我看天气，如果下雨就播放 Spotify 歌单。',
     createdAt: new Date().toISOString(),
   },
-])
+]
+// Reminders are macOS-only tools, so this projection is checked on a forced
+// macOS host; the headless Linux variant follows below.
+const ambientProjection = withToolHostEnvironment(
+  { platform: 'darwin', hasDisplay: true },
+  () => projectDirectToolNames(ambientMessages),
+)
+const headlessAmbientProjection = withToolHostEnvironment(
+  { platform: 'linux', hasDisplay: false },
+  () => projectDirectToolNames(ambientMessages),
+)
 
 assert(
   'tool projection: ambient requests keep productivity, weather, and music tools',
@@ -645,6 +851,14 @@ assert(
     ambientProjection.includes('spotify_play_playlist') &&
     !ambientProjection.includes('apply_patch'),
   ambientProjection.join(', '),
+)
+
+assert(
+  'tool projection: headless linux never projects macOS-only tools but keeps Spotify',
+  headlessAmbientProjection.includes('weather_forecast') &&
+    !headlessAmbientProjection.includes('reminders_add') &&
+    headlessAmbientProjection.includes('spotify_play_playlist'),
+  headlessAmbientProjection.join(', '),
 )
 
 const dreamProtocolDiscussionProjection = projectDirectToolNames([
@@ -1381,6 +1595,316 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 }
 
 {
+  // The agent looks at an image mid-run: view_image attaches it to the next request.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  let calls = 0
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      calls += 1
+      seen.push(options?.imageAttachments?.length)
+      if (calls === 1) {
+        return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+      }
+      return { text: JSON.stringify({ reply: 'It is a login page.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'What does the screenshot show?', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  assert('view_image: the image reaches the request after the tool call, and only that one', seen[0] === undefined && seen[1] === 1 && seen.slice(2).every((n) => n === undefined), JSON.stringify(seen))
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // A run that ends right after view_image (here: out of turns) must not hand
+  // the image to the next run on the same session, as a long-lived bridge would.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-leak-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image leak smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      seen.push(options?.imageAttachments?.length)
+      return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+    },
+  }
+  const runOnce = (prompt: string) => runAgent(session, prompt, {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 1,
+    profile: 'main',
+  })
+  await runOnce('Look at the screenshot.')
+  await runOnce('Something unrelated.')
+  assert(
+    'view_image: an image queued in the last turn of a run does not reach the next run on the same session',
+    seen.length === 2 && seen[0] === undefined && seen[1] === undefined,
+    JSON.stringify(seen),
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // view_image resolves paths like read_file: outside the workspace needs the
+  // workspace trust prompt (declined here, since the run offers none).
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-ws-${Date.now()}`)
+  const outsideDir = path.join(os.tmpdir(), `artemis-view-image-outside-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.mkdirSync(outsideDir, { recursive: true })
+  const outsideImage = path.join(outsideDir, 'private.png')
+  fs.writeFileSync(outsideImage, Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image workspace smoke' })
+  await store.save(session)
+  const seen: (number | undefined)[] = []
+  let calls = 0
+  const provider: ChatProvider = {
+    supportsImages: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      calls += 1
+      seen.push(options?.imageAttachments?.length)
+      if (calls === 1) {
+        return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: outsideImage }] }), raw: null }
+      }
+      return { text: JSON.stringify({ reply: 'Could not open it.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'Look at that picture.', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+  assert(
+    'view_image: an image outside the workspace is refused without the workspace trust prompt and never attached',
+    seen.every((n) => n === undefined) && /declined|escapes/i.test(toolText),
+    `${JSON.stringify(seen)} ${toolText.slice(0, 300)}`,
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+  fs.rmSync(outsideDir, { recursive: true, force: true })
+}
+
+{
+  // A model that cannot see images: view_image is not offered as a native
+  // tool, and calling it anyway fails instead of claiming success.
+  const runWith = async (supportsImages: boolean) => {
+    const tmpDir = path.join(os.tmpdir(), `artemis-view-image-novision-${Date.now()}-${supportsImages}`)
+    fs.mkdirSync(tmpDir, { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'view image no-vision smoke' })
+    await store.save(session)
+    const seen: (number | undefined)[] = []
+    const nativeToolNames: string[][] = []
+    let calls = 0
+    const provider: ChatProvider = {
+      supportsImages,
+      supportsNativeToolCalls: true,
+      async complete(_messages, options): Promise<ProviderResponse> {
+        calls += 1
+        seen.push(options?.imageAttachments?.length)
+        nativeToolNames.push((options?.nativeFunctionTools ?? []).map((t) => t.name))
+        if (calls === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'Done.', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'What does the screenshot show?', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+    })
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { seen, nativeToolNames, toolText }
+  }
+  const vision = await runWith(true)
+  const textOnly = await runWith(false)
+  assert(
+    'view_image: offered as a native tool to a vision model and attached on the next request',
+    vision.nativeToolNames[0]?.includes('view_image') === true && vision.seen[1] === 1,
+    JSON.stringify({ tools: vision.nativeToolNames[0]?.includes('view_image'), seen: vision.seen }),
+  )
+  assert(
+    'view_image: hidden from a model that cannot see images, and fails (no image sent) when called anyway',
+    textOnly.nativeToolNames.every((names) => !names.includes('view_image')) &&
+      textOnly.seen.every((n) => n === undefined) &&
+      /cannot see images/.test(textOnly.toolText) &&
+      !/is attached to your next step/.test(textOnly.toolText),
+    JSON.stringify({ seen: textOnly.seen, tool: textOnly.toolText.slice(0, 300) }),
+  )
+}
+
+{
+  // Responses API: native tool calls run inside the native loop, whose
+  // continuation request (previous_response_id) must carry the viewed image.
+  const tmpDir = path.join(os.tmpdir(), `artemis-view-image-responses-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'view image responses smoke' })
+  await store.save(session)
+  const requests: Array<{ previousResponseId?: string; images?: number; toolOutputs?: number }> = []
+  const provider: ChatProvider = {
+    supportsImages: true,
+    supportsNativeToolCalls: true,
+    async complete(_messages, options): Promise<ProviderResponse> {
+      requests.push({
+        previousResponseId: options?.previousResponseId,
+        images: options?.imageAttachments?.length,
+        toolOutputs: options?.toolOutputs?.length,
+      })
+      if (requests.length === 1) {
+        return {
+          text: '',
+          raw: null,
+          responseId: 'resp_1',
+          nativeToolCalls: [{ name: 'view_image', arguments: JSON.stringify({ path: 'screenshot.png' }), callId: 'call_1' }],
+        }
+      }
+      return { text: JSON.stringify({ reply: 'It is a login page.', done: true }), raw: null }
+    },
+  }
+  await runAgent(session, 'What does the screenshot show?', {
+    cwd: tmpDir,
+    provider,
+    sessionStore: store,
+    permissionManager: new PermissionManager('accept-all', false),
+    maxTurns: 3,
+    profile: 'main',
+  })
+  assert(
+    'view_image (Responses native loop): the continuation request carries the viewed image with the tool output',
+    requests.length === 2 &&
+      requests[0]?.images === undefined &&
+      requests[1]?.previousResponseId === 'resp_1' &&
+      requests[1]?.toolOutputs === 1 &&
+      requests[1]?.images === 1,
+    JSON.stringify(requests),
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // Provider wire formats for images: OpenAI-compatible endpoints always get
+  // image_url blocks (also for Claude and Gemini models behind a gateway),
+  // text-only models get a note and never base64 text, and the Responses
+  // continuation adds the images after the tool outputs.
+  const bodies: Array<Record<string, unknown>> = []
+  let reply: unknown = {}
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      bodies.push(raw ? JSON.parse(raw) as Record<string, unknown> : {})
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(reply))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Mock image wire-format server failed to bind.')
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const image = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const, label: 'Image: shot.png' }
+  const userMessage = { id: 'u1', role: 'user' as const, content: 'What is this?', createdAt: new Date().toISOString() }
+  try {
+    reply = { choices: [{ message: { content: 'ok' } }], usage: {} }
+    const chatImageBlocks = async (model: string) => {
+      bodies.length = 0
+      const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model })
+      await provider.complete([userMessage], { imageAttachments: [image] })
+      const messages = bodies[0]?.messages as Array<{ role?: string; content?: unknown }> | undefined
+      return { provider, content: messages?.find((m) => m.role === 'user')?.content, raw: JSON.stringify(bodies[0] ?? {}) }
+    }
+    const isImageUrlContent = (content: unknown) => Array.isArray(content) &&
+      content.some((b) => (b as { type?: string }).type === 'image_url') &&
+      content.some((b) => (b as { type?: string; text?: string }).type === 'text' && (b as { text?: string }).text === 'What is this?')
+    const claude = await chatImageBlocks('anthropic/claude-sonnet-4.5')
+    const gemini = await chatImageBlocks('gemini-2.5-flash')
+    assert(
+      'image wire format: Claude and Gemini models behind an OpenAI-compatible endpoint get standard image_url blocks',
+      claude.provider.supportsImages && gemini.provider.supportsImages && isImageUrlContent(claude.content) && isImageUrlContent(gemini.content),
+      `${JSON.stringify(claude.content).slice(0, 200)} ${JSON.stringify(gemini.content).slice(0, 200)}`,
+    )
+    const deepseek = await chatImageBlocks('deepseek-chat')
+    assert(
+      'image wire format: a text-only model (DeepSeek) gets a note instead of the image, never base64 text',
+      deepseek.provider.supportsImages === false &&
+        typeof deepseek.content === 'string' &&
+        /omitted: this model cannot see images/.test(deepseek.content) &&
+        !deepseek.raw.includes(image.data),
+      deepseek.raw.slice(0, 300),
+    )
+
+    reply = { id: 'resp_2', output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }], usage: {} }
+    bodies.length = 0
+    const responses = new ResponsesCompatibleProvider({ protocol: 'responses', baseUrl, apiKey: 'k', model: 'gpt-5.4' })
+    await responses.complete([userMessage], {
+      previousResponseId: 'resp_1',
+      toolOutputs: [{ callId: 'call_1', output: '{"ok":true}' }],
+      imageAttachments: [image],
+    })
+    const input = bodies[0]?.input as Array<Record<string, unknown>> | undefined
+    const userItem = input?.[1] as { role?: string; content?: Array<{ type?: string; image_url?: string }> } | undefined
+    assert(
+      'image wire format: a Responses continuation sends the tool output, then a user item with the image',
+      bodies[0]?.previous_response_id === 'resp_1' &&
+        input?.[0]?.type === 'function_call_output' &&
+        userItem?.role === 'user' &&
+        userItem.content?.some((b) => b.type === 'input_image' && b.image_url === `data:image/png;base64,${image.data}`) === true,
+      JSON.stringify(bodies[0]).slice(0, 400),
+    )
+
+    reply = { content: [{ type: 'text', text: 'ok' }], usage: {} }
+    bodies.length = 0
+    const messagesProvider = new MessagesCompatibleProvider({ protocol: 'messages', baseUrl, apiKey: 'k', model: 'claude-sonnet-4-5' })
+    await messagesProvider.complete([
+      userMessage,
+      { id: 'a1', role: 'assistant', content: '', toolCalls: [{ id: 'tu_1', name: 'view_image', arguments: '{"path":"shot.png"}' }], createdAt: new Date().toISOString() },
+      { id: 't1', role: 'tool', content: 'attached', toolUseId: 'tu_1', createdAt: new Date().toISOString() },
+    ], { imageAttachments: [image] })
+    const anthropicMessages = bodies[0]?.messages as Array<{ role?: string; content?: Array<Record<string, unknown>> }> | undefined
+    const lastUser = anthropicMessages?.[anthropicMessages.length - 1]?.content
+    assert(
+      'image wire format: on the Messages API the image follows the tool_result block instead of replacing it',
+      Array.isArray(lastUser) &&
+        lastUser[0]?.type === 'tool_result' &&
+        lastUser.some((b) => b.type === 'image' && !('_label' in b)) &&
+        !lastUser.some((b) => b.type === 'text' && b.text === ''),
+      JSON.stringify(lastUser).slice(0, 400),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
   // A project without its own providers.json uses the global semantic-memory
   // setting, like the main model does.
   const tmpDir = path.join(os.tmpdir(), `artemis-memory-profile-${Date.now()}`)
@@ -1853,6 +2377,46 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'model context: stale GPT-5.6 metadata and cached values are capped at 272K',
     resolveEffectiveModelContextLength('gpt-5.6-sol', 372_000) === GPT_5_6_CONTEXT_LENGTH &&
       estimateContextLimit('gpt-5.6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH,
+  )
+  assert(
+    'model context: GPT-6 family is hard-capped at the GPT-5.6 272K window',
+    inferKnownModelContextLength('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      inferKnownModelContextLength('openai/gpt-6-luna') === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 400_000) === GPT_5_6_CONTEXT_LENGTH &&
+      resolveEffectiveModelContextLength('openai/gpt-6.1', 1_000_000) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 200_000) === 200_000 &&
+      estimateContextLimit('gpt-60', 400_000) === 400_000,
+  )
+  assert(
+    'model context: GLM-5.2/5.3 use 200K while GLM-5.1 keeps its entry',
+    estimateContextLimit('glm-5.2') === 200_000 &&
+      estimateContextLimit('glm-5.3') === 200_000 &&
+      estimateContextLimit('z-ai/glm-5.3') === 200_000 &&
+      estimateContextLimit('glm-5.1') === 1_000_000,
+  )
+  assert(
+    'model context: Seed 2.0 aliases use the same 128K as the dated presets',
+    estimateContextLimit('seed-2-0-pro') === 128_000 &&
+      estimateContextLimit('seed-2-0-mini') === 128_000 &&
+      estimateContextLimit('seed-2-0-lite') === 128_000 &&
+      estimateContextLimit('seed-2-0-pro-260328') === 128_000,
+  )
+  assert(
+    'model context: Kimi K3 (unverified) and Qwen3.7 use 128K',
+    estimateContextLimit('kimi-k3') === 128_000 &&
+      estimateContextLimit('moonshotai/kimi-k3-preview') === 128_000 &&
+      estimateContextLimit('kimi-k2') === 128_000 &&
+      estimateContextLimit('qwen3.7') === 128_000 &&
+      estimateContextLimit('qwen3.7-max') === 128_000,
+  )
+  assert(
+    'model context: Claude 5.5 family uses the 1M window',
+    estimateContextLimit('claude-opus-5-5') === 1_000_000 &&
+      estimateContextLimit('claude-sonnet-5-5') === 1_000_000 &&
+      estimateContextLimit('claude-haiku-5-5') === 1_000_000 &&
+      estimateContextLimit('anthropic.claude-opus-5-5-v1:0') === 1_000_000 &&
+      estimateContextLimit('claude-haiku-4-5') === 200_000,
   )
   assert(
     'context compression: GPT-5.6 auto-compaction follows the reduced window',
@@ -2981,7 +3545,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
           model: 'dreamina-seedance-2-0-260128',
           defaultParams: {
             duration: '10s',
-            resolution: '720p',
+            // What older onboarding wrote for every BytePlus user.
+            resolution: '1080p',
             quality: 'standard',
             style: 'realistic',
             format: 'mp4',
@@ -3013,6 +3578,79 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         createBody.generate_audio === true &&
         createBody.duration === 11,
       JSON.stringify(createBody),
+    )
+    assert(
+      'ModelArk visual provider: does not bill the configured 1080p default when no resolution is asked for',
+      createBody !== undefined && !('resolution' in createBody),
+      JSON.stringify(createBody),
+    )
+    await provider.generateVideo({ prompt: 'hd product film', model: 'dreamina-seedance-2-0-260128', resolution: '1080P' })
+    assert(
+      'ModelArk visual provider: sends the requested resolution, normalized',
+      createBody?.resolution === '1080p',
+      JSON.stringify(createBody),
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  assert(
+    'video resolution: canonical values from loose spellings; unknown and 4k (no provider renders it) rejected',
+    normalizeVideoResolution('1080P') === '1080p' &&
+      normalizeVideoResolution(' 720 ') === '720p' &&
+      normalizeVideoResolution('480') === '480p' &&
+      normalizeVideoResolution('4K') === undefined &&
+      normalizeVideoResolution('8k') === undefined &&
+      normalizeVideoResolution('') === undefined &&
+      normalizeVideoResolution(undefined) === undefined,
+  )
+  assert(
+    'video resolution: generate_video validation rejects 4k before any provider is called',
+    validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '4k' } as any).some((e) => e.includes('resolution')) &&
+      validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '1080p' } as any).length === 0,
+  )
+}
+
+{
+  // OpenAI (Sora) receives the requested resolution as a size; one it cannot
+  // render fails before the create request instead of silently changing.
+  const originalFetch = globalThis.fetch
+  const sizes: string[] = []
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (init?.body instanceof FormData) sizes.push(String(init.body.get('size')))
+    return new Response('{"error":{"message":"stop here"}}', { status: 400 })
+  }) as typeof fetch
+  const soraProvider = (model: string) => new OpenAIProvider({
+    enabled: true,
+    image: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model: 'gpt-image-2',
+      defaultParams: { size: '1024x1024', quality: 'medium', style: 'realistic', watermark: false, outputFormat: 'png', background: 'auto' },
+    },
+    video: {
+      enabled: true,
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model,
+      defaultParams: { duration: '8s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false },
+    },
+  })
+  try {
+    await soraProvider('sora-2-pro').generateVideo({ prompt: 'hd', model: 'sora-2-pro', ratio: '16:9', resolution: '1080p' })
+    const rejected480 = await soraProvider('sora-2').generateVideo({ prompt: 'small', model: 'sora-2', resolution: '480p' })
+    const rejected1080 = await soraProvider('sora-2').generateVideo({ prompt: 'hd', model: 'sora-2', resolution: '1080p' })
+    assert(
+      'OpenAI visual provider: passes a requested 1080p to pro models and rejects what Sora cannot render',
+      sizes.length === 1 &&
+        sizes[0] === '1920x1080' &&
+        rejected480.success === false && /cannot render 480p/.test(String(rejected480.error)) &&
+        rejected1080.success === false && /cannot render 1080p/.test(String(rejected1080.error)),
+      `sizes=${JSON.stringify(sizes)} 480=${rejected480.error} 1080=${rejected1080.error}`,
     )
   } finally {
     globalThis.fetch = originalFetch
@@ -8566,6 +9204,108 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       server.close((error) => (error ? reject(error) : resolve())),
     )
     fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+// ── MCP stdio transport ───────────────────────────────────────────────────────
+
+{
+  // The MCP stdio transport is newline-delimited JSON; servers built on the
+  // official SDKs read only that. Servers that read only LSP-style
+  // Content-Length frames are detected at initialize and still work. A stray
+  // non-JSON stdout line must not break a call, and must show up in the error
+  // when the server fails. A malformed frame header fails fast (it used to
+  // spin forever).
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-stdio-'))
+  type Mode = 'newline' | 'newline-noisy' | 'content-length' | 'content-length-exit'
+  const serverSource = (mode: Mode) => `
+const framed = ${mode.startsWith('content-length')}
+const write = (m) => {
+  const body = JSON.stringify(m)
+  process.stdout.write(framed ? 'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body : body + '\\n')
+}
+${mode === 'newline-noisy' ? "process.stdout.write('server starting...\\n')" : ''}
+let buf = ''
+process.stdin.on('data', (chunk) => {
+  buf += chunk
+  for (;;) {
+    let line
+    if (framed) {
+      // Strict LSP-style reader: anything else is never answered${mode === 'content-length-exit' ? ' (this one exits)' : ''}.
+      const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+      if (!m) {
+        ${mode === 'content-length-exit' ? "if (buf.length > 0) { process.stderr.write('expected Content-Length header\\n'); process.exit(1) }" : ''}
+        return
+      }
+      const end = m[0].length + Number(m[1])
+      if (buf.length < end) return
+      line = buf.slice(m[0].length, end)
+      buf = buf.slice(end)
+    } else {
+      const i = buf.indexOf('\\n')
+      if (i < 0) return
+      line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+    }
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'smoke', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] } })
+    else if (msg.method === 'tools/call') write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo:' + msg.params.arguments.text }] } })
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`
+  const stdioServer = (id: string, source: string) => {
+    const file = path.join(dir, `${id}.mjs`)
+    fs.writeFileSync(file, source)
+    return {
+      id,
+      enabled: true,
+      transport: 'stdio' as const,
+      command: process.execPath,
+      commandArgs: [file],
+      authType: 'none' as const,
+      authState: 'unknown' as const,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+  const callEcho = async (server: ReturnType<typeof stdioServer>): Promise<{ output: string; ms: number }> => {
+    const started = Date.now()
+    try {
+      return { output: (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), ms: Date.now() - started }
+    }
+  }
+  try {
+    const cases: [string, Mode][] = [
+      ['newline-delimited JSON (MCP spec, official SDKs)', 'newline'],
+      ['a server that reads only Content-Length frames (detected at initialize)', 'content-length'],
+      ['a Content-Length-only server that exits on unframed input', 'content-length-exit'],
+      ['a stray log line on stdout before the first message', 'newline-noisy'],
+    ]
+    for (const [label, mode] of cases) {
+      const { output } = await callEcho(stdioServer(`smoke-${mode}`, serverSource(mode)))
+      assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
+    }
+
+    // The detected framing is remembered: a fresh spawn skips the probe.
+    await closeCachedMcpClients()
+    const again = await callEcho(stdioServer('smoke-content-length', serverSource('content-length')))
+    assert('mcp stdio: detected Content-Length framing is reused on the next spawn', again.output.includes('echo:hi') && again.ms < 2500, `${again.ms}ms ${again.output}`)
+
+    const badHeader = await callEcho(stdioServer('smoke-bad-header', `process.stdin.on('data', () => { process.stdout.write('Content-Length: x\\r\\n\\r\\n{}') })\n`))
+    assert('mcp stdio: a malformed Content-Length header fails fast instead of hanging', /Content-Length/.test(badHeader.output) && badHeader.ms < 4000, `${badHeader.ms}ms ${badHeader.output}`)
+
+    const dying = await callEcho(stdioServer('smoke-dying', `process.stdout.write('fatal: missing API token\\n'); setTimeout(() => process.exit(1), 50)\n`))
+    assert('mcp stdio: dropped non-JSON stdout lines appear in the failure message', dying.output.includes('fatal: missing API token'), dying.output)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 }
 
