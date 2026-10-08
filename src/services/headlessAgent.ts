@@ -58,7 +58,7 @@ export async function runHeadlessAgent(
   const { createProviderRouter } = await import('../providers/router.js')
   const { PermissionManager } = await import('../security/permissions.js')
   const { SessionStore } = await import('../storage/sessions.js')
-  const { runAgent } = await import('../core/agent.js')
+  const { runAgent, toolHeartbeatIntervalMs } = await import('../core/agent.js')
   const { loadCompactionSettings } = await import('./compactionSettings.js')
 
   const onInfo = opts.onInfo ?? (() => undefined)
@@ -120,6 +120,9 @@ export async function runHeadlessAgent(
     // generation, delegated tasks) run in the foreground so their result is
     // part of this run's reply instead of a background task that dies with it.
     allowBackgroundTools: false,
+    // ...and while one runs, a progress line every minute tells the host the
+    // run is alive (a Saga long video can take an hour in one tool call).
+    toolHeartbeatMs: toolHeartbeatIntervalMs(),
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
     resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,

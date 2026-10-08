@@ -708,5 +708,32 @@ test('provider store: a load running next to saves never reads a half-written fi
   }
 });
 
+test('search_web: the platform backend and freshness are valid arguments, and the native schema offers them', async () => {
+  const { validateToolAction } = await import('../src/tools/registry.js');
+  const { buildActionParametersSchema } = await import('../src/core/providerNativeTools.js');
+  assert.deepEqual(validateToolAction({ type: 'search_web', query: 'monad', backend: 'platform', freshness: 'week' }), []);
+  assert.ok(validateToolAction({ type: 'search_web', query: 'monad', freshness: 'decade' }).some((e) => e.includes('freshness')));
+  assert.ok(validateToolAction({ type: 'search_web', query: 'monad', backend: 'yahoo' }).some((e) => e.includes('backend')));
+  const schema = buildActionParametersSchema('search_web') as { properties?: Record<string, { enum?: string[]; description?: string }> };
+  assert.deepEqual(schema.properties?.freshness?.enum, ['day', 'week', 'month', 'year']);
+  assert.match(schema.properties?.backend?.description ?? '', /platform/);
+});
+
+test('provider store: an engine re-save keeps the server-written webSearch setting', async () => {
+  const { ProviderStore } = await import('../src/providers/store.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-store-websearch-'));
+  try {
+    const root = path.join(dir, '.artemis');
+    fs.mkdirSync(root, { recursive: true });
+    const webSearch = { provider: 'platform', enabled: true, baseUrl: 'https://gw.example/v1', apiKey: 'ak-x', managedBy: 'platform' };
+    fs.writeFileSync(path.join(root, 'providers.json'), JSON.stringify({ profiles: [], webSearch }));
+    const store = new ProviderStore(root);
+    await store.save(await store.load());
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'providers.json'), 'utf8')).webSearch, webSearch);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await pending;
 console.log('\n  ✔ All system smoke tests passed');

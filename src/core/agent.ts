@@ -14,6 +14,7 @@ import type {
 } from '../providers/types.js';
 import type { UiLocale } from '../cli/locale.js';
 import { executeAction } from '../tools/index.js';
+import { resolveRunCommandTimeoutMs } from '../tools/runCommand.js';
 import type { WorkspaceSwitchRequest } from '../tools/types.js';
 import {
   getToolDefinition,
@@ -3810,6 +3811,13 @@ export type RunAgentOptions = {
    * background generation would be lost and its result never reach the reply.
    */
   allowBackgroundTools?: boolean;
+  /**
+   * While a foreground tool runs, report `[tool:<name>] progress` through
+   * onInfo every this many milliseconds (see startToolHeartbeat). Headless
+   * runs (`artemis execute`) set it so the host can tell a long tool from a
+   * hung engine; unset or 0: no heartbeat (interactive CLI, chat bridges).
+   */
+  toolHeartbeatMs?: number;
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -4931,6 +4939,82 @@ function maybeRerouteToSagaLongVideo(
   } satisfies Extract<AgentAction, { type: 'generate_long_video' }>;
 }
 
+/** Default interval between progress lines of a running foreground tool. */
+const TOOL_HEARTBEAT_MS = 60_000;
+
+/** The heartbeat interval: ARTEMIS_TOOL_HEARTBEAT_MS (at least 1 s), else one minute. */
+export function toolHeartbeatIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ARTEMIS_TOOL_HEARTBEAT_MS);
+  return Number.isFinite(raw) && raw >= 1_000 ? Math.floor(raw) : TOOL_HEARTBEAT_MS;
+}
+
+/** How long an ordinary tool (a fetch, a search, a file edit) may take before it counts as hung. */
+const DEFAULT_TOOL_EXPECTED_MAX_MS = 10 * 60_000;
+
+/** Tools that legitimately run longer, and how long at most. */
+const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
+  // A Saga long video: an hour or more of segments, then the final stitch.
+  generate_long_video: 4 * 3_600_000,
+  generate_video: 60 * 60_000,
+  generate_image: 15 * 60_000,
+  deep_research: 60 * 60_000,
+  delegate_task: 2 * 3_600_000,
+  agent: 2 * 3_600_000,
+  spawn_background_workflow: 2 * 3_600_000,
+  mcp_call_tool: 30 * 60_000,
+  synthesize_speech: 30 * 60_000,
+  transcribe_audio: 30 * 60_000,
+};
+
+/**
+ * How long a tool call is expected to take at most: its own timeout for
+ * run_command (plus a minute), a declared maximum for long tools, else ten
+ * minutes. Past it the heartbeat stops, so a host's no-progress watchdog
+ * can end a hung tool long before the run's hard ceiling.
+ */
+export function toolHeartbeatLimitMs(action: AgentAction): number {
+  if (action.type === 'run_command') {
+    const command = typeof (action as { command?: unknown }).command === 'string' ? (action as { command: string }).command : '';
+    const requested = (action as { timeoutMs?: unknown }).timeoutMs;
+    return resolveRunCommandTimeoutMs(command, typeof requested === 'number' ? requested : undefined) + 60_000;
+  }
+  return TOOL_EXPECTED_MAX_MS[action.type] ?? DEFAULT_TOOL_EXPECTED_MAX_MS;
+}
+
+/**
+ * While a foreground tool runs, reports `[tool:<name>] progress
+ * {"elapsedSeconds":N}` through onInfo at a fixed interval (stderr for
+ * `artemis execute`), so a host watching for runs that stopped making
+ * progress can tell a long tool from a hung engine. The heartbeat stands
+ * for progress, not just a live process: once the tool has run longer than
+ * `limitMs` (its expected maximum) it reports `"overdue":true` once and
+ * goes quiet, so the host's watchdog can stop a hung tool. Hosts that do not
+ * know the line ignore it. Returns the function that stops it. Only runs
+ * that set RunAgentOptions.toolHeartbeatMs get it.
+ */
+export function startToolHeartbeat(
+  toolName: string,
+  onInfo: ((message: string) => void) | undefined,
+  intervalMs: number = toolHeartbeatIntervalMs(),
+  limitMs: number = DEFAULT_TOOL_EXPECTED_MAX_MS,
+): () => void {
+  if (!onInfo) return () => undefined;
+  const started = Date.now();
+  const timer = setInterval(() => {
+    const elapsedMs = Date.now() - started;
+    const elapsedSeconds = Math.round(elapsedMs / 1000);
+    if (elapsedMs > limitMs) {
+      onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds, overdue: true })}`);
+      clearInterval(timer);
+      return;
+    }
+    onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds })}`);
+  }, intervalMs);
+  // Never the reason the process stays alive.
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 async function executeAgentAction(
   session: SessionRecord,
   action: AgentAction,
@@ -5662,7 +5746,18 @@ async function executeAuthorizedAction(
       return startBackgroundAction(session, hydratedAction, options);
     }
 
-    const result = await executeAgentAction(session, hydratedAction, options, abortSignal);
+    // Long tools (Saga long video, a big ffmpeg encode) can run for an hour
+    // without printing anything; a host that stops runs with no progress
+    // must still see that this one is alive.
+    const stopHeartbeat = options.toolHeartbeatMs && options.toolHeartbeatMs > 0
+      ? startToolHeartbeat(hydratedAction.type, options.onInfo, options.toolHeartbeatMs, toolHeartbeatLimitMs(hydratedAction))
+      : () => undefined;
+    let result: Awaited<ReturnType<typeof executeAgentAction>>;
+    try {
+      result = await executeAgentAction(session, hydratedAction, options, abortSignal);
+    } finally {
+      stopHeartbeat();
+    }
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;
     if (options.heimdallThreadState) {
