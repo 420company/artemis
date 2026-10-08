@@ -7,7 +7,7 @@ import {
 } from '../../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext } from '../types.js';
 import { toolLog, toolWarn } from '../../utils/log.js';
-import { createVisualProvider } from './providers/interface.js';
+import { createVisualProvider, type GenerationResult } from './providers/interface.js';
 
 // Process-wide relay-health short-circuit. When the configured image relay
 // returns persistent transient errors (HTTP 502/429 upstream_error) for both
@@ -26,17 +26,6 @@ function isRelaySick(): boolean { return Date.now() < relaySickUntil; }
 function markRelaySick(reason: string): void {
   relaySickUntil = Date.now() + RELAY_SICK_COOLDOWN_MS;
   toolWarn(`⚠️ Super Visual: 标记 image relay 为 sick（10 分钟内跳过三视图生成）— 原因: ${reason.slice(0, 160)}`);
-}
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
@@ -616,11 +605,14 @@ export async function generateSafeBridgeKeyframe(options: {
     aspect: seedreamAspectForRatio(options.ratio),
     timeoutMs: SAFE_BRIDGE_IMAGE_EDIT_TIMEOUT_MS,
     attempts: 1,
-  }).catch((error) => ({
-    ok: false as const,
+  }).catch((error): ImageFromImagesOutcome => ({
+    ok: false,
     error: error instanceof Error ? error.message : String(error),
   }));
-  if (!edit.ok) return { ok: false, reason: `safe bridge generation failed: ${edit.error}` };
+  if (!edit.ok) {
+    if (edit.billed) options.imageBudget?.record(options.shotIndex);
+    return { ok: false, reason: `safe bridge generation failed: ${edit.error}` };
+  }
   options.imageBudget?.record(options.shotIndex);
 
   const framePath = safeBridgeKeyframePath(options.projectDir, options.shotIndex);
@@ -754,11 +746,14 @@ async function postOpenAIImageEdit(options: {
   quality?: string;
   timeoutMs?: number;
   attempts?: number;
-}): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
+}): Promise<ImageFromImagesOutcome> {
   if (options.inputImagePaths.length === 0) {
     return { ok: false, error: 'no input images supplied' };
   }
   const url = normalizeBaseUrl(options.baseUrl) + '/images/edits';
+  // Set once a request may have produced a billed image: the API answered
+  // 200, or a request was cut off after it was sent.
+  let billed = false;
   // Up to 3 attempts with exponential backoff. Relays in front of OpenAI
   // (e.g. http://69.5.20.196:8080/v1) intermittently return HTTP 502/503/504
   // upstream_error during transient OpenAI hiccups; one retry recovers.
@@ -822,11 +817,15 @@ async function postOpenAIImageEdit(options: {
       });
     } catch (error) {
       lastError = `network error: ${error instanceof Error ? error.message : String(error)}`;
+      if (isAbortLike(error)) {
+        // A cut-off request may still be generated and billed; never retry it.
+        return { ok: false, error: lastError, billed: true };
+      }
       if (attempt < attempts) {
         await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
         continue;
       }
-      return { ok: false, error: lastError };
+      return { ok: false, error: lastError, billed };
     }
     const raw = await res.text();
     if (!res.ok) {
@@ -835,8 +834,9 @@ async function postOpenAIImageEdit(options: {
         await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
         continue;
       }
-      return { ok: false, error: lastError };
+      return { ok: false, error: lastError, billed };
     }
+    billed = true;
     try {
       const parsed = JSON.parse(raw) as { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } };
       const item = parsed.data?.[0];
@@ -846,7 +846,7 @@ async function postOpenAIImageEdit(options: {
           await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
           continue;
         }
-        return { ok: false, error: lastError };
+        return { ok: false, error: lastError, billed };
       }
       if (item.b64_json) return { ok: true, buffer: Buffer.from(item.b64_json, 'base64') };
       if (item.url) {
@@ -857,27 +857,32 @@ async function postOpenAIImageEdit(options: {
           });
           return { ok: true, buffer };
         } catch (error) {
-          return { ok: false, error: `download failed: ${error instanceof Error ? error.message : String(error)}` };
+          return { ok: false, error: `download failed: ${error instanceof Error ? error.message : String(error)}`, billed };
         }
       }
-      return { ok: false, error: 'images/edits response had neither b64_json nor url' };
+      return { ok: false, error: 'images/edits response had neither b64_json nor url', billed };
     } catch {
       lastError = `images/edits invalid JSON: ${raw.slice(0, 200)}`;
       if (attempt < attempts) {
         await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
         continue;
       }
-      return { ok: false, error: lastError };
+      return { ok: false, error: lastError, billed };
     }
   }
-  return { ok: false, error: lastError || 'unknown failure' };
+  return { ok: false, error: lastError || 'unknown failure', billed };
+}
+
+function isAbortLike(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
 }
 
 /**
  * Caps the Super Visual images one Saga run generates. Every image is billed,
  * so a long video gets one turnaround sheet, one keyframe per segment and a
  * small allowance for safe-bridge re-renders, never an unbounded number.
- * Only generated images count; a request that fails produced nothing.
+ * An image counts as soon as the API has produced it (or a request was cut
+ * off after it was sent), even when Saga could not download or use it.
  */
 export class SuperVisualImageBudget {
   private generated = 0;
@@ -921,6 +926,9 @@ const BUDGET_REACHED = 'Super Visual image cap for this run reached';
 
 type ConfiguredImageProvider = NonNullable<Awaited<ReturnType<typeof resolveConfiguredVisualProvider>>>;
 
+/** `billed` marks a failure after which the image may still have been billed. */
+type ImageFromImagesOutcome = { ok: true; buffer: Buffer } | { ok: false; error: string; billed?: boolean };
+
 function openAIEditSize(aspect: SeedreamAspect): string {
   if (aspect === '9:16' || aspect === '3:4') return '1024x1536';
   if (aspect === '1:1') return '1024x1024';
@@ -941,7 +949,7 @@ async function generateImageFromImages(options: {
   aspect: SeedreamAspect;
   timeoutMs?: number;
   attempts?: number;
-}): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
+}): Promise<ImageFromImagesOutcome> {
   const config = options.imageConfigured.config;
   const route = superVisualImageRoute(config.image.provider, options.model);
   if (route === 'openai-edits') {
@@ -974,23 +982,38 @@ async function generateImageFromImages(options: {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  const generation = provider.generateImage({
-    prompt: options.prompt,
-    model: options.model,
-    size: seedreamImageSize(options.model, options.aspect),
-    count: 1,
-    watermark: false,
-    referenceImages,
-  });
-  const result = options.timeoutMs
-    ? await withTimeout(generation, options.timeoutMs, 'reference image generation').catch((error) => ({
-        success: false as const,
-        error: error instanceof Error ? error.message : String(error),
-        assetPath: undefined,
-      }))
-    : await generation;
-  if (!result.success || !result.assetPath) return { ok: false, error: result.error ?? 'no image returned' };
+  // The timeout aborts the request itself, so a slow image is never left
+  // running (and billed) after Saga has given up on it.
+  const controller = options.timeoutMs ? new AbortController() : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
+  let result: GenerationResult;
+  try {
+    result = await provider.generateImage({
+      prompt: options.prompt,
+      model: options.model,
+      size: seedreamImageSize(options.model, options.aspect),
+      count: 1,
+      watermark: false,
+      referenceImages,
+      abortSignal: controller?.signal,
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  const timedOut = controller?.signal.aborted === true;
+  if (!result.success || !result.assetPath) {
+    return {
+      ok: false,
+      error: timedOut ? `reference image generation timed out after ${Math.round((options.timeoutMs ?? 0) / 1000)}s` : result.error ?? 'no image returned',
+      billed: imageResultWasBilled(result) || timedOut,
+    };
+  }
   return { ok: true, buffer: await readFile(result.assetPath) };
+}
+
+/** Whether a generation result means an image was produced (and billed), even if Saga could not use it. */
+function imageResultWasBilled(result: GenerationResult): boolean {
+  return result.success || result.failureStage === 'download';
 }
 
 // ─── User image resolution (paths + URLs → local files) ───────────────────
@@ -1592,6 +1615,7 @@ export async function maybeGenerateSuperVisualReference(options: {
         inputIsRealPerson: inputLooksRealPerson,
       };
     }
+    if (edit.billed) options.imageBudget?.record();
     // Edit endpoint failed. We MUST rebuild the prompt for text-to-image
     // mode — the prompt above is built with `withUserImageInput: true`
     // which says "the attached input image IS the character"; running it
@@ -1638,6 +1662,9 @@ export async function maybeGenerateSuperVisualReference(options: {
       })
     : prompt;
   if (useEditMode) await writeFile(promptPath, textOnlyPrompt, 'utf8');
+  if (options.imageBudget && !options.imageBudget.canGenerate()) {
+    return { enabled: false, reason: BUDGET_REACHED, inputIsRealPerson: inputLooksRealPerson, resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined };
+  }
   const imageProvider = await createVisualProvider(imageConfigured.config, 'image');
   const result = await imageProvider.generateImage({
     prompt: textOnlyPrompt,
@@ -1649,6 +1676,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     count: 1,
   });
   if (!result.success || !result.assetPath) {
+    if (imageResultWasBilled(result)) options.imageBudget?.record();
     const errorText = result.error ?? 'no image returned';
     if (/HTTP 5\d\d|upstream_error|rate.?limit|429/i.test(errorText)) {
       markRelaySick(errorText);
@@ -1826,18 +1854,16 @@ export async function generateSegmentKeyframe(options: {
     const inputImagePaths = withPreviousLastFrame
       ? [options.turnaroundPath, options.previousLastFramePath!]
       : [options.turnaroundPath];
-    const edit = await withTimeout(
-      generateImageFromImages({
-        imageConfigured,
-        model: resolvedImageModel,
-        prompt,
-        inputImagePaths,
-        aspect: seedreamAspectForRatio(options.ratio),
-      }),
-      SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS,
-      'segment keyframe image-to-image',
-    ).catch((error) => ({
-      ok: false as const,
+    // The timeout is passed down so it cancels the request itself.
+    const edit = await generateImageFromImages({
+      imageConfigured,
+      model: resolvedImageModel,
+      prompt,
+      inputImagePaths,
+      aspect: seedreamAspectForRatio(options.ratio),
+      timeoutMs: SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS,
+    }).catch((error): ImageFromImagesOutcome => ({
+      ok: false,
       error: error instanceof Error ? error.message : String(error),
     }));
     if (edit.ok) {
@@ -1846,10 +1872,13 @@ export async function generateSegmentKeyframe(options: {
       await writeFile(framePath, edit.buffer);
       return { ok: true, framePath, promptPath, mode: 'image-to-image' };
     }
+    // An image the API produced but Saga could not fetch is still billed.
+    if (edit.billed) options.imageBudget?.record(options.shotIndex);
     // edit failed — fall through to text-to-image
   }
 
   // Fallback: text-to-image (loses identity lock — surface as warning).
+  if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
   const imageProvider = await createVisualProvider(imageConfigured.config, 'image');
   const result = await imageProvider.generateImage({
     prompt,
@@ -1861,6 +1890,7 @@ export async function generateSegmentKeyframe(options: {
     count: 1,
   });
   if (!result.success || !result.assetPath) {
+    if (imageResultWasBilled(result)) options.imageBudget?.record(options.shotIndex);
     return { ok: false, reason: `keyframe generation failed: ${result.error ?? 'no image returned'}` };
   }
   options.imageBudget?.record(options.shotIndex);

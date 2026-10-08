@@ -117,7 +117,7 @@ export class BytePlusProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS)),
       })
 
       const raw = await res.text()
@@ -141,6 +141,7 @@ export class BytePlusProvider implements VisualProvider {
         buf = await downloadProviderAsset(item.url, {
           timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
           allowLoopback: baseUrlIsLoopback(baseUrl),
+          signal: params.abortSignal,
         })
       } catch (error) {
         throw new ImageApiError(

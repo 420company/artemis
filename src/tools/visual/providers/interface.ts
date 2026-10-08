@@ -15,6 +15,8 @@ export interface VisualGenerationParams {
   count?: number
   /** Image references as http(s) URLs or base64 data URIs (generate_image only). */
   referenceImages?: string[]
+  /** Cancels the request and the result download (image generation). */
+  abortSignal?: AbortSignal
 }
 
 export interface VideoGenerationParams extends VisualGenerationParams {

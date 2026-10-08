@@ -101,6 +101,19 @@ async function superVisualOnSeedream(): Promise<void> {
   assert.ok(images.every((body) => String(Array.isArray(body.image) ? body.image[0] : body.image).startsWith('data:image/png;base64,')), 'references are sent as data URIs');
   assert.ok(run.logs.some((line) => /第 2\/2 段生成图片 1 张；全片累计 3\/5 张/.test(line)), 'per-segment image counts are logged');
 
+  // Images the API produced count against the cap even when their download
+  // fails, and the text-to-image fallback respects the cap too.
+  const lost = await runHermeticSaga(
+    { prompt: STORY, totalDuration: 30, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] },
+    { imageDownloadFailsFrom: 2 },
+  );
+  assert.equal(lost.result.ok, true, lost.result.output);
+  const billed = imageBodies(lost.requests).length;
+  const counted = lost.result.output.match(/images=(\d+)\/(\d+)/);
+  assert.ok(counted, lost.result.output);
+  assert.equal(Number(counted[1]), billed, `every billed image is counted (${counted[0]}, ${billed} requests)`);
+  assert.ok(billed <= Number(counted[2]), `billed images stay within the cap (${billed}/${counted[2]})`);
+
   // Safe bridge frame on the same route carries its source frame.
   await withHermeticWorkspace({}, async (cwd, requests) => {
     const projectDir = await mkdtemp(path.join(os.tmpdir(), 'artemis-saga-bridge-'));

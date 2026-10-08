@@ -28,6 +28,8 @@ export type HermeticOptions = {
   imageStatus?: number;
   /** Image generations from this 1-based request number on fail with HTTP 500. */
   imageFailFrom?: number;
+  /** Image generations from this 1-based request number on succeed, but their result URL cannot be downloaded. */
+  imageDownloadFailsFrom?: number;
   /** 1-based video task creations answered with a privacy rejection of an input image. */
   rejectVideoCreates?: number[];
 };
@@ -121,6 +123,9 @@ export async function withHermeticWorkspace<T>(
       imageCounter += 1;
       if (options.imageFailFrom && imageCounter >= options.imageFailFrom) return json(500, { error: { message: 'image service down in this test' } });
       if (options.imageStatus) return json(options.imageStatus, { error: { message: 'image generation refused in this test' } });
+      if (options.imageDownloadFailsFrom && imageCounter >= options.imageDownloadFailsFrom) {
+        return json(200, { data: [{ url: 'https://cdn.example.test/expired.png' }] });
+      }
       return json(200, { data: [{ url: 'https://cdn.example.test/still.png' }] });
     }
     if (method === 'POST' && url.endsWith('/contents/generations/tasks')) {
@@ -135,6 +140,7 @@ export async function withHermeticWorkspace<T>(
       return json(200, { status: 'succeeded', content: { video_url: 'https://cdn.example.test/clip.mp4' } });
     }
     if (url === 'https://cdn.example.test/clip.mp4') return new Response(clipBytes, { status: 200, headers: { 'Content-Type': 'video/mp4' } });
+    if (url === 'https://cdn.example.test/expired.png') return new Response('gone', { status: 403 });
     if (url === 'https://cdn.example.test/still.png') return new Response(pngBytes, { status: 200, headers: { 'Content-Type': 'image/png' } });
     return new Response(`unexpected request ${method} ${url}`, { status: 500 });
   }) as typeof fetch;
