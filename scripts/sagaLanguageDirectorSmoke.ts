@@ -38,8 +38,32 @@ async function spokenLineCleanup(): Promise<void> {
   // A trailing direction after the sentence ends, and a direction between the colon and the quote.
   assert.deepEqual(spokenOf('对白：“今天谁也别想走！（拍桌）”'), ['今天谁也别想走！']);
   assert.deepEqual(spokenOf('对白：（低声）“你终于来了。”'), ['你终于来了。']);
-  // A quote that is only a direction is left alone rather than emptied.
-  assert.equal(parseSpokenLine('（沉默）').spoken, '（沉默）');
+  // A quote that is only a direction is not speech: it loses its quotes.
+  assert.deepEqual(parseSpokenLine('（沉默）'), { spoken: '', cues: ['沉默'] });
+  assert.equal(relocateDialogueCues('他抬头。“（叹气）”'), '他抬头。（叹气）');
+  assert.deepEqual(spokenOf('对白：“（叹气）”'), []);
+  // A second speaker inside one quote becomes a line of its own.
+  assert.equal(
+    relocateDialogueCues('“方天豪：（大笑）走！李四：（冷笑）你走不了。”'),
+    '（方天豪，大笑）“走！”（李四，冷笑）“你走不了。”',
+  );
+  assert.deepEqual(spokenOf('对白：“方天豪：（大笑）走！李四：（冷笑）你走不了。”'), ['走！', '你走不了。']);
+  // Abbreviations never split a speaker; a direction after a sentence ends is removed anywhere.
+  assert.equal(relocateDialogueCues('dialogue: "Dr. Smith: (sighs) We are out of time."'), 'dialogue: (Dr. Smith, sighs) "We are out of time."');
+  assert.equal(relocateDialogueCues('"Yes! (laughs) Absolutely! (smiles)"'), '(laughs, smiles) "Yes! Absolutely!"');
+  // 「」 quotes, and kana / Hangul speaker names.
+  assert.equal(relocateDialogueCues('「田中：（笑）行こう！」'), '（田中，笑）「行こう！」');
+  assert.equal(relocateDialogueCues('“ミク：（笑顔）ありがとう！”'), '（ミク，笑顔）“ありがとう！”');
+  assert.equal(relocateDialogueCues('“김철수: (웃으며) 가자!”'), '（김철수，웃으며）“가자!”');
+  // ASCII quotes that cannot be paired safely are left alone.
+  for (const ambiguous of [
+    'He pulls a 6" blade. "Drop it!" (gunshot) Everyone freezes. "Who fired?"',
+    '他拿起一张5"照片。"别动！"（枪声）众人回头。"谁开的枪？"',
+    '"She said "hi" (laughs) and left."',
+  ]) {
+    assert.equal(relocateDialogueCues(ambiguous), ambiguous, ambiguous);
+  }
+  assert.deepEqual(spokenOf('他拿起一张5"照片。"别动！"（枪声）众人回头。'), [], 'an odd number of ASCII quotes on a line yields no guessed dialogue');
   assert.deepEqual(parseSpokenLine('方天豪：（豪迈大笑）今天谁也别想走！'), {
     spoken: '今天谁也别想走！',
     speaker: '方天豪',

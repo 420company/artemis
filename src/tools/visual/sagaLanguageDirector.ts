@@ -67,27 +67,59 @@ function classifyDialogueUse(marker: string | undefined): SagaDialogueUse {
 //     in the brief as "Name: (direction)") or a parenthetical follows it, so
 //     "注意：前方有危险！" and "Listen: the bridge is out!" stay intact;
 //   - only a leading parenthetical, or a trailing one after sentence-final
-//     punctuation, counts as a stage direction; "我（们）一起走吧。" stays.
+//     punctuation, counts as a stage direction; "我（们）一起走吧。" stays;
+//   - a second "Name：（direction）" after a sentence ends starts a new line
+//     by that speaker; a quote that is only a direction is not speech;
+//   - typographic “…” and 「…」 quotes are always paired; plain ASCII "…" only
+//     on a line with an even number of them, and only when the quote hugs its
+//     text, so 6" blade or 5"照片 never pairs with real dialogue.
 
-const SPEAKER_NAME_SOURCE = "[\\p{Script=Han}·]{1,8}|[A-Z][A-Za-z'’.-]*(?:[ \\t]+[A-Z][A-Za-z'’.-]*){0,3}";
+const SPEAKER_NAME_SOURCE = "[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}ー·]{1,8}|[A-Z][A-Za-z'’.-]*(?:[ \\t]+[A-Z][A-Za-z'’.-]*){0,3}";
 const SPEAKER_PREFIX_RE = new RegExp(`^[*_]*(?<name>${SPEAKER_NAME_SOURCE})[*_]*[ \\t]*[:：][ \\t]*`, 'u');
+// A later speaker inside the same quote: after a sentence ends, "Name：（cue）".
+// ASCII "." is left out so "Dr. Smith:" or "Mr. O'Brien:" never splits.
+const MID_SPEAKER_RE = new RegExp(`(?<=[。！？!?…~～])[ \\t]*(?=(?:${SPEAKER_NAME_SOURCE})[ \\t]*[:：][ \\t]*[（(][^（）()\\n]{1,40}[）)])`, 'gu');
 const LEADING_CUE_RE = /^[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*/u;
-const TRAILING_CUE_RE = /(?<=[。！？!?…~～.])[ \t]*[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*$/u;
-// Double-quoted spans only: single quotes collide with English apostrophes.
-const QUOTED_SPAN_RE = /(?<open>[“"])(?<inner>[^“”"\n]{1,240})(?<close>[”"])/gu;
+// A direction right after a sentence ends, anywhere in the line ("Yes! (laughs) Absolutely!").
+const AFTER_SENTENCE_CUE_RE = /(?<=[。！？!?…~～.])[ \t]*[（(](?<cue>[^（）()\n]{1,40})[）)][ \t]*/gu;
+// Single quotes are left out: they collide with English apostrophes.
+const QUOTED_SPAN_RE = /(?<open>“)(?<inner>[^“”\n]{1,240})(?<close>”)|(?<open2>「)(?<inner2>[^「」\n]{1,240})(?<close2>」)|(?<open3>")(?<inner3>[^"\s\n](?:[^"\n]{0,238}[^"\s\n])?)(?<close3>")/gu;
+
+type QuotedSpan = { whole: string; index: number; open: string; inner: string; close: string };
+
+/** Quoted spans of a text, skipping ASCII pairs on lines where their pairing is ambiguous. */
+function quotedSpans(text: string): QuotedSpan[] {
+  const spans: QuotedSpan[] = [];
+  for (const match of text.matchAll(QUOTED_SPAN_RE)) {
+    const groups = match.groups ?? {};
+    const index = match.index ?? 0;
+    if (groups.open3) {
+      const lineStart = text.lastIndexOf('\n', index) + 1;
+      const lineEnd = text.indexOf('\n', index);
+      const line = text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+      if ((line.match(/"/g) ?? []).length % 2 !== 0) continue;
+    }
+    spans.push({
+      whole: match[0],
+      index,
+      open: groups.open ?? groups.open2 ?? groups.open3 ?? '"',
+      inner: groups.inner ?? groups.inner2 ?? groups.inner3 ?? '',
+      close: groups.close ?? groups.close2 ?? groups.close3 ?? '"',
+    });
+  }
+  return spans;
+}
 
 export type ParsedSpokenLine = {
-  /** Only the words to be spoken. */
+  /** Only the words to be spoken; empty when the quote is only a direction. */
   spoken: string;
   speaker?: string;
   /** Stage directions removed from the line, e.g. "豪迈大笑". */
   cues: string[];
 };
 
-/** Splits a quoted line into the words spoken, its speaker and its stage directions. */
-export function parseSpokenLine(raw: string, knownSpeakers: ReadonlySet<string> = new Set()): ParsedSpokenLine {
-  const original = raw.replace(/\s+/g, ' ').trim();
-  let rest = original;
+function parseSingleSpeakerLine(raw: string, knownSpeakers: ReadonlySet<string>): ParsedSpokenLine {
+  let rest = raw.trim();
   let speaker: string | undefined;
   const cues: string[] = [];
   const prefix = SPEAKER_PREFIX_RE.exec(rest);
@@ -103,25 +135,37 @@ export function parseSpokenLine(raw: string, knownSpeakers: ReadonlySet<string> 
     cues.push(leading.groups.cue.trim());
     rest = rest.slice(leading[0].length);
   }
-  const trailing = TRAILING_CUE_RE.exec(rest);
-  if (trailing?.groups?.cue) {
-    cues.push(trailing.groups.cue.trim());
-    rest = rest.slice(0, trailing.index);
-  }
-  const spoken = rest.trim();
-  // Never reduce a line to nothing: a quote that is only a direction is left alone.
-  if (!spoken) return { spoken: original, cues: [] };
-  return { spoken, ...(speaker ? { speaker } : {}), cues };
+  rest = rest.replace(AFTER_SENTENCE_CUE_RE, (_whole, cue: string) => {
+    cues.push(cue.trim());
+    return ' ';
+  }).replace(/(?<=[。！？…～])[ \t]+/gu, '');
+  return { spoken: rest.trim(), ...(speaker ? { speaker } : {}), cues };
+}
+
+/**
+ * Splits a quoted line into one entry per speaker: the words spoken, the
+ * speaker and the stage directions. “方天豪：（大笑）走！李四：（冷笑）你走不了。”
+ * gives two entries.
+ */
+export function parseSpokenLines(raw: string, knownSpeakers: ReadonlySet<string> = new Set()): ParsedSpokenLine[] {
+  const original = raw.replace(/\s+/g, ' ').trim();
+  return original
+    .split(MID_SPEAKER_RE)
+    .map((piece) => parseSingleSpeakerLine(piece, knownSpeakers))
+    .filter((piece) => piece.spoken || piece.speaker || piece.cues.length > 0);
+}
+
+/** The first speaker's entry of a quoted line (see parseSpokenLines). */
+export function parseSpokenLine(raw: string, knownSpeakers: ReadonlySet<string> = new Set()): ParsedSpokenLine {
+  return parseSpokenLines(raw, knownSpeakers)[0] ?? { spoken: '', cues: [] };
 }
 
 /** Names written as "Name: (direction)" inside any quoted line of the brief. */
 function speakersWithDirections(text: string): Set<string> {
   const names = new Set<string>();
-  for (const match of text.matchAll(QUOTED_SPAN_RE)) {
-    const inner = match.groups?.inner ?? '';
-    const prefix = SPEAKER_PREFIX_RE.exec(inner.trim());
-    if (prefix?.groups?.name && LEADING_CUE_RE.test(inner.trim().slice(prefix[0].length))) {
-      names.add(prefix.groups.name.trim());
+  for (const span of quotedSpans(text)) {
+    for (const piece of parseSpokenLines(span.inner)) {
+      if (piece.speaker) names.add(piece.speaker);
     }
   }
   return names;
@@ -139,36 +183,45 @@ function knownSpeakerSet(text: string, extra: readonly string[] | undefined): Se
 /**
  * Moves speaker names and stage directions out of quoted dialogue so only the
  * spoken words stay inside the quotes: “方天豪：（豪迈大笑）今天谁也别想走！”
- * becomes （方天豪，豪迈大笑）“今天谁也别想走！”. Quotes without such cues are
- * left byte-for-byte unchanged.
+ * becomes （方天豪，豪迈大笑）“今天谁也别想走！”, and a quote that is only a
+ * direction loses its quotes. Quotes without such cues are left unchanged.
  */
 export function relocateDialogueCues(text: string, options: { knownSpeakers?: readonly string[] } = {}): string {
   const known = knownSpeakerSet(text, options.knownSpeakers);
-  return text.replace(QUOTED_SPAN_RE, (whole, ...args) => {
-    const groups = args[args.length - 1] as { open: string; inner: string; close: string };
-    const parsed = parseSpokenLine(groups.inner, known);
-    if (!parsed.speaker && parsed.cues.length === 0) return whole;
-    const notes = [parsed.speaker, ...parsed.cues].filter((part): part is string => Boolean(part));
-    const cjk = /\p{Script=Han}/u.test(groups.inner);
-    const note = cjk ? `（${notes.join('，')}）` : `(${notes.join(', ')}) `;
-    return `${note}${groups.open}${parsed.spoken}${groups.close}`;
-  });
+  let out = '';
+  let cursor = 0;
+  for (const span of quotedSpans(text)) {
+    const pieces = parseSpokenLines(span.inner, known);
+    const changed = pieces.length > 1 || pieces.some((piece) => piece.speaker || piece.cues.length > 0);
+    if (!changed) continue;
+    const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(span.inner) || span.open !== '"';
+    const rendered = pieces.map((piece) => {
+      const notes = [piece.speaker, ...piece.cues].filter((part): part is string => Boolean(part));
+      const note = notes.length === 0 ? '' : cjk ? `（${notes.join('，')}）` : `(${notes.join(', ')})${piece.spoken ? ' ' : ''}`;
+      return piece.spoken ? `${note}${span.open}${piece.spoken}${span.close}` : note;
+    }).join(cjk ? '' : ' ');
+    out += text.slice(cursor, span.index) + rendered;
+    cursor = span.index + span.whole.length;
+  }
+  return out + text.slice(cursor);
 }
 
 export function extractSagaDialogueLines(text: string, options: { knownSpeakers?: readonly string[] } = {}): SagaDialogueLine[] {
   const lines: SagaDialogueLine[] = [];
   const known = knownSpeakerSet(text, options.knownSpeakers);
-  const spokenText = (raw: string | undefined): string => (raw ? parseSpokenLine(raw, known).spoken : '');
+  const spokenTexts = (raw: string | undefined): string[] => (raw
+    ? parseSpokenLines(raw, known).map((piece) => piece.spoken).filter(Boolean)
+    : []);
   // Marker pass: explicit "对白/台词/旁白/dialogue/..." preceding quoted text.
   // The optional [*_]* before/after the marker accommodates markdown emphasis
   // like **对白（…）**: which is common in detailed briefs. A direction may also
   // sit between the colon and the quote: 对白：（低声）“…”.
-  const markerRe = /(?:^|[\n\r。；;.!?\s])[*_]*(?<marker>对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*(?:[（(][^）)\n]{0,60}[）)]\s*)?[“"'‘](?<line>[^”"'’]{1,240})[”"'’]/giu;
+  const markerRe = /(?:^|[\n\r。；;.!?\s])[*_]*(?<marker>对白|台词|旁白|字幕|dialogue|spoken\s*dialogue|spoken\s*line|voice\s*over|voiceover|narration|subtitle|caption|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs)|她\s*(?:说|低声说)|他\s*(?:说|低声说))[*_]*\s*(?:[（(][^）)]{0,40}[）)])?\s*[*_]*\s*[:：]\s*(?:[（(][^）)\n]{0,60}[）)]\s*)?[“"'‘「](?<line>[^”"'’」]{1,240})[”"'’」]/giu;
   for (const match of text.matchAll(markerRe)) {
-    const line = spokenText(match.groups?.line);
-    if (!line) continue;
     const marker = match.groups?.marker?.trim();
-    lines.push({ text: line, language: detectTextLanguage(line), use: classifyDialogueUse(marker), marker });
+    for (const line of spokenTexts(match.groups?.line)) {
+      lines.push({ text: line, language: detectTextLanguage(line), use: classifyDialogueUse(marker), marker });
+    }
   }
 
   // Greedy fallback: bare quoted text without a marker is only treated as
@@ -179,15 +232,18 @@ export function extractSagaDialogueLines(text: string, options: { knownSpeakers?
   // the car") from being mis-classified as spoken dialogue — which would
   // otherwise trigger audio safety rejection at the provider and pollute the
   // dialogue language map.
-  const quoteRe = /[“"'‘](?<line>[^”"'’]{2,240})[”"'’]/gu;
   const sentenceEndRe = /(?:[。！？!?…]|\.{3,})\s*$/u;
-  for (const match of text.matchAll(quoteRe)) {
-    const line = spokenText(match.groups?.line);
-    if (!line) continue;
-    if (!sentenceEndRe.test(line)) continue;
-    const language = detectTextLanguage(line);
-    if (language === 'English' && !/[。！？：，、]/.test(line)) continue;
-    lines.push({ text: line, language, use: 'spoken_dialogue' });
+  const quotedInners = [
+    ...quotedSpans(text).map((span) => span.inner),
+    ...Array.from(text.matchAll(/‘(?<line>[^‘’\n]{2,240})’/gu), (match) => match.groups?.line ?? ''),
+  ];
+  for (const inner of quotedInners) {
+    for (const line of spokenTexts(inner)) {
+      if (line.length < 2 || !sentenceEndRe.test(line)) continue;
+      const language = detectTextLanguage(line);
+      if (language === 'English' && !/[。！？：，、]/.test(line)) continue;
+      lines.push({ text: line, language, use: 'spoken_dialogue' });
+    }
   }
   return uniqueLines(lines);
 }
