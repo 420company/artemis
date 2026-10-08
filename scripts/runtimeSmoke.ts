@@ -15,9 +15,29 @@ import {
 } from '../src/cli/settings.js'
 import { applyProviderOverrides, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
-import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
+import { parseAssistantEnvelopeForSmoke, runAgent as runAgentNow } from '../src/core/agent.js'
+import { settleMemoryCuration } from '../src/core/memory.js'
 import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
-import { runHeadlessAgent } from '../src/services/headlessAgent.js'
+import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
+
+// A finished run starts the memory curator in the background, which reads
+// process state (cwd, ARTEMIS_HOME, provider stores) when it runs. Every run
+// here waits for it, so no curator outlives its test and touches the next
+// test's files.
+const runAgent: typeof runAgentNow = async (...args) => {
+  try {
+    return await runAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
+const runHeadlessAgent: typeof runHeadlessAgentNow = async (...args) => {
+  try {
+    return await runHeadlessAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile, validateProfileAction } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
@@ -2617,7 +2637,8 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     'view_image: hidden from a model that cannot see images, and fails (no image sent) when called anyway',
     textOnly.nativeToolNames.every((names) => !names.includes('view_image')) &&
       textOnly.seen.every((n) => n === undefined) &&
-      /cannot see images/.test(textOnly.toolText) &&
+      /Images cannot be viewed here/.test(textOnly.toolText) &&
+      /Do not mention plans, tiers or models/.test(textOnly.toolText) &&
       !/is attached to your next step/.test(textOnly.toolText),
     JSON.stringify({ seen: textOnly.seen, tool: textOnly.toolText.slice(0, 300) }),
   )
@@ -2720,7 +2741,7 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
       'image wire format: a text-only model (DeepSeek) gets a note instead of the image, never base64 text',
       deepseek.provider.supportsImages === false &&
         typeof deepseek.content === 'string' &&
-        /omitted: this model cannot see images/.test(deepseek.content) &&
+        /not shown: they cannot be read in this request/.test(deepseek.content) &&
         !deepseek.raw.includes(image.data),
       deepseek.raw.slice(0, 300),
     )
@@ -2890,7 +2911,6 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
       defaultMainProfileId: 'mock-openai',
       profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
     }))
-    const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
     const { memoryDirForScope } = await import('../src/storage/memoryFiles.js')
     const result = await runHeadlessAgent(project, 'Remember: deploys go to staging first, and reply in Simplified Chinese.', { maxTurns: 3 })
     const list = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
@@ -3244,7 +3264,6 @@ const ONE_PIXEL_PNG_BASE64 =
   // (b) A headless image request runs generate_image end to end against a mock
   // image endpoint. runInBackground is ignored headless: the file exists when
   // the run returns, and the model saw the tool result before answering.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     configureVisual: true,
     chat: (index) => index === 1
@@ -3289,7 +3308,6 @@ const ONE_PIXEL_PNG_BASE64 =
   // references, headless: the attached photo is described by the helper,
   // view_image returns the description, and generate_image sends the photo
   // as a reference and saves the result before the run returns.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   let mainCalls = 0
   let visionCalls = 0
   await withMockHeadlessHost({
@@ -3351,7 +3369,6 @@ const ONE_PIXEL_PNG_BASE64 =
 {
   // (c) No visual provider configured: the image request ends quickly with an
   // honest "not configured" answer, never a 60-turn checklist loop.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     chat: (index) => index === 1
       ? '<toolcall name="generate_image">{"prompt":"a red fox in the snow"}</toolcall>'
@@ -3520,7 +3537,6 @@ const ONE_PIXEL_PNG_BASE64 =
 {
   // (d) No usable search backend: search_web reports what is missing and the
   // run ends with an honest answer instead of looping.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     chat: (index) => index === 1
       ? '<toolcall name="search_web">{"query":"latest Node.js LTS version"}</toolcall>'
@@ -10065,6 +10081,71 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+// ── think(): cancelling while the vision helper reads the images ────────────
+
+{
+  const originalCwd = process.cwd()
+  const tmpDir = path.join(os.tmpdir(), `artemis-think-vision-abort-${Date.now()}`)
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+  let chatRequests = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      chatRequests += 1
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }))
+    })
+  })
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock think-abort server failed to bind.')
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-text',
+      profiles: [{ id: 'mock-text', protocol: 'openai', apiKey: 'k', model: 'mock-text-only', supportsImages: false, baseUrl: `http://127.0.0.1:${address.port}` }],
+    }), 'utf8')
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+    // A helper that only returns when the run is cancelled.
+    let helperSawSignal = false
+    const helper: VisionHelper = {
+      label: 'slow-eye',
+      describe: (images, context) => new Promise((resolve) => {
+        helperSawSignal = context?.signal !== undefined
+        const done = () => resolve(images.map(() => ({ ok: false as const, error: 'the run was cancelled' })))
+        if (!context?.signal) return done()
+        context.signal.addEventListener('abort', done, { once: true })
+      }),
+    }
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 50)
+    let errorName = ''
+    try {
+      await think('what is in this picture?', () => {}, {
+        cwd: tmpDir,
+        permissionMode: 'accept-all',
+        imageAttachments: [{ data: 'iVBORw0KGgo=', mediaType: 'image/png', label: 'Image: a.png' }],
+        visionHelper: helper,
+        abortSignal: controller.signal,
+      })
+    } catch (error) {
+      errorName = error instanceof Error ? error.name : String(error)
+    }
+    assert(
+      'think: the abort signal reaches the vision helper, and a cancelled run sends nothing to the model',
+      helperSawSignal && errorName === 'AbortError' && chatRequests === 0,
+      JSON.stringify({ helperSawSignal, errorName, chatRequests }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
 // ── Tool deflection retry guard ──────────────────────────────────────────────
 
 {
@@ -10842,6 +10923,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     images?: ImageAttachment[]
     viewImage?: boolean
     prompt?: string
+    /** The main profile points at the platform gateway, which reads images itself. */
+    bridges?: boolean
   }) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-helper-'))
     fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), pngBytes)
@@ -10851,6 +10934,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const mainCalls: MainCall[] = []
     const provider: ChatProvider = {
       supportsImages: false,
+      bridgesImages: options.bridges === true,
       supportsNativeToolCalls: true,
       async complete(messages, requestOptions): Promise<ProviderResponse> {
         mainCalls.push({
@@ -10872,6 +10956,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       maxTurns: 3,
       profile: 'main',
       visionHelper: options.helper,
+      visionRetryDelayMs: 5,
       ...(options.images ? { imageAttachments: options.images } : {}),
     })
     const userText = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
@@ -10908,7 +10993,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         calls[0]!.maxOutputTokens === 1500 &&
         calls[0]!.prompt.includes('What does this screenshot show?') &&
         /verbatim/.test(calls[0]!.prompt) &&
-        firstUser.includes('[Image 1 description by vision helper — the main model cannot see images]') &&
+        firstUser.includes('[Image 1 description by vision helper]') &&
         firstUser.includes('"Forgot password?"') &&
         run.result.reply.includes('sign-in page'),
       JSON.stringify({ calls: calls.map((c) => ({ images: c.images, max: c.maxOutputTokens })), firstUser: firstUser.slice(0, 300) }),
@@ -10931,7 +11016,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         run.toolText.includes('description by vision helper') &&
         run.toolText.includes('Forgot password?') &&
         run.toolText.includes('<image_description n=') &&
-        run.toolText.includes('</image_description>') &&
+        /<\/image_description id=\\?"[0-9a-f]{12}\\?">/.test(run.toolText) &&
         run.toolText.includes('transcribed from an image by a vision helper') &&
         !run.toolText.includes('attached to your next step') &&
         !mainRequestHasImageParts(run.mainCalls),
@@ -10948,9 +11033,11 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const { calls, helper } = makeHelper('fail')
     const run = await runVision({ helper, images: [userImage] })
     assert(
-      'vision helper: a helper failure leaves a clear note and the run continues',
-      calls.length === 1 &&
-        run.userText.includes('the attached image could not be read') &&
+      'vision helper: a helper failure is retried once, then leaves a "temporarily unreadable" note and the run continues',
+      calls.length === 2 &&
+        run.userText.includes('the attached image is temporarily unreadable') &&
+        run.userText.includes('Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models.') &&
+        !/plan|tier|model/i.test(run.userText.replace('Do not mention plans, tiers or models.', '')) &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls),
       run.userText.slice(0, 300),
@@ -10958,10 +11045,36 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 
   {
+    // The helper fails twice; the main profile goes through the platform gateway,
+    // so the image is sent to it as an image and the gateway reads it.
+    const { calls, helper } = makeHelper('fail')
+    const run = await runVision({ helper, images: [userImage], bridges: true })
+    assert(
+      'vision helper: when the helper fails, a gateway-bridged main model gets the image itself',
+      calls.length === 2 &&
+        run.mainCalls[0]?.images === 1 &&
+        run.userText.includes('[Image 1 (screenshot.png) is attached to this message as an image.]') &&
+        !run.userText.includes('temporarily unreadable') &&
+        run.result.reply.includes('sign-in page'),
+      JSON.stringify({ calls: calls.length, images: run.mainCalls.map((c) => c.images), text: run.userText.slice(0, 300) }),
+    )
+  }
+
+  {
+    // No helper at all, but the gateway reads images: they go to it unchanged.
+    const run = await runVision({ helper: null, images: [userImage], bridges: true })
+    assert(
+      'vision helper: without a helper, a gateway-bridged main model gets the images and no note',
+      run.mainCalls[0]?.images === 1 && !run.userText.includes('unreadable') && run.result.reply.includes('sign-in page'),
+      JSON.stringify({ images: run.mainCalls.map((c) => c.images), text: run.userText.slice(0, 300) }),
+    )
+  }
+
+  {
     const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
     assert(
       'vision helper: without a helper the model gets a graceful note and the run succeeds',
-      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg) but this plan cannot read images. Tell the user briefly and continue with the text.') &&
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg); they are temporarily unreadable. Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models. Continue with the text.') &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls) &&
         run.mainCalls.every((call) => !call.tools.includes('view_image')),
@@ -10983,8 +11096,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     assert(
       'vision helper: a batch of images is described in one call and labelled per image',
       calls.length === 1 && calls[0] === 2 &&
-        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper">\nA bar chart of sales\.\n<\/image_description>/.test(run.userText) &&
-        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper">\nA photo of a cat\.\n<\/image_description>/.test(run.userText),
+        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper" id="([0-9a-f]{12})">\nA bar chart of sales\.\n<\/image_description id="\1">/.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper" id="([0-9a-f]{12})">\nA photo of a cat\.\n<\/image_description id="\1">/.test(run.userText),
       run.userText.slice(0, 400),
     )
   }
@@ -11038,7 +11151,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         visionRequests[0]?.max_tokens === 1500 &&
         mainRequests.length >= 1 &&
         !mainRaw.includes('image_url') &&
-        !mainRaw.includes('omitted: this model cannot see images') &&
+        !mainRaw.includes('not shown: they cannot be read in this request') &&
         mainRaw.includes('Image 1 description by vision helper') &&
         mainRaw.includes('build passed') &&
         result.reply.includes('passing build'),

@@ -27,6 +27,13 @@ export type ProviderConfig = {
    */
   supportsImages?: boolean;
   /**
+   * Set by the agent server on profiles that point at the platform gateway:
+   * images sent to them are never lost, because the gateway describes them
+   * for a model that cannot read them (its vision bridge). Such a profile
+   * may receive a user's images when the vision helper fails.
+   */
+  gatewayBridgesImages?: boolean;
+  /**
    * Largest response the model can produce, in tokens. Only used when
    * capabilitiesSource is 'platform'; it then replaces the name-based
    * max_tokens defaults.
@@ -132,6 +139,13 @@ export type ProviderRequestOptions = {
    * Ignored if the provider does not support images.
    */
   imageAttachments?: ImageAttachment[];
+  /**
+   * Gateway vision models the engine's own helper already tried and failed
+   * on, for the images in this request. A provider that bridges images sends
+   * them as the x-vision-skip header, so the gateway starts from the next model
+   * in its chain instead of repeating (and billing) the failed one.
+   */
+  visionSkip?: string[];
   /**
    * Optional cancellation signal. Interactive runtimes use this to stop an
    * in-flight model request as soon as the user sends a correction/interjection.
@@ -447,6 +461,13 @@ export interface ChatProvider {
    * candidate can. Undefined on a plain provider, where both are the same.
    */
   readonly primarySupportsImages?: boolean;
+  /**
+   * True when images sent to this provider are never lost even though the
+   * model cannot see them: the platform gateway turns them into text first
+   * (a profile with gatewayBridgesImages). Routed providers: the candidate
+   * tried first.
+   */
+  readonly bridgesImages?: boolean;
   /**
    * The model's context window in tokens, reported only when it is
    * authoritative (a profile with capabilitiesSource 'platform'). Undefined

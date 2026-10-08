@@ -80,7 +80,7 @@ export async function runHeadlessAgent(
 
   // A missing, unreadable or oversized image fails the run. A model that
   // cannot see images does not: runAgent hands the images to the vision
-  // helper, or tells the model the plan cannot read them.
+  // helper, or tells the model they could not be read right now.
   const { loadPromptImages } = await import('../core/imageInput.js')
   const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
 
