@@ -41,6 +41,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
 import { extractOpeningFraming } from './sagaFraming.js';
+import { postSagaChatCompletion, resolveSagaChatEndpoint, SAGA_CHAT_TIMEOUT_MS } from './sagaChat.js';
 
 // ─── Result types ─────────────────────────────────────────────────────────
 
@@ -1028,6 +1029,7 @@ async function describeUserImageWithGeminiVision(options: {
         }],
         generationConfig: { temperature: 0.2, maxOutputTokens: 600 },
       }),
+      signal: AbortSignal.timeout(SAGA_CHAT_TIMEOUT_MS),
     });
     const raw = await res.text();
     if (!res.ok) {
@@ -1098,18 +1100,15 @@ export async function describeUserImageWithVision(options: {
       }
     }
   }
-  // ── Priority 2: main LLM profile (may not support vision, but worth trying)
+  // ── Priority 2: the main LLM profile, or the configured vision profile
+  // when the main model cannot see images.
   if (!apiKey || !baseUrl) {
-    try {
-      const { ProviderStore } = await import('../../providers/store.js');
-      const store = await new ProviderStore(options.context.cwd).load();
-      const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
-      if (main) {
-        if (main.apiKey) apiKey = main.apiKey.trim();
-        if (main.baseUrl) baseUrl = main.baseUrl.trim();
-        if (main.model) chatModel = main.model;
-      }
-    } catch { /* fall through */ }
+    const chatEndpoint = await resolveSagaChatEndpoint(options.context.cwd, { needsImages: true });
+    if (chatEndpoint && chatEndpoint.source !== 'image-provider') {
+      apiKey = chatEndpoint.apiKey;
+      baseUrl = chatEndpoint.baseUrl;
+      chatModel = chatEndpoint.model;
+    }
   }
   if (!apiKey || !baseUrl) return null;
 
@@ -1138,7 +1137,7 @@ export async function describeUserImageWithVision(options: {
     });
   }
 
-  const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  const endpoint = { apiKey, baseUrl };
   const body = {
     model: chatModel || 'gpt-5.5',
     messages: [
@@ -1166,13 +1165,12 @@ export async function describeUserImageWithVision(options: {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       body.model = chatModel || 'gpt-5.4-mini';
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-      });
+      const res = await postSagaChatCompletion(endpoint, body);
+      if (!res.ok && res.status === undefined) {
+        throw new Error(res.timedOut ? `timed out: ${res.text}` : res.text);
+      }
       if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
+        const errBody = res.text;
         toolWarn(`⚠️ Super Visual: vision-describe 失败（HTTP ${res.status}，model=${body.model}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
         // 404 / 400 with model-not-found / 503 from a model-missing relay
         // means THIS model isn't served — try the next fallback in the chain.
@@ -1185,13 +1183,13 @@ export async function describeUserImageWithVision(options: {
           chatModel = nextModel;
           continue;  // retry immediately with new model, same attempt counter
         }
-        if (attempt < maxAttempts - 1 && (res.status === 429 || res.status >= 500)) {
+        if (attempt < maxAttempts - 1 && (res.status === 429 || (res.status ?? 0) >= 500)) {
           await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
           continue;
         }
         return null;
       }
-      const text = await res.text();
+      const text = res.text;
       let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
       try { parsed = JSON.parse(text); } catch {
         toolWarn(`⚠️ Super Visual: vision-describe 响应 JSON 解析失败（尝试 ${attempt + 1}/${maxAttempts}）`);

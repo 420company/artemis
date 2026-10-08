@@ -27,6 +27,8 @@
 // prompt directly under the IDENTITY LOCK section, where it gets the
 // highest attention weight in the prompt window.
 
+import { chatCompletionContent, postSagaChatCompletion } from './sagaChat.js';
+
 type FramingArgs = {
   storyBeat: string;
   sourceStory?: string;
@@ -324,16 +326,10 @@ export async function extractOpeningFramingWithLlm(
     max_tokens: 600,
   };
   try {
-    const res = await fetch(chat.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chat.apiKey}` },
-      body: JSON.stringify(body),
-    });
+    const res = await postSagaChatCompletion(chat, body);
     if (!res.ok) return [];
-    const raw = await res.text();
-    const parsed = JSON.parse(raw) as { choices?: Array<{ message?: { content?: unknown } }> };
-    const content = parsed.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') return [];
+    const content = chatCompletionContent(res.text);
+    if (content === undefined) return [];
     let payload: any;
     try {
       payload = JSON.parse(content);

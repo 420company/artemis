@@ -1,5 +1,5 @@
 import { toolWarn } from '../../utils/log.js';
-import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
+import { chatCompletionContent, postSagaChatCompletion, resolveSagaChatEndpoint } from './sagaChat.js';
 
 export type SagaDialogueUse = 'spoken_dialogue' | 'voiceover' | 'subtitle' | 'quoted_dialogue';
 
@@ -20,8 +20,6 @@ export type SagaGenerationLanguageResult = {
 };
 
 export type SagaSubtitleMode = 'auto' | 'always' | 'off';
-
-type ChatModelInfo = { apiKey: string; baseUrl: string; model: string };
 
 function uniqueLines(lines: SagaDialogueLine[]): SagaDialogueLine[] {
   const seen = new Set<string>();
@@ -237,28 +235,6 @@ export function buildDeterministicEnglishVisualPrompt(input: {
   ].join('\n');
 }
 
-async function resolveChatModel(cwd: string): Promise<ChatModelInfo | null> {
-  let mainApiKey: string | undefined;
-  let mainBaseUrl: string | undefined;
-  let mainModel = 'gpt-5.5';
-  try {
-    const { ProviderStore } = await import('../../providers/store.js');
-    const store = await new ProviderStore(cwd).load();
-    const main = store?.profiles?.find((p: any) => p.id === (store?.defaultMainProfileId ?? 'main'));
-    if (main) {
-      if (main.apiKey) mainApiKey = String(main.apiKey).trim();
-      if (main.baseUrl) mainBaseUrl = String(main.baseUrl).trim();
-      if (main.model) mainModel = String(main.model);
-    }
-  } catch { /* fallback below */ }
-  if (mainApiKey && mainBaseUrl) return { apiKey: mainApiKey, baseUrl: mainBaseUrl, model: mainModel };
-  const imageConfigured = await resolveConfiguredVisualProvider(cwd, 'image');
-  const apiKey = imageConfigured?.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured?.config.image.baseUrl?.trim();
-  if (!apiKey || !baseUrl) return null;
-  return { apiKey, baseUrl, model: mainModel };
-}
-
 const VISUAL_DIRECTOR_REWRITE_SYSTEM_PROMPT = `You are Artemis Saga's Visual Director Translation Pass.
 
 Task: convert a user video brief into an English video-generation prompt while preserving the user's original meaning.
@@ -302,7 +278,7 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
     return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
   }
 
-  const chat = await resolveChatModel(options.cwd);
+  const chat = await resolveSagaChatEndpoint(options.cwd);
   if (!chat) return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
 
   const userPayload = {
@@ -322,19 +298,13 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
   } as Record<string, unknown>;
 
   try {
-    const res = await fetch(chat.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chat.apiKey}` },
-      body: JSON.stringify(body),
-    });
+    const res = await postSagaChatCompletion(chat, body);
     if (!res.ok) {
-      toolWarn(`⚠️ Saga Visual Director English rewrite skipped: LLM ${res.status}`);
+      toolWarn(`⚠️ Saga Visual Director English rewrite skipped: LLM ${res.timedOut ? res.text : res.status ?? res.text}`);
       return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
     }
-    const raw = await res.text();
-    const parsed = JSON.parse(raw) as { choices?: Array<{ message?: { content?: unknown } }> };
-    const content = parsed.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') throw new Error('empty content');
+    const content = chatCompletionContent(res.text);
+    if (content === undefined) throw new Error('empty content');
     let payload: any;
     try { payload = JSON.parse(content); } catch {
       const match = content.match(/\{[\s\S]*\}/);

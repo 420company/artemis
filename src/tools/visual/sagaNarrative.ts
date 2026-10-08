@@ -13,7 +13,7 @@
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
+import { chatCompletionContent, postSagaChatCompletion, resolveSagaChatEndpoint } from './sagaChat.js';
 import { toolLog, toolWarn } from '../../utils/log.js';
 import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 
@@ -249,38 +249,6 @@ Rules:
 8. REAL-WORLD TWO-SIDED PROPS: when the user mentions playing cards / poker / tarot / mahjong / tiles / dominoes or similar game pieces, model their real front/back information logic. Playing cards have a readable face side (rank/suit/illustration) and a patterned back side; in ordinary play the readable face is private to the holder and usually points toward the holder, while the public/outward side is the card back unless the story explicitly says cards are revealed. Mahjong tiles likewise have a marked/readable face and an unmarked/back side; a player's concealed hand keeps readable faces hidden from others until revealed/discarded. Never describe two identical sides unless the user explicitly asks for a fantasy/nonstandard prop.
 9. Output the JSON only.`;
 
-type ChatModelInfo = { apiKey: string; baseUrl: string; model: string };
-
-// Resolve the chat / vision endpoint. Read the user's MAIN profile
-// (not the image-gen provider config) — these may live on different relays
-// in some setups and assuming they're co-located silently fails when
-// they're not. Falls back to image-provider config only as a last resort.
-async function resolveChatModel(cwd: string): Promise<ChatModelInfo | null> {
-  let mainApiKey: string | undefined;
-  let mainBaseUrl: string | undefined;
-  let mainModel = 'gpt-5.5';
-  try {
-    const { ProviderStore } = await import('../../providers/store.js');
-    const store = await new ProviderStore(cwd).load();
-    const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
-    if (main) {
-      if (main.apiKey) mainApiKey = main.apiKey.trim();
-      if (main.baseUrl) mainBaseUrl = main.baseUrl.trim();
-      if (main.model) mainModel = main.model;
-    }
-  } catch { /* fall through to image-provider config */ }
-  if (mainApiKey && mainBaseUrl) {
-    return { apiKey: mainApiKey, baseUrl: mainBaseUrl, model: mainModel };
-  }
-  // Last-resort fallback: image provider's chat endpoint (only correct when
-  // image and chat share a relay).
-  const imageConfigured = await resolveConfiguredVisualProvider(cwd, 'image');
-  const apiKey = imageConfigured?.config.image.apiKey?.trim();
-  const baseUrl = imageConfigured?.config.image.baseUrl?.trim();
-  if (!apiKey || !baseUrl) return null;
-  return { apiKey, baseUrl, model: mainModel };
-}
-
 async function readImageAsDataUrl(filePath: string): Promise<string | null> {
   try {
     const buffer = await readFile(filePath);
@@ -324,7 +292,8 @@ export async function analyzeNarrative(options: {
   userText: string;
   imagePaths?: string[];
 }): Promise<NarrativeEntities | null> {
-  const chat = await resolveChatModel(options.cwd);
+  const imagePaths = options.imagePaths ?? [];
+  const chat = await resolveSagaChatEndpoint(options.cwd, { needsImages: imagePaths.length > 0 });
   if (!chat) return null;
 
   const userContent: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [
@@ -333,12 +302,11 @@ export async function analyzeNarrative(options: {
       text: `User's video brief follows. Apply the rules in the system message and produce the JSON object.\n\n--- USER BRIEF ---\n${options.userText.trim() || '(no text — only reference images supplied)'}\n--- END USER BRIEF ---`,
     },
   ];
-  for (const imagePath of options.imagePaths ?? []) {
+  for (const imagePath of imagePaths) {
     const dataUrl = await readImageAsDataUrl(imagePath);
     if (dataUrl) userContent.push({ type: 'image_url', image_url: { url: dataUrl } });
   }
 
-  const url = chat.baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const body = {
     model: chat.model,
     messages: [
@@ -351,36 +319,36 @@ export async function analyzeNarrative(options: {
   } as Record<string, unknown>;
 
   // Up to 3 attempts; transient relay failures shouldn't kill narrative analysis.
+  // A timeout is not retried: a relay that hung for 90 s will hang again, and
+  // the wizard carries on without narrative analysis.
   const transientStatuses = new Set([429, 500, 502, 503, 504]);
   let raw = '';
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chat.apiKey}` },
-        body: JSON.stringify(body),
-      });
-    } catch {
+    const res = await postSagaChatCompletion(chat, body);
+    if (res.ok) {
+      raw = res.text;
+      break;
+    }
+    if (res.timedOut) {
+      toolWarn(`⚠️ Saga 叙事分析: LLM ${res.text}`);
+      return null;
+    }
+    if (res.status === undefined) {
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
         continue;
       }
       return null;
     }
-    raw = await res.text();
-    if (res.ok) break;
     if (!transientStatuses.has(res.status) || attempt === 3) {
-      toolWarn(`⚠️ Saga 叙事分析: LLM ${res.status} — ${raw.slice(0, 160)}`);
+      toolWarn(`⚠️ Saga 叙事分析: LLM ${res.status} — ${res.text.slice(0, 160)}`);
       return null;
     }
     await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
   }
 
-  let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
-  try { parsed = JSON.parse(raw); } catch { return null; }
-  const content = parsed?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') return null;
+  const content = chatCompletionContent(raw);
+  if (content === undefined) return null;
 
   let analysis: Record<string, unknown>;
   try {
@@ -933,7 +901,7 @@ export async function rewriteShotWithDialogue(options: {
   entities: NarrativeEntities;
   duration: number;
 }): Promise<{ storyBeat: string; visualPrompt: string; transition: string } | null> {
-  const chat = await resolveChatModel(options.cwd);
+  const chat = await resolveSagaChatEndpoint(options.cwd);
   if (!chat) return null;
 
   const ctx = {
@@ -958,7 +926,6 @@ export async function rewriteShotWithDialogue(options: {
     },
   };
 
-  const url = chat.baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const body = {
     model: chat.model,
     messages: [
@@ -970,22 +937,10 @@ export async function rewriteShotWithDialogue(options: {
     max_tokens: 1200,
   } as Record<string, unknown>;
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chat.apiKey}` },
-      body: JSON.stringify(body),
-    });
-  } catch {
-    return null;
-  }
+  const res = await postSagaChatCompletion(chat, body);
   if (!res.ok) return null;
-  const raw = await res.text();
-  let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
-  try { parsed = JSON.parse(raw); } catch { return null; }
-  const content = parsed?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') return null;
+  const content = chatCompletionContent(res.text);
+  if (content === undefined) return null;
 
   let result: Record<string, unknown>;
   try { result = JSON.parse(content); } catch {
