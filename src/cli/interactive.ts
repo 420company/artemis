@@ -232,7 +232,7 @@ import { PromptHistoryStore } from './promptHistory.js'
 import { buildFullSystemSuffix } from './artemisMd.js'
 import { loadUserProfile, saveUserProfile, autoUpdateUserProfile } from '../memory/userProfile.js'
 import { searchSessions } from '../storage/sessionSearch.js'
-import { summarizeOnce } from '../brain.js'
+import { ENV_FALLBACK_ANTHROPIC_MODEL, summarizeOnce } from '../brain.js'
 import { McpServerStore } from '../mcp/store.js'
 import { suggestMcpServersForIntent } from '../mcp/runtime.js'
 import { OdinStore } from '../odin/store.js'
@@ -993,7 +993,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   }
 
   const brainConfig = activeStore.getProfile(activeData, activeData.specialistProfileId)
-  let modelLabel = opts.model ?? config?.model ?? (process.env.ANTHROPIC_API_KEY ? 'claude-sonnet-4-20250514' : '?')
+  let modelLabel = opts.model ?? config?.model ?? (process.env.ANTHROPIC_API_KEY ? ENV_FALLBACK_ANTHROPIC_MODEL : '?')
   let modelContextLimit: number | undefined = opts.model ? undefined : config?.contextLength
   let brainLabel: string | undefined = brainConfig?.model
 
@@ -1540,7 +1540,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
 
     const nextBrain = nextStore.getProfile(nextData, nextData.specialistProfileId)
-    modelLabel = opts.model ?? nextConfig?.model ?? (process.env.ANTHROPIC_API_KEY ? 'claude-sonnet-4-20250514' : '?')
+    modelLabel = opts.model ?? nextConfig?.model ?? (process.env.ANTHROPIC_API_KEY ? ENV_FALLBACK_ANTHROPIC_MODEL : '?')
     modelContextLimit = opts.model ? undefined : nextConfig?.contextLength
     brainLabel = nextBrain?.model
     hud.defaultModel = modelLabel
