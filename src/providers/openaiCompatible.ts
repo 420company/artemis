@@ -487,6 +487,13 @@ function extractText(content: unknown): string {
   return '';
 }
 
+/** The x-vision-skip header for a gateway profile sending images (see ProviderRequestOptions.visionSkip). */
+export function visionSkipHeader(bridgesImages: boolean, options?: ProviderRequestOptions): Record<string, string> {
+  const skip = (options?.visionSkip ?? []).filter((model) => /^[\w.:/@+-]+$/.test(model))
+  if (!bridgesImages || !options?.imageAttachments?.length || skip.length === 0) return {}
+  return { 'x-vision-skip': skip.join(',') }
+}
+
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly bridgesImages: boolean;
@@ -548,6 +555,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
           signal: idleGuard.signal,
@@ -869,6 +877,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
           signal: options?.abortSignal,

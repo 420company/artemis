@@ -2745,6 +2745,8 @@ export interface ThinkOptions {
     onRunningUserMessageAccepted?: (text: string) => void;
     initialCompressionSummary?: string;
     onCompressionSummary?: (summary: string) => void;
+    /** Cancels the run: the vision helper's image reading and the model calls. */
+    abortSignal?: AbortSignal;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2791,6 +2793,7 @@ export async function think(
         onRunningUserMessageAccepted,
         initialCompressionSummary,
         onCompressionSummary,
+        abortSignal,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2801,6 +2804,7 @@ export async function think(
     // A model that cannot see images gets bridge/pasted images as text: the
     // vision helper's descriptions, or a note when there is no helper.
     let requestImageAttachments = imageAttachments;
+    let requestVisionSkip: string[] | undefined;
     if (imageAttachments.length > 0) {
         const imageProvider = await loadProvider(cwd);
         const preparedImages = await prepareUserImagesForModel({
@@ -2814,9 +2818,13 @@ export async function think(
                     : loadVisionHelper(cwd, { onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined })),
             locale,
             onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined,
+            signal: abortSignal,
         });
+        // Cancelled while the images were read: nothing goes to the model.
+        if (abortSignal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         input = appendImageNote(input, preparedImages.note);
         requestImageAttachments = preparedImages.images;
+        requestVisionSkip = preparedImages.visionSkip;
     }
     tSession.addUser(input);
 
@@ -2922,6 +2930,10 @@ export async function think(
         completionOptions: Record<string, unknown>,
     ): Promise<{ interrupted: true } | { interrupted: false; completion: ProviderResponse }> => {
         const controller = new AbortController();
+        // The caller's cancellation stops the model call too.
+        const onCallerAbort = (): void => controller.abort();
+        if (abortSignal?.aborted) controller.abort();
+        else abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
         let interrupted = false;
         let polling = false;
         const poll = (): void => {
@@ -2956,6 +2968,7 @@ export async function think(
             throw error;
         } finally {
             clearInterval(timer);
+            abortSignal?.removeEventListener('abort', onCallerAbort);
         }
     };
 
@@ -3009,6 +3022,7 @@ export async function think(
                 // tool group was disabled; providers that cannot handle images will
                 // ignore/fail explicitly in their own adapter path.
                 imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
+                ...(round === 1 && hasImageAttachments && requestVisionSkip ? { visionSkip: requestVisionSkip } : {}),
                 onReasoning,
                 guardStreamingText: supportsNativeTools && !plainChat,
             },

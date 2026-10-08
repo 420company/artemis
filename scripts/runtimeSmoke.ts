@@ -2721,7 +2721,7 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
       'image wire format: a text-only model (DeepSeek) gets a note instead of the image, never base64 text',
       deepseek.provider.supportsImages === false &&
         typeof deepseek.content === 'string' &&
-        /omitted: this model cannot see images/.test(deepseek.content) &&
+        /not shown: they cannot be read in this request/.test(deepseek.content) &&
         !deepseek.raw.includes(image.data),
       deepseek.raw.slice(0, 300),
     )
@@ -10066,6 +10066,71 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+// ── think(): cancelling while the vision helper reads the images ────────────
+
+{
+  const originalCwd = process.cwd()
+  const tmpDir = path.join(os.tmpdir(), `artemis-think-vision-abort-${Date.now()}`)
+  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+  let chatRequests = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      chatRequests += 1
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }))
+    })
+  })
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock think-abort server failed to bind.')
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-text',
+      profiles: [{ id: 'mock-text', protocol: 'openai', apiKey: 'k', model: 'mock-text-only', supportsImages: false, baseUrl: `http://127.0.0.1:${address.port}` }],
+    }), 'utf8')
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+    // A helper that only returns when the run is cancelled.
+    let helperSawSignal = false
+    const helper: VisionHelper = {
+      label: 'slow-eye',
+      describe: (images, context) => new Promise((resolve) => {
+        helperSawSignal = context?.signal !== undefined
+        const done = () => resolve(images.map(() => ({ ok: false as const, error: 'the run was cancelled' })))
+        if (!context?.signal) return done()
+        context.signal.addEventListener('abort', done, { once: true })
+      }),
+    }
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 50)
+    let errorName = ''
+    try {
+      await think('what is in this picture?', () => {}, {
+        cwd: tmpDir,
+        permissionMode: 'accept-all',
+        imageAttachments: [{ data: 'iVBORw0KGgo=', mediaType: 'image/png', label: 'Image: a.png' }],
+        visionHelper: helper,
+        abortSignal: controller.signal,
+      })
+    } catch (error) {
+      errorName = error instanceof Error ? error.name : String(error)
+    }
+    assert(
+      'think: the abort signal reaches the vision helper, and a cancelled run sends nothing to the model',
+      helperSawSignal && errorName === 'AbortError' && chatRequests === 0,
+      JSON.stringify({ helperSawSignal, errorName, chatRequests }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
 // ── Tool deflection retry guard ──────────────────────────────────────────────
 
 {
@@ -10913,7 +10978,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         calls[0]!.maxOutputTokens === 1500 &&
         calls[0]!.prompt.includes('What does this screenshot show?') &&
         /verbatim/.test(calls[0]!.prompt) &&
-        firstUser.includes('[Image 1 description by vision helper — the main model cannot see images]') &&
+        firstUser.includes('[Image 1 description by vision helper]') &&
         firstUser.includes('"Forgot password?"') &&
         run.result.reply.includes('sign-in page'),
       JSON.stringify({ calls: calls.map((c) => ({ images: c.images, max: c.maxOutputTokens })), firstUser: firstUser.slice(0, 300) }),
@@ -10936,7 +11001,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         run.toolText.includes('description by vision helper') &&
         run.toolText.includes('Forgot password?') &&
         run.toolText.includes('<image_description n=') &&
-        run.toolText.includes('</image_description>') &&
+        /<\/image_description id=\\?"[0-9a-f]{12}\\?">/.test(run.toolText) &&
         run.toolText.includes('transcribed from an image by a vision helper') &&
         !run.toolText.includes('attached to your next step') &&
         !mainRequestHasImageParts(run.mainCalls),
@@ -11016,8 +11081,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     assert(
       'vision helper: a batch of images is described in one call and labelled per image',
       calls.length === 1 && calls[0] === 2 &&
-        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper">\nA bar chart of sales\.\n<\/image_description>/.test(run.userText) &&
-        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper">\nA photo of a cat\.\n<\/image_description>/.test(run.userText),
+        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper" id="([0-9a-f]{12})">\nA bar chart of sales\.\n<\/image_description id="\1">/.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper" id="([0-9a-f]{12})">\nA photo of a cat\.\n<\/image_description id="\1">/.test(run.userText),
       run.userText.slice(0, 400),
     )
   }
@@ -11071,7 +11136,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         visionRequests[0]?.max_tokens === 1500 &&
         mainRequests.length >= 1 &&
         !mainRaw.includes('image_url') &&
-        !mainRaw.includes('omitted: this model cannot see images') &&
+        !mainRaw.includes('not shown: they cannot be read in this request') &&
         mainRaw.includes('Image 1 description by vision helper') &&
         mainRaw.includes('build passed') &&
         result.reply.includes('passing build'),

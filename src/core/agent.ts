@@ -3708,10 +3708,10 @@ const CHILD_RUN_IMAGE_RESET = {
 
 /** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
 const VIEW_IMAGE_UNAVAILABLE_SECTION =
-  'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+  'Image input: view_image is unavailable in this session. Do not call it; learn about image files with other tools instead. Do not mention plans, tiers or models.';
 /** Prompt note for a text-only model whose view_image goes through the vision helper. */
 const VIEW_IMAGE_HELPER_SECTION =
-  'Image input: the current model cannot see images. view_image still works: it returns a detailed text description of the image written by a vision helper model.';
+  'Image input: view_image returns a detailed text description of the image, written by a vision helper.';
 
 export type RunAgentOptions = {
   cwd: string;
@@ -6360,17 +6360,20 @@ export async function runAgent(
   function takeRequestImages(
     userImages: readonly import('../providers/types.ts').ImageAttachment[],
     provider: ChatProvider,
-  ): import('../providers/types.ts').ImageAttachment[] {
+    userVisionSkip: readonly string[] = [],
+  ): { images: import('../providers/types.ts').ImageAttachment[]; visionSkip?: string[] } {
     const { kept, dropped } = fitImagesToRequest([...userImages, ...viewedImages.take()]);
+    // Gateway vision models the helper already failed on for these images.
+    const visionSkip = [...new Set([...userVisionSkip, ...viewedImages.takeVisionSkip()])];
     if (dropped.length > 0) {
       options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
     }
     // A provider whose images reach the platform gateway (which reads them) takes them too.
     if (kept.length > 0 && provider.supportsImages !== true && provider.bridgesImages !== true) {
       options.onInfo?.(`[images] this model cannot take images; ${kept.length} dropped`);
-      return [];
+      return { images: [] };
     }
-    return kept;
+    return { images: kept, ...(kept.length && visionSkip.length ? { visionSkip } : {}) };
   }
 
   async function runNativeToolLoop(
@@ -6472,7 +6475,8 @@ export async function runAgent(
 
       // Images the tools just queued (view_image) go with the continuation,
       // so the model sees them in the very next round.
-      const continuationImages = takeRequestImages([], provider);
+      const continuation = takeRequestImages([], provider);
+      const continuationImages = continuation.images;
       currentCompletion = await completeProviderTurn(
         provider,
         providerMessages,
@@ -6481,6 +6485,7 @@ export async function runAgent(
           toolOutputs,
           nativeFunctionTools,
           ...(continuationImages.length ? { imageAttachments: continuationImages } : {}),
+          ...(continuation.visionSkip ? { visionSkip: continuation.visionSkip } : {}),
         },
       );
     }
@@ -6553,6 +6558,7 @@ export async function runAgent(
     const modelSeesImages = imageRoute.native;
     viewedImages.acceptsImages = modelSeesImages;
     viewedImages.bridgesImages = imageRoute.bridged;
+    viewedImages.helperGatewayModel = imageRoute.helper?.gatewayModel;
     if (options.visionRetryDelayMs !== undefined) viewedImages.retryDelayMs = options.visionRetryDelayMs;
     const imageHelper = imageRoute.helper;
     viewedImages.describeImage = imageHelper
@@ -6676,13 +6682,15 @@ export async function runAgent(
     const nativeFunctionTools = nativeToolRuntime?.tools;
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
-    const requestImages = takeRequestImages(
+    const { images: requestImages, visionSkip } = takeRequestImages(
       turn === 1 ? userImages.images : [],
       activeProvider,
+      turn === 1 ? userImages.visionSkip : [],
     );
     const providerCallOptions = {
       nativeFunctionTools,
       imageAttachments: requestImages.length ? requestImages : undefined,
+      ...(visionSkip ? { visionSkip } : {}),
     };
     // Stream the model output live to the workflow UI when the provider
     // supports it. We forward each delta as a `[stream-chunk]` info line,

@@ -140,6 +140,13 @@ export type ProviderRequestOptions = {
    */
   imageAttachments?: ImageAttachment[];
   /**
+   * Gateway vision models the engine's own helper already tried and failed
+   * on, for the images in this request. A provider that bridges images sends
+   * them as the x-vision-skip header, so the gateway starts from the next model
+   * in its chain instead of repeating (and billing) the failed one.
+   */
+  visionSkip?: string[];
+  /**
    * Optional cancellation signal. Interactive runtimes use this to stop an
    * in-flight model request as soon as the user sends a correction/interjection.
    */

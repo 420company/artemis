@@ -41,7 +41,8 @@ import { resolveArtemisHomeDir } from '../utils/fs.js';
 import { hasPlatformCapabilities } from '../providers/capabilities.js';
 import {
   frameImageDescription,
-  IMAGE_DESCRIPTION_DATA_NOTE,
+  imageDescriptionDataNote,
+  imageDescriptionNonce,
   sanitizeImageName,
 } from './imageDescription.js';
 
@@ -61,6 +62,12 @@ export type VisionDescription =
 export type VisionHelper = {
   /** Profile id (or model) of the helper, for logs. */
   readonly label: string;
+  /**
+   * The gateway model the helper calls, when it is the platform's own helper
+   * profile: images it failed on are sent to the gateway with this model in
+   * x-vision-skip, so the gateway does not try (and bill) it again.
+   */
+  readonly gatewayModel?: string;
   /**
    * Describes each image, in order. Images already described in this run for
    * the same question come from the cache; the others go to the vision model,
@@ -213,7 +220,7 @@ const CUT_OFF_NOTE = '[The description was cut off at the output limit.]';
  */
 export function createVisionHelper(
   provider: ChatProvider,
-  options: { label?: string; onInfo?: (message: string) => void; timeoutMs?: number } = {},
+  options: { label?: string; onInfo?: (message: string) => void; timeoutMs?: number; gatewayModel?: string } = {},
 ): VisionHelper {
   const cache = new Map<string, string>();
   const label = options.label ?? 'vision';
@@ -305,6 +312,7 @@ export function createVisionHelper(
 
   return {
     label,
+    ...(options.gatewayModel ? { gatewayModel: options.gatewayModel } : {}),
     async describe(images, context) {
       const keys = images.map((image) => visionCacheKey(image, context));
       const pending: Array<{ key: string; image: ImageAttachment }> = [];
@@ -384,7 +392,11 @@ export async function loadVisionHelper(
     profileId: profile.id,
     profileLabel: profile.label ?? profile.id,
   });
-  return createVisionHelper(provider, { label: profile.id, onInfo: options.onInfo });
+  return createVisionHelper(provider, {
+    label: profile.id,
+    onInfo: options.onInfo,
+    gatewayModel: isPlatformManagedProfile(profile) ? profile.model : undefined,
+  });
 }
 
 /** Memoizes a helper lookup, so one run resolves (and caches through) one helper. */
@@ -458,6 +470,8 @@ export type PreparedUserImages = {
   note?: string;
   /** Images still to send with the request: empty once they were turned into text. */
   images: ImageAttachment[];
+  /** Gateway vision models the helper already failed on for those images (ProviderRequestOptions.visionSkip). */
+  visionSkip?: string[];
 };
 
 /**
@@ -526,6 +540,8 @@ export async function prepareUserImagesForModel(input: {
   // Still unread: the platform gateway reads them when the main provider goes through it.
   const bridged: ImageAttachment[] = input.mainBridgesImages ? kept.filter((_, i) => !described[i]?.ok) : [];
   if (bridged.length) input.onInfo?.(`[images] ${bridged.length} image(s) go to the platform gateway, which reads them`);
+  // One nonce per note: only its exact closing tag ends a description block.
+  const nonce = imageDescriptionNonce();
   const blocks = images.map((image, index) => {
     const n = index + 1;
     const name = imageDisplayName(image, index);
@@ -535,13 +551,15 @@ export async function prepareUserImagesForModel(input: {
     }
     const result = described[kept.indexOf(image)];
     if (result?.ok) {
-      return `[Image ${n} description by vision helper — the main model cannot see images]\n${frameImageDescription(n, result.text)}`;
+      return `[Image ${n} description by vision helper]\n${frameImageDescription(n, result.text, { nonce })}`;
     }
     return bridged.includes(image) ? formatBridgedImageNote(n, name) : formatUnreadImageNote(n, name);
   });
   // The fixed data-not-instructions note goes first whenever a block follows.
   const anyDescribed = described.some((result) => result?.ok);
-  return { note: [...(anyDescribed ? [IMAGE_DESCRIPTION_DATA_NOTE] : []), ...blocks].join('\n\n'), images: bridged };
+  const note = [...(anyDescribed ? [imageDescriptionDataNote(nonce)] : []), ...blocks].join('\n\n');
+  const visionSkip = bridged.length && helper.gatewayModel ? [helper.gatewayModel] : undefined;
+  return { note, images: bridged, ...(visionSkip ? { visionSkip } : {}) };
 }
 
 /**

@@ -12,7 +12,7 @@
  */
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js'
 import { loadImageFile } from '../core/imageInput.js'
-import { frameImageDescription, IMAGE_DESCRIPTION_DATA_NOTE } from '../core/imageDescription.js'
+import { frameImageDescription, imageDescriptionDataNote, imageDescriptionNonce } from '../core/imageDescription.js'
 import { NO_SWITCH_ADVICE } from '../core/visionHelper.js'
 import { ensureNotSensitivePath } from '../utils/fs.js'
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js'
@@ -60,7 +60,7 @@ export async function executeViewImage(
       if (description === undefined) {
         // The platform gateway reads images itself: send it along instead.
         if (queue.bridgesImages) {
-          const dropped = queue.add(image)
+          const dropped = queue.addUnread(image)
           return {
             action: action as any,
             ok: true,
@@ -70,13 +70,14 @@ export async function executeViewImage(
         return fail(`${image.label}: the image is temporarily unreadable (the image reader failed or took too long, also on a retry: ${reason}). Try view_image on it once more in a moment; if that fails too, tell the user briefly that the image is temporarily unreadable and that you will retry. ${NO_SWITCH_ADVICE}`)
       }
       // Delimited and marked as data: the image may contain text phrased as instructions.
+      const nonce = imageDescriptionNonce()
       return {
         action: action as any,
         ok: true,
         output: [
-          `[${image.label} — description by vision helper; the main model cannot see images]`,
-          IMAGE_DESCRIPTION_DATA_NOTE,
-          frameImageDescription(1, description, { file: displayPath }),
+          `[${image.label} — description by vision helper]`,
+          imageDescriptionDataNote(nonce),
+          frameImageDescription(1, description, { file: displayPath, nonce }),
         ].join('\n'),
       }
     }
