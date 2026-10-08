@@ -145,6 +145,25 @@ function titleChecks(): void {
   assert.equal(deriveTitleFromBrief('[原样直传]\n---'), undefined, 'nothing usable falls back to the default title');
 }
 
+async function directorKeepsShotContent(): Promise<void> {
+  // No LLM in the hermetic run, so every segment prompt goes through the
+  // deterministic language template and the Director. Each segment's own
+  // shot text must still reach its video request.
+  const script = '[0-5秒] 镜头1：红色风筝飞过山坡，戴黄帽子的男孩追着跑。\n[5-10秒] 镜头2：风筝落进开满蓝色野花的草地，男孩蹲下捡起它。';
+  const run = await runHermeticSaga({ prompt: script, story: script, totalDuration: 10, ratio: '16:9', generateAudio: false });
+  assert.equal(run.result.ok, true, run.result.output);
+  const textOf = (body: Record<string, any>) => (body.content ?? []).filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n');
+  const [first, second] = videoTaskBodies(run.requests).map(textOf);
+  assert.ok(first?.includes('红色风筝飞过山坡，戴黄帽子的男孩追着跑'), `segment 1 shot text is missing: ${first}`);
+  assert.ok(second?.includes('风筝落进开满蓝色野花的草地，男孩蹲下捡起它'), `segment 2 shot text is missing: ${second}`);
+  assert.ok([first, second].every((text) => (text?.length ?? 0) <= 4000));
+  // Each shot's own beat comes before the bible, which repeats the whole story.
+  for (const [text, beat] of [[first, '红色风筝飞过山坡'], [second, '风筝落进开满蓝色野花的草地']] as const) {
+    const bibleAt = text!.indexOf('continuity bible');
+    assert.ok(bibleAt === -1 || text!.indexOf(beat) < bibleAt, `the shot beat should precede the continuity bible: ${text}`);
+  }
+}
+
 async function rawModeChecks(): Promise<void> {
   assert.equal(stripRawModeTag('海边的女孩。\n\n[原样直传]'), '海边的女孩。');
   assert.equal(stripRawModeTag('【raw直传】 kite story'), 'kite story');
@@ -220,4 +239,5 @@ await superVisualOnSeedream();
 await rawModeChecks();
 await chainAccountingChecks();
 await guardrailChecks();
+await directorKeepsShotContent();
 console.log('saga hermetic smoke ok');

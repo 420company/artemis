@@ -469,6 +469,18 @@ export function compileShotPromptWithContinuity(options: {
     '[/EXPLICIT USER BRIEF LOCK]',
   ].filter(Boolean).join('\n');
 
+  // The shot's own content goes right after the identity card and opening
+  // framing, before the continuity bible (which repeats the whole source
+  // story). A prompt that has to be shortened downstream is cut from the
+  // end, so the part that differs from shot to shot must come first.
+  const shotHeader = `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`;
+  const shotContent: string[] = authored
+    ? [authored]
+    : [
+        `Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`,
+        `Visual direction: ${options.visualPrompt}`,
+      ];
+
   if (options.cleanDirect) {
     // cleanDirect strips DIRECTORIAL/AESTHETIC scaffolding (style lock,
     // aesthetic lock, reference-role-separation, default camera/continuity
@@ -479,21 +491,16 @@ export function compileShotPromptWithContinuity(options: {
     // and stripping them caused character/wardrobe/location drift across
     // long-video segments.
     const cleanMiddle: string[] = [];
-    if (authored) {
-      cleanMiddle.push(authored);
-    } else {
-      cleanMiddle.push(`Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`);
-      cleanMiddle.push(`Visual direction: ${options.visualPrompt}`);
-    }
     cleanMiddle.push(explicitBriefLock);
     if (options.continuity) cleanMiddle.push(`Continuity requirements: ${options.continuity}`);
     if (options.camera) cleanMiddle.push(`Camera and motion: ${options.camera}`);
     return [
       options.bible.identityCard,
       options.openingFraming ? `\n${options.openingFraming}` : '',
+      shotHeader,
+      ...shotContent,
       options.bible.bible,
       scenePriority,
-      `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`,
       ...cleanMiddle,
       'no watermark',
     ].filter(Boolean).join('\n');
@@ -504,10 +511,11 @@ export function compileShotPromptWithContinuity(options: {
   const head = [
     options.bible.identityCard,
     options.openingFraming ? `\n${options.openingFraming}` : '',
+    shotHeader,
+    ...shotContent,
     options.bible.bible,
     styleLock,
     scenePriority,
-    `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`,
   ];
 
   // For text-only providers, repeat the most identity-critical line near
@@ -519,12 +527,6 @@ export function compileShotPromptWithContinuity(options: {
 
   const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
   const middle: string[] = [];
-  if (authored) {
-    middle.push(authored);
-  } else {
-    middle.push(`Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`);
-    middle.push(`Visual direction: ${options.visualPrompt}`);
-  }
   if (motionContinuityGuard) middle.push(motionContinuityGuard);
   middle.push(explicitBriefLock);
   middle.push(`Continuity requirements: ${options.continuity}`);

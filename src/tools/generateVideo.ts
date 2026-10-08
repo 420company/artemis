@@ -21,7 +21,7 @@ import {
   shouldPromoteBytePlusVideoModel,
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
-import { appendRenderingGuardrails } from './visual/renderingGuardrails.js';
+import { appendRenderingGuardrails, renderingGuardrailsLength } from './visual/renderingGuardrails.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
 import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
@@ -254,6 +254,7 @@ export async function executeGenerateVideo(
       referenceAudioCount: (action.referenceAudioUrls?.length ?? 0) + (action.referenceAudioPaths?.length ?? 0),
       firstFrameImageCount: (action.firstFrameImageUrls?.length ?? 0) + (action.firstFrameImagePaths?.length ?? 0),
       lastFrameImageCount: (action.lastFrameImageUrls?.length ?? 0) + (action.lastFrameImagePaths?.length ?? 0),
+      maxPromptChars: directorPromptBudget(action, 'byteplus', model),
     });
     toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
@@ -412,12 +413,25 @@ export async function executeGenerateVideo(
   }
 }
 
+function wantsRenderingGuardrails(action: GenerateVideoAction): boolean {
+  return action.renderingGuardrails === true && action.cleanDirect !== true;
+}
+
+/**
+ * How long the Director may make the prompt: the model's limit, less room
+ * for the rendering rules when a Saga segment will get them.
+ */
+function directorPromptBudget(action: GenerateVideoAction, provider: string, model: string): number {
+  const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
+  return wantsRenderingGuardrails(action) ? limit - renderingGuardrailsLength() : limit;
+}
+
 /**
  * A Saga segment (outside raw mode) gets the short rendering rules appended,
  * only while the whole prompt stays within the model's prompt limit.
  */
 function withSagaRenderingGuardrails(prompt: string, action: GenerateVideoAction, provider: string, model: string): string {
-  if (action.renderingGuardrails !== true || action.cleanDirect === true) return prompt;
+  if (!wantsRenderingGuardrails(action)) return prompt;
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   const guarded = appendRenderingGuardrails(prompt, limit);
   if (guarded.added === 0) {
@@ -594,6 +608,7 @@ async function generateVideoWithVisualProvider(
         referenceAudioCount: referenceAudioUrls.length,
         firstFrameImageCount: firstFrameImageUrls.length,
         lastFrameImageCount: lastFrameImageUrls.length,
+        maxPromptChars: directorPromptBudget(action, videoConfig.provider, model),
       });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({

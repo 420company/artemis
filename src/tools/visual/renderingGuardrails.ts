@@ -28,6 +28,11 @@ export const SAGA_VIDEO_RENDERING_GUARDRAILS = [
   `- ${ANATOMICAL_SIDE_RULE}`,
 ].join('\n');
 
+/** Characters the rules add to a prompt, separator included. */
+export function renderingGuardrailsLength(): number {
+  return SAGA_VIDEO_RENDERING_GUARDRAILS.length + 2;
+}
+
 /**
  * Appends the rendering rules when the whole prompt still fits the model's
  * limit; otherwise the prompt is returned unchanged, since the user's content

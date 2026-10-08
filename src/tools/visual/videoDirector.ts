@@ -11,6 +11,11 @@ export type VideoDirectorInput = {
   referenceAudioCount?: number;
   firstFrameImageCount?: number;
   lastFrameImageCount?: number;
+  /**
+   * Longest directed prompt to produce (the model's limit, less anything the
+   * caller appends). Defaults to the long-standing 2,600-character cap.
+   */
+  maxPromptChars?: number;
 };
 
 export type VideoDirectorResult = {
@@ -26,8 +31,7 @@ export type VideoDirectorResult = {
 
 type SceneKind = 'portrait' | 'product' | 'environment' | 'abstract';
 
-const MAX_SOURCE_PROMPT_CHARS = 900;
-const MAX_DIRECTED_PROMPT_CHARS = 2600;
+const DEFAULT_DIRECTED_PROMPT_CHARS = 2600;
 
 const PERSON_HINTS = [
   'person',
@@ -99,14 +103,54 @@ const ENVIRONMENT_HINTS = [
   '风景',
 ];
 
-function cleanPrompt(prompt: string): string {
+function cleanPrompt(prompt: string, maxChars: number): string {
   return prompt
     .replace(/\s+/g, ' ')
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/`+/g, '')
     .trim()
-    .slice(0, MAX_SOURCE_PROMPT_CHARS);
+    .slice(0, maxChars);
+}
+
+function directedPromptCap(input: VideoDirectorInput): number {
+  const cap = input.maxPromptChars;
+  return typeof cap === 'number' && Number.isFinite(cap) && cap >= 600 ? Math.floor(cap) : DEFAULT_DIRECTED_PROMPT_CHARS;
+}
+
+/**
+ * One part of a directed prompt. `dropRank` marks Director scaffolding that
+ * may be left out to make room (rank 1 goes first); parts without it are
+ * always kept. The source brief is its own part and is only shortened when
+ * the required parts alone exceed the cap.
+ */
+type DirectedSection = { text: string; dropRank?: number } | { sourceLabel: string };
+
+/**
+ * Joins the sections within `cap`. The user's or shot's own text has
+ * priority: optional Director sections are dropped first, lowest rank first,
+ * and the source is shortened only as a last resort. Before, the source was
+ * cut to 900 characters up front, so a long Saga segment lost its shot
+ * content while generic scaffolding was kept.
+ */
+function assembleDirectedPrompt(sections: DirectedSection[], source: string, cap: number): string {
+  const render = (active: DirectedSection[], sourceText: string) => active
+    .map((section) => ('sourceLabel' in section ? `${section.sourceLabel}${sourceText}.` : section.text))
+    .filter(Boolean)
+    .join(' ');
+  let active = sections.filter((section) => 'sourceLabel' in section || section.text);
+  let out = render(active, source);
+  const droppable = active
+    .filter((section): section is { text: string; dropRank: number } => 'text' in section && section.dropRank !== undefined)
+    .sort((a, b) => a.dropRank - b.dropRank);
+  for (const section of droppable) {
+    if (out.length <= cap) return out;
+    active = active.filter((entry) => entry !== section);
+    out = render(active, source);
+  }
+  if (out.length <= cap) return out;
+  const room = Math.max(0, cap - (out.length - source.length) - 1);
+  return render(active, `${source.slice(0, room).trimEnd()}…`);
 }
 
 function includesAny(prompt: string, hints: string[]): boolean {
@@ -384,7 +428,8 @@ function buildSeedanceScenarioStrategy(prompt: string, kind: SceneKind): string 
 }
 
 function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string): string {
-  const originalPrompt = cleanPrompt(input.prompt);
+  const cap = directedPromptCap(input);
+  const originalPrompt = cleanPrompt(input.prompt, cap);
   const kind = detectSceneKind(originalPrompt);
   const duration = typeof input.duration === 'number' && Number.isFinite(input.duration) ? input.duration : 5;
   const focalPoint = buildFocalPoint(originalPrompt, kind);
@@ -401,35 +446,31 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
   const scenario = buildSeedanceScenarioStrategy(originalPrompt, kind);
   const negative = buildSeedanceNegativePrompt(kind);
 
-  return truncateDirectedPrompt([
-    `Seedance 2.0 Pro optimized prompt.`,
-    `Technical spec: ${buildSeedanceTechnicalSpec(duration, input.ratio)}`,
-    `Source brief: ${originalPrompt}.`,
-    `Director profile: ${profile}.`,
-    scenario,
-    `Reference usage: ${referencePlan}`,
-    autoCreative,
-    soundPlan,
-    `single clear focal point: ${focalPoint}.`,
-    `Timestamp storyboard: ${timeline}.`,
-    `Camera language: ${camera}.`,
-    `Fibonacci composition: ${fibonacci}.`,
-    `Lighting and texture: ${lighting}.`,
-    `Motion physics: ${physics}.`,
-    `Spatial depth & scale: ${spatial}.`,
-    extension,
-    negative,
-    `Final frame: stable, cinematic, visually coherent, with physically plausible continuity.`,
-  ].join(' '));
-}
-
-function truncateDirectedPrompt(prompt: string): string {
-  if (prompt.length <= MAX_DIRECTED_PROMPT_CHARS) return prompt;
-  return `${prompt.slice(0, MAX_DIRECTED_PROMPT_CHARS - 160).trim()} Negative constraints: no subtitles, no text overlays, no logos, no watermark, no random morphing, no flicker. Final frame remains physically plausible, stable, coherent, and cinematic.`;
+  return assembleDirectedPrompt([
+    { text: `Seedance 2.0 Pro optimized prompt.` },
+    { text: `Technical spec: ${buildSeedanceTechnicalSpec(duration, input.ratio)}` },
+    { sourceLabel: 'Source brief: ' },
+    { text: `Director profile: ${profile}.`, dropRank: 7 },
+    { text: scenario, dropRank: 13 },
+    { text: `Reference usage: ${referencePlan}` },
+    { text: autoCreative, dropRank: 12 },
+    { text: soundPlan, dropRank: 14 },
+    { text: `single clear focal point: ${focalPoint}.`, dropRank: 10 },
+    { text: `Timestamp storyboard: ${timeline}.`, dropRank: 11 },
+    { text: `Camera language: ${camera}.`, dropRank: 9 },
+    { text: `Fibonacci composition: ${fibonacci}.`, dropRank: 4 },
+    { text: `Lighting and texture: ${lighting}.`, dropRank: 6 },
+    { text: `Motion physics: ${physics}.`, dropRank: 5 },
+    { text: `Spatial depth & scale: ${spatial}.`, dropRank: 3 },
+    { text: extension, dropRank: 2 },
+    { text: negative },
+    { text: `Final frame: stable, cinematic, visually coherent, with physically plausible continuity.`, dropRank: 1 },
+  ], originalPrompt, cap);
 }
 
 export function buildDirectedVideoPrompt(input: VideoDirectorInput): VideoDirectorResult {
-  const originalPrompt = cleanPrompt(input.prompt);
+  const cap = directedPromptCap(input);
+  const originalPrompt = cleanPrompt(input.prompt, cap);
   const kind = detectSceneKind(originalPrompt);
   const duration = typeof input.duration === 'number' && Number.isFinite(input.duration) ? input.duration : 5;
   const focalPoint = buildFocalPoint(originalPrompt, kind);
@@ -474,20 +515,20 @@ export function buildDirectedVideoPrompt(input: VideoDirectorInput): VideoDirect
   const spatial = buildSpatialDepth(kind, originalPrompt);
   const extension = buildIntelligentExtension(originalPrompt);
 
-  const directedPrompt = truncateDirectedPrompt([
-    `Source dream brief: ${originalPrompt}.`,
-    `Director profile: ${profile}.`,
-    extension,
-    `Focal point: ${focalPoint}.`,
-    `Timeline: ${timeline}.`,
-    `Camera: ${camera}.`,
-    `Fibonacci composition: ${fibonacci}.`,
-    `Lighting and texture: ${lighting}.`,
-    `Motion physics: ${physics}.`,
-    `Spatial depth & scale: ${spatial}.`,
-    referenceNote,
-    `Quality constraints: ${constraints}.`,
-  ].join(' '));
+  const directedPrompt = assembleDirectedPrompt([
+    { sourceLabel: 'Source dream brief: ' },
+    { text: `Director profile: ${profile}.`, dropRank: 6 },
+    { text: extension, dropRank: 5 },
+    { text: `Focal point: ${focalPoint}.`, dropRank: 9 },
+    { text: `Timeline: ${timeline}.`, dropRank: 8 },
+    { text: `Camera: ${camera}.`, dropRank: 7 },
+    { text: `Fibonacci composition: ${fibonacci}.`, dropRank: 2 },
+    { text: `Lighting and texture: ${lighting}.`, dropRank: 4 },
+    { text: `Motion physics: ${physics}.`, dropRank: 3 },
+    { text: `Spatial depth & scale: ${spatial}.`, dropRank: 1 },
+    { text: referenceNote },
+    { text: `Quality constraints: ${constraints}.` },
+  ], originalPrompt, cap);
 
   return {
     originalPrompt,

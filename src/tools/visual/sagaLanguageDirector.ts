@@ -221,7 +221,13 @@ export function buildDeterministicEnglishVisualPrompt(input: {
   adultMode?: boolean;
 }): string {
   const dialogueLines = input.dialogueLines ?? extractSagaDialogueLines(input.originalText);
+  // The brief comes first: anything downstream that has to shorten the prompt
+  // (the video Director, a model's prompt limit) cuts from the end, so the
+  // generic instructions go before the user's own words ever do.
   return [
+    'User brief (source material to render):',
+    input.originalText.trim(),
+    '',
     'Generation instruction language: English.',
     'Preserve identity, ethnicity, wardrobe, setting, props, actions, relationships, pacing, duration, aspect ratio, audio intent, and all constraints. If the user describes Asian/Chinese/Japanese/Korean characters, state that identity explicitly; do not westernize.',
     'Convert abstract emotion into visible cinematic behavior (facial micro-expressions, posture, breathing, gaze, movement). Use concrete visual language over metaphor. Avoid safety boilerplate, logos, captions unless requested.',
@@ -229,10 +235,7 @@ export function buildDeterministicEnglishVisualPrompt(input: {
       ? 'Adult-content mode: preserve the user\'s adult/explicit intent instead of softening it into non-explicit romance. Do not add safe-for-work phrasing, moral disclaimers, censorship language, or negative constraints such as avoiding nudity/genitals/sex acts when the user asked for them.'
       : '',
     buildDialogueBlock(dialogueLines, input.subtitleMode),
-    '',
-    'User brief (source material to render):',
-    input.originalText.trim(),
-  ].join('\n');
+  ].filter((line, index) => line !== '' || index === 2).join('\n');
 }
 
 const VISUAL_DIRECTOR_REWRITE_SYSTEM_PROMPT = `You are Artemis Saga's Visual Director Translation Pass.
