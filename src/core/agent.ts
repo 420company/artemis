@@ -674,6 +674,24 @@ function buildActionFromLooseArgs(
         command: getLooseStringArg(args, 'command', 'cmd'),
       };
     }
+    case 'memory':
+    case 'remember':
+    case 'save_memory': {
+      const raw = (getLooseStringArg(args, 'action', 'op', 'operation') ?? (lower === 'memory' ? '' : 'save')).toLowerCase();
+      const op = (['save', 'update', 'delete', 'list'] as const).find((o) => o === raw);
+      if (!op) return null;
+      const scope = getLooseStringArg(args, 'scope');
+      const category = getLooseStringArg(args, 'category') as Extract<AgentAction, { type: 'memory' }>['category'];
+      return {
+        type: 'memory',
+        action: op,
+        ...(scope === 'global' || scope === 'project' ? { scope } : {}),
+        name: getLooseStringArg(args, 'name', 'key', 'title', 'slug'),
+        description: getLooseStringArg(args, 'description', 'summary'),
+        category,
+        content: getLooseStringArg(args, 'content', 'text', 'body', 'memory'),
+      };
+    }
     default:
       return null;
   }
@@ -2793,6 +2811,26 @@ async function buildProviderMessages(
   const latestUserMessage = [...context.messages]
     .reverse()
     .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
+
+  // Who the user is and how the agent should sound: the same user profile and
+  // soul.md the interactive chat loads, so headless runs (execute, the web
+  // product, workflows) know the owner too. Sub-agents work on narrow tasks
+  // and do without.
+  if (profile === 'main') {
+    try {
+      const [{ loadUserProfile, formatProfileForPrompt }, { loadSoul, formatSoulForPrompt }] = await Promise.all([
+        import('../memory/userProfile.js'),
+        import('../memory/soul.js'),
+      ]);
+      const [userProfile, soul] = await Promise.all([loadUserProfile(), loadSoul()]);
+      const sections = [formatProfileForPrompt(userProfile), formatSoulForPrompt(soul)]
+        .map((section) => section.trim())
+        .filter(Boolean);
+      if (sections.length > 0) systemSections.push(...sections, '');
+    } catch {
+      // Profile and persona are optional context; failures must not block the turn.
+    }
+  }
 
   try {
     const {

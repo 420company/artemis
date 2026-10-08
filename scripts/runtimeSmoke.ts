@@ -1268,6 +1268,56 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 }
 
 {
+  // Headless runs (artemis execute, the web product) know the owner: soul.md
+  // reaches the system prompt, and main may save a long-term memory.
+  const tmpDir = path.join(os.tmpdir(), `artemis-headless-memory-${Date.now()}`)
+  const home = path.join(tmpDir, 'artemis-home')
+  fs.mkdirSync(home, { recursive: true })
+  fs.writeFileSync(path.join(home, 'soul.md'), 'Speak like a calm ship captain.')
+  const previousHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = home
+  try {
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'headless memory smoke' })
+    await store.save(session)
+    let calls = 0
+    let systemText = ''
+    const provider: ChatProvider = {
+      async complete(messages): Promise<ProviderResponse> {
+        calls += 1
+        if (calls === 1) {
+          systemText = messages.filter((m) => m.role === 'system').map((m) => String(m.content)).join('\n')
+          return {
+            text: JSON.stringify({
+              reply: 'Noted.',
+              done: false,
+              actions: [{ type: 'memory', action: 'save', name: 'reply-language', description: 'Owner wants replies in Simplified Chinese', content: 'Always reply in Simplified Chinese.' }],
+            }),
+            raw: null,
+          }
+        }
+        return { text: JSON.stringify({ reply: 'Saved.', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'Remember: always reply in Simplified Chinese.', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+    })
+    assert('headless memory: soul.md reaches the main system prompt', systemText.includes('Speak like a calm ship captain.'), systemText.slice(0, 400))
+    const saved = fs.existsSync(path.join(home, 'memory')) ? fs.readdirSync(path.join(home, 'memory')) : []
+    assert('headless memory: main may save a long-term memory', saved.some((f) => f.startsWith('reply-language')), saved.join(', '))
+  } finally {
+    if (previousHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
   const tmpDir = path.join(os.tmpdir(), `artemis-visual-required-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   await configureMockImageProfile(tmpDir)

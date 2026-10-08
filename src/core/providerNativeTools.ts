@@ -1755,6 +1755,32 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           targetId: optionalStringSchema('Optional platform target id/chat id/channel id. Defaults to configured or live bridge targets.'),
         },
       };
+    case 'memory':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['action'],
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['save', 'update', 'delete', 'list'],
+            description: 'save a new memory, update an existing one, delete one the user contradicted, or list them all.',
+          },
+          scope: {
+            type: 'string',
+            enum: ['global', 'project'],
+            description: 'global: about the user, across projects (default). project: only this workspace.',
+          },
+          name: optionalStringSchema('Short kebab-case slug, e.g. reply-language. Required for update and delete.'),
+          description: optionalStringSchema('One concrete sentence; recall relies on it.'),
+          category: {
+            type: 'string',
+            enum: ['preference', 'feedback', 'project', 'reference', 'skill', 'architecture'],
+            description: 'What kind of memory this is.',
+          },
+          content: optionalStringSchema('The memory in Markdown, with absolute dates. Required for save and update.'),
+        },
+      };
   default:
     return { type: 'object', properties: {}, additionalProperties: true };
   }

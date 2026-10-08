@@ -162,6 +162,9 @@ export function getAllowedActionTypesForProfile(
       'run_command',
       'delegate_task',
       'approve_builder_execution',
+      // Long-term memory: the system prompt asks main to persist what the
+      // user says to remember, so the tool must be allowed here too.
+      'memory',
     ];
   }
 
