@@ -77,6 +77,7 @@ import {
   loadVisionHelper,
   memoizeVisionHelper,
   prepareUserImagesForModel,
+  anyAbortSignal,
   resolveImageRoute,
   type VisionHelper,
 } from './visionHelper.js';
@@ -6134,6 +6135,7 @@ export async function runAgent(
     getHelper: async () => userImageRoute.helper,
     locale: options.locale,
     onInfo: options.onInfo,
+    signal: options.abortSignal,
   });
   if (options.appendUserMessage !== false) {
     options.sessionStore.appendMessage(session, 'user', appendImageNote(userInput, userImages.note));
@@ -6628,7 +6630,11 @@ export async function runAgent(
     viewedImages.acceptsImages = modelSeesImages;
     const imageHelper = imageRoute.helper;
     viewedImages.describeImage = imageHelper
-      ? (image) => describeSingleImage(imageHelper, image, { userText: userInput, locale: options.locale })
+      ? (image, signal) => describeSingleImage(imageHelper, image, {
+        userText: userInput,
+        locale: options.locale,
+        signal: anyAbortSignal(signal, options.abortSignal),
+      })
       : undefined;
     const canViewImages = modelSeesImages || imageHelper !== undefined;
     const context = await buildContextWindow(session, profile, {

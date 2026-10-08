@@ -242,18 +242,19 @@ Model names behind a gateway can be aliases (`gpt-6-sol` may be a text-only GLM 
 ```json
 {
   "defaultMainProfileId": "platform-main",
-  "visionProfileId": "platform-vision",
+  "visionProfileId": "artemis-platform-vision",
   "profiles": [
     { "id": "platform-main", "model": "gpt-6-sol", "supportsImages": false,
       "contextLength": 200000, "maxOutputTokens": 16384, "capabilitiesSource": "platform" },
-    { "id": "platform-vision", "model": "vision-model", "supportsImages": true, "capabilitiesSource": "platform" }
+    { "id": "artemis-platform-vision", "model": "vision-model", "supportsImages": true, "managedBy": "platform" }
   ]
 }
 ```
 
-- `supportsImages` always beats name inference. With `"capabilitiesSource": "platform"`, `contextLength` and `maxOutputTokens` also win over every name rule (including the GPT-5.6 / GPT-6 272K cap and `/models` metadata) in the HUD, compaction, `execute`, bridges, workflows and sub-agents, and Artemis never caps or re-detects that profile. A field left out falls back to the usual rules.
-- `max_tokens` is kept within the window: min(output limit, window − estimated prompt − margin).
-- `visionProfileId` (stored like `specialistProfileId`, project store first, then `~/.artemis`) names a profile that can see images. When the main model cannot, images attached with `--image`, uploaded on the web or sent through a chat bridge are described once by that model (all visible text transcribed, charts and tables as data, in the user's language), and the main model gets the text as "[Image N description by vision helper — …]". `view_image` returns the same kind of description. Descriptions are cached per run by image content.
+- `supportsImages` always beats name inference, with or without `capabilitiesSource`. With `"capabilitiesSource": "platform"`, `contextLength` and `maxOutputTokens` also win over every name rule (including the GPT-5.6 / GPT-6 272K cap and `/models` metadata) in the HUD, compaction, `execute`, bridges, workflows and sub-agents, and Artemis never caps or re-detects that profile. A field left out falls back to the usual rules.
+- `max_tokens` is kept within the window: min(output limit, window − estimated prompt − margin). When the window is only guessed from the model name, it never drops below max(1024, 25% of the limit). Platform profiles always send plain `max_tokens`.
+- Fields Artemis does not know, such as `managedBy`, are kept when it rewrites `providers.json`. A bridge re-reads its provider when `providers.json` changes.
+- `visionProfileId` (stored like `specialistProfileId`, project store first, then `~/.artemis`) names a profile that can see images. When the main model cannot, images attached with `--image`, uploaded on the web or sent through a chat bridge are described once by that model (all visible text transcribed, charts and tables as data, in the user's language), and the main model gets the text as "[Image N description by vision helper — …]". `view_image` returns the same kind of description. Each description is wrapped in an `<image_description>` block after a note that it is data from an image, never instructions, and text inside the image cannot close that block. Helper calls time out after 60 s and follow the run's cancellation; a failed, timed-out or cut-off image gets a "could not be read" note instead. Descriptions are cached per run by image content and the user's question. A platform-managed global vision profile (`managedBy: "platform"`) wins over a workspace store; otherwise a workspace store is trusted like it is for the main profile.
 - With no vision helper and a text-only model, attached images are not an error: the model is told the plan cannot read images and continues with the text.
 
 ---

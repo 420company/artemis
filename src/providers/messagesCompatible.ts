@@ -13,7 +13,7 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
-import { estimateRequestPromptTokens, fitOutputTokensToWindow, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, hasTrustedContextLength, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
 import { resolveProfileContextLength } from './modelContext.js';
 
 function cleanProviderBody(body: string): string {
@@ -446,6 +446,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
         resolveRequestMaxTokens(this.config, streaming, options?.maxOutputTokens),
         resolveProfileContextLength(this.config),
         estimateRequestPromptTokens(messages, options),
+        hasTrustedContextLength(this.config),
       ),
       ...(streaming ? { stream: true } : {}),
       ...(thinking ? { thinking } : {}),
@@ -460,6 +461,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
     body: Record<string, unknown>,
     options?: ProviderRequestOptions,
     signal?: AbortSignal,
+    onImagesStripped?: () => void,
   ): Promise<Response> {
     const effectiveSignal = signal ?? options?.abortSignal;
     let response: Response;
@@ -481,6 +483,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
           onRetry: options?.onRetry,
           onPayloadTooLarge: () => {
             const stripped = stripImagesFromMessagesBody(body);
+            if (stripped) onImagesStripped?.();
             return stripped ? JSON.stringify(stripped) : null;
           },
         },
@@ -542,9 +545,11 @@ export class MessagesCompatibleProvider implements ChatProvider {
   ): Promise<ProviderResponse> {
     const startedAt = Date.now();
     const body = this.buildRequestBody(messages, options, false);
-    const response = await this.postMessages(body, options);
+    let imagesOmitted = false;
+    const response = await this.postMessages(body, options, undefined, () => { imagesOmitted = true; });
     const json = (await response.json()) as Parameters<typeof parseMessageJson>[0];
-    return this.finishResponse(parseMessageJson(json), options, startedAt);
+    const result = this.finishResponse(parseMessageJson(json), options, startedAt);
+    return imagesOmitted ? { ...result, imagesOmitted: true } : result;
   }
 
   // ── Streaming (SSE) ─────────────────────────────────────────────────────────

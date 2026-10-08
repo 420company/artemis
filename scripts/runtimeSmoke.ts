@@ -13,7 +13,7 @@ import {
   CliSettingsStore,
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
 } from '../src/cli/settings.js'
-import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
+import { applyProviderOverrides, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
@@ -9477,6 +9477,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       run.mainCalls[0]?.tools.includes('view_image') === true &&
         run.toolText.includes('description by vision helper') &&
         run.toolText.includes('Forgot password?') &&
+        run.toolText.includes('<image_description n=') &&
+        run.toolText.includes('</image_description>') &&
+        run.toolText.includes('transcribed from an image by a vision helper') &&
         !run.toolText.includes('attached to your next step') &&
         !mainRequestHasImageParts(run.mainCalls),
       JSON.stringify({ tools: run.mainCalls[0]?.tools.includes('view_image'), tool: run.toolText.slice(0, 300) }),
@@ -9527,8 +9530,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     assert(
       'vision helper: a batch of images is described in one call and labelled per image',
       calls.length === 1 && calls[0] === 2 &&
-        /\[Image 1 description by vision helper[^\]]*\]\nA bar chart of sales\./.test(run.userText) &&
-        /\[Image 2 description by vision helper[^\]]*\]\nA photo of a cat\./.test(run.userText),
+        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper">\nA bar chart of sales\.\n<\/image_description>/.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper">\nA photo of a cat\.\n<\/image_description>/.test(run.userText),
       run.userText.slice(0, 400),
     )
   }
@@ -9770,6 +9773,126 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     )
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Platform profiles always send plain max_tokens (the gateway translates it
+  // per upstream); other profiles keep the name rule for OpenAI reasoning models.
+  const bodies: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock output-param server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const userMessage = { id: 'u1', role: 'user' as const, content: 'hi', createdAt: new Date().toISOString() }
+    await new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-5.4', capabilitiesSource: 'platform' }).complete([userMessage], { maxOutputTokens: 1500 })
+    await new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-5.4' }).complete([userMessage], { maxOutputTokens: 1500 })
+    assert(
+      'platform capabilities: platform profiles send plain max_tokens even for a reasoning-model alias',
+      bodies[0]?.max_tokens === 1500 && bodies[0]?.max_completion_tokens === undefined &&
+        bodies[1]?.max_completion_tokens === 1500 && bodies[1]?.max_tokens === undefined,
+      JSON.stringify(bodies.map((b) => ({ max_tokens: b.max_tokens, max_completion_tokens: b.max_completion_tokens }))),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // A 413 makes the provider retry without the images; the helper must not
+  // use (or cache) a description of a request whose images were dropped.
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      requests += 1
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (raw.includes('image_url')) {
+        res.writeHead(413, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'request too large' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'I cannot see any image.' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock 413 server failed to bind.')
+    const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: `http://127.0.0.1:${address.port}`, apiKey: 'k', model: 'vision-alias', supportsImages: true })
+    const helper = createVisionHelper(provider)
+    const image = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const }
+    const first = await helper.describe([image], { userText: 'what is it?' })
+    const second = await helper.describe([image], { userText: 'what is it?' })
+    assert(
+      'vision helper: a reply after a 413 image strip is a failure and is never cached',
+      first[0]?.ok === false && /too large/.test(first[0].error) && second[0]?.ok === false && requests === 4,
+      JSON.stringify({ first, second, requests }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // brain: a --model override drops all four platform fields, and a cached
+  // lead provider is rebuilt when providers.json changes (a long-lived bridge
+  // sees a plan change that flips supportsImages).
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-brain-platform-'))
+  const originalCwd = process.cwd()
+  const providersPath = path.join(tmpDir, '.artemis', 'providers.json')
+  const writeProviders = (supportsImages: boolean, mtime: Date) => {
+    fs.writeFileSync(providersPath, JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      profiles: [{ id: 'platform-main', protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model: 'gpt-6-sol', supportsImages, contextLength: 1_000_000, maxOutputTokens: 32_000, capabilitiesSource: 'platform' }],
+    }), 'utf8')
+    fs.utimesSync(providersPath, mtime, mtime)
+  }
+  try {
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    writeProviders(true, new Date(Date.now() - 60_000))
+    process.chdir(tmpDir)
+    switchModel(undefined)
+    applyProviderOverrides({ model: 'deepseek-chat' })
+    const overridden = await getLeadProvider()
+    switchModel(undefined)
+    applyProviderOverrides({})
+    const before = await getLeadProvider()
+    writeProviders(false, new Date())
+    const after = await getLeadProvider()
+    assert(
+      'platform capabilities: a --model override clears supportsImages, contextLength, maxOutputTokens and capabilitiesSource',
+      overridden.config.model === 'deepseek-chat' &&
+        overridden.config.supportsImages === undefined &&
+        overridden.config.contextLength === undefined &&
+        overridden.config.maxOutputTokens === undefined &&
+        overridden.config.capabilitiesSource === undefined &&
+        overridden.provider.supportsImages === false,
+      JSON.stringify(overridden.config),
+    )
+    assert(
+      'platform capabilities: brain re-reads its provider when providers.json changes (stale supportsImages)',
+      before.provider.supportsImages === true && after.provider.supportsImages === false && before.provider !== after.provider,
+      `before=${before.provider.supportsImages} after=${after.provider.supportsImages}`,
+    )
+  } finally {
+    process.chdir(originalCwd)
+    switchModel(undefined)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 

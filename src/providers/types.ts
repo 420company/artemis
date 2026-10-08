@@ -63,6 +63,12 @@ export type ProviderProfile = ProviderConfig & {
   label?: string;
   /** Context window in tokens. Authoritative when capabilitiesSource is 'platform'. */
   contextLength?: number;
+  /**
+   * Who owns the profile. 'platform' marks a profile the agent server writes
+   * and manages (for example the vision helper profile); the engine keeps the
+   * field as written. Other fields the server adds are kept as well.
+   */
+  managedBy?: string;
   /** Where contextLength came from. models-api means provider metadata, known-model means Artemis fallback rules. */
   contextLengthSource?: 'models-api' | 'known-model' | 'manual';
   contextLengthCheckedAt?: string;
@@ -411,6 +417,12 @@ export type ProviderResponse = {
    * before the user sees anything.
    */
   streamed?: boolean;
+  /**
+   * True when the request was too large (HTTP 413) and was retried with its
+   * images replaced by a placeholder, so the model never saw them. Reported
+   * by complete(); callers that need the images treat it as a failure.
+   */
+  imagesOmitted?: boolean;
   usage?: {
     promptTokens?: number;
     completionTokens?: number;

@@ -12,6 +12,7 @@
  */
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js'
 import { loadImageFile } from '../core/imageInput.js'
+import { frameImageDescription, IMAGE_DESCRIPTION_DATA_NOTE } from '../core/imageDescription.js'
 import { ensureNotSensitivePath } from '../utils/fs.js'
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js'
 
@@ -45,15 +46,20 @@ export async function executeViewImage(
       // A text-only model: a vision helper looks at the image instead.
       let description: string
       try {
-        description = await describeImage(image)
+        description = await describeImage(image, context.abortSignal)
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         return fail(`${image.label}: the image could not be read (the vision helper failed: ${reason}). Continue without it.`)
       }
+      // Delimited and marked as data: the image may contain text phrased as instructions.
       return {
         action: action as any,
         ok: true,
-        output: `[${image.label} — description by vision helper; the main model cannot see images]\n${description}`,
+        output: [
+          `[${image.label} — description by vision helper; the main model cannot see images]`,
+          IMAGE_DESCRIPTION_DATA_NOTE,
+          frameImageDescription(1, description, { file: displayPath }),
+        ].join('\n'),
       }
     }
     const dropped = queue.add(image)

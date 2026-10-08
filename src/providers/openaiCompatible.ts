@@ -15,7 +15,7 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
-import { estimateRequestPromptTokens, fitOutputTokensToWindow, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, hasTrustedContextLength, hasPlatformCapabilities, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
 import { resolveProfileContextLength } from './modelContext.js';
 
 function buildProviderErrorMessage(
@@ -266,8 +266,13 @@ function applyRequestOutputLimit(
     Math.floor(platformMax !== undefined ? Math.min(platformMax, requestLimit) : requestLimit),
     resolveProfileContextLength(config),
     estimateRequestPromptTokens(messages, options),
+    hasTrustedContextLength(config),
   );
-  body[OPENAI_REASONING_EFFORT_MODELS.test(config.model) ? 'max_completion_tokens' : 'max_tokens'] = limit;
+  // A platform profile's model name is a gateway alias, so it says nothing
+  // about the upstream API: send plain max_tokens and let the gateway
+  // translate it. Elsewhere OpenAI reasoning models take max_completion_tokens.
+  const useCompletionTokens = !hasPlatformCapabilities(config) && OPENAI_REASONING_EFFORT_MODELS.test(config.model);
+  body[useCompletionTokens ? 'max_completion_tokens' : 'max_tokens'] = limit;
 }
 
 interface MapMessageOptions {
@@ -853,6 +858,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     }
 
     let response: Response;
+    let imagesOmitted = false;
     try {
       response = await retryFetch(
         `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`,
@@ -870,6 +876,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           onRetry: options?.onRetry,
           onPayloadTooLarge: () => {
             const stripped = stripImagesFromChatBody(body);
+            if (stripped) imagesOmitted = true;
             return stripped ? JSON.stringify(stripped) : null;
           },
         },
@@ -918,6 +925,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       model: typeof json.model === 'string' ? json.model : this.config.model,
       nativeToolCalls,
       reasoningContent,
+      ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens: json.usage?.prompt_tokens,
         completionTokens: json.usage?.completion_tokens,

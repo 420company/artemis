@@ -22,6 +22,7 @@ import type { ProviderRequestOptions } from './types.js'
 export type ModelCapabilityConfig = {
   model?: string
   contextLength?: number
+  contextLengthSource?: string
   maxOutputTokens?: number
   capabilitiesSource?: string
 }
@@ -64,19 +65,34 @@ export function estimateRequestPromptTokens(
 }
 
 /**
+ * Whether the profile's window is known rather than guessed: written by the
+ * platform, or read from the provider's /models metadata.
+ */
+export function hasTrustedContextLength(config: ModelCapabilityConfig | null | undefined): boolean {
+  if (platformContextLength(config) !== undefined) return true
+  return config?.contextLengthSource === 'models-api' && positiveTokens(config.contextLength) !== undefined
+}
+
+/**
  * Lowers an output limit so prompt + output stays inside the context window:
  * min(limit, window − estimated prompt − margin). Some providers reject a
  * request whose prompt plus max_tokens exceeds the window, and output caps
  * can be large (128K–384K). The margin (2% of the window, at least 1024
  * tokens) absorbs estimation error. Unknown window: the limit is unchanged.
+ *
+ * With a trusted window (platform or /models metadata) the result may go down
+ * to 256 tokens. A window guessed from the model name may be wrong, so the
+ * result then never drops below max(1024, 25% of the limit).
  */
 export function fitOutputTokensToWindow(
   limit: number,
   contextLength: number | undefined,
   promptTokens: number,
+  trustedWindow = true,
 ): number {
   if (!contextLength || contextLength <= 0) return limit
   const margin = Math.max(1024, Math.ceil(contextLength * 0.02))
   const room = Math.floor(contextLength - promptTokens - margin)
-  return Math.min(limit, Math.max(MIN_OUTPUT_TOKENS, room))
+  const floor = trustedWindow ? MIN_OUTPUT_TOKENS : Math.max(1024, Math.ceil(limit * 0.25))
+  return Math.min(limit, Math.max(floor, room))
 }

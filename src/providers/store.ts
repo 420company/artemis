@@ -251,7 +251,9 @@ function positiveInteger(value: unknown): number | undefined {
 /**
  * Keeps the capability fields the agent server writes (supportsImages,
  * contextLength, maxOutputTokens, capabilitiesSource) when they are well
- * formed, and drops malformed values so they cannot reach a request.
+ * formed, and drops malformed values so they cannot reach a request. Every
+ * other field, including managedBy and fields this engine does not know,
+ * is kept as written so it survives load and save.
  */
 function normalizeProfileCapabilities(entry: ProviderProfile): ProviderProfile {
   const next: ProviderProfile = { ...entry };
@@ -267,6 +269,7 @@ function normalizeProfileCapabilities(entry: ProviderProfile): ProviderProfile {
     else next.maxOutputTokens = maxOutputTokens;
   }
   if (next.capabilitiesSource !== undefined && next.capabilitiesSource !== 'platform') delete next.capabilitiesSource;
+  if (next.managedBy !== undefined && typeof next.managedBy !== 'string') delete next.managedBy;
   return next;
 }
 
@@ -365,6 +368,10 @@ export class ProviderStore {
     const setup = mergeSetupConfigWithDefaults(rawSetup);
 
     const data: ProviderStoreData = {
+      // Top-level keys this engine does not know (written by the agent server
+      // or a newer engine) survive a re-save; the known keys below replace
+      // their raw values with normalized ones.
+      ...parsed,
       profiles: Array.isArray(parsed.profiles)
         ? parsed.profiles
             .filter((entry): entry is ProviderProfile => typeof entry?.id === 'string')

@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { release as osRelease } from 'node:os';
 import { ProviderStore, createGlobalProviderStore } from './providers/store.js';
-import { resolveArtemisHomeDir } from './utils/fs.js';
+import { resolveArtemisHomeDir, resolveDataRootDir } from './utils/fs.js';
 import { annotateProviderResponse, createTrackedProviderFromConfig, recordProviderProfileTelemetry, } from './providers/telemetry.js';
 import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
@@ -132,6 +132,8 @@ let provider: any = null;
 let providerConfig: any = null;
 let providerTelemetryContext: any = null;
 let providerCwd: string | null = null;
+// mtimes of the provider stores the cached lead provider was built from.
+let providerStoreStamp: string | null = null;
 let session: any = null;
 let systemPromptSuffix: string = '';
 // Model used when no provider profile exists and only ANTHROPIC_API_KEY is
@@ -485,10 +487,36 @@ function resolveProjectedDirectToolNames(
 }
 
 // ── provider ──────────────────────────────────────────────────────────────────
+/**
+ * Modification times of the cwd-local and global providers.json. A long-lived
+ * bridge re-reads its provider when either changes (for example the platform
+ * rewrote the profile after a plan change, flipping supportsImages).
+ */
+async function readProviderStoreStamp(cwd: string): Promise<string> {
+    const files = [
+        path.join(resolveDataRootDir(cwd), 'providers.json'),
+        path.join(resolveArtemisHomeDir(), 'providers.json'),
+    ];
+    const times = await Promise.all(files.map(async (file) => {
+        try {
+            return String((await stat(file)).mtimeMs);
+        } catch {
+            return '-';
+        }
+    }));
+    return times.join('|');
+}
+
 async function loadProvider(cwd: string = process.cwd()) {
     const requestedCwd = path.resolve(cwd);
-    if (provider && providerCwd === requestedCwd)
-        return provider;
+    if (provider && providerCwd === requestedCwd) {
+        if (providerStoreStamp === await readProviderStoreStamp(requestedCwd))
+            return provider;
+        // The stores changed: rebuild the lead and the worker from them.
+        workerProvider = null;
+        workerProviderConfig = null;
+        workerProviderCwd = null;
+    }
     // 1. Try cwd-local .artemis/providers.json
     const currentCwd = requestedCwd;
     const store = new ProviderStore(currentCwd);
@@ -527,9 +555,16 @@ async function loadProvider(cwd: string = process.cwd()) {
     // Apply CLI overrides
     let finalConfig = { ...config };
     if (_modelOverride) {
-        // Platform capabilities describe the profile's own model, not an override.
-        const overridesModel = _modelOverride !== config.model;
-        finalConfig = { ...finalConfig, model: _modelOverride, ...(overridesModel ? { capabilitiesSource: undefined } : {}) };
+        // Platform capabilities describe the profile's own model, not an
+        // override: drop all four so the override model gets the name rules.
+        const dropPlatformCapabilities = _modelOverride !== config.model && hasPlatformCapabilities(config);
+        finalConfig = {
+            ...finalConfig,
+            model: _modelOverride,
+            ...(dropPlatformCapabilities
+                ? { supportsImages: undefined, contextLength: undefined, maxOutputTokens: undefined, capabilitiesSource: undefined }
+                : {}),
+        };
     }
     if (_apiKeyOverride) finalConfig = { ...finalConfig, apiKey: _apiKeyOverride };
     if (_baseUrlOverride) finalConfig = { ...finalConfig, baseUrl: _baseUrlOverride ?? undefined };
@@ -549,6 +584,8 @@ async function loadProvider(cwd: string = process.cwd()) {
         ...(providerTelemetryContext ?? {}),
     });
     providerCwd = currentCwd;
+    // Taken after loading: load() itself may rewrite a store it repaired.
+    providerStoreStamp = await readProviderStoreStamp(currentCwd);
     return provider;
 }
 

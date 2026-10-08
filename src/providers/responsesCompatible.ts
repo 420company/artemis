@@ -11,7 +11,7 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
-import { estimateRequestPromptTokens, fitOutputTokensToWindow, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
+import { estimateRequestPromptTokens, fitOutputTokensToWindow, hasTrustedContextLength, platformContextLength, platformMaxOutputTokens } from './capabilities.js';
 import { resolveProfileContextLength } from './modelContext.js';
 
 type ResponsesInputContent =
@@ -416,10 +416,12 @@ export class ResponsesCompatibleProvider implements ChatProvider {
         Math.floor(platformMax !== undefined ? Math.min(platformMax, options.maxOutputTokens) : options.maxOutputTokens),
         resolveProfileContextLength(this.config),
         estimateRequestPromptTokens(messages, options),
+        hasTrustedContextLength(this.config),
       );
     }
 
     let attemptResponse: Response | undefined;
+    let imagesOmitted = false;
     for (let attempt = 0; attempt < reasoningCandidates.length; attempt++) {
       const reasoning = reasoningCandidates[attempt];
       if (reasoning) payload.reasoning = reasoning;
@@ -439,6 +441,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
           onPayloadTooLarge: () => {
             const strippedInput = stripImagesFromResponsesInput(payload.input);
             if (!strippedInput) return null;
+            imagesOmitted = true;
             payload.input = strippedInput;
             return JSON.stringify(payload);
           },
@@ -485,6 +488,7 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       model: typeof json.model === 'string' ? json.model : this.config.model,
       responseId: typeof json.id === 'string' ? json.id : undefined,
       nativeToolCalls,
+      ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens,
         completionTokens,

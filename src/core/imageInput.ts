@@ -152,7 +152,7 @@ export class ViewedImageQueue {
    * view_image then returns this description instead of queueing the image.
    * Resolves to the description; rejects when the helper failed.
    */
-  describeImage?: (image: ImageAttachment) => Promise<string>;
+  describeImage?: (image: ImageAttachment, signal?: AbortSignal) => Promise<string>;
 
   /**
    * Queues an image for the next request. When the queue would exceed the
