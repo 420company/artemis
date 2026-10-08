@@ -9,7 +9,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { writeFileAtomic } from './atomicWrite.js';
+import { removeStaleTempFiles, writeFileAtomic } from './atomicWrite.js';
 import { holdsSessionLock, withSessionLock } from './sessionLock.js';
 import type {
   AgentRole,
@@ -442,6 +442,8 @@ export class SessionStore {
   private readonly evidenceCache = new Map<string, EvidenceGraph>();
   /** Last serialized form written per session, to skip identical rewrites. */
   private readonly lastWritten = new Map<string, string>();
+  /** When stale temp files were last swept from the sessions directory. */
+  private lastTempSweep = 0;
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -623,7 +625,10 @@ export class SessionStore {
       return cached;
     }
 
-    if (!options.readOnly) await this.ensure();
+    if (!options.readOnly) {
+      await this.ensure();
+      await this.sweepTempFiles();
+    }
     const filePath = path.join(this.sessionDir, `${sessionId}.json`);
     const attempt = await readSessionFile(filePath, 4);
     if (!attempt.ok) {
@@ -734,8 +739,16 @@ export class SessionStore {
     );
   }
 
+  /** Leftovers of interrupted atomic writes, at most every ten minutes. */
+  private async sweepTempFiles(): Promise<void> {
+    if (Date.now() - this.lastTempSweep < 10 * 60_000) return;
+    this.lastTempSweep = Date.now();
+    await removeStaleTempFiles(this.sessionDir).catch(() => 0);
+  }
+
   async list(): Promise<SessionRecord[]> {
     await this.ensure();
+    await this.sweepTempFiles();
     const entries = await readdir(this.sessionDir);
     const sessions: Array<{ session: SessionRecord; mtimeMs: number }> = [];
 

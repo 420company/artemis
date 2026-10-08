@@ -13,10 +13,14 @@
  *
  * Re-entrant within one async call chain: code already running under the
  * lock (a load that needs to quarantine a damaged file, say) does not wait
- * for itself.
+ * for itself. Work started under a hold that has since ended (a detached
+ * background task) is not inside it any more and waits like anyone else.
+ *
+ * SIGINT/SIGTERM handlers exist only while a lock is held: they release the
+ * locks and re-raise the signal with its default action.
  */
 
-import { link, open, readFile, rename, rm, stat, utimes, mkdir } from 'node:fs/promises'
+import { open, readFile, rm, stat, utimes, mkdir } from 'node:fs/promises'
 import { readFileSync, unlinkSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomBytes } from 'node:crypto'
@@ -42,9 +46,12 @@ type LockOwner = { token?: string; pid?: number; host?: string; createdAt?: stri
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_STALE_MS = 60_000
+/** A takeover guard older than this was left by a crashed process. */
+const TAKEOVER_GUARD_STALE_MS = 10_000
 
-const held = new AsyncLocalStorage<ReadonlySet<string>>()
-/** Locks held by this process: path -> token (for release on exit or signal). */
+/** Locks the current async chain entered: path -> owner token of that hold. */
+const held = new AsyncLocalStorage<ReadonlyMap<string, string>>()
+/** Locks held by this process right now: path -> token (for release on exit or signal). */
 const processLocks = new Map<string, string>()
 
 function processAlive(pid: number): boolean {
@@ -94,23 +101,32 @@ async function isStale(lockPath: string, owner: LockOwner | undefined, staleMs: 
 }
 
 /**
- * Remove an abandoned lock without removing a fresh one that replaced it in
- * between: move it aside, check it is the one judged stale, and put it back
- * if it is not.
+ * Remove an abandoned lock. Only one contender at a time may do it (an
+ * O_EXCL guard file), and it re-checks under the guard that the lock is
+ * still the one judged stale, so a fresh lock that replaced it is never
+ * removed.
  */
-async function takeOver(lockPath: string, judged: LockOwner | undefined): Promise<void> {
-  const aside = `${lockPath}.stale-${randomBytes(6).toString('hex')}`
+async function takeOver(lockPath: string, judged: LockOwner | undefined, staleMs: number): Promise<void> {
+  const guard = `${lockPath}.takeover`
   try {
-    await rename(lockPath, aside)
-  } catch {
-    return // someone else moved or released it
+    const handle = await open(guard, 'wx', 0o600)
+    await handle.close()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      try {
+        if (Date.now() - (await stat(guard)).mtimeMs > TAKEOVER_GUARD_STALE_MS) await rm(guard, { force: true })
+      } catch { /* gone */ }
+    }
+    return
   }
-  const moved = await readOwner(aside)
-  if (moved?.token && judged?.token !== moved.token) {
-    // A new owner got in after we looked: give its lock back.
-    await link(aside, lockPath).catch(() => undefined)
+  try {
+    const current = await readOwner(lockPath)
+    if (JSON.stringify(current) === JSON.stringify(judged) && await isStale(lockPath, current, staleMs)) {
+      await rm(lockPath, { force: true })
+    }
+  } finally {
+    await rm(guard, { force: true }).catch(() => undefined)
   }
-  await rm(aside, { force: true }).catch(() => undefined)
 }
 
 function releaseSync(lockPath: string, token: string): void {
@@ -122,35 +138,42 @@ function releaseSync(lockPath: string, token: string): void {
   }
 }
 
-let cleanupInstalled = false
+const releaseAll = (): void => {
+  for (const [lockPath, token] of processLocks) releaseSync(lockPath, token)
+  processLocks.clear()
+}
+
+const SIGNALS = ['SIGINT', 'SIGTERM'] as const
+const signalHandlers = new Map<NodeJS.Signals, () => void>()
+
+/** Installed while at least one lock is held; removed with the last one. */
 function installCleanup(): void {
-  if (cleanupInstalled) return
-  cleanupInstalled = true
-  const releaseAll = (): void => {
-    for (const [lockPath, token] of processLocks) releaseSync(lockPath, token)
-    processLocks.clear()
-  }
+  if (signalHandlers.size > 0) return
   process.on('exit', releaseAll)
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  for (const signal of SIGNALS) {
     const onSignal = (): void => {
-      if (processLocks.size === 0) return
       releaseAll()
-      // Nobody else handles the signal: restore the default (terminate).
-      if (process.listenerCount(signal) === 1) {
-        process.removeListener(signal, onSignal)
-        process.kill(process.pid, signal)
-      }
+      uninstallCleanup()
+      // Nobody else handles the signal: re-raise it with the default action
+      // (terminate). Otherwise the other handlers decide.
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal)
     }
+    signalHandlers.set(signal, onSignal)
     process.on(signal, onSignal)
   }
 }
 
-/** True when the current async call chain holds `lockPath`. */
+function uninstallCleanup(): void {
+  process.removeListener('exit', releaseAll)
+  for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler)
+  signalHandlers.clear()
+}
+
+/** True when the current async call chain is inside a hold of `lockPath` that is still in effect. */
 export function holdsSessionLock(lockPath: string): boolean {
   const resolved = path.resolve(lockPath)
-  // The async context outlives the lock in background work started under
-  // it, so the lock must also still be held by this process.
-  return (held.getStore()?.has(resolved) ?? false) && processLocks.has(resolved)
+  const token = held.getStore()?.get(resolved)
+  return token !== undefined && processLocks.get(resolved) === token
 }
 
 export async function withSessionLock<T>(
@@ -181,7 +204,7 @@ export async function withSessionLock<T>(
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       const owner = await readOwner(resolved)
       if (await isStale(resolved, owner, staleMs)) {
-        await takeOver(resolved, owner)
+        await takeOver(resolved, owner, staleMs)
         continue
       }
       if (Date.now() >= deadline) throw new SessionBusyError()
@@ -202,13 +225,14 @@ export async function withSessionLock<T>(
   }, Math.max(20, Math.floor(staleMs / 4)))
   beat.unref?.()
 
-  const heldNow = new Set(held.getStore() ?? [])
-  heldNow.add(resolved)
+  const heldNow = new Map(held.getStore() ?? [])
+  heldNow.set(resolved, token)
   try {
     return await held.run(heldNow, fn)
   } finally {
     clearInterval(beat)
-    processLocks.delete(resolved)
+    if (processLocks.get(resolved) === token) processLocks.delete(resolved)
+    if (processLocks.size === 0) uninstallCleanup()
     const owner = await readOwner(resolved)
     if (owner?.token === token) await rm(resolved, { force: true }).catch(() => undefined)
   }

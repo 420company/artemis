@@ -5,8 +5,9 @@
  * a half-written mix.
  */
 
-import { open, rename, rm, writeFile } from 'node:fs/promises'
+import { open, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
+import path from 'node:path'
 
 const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
 
@@ -29,6 +30,7 @@ export async function writeFileAtomic(
   for (let attempt = 0; ; attempt += 1) {
     try {
       await rename(tmp, target)
+      await syncDirectory(path.dirname(target))
       return
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? ''
@@ -41,4 +43,48 @@ export async function writeFileAtomic(
       await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt))
     }
   }
+}
+
+/** Make the rename itself durable (POSIX); a no-op where directories cannot be opened (Windows). */
+async function syncDirectory(dir: string): Promise<void> {
+  if (process.platform === 'win32') return
+  try {
+    const handle = await open(dir, 'r')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    /* not supported here */
+  }
+}
+
+const TEMP_NAME = /\.\d+\.[0-9a-f]{12}\.tmp$/
+const STALE_TEMP_MS = 60 * 60_000
+
+/**
+ * Remove temp files a crashed writer left behind in `dir` (older than an
+ * hour, so a write in progress is never touched).
+ */
+export async function removeStaleTempFiles(dir: string): Promise<number> {
+  let removed = 0
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return 0
+  }
+  const cutoff = Date.now() - STALE_TEMP_MS
+  for (const name of names) {
+    if (!TEMP_NAME.test(name)) continue
+    const full = path.join(dir, name)
+    try {
+      if ((await stat(full)).mtimeMs < cutoff) {
+        await rm(full, { force: true })
+        removed += 1
+      }
+    } catch { /* gone */ }
+  }
+  return removed
 }

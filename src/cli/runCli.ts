@@ -689,8 +689,9 @@ async function runQueryCommand(options: {
   } catch (error) {
     if (error instanceof SessionBusyError) {
       // A distinct exit code (75, EX_TEMPFAIL) so a host can tell "retry
-      // later" from a failure.
-      console.error(t(SESSION_BUSY_MESSAGE_ZH, SESSION_BUSY_MESSAGE))
+      // later" from a failure. The `CLI Error:` prefix is the line hosts
+      // already parse for the failure reason (the web server shows it).
+      console.error(`CLI Error: ${t(SESSION_BUSY_MESSAGE_ZH, SESSION_BUSY_MESSAGE)}`)
       process.exit(error.exitCode)
     }
     throw error
