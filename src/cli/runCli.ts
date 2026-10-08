@@ -322,6 +322,7 @@ export async function runCli(argv: string[]): Promise<void> {
       model: options.model,
       maxTurns: options.maxTurnsExplicit ? options.maxTurns : undefined,
       sessionId: options.sessionId,
+      imagePaths: options.imagePaths,
     })
     return
   }
@@ -663,6 +664,7 @@ async function runQueryCommand(options: {
   model?: string
   maxTurns?: number
   sessionId?: string
+  imagePaths?: string[]
 }): Promise<void> {
   const { cwd, locale, prompt, mode, model } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
@@ -684,6 +686,7 @@ async function runQueryCommand(options: {
     model,
     maxTurns: options.maxTurns,
     sessionId: options.sessionId,
+    imagePaths: options.imagePaths,
     sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
     onInfo: (message) => console.error(message),
   })
