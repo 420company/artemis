@@ -968,6 +968,35 @@ async function probeSegment(filePath: string): Promise<SegmentProbe> {
 
 export { stripRawModeTag };
 
+const INPUT_PATH_LIST_FIELDS = [
+  'referenceImagePaths',
+  'referenceVideoPaths',
+  'referenceAudioPaths',
+  'storyboardImagePaths',
+  'firstFrameImagePaths',
+  'lastFrameImagePaths',
+] as const;
+
+async function resolveInputPath(inputPath: string, context: ToolExecutionContext): Promise<string> {
+  const { absolute } = await resolveToolPathWithWorkspaceAccess({ inputPath, toolName: 'generate_long_video', context });
+  if (context.permissionMode !== 'full-access') ensureNotSensitivePath(absolute, inputPath);
+  return absolute;
+}
+
+/** The action with every user-named local file replaced by its checked absolute path. */
+async function withResolvedInputPaths(action: GenerateLongVideoAction, context: ToolExecutionContext): Promise<GenerateLongVideoAction> {
+  const resolved: GenerateLongVideoAction = { ...action };
+  for (const field of INPUT_PATH_LIST_FIELDS) {
+    const entries = nonEmptyStringArray(action[field]);
+    if (entries.length === 0) continue;
+    const absolutes: string[] = [];
+    for (const entry of entries) absolutes.push(await resolveInputPath(entry, context));
+    resolved[field] = absolutes;
+  }
+  if (action.soundtrackPath?.trim()) resolved.soundtrackPath = await resolveInputPath(action.soundtrackPath.trim(), context);
+  return resolved;
+}
+
 function shouldChainFrames(action: GenerateLongVideoAction, providerSupportsImageRef: boolean): boolean {
   const mode = action.chainReferenceFrames ?? 'auto';
   if (mode === 'off') return false;
@@ -1018,6 +1047,15 @@ export async function executeGenerateLongVideo(
     const configured = await resolveConfiguredVisualProvider(context.cwd, 'video');
     if (!configured) {
       return { action, ok: false, output: buildVisualSetupRequiredMessage('video') };
+    }
+
+    // Every local file the request names is resolved like any tool path
+    // before anything is read or sent: workspace containment (or an approved
+    // workspace switch) and, outside full access, the protected-path check.
+    try {
+      action = await withResolvedInputPaths(action, context);
+    } catch (error) {
+      return { action, ok: false, output: `generate_long_video: ${error instanceof Error ? error.message : String(error)}` };
     }
 
     const provider = configured.config.video.provider;

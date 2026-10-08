@@ -155,6 +155,7 @@ export async function withHermeticWorkspace<T>(
 export async function runHermeticSaga(
   action: Record<string, unknown>,
   options: HermeticOptions = {},
+  contextOverrides: (cwd: string) => Record<string, unknown> = () => ({}),
 ): Promise<{ result: Awaited<ReturnType<typeof executeGenerateLongVideo>>; requests: RecordedRequest[]; logs: string[] }> {
   const { withRuntimeLogSink } = await import('../src/utils/log.js');
   return withHermeticWorkspace(options, async (cwd, requests) => {
@@ -163,7 +164,9 @@ export async function runHermeticSaga(
       (entry) => { logs.push(entry.message); },
       () => executeGenerateLongVideo(
         { type: 'generate_long_video', assemblyMode: 'ffmpeg', gpu: 'off', maxPolls: 3, pollIntervalMs: 1000, ...action } as any,
-        { cwd, permissionMode: 'full-access', sessionId: 'saga-hermetic', locale: 'en' } as any,
+        // The fixtures live outside the workspace: an approving host, as the
+        // CLI and the agent server are when the user allows it.
+        { cwd, permissionMode: 'full-access', sessionId: 'saga-hermetic', locale: 'en', requestWorkspaceSwitch: async () => true, ...contextOverrides(cwd) } as any,
       ),
     );
     return { result, requests, logs };

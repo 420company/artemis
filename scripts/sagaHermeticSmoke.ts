@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { copyFile, mkdtemp } from 'node:fs/promises';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { fixturePng, imageBodies, runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 import {
@@ -243,10 +244,39 @@ async function guardrailChecks(): Promise<void> {
   });
 }
 
+async function inputPathChecks(): Promise<void> {
+  // A reference outside the workspace that the host does not approve is refused before any request.
+  const declined = await runHermeticSaga(
+    { prompt: STORY, totalDuration: 10, referenceImagePaths: [fixturePng()] },
+    {},
+    () => ({ permissionMode: 'ask', requestWorkspaceSwitch: async () => false }),
+  );
+  assert.equal(declined.result.ok, false);
+  assert.match(declined.result.output, /Workspace switch declined/);
+  assert.equal(declined.requests.length, 0, 'nothing is read or sent for a refused path');
+
+  // A protected file inside the workspace is refused outside full access.
+  let protectedPath = '';
+  const guarded = await runHermeticSaga(
+    { prompt: STORY, totalDuration: 10, soundtrackPath: '.ssh/theme.mp3' },
+    {},
+    (cwd) => {
+      protectedPath = path.join(cwd, '.ssh');
+      mkdirSync(protectedPath, { recursive: true });
+      writeFileSync(path.join(protectedPath, 'theme.mp3'), 'not really audio');
+      return { permissionMode: 'ask' };
+    },
+  );
+  assert.equal(guarded.result.ok, false);
+  assert.match(guarded.result.output, /protected directory/);
+  assert.equal(guarded.requests.length, 0);
+}
+
 seedreamSizeChecks();
 titleChecks();
 eligibilityChecks();
 budgetChecks();
+await inputPathChecks();
 await resolutionChecks();
 await superVisualOnSeedream();
 await rawModeChecks();
