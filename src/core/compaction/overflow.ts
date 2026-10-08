@@ -12,8 +12,13 @@
  *   allowed (M)".
  * - BytePlus / Volcengine Ark: "Total tokens of image and text exceed max
  *   message tokens", "...exceeds the model's context window/length".
+ * - vLLM "is longer than the maximum model length", llama.cpp "exceeds the
+ *   available context size", Zhipu "Prompt exceeds max length".
  * - Others seen in the wild: DashScope "Range of input length should be",
- *   Moonshot "exceeded model token limit", plain 413 Payload Too Large.
+ *   Moonshot "exceeded model token limit".
+ * - A 5xx counts only when it wraps an unmistakable upstream overflow; a 413
+ *   only when it mentions tokens or context (not an image or body size); a
+ *   400 about one tool definition never counts.
  */
 
 const OVERFLOW_PATTERNS: RegExp[] = [
@@ -21,8 +26,12 @@ const OVERFLOW_PATTERNS: RegExp[] = [
   /maximum context length/i,
   /context (?:window|length|limit)[^.\n]{0,40}(?:exceed|too (?:long|large|small))/i,
   /exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:window|length|limit)/i,
+  /exceeds? the available context size/i, // llama.cpp server
+  /longer than the maximum model length/i, // vLLM
   /prompt is too long/i,
-  /input (?:is )?too long/i,
+  /prompt exceeds max(?:imum)? length/i, // Zhipu (code 1261)
+  /input length exceeds the maximum length/i,
+  /input (?:is )?too long for (?:the )?model/i,
   /input length and `?max_tokens`? exceed/i,
   /too many (?:input )?tokens/i,
   /input token count[^.\n]{0,60}exceeds/i,
@@ -31,14 +40,21 @@ const OVERFLOW_PATTERNS: RegExp[] = [
   /(?:exceeded|exceeds?) (?:the )?model(?:'s)? token limit/i,
   /range of input length should be/i,
   /reduce the length of the messages/i,
-  /request (?:entity )?too large/i,
-  /payload too large/i,
   /上下文(?:长度|窗口)?[^。\n]{0,20}(?:超出|超过|过长)/,
   /(?:超出|超过)[^。\n]{0,20}(?:上下文|最大长度|最大 ?token)/,
 ]
 
+/** Strong wording that marks overflow even inside a gateway's 5xx wrapper. */
+const STRONG_OVERFLOW = /context[_ ]length[_ ]exceeded|maximum context length|prompt is too long/i
+
 /** Signals that look like overflow wording but mean rate limiting. */
 const NOT_OVERFLOW = /rate.?limit|tokens per (?:min|minute|day)|\bTPM\b|\bRPM\b|quota/i
+
+/** A request rejected for one tool definition (a schema field too long), not the context. */
+const TOOL_SCHEMA_ERROR = /\btools?\.\d+|\btool(?:s)?\[\d+\]|\b(?:function|tool) (?:schema|description|definition)/i
+
+/** 413s about the body or an image, not the context. */
+const TOKEN_WORDING = /token|context|prompt|上下文/i
 
 function statusOf(error: unknown): number | undefined {
   const e = error as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } } | null
@@ -62,10 +78,15 @@ export function isContextOverflowError(error: unknown): boolean {
   if (!error) return false
   if (error instanceof ContextOverflowError) return true
   const status = statusOf(error)
-  if (status === 413) return true
-  if (status !== undefined && status !== 400 && status !== 422) return false
   const message = messageOf(error)
   if (NOT_OVERFLOW.test(message)) return false
+  if (TOOL_SCHEMA_ERROR.test(message) && !STRONG_OVERFLOW.test(message)) return false
+  // Gateways sometimes wrap the upstream 400 in a 5xx.
+  if (status !== undefined && status >= 500) return STRONG_OVERFLOW.test(message)
+  // 413 is about the body size; only token or context wording makes it ours
+  // (an oversized image is handled by the image-stripping retry instead).
+  if (status === 413) return TOKEN_WORDING.test(message)
+  if (status !== undefined && status !== 400 && status !== 422) return false
   return OVERFLOW_PATTERNS.some((pattern) => pattern.test(message))
 }
 

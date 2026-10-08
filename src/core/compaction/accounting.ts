@@ -34,9 +34,55 @@ export type ContextState = {
   summaryFailures: number
   anchor?: UsageAnchor
   lastCompactionAt?: string
+  /**
+   * Provider count / local estimate, last seen (1-2). Kept so estimates made
+   * after a compaction (when no anchor exists) still use the provider's scale.
+   */
+  calibration?: number
+  /** When the failure breaker opened (summaryFailures reached the limit). */
+  breakerOpenedAt?: string
+  /** Compactions done mechanically since the breaker opened. */
+  skippedSinceOpen?: number
 }
 
 export const MAX_SUMMARY_FAILURES = 3
+/** With the breaker open, the summarizer is tried again after this many compactions... */
+export const BREAKER_RETRY_AFTER_COMPACTIONS = 2
+/** ...or after this long, whichever comes first. */
+export const BREAKER_RETRY_AFTER_MS = 30 * 60_000
+
+/**
+ * Whether the summarizer may be called. After MAX_SUMMARY_FAILURES
+ * consecutive failures the breaker opens and compactions are mechanical;
+ * it half-opens (one attempt) after a few compactions or some time, so a
+ * summarizer that recovered is used again.
+ */
+export function summarizerAllowed(state: ContextState, now: Date = new Date()): boolean {
+  if (state.summaryFailures < MAX_SUMMARY_FAILURES) return true
+  const openedAt = state.breakerOpenedAt ? Date.parse(state.breakerOpenedAt) : NaN
+  if (!Number.isFinite(openedAt)) return true
+  return (state.skippedSinceOpen ?? 0) >= BREAKER_RETRY_AFTER_COMPACTIONS ||
+    now.getTime() - openedAt >= BREAKER_RETRY_AFTER_MS
+}
+
+export function recordSummarizerSuccess(state: ContextState): void {
+  state.summaryFailures = 0
+  state.breakerOpenedAt = undefined
+  state.skippedSinceOpen = undefined
+}
+
+export function recordSummarizerFailure(state: ContextState, now: Date = new Date()): void {
+  state.summaryFailures += 1
+  if (state.summaryFailures >= MAX_SUMMARY_FAILURES) {
+    // (Re)open: a failed half-open attempt waits a full cooldown again.
+    state.breakerOpenedAt = now.toISOString()
+    state.skippedSinceOpen = 0
+  }
+}
+
+export function recordSummarizerSkipped(state: ContextState): void {
+  if (state.summaryFailures >= MAX_SUMMARY_FAILURES) state.skippedSinceOpen = (state.skippedSinceOpen ?? 0) + 1
+}
 
 export function createContextState(): ContextState {
   return { version: 1, compactions: 0, summaryFailures: 0 }
@@ -68,6 +114,13 @@ export function normalizeContextState(raw: unknown): ContextState {
     }
   }
   if (typeof record.lastCompactionAt === 'string') state.lastCompactionAt = record.lastCompactionAt
+  if (typeof record.calibration === 'number' && record.calibration >= 1 && record.calibration <= 2) {
+    state.calibration = record.calibration
+  }
+  if (typeof record.breakerOpenedAt === 'string') state.breakerOpenedAt = record.breakerOpenedAt
+  if (typeof record.skippedSinceOpen === 'number' && record.skippedSinceOpen >= 0) {
+    state.skippedSinceOpen = Math.floor(record.skippedSinceOpen)
+  }
   return state
 }
 
@@ -97,6 +150,8 @@ export function recordProviderUsage(
 ): void {
   const promptTokens = providerPromptTokens(usage)
   if (!promptTokens) return
+  const estimate = Math.max(0, fixedTokens) + estimateMessagesTokens(sentMessages)
+  if (estimate > 0) state.calibration = Math.min(2, Math.max(1, promptTokens / estimate))
   state.anchor = {
     promptTokens,
     messageCount: sentMessages.length,
@@ -137,5 +192,8 @@ export function measureContext(
     const fixedGrowth = Math.max(0, fixedTokens - anchor.fixedTokens)
     return { tokens: anchor.promptTokens + added + fixedGrowth, source: 'provider+delta' }
   }
-  return { tokens: Math.max(0, fixedTokens) + estimateMessagesTokens(messages), source: 'estimate' }
+  const estimate = Math.max(0, fixedTokens) + estimateMessagesTokens(messages)
+  // No anchor (first request, or right after a compaction): use the last
+  // known provider/estimate ratio so a dense tokenizer is not underestimated.
+  return { tokens: Math.ceil(estimate * (state?.calibration ?? 1)), source: 'estimate' }
 }

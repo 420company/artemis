@@ -73,8 +73,9 @@ export function parseToolContent(content: string): ParsedToolContent {
         // Only Artemis' own envelopes count: path A always has `action`,
         // failures carry `error`. A tool whose raw output merely happens to
         // be JSON with an `output` field (an HTTP body) stays plain text.
-        const isArtemisEnvelope = Boolean(action) || envelope.error !== undefined ||
-          typeof envelope.toolName === 'string' || typeof envelope.path === 'string'
+        // A top-level `path` is NOT enough: tool output (a fetched JSON API)
+        // could claim any path, and paths here feed restoration.
+        const isArtemisEnvelope = Boolean(action) || envelope.error !== undefined || typeof envelope.toolName === 'string'
         if (typeof envelope.output === 'string' && isArtemisEnvelope) {
           return {
             envelope,
@@ -234,8 +235,19 @@ export function buildPreview(text: string, tokens: number): { preview: string; h
   return { preview: parts.join('\n'), headLines: head.length, tailLines: tail.length }
 }
 
+/**
+ * True only for results Artemis itself spilled: the content starts with the
+ * spill header, or is an Artemis envelope whose output starts with it and
+ * that records where the output went. Output that merely mentions the marker
+ * (a search over old transcripts) is not mistaken for a spilled result.
+ */
 export function isSpilledToolContent(content: string): boolean {
-  return content.includes(SPILL_MARKER) || content.includes('"outputSavedTo"')
+  if (content.startsWith(SPILL_MARKER)) return true
+  if (!content.trimStart().startsWith('{')) return false
+  const parsed = parseToolContent(content)
+  return Boolean(parsed.envelope) &&
+    typeof parsed.envelope?.outputSavedTo === 'string' &&
+    parsed.output.startsWith(SPILL_MARKER)
 }
 
 export type SpillOptions = {
@@ -290,10 +302,13 @@ export function spillToolResultIfLarge(content: string, options: SpillOptions): 
   return { content: body, savedTo }
 }
 
+/** Where Artemis saved the full output of a result it spilled, if it did. */
 function extractSavedPath(content: string, parsed: ParsedToolContent): string | undefined {
-  const fromEnvelope = parsed.envelope?.outputSavedTo ?? parsed.envelope?.artifactPath
+  if (!isSpilledToolContent(content)) return undefined
+  const fromEnvelope = parsed.envelope?.outputSavedTo
   if (typeof fromEnvelope === 'string' && fromEnvelope) return fromEnvelope
-  const match = content.match(/Full original output saved at: ([^\n"\\]+)/)
+  const header = content.split('\n').slice(0, 3).join('\n')
+  const match = header.match(/Full original output saved at: ([^\n"\\]+)/)
   return match?.[1]?.trim()
 }
 
