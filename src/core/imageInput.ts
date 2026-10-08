@@ -30,8 +30,14 @@ export const MAX_REQUEST_IMAGE_BYTES = 15 * 1024 * 1024;
 
 export class ImageInputError extends Error {}
 
-/** The image type from the file's first bytes (extensions lie). */
-export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
+/**
+ * Every image format some consumer here accepts, identified from the file's
+ * first bytes (extensions lie). Models see only ImageMediaType; image
+ * generation references (Seedream) also take BMP, TIFF and HEIC/HEIF.
+ */
+export type SniffedImageType = ImageMediaType | 'image/bmp' | 'image/tiff' | 'image/heic' | 'image/heif';
+
+export function sniffAnyImageType(bytes: Uint8Array): SniffedImageType | undefined {
   const b = bytes;
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
@@ -43,7 +49,28 @@ export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
   ) {
     return 'image/webp';
   }
+  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp';
+  if (
+    b.length >= 4 &&
+    ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a && b[3] === 0x00) ||
+      (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0x00 && b[3] === 0x2a))
+  ) {
+    return 'image/tiff';
+  }
+  if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    const brand = String.fromCharCode(b[8]!, b[9]!, b[10]!, b[11]!);
+    if (/^(heic|heix|hevc|hevx|heim|heis)$/.test(brand)) return 'image/heic';
+    if (/^(mif1|msf1|heif)$/.test(brand)) return 'image/heif';
+  }
   return undefined;
+}
+
+const MODEL_IMAGE_TYPES: ReadonlySet<SniffedImageType> = new Set<ImageMediaType>(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** The image type from the file's first bytes, limited to the formats models accept. */
+export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
+  const type = sniffAnyImageType(bytes);
+  return type && MODEL_IMAGE_TYPES.has(type) ? (type as ImageMediaType) : undefined;
 }
 
 /** Decoded size of an attachment, from its base64 length. */

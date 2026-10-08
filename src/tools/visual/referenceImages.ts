@@ -7,6 +7,7 @@
 // size-capped, and inlined as data URIs.
 
 import { readFile, stat } from 'node:fs/promises';
+import { sniffAnyImageType } from '../../core/imageInput.js';
 import { ensureNotSensitivePath } from '../../utils/fs.js';
 import { resolveToolPathWithWorkspaceAccess } from '../workspaceAccess.js';
 import type { ToolExecutionContext } from '../types.js';
@@ -63,26 +64,13 @@ export function isRemoteImageReference(entry: string): boolean {
   return /^https?:\/\//i.test(entry);
 }
 
-/** Identifies an image by its leading bytes. Returns the data-URI media type, or undefined when it is not a supported image. */
-export function sniffImageMimeType(buf: Buffer): string | undefined {
-  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  if (buf.length >= 6 && /^GIF8[79]a$/.test(buf.toString('ascii', 0, 6))) return 'image/gif';
-  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
-  if (
-    buf.length >= 4 &&
-    ((buf[0] === 0x49 && buf[1] === 0x49 && buf[2] === 0x2a && buf[3] === 0x00) ||
-      (buf[0] === 0x4d && buf[1] === 0x4d && buf[2] === 0x00 && buf[3] === 0x2a))
-  ) {
-    return 'image/tiff';
-  }
-  if (buf.length >= 12 && buf.toString('ascii', 4, 8) === 'ftyp') {
-    const brand = buf.toString('ascii', 8, 12);
-    if (/^(heic|heix|hevc|hevx|heim|heis)$/.test(brand)) return 'image/heic';
-    if (/^(mif1|msf1|heif)$/.test(brand)) return 'image/heif';
-  }
-  return undefined;
+/**
+ * Identifies an image by its leading bytes (the shared sniffer in
+ * core/imageInput.ts). Returns the data-URI media type, or undefined when it
+ * is not a format Seedream accepts.
+ */
+export function sniffImageMimeType(buf: Uint8Array): string | undefined {
+  return sniffAnyImageType(buf);
 }
 
 function formatMiB(bytes: number): string {

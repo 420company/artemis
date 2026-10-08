@@ -20,6 +20,7 @@ import {
   detectVisualGenerationNeed,
   hasExplicitLocalVisualConsent,
   hasExplicitRemoteVisualFallback,
+  VISUAL_NOT_CONFIGURED_POLICY,
   resolveConfiguredVisualProvider,
   describeVisualProvider,
 } from '../utils/visualGenerationConfig.js'
@@ -213,10 +214,10 @@ async function applyVisualPolicy(
 
   if (configured.length === 0) {
     return {
-      prompt: `${prompt}\n\n[Visual generation policy]\nNo configured local visual generation API is available. Use web-search assets if needed, and do not claim local generation. Do NOT write scripts that generate SVG placeholders as a substitute.`,
+      prompt: `${prompt}\n\n${VISUAL_NOT_CONFIGURED_POLICY}`,
       summary: t(
-        '⚠️ 视觉素材策略：未配置本地视觉 API，本轮将使用网络搜索素材',
-        '⚠️ Visual policy: no local visual API configured; this turn will use web-search assets',
+        '⚠️ 视觉素材策略：图片/视频生成尚未配置，运行 /visual 完成配置后重试',
+        '⚠️ Visual policy: image/video generation is not configured; run /visual to set it up, then retry',
       ),
     }
   }

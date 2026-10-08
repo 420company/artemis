@@ -56,7 +56,7 @@ export const GENERATE_IMAGE_DESCRIPTION = [
   'Put text to render in double quotes, exactly as it should appear.',
   'Set size/aspect ratio with `size`, not in the prompt.',
   'Keep the user\'s language (Chinese works well; do not translate).',
-  'When the request refers to an attached or earlier image (edit it, "this style", "like this"), pass it in `referenceImages`; if you can view images (view_image), look first, then say what to keep (subject, style, palette, lighting, composition) and what to change.',
+  'When the request refers to an attached or earlier image (edit it, "this style", "like this"), pass it in `referenceImages`. Look at it first with view_image whenever that tool is available to you, then say in the prompt what to keep (subject, style, palette, lighting, composition) and what to change.',
   'A failure says why (e.g. low balance, safety rejection): tell the user; never substitute a web image.',
 ].join(' ');
 

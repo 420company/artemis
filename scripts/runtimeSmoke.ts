@@ -79,6 +79,7 @@ import {
   cleanupLedger,
 } from '../src/core/collapse/index.js'
 import { normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import { sniffAnyImageType, sniffImageType } from '../src/core/imageInput.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
 import { executeGenerateVideo } from '../src/tools/generateVideo.js'
@@ -147,7 +148,7 @@ import {
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
-import { detectVisualGenerationNeed } from '../src/utils/visualGenerationConfig.js'
+import { detectVisualGenerationNeed, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
 import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
@@ -1679,6 +1680,13 @@ async function withMockedFetch<T>(
       sniffImageMimeType(Buffer.from('RIFF\0\0\0\0WEBPVP8 ', 'binary')) === 'image/webp' &&
       sniffImageMimeType(Buffer.from('API_KEY=secret\n')) === undefined,
   )
+  assert(
+    'referenceImages: one shared sniffer; view_image still sees only model formats',
+    sniffImageMimeType(Buffer.from('BM\0\0\0\0', 'binary')) === 'image/bmp' &&
+      sniffAnyImageType(Buffer.from('BM\0\0\0\0', 'binary')) === 'image/bmp' &&
+      sniffImageType(Buffer.from('BM\0\0\0\0', 'binary')) === undefined &&
+      sniffImageType(PNG_1X1) === 'image/png',
+  )
 
   const recovered = parseAssistantEnvelopeForSmoke(`
 <tool_calls>
@@ -1719,6 +1727,9 @@ async function withMockedFetch<T>(
   fs.writeFileSync(path.join(workspace, 'uploads', 'style.png'), PNG_1X1)
   fs.writeFileSync(path.join(workspace, 'uploads', 'notes.png'), 'API_KEY=not-an-image\n')
   fs.writeFileSync(path.join(root, 'outside.png'), PNG_1X1)
+  fs.mkdirSync(path.join(workspace, '.ssh'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.ssh', 'id.png'), PNG_1X1)
+  fs.writeFileSync(path.join(workspace, '.env.png'), PNG_1X1)
   const context = { cwd: workspace } as any
   const rejects = async (raw: unknown, pattern: RegExp): Promise<boolean> => {
     try {
@@ -1743,9 +1754,18 @@ async function withMockedFetch<T>(
         await rejects([path.join(root, 'outside.png')], /escapes|declined/i),
     )
     assert(
-      'referenceImages: protected paths, non-images, missing files and other schemes are refused',
-      await rejects([path.join(os.homedir(), '.ssh', 'id_rsa')], /escapes|declined|denied|protected/i) &&
-        await rejects(['uploads/notes.png'], /not a supported image/) &&
+      'referenceImages: protected paths inside the workspace (.ssh dir, .env file) are refused by ensureNotSensitivePath',
+      await rejects(['.ssh/id.png'], /Access denied: \.ssh\/id\.png is in a protected directory/) &&
+        await rejects(['.env.png'], /Access denied: \.env\.png is in a protected directory/),
+    )
+    const fullAccess = await resolveReferenceImages(['.ssh/id.png'], { ...context, permissionMode: 'full-access' })
+    assert(
+      'referenceImages: full-access mode skips the protected-path check, like read_file',
+      fullAccess.length === 1 && fullAccess[0]!.startsWith('data:image/png;base64,'),
+    )
+    assert(
+      'referenceImages: non-images, missing files and other schemes are refused',
+      await rejects(['uploads/notes.png'], /not a supported image/) &&
         await rejects(['uploads/missing.png'], /not found/) &&
         await rejects(['file:///etc/passwd'], /not supported/),
     )
@@ -1854,6 +1874,19 @@ async function withMockedFetch<T>(
 }
 
 {
+  // No visual API configured: the policy says so and how to configure it, and
+  // does not send the model to web-search images.
+  assert(
+    'visual policy: not-configured policy names /visual and does not suggest web-search assets',
+    VISUAL_NOT_CONFIGURED_POLICY.includes('not configured') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('/visual') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('artemis setup visual') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('Do not substitute web-search or downloaded images') &&
+      !/use web-search assets/i.test(VISUAL_NOT_CONFIGURED_POLICY),
+  )
+}
+
+{
   // Prompt guidance lives in the tool description, not in a rewrite of the prompt.
   const imageTool = providerNativeTools.find((tool) => tool.name === 'generate_image')
   const description = imageTool?.description ?? ''
@@ -1866,7 +1899,8 @@ async function withMockedFetch<T>(
       /`size`, not in the prompt/.test(description) &&
       /Keep the user's language/.test(description) &&
       /`referenceImages`/.test(description) &&
-      /view_image/.test(description) &&
+      /Look at it first with view_image whenever that tool is available/.test(description) &&
+      !/if you can/i.test(description) &&
       /ask one short question only/.test(description) &&
       /never substitute a web image/.test(description),
     description,
