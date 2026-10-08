@@ -5617,11 +5617,11 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const generateVideoSource = fs.readFileSync(path.join(process.cwd(), 'src/tools/generateVideo.ts'), 'utf8')
   assert(
     'generate_video: visual provider path sends Director prompt to video adapters',
-    /buildDirectedVideoPrompt\([\s\S]*provider:\s*videoConfig\.provider[\s\S]*prompt:\s*directed\.directedPrompt/.test(generateVideoSource),
+    /buildDirectedVideoPrompt\([\s\S]*provider:\s*videoConfig\.provider[\s\S]*prompt:\s*withSagaRenderingGuardrails\(directed\.directedPrompt,/.test(generateVideoSource),
   )
   assert(
     'generate_video: legacy BytePlus fallback sends Director prompt',
-    /provider:\s*'byteplus'[\s\S]*\{ type:\s*'text', text:\s*directed\.directedPrompt \}/.test(generateVideoSource),
+    /provider:\s*'byteplus'[\s\S]*\{ type:\s*'text', text:\s*withSagaRenderingGuardrails\(directed\.directedPrompt,/.test(generateVideoSource),
   )
 }
 

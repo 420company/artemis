@@ -377,6 +377,9 @@ export type AgentAction =
       // Saga raw mode: the prompt goes to the provider as written (no
       // Director, no prompt rewrite or provider-side prompt extension).
       cleanDirect?: boolean;
+      // Set by Saga outside raw mode: append the short rendering rules
+      // (renderingGuardrails.ts) when the prompt limit allows.
+      renderingGuardrails?: boolean;
       outputPath?: string;
       referenceImageUrls?: string[];
       referenceVideoUrls?: string[];

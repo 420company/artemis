@@ -1820,8 +1820,9 @@ export async function executeGenerateLongVideo(
           ratio,
           duration: segment.duration,
           ...(requestedResolution ? { resolution: requestedResolution } : {}),
-          // Raw mode: the segment prompt goes to the model as written.
-          ...(cleanDirect ? { cleanDirect: true } : {}),
+          // Raw mode: the segment prompt goes to the model as written;
+          // otherwise the short rendering rules ride along.
+          ...(cleanDirect ? { cleanDirect: true } : { renderingGuardrails: true }),
           outputPath: segment.outputPath,
           referenceImageUrls: hasGlobalUserImageReferences ? userReferenceImageUrls : undefined,
           referenceVideoUrls: segment.index === 1 ? action.referenceVideoUrls : undefined,

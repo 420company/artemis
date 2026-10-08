@@ -21,6 +21,8 @@ import {
   shouldPromoteBytePlusVideoModel,
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
+import { appendRenderingGuardrails } from './visual/renderingGuardrails.js';
+import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
 import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
@@ -256,7 +258,7 @@ export async function executeGenerateVideo(
     toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
     const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: directed.directedPrompt },
+      { type: 'text', text: withSagaRenderingGuardrails(directed.directedPrompt, action, 'byteplus', model) },
     ];
     const referenceImageUrls = [
       ...nonEmptyValues(action.referenceImageUrls),
@@ -408,6 +410,20 @@ export async function executeGenerateVideo(
     }
     return { action, ok: false, output: `generate_video error: ${message}` };
   }
+}
+
+/**
+ * A Saga segment (outside raw mode) gets the short rendering rules appended,
+ * only while the whole prompt stays within the model's prompt limit.
+ */
+function withSagaRenderingGuardrails(prompt: string, action: GenerateVideoAction, provider: string, model: string): string {
+  if (action.renderingGuardrails !== true || action.cleanDirect === true) return prompt;
+  const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
+  const guarded = appendRenderingGuardrails(prompt, limit);
+  if (guarded.added === 0) {
+    toolWarn(`⚠️ Saga: 提示词已接近 ${model} 的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
+  }
+  return guarded.prompt;
 }
 
 /** Output and ToolError for a failed legacy ModelArk call: the raw error plus a plain reason. */
@@ -581,7 +597,7 @@ async function generateVideoWithVisualProvider(
       });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({
-    prompt: directed.directedPrompt,
+    prompt: withSagaRenderingGuardrails(directed.directedPrompt, action, videoConfig.provider, model),
     model,
     ratio,
     duration,

@@ -44,6 +44,7 @@ import { extractOpeningFraming } from './sagaFraming.js';
 import { postSagaChatCompletion, resolveSagaChatEndpoint, SAGA_CHAT_TIMEOUT_MS } from './sagaChat.js';
 import { bytePlusImageModelReferenceLimit, checkBytePlusReferenceSupport, localImagesToReferenceDataUris, MAX_REFERENCE_IMAGES } from './referenceImages.js';
 import { seedreamAspectForRatio, seedreamImageSize, type SeedreamAspect } from './seedreamSizes.js';
+import { ANATOMICAL_SIDE_RULE, SINGLE_PROTAGONIST_RULE } from './renderingGuardrails.js';
 import { baseUrlIsLoopback, downloadGuardedUrl, downloadProviderAsset } from './safeDownload.js';
 
 // ─── Result types ─────────────────────────────────────────────────────────
@@ -300,6 +301,7 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
       'OUTPUT (fixed):',
       '- Three full-body views of the same character from the input: front view, side profile view, back view.',
       '- All three views must be the same person/being with identical features, outfit, and palette.',
+      `- ${ANATOMICAL_SIDE_RULE}`,
       styleLine,
       '- Clean neutral studio background, even soft lighting, hands and feet fully visible, no cropping.',
       `- Aspect ratio: ${input.ratio}.`,
@@ -347,6 +349,7 @@ export function buildSuperVisualCharacterTurnaroundPrompt(input: {
     'Image requirements (FIXED):',
     '- Three full-body views of the exact same character: front view, side profile view, and back view.',
     '- Same face structure, hair shape, body proportions, outfit, accessories, silhouette, color palette, and art style across all three views.',
+    `- ${ANATOMICAL_SIDE_RULE}`,
     '- Neutral studio background, even soft lighting, clean readable full-body pose, hands and feet fully visible, no cropping.',
     '- Character sheet layout only; no action scene, no environment scene, no other people, no alternate costumes.',
     '- No text, no labels, no captions, no watermark, no logo, no UI, no speech bubbles.',
@@ -513,6 +516,7 @@ export function buildSegmentKeyframePrompt(input: {
 
   return [
     identitySection,
+    `${SINGLE_PROTAGONIST_RULE} ${ANATOMICAL_SIDE_RULE}`,
     input.openingFraming ? `\n${input.openingFraming}` : '',
     visionTruth,
     locksSection,

@@ -15,6 +15,9 @@ import {
 } from '../src/tools/visual/superVisualMode.js';
 import { seedreamImageSize, seedreamPixelRange } from '../src/tools/visual/seedreamSizes.js';
 import { stripRawModeTag } from '../src/tools/generateLongVideo.js';
+import { executeGenerateVideo } from '../src/tools/generateVideo.js';
+import { appendRenderingGuardrails, SAGA_VIDEO_RENDERING_GUARDRAILS } from '../src/tools/visual/renderingGuardrails.js';
+import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
 
 const STORY = 'A young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
 
@@ -144,7 +147,8 @@ async function rawModeChecks(): Promise<void> {
   assert.ok(tasks.every((body) => !/原样直传/.test(promptText(body))), 'the raw-mode tag never reaches the video model');
   assert.ok(tasks.every((body) => !/Artemis Director|Fibonacci|focal point/i.test(promptText(body))), 'raw mode bypasses the Director');
   assert.equal(raw.requests.filter((r) => r.url.endsWith('/chat/completions')).length, 0, 'raw mode makes no narrative, rewrite or Director LLM calls');
-  assert.equal(imageBodies(raw.requests).filter(Boolean).length <= 1, true, 'raw mode generates no segment keyframes');
+  assert.equal(imageBodies(raw.requests).length, 0, 'raw mode generates no turnaround or keyframes');
+  assert.ok(tasks.every((body) => !promptText(body).includes('Rendering rules:')), 'raw mode never gets the rendering rules');
 }
 
 async function chainAccountingChecks(): Promise<void> {
@@ -161,6 +165,36 @@ async function chainAccountingChecks(): Promise<void> {
   assert.match(run.result.output, /chained=0\/2/, run.result.output.split('\n').find((line) => line.includes('Continuity')));
 }
 
+async function guardrailChecks(): Promise<void> {
+  const added = SAGA_VIDEO_RENDERING_GUARDRAILS.length + 2;
+  assert.ok(added < 600, `rendering rules add ${added} characters`);
+  assert.equal(appendRenderingGuardrails('x'.repeat(3990), 4000).added, 0, 'rules are dropped rather than overflow the limit');
+  assert.equal(appendRenderingGuardrails('x'.repeat(100), 4000).added, added);
+  assert.equal(resolveVideoModelLimits('byteplus', 'dreamina-seedance-2-0-260128').maxPromptChars, 4000);
+  assert.equal(resolveVideoModelLimits('openai', 'sora-2').maxPromptChars, 2600);
+
+  const run = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] });
+  assert.equal(run.result.ok, true, run.result.output);
+  const textOf = (body: Record<string, any>) => (body.content ?? []).filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n');
+  const prompts = videoTaskBodies(run.requests).map(textOf);
+  assert.ok(prompts.every((text) => text.endsWith(SAGA_VIDEO_RENDERING_GUARDRAILS)), 'every Saga segment carries the rendering rules');
+  assert.ok(prompts.every((text) => text.length <= 4000), `segment prompts stay within the Seedance limit: ${prompts.map((t) => t.length).join(', ')}`);
+  console.log(`  rendering rules: +${added} chars; segment prompts ${prompts.map((t) => t.length).join(', ')} chars`);
+  const images = imageBodies(run.requests);
+  assert.ok(images.every((body) => String(body.prompt).includes("character's own left or right")), 'turnaround and keyframes carry the side rule');
+  assert.ok(images.slice(1).every((body) => String(body.prompt).includes('Exactly one protagonist body')), 'keyframes carry the single-protagonist rule');
+
+  // A plain generate_video call never gets them.
+  await withHermeticWorkspace({}, async (cwd, requests) => {
+    const result = await executeGenerateVideo(
+      { type: 'generate_video', prompt: 'a kite drifting over a hill', outputPath: path.join(cwd, 'kite.mp4') } as any,
+      { cwd, permissionMode: 'full-access' } as any,
+    );
+    assert.equal(result.ok, true, result.output);
+    assert.ok(videoTaskBodies(requests).every((body) => !textOf(body).includes('Rendering rules:')));
+  });
+}
+
 seedreamSizeChecks();
 eligibilityChecks();
 budgetChecks();
@@ -168,4 +202,5 @@ await resolutionChecks();
 await superVisualOnSeedream();
 await rawModeChecks();
 await chainAccountingChecks();
+await guardrailChecks();
 console.log('saga hermetic smoke ok');
