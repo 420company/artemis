@@ -25,6 +25,7 @@ import { isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 import type { AgentAction } from '../../core/types.js';
 import type { SagaRatio } from './sagaRenderer/types.js';
+import { extractBriefAspectRatio, normalizeAspectRatio } from './aspectRatio.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
   return explicitLocale ?? DEFAULT_UI_LOCALE;
@@ -173,9 +174,7 @@ const TEXT_ONLY_IDENTITY_RE  = /^(?:4|四|④|没有图片?|纯文字|文字描�
 const SUBTITLE_AUTO_RE       = /^(?:1|一|①|自动|按需|默认|auto|automatic|as\s*needed|default)$/i;
 const SUBTITLE_ALWAYS_RE     = /^(?:2|二|②|要字幕|带字幕|有字幕|加字幕|字幕|需要字幕|always|with\s*subtitles?|subtitles?\s*on)$/i;
 const SUBTITLE_OFF_RE        = /^(?:3|三|③|不要字幕|无字幕|没字幕|去字幕|关闭字幕|off|no\s*subtitles?|subtitles?\s*off)$/i;
-const RATIO_VERTICAL_RE      = /^(?:1|一|①|9\s*[:：xX]\s*16|竖屏|纵向|portrait|vertical)$/i;
-const RATIO_HORIZONTAL_RE    = /^(?:2|二|②|16\s*[:：xX]\s*9|横屏|横向|landscape|horizontal)$/i;
-const RATIO_SQUARE_RE        = /^(?:3|三|③|1\s*[:：xX]\s*1|方屏|方形|正方形|square)$/i;
+const RATIO_MENU_INDEX_RE    = /^(?:([1一①])|([2二②])|([3三③]))[.、)）]?$/;
 const BGM_OFF_RE             = /^(?:1|一|①|不加(?:\s*(?:BGM|音乐|配乐))?|不要(?:\s*(?:BGM|音乐|配乐))?|无(?:\s*(?:BGM|音乐|配乐))?|跳过(?:\s*(?:BGM|音乐|配乐))?|不用(?:\s*(?:BGM|音乐|配乐))?|no(?:\s*(?:bgm|music|soundtrack))?|none|skip(?:\s*(?:bgm|music|soundtrack))?)$/i;
 const BGM_ADD_RE             = /^(?:2|二|②|添加|加|有|要|bgm|music|soundtrack|add)$/i;
 const BGM_ASSET_PROMPT_ZH    = '请发送本地音频路径，或直接音频文件 URL（mp3/wav/m4a/flac 等）；不加 BGM 回复 “不加”。';
@@ -350,22 +349,64 @@ function estimateDuration(text: string): number {
 }
 
 function extractRatio(text: string): SagaRatio | undefined {
-  // Deliberately conservative: only explicit aspect-ratio / orientation words.
-  // Do NOT infer from platform names (小红书 / Instagram / YouTube / etc.);
-  // the workflow asks the user to confirm the final hard generation parameter.
-  if (/(?:9\s*[:：xX]\s*16|竖屏|纵向|portrait|vertical)/i.test(text)) return '9:16';
-  if (/(?:1\s*[:：xX]\s*1|方屏|方形|正方形|square)/i.test(text)) return '1:1';
-  if (/(?:16\s*[:：xX]\s*9|横屏|横向|landscape|horizontal)/i.test(text)) return '16:9';
-  return undefined;
+  // Deliberately conservative: a labelled ratio line first, otherwise only
+  // bounded numeric ratios and unambiguous orientation words. Never inferred
+  // from platform names (小红书 / Instagram / YouTube / etc.).
+  return extractBriefAspectRatio(text)?.ratio;
+}
+
+/**
+ * A ratio the user has already answered: a labelled line in the brief
+ * ("画幅比例 / ratio: 9:16 竖屏") or a format named in the opening request
+ * line ("/saga 做一个竖屏视频"). The wizard applies it instead of asking.
+ */
+function statedRatio(state: SagaWorkflowState): SagaRatio | undefined {
+  const brief = extractBriefAspectRatio(combinedStoryText(state));
+  if (brief?.labelled) return brief.ratio;
+  const requestLine = state.originalText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? '';
+  if (requestLine.length > 200) return undefined;
+  return extractBriefAspectRatio(requestLine)?.ratio;
 }
 
 function applyRatioReplyToState(state: SagaWorkflowState, text: string): boolean {
-  if (RATIO_VERTICAL_RE.test(text)) state.ratio = '9:16';
-  else if (RATIO_HORIZONTAL_RE.test(text)) state.ratio = '16:9';
-  else if (RATIO_SQUARE_RE.test(text)) state.ratio = '1:1';
-  else if (CONFIRM_DEFAULT_RE.test(text)) state.ratio = state.suggestedRatio ?? '16:9';
-  else return false;
+  const index = text.trim().match(RATIO_MENU_INDEX_RE);
+  if (index) {
+    state.ratio = index[1] ? '9:16' : index[2] ? '16:9' : '1:1';
+    return true;
+  }
+  if (CONFIRM_DEFAULT_RE.test(text)) {
+    state.ratio = state.suggestedRatio ?? '16:9';
+    return true;
+  }
+  // "9:16 竖屏", "竖屏 9:16", "portrait" — anything that names exactly one
+  // ratio, including a line copied from the menu.
+  if (text.trim().length > 40) return false;
+  const ratio = normalizeAspectRatio(text);
+  if (!ratio) return false;
+  state.ratio = ratio;
   return true;
+}
+
+/**
+ * Move to the ratio step. When the brief already states the ratio it is
+ * applied with a one-line note and the subtitle question follows directly.
+ */
+function enterRatioStep(state: SagaWorkflowState): SagaWorkflowOutcome {
+  state.updatedAt = Date.now();
+  const stated = statedRatio(state);
+  if (stated) {
+    state.ratio = stated;
+    state.suggestedRatio = stated;
+    state.stage = 'awaiting_subtitle_mode';
+    const note = pickLocale(state.locale, {
+      zh: `📐 画幅：${formatRatioLabel(stated, state.locale)}（按剧本）。要改的话直接回复其它比例，例如 “16:9”。`,
+      en: `📐 Aspect ratio: ${formatRatioLabel(stated, state.locale)} (from your brief). Reply with another ratio such as "16:9" to change it.`,
+    });
+    return { handled: true, reply: `${note}\n\n${buildSubtitleModeAskMessage(state)}` };
+  }
+  state.suggestedRatio = extractRatio(combinedStoryText(state)) ?? '16:9';
+  state.stage = 'awaiting_ratio';
+  return { handled: true, reply: buildRatioAskMessage(state) };
 }
 
 // ─── Reference collection helpers ─────────────────────────────────────────
@@ -1639,10 +1680,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
           state.updatedAt = Date.now();
           return { handled: true, reply: buildProtagonistAskMessage(state) };
         }
-        state.suggestedRatio = extractRatio(combinedStoryText(state)) ?? '16:9';
-        state.stage = 'awaiting_ratio';
-        state.updatedAt = Date.now();
-        return { handled: true, reply: buildRatioAskMessage(state) };
+        return enterRatioStep(state);
       }
 
       // Acknowledge the refs and continue collecting
@@ -1804,10 +1842,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
         state.updatedAt = Date.now();
         return { handled: true, reply: buildProtagonistAskMessage(state) };
       }
-      state.suggestedRatio = extractRatio(combinedStoryText(state)) ?? '16:9';
-      state.stage = 'awaiting_ratio';
-      state.updatedAt = Date.now();
-      return { handled: true, reply: buildRatioAskMessage(state) };
+      return enterRatioStep(state);
     }
 
     if (state.stage === 'awaiting_ratio') {
@@ -1827,6 +1862,16 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       else if (SUBTITLE_AUTO_RE.test(text) || CONFIRM_DEFAULT_RE.test(text)) state.subtitleMode = 'auto';
       else {
         state.updatedAt = Date.now();
+        // The ratio note above this menu invites a different ratio here.
+        const ratioChange = text.length <= 40 ? normalizeAspectRatio(text) : undefined;
+        if (ratioChange) {
+          state.ratio = ratioChange;
+          const note = pickLocale(state.locale, {
+            zh: `📐 画幅已改为 ${formatRatioLabel(ratioChange, state.locale)}。`,
+            en: `📐 Aspect ratio changed to ${formatRatioLabel(ratioChange, state.locale)}.`,
+          });
+          return { handled: true, reply: `${note}\n\n${buildSubtitleModeAskMessage(state)}` };
+        }
         return { handled: true, reply: buildSubtitleModeAskMessage(state) };
       }
       state.stage = 'awaiting_duration';

@@ -26,6 +26,7 @@ import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
 import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
+import { normalizeVideoRatioArgument } from './visual/aspectRatio.js';
 import {
   buildVisualSetupRequiredMessage,
   isVisualSetupRequiredError,
@@ -233,7 +234,7 @@ export async function executeGenerateVideo(
         output: 'generate_video: selected video model cannot generate audio. Choose Seedance 2.0 Pro, or set generateAudio to false.',
       };
     }
-    const ratio = action.ratio?.trim() || DEFAULT_RATIO;
+    const ratio = normalizeVideoRatioArgument(action.ratio, DEFAULT_RATIO, toolWarn) ?? DEFAULT_RATIO;
     const duration = normalizeVideoDurationForProvider(action.duration, 'byteplus', model);
     const maxPolls =
       typeof action.maxPolls === 'number' && action.maxPolls > 0
@@ -550,7 +551,7 @@ async function generateVideoWithVisualProvider(
       output: `generate_video: ${videoConfig.provider}/${model} cannot generate audio.${modelHint}`,
     };
   }
-  const ratio = action.ratio;
+  const ratio = normalizeVideoRatioArgument(action.ratio, undefined, toolWarn);
   const referenceImageUrls = [
     ...nonEmptyValues(action.referenceImageUrls),
     ...await localImagePathsToProviderUrls(action.referenceImagePaths, context, videoConfig.provider, model),

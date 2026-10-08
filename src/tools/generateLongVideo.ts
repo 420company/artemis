@@ -64,6 +64,7 @@ import {
 import { extractOpeningFramingRegex, formatOpeningFramingBlock } from './visual/sagaFraming.js';
 import type { SagaContinuityMode } from './visual/sagaRenderer/continuity.js';
 import { detectsLockOffCamera } from './visual/sagaRenderer/continuity.js';
+import { normalizeAspectRatio } from './visual/aspectRatio.js';
 import type {
   SagaFps,
   SagaQuality,
@@ -420,8 +421,9 @@ async function buildDefaultLongVideoOutputPath(options: {
 }
 
 function resolveRatio(raw: string | undefined): SagaRatio {
-  const normalized = raw?.trim();
-  if (normalized === '9:16' || normalized === '1:1' || normalized === '16:9') return normalized;
+  const ratio = normalizeAspectRatio(raw);
+  if (ratio) return ratio;
+  if (raw?.trim()) toolWarn(`⚠️ Saga: unrecognised aspect ratio "${raw.trim()}"; using ${DEFAULT_RATIO}.`);
   return DEFAULT_RATIO;
 }
 

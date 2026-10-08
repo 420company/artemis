@@ -5,6 +5,7 @@ import path from 'node:path';
 import { ProviderStore } from '../src/providers/store.js';
 import { extractRequestedResolution, handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
 import { BYTEPLUS_SEEDANCE_2_PRO_MODEL } from '../src/tools/visual/videoCapabilities.js';
+import { extractBriefAspectRatio, normalizeAspectRatio, normalizeVideoRatioArgument } from '../src/tools/visual/aspectRatio.js';
 
 // Explicit /saga entry only starts the wizard when a video provider is
 // configured (resolveConfiguredVisualProvider). Configure one in the temp
@@ -548,7 +549,78 @@ async function main(): Promise<void> {
   assert.equal(casual.handled, false, 'the casual-words flow should end in a generate_long_video action');
   assert.notEqual(casual.action?.cleanDirect, true, '"不要滤镜" / "short prompt" in a story must not switch on raw mode');
 
+  await ratioCases(cwd, key);
+
   console.log('saga workflow explicit-trigger guard ok');
+}
+
+function ratioBrief(ratioLine: string, extra = '', timecodes = ['[0-8秒] 女孩推开旧影院的门。', '[8-16秒] 她走到银幕前。']): string {
+  return ['【整片叙事】', `一个女孩在废弃影院里找到童年的胶片。${extra}`, '【画质规格】', ratioLine, '· 镜头: 35mm', '【分镜】', ...timecodes].join('\n');
+}
+
+async function ratioCases(cwd: string, key: string): Promise<void> {
+  const table: Array<[string, string, string | undefined, boolean?]> = [
+    ['labelled zh', ratioBrief('· 画幅比例 / ratio: 9:16 竖屏'), '9:16', true],
+    ['labelled en', 'Aspect ratio: 9:16 portrait\n[0-8s] A girl opens the door.', '9:16', true],
+    ['labelled 1:1', ratioBrief('· 画幅比例 / ratio: 1:1 方屏'), '1:1', true],
+    ['timecodes past 1:10 with 16:9', ratioBrief('· 画幅比例 / ratio: 16:9 横屏', '', ['[0:56-1:04] 推门。', '[1:04-1:12] 走近。', '[1:12-1:20] 银幕亮起。']), '16:9', true],
+    ['unlabelled timecodes only', ratioBrief('· 镜头: 50mm', '', ['[1:04-1:12] 走近。', '[1:12-1:20] 银幕亮起。']), undefined],
+    ['BGM start 1:19', ratioBrief('· 摄影机感: iPhone', '配乐起点从 1:19 开始。'), undefined],
+    ['纵向推进', ratioBrief('· 摄影机感: iPhone', '镜头纵向推进。'), undefined],
+    ['town square', '[0-8s] A girl crosses the town square.\n[8-16s] She stops.', undefined],
+    ['portrait 85mm', '[0-8s] Close portrait of the girl, 85mm, vertical light.', undefined],
+    ['竖版', ratioBrief('· 画面尺寸：竖版'), '9:16', true],
+    ['9×16', ratioBrief('· 画面尺寸：9×16'), '9:16', true],
+    ['1080x1920', ratioBrief('· 画面尺寸：1080x1920'), '9:16', true],
+    ['unlabelled 竖屏 in request', '帮我做一个竖屏长视频', '9:16', false],
+    ['unfilled template', ratioBrief('· 画幅比例 / ratio: [16:9 横屏 / 9:16 竖屏 / 1:1 方屏]'), undefined],
+    ['人物比例 is not a label', ratioBrief('· 人物比例：9:16 竖屏 和 16:9 都试过'), undefined],
+  ];
+  for (const [name, text, expected, labelled] of table) {
+    const found = extractBriefAspectRatio(text);
+    assert.equal(found?.ratio, expected, `ratio case "${name}"`);
+    if (expected) assert.equal(found?.labelled, labelled, `ratio case "${name}" labelled`);
+  }
+  for (const [value, expected] of [['9:16 竖屏', '9:16'], ['竖屏 9:16', '9:16'], ['portrait', '9:16'], ['9×16', '9:16'], ['1920x1080', '16:9'], ['square', '1:1'], ['16:9 / 9:16', undefined], ['', undefined]] as const) {
+    assert.equal(normalizeAspectRatio(value), expected, `normalizeAspectRatio(${JSON.stringify(value)})`);
+  }
+  const warnings: string[] = [];
+  assert.equal(normalizeVideoRatioArgument('portrait', '16:9', (m) => warnings.push(m)), '9:16');
+  assert.equal(normalizeVideoRatioArgument('4:3', '16:9', (m) => warnings.push(m)), '4:3');
+  assert.equal(normalizeVideoRatioArgument('tall-ish', '16:9', (m) => warnings.push(m)), '16:9');
+  assert.equal(warnings.length, 1, 'an unrecognised ratio warns before defaulting');
+
+  async function drive(name: string, text: string, ratioAnswer: string): Promise<{ menu?: string; note?: string; ratio?: string }> {
+    const flowKey = `${key}-ratio-${name}`;
+    const send = (t: string, forceIntent = false) => handleSagaLongVideoWorkflow({ scope: 'bridge', key: flowKey, cwd, locale: 'zh-CN', text: t, forceIntent });
+    let out = await send(text, true);
+    let menu: string | undefined;
+    let note: string | undefined;
+    for (let step = 0; step < 12 && out.handled; step += 1) {
+      const head = out.reply.split('\n')[0] ?? '';
+      let answer = '开始生成';
+      if (/请选择视频画幅比例/.test(head)) { menu = head; answer = ratioAnswer; }
+      else if (/画幅：/.test(head)) { note = head; answer = '默认'; }
+      else if (/这段视频里/.test(out.reply)) answer = '2';
+      else if (/字幕/.test(head)) answer = '默认';
+      else if (/时长/.test(out.reply)) answer = '默认';
+      else if (/背景音乐/.test(head)) answer = '不加';
+      else if (/主角/.test(out.reply)) answer = '1';
+      out = await send(answer);
+    }
+    assert.equal(out.handled, false, `ratio flow "${name}" should end in an action: ${out.handled ? out.reply.slice(0, 300) : ""}`);
+    return { menu, note, ratio: out.action?.ratio };
+  }
+  const labelledFlow = await drive('labelled', ratioBrief('· 画幅比例 / ratio: 9:16 竖屏', '', ['[1:04-1:12] 走近。', '[1:12-1:20] 银幕亮起。']), '默认');
+  assert.equal(labelledFlow.menu, undefined, 'a labelled ratio line skips the ratio menu');
+  assert.match(labelledFlow.note ?? '', /9:16 竖屏（按剧本）/);
+  assert.equal(labelledFlow.ratio, '9:16');
+  const templateFlow = await drive('template', ratioBrief('· 画幅比例 / ratio: [16:9 横屏 / 9:16 竖屏 / 1:1 方屏]'), '竖屏 9:16');
+  assert.match(templateFlow.menu ?? '', /当前建议：16:9 横屏/, 'an unfilled template line is no answer');
+  assert.equal(templateFlow.ratio, '9:16', 'a menu reply naming the ratio and its label is accepted');
+  const copiedFlow = await drive('copied', ratioBrief('· 摄影机感: iPhone', '配乐起点从 1:19 开始。'), '9:16 竖屏');
+  assert.match(copiedFlow.menu ?? '', /当前建议：16:9 横屏/, '"1:19" is not a 1:1 ratio');
+  assert.equal(copiedFlow.ratio, '9:16', 'a line copied from the menu is accepted');
 }
 
 main().catch((error) => {
