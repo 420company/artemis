@@ -1116,7 +1116,24 @@ async function runSessionCommand(options: { cwd: string; locale: UiLocale; args:
       return
     }
     const session = await store.load(id)
-    console.log(JSON.stringify(session, null, 2))
+    // `messages` is the whole user-visible conversation: messages moved to
+    // the transcript archive by compaction, then the live ones, without the
+    // compaction boundary or runtime-context entries. `--live` prints the
+    // stored record as is (what the model is sent).
+    if (args.includes('--live')) {
+      console.log(JSON.stringify(session, null, 2))
+      return
+    }
+    const history = await store.loadFullHistory(session)
+    console.log(JSON.stringify({
+      ...session,
+      messages: history.messages,
+      history: {
+        archivedMessages: history.archived,
+        liveMessages: session.messages.length,
+        compactions: session.messages[0]?.compaction?.index ?? 0,
+      },
+    }, null, 2))
     return
   }
 
@@ -1136,8 +1153,24 @@ async function runSessionCommand(options: { cwd: string; locale: UiLocale; args:
       return
     }
     await fs.promises.unlink(path.join(resolveDataRootDir(cwd), 'sessions', `${session.id}.json`))
-    // Context files (transcript archive, spilled tool outputs) go with it.
-    await fs.promises.rm(path.join(resolveDataRootDir(cwd), 'sessions', session.id), { recursive: true, force: true })
+    // Context files (transcript archive, spilled tool outputs) go with it,
+    // and so do its delegated child sessions and theirs.
+    await store.removeContextDir(session.id)
+    const removed = new Set([session.id])
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const candidate of sessions) {
+        if (removed.has(candidate.id)) continue
+        if ((candidate.parentSessionId && removed.has(candidate.parentSessionId)) ||
+          (candidate.kind === 'agent' && candidate.rootSessionId && removed.has(candidate.rootSessionId))) {
+          removed.add(candidate.id)
+          grew = true
+          await fs.promises.rm(path.join(resolveDataRootDir(cwd), 'sessions', `${candidate.id}.json`), { force: true })
+          await store.removeContextDir(candidate.id)
+        }
+      }
+    }
     console.log()
     console.log(buildPanel(t('会话已删除', 'Session deleted'), [`ID: ${session.id}`]))
     console.log()

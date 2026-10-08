@@ -2,6 +2,8 @@ import {
   appendFile,
   readFile,
   readdir,
+  rename,
+  rm,
   stat,
   writeFile,
 } from 'node:fs/promises';
@@ -27,11 +29,18 @@ import type {
 import { isHeimdallEventKind } from '../core/types.js';
 import {
   createContextStorage,
+  isCompactionBoundary,
   normalizeContextState,
+  readFullHistory,
   resolveContextBudget,
   spillToolResultIfLarge,
   type ContextStorage,
 } from '../core/compaction/index.js';
+
+/** Entries the runtime writes into a history that the user never wrote or saw. */
+export function isSyntheticHistoryMessage(message: SessionMessage): boolean {
+  return isCompactionBoundary(message) || message.name === 'runtime_context';
+}
 import {
   canonicalizeClaimStatement,
   synchronizeEvidenceGraph,
@@ -106,16 +115,40 @@ function normalizeStoredMessage(
     createdAt = fallbackCreatedAt;
     mutated = true;
   }
+  // toolCalls must be an array of { id, name, arguments: string }; drop
+  // anything else (old or damaged files held strings and nulls).
+  let toolCalls = candidate.toolCalls;
+  if (toolCalls !== undefined) {
+    const valid = Array.isArray(toolCalls)
+      ? toolCalls
+        .filter((call): call is Record<string, unknown> =>
+          Boolean(call) && typeof call === 'object' && !Array.isArray(call) &&
+          typeof (call as Record<string, unknown>).id === 'string' &&
+          typeof (call as Record<string, unknown>).name === 'string')
+        .map((call) => ({
+          id: call.id as string,
+          name: call.name as string,
+          arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {}),
+        }))
+      : [];
+    if (!Array.isArray(toolCalls) || valid.length !== toolCalls.length ||
+      valid.some((call, i) => (toolCalls as Array<Record<string, unknown>>)[i]?.arguments !== call.arguments)) {
+      mutated = true;
+    }
+    toolCalls = valid.length > 0 ? valid : undefined;
+  }
   if (!mutated) {
     return { message: raw as SessionMessage, mutated: false };
   }
+  const { toolCalls: _rawToolCalls, ...rest } = candidate;
   return {
     message: {
-      ...(candidate as unknown as SessionMessage),
+      ...(rest as unknown as SessionMessage),
       id: id as string,
       role: role as SessionMessage['role'],
       content: content as string,
       createdAt: createdAt as string,
+      ...(toolCalls ? { toolCalls: toolCalls as SessionMessage['toolCalls'] } : {}),
     },
     mutated: true,
   };
@@ -396,6 +429,11 @@ export class SessionStore {
     return path.join(this.sessionDir, sessionId);
   }
 
+  /** Advisory lock file for runs on this session (see storage/sessionLock.ts). */
+  getLockPath(sessionId: string): string {
+    return path.join(this.sessionDir, `${sessionId}.lock`);
+  }
+
   getContextStorage(session: Pick<SessionRecord, 'id'>): ContextStorage {
     return createContextStorage(this.getContextDir(session.id));
   }
@@ -489,10 +527,11 @@ export class SessionStore {
       return;
     }
     session.updatedAt = now();
+    // Conversation content: readable by the owner only.
     await writeFile(
       path.join(this.sessionDir, `${session.id}.json`),
       JSON.stringify(session, null, 2),
-      'utf8',
+      { encoding: 'utf8', mode: 0o600 },
     );
     this.lastWritten.set(session.id, comparable);
     invalidateSessionSearchCache(this.cwd);
@@ -506,16 +545,65 @@ export class SessionStore {
     }
 
     await this.ensure();
-    const raw = await readFile(
-      path.join(this.sessionDir, `${sessionId}.json`),
-      'utf8',
-    );
-    const normalized = this.normalizeSession(JSON.parse(raw) as SessionRecord);
+    const filePath = path.join(this.sessionDir, `${sessionId}.json`);
+    const raw = await readFile(filePath, 'utf8');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return this.quarantine(sessionId, filePath, error);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return this.quarantine(sessionId, filePath, new Error('not a session object'));
+    }
+    const record = parsed as SessionRecord;
+    // The file name is the id; a missing or wrong id inside is repaired.
+    if (record.id !== sessionId) record.id = sessionId;
+    const normalized = this.normalizeSession(record);
     if (normalized.mutated) {
       await this.save(normalized.session);
     }
     this.sessionCache.set(normalized.session.id, normalized.session);
     return normalized.session;
+  }
+
+  /**
+   * An unreadable session file must not brick the session: it is moved
+   * aside to `<id>.json.corrupt-<time>` (kept for inspection) and a fresh,
+   * empty session with the same id takes its place.
+   */
+  private async quarantine(sessionId: string, filePath: string, error: unknown): Promise<SessionRecord> {
+    const aside = `${filePath}.corrupt-${Date.now()}`;
+    await rename(filePath, aside).catch(() => undefined);
+    const reason = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[session] ${sessionId}: the session file could not be read (${reason}); it was moved to ${aside} and a fresh session was started.\n`,
+    );
+    const fresh = this.createSession({ title: 'Recovered session' });
+    this.sessionCache.delete(fresh.id);
+    const recovered: SessionRecord = {
+      ...fresh,
+      id: sessionId,
+      rootSessionId: sessionId,
+      metadata: { recoveredFrom: aside, recoveredAt: now() },
+    };
+    await this.save(recovered);
+    return recovered;
+  }
+
+  /**
+   * Every message of the conversation in order, including the ones moved to
+   * the transcript archive by compaction; the compaction boundary and
+   * runtime-context entries are left out. This is the user-visible history
+   * (`artemis session show`), not what the model is sent.
+   */
+  async loadFullHistory(session: SessionRecord): Promise<{ messages: SessionMessage[]; archived: number }> {
+    return readFullHistory(this.getContextDir(session.id), session.messages, isSyntheticHistoryMessage);
+  }
+
+  /** Remove a session's context directory (archive, spilled tool outputs). */
+  async removeContextDir(sessionId: string): Promise<void> {
+    await rm(this.getContextDir(sessionId), { recursive: true, force: true });
   }
 
   async loadLatest(): Promise<SessionRecord | null> {
@@ -560,8 +648,19 @@ export class SessionStore {
         readFile(filePath, 'utf8'),
         stat(filePath),
       ]);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // One damaged file must not hide every other session.
+        process.stderr.write(`[session] skipped unreadable session file ${entry}\n`);
+        continue;
+      }
       sessions.push({
-        session: JSON.parse(raw) as SessionRecord,
+        session: { ...(parsed as SessionRecord), id: (parsed as SessionRecord).id || entry.slice(0, -5) },
         mtimeMs: info.mtimeMs,
       });
     }
