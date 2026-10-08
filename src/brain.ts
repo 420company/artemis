@@ -2615,7 +2615,7 @@ async function completeWithOptionalStream(
     const onRetryLog: ((m: string) => void) | undefined = typeof options?.onRetryLog === 'function' ? options.onRetryLog : undefined;
     const abortSignal: AbortSignal | undefined = options?.abortSignal;
     let attempt = 0;
-    while (true) {
+    for (;;) {
         attempt += 1;
         let emitted = false;
         const guardedDelta = onDelta ? (d: string): void => { emitted = true; onDelta(d); } : undefined;
