@@ -37,6 +37,9 @@ export class ImageInputError extends Error {}
  */
 export type SniffedImageType = ImageMediaType | 'image/bmp' | 'image/tiff' | 'image/heic' | 'image/heif';
 
+/** BITMAPCOREHEADER, BITMAPINFOHEADER, V2, V3, V4 and V5 header sizes. */
+const BMP_DIB_HEADER_SIZES = new Set([12, 40, 52, 56, 108, 124]);
+
 export function sniffAnyImageType(bytes: Uint8Array): SniffedImageType | undefined {
   const b = bytes;
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
@@ -49,7 +52,13 @@ export function sniffAnyImageType(bytes: Uint8Array): SniffedImageType | undefin
   ) {
     return 'image/webp';
   }
-  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp';
+  if (b.length >= 18 && b[0] === 0x42 && b[1] === 0x4d) {
+    // "BM" alone is too weak (any text file may start with it): also require a
+    // plausible file size and a known DIB header size.
+    const fileSize = (b[2]! | (b[3]! << 8) | (b[4]! << 16) | (b[5]! << 24)) >>> 0;
+    const dibHeaderSize = (b[14]! | (b[15]! << 8) | (b[16]! << 16) | (b[17]! << 24)) >>> 0;
+    if (fileSize >= 26 && BMP_DIB_HEADER_SIZES.has(dibHeaderSize)) return 'image/bmp';
+  }
   if (
     b.length >= 4 &&
     ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a && b[3] === 0x00) ||

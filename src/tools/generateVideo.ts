@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { AgentAction } from '../core/types.js';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';
 import { uploadLocalReferenceAssets } from './vidarAssetHosting.js';
-import { resolveModelArkMediaCredentials } from './vidarMedia.js';
+import { modelArkEndpoint, resolveModelArkMediaCredentials } from './vidarMedia.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { createVisualProvider } from './visual/providers/interface.js';
@@ -281,7 +281,7 @@ export async function executeGenerateVideo(
     appendReferenceContent(content, firstFrameImageUrls, 'image_url', 'first_frame');
     appendReferenceContent(content, lastFrameImageUrls, 'image_url', 'last_frame');
 
-    const createEndpoint = `${baseUrl}/contents/generations/tasks`;
+    const createEndpoint = modelArkEndpoint(baseUrl, 'contents/generations/tasks');
     const createBody = {
       model,
       content,
@@ -330,7 +330,7 @@ export async function executeGenerateVideo(
       };
     }
 
-    const statusEndpoint = `${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`;
+    const statusEndpoint = modelArkEndpoint(baseUrl, `contents/generations/tasks/${encodeURIComponent(taskId)}`);
     let videoUrl: string | undefined;
     let lastStatus = 'pending';
 

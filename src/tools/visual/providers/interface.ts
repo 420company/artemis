@@ -45,6 +45,10 @@ export interface GenerationResult {
   success: boolean
   assetPath?: string
   error?: string
+  /** HTTP status of the generation API call when it failed with one (never a download's status). */
+  httpStatus?: number
+  /** Whether the generation request or the download of its result failed. */
+  failureStage?: 'request' | 'download'
   generationTime?: number
   modelInfo?: {
     provider: string

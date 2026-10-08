@@ -78,7 +78,8 @@ import {
   saveLedger,
   cleanupLedger,
 } from '../src/core/collapse/index.js'
-import { normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import { modelArkEndpoint, normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import { downloadProviderAsset, isNonPublicAddress } from '../src/tools/visual/safeDownload.js'
 import { sniffAnyImageType, sniffImageType } from '../src/core/imageInput.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
@@ -1491,6 +1492,16 @@ const PNG_1X1 = Buffer.from(
   'base64',
 )
 
+// A 1x1 BITMAPINFOHEADER bmp header: size 58, DIB header 40.
+const BMP_HEADER = (() => {
+  const buf = Buffer.alloc(58)
+  buf.write('BM', 0, 'ascii')
+  buf.writeUInt32LE(58, 2)
+  buf.writeUInt32LE(54, 10)
+  buf.writeUInt32LE(40, 14)
+  return buf
+})()
+
 async function configureBytePlusImageProfile(cwd: string, baseUrl: string): Promise<void> {
   const store = new ProviderStore(cwd)
   const data = await store.load()
@@ -1551,7 +1562,26 @@ async function withMockedFetch<T>(
   )
   assert(
     'image failure: ModelArk overdue account (403 ServiceOverdue) is insufficient balance',
-    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 403): {"error":{"code":"OperationDenied.ServiceOverdue","message":"account overdue"}}' }) === 'insufficient_balance',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 403): {"error":{"code":"OperationDenied.ServiceOverdue","message":"account overdue"}}', status: 403 }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: 401/403 is billing only with a specific code, otherwise unauthorized, even with "not configured" text',
+    classifyImageGenerationFailure({ detail: '{"error":{"code":"insufficient_balance"}}', status: 401 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: '{"error":{"code":"AccountOverdueError"}}', status: 403 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: 'your account balance is too low', status: 403 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'model access not configured for this key', status: 403 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API key is not configured', status: 401 }) === 'unauthorized',
+  )
+  assert(
+    'image failure: the status is never parsed from text; a failed download is download_failed',
+    classifyImageGenerationFailure({ detail: 'Image download failed: download failed: HTTP 403' }) === 'upstream' &&
+      classifyImageGenerationFailure({ detail: 'Image download failed: download failed: HTTP 403', stage: 'download' }) === 'download_failed' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 402): busy' }) === 'upstream',
+  )
+  assert(
+    'image failure: with reference images, the too-large advice mentions shrinking them',
+    formatImageGenerationFailure({ detail: 'Request body too large', status: 413, hasReferences: true }).output.includes('fewer reference images or smaller/compressed copies') &&
+      !formatImageGenerationFailure({ detail: 'Request body too large', status: 413 }).output.includes('reference'),
   )
   assert(
     'image failure: 413 is payload too large',
@@ -1565,7 +1595,7 @@ async function withMockedFetch<T>(
   assert(
     'image failure: missing key is not configured, 401 is unauthorized, 5xx and network errors are upstream',
     classifyImageGenerationFailure({ detail: 'Custom image API key is not configured.' }) === 'not_configured' &&
-      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 401): {"error":{"code":"AuthenticationError"}}' }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 401): {"error":{"code":"AuthenticationError"}}', status: 401 }) === 'unauthorized' &&
       classifyImageGenerationFailure({ detail: 'API request failed (HTTP 503): upstream busy' }) === 'upstream' &&
       classifyImageGenerationFailure({ detail: 'fetch failed' }) === 'upstream',
   )
@@ -1643,6 +1673,32 @@ async function withMockedFetch<T>(
       normalizeModelArkMediaBaseUrl(undefined) === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
       normalizeModelArkMediaBaseUrl('mock://local') === 'https://ark.ap-southeast.bytepluses.com/api/v3',
   )
+  const throwsMisconfigured = (url: string): boolean => {
+    try {
+      normalizeModelArkMediaBaseUrl(url)
+      return false
+    } catch (error) {
+      return /Visual API base URL is misconfigured: .*plain http/.test(String(error))
+    }
+  }
+  assert(
+    'ModelArk base URL: volces.com normalizes like bytepluses.com; gateway query strings are kept',
+    normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/api/v3/images/generations') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('http://ark.cn-beijing.volces.com/api/v3') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1?tenant=a') === 'https://gw.example.test/v1?tenant=a' &&
+      modelArkEndpoint('https://gw.example.test/v1?tenant=a', 'images/generations') === 'https://gw.example.test/v1/images/generations?tenant=a' &&
+      modelArkEndpoint('https://ark.ap-southeast.bytepluses.com/api/v3', 'contents/generations/tasks') === 'https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks',
+  )
+  assert(
+    'ModelArk base URL: plain http only for loopback; a lookalike host is not treated as BytePlus',
+    normalizeModelArkMediaBaseUrl('http://localhost:8080/v1') === 'http://localhost:8080/v1' &&
+      normalizeModelArkMediaBaseUrl('http://127.0.0.1:8080/v1') === 'http://127.0.0.1:8080/v1' &&
+      normalizeModelArkMediaBaseUrl('http://[::1]:8080/v1') === 'http://[::1]:8080/v1' &&
+      throwsMisconfigured('http://gw.example.test/v1') &&
+      throwsMisconfigured('http://10.0.0.5:8080/v1') &&
+      normalizeModelArkMediaBaseUrl('https://bytepluses.com.evil.test/api/v3/x') === 'https://bytepluses.com.evil.test/api/v3/x',
+  )
   const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-gateway-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   await configureBytePlusImageProfile(tmpDir, 'https://gw.example.test/v1')
@@ -1665,6 +1721,173 @@ async function withMockedFetch<T>(
 }
 
 {
+  // Downloads of provider-returned URLs refuse private, link-local and
+  // loopback targets, also after redirects; loopback only for a loopback base URL.
+  assert(
+    'asset download: private, link-local, loopback and mapped addresses are non-public',
+    isNonPublicAddress('10.1.2.3') &&
+      isNonPublicAddress('172.20.0.1') &&
+      isNonPublicAddress('192.168.1.1') &&
+      isNonPublicAddress('169.254.169.254') &&
+      isNonPublicAddress('127.0.0.1') &&
+      isNonPublicAddress('::1') &&
+      isNonPublicAddress('fe80::1') &&
+      isNonPublicAddress('fd00::1') &&
+      isNonPublicAddress('::ffff:10.0.0.1') &&
+      !isNonPublicAddress('93.184.216.34') &&
+      !isNonPublicAddress('2606:2800:220:1:248:1893:25c8:1946') &&
+      !isNonPublicAddress('127.0.0.1', { allowLoopback: true }) &&
+      isNonPublicAddress('10.0.0.1', { allowLoopback: true }),
+  )
+  const refused = async (url: string, respond: (u: string) => Response, allowLoopback = false) =>
+    withMockedFetch(respond, async (calls) => {
+      try {
+        await downloadProviderAsset(url, { timeoutMs: 5_000, allowLoopback })
+        return { refused: false, calls: [...calls], message: '' }
+      } catch (error) {
+        return { refused: true, calls: [...calls], message: String(error) }
+      }
+    })
+  const metadata = await refused('http://169.254.169.254/latest/meta-data/', () => new Response('secret'))
+  assert(
+    'asset download: a cloud-metadata URL is refused without being fetched',
+    metadata.refused && metadata.calls.length === 0 && /private, link-local or loopback/.test(metadata.message),
+    metadata.message,
+  )
+  const redirected = await refused('https://93.184.216.34/a.png', (u) =>
+    u.startsWith('https://93.184.216.34')
+      ? new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:9000/admin' } })
+      : new Response('internal'),
+  )
+  assert(
+    'asset download: a redirect to loopback is refused before it is followed',
+    redirected.refused && redirected.calls.length === 1 && /127\.0\.0\.1/.test(redirected.message),
+    redirected.message,
+  )
+  const loopbackAllowed = await refused('http://127.0.0.1:9000/a.png', () => new Response(PNG_1X1), true)
+  assert(
+    'asset download: loopback is allowed when the provider base URL is loopback',
+    !loopbackAllowed.refused && loopbackAllowed.calls.length === 1,
+    loopbackAllowed.message,
+  )
+}
+
+{
+  // M1/M2 on the configured-provider path, and the legacy ARK_API_KEY path.
+  const PUBLIC_ASSET = 'https://93.184.216.34/generated/a.png'
+  const root = path.join(os.tmpdir(), `artemis-image-review-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(workspace, { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'ref.png'), PNG_1X1)
+  const savedEnv = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME, ARK_API_KEY: process.env.ARK_API_KEY }
+  process.env.HOME = path.join(root, 'home')
+  process.env.ARTEMIS_HOME = path.join(root, 'artemis-home')
+  delete process.env.ARK_API_KEY
+  fs.mkdirSync(process.env.HOME, { recursive: true })
+  const context = { cwd: workspace } as any
+  const generatedThenDownload = (downloadStatus: number) => (url: string) =>
+    url.endsWith('/images/generations')
+      ? new Response(JSON.stringify({ data: [{ url: PUBLIC_ASSET }] }), { status: 200 })
+      : downloadStatus === 200
+        ? new Response(PNG_1X1, { status: 200 })
+        : new Response('AccessDenied', { status: downloadStatus })
+  try {
+    await configureBytePlusImageProfile(workspace, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+
+    const downloadFailed = await withMockedFetch(generatedThenDownload(403), async (calls) => ({
+      result: await executeGenerateImage({ type: 'generate_image', prompt: 'a lighthouse at dusk' } as any, context),
+      calls: [...calls],
+    }))
+    assert(
+      'generate_image: a 403 on the result download is download_failed, not rejected credentials',
+      downloadFailed.result.ok === false &&
+        String(downloadFailed.result.output).startsWith('generate_image failed: the image was generated') &&
+        !String(downloadFailed.result.output).includes('rejected the credentials') &&
+        downloadFailed.calls.length === 2,
+      String(downloadFailed.result.output),
+    )
+
+    let generation = 0
+    const partial = await withMockedFetch(
+      (url) => {
+        if (url.endsWith('/images/generations')) {
+          generation += 1
+          return generation === 1
+            ? new Response(JSON.stringify({ data: [{ url: PUBLIC_ASSET }] }), { status: 200 })
+            : new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 })
+        }
+        return new Response(PNG_1X1, { status: 200 })
+      },
+      async () => executeGenerateImage({ type: 'generate_image', prompt: 'two lighthouses', count: 2, outputPath: 'out/light.png' } as any, context),
+    )
+    const partialOutput = String(partial.output)
+    assert(
+      'generate_image: count 2 with the second failing returns the saved image plus the reason',
+      partial.ok === true &&
+        partialOutput.startsWith('Generated 1 of 2 requested image(s) via configured visual API:') &&
+        partialOutput.includes(path.join('out', 'light-1.png')) &&
+        partialOutput.includes('The other 1 image(s) failed: insufficient balance') &&
+        !partialOutput.includes('No image was created') &&
+        fs.existsSync(path.join(workspace, 'out', 'light-1.png')),
+      partialOutput,
+    )
+
+    // Legacy path: no visual profile, credentials from ARK_API_KEY. With
+    // ARTEMIS_HOME set the provider store lives there, so clear it too.
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.rmSync(process.env.ARTEMIS_HOME!, { recursive: true, force: true })
+    fs.mkdirSync(workspace, { recursive: true })
+    fs.writeFileSync(path.join(workspace, 'ref.png'), PNG_1X1)
+    process.env.ARK_API_KEY = 'ark-test-key'
+    const legacy = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (calls) => ({
+        result: await executeGenerateImage(
+          { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['ref.png'] } as any,
+          context,
+        ),
+        calls: [...calls],
+      }),
+    )
+    const legacyBody = JSON.parse(legacy.calls[0]?.body ?? '{}')
+    assert(
+      'generate_image legacy ARK_API_KEY path: sends image as a data URI and maps 402 to top up',
+      legacy.calls.length === 1 &&
+        legacy.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
+        legacyBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        legacy.result.ok === false &&
+        String(legacy.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(legacy.result.output).includes('BytePlus image API failed (HTTP 402)'),
+      JSON.stringify({ calls: legacy.calls.map((call) => call.url), output: legacy.result.output }),
+    )
+    const legacyDownload = await withMockedFetch(generatedThenDownload(403), async () =>
+      executeGenerateImage({ type: 'generate_image', prompt: 'x' } as any, context),
+    )
+    assert(
+      'generate_image legacy ARK_API_KEY path: a 403 download is download_failed',
+      legacyDownload.ok === false &&
+        String(legacyDownload.output).startsWith('generate_image failed: the image was generated'),
+      String(legacyDownload.output),
+    )
+    const legacyTooLarge = await withMockedFetch(
+      () => new Response('{"error":{"code":"payload_too_large","message":"Request body too large"}}', { status: 413 }),
+      async () => executeGenerateImage({ type: 'generate_image', prompt: 'x', referenceImages: ['ref.png'] } as any, context),
+    )
+    assert(
+      'generate_image legacy ARK_API_KEY path: 413 with references says to shrink them',
+      legacyTooLarge.ok === false && String(legacyTooLarge.output).includes('fewer reference images or smaller/compressed copies'),
+      String(legacyTooLarge.output),
+    )
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   // Reference images: parsing, containment, data URIs, unsupported providers.
   assert(
     'referenceImages: arrays, JSON strings and single strings normalize, de-duplicated',
@@ -1682,10 +1905,16 @@ async function withMockedFetch<T>(
   )
   assert(
     'referenceImages: one shared sniffer; view_image still sees only model formats',
-    sniffImageMimeType(Buffer.from('BM\0\0\0\0', 'binary')) === 'image/bmp' &&
-      sniffAnyImageType(Buffer.from('BM\0\0\0\0', 'binary')) === 'image/bmp' &&
-      sniffImageType(Buffer.from('BM\0\0\0\0', 'binary')) === undefined &&
+    sniffImageMimeType(BMP_HEADER) === 'image/bmp' &&
+      sniffAnyImageType(BMP_HEADER) === 'image/bmp' &&
+      sniffImageType(BMP_HEADER) === undefined &&
       sniffImageType(PNG_1X1) === 'image/png',
+  )
+  assert(
+    'referenceImages: BMP needs a plausible header, not just "BM"',
+    sniffAnyImageType(Buffer.from('BM is how this text file starts')) === undefined &&
+      sniffAnyImageType(Buffer.concat([Buffer.from('BM'), Buffer.alloc(16)])) === undefined &&
+      sniffAnyImageType(BMP_HEADER) === 'image/bmp',
   )
 
   const recovered = parseAssistantEnvelopeForSmoke(`

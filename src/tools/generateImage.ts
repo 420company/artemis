@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';
-import { resolveModelArkMediaCredentials } from './vidarMedia.js';
+import { modelArkEndpoint, resolveModelArkMediaCredentials } from './vidarMedia.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { toolLog, toolWarn } from '../utils/log.js';
 import { createVisualProvider } from './visual/providers/interface.js';
@@ -20,9 +20,12 @@ import {
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import {
     classifyImageGenerationFailure,
+    describeImageGenerationFailureParts,
     formatImageGenerationFailure,
+    type ImageGenerationFailureInput,
     type ImageGenerationFailureKind,
 } from './visual/imageGenerationFailure.js';
+import { baseUrlIsLoopback, downloadProviderAsset } from './visual/safeDownload.js';
 import {
     checkBytePlusReferenceSupport,
     resolveReferenceImages,
@@ -49,21 +52,37 @@ function buildDefaultOutputPath(_cwd: string, index: number, total: number, exte
     return path.join(getMediaOutputRoot(), DEFAULT_SUBDIR, `${ts}${suffix}${extension}`);
 }
 
-async function downloadUrl(url: string): Promise<Buffer> {
-    const res = await fetch(url, {
-        signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS),
-    });
-    if (!res.ok)
-        throw new Error(`download failed: HTTP ${res.status}`);
-    const ab = await res.arrayBuffer();
-    return Buffer.from(ab);
-}
+type FailureOptions = Omit<ImageGenerationFailureInput, 'detail'>;
 
-function failure(action: any, detail: string, options: { status?: number; source?: string } = {}) {
+function failure(action: any, detail: string, options: FailureOptions = {}) {
     return {
         action,
         ok: false,
         output: formatImageGenerationFailure({ detail, ...options }).output,
+    };
+}
+
+/**
+ * Some of the requested images were saved and the rest failed: report the saved
+ * paths (they are real, usable results) together with why the rest failed.
+ */
+function partialSuccess(
+    action: any,
+    savedLines: string[],
+    requested: number,
+    sourceLabel: string,
+    failed: ImageGenerationFailureInput,
+) {
+    const parts = describeImageGenerationFailureParts(failed);
+    return {
+        action,
+        ok: true,
+        output: [
+            `Generated ${savedLines.length} of ${requested} requested image(s) via ${sourceLabel}:`,
+            ...savedLines,
+            `The other ${requested - savedLines.length} image(s) failed: ${parts.reason}`,
+            parts.details,
+        ].join('\n'),
     };
 }
 
@@ -105,13 +124,14 @@ export async function executeGenerateImage(action: any, context: any) {
         const size = action.size?.trim() || DEFAULT_SIZE;
         const count = sanitizeCount(action.count);
         const source = 'BytePlus image API';
+        const hasReferences = referenceImages.length > 0;
 
         const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length);
         if (referenceError) {
             return { action, ok: false, output: `generate_image failed: ${referenceError}\nNo image was created.` };
         }
 
-        const endpoint = `${baseUrl}/images/generations`;
+        const endpoint = modelArkEndpoint(baseUrl, 'images/generations');
         const body: Record<string, unknown> = {
             model,
             prompt: action.prompt,
@@ -142,7 +162,7 @@ export async function executeGenerateImage(action: any, context: any) {
 
         const raw = await res.text();
         if (!res.ok) {
-            return failure(action, raw.slice(0, 1000), { status: res.status, source });
+            return failure(action, raw.slice(0, 1000), { status: res.status, source, hasReferences });
         }
 
         let payload: any;
@@ -159,6 +179,7 @@ export async function executeGenerateImage(action: any, context: any) {
         }
 
         const savedEntries: Array<{ path: string; url?: string }> = [];
+        let downloadError: string | undefined;
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
             const url = item?.url;
@@ -178,19 +199,34 @@ export async function executeGenerateImage(action: any, context: any) {
                 ensureNotSensitivePath(absolute, targetRaw);
             }
 
-            const buf = await downloadUrl(url);
+            let buf: Buffer;
+            try {
+                buf = await downloadProviderAsset(url, {
+                    timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+                    allowLoopback: baseUrlIsLoopback(baseUrl),
+                });
+            } catch (error) {
+                downloadError = `Image download failed: ${error instanceof Error ? error.message : String(error)}`;
+                continue;
+            }
             await ensureDir(path.dirname(absolute));
             await writeFile(absolute, buf);
             savedEntries.push({ path: absolute, url });
         }
 
         if (!savedEntries.length) {
-            return failure(action, 'response contained no downloadable image URLs', { source });
+            return downloadError
+                ? failure(action, downloadError, { source, stage: 'download' })
+                : failure(action, 'response contained no downloadable image URLs', { source });
         }
 
+        const savedLines = savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.path}`);
+        if (downloadError && savedEntries.length < items.length) {
+            return partialSuccess(action, savedLines, items.length, model, { detail: downloadError, source, stage: 'download' });
+        }
         const lines = [
             `Generated ${savedEntries.length} image(s) via ${model}:`,
-            ...savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.path}`),
+            ...savedLines,
         ];
         return { action, ok: true, output: lines.join('\n') };
     } catch (error) {
@@ -247,7 +283,7 @@ async function tryGenerateWithMainSecondaryFallbackProviders(action: any, contex
                 continue;
             }
 
-            const result = await generateImageWithVisualProvider(action, context, candidate.config, provider, candidate.model, 'main/secondary fallback', referenceImages);
+            const result = await generateImageWithVisualProvider(action, context, candidate.config, provider, candidate.model, candidate.label, referenceImages);
             if (result.ok) return result;
             failures.push({ label: candidate.label, detail: String(result.output) });
         } catch (error) {
@@ -311,7 +347,23 @@ async function generateImageWithVisualProvider(
         if (!result.success || !result.assetPath) {
             const message = result.error ?? 'unknown error';
             toolWarn(`⚠️ ${sourceLabel}图片生成失败: ${message}`);
-            return failure(action, message, { source: sourceLabel });
+            const failed: ImageGenerationFailureInput = {
+                detail: message,
+                status: result.httpStatus,
+                stage: result.failureStage,
+                source: sourceLabel,
+                hasReferences: referenceImages.length > 0,
+            };
+            if (savedEntries.length > 0) {
+                return partialSuccess(
+                    action,
+                    savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.provider}/${entry.model}: ${entry.path}`),
+                    count,
+                    sourceLabel,
+                    failed,
+                );
+            }
+            return failure(action, message, failed);
         }
 
         const targetRaw = action.outputPath
