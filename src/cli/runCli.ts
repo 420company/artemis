@@ -321,6 +321,7 @@ export async function runCli(argv: string[]): Promise<void> {
       mode: options.command,
       model: options.model,
       maxTurns: options.maxTurnsExplicit ? options.maxTurns : undefined,
+      sessionId: options.sessionId,
     })
     return
   }
@@ -661,6 +662,7 @@ async function runQueryCommand(options: {
   mode: 'analyze' | 'execute'
   model?: string
   maxTurns?: number
+  sessionId?: string
 }): Promise<void> {
   const { cwd, locale, prompt, mode, model } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
@@ -681,6 +683,7 @@ async function runQueryCommand(options: {
     permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
     model,
     maxTurns: options.maxTurns,
+    sessionId: options.sessionId,
     sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
     onInfo: (message) => console.error(message),
   })

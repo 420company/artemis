@@ -248,6 +248,33 @@ function getLooseArgValue(
   return matchedKey ? args[matchedKey] : undefined;
 }
 
+/**
+ * An object argument; also accepts the object as a JSON string, which is how
+ * XML-style dialects deliver nested values.
+ */
+function getLooseObjectArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const value = getLooseArgValue(args, key);
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    if (typeof value === 'string' && value.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Not JSON: keep looking.
+      }
+    }
+  }
+  return undefined;
+}
+
 function getLooseIntegerArg(
   args: Record<string, unknown>,
   ...keys: string[]
@@ -485,6 +512,43 @@ function buildActionFromLooseArgs(
         ),
         watermark: getLooseBooleanArg(args, 'watermark'),
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
+      };
+    }
+    case 'mcp_call_tool': {
+      const serverId = getLooseStringArg(args, 'serverId', 'server_id', 'server');
+      const toolName = getLooseStringArg(args, 'toolName', 'tool_name', 'tool', 'name');
+      if (!serverId?.trim() || !toolName?.trim()) return null;
+      const readOnly = getLooseBooleanArg(args, 'readOnly', 'read_only');
+      return {
+        type: 'mcp_call_tool',
+        serverId,
+        toolName,
+        args: getLooseObjectArg(args, 'args', 'arguments', 'input', 'params') ?? {},
+        ...(readOnly !== undefined ? { readOnly } : {}),
+        timeoutMs: getLooseIntegerArg(args, 'timeoutMs', 'timeout_ms', 'timeout'),
+      };
+    }
+    case 'mcp_read_resource': {
+      const serverId = getLooseStringArg(args, 'serverId', 'server_id', 'server');
+      const uri = getLooseStringArg(args, 'uri', 'resource', 'url');
+      if (!serverId?.trim() || !uri?.trim()) return null;
+      return {
+        type: 'mcp_read_resource',
+        serverId,
+        uri,
+        timeoutMs: getLooseIntegerArg(args, 'timeoutMs', 'timeout_ms', 'timeout'),
+      };
+    }
+    case 'mcp_get_prompt': {
+      const serverId = getLooseStringArg(args, 'serverId', 'server_id', 'server');
+      const promptName = getLooseStringArg(args, 'promptName', 'prompt_name', 'prompt', 'name');
+      if (!serverId?.trim() || !promptName?.trim()) return null;
+      return {
+        type: 'mcp_get_prompt',
+        serverId,
+        promptName,
+        args: getLooseObjectArg(args, 'args', 'arguments', 'input', 'params') ?? {},
+        timeoutMs: getLooseIntegerArg(args, 'timeoutMs', 'timeout_ms', 'timeout'),
       };
     }
     case 'generate_video':
@@ -769,10 +833,13 @@ function extractXmlToolCalls(text: string): AgentAction[] {
     try {
       const parsed = JSON.parse(body) as Record<string, unknown>;
       // Body may be the args object directly, or wrapped under a "parameters"/"args" key.
+      // MCP actions carry the called tool's own arguments under "args", so for them
+      // "args" is a field, not a wrapper.
+      const isMcpAction = /^mcp_(call_tool|read_resource|get_prompt)$/i.test(tool);
       const argsRaw =
         parsed.parameters && typeof parsed.parameters === 'object' && !Array.isArray(parsed.parameters)
           ? parsed.parameters as Record<string, unknown>
-          : parsed.args && typeof parsed.args === 'object' && !Array.isArray(parsed.args)
+          : !isMcpAction && parsed.args && typeof parsed.args === 'object' && !Array.isArray(parsed.args)
             ? parsed.args as Record<string, unknown>
             : parsed;
       const action = buildActionFromLooseArgs(tool, argsRaw as Record<string, unknown>);
@@ -6202,9 +6269,20 @@ export async function runAgent(
         // Regular chat-completions provider (not stateful Responses API).
         // Convert native tool calls to the <toolcall name="...">JSON</toolcall>
         // format so extractXmlToolCalls picks them up in the normal agent loop.
-        const xmlParts = nativeCalls.map(
-          (call) => `<toolcall name="${call.name}">${call.arguments}</toolcall>`,
-        );
+        // Projected MCP tools (mcp__<server>__<tool>) are not names that parser
+        // knows, so they are rewritten to the generic MCP action they stand for.
+        const xmlParts = nativeCalls.map((call) => {
+          if (nativeToolRuntime?.projectedMcpTools?.has(call.name)) {
+            const mapped = mapProviderNativeToolCallToAction(
+              call,
+              nativeToolRuntime.projectedMcpTools,
+            );
+            if (mapped.ok) {
+              return `<toolcall name="${mapped.action.type}">${JSON.stringify(mapped.action)}</toolcall>`;
+            }
+          }
+          return `<toolcall name="${call.name}">${call.arguments}</toolcall>`;
+        });
         const combinedText = [currentCompletion.text?.trim() ?? '', ...xmlParts]
           .filter(Boolean)
           .join('\n');

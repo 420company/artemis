@@ -6,6 +6,7 @@ import {
   choosePromptBoolean,
 } from '../cli/prompt.js';
 import {
+  createGlobalProviderStore,
   promptForVerifiedProviderProfile,
 } from './onboarding.js';
 import { ProviderStore } from './store.js';
@@ -196,8 +197,24 @@ async function promptForSpecialistProfile(
 export async function createProviderRouter(
   options: CreateProviderRouterOptions,
 ): Promise<ProviderRouter> {
-  const store = new ProviderStore(options.cwd);
-  const data = await store.load();
+  // Read profiles from the store the main model resolves from: cwd-local
+  // first, then the global store (same fallback as resolveMainProviderConfig),
+  // so a globally configured specialist is honored in project directories.
+  // A cwd store holding only a specialist (saved there by older routers) keeps
+  // cwd-local precedence, matching loadWorkerProvider in brain.ts.
+  let store = new ProviderStore(options.cwd);
+  let data = await store.load();
+  if (
+    !store.getDefaultMainProfile(data) &&
+    !store.getProfile(data, data.specialistProfileId)
+  ) {
+    const globalStore = createGlobalProviderStore();
+    const globalData = await globalStore.load();
+    if (globalStore.getDefaultMainProfile(globalData)) {
+      store = globalStore;
+      data = globalData;
+    }
+  }
   const uiLocale = (await new CliSettingsStore(options.cwd).load()).uiLocale;
   const mainProfile = store.getDefaultMainProfile(data);
   let specialistProfile = store.getProfile(data, data.specialistProfileId);

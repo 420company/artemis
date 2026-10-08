@@ -112,8 +112,8 @@ ${t('命令', 'Commands')}:
   contest <prompt>  ${t('执行多方案竞赛工作流', 'Run the multi-variant contest workflow')}
   nidhogg <prompt>  ${t('执行深度批判/审查工作流', 'Run the critique/review workflow')}
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
-  analyze <query>   ${t('用查询引擎分析输入', 'Analyze input with the query engine')}
-  execute <query>   ${t('用查询引擎执行输入', 'Execute input with the query engine')}
+  analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话）', 'Headless read-only analysis (--session <id> continues a session)')}
+  execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话）', 'Headless full agent run (--session <id> continues a session)')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
   session           ${t('管理会话记录', 'Manage session records')}
@@ -208,6 +208,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue
     }
     if (command === 'resume' && cur === '--last') { resumeLast = true; sessionId = undefined; continue }
+    // Headless hosts (e.g. a web server driving one turn per process) continue a conversation by id.
+    if ((command === 'execute' || command === 'analyze') && cur === '--session') {
+      const v = args.shift()
+      const extracted = v ? extractSessionIdToken(v) : undefined
+      if (!extracted) throw new Error(`${command} --session requires a valid session id.`)
+      sessionId = extracted
+      continue
+    }
     if (command === 'resume' && cur === '--session') {
       const v = args.shift()
       const extracted = v ? extractSessionIdToken(v) : undefined

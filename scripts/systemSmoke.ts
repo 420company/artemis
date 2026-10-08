@@ -43,6 +43,18 @@ test('parser accepts documented utility commands', () => {
   assert.equal(parseArgs(['execute', 'hello']).prompt, 'hello');
 });
 
+test('execute and analyze can continue an existing session', () => {
+  const id = '3f2a9c1e-8b7d-4e6f-9a01-23456789abcd';
+  const parsed = parseArgs(['execute', '--session', id, 'and', 'now', 'the', 'next', 'step']);
+  assert.equal(parsed.command, 'execute');
+  assert.equal(parsed.sessionId, id);
+  assert.equal(parsed.prompt, 'and now the next step');
+  assert.equal(parseArgs(['analyze', '--session', id, 'why']).sessionId, id);
+  assert.equal(parseArgs(['execute', 'hello']).sessionId, undefined);
+  assert.throws(() => parseArgs(['execute', '--session']), /execute --session requires a valid session id/);
+  assert.throws(() => parseArgs(['execute', '--session', 'not-an-id', 'hi']), /requires a valid session id/);
+});
+
 test('parser accepts direct workflow commands', () => {
   const parsed = parseArgs(['design', 'make', 'a', 'homepage']);
   assert.equal(parsed.command, 'design');
