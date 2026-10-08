@@ -10,6 +10,7 @@ import type {
   ProviderRequestOptions,
   ProviderResponse,
 } from './types.js';
+import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
 
 type ResponsesInputContent =
   | { type: 'input_text'; text: string }
@@ -20,9 +21,22 @@ type ResponsesInputItem = {
   content: Array<ResponsesInputContent>;
 };
 
+function buildImageBlocks(
+  attachments: import('./types.ts').ImageAttachment[],
+  supportsImages: boolean,
+): ResponsesInputContent[] {
+  return supportsImages
+    ? attachments.map((img) => ({
+      type: 'input_image',
+      image_url: `data:${img.mediaType};base64,${img.data}`,
+    }))
+    : [{ type: 'input_text', text: describeOmittedImages(attachments.length) }];
+}
+
 function injectImagesIntoInput(
   input: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem>,
   attachments: import('./types.ts').ImageAttachment[],
+  supportsImages: boolean,
 ): void {
   if (attachments.length === 0) return;
   let lastUserIdx = -1;
@@ -36,13 +50,28 @@ function injectImagesIntoInput(
   if (lastUserIdx < 0) return;
 
   const userItem = input[lastUserIdx] as ResponsesInputItem;
-  const imageBlocks: ResponsesInputContent[] = attachments.map((img) => ({
-    type: 'input_image',
-    image_url: `data:${img.mediaType};base64,${img.data}`,
-  }));
   (input[lastUserIdx] as ResponsesInputItem) = {
     role: userItem.role,
-    content: [...imageBlocks, ...userItem.content],
+    content: [...buildImageBlocks(attachments, supportsImages), ...userItem.content],
+  };
+}
+
+/**
+ * A continuation request (previous_response_id) carries only the tool
+ * outputs, so images the tools produced (view_image) follow them as a user
+ * item of their own.
+ */
+function buildContinuationImageItem(
+  attachments: import('./types.ts').ImageAttachment[],
+  supportsImages: boolean,
+): ResponsesInputItem {
+  const labels = attachments.map((img) => img.label).filter((label): label is string => Boolean(label));
+  return {
+    role: 'user',
+    content: [
+      { type: 'input_text', text: labels.length ? `Attached for you to look at: ${labels.join('; ')}` : 'Attached for you to look at.' },
+      ...buildImageBlocks(attachments, supportsImages),
+    ],
   };
 }
 
@@ -310,12 +339,13 @@ function asNumber(value: unknown): number | undefined {
 
 export class ResponsesCompatibleProvider implements ChatProvider {
   readonly supportsNativeToolCalls = true;
-  readonly supportsImages = true;
+  readonly supportsImages: boolean;
 
   private readonly config: ProviderConfig;
 
   constructor(config: ProviderConfig) {
     this.config = config;
+    this.supportsImages = modelSupportsImages(config);
   }
 
   async complete(
@@ -354,13 +384,18 @@ export class ResponsesCompatibleProvider implements ChatProvider {
 
     if (options?.previousResponseId) {
       payload.previous_response_id = options.previousResponseId;
-      payload.input = (options.toolOutputs ?? []).map(mapToolOutput);
+      const continuation: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem> =
+        (options.toolOutputs ?? []).map(mapToolOutput);
+      if (options.imageAttachments?.length) {
+        continuation.push(buildContinuationImageItem(options.imageAttachments, this.supportsImages));
+      }
+      payload.input = continuation;
     } else {
       const input: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem> = messages
         .map(mapMessage)
         .filter((entry): entry is ResponsesInputItem => entry !== null);
       if (options?.imageAttachments?.length) {
-        injectImagesIntoInput(input, options.imageAttachments);
+        injectImagesIntoInput(input, options.imageAttachments, this.supportsImages);
       }
       payload.input = input;
     }

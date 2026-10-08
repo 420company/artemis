@@ -21,6 +21,11 @@ export type ProviderConfig = {
   apiKeyHeader?: ProviderApiKeyHeader;
   /** Optional reasoning effort. Unset = provider/API default (Anthropic: high). */
   effort?: EffortLevel;
+  /**
+   * Whether the model accepts image input. Unset = inferred from the model
+   * name (known vision families yes; DeepSeek and unknown models no).
+   */
+  supportsImages?: boolean;
 };
 
 export type ProviderProfileTelemetry = {

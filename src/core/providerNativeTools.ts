@@ -8,6 +8,7 @@ import {
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
+import { getToolHostKey } from '../tools/platformSupport.js';
 import {
   McpServerStore,
   type McpPromptDescriptor,
@@ -41,7 +42,9 @@ export type ProviderNativeToolRuntime = {
 
 const MAX_PROJECTED_MCP_DESCRIPTION_LENGTH = 2_048;
 const DEFAULT_MAX_PROJECTED_MCP_TOOLS = 96;
-let cachedBuiltInTools: ProviderNativeFunctionTool[] | undefined;
+// Keyed by host so a forced host environment (tests) never reuses a manifest
+// built for a different platform.
+let cachedBuiltInTools: { hostKey: string; tools: ProviderNativeFunctionTool[] } | undefined;
 
 type BuildProviderNativeToolRuntimeOptions = {
   requestContext?: string;
@@ -913,6 +916,15 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    case 'view_image':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path'],
+        properties: {
+          path: nonEmptyStringSchema('Image file (PNG, JPEG, GIF or WebP, up to 8 MB), relative to the workspace. It is attached to your next step so you can see it.'),
+        },
+      };
     case 'task_output':
       return {
         type: 'object',
@@ -1781,19 +1793,23 @@ export function buildProviderNativeFunctionTools(
       });
   }
 
-  if (!cachedBuiltInTools) {
-    cachedBuiltInTools = getProviderCallableActionTypes().map((type) => {
-      const tool = getToolDefinition(type);
-      return {
-        type: 'function',
-        name: type,
-        description: tool?.description || `Tool for ${type}`,
-        parameters: buildActionParametersSchema(type),
-      };
-    });
+  const hostKey = getToolHostKey();
+  if (!cachedBuiltInTools || cachedBuiltInTools.hostKey !== hostKey) {
+    cachedBuiltInTools = {
+      hostKey,
+      tools: getProviderCallableActionTypes().map((type) => {
+        const tool = getToolDefinition(type);
+        return {
+          type: 'function',
+          name: type,
+          description: tool?.description || `Tool for ${type}`,
+          parameters: buildActionParametersSchema(type),
+        };
+      }),
+    };
   }
 
-  return cachedBuiltInTools;
+  return cachedBuiltInTools.tools;
 }
 
 export async function buildProviderNativeToolRuntime(
