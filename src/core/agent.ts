@@ -21,6 +21,7 @@ import {
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
+import { normalizeReferenceImagesArg } from '../tools/visual/referenceImages.js';
 import { PermissionManager } from '../security/permissions.js';
 import {
   mapPermissionModeToToolAccess,
@@ -90,15 +91,7 @@ import {
 import { estimateTokens, estimateToolSchemaTokens } from './tokenEstimation.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
-  executeOdinFixSkill,
-  executeOdinSearchSkills,
-  executeOdinUploadSkill,
-  importOdinCloudSkills,
-  recordOdinWorkflowFailure,
-  recordOdinWorkflowSuccess,
-  resolveOdinSkillContext,
-} from '../odin/runtime.js';
-import {
+  McpCallCancelledError,
   McpDependencyError,
   callMcpServerTool,
   getMcpServerPrompt,
@@ -246,6 +239,24 @@ function getLooseStringArrayArg(
     }
   }
 
+  return undefined;
+}
+
+/** Reference images for generate_image; XML-style dialects deliver the array as a JSON string. */
+function getLooseReferenceImagesArg(args: Record<string, unknown>): string[] | undefined {
+  for (const key of [
+    'referenceImages',
+    'reference_images',
+    'referenceImage',
+    'reference_image',
+    'referenceImagePaths',
+    'referenceImageUrls',
+    'images',
+    'image',
+  ]) {
+    const items = normalizeReferenceImagesArg(getLooseArgValue(args, key));
+    if (items.length > 0) return items;
+  }
   return undefined;
 }
 
@@ -528,6 +539,7 @@ function buildActionFromLooseArgs(
         ),
         watermark: getLooseBooleanArg(args, 'watermark'),
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
+        referenceImages: getLooseReferenceImagesArg(args),
       };
     }
     case 'mcp_call_tool': {
@@ -577,6 +589,7 @@ function buildActionFromLooseArgs(
         prompt,
         model: getLooseStringArg(args, 'model'),
         ratio: getLooseStringArg(args, 'ratio', 'aspectRatio', 'aspect_ratio'),
+        resolution: getLooseStringArg(args, 'resolution', 'rs'),
         duration: getLooseIntegerArg(args, 'duration', 'durationSeconds', 'duration_seconds'),
         outputPath: getLooseStringArg(
           args,
@@ -752,6 +765,24 @@ function buildActionFromLooseArgs(
         modelPath: getLooseStringArg(args, 'modelPath', 'model_path'),
         engine,
         command: getLooseStringArg(args, 'command', 'cmd'),
+      };
+    }
+    case 'memory':
+    case 'remember':
+    case 'save_memory': {
+      const raw = (getLooseStringArg(args, 'action', 'op', 'operation') ?? (lower === 'memory' ? '' : 'save')).toLowerCase();
+      const op = (['save', 'update', 'delete', 'list'] as const).find((o) => o === raw);
+      if (!op) return null;
+      const scope = getLooseStringArg(args, 'scope');
+      const category = getLooseStringArg(args, 'category') as Extract<AgentAction, { type: 'memory' }>['category'];
+      return {
+        type: 'memory',
+        action: op,
+        ...(scope === 'global' || scope === 'project' ? { scope } : {}),
+        name: getLooseStringArg(args, 'name', 'key', 'title', 'slug'),
+        description: getLooseStringArg(args, 'description', 'summary'),
+        category,
+        content: getLooseStringArg(args, 'content', 'text', 'body', 'memory'),
       };
     }
     case 'view_image':
@@ -1792,16 +1823,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `delegate_task role=${action.role} task=${truncate(action.task, 120)}`;
     case 'approve_builder_execution':
       return `approve_builder_execution session=${action.sessionId}`;
-    case 'odin_search_skills':
-      return `odin_search_skills query=${truncate(action.query, 120)} scope=${action.scope ?? 'all'}`;
-    case 'odin_execute_task':
-      return `odin_execute_task task=${truncate(action.task, 120)}`;
-    case 'odin_fix_skill':
-      return `odin_fix_skill skillId=${action.skillId}`;
-    case 'odin_upload_skill':
-      return `odin_upload_skill skillId=${action.skillId} visibility=${action.visibility ?? 'local'}`;
-    case 'odin_import_cloud_skills':
-      return `odin_import_cloud_skills query=${action.query ?? ''} limit=${action.limit ?? 10}`;
     case 'generate_image':
       return `generate_image model=${action.model ?? 'seedream-5-0-260128'} prompt=${truncate(action.prompt, 120)}`;
     case 'generate_video':
@@ -1814,8 +1835,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
-    case 'request_freya_visual_asset':
-      return `request_freya_visual_asset type=${action.assetType} style=${action.preferredStyle ?? 'default'} context=${truncate(action.contextDescription, 120)}`;
     case 'agent':
       const agentSummary = `agent action=${action.action}`;
       if (action.id) {
@@ -2888,6 +2907,26 @@ async function buildStableSystemContent(input: {
     nativeToolRuntime: input.nativeToolRuntime,
   });
 
+  // Who the user is and how the agent should sound: the same user profile and
+  // soul.md the interactive chat loads, so headless runs (execute, the web
+  // product, workflows) know the owner too. Sub-agents work on narrow tasks
+  // and do without.
+  if (input.profile === 'main') {
+    try {
+      const [{ loadUserProfile, formatProfileForPrompt }, { loadSoul, formatSoulForPrompt }] = await Promise.all([
+        import('../memory/userProfile.js'),
+        import('../memory/soul.js'),
+      ]);
+      const [userProfile, soul] = await Promise.all([loadUserProfile(), loadSoul()]);
+      const sections = [formatProfileForPrompt(userProfile), formatSoulForPrompt(soul)]
+        .map((section) => section.trim())
+        .filter(Boolean);
+      if (sections.length > 0) systemSections.push(...sections, '');
+    } catch {
+      // Profile and persona are optional context; failures must not block the turn.
+    }
+  }
+
   try {
     const {
       ensureMemoryMigrated,
@@ -3615,6 +3654,13 @@ export type RunAgentOptions = {
   delegationDepth?: number;
   maxDelegationDepth?: number;
   appendUserMessage?: boolean;
+  /**
+   * Scope for memories the memory tool saves when the model names none.
+   * Headless runs pass 'project', so something picked up from fetched or
+   * tool content stays in this workspace unless the model explicitly saves
+   * it globally. Unset: global (interactive CLI behaviour).
+   */
+  memoryDefaultScope?: 'global' | 'project';
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -4373,9 +4419,29 @@ export async function runSpecialistAgent(
   }
 }
 
+/**
+ * A cancelled run is not a server failure: report it without marking the
+ * server unhealthy.
+ */
+function buildMcpCancelledOutcome(
+  error: unknown,
+): { ok: boolean; output: string; error?: ToolError } | undefined {
+  if (!(error instanceof McpCallCancelledError)) {
+    return undefined;
+  }
+  return {
+    ok: false,
+    output: error.message,
+    error: buildToolError('tool_run_cancelled', error.message, {
+      retryable: false,
+    }),
+  };
+}
+
 async function executeMcpToolAction(
   action: Extract<AgentAction, { type: 'mcp_call_tool' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4411,6 +4477,7 @@ async function executeMcpToolAction(
       toolName: action.toolName,
       args: action.args,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4425,6 +4492,10 @@ async function executeMcpToolAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     // Dependency missing: stop immediately, surface install prompt to user
     if (error instanceof McpDependencyError) {
       const info = error.dependencyInfo;
@@ -4443,6 +4514,7 @@ async function executeMcpToolAction(
             toolName: action.toolName,
             args: action.args,
             timeoutMs: action.timeoutMs,
+            abortSignal,
           });
           return { ok: true, output: result.output };
         } catch {
@@ -4487,6 +4559,7 @@ async function executeMcpToolAction(
 async function executeMcpReadResourceAction(
   action: Extract<AgentAction, { type: 'mcp_read_resource' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4521,6 +4594,7 @@ async function executeMcpReadResourceAction(
       cwd: options.cwd,
       uri: action.uri,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4535,6 +4609,10 @@ async function executeMcpReadResourceAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =
@@ -4558,6 +4636,7 @@ async function executeMcpReadResourceAction(
 async function executeMcpGetPromptAction(
   action: Extract<AgentAction, { type: 'mcp_get_prompt' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4593,6 +4672,7 @@ async function executeMcpGetPromptAction(
       promptName: action.promptName,
       args: action.args,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4607,6 +4687,10 @@ async function executeMcpGetPromptAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =
@@ -4742,6 +4826,7 @@ async function executeAgentAction(
           options.permissionManager.getMode(),
         ),
         sessionId: session.id,
+        memoryDefaultScope: options.memoryDefaultScope,
         viewedImages: options.viewedImages,
         context: {
           profile: options.profile ?? 'main',
@@ -4760,11 +4845,11 @@ async function executeAgentAction(
 
   switch (action.type) {
     case 'mcp_call_tool':
-      return executeMcpToolAction(action, options);
+      return executeMcpToolAction(action, options, abortSignal);
     case 'mcp_read_resource':
-      return executeMcpReadResourceAction(action, options);
+      return executeMcpReadResourceAction(action, options, abortSignal);
     case 'mcp_get_prompt':
-      return executeMcpGetPromptAction(action, options);
+      return executeMcpGetPromptAction(action, options, abortSignal);
     case 'approve_builder_execution':
       return approveBuilderExecution(session, action, options);
     case 'spawn_background_workflow': {
@@ -4826,148 +4911,6 @@ You can continue executing your current tasks. The background workflow will run 
             retryable: true,
           },
         );
-      }
-    }
-    case 'request_freya_visual_asset': {
-      // Legacy interactive flow: it is no longer offered to the model
-      // (generate_image / generate_video / generate_long_video replace it) and
-      // it needs a terminal menu, so without an interactive terminal (e.g.
-      // headless `artemis execute`) it fails fast instead of blocking.
-      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
-        return buildRuntimeManagedFailure(
-          'freya_visual_asset_unavailable',
-          'request_freya_visual_asset is not available in this session (it needs an interactive terminal menu). Use generate_image for images, generate_video for short videos, or generate_long_video for long-form video instead.',
-          {
-            retryable: false,
-          },
-        );
-      }
-      try {
-        const { showFreyaMenu } = await import('../cli/freyaPrompt.js')
-        const { FreyaVisualAgent } = await import('../agents/freyaAgent.js')
-        const { FreyaSearch } = await import('../tools/visual/freyaSearch.js')
-        const { ProviderStore } = await import('../providers/store.js')
-
-        // Get current visual model config
-        const providerStore = new ProviderStore(options.cwd)
-        const storeData = await providerStore.load()
-        const visualConfig = providerStore.getVisualProfile(storeData)
-
-        // Show Freya menu and get user choice
-        const menuResult = await showFreyaMenu(action, undefined, 'en', {
-          messages: session.messages,
-          astState: {},
-          taskContext: {}
-        })
-
-        switch (menuResult.assetPath) {
-          case 'configure':
-            // Never exit the process mid-run: report back so the session
-            // can continue (or the user can configure and retry).
-            options.onInfo?.('[log:info] Freya: 请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重试。')
-            return buildRuntimeManagedFailure(
-              'freya_visual_model_configuration_requested',
-              'The user chose to configure the visual model. Ask them to run /config visual (or artemis config visual) and retry; meanwhile use generate_image or generate_video directly.',
-              {
-                retryable: false,
-              },
-            );
-
-
-          case 'generate':
-            if (!visualConfig?.enabled) {
-              options.onInfo?.('[log:warn] ⚠️ Freya: 视觉模型尚未配置。请运行 /config visual（或 artemis config visual）进行配置。')
-              return buildRuntimeManagedFailure(
-                'freya_visual_model_not_configured',
-                'Visual model not configured. Please run /config visual (or artemis config visual) first.',
-                {
-                  retryable: false,
-                },
-              );
-            }
-
-            const agent = new FreyaVisualAgent(visualConfig)
-            const expandedPrompt = await agent.expandPrompt(action.contextDescription, action.assetType)
-            const generationResult = await agent.generateAsset(expandedPrompt, action.assetType)
-            
-            if (generationResult.success && generationResult.assetPath) {
-              return {
-                ok: true,
-                output: `Visual asset generated successfully: ${generationResult.assetPath}`
-              }
-            }
-            return buildRuntimeManagedFailure(
-              'freya_visual_generation_failed',
-              `Visual asset generation failed: ${generationResult.error ?? 'unknown error'}`,
-              {
-                retryable: true,
-              },
-            );
-
-          case 'search': {
-            const expandedSearchPrompt = await (new FreyaVisualAgent(visualConfig || {
-              enabled: false,
-              image: {
-                provider: 'mock',
-                apiKey: '',
-                baseUrl: '',
-                model: 'mock',
-                defaultParams: {
-                  size: '2K',
-                  quality: 'standard',
-                  style: 'realistic',
-                  watermark: false
-                }
-              },
-              video: {
-                enabled: false,
-                provider: 'mock',
-                apiKey: '',
-                baseUrl: '',
-                model: 'mock',
-                defaultParams: {
-                  duration: '10s',
-                  resolution: '1080p',
-                  quality: 'standard',
-                  style: 'realistic',
-                  format: 'mp4',
-                  framerate: '30fps'
-                }
-              }
-            })).expandPrompt(action.contextDescription, action.assetType)
-
-            const searchDestPath = `.artemis/assets/searched_${Date.now()}.${action.assetType === 'video' ? 'mp4' : 'png'}`
-            const searchResult = await FreyaSearch.deepSearchSimilarImage(expandedSearchPrompt, searchDestPath)
-            
-            if (searchResult.success && searchResult.downloadedPath) {
-              return {
-                ok: true,
-                output: `Visual asset searched and downloaded successfully: ${searchResult.downloadedPath}`
-              }
-            }
-            return buildRuntimeManagedFailure(
-              'freya_visual_search_failed',
-              `Visual asset search failed: ${searchResult.error ?? 'unknown error'}`,
-              {
-                retryable: true,
-              },
-            );
-          }
-
-          case 'cancel':
-          default:
-            return {
-              ok: true,
-              output: 'User cancelled visual generation. Please continue without the visual asset.'
-            }
-        }
-      } catch (error) {
-        const message = `Freya visual asset request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-        return buildRuntimeManagedFailure('freya_visual_asset_failed', message, {
-          retryable: true,
-        });
       }
     }
     case 'delegate_task':
@@ -5096,91 +5039,6 @@ You can continue executing your current tasks. The background workflow will run 
             summary: specialist.result.reply,
         }),
       };
-    case 'odin_search_skills':
-      return executeOdinSearchSkills({
-        cwd: options.cwd,
-        query: action.query,
-        scope: action.scope,
-        limit: action.limit,
-      });
-    case 'odin_execute_task': {
-      const skillContext = await resolveOdinSkillContext({
-        cwd: options.cwd,
-        task: action.task,
-        scope: action.searchScope,
-      });
-      const taskWithContext = skillContext
-        ? `${action.task}\n\n${skillContext}`
-        : action.task;
-      let specialist;
-      try {
-        specialist = await runSpecialistAgent(
-          session,
-          'researcher',
-          taskWithContext,
-          {
-            ...options,
-            maxTurns: clampTurns(
-              action.maxIterations ?? Math.max(options.maxTurns, 15),
-            ),
-          },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await recordOdinWorkflowFailure({
-          cwd: options.cwd,
-          mode: 'direct',
-          prompt: action.task,
-          error: message,
-        });
-        return buildRuntimeManagedFailure(
-          'odin_execute_task_failed',
-          `Odin task execution failed: ${message}`,
-          {
-            retryable: true,
-          },
-        );
-      }
-      await recordOdinWorkflowSuccess({
-        cwd: options.cwd,
-        mode: 'direct',
-        prompt: action.task,
-        reply: specialist.result.reply,
-        turns: specialist.result.turns,
-      });
-      return {
-        ok: true,
-        output: JSON.stringify(
-          {
-            reply: specialist.result.reply,
-            sessionId: specialist.session.id,
-            turns: specialist.result.turns,
-          },
-          null,
-          2,
-        ),
-      };
-    }
-    case 'odin_fix_skill':
-      return executeOdinFixSkill({
-        cwd: options.cwd,
-        skillId: action.skillId,
-        errorContext: action.errorContext,
-        summary: action.summary,
-      });
-    case 'odin_upload_skill':
-      return executeOdinUploadSkill({
-        cwd: options.cwd,
-        skillId: action.skillId,
-        visibility: action.visibility,
-        notes: action.notes,
-      });
-    case 'odin_import_cloud_skills':
-      return importOdinCloudSkills({
-        cwd: options.cwd,
-        query: action.query,
-        limit: action.limit,
-      });
     default:
       const message = [
         `Tool ${action.type} is marked as runtime-managed but has no runtime handler.`,
@@ -6177,7 +6035,7 @@ export async function runAgent(
     options.onInfo?.(
       configured.length > 0
         ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. ${remoteFallbackRequested ? 'User requested web/search fallback.' : 'Local generate_image/generate_video/generate_long_video is required before completion.'}`
-        : '[visual] task needs visual assets; no configured local visual API found. Use Freya/web-search fallback if image assets are required.',
+        : '[visual] task needs visual assets; no configured local visual API found. generate_image/generate_video will report that setup is required.',
     );
   }
   const completionChecklist = buildRuntimeCompletionChecklist(

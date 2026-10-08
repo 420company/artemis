@@ -235,7 +235,6 @@ import { searchSessions } from '../storage/sessionSearch.js'
 import { ENV_FALLBACK_ANTHROPIC_MODEL, summarizeOnce } from '../brain.js'
 import { McpServerStore } from '../mcp/store.js'
 import { suggestMcpServersForIntent } from '../mcp/runtime.js'
-import { OdinStore } from '../odin/store.js'
 import { CronScheduler } from '../services/cron.js'
 import { BragiStore } from '../bragi/store.js'
 import { runOnboarding, runVisualModelSetup } from './onboarding.js'
@@ -294,6 +293,7 @@ import {
   describeVisualProvider,
   hasExplicitLocalVisualConsent,
   hasExplicitRemoteVisualFallback,
+  VISUAL_NOT_CONFIGURED_POLICY,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
@@ -1123,18 +1123,19 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '检测到任务需要图片/视频，但没有找到已配置且启用的本地视觉生成 API。',
           'Detected image/video needs, but no enabled local visual generation API is configured.',
         ),
-        savedPreference === 'local'
-          ? t(
-              '你之前选择了本地视觉 API，但当前配置不可用；本轮将改用网络搜索素材。请重新配置 providers.json 后再使用本地视觉生成。',
-              'Your saved preference is local visual API, but the current configuration is unavailable; this turn will use web-search assets. Reconfigure providers.json before using local visual generation again.',
-            )
-          : t(
-              '本轮如需视觉素材，将使用网络搜索素材，不会伪装成本地生成。',
-              'This turn will use web-search assets if needed and will not claim local generation.',
-            ),
+        ...(savedPreference === 'local'
+          ? [t(
+              '你之前选择了本地视觉 API，但当前配置不可用。',
+              'Your saved preference is the local visual API, but its configuration is unavailable.',
+            )]
+          : []),
+        t(
+          '图片/视频生成尚未配置：运行 /visual（或 /config visual，命令行 artemis setup visual）完成配置后重试。',
+          'Image/video generation is not configured: run /visual (or /config visual, or `artemis setup visual` in a shell), then retry.',
+        ),
         `${t('已检查配置: ', 'Checked config: ')}${checkedPaths.join(' ; ')}`,
       ])
-      return `${requestText}\n\n[Visual generation policy]\nNo configured local visual generation API is available. Use web-search assets if needed, and do not claim local generation.`
+      return `${requestText}\n\n${VISUAL_NOT_CONFIGURED_POLICY}`
     }
 
     if (hasExplicitRemoteVisualFallback(requestText)) {
@@ -1791,7 +1792,6 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/saga',       hint: t('Saga 长视频生成（显式进入）', 'Saga long-video generation (explicit)') },
     { value: '/run',        hint: t('后台运行工作流',             'Run workflow in background') },
     // ── 系统 & 技能 ──
-    { value: '/odin',       hint: t('Odin 技能库管理',           'Odin skill store') },
     { value: '/heimdall',   hint: t('Heimdall 线程控制面',        'Heimdall thread control plane') },
     { value: '/mcp',        hint: t('MCP 服务管理',              'Manage MCP servers') },
     { value: '/skills',     hint: t('技能库搜索与推荐',           'Search and recommend skills') },
@@ -3863,30 +3863,6 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    // ── /odin [sub] — skill store ──────────────────────────────────────────────
-    if (isSlashCommand(trimmed, '/odin')) {
-      const sub = trimmed.slice('/odin'.length).trim().toLowerCase()
-      const odinStore = new OdinStore(cwd)
-      if (!sub || sub === 'list' || sub === 'ls') {
-        const skills = await odinStore.list({ status: 'active' })
-        if (skills.length === 0) {
-          appendSystemPanel(t('Odin 技能库', 'Odin skill store'), [t('暂无技能。AI 使用 5+ 个工具后会自动捕获技能。', 'No skills yet. Skills are auto-captured after 5+ tool calls in a turn.')])
-        } else {
-          const rows = skills.slice(0, 20).map(s => `[${String(s.confidence).padStart(2)}/10]  ${s.name.slice(0, 50)}`)
-          appendSystemPanel(t(`Odin 技能库 (${skills.length})`, `Odin skills (${skills.length})`), rows)
-        }
-      } else if (sub === 'help') {
-        appendSystemPanel('Odin', [
-          '  /odin              ' + t('列出所有技能', 'List all skills'),
-          '  /odin help         ' + t('显示帮助', 'Show help'),
-          '  artemis odin list  ' + t('完整技能列表（终端）', 'Full list (terminal)'),
-        ])
-      } else {
-        appendSystemPanel(t('Odin — 未知子命令', 'Odin — unknown subcommand'), [`"${sub}" — ` + t('运行 /odin help 查看用法', 'Run /odin help for usage')])
-      }
-      continue
-    }
-
     // ── /heimdall [sub] — thread monitor ──────────────────────────────────────
     if (isSlashCommand(trimmed, '/heimdall')) {
       const args = trimmed.slice('/heimdall'.length).trim()
@@ -5315,7 +5291,6 @@ function renderHelp(locale: UiLocale): string {
     `/undo              ${t('撤回上一步操作', 'Undo last turn')}`,
     `/retry             ${t('重试上一步操作', 'Retry last turn')}`,
     ``,
-    `/odin              ${t('Odin skill store · 管理 skills', 'Odin skill store')}`,
     `/heimdall          ${t('thread control plane / 观察 + approve', 'thread control plane / observe + approve')}`,
     `/hud               ${t('HUD status bar · 查看状态', 'HUD status bar')}`,
     ``,

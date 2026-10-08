@@ -35,7 +35,10 @@ export async function executeMemoryTool(
   const cwd = context.cwd
   await ensureMemoryMigrated(cwd)
   const collided = scopesCollide(cwd)
-  const scope: MemoryScope = collided ? 'global' : (action.scope === 'project' ? 'project' : 'global')
+  // An explicit scope wins; otherwise the runtime's default (headless runs:
+  // project, so content met during a run does not reach every future prompt).
+  const requestedScope = action.scope ?? context.memoryDefaultScope ?? 'global'
+  const scope: MemoryScope = collided ? 'global' : (requestedScope === 'project' ? 'project' : 'global')
 
   try {
     if (action.action === 'list') {

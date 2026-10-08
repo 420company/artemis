@@ -991,83 +991,23 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           maxTurns: integerSchema('Optional max turns for the builder execution pass.'),
         },
       };
-    case 'odin_search_skills':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['query'],
-        properties: {
-          query: nonEmptyStringSchema('Search query to find matching skills.'),
-          scope: {
-            type: 'string',
-            description: 'Optional scope: local, cloud, or all (default: all).',
-          },
-          limit: integerSchema('Optional maximum number of results to return.'),
-          autoImport: {
-            type: 'boolean',
-            description: 'When true, automatically import the best matching skill.',
-          },
-        },
-      };
-    case 'odin_execute_task':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['task'],
-        properties: {
-          task: nonEmptyStringSchema('Task description to find and execute a matching skill for.'),
-          searchScope: {
-            type: 'string',
-            description: 'Optional scope to search for matching skills.',
-          },
-          maxIterations: integerSchema('Optional maximum execution iterations.'),
-        },
-      };
-    case 'odin_fix_skill':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['skillId'],
-        properties: {
-          skillId: nonEmptyStringSchema('Identifier of the skill to repair.'),
-          errorContext: optionalStringSchema('Optional error message or context to guide the fix.'),
-          summary: optionalStringSchema('Optional short summary of the intended fix.'),
-        },
-      };
-    case 'odin_upload_skill':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['skillId'],
-        properties: {
-          skillId: nonEmptyStringSchema('Identifier of the local skill to publish.'),
-          visibility: {
-            type: 'string',
-            description: 'Visibility level for the uploaded skill.',
-          },
-          notes: optionalStringSchema('Optional release notes for this skill version.'),
-        },
-      };
-    case 'odin_import_cloud_skills':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          query: optionalStringSchema('Optional keyword query to filter which cloud skills to import.'),
-          limit: integerSchema('Maximum number of skills to import. Defaults to 10.'),
-        },
-      };
     case 'generate_image':
       return {
         type: 'object',
         additionalProperties: false,
         required: ['prompt'],
         properties: {
-          prompt: nonEmptyStringSchema('Text description of the image to generate.'),
+          prompt: nonEmptyStringSchema('Full natural-language description: subject, action, setting, then style/medium (the user\'s style). Text to render in "double quotes". Keep the user\'s language. No size or aspect-ratio words; use size.'),
           model: optionalStringSchema('Optional image generation model ID. Defaults to the configured visual provider model.'),
           size: {
             type: 'string',
-            description: 'Output size preset or provider-specific size. Examples: 1K, 2K, 4K, 1024x1024, 1536x1024. Default: configured visual profile size.',
+            description: 'Output size and aspect ratio: a preset (1K, 2K, 4K; square) or WxH, e.g. 2560x1440 for 16:9 or 1440x2560 for 9:16 on Seedream, 1536x1024 on gpt-image. Default: configured visual profile size.',
+          },
+          referenceImages: {
+            type: 'array',
+            maxItems: 14,
+            description: 'Images to edit or follow (style, subject, composition): workspace file paths or http(s) URLs, up to 14. Seedream 4.x/5.x only; other image providers return an error. Say in prompt what to keep and what to change.',
+            items: { type: 'string' },
           },
           quality: optionalStringSchema('Optional image quality. For gpt-image-2: low, medium, high, or auto. Default: configured visual profile quality.'),
           outputFormat: optionalStringSchema('Optional output format. For gpt-image-2: png, jpeg, or webp. Default: configured visual profile output format or png.'),
@@ -1100,6 +1040,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           model: optionalStringSchema('Optional video generation model name.'),
           ratio: optionalStringSchema('Optional aspect ratio (e.g., 16:9).'),
           duration: integerSchema('Optional duration in seconds (1-60).'),
+          resolution: optionalStringSchema(
+            'Optional output resolution: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution, since it costs several times more.',
+          ),
           outputPath: optionalStringSchema('Optional local file path to save the generated video.'),
           referenceImageUrls: {
             type: 'array',
@@ -1350,21 +1293,6 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             description: 'Local engine selection. auto tries whisper.cpp first, then Python whisper.',
           },
           command: optionalStringSchema('Optional executable path/name override, e.g. whisper-cli or whisper.'),
-        },
-      };
-    case 'request_freya_visual_asset':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['assetType', 'contextDescription'],
-        properties: {
-          assetType: {
-            type: 'string',
-            description: 'Type of visual asset to request (image, video, or icon).',
-            enum: ['image', 'video', 'icon'],
-          },
-          contextDescription: nonEmptyStringSchema('Detailed description of the UI or component context.'),
-          preferredStyle: optionalStringSchema('Optional preferred visual style.'),
         },
       };
     case 'agent':
@@ -1765,6 +1693,32 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             description: 'Target platform. Defaults to all.',
           },
           targetId: optionalStringSchema('Optional platform target id/chat id/channel id. Defaults to configured or live bridge targets.'),
+        },
+      };
+    case 'memory':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['action'],
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['save', 'update', 'delete', 'list'],
+            description: 'save a new memory, update an existing one, delete one the user contradicted, or list them all.',
+          },
+          scope: {
+            type: 'string',
+            enum: ['global', 'project'],
+            description: 'global: about the user, across projects. project: only this workspace. Set global explicitly for lasting facts about the user; if omitted, interactive runs save globally and headless runs to the project.',
+          },
+          name: optionalStringSchema('Short kebab-case slug, e.g. reply-language. Required for update and delete.'),
+          description: optionalStringSchema('One concrete sentence; recall relies on it.'),
+          category: {
+            type: 'string',
+            enum: ['preference', 'feedback', 'project', 'reference', 'skill', 'architecture'],
+            description: 'What kind of memory this is.',
+          },
+          content: optionalStringSchema('The memory in Markdown, with absolute dates. Required for save and update.'),
         },
       };
   default:

@@ -127,6 +127,9 @@ export async function runHeadlessAgent(
     // further by their own provider metadata inside runAgent.
     contextLength: resolveEffectiveModelContextLength(providerConfig.model, providerConfig.contextLength),
     compaction: await loadCompactionSettings(cwd),
+    // Nobody reviews a headless turn as it runs: memories the model saves
+    // without naming a scope stay in this workspace.
+    memoryDefaultScope: 'project',
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
     resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,

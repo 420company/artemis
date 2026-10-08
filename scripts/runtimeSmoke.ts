@@ -59,8 +59,20 @@ import {
   isDirectlyExecutableTool,
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
+  validateToolAction,
   renderDetailedToolManifest,
+  validateToolAction,
+  GENERATE_IMAGE_DESCRIPTION,
 } from '../src/tools/registry.js'
+import {
+  classifyImageGenerationFailure,
+  formatImageGenerationFailure,
+} from '../src/tools/visual/imageGenerationFailure.js'
+import {
+  normalizeReferenceImagesArg,
+  resolveReferenceImages,
+  sniffImageMimeType,
+} from '../src/tools/visual/referenceImages.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
@@ -74,7 +86,17 @@ import {
   saveLedger,
   cleanupLedger,
 } from '../src/core/collapse/index.js'
-import { resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import { modelArkEndpoint, normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import {
+  downloadProviderAsset,
+  isNonPublicAddress,
+  setAssetDownloadResolverForTests,
+  setAssetDownloadTransportForTests,
+  type AssetHostResolver,
+  type AssetTransport,
+} from '../src/tools/visual/safeDownload.js'
+import { lookup as dnsLookup } from 'node:dns/promises'
+import { sniffAnyImageType, sniffImageType } from '../src/core/imageInput.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
 import { executeGenerateVideo } from '../src/tools/generateVideo.js'
@@ -104,8 +126,9 @@ import {
   resolveVisionDescribeRouteForTest,
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
+import { resolveSoundtrackPath } from '../src/tools/visual/sagaRenderer/index.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
-import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
+import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../src/tools/visual/videoParams.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
   isPathInsideWorkspace,
@@ -117,6 +140,8 @@ import {
 import { projectDirectToolNames } from '../src/core/directToolProjection.js'
 import { buildDreamBridgeText } from '../src/services/dreamComposer.js'
 import type { SessionMessage } from '../src/core/types.js'
+import { ALL_AGENT_ACTION_TYPES, RUNTIME_MANAGED_AGENT_ACTION_TYPES } from '../src/core/types.js'
+import { resolveDataRootDir } from '../src/utils/fs.js'
 import type {
   ChatProvider,
   ProviderNativeToolOutput,
@@ -143,7 +168,7 @@ import {
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
-import { detectVisualGenerationNeed } from '../src/utils/visualGenerationConfig.js'
+import { detectVisualGenerationNeed, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
 import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
@@ -196,6 +221,24 @@ console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
 const providerNativeTools = buildProviderNativeFunctionTools()
+
+// Generated-asset downloads normally go through node:http(s) with a guarded
+// DNS lookup. Most tests here mock globalThis.fetch, so route downloads
+// through fetch and resolve the reserved .test domain to a public
+// documentation address. The download-guard tests swap in the real transport.
+const fetchAssetTransport: AssetTransport = async (url, { signal }) => {
+  const res = await fetch(url, { redirect: 'manual', signal })
+  return {
+    status: res.status,
+    location: res.headers.get('location') ?? undefined,
+    contentType: res.headers.get('content-type') ?? undefined,
+    body: Buffer.from(await res.arrayBuffer()),
+  }
+}
+const testAssetResolver: AssetHostResolver = async (hostname) =>
+  hostname.endsWith('.test') ? [{ address: '93.184.216.34', family: 4 }] : dnsLookup(hostname, { all: true, verbatim: true })
+setAssetDownloadTransportForTests(fetchAssetTransport)
+setAssetDownloadResolverForTests(testAssetResolver)
 const providerNativeToolNames = providerNativeTools.map((tool) => tool.name)
 
 assert(
@@ -369,25 +412,6 @@ assert(
     if (previousHeadless === undefined) delete process.env.ARTEMIS_BROWSER_HEADLESS
     else process.env.ARTEMIS_BROWSER_HEADLESS = previousHeadless
   }
-}
-
-{
-  // The legacy interactive Freya flow is not offered to the model anywhere.
-  const freya = 'request_freya_visual_asset'
-  const mainNativeNames = buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main'))
-    .map((tool) => tool.name)
-  const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
-  const mainPrompt = buildSystemPrompt(process.cwd(), 'accept-all', 'standard', 'main', false)
-  assert(
-    'freya: request_freya_visual_asset is not offered to main (native, direct, manifest, prompt)',
-    !providerNativeToolNames.includes(freya) &&
-      !mainNativeNames.includes(freya) &&
-      !getProviderCallableActionTypes().includes(freya) &&
-      !buildDirectNativeFunctionTools().some((tool) => tool.name === freya) &&
-      !manifestNames.includes(freya) &&
-      !mainPrompt.includes(freya) &&
-      !mapProviderNativeToolCallToAction({ callId: 'freya-call', name: freya, arguments: '{}' }).ok,
-  )
 }
 
 {
@@ -1507,6 +1531,842 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
+// ── generate_image: honest failures, reference images, prompt guidance ─────────
+
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+// A 1x1 BITMAPINFOHEADER bmp header: size 58, DIB header 40.
+const BMP_HEADER = (() => {
+  const buf = Buffer.alloc(58)
+  buf.write('BM', 0, 'ascii')
+  buf.writeUInt32LE(58, 2)
+  buf.writeUInt32LE(54, 10)
+  buf.writeUInt32LE(40, 14)
+  return buf
+})()
+
+async function configureBytePlusImageProfile(cwd: string, baseUrl: string): Promise<void> {
+  const store = new ProviderStore(cwd)
+  const data = await store.load()
+  data.visualProfile = {
+    enabled: true,
+    image: {
+      provider: 'byteplus',
+      apiKey: 'test-image-key',
+      baseUrl,
+      model: 'seedream-5-0-260128',
+      defaultParams: { size: '2K', quality: 'standard', style: 'realistic', watermark: false },
+    },
+    video: {
+      enabled: false,
+      provider: 'byteplus',
+      apiKey: '',
+      baseUrl,
+      model: 'seedance-1-5-pro-251215',
+      defaultParams: {
+        duration: '10s',
+        resolution: '1080p',
+        quality: 'standard',
+        style: 'realistic',
+        format: 'mp4',
+        framerate: '30fps',
+        watermark: false,
+      },
+    },
+  }
+  await store.save(data)
+}
+
+async function withMockedFetch<T>(
+  respond: (url: string, init?: RequestInit) => Response,
+  run: (calls: Array<{ url: string; body?: string }>) => Promise<T>,
+): Promise<T> {
+  const originalFetch = globalThis.fetch
+  const calls: Array<{ url: string; body?: string }> = []
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    calls.push({ url, body: typeof init?.body === 'string' ? init.body : undefined })
+    return respond(url, init)
+  }) as typeof fetch
+  try {
+    return await run(calls)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  // Failure classification: each case gets its own actionable message.
+  const gateway402 = '{"error":{"code":"insufficient_balance","message":"Balance too low: please top up","type":"insufficient_balance"}}'
+  assert(
+    'image failure: gateway 402 is insufficient balance',
+    classifyImageGenerationFailure({ detail: gateway402, status: 402 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: `API request failed (HTTP 402): ${gateway402}` }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: ModelArk overdue account (403 ServiceOverdue) is insufficient balance',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 403): {"error":{"code":"OperationDenied.ServiceOverdue","message":"account overdue"}}', status: 403 }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: 401/403 is billing only with a specific code, otherwise unauthorized, even with "not configured" text',
+    classifyImageGenerationFailure({ detail: '{"error":{"code":"insufficient_balance"}}', status: 401 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: '{"error":{"code":"AccountOverdueError"}}', status: 403 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: 'your account balance is too low', status: 403 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'model access not configured for this key', status: 403 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API key is not configured', status: 401 }) === 'unauthorized',
+  )
+  assert(
+    'image failure: the status is never parsed from text; a failed download is download_failed',
+    classifyImageGenerationFailure({ detail: 'Image download failed: download failed: HTTP 403' }) === 'upstream' &&
+      classifyImageGenerationFailure({ detail: 'Image download failed: download failed: HTTP 403', stage: 'download' }) === 'download_failed' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 402): busy' }) === 'upstream',
+  )
+  assert(
+    'image failure: with reference images, the too-large advice mentions shrinking them',
+    formatImageGenerationFailure({ detail: 'Request body too large', status: 413, hasReferences: true }).output.includes('fewer reference images or smaller/compressed copies') &&
+      !formatImageGenerationFailure({ detail: 'Request body too large', status: 413 }).output.includes('reference'),
+  )
+  assert(
+    'image failure: 413 is payload too large',
+    classifyImageGenerationFailure({ detail: '{"error":{"code":"payload_too_large","message":"Request body too large"}}', status: 413 }) === 'payload_too_large',
+  )
+  assert(
+    'image failure: ModelArk SensitiveContentDetected and OpenAI moderation_blocked are content rejections',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 400): {"error":{"code":"SensitiveContentDetected.Violence","message":"The request failed because the input text may contain sensitive information."}}' }) === 'content_rejected' &&
+      classifyImageGenerationFailure({ detail: 'OpenAI image generation failed (HTTP 400): moderation_blocked' }) === 'content_rejected',
+  )
+  assert(
+    'image failure: missing key is not configured, 401 is unauthorized, 5xx and network errors are upstream',
+    classifyImageGenerationFailure({ detail: 'Custom image API key is not configured.' }) === 'not_configured' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 401): {"error":{"code":"AuthenticationError"}}', status: 401 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 503): upstream busy' }) === 'upstream' &&
+      classifyImageGenerationFailure({ detail: 'fetch failed' }) === 'upstream',
+  )
+  const formatted = formatImageGenerationFailure({ detail: gateway402, status: 402, source: 'BytePlus image API' }).output
+  assert(
+    'image failure: 402 message tells the user to top up and names the source',
+    formatted.startsWith('generate_image failed: insufficient balance') &&
+      formatted.includes('top up') &&
+      formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
+      formatted.includes('Do not substitute a downloaded web image'),
+    formatted,
+  )
+}
+
+{
+  // A failed image API call returns ok:false with the right message and never
+  // falls back to a web search or downloads anything else.
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-honest-failure-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusImageProfile(tmpDir, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+  try {
+    const balance = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up","type":"insufficient_balance"}}', { status: 402 }),
+      async (calls) => ({
+        result: await executeGenerateImage({ type: 'generate_image', prompt: 'a red fox in snow, watercolor' } as any, { cwd: tmpDir } as any),
+        calls: [...calls],
+      }),
+    )
+    assert(
+      'generate_image: HTTP 402 returns ok:false with a top-up message',
+      balance.result.ok === false &&
+        String(balance.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(balance.result.output).includes('top up'),
+      String(balance.result.output),
+    )
+    assert(
+      'generate_image: HTTP 402 makes exactly one image API call and no web search',
+      balance.calls.length === 1 &&
+        balance.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
+        !balance.calls.some((call) => /bing|google|duckduckgo|search/i.test(call.url)),
+      JSON.stringify(balance.calls.map((call) => call.url)),
+    )
+
+    const generic = await withMockedFetch(
+      () => new Response('<html>Bad Gateway</html>', { status: 502 }),
+      async (calls) => ({
+        result: await executeGenerateImage({ type: 'generate_image', prompt: 'logo with the text "ACME"' } as any, { cwd: tmpDir } as any),
+        calls: [...calls],
+      }),
+    )
+    assert(
+      'generate_image: a generic upstream error returns ok:false with a retry message and no web search',
+      generic.result.ok === false &&
+        String(generic.result.output).startsWith('generate_image failed: the image service or network failed') &&
+        String(generic.result.output).includes('HTTP 502') &&
+        generic.calls.length === 1 &&
+        generic.calls.every((call) => call.url.endsWith('/images/generations')),
+      String(generic.result.output),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // A ModelArk-compatible base URL on another host (the platform gateway) is
+  // kept, so its key is never sent to the public BytePlus host.
+  assert(
+    'ModelArk base URL: gateway and Volcengine hosts are kept; BytePlus paths still normalize',
+    normalizeModelArkMediaBaseUrl('https://gw.example.test/v1') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1/') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1/images/generations') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/api/v3') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://ark.ap-southeast.bytepluses.com/api/v3/images/generations') === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl(undefined) === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('mock://local') === 'https://ark.ap-southeast.bytepluses.com/api/v3',
+  )
+  const throwsMisconfigured = (url: string): boolean => {
+    try {
+      normalizeModelArkMediaBaseUrl(url)
+      return false
+    } catch (error) {
+      return /Visual API base URL is misconfigured: .*plain http/.test(String(error))
+    }
+  }
+  assert(
+    'ModelArk base URL: volces.com normalizes like bytepluses.com; gateway query strings are kept',
+    normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/api/v3/images/generations') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('http://ark.cn-beijing.volces.com/api/v3') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1?tenant=a') === 'https://gw.example.test/v1?tenant=a' &&
+      modelArkEndpoint('https://gw.example.test/v1?tenant=a', 'images/generations') === 'https://gw.example.test/v1/images/generations?tenant=a' &&
+      modelArkEndpoint('https://ark.ap-southeast.bytepluses.com/api/v3', 'contents/generations/tasks') === 'https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks',
+  )
+  assert(
+    'ModelArk base URL: plain http only for loopback; a lookalike host is not treated as BytePlus',
+    normalizeModelArkMediaBaseUrl('http://localhost:8080/v1') === 'http://localhost:8080/v1' &&
+      normalizeModelArkMediaBaseUrl('http://127.0.0.1:8080/v1') === 'http://127.0.0.1:8080/v1' &&
+      normalizeModelArkMediaBaseUrl('http://[::1]:8080/v1') === 'http://[::1]:8080/v1' &&
+      throwsMisconfigured('http://gw.example.test/v1') &&
+      throwsMisconfigured('http://10.0.0.5:8080/v1') &&
+      normalizeModelArkMediaBaseUrl('https://bytepluses.com.evil.test/api/v3/x') === 'https://bytepluses.com.evil.test/api/v3/x',
+  )
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-gateway-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusImageProfile(tmpDir, 'https://gw.example.test/v1')
+  try {
+    const calls = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (seen) => {
+        await executeGenerateImage({ type: 'generate_image', prompt: 'x' } as any, { cwd: tmpDir } as any)
+        return [...seen]
+      },
+    )
+    assert(
+      'generate_image: a byteplus profile pointed at the platform gateway calls the gateway',
+      calls.length === 1 && calls[0]!.url === 'https://gw.example.test/v1/images/generations',
+      JSON.stringify(calls.map((call) => call.url)),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Downloads of provider-returned URLs refuse private, link-local and
+  // loopback targets, also after redirects; loopback only for a loopback base URL.
+  assert(
+    'asset download: private, link-local, loopback and mapped addresses are non-public',
+    isNonPublicAddress('10.1.2.3') &&
+      isNonPublicAddress('172.20.0.1') &&
+      isNonPublicAddress('192.168.1.1') &&
+      isNonPublicAddress('169.254.169.254') &&
+      isNonPublicAddress('127.0.0.1') &&
+      isNonPublicAddress('::1') &&
+      isNonPublicAddress('fe80::1') &&
+      isNonPublicAddress('fd00::1') &&
+      isNonPublicAddress('::ffff:10.0.0.1') &&
+      !isNonPublicAddress('93.184.216.34') &&
+      !isNonPublicAddress('2606:2800:220:1:248:1893:25c8:1946') &&
+      !isNonPublicAddress('127.0.0.1', { allowLoopback: true }) &&
+      isNonPublicAddress('10.0.0.1', { allowLoopback: true }),
+  )
+  const refused = async (url: string, respond: (u: string) => Response, allowLoopback = false) =>
+    withMockedFetch(respond, async (calls) => {
+      try {
+        await downloadProviderAsset(url, { timeoutMs: 5_000, allowLoopback })
+        return { refused: false, calls: [...calls], message: '' }
+      } catch (error) {
+        return { refused: true, calls: [...calls], message: String(error) }
+      }
+    })
+  const metadata = await refused('http://169.254.169.254/latest/meta-data/', () => new Response('secret'))
+  assert(
+    'asset download: a cloud-metadata URL is refused without being fetched',
+    metadata.refused && metadata.calls.length === 0 && /private, link-local or loopback/.test(metadata.message),
+    metadata.message,
+  )
+  const redirected = await refused('https://93.184.216.34/a.png', (u) =>
+    u.startsWith('https://93.184.216.34')
+      ? new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:9000/admin' } })
+      : new Response('internal'),
+  )
+  assert(
+    'asset download: a redirect to loopback is refused before it is followed',
+    redirected.refused && redirected.calls.length === 1 && /127\.0\.0\.1/.test(redirected.message),
+    redirected.message,
+  )
+  const loopbackAllowed = await refused('http://127.0.0.1:9000/a.png', () => new Response(PNG_1X1), true)
+  assert(
+    'asset download: loopback is allowed when the provider base URL is loopback',
+    !loopbackAllowed.refused && loopbackAllowed.calls.length === 1,
+    loopbackAllowed.message,
+  )
+}
+
+{
+  // DNS rebinding: the address is checked inside the socket's lookup, so a
+  // host that resolves public for the early check and private at connect time
+  // is still refused. Uses the real node:http transport and a local server.
+  const hits: string[] = []
+  const server = http.createServer((req, res) => {
+    hits.push(req.url ?? '')
+    if (req.url === '/redirect') {
+      res.writeHead(302, { location: 'http://169.254.169.254/latest/meta-data/' })
+      res.end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'image/png' })
+    res.end(PNG_1X1)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const port = (server.address() as { port: number }).port
+  const lookups: string[] = []
+  setAssetDownloadTransportForTests(undefined)
+  const attempt = async (url: string, allowLoopback: boolean) => {
+    try {
+      const body = await downloadProviderAsset(url, { timeoutMs: 5_000, allowLoopback })
+      return { ok: true, body, message: '' }
+    } catch (error) {
+      return { ok: false, body: undefined, message: String(error) }
+    }
+  }
+  try {
+    let rebindCalls = 0
+    setAssetDownloadResolverForTests(async (hostname) => {
+      lookups.push(hostname)
+      if (hostname === 'assets.rebind.test') {
+        rebindCalls += 1
+        return [{ address: rebindCalls === 1 ? '93.184.216.34' : '127.0.0.1', family: 4 }]
+      }
+      if (hostname === 'assets.loopback.test') return [{ address: '127.0.0.1', family: 4 }]
+      return testAssetResolver(hostname)
+    })
+    const rebound = await attempt(`http://assets.rebind.test:${port}/a.png`, false)
+    assert(
+      'asset download: a host that rebinds to loopback at connect time is refused and never reached',
+      !rebound.ok && rebindCalls === 2 && /127\.0\.0\.1/.test(rebound.message) && hits.length === 0,
+      `${rebound.message} lookups=${rebindCalls} hits=${hits.length}`,
+    )
+    const viaLookup = await attempt(`http://assets.loopback.test:${port}/a.png`, true)
+    assert(
+      'asset download: the connection uses the guarded lookup (loopback base URL allowed)',
+      viaLookup.ok && Buffer.compare(viaLookup.body!, PNG_1X1) === 0 && hits.length === 1 &&
+        lookups.filter((name) => name === 'assets.loopback.test').length === 2,
+      viaLookup.message,
+    )
+    const redirect = await attempt(`http://127.0.0.1:${port}/redirect`, true)
+    assert(
+      'asset download: the real transport checks every redirect hop',
+      !redirect.ok && /169\.254\.169\.254/.test(redirect.message) && hits.length === 2 && hits[1] === '/redirect',
+      redirect.message,
+    )
+  } finally {
+    setAssetDownloadTransportForTests(fetchAssetTransport)
+    setAssetDownloadResolverForTests(testAssetResolver)
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Saga soundtrack URLs can come from content the agent read: same guard.
+  const workDir = path.join(os.tmpdir(), `artemis-soundtrack-guard-${Date.now()}`)
+  fs.mkdirSync(workDir, { recursive: true })
+  const AUDIO = Buffer.from('ID3fake-mp3-bytes')
+  const soundtrack = async (url: string) => {
+    const calls: string[] = []
+    const result = await withMockedFetch(
+      (requested) => {
+        calls.push(requested)
+        if (requested === 'https://music.test/redirect.mp3') {
+          return new Response(null, { status: 302, headers: { location: 'http://10.0.0.8/internal.mp3' } })
+        }
+        return new Response(AUDIO, { status: 200, headers: { 'content-type': 'audio/mpeg' } })
+      },
+      async () => {
+        try {
+          return { path: await resolveSoundtrackPath({ url }, workDir), message: '' }
+        } catch (error) {
+          return { path: undefined, message: String(error) }
+        }
+      },
+    )
+    return { ...result, calls }
+  }
+  try {
+    const ok = await soundtrack('https://music.test/song.mp3')
+    assert(
+      'saga soundtrack: a public audio URL downloads through the guard',
+      ok.path === path.join(workDir, 'soundtrack.mp3') && Buffer.compare(fs.readFileSync(ok.path), AUDIO) === 0,
+      ok.message,
+    )
+    const local = await soundtrack('http://127.0.0.1:8080/admin/export.mp3')
+    const metadata = await soundtrack('http://169.254.169.254/latest/meta-data/x.wav')
+    assert(
+      'saga soundtrack: loopback and metadata URLs are refused without a request',
+      !local.path && /private, link-local or loopback/.test(local.message) && local.calls.length === 0 &&
+        !metadata.path && /private, link-local or loopback/.test(metadata.message) && metadata.calls.length === 0,
+      `${local.message} | ${metadata.message}`,
+    )
+    const redirected = await soundtrack('https://music.test/redirect.mp3')
+    assert(
+      'saga soundtrack: a redirect to a private address is refused',
+      !redirected.path && /10\.0\.0\.8/.test(redirected.message) && redirected.calls.length === 1,
+      redirected.message,
+    )
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Video results go through the same guard, on the provider path and the
+  // legacy ARK_API_KEY path.
+  const METADATA_VIDEO = 'http://169.254.169.254/latest/meta-data/out.mp4'
+  const videoMock = (calls: string[]) => (url: string) => {
+    calls.push(url)
+    if (url.endsWith('/contents/generations/tasks')) return new Response('{"id":"task-guard"}', { status: 200 })
+    if (url.endsWith('/contents/generations/tasks/task-guard')) {
+      return new Response(JSON.stringify({ status: 'succeeded', content: { video_url: METADATA_VIDEO } }), { status: 200 })
+    }
+    return new Response('should not be fetched', { status: 200 })
+  }
+  const root = path.join(os.tmpdir(), `artemis-video-guard-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(workspace, { recursive: true })
+  const savedEnv = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME, ARK_API_KEY: process.env.ARK_API_KEY }
+  process.env.HOME = path.join(root, 'home')
+  process.env.ARTEMIS_HOME = path.join(root, 'artemis-home')
+  delete process.env.ARK_API_KEY
+  fs.mkdirSync(process.env.HOME, { recursive: true })
+  try {
+    await configureBytePlusVideoProfile(workspace, 'seedance-1-5-pro-251215')
+    const providerCalls: string[] = []
+    const viaProvider = await withMockedFetch(videoMock(providerCalls), async () =>
+      executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a short wave clip', duration: 5, maxPolls: 1, pollIntervalMs: 1000 } as any,
+        { cwd: workspace } as any,
+      ),
+    )
+    assert(
+      'generate_video: the BytePlus provider refuses a private video result URL',
+      viaProvider.ok === false &&
+        /private, link-local or loopback/.test(String(viaProvider.output)) &&
+        !providerCalls.includes(METADATA_VIDEO),
+      String(viaProvider.output),
+    )
+
+    fs.rmSync(process.env.ARTEMIS_HOME!, { recursive: true, force: true })
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.mkdirSync(workspace, { recursive: true })
+    process.env.ARK_API_KEY = 'ark-test-key'
+    const legacyCalls: string[] = []
+    const viaLegacy = await withMockedFetch(videoMock(legacyCalls), async () =>
+      executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a short wave clip', duration: 5, maxPolls: 1, pollIntervalMs: 1000 } as any,
+        { cwd: workspace } as any,
+      ),
+    )
+    assert(
+      'generate_video: the legacy ARK_API_KEY path refuses a private video result URL',
+      viaLegacy.ok === false &&
+        /private, link-local or loopback/.test(String(viaLegacy.output)) &&
+        legacyCalls.some((url) => url.startsWith('https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks')) &&
+        !legacyCalls.includes(METADATA_VIDEO),
+      String(viaLegacy.output),
+    )
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // M1/M2 on the configured-provider path, and the legacy ARK_API_KEY path.
+  const PUBLIC_ASSET = 'https://93.184.216.34/generated/a.png'
+  const root = path.join(os.tmpdir(), `artemis-image-review-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(workspace, { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'ref.png'), PNG_1X1)
+  const savedEnv = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME, ARK_API_KEY: process.env.ARK_API_KEY }
+  process.env.HOME = path.join(root, 'home')
+  process.env.ARTEMIS_HOME = path.join(root, 'artemis-home')
+  delete process.env.ARK_API_KEY
+  fs.mkdirSync(process.env.HOME, { recursive: true })
+  const context = { cwd: workspace } as any
+  const generatedThenDownload = (downloadStatus: number) => (url: string) =>
+    url.endsWith('/images/generations')
+      ? new Response(JSON.stringify({ data: [{ url: PUBLIC_ASSET }] }), { status: 200 })
+      : downloadStatus === 200
+        ? new Response(PNG_1X1, { status: 200 })
+        : new Response('AccessDenied', { status: downloadStatus })
+  try {
+    await configureBytePlusImageProfile(workspace, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+
+    const downloadFailed = await withMockedFetch(generatedThenDownload(403), async (calls) => ({
+      result: await executeGenerateImage({ type: 'generate_image', prompt: 'a lighthouse at dusk' } as any, context),
+      calls: [...calls],
+    }))
+    assert(
+      'generate_image: a 403 on the result download is download_failed, not rejected credentials',
+      downloadFailed.result.ok === false &&
+        String(downloadFailed.result.output).startsWith('generate_image failed: the image was generated') &&
+        !String(downloadFailed.result.output).includes('rejected the credentials') &&
+        downloadFailed.calls.length === 2,
+      String(downloadFailed.result.output),
+    )
+
+    let generation = 0
+    const partial = await withMockedFetch(
+      (url) => {
+        if (url.endsWith('/images/generations')) {
+          generation += 1
+          return generation === 1
+            ? new Response(JSON.stringify({ data: [{ url: PUBLIC_ASSET }] }), { status: 200 })
+            : new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 })
+        }
+        return new Response(PNG_1X1, { status: 200 })
+      },
+      async () => executeGenerateImage({ type: 'generate_image', prompt: 'two lighthouses', count: 2, outputPath: 'out/light.png' } as any, context),
+    )
+    const partialOutput = String(partial.output)
+    assert(
+      'generate_image: count 2 with the second failing returns the saved image plus the reason',
+      partial.ok === true &&
+        partialOutput.startsWith('Generated 1 of 2 requested image(s) via configured visual API:') &&
+        partialOutput.includes(path.join('out', 'light-1.png')) &&
+        partialOutput.includes('The other 1 image(s) failed: insufficient balance') &&
+        !partialOutput.includes('No image was created') &&
+        fs.existsSync(path.join(workspace, 'out', 'light-1.png')),
+      partialOutput,
+    )
+
+    // Legacy path: no visual profile, credentials from ARK_API_KEY. With
+    // ARTEMIS_HOME set the provider store lives there, so clear it too.
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.rmSync(process.env.ARTEMIS_HOME!, { recursive: true, force: true })
+    fs.mkdirSync(workspace, { recursive: true })
+    fs.writeFileSync(path.join(workspace, 'ref.png'), PNG_1X1)
+    process.env.ARK_API_KEY = 'ark-test-key'
+    const legacy = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (calls) => ({
+        result: await executeGenerateImage(
+          { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['ref.png'] } as any,
+          context,
+        ),
+        calls: [...calls],
+      }),
+    )
+    const legacyBody = JSON.parse(legacy.calls[0]?.body ?? '{}')
+    assert(
+      'generate_image legacy ARK_API_KEY path: sends image as a data URI and maps 402 to top up',
+      legacy.calls.length === 1 &&
+        legacy.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
+        legacyBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        legacy.result.ok === false &&
+        String(legacy.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(legacy.result.output).includes('BytePlus image API failed (HTTP 402)'),
+      JSON.stringify({ calls: legacy.calls.map((call) => call.url), output: legacy.result.output }),
+    )
+    const legacyDownload = await withMockedFetch(generatedThenDownload(403), async () =>
+      executeGenerateImage({ type: 'generate_image', prompt: 'x' } as any, context),
+    )
+    assert(
+      'generate_image legacy ARK_API_KEY path: a 403 download is download_failed',
+      legacyDownload.ok === false &&
+        String(legacyDownload.output).startsWith('generate_image failed: the image was generated'),
+      String(legacyDownload.output),
+    )
+    const legacyTooLarge = await withMockedFetch(
+      () => new Response('{"error":{"code":"payload_too_large","message":"Request body too large"}}', { status: 413 }),
+      async () => executeGenerateImage({ type: 'generate_image', prompt: 'x', referenceImages: ['ref.png'] } as any, context),
+    )
+    assert(
+      'generate_image legacy ARK_API_KEY path: 413 with references says to shrink them',
+      legacyTooLarge.ok === false && String(legacyTooLarge.output).includes('fewer reference images or smaller/compressed copies'),
+      String(legacyTooLarge.output),
+    )
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Reference images: parsing, containment, data URIs, unsupported providers.
+  assert(
+    'referenceImages: arrays, JSON strings and single strings normalize, de-duplicated',
+    eq(normalizeReferenceImagesArg([' a.png ', 'a.png', '', 'https://x.test/b.jpg']), ['a.png', 'https://x.test/b.jpg']) &&
+      eq(normalizeReferenceImagesArg('["a.png","b.png"]'), ['a.png', 'b.png']) &&
+      eq(normalizeReferenceImagesArg('a.png'), ['a.png']) &&
+      eq(normalizeReferenceImagesArg(undefined), []),
+  )
+  assert(
+    'referenceImages: image types are sniffed from bytes, not extensions',
+    sniffImageMimeType(PNG_1X1) === 'image/png' &&
+      sniffImageMimeType(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0])) === 'image/jpeg' &&
+      sniffImageMimeType(Buffer.from('RIFF\0\0\0\0WEBPVP8 ', 'binary')) === 'image/webp' &&
+      sniffImageMimeType(Buffer.from('API_KEY=secret\n')) === undefined,
+  )
+  assert(
+    'referenceImages: one shared sniffer; view_image still sees only model formats',
+    sniffImageMimeType(BMP_HEADER) === 'image/bmp' &&
+      sniffAnyImageType(BMP_HEADER) === 'image/bmp' &&
+      sniffImageType(BMP_HEADER) === undefined &&
+      sniffImageType(PNG_1X1) === 'image/png',
+  )
+  assert(
+    'referenceImages: BMP needs a plausible header, not just "BM"',
+    sniffAnyImageType(Buffer.from('BM is how this text file starts')) === undefined &&
+      sniffAnyImageType(Buffer.concat([Buffer.from('BM'), Buffer.alloc(16)])) === undefined &&
+      sniffAnyImageType(BMP_HEADER) === 'image/bmp',
+  )
+
+  const recovered = parseAssistantEnvelopeForSmoke(`
+<tool_calls>
+<call name="generate_image">{"prompt":"same style, but a cat","reference_images":["uploads/style.png"]}</call>
+</tool_calls>
+`)
+  const looseAction = (recovered.actions ?? [])[0] as any
+  assert(
+    'referenceImages: text tool-call recovery parses reference_images',
+    looseAction?.type === 'generate_image' && eq(looseAction.referenceImages, ['uploads/style.png']),
+    JSON.stringify(recovered.actions),
+  )
+  const nativeMapped = mapProviderNativeToolCallToAction({
+    callId: 'img-ref',
+    name: 'generate_image',
+    arguments: JSON.stringify({ prompt: 'same style, but a cat', referenceImages: ['uploads/style.png', 'https://x.test/a.png'] }),
+  })
+  assert(
+    'referenceImages: native tool call keeps referenceImages',
+    nativeMapped.ok && eq((nativeMapped.action as any).referenceImages, ['uploads/style.png', 'https://x.test/a.png']),
+    JSON.stringify(nativeMapped),
+  )
+  assert(
+    'referenceImages: validator rejects more than 14 entries and non-string entries',
+    validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: Array.from({ length: 15 }, (_, i) => `r${i}.png`) }).length > 0 &&
+      validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: [42] }).length > 0 &&
+      validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: ['a.png'] }).length === 0,
+  )
+  const imageSchema = providerNativeTools.find((tool) => tool.name === 'generate_image')?.parameters as any
+  assert(
+    'referenceImages: native schema exposes an array capped at 14',
+    imageSchema?.properties?.referenceImages?.type === 'array' && imageSchema.properties.referenceImages.maxItems === 14,
+  )
+
+  const root = path.join(os.tmpdir(), `artemis-image-refs-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(path.join(workspace, 'uploads'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'uploads', 'style.png'), PNG_1X1)
+  fs.writeFileSync(path.join(workspace, 'uploads', 'notes.png'), 'API_KEY=not-an-image\n')
+  fs.writeFileSync(path.join(root, 'outside.png'), PNG_1X1)
+  fs.mkdirSync(path.join(workspace, '.ssh'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.ssh', 'id.png'), PNG_1X1)
+  fs.writeFileSync(path.join(workspace, '.env.png'), PNG_1X1)
+  const context = { cwd: workspace } as any
+  const rejects = async (raw: unknown, pattern: RegExp): Promise<boolean> => {
+    try {
+      await resolveReferenceImages(raw, context)
+      return false
+    } catch (error) {
+      return pattern.test(error instanceof Error ? error.message : String(error))
+    }
+  }
+  try {
+    const resolved = await resolveReferenceImages(['uploads/style.png', 'https://x.test/a.png'], context)
+    assert(
+      'referenceImages: workspace files become data URIs and URLs pass through',
+      resolved.length === 2 &&
+        resolved[0] === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        resolved[1] === 'https://x.test/a.png',
+      JSON.stringify(resolved.map((entry) => entry.slice(0, 40))),
+    )
+    assert(
+      'referenceImages: paths outside the workspace are refused',
+      await rejects(['../outside.png'], /escapes|declined/i) &&
+        await rejects([path.join(root, 'outside.png')], /escapes|declined/i),
+    )
+    assert(
+      'referenceImages: protected paths inside the workspace (.ssh dir, .env file) are refused by ensureNotSensitivePath',
+      await rejects(['.ssh/id.png'], /Access denied: \.ssh\/id\.png is in a protected directory/) &&
+        await rejects(['.env.png'], /Access denied: \.env\.png is in a protected directory/),
+    )
+    const fullAccess = await resolveReferenceImages(['.ssh/id.png'], { ...context, permissionMode: 'full-access' })
+    assert(
+      'referenceImages: full-access mode skips the protected-path check, like read_file',
+      fullAccess.length === 1 && fullAccess[0]!.startsWith('data:image/png;base64,'),
+    )
+    assert(
+      'referenceImages: non-images, missing files and other schemes are refused',
+      await rejects(['uploads/notes.png'], /not a supported image/) &&
+        await rejects(['uploads/missing.png'], /not found/) &&
+        await rejects(['file:///etc/passwd'], /not supported/),
+    )
+    assert(
+      'referenceImages: more than 14, or references plus outputs over 15, are refused',
+      await rejects(Array.from({ length: 15 }, (_, i) => `https://x.test/${i}.png`), /at most 14/) &&
+        await (async () => {
+          try {
+            await resolveReferenceImages(Array.from({ length: 13 }, (_, i) => `https://x.test/${i}.png`), context, { outputCount: 3 })
+            return false
+          } catch (error) {
+            return /limit of 15/.test(String(error))
+          }
+        })(),
+    )
+
+    // The request body carries the reference as a ModelArk `image` data URI.
+    await configureBytePlusImageProfile(workspace, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+    const sent = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (calls) => {
+        const result = await executeGenerateImage(
+          { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['uploads/style.png'] } as any,
+          context,
+        )
+        return { result, calls: [...calls] }
+      },
+    )
+    const sentBody = JSON.parse(sent.calls[0]?.body ?? '{}')
+    assert(
+      'referenceImages: BytePlus request body has image as a data URI',
+      sent.calls.length === 1 &&
+        sentBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        sentBody.prompt === 'same style, but a cat' &&
+        sent.result.ok === false,
+      JSON.stringify({ keys: Object.keys(sentBody), output: sent.result.output }),
+    )
+    const sentTwo = await withMockedFetch(
+      () => new Response('{"error":{"message":"boom"}}', { status: 500 }),
+      async (calls) => {
+        await executeGenerateImage(
+          { type: 'generate_image', prompt: 'blend these', referenceImages: ['uploads/style.png', 'https://x.test/a.png'] } as any,
+          context,
+        )
+        return [...calls]
+      },
+    )
+    const sentTwoBody = JSON.parse(sentTwo[0]?.body ?? '{}')
+    assert(
+      'referenceImages: several references are sent as an image array',
+      Array.isArray(sentTwoBody.image) && sentTwoBody.image.length === 2 && sentTwoBody.image[1] === 'https://x.test/a.png',
+    )
+
+    // Providers without reference support fail clearly instead of ignoring them.
+    for (const provider of ['openai', 'mock'] as const) {
+      const store = new ProviderStore(workspace)
+      const data = await store.load()
+      data.visualProfile!.image = {
+        ...data.visualProfile!.image,
+        provider,
+        apiKey: 'test-key',
+        baseUrl: provider === 'openai' ? 'https://api.openai.com/v1' : 'mock://local',
+        model: provider === 'openai' ? 'gpt-image-2' : 'mock-image',
+      }
+      await store.save(data)
+      const unsupported = await withMockedFetch(
+        () => new Response('{}', { status: 500 }),
+        async (calls) => ({
+          result: await executeGenerateImage(
+            { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['uploads/style.png'] } as any,
+            context,
+          ),
+          calls: [...calls],
+        }),
+      )
+      assert(
+        `referenceImages: ${provider} provider fails clearly without calling the API`,
+        unsupported.result.ok === false &&
+          String(unsupported.result.output).includes('reference images are not supported') &&
+          unsupported.calls.length === 0,
+        String(unsupported.result.output),
+      )
+    }
+
+    // A text-to-image-only Seedream model refuses references.
+    const t2i = new BytePlusProvider(
+      {
+        enabled: true,
+        image: { provider: 'byteplus', apiKey: 'k', baseUrl: '', model: 'seedream-3-0-t2i-250415', defaultParams: { size: '2K', quality: 'standard', style: 'realistic', watermark: false } },
+        video: { enabled: false, provider: 'byteplus', apiKey: '', baseUrl: '', model: '', defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false } },
+      } as any,
+      'image',
+    )
+    const t2iResult = await withMockedFetch(
+      () => new Response('{}', { status: 500 }),
+      async (calls) => ({ result: await t2i.generateImage({ prompt: 'x', referenceImages: ['https://x.test/a.png'] }), calls: [...calls] }),
+    )
+    assert(
+      'referenceImages: Seedream 3.0 text-to-image model refuses references before calling the API',
+      !t2iResult.result.success && /text-to-image only/.test(t2iResult.result.error ?? '') && t2iResult.calls.length === 0,
+      t2iResult.result.error,
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // No visual API configured: the policy says so and how to configure it, and
+  // does not send the model to web-search images.
+  assert(
+    'visual policy: not-configured policy names /visual and does not suggest web-search assets',
+    VISUAL_NOT_CONFIGURED_POLICY.includes('not configured') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('/visual') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('artemis setup visual') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('Do not substitute web-search or downloaded images') &&
+      !/use web-search assets/i.test(VISUAL_NOT_CONFIGURED_POLICY),
+  )
+}
+
+{
+  // Prompt guidance lives in the tool description, not in a rewrite of the prompt.
+  const imageTool = providerNativeTools.find((tool) => tool.name === 'generate_image')
+  const description = imageTool?.description ?? ''
+  assert(
+    'generate_image description: carries the Seedream prompt guidance',
+    description === GENERATE_IMAGE_DESCRIPTION &&
+      /natural sentences for subject, action and setting/.test(description) &&
+      /style the user asked for/.test(description) &&
+      /double quotes/.test(description) &&
+      /`size`, not in the prompt/.test(description) &&
+      /Keep the user's language/.test(description) &&
+      /`referenceImages`/.test(description) &&
+      /Look at it first with view_image whenever that tool is available/.test(description) &&
+      !/if you can/i.test(description) &&
+      /ask one short question only/.test(description) &&
+      /never substitute a web image/.test(description),
+    description,
+  )
+  assert(
+    'generate_image description: stays short and adds no fixed photo keywords',
+    description.length < 1400 && !/Canon|f\/1\.8|photorealistic, /i.test(description),
+    `length=${description.length}`,
+  )
+}
+
 async function configureMockImageProfile(cwd: string): Promise<void> {
   const store = new ProviderStore(cwd)
   const data = await store.load()
@@ -1915,6 +2775,204 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     )
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // A project without its own providers.json uses the global semantic-memory
+  // setting, like the main model does.
+  const tmpDir = path.join(os.tmpdir(), `artemis-memory-profile-${Date.now()}`)
+  const home = path.join(tmpDir, 'home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(path.join(home, '.artemis'), { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  fs.writeFileSync(path.join(home, '.artemis', 'providers.json'), JSON.stringify({
+    profiles: [],
+    memoryProfile: { enabled: true, provider: 'openai', config: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'embed-test' } },
+  }))
+  const previous = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME }
+  process.env.HOME = home
+  delete process.env.ARTEMIS_HOME
+  try {
+    const { getMemoryProfile } = await import('../src/core/memoryEnhancement.js')
+    const profile = await getMemoryProfile(project)
+    assert('semantic memory: a project without its own setting uses the global one', profile.enabled === true && profile.config?.model === 'embed-test', JSON.stringify(profile))
+  } finally {
+    if (previous.HOME === undefined) delete process.env.HOME
+    else process.env.HOME = previous.HOME
+    if (previous.ARTEMIS_HOME !== undefined) process.env.ARTEMIS_HOME = previous.ARTEMIS_HOME
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // With ARTEMIS_HOME set, the global store is $ARTEMIS_HOME/providers.json
+  // (not a workspaces/<hash> path) for the main model, the provider router,
+  // semantic memory and brain.ts alike. A setup written earlier at the
+  // workspace path of the home directory keeps working until that file exists.
+  const tmpDir = path.join(os.tmpdir(), `artemis-global-store-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  const mainProfile = (id: string) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: `sk-${id}`, model: `${id}-model` })
+  const previousArtemisHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = artemisHome
+  let legacyPath = ''
+  try {
+    const { createGlobalProviderStore } = await import('../src/providers/store.js')
+    const { resolveMainProviderConfig } = await import('../src/providers/onboarding.js')
+    const { getMemoryProfile } = await import('../src/core/memoryEnhancement.js')
+    const homePath = path.join(artemisHome, 'providers.json')
+    legacyPath = new ProviderStore(os.homedir()).getFilePath()
+    assert(
+      'global provider store: an ARTEMIS_HOME path resolves to $ARTEMIS_HOME/providers.json',
+      new ProviderStore(artemisHome).getFilePath() === homePath && legacyPath !== homePath,
+      `${new ProviderStore(artemisHome).getFilePath()} vs ${legacyPath}`,
+    )
+
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true })
+    fs.writeFileSync(legacyPath, JSON.stringify({ profiles: [mainProfile('legacy-main')], defaultMainProfileId: 'legacy-main' }))
+    const legacyMain = await resolveMainProviderConfig({ cwd: project, config: {} })
+    assert(
+      'global provider store: a setup at the old workspace path is still found while $ARTEMIS_HOME/providers.json is missing',
+      createGlobalProviderStore().getFilePath() === legacyPath && legacyMain.model === 'legacy-main-model',
+      `${createGlobalProviderStore().getFilePath()} ${legacyMain.model}`,
+    )
+
+    fs.writeFileSync(homePath, JSON.stringify({
+      profiles: [mainProfile('home-main')],
+      defaultMainProfileId: 'home-main',
+      memoryProfile: { enabled: true, provider: 'openai', config: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'embed-home' } },
+    }))
+    const homeMain = await resolveMainProviderConfig({ cwd: project, config: {} })
+    const memoryProfile = await getMemoryProfile(project)
+    assert(
+      'global provider store: main model and semantic memory read $ARTEMIS_HOME/providers.json',
+      createGlobalProviderStore().getFilePath() === homePath &&
+        homeMain.model === 'home-main-model' &&
+        memoryProfile.config?.model === 'embed-home',
+      `${createGlobalProviderStore().getFilePath()} ${homeMain.model} ${JSON.stringify(memoryProfile)}`,
+    )
+  } finally {
+    if (previousArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousArtemisHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // A real headless run (runHeadlessAgent, as `artemis execute` and the web
+  // product use) against a chat-completions server that answers in the text
+  // tool-call dialect: the loose `remember` form saves a memory, and with no
+  // scope named it stays in the project; an explicit global save goes global.
+  const tmpDir = path.join(os.tmpdir(), `artemis-headless-remember-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  let requestCount = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      requestCount += 1
+      const content = requestCount === 1
+        ? [
+          'Noted both.',
+          '<toolcall name="remember">{"name":"deploy-target","description":"Deploys go to the staging VPS first","content":"Deploy to the staging VPS before production."}</toolcall>',
+          '<toolcall name="memory">{"action":"save","scope":"global","name":"reply-language","description":"Owner wants replies in Simplified Chinese","content":"Always reply in Simplified Chinese."}</toolcall>',
+        ].join('\n')
+        : 'Saved both.'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        model: 'mock-openai-compatible',
+        choices: [{ message: { content } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }))
+    })
+  })
+  const previousArtemisHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = artemisHome
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock provider server failed to bind to a TCP port.')
+    fs.writeFileSync(path.join(artemisHome, 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-openai',
+      profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
+    }))
+    const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+    const { memoryDirForScope } = await import('../src/storage/memoryFiles.js')
+    const result = await runHeadlessAgent(project, 'Remember: deploys go to staging first, and reply in Simplified Chinese.', { maxTurns: 3 })
+    const list = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+    const projectSaved = list(memoryDirForScope(project, 'project'))
+    const globalSaved = list(memoryDirForScope(project, 'global'))
+    const detail = `reply=${result.reply} requests=${requestCount} project=${projectSaved.join(',')} global=${globalSaved.join(',')}`
+    assert(
+      'headless memory: a <toolcall name="remember"> without a scope is saved to the project, not globally',
+      projectSaved.some((f) => f.startsWith('deploy-target')) && !globalSaved.some((f) => f.startsWith('deploy-target')),
+      detail,
+    )
+    assert(
+      'headless memory: an explicit global memory save still goes global',
+      globalSaved.some((f) => f.startsWith('reply-language')),
+      detail,
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (previousArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousArtemisHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Headless runs (artemis execute, the web product) know the owner: soul.md
+  // reaches the system prompt, and main may save a long-term memory.
+  const tmpDir = path.join(os.tmpdir(), `artemis-headless-memory-${Date.now()}`)
+  const home = path.join(tmpDir, 'artemis-home')
+  fs.mkdirSync(home, { recursive: true })
+  fs.writeFileSync(path.join(home, 'soul.md'), 'Speak like a calm ship captain.')
+  const previousHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = home
+  try {
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'headless memory smoke' })
+    await store.save(session)
+    let calls = 0
+    let systemText = ''
+    const provider: ChatProvider = {
+      async complete(messages): Promise<ProviderResponse> {
+        calls += 1
+        if (calls === 1) {
+          systemText = messages.filter((m) => m.role === 'system').map((m) => String(m.content)).join('\n')
+          return {
+            text: JSON.stringify({
+              reply: 'Noted.',
+              done: false,
+              actions: [{ type: 'memory', action: 'save', name: 'reply-language', description: 'Owner wants replies in Simplified Chinese', content: 'Always reply in Simplified Chinese.' }],
+            }),
+            raw: null,
+          }
+        }
+        return { text: JSON.stringify({ reply: 'Saved.', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'Remember: always reply in Simplified Chinese.', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+    })
+    assert('headless memory: soul.md reaches the main system prompt', systemText.includes('Speak like a calm ship captain.'), systemText.slice(0, 400))
+    const saved = fs.existsSync(path.join(home, 'memory')) ? fs.readdirSync(path.join(home, 'memory')) : []
+    assert('headless memory: main may save a long-term memory', saved.some((f) => f.startsWith('reply-language')), saved.join(', '))
+  } finally {
+    if (previousHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 
@@ -3415,7 +4473,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
           model: 'dreamina-seedance-2-0-260128',
           defaultParams: {
             duration: '10s',
-            resolution: '720p',
+            // What older onboarding wrote for every BytePlus user.
+            resolution: '1080p',
             quality: 'standard',
             style: 'realistic',
             format: 'mp4',
@@ -3447,6 +4506,79 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         createBody.generate_audio === true &&
         createBody.duration === 11,
       JSON.stringify(createBody),
+    )
+    assert(
+      'ModelArk visual provider: does not bill the configured 1080p default when no resolution is asked for',
+      createBody !== undefined && !('resolution' in createBody),
+      JSON.stringify(createBody),
+    )
+    await provider.generateVideo({ prompt: 'hd product film', model: 'dreamina-seedance-2-0-260128', resolution: '1080P' })
+    assert(
+      'ModelArk visual provider: sends the requested resolution, normalized',
+      createBody?.resolution === '1080p',
+      JSON.stringify(createBody),
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  assert(
+    'video resolution: canonical values from loose spellings; unknown and 4k (no provider renders it) rejected',
+    normalizeVideoResolution('1080P') === '1080p' &&
+      normalizeVideoResolution(' 720 ') === '720p' &&
+      normalizeVideoResolution('480') === '480p' &&
+      normalizeVideoResolution('4K') === undefined &&
+      normalizeVideoResolution('8k') === undefined &&
+      normalizeVideoResolution('') === undefined &&
+      normalizeVideoResolution(undefined) === undefined,
+  )
+  assert(
+    'video resolution: generate_video validation rejects 4k before any provider is called',
+    validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '4k' } as any).some((e) => e.includes('resolution')) &&
+      validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '1080p' } as any).length === 0,
+  )
+}
+
+{
+  // OpenAI (Sora) receives the requested resolution as a size; one it cannot
+  // render fails before the create request instead of silently changing.
+  const originalFetch = globalThis.fetch
+  const sizes: string[] = []
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (init?.body instanceof FormData) sizes.push(String(init.body.get('size')))
+    return new Response('{"error":{"message":"stop here"}}', { status: 400 })
+  }) as typeof fetch
+  const soraProvider = (model: string) => new OpenAIProvider({
+    enabled: true,
+    image: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model: 'gpt-image-2',
+      defaultParams: { size: '1024x1024', quality: 'medium', style: 'realistic', watermark: false, outputFormat: 'png', background: 'auto' },
+    },
+    video: {
+      enabled: true,
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model,
+      defaultParams: { duration: '8s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false },
+    },
+  })
+  try {
+    await soraProvider('sora-2-pro').generateVideo({ prompt: 'hd', model: 'sora-2-pro', ratio: '16:9', resolution: '1080p' })
+    const rejected480 = await soraProvider('sora-2').generateVideo({ prompt: 'small', model: 'sora-2', resolution: '480p' })
+    const rejected1080 = await soraProvider('sora-2').generateVideo({ prompt: 'hd', model: 'sora-2', resolution: '1080p' })
+    assert(
+      'OpenAI visual provider: passes a requested 1080p to pro models and rejects what Sora cannot render',
+      sizes.length === 1 &&
+        sizes[0] === '1920x1080' &&
+        rejected480.success === false && /cannot render 480p/.test(String(rejected480.error)) &&
+        rejected1080.success === false && /cannot render 1080p/.test(String(rejected1080.error)),
+      `sizes=${JSON.stringify(sizes)} 480=${rejected480.error} 1080=${rejected1080.error}`,
     )
   } finally {
     globalThis.fetch = originalFetch
@@ -8996,6 +10128,309 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     )
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
+}
+
+// ── MCP stdio transport ───────────────────────────────────────────────────────
+
+{
+  // The MCP stdio transport is newline-delimited JSON; servers built on the
+  // official SDKs read only that. Servers that read only LSP-style
+  // Content-Length frames are detected at initialize and still work. A stray
+  // non-JSON stdout line must not break a call, and must show up in the error
+  // when the server fails. A malformed frame header fails fast (it used to
+  // spin forever).
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-stdio-'))
+  type Mode = 'newline' | 'newline-noisy' | 'content-length' | 'content-length-exit'
+  const serverSource = (mode: Mode) => `
+const framed = ${mode.startsWith('content-length')}
+const write = (m) => {
+  const body = JSON.stringify(m)
+  process.stdout.write(framed ? 'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body : body + '\\n')
+}
+${mode === 'newline-noisy' ? "process.stdout.write('server starting...\\n')" : ''}
+let buf = ''
+process.stdin.on('data', (chunk) => {
+  buf += chunk
+  for (;;) {
+    let line
+    if (framed) {
+      // Strict LSP-style reader: anything else is never answered${mode === 'content-length-exit' ? ' (this one exits)' : ''}.
+      const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+      if (!m) {
+        ${mode === 'content-length-exit' ? "if (buf.length > 0) { process.stderr.write('expected Content-Length header\\n'); process.exit(1) }" : ''}
+        return
+      }
+      const end = m[0].length + Number(m[1])
+      if (buf.length < end) return
+      line = buf.slice(m[0].length, end)
+      buf = buf.slice(end)
+    } else {
+      const i = buf.indexOf('\\n')
+      if (i < 0) return
+      line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+    }
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'smoke', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] } })
+    else if (msg.method === 'tools/call') write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo:' + msg.params.arguments.text }] } })
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`
+  const stdioServer = (id: string, source: string) => {
+    const file = path.join(dir, `${id}.mjs`)
+    fs.writeFileSync(file, source)
+    return {
+      id,
+      enabled: true,
+      transport: 'stdio' as const,
+      command: process.execPath,
+      commandArgs: [file],
+      authType: 'none' as const,
+      authState: 'unknown' as const,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+  const callEcho = async (server: ReturnType<typeof stdioServer>): Promise<{ output: string; ms: number }> => {
+    const started = Date.now()
+    try {
+      return { output: (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), ms: Date.now() - started }
+    }
+  }
+  try {
+    const cases: [string, Mode][] = [
+      ['newline-delimited JSON (MCP spec, official SDKs)', 'newline'],
+      ['a server that reads only Content-Length frames (detected at initialize)', 'content-length'],
+      ['a Content-Length-only server that exits on unframed input', 'content-length-exit'],
+      ['a stray log line on stdout before the first message', 'newline-noisy'],
+    ]
+    for (const [label, mode] of cases) {
+      const { output } = await callEcho(stdioServer(`smoke-${mode}`, serverSource(mode)))
+      assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
+    }
+
+    // The detected framing is remembered: a fresh spawn skips the probe.
+    await closeCachedMcpClients()
+    const again = await callEcho(stdioServer('smoke-content-length', serverSource('content-length')))
+    assert('mcp stdio: detected Content-Length framing is reused on the next spawn', again.output.includes('echo:hi') && again.ms < 2500, `${again.ms}ms ${again.output}`)
+
+    const badHeader = await callEcho(stdioServer('smoke-bad-header', `process.stdin.on('data', () => { process.stdout.write('Content-Length: x\\r\\n\\r\\n{}') })\n`))
+    assert('mcp stdio: a malformed Content-Length header fails fast instead of hanging', /Content-Length/.test(badHeader.output) && badHeader.ms < 4000, `${badHeader.ms}ms ${badHeader.output}`)
+
+    const dying = await callEcho(stdioServer('smoke-dying', `process.stdout.write('fatal: missing API token\\n'); setTimeout(() => process.exit(1), 50)\n`))
+    assert('mcp stdio: dropped non-JSON stdout lines appear in the failure message', dying.output.includes('fatal: missing API token'), dying.output)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ── MCP call timeout and cancellation ─────────────────────────────────────────
+
+{
+  // Real tools (search, scrape, render) take longer than a probe: a call that
+  // needs ~5 s must not hit the old 4 s default. Connecting keeps a shorter
+  // budget than the call, and a cancelled run stops waiting at once (also
+  // while the server is still starting) instead of after the timeout.
+  const { callMcpServerTool, closeCachedMcpClients, resolveMcpRequestTimeouts, McpCallCancelledError } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-timeout-'))
+  const slowFile = path.join(dir, 'slow.mjs')
+  fs.writeFileSync(slowFile, `
+const write = (m) => process.stdout.write(JSON.stringify(m) + '\\n')
+let buf = ''
+process.stdin.on('data', (c) => {
+  buf += c
+  for (;;) {
+    const i = buf.indexOf('\\n')
+    if (i < 0) return
+    const line = buf.slice(0, i)
+    buf = buf.slice(i + 1)
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'slow', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'slow', inputSchema: { type: 'object' } }] } })
+    else if (msg.method === 'tools/call') setTimeout(() => write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'slow done' }] } }), 5000)
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`)
+  const silentFile = path.join(dir, 'silent.mjs')
+  fs.writeFileSync(silentFile, `process.stdin.on('data', () => {})\n`)
+  const stdioServer = (id: string, file: string) => ({ id, enabled: true, transport: 'stdio' as const, command: process.execPath, commandArgs: [file], authType: 'none' as const, authState: 'unknown' as const, createdAt: '', updatedAt: '' })
+  const callSlow = async (server: ReturnType<typeof stdioServer>, abortAfterMs?: number): Promise<{ output: string; error?: unknown; ms: number }> => {
+    const controller = new AbortController()
+    const timer = abortAfterMs === undefined ? undefined : setTimeout(() => controller.abort(), abortAfterMs)
+    const started = Date.now()
+    try {
+      const output = (await callMcpServerTool({ server, cwd: dir, toolName: 'slow', args: {}, abortSignal: controller.signal })).output
+      return { output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), error, ms: Date.now() - started }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  try {
+    const timeouts = resolveMcpRequestTimeouts(undefined)
+    assert('mcp call: default budget is 120 s for the call and 30 s for connecting', timeouts.callTimeoutMs === 120_000 && timeouts.setupTimeoutMs === 30_000, JSON.stringify(timeouts))
+    const explicit = resolveMcpRequestTimeouts(5_000)
+    assert('mcp call: an explicit shorter timeout bounds connecting too', explicit.callTimeoutMs === 5_000 && explicit.setupTimeoutMs === 5_000, JSON.stringify(explicit))
+
+    const done = await callSlow(stdioServer('slow', slowFile))
+    assert('mcp call: a 5 s tool call completes under the default call timeout', done.output.includes('slow done'), done.output)
+
+    const cancelled = await callSlow(stdioServer('slow-cancel', slowFile), 300)
+    assert('mcp call: cancelling a running tool call stops waiting at once', cancelled.error instanceof McpCallCancelledError && cancelled.ms < 2000, `${cancelled.ms}ms ${cancelled.output}`)
+
+    const cancelledConnect = await callSlow(stdioServer('silent-cancel', silentFile), 300)
+    assert('mcp call: cancelling while the server never answers initialize stops waiting at once', cancelledConnect.error instanceof McpCallCancelledError && cancelledConnect.ms < 2000, `${cancelledConnect.ms}ms ${cancelledConnect.output}`)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+{
+  // The retired "Odin" skill subsystem must stay gone: no tool in any table,
+  // and a leftover odin.json in the data root is neither read nor touched.
+  const retired = 'odin'
+  const retiredToolPattern = new RegExp(`\\b${retired}_`, 'i')
+  const retiredTools = ['search_skills', 'execute_task', 'fix_skill', 'upload_skill', 'import_cloud_skills'].map((name) => `${retired}_${name}`)
+  const profiles = ['main', 'planner', 'researcher', 'builder', 'reviewer', 'brainstormer', 'arbiter', 'architect', 'designer', 'qa'] as const
+  const nameLists: Record<string, string[]> = {
+    actionTypes: [...ALL_AGENT_ACTION_TYPES],
+    runtimeManaged: [...RUNTIME_MANAGED_AGENT_ACTION_TYPES],
+    providerCallable: getProviderCallableActionTypes(),
+    providerNative: buildProviderNativeFunctionTools().map((tool) => tool.name),
+    directNative: buildDirectNativeFunctionTools().map((tool) => tool.name),
+    ...Object.fromEntries(profiles.map((profile) => [`profile:${profile}`, getAllowedActionTypesForProfile(profile)])),
+  }
+  const leaks = Object.entries(nameLists).flatMap(([list, names]) =>
+    names.filter((name) => retiredToolPattern.test(name)).map((name) => `${list}:${name}`),
+  )
+  assert('retired skill tools: no tool list, profile, or native projection exposes them', leaks.length === 0, leaks.join(', '))
+  assert(
+    'retired skill tools: the detailed tool manifest does not mention them',
+    !new RegExp(`\\b${retired}\\b`, 'i').test(renderDetailedToolManifest()) && !retiredToolPattern.test(renderDetailedToolManifest()),
+  )
+  assert(
+    'retired skill tools: registry has no definition and validation rejects them as unknown',
+    retiredTools.every((type) => getToolDefinition(type) === undefined && isRuntimeManagedTool(type) === false) &&
+      retiredTools.every((type) => validateToolAction({ type, query: 'x', task: 'x', skillId: 'x' }).includes('Unknown tool type')),
+  )
+  const nativeCall = mapProviderNativeToolCallToAction({
+    callId: 'retired-call',
+    name: retiredTools[0]!,
+    arguments: '{"query":"x"}',
+  })
+  assert('retired skill tools: a provider-native call to one is rejected', nativeCall.ok === false, JSON.stringify(nativeCall))
+  assert(
+    `retired skill CLI: parseArgs(['${retired}']) behaves like any unknown command`,
+    eq(
+      { ...parseArgs([retired, 'list']), prompt: undefined, promptArgs: undefined },
+      { ...parseArgs(['zz-not-a-command', 'list']), prompt: undefined, promptArgs: undefined },
+    ) &&
+      parseArgs([retired, 'list']).command === 'chat' &&
+      parseArgs([retired, 'list']).prompt === `${retired} list`,
+    JSON.stringify(parseArgs([retired, 'list'])),
+  )
+
+  // A corrupt odin.json left in the data root by an older release must not
+  // break runAgent or a workflow run, and must be left exactly as it was.
+  const tmpDir = path.join(os.tmpdir(), `artemis-retired-skill-store-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const dataRoot = resolveDataRootDir(tmpDir)
+  fs.mkdirSync(dataRoot, { recursive: true })
+  const legacyFile = path.join(dataRoot, `${retired}.json`)
+  const corrupt = '{"version":1,"skills":[{"id":"x", this is not json'
+  fs.writeFileSync(legacyFile, corrupt)
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'retired skill store smoke' })
+  await store.save(session)
+  const systemTexts: string[] = []
+  const infos: string[] = []
+  const provider: ChatProvider = {
+    async complete(messages, options): Promise<ProviderResponse> {
+      systemTexts.push(JSON.stringify({ messages, options }))
+      return { text: JSON.stringify({ reply: 'Done without skill hints.', done: true }), raw: null }
+    },
+  }
+  let runError: unknown
+  let reply = ''
+  try {
+    const result = await runAgent(session, 'search skills for a deploy task', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+      onInfo: (message) => infos.push(message),
+    })
+    reply = result.reply
+  } catch (error) {
+    runError = error
+  }
+  assert(
+    'retired skill store: runAgent still runs with a corrupt odin.json in the data root',
+    runError === undefined && reply.includes('Done without skill hints'),
+    runError instanceof Error ? runError.message : reply,
+  )
+  assert(
+    'retired skill store: no skill-hint section or info line reaches the run',
+    systemTexts.length > 0 &&
+      systemTexts.every((text) => !new RegExp(`\\b${retired}\\b`, 'i').test(text)) &&
+      infos.every((message) => !new RegExp(`\\b${retired}\\b`, 'i').test(message)),
+    infos.join(' | '),
+  )
+
+  let workflowError: unknown
+  let workflowReply = ''
+  try {
+    const result = await runWorkflowMode('direct', session, 'one more simple step', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+    })
+    workflowReply = result.reply
+  } catch (error) {
+    workflowError = error
+  }
+  assert(
+    'retired skill store: a direct workflow run completes with a corrupt odin.json present',
+    workflowError === undefined && workflowReply.includes('Done without skill hints'),
+    workflowError instanceof Error ? workflowError.message : workflowReply,
+  )
+  // buildContextWindow is gone; the shared context manager must likewise
+  // not depend on the workspace for anything skill-related.
+  const contextInput = {
+    messages: session.messages,
+    fixedTokens: 1_000,
+    budget: resolveContextBudget({ contextWindow: 128_000 }),
+  }
+  const contextWithCwd = await manageContext({ ...contextInput, state: createContextState(), restore: { cwd: tmpDir } })
+  const contextWithoutCwd = await manageContext({ ...contextInput, state: createContextState() })
+  assert(
+    'retired skill store: context management gives the same result with or without a cwd',
+    eq(contextWithCwd.messages, contextWithoutCwd.messages) &&
+      contextWithCwd.messages.every((message) => !new RegExp(`\\b${retired}\\b`, 'i').test(message.content)),
+  )
+  assert(
+    'retired skill store: the legacy odin.json is left untouched',
+    fs.existsSync(legacyFile) && fs.readFileSync(legacyFile, 'utf8') === corrupt,
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────

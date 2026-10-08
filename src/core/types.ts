@@ -384,36 +384,6 @@ export type AgentAction =
       maxTurns?: number;
     }
   | {
-      type: 'odin_search_skills';
-      query: string;
-      scope?: 'local' | 'cloud' | 'all';
-      limit?: number;
-      autoImport?: boolean;
-    }
-  | {
-      type: 'odin_execute_task';
-      task: string;
-      searchScope?: 'local' | 'cloud' | 'all';
-      maxIterations?: number;
-    }
-  | {
-      type: 'odin_fix_skill';
-      skillId: string;
-      errorContext?: string;
-      summary?: string;
-    }
-  | {
-      type: 'odin_upload_skill';
-      skillId: string;
-      visibility?: 'local' | 'private' | 'public';
-      notes?: string;
-    }
-  | {
-      type: 'odin_import_cloud_skills';
-      query?: string;
-      limit?: number;
-    }
-  | {
       type: 'generate_image';
       prompt: string;
       model?: string;
@@ -422,6 +392,8 @@ export type AgentAction =
       outputPath?: string;
       watermark?: boolean;
       runInBackground?: boolean;
+      /** Workspace image paths or http(s) URLs sent to the model as references (max 14). */
+      referenceImages?: string[];
     }
   | {
       type: 'generate_video';
@@ -429,6 +401,10 @@ export type AgentAction =
       model?: string;
       ratio?: string;
       duration?: number;
+      // Output resolution ("480p" / "720p" / "1080p"). Omitted: BytePlus uses
+      // the model's own default; custom/OpenAI providers use
+      // visualProfile.video.defaultParams.resolution.
+      resolution?: string;
       outputPath?: string;
       referenceImageUrls?: string[];
       referenceVideoUrls?: string[];
@@ -670,12 +646,6 @@ export type AgentAction =
       command?: string;
     }
   | {
-      type: 'request_freya_visual_asset';
-      assetType: 'image' | 'video' | 'icon';
-      contextDescription: string;
-      preferredStyle?: string;
-    }
-  | {
       type: 'agent';
       action: 'create' | 'list' | 'run' | 'stop' | 'status' | 'result';
       id?: string;
@@ -775,17 +745,11 @@ export const ALL_AGENT_ACTION_TYPES = [
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',
-  'odin_search_skills',
-  'odin_execute_task',
-  'odin_fix_skill',
-  'odin_upload_skill',
-  'odin_import_cloud_skills',
   'generate_image',
   'generate_video',
   'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
-  'request_freya_visual_asset',
   'agent',
   // ── Spotify integration ────────────────────────────────────────────────
   'spotify_play_liked',
@@ -858,12 +822,6 @@ export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',
-  'odin_search_skills',
-  'odin_execute_task',
-  'odin_fix_skill',
-  'odin_upload_skill',
-  'odin_import_cloud_skills',
-  'request_freya_visual_asset',
 ] as const satisfies readonly AgentActionType[];
 
 export type AssistantEnvelope = {

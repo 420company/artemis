@@ -2,10 +2,6 @@ import type { RunAgentOptions } from './agent.js';
 import { runAgent } from './agent.js';
 import { runNidhoggWorkflow } from './nidhogg.js';
 import { buildWorkflowHint } from './workflowHints.js';
-import {
-  recordOdinWorkflowFailure,
-  recordOdinWorkflowSuccess,
-} from '../odin/runtime.js';
 import { appendTaskRuntime, createTaskRuntimeRecord, updateTaskRuntime } from './taskRuntime.js';
 import { runPluginHooks } from '../extensions/hooks.js';
 import type { RunResult, SessionRecord } from './types.js';
@@ -82,8 +78,6 @@ export async function runWorkflowMode(
   userPrompt: string,
   options: RunAgentOptions,
 ): Promise<RunResult> {
-  const changedFilesBefore = new Set(session.changedFiles ?? []);
-  const verificationCommandsBefore = session.verificationCommands?.length ?? 0;
   let rootRuntime =
     options.rootRuntimeId
       ? (session.taskRuntimes ?? []).find(
@@ -230,19 +224,6 @@ export async function runWorkflowMode(
         ),
       );
     }
-    await recordOdinWorkflowSuccess({
-      cwd: options.cwd,
-      mode,
-      prompt: userPrompt,
-      reply: result.reply,
-      turns: result.turns,
-      changedFiles: (session.changedFiles ?? []).filter(
-        (filePath) => !changedFilesBefore.has(filePath),
-      ),
-      verificationCommands: (session.verificationCommands ?? []).slice(
-        verificationCommandsBefore,
-      ),
-    });
     await recordHeimdallStage(
       options.sessionStore,
       session,
@@ -277,12 +258,6 @@ export async function runWorkflowMode(
       processStartedAt: undefined,
       processToken: undefined,
       lastOutput: message,
-    });
-    await recordOdinWorkflowFailure({
-      cwd: options.cwd,
-      mode,
-      prompt: userPrompt,
-      error: message,
     });
     await recordHeimdallStage(
       options.sessionStore,

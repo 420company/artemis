@@ -36,7 +36,6 @@ import { runDiscordBridge, setupDiscordBridge, shouldAutoStartDiscordBridge } fr
 import { runWeChatBridge, setupWeChatBridge, shouldAutoStartWeChatBridge } from '../wechat/bridge.js'
 import { McpServerStore } from '../mcp/store.js'
 import { probeMcpServer } from '../mcp/probe.js'
-import { OdinStore } from '../odin/store.js'
 import { SessionStore } from '../storage/sessions.js'
 import { parseHeimdallCommandBody, buildHeimdallReport, buildHeimdallThreadsReport } from '../services/heimdallControl.js'
 import type { UiLocale } from './locale.js'
@@ -276,12 +275,6 @@ export async function runCli(argv: string[]): Promise<void> {
   // ── mcp ──────────────────────────────────────────────────────────────────────
   if (options.command === 'mcp') {
     await runMcpCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
-    return
-  }
-
-  // ── odin ─────────────────────────────────────────────────────────────────────
-  if (options.command === 'odin') {
-    await runOdinCommand({ cwd: options.cwd, locale, args: options.prompt?.split(' ') ?? [] })
     return
   }
 
@@ -1599,97 +1592,6 @@ async function runMcpCommand(options: { cwd: string; locale: UiLocale; args: str
   console.log()
 }
 
-// ─── odin subcommand ──────────────────────────────────────────────────────────
-
-async function runOdinCommand(options: { cwd: string; locale: UiLocale; args: string[] }): Promise<void> {
-  const { cwd, locale, args } = options
-  const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
-  const sub = args[0]?.toLowerCase()
-  const odinStore = new OdinStore(cwd)
-
-  if (!sub || sub === 'list' || sub === 'ls') {
-    const skills = await odinStore.list({ status: 'active' })
-    if (skills.length === 0) {
-      console.log()
-      console.log(buildPanel(t('Odin 技能', 'Odin skills'), [
-        t('暂无活跃技能。', 'No active skills.'),
-      ]))
-      console.log()
-      return
-    }
-    const rows = skills.slice(0, 20).map(s => {
-      const conf = `[${String(s.confidence).padStart(2)}/10]`
-      return `${conf} ${s.id.padEnd(24)} ${s.name.slice(0, 40)}`
-    })
-    console.log()
-    console.log(buildPanel(t(`Odin 技能 (${skills.length})`, `Odin skills (${skills.length})`), rows))
-    console.log()
-    return
-  }
-
-  if (sub === 'search' || sub === 'find') {
-    const query = args.slice(1).join(' ')
-    if (!query) { console.log(t('\n  用法: artemis odin search <关键词>', '\n  Usage: artemis odin search <keywords>')); console.log(); return }
-    const result = await odinStore.search({ query, limit: 8 })
-    if (result.hits.length === 0) {
-      console.log()
-      console.log(buildPanel(t('搜索结果', 'Search results'), [t(`"${query}" — 无匹配。`, `"${query}" — no matches.`)]))
-      console.log()
-      return
-    }
-    const all = await odinStore.list()
-    const rows = result.hits.map(h => {
-      const skill = all.find(s => s.id === h.skillId)
-      return `[${String(h.score).padStart(3)}] ${h.skillId.padEnd(24)} ${skill?.name?.slice(0, 40) ?? ''}`
-    })
-    console.log()
-    console.log(buildPanel(t(`搜索: "${query}"`, `Search: "${query}"`), rows))
-    console.log()
-    return
-  }
-
-  if (sub === 'capture') {
-    const name = args.slice(1).join(' ')
-    if (!name) { console.log(t('\n  用法: artemis odin capture <技能名>', '\n  Usage: artemis odin capture <skill name>')); console.log(); return }
-    const skill = await odinStore.capture({ name, source: 'captured' } as Parameters<typeof odinStore.capture>[0])
-    console.log()
-    console.log(buildPanel(t('技能已捕获', 'Skill captured'), [`ID: ${skill.id}`, `Name: ${skill.name}`]))
-    console.log()
-    return
-  }
-
-  if (sub === 'decay') {
-    const result = await odinStore.applyDecay()
-    console.log()
-    console.log(buildPanel(t('技能衰减', 'Skill decay'), [
-      t(`影响: ${result.affected}`, `Affected: ${result.affected}`),
-    ]))
-    console.log()
-    return
-  }
-
-  if (sub === 'remove' || sub === 'rm') {
-    const id = args[1]
-    if (!id) { console.log(t('\n  用法: artemis odin remove <id>', '\n  Usage: artemis odin remove <id>')); console.log(); return }
-    const removed = await odinStore.delete(id)
-    console.log()
-    console.log(buildPanel(removed ? t('已删除', 'Removed') : t('未找到', 'Not found'), [`ID: ${id}`]))
-    console.log()
-    return
-  }
-
-  // help
-  console.log()
-  console.log(buildPanel(t('Odin 技能引擎', 'Odin skill engine'), [
-    '  artemis odin list             ' + t('列出活跃技能', 'List active skills'),
-    '  artemis odin search <关键词>  ' + t('搜索技能', 'Search skills'),
-    '  artemis odin capture <名称>   ' + t('捕获新技能', 'Capture new skill'),
-    '  artemis odin decay            ' + t('运行技能衰减', 'Run skill decay'),
-    '  artemis odin remove <id>      ' + t('删除技能', 'Remove skill'),
-  ]))
-  console.log()
-}
-
 // ─── doctor subcommand ────────────────────────────────────────────────────────
 
 async function runDoctor(options: {
@@ -1770,11 +1672,6 @@ async function runDoctor(options: {
   const mcpStore = new McpServerStore(options.cwd)
   const mcpData = await mcpStore.load()
   lines.push(`MCP servers: ${mcpData.servers.length}`)
-
-  // Odin skills
-  const odinStore = new OdinStore(options.cwd)
-  const skills = await odinStore.list({ status: 'active' })
-  lines.push(`Odin skills: ${skills.length} active`)
 
   console.log()
   console.log(buildPanel(

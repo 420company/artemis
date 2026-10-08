@@ -20,6 +20,7 @@ import { securityAuditToolDef } from '../core/securityAuditSystem.js';
 import { executeApplyPatch } from './applyPatch.js';
 import { executeDeepResearch } from './deepResearch.js';
 import { executeGenerateImage } from './generateImage.js';
+import { MAX_REFERENCE_IMAGES } from './visual/referenceImages.js';
 import { executeGenerateLongVideo } from './generateLongVideo.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
@@ -41,10 +42,24 @@ import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
 import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
+import { normalizeVideoResolution } from './visual/videoParams.js';
 import { executeViewImage } from './viewImage.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
 
 export type { ToolDefinition };
+
+// Model-facing guidance for generate_image, after BytePlus Seedream's prompt
+// guide. It is sent every turn, so keep it short.
+export const GENERATE_IMAGE_DESCRIPTION = [
+  'Generate images. You write `prompt` yourself: natural sentences for subject, action and setting, then the style or medium, keeping the style the user asked for (anime, logo, flat illustration, poster, photo...).',
+  'Add composition, camera or lighting only when they fit that style; no keyword lists or stock quality tags.',
+  'Expand a vague request into a full description that keeps the user\'s intent; ask one short question only when a key choice is truly ambiguous.',
+  'Put text to render in double quotes, exactly as it should appear.',
+  'Set size/aspect ratio with `size`, not in the prompt.',
+  'Keep the user\'s language (Chinese works well; do not translate).',
+  'When the request refers to an attached or earlier image (edit it, "this style", "like this"), pass it in `referenceImages`. Look at it first with view_image whenever that tool is available to you, then say in the prompt what to keep (subject, style, palette, lighting, composition) and what to change.',
+  'A failure says why (e.g. low balance, safety rejection): tell the user; never substitute a web image.',
+].join(' ');
 
 const AGENT_ROLE_VALUES: readonly AgentRole[] = [
   'planner',
@@ -61,12 +76,9 @@ const AGENT_ROLE_VALUES: readonly AgentRole[] = [
 const RUNTIME_MANAGED_TOOL_TYPES = new Set<AgentActionType>(
   RUNTIME_MANAGED_AGENT_ACTION_TYPES,
 );
-// Action types never offered to the model. `agent` has no executor;
-// `request_freya_visual_asset` is a legacy interactive flow (terminal menu)
-// superseded by generate_image / generate_video / generate_long_video.
+// Action types never offered to the model. `agent` has no executor.
 const PROVIDER_EXCLUDED_ACTION_TYPES = new Set<AgentActionType>([
   'agent',
-  'request_freya_visual_asset',
 ]);
 const PARALLEL_READ_ACTION_TYPES = new Set<AgentActionType>([
   'list_files',
@@ -438,56 +450,6 @@ function validateApproveBuilderExecutionAction(action: any): string[] {
   return errors;
 }
 
-function validateOdinSearchSkillsAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.query, 'query', errors);
-  validateEnumString(action?.scope, 'scope', ['local', 'cloud', 'all'] as const, errors);
-  validatePositiveInteger(action?.limit, 'limit', errors);
-  validateBooleanValue(action?.autoImport, 'autoImport', errors);
-  return errors;
-}
-
-function validateOdinExecuteTaskAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.task, 'task', errors);
-  validateEnumString(
-    action?.searchScope,
-    'searchScope',
-    ['local', 'cloud', 'all'] as const,
-    errors,
-  );
-  validatePositiveInteger(action?.maxIterations, 'maxIterations', errors);
-  return errors;
-}
-
-function validateOdinFixSkillAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.skillId, 'skillId', errors);
-  validateOptionalNonEmptyString(action?.errorContext, 'errorContext', errors);
-  validateOptionalNonEmptyString(action?.summary, 'summary', errors);
-  return errors;
-}
-
-function validateOdinUploadSkillAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.skillId, 'skillId', errors);
-  validateEnumString(
-    action?.visibility,
-    'visibility',
-    ['local', 'private', 'public'] as const,
-    errors,
-  );
-  validateOptionalNonEmptyString(action?.notes, 'notes', errors);
-  return errors;
-}
-
-function validateOdinImportCloudSkillsAction(action: any): string[] {
-  const errors: string[] = [];
-  validateOptionalNonEmptyString(action?.query, 'query', errors);
-  validatePositiveInteger(action?.limit, 'limit', errors);
-  return errors;
-}
-
 function validateGenerateImageAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
@@ -501,6 +463,10 @@ function validateGenerateImageAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateBooleanValue(action?.watermark, 'watermark', errors);
   validateBooleanValue(action?.runInBackground, 'runInBackground', errors);
+  validateStringArray(action?.referenceImages, 'referenceImages', errors);
+  if (Array.isArray(action?.referenceImages) && action.referenceImages.length > MAX_REFERENCE_IMAGES) {
+    errors.push(`referenceImages accepts at most ${MAX_REFERENCE_IMAGES} images.`);
+  }
   return errors;
 }
 
@@ -511,6 +477,9 @@ function validateGenerateVideoAction(action: any): string[] {
   validateStringArray(action?.referenceNotes, 'referenceNotes', errors);
   validateOptionalNonEmptyString(action?.ratio, 'ratio', errors);
   validatePositiveInteger(action?.duration, 'duration', errors);
+  if (action?.resolution !== undefined && normalizeVideoResolution(action.resolution) === undefined) {
+    errors.push('resolution must be one of 480p, 720p, 1080p');
+  }
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateStringArray(
     action?.referenceImageUrls,
@@ -713,23 +682,6 @@ function validateTranscribeAudioAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.modelPath, 'modelPath', errors);
   validateEnumString(action?.engine, 'engine', ['auto', 'whisper.cpp', 'openai-whisper'] as const, errors);
   validateOptionalNonEmptyString(action?.command, 'command', errors);
-  return errors;
-}
-
-function validateFreyaVisualAssetAction(action: any): string[] {
-  const errors: string[] = [];
-  validateEnumString(
-    action?.assetType,
-    'assetType',
-    ['image', 'video', 'icon'] as const,
-    errors,
-  );
-  validateRequiredNonEmptyString(
-    action?.contextDescription,
-    'contextDescription',
-    errors,
-  );
-  validateOptionalNonEmptyString(action?.preferredStyle, 'preferredStyle', errors);
   return errors;
 }
 
@@ -977,53 +929,8 @@ const actionToolDefs: ToolDefinition[] = [
     validate: validateApproveBuilderExecutionAction,
   },
   {
-    type: 'odin_search_skills',
-    description: '搜索可用技能',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'non-blocking',
-    parallelSafe: true,
-    validate: validateOdinSearchSkillsAction,
-  },
-  {
-    type: 'odin_execute_task',
-    description: '通过 Odin 查找并执行技能任务',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinExecuteTaskAction,
-  },
-  {
-    type: 'odin_fix_skill',
-    description: '修复指定技能',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinFixSkillAction,
-  },
-  {
-    type: 'odin_upload_skill',
-    description: '上传本地技能到 Odin 云端',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinUploadSkillAction,
-  },
-  {
-    type: 'odin_import_cloud_skills',
-    description: '导入 Odin 云端技能',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinImportCloudSkillsAction,
-  },
-  {
     type: 'generate_image',
-    description: '生成图像',
+    description: GENERATE_IMAGE_DESCRIPTION,
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1070,15 +977,6 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateTranscribeAudioAction,
     execute: executeTranscribeAudio as any,
-  },
-  {
-    type: 'request_freya_visual_asset',
-    description: '请求 Freya 视觉资源工作流',
-    kind: 'code',
-    permissionCategory: 'execute',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateFreyaVisualAssetAction,
   },
   {
     type: 'agent',

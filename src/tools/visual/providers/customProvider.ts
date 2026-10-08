@@ -1,6 +1,8 @@
 import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import os from 'node:os'
 import path from 'node:path'
+import { ImageApiError } from '../imageGenerationFailure.js'
+import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type {
   GenerationResult,
@@ -15,6 +17,7 @@ import {
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js'
 import { toolLog } from '../../../utils/log.js'
+import { assertVideoResolutionSupported } from '../videoParams.js'
 
 // Emit a progress line every Nth poll so the user can see the provider is
 // being talked to (not hanging). Default 6 polls × 10s = one line per minute.
@@ -136,7 +139,7 @@ export class CustomProvider implements VisualProvider {
         raw = await res.text()
       }
       if (!res.ok) {
-        throw new Error(`Custom image generation failed (HTTP ${res.status}): ${raw.slice(0, 800)}`)
+        throw new ImageApiError(`Custom image generation failed (HTTP ${res.status}): ${raw.slice(0, 800)}`, res.status)
       }
 
       let payload: CustomImageResponse
@@ -154,7 +157,7 @@ export class CustomProvider implements VisualProvider {
       const buffer = item.b64_json
         ? Buffer.from(item.b64_json, 'base64')
         : item.url
-          ? await downloadUrl(item.url)
+          ? await downloadUrl(item.url, baseUrl)
           : null
       if (!buffer) {
         throw new Error('Custom image response contained neither b64_json nor url.')
@@ -181,6 +184,8 @@ export class CustomProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof ImageApiError ? error.status : undefined,
+        failureStage: error instanceof ImageApiError ? error.stage : undefined,
         generationTime: Date.now() - startedAt,
       }
     }
@@ -284,11 +289,11 @@ export class CustomProvider implements VisualProvider {
       const body: Record<string, unknown> = {
         model,
         duration: durationNum,
-        resolution: videoConfig.defaultParams.resolution || '720p',
+        resolution: params.resolution || videoConfig.defaultParams.resolution || '720p',
         aspect_ratio: ratio,
         input,
         parameters: {
-          resolution: (videoConfig.defaultParams.resolution || '720p').toUpperCase(),
+          resolution: (params.resolution || videoConfig.defaultParams.resolution || '720p').toUpperCase(),
           ratio,
           duration: durationNum,
           prompt_extend: promptExtend,
@@ -371,14 +376,7 @@ export class CustomProvider implements VisualProvider {
         throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const downloadRes = await fetch(videoUrl, {
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
-      })
-      if (!downloadRes.ok) {
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
-      }
-
-      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const buffer = await downloadVideoUrl(videoUrl, baseUrl, params.abortSignal)
       const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
       await writeFileEnsured(videoPath, buffer)
 
@@ -500,7 +498,7 @@ export class CustomProvider implements VisualProvider {
         model,
         content,
         duration: durationNum,
-        resolution: videoConfig.defaultParams.resolution || '720p',
+        resolution: params.resolution || videoConfig.defaultParams.resolution || '720p',
         ratio,
         generate_audio: params.generateAudio !== false && /^dreamina-seedance-2/i.test(model.trim()),
         prompt_extend: promptExtend,
@@ -589,14 +587,7 @@ export class CustomProvider implements VisualProvider {
         throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const downloadRes = await fetch(videoUrl, {
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
-      })
-      if (!downloadRes.ok) {
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
-      }
-
-      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const buffer = await downloadVideoUrl(videoUrl, baseUrl, params.abortSignal)
       const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
       await writeFileEnsured(videoPath, buffer)
 
@@ -637,9 +628,11 @@ export class CustomProvider implements VisualProvider {
     try {
       const videoConfig = this.config.video
       const seconds = mapVideoSeconds(params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration))
+      // This protocol only has 720p and 1080p sizes; never downgrade/upgrade silently.
+      assertVideoResolutionSupported(params.resolution, ['720p', '1080p'], `Custom video endpoint ${model}`)
       const size = mapVideoSize({
         ratio: params.ratio,
-        resolution: videoConfig.defaultParams.resolution,
+        resolution: params.resolution || videoConfig.defaultParams.resolution,
       })
 
       const body = new FormData()
@@ -765,12 +758,27 @@ function normalizeRequiredBaseUrl(raw: string | undefined, assetKind: 'image' | 
   return normalizeCustomVisualBaseUrlForTest(raw, assetKind)
 }
 
-async function downloadUrl(url: string): Promise<Buffer> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
-  if (!res.ok) {
-    throw new Error(`download failed: HTTP ${res.status}`)
+async function downloadVideoUrl(url: string, baseUrl: string | undefined, signal?: AbortSignal): Promise<Buffer> {
+  try {
+    return await downloadProviderAsset(url, {
+      timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+      allowLoopback: baseUrlIsLoopback(baseUrl),
+      signal,
+    })
+  } catch (error) {
+    throw new Error(`Custom video download failed: ${error instanceof Error ? error.message : String(error)}`)
   }
-  return Buffer.from(await res.arrayBuffer())
+}
+
+async function downloadUrl(url: string, baseUrl?: string): Promise<Buffer> {
+  try {
+    return await downloadProviderAsset(url, {
+      timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+      allowLoopback: baseUrlIsLoopback(baseUrl),
+    })
+  } catch (error) {
+    throw new ImageApiError(`Image download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
+  }
 }
 
 async function writeFileEnsured(filePath: string, buffer: Buffer): Promise<void> {

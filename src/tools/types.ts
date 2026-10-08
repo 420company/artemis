@@ -68,6 +68,11 @@ export type ToolExecutionContext = {
    */
   sessionId?: string;
   /**
+   * Scope the memory tool saves to when the action names none. Unset means
+   * global (interactive CLI); headless runs pass 'project'.
+   */
+  memoryDefaultScope?: 'global' | 'project';
+  /**
    * The current agent run's queue of images to show the model on its next
    * request (view_image). Absent outside an agent run.
    */

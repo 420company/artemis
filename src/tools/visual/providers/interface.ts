@@ -13,11 +13,15 @@ export interface VisualGenerationParams {
   background?: string
   watermark?: boolean
   count?: number
+  /** Image references as http(s) URLs or base64 data URIs (generate_image only). */
+  referenceImages?: string[]
 }
 
 export interface VideoGenerationParams extends VisualGenerationParams {
   duration?: number
   ratio?: string
+  /** "480p" / "720p" / "1080p", only when the request asked for one. */
+  resolution?: string
   generateAudio?: boolean
   referenceImageUrls?: string[]
   referenceVideoUrls?: string[]
@@ -43,6 +47,10 @@ export interface GenerationResult {
   success: boolean
   assetPath?: string
   error?: string
+  /** HTTP status of the generation API call when it failed with one (never a download's status). */
+  httpStatus?: number
+  /** Whether the generation request or the download of its result failed. */
+  failureStage?: 'request' | 'download'
   generationTime?: number
   modelInfo?: {
     provider: string
@@ -55,6 +63,8 @@ export interface VisualProvider {
   readonly name: string
   readonly supportsImages: boolean
   readonly supportsVideos: boolean
+  /** True when generateImage accepts `referenceImages`. Providers without it must not be sent references. */
+  readonly supportsImageReferences?: boolean
   
   generateImage(params: VisualGenerationParams): Promise<GenerationResult>
   generateVideo?(params: VideoGenerationParams): Promise<GenerationResult>

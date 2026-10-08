@@ -513,15 +513,6 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     desc: { zh: '浏览、推荐和查看内置技能', en: 'Browse, recommend, and inspect built-in skills' },
   },
   {
-    id: 'odin',
-    group: 'project',
-    cli: 'odin [skills|events|search <query>]',
-    slash: '/odin [skills|events|search <query>]',
-    autocomplete: true,
-    quickValue: '/odin',
-    desc: { zh: 'Inspect the native Odin skill evolution layer', en: 'Inspect the native Odin skill evolution layer' },
-  },
-  {
     id: 'plugins',
     group: 'project',
     cli: 'plugins [run <plugin-id> <command...>]',
