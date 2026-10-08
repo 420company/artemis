@@ -6,9 +6,10 @@
  * a delimited block that the content cannot close, after a fixed note that
  * the block is data from an image and never instructions. Each block carries
  * a random id (one per note) that the image text cannot know, and only the
- * closing tag with that id ends it; the text itself is NFKC-normalized and
- * stripped of invisible characters, and anything resembling the tag inside
- * it is escaped. Used for user attachments and for view_image results.
+ * closing tag with that id ends it; anything resembling the tag inside the
+ * text (after NFKC, without invisible characters, lookalikes included) is
+ * escaped, and the text is otherwise left verbatim. Used for user
+ * attachments and for view_image results.
  */
 import { randomBytes } from 'node:crypto';
 
@@ -42,15 +43,38 @@ const FORMAT_CHARS = /[\p{Cf}\u034f\u115f\u1160\u3164\uffa0]/gu;
 /** Characters that look like "<" after normalization did not make them one. */
 const LT_LOOKALIKES = /[\u2039\u276e\u27e8\u3008\u02c2\u1438\u16b2]/g;
 /** A tag-like "image description" whatever its spacing, joiner or letter case. */
-const TAG_LIKE = /<(\s*\/?\s*image[\s_\-.]*description)/gi;
+const TAG_LIKE = /<\s*\/?\s*image[\s_\-.]*description/gi;
 
 /**
  * Makes any opening or closing image_description tag inside the content
- * inert, lookalikes included: NFKC first (full-width and small forms become
- * ASCII), invisible format characters removed, "<" lookalikes taken as "<".
+ * inert, lookalikes included, and leaves everything else exactly as the
+ * vision model wrote it (a transcription must stay verbatim: "10⁶ IU" is not
+ * "106 IU"). Tags are looked for in a shadow copy that is NFKC-normalized
+ * (full-width and small forms become ASCII), stripped of invisible format
+ * characters, and has "<" lookalikes as "<"; the character in the original
+ * that each such "<" came from is then escaped as "&lt;".
  */
 export function neutralizeImageDescription(text: string): string {
-  return text.normalize('NFKC').replace(FORMAT_CHARS, '').replace(LT_LOOKALIKES, '<').replace(TAG_LIKE, '&lt;$1');
+  let shadow = '';
+  // For every UTF-16 unit of the shadow: the index of the original character it came from.
+  const origin: number[] = [];
+  let at = 0;
+  for (const char of text) {
+    const normalized = char.normalize('NFKC').replace(FORMAT_CHARS, '').replace(LT_LOOKALIKES, '<');
+    for (let i = 0; i < normalized.length; i += 1) origin.push(at);
+    shadow += normalized;
+    at += char.length;
+  }
+  const escape = new Set<number>();
+  for (const match of shadow.matchAll(TAG_LIKE)) escape.add(origin[match.index ?? 0]!);
+  if (escape.size === 0) return text;
+  let out = '';
+  at = 0;
+  for (const char of text) {
+    out += escape.has(at) ? '&lt;' : char;
+    at += char.length;
+  }
+  return out;
 }
 
 /** One description in its delimited block, tagged with the note's id. */
