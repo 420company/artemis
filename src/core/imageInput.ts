@@ -189,6 +189,14 @@ export class ViewedImageQueue {
    * Resolves to the description; rejects when the helper failed.
    */
   describeImage?: (image: ImageAttachment, signal?: AbortSignal) => Promise<string>;
+  /**
+   * Set by the run when images sent to the model reach the platform gateway,
+   * which reads them (ChatProvider.bridgesImages): view_image then queues an
+   * image the helper could not describe instead of failing.
+   */
+  bridgesImages = false;
+  /** Pause before view_image's one automatic retry of the helper. */
+  retryDelayMs = 3_000;
 
   /**
    * Queues an image for the next request. When the queue would exceed the

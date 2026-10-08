@@ -2807,6 +2807,7 @@ export async function think(
             userText: input,
             images: imageAttachments,
             modelSeesImages: imageProvider.supportsImages === true,
+            mainBridgesImages: imageProvider.bridgesImages === true,
             getHelper: memoizeVisionHelper(async () =>
                 visionHelper !== undefined
                     ? visionHelper ?? undefined

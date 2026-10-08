@@ -489,6 +489,7 @@ function extractText(content: unknown): string {
 
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
+  readonly bridgesImages: boolean;
   readonly supportsNativeToolCalls = true;
   readonly contextLength?: number;
   private readonly config: ProviderConfig;
@@ -496,6 +497,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.bridgesImages = config.gatewayBridgesImages === true;
     this.contextLength = platformContextLength(config);
   }
 
@@ -510,7 +512,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model)
     const mapped = messages.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
 
     const body: Record<string, unknown> = {
@@ -834,7 +836,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model);
     const mapped = messages.map((m) => mapMessage(m, { reasoningMode }));
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
 
     const body: Record<string, unknown> = {

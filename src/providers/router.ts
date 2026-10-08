@@ -426,6 +426,9 @@ export async function createProviderRouter(
         get primarySupportsImages() {
           return rankForTarget(buildCandidates())[0]?.provider.supportsImages === true;
         },
+        get bridgesImages() {
+          return rankForTarget(buildCandidates())[0]?.provider.bridgesImages === true;
+        },
         // The window of the provider this target tries first.
         get contextLength() {
           return rankForTarget(buildCandidates())[0]?.provider.contextLength;

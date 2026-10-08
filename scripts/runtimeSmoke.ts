@@ -2618,7 +2618,7 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     textOnly.nativeToolNames.every((names) => !names.includes('view_image')) &&
       textOnly.seen.every((n) => n === undefined) &&
       /Images cannot be viewed here/.test(textOnly.toolText) &&
-      /Do not suggest switching plan, tier or model/.test(textOnly.toolText) &&
+      /Do not mention plans, tiers or models/.test(textOnly.toolText) &&
       !/is attached to your next step/.test(textOnly.toolText),
     JSON.stringify({ seen: textOnly.seen, tool: textOnly.toolText.slice(0, 300) }),
   )
@@ -10843,6 +10843,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     images?: ImageAttachment[]
     viewImage?: boolean
     prompt?: string
+    /** The main profile points at the platform gateway, which reads images itself. */
+    bridges?: boolean
   }) => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-helper-'))
     fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), pngBytes)
@@ -10852,6 +10854,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const mainCalls: MainCall[] = []
     const provider: ChatProvider = {
       supportsImages: false,
+      bridgesImages: options.bridges === true,
       supportsNativeToolCalls: true,
       async complete(messages, requestOptions): Promise<ProviderResponse> {
         mainCalls.push({
@@ -10873,6 +10876,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       maxTurns: 3,
       profile: 'main',
       visionHelper: options.helper,
+      visionRetryDelayMs: 5,
       ...(options.images ? { imageAttachments: options.images } : {}),
     })
     const userText = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
@@ -10949,11 +10953,11 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     const { calls, helper } = makeHelper('fail')
     const run = await runVision({ helper, images: [userImage] })
     assert(
-      'vision helper: a helper failure leaves a clear note and the run continues',
-      calls.length === 1 &&
-        run.userText.includes('the attached image could not be read right now') &&
-        run.userText.includes('to try again shortly') &&
-        !/switch(?:ing)? (?:to )?(?:a |another )?(?:plan|tier|model)\b(?! or)/i.test(run.userText.replace('Do not suggest switching plan, tier or model.', '')) &&
+      'vision helper: a helper failure is retried once, then leaves a "temporarily unreadable" note and the run continues',
+      calls.length === 2 &&
+        run.userText.includes('the attached image is temporarily unreadable') &&
+        run.userText.includes('Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models.') &&
+        !/plan|tier|model/i.test(run.userText.replace('Do not mention plans, tiers or models.', '')) &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls),
       run.userText.slice(0, 300),
@@ -10961,10 +10965,36 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 
   {
+    // The helper fails twice; the main profile goes through the platform gateway,
+    // so the image is sent to it as an image and the gateway reads it.
+    const { calls, helper } = makeHelper('fail')
+    const run = await runVision({ helper, images: [userImage], bridges: true })
+    assert(
+      'vision helper: when the helper fails, a gateway-bridged main model gets the image itself',
+      calls.length === 2 &&
+        run.mainCalls[0]?.images === 1 &&
+        run.userText.includes('[Image 1 (screenshot.png) is attached to this message as an image.]') &&
+        !run.userText.includes('temporarily unreadable') &&
+        run.result.reply.includes('sign-in page'),
+      JSON.stringify({ calls: calls.length, images: run.mainCalls.map((c) => c.images), text: run.userText.slice(0, 300) }),
+    )
+  }
+
+  {
+    // No helper at all, but the gateway reads images: they go to it unchanged.
+    const run = await runVision({ helper: null, images: [userImage], bridges: true })
+    assert(
+      'vision helper: without a helper, a gateway-bridged main model gets the images and no note',
+      run.mainCalls[0]?.images === 1 && !run.userText.includes('unreadable') && run.result.reply.includes('sign-in page'),
+      JSON.stringify({ images: run.mainCalls.map((c) => c.images), text: run.userText.slice(0, 300) }),
+    )
+  }
+
+  {
     const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
     assert(
       'vision helper: without a helper the model gets a graceful note and the run succeeds',
-      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg), but they could not be read right now. Tell the user briefly that the image could not be read right now and to try again shortly. Do not suggest switching plan, tier or model. Continue with the text.') &&
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg); they are temporarily unreadable. Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models. Continue with the text.') &&
         run.result.reply.includes('sign-in page') &&
         !mainRequestHasImageParts(run.mainCalls) &&
         run.mainCalls.every((call) => !call.tools.includes('view_image')),

@@ -3762,6 +3762,8 @@ export type RunAgentOptions = {
    * from the provider store's visionProfileId when first needed; null: none.
    */
   visionHelper?: VisionHelper | null;
+  /** Pause before the automatic retry of images the vision helper could not describe (tests); default 3 s. */
+  visionRetryDelayMs?: number;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -6035,12 +6037,14 @@ export async function runAgent(
       : loadVisionHelper(options.cwd, { onInfo: options.onInfo }));
   const userImageRoute = options.imageAttachments?.length
     ? await resolveImageRoute(options.resolveProvider?.(options.profile ?? 'main') ?? options.provider, getVisionHelper)
-    : { native: true };
+    : { native: true, bridged: false };
   const userImages = await prepareUserImagesForModel({
     userText: userInput,
     images: options.imageAttachments,
     modelSeesImages: userImageRoute.native,
     getHelper: async () => userImageRoute.helper,
+    mainBridgesImages: userImageRoute.bridged,
+    ...(options.visionRetryDelayMs !== undefined ? { retryDelayMs: options.visionRetryDelayMs } : {}),
     locale: options.locale,
     onInfo: options.onInfo,
     signal: options.abortSignal,
@@ -6361,7 +6365,8 @@ export async function runAgent(
     if (dropped.length > 0) {
       options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
     }
-    if (kept.length > 0 && provider.supportsImages !== true) {
+    // A provider whose images reach the platform gateway (which reads them) takes them too.
+    if (kept.length > 0 && provider.supportsImages !== true && provider.bridgesImages !== true) {
       options.onInfo?.(`[images] this model cannot take images; ${kept.length} dropped`);
       return [];
     }
@@ -6547,6 +6552,8 @@ export async function runAgent(
     const imageRoute = await resolveImageRoute(activeProvider, getVisionHelper);
     const modelSeesImages = imageRoute.native;
     viewedImages.acceptsImages = modelSeesImages;
+    viewedImages.bridgesImages = imageRoute.bridged;
+    if (options.visionRetryDelayMs !== undefined) viewedImages.retryDelayMs = options.visionRetryDelayMs;
     const imageHelper = imageRoute.helper;
     viewedImages.describeImage = imageHelper
       ? (image, signal) => describeSingleImage(imageHelper, image, {

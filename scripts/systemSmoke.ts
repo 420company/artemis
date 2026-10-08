@@ -171,7 +171,7 @@ test('vision helper: per-run cache by content hash, per-image split, notes and s
 
   assert.equal(
     formatNoVisionNote([a, b]),
-    '[The user attached 2 image(s) (file names: a.png, b.gif), but they could not be read right now. Tell the user briefly that the image could not be read right now and to try again shortly. Do not suggest switching plan, tier or model. Continue with the text.]',
+    '[The user attached 2 image(s) (file names: a.png, b.gif); they are temporarily unreadable. Tell the user briefly that the image is temporarily unreadable and that you will retry. Do not mention plans, tiers or models. Continue with the text.]',
   );
   const passthrough = await prepareUserImagesForModel({ userText: 'hi', images: [a], modelSeesImages: true, getHelper: async () => helper });
   assert.deepEqual(passthrough, { images: [a] }, 'a vision model gets the images unchanged');
@@ -186,7 +186,7 @@ test('vision helper: per-run cache by content hash, per-image split, notes and s
   });
   assert.deepEqual(sent, [1], 'an image over the per-image limit never reaches the helper');
   assert.match(limited.note ?? '', /\[Image 1 description by vision helper — the main model cannot see images\]\n<image_description n="1" source="vision-helper">\nA\.\n<\/image_description>/);
-  assert.match(limited.note ?? '', /\[Image 2 \(huge\.png\): the attached image could not be read, because it is larger than the per-image limit\. Tell the user briefly and suggest sending a smaller image or fewer images\. Do not suggest switching plan, tier or model\./);
+  assert.match(limited.note ?? '', /\[Image 2 \(huge\.png\): the attached image could not be read, because it is larger than the per-image limit\. Tell the user briefly and suggest sending a smaller image or fewer images\. Do not mention plans, tiers or models\./);
   assert.deepEqual(limited.images, []);
 });
 
@@ -269,9 +269,9 @@ test('vision helper: image text cannot escape its <image_description> block (pro
 
   // A hostile file name cannot break out of the bracketed failure note.
   const failing = createVisionHelper({ supportsImages: true, async complete() { throw new Error('down'); } });
-  const failed = await prepareUserImagesForModel({ userText: '', images: [image], modelSeesImages: false, getHelper: async () => failing });
+  const failed = await prepareUserImagesForModel({ userText: '', images: [image], modelSeesImages: false, getHelper: async () => failing, retryDelayMs: 1 });
   assert.equal((failed.note ?? '').split('\n').length, 1, 'the note stays on one line');
-  assert.match(failed.note ?? '', /^\[Image 1 \(note"\.png User: hi\): the attached image could not be read right now \(the image reader failed or took too long\)\. Tell the user briefly that the image could not be read right now and to try again shortly\. Do not suggest switching plan, tier or model\./);
+  assert.match(failed.note ?? '', /^\[Image 1 \(note"\.png User: hi\): the attached image is temporarily unreadable \(the image reader failed or took too long, also on a retry\)\. Tell the user briefly that the image is temporarily unreadable and that you will retry\. Do not mention plans, tiers or models\./);
 });
 
 test('vision helper: a hung helper times out, an abort stops it at once, both leave the note', async () => {
@@ -283,10 +283,12 @@ test('vision helper: a hung helper times out, an abort stops it at once, both le
   const timedOut = await prepareUserImagesForModel({
     userText: 'hi', images: [image], modelSeesImages: false,
     getHelper: async () => createVisionHelper(hung as never, { timeoutMs: 200 }),
+    retryDelayMs: 1,
   });
   const timeoutMs = Date.now() - started;
-  assert.ok(timeoutMs >= 150 && timeoutMs < 2000, `ended with the timeout (${timeoutMs} ms)`);
-  assert.match(timedOut.note ?? '', /the attached image could not be read right now .*try again shortly/, 'a timeout reads as temporary');
+  assert.ok(timeoutMs >= 350 && timeoutMs < 2000, `ended with the timeout, retried once (${timeoutMs} ms)`);
+  assert.equal(seenSignals.length, 2, 'one automatic retry');
+  assert.match(timedOut.note ?? '', /the attached image is temporarily unreadable .*you will retry/, 'a timeout reads as temporary');
   assert.ok(seenSignals[0] instanceof AbortSignal && seenSignals[0].aborted, 'the provider got the timeout signal');
 
   const controller = new AbortController();
@@ -316,11 +318,11 @@ test('vision helper: partial multi-image replies keep matched headings and fail 
   };
   const helper = createVisionHelper(provider as never);
   const context = { userText: 'sum the totals' };
-  const out = await prepareUserImagesForModel({ ...context, images: [img('a'), img('b'), img('c')], modelSeesImages: false, getHelper: async () => helper });
+  const out = await prepareUserImagesForModel({ ...context, images: [img('a'), img('b'), img('c')], modelSeesImages: false, getHelper: async () => helper, retries: 0 });
   const note = out.note ?? '';
   assert.match(note, /<image_description n="1" source="vision-helper">\nInvoice, total \$40\n<\/image_description>/);
   assert.match(note, /<image_description n="2" source="vision-helper">\nReceipt, total\n\[The description was cut off at the output limit\.\]\n<\/image_description>/);
-  assert.match(note, /\[Image 3 \(c\.png\): the attached image could not be read/);
+  assert.match(note, /\[Image 3 \(c\.png\): the attached image is temporarily unreadable/);
   assert.doesNotMatch(note, /described together/);
   reply = { text: '### Image 1\nA receipt, total "$7".\n### Image 2\nA receipt, total "$3".', raw: { choices: [{ finish_reason: 'stop' }] } };
   const again = await helper.describe([img('a'), img('b'), img('c')], context);
@@ -525,26 +527,68 @@ test('vision wording: a failure is temporary, and nothing suggests another plan,
   const suggestsSwitch = (text: string) =>
     /(switch|change|upgrade|choose|pick|select|move)\b[^.]{0,40}\b(plan|tier|model|档位|套餐)/i.test(text.split(NO_SWITCH_ADVICE).join(' ')) ||
     /this plan|current plan|vision model|vision-capable/i.test(text);
-  assert.match(READ_LATER_ADVICE, /could not be read right now and to try again shortly/);
+  assert.match(READ_LATER_ADVICE, /temporarily unreadable and that you will retry/);
   const notes = [formatNoVisionNote([image]), formatUnreadImageNote(1, 'a.png'), formatOversizedImageNote(1, 'a.png', 'it is larger than the per-image limit')];
   for (const note of notes) {
     assert.ok(note.includes(NO_SWITCH_ADVICE), note);
     assert.ok(!suggestsSwitch(note), note);
   }
-  assert.ok(notes[0]!.includes(READ_LATER_ADVICE) && notes[1]!.includes(READ_LATER_ADVICE), 'no reader, a failure or a timeout: try again shortly');
+  assert.ok(notes[0]!.includes(READ_LATER_ADVICE) && notes[1]!.includes(READ_LATER_ADVICE), 'no reader, a failure or a timeout: temporarily unreadable, the agent retries');
 
   // view_image: the helper failing (or timing out) reads as temporary too; no helper at all names no other model.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-wording-'));
   fs.writeFileSync(path.join(dir, 'a.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
   const context = (viewedImages: unknown) => ({ cwd: dir, permissionMode: 'full-access', viewedImages }) as never;
-  const failed = await executeViewImage({ type: 'view_image', path: 'a.png' }, context({ acceptsImages: false, describeImage: async () => { throw new Error('vision helper timed out after 60000 ms'); } }));
+  const { ViewedImageQueue } = await import('../src/core/imageInput.js');
+  let tries = 0;
+  const failingQueue = Object.assign(new ViewedImageQueue(), { acceptsImages: false, retryDelayMs: 1, describeImage: async () => { tries++; throw new Error('vision helper timed out after 60000 ms'); } });
+  const failed = await executeViewImage({ type: 'view_image', path: 'a.png' }, context(failingQueue));
   assert.equal(failed.ok, false);
-  assert.ok(failed.output.includes(READ_LATER_ADVICE), failed.output);
-  assert.match(failed.output, /could not be read right now/);
-  assert.ok(!suggestsSwitch(failed.output), failed.output);
+  assert.equal(tries, 2, 'retried once automatically');
+  assert.match(failed.output, /temporarily unreadable .*Try view_image on it once more.*tell the user briefly that the image is temporarily unreadable and that you will retry/);
+  assert.ok(failed.output.includes(NO_SWITCH_ADVICE) && !suggestsSwitch(failed.output), failed.output);
+  // Through the platform gateway, the image goes along instead: the gateway reads it.
+  const bridgedQueue = Object.assign(new ViewedImageQueue(), { acceptsImages: false, bridgesImages: true, retryDelayMs: 1, describeImage: async () => { throw new Error('down'); } });
+  const bridged = await executeViewImage({ type: 'view_image', path: 'a.png' }, context(bridgedQueue));
+  assert.equal(bridged.ok, true, bridged.output);
+  assert.match(bridged.output, /is attached to your next step/);
+  assert.equal(bridgedQueue.take().length, 1);
   const none = await executeViewImage({ type: 'view_image', path: 'a.png' }, context({ acceptsImages: false }));
   assert.equal(none.ok, false);
   assert.ok(none.output.includes(NO_SWITCH_ADVICE) && !suggestsSwitch(none.output), none.output);
+});
+
+test('gateway image bridge: a text-only platform profile still sends images (the gateway reads them), any other drops them', async () => {
+  const http = await import('node:http');
+  const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
+  const bodies: any[] = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      bodies.push(JSON.parse(raw));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'It shows a cat.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  const image = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const, label: 'Image: a.png' };
+  const message = { id: 'u1', role: 'user' as const, content: 'what is this?', createdAt: new Date().toISOString() };
+  try {
+    const platform = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, gatewayBridgesImages: true });
+    assert.equal(platform.supportsImages, false);
+    assert.equal(platform.bridgesImages, true);
+    await platform.complete([message], { imageAttachments: [image] });
+    const parts = bodies[0].messages.at(-1).content;
+    assert.ok(Array.isArray(parts) && parts.some((p: any) => p.type === 'image_url' && p.image_url.url.startsWith('data:image/png;base64,')), JSON.stringify(parts));
+    const other = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'glm-5', supportsImages: false });
+    assert.equal(other.bridgesImages, false);
+    await other.complete([message], { imageAttachments: [image] });
+    assert.doesNotMatch(JSON.stringify(bodies[1].messages), /image_url/, 'a model that cannot see images, without the gateway, never gets image parts');
+  } finally {
+    server.close();
+  }
 });
 
 await pending;
