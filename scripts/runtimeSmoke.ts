@@ -354,6 +354,33 @@ assert(
 }
 
 {
+  // Native tool calls from chat-completions providers arrive as <toolcall name="...">JSON</toolcall>.
+  // MCP calls carry the called tool's arguments under "args": they must survive, with the server id.
+  const recovered = parseAssistantEnvelopeForSmoke(
+    '<toolcall name="mcp_call_tool">{"serverId":"artemis_online","toolName":"schedule_create","args":{"title":"Brief","cron":"0 8 * * *"}}</toolcall>\n' +
+      '<toolcall name="mcp_get_prompt">{"type":"mcp_get_prompt","serverId":"docs","promptName":"summarize","args":{"topic":"x"}}</toolcall>\n' +
+      '<toolcall name="mcp_read_resource">{"serverId":"docs","uri":"file:///readme.md"}</toolcall>',
+  )
+  const [call, prompt, resource] = (recovered.actions ?? []) as any[]
+  assert(
+    'text tool-call recovery: MCP actions keep their server, tool and arguments',
+    recovered.actions?.length === 3 &&
+      call?.type === 'mcp_call_tool' &&
+      call.serverId === 'artemis_online' &&
+      call.toolName === 'schedule_create' &&
+      call.args?.title === 'Brief' &&
+      call.args?.cron === '0 8 * * *' &&
+      prompt?.type === 'mcp_get_prompt' &&
+      prompt.promptName === 'summarize' &&
+      prompt.args?.topic === 'x' &&
+      resource?.type === 'mcp_read_resource' &&
+      resource.uri === 'file:///readme.md' &&
+      recovered.done === false,
+    JSON.stringify(recovered),
+  )
+}
+
+{
   const recovered = parseAssistantEnvelopeForSmoke(`
 <actions>
 <action name="write_file">
@@ -492,6 +519,92 @@ assert(
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // A project cwd without its own providers.json must still route specialist
+  // roles to the globally configured specialist profile, like the main model,
+  // while a cwd-local store (full, or specialist-only from older routers)
+  // keeps precedence over the global one.
+  const tmpRoot = path.join(os.tmpdir(), `artemis-provider-router-global-${Date.now()}`)
+  const fakeHome = path.join(tmpRoot, 'home')
+  const testProfile = (id: string) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: `sk-test-${id}`, model: `${id}-model` })
+  fs.mkdirSync(path.join(fakeHome, '.artemis'), { recursive: true })
+  fs.writeFileSync(
+    path.join(fakeHome, '.artemis', 'providers.json'),
+    JSON.stringify({
+      profiles: [testProfile('global-main'), testProfile('global-specialist')],
+      defaultMainProfileId: 'global-main',
+      specialistProfileId: 'global-specialist',
+    }),
+  )
+
+  const originalHome = process.env.HOME
+  const originalArtemisHome = process.env.ARTEMIS_HOME
+  process.env.HOME = fakeHome
+  delete process.env.ARTEMIS_HOME
+
+  const routeResearcherAndMain = async (name: string, projectStore?: Record<string, unknown>): Promise<string[]> => {
+    const projectCwd = path.join(tmpRoot, name)
+    fs.mkdirSync(path.join(projectCwd, '.artemis'), { recursive: true })
+    if (projectStore) {
+      fs.writeFileSync(path.join(projectCwd, '.artemis', 'providers.json'), JSON.stringify(projectStore))
+    }
+    const servedBy: string[] = []
+    const makeProvider = (id: string): ChatProvider => ({
+      async complete(): Promise<ProviderResponse> {
+        servedBy.push(id)
+        return { text: JSON.stringify({ reply: id, done: true }), raw: null }
+      },
+    })
+    const router = await createProviderRouter({
+      cwd: projectCwd,
+      mainProvider: makeProvider('main'),
+      createProviderFromProfile: (profile) => makeProvider(profile.id),
+    })
+    const userMessage = { id: `router-${name}-user`, role: 'user' as const, content: 'look this up', createdAt: new Date().toISOString() }
+    await router.resolveProvider('researcher').complete([userMessage])
+    await router.resolveProvider('main').complete([userMessage])
+    return servedBy
+  }
+
+  let emptyCwd: string[] = []
+  let localFull: string[] = []
+  let localSpecialistOnly: string[] = []
+  try {
+    emptyCwd = await routeResearcherAndMain('empty')
+    localFull = await routeResearcherAndMain('local-full', {
+      profiles: [testProfile('local-main'), testProfile('local-specialist')],
+      defaultMainProfileId: 'local-main',
+      specialistProfileId: 'local-specialist',
+    })
+    localSpecialistOnly = await routeResearcherAndMain('local-specialist-only', {
+      profiles: [testProfile('local-spec')],
+      specialistProfileId: 'local-spec',
+    })
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME
+    else process.env.HOME = originalHome
+    if (originalArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = originalArtemisHome
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  }
+
+  assert(
+    'provider router: falls back to the global specialist profile when the project cwd has no providers.json',
+    emptyCwd[0] === 'global-specialist' && emptyCwd[1] === 'main',
+    emptyCwd.join(', '),
+  )
+  assert(
+    'provider router: a cwd-local main+specialist store takes precedence over the global store',
+    localFull[0] === 'local-specialist' && localFull[1] === 'main',
+    localFull.join(', '),
+  )
+  assert(
+    'provider router: a cwd-local specialist-only store takes precedence over the global store',
+    localSpecialistOnly[0] === 'local-spec' && localSpecialistOnly[1] === 'main',
+    localSpecialistOnly.join(', '),
+  )
 }
 
 {
