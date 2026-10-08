@@ -259,6 +259,32 @@ async function main(): Promise<void> {
   assert.equal(bgmInlineFinal.action?.soundtrackVolumeDb, -15, 'inline 音量-15dB should set soundtrackVolumeDb to -15');
   assert.equal(bgmInlineFinal.action?.soundtrackFadeOutSec, 2, 'inline 淡出2秒 should set soundtrackFadeOutSec to 2');
 
+  // "环境音音量 -18dB" sets the ambience level and leaves the music volume alone.
+  const ambienceKey = `${key}-bgm-ambience`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
+  const ambienceStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '开始生成' });
+  if (ambienceStart.handled && /确认.*主角|confirm the lead/i.test(ambienceStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: 'X' });
+  }
+  for (const reply of ['16:9', '无字幕', '60秒', '2']) await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: reply });
+  const ambienceFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: `${bgmInlinePath} 环境音音量 -18dB` });
+  assert.equal(ambienceFinal.action?.environmentVolumeDb, -18, '环境音音量 sets the ambience level');
+  assert.equal(ambienceFinal.action?.soundtrackVolumeDb, undefined, '环境音音量 never sets the music volume');
+
+  // Guide §9.6: a declared subject mode / identity source skips those questions.
+  const declaredText = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-text`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：有主角。身份来源：纯文字。\n[0-5秒] 镜头1：风筝飞过山坡。\n[5-10秒] 镜头2：风筝落进草地。' });
+  assert.match(declaredText.reply, /已按剧本设定：有主角 · 身份来源：纯文字/);
+  assert.match(declaredText.reply, /补充其它素材/, 'text-only identity goes straight to the materials step');
+  const declaredVisual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-visual`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：纯视觉 / 无主角。\n[0-5秒] 雨中的山谷。\n[5-10秒] 云雾散开。' });
+  assert.match(declaredVisual.reply, /已按剧本设定：纯视觉/);
+  assert.doesNotMatch(declaredVisual.reply, /这段视频里/, 'the subject question is not asked again');
+  const declaredTurnaround = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-turnaround`, cwd, locale: 'en', forceIntent: true, text: 'Subject mode: has protagonist. Identity source: turnaround reference sheet; do not inherit reference-photo backgrounds.\n[0-5s] A girl opens the door.\n[5-10s] She looks back.' });
+  assert.match(declaredTurnaround.reply, /Taken from your brief: has a protagonist · identity source: turnaround sheet/);
+  const undeclared = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-undeclared`, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我做一个关于风筝的长视频' });
+  assert.match(undeclared.reply, /这段视频里/, 'without a declaration the subject question is asked');
+
   const bgmTuneKey = `${key}-bgm-tune`;
   const bgmTunePath = path.join(cwd, 'tune-bgm.mp3');
   await writeFile(bgmTunePath, Buffer.alloc(128, 1));

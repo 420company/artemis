@@ -243,7 +243,8 @@ function extractBgmParamUpdates(text: string): BgmParamDiff {
   const result: BgmParamDiff = {};
   const start = parseTimeExpressionSeconds(text);
   if (typeof start === 'number' && Number.isFinite(start) && start >= 0) result.startSec = start;
-  const music = parseDbAfter(text, /(?:bgm|音乐|音量|volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  // "环境音音量 -18dB" / "ambience volume -18dB" is the ambience level, not the music's.
+  const music = parseDbAfter(text, /(?:bgm|音乐|(?<!环境音\s*)音量|(?<!(?:ambience|ambient|environment)\s*)volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (music !== undefined) result.musicVolumeDb = music;
   const env = parseDbAfter(text, /(?:环境音|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (env !== undefined) result.environmentVolumeDb = env;
@@ -1297,8 +1298,44 @@ function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean
   return false;
 }
 
+// Guide §3.2: about 4-5 Chinese characters or 2-3 English words per second.
+const CHINESE_CHARS_PER_SECOND = 5;
+const ENGLISH_WORDS_PER_SECOND = 3;
+
+/**
+ * One line per timecoded segment whose marked dialogue (spoken lines and
+ * voiceover, not subtitles) needs longer than the segment lasts at a natural
+ * speech rate; such lines get cut off or sped up.
+ */
+function speechRateWarnings(text: string, locale: UiLocale): string[] {
+  const brief = stripBriefNoise(text);
+  const range = `(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}\\s*[-–—~至到]\\s*(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}`;
+  const markers = Array.from(brief.matchAll(new RegExp(`\\[\\s*${range}\\s*\\]`, 'gi')));
+  const toSeconds = (token: string) => token.split(':').map(Number).reduce((total, part) => total * 60 + part, 0);
+  const warnings: string[] = [];
+  markers.forEach((marker, index) => {
+    const start = toSeconds(marker[1] ?? '');
+    const end = toSeconds(marker[2] ?? '');
+    const seconds = end - start;
+    if (!(seconds > 0)) return;
+    const body = brief.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index ?? brief.length);
+    const spoken = extractSagaDialogueLines(body).filter((line) => line.use !== 'subtitle');
+    const han = spoken.reduce((sum, line) => sum + (line.text.match(/\p{Script=Han}/gu)?.length ?? 0), 0);
+    const words = spoken.reduce((sum, line) => sum + (line.text.replace(/\p{Script=Han}/gu, ' ').match(/[\p{L}\p{N}'’-]+/gu)?.length ?? 0), 0);
+    const needed = han / CHINESE_CHARS_PER_SECOND + words / ENGLISH_WORDS_PER_SECOND;
+    if (needed <= seconds) return;
+    const amount = [han > 0 ? `${han} ${locale === 'zh-CN' ? '字' : 'Chinese characters'}` : '', words > 0 ? `${words} ${locale === 'zh-CN' ? '个英文词' : 'words'}` : ''].filter(Boolean).join(' + ');
+    warnings.push(pickLocale(locale, {
+      zh: `⚠️ 语速提示：段 ${index + 1}（${marker[0]}，${seconds} 秒）的对白约 ${amount}，正常语速需要约 ${Math.ceil(needed)} 秒，可能说不完或被加速；建议精简台词或拉长该段。`,
+      en: `⚠️ Speech rate: segment ${index + 1} (${marker[0]}, ${seconds}s) has about ${amount} of dialogue, which takes about ${Math.ceil(needed)}s at a natural pace; it may be cut off or sped up. Shorten the lines or lengthen the segment.`,
+    }));
+  });
+  return warnings;
+}
+
 async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string> {
   const modelLine = await buildModelLine(state.cwd, state.locale);
+  const rateWarnings = speechRateWarnings(combinedStoryText(state), state.locale);
   const estimated = estimateDuration(combinedStoryText(state));
   const refsCount = refTotal(state);
   const imgs = state.referenceImageUrls.length + state.referenceImagePaths.length + state.turnaroundImagePaths.length + state.turnaroundImageUrls.length;
@@ -1313,6 +1350,7 @@ async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string
       modelLine,
       refLine,
       storyLine,
+      ...rateWarnings,
       state.prefilledDuration
         ? `我从你前面的文字里识别到 ${state.prefilledDuration} 秒；回复 "默认/自动" 就用这个。也可以重新告诉我 "60秒"、"90秒"、"2分钟"。`
         : `请告诉我视频总长度 — "60秒"、"90秒"、"2分钟" 之类都行；想让我根据剧本和素材决定就回复 "自动"（建议 ${estimated} 秒）。`,
@@ -1326,6 +1364,7 @@ async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string
     modelLine,
     refLine,
     storyLine,
+    ...rateWarnings,
     state.prefilledDuration
       ? `I detected ${state.prefilledDuration}s earlier; reply "default/auto" to use that, or give a new duration such as "60s", "90s", "2 minutes".`
       : `How long should the video be? Tell me a duration — "60s", "90s", "2 minutes" — or reply "auto" and I'll choose from the complete script/materials (suggesting ${estimated}s).`,
@@ -2028,5 +2067,59 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
   next.stage = 'awaiting_subject_mode';
   WORKFLOWS.set(key, next);
+  const declared = applyDeclaredSubjectAndIdentity(next);
+  if (declared) return { handled: true, reply: declared };
   return { handled: true, reply: buildSubjectModeAskMessage(next) };
+}
+
+// Guide §9.6: "主体模式：有主角。身份来源：纯文字。" / "Subject mode: pure visual."
+const DECLARED_SUBJECT_RE = /(?:主体模式|subject\s*mode)\s*[:：]\s*(?<value>有主角|纯视觉|无主角|has\s+(?:a\s+)?protagonist|pure\s+visual|no\s+protagonist)/i;
+const DECLARED_IDENTITY_RE = /(?:身份来源|identity\s*source)\s*[:：]\s*(?<value>三视图|角色三视图|角色图|人物图|人物照片|照片|直接(?:用)?图片|纯文字|文字描述|turnaround|three[-\s]?view|character\s*(?:image|photo)|photo|direct\s*image|text[-\s]?only|text)/i;
+
+/**
+ * Applies a subject mode / identity source the brief declares up front, so
+ * those questions are not asked. Returns the next reply, or undefined when
+ * the brief declares neither.
+ */
+function applyDeclaredSubjectAndIdentity(state: SagaWorkflowState): string | undefined {
+  const text = state.originalText;
+  const subject = text.match(DECLARED_SUBJECT_RE)?.groups?.value?.toLowerCase();
+  const identity = text.match(DECLARED_IDENTITY_RE)?.groups?.value?.toLowerCase();
+  if (!subject && !identity) return undefined;
+  const note = (zh: string, en: string) => pickLocale(state.locale, { zh: `📋 已按剧本设定：${zh}`, en: `📋 Taken from your brief: ${en}` });
+  if (subject && /纯视觉|无主角|pure|no\s+protagonist/.test(subject)) {
+    markAbstractPreference(state);
+    state.stage = 'collecting_refs';
+    return `${note('纯视觉（无主角）。', 'pure visual (no protagonist).')}\n\n${buildRefIntroMessage(state)}`;
+  }
+  // An identity source implies a protagonist.
+  if (!identity) {
+    if (!state.multimodalCapable) {
+      state.identitySource = 'text_only';
+      state.stage = 'collecting_refs';
+      return `${note('有主角。', 'has a protagonist.')}\n\n${buildRefIntroMessage(state)}`;
+    }
+    state.stage = 'awaiting_identity_source';
+    return `${note('有主角。', 'has a protagonist.')}\n\n${buildIdentitySourceAskMessage(state)}`;
+  }
+  if (/纯文字|文字描述|text/.test(identity) || !state.multimodalCapable) {
+    state.identitySource = 'text_only';
+    state.referenceImagePaths = [];
+    state.referenceImageUrls = [];
+    state.stage = 'collecting_refs';
+    return `${note('有主角 · 身份来源：纯文字。', 'has a protagonist · identity source: text only.')}\n\n${buildRefIntroMessage(state)}`;
+  }
+  if (/三视图|turnaround|three/.test(identity)) {
+    state.identitySource = 'turnaround';
+    state.stage = 'awaiting_turnaround_upload';
+    return `${note('有主角 · 身份来源：三视图。', 'has a protagonist · identity source: turnaround sheet.')}\n\n${buildTurnaroundUploadMessage(state)}`;
+  }
+  if (/直接|direct/.test(identity)) {
+    state.identitySource = 'direct_image';
+    state.stage = 'awaiting_character_image_upload';
+    return `${note('有主角 · 身份来源：直接用图片。', 'has a protagonist · identity source: image used directly.')}\n\n${buildDirectImageUploadMessage(state)}`;
+  }
+  state.identitySource = 'character_image';
+  state.stage = 'awaiting_character_image_upload';
+  return `${note('有主角 · 身份来源：角色图。', 'has a protagonist · identity source: character image.')}\n\n${buildCharacterImageUploadMessage(state)}`;
 }
