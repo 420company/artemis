@@ -317,6 +317,23 @@ function shortenTitle(title: string, maxChars: number): string {
   return `${(lastSpace > maxChars / 2 ? cut.slice(0, lastSpace) : cut).trim()}…`;
 }
 
+// A spec line ("参考画质等级: 王家卫《花样年华》式…") names a reference, not this film.
+const REFERENCE_LABEL_RE = /^[\s·•*-]*[^:：\n]{0,16}(?:参考|画质|风格|摄影|镜头|色彩|光照|质感|reference|quality|style|camera|lens|look)[^:：\n]{0,16}[:：]/i;
+
+/** A film named in 《…》, unless the brief only cites it as a reference ("《花样年华》式"). */
+function namedFilmTitle(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    if (REFERENCE_LABEL_RE.test(line)) continue;
+    for (const match of line.matchAll(/《([^》\n]{1,60})》/g)) {
+      const after = line.slice((match.index ?? 0) + match[0].length);
+      if (/^(?:式|风|般|那样|一样|似的|同款|质感|画质)/.test(after)) continue;
+      const title = trimTitle(match[1] ?? '');
+      if (title) return title;
+    }
+  }
+  return undefined;
+}
+
 /**
  * A title from the user's own brief: a named film (《…》 or "片名：…"), else
  * the first sentence of the first line that is story rather than structure,
@@ -324,8 +341,8 @@ function shortenTitle(title: string, maxChars: number): string {
  */
 export function deriveTitleFromBrief(brief: string): string | undefined {
   const text = stripRawModeTag(brief);
-  const named = text.match(/《([^》\n]{1,60})》/)?.[1];
-  if (named && trimTitle(named)) return trimTitle(named);
+  const named = namedFilmTitle(text);
+  if (named) return named;
   for (const rawLine of text.split(/\r?\n/)) {
     const line = compactInline(rawLine);
     if (!line) continue;
