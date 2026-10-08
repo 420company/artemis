@@ -1100,6 +1100,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           model: optionalStringSchema('Optional video generation model name.'),
           ratio: optionalStringSchema('Optional aspect ratio (e.g., 16:9).'),
           duration: integerSchema('Optional duration in seconds (1-60).'),
+          resolution: optionalStringSchema(
+            'Optional output resolution: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution, since it costs several times more.',
+          ),
           outputPath: optionalStringSchema('Optional local file path to save the generated video.'),
           referenceImageUrls: {
             type: 'array',
@@ -1765,6 +1768,32 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             description: 'Target platform. Defaults to all.',
           },
           targetId: optionalStringSchema('Optional platform target id/chat id/channel id. Defaults to configured or live bridge targets.'),
+        },
+      };
+    case 'memory':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['action'],
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['save', 'update', 'delete', 'list'],
+            description: 'save a new memory, update an existing one, delete one the user contradicted, or list them all.',
+          },
+          scope: {
+            type: 'string',
+            enum: ['global', 'project'],
+            description: 'global: about the user, across projects. project: only this workspace. Set global explicitly for lasting facts about the user; if omitted, interactive runs save globally and headless runs to the project.',
+          },
+          name: optionalStringSchema('Short kebab-case slug, e.g. reply-language. Required for update and delete.'),
+          description: optionalStringSchema('One concrete sentence; recall relies on it.'),
+          category: {
+            type: 'string',
+            enum: ['preference', 'feedback', 'project', 'reference', 'skill', 'architecture'],
+            description: 'What kind of memory this is.',
+          },
+          content: optionalStringSchema('The memory in Markdown, with absolute dates. Required for save and update.'),
         },
       };
   default:

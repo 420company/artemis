@@ -15,6 +15,7 @@ import {
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js'
 import { toolLog } from '../../../utils/log.js'
+import { assertVideoResolutionSupported } from '../videoParams.js'
 
 // Emit a progress line every Nth poll so the user can see the provider is
 // being talked to (not hanging). Default 6 polls × 10s = one line per minute.
@@ -284,11 +285,11 @@ export class CustomProvider implements VisualProvider {
       const body: Record<string, unknown> = {
         model,
         duration: durationNum,
-        resolution: videoConfig.defaultParams.resolution || '720p',
+        resolution: params.resolution || videoConfig.defaultParams.resolution || '720p',
         aspect_ratio: ratio,
         input,
         parameters: {
-          resolution: (videoConfig.defaultParams.resolution || '720p').toUpperCase(),
+          resolution: (params.resolution || videoConfig.defaultParams.resolution || '720p').toUpperCase(),
           ratio,
           duration: durationNum,
           prompt_extend: promptExtend,
@@ -500,7 +501,7 @@ export class CustomProvider implements VisualProvider {
         model,
         content,
         duration: durationNum,
-        resolution: videoConfig.defaultParams.resolution || '720p',
+        resolution: params.resolution || videoConfig.defaultParams.resolution || '720p',
         ratio,
         generate_audio: params.generateAudio !== false && /^dreamina-seedance-2/i.test(model.trim()),
         prompt_extend: promptExtend,
@@ -637,9 +638,11 @@ export class CustomProvider implements VisualProvider {
     try {
       const videoConfig = this.config.video
       const seconds = mapVideoSeconds(params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration))
+      // This protocol only has 720p and 1080p sizes; never downgrade/upgrade silently.
+      assertVideoResolutionSupported(params.resolution, ['720p', '1080p'], `Custom video endpoint ${model}`)
       const size = mapVideoSize({
         ratio: params.ratio,
-        resolution: videoConfig.defaultParams.resolution,
+        resolution: params.resolution || videoConfig.defaultParams.resolution,
       })
 
       const body = new FormData()
