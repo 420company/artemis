@@ -17,6 +17,7 @@ import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
+import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
@@ -250,6 +251,25 @@ assert(
   assert(
     'platform tools: host override is restored after the forced snapshot',
     eq(buildProviderNativeFunctionTools().map((tool) => tool.name), providerNativeToolNames),
+  )
+}
+
+{
+  // The legacy interactive Freya flow is not offered to the model anywhere.
+  const freya = 'request_freya_visual_asset'
+  const mainNativeNames = buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main'))
+    .map((tool) => tool.name)
+  const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
+  const mainPrompt = buildSystemPrompt(process.cwd(), 'accept-all', 'standard', 'main', false)
+  assert(
+    'freya: request_freya_visual_asset is not offered to main (native, direct, manifest, prompt)',
+    !providerNativeToolNames.includes(freya) &&
+      !mainNativeNames.includes(freya) &&
+      !getProviderCallableActionTypes().includes(freya) &&
+      !buildDirectNativeFunctionTools().some((tool) => tool.name === freya) &&
+      !manifestNames.includes(freya) &&
+      !mainPrompt.includes(freya) &&
+      !mapProviderNativeToolCallToAction({ callId: 'freya-call', name: freya, arguments: '{}' }).ok,
   )
 }
 

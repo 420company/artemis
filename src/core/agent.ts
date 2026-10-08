@@ -4644,6 +4644,19 @@ You can continue executing your current tasks. The background workflow will run 
       }
     }
     case 'request_freya_visual_asset': {
+      // Legacy interactive flow: it is no longer offered to the model
+      // (generate_image / generate_video / generate_long_video replace it) and
+      // it needs a terminal menu, so without an interactive terminal (e.g.
+      // headless `artemis execute`) it fails fast instead of blocking.
+      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+        return buildRuntimeManagedFailure(
+          'freya_visual_asset_unavailable',
+          'request_freya_visual_asset is not available in this session (it needs an interactive terminal menu). Use generate_image for images, generate_video for short videos, or generate_long_video for long-form video instead.',
+          {
+            retryable: false,
+          },
+        );
+      }
       try {
         const { showFreyaMenu } = await import('../cli/freyaPrompt.js')
         const { FreyaVisualAgent } = await import('../agents/freyaAgent.js')
@@ -4664,9 +4677,18 @@ You can continue executing your current tasks. The background workflow will run 
 
         switch (menuResult.assetPath) {
           case 'configure':
-            options.onInfo?.('[log:info] ✅ Freya: 会话已成功挂起。请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重新启动会话以恢复任务。')
-            process.exit(0)
-            
+            // Never exit the process mid-run: report back so the session
+            // can continue (or the user can configure and retry).
+            options.onInfo?.('[log:info] Freya: 请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重试。')
+            return buildRuntimeManagedFailure(
+              'freya_visual_model_configuration_requested',
+              'The user chose to configure the visual model. Ask them to run /config visual (or artemis config visual) and retry; meanwhile use generate_image or generate_video directly.',
+              {
+                retryable: false,
+              },
+            );
+
+
           case 'generate':
             if (!visualConfig?.enabled) {
               options.onInfo?.('[log:warn] ⚠️ Freya: 视觉模型尚未配置。请运行 /config visual（或 artemis config visual）进行配置。')
