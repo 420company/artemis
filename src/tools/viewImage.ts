@@ -12,7 +12,8 @@
  */
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js'
 import { loadImageFile } from '../core/imageInput.js'
-import { frameImageDescription, IMAGE_DESCRIPTION_DATA_NOTE } from '../core/imageDescription.js'
+import { frameImageDescription, imageDescriptionDataNote, imageDescriptionNonce } from '../core/imageDescription.js'
+import { NO_SWITCH_ADVICE } from '../core/visionHelper.js'
 import { ensureNotSensitivePath } from '../utils/fs.js'
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js'
 
@@ -30,7 +31,7 @@ export async function executeViewImage(
   if (!queue) return fail('view_image only works inside an agent run, which shows the image on its next step.')
   const describeImage = queue.acceptsImages ? undefined : queue.describeImage
   if (!queue.acceptsImages && !describeImage) {
-    return fail('The current model cannot see images, so view_image is unavailable. Use other tools (for example run_command with `file` or an image metadata tool) to learn about the file.')
+    return fail(`Images cannot be viewed here, so view_image is unavailable. Use other tools (for example run_command with \`file\` or an image metadata tool) to learn about the file. ${NO_SWITCH_ADVICE}`)
   }
   try {
     const { absolute, displayPath } = await resolveToolPathWithWorkspaceAccess({
@@ -43,22 +44,40 @@ export async function executeViewImage(
     }
     const image = await loadImageFile(absolute, displayPath)
     if (describeImage) {
-      // A text-only model: a vision helper looks at the image instead.
-      let description: string
-      try {
-        description = await describeImage(image, context.abortSignal)
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        return fail(`${image.label}: the image could not be read (the vision helper failed: ${reason}). Continue without it.`)
+      // A text-only model: a vision helper looks at the image instead, with one
+      // automatic retry after a short pause.
+      let description: string | undefined
+      let reason = ''
+      for (let attempt = 0; attempt < 2 && description === undefined; attempt++) {
+        if (attempt > 0) await pauseFor(queue.retryDelayMs, context.abortSignal)
+        if (context.abortSignal?.aborted) break
+        try {
+          description = await describeImage(image, context.abortSignal)
+        } catch (error) {
+          reason = error instanceof Error ? error.message : String(error)
+        }
+      }
+      if (description === undefined) {
+        // The platform gateway reads images itself: send it along instead.
+        if (queue.bridgesImages) {
+          const dropped = queue.addUnread(image)
+          return {
+            action: action as any,
+            ok: true,
+            output: `${image.label} (${image.mediaType}) is attached to your next step: look at it there.${dropped.length ? ` ${dropped.length} earlier image(s) were dropped to stay within the per-request image limit.` : ''}`,
+          }
+        }
+        return fail(`${image.label}: the image is temporarily unreadable (the image reader failed or took too long, also on a retry: ${reason}). Try view_image on it once more in a moment; if that fails too, tell the user briefly that the image is temporarily unreadable and that you will retry. ${NO_SWITCH_ADVICE}`)
       }
       // Delimited and marked as data: the image may contain text phrased as instructions.
+      const nonce = imageDescriptionNonce()
       return {
         action: action as any,
         ok: true,
         output: [
-          `[${image.label} — description by vision helper; the main model cannot see images]`,
-          IMAGE_DESCRIPTION_DATA_NOTE,
-          frameImageDescription(1, description, { file: displayPath }),
+          `[${image.label} — description by vision helper]`,
+          imageDescriptionDataNote(nonce),
+          frameImageDescription(1, description, { file: displayPath, nonce }),
         ].join('\n'),
       }
     }
@@ -74,4 +93,18 @@ export async function executeViewImage(
   } catch (error) {
     return fail(error instanceof Error ? error.message : `view_image failed: ${String(error)}`)
   }
+}
+
+/** Waits `ms`, or less when the run is cancelled. */
+function pauseFor(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
 }

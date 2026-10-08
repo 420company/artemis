@@ -189,6 +189,20 @@ export class ViewedImageQueue {
    * Resolves to the description; rejects when the helper failed.
    */
   describeImage?: (image: ImageAttachment, signal?: AbortSignal) => Promise<string>;
+  /**
+   * Set by the run when images sent to the model reach the platform gateway,
+   * which reads them (ChatProvider.bridgesImages): view_image then queues an
+   * image the helper could not describe instead of failing.
+   */
+  bridgesImages = false;
+  /**
+   * Set by the run: the gateway model the vision helper calls, when it is the
+   * platform's helper (VisionHelper.gatewayModel).
+   */
+  helperGatewayModel?: string;
+  /** Pause before view_image's one automatic retry of the helper. */
+  retryDelayMs = 3_000;
+  private visionSkip = new Set<string>();
 
   /**
    * Queues an image for the next request. When the queue would exceed the
@@ -199,6 +213,22 @@ export class ViewedImageQueue {
     const { kept, dropped } = fitImagesToRequest([...this.images, image]);
     this.images = kept;
     return dropped;
+  }
+
+  /**
+   * Queues an image the vision helper failed on, for the gateway to read;
+   * the helper's model is remembered so the gateway skips it (x-vision-skip).
+   */
+  addUnread(image: ImageAttachment): ImageAttachment[] {
+    if (this.helperGatewayModel) this.visionSkip.add(this.helperGatewayModel);
+    return this.add(image);
+  }
+
+  /** Removes and returns the gateway vision models to skip for what was queued. */
+  takeVisionSkip(): string[] {
+    const skip = [...this.visionSkip];
+    this.visionSkip.clear();
+    return skip;
   }
 
   /** Removes and returns everything queued. */

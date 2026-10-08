@@ -787,12 +787,13 @@ export function getActiveContextState(): ContextState | undefined {
     return state ? normalizeContextState(state) : undefined;
 }
 
-async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: string, auditRole: 'worker' | 'compression'): Promise<string> {
+async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: string, auditRole: 'worker' | 'compression', abortSignal?: AbortSignal): Promise<string> {
     const messages: SessionMessage[] = [
         { id: 'sum-sys', role: 'system', content: system, createdAt: new Date().toISOString() },
         { id: 'sum-usr', role: 'user', content: prompt, createdAt: new Date().toISOString() },
     ];
-    const result = await p.complete(messages);
+    if (abortSignal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    const result = await p.complete(messages, abortSignal ? { abortSignal } : undefined);
     recordBifrostAudit(auditRole, estimateResponseUsage(result, messages), messages);
     return result.text ?? '';
 }
@@ -802,14 +803,19 @@ async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: st
  * model when one is configured, else the main model; falls back to the main
  * model when the worker fails. No model id is hard-coded.
  */
-const summarizeForCompaction: SummarizeFn = async ({ system, prompt, attempt }) => {
+const summarizeForCompactionWith = async (
+    { system, prompt, attempt }: Parameters<SummarizeFn>[0],
+    abortSignal?: AbortSignal,
+): Promise<string> => {
     const lead = await loadProvider(providerCwd ?? process.cwd());
     const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
     // First try: the worker when one is configured. The single retry goes to
     // the main model; the context manager charges both to one input budget.
     const useWorker = (attempt ?? 0) === 0 && workerCfg && workerCfg !== providerConfig && workerP;
-    return completeSummaryPrompt(useWorker ? workerP : lead, system, prompt, 'compression');
+    return completeSummaryPrompt(useWorker ? workerP : lead, system, prompt, 'compression', abortSignal);
 };
+
+const summarizeForCompaction: SummarizeFn = (request) => summarizeForCompactionWith(request);
 
 /** Context window of the model compaction summaries go to. */
 async function resolveSummarizerWindow(): Promise<number | undefined> {
@@ -2102,6 +2108,8 @@ export interface ThinkOptions {
      * uses the full model window unless a cap is configured.
      */
     contextMode?: 'hosted' | 'interactive';
+    /** Cancels the run: the vision helper's image reading and the model calls. */
+    abortSignal?: AbortSignal;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2149,6 +2157,7 @@ export async function think(
         onCompressionSummary,
         contextDir,
         contextMode = 'interactive',
+        abortSignal,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2156,21 +2165,27 @@ export async function think(
     // A model that cannot see images gets bridge/pasted images as text: the
     // vision helper's descriptions, or a note when there is no helper.
     let requestImageAttachments = imageAttachments;
+    let requestVisionSkip: string[] | undefined;
     if (imageAttachments.length > 0) {
         const imageProvider = await loadProvider(cwd);
         const preparedImages = await prepareUserImagesForModel({
             userText: input,
             images: imageAttachments,
             modelSeesImages: imageProvider.supportsImages === true,
+            mainBridgesImages: imageProvider.bridgesImages === true,
             getHelper: memoizeVisionHelper(async () =>
                 visionHelper !== undefined
                     ? visionHelper ?? undefined
                     : loadVisionHelper(cwd, { onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined })),
             locale,
             onInfo: onToolLog ? (m: string) => onToolLog(m, 'info') : undefined,
+            signal: abortSignal,
         });
+        // Cancelled while the images were read: nothing goes to the model.
+        if (abortSignal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         input = appendImageNote(input, preparedImages.note);
         requestImageAttachments = preparedImages.images;
+        requestVisionSkip = preparedImages.visionSkip;
     }
     tSession.addUser(input);
     const requestMessageId = tSession.getMessages().at(-1)?.id;
@@ -2228,7 +2243,8 @@ export async function think(
             budget: contextBudget,
             state: contextState,
             storage: contextStorage,
-            summarize: summarizeForCompaction,
+            // A cancelled run also cancels its compaction (aborts are rethrown, never counted as failures).
+            summarize: (request) => summarizeForCompactionWith(request, abortSignal),
             summarizerWindow,
             restore: { cwd: currentCwd },
             // This turn's request stays in the live history, however large.
@@ -2325,6 +2341,10 @@ export async function think(
         completionOptions: Record<string, unknown>,
     ): Promise<{ interrupted: true } | { interrupted: false; completion: ProviderResponse }> => {
         const controller = new AbortController();
+        // The caller's cancellation stops the model call too.
+        const onCallerAbort = (): void => controller.abort();
+        if (abortSignal?.aborted) controller.abort();
+        else abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
         let interrupted = false;
         let polling = false;
         const poll = (): void => {
@@ -2359,6 +2379,7 @@ export async function think(
             throw error;
         } finally {
             clearInterval(timer);
+            abortSignal?.removeEventListener('abort', onCallerAbort);
         }
     };
     /**
@@ -2438,6 +2459,7 @@ export async function think(
                     // tool group was disabled; providers that cannot handle images will
                     // ignore/fail explicitly in their own adapter path.
                     imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
+                    ...(round === 1 && hasImageAttachments && requestVisionSkip ? { visionSkip: requestVisionSkip } : {}),
                     onReasoning,
                     guardStreamingText: supportsNativeTools && !plainChat,
                 },

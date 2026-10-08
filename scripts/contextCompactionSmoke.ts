@@ -39,7 +39,8 @@ import {
   estimateTokens,
   estimateToolSchemaTokens,
 } from '../src/core/tokenEstimation.js'
-import { runAgent } from '../src/core/agent.js'
+import { runAgent as runAgentNow } from '../src/core/agent.js'
+import { settleMemoryCuration } from '../src/core/memory.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { PermissionManager } from '../src/security/permissions.js'
 import { MessagesCompatibleProvider } from '../src/providers/messagesCompatible.js'
@@ -48,7 +49,7 @@ import type { SessionMessage } from '../src/core/types.js'
 import type { ChatProvider, ProviderResponse } from '../src/providers/types.js'
 import { applyProviderOverrides, getLastPromptTokens, getMessages, resetSession, restoreSessionStateForCwd, think } from '../src/brain.js'
 import { parseRemoteCommand, runRemoteCommand } from '../src/bragi/runtime.js'
-import { runHeadlessAgent } from '../src/services/headlessAgent.js'
+import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
 import { HOSTED_DEFAULT_MAX_CONTEXT_TOKENS, resolveMaxContextTokens } from '../src/core/compaction/index.js'
 import { fitOutputTokensToWindow } from '../src/providers/capabilities.js'
 import { spawnSync } from 'node:child_process'
@@ -62,6 +63,23 @@ import { memoryDirForScope } from '../src/storage/memoryFiles.js'
 
 let passed = 0
 let failed = 0
+
+// A finished run starts the memory curator in the background; wait for it
+// so no curator outlives its test and touches the next test's files.
+const runAgent: typeof runAgentNow = async (...args) => {
+  try {
+    return await runAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
+const runHeadlessAgent: typeof runHeadlessAgentNow = async (...args) => {
+  try {
+    return await runHeadlessAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
 
 function assert(label: string, cond: boolean, detail?: string): void {
   if (cond) {

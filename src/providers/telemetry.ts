@@ -342,6 +342,7 @@ export function createTrackedProviderFromConfig(
 
   const wrapped: ChatProvider = {
     supportsImages: provider.supportsImages,
+    bridgesImages: provider.bridgesImages,
     supportsNativeToolCalls: provider.supportsNativeToolCalls,
     model: provider.model,
     contextWindow: provider.contextWindow,

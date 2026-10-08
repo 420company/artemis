@@ -501,8 +501,16 @@ function extractText(content: unknown): string {
   return '';
 }
 
+/** The x-vision-skip header for a gateway profile sending images (see ProviderRequestOptions.visionSkip). */
+export function visionSkipHeader(bridgesImages: boolean, options?: ProviderRequestOptions): Record<string, string> {
+  const skip = (options?.visionSkip ?? []).filter((model) => /^[\w.:/@+-]+$/.test(model))
+  if (!bridgesImages || !options?.imageAttachments?.length || skip.length === 0) return {}
+  return { 'x-vision-skip': skip.join(',') }
+}
+
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
+  readonly bridgesImages: boolean;
   readonly supportsNativeToolCalls = true;
   readonly contextLength?: number;
   private readonly config: ProviderConfig;
@@ -515,6 +523,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
     this.model = config.model;
+    this.bridgesImages = config.gatewayBridgesImages === true;
     this.contextLength = platformContextLength(config);
     // Only a platform profile states its output limit; otherwise the budget
     // reserves a default (requests send no max_tokens unless asked).
@@ -533,7 +542,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages)
     const mapped = conversation.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
     mapped.push(...(runtimeContext.map((m) => mapMessage(m, { reasoningMode })) as typeof mapped))
 
@@ -570,6 +579,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
           signal: idleGuard.signal,
@@ -865,7 +875,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
     const mapped = conversation.map((m) => mapMessage(m, { reasoningMode }));
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
     mapped.push(...runtimeContext.map((m) => mapMessage(m, { reasoningMode })));
 
@@ -899,6 +909,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
           signal: options?.abortSignal,

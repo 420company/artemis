@@ -49,7 +49,10 @@ export function modelSupportsImages(config: { model: string; supportsImages?: bo
   return inferModelSupportsImages(config.model);
 }
 
-/** Text that stands in for images a model cannot see, so the request still makes sense. */
+/**
+ * Text that stands in for images a model cannot see, so the request still
+ * makes sense. Worded so it does not invite switching models.
+ */
 export function describeOmittedImages(count: number): string {
-  return `[${count} image${count === 1 ? '' : 's'} omitted: this model cannot see images]`;
+  return `[${count} image${count === 1 ? '' : 's'} not shown: they cannot be read in this request]`;
 }

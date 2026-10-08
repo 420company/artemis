@@ -13,12 +13,16 @@
  * Descriptions travel inside <image_description> blocks after a note that
  * they are data from an image, never instructions (see imageDescription.ts).
  * Each helper call has a timeout and follows the run's cancellation; a failed,
- * timed-out or cut-off image gets a "could not be read" note and the run
- * continues.
+ * timed-out or cut-off image is tried once more after a short pause. If it
+ * still fails and the main profile points at the platform gateway (which
+ * reads images itself, see gatewayBridgesImages), the image goes with the
+ * request as an image; otherwise it gets a "temporarily unreadable" note that
+ * has the model tell the user it will retry, and the run continues.
  *
- * Without a helper the user's images become a short note asking the model to
- * tell the user, so the run never fails just because the plan cannot read
- * images. One helper instance belongs to one run: its description cache,
+ * Without a helper the user's images go to the gateway the same way, or
+ * become that note, so the run never fails just because no model here can
+ * read images. No note mentions plans, tiers or models: the platform gives
+ * every tier image reading, so a failure is temporary. One helper instance belongs to one run: its description cache,
  * keyed by the image content hash plus a hash of the user's question (see
  * visionCacheKey), never outlives the run.
  *
@@ -37,7 +41,8 @@ import { resolveArtemisHomeDir } from '../utils/fs.js';
 import { hasPlatformCapabilities } from '../providers/capabilities.js';
 import {
   frameImageDescription,
-  IMAGE_DESCRIPTION_DATA_NOTE,
+  imageDescriptionDataNote,
+  imageDescriptionNonce,
   sanitizeImageName,
 } from './imageDescription.js';
 
@@ -57,6 +62,12 @@ export type VisionDescription =
 export type VisionHelper = {
   /** Profile id (or model) of the helper, for logs. */
   readonly label: string;
+  /**
+   * The gateway model the helper calls, when it is the platform's own helper
+   * profile: images it failed on are sent to the gateway with this model in
+   * x-vision-skip, so the gateway does not try (and bill) it again.
+   */
+  readonly gatewayModel?: string;
   /**
    * Describes each image, in order. Images already described in this run for
    * the same question come from the cache; the others go to the vision model,
@@ -209,7 +220,7 @@ const CUT_OFF_NOTE = '[The description was cut off at the output limit.]';
  */
 export function createVisionHelper(
   provider: ChatProvider,
-  options: { label?: string; onInfo?: (message: string) => void; timeoutMs?: number } = {},
+  options: { label?: string; onInfo?: (message: string) => void; timeoutMs?: number; gatewayModel?: string } = {},
 ): VisionHelper {
   const cache = new Map<string, string>();
   const label = options.label ?? 'vision';
@@ -301,6 +312,7 @@ export function createVisionHelper(
 
   return {
     label,
+    ...(options.gatewayModel ? { gatewayModel: options.gatewayModel } : {}),
     async describe(images, context) {
       const keys = images.map((image) => visionCacheKey(image, context));
       const pending: Array<{ key: string; image: ImageAttachment }> = [];
@@ -380,7 +392,11 @@ export async function loadVisionHelper(
     profileId: profile.id,
     profileLabel: profile.label ?? profile.id,
   });
-  return createVisionHelper(provider, { label: profile.id, onInfo: options.onInfo });
+  return createVisionHelper(provider, {
+    label: profile.id,
+    onInfo: options.onInfo,
+    gatewayModel: isPlatformManagedProfile(profile) ? profile.model : undefined,
+  });
 }
 
 /** Memoizes a helper lookup, so one run resolves (and caches through) one helper. */
@@ -409,10 +425,44 @@ export function imageDisplayName(image: ImageAttachment, index: number): string 
   return `image ${index + 1}`;
 }
 
+/** Image reading is part of every plan: an unreadable image never leads to talk of plans, tiers or models. */
+export const NO_SWITCH_ADVICE = 'Do not mention plans, tiers or models.';
+
+/** What the model tells the user when everything failed (the helper, its automatic retry, and any fallback). */
+export const READ_LATER_ADVICE = `Tell the user briefly that the image is temporarily unreadable and that you will retry. ${NO_SWITCH_ADVICE}`;
+
+/** How long to wait before the one automatic retry of images the helper could not describe. */
+export const VISION_HELPER_RETRY_DELAY_MS = 3_000;
+
 /** Shown to the main model when no helper exists and the model cannot see images. */
 export function formatNoVisionNote(images: readonly ImageAttachment[]): string {
   const names = images.map(imageDisplayName).join(', ');
-  return `[The user attached ${images.length} image(s) (file names: ${names}) but this plan cannot read images. Tell the user briefly and continue with the text.]`;
+  return `[The user attached ${images.length} image(s) (file names: ${names}); they are temporarily unreadable. ${READ_LATER_ADVICE} Continue with the text.]`;
+}
+
+/** Shown to the main model for an image the helper could not describe, even on its automatic retry. */
+export function formatUnreadImageNote(n: number, name: string): string {
+  return `[Image ${n} (${name}): the attached image is temporarily unreadable (the image reader failed or took too long, also on a retry). ${READ_LATER_ADVICE} Continue with the text.]`;
+}
+
+/** Shown for an image the helper could not describe that goes with the request as an image (the gateway reads it). */
+export function formatBridgedImageNote(n: number, name: string): string {
+  return `[Image ${n} (${name}) is attached to this message as an image.]`;
+}
+
+/** Waits `ms`, or less when the run is cancelled. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Shown to the main model for an image too large to send. */
+export function formatOversizedImageNote(n: number, name: string, why: string): string {
+  return `[Image ${n} (${name}): the attached image could not be read, because ${why}. Tell the user briefly and suggest sending a smaller image or fewer images. ${NO_SWITCH_ADVICE} Continue with the text.]`;
 }
 
 export type PreparedUserImages = {
@@ -420,18 +470,33 @@ export type PreparedUserImages = {
   note?: string;
   /** Images still to send with the request: empty once they were turned into text. */
   images: ImageAttachment[];
+  /** Gateway vision models the helper already failed on for those images (ProviderRequestOptions.visionSkip). */
+  visionSkip?: string[];
 };
 
 /**
  * Turns the user's images into text for a model that cannot see them: the
  * helper's descriptions when a helper exists, else a short note. A model that
  * can see images gets them unchanged. Never throws.
+ *
+ * Images the helper could not describe are tried once more after a short
+ * pause (VISION_HELPER_RETRY_DELAY_MS). Those that still fail, or all of them
+ * without a helper, go with the request as images when the main provider
+ * bridges images (a platform gateway profile: the gateway describes them with
+ * its own vision models); otherwise they become a "temporarily unreadable"
+ * note.
  */
 export async function prepareUserImagesForModel(input: {
   userText: string;
   images: readonly ImageAttachment[] | undefined;
   modelSeesImages: boolean;
   getHelper: () => Promise<VisionHelper | undefined>;
+  /** The main provider gets images to the gateway, which describes them (see ChatProvider.bridgesImages). */
+  mainBridgesImages?: boolean;
+  /** Pause before the automatic retry; default VISION_HELPER_RETRY_DELAY_MS. */
+  retryDelayMs?: number;
+  /** Automatic retries of what the helper could not describe; default 1. */
+  retries?: number;
   locale?: string;
   onInfo?: (message: string) => void;
   /** The run's cancellation, passed to the helper calls. */
@@ -447,6 +512,10 @@ export async function prepareUserImagesForModel(input: {
     helper = undefined;
   }
   if (!helper) {
+    if (input.mainBridgesImages) {
+      input.onInfo?.(`[images] no vision helper; ${images.length} image(s) go to the platform gateway, which reads them`);
+      return { images };
+    }
     input.onInfo?.(`[images] the model cannot see images and no vision helper is configured; ${images.length} image(s) replaced by a note`);
     return { note: formatNoVisionNote(images), images: [] };
   }
@@ -456,23 +525,41 @@ export async function prepareUserImagesForModel(input: {
   const oversized = new Set(images.filter((image) => imageByteSize(image) > MAX_IMAGE_BYTES));
   const { kept } = fitImagesToRequest(images.filter((image) => !oversized.has(image)));
   const sendable = new Set(kept);
-  const described = await helper.describe(kept, { userText: input.userText, locale: input.locale, signal: input.signal });
+  const context = { userText: input.userText, locale: input.locale, signal: input.signal };
+  const described = await helper.describe(kept, context);
+  // One automatic retry, after a short pause, for what the helper could not describe.
+  const failed = kept.filter((_, i) => !described[i]?.ok);
+  if (failed.length && (input.retries ?? 1) > 0 && !input.signal?.aborted) {
+    input.onInfo?.(`[images] the vision helper could not describe ${failed.length} image(s); retrying once`);
+    await pause(input.retryDelayMs ?? VISION_HELPER_RETRY_DELAY_MS, input.signal);
+    const retried = input.signal?.aborted ? [] : await helper.describe(failed, context);
+    failed.forEach((image, i) => {
+      if (retried[i]?.ok) described[kept.indexOf(image)] = retried[i]!;
+    });
+  }
+  // Still unread: the platform gateway reads them when the main provider goes through it.
+  const bridged: ImageAttachment[] = input.mainBridgesImages ? kept.filter((_, i) => !described[i]?.ok) : [];
+  if (bridged.length) input.onInfo?.(`[images] ${bridged.length} image(s) go to the platform gateway, which reads them`);
+  // One nonce per note: only its exact closing tag ends a description block.
+  const nonce = imageDescriptionNonce();
   const blocks = images.map((image, index) => {
     const n = index + 1;
     const name = imageDisplayName(image, index);
     if (!sendable.has(image)) {
       const why = oversized.has(image) ? 'it is larger than the per-image limit' : 'it is over the per-message image limit';
-      return `[Image ${n} (${name}): the attached image could not be read, because ${why}. Tell the user briefly and continue with the text.]`;
+      return formatOversizedImageNote(n, name, why);
     }
     const result = described[kept.indexOf(image)];
     if (result?.ok) {
-      return `[Image ${n} description by vision helper — the main model cannot see images]\n${frameImageDescription(n, result.text)}`;
+      return `[Image ${n} description by vision helper]\n${frameImageDescription(n, result.text, { nonce })}`;
     }
-    return `[Image ${n} (${name}): the attached image could not be read (the vision helper failed). Tell the user briefly and continue with the text.]`;
+    return bridged.includes(image) ? formatBridgedImageNote(n, name) : formatUnreadImageNote(n, name);
   });
   // The fixed data-not-instructions note goes first whenever a block follows.
   const anyDescribed = described.some((result) => result?.ok);
-  return { note: [...(anyDescribed ? [IMAGE_DESCRIPTION_DATA_NOTE] : []), ...blocks].join('\n\n'), images: [] };
+  const note = [...(anyDescribed ? [imageDescriptionDataNote(nonce)] : []), ...blocks].join('\n\n');
+  const visionSkip = bridged.length && helper.gatewayModel ? [helper.gatewayModel] : undefined;
+  return { note, images: bridged, ...(visionSkip ? { visionSkip } : {}) };
 }
 
 /**
@@ -483,15 +570,17 @@ export async function prepareUserImagesForModel(input: {
  * that request to it. A text-only model never receives image parts.
  */
 export async function resolveImageRoute(
-  provider: Pick<ChatProvider, 'supportsImages' | 'primarySupportsImages'>,
+  provider: Pick<ChatProvider, 'supportsImages' | 'primarySupportsImages' | 'bridgesImages'>,
   getHelper: () => Promise<VisionHelper | undefined>,
-): Promise<{ native: boolean; helper?: VisionHelper }> {
+): Promise<{ native: boolean; helper?: VisionHelper; bridged: boolean }> {
   const anySees = provider.supportsImages === true;
   const primarySees = provider.primarySupportsImages ?? anySees;
-  if (primarySees) return { native: true };
+  // A platform gateway profile: images sent to it are read by the gateway.
+  const bridged = provider.bridgesImages === true;
+  if (primarySees) return { native: true, bridged };
   const helper = await getHelper();
-  if (helper) return { native: false, helper };
-  return { native: anySees };
+  if (helper) return { native: false, helper, bridged };
+  return { native: anySees || bridged, bridged };
 }
 
 /** One image's description for view_image; rejects with the reason when the helper failed. */
