@@ -7,7 +7,7 @@ import { concatWithSagaRenderer, ensureFfmpegAvailable, ensureSegmentReadable } 
 import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
 import { generateSagaReviewFrames } from './reviewFrames.js';
 import { downloadGuardedUrl } from '../safeDownload.js';
-import { DIALOGUE_MARKER_SOURCE, QUOTED_LINE_SOURCE } from '../sagaLanguageDirector.js';
+import { extractSagaDialogueLines } from '../sagaLanguageDirector.js';
 import type {
   SagaCompositionSpec,
   SagaEncodeOptions,
@@ -85,13 +85,13 @@ export type SagaDuckZone = { start: number; end: number };
 // simple and survives planner drift (the model rarely respects sub-segment
 // dialogue start/end seconds exactly).
 export function computeDialogueDuckZones(segments: SagaSegmentInput[]): SagaDuckZone[] {
-  // The same markers and quote pairs the dialogue extractor reads, 「」 included.
-  const markerRe = new RegExp(`[*_]*(?:${DIALOGUE_MARKER_SOURCE})[*_]*\\s*(?:[（(][^）)]{0,40}[）)])?\\s*[*_]*\\s*[:：]\\s*(?:[（(][^）)\\n]{0,60}[）)]\\s*)?${QUOTED_LINE_SOURCE}`, 'iu');
+  // The same lines the dialogue extractor reads (markers, speech verbs, speaker names).
+  const hasDialogue = (beat: string) => extractSagaDialogueLines(beat).length > 0;
   const zones: SagaDuckZone[] = [];
   let cursor = 0;
   for (const segment of segments) {
     const duration = Math.max(0, segment.duration);
-    if (markerRe.test(segment.storyBeat)) {
+    if (hasDialogue(segment.storyBeat)) {
       zones.push({ start: cursor, end: cursor + duration });
     }
     cursor += duration;

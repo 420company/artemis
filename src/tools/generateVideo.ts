@@ -615,6 +615,7 @@ async function generateVideoWithVisualProvider(
         enableLlmRewrite: action.sagaSegment !== true,
         subtitleMode: action.subtitleMode ?? 'auto',
         compact: action.sagaSegment === true,
+        markedDialogueOnly: action.sagaSegment === true,
       });
   const generationPrompt = languageNormalized?.generationText ?? action.prompt;
   if (languageNormalized) {

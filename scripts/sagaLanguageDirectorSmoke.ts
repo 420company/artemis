@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   assert.deepEqual(lines.map((line) => line.use), ['spoken_dialogue', 'voiceover', 'subtitle', 'spoken_dialogue', 'voiceover']);
   assert.deepEqual(lines.map((line) => line.language), ['Mandarin Chinese', 'Mandarin Chinese', 'Mandarin Chinese', 'Spanish', 'French']);
 
-  const prompt = buildDeterministicEnglishVisualPrompt({ originalText: text, dialogueLines: lines, subtitleMode: 'always' });
+  const prompt = buildDeterministicEnglishVisualPrompt({ originalText: text, dialogueLines: lines, subtitleMode: 'always', markedDialogueOnly: true });
   assert.match(prompt, /Generation instruction language: English/);
   assert.match(prompt, /Chinese/);
   assert.match(prompt, /Dialogue handling:/);
@@ -130,7 +130,8 @@ async function main(): Promise<void> {
   assert.doesNotMatch(prompt, /matching lip movement;/);
   assert.doesNotMatch(prompt, /Saga Visual Director Language Normalization/);
 
-  const normalized = await normalizeSagaPromptForVideoGeneration({ cwd: process.cwd(), text, enableLlmRewrite: false, subtitleMode: 'off' });
+  const normalized = await normalizeSagaPromptForVideoGeneration({ cwd: process.cwd(), text, enableLlmRewrite: false, subtitleMode: 'off', markedDialogueOnly: true });
+  assert.doesNotMatch(normalized.bodyText, /Dialogue handling:/, 'the body text has no dialogue note');
   assert.equal(normalized.generationLanguage, 'en');
   assert.equal(normalized.usedLlmRewrite, false);
   assert.equal(normalized.dialogueLines.length, 5);
@@ -166,8 +167,39 @@ async function main(): Promise<void> {
   assert.deepEqual(spokenOf('**line**: "I\'m back."'), ["I'm back."]);
   assert.deepEqual(spokenOf('周屿：“（轻笑）我回来了。”'), ['我回来了。'], 'a speaker name opening a line marks dialogue');
   assert.deepEqual(spokenOf('歌词：“It was just two lovers”\n招牌写着“霓虹城市”\n标题：“重逢”'), [], 'lyrics, signs and titles are never dialogue');
-  const none = buildDeterministicEnglishVisualPrompt({ originalText: '霓虹招牌写着"霓虹城市"。', subtitleMode: 'auto' });
-  assert.match(none, /There is no dialogue/);
+  // A Saga segment without marked lines does not claim there is no speech.
+  const none = buildDeterministicEnglishVisualPrompt({ originalText: '霓虹招牌写着"霓虹城市"。', subtitleMode: 'auto', markedDialogueOnly: true });
+  assert.match(none, /Lyrics, signs, titles and quoted concepts in the brief are not speech/);
+  assert.doesNotMatch(none, /There is no dialogue/);
+  // A plain generate_video prompt keeps the general rule: quoted speech is dialogue.
+  for (const plain of ['A tired soldier looks into the camera and says "We made it home."', '一个女孩对着镜头笑着说“我们回家吧！”', 'A woman says: "Welcome back."']) {
+    const normalizedPlain = await normalizeSagaPromptForVideoGeneration({ cwd: '/nonexistent', text: plain, enableLlmRewrite: false });
+    assert.match(normalizedPlain.generationText, /Quoted text in the brief is spoken dialogue|Treat quoted speech in the brief as spoken dialogue/, plain);
+    assert.doesNotMatch(normalizedPlain.generationText, /not speech/, plain);
+  }
+  // Speech verbs and speaker names (guide §3.2 natural variants); display text is never speech.
+  const cases: Array<[string, string[], string?]> = [
+    ['他喊道“林夏！”', ['林夏！']],
+    ['老陈笑着喊：“别动！”', ['别动！']],
+    ['林夏轻声说：“好久不见。”', ['好久不见。']],
+    ['Elias says: "Nothing to report."', ['Nothing to report.']],
+    ['Maya asks: "Are you Mr. Elias?"', ['Are you Mr. Elias?']],
+    ['Lin Xia whispers: "I missed you."', ['I missed you.']],
+    ['The old man asks: "Is it time?"', ['Is it time?']],
+    ['"Just Elias," he says.', ['Just Elias']],
+    ['Narrator: "It began in winter."', ['It began in winter.'], 'voiceover'],
+    ['The sign reads: "OPEN 24 HOURS."', []],
+    ['The poster says: "SALE."', []],
+    ['A song plays: "Drunken Sailor."', []],
+    ['招牌写着："老火锅。"', []],
+    ['他读过的小说“边城”。', []],
+    ['霓虹街道“不夜城”', []],
+  ];
+  for (const [text, expected, use] of cases) {
+    const found = extractSagaDialogueLines(text);
+    assert.deepEqual(found.map((line) => line.text), expected, text);
+    if (use) assert.equal(found[0]?.use, use, text);
+  }
 
   // Ellipsis-terminated lines are recognized as dialogue.
   const ellipsisSnippet = '对白: "走了好远好远..."';

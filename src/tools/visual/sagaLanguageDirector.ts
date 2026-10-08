@@ -14,6 +14,8 @@ export type SagaGenerationLanguageResult = {
   /** The brief, with speaker names and stage directions moved outside quoted dialogue. */
   originalText: string;
   generationText: string;
+  /** generationText without its leading dialogue note: the brief as rewritten or templated. */
+  bodyText: string;
   generationLanguage: 'en';
   dialogueLines: SagaDialogueLine[];
   usedLlmRewrite: boolean;
@@ -235,12 +237,12 @@ export function relocateDialogueCues(text: string, options: { knownSpeakers?: re
 // Dialogue markers of the Saga Brief Authoring Guide (§3.2). Only text after
 // one of them is speech; bare quotes are signs, titles, lyrics or concepts.
 const SPEECH_VERB_MARKER_SOURCE = '(?:she|he|they)\\s+(?:says|said|whispers|whispered|murmurs|murmured|asks|asked|replies|replied|shouts|shouted)|[她他]\\s*(?:轻声|低声|小声|大声|笑着|轻轻)?\\s*(?:说道|说|道|问|喊)';
-export const DIALOGUE_MARKER_SOURCE = `对白|台词|旁白|字幕|画外音|spoken\\s*dialogue|spoken\\s*line|dialogue|line|voice\\s*over|voiceover|narration|subtitle|caption|${SPEECH_VERB_MARKER_SOURCE}`;
+export const DIALOGUE_MARKER_SOURCE = `对白|台词|旁白|字幕|画外音|spoken\\s*dialogue|spoken\\s*line|dialogue|line|voice\\s*over|voiceover|narration|narrator|subtitle|caption|${SPEECH_VERB_MARKER_SOURCE}`;
 // A quoted line, pairing each kind of quote with its own closer so an
 // apostrophe inside ("I've", "Je t'ai", "we'd") never ends the line.
 export const QUOTED_LINE_SOURCE = '(?:“(?<q1>[^”\\n]{1,240})”|「(?<q2>[^」\\n]{1,240})」|"(?<q3>[^"\\n]{1,240})"|‘(?<q4>[^‘\\n]{1,240}?)’(?!\\p{L}))';
 const MARKED_LINE_RE = new RegExp(
-  `(?:^|[\\n\\r。；;.!?！？\\s])[*_]*(?<marker>${DIALOGUE_MARKER_SOURCE})[*_]*\\s*(?:[（(][^）)]{0,40}[）)])?\\s*[*_]*\\s*[:：]\\s*(?:[（(][^）)\\n]{0,60}[）)]\\s*)?${QUOTED_LINE_SOURCE}`,
+  `(?:^|[\\n\\r。；;.!?！？，,、\\s])[*_]*(?<marker>${DIALOGUE_MARKER_SOURCE})[*_]*\\s*(?:[（(][^）)]{0,40}[）)])?\\s*[*_]*\\s*[:：]\\s*(?:[（(][^）)\\n]{0,60}[）)]\\s*)?${QUOTED_LINE_SOURCE}`,
   'giu',
 );
 // "周屿：“（轻笑）我回来了。”" — a speaker name opening a line or a sentence.
@@ -248,6 +250,28 @@ const SPEAKER_LINE_RE = new RegExp(
   `(?:^|\\n|(?<=[。！？!?]))[ \\t]*[*_]*(?<name>${SPEAKER_NAME_SOURCE})[*_]*[ \\t]*[:：][ \\t]*(?:[（(][^）)\\n]{0,60}[）)][ \\t]*)?${QUOTED_LINE_SOURCE}`,
   'gu',
 );
+const EN_SPEECH_VERBS = 'says|said|asks|asked|whispers|whispered|shouts|shouted|replies|replied|yells|yelled|murmurs|murmured|mutters|muttered|calls|called|cries|cried|answers|answered|sings|sang';
+// "Elias says: “…”", "Lin Xia whispers “…”", "the old man asks: “…”". Case-
+// sensitive, so a name is one to three capitalised words.
+const EN_SPEAKER_VERB_RE = new RegExp(
+  `(?<![\\p{L}])(?<name>[Ss]he|[Hh]e|[Tt]hey|[A-Z][\\p{Ll}'’-]+(?:[ \\t]+[A-Z][\\p{Ll}'’-]+){0,2}|(?:[Tt]he|[Aa]n?)[ \\t]+(?:\\p{Ll}+[ \\t]+)?\\p{Ll}+)[ \\t]+(?:${EN_SPEECH_VERBS})(?:[ \\t]+(?:softly|quietly|loudly|gently|firmly|coldly))?[ \\t]*[:,]?[ \\t]*(?:\\([^)\\n]{0,40}\\)[ \\t]*)?${QUOTED_LINE_SOURCE}`,
+  'gu',
+);
+// "“Just Elias,” he says." — the speaker after the line.
+const EN_TRAILING_SPEAKER_RE = new RegExp(
+  `${QUOTED_LINE_SOURCE}[ \\t]*(?<name>[Ss]he|[Hh]e|[Tt]hey|[A-Z][\\p{Ll}'’-]+(?:[ \\t]+[A-Z][\\p{Ll}'’-]+){0,2})[ \\t]+(?:${EN_SPEECH_VERBS})\\b`,
+  'gu',
+);
+// "林夏轻声说：“…”", "他喊道“林夏！”", "老陈笑着喊：“别动！”" — a speech verb right
+// before the quote, colon optional.
+const ZH_SPEAKER_VERB_RE = new RegExp(
+  `(?<name>[她他它]们?|[\\p{Script=Han}]{1,4}?)(?:轻声|低声|小声|大声|笑着|轻轻地?|冷冷地?|淡淡地?|哽咽着|颤声|小心地|喃喃)?(?:说道|说|问道|问|喊道|喊|叫道|答道|回答|低语|嘀咕|嘟囔|笑道)[ \\t]*[:：]?[ \\t]*(?:[（(][^）)\\n]{0,40}[）)][ \\t]*)?${QUOTED_LINE_SOURCE}`,
+  'gu',
+);
+// Words that end in a speech verb but name something else: "小说“…”", "呐喊“…”".
+const NOT_SPEECH_VERB_RE = /(?:小|传|听|据|解|学|演|游|劝|胡|评)说|(?:疑|顾|学|访|提|质)问|呐喊|回答[题案]/u;
+// Text shown on screen is never speech: "招牌写着：“老火锅。”", "the sign says".
+const DISPLAY_TEXT_RE = /写着|写道|写了|印着|显示|标着|刻着|贴着|打着|亮着|招牌|标题|字幕|歌词|屏幕上|\b(?:sign|signs|screen|caption|poster|banner|title|card|label|text|board|billboard|note|headline|plaque|display|message|letter|page|menu|notice|graffiti|tattoo|song|lyrics?)\b|\breads?\b/iu;
 
 function quotedLineOf(groups: Record<string, string | undefined> | undefined): string | undefined {
   return groups?.q1 ?? groups?.q2 ?? groups?.q3 ?? groups?.q4;
@@ -256,35 +280,55 @@ function quotedLineOf(groups: Record<string, string | undefined> | undefined): s
 /**
  * Spoken, voiceover and subtitle lines of a brief: quoted text after an
  * explicit marker (**对白（…）**, **台词**, **旁白**, **字幕**, dialogue: /
- * line: / voiceover: / subtitle:, "she says:" / "他低声说:") or after a speaker
- * name opening the line ("周屿：“…”"). Bare quotes are never dialogue (guide
- * §3.2): lyrics, sign text, titles and quoted concepts stay plain text.
+ * line: / voiceover: / subtitle: / Narrator:), after a speaker and a speech
+ * verb ("Elias says: “…”", "林夏轻声说“…”", "“…,” he says"), or after a
+ * speaker name opening the line ("周屿：“…”"). Bare quotes are never dialogue
+ * (guide §3.2): lyrics, sign text, titles and quoted concepts stay plain text.
  */
 export function extractSagaDialogueLines(text: string, options: { knownSpeakers?: readonly string[] } = {}): SagaDialogueLine[] {
-  const lines: SagaDialogueLine[] = [];
   const known = knownSpeakerSet(text, options.knownSpeakers);
   const spokenTexts = (raw: string | undefined): string[] => (raw
     ? parseSpokenLines(raw, known).map((piece) => piece.spoken).filter(Boolean)
     : []);
-  const found: Array<{ index: number; line: SagaDialogueLine }> = [];
+  const found = new Map<number, SagaDialogueLine[]>();
+  const add = (index: number, raw: string | undefined, use: SagaDialogueUse, marker: string) => {
+    if (found.has(index)) return;
+    found.set(index, spokenTexts(raw).map((line) => ({ text: line, language: detectTextLanguage(line), use, marker })));
+  };
+  // The position of the quote keys each line, so two rules reading the same
+  // quote add it once.
+  const quoteIndex = (match: RegExpMatchArray) => (match.index ?? 0) + match[0].length - (quotedLineOf(match.groups)?.length ?? 0);
   for (const match of text.matchAll(MARKED_LINE_RE)) {
-    const marker = match.groups?.marker?.trim();
-    for (const line of spokenTexts(quotedLineOf(match.groups))) {
-      found.push({ index: match.index ?? 0, line: { text: line, language: detectTextLanguage(line), use: classifyDialogueUse(marker), marker } });
-    }
+    const marker = match.groups?.marker?.trim() ?? '';
+    add(quoteIndex(match), quotedLineOf(match.groups), classifyDialogueUse(marker), marker);
+  }
+  for (const match of text.matchAll(EN_SPEAKER_VERB_RE)) {
+    const name = match.groups?.name?.trim() ?? '';
+    if (DISPLAY_TEXT_RE.test(name)) continue;
+    add(quoteIndex(match), quotedLineOf(match.groups), 'spoken_dialogue', name);
+  }
+  for (const match of text.matchAll(EN_TRAILING_SPEAKER_RE)) {
+    const name = match.groups?.name?.trim() ?? '';
+    if (DISPLAY_TEXT_RE.test(name)) continue;
+    const quoted = quotedLineOf(match.groups) ?? '';
+    add((match.index ?? 0) + 1, quoted.replace(/[,，]\s*$/, ''), 'spoken_dialogue', name);
+  }
+  for (const match of text.matchAll(ZH_SPEAKER_VERB_RE)) {
+    const before = text.slice(Math.max(0, (match.index ?? 0) - 6), match.index ?? 0);
+    const head = match[0].slice(0, match[0].length - (quotedLineOf(match.groups)?.length ?? 0));
+    if (DISPLAY_TEXT_RE.test(before + head) || NOT_SPEECH_VERB_RE.test(head)) continue;
+    add(quoteIndex(match), quotedLineOf(match.groups), 'spoken_dialogue', head.replace(/[\s:：“"「‘（(].*$/u, ''));
   }
   for (const match of text.matchAll(SPEAKER_LINE_RE)) {
     const name = match.groups?.name?.trim() ?? '';
-    if (!isSpeakerName(name) || new RegExp(`^(?:${DIALOGUE_MARKER_SOURCE})$`, 'iu').test(name)) continue;
+    if (!isSpeakerName(name) || DISPLAY_TEXT_RE.test(name) || new RegExp(`^(?:${DIALOGUE_MARKER_SOURCE})$`, 'iu').test(name)) continue;
     // A label ("参考：“Parts Unknown”") is not a speaker: the name must be a
     // known character, or the quote a sentence.
     const quoted = quotedLineOf(match.groups) ?? '';
     if (!known.has(name) && !/[。！？!?…~～.]\s*$/u.test(quoted)) continue;
-    for (const line of spokenTexts(quoted)) {
-      found.push({ index: match.index ?? 0, line: { text: line, language: detectTextLanguage(line), use: 'spoken_dialogue', marker: name } });
-    }
+    add(quoteIndex(match), quoted, 'spoken_dialogue', name);
   }
-  for (const entry of found.sort((a, b) => a.index - b.index)) lines.push(entry.line);
+  const lines = [...found.entries()].sort((a, b) => a[0] - b[0]).flatMap(([, entries]) => entries);
   return uniqueLines(lines);
 }
 
@@ -299,16 +343,41 @@ function describeDialogueLine(line: SagaDialogueLine): string {
 /** Longest list of lines in a compact dialogue block (the lines also stay in the brief below it). */
 const COMPACT_DIALOGUE_LIST_CHARS = 200;
 
-function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: SagaSubtitleMode = 'auto', compact = false): string {
+type DialogueBlockOptions = {
+  /** Fewer listed lines: the prompt below already carries them. */
+  compact?: boolean;
+  /**
+   * Saga briefs (guide §3.2): only marked lines are speech. A plain
+   * generate_video prompt keeps the general rule that quoted speech is
+   * dialogue ("She says “We made it home.”").
+   */
+  markedDialogueOnly?: boolean;
+};
+
+function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: SagaSubtitleMode = 'auto', options: DialogueBlockOptions = {}): string {
+  const { compact = false, markedDialogueOnly = false } = options;
   const subtitlePolicy = subtitleMode === 'always'
     ? '- Render readable on-screen subtitles/captions for spoken dialogue and voiceover, preserving the exact original characters.'
     : subtitleMode === 'off'
       ? '- Dialogue and voiceover are audio only; render on-screen text only for lines marked subtitle/caption.'
       : '- Only render on-screen subtitles/captions when the brief explicitly marks a line as subtitle/caption.';
-  if (dialogueLines.length === 0) {
+  if (!markedDialogueOnly) {
+    const languages = Array.from(new Set(dialogueLines.map((line) => line.language))).filter(Boolean).join(', ');
     return [
       'Dialogue handling:',
-      '- There is no dialogue: quoted text in the brief (signs, titles, lyrics, concepts) is not speech.',
+      dialogueLines.length > 0
+        ? `- Quoted text in the brief is spoken dialogue (or voiceover/subtitle if explicitly marked). Detected languages: ${languages || 'as-written'}.`
+        : '- Treat quoted speech in the brief as spoken dialogue in its original language; do not translate.',
+      '- Render speech in the original language with matching lip-sync; do not translate or romanize.',
+      subtitlePolicy,
+    ].join('\n');
+  }
+  if (dialogueLines.length === 0) {
+    // A segment without marked lines may still show people talking: say only
+    // what is not speech.
+    return [
+      'Dialogue handling:',
+      '- Lyrics, signs, titles and quoted concepts in the brief are not speech.',
       subtitlePolicy,
     ].join('\n');
   }
@@ -327,6 +396,20 @@ function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: Sag
   ].join('\n');
 }
 
+function withoutLeadingDialogueBlock(text: string): string {
+  return text.replace(/^Dialogue handling:\n(?:- [^\n]*\n)*/, '').trim();
+}
+
+/**
+ * The dialogue note for a prompt that goes to the model as written
+ * (cleanDirect, raw passthrough): this text's own marked lines, or nothing
+ * when it has none.
+ */
+export function buildSagaDialogueNote(text: string, subtitleMode: SagaSubtitleMode = 'auto'): string {
+  const lines = extractSagaDialogueLines(relocateDialogueCues(text));
+  return lines.length > 0 ? buildDialogueBlock(lines, subtitleMode, { compact: true, markedDialogueOnly: true }) : '';
+}
+
 export function buildDeterministicEnglishVisualPrompt(input: {
   originalText: string;
   dialogueLines?: SagaDialogueLine[];
@@ -337,13 +420,15 @@ export function buildDeterministicEnglishVisualPrompt(input: {
    * dialogue rules and the prompt itself are kept.
    */
   compact?: boolean;
+  /** Saga brief: only marked lines are speech (see buildDialogueBlock). */
+  markedDialogueOnly?: boolean;
 }): string {
   const dialogueLines = input.dialogueLines ?? extractSagaDialogueLines(input.originalText);
   // The short dialogue rules go first and the brief right after them:
   // anything downstream that has to shorten the prompt (the video Director, a
   // model's prompt limit) cuts from the end, so the generic instructions go
   // before the user's own words or the dialogue rules ever do.
-  const dialogueBlock = buildDialogueBlock(dialogueLines, input.subtitleMode, input.compact);
+  const dialogueBlock = buildDialogueBlock(dialogueLines, input.subtitleMode, { compact: input.compact, markedDialogueOnly: input.markedDialogueOnly || input.compact });
   if (input.compact) {
     return [dialogueBlock, 'User brief (source material to render):', input.originalText.trim()].join('\n');
   }
@@ -394,6 +479,8 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
   knownSpeakers?: readonly string[];
   /** A compiled Saga segment prompt: the short template (see buildDeterministicEnglishVisualPrompt). */
   compact?: boolean;
+  /** Saga brief: only marked lines are speech (see buildDialogueBlock). */
+  markedDialogueOnly?: boolean;
 }): Promise<SagaGenerationLanguageResult> {
   // Speaker names and stage directions move outside the quotes before
   // anything else reads the brief, so neither the rewrite nor the video model
@@ -401,13 +488,15 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
   const originalText = relocateDialogueCues(options.text.trim(), { knownSpeakers: options.knownSpeakers });
   const dialogueLines = extractSagaDialogueLines(originalText, { knownSpeakers: options.knownSpeakers });
   const subtitleMode = options.subtitleMode ?? 'auto';
-  const fallback = buildDeterministicEnglishVisualPrompt({ originalText, dialogueLines, subtitleMode, adultMode: options.adultMode, compact: options.compact });
+  const markedDialogueOnly = options.markedDialogueOnly === true || options.compact === true;
+  const fallback = buildDeterministicEnglishVisualPrompt({ originalText, dialogueLines, subtitleMode, adultMode: options.adultMode, compact: options.compact, markedDialogueOnly });
+  const fallbackBody = withoutLeadingDialogueBlock(fallback);
   if (!options.enableLlmRewrite) {
-    return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
+    return { originalText, generationText: fallback, bodyText: fallbackBody, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
   }
 
   const chat = await resolveSagaChatEndpoint(options.cwd);
-  if (!chat) return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
+  if (!chat) return { originalText, generationText: fallback, bodyText: fallbackBody, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
 
   const userPayload = {
     originalText,
@@ -429,7 +518,7 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
     const res = await postSagaChatCompletion(chat, body);
     if (!res.ok) {
       toolWarn(`⚠️ Saga Visual Director English rewrite skipped: LLM ${res.timedOut ? res.text : res.status ?? res.text}`);
-      return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
+      return { originalText, generationText: fallback, bodyText: fallbackBody, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
     }
     const content = chatCompletionContent(res.text);
     if (content === undefined) throw new Error('empty content');
@@ -453,13 +542,14 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
     return {
       originalText,
       // Dialogue rules first, for the same reason as in the deterministic template.
-      generationText: [buildDialogueBlock(uniqueLines([...dialogueLines, ...llmDialogue]), subtitleMode), '', generationText].join('\n'),
+      generationText: [buildDialogueBlock(uniqueLines([...dialogueLines, ...llmDialogue]), subtitleMode, { markedDialogueOnly }), '', generationText].join('\n'),
+      bodyText: generationText,
       generationLanguage: 'en',
       dialogueLines: uniqueLines([...dialogueLines, ...llmDialogue]),
       usedLlmRewrite: true,
     };
   } catch (error) {
     toolWarn(`⚠️ Saga Visual Director English rewrite skipped: ${error instanceof Error ? error.message : String(error)}`);
-    return { originalText, generationText: fallback, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
+    return { originalText, generationText: fallback, bodyText: fallbackBody, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
   }
 }
