@@ -13,6 +13,7 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo } from './generateVideo.js';
+import { stripRawModeTag } from './visual/rawModeTag.js';
 import { normalizeVideoResolution, VIDEO_RESOLUTIONS } from './visual/videoParams.js';
 import {
   describeVideoGenerationFailure,
@@ -965,19 +966,7 @@ async function probeSegment(filePath: string): Promise<SegmentProbe> {
   }
 }
 
-/**
- * Removes the raw-mode switch ("[原样直传]", "【raw直传】", or the keyword alone
- * on a line) from the story, so the video model never sees it. The word inside
- * a sentence is left alone.
- */
-export function stripRawModeTag(text: string): string {
-  return text
-    .replace(/[[【]\s*(?:原样直传|raw[-\s]?直传)\s*[\]】]/gi, ' ')
-    .replace(/^[ \t]*(?:原样直传|raw[-\s]?直传)[ \t]*$/gim, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
+export { stripRawModeTag };
 
 function shouldChainFrames(action: GenerateLongVideoAction, providerSupportsImageRef: boolean): boolean {
   const mode = action.chainReferenceFrames ?? 'auto';

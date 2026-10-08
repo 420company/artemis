@@ -8,6 +8,7 @@ import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveVideoModelLimits } from './videoModelLimits.js';
 import { normalizeVideoResolution } from './videoParams.js';
+import { hasRawModeTag } from './rawModeTag.js';
 import { resolveVideoModelCapabilities } from './videoCapabilities.js';
 import type { ImageAttachment } from '../../providers/types.js';
 import {
@@ -141,8 +142,7 @@ const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发�
 
 
 function wantsCleanDirectMode(segments: string[]): boolean {
-  const text = segments.join('\n').toLowerCase();
-  return /(?:clean[-\s]?direct|raw[-\s]?seedance|raw\s*mode|raw[-\s]?直传|原样直传|直连\s*seedance|旧版质感|老版本质感|原始质感|不要滤镜|别加滤镜|少滤镜|无滤镜|干净质感|clean prompt|short prompt)/i.test(text);
+  return segments.some((segment) => hasRawModeTag(segment));
 }
 
 function hasExplicitUserScriptText(segments: string[]): boolean {
@@ -561,15 +561,29 @@ async function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): P
   state.updatedAt = Date.now();
 }
 
-/** A resolution the user named ("1080p", "720P", "480 p"); 4K is not offered by any provider. */
-function extractRequestedResolution(text: string): string | undefined {
-  const match = text.match(/(?:^|[^\d])(480|720|1080)\s*[pP](?![a-zA-Z])/);
-  return match ? normalizeVideoResolution(`${match[1]}p`) : undefined;
-}
+const RESOLUTION_WORDS: Record<string, string> = {
+  标清: '480p',
+  sd: '480p',
+  高清: '1080p',
+  超清: '1080p',
+  全高清: '1080p',
+  hd: '1080p',
+  fullhd: '1080p',
+};
 
-function rememberRequestedResolution(state: SagaWorkflowState, text: string): void {
-  const resolution = extractRequestedResolution(text);
-  if (resolution) state.resolution = resolution;
+/**
+ * A resolution from a message that is only a resolution choice ("1080p",
+ * "分辨率 720P", "高清"). Resolution is never read out of story text: a
+ * script mentioning "一台1080P的旧显示器" must not bill every segment at
+ * 1080p. 4K is not offered by any provider.
+ */
+export function extractRequestedResolution(text: string): string | undefined {
+  const compacted = text.trim().toLowerCase().replace(/\s+/g, '');
+  if (!compacted || compacted.length > 16) return undefined;
+  const match = compacted.match(/^(?:请|用|要|改成|改为|输出|设为|画质|分辨率|清晰度|resolution|quality|[:：])*(?:(480|720|1080)p?|(标清|高清|超清|全高清|fullhd|hd|sd))(?:高清|超清|画质|分辨率|吧|的|[。.!！])*$/u);
+  if (!match) return undefined;
+  if (match[1]) return normalizeVideoResolution(`${match[1]}p`);
+  return RESOLUTION_WORDS[match[2] ?? ''];
 }
 
 async function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): Promise<void> {
@@ -1533,7 +1547,18 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   // ─── continuing an active workflow ──────────────────────────────────
   if (state) {
     if (input.locale) state.locale = input.locale;
-    rememberRequestedResolution(state, text);
+
+    // A message that is only a resolution choice sets it and leaves the
+    // current step as it was.
+    const requestedResolution = extractRequestedResolution(text);
+    if (requestedResolution) {
+      state.resolution = requestedResolution;
+      state.updatedAt = Date.now();
+      return { handled: true, reply: pickLocale(state.locale, {
+        zh: `已记下：所有分段按 ${requestedResolution} 生成${requestedResolution === '1080p' ? '（费用约为默认画质的数倍）' : ''}。请继续回答上一步的问题。`,
+        en: `Noted: every segment will be generated at ${requestedResolution}${requestedResolution === '1080p' ? ' (several times the default cost)' : ''}. Please continue with the previous question.`,
+      }) };
+    }
 
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
@@ -1897,7 +1922,6 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
   const multimodalCapable = await isMultimodalCapable(input.cwd);
   const next = newState(input, multimodalCapable);
-  rememberRequestedResolution(next, text);
 
   // Even on the first turn, if the user already attached references in this
   // very message (Telegram image / inline URL), we want to capture them.

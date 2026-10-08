@@ -469,10 +469,13 @@ async function main(): Promise<void> {
   const comboSubtitle = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认 / 自动' });
   assert.match(comboSubtitle.reply, /最后确认一下总时长|confirm the total length/i, `"默认 / 自动" should confirm the default subtitle mode: ${comboSubtitle.reply}`);
 
-  // A resolution named anywhere in the wizard reaches the generate_long_video action.
+  // A message that is only a resolution choice sets it; story text never does.
   const hdKey = `${key}-resolution`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频，1080P 高清' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1' });
+  const hdAck = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1080P' });
+  assert.equal(hdAck.handled, true);
+  assert.match(hdAck.reply, /1080p/, 'a resolution-only message is acknowledged');
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '4' });
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '剧情你来创造。' });
   const hdStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '开始生成' });
@@ -484,8 +487,24 @@ async function main(): Promise<void> {
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '10秒' });
   const hdFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '不加' });
   assert.equal(hdFinal.handled, false, 'the resolution flow should end in a generate_long_video action');
-  assert.equal(hdFinal.action?.resolution, '1080p', 'a resolution named in the brief should reach the action');
+  assert.equal(hdFinal.action?.resolution, '1080p', 'a resolution-only message should reach the action');
   assert.match(hdFinal.action?.prompt ?? '', /resolution: "1080p"/, 'workflow prompt should tell the model to pass resolution');
+
+  const storyKey = `${key}-resolution-in-story`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频，画面里有一台1080P的旧显示器' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '[0-5秒] 一台1080P的旧显示器在桌上闪烁。 [5-10秒] 屏幕里出现 720p 的雪花画面。' });
+  const storyStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '开始生成' });
+  if (/确认.*主角|confirm the lead/i.test(storyStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '10秒' });
+  const storyFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '不加' });
+  assert.equal(storyFinal.handled, false);
+  assert.equal(storyFinal.action?.resolution, undefined, 'a resolution mentioned in the story never sets the billing resolution');
   assert.equal(afterBgmSkip.action?.resolution, undefined, 'no resolution is set unless the user named one');
 
   // "[原样直传]" switches on raw mode, and raw mode skips the narrative LLM call.
