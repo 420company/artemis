@@ -168,8 +168,11 @@ export function detectsEnvironmentalAudioOnly(story: string | undefined): boolea
   if (/只出环境音|仅环境音|只生成环境音|AI[^。\n]{0,20}(?:只出|仅出|只生成)[^。\n]{0,10}环境音/i.test(story)) return true;
   if (/不要\s*(?:BGM|配乐|背景音乐|音乐)|无\s*(?:BGM|背景音乐|配乐)|no\s+(?:bgm|music|soundtrack|instrumental)/i.test(story)) return true;
   // English signals
-  if (/environmental\s+(?:audio|sound)s?\s+only|ambient\s+(?:audio|sound)s?\s+only/i.test(story)) return true;
-  if (/(?:music|score|soundtrack)\s+(?:is|are)\s+(?:added|overlaid|applied)\s+(?:in\s+)?post/i.test(story)) return true;
+  // "ambience only", "ambient rain sounds only" — not "ambient light only".
+  if (/environmental\s+(?:audio|sound)s?\s+only|\bambience\s+only\b|\bambient\b(?:\s+[\w-]+){0,2}?\s+(?:sounds?|audio|noises?)\s+only\b/i.test(story)) return true;
+  // "music and dialogue are layered in post", "all music is added in post-production".
+  if (/\b(?:music|bgm|score|soundtrack)\b[^.\n]{0,40}\b(?:added|overlaid|overlayed|layered|mixed|applied|laid)\b\s+(?:in\s+)?post(?:[-\s]?production)?\b/i.test(story)) return true;
+  if (/\b(?:overlay|add|layer|mix)\b[^.\n]{0,30}\b(?:music|bgm|score|soundtrack)\b[^.\n]{0,20}\bin\s+post\b/i.test(story)) return true;
   return false;
 }
 
