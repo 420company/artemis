@@ -15,6 +15,7 @@ import type {
 } from './types.js';
 import { ensureDir, pathExists } from '../utils/fs.js';
 import { capKnownModelContextLength, detectModelContextLength } from './modelContext.js';
+import { hasPlatformCapabilities } from './capabilities.js';
 
 function getDefaultSetupConfig(): ArtemisSetupConfig {
   return {
@@ -241,6 +242,37 @@ function findCompleteJsonValueEnd(raw: string): number | undefined {
   return undefined;
 }
 
+function positiveInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const rounded = Math.round(value);
+  return rounded > 0 ? rounded : undefined;
+}
+
+/**
+ * Keeps the capability fields the agent server writes (supportsImages,
+ * contextLength, maxOutputTokens, capabilitiesSource) when they are well
+ * formed, and drops malformed values so they cannot reach a request. Every
+ * other field, including managedBy and fields this engine does not know,
+ * is kept as written so it survives load and save.
+ */
+function normalizeProfileCapabilities(entry: ProviderProfile): ProviderProfile {
+  const next: ProviderProfile = { ...entry };
+  if (next.supportsImages !== undefined && typeof next.supportsImages !== 'boolean') delete next.supportsImages;
+  if (next.contextLength !== undefined) {
+    const contextLength = positiveInteger(next.contextLength);
+    if (contextLength === undefined) delete next.contextLength;
+    else next.contextLength = contextLength;
+  }
+  if (next.maxOutputTokens !== undefined) {
+    const maxOutputTokens = positiveInteger(next.maxOutputTokens);
+    if (maxOutputTokens === undefined) delete next.maxOutputTokens;
+    else next.maxOutputTokens = maxOutputTokens;
+  }
+  if (next.capabilitiesSource !== undefined && next.capabilitiesSource !== 'platform') delete next.capabilitiesSource;
+  if (next.managedBy !== undefined && typeof next.managedBy !== 'string') delete next.managedBy;
+  return next;
+}
+
 function ensureProviderStoreObject(value: unknown, filePath: string): Partial<ProviderStoreData> {
   if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
     return value as Partial<ProviderStoreData>;
@@ -309,6 +341,8 @@ export class ProviderStore {
 
     const capStoredContextLength = <T extends { model: string; contextLength?: number }>(entry: T): T => {
       if (entry.contextLength === undefined) return entry;
+      // Platform profiles belong to the agent server: never cap them by name.
+      if (hasPlatformCapabilities(entry)) return entry;
       const capped = capKnownModelContextLength(entry.model, entry.contextLength);
       if (capped === undefined || capped === entry.contextLength) return entry;
       repairedContextLength = true;
@@ -334,9 +368,14 @@ export class ProviderStore {
     const setup = mergeSetupConfigWithDefaults(rawSetup);
 
     const data: ProviderStoreData = {
+      // Top-level keys this engine does not know (written by the agent server
+      // or a newer engine) survive a re-save; the known keys below replace
+      // their raw values with normalized ones.
+      ...parsed,
       profiles: Array.isArray(parsed.profiles)
         ? parsed.profiles
             .filter((entry): entry is ProviderProfile => typeof entry?.id === 'string')
+            .map(normalizeProfileCapabilities)
             .map(capStoredContextLength)
             .map((entry) => ({
               ...entry,
@@ -350,6 +389,10 @@ export class ProviderStore {
       specialistProfileId:
         typeof parsed.specialistProfileId === 'string'
           ? parsed.specialistProfileId
+          : undefined,
+      visionProfileId:
+        typeof parsed.visionProfileId === 'string'
+          ? parsed.visionProfileId
           : undefined,
       memoryProfile: parsed.memoryProfile,
       customProviders,
@@ -390,6 +433,9 @@ export class ProviderStore {
     if (index < 0) return undefined;
 
     const profile = data.profiles[index]!;
+    // Platform profiles belong to the agent server: never overwrite them.
+    // Without a platform contextLength the runtime falls back to name rules.
+    if (hasPlatformCapabilities(profile)) return profile;
     const detected = await detectModelContextLength(profile);
     if (!detected.contextLength || detected.source === 'unknown') {
       return profile;
@@ -425,6 +471,7 @@ export class ProviderStore {
     const refreshedByKey = new Map<string, ProviderProfile>();
 
     const refreshProfile = async (profile: ProviderProfile): Promise<ProviderProfile> => {
+      if (hasPlatformCapabilities(profile)) return profile;
       const detected = await detectModelContextLength(profile);
       if (!detected.contextLength || detected.source === 'unknown') return profile;
       const refreshed: ProviderProfile = {
@@ -463,6 +510,13 @@ export class ProviderStore {
   async setSpecialistProfile(id: string): Promise<ProviderStoreData> {
     const data = await this.load();
     data.specialistProfileId = id;
+    await this.save(data);
+    return data;
+  }
+
+  async setVisionProfile(id: string | undefined): Promise<ProviderStoreData> {
+    const data = await this.load();
+    data.visionProfileId = id;
     await this.save(data);
     return data;
   }

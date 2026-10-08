@@ -1,6 +1,5 @@
 import type { AgentRole, SessionMessage, SessionRecord } from './types.js';
 import { truncate } from '../utils/fs.js';
-import { resolveOdinSkillContext } from '../odin/runtime.js';
 
 const MIN_RECENT_MESSAGES = 6;
 const LARGE_CONTEXT_MESSAGE_LIMIT = 65_535;
@@ -35,6 +34,7 @@ const SPECIALIST_CONTEXT_BUDGET: ContextBudgetProfile = {
 };
 
 export type ContextWindowOptions = {
+  // Accepted for call-site compatibility; the context window itself does not read it.
   cwd?: string;
   contextLength?: number;
 };
@@ -334,31 +334,6 @@ export async function buildContextWindow(
     ? session.messages.slice(0, summarizedMessages)
     : [];
   let summary = buildSummary(summarySource, budgets);
-
-  // 查找用户的最新任务描述
-  const userMessages = session.messages.filter(msg => msg.role === 'user');
-  const latestUserMessage = userMessages[userMessages.length - 1];
-  
-  if (latestUserMessage && options?.cwd) {
-    // 调用 resolveOdinSkillContext 查找匹配的技能
-    try {
-      const skillContext = await resolveOdinSkillContext({
-        cwd: options.cwd,
-        task: latestUserMessage.content,
-        scope: 'local',
-      });
-      
-      if (skillContext) {
-        if (summary) {
-          summary = `\n${skillContext}\n${summary}`;
-        } else {
-          summary = skillContext;
-        }
-      }
-    } catch (error) {
-      console.error('Failed to resolve Odin skills:', error);
-    }
-  }
 
   if (summary) {
     approxChars += summary.length;

@@ -8,7 +8,8 @@
  * agent views ride on the request right after the tool call. Viewed images are
  * held in a queue owned by one run (see ViewedImageQueue), so nothing outlives
  * the run or reaches another session. Models that cannot see images never get
- * them: the tool fails and `--image` is rejected instead.
+ * them: a vision helper describes them instead (core/visionHelper.ts), or,
+ * without one, the model gets a note and view_image is not offered.
  */
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -30,8 +31,17 @@ export const MAX_REQUEST_IMAGE_BYTES = 15 * 1024 * 1024;
 
 export class ImageInputError extends Error {}
 
-/** The image type from the file's first bytes (extensions lie). */
-export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
+/**
+ * Every image format some consumer here accepts, identified from the file's
+ * first bytes (extensions lie). Models see only ImageMediaType; image
+ * generation references (Seedream) also take BMP, TIFF and HEIC/HEIF.
+ */
+export type SniffedImageType = ImageMediaType | 'image/bmp' | 'image/tiff' | 'image/heic' | 'image/heif';
+
+/** BITMAPCOREHEADER, BITMAPINFOHEADER, V2, V3, V4 and V5 header sizes. */
+const BMP_DIB_HEADER_SIZES = new Set([12, 40, 52, 56, 108, 124]);
+
+export function sniffAnyImageType(bytes: Uint8Array): SniffedImageType | undefined {
   const b = bytes;
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
@@ -43,7 +53,34 @@ export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
   ) {
     return 'image/webp';
   }
+  if (b.length >= 18 && b[0] === 0x42 && b[1] === 0x4d) {
+    // "BM" alone is too weak (any text file may start with it): also require a
+    // plausible file size and a known DIB header size.
+    const fileSize = (b[2]! | (b[3]! << 8) | (b[4]! << 16) | (b[5]! << 24)) >>> 0;
+    const dibHeaderSize = (b[14]! | (b[15]! << 8) | (b[16]! << 16) | (b[17]! << 24)) >>> 0;
+    if (fileSize >= 26 && BMP_DIB_HEADER_SIZES.has(dibHeaderSize)) return 'image/bmp';
+  }
+  if (
+    b.length >= 4 &&
+    ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a && b[3] === 0x00) ||
+      (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0x00 && b[3] === 0x2a))
+  ) {
+    return 'image/tiff';
+  }
+  if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    const brand = String.fromCharCode(b[8]!, b[9]!, b[10]!, b[11]!);
+    if (/^(heic|heix|hevc|hevx|heim|heis)$/.test(brand)) return 'image/heic';
+    if (/^(mif1|msf1|heif)$/.test(brand)) return 'image/heif';
+  }
   return undefined;
+}
+
+const MODEL_IMAGE_TYPES: ReadonlySet<SniffedImageType> = new Set<ImageMediaType>(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** The image type from the file's first bytes, limited to the formats models accept. */
+export function sniffImageType(bytes: Uint8Array): ImageMediaType | undefined {
+  const type = sniffAnyImageType(bytes);
+  return type && MODEL_IMAGE_TYPES.has(type) ? (type as ImageMediaType) : undefined;
 }
 
 /** Decoded size of an attachment, from its base64 length. */
@@ -93,21 +130,15 @@ export async function loadImageForModel(filePath: string, cwd: string): Promise<
 
 /**
  * Loads the images a user attached to a prompt (`--image`). Fails before the
- * run starts when the model cannot see images or the images do not fit in one
- * request, because the user expects every one of them to be seen.
+ * run starts when a file is missing or not an image, or the images do not fit
+ * in one request. Whether the model can see them is decided by the run: a
+ * text-only model gets a vision helper's description or a note instead.
  */
 export async function loadPromptImages(
   paths: readonly string[],
   cwd: string,
-  model: { supportsImages?: boolean; name?: string },
 ): Promise<ImageAttachment[]> {
   if (paths.length === 0) return [];
-  if (model.supportsImages !== true) {
-    throw new ImageInputError(
-      `The model${model.name ? ` ${model.name}` : ''} cannot see images, so --image cannot be used with it. ` +
-        'Use a vision model, or set "supportsImages": true on its provider profile if it does accept images.',
-    );
-  }
   if (paths.length > MAX_IMAGES_PER_REQUEST) {
     throw new ImageInputError(`At most ${MAX_IMAGES_PER_REQUEST} images per message (got ${paths.length})`);
   }
@@ -152,6 +183,12 @@ export class ViewedImageQueue {
    * every turn; view_image fails while it is false.
    */
   acceptsImages = true;
+  /**
+   * Set by the run when the model cannot see images but a vision helper can:
+   * view_image then returns this description instead of queueing the image.
+   * Resolves to the description; rejects when the helper failed.
+   */
+  describeImage?: (image: ImageAttachment, signal?: AbortSignal) => Promise<string>;
 
   /**
    * Queues an image for the next request. When the queue would exceed the

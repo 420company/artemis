@@ -13,9 +13,11 @@ import {
   CliSettingsStore,
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
 } from '../src/cli/settings.js'
-import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
+import { applyProviderOverrides, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
+import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
+import { runHeadlessAgent } from '../src/services/headlessAgent.js'
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile, validateProfileAction } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
@@ -31,6 +33,7 @@ import {
   GPT_5_6_CONTEXT_LENGTH,
   inferKnownModelContextLength,
   resolveEffectiveModelContextLength,
+  resolveProfileContextLength,
 } from '../src/providers/modelContext.js'
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
@@ -54,13 +57,24 @@ import {
   isRuntimeManagedTool,
   validateToolAction,
   renderDetailedToolManifest,
+  validateToolAction,
+  GENERATE_IMAGE_DESCRIPTION,
 } from '../src/tools/registry.js'
+import {
+  classifyImageGenerationFailure,
+  formatImageGenerationFailure,
+} from '../src/tools/visual/imageGenerationFailure.js'
+import {
+  normalizeReferenceImagesArg,
+  resolveReferenceImages,
+  sniffImageMimeType,
+} from '../src/tools/visual/referenceImages.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
 import { compressMessages, getCompressionTriggerTokens, getMicrocompactTriggerTokens } from '../src/core/contextCompressor.js'
-import { estimateContextLimit } from '../src/cli/hud.js'
+import { createHudState, estimateContextLimit, renderHud, updateHudState } from '../src/cli/hud.js'
 import {
   buildPostCompactRecoveryMessages,
   createLedger,
@@ -69,7 +83,17 @@ import {
   saveLedger,
   cleanupLedger,
 } from '../src/core/collapse/index.js'
-import { resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import { modelArkEndpoint, normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import {
+  downloadProviderAsset,
+  isNonPublicAddress,
+  setAssetDownloadResolverForTests,
+  setAssetDownloadTransportForTests,
+  type AssetHostResolver,
+  type AssetTransport,
+} from '../src/tools/visual/safeDownload.js'
+import { lookup as dnsLookup } from 'node:dns/promises'
+import { sniffAnyImageType, sniffImageType } from '../src/core/imageInput.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
 import { executeGenerateVideo } from '../src/tools/generateVideo.js'
@@ -99,6 +123,7 @@ import {
   resolveVisionDescribeRouteForTest,
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
+import { resolveSoundtrackPath } from '../src/tools/visual/sagaRenderer/index.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../src/tools/visual/videoParams.js'
 import {
@@ -112,8 +137,11 @@ import {
 import { projectDirectToolNames } from '../src/core/directToolProjection.js'
 import { buildDreamBridgeText } from '../src/services/dreamComposer.js'
 import type { AgentAction, SessionMessage } from '../src/core/types.js'
+import { ALL_AGENT_ACTION_TYPES, RUNTIME_MANAGED_AGENT_ACTION_TYPES } from '../src/core/types.js'
+import { resolveDataRootDir } from '../src/utils/fs.js'
 import type {
   ChatProvider,
+  ImageAttachment,
   ProviderNativeToolOutput,
   ProviderResponse,
 } from '../src/providers/types.js'
@@ -138,7 +166,7 @@ import {
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
-import { detectVisualGenerationNeed } from '../src/utils/visualGenerationConfig.js'
+import { detectVisualGenerationNeed, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
 import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
@@ -182,6 +210,24 @@ console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
 const providerNativeTools = buildProviderNativeFunctionTools()
+
+// Generated-asset downloads normally go through node:http(s) with a guarded
+// DNS lookup. Most tests here mock globalThis.fetch, so route downloads
+// through fetch and resolve the reserved .test domain to a public
+// documentation address. The download-guard tests swap in the real transport.
+const fetchAssetTransport: AssetTransport = async (url, { signal }) => {
+  const res = await fetch(url, { redirect: 'manual', signal })
+  return {
+    status: res.status,
+    location: res.headers.get('location') ?? undefined,
+    contentType: res.headers.get('content-type') ?? undefined,
+    body: Buffer.from(await res.arrayBuffer()),
+  }
+}
+const testAssetResolver: AssetHostResolver = async (hostname) =>
+  hostname.endsWith('.test') ? [{ address: '93.184.216.34', family: 4 }] : dnsLookup(hostname, { all: true, verbatim: true })
+setAssetDownloadTransportForTests(fetchAssetTransport)
+setAssetDownloadResolverForTests(testAssetResolver)
 const providerNativeToolNames = providerNativeTools.map((tool) => tool.name)
 
 assert(
@@ -355,25 +401,6 @@ assert(
     if (previousHeadless === undefined) delete process.env.ARTEMIS_BROWSER_HEADLESS
     else process.env.ARTEMIS_BROWSER_HEADLESS = previousHeadless
   }
-}
-
-{
-  // The legacy interactive Freya flow is not offered to the model anywhere.
-  const freya = 'request_freya_visual_asset'
-  const mainNativeNames = buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main'))
-    .map((tool) => tool.name)
-  const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
-  const mainPrompt = buildSystemPrompt(process.cwd(), 'accept-all', 'standard', 'main', false)
-  assert(
-    'freya: request_freya_visual_asset is not offered to main (native, direct, manifest, prompt)',
-    !providerNativeToolNames.includes(freya) &&
-      !mainNativeNames.includes(freya) &&
-      !getProviderCallableActionTypes().includes(freya) &&
-      !buildDirectNativeFunctionTools().some((tool) => tool.name === freya) &&
-      !manifestNames.includes(freya) &&
-      !mainPrompt.includes(freya) &&
-      !mapProviderNativeToolCallToAction({ callId: 'freya-call', name: freya, arguments: '{}' }).ok,
-  )
 }
 
 {
@@ -1493,6 +1520,842 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
+// ── generate_image: honest failures, reference images, prompt guidance ─────────
+
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+// A 1x1 BITMAPINFOHEADER bmp header: size 58, DIB header 40.
+const BMP_HEADER = (() => {
+  const buf = Buffer.alloc(58)
+  buf.write('BM', 0, 'ascii')
+  buf.writeUInt32LE(58, 2)
+  buf.writeUInt32LE(54, 10)
+  buf.writeUInt32LE(40, 14)
+  return buf
+})()
+
+async function configureBytePlusImageProfile(cwd: string, baseUrl: string): Promise<void> {
+  const store = new ProviderStore(cwd)
+  const data = await store.load()
+  data.visualProfile = {
+    enabled: true,
+    image: {
+      provider: 'byteplus',
+      apiKey: 'test-image-key',
+      baseUrl,
+      model: 'seedream-5-0-260128',
+      defaultParams: { size: '2K', quality: 'standard', style: 'realistic', watermark: false },
+    },
+    video: {
+      enabled: false,
+      provider: 'byteplus',
+      apiKey: '',
+      baseUrl,
+      model: 'seedance-1-5-pro-251215',
+      defaultParams: {
+        duration: '10s',
+        resolution: '1080p',
+        quality: 'standard',
+        style: 'realistic',
+        format: 'mp4',
+        framerate: '30fps',
+        watermark: false,
+      },
+    },
+  }
+  await store.save(data)
+}
+
+async function withMockedFetch<T>(
+  respond: (url: string, init?: RequestInit) => Response,
+  run: (calls: Array<{ url: string; body?: string }>) => Promise<T>,
+): Promise<T> {
+  const originalFetch = globalThis.fetch
+  const calls: Array<{ url: string; body?: string }> = []
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    calls.push({ url, body: typeof init?.body === 'string' ? init.body : undefined })
+    return respond(url, init)
+  }) as typeof fetch
+  try {
+    return await run(calls)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  // Failure classification: each case gets its own actionable message.
+  const gateway402 = '{"error":{"code":"insufficient_balance","message":"Balance too low: please top up","type":"insufficient_balance"}}'
+  assert(
+    'image failure: gateway 402 is insufficient balance',
+    classifyImageGenerationFailure({ detail: gateway402, status: 402 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: `API request failed (HTTP 402): ${gateway402}` }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: ModelArk overdue account (403 ServiceOverdue) is insufficient balance',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 403): {"error":{"code":"OperationDenied.ServiceOverdue","message":"account overdue"}}', status: 403 }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: 401/403 is billing only with a specific code, otherwise unauthorized, even with "not configured" text',
+    classifyImageGenerationFailure({ detail: '{"error":{"code":"insufficient_balance"}}', status: 401 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: '{"error":{"code":"AccountOverdueError"}}', status: 403 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: 'your account balance is too low', status: 403 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'model access not configured for this key', status: 403 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API key is not configured', status: 401 }) === 'unauthorized',
+  )
+  assert(
+    'image failure: the status is never parsed from text; a failed download is download_failed',
+    classifyImageGenerationFailure({ detail: 'Image download failed: download failed: HTTP 403' }) === 'upstream' &&
+      classifyImageGenerationFailure({ detail: 'Image download failed: download failed: HTTP 403', stage: 'download' }) === 'download_failed' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 402): busy' }) === 'upstream',
+  )
+  assert(
+    'image failure: with reference images, the too-large advice mentions shrinking them',
+    formatImageGenerationFailure({ detail: 'Request body too large', status: 413, hasReferences: true }).output.includes('fewer reference images or smaller/compressed copies') &&
+      !formatImageGenerationFailure({ detail: 'Request body too large', status: 413 }).output.includes('reference'),
+  )
+  assert(
+    'image failure: 413 is payload too large',
+    classifyImageGenerationFailure({ detail: '{"error":{"code":"payload_too_large","message":"Request body too large"}}', status: 413 }) === 'payload_too_large',
+  )
+  assert(
+    'image failure: ModelArk SensitiveContentDetected and OpenAI moderation_blocked are content rejections',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 400): {"error":{"code":"SensitiveContentDetected.Violence","message":"The request failed because the input text may contain sensitive information."}}' }) === 'content_rejected' &&
+      classifyImageGenerationFailure({ detail: 'OpenAI image generation failed (HTTP 400): moderation_blocked' }) === 'content_rejected',
+  )
+  assert(
+    'image failure: missing key is not configured, 401 is unauthorized, 5xx and network errors are upstream',
+    classifyImageGenerationFailure({ detail: 'Custom image API key is not configured.' }) === 'not_configured' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 401): {"error":{"code":"AuthenticationError"}}', status: 401 }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 503): upstream busy' }) === 'upstream' &&
+      classifyImageGenerationFailure({ detail: 'fetch failed' }) === 'upstream',
+  )
+  const formatted = formatImageGenerationFailure({ detail: gateway402, status: 402, source: 'BytePlus image API' }).output
+  assert(
+    'image failure: 402 message tells the user to top up and names the source',
+    formatted.startsWith('generate_image failed: insufficient balance') &&
+      formatted.includes('top up') &&
+      formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
+      formatted.includes('Do not substitute a downloaded web image'),
+    formatted,
+  )
+}
+
+{
+  // A failed image API call returns ok:false with the right message and never
+  // falls back to a web search or downloads anything else.
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-honest-failure-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusImageProfile(tmpDir, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+  try {
+    const balance = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up","type":"insufficient_balance"}}', { status: 402 }),
+      async (calls) => ({
+        result: await executeGenerateImage({ type: 'generate_image', prompt: 'a red fox in snow, watercolor' } as any, { cwd: tmpDir } as any),
+        calls: [...calls],
+      }),
+    )
+    assert(
+      'generate_image: HTTP 402 returns ok:false with a top-up message',
+      balance.result.ok === false &&
+        String(balance.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(balance.result.output).includes('top up'),
+      String(balance.result.output),
+    )
+    assert(
+      'generate_image: HTTP 402 makes exactly one image API call and no web search',
+      balance.calls.length === 1 &&
+        balance.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
+        !balance.calls.some((call) => /bing|google|duckduckgo|search/i.test(call.url)),
+      JSON.stringify(balance.calls.map((call) => call.url)),
+    )
+
+    const generic = await withMockedFetch(
+      () => new Response('<html>Bad Gateway</html>', { status: 502 }),
+      async (calls) => ({
+        result: await executeGenerateImage({ type: 'generate_image', prompt: 'logo with the text "ACME"' } as any, { cwd: tmpDir } as any),
+        calls: [...calls],
+      }),
+    )
+    assert(
+      'generate_image: a generic upstream error returns ok:false with a retry message and no web search',
+      generic.result.ok === false &&
+        String(generic.result.output).startsWith('generate_image failed: the image service or network failed') &&
+        String(generic.result.output).includes('HTTP 502') &&
+        generic.calls.length === 1 &&
+        generic.calls.every((call) => call.url.endsWith('/images/generations')),
+      String(generic.result.output),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // A ModelArk-compatible base URL on another host (the platform gateway) is
+  // kept, so its key is never sent to the public BytePlus host.
+  assert(
+    'ModelArk base URL: gateway and Volcengine hosts are kept; BytePlus paths still normalize',
+    normalizeModelArkMediaBaseUrl('https://gw.example.test/v1') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1/') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1/images/generations') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/api/v3') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://ark.ap-southeast.bytepluses.com/api/v3/images/generations') === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl(undefined) === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('mock://local') === 'https://ark.ap-southeast.bytepluses.com/api/v3',
+  )
+  const throwsMisconfigured = (url: string): boolean => {
+    try {
+      normalizeModelArkMediaBaseUrl(url)
+      return false
+    } catch (error) {
+      return /Visual API base URL is misconfigured: .*plain http/.test(String(error))
+    }
+  }
+  assert(
+    'ModelArk base URL: volces.com normalizes like bytepluses.com; gateway query strings are kept',
+    normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/api/v3/images/generations') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('http://ark.cn-beijing.volces.com/api/v3') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1?tenant=a') === 'https://gw.example.test/v1?tenant=a' &&
+      modelArkEndpoint('https://gw.example.test/v1?tenant=a', 'images/generations') === 'https://gw.example.test/v1/images/generations?tenant=a' &&
+      modelArkEndpoint('https://ark.ap-southeast.bytepluses.com/api/v3', 'contents/generations/tasks') === 'https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks',
+  )
+  assert(
+    'ModelArk base URL: plain http only for loopback; a lookalike host is not treated as BytePlus',
+    normalizeModelArkMediaBaseUrl('http://localhost:8080/v1') === 'http://localhost:8080/v1' &&
+      normalizeModelArkMediaBaseUrl('http://127.0.0.1:8080/v1') === 'http://127.0.0.1:8080/v1' &&
+      normalizeModelArkMediaBaseUrl('http://[::1]:8080/v1') === 'http://[::1]:8080/v1' &&
+      throwsMisconfigured('http://gw.example.test/v1') &&
+      throwsMisconfigured('http://10.0.0.5:8080/v1') &&
+      normalizeModelArkMediaBaseUrl('https://bytepluses.com.evil.test/api/v3/x') === 'https://bytepluses.com.evil.test/api/v3/x',
+  )
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-gateway-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusImageProfile(tmpDir, 'https://gw.example.test/v1')
+  try {
+    const calls = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (seen) => {
+        await executeGenerateImage({ type: 'generate_image', prompt: 'x' } as any, { cwd: tmpDir } as any)
+        return [...seen]
+      },
+    )
+    assert(
+      'generate_image: a byteplus profile pointed at the platform gateway calls the gateway',
+      calls.length === 1 && calls[0]!.url === 'https://gw.example.test/v1/images/generations',
+      JSON.stringify(calls.map((call) => call.url)),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Downloads of provider-returned URLs refuse private, link-local and
+  // loopback targets, also after redirects; loopback only for a loopback base URL.
+  assert(
+    'asset download: private, link-local, loopback and mapped addresses are non-public',
+    isNonPublicAddress('10.1.2.3') &&
+      isNonPublicAddress('172.20.0.1') &&
+      isNonPublicAddress('192.168.1.1') &&
+      isNonPublicAddress('169.254.169.254') &&
+      isNonPublicAddress('127.0.0.1') &&
+      isNonPublicAddress('::1') &&
+      isNonPublicAddress('fe80::1') &&
+      isNonPublicAddress('fd00::1') &&
+      isNonPublicAddress('::ffff:10.0.0.1') &&
+      !isNonPublicAddress('93.184.216.34') &&
+      !isNonPublicAddress('2606:2800:220:1:248:1893:25c8:1946') &&
+      !isNonPublicAddress('127.0.0.1', { allowLoopback: true }) &&
+      isNonPublicAddress('10.0.0.1', { allowLoopback: true }),
+  )
+  const refused = async (url: string, respond: (u: string) => Response, allowLoopback = false) =>
+    withMockedFetch(respond, async (calls) => {
+      try {
+        await downloadProviderAsset(url, { timeoutMs: 5_000, allowLoopback })
+        return { refused: false, calls: [...calls], message: '' }
+      } catch (error) {
+        return { refused: true, calls: [...calls], message: String(error) }
+      }
+    })
+  const metadata = await refused('http://169.254.169.254/latest/meta-data/', () => new Response('secret'))
+  assert(
+    'asset download: a cloud-metadata URL is refused without being fetched',
+    metadata.refused && metadata.calls.length === 0 && /private, link-local or loopback/.test(metadata.message),
+    metadata.message,
+  )
+  const redirected = await refused('https://93.184.216.34/a.png', (u) =>
+    u.startsWith('https://93.184.216.34')
+      ? new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:9000/admin' } })
+      : new Response('internal'),
+  )
+  assert(
+    'asset download: a redirect to loopback is refused before it is followed',
+    redirected.refused && redirected.calls.length === 1 && /127\.0\.0\.1/.test(redirected.message),
+    redirected.message,
+  )
+  const loopbackAllowed = await refused('http://127.0.0.1:9000/a.png', () => new Response(PNG_1X1), true)
+  assert(
+    'asset download: loopback is allowed when the provider base URL is loopback',
+    !loopbackAllowed.refused && loopbackAllowed.calls.length === 1,
+    loopbackAllowed.message,
+  )
+}
+
+{
+  // DNS rebinding: the address is checked inside the socket's lookup, so a
+  // host that resolves public for the early check and private at connect time
+  // is still refused. Uses the real node:http transport and a local server.
+  const hits: string[] = []
+  const server = http.createServer((req, res) => {
+    hits.push(req.url ?? '')
+    if (req.url === '/redirect') {
+      res.writeHead(302, { location: 'http://169.254.169.254/latest/meta-data/' })
+      res.end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'image/png' })
+    res.end(PNG_1X1)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const port = (server.address() as { port: number }).port
+  const lookups: string[] = []
+  setAssetDownloadTransportForTests(undefined)
+  const attempt = async (url: string, allowLoopback: boolean) => {
+    try {
+      const body = await downloadProviderAsset(url, { timeoutMs: 5_000, allowLoopback })
+      return { ok: true, body, message: '' }
+    } catch (error) {
+      return { ok: false, body: undefined, message: String(error) }
+    }
+  }
+  try {
+    let rebindCalls = 0
+    setAssetDownloadResolverForTests(async (hostname) => {
+      lookups.push(hostname)
+      if (hostname === 'assets.rebind.test') {
+        rebindCalls += 1
+        return [{ address: rebindCalls === 1 ? '93.184.216.34' : '127.0.0.1', family: 4 }]
+      }
+      if (hostname === 'assets.loopback.test') return [{ address: '127.0.0.1', family: 4 }]
+      return testAssetResolver(hostname)
+    })
+    const rebound = await attempt(`http://assets.rebind.test:${port}/a.png`, false)
+    assert(
+      'asset download: a host that rebinds to loopback at connect time is refused and never reached',
+      !rebound.ok && rebindCalls === 2 && /127\.0\.0\.1/.test(rebound.message) && hits.length === 0,
+      `${rebound.message} lookups=${rebindCalls} hits=${hits.length}`,
+    )
+    const viaLookup = await attempt(`http://assets.loopback.test:${port}/a.png`, true)
+    assert(
+      'asset download: the connection uses the guarded lookup (loopback base URL allowed)',
+      viaLookup.ok && Buffer.compare(viaLookup.body!, PNG_1X1) === 0 && hits.length === 1 &&
+        lookups.filter((name) => name === 'assets.loopback.test').length === 2,
+      viaLookup.message,
+    )
+    const redirect = await attempt(`http://127.0.0.1:${port}/redirect`, true)
+    assert(
+      'asset download: the real transport checks every redirect hop',
+      !redirect.ok && /169\.254\.169\.254/.test(redirect.message) && hits.length === 2 && hits[1] === '/redirect',
+      redirect.message,
+    )
+  } finally {
+    setAssetDownloadTransportForTests(fetchAssetTransport)
+    setAssetDownloadResolverForTests(testAssetResolver)
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Saga soundtrack URLs can come from content the agent read: same guard.
+  const workDir = path.join(os.tmpdir(), `artemis-soundtrack-guard-${Date.now()}`)
+  fs.mkdirSync(workDir, { recursive: true })
+  const AUDIO = Buffer.from('ID3fake-mp3-bytes')
+  const soundtrack = async (url: string) => {
+    const calls: string[] = []
+    const result = await withMockedFetch(
+      (requested) => {
+        calls.push(requested)
+        if (requested === 'https://music.test/redirect.mp3') {
+          return new Response(null, { status: 302, headers: { location: 'http://10.0.0.8/internal.mp3' } })
+        }
+        return new Response(AUDIO, { status: 200, headers: { 'content-type': 'audio/mpeg' } })
+      },
+      async () => {
+        try {
+          return { path: await resolveSoundtrackPath({ url }, workDir), message: '' }
+        } catch (error) {
+          return { path: undefined, message: String(error) }
+        }
+      },
+    )
+    return { ...result, calls }
+  }
+  try {
+    const ok = await soundtrack('https://music.test/song.mp3')
+    assert(
+      'saga soundtrack: a public audio URL downloads through the guard',
+      ok.path === path.join(workDir, 'soundtrack.mp3') && Buffer.compare(fs.readFileSync(ok.path), AUDIO) === 0,
+      ok.message,
+    )
+    const local = await soundtrack('http://127.0.0.1:8080/admin/export.mp3')
+    const metadata = await soundtrack('http://169.254.169.254/latest/meta-data/x.wav')
+    assert(
+      'saga soundtrack: loopback and metadata URLs are refused without a request',
+      !local.path && /private, link-local or loopback/.test(local.message) && local.calls.length === 0 &&
+        !metadata.path && /private, link-local or loopback/.test(metadata.message) && metadata.calls.length === 0,
+      `${local.message} | ${metadata.message}`,
+    )
+    const redirected = await soundtrack('https://music.test/redirect.mp3')
+    assert(
+      'saga soundtrack: a redirect to a private address is refused',
+      !redirected.path && /10\.0\.0\.8/.test(redirected.message) && redirected.calls.length === 1,
+      redirected.message,
+    )
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Video results go through the same guard, on the provider path and the
+  // legacy ARK_API_KEY path.
+  const METADATA_VIDEO = 'http://169.254.169.254/latest/meta-data/out.mp4'
+  const videoMock = (calls: string[]) => (url: string) => {
+    calls.push(url)
+    if (url.endsWith('/contents/generations/tasks')) return new Response('{"id":"task-guard"}', { status: 200 })
+    if (url.endsWith('/contents/generations/tasks/task-guard')) {
+      return new Response(JSON.stringify({ status: 'succeeded', content: { video_url: METADATA_VIDEO } }), { status: 200 })
+    }
+    return new Response('should not be fetched', { status: 200 })
+  }
+  const root = path.join(os.tmpdir(), `artemis-video-guard-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(workspace, { recursive: true })
+  const savedEnv = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME, ARK_API_KEY: process.env.ARK_API_KEY }
+  process.env.HOME = path.join(root, 'home')
+  process.env.ARTEMIS_HOME = path.join(root, 'artemis-home')
+  delete process.env.ARK_API_KEY
+  fs.mkdirSync(process.env.HOME, { recursive: true })
+  try {
+    await configureBytePlusVideoProfile(workspace, 'seedance-1-5-pro-251215')
+    const providerCalls: string[] = []
+    const viaProvider = await withMockedFetch(videoMock(providerCalls), async () =>
+      executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a short wave clip', duration: 5, maxPolls: 1, pollIntervalMs: 1000 } as any,
+        { cwd: workspace } as any,
+      ),
+    )
+    assert(
+      'generate_video: the BytePlus provider refuses a private video result URL',
+      viaProvider.ok === false &&
+        /private, link-local or loopback/.test(String(viaProvider.output)) &&
+        !providerCalls.includes(METADATA_VIDEO),
+      String(viaProvider.output),
+    )
+
+    fs.rmSync(process.env.ARTEMIS_HOME!, { recursive: true, force: true })
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.mkdirSync(workspace, { recursive: true })
+    process.env.ARK_API_KEY = 'ark-test-key'
+    const legacyCalls: string[] = []
+    const viaLegacy = await withMockedFetch(videoMock(legacyCalls), async () =>
+      executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a short wave clip', duration: 5, maxPolls: 1, pollIntervalMs: 1000 } as any,
+        { cwd: workspace } as any,
+      ),
+    )
+    assert(
+      'generate_video: the legacy ARK_API_KEY path refuses a private video result URL',
+      viaLegacy.ok === false &&
+        /private, link-local or loopback/.test(String(viaLegacy.output)) &&
+        legacyCalls.some((url) => url.startsWith('https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks')) &&
+        !legacyCalls.includes(METADATA_VIDEO),
+      String(viaLegacy.output),
+    )
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // M1/M2 on the configured-provider path, and the legacy ARK_API_KEY path.
+  const PUBLIC_ASSET = 'https://93.184.216.34/generated/a.png'
+  const root = path.join(os.tmpdir(), `artemis-image-review-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(workspace, { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'ref.png'), PNG_1X1)
+  const savedEnv = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME, ARK_API_KEY: process.env.ARK_API_KEY }
+  process.env.HOME = path.join(root, 'home')
+  process.env.ARTEMIS_HOME = path.join(root, 'artemis-home')
+  delete process.env.ARK_API_KEY
+  fs.mkdirSync(process.env.HOME, { recursive: true })
+  const context = { cwd: workspace } as any
+  const generatedThenDownload = (downloadStatus: number) => (url: string) =>
+    url.endsWith('/images/generations')
+      ? new Response(JSON.stringify({ data: [{ url: PUBLIC_ASSET }] }), { status: 200 })
+      : downloadStatus === 200
+        ? new Response(PNG_1X1, { status: 200 })
+        : new Response('AccessDenied', { status: downloadStatus })
+  try {
+    await configureBytePlusImageProfile(workspace, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+
+    const downloadFailed = await withMockedFetch(generatedThenDownload(403), async (calls) => ({
+      result: await executeGenerateImage({ type: 'generate_image', prompt: 'a lighthouse at dusk' } as any, context),
+      calls: [...calls],
+    }))
+    assert(
+      'generate_image: a 403 on the result download is download_failed, not rejected credentials',
+      downloadFailed.result.ok === false &&
+        String(downloadFailed.result.output).startsWith('generate_image failed: the image was generated') &&
+        !String(downloadFailed.result.output).includes('rejected the credentials') &&
+        downloadFailed.calls.length === 2,
+      String(downloadFailed.result.output),
+    )
+
+    let generation = 0
+    const partial = await withMockedFetch(
+      (url) => {
+        if (url.endsWith('/images/generations')) {
+          generation += 1
+          return generation === 1
+            ? new Response(JSON.stringify({ data: [{ url: PUBLIC_ASSET }] }), { status: 200 })
+            : new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 })
+        }
+        return new Response(PNG_1X1, { status: 200 })
+      },
+      async () => executeGenerateImage({ type: 'generate_image', prompt: 'two lighthouses', count: 2, outputPath: 'out/light.png' } as any, context),
+    )
+    const partialOutput = String(partial.output)
+    assert(
+      'generate_image: count 2 with the second failing returns the saved image plus the reason',
+      partial.ok === true &&
+        partialOutput.startsWith('Generated 1 of 2 requested image(s) via configured visual API:') &&
+        partialOutput.includes(path.join('out', 'light-1.png')) &&
+        partialOutput.includes('The other 1 image(s) failed: insufficient balance') &&
+        !partialOutput.includes('No image was created') &&
+        fs.existsSync(path.join(workspace, 'out', 'light-1.png')),
+      partialOutput,
+    )
+
+    // Legacy path: no visual profile, credentials from ARK_API_KEY. With
+    // ARTEMIS_HOME set the provider store lives there, so clear it too.
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.rmSync(process.env.ARTEMIS_HOME!, { recursive: true, force: true })
+    fs.mkdirSync(workspace, { recursive: true })
+    fs.writeFileSync(path.join(workspace, 'ref.png'), PNG_1X1)
+    process.env.ARK_API_KEY = 'ark-test-key'
+    const legacy = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (calls) => ({
+        result: await executeGenerateImage(
+          { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['ref.png'] } as any,
+          context,
+        ),
+        calls: [...calls],
+      }),
+    )
+    const legacyBody = JSON.parse(legacy.calls[0]?.body ?? '{}')
+    assert(
+      'generate_image legacy ARK_API_KEY path: sends image as a data URI and maps 402 to top up',
+      legacy.calls.length === 1 &&
+        legacy.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
+        legacyBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        legacy.result.ok === false &&
+        String(legacy.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(legacy.result.output).includes('BytePlus image API failed (HTTP 402)'),
+      JSON.stringify({ calls: legacy.calls.map((call) => call.url), output: legacy.result.output }),
+    )
+    const legacyDownload = await withMockedFetch(generatedThenDownload(403), async () =>
+      executeGenerateImage({ type: 'generate_image', prompt: 'x' } as any, context),
+    )
+    assert(
+      'generate_image legacy ARK_API_KEY path: a 403 download is download_failed',
+      legacyDownload.ok === false &&
+        String(legacyDownload.output).startsWith('generate_image failed: the image was generated'),
+      String(legacyDownload.output),
+    )
+    const legacyTooLarge = await withMockedFetch(
+      () => new Response('{"error":{"code":"payload_too_large","message":"Request body too large"}}', { status: 413 }),
+      async () => executeGenerateImage({ type: 'generate_image', prompt: 'x', referenceImages: ['ref.png'] } as any, context),
+    )
+    assert(
+      'generate_image legacy ARK_API_KEY path: 413 with references says to shrink them',
+      legacyTooLarge.ok === false && String(legacyTooLarge.output).includes('fewer reference images or smaller/compressed copies'),
+      String(legacyTooLarge.output),
+    )
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Reference images: parsing, containment, data URIs, unsupported providers.
+  assert(
+    'referenceImages: arrays, JSON strings and single strings normalize, de-duplicated',
+    eq(normalizeReferenceImagesArg([' a.png ', 'a.png', '', 'https://x.test/b.jpg']), ['a.png', 'https://x.test/b.jpg']) &&
+      eq(normalizeReferenceImagesArg('["a.png","b.png"]'), ['a.png', 'b.png']) &&
+      eq(normalizeReferenceImagesArg('a.png'), ['a.png']) &&
+      eq(normalizeReferenceImagesArg(undefined), []),
+  )
+  assert(
+    'referenceImages: image types are sniffed from bytes, not extensions',
+    sniffImageMimeType(PNG_1X1) === 'image/png' &&
+      sniffImageMimeType(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0])) === 'image/jpeg' &&
+      sniffImageMimeType(Buffer.from('RIFF\0\0\0\0WEBPVP8 ', 'binary')) === 'image/webp' &&
+      sniffImageMimeType(Buffer.from('API_KEY=secret\n')) === undefined,
+  )
+  assert(
+    'referenceImages: one shared sniffer; view_image still sees only model formats',
+    sniffImageMimeType(BMP_HEADER) === 'image/bmp' &&
+      sniffAnyImageType(BMP_HEADER) === 'image/bmp' &&
+      sniffImageType(BMP_HEADER) === undefined &&
+      sniffImageType(PNG_1X1) === 'image/png',
+  )
+  assert(
+    'referenceImages: BMP needs a plausible header, not just "BM"',
+    sniffAnyImageType(Buffer.from('BM is how this text file starts')) === undefined &&
+      sniffAnyImageType(Buffer.concat([Buffer.from('BM'), Buffer.alloc(16)])) === undefined &&
+      sniffAnyImageType(BMP_HEADER) === 'image/bmp',
+  )
+
+  const recovered = parseAssistantEnvelopeForSmoke(`
+<tool_calls>
+<call name="generate_image">{"prompt":"same style, but a cat","reference_images":["uploads/style.png"]}</call>
+</tool_calls>
+`)
+  const looseAction = (recovered.actions ?? [])[0] as any
+  assert(
+    'referenceImages: text tool-call recovery parses reference_images',
+    looseAction?.type === 'generate_image' && eq(looseAction.referenceImages, ['uploads/style.png']),
+    JSON.stringify(recovered.actions),
+  )
+  const nativeMapped = mapProviderNativeToolCallToAction({
+    callId: 'img-ref',
+    name: 'generate_image',
+    arguments: JSON.stringify({ prompt: 'same style, but a cat', referenceImages: ['uploads/style.png', 'https://x.test/a.png'] }),
+  })
+  assert(
+    'referenceImages: native tool call keeps referenceImages',
+    nativeMapped.ok && eq((nativeMapped.action as any).referenceImages, ['uploads/style.png', 'https://x.test/a.png']),
+    JSON.stringify(nativeMapped),
+  )
+  assert(
+    'referenceImages: validator rejects more than 14 entries and non-string entries',
+    validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: Array.from({ length: 15 }, (_, i) => `r${i}.png`) }).length > 0 &&
+      validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: [42] }).length > 0 &&
+      validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: ['a.png'] }).length === 0,
+  )
+  const imageSchema = providerNativeTools.find((tool) => tool.name === 'generate_image')?.parameters as any
+  assert(
+    'referenceImages: native schema exposes an array capped at 14',
+    imageSchema?.properties?.referenceImages?.type === 'array' && imageSchema.properties.referenceImages.maxItems === 14,
+  )
+
+  const root = path.join(os.tmpdir(), `artemis-image-refs-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(path.join(workspace, 'uploads'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'uploads', 'style.png'), PNG_1X1)
+  fs.writeFileSync(path.join(workspace, 'uploads', 'notes.png'), 'API_KEY=not-an-image\n')
+  fs.writeFileSync(path.join(root, 'outside.png'), PNG_1X1)
+  fs.mkdirSync(path.join(workspace, '.ssh'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.ssh', 'id.png'), PNG_1X1)
+  fs.writeFileSync(path.join(workspace, '.env.png'), PNG_1X1)
+  const context = { cwd: workspace } as any
+  const rejects = async (raw: unknown, pattern: RegExp): Promise<boolean> => {
+    try {
+      await resolveReferenceImages(raw, context)
+      return false
+    } catch (error) {
+      return pattern.test(error instanceof Error ? error.message : String(error))
+    }
+  }
+  try {
+    const resolved = await resolveReferenceImages(['uploads/style.png', 'https://x.test/a.png'], context)
+    assert(
+      'referenceImages: workspace files become data URIs and URLs pass through',
+      resolved.length === 2 &&
+        resolved[0] === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        resolved[1] === 'https://x.test/a.png',
+      JSON.stringify(resolved.map((entry) => entry.slice(0, 40))),
+    )
+    assert(
+      'referenceImages: paths outside the workspace are refused',
+      await rejects(['../outside.png'], /escapes|declined/i) &&
+        await rejects([path.join(root, 'outside.png')], /escapes|declined/i),
+    )
+    assert(
+      'referenceImages: protected paths inside the workspace (.ssh dir, .env file) are refused by ensureNotSensitivePath',
+      await rejects(['.ssh/id.png'], /Access denied: \.ssh\/id\.png is in a protected directory/) &&
+        await rejects(['.env.png'], /Access denied: \.env\.png is in a protected directory/),
+    )
+    const fullAccess = await resolveReferenceImages(['.ssh/id.png'], { ...context, permissionMode: 'full-access' })
+    assert(
+      'referenceImages: full-access mode skips the protected-path check, like read_file',
+      fullAccess.length === 1 && fullAccess[0]!.startsWith('data:image/png;base64,'),
+    )
+    assert(
+      'referenceImages: non-images, missing files and other schemes are refused',
+      await rejects(['uploads/notes.png'], /not a supported image/) &&
+        await rejects(['uploads/missing.png'], /not found/) &&
+        await rejects(['file:///etc/passwd'], /not supported/),
+    )
+    assert(
+      'referenceImages: more than 14, or references plus outputs over 15, are refused',
+      await rejects(Array.from({ length: 15 }, (_, i) => `https://x.test/${i}.png`), /at most 14/) &&
+        await (async () => {
+          try {
+            await resolveReferenceImages(Array.from({ length: 13 }, (_, i) => `https://x.test/${i}.png`), context, { outputCount: 3 })
+            return false
+          } catch (error) {
+            return /limit of 15/.test(String(error))
+          }
+        })(),
+    )
+
+    // The request body carries the reference as a ModelArk `image` data URI.
+    await configureBytePlusImageProfile(workspace, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+    const sent = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (calls) => {
+        const result = await executeGenerateImage(
+          { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['uploads/style.png'] } as any,
+          context,
+        )
+        return { result, calls: [...calls] }
+      },
+    )
+    const sentBody = JSON.parse(sent.calls[0]?.body ?? '{}')
+    assert(
+      'referenceImages: BytePlus request body has image as a data URI',
+      sent.calls.length === 1 &&
+        sentBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        sentBody.prompt === 'same style, but a cat' &&
+        sent.result.ok === false,
+      JSON.stringify({ keys: Object.keys(sentBody), output: sent.result.output }),
+    )
+    const sentTwo = await withMockedFetch(
+      () => new Response('{"error":{"message":"boom"}}', { status: 500 }),
+      async (calls) => {
+        await executeGenerateImage(
+          { type: 'generate_image', prompt: 'blend these', referenceImages: ['uploads/style.png', 'https://x.test/a.png'] } as any,
+          context,
+        )
+        return [...calls]
+      },
+    )
+    const sentTwoBody = JSON.parse(sentTwo[0]?.body ?? '{}')
+    assert(
+      'referenceImages: several references are sent as an image array',
+      Array.isArray(sentTwoBody.image) && sentTwoBody.image.length === 2 && sentTwoBody.image[1] === 'https://x.test/a.png',
+    )
+
+    // Providers without reference support fail clearly instead of ignoring them.
+    for (const provider of ['openai', 'mock'] as const) {
+      const store = new ProviderStore(workspace)
+      const data = await store.load()
+      data.visualProfile!.image = {
+        ...data.visualProfile!.image,
+        provider,
+        apiKey: 'test-key',
+        baseUrl: provider === 'openai' ? 'https://api.openai.com/v1' : 'mock://local',
+        model: provider === 'openai' ? 'gpt-image-2' : 'mock-image',
+      }
+      await store.save(data)
+      const unsupported = await withMockedFetch(
+        () => new Response('{}', { status: 500 }),
+        async (calls) => ({
+          result: await executeGenerateImage(
+            { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['uploads/style.png'] } as any,
+            context,
+          ),
+          calls: [...calls],
+        }),
+      )
+      assert(
+        `referenceImages: ${provider} provider fails clearly without calling the API`,
+        unsupported.result.ok === false &&
+          String(unsupported.result.output).includes('reference images are not supported') &&
+          unsupported.calls.length === 0,
+        String(unsupported.result.output),
+      )
+    }
+
+    // A text-to-image-only Seedream model refuses references.
+    const t2i = new BytePlusProvider(
+      {
+        enabled: true,
+        image: { provider: 'byteplus', apiKey: 'k', baseUrl: '', model: 'seedream-3-0-t2i-250415', defaultParams: { size: '2K', quality: 'standard', style: 'realistic', watermark: false } },
+        video: { enabled: false, provider: 'byteplus', apiKey: '', baseUrl: '', model: '', defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false } },
+      } as any,
+      'image',
+    )
+    const t2iResult = await withMockedFetch(
+      () => new Response('{}', { status: 500 }),
+      async (calls) => ({ result: await t2i.generateImage({ prompt: 'x', referenceImages: ['https://x.test/a.png'] }), calls: [...calls] }),
+    )
+    assert(
+      'referenceImages: Seedream 3.0 text-to-image model refuses references before calling the API',
+      !t2iResult.result.success && /text-to-image only/.test(t2iResult.result.error ?? '') && t2iResult.calls.length === 0,
+      t2iResult.result.error,
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // No visual API configured: the policy says so and how to configure it, and
+  // does not send the model to web-search images.
+  assert(
+    'visual policy: not-configured policy names /visual and does not suggest web-search assets',
+    VISUAL_NOT_CONFIGURED_POLICY.includes('not configured') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('/visual') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('artemis setup visual') &&
+      VISUAL_NOT_CONFIGURED_POLICY.includes('Do not substitute web-search or downloaded images') &&
+      !/use web-search assets/i.test(VISUAL_NOT_CONFIGURED_POLICY),
+  )
+}
+
+{
+  // Prompt guidance lives in the tool description, not in a rewrite of the prompt.
+  const imageTool = providerNativeTools.find((tool) => tool.name === 'generate_image')
+  const description = imageTool?.description ?? ''
+  assert(
+    'generate_image description: carries the Seedream prompt guidance',
+    description === GENERATE_IMAGE_DESCRIPTION &&
+      /natural sentences for subject, action and setting/.test(description) &&
+      /style the user asked for/.test(description) &&
+      /double quotes/.test(description) &&
+      /`size`, not in the prompt/.test(description) &&
+      /Keep the user's language/.test(description) &&
+      /`referenceImages`/.test(description) &&
+      /Look at it first with view_image whenever that tool is available/.test(description) &&
+      !/if you can/i.test(description) &&
+      /ask one short question only/.test(description) &&
+      /never substitute a web image/.test(description),
+    description,
+  )
+  assert(
+    'generate_image description: stays short and adds no fixed photo keywords',
+    description.length < 1400 && !/Canon|f\/1\.8|photorealistic, /i.test(description),
+    `length=${description.length}`,
+  )
+}
+
 async function configureMockImageProfile(cwd: string): Promise<void> {
   const store = new ProviderStore(cwd)
   const data = await store.load()
@@ -2145,7 +3008,6 @@ const WEB_MAIN_EXCLUDED_TOOLS = [
   'bridge_send_image',
   'request_user_confirmation',
   'spawn_background_workflow',
-  'odin_execute_task',
 ] as const
 
 // Minimal valid arguments for each added tool, so validateToolAction and the
@@ -2243,9 +3105,16 @@ function sampleWebToolAction(type: string): AgentAction {
 type MockHostRequest = { path: string; body: string }
 async function withMockHeadlessHost(
   options: {
+    /** The agent's own requests (they carry tools), numbered from 1. */
     chat: (index: number, body: string) => string
-    image?: (body: string) => { status: number; json: unknown }
+    /** Tool-less side requests: vision helper, memory curator, summaries. */
+    aux?: (body: string) => string
+    image?: (body: string, hostBaseUrl: string) => { status: number; json: unknown }
     configureVisual?: boolean
+    /** BytePlus image profile on the mock host (supports referenceImages). */
+    configureBytePlusVisual?: boolean
+    /** Replaces the default providers.json written to ARTEMIS_HOME. */
+    providers?: (baseUrl: string) => unknown
   },
   run: (ctx: { project: string; requests: MockHostRequest[]; port: number }) => Promise<void>,
 ): Promise<void> {
@@ -2256,6 +3125,7 @@ async function withMockHeadlessHost(
   fs.mkdirSync(project, { recursive: true })
   const requests: MockHostRequest[] = []
   let chatCount = 0
+  let hostBaseUrl = ''
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -2264,17 +3134,26 @@ async function withMockHeadlessHost(
       const url = req.url ?? ''
       requests.push({ path: url, body })
       if (url.includes('/chat/completions')) {
-        chatCount += 1
+        // Side requests (the post-run memory curator, the vision helper) can
+        // interleave with the agent's; only tool-bearing requests are scripted.
+        const isAgentRequest = body.includes('"tools"')
+        if (isAgentRequest) chatCount += 1
+        else requests[requests.length - 1]!.path = `${url}#aux`
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({
           model: 'mock-openai-compatible',
-          choices: [{ message: { content: options.chat(chatCount, body) } }],
+          choices: [{ message: { content: isAgentRequest ? options.chat(chatCount, body) : (options.aux?.(body) ?? '[]') } }],
           usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         }))
         return
       }
+      if (url === '/visual/asset.png') {
+        res.writeHead(200, { 'content-type': 'image/png' })
+        res.end(Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'))
+        return
+      }
       if (url.startsWith('/visual/') && url.includes('/images/generations') && options.image) {
-        const reply = options.image(body)
+        const reply = options.image(body, hostBaseUrl)
         res.writeHead(reply.status, { 'content-type': 'application/json' })
         res.end(JSON.stringify(reply.json))
         return
@@ -2307,10 +3186,16 @@ async function withMockHeadlessHost(
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('Mock headless host failed to bind to a TCP port.')
-    fs.writeFileSync(path.join(artemisHome, 'providers.json'), JSON.stringify({
-      defaultMainProfileId: 'mock-openai',
-      profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
-    }))
+    hostBaseUrl = `http://127.0.0.1:${address.port}`
+    fs.writeFileSync(path.join(artemisHome, 'providers.json'), JSON.stringify(
+      options.providers?.(`http://127.0.0.1:${address.port}`) ?? {
+        defaultMainProfileId: 'mock-openai',
+        profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
+      },
+    ))
+    if (options.configureBytePlusVisual) {
+      await configureBytePlusImageProfile(project, `http://127.0.0.1:${address.port}/visual/api/v3`)
+    }
     if (options.configureVisual) {
       const store = new ProviderStore(project)
       const data = await store.load()
@@ -2372,7 +3257,7 @@ const ONE_PIXEL_PNG_BASE64 =
   }, async ({ project, requests }) => {
     const result = await runHeadlessAgent(project, 'Generate an image of a red fox in the snow.', { maxTurns: 6 })
     const imageCalls = requests.filter((request) => request.path.includes('/images/generations'))
-    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions'))
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
     const saved = path.join(project, 'fox.png')
     const savedBytes = fs.existsSync(saved) ? fs.readFileSync(saved) : Buffer.alloc(0)
     const detail = `reply=${result.reply} turns=${result.turns} image=${imageCalls.length} chat=${chatCalls.length}`
@@ -2400,6 +3285,70 @@ const ONE_PIXEL_PNG_BASE64 =
 }
 
 {
+  // (b, merged main) Text-only platform model + vision helper + BytePlus
+  // references, headless: the attached photo is described by the helper,
+  // view_image returns the description, and generate_image sends the photo
+  // as a reference and saves the result before the run returns.
+  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+  let mainCalls = 0
+  let visionCalls = 0
+  await withMockHeadlessHost({
+    configureBytePlusVisual: true,
+    providers: (baseUrl) => ({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, contextLength: 200_000, maxOutputTokens: 8192, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }),
+    aux: (body) => {
+      if (!body.includes('"model":"vision-alias"')) return '[]'
+      visionCalls += 1
+      return 'A watercolor painting of a lighthouse in soft blue tones.'
+    },
+    chat: (index) => {
+      mainCalls = index
+      return index === 1
+        ? [
+          'Looking at the reference, then painting the cat in the same style.',
+          '<toolcall name="view_image">{"path":"style.png"}</toolcall>',
+          '<toolcall name="generate_image">{"prompt":"a cat, watercolor, soft blue tones","referenceImages":["style.png"],"outputPath":"cat.png","runInBackground":true}</toolcall>',
+        ].join('\n')
+        : 'Done: cat.png uses the watercolor style of your photo.'
+    },
+    image: (_body, hostBase) => ({ status: 200, json: { data: [{ url: `${hostBase}/visual/asset.png` }] } }),
+  }, async ({ project, requests }) => {
+    fs.writeFileSync(path.join(project, 'style.png'), Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'))
+    const result = await runHeadlessAgent(project, 'Paint a cat in the style of this photo.', {
+      maxTurns: 6,
+      imagePaths: ['style.png'],
+    })
+    const imageCalls = requests.filter((request) => request.path.includes('/images/generations'))
+    const mainBodies = requests.filter((request) => request.path.includes('/chat/completions') && request.body.includes('"model":"gpt-6-sol"')).map((request) => request.body)
+    const imageBody = (() => { try { return JSON.parse(imageCalls[0]?.body ?? '{}') as { image?: unknown } } catch { return {} } })()
+    const saved = path.join(project, 'cat.png')
+    const detail = JSON.stringify({ reply: result.reply, turns: result.turns, vision: visionCalls, main: mainCalls, image: imageCalls.length })
+    assert(
+      'web tools + vision helper: a text-only headless model gets the attached photo described, and view_image returns the description',
+      visionCalls >= 1 &&
+        mainBodies.every((body) => !body.includes('image_url')) &&
+        mainBodies.some((body) => body.includes('Image 1 description by vision helper')) &&
+        mainBodies.some((body) => body.includes('description by vision helper') && body.includes('watercolor painting of a lighthouse')),
+      detail,
+    )
+    assert(
+      'web tools + referenceImages: headless generate_image sends the workspace photo as a reference and saves the result before returning',
+      imageCalls.length === 1 &&
+        typeof imageBody.image === 'string' && (imageBody.image as string).startsWith('data:image/png;base64,') &&
+        fs.existsSync(saved) && fs.readFileSync(saved).subarray(0, 4).toString('hex') === '89504e47' &&
+        result.reply.includes('cat.png') && !result.reply.includes('Execution blocked'),
+      detail,
+    )
+  })
+}
+
+{
   // (c) No visual provider configured: the image request ends quickly with an
   // honest "not configured" answer, never a 60-turn checklist loop.
   const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
@@ -2409,7 +3358,7 @@ const ONE_PIXEL_PNG_BASE64 =
       : 'I could not create the image: image generation is not configured on this server. Ask the owner to set up a visual provider (artemis setup visual).',
   }, async ({ project, requests }) => {
     const result = await runHeadlessAgent(project, 'Generate an image of a red fox in the snow.', { maxTurns: 60 })
-    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions'))
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
     const detail = `reply=${result.reply} turns=${result.turns} chat=${chatCalls.length}`
     assert(
       'web tools: unconfigured image generation ends within a few turns, no checklist spin',
@@ -2513,37 +3462,52 @@ const ONE_PIXEL_PNG_BASE64 =
     script: () => ({ reply: 'Here is a vivid description of a red fox in the snow.', done: true }),
   })
   {
-    // A plain chat request the workspace-mutation heuristic matches ("write",
-    // "create") is answered directly: bounded reminders, then the answer.
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-chat-mutation-'))
-    try {
-      const sessions = new SessionStore(tmpDir)
-      const session = sessions.createSession({ title: 'chat mutation smoke' })
-      await sessions.save(session)
-      let calls = 0
-      const provider: ChatProvider = {
-        async complete(): Promise<ProviderResponse> {
-          calls += 1
-          return { text: JSON.stringify({ reply: 'Red fox in the snow, quiet paws on silver light, gone before the dawn.', done: true }), raw: null }
-        },
+    // Plain writing requests ("write a haiku") are chat answers, not file
+    // tasks: no mutation reminder, no runtime note. A request that names a
+    // file still gets bounded reminders, then reports the missing file.
+    const haiku = 'Red fox in the snow, quiet paws on silver light, gone before the dawn.'
+    async function runChat(prompt: string): Promise<{ reply: string; calls: number }> {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-chat-mutation-'))
+      try {
+        const sessions = new SessionStore(tmpDir)
+        const session = sessions.createSession({ title: 'chat mutation smoke' })
+        await sessions.save(session)
+        let calls = 0
+        const provider: ChatProvider = {
+          async complete(): Promise<ProviderResponse> {
+            calls += 1
+            return { text: JSON.stringify({ reply: haiku, done: true }), raw: null }
+          },
+        }
+        const result = await runAgent(session, prompt, {
+          cwd: tmpDir,
+          provider,
+          sessionStore: sessions,
+          permissionManager: new PermissionManager('PRODUCER', false),
+          maxTurns: 60,
+          profile: 'main',
+        })
+        return { reply: result.reply, calls }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true })
       }
-      const result = await runAgent(session, 'Write a short haiku about foxes.', {
-        cwd: tmpDir,
-        provider,
-        sessionStore: sessions,
-        permissionManager: new PermissionManager('PRODUCER', false),
-        maxTurns: 60,
-        profile: 'main',
-      })
-      assert(
-        'mutation guard: a chat-style "write" request ends within a few turns with the answer and an honest no-files note',
-        calls <= 3 && result.reply.includes('Red fox in the snow') &&
-          result.reply.includes('No files were created or changed') && !result.reply.includes('Execution blocked'),
-        `calls=${calls} reply=${result.reply}`,
-      )
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true })
     }
+    const chatRuns = await Promise.all([
+      'Write a short haiku about foxes.',
+      'Create a packing list for a weekend in Paris.',
+      'Draft an email to my landlord about the heating.',
+    ].map(runChat))
+    assert(
+      'mutation guard: plain writing requests (poem, list, email) are answered in one turn with exactly the model answer',
+      chatRuns.every((run) => run.calls === 1 && run.reply === haiku),
+      JSON.stringify(chatRuns),
+    )
+    const fileRun = await runChat('Create notes.md with a haiku about foxes.')
+    assert(
+      'mutation guard: a request naming a file that is never written gets bounded reminders, then says which file is missing',
+      fileRun.calls === 3 && fileRun.reply.includes('Missing target files: notes.md'),
+      JSON.stringify(fileRun),
+    )
   }
 
   assert(
@@ -2563,7 +3527,7 @@ const ONE_PIXEL_PNG_BASE64 =
       : 'Sorry, web search is not available on this server right now (no search backend is configured), so I could not look that up.',
   }, async ({ project, requests }) => {
     const result = await runHeadlessAgent(project, 'Search the web for the latest Node.js LTS version.', { maxTurns: 60 })
-    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions'))
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
     const detail = `reply=${result.reply} turns=${result.turns} chat=${chatCalls.length}`
     const offered = (() => {
       try {
@@ -9700,6 +10664,691 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+{
+  // Platform capabilities: values the agent server wrote into the profile
+  // (capabilitiesSource "platform") beat every model-name rule, because the
+  // name can be a gateway alias (gpt-6-sol serving a GLM model).
+  const platformAlias = {
+    protocol: 'openai' as const,
+    baseUrl: 'http://127.0.0.1:9',
+    apiKey: 'k',
+    model: 'gpt-6-sol',
+    contextLength: 1_000_000,
+    maxOutputTokens: 12_345,
+    capabilitiesSource: 'platform' as const,
+  }
+  assert(
+    'platform capabilities: contextLength beats the GPT-6 cap for an alias named gpt-6-sol',
+    resolveProfileContextLength(platformAlias) === 1_000_000 &&
+      resolveProfileContextLength({ ...platformAlias, contextLength: 131_072 }) === 131_072 &&
+      estimateContextLimit('gpt-6-sol', 1_000_000, true) === 1_000_000 &&
+      new OpenAICompatibleProvider(platformAlias).contextLength === 1_000_000 &&
+      new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages' }).contextLength === 1_000_000 &&
+      new ResponsesCompatibleProvider({ ...platformAlias, protocol: 'responses' }).contextLength === 1_000_000,
+  )
+  const { capabilitiesSource: _source, ...nonPlatform } = platformAlias
+  assert(
+    'platform capabilities: non-platform profiles keep the GPT-6 / GPT-5.6 caps',
+    resolveProfileContextLength(nonPlatform) === GPT_5_6_CONTEXT_LENGTH &&
+      resolveProfileContextLength({ ...nonPlatform, model: 'gpt-5.6-sol' }) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH &&
+      new OpenAICompatibleProvider(nonPlatform).contextLength === undefined,
+  )
+
+  const hud = createHudState('gpt-6-sol')
+  updateHudState(hud, { model: 'gpt-6-sol', contextLimit: 1_000_000, contextLimitAuthoritative: true, promptTokens: 500_000 })
+  const platformHud = renderHud(hud)
+  updateHudState(hud, { model: 'gpt-6-sol', contextLimit: 1_000_000, promptTokens: 200_000 })
+  const cappedHud = renderHud(hud)
+  assert(
+    'platform capabilities: the HUD shows the platform window and still caps a non-platform one',
+    platformHud.includes('1.0M') && cappedHud.includes('272.0K') && !cappedHud.includes('1.0M'),
+    `${platformHud} | ${cappedHud}`,
+  )
+
+  // Store: the fields survive load and save; platform windows are not capped
+  // or re-detected; malformed values are dropped; visionProfileId is kept.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-caps-'))
+  try {
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { ...platformAlias, id: 'platform-main', supportsImages: false },
+        { ...platformAlias, id: 'platform-vision', model: 'vision-alias', supportsImages: true, maxOutputTokens: 'lots', capabilitiesSource: 'server' },
+        { ...nonPlatform, id: 'byok' },
+        { ...platformAlias, id: 'platform-no-window', contextLength: undefined },
+      ],
+    }), 'utf8')
+    const store = new ProviderStore(tmpDir)
+    const loaded = await store.load()
+    await store.save(loaded)
+    const reloaded = await store.load()
+    const main = store.getProfile(reloaded, 'platform-main')
+    const vision = store.getProfile(reloaded, 'platform-vision')
+    const byok = store.getProfile(reloaded, 'byok')
+    const refreshed = await store.refreshProfileContextLength('platform-main')
+    const noWindow = await store.refreshProfileContextLength('platform-no-window')
+    assert(
+      'platform capabilities: profile fields and visionProfileId survive load and save',
+      reloaded.visionProfileId === 'platform-vision' &&
+        main?.contextLength === 1_000_000 &&
+        main.maxOutputTokens === 12_345 &&
+        main.capabilitiesSource === 'platform' &&
+        main.supportsImages === false &&
+        refreshed?.contextLength === 1_000_000 &&
+        vision?.supportsImages === true &&
+        vision.maxOutputTokens === undefined &&
+        vision.capabilitiesSource === undefined &&
+        byok?.contextLength === GPT_5_6_CONTEXT_LENGTH &&
+        noWindow?.contextLength === undefined &&
+        resolveProfileContextLength(noWindow) === GPT_5_6_CONTEXT_LENGTH,
+      JSON.stringify({ visionProfileId: reloaded.visionProfileId, main, vision, byok, noWindow }),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+
+  // max output: the platform's maxOutputTokens replaces the name-based
+  // max_tokens on the Messages API, and a per-request limit only lowers it.
+  const bodies: Array<Record<string, unknown>> = []
+  let reply: unknown = {}
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      bodies.push(raw ? JSON.parse(raw) as Record<string, unknown> : {})
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(reply))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock max-output server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const userMessage = { id: 'u1', role: 'user' as const, content: 'hi', createdAt: new Date().toISOString() }
+    reply = { content: [{ type: 'text', text: 'ok' }], usage: {} }
+    await new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages', baseUrl }).complete([userMessage])
+    await new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages', baseUrl }).complete([userMessage], { maxOutputTokens: 1500 })
+    await new MessagesCompatibleProvider({ ...nonPlatform, protocol: 'messages', baseUrl }).complete([userMessage])
+    reply = { choices: [{ message: { content: 'ok' } }], usage: {} }
+    await new OpenAICompatibleProvider({ ...platformAlias, baseUrl }).complete([userMessage])
+    await new OpenAICompatibleProvider({ ...platformAlias, baseUrl, maxOutputTokens: 1000 }).complete([userMessage], { maxOutputTokens: 1500 })
+    assert(
+      'platform capabilities: maxOutputTokens replaces the name-based max_tokens and bounds per-request limits',
+      bodies[0]?.max_tokens === 12_345 &&
+        bodies[1]?.max_tokens === 1500 &&
+        bodies[2]?.max_tokens === 8_192 &&
+        bodies[3]?.max_tokens === undefined && bodies[3]?.max_completion_tokens === undefined &&
+        bodies[4]?.max_tokens === 1000,
+      JSON.stringify(bodies.map((b) => ({ max_tokens: b.max_tokens, max_completion_tokens: b.max_completion_tokens }))),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // runAgent sizes its context window from the active provider's platform
+  // window: a 1M-token platform model keeps more history than the default.
+  const runWithWindow = async (contextLength: number | undefined) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-window-'))
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'platform window smoke' })
+    for (let i = 0; i < 60; i += 1) {
+      session.messages.push({ id: `h${i}`, role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'x'.repeat(4_000)}`, createdAt: new Date().toISOString() })
+    }
+    await store.save(session)
+    const info: string[] = []
+    const provider: ChatProvider = {
+      contextLength,
+      async complete(): Promise<ProviderResponse> {
+        return { text: JSON.stringify({ reply: 'ok', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'continue', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 1,
+      profile: 'main',
+      onInfo: (message) => info.push(message),
+    })
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    const line = info.find((m) => m.startsWith('[context] included='))
+    return Number(/included=(\d+)/.exec(line ?? '')?.[1] ?? NaN)
+  }
+  const defaultIncluded = await runWithWindow(undefined)
+  const platformIncluded = await runWithWindow(1_000_000)
+  assert(
+    'platform capabilities: runAgent budgets its context by the platform window',
+    platformIncluded > defaultIncluded,
+    `default=${defaultIncluded} platform=${platformIncluded}`,
+  )
+}
+
+{
+  // Vision helper on the runAgent path (headless, web, workflows): a model
+  // that cannot see images gets a description from the vision profile.
+  const pngBytes = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const userImage = { data: pngBytes.toString('base64'), mediaType: 'image/png' as const, label: 'Image: screenshot.png' }
+  type MainCall = { images?: number; tools: string[]; messages: SessionMessage[] }
+  const runVision = async (options: {
+    helper: VisionHelper | null
+    images?: ImageAttachment[]
+    viewImage?: boolean
+    prompt?: string
+  }) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-helper-'))
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), pngBytes)
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'vision helper smoke' })
+    await store.save(session)
+    const mainCalls: MainCall[] = []
+    const provider: ChatProvider = {
+      supportsImages: false,
+      supportsNativeToolCalls: true,
+      async complete(messages, requestOptions): Promise<ProviderResponse> {
+        mainCalls.push({
+          images: requestOptions?.imageAttachments?.length,
+          tools: (requestOptions?.nativeFunctionTools ?? []).map((t) => t.name),
+          messages,
+        })
+        if (options.viewImage && mainCalls.length === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'It is a sign-in page.', done: true }), raw: null }
+      },
+    }
+    const result = await runAgent(session, options.prompt ?? 'What does this screenshot show?', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+      visionHelper: options.helper,
+      ...(options.images ? { imageAttachments: options.images } : {}),
+    })
+    const userText = session.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { result, mainCalls, userText, toolText }
+  }
+  const makeHelper = (behaviour: 'ok' | 'fail') => {
+    const calls: Array<{ images: number; maxOutputTokens?: number; prompt: string }> = []
+    const visionProvider: ChatProvider = {
+      supportsImages: true,
+      async complete(messages, requestOptions): Promise<ProviderResponse> {
+        calls.push({
+          images: requestOptions?.imageAttachments?.length ?? 0,
+          maxOutputTokens: requestOptions?.maxOutputTokens,
+          prompt: messages.map((m) => m.content).join('\n'),
+        })
+        if (behaviour === 'fail') throw new Error('vision gateway unavailable')
+        return { text: 'A sign-in form. Visible text: "Sign in", "Forgot password?". Blue button.', raw: null }
+      },
+    }
+    return { calls, helper: createVisionHelper(visionProvider, { label: 'platform-vision' }) }
+  }
+  const mainRequestHasImageParts = (calls: MainCall[]) => calls.some((call) => (call.images ?? 0) > 0)
+
+  {
+    const { calls, helper } = makeHelper('ok')
+    const run = await runVision({ helper, images: [userImage] })
+    const firstUser = run.mainCalls[0]?.messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n') ?? ''
+    assert(
+      'vision helper: supportsImages:false with a vision profile calls the helper once and injects the description',
+      calls.length === 1 &&
+        calls[0]!.images === 1 &&
+        calls[0]!.maxOutputTokens === 1500 &&
+        calls[0]!.prompt.includes('What does this screenshot show?') &&
+        /verbatim/.test(calls[0]!.prompt) &&
+        firstUser.includes('[Image 1 description by vision helper — the main model cannot see images]') &&
+        firstUser.includes('"Forgot password?"') &&
+        run.result.reply.includes('sign-in page'),
+      JSON.stringify({ calls: calls.map((c) => ({ images: c.images, max: c.maxOutputTokens })), firstUser: firstUser.slice(0, 300) }),
+    )
+    assert(
+      'vision helper: the main request carries no image parts',
+      !mainRequestHasImageParts(run.mainCalls),
+      JSON.stringify(run.mainCalls.map((c) => c.images)),
+    )
+  }
+
+  {
+    // The user attaches screenshot.png and the agent then views the same file:
+    // the second look is a cache hit, and view_image returns the description.
+    const { calls, helper } = makeHelper('ok')
+    const run = await runVision({ helper, images: [userImage], viewImage: true })
+    assert(
+      'vision helper: view_image is offered and returns the description instead of queueing the image',
+      run.mainCalls[0]?.tools.includes('view_image') === true &&
+        run.toolText.includes('description by vision helper') &&
+        run.toolText.includes('Forgot password?') &&
+        run.toolText.includes('<image_description n=') &&
+        run.toolText.includes('</image_description>') &&
+        run.toolText.includes('transcribed from an image by a vision helper') &&
+        !run.toolText.includes('attached to your next step') &&
+        !mainRequestHasImageParts(run.mainCalls),
+      JSON.stringify({ tools: run.mainCalls[0]?.tools.includes('view_image'), tool: run.toolText.slice(0, 300) }),
+    )
+    assert(
+      'vision helper: the same image is described once per run (cache hit by content hash)',
+      calls.length === 1,
+      `helper calls=${calls.length}`,
+    )
+  }
+
+  {
+    const { calls, helper } = makeHelper('fail')
+    const run = await runVision({ helper, images: [userImage] })
+    assert(
+      'vision helper: a helper failure leaves a clear note and the run continues',
+      calls.length === 1 &&
+        run.userText.includes('the attached image could not be read') &&
+        run.result.reply.includes('sign-in page') &&
+        !mainRequestHasImageParts(run.mainCalls),
+      run.userText.slice(0, 300),
+    )
+  }
+
+  {
+    const run = await runVision({ helper: null, images: [userImage, { ...userImage, label: 'Image: chart.jpg' }] })
+    assert(
+      'vision helper: without a helper the model gets a graceful note and the run succeeds',
+      run.userText.includes('The user attached 2 image(s) (file names: screenshot.png, chart.jpg) but this plan cannot read images. Tell the user briefly and continue with the text.') &&
+        run.result.reply.includes('sign-in page') &&
+        !mainRequestHasImageParts(run.mainCalls) &&
+        run.mainCalls.every((call) => !call.tools.includes('view_image')),
+      run.userText.slice(0, 300),
+    )
+  }
+
+  {
+    // Two images in one batch: one helper call, one labelled part per image.
+    const calls: number[] = []
+    const helper = createVisionHelper({
+      supportsImages: true,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        calls.push(requestOptions?.imageAttachments?.length ?? 0)
+        return { text: '### Image 1\nA bar chart of sales.\n\n### Image 2\nA photo of a cat.', raw: null }
+      },
+    })
+    const run = await runVision({ helper, images: [userImage, { data: 'R0lGODlh', mediaType: 'image/gif', label: 'Image: cat.gif' }] })
+    assert(
+      'vision helper: a batch of images is described in one call and labelled per image',
+      calls.length === 1 && calls[0] === 2 &&
+        /\[Image 1 description by vision helper[^\]]*\]\n<image_description n="1" source="vision-helper">\nA bar chart of sales\.\n<\/image_description>/.test(run.userText) &&
+        /\[Image 2 description by vision helper[^\]]*\]\n<image_description n="2" source="vision-helper">\nA photo of a cat\.\n<\/image_description>/.test(run.userText),
+      run.userText.slice(0, 400),
+    )
+  }
+}
+
+{
+  // End to end through the provider store: `artemis execute --image` on a
+  // text-only platform model with visionProfileId -> platform-vision.
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      requests.push(body)
+      const content = body.model === 'vision-alias'
+        ? 'A terminal window showing the text "build passed".'
+        : 'The screenshot shows a passing build.'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: body.model, choices: [{ message: { content } }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-headless-'))
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock vision server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, contextLength: 200_000, maxOutputTokens: 8192, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }), 'utf8')
+    fs.writeFileSync(path.join(tmpDir, 'build.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    const result = await runHeadlessAgent(tmpDir, 'Did the build pass?', {
+      permissionMode: 'read-only',
+      maxTurns: 1,
+      imagePaths: ['build.png'],
+    })
+    const visionRequests = requests.filter((r) => r.model === 'vision-alias')
+    const mainRequests = requests.filter((r) => r.model === 'gpt-6-sol')
+    const mainRaw = JSON.stringify(mainRequests)
+    assert(
+      'vision helper (--image, headless/web): resolved from visionProfileId, called once, main request text-only with the description',
+      visionRequests.length === 1 &&
+        JSON.stringify(visionRequests[0]).includes('image_url') &&
+        visionRequests[0]?.max_tokens === 1500 &&
+        mainRequests.length >= 1 &&
+        !mainRaw.includes('image_url') &&
+        !mainRaw.includes('omitted: this model cannot see images') &&
+        mainRaw.includes('Image 1 description by vision helper') &&
+        mainRaw.includes('build passed') &&
+        result.reply.includes('passing build'),
+      JSON.stringify({ vision: visionRequests.length, main: mainRequests.length, reply: result.reply, raw: mainRaw.slice(0, 300) }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Bridge / pasted images go through think(): the same vision helper turns
+  // them into text for a text-only main model.
+  const requests: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      requests.push(body)
+      const content = body.model === 'vision-alias'
+        ? '一张收据，文字：“合计 42 元”。'
+        : '收据上的合计是 42 元。'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ model: body.model, choices: [{ message: { content } }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-bridge-'))
+  const originalCwd = process.cwd()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock vision bridge server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }), 'utf8')
+    process.chdir(tmpDir)
+    resetSession()
+    applyProviderOverrides({})
+    const result = await think('这张收据合计多少？', () => {}, {
+      cwd: tmpDir,
+      permissionMode: 'accept-all',
+      disableNativeTools: true,
+      imageAttachments: [{ data: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64'), mediaType: 'image/png' }],
+    })
+    const visionRequests = requests.filter((r) => r.model === 'vision-alias')
+    const mainRaw = JSON.stringify(requests.filter((r) => r.model === 'gpt-6-sol'))
+    assert(
+      'vision helper (bridge think()): the helper describes the pasted image and the main request is text-only',
+      visionRequests.length === 1 &&
+        JSON.stringify(visionRequests[0]).includes('image_url') &&
+        JSON.stringify(visionRequests[0]).includes('这张收据合计多少') &&
+        !mainRaw.includes('image_url') &&
+        mainRaw.includes('Image 1 description by vision helper') &&
+        mainRaw.includes('合计 42 元') &&
+        result.reply.includes('42'),
+      JSON.stringify({ vision: visionRequests.length, reply: result.reply, raw: mainRaw.slice(0, 300) }),
+    )
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sub-agents: a text-only worker never receives image parts. view_image goes
+  // through the vision helper when one exists, otherwise through the main
+  // profile (which can see images).
+  const runSubAgent = async (helper: VisionHelper | null) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-vision-subagent-'))
+    fs.writeFileSync(path.join(tmpDir, 'screenshot.png'), Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      specialistProfileId: 'worker',
+      profiles: [{ id: 'worker', protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model: 'text-worker', supportsImages: false }],
+    }), 'utf8')
+    const workerImages: number[] = []
+    const mainImages: number[] = []
+    let workerCalls = 0
+    const worker: ChatProvider = {
+      supportsImages: false,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        workerCalls += 1
+        workerImages.push(requestOptions?.imageAttachments?.length ?? 0)
+        if (workerCalls === 1) {
+          return { text: JSON.stringify({ reply: 'Let me look.', done: false, actions: [{ type: 'view_image', path: 'screenshot.png' }] }), raw: null }
+        }
+        return { text: JSON.stringify({ reply: 'Reviewed.', done: true }), raw: null }
+      },
+    }
+    const main: ChatProvider = {
+      supportsImages: true,
+      async complete(_messages, requestOptions): Promise<ProviderResponse> {
+        mainImages.push(requestOptions?.imageAttachments?.length ?? 0)
+        return { text: JSON.stringify({ reply: 'Reviewed with the image.', done: true }), raw: null }
+      },
+    }
+    const router = await createProviderRouter({ cwd: tmpDir, mainProvider: main, createProviderFromProfile: () => worker })
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'vision sub-agent smoke' })
+    await store.save(session)
+    await runAgent(session, 'Review the screenshot.', {
+      cwd: tmpDir,
+      provider: main,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'reviewer',
+      resolveProvider: router.resolveProvider,
+      visionHelper: helper,
+    })
+    const toolText = session.messages.filter((m) => m.role === 'tool').map((m) => m.content).join('\n')
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    return { workerImages, mainImages, toolText }
+  }
+  const helperCalls: number[] = []
+  const withHelper = await runSubAgent(createVisionHelper({
+    supportsImages: true,
+    async complete(_messages, requestOptions): Promise<ProviderResponse> {
+      helperCalls.push(requestOptions?.imageAttachments?.length ?? 0)
+      return { text: 'A dashboard with a red error banner.', raw: null }
+    },
+  }))
+  assert(
+    'vision helper (sub-agent): a text-only worker uses the helper, and neither worker nor main gets image parts',
+    helperCalls.length === 1 &&
+      withHelper.toolText.includes('red error banner') &&
+      withHelper.workerImages.every((n) => n === 0) &&
+      withHelper.mainImages.every((n) => n === 0),
+    JSON.stringify({ helperCalls, worker: withHelper.workerImages, main: withHelper.mainImages }),
+  )
+  const withoutHelper = await runSubAgent(null)
+  assert(
+    'vision helper (sub-agent): without a helper the viewed image goes to the main profile, never to the text-only worker',
+    withoutHelper.workerImages.every((n) => n === 0) &&
+      withoutHelper.mainImages.includes(1),
+    JSON.stringify({ worker: withoutHelper.workerImages, main: withoutHelper.mainImages }),
+  )
+}
+
+{
+  // max_tokens is bounded by the room left in the context window, because
+  // some providers reject prompt + max_tokens above the window.
+  const bodies: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+      bodies.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      // One reply that both the Messages and the chat/completions parsers accept.
+      res.end(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], choices: [{ message: { content: 'ok' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock window server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const big = { id: 'u1', role: 'user' as const, content: 'x'.repeat(32_000), createdAt: new Date().toISOString() }
+    const small = { ...big, content: 'hi' }
+    const platform = { baseUrl, apiKey: 'k', model: 'gpt-6-sol', contextLength: 20_000, maxOutputTokens: 128_000, capabilitiesSource: 'platform' as const }
+    await new MessagesCompatibleProvider({ ...platform, protocol: 'messages' }).completeStream([big], () => {})
+    await new MessagesCompatibleProvider({ ...platform, protocol: 'messages' }).completeStream([small], () => {})
+    await new OpenAICompatibleProvider({ ...platform, protocol: 'openai' }).complete([big], { maxOutputTokens: 128_000 })
+    const [bigMessages, smallMessages, bigOpenAI] = bodies.map((b) => Number(b.max_tokens))
+    assert(
+      'platform capabilities: max_tokens = min(maxOutputTokens, window − estimated prompt − margin)',
+      bigMessages! >= 256 && bigMessages! <= 20_000 - 8_000 - 1_024 &&
+        smallMessages! <= 20_000 - 1_024 && smallMessages! > bigMessages! &&
+        bigOpenAI === bigMessages,
+      JSON.stringify({ bigMessages, smallMessages, bigOpenAI }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Platform profiles always send plain max_tokens (the gateway translates it
+  // per upstream); other profiles keep the name rule for OpenAI reasoning models.
+  const bodies: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock output-param server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const userMessage = { id: 'u1', role: 'user' as const, content: 'hi', createdAt: new Date().toISOString() }
+    await new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-5.4', capabilitiesSource: 'platform' }).complete([userMessage], { maxOutputTokens: 1500 })
+    await new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-5.4' }).complete([userMessage], { maxOutputTokens: 1500 })
+    assert(
+      'platform capabilities: platform profiles send plain max_tokens even for a reasoning-model alias',
+      bodies[0]?.max_tokens === 1500 && bodies[0]?.max_completion_tokens === undefined &&
+        bodies[1]?.max_completion_tokens === 1500 && bodies[1]?.max_tokens === undefined,
+      JSON.stringify(bodies.map((b) => ({ max_tokens: b.max_tokens, max_completion_tokens: b.max_completion_tokens }))),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // A 413 makes the provider retry without the images; the helper must not
+  // use (or cache) a description of a request whose images were dropped.
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      requests += 1
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (raw.includes('image_url')) {
+        res.writeHead(413, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'request too large' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'I cannot see any image.' } }], usage: {} }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock 413 server failed to bind.')
+    const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: `http://127.0.0.1:${address.port}`, apiKey: 'k', model: 'vision-alias', supportsImages: true })
+    const helper = createVisionHelper(provider)
+    const image = { data: 'iVBORw0KGgo=', mediaType: 'image/png' as const }
+    const first = await helper.describe([image], { userText: 'what is it?' })
+    const second = await helper.describe([image], { userText: 'what is it?' })
+    assert(
+      'vision helper: a reply after a 413 image strip is a failure and is never cached',
+      first[0]?.ok === false && /too large/.test(first[0].error) && second[0]?.ok === false && requests === 4,
+      JSON.stringify({ first, second, requests }),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // brain: a --model override drops all four platform fields, and a cached
+  // lead provider is rebuilt when providers.json changes (a long-lived bridge
+  // sees a plan change that flips supportsImages).
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-brain-platform-'))
+  const originalCwd = process.cwd()
+  const providersPath = path.join(tmpDir, '.artemis', 'providers.json')
+  const writeProviders = (supportsImages: boolean, mtime: Date) => {
+    fs.writeFileSync(providersPath, JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      profiles: [{ id: 'platform-main', protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model: 'gpt-6-sol', supportsImages, contextLength: 1_000_000, maxOutputTokens: 32_000, capabilitiesSource: 'platform' }],
+    }), 'utf8')
+    fs.utimesSync(providersPath, mtime, mtime)
+  }
+  try {
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    writeProviders(true, new Date(Date.now() - 60_000))
+    process.chdir(tmpDir)
+    switchModel(undefined)
+    applyProviderOverrides({ model: 'deepseek-chat' })
+    const overridden = await getLeadProvider()
+    switchModel(undefined)
+    applyProviderOverrides({})
+    const before = await getLeadProvider()
+    writeProviders(false, new Date())
+    const after = await getLeadProvider()
+    assert(
+      'platform capabilities: a --model override clears supportsImages, contextLength, maxOutputTokens and capabilitiesSource',
+      overridden.config.model === 'deepseek-chat' &&
+        overridden.config.supportsImages === undefined &&
+        overridden.config.contextLength === undefined &&
+        overridden.config.maxOutputTokens === undefined &&
+        overridden.config.capabilitiesSource === undefined &&
+        overridden.provider.supportsImages === false,
+      JSON.stringify(overridden.config),
+    )
+    assert(
+      'platform capabilities: brain re-reads its provider when providers.json changes (stale supportsImages)',
+      before.provider.supportsImages === true && after.provider.supportsImages === false && before.provider !== after.provider,
+      `before=${before.provider.supportsImages} after=${after.provider.supportsImages}`,
+    )
+  } finally {
+    process.chdir(originalCwd)
+    switchModel(undefined)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
 // ── MCP stdio transport ───────────────────────────────────────────────────────
 
 {
@@ -9866,6 +11515,133 @@ process.stdin.on('data', (c) => {
     await closeCachedMcpClients()
     fs.rmSync(dir, { recursive: true, force: true })
   }
+}
+
+{
+  // The retired "Odin" skill subsystem must stay gone: no tool in any table,
+  // and a leftover odin.json in the data root is neither read nor touched.
+  const retired = 'odin'
+  const retiredToolPattern = new RegExp(`\\b${retired}_`, 'i')
+  const retiredTools = ['search_skills', 'execute_task', 'fix_skill', 'upload_skill', 'import_cloud_skills'].map((name) => `${retired}_${name}`)
+  const profiles = ['main', 'planner', 'researcher', 'builder', 'reviewer', 'brainstormer', 'arbiter', 'architect', 'designer', 'qa'] as const
+  const nameLists: Record<string, string[]> = {
+    actionTypes: [...ALL_AGENT_ACTION_TYPES],
+    runtimeManaged: [...RUNTIME_MANAGED_AGENT_ACTION_TYPES],
+    providerCallable: getProviderCallableActionTypes(),
+    providerNative: buildProviderNativeFunctionTools().map((tool) => tool.name),
+    directNative: buildDirectNativeFunctionTools().map((tool) => tool.name),
+    ...Object.fromEntries(profiles.map((profile) => [`profile:${profile}`, getAllowedActionTypesForProfile(profile)])),
+  }
+  const leaks = Object.entries(nameLists).flatMap(([list, names]) =>
+    names.filter((name) => retiredToolPattern.test(name)).map((name) => `${list}:${name}`),
+  )
+  assert('retired skill tools: no tool list, profile, or native projection exposes them', leaks.length === 0, leaks.join(', '))
+  assert(
+    'retired skill tools: the detailed tool manifest does not mention them',
+    !new RegExp(`\\b${retired}\\b`, 'i').test(renderDetailedToolManifest()) && !retiredToolPattern.test(renderDetailedToolManifest()),
+  )
+  assert(
+    'retired skill tools: registry has no definition and validation rejects them as unknown',
+    retiredTools.every((type) => getToolDefinition(type) === undefined && isRuntimeManagedTool(type) === false) &&
+      retiredTools.every((type) => validateToolAction({ type, query: 'x', task: 'x', skillId: 'x' }).includes('Unknown tool type')),
+  )
+  const nativeCall = mapProviderNativeToolCallToAction({
+    callId: 'retired-call',
+    name: retiredTools[0]!,
+    arguments: '{"query":"x"}',
+  })
+  assert('retired skill tools: a provider-native call to one is rejected', nativeCall.ok === false, JSON.stringify(nativeCall))
+  assert(
+    `retired skill CLI: parseArgs(['${retired}']) behaves like any unknown command`,
+    eq(
+      { ...parseArgs([retired, 'list']), prompt: undefined, promptArgs: undefined },
+      { ...parseArgs(['zz-not-a-command', 'list']), prompt: undefined, promptArgs: undefined },
+    ) &&
+      parseArgs([retired, 'list']).command === 'chat' &&
+      parseArgs([retired, 'list']).prompt === `${retired} list`,
+    JSON.stringify(parseArgs([retired, 'list'])),
+  )
+
+  // A corrupt odin.json left in the data root by an older release must not
+  // break runAgent or a workflow run, and must be left exactly as it was.
+  const tmpDir = path.join(os.tmpdir(), `artemis-retired-skill-store-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const dataRoot = resolveDataRootDir(tmpDir)
+  fs.mkdirSync(dataRoot, { recursive: true })
+  const legacyFile = path.join(dataRoot, `${retired}.json`)
+  const corrupt = '{"version":1,"skills":[{"id":"x", this is not json'
+  fs.writeFileSync(legacyFile, corrupt)
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'retired skill store smoke' })
+  await store.save(session)
+  const systemTexts: string[] = []
+  const infos: string[] = []
+  const provider: ChatProvider = {
+    async complete(messages, options): Promise<ProviderResponse> {
+      systemTexts.push(JSON.stringify({ messages, options }))
+      return { text: JSON.stringify({ reply: 'Done without skill hints.', done: true }), raw: null }
+    },
+  }
+  let runError: unknown
+  let reply = ''
+  try {
+    const result = await runAgent(session, 'search skills for a deploy task', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+      onInfo: (message) => infos.push(message),
+    })
+    reply = result.reply
+  } catch (error) {
+    runError = error
+  }
+  assert(
+    'retired skill store: runAgent still runs with a corrupt odin.json in the data root',
+    runError === undefined && reply.includes('Done without skill hints'),
+    runError instanceof Error ? runError.message : reply,
+  )
+  assert(
+    'retired skill store: no skill-hint section or info line reaches the run',
+    systemTexts.length > 0 &&
+      systemTexts.every((text) => !new RegExp(`\\b${retired}\\b`, 'i').test(text)) &&
+      infos.every((message) => !new RegExp(`\\b${retired}\\b`, 'i').test(message)),
+    infos.join(' | '),
+  )
+
+  let workflowError: unknown
+  let workflowReply = ''
+  try {
+    const result = await runWorkflowMode('direct', session, 'one more simple step', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+    })
+    workflowReply = result.reply
+  } catch (error) {
+    workflowError = error
+  }
+  assert(
+    'retired skill store: a direct workflow run completes with a corrupt odin.json present',
+    workflowError === undefined && workflowReply.includes('Done without skill hints'),
+    workflowError instanceof Error ? workflowError.message : workflowReply,
+  )
+  const contextWithCwd = await buildContextWindow(session, 'main', tmpDir)
+  const contextWithoutCwd = await buildContextWindow(session, 'main')
+  assert(
+    'retired skill store: buildContextWindow gives the same result with or without a cwd',
+    eq(contextWithCwd, contextWithoutCwd),
+  )
+  assert(
+    'retired skill store: the legacy odin.json is left untouched',
+    fs.existsSync(legacyFile) && fs.readFileSync(legacyFile, 'utf8') === corrupt,
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────

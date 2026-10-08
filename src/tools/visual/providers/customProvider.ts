@@ -1,6 +1,8 @@
 import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import os from 'node:os'
 import path from 'node:path'
+import { ImageApiError } from '../imageGenerationFailure.js'
+import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type {
   GenerationResult,
@@ -137,7 +139,7 @@ export class CustomProvider implements VisualProvider {
         raw = await res.text()
       }
       if (!res.ok) {
-        throw new Error(`Custom image generation failed (HTTP ${res.status}): ${raw.slice(0, 800)}`)
+        throw new ImageApiError(`Custom image generation failed (HTTP ${res.status}): ${raw.slice(0, 800)}`, res.status)
       }
 
       let payload: CustomImageResponse
@@ -155,7 +157,7 @@ export class CustomProvider implements VisualProvider {
       const buffer = item.b64_json
         ? Buffer.from(item.b64_json, 'base64')
         : item.url
-          ? await downloadUrl(item.url)
+          ? await downloadUrl(item.url, baseUrl)
           : null
       if (!buffer) {
         throw new Error('Custom image response contained neither b64_json nor url.')
@@ -182,6 +184,8 @@ export class CustomProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof ImageApiError ? error.status : undefined,
+        failureStage: error instanceof ImageApiError ? error.stage : undefined,
         generationTime: Date.now() - startedAt,
       }
     }
@@ -372,14 +376,7 @@ export class CustomProvider implements VisualProvider {
         throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const downloadRes = await fetch(videoUrl, {
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
-      })
-      if (!downloadRes.ok) {
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
-      }
-
-      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const buffer = await downloadVideoUrl(videoUrl, baseUrl, params.abortSignal)
       const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
       await writeFileEnsured(videoPath, buffer)
 
@@ -590,14 +587,7 @@ export class CustomProvider implements VisualProvider {
         throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const downloadRes = await fetch(videoUrl, {
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
-      })
-      if (!downloadRes.ok) {
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
-      }
-
-      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const buffer = await downloadVideoUrl(videoUrl, baseUrl, params.abortSignal)
       const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
       await writeFileEnsured(videoPath, buffer)
 
@@ -768,12 +758,27 @@ function normalizeRequiredBaseUrl(raw: string | undefined, assetKind: 'image' | 
   return normalizeCustomVisualBaseUrlForTest(raw, assetKind)
 }
 
-async function downloadUrl(url: string): Promise<Buffer> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
-  if (!res.ok) {
-    throw new Error(`download failed: HTTP ${res.status}`)
+async function downloadVideoUrl(url: string, baseUrl: string | undefined, signal?: AbortSignal): Promise<Buffer> {
+  try {
+    return await downloadProviderAsset(url, {
+      timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+      allowLoopback: baseUrlIsLoopback(baseUrl),
+      signal,
+    })
+  } catch (error) {
+    throw new Error(`Custom video download failed: ${error instanceof Error ? error.message : String(error)}`)
   }
-  return Buffer.from(await res.arrayBuffer())
+}
+
+async function downloadUrl(url: string, baseUrl?: string): Promise<Buffer> {
+  try {
+    return await downloadProviderAsset(url, {
+      timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+      allowLoopback: baseUrlIsLoopback(baseUrl),
+    })
+  } catch (error) {
+    throw new ImageApiError(`Image download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
+  }
 }
 
 async function writeFileEnsured(filePath: string, buffer: Buffer): Promise<void> {

@@ -9,6 +9,7 @@ import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { homedir } from 'node:os'
 import type { VisualModelConfig } from '../../../providers/types.js'
+import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import type {
   GenerationResult,
   VideoGenerationParams,
@@ -183,11 +184,16 @@ export class GoogleProvider implements VisualProvider {
       if (!videoUri) throw new Error('Google Veo did not return a video within the timeout.')
 
       const downloadUrl = videoUri.includes('?') ? `${videoUri}&key=${encodeURIComponent(apiKey)}` : `${videoUri}?key=${encodeURIComponent(apiKey)}`
-      const downloadResponse = await fetch(downloadUrl, { signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)) })
-      if (!downloadResponse.ok) {
-        throw new Error(`Failed to download Veo video: ${downloadResponse.status}`)
+      let buffer: Buffer
+      try {
+        buffer = await downloadProviderAsset(downloadUrl, {
+          timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+          allowLoopback: baseUrlIsLoopback(this.config.video.baseUrl),
+          signal: params.abortSignal,
+        })
+      } catch (error) {
+        throw new Error(`Failed to download Veo video: ${error instanceof Error ? error.message : String(error)}`)
       }
-      const buffer = Buffer.from(await downloadResponse.arrayBuffer())
       const filename = `veo-${Date.now()}.mp4`
       const assetPath = deriveOutputPath(filename)
       await writeFile(assetPath, buffer)

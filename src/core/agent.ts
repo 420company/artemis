@@ -23,6 +23,7 @@ import {
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
+import { normalizeReferenceImagesArg } from '../tools/visual/referenceImages.js';
 import { PermissionManager } from '../security/permissions.js';
 import {
   mapPermissionModeToToolAccess,
@@ -72,18 +73,18 @@ import {
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
 import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
+import {
+  appendImageNote,
+  describeSingleImage,
+  loadVisionHelper,
+  memoizeVisionHelper,
+  prepareUserImagesForModel,
+  anyAbortSignal,
+  resolveImageRoute,
+  type VisionHelper,
+} from './visionHelper.js';
 import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
-import {
-  buildOdinRuntimeSection,
-  executeOdinFixSkill,
-  executeOdinSearchSkills,
-  executeOdinUploadSkill,
-  importOdinCloudSkills,
-  recordOdinWorkflowFailure,
-  recordOdinWorkflowSuccess,
-  resolveOdinSkillContext,
-} from '../odin/runtime.js';
 import {
   McpCallCancelledError,
   McpDependencyError,
@@ -233,6 +234,24 @@ function getLooseStringArrayArg(
     }
   }
 
+  return undefined;
+}
+
+/** Reference images for generate_image; XML-style dialects deliver the array as a JSON string. */
+function getLooseReferenceImagesArg(args: Record<string, unknown>): string[] | undefined {
+  for (const key of [
+    'referenceImages',
+    'reference_images',
+    'referenceImage',
+    'reference_image',
+    'referenceImagePaths',
+    'referenceImageUrls',
+    'images',
+    'image',
+  ]) {
+    const items = normalizeReferenceImagesArg(getLooseArgValue(args, key));
+    if (items.length > 0) return items;
+  }
   return undefined;
 }
 
@@ -515,6 +534,7 @@ function buildActionFromLooseArgs(
         ),
         watermark: getLooseBooleanArg(args, 'watermark'),
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
+        referenceImages: getLooseReferenceImagesArg(args),
       };
     }
     case 'mcp_call_tool': {
@@ -1600,6 +1620,27 @@ function taskLikelyRequiresWorkspaceMutation(input: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
+// The mutation heuristic above also matches plain writing requests ("write a
+// poem", "create a packing list", "draft an email"), which the model answers
+// in chat. The completion checklist only treats a request as a file task when
+// it names or implies a workspace artifact: a path or file name, or a code,
+// site or project noun.
+function requestNamesWorkspaceArtifact(input: string): boolean {
+  const normalized = extractOriginalRequestFromExecutionPrompt(input);
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    // A path or a file name with an extension: /srv/site, ./notes, a/b/c, README.md
+    /(?:^|[\s"'`(])(?:~|\.{1,2})?\/[\w.-]+/,
+    /\b[\w-]+\/[\w-]+\/[\w./-]+/,
+    /\b[\w-]+\.(?:[jt]sx?|mjs|cjs|json|ya?ml|toml|md|mdx|txt|csv|html?|css|scss|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|sh|sql|xml|svg|png|jpe?g|webp|gif|pdf|docx?|xlsx?|pptx?|env|lock|ini|cfg|conf)\b/i,
+    /\b(?:files?|folders?|director(?:y|ies)|repo(?:sitory)?|codebase|projects?|code|source|scripts?|functions?|class(?:es)?|modules?|components?|packages?|librar(?:y|ies)|tests?|unit tests?|endpoints?|api|server|database|schema|migrations?|config(?:uration)?|dockerfile|makefile|readme|commit|branch|pull request|bug|build|deploy(?:ment)?|website|web ?site|web ?page|landing page|web ?app|app|application|frontend|backend|cli|plugin|extension|workspace|desktop)\b/i,
+    /(?:文件|目录|文件夹|项目|仓库|代码|源码|脚本|函数|组件|模块|接口|服务器|数据库|配置|测试|部署|网站|网页|页面|前端|后端|应用|程序|插件|工作区|桌面)/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 function isWorkspaceVerificationFollowupAction(action: AgentAction): boolean {
   switch (action.type) {
     case 'list_files':
@@ -1818,16 +1859,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `delegate_task role=${action.role} task=${truncate(action.task, 120)}`;
     case 'approve_builder_execution':
       return `approve_builder_execution session=${action.sessionId}`;
-    case 'odin_search_skills':
-      return `odin_search_skills query=${truncate(action.query, 120)} scope=${action.scope ?? 'all'}`;
-    case 'odin_execute_task':
-      return `odin_execute_task task=${truncate(action.task, 120)}`;
-    case 'odin_fix_skill':
-      return `odin_fix_skill skillId=${action.skillId}`;
-    case 'odin_upload_skill':
-      return `odin_upload_skill skillId=${action.skillId} visibility=${action.visibility ?? 'local'}`;
-    case 'odin_import_cloud_skills':
-      return `odin_import_cloud_skills query=${action.query ?? ''} limit=${action.limit ?? 10}`;
     case 'generate_image':
       return `generate_image model=${action.model ?? 'seedream-5-0-260128'} prompt=${truncate(action.prompt, 120)}`;
     case 'generate_video':
@@ -1840,8 +1871,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
-    case 'request_freya_visual_asset':
-      return `request_freya_visual_asset type=${action.assetType} style=${action.preferredStyle ?? 'default'} context=${truncate(action.contextDescription, 120)}`;
     case 'agent':
       const agentSummary = `agent action=${action.action}`;
       if (action.id) {
@@ -3214,8 +3243,9 @@ const MAX_PARALLEL_DELEGATE_TASKS = 4;
 // the run ends with an honest message instead of looping to maxTurns.
 const MAX_VISUAL_CHECKLIST_REMINDERS = 2;
 const MAX_TERMINAL_FAILURE_REMINDERS = 2;
-// The workspace-mutation heuristic also matches plain chat requests ("write a
-// poem", "create a packing list"), so its reminder is bounded too.
+// The workspace-mutation guard only runs for requests that name a workspace
+// artifact (requestNamesWorkspaceArtifact). It and the named-file checklists
+// remind at most this many times.
 const MAX_MUTATION_EVIDENCE_REMINDERS = 2;
 
 type RuntimeCompletionChecklist = {
@@ -3277,6 +3307,9 @@ function buildRuntimeCompletionChecklist(
   // False when this run cannot edit files at all (read-only mode): the
   // checklist must not demand changes it has no tool to make.
   canEditWorkspace = true,
+  // True when the run is already about workspace work (a workflow run, or a
+  // session that has changed files), so a request needs no artifact noun.
+  workspaceContext = false,
 ): RuntimeCompletionChecklist {
   const canOwnWorkspaceMutation =
     canEditWorkspace &&
@@ -3285,7 +3318,9 @@ function buildRuntimeCompletionChecklist(
 
   return {
     requiresWorkspaceMutation:
-      canOwnWorkspaceMutation && taskLikelyRequiresWorkspaceMutation(userInput),
+      canOwnWorkspaceMutation &&
+      taskLikelyRequiresWorkspaceMutation(userInput) &&
+      (workspaceContext || requestNamesWorkspaceArtifact(userInput)),
     requiresLocalImageGeneration: canOwnWorkspaceMutation && (visualPolicy?.imageRequired ?? false),
     requiresLocalVideoGeneration: canOwnWorkspaceMutation && (visualPolicy?.videoRequired ?? false),
     imageGenerationObserved: false,
@@ -3674,6 +3709,9 @@ const CHILD_RUN_IMAGE_RESET = {
 /** Prompt note for models that cannot see images (view_image stays in the static tool manifest). */
 const VIEW_IMAGE_UNAVAILABLE_SECTION =
   'Image input: the current model cannot see images, so view_image is unavailable in this session. Do not call it; learn about image files with other tools instead.';
+/** Prompt note for a text-only model whose view_image goes through the vision helper. */
+const VIEW_IMAGE_HELPER_SECTION =
+  'Image input: the current model cannot see images. view_image still works: it returns a detailed text description of the image written by a vision helper model.';
 
 export type RunAgentOptions = {
   cwd: string;
@@ -3719,6 +3757,11 @@ export type RunAgentOptions = {
    * images never outlive the run or reach another session.
    */
   viewedImages?: ViewedImageQueue;
+  /**
+   * Describes images for a model that cannot see them. Undefined: resolved
+   * from the provider store's visionProfileId when first needed; null: none.
+   */
+  visionHelper?: VisionHelper | null;
   /**
    * Absolute file paths to reference images for the Nidhogg visual critic (Phase 2).
    * Forwarded to NidhoggConfig.images when the workflow mode is 'nidhogg'.
@@ -4937,148 +4980,6 @@ You can continue executing your current tasks. The background workflow will run 
         );
       }
     }
-    case 'request_freya_visual_asset': {
-      // Legacy interactive flow: it is no longer offered to the model
-      // (generate_image / generate_video / generate_long_video replace it) and
-      // it needs a terminal menu, so without an interactive terminal (e.g.
-      // headless `artemis execute`) it fails fast instead of blocking.
-      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
-        return buildRuntimeManagedFailure(
-          'freya_visual_asset_unavailable',
-          'request_freya_visual_asset is not available in this session (it needs an interactive terminal menu). Use generate_image for images, generate_video for short videos, or generate_long_video for long-form video instead.',
-          {
-            retryable: false,
-          },
-        );
-      }
-      try {
-        const { showFreyaMenu } = await import('../cli/freyaPrompt.js')
-        const { FreyaVisualAgent } = await import('../agents/freyaAgent.js')
-        const { FreyaSearch } = await import('../tools/visual/freyaSearch.js')
-        const { ProviderStore } = await import('../providers/store.js')
-
-        // Get current visual model config
-        const providerStore = new ProviderStore(options.cwd)
-        const storeData = await providerStore.load()
-        const visualConfig = providerStore.getVisualProfile(storeData)
-
-        // Show Freya menu and get user choice
-        const menuResult = await showFreyaMenu(action, undefined, 'en', {
-          messages: session.messages,
-          astState: {},
-          taskContext: {}
-        })
-
-        switch (menuResult.assetPath) {
-          case 'configure':
-            // Never exit the process mid-run: report back so the session
-            // can continue (or the user can configure and retry).
-            options.onInfo?.('[log:info] Freya: 请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重试。')
-            return buildRuntimeManagedFailure(
-              'freya_visual_model_configuration_requested',
-              'The user chose to configure the visual model. Ask them to run /config visual (or artemis config visual) and retry; meanwhile use generate_image or generate_video directly.',
-              {
-                retryable: false,
-              },
-            );
-
-
-          case 'generate':
-            if (!visualConfig?.enabled) {
-              options.onInfo?.('[log:warn] ⚠️ Freya: 视觉模型尚未配置。请运行 /config visual（或 artemis config visual）进行配置。')
-              return buildRuntimeManagedFailure(
-                'freya_visual_model_not_configured',
-                'Visual model not configured. Please run /config visual (or artemis config visual) first.',
-                {
-                  retryable: false,
-                },
-              );
-            }
-
-            const agent = new FreyaVisualAgent(visualConfig)
-            const expandedPrompt = await agent.expandPrompt(action.contextDescription, action.assetType)
-            const generationResult = await agent.generateAsset(expandedPrompt, action.assetType)
-            
-            if (generationResult.success && generationResult.assetPath) {
-              return {
-                ok: true,
-                output: `Visual asset generated successfully: ${generationResult.assetPath}`
-              }
-            }
-            return buildRuntimeManagedFailure(
-              'freya_visual_generation_failed',
-              `Visual asset generation failed: ${generationResult.error ?? 'unknown error'}`,
-              {
-                retryable: true,
-              },
-            );
-
-          case 'search': {
-            const expandedSearchPrompt = await (new FreyaVisualAgent(visualConfig || {
-              enabled: false,
-              image: {
-                provider: 'mock',
-                apiKey: '',
-                baseUrl: '',
-                model: 'mock',
-                defaultParams: {
-                  size: '2K',
-                  quality: 'standard',
-                  style: 'realistic',
-                  watermark: false
-                }
-              },
-              video: {
-                enabled: false,
-                provider: 'mock',
-                apiKey: '',
-                baseUrl: '',
-                model: 'mock',
-                defaultParams: {
-                  duration: '10s',
-                  resolution: '1080p',
-                  quality: 'standard',
-                  style: 'realistic',
-                  format: 'mp4',
-                  framerate: '30fps'
-                }
-              }
-            })).expandPrompt(action.contextDescription, action.assetType)
-
-            const searchDestPath = `.artemis/assets/searched_${Date.now()}.${action.assetType === 'video' ? 'mp4' : 'png'}`
-            const searchResult = await FreyaSearch.deepSearchSimilarImage(expandedSearchPrompt, searchDestPath)
-            
-            if (searchResult.success && searchResult.downloadedPath) {
-              return {
-                ok: true,
-                output: `Visual asset searched and downloaded successfully: ${searchResult.downloadedPath}`
-              }
-            }
-            return buildRuntimeManagedFailure(
-              'freya_visual_search_failed',
-              `Visual asset search failed: ${searchResult.error ?? 'unknown error'}`,
-              {
-                retryable: true,
-              },
-            );
-          }
-
-          case 'cancel':
-          default:
-            return {
-              ok: true,
-              output: 'User cancelled visual generation. Please continue without the visual asset.'
-            }
-        }
-      } catch (error) {
-        const message = `Freya visual asset request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-        return buildRuntimeManagedFailure('freya_visual_asset_failed', message, {
-          retryable: true,
-        });
-      }
-    }
     case 'delegate_task':
       if (action.role === 'builder') {
         await recordWorkflowEntry(session, options, 'Builder Task Assigned', [
@@ -5205,91 +5106,6 @@ You can continue executing your current tasks. The background workflow will run 
             summary: specialist.result.reply,
         }),
       };
-    case 'odin_search_skills':
-      return executeOdinSearchSkills({
-        cwd: options.cwd,
-        query: action.query,
-        scope: action.scope,
-        limit: action.limit,
-      });
-    case 'odin_execute_task': {
-      const skillContext = await resolveOdinSkillContext({
-        cwd: options.cwd,
-        task: action.task,
-        scope: action.searchScope,
-      });
-      const taskWithContext = skillContext
-        ? `${action.task}\n\n${skillContext}`
-        : action.task;
-      let specialist;
-      try {
-        specialist = await runSpecialistAgent(
-          session,
-          'researcher',
-          taskWithContext,
-          {
-            ...options,
-            maxTurns: clampTurns(
-              action.maxIterations ?? Math.max(options.maxTurns, 15),
-            ),
-          },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await recordOdinWorkflowFailure({
-          cwd: options.cwd,
-          mode: 'direct',
-          prompt: action.task,
-          error: message,
-        });
-        return buildRuntimeManagedFailure(
-          'odin_execute_task_failed',
-          `Odin task execution failed: ${message}`,
-          {
-            retryable: true,
-          },
-        );
-      }
-      await recordOdinWorkflowSuccess({
-        cwd: options.cwd,
-        mode: 'direct',
-        prompt: action.task,
-        reply: specialist.result.reply,
-        turns: specialist.result.turns,
-      });
-      return {
-        ok: true,
-        output: JSON.stringify(
-          {
-            reply: specialist.result.reply,
-            sessionId: specialist.session.id,
-            turns: specialist.result.turns,
-          },
-          null,
-          2,
-        ),
-      };
-    }
-    case 'odin_fix_skill':
-      return executeOdinFixSkill({
-        cwd: options.cwd,
-        skillId: action.skillId,
-        errorContext: action.errorContext,
-        summary: action.summary,
-      });
-    case 'odin_upload_skill':
-      return executeOdinUploadSkill({
-        cwd: options.cwd,
-        skillId: action.skillId,
-        visibility: action.visibility,
-        notes: action.notes,
-      });
-    case 'odin_import_cloud_skills':
-      return importOdinCloudSkills({
-        cwd: options.cwd,
-        query: action.query,
-        limit: action.limit,
-      });
     default:
       const message = [
         `Tool ${action.type} is marked as runtime-managed but has no runtime handler.`,
@@ -6211,8 +6027,29 @@ export async function runAgent(
       };
     }
   }
+  // A model that cannot see images gets the user's images as text: the
+  // vision helper's descriptions, or a note when there is no helper.
+  const getVisionHelper = memoizeVisionHelper(async () =>
+    options.visionHelper !== undefined
+      ? options.visionHelper ?? undefined
+      : loadVisionHelper(options.cwd, { onInfo: options.onInfo }));
+  const userImageRoute = options.imageAttachments?.length
+    ? await resolveImageRoute(options.resolveProvider?.(options.profile ?? 'main') ?? options.provider, getVisionHelper)
+    : { native: true };
+  const userImages = await prepareUserImagesForModel({
+    userText: userInput,
+    images: options.imageAttachments,
+    modelSeesImages: userImageRoute.native,
+    getHelper: async () => userImageRoute.helper,
+    locale: options.locale,
+    onInfo: options.onInfo,
+    signal: options.abortSignal,
+  });
   if (options.appendUserMessage !== false) {
-    options.sessionStore.appendMessage(session, 'user', userInput);
+    options.sessionStore.appendMessage(session, 'user', appendImageNote(userInput, userImages.note));
+    await options.sessionStore.save(session);
+  } else if (userImages.note) {
+    options.sessionStore.appendMessage(session, 'user', userImages.note);
     await options.sessionStore.save(session);
   }
 
@@ -6299,7 +6136,7 @@ export async function runAgent(
     options.onInfo?.(
       configured.length > 0
         ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. ${remoteFallbackRequested ? 'User requested web/search fallback.' : 'Local generate_image/generate_video/generate_long_video is required before completion.'}`
-        : '[visual] task needs visual assets; no configured local visual API found. Use Freya/web-search fallback if image assets are required.',
+        : '[visual] task needs visual assets; no configured local visual API found. generate_image/generate_video will report that setup is required.',
     );
   }
   const completionChecklist = buildRuntimeCompletionChecklist(
@@ -6311,6 +6148,8 @@ export async function runAgent(
       videoRequired: localVideoGenerationRequired,
     },
     runtimeCanCallAction(profile, options.permissionManager.getMode(), 'write_file'),
+    completionContract === 'requires_execution_evidence' ||
+      (session.changedFiles?.length ?? 0) > 0,
   );
   // Continuation guard for the requires_execution_evidence contract: count how
   // many consecutive turns the model produced only intent text without tool
@@ -6329,6 +6168,7 @@ export async function runAgent(
   let visualChecklistReminders = 0;
   let terminalFailureReminders = 0;
   let mutationEvidenceReminders = 0;
+  let fileChecklistReminders = 0;
   let pendingTrimmedActionFollowup = false;
   // Push-based mid-turn interjection buffer. Any input surface can push into
   // the session's queue at any time; legacy pollRunningUserMessages callers are
@@ -6360,11 +6200,6 @@ export async function runAgent(
     return accepted;
   };
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
-  const odinRuntimeSection = await buildOdinRuntimeSection({
-    cwd: options.cwd,
-    prompt: userInput,
-    profile,
-  });
 
   try {
     if (extensionRuntime.activeSkills.length > 0) {
@@ -6385,9 +6220,6 @@ export async function runAgent(
           .map((entry) => entry.plugin.id)
           .join(',')}`,
       );
-    }
-    if (odinRuntimeSection) {
-      options.onInfo?.('[odin] matched reusable skills for the current request');
     }
     if (extensionRuntime.gatedPlugins.length > 0) {
       options.onInfo?.(
@@ -6709,14 +6541,25 @@ export async function runAgent(
     }
     const activeProvider =
       options.resolveProvider?.(profile) ?? options.provider;
-    // view_image only exists for models that can see images: it is left out
-    // of the native tools, the prompt says it is unavailable, and the tool
-    // itself fails while the flag is off.
-    const modelSeesImages = activeProvider.supportsImages === true;
+    // view_image needs a model that can see images or a vision helper that
+    // describes them; otherwise it is left out of the native tools, the
+    // prompt says it is unavailable, and the tool itself fails.
+    const imageRoute = await resolveImageRoute(activeProvider, getVisionHelper);
+    const modelSeesImages = imageRoute.native;
     viewedImages.acceptsImages = modelSeesImages;
+    const imageHelper = imageRoute.helper;
+    viewedImages.describeImage = imageHelper
+      ? (image, signal) => describeSingleImage(imageHelper, image, {
+        userText: userInput,
+        locale: options.locale,
+        signal: anyAbortSignal(signal, options.abortSignal),
+      })
+      : undefined;
+    const canViewImages = modelSeesImages || imageHelper !== undefined;
     const context = await buildContextWindow(session, profile, {
       cwd: options.cwd,
-      contextLength: options.contextLength,
+      // A platform-written window (capabilitiesSource "platform") wins.
+      contextLength: activeProvider.contextLength ?? options.contextLength,
     });
     session.summary = context.summary;
     options.onInfo?.(
@@ -6750,8 +6593,7 @@ export async function runAgent(
       activeProvider.supportsNativeToolCalls === true,
       [
         ...extensionRuntime.sections,
-        ...(odinRuntimeSection ? [odinRuntimeSection] : []),
-        ...(modelSeesImages ? [] : [VIEW_IMAGE_UNAVAILABLE_SECTION]),
+        ...(modelSeesImages ? [] : [canViewImages ? VIEW_IMAGE_HELPER_SECTION : VIEW_IMAGE_UNAVAILABLE_SECTION]),
       ],
     );
     const latestUserRequest = extractLatestUserRequest(context.messages);
@@ -6780,7 +6622,7 @@ export async function runAgent(
           allowedActionTypes: getNativeAllowedActionTypesForRuntime(
             profile,
             options.permissionManager.getMode(),
-          ).filter((type) => modelSeesImages || type !== 'view_image'),
+          ).filter((type) => canViewImages || type !== 'view_image'),
           allowReadOnlyMcpToolCalls: true,
         })
         : undefined;
@@ -6828,7 +6670,7 @@ export async function runAgent(
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
     const requestImages = takeRequestImages(
-      turn === 1 ? options.imageAttachments ?? [] : [],
+      turn === 1 ? userImages.images : [],
       activeProvider,
     );
     const providerCallOptions = {
@@ -7239,7 +7081,7 @@ export async function runAgent(
       options.onInfo?.(
         `[completion-checklist] expected mutation paths missing: ${missingExpectedMutationPaths.join(', ')}`,
       );
-      if (turn >= options.maxTurns) {
+      if (turn >= options.maxTurns || fileChecklistReminders >= MAX_MUTATION_EVIDENCE_REMINDERS) {
         return {
           reply: [
             'Execution blocked by deterministic completion checklist: the request named target files that were not changed or observed after execution.',
@@ -7252,6 +7094,7 @@ export async function runAgent(
           turns: turn,
         };
       }
+      fileChecklistReminders += 1;
 
       options.sessionStore.appendMessage(
         session,
@@ -7275,7 +7118,7 @@ export async function runAgent(
       options.onInfo?.(
         `[completion-checklist] expected changed file count missing: expected=${expectedChangedFileCount} observed=${freshChangedFiles.length}`,
       );
-      if (turn >= options.maxTurns) {
+      if (turn >= options.maxTurns || fileChecklistReminders >= MAX_MUTATION_EVIDENCE_REMINDERS) {
         return {
           reply: [
             'Execution blocked by deterministic completion checklist: the request asked for a specific number of file changes, but fewer changed files were recorded.',
@@ -7291,6 +7134,7 @@ export async function runAgent(
           turns: turn,
         };
       }
+      fileChecklistReminders += 1;
 
       options.sessionStore.appendMessage(
         session,
@@ -7371,10 +7215,10 @@ export async function runAgent(
         };
       }
       if (mutationEvidenceReminders >= MAX_MUTATION_EVIDENCE_REMINDERS) {
-        // Keep the model's answer (often a direct chat answer) but say
-        // plainly that nothing in the workspace changed.
+        // The model kept answering without touching the workspace: end
+        // quietly with its answer instead of spinning to maxTurns.
         return {
-          reply: `${envelope.reply}\n\n(No files were created or changed in this run.)`,
+          reply: finalReply,
           turns: turn,
         };
       }

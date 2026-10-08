@@ -161,7 +161,7 @@ export function getDelegatedPermissionMode(
 // - request_user_confirmation: nobody can answer it in a headless run.
 // - spawn_background_workflow: detaches a separate agent process whose result
 //   never returns to the requesting session.
-// - odin_*, request_freya_visual_asset, agent: retired or runtime-internal.
+// - agent: runtime-internal, no executor.
 const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   // Web search. Web pages are read with the browser tools below.
   'search_web',
