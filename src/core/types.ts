@@ -295,7 +295,9 @@ export type AgentAction =
       type: 'search_web';
       query: string;
       limit?: number;
-      backend?: 'auto' | 'bing' | 'google' | 'duckduckgo' | 'wikipedia';
+      backend?: 'auto' | 'platform' | 'bing' | 'google' | 'duckduckgo' | 'wikipedia';
+      /** Only results from the last day / week / month / year (platform backend). */
+      freshness?: 'day' | 'week' | 'month' | 'year';
     }
   | {
       type: 'deep_research';

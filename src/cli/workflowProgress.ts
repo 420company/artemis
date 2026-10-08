@@ -1202,7 +1202,7 @@ export function shouldSurfaceWorkflowInfo(message: string): boolean {
   // Strip any `[niko:reviewer] [agent:reviewer]` prefixes so the [tool:...]
   // pattern matches even when wrapped by specialist agents.
   const stripped = stripSpecialistPrefix(message);
-  if (/^\[tool:[a-z_]+\]\s+(ok|failed|blocked|denied|running|authorize_error|error|heimdall_artifact_error)/i.test(stripped)) return false;
+  if (/^\[tool:[a-z_]+\]\s+(ok|failed|blocked|denied|running|progress|authorize_error|error|heimdall_artifact_error)/i.test(stripped)) return false;
   // Same for usage / reply / stream meta-events the workflow renderer consumes.
   if (/^\[usage\]/i.test(stripped)) return false;
   if (/^\[stream-(start|chunk|end)\]/i.test(stripped)) return false;
