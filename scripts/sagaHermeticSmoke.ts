@@ -309,6 +309,20 @@ async function inputPathChecks(): Promise<void> {
   assert.equal(guarded.requests.length, 0);
 }
 
+async function silentShortClipChecks(): Promise<void> {
+  // The mock provider returns 5-second clips for 8-second segments. With
+  // audio, the silent audio padding used to stretch the timeline; without
+  // audio the video came out 10 s instead of 16 s and failed the final
+  // duration check. Each clip now holds its last frame to its planned length.
+  const script = '[0-8秒] 镜头1：红色风筝飞过山坡。\n[8-16秒] 镜头2：风筝落进草地。';
+  for (const generateAudio of [false, true]) {
+    const run = await runHermeticSaga({ prompt: script, story: script, totalDuration: 16, ratio: '9:16', generateAudio });
+    assert.equal(run.result.ok, true, `generateAudio=${generateAudio}: ${run.result.output}`);
+    const seconds = Number(String(run.result.output).match(/^([\d.]+)s · 2 segments/m)?.[1]);
+    assert.ok(seconds >= 15.5 && seconds <= 16.5, `generateAudio=${generateAudio}: the video fills its 16 s, got ${seconds}`);
+  }
+}
+
 async function richBibleBudgetChecks(): Promise<void> {
   // A rich continuity bible (many locked characters, wardrobe, props,
   // locations) must not crowd the shot or the dialogue rules out of a
@@ -368,6 +382,7 @@ async function richBibleBudgetChecks(): Promise<void> {
 seedreamSizeChecks();
 titleChecks();
 await richBibleBudgetChecks();
+await silentShortClipChecks();
 eligibilityChecks();
 budgetChecks();
 await inputPathChecks();
