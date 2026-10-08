@@ -1,5 +1,4 @@
 import { CliSettingsStore } from '../cli/settings.js';
-import { homedir } from 'node:os';
 import { ensureUiLocaleConfigured } from '../cli/localeSetup.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { choosePromptOption } from '../cli/prompt.js';
@@ -19,7 +18,7 @@ import {
   type ProviderPreset,
 } from './presets.js';
 import { detectModelContextLength } from './modelContext.js';
-import { ProviderStore } from './store.js';
+import { ProviderStore, createGlobalProviderStore } from './store.js';
 import type {
   PromptIO,
   ProviderApiKeyHeader,
@@ -932,13 +931,9 @@ export async function promptForVerifiedProviderProfile(
   }
 }
 
-/**
- * Global provider store used when the cwd has no main profile. Shared with the
- * provider router so main and specialist profiles always come from one file.
- */
-export function createGlobalProviderStore(): ProviderStore {
-  return new ProviderStore(homedir());
-}
+// Global provider store used when the cwd has no main profile; shared with the
+// provider router so main and specialist profiles always come from one file.
+export { createGlobalProviderStore };
 
 export async function resolveMainProviderConfig(options: {
   cwd: string;
