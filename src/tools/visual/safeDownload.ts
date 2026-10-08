@@ -73,7 +73,7 @@ export type AssetHostResolver = (hostname: string) => Promise<ResolvedAddress[]>
 export type AssetTransport = (
   url: URL,
   options: { lookup: LookupFunction; signal: AbortSignal },
-) => Promise<{ status: number; location?: string; body: Buffer }>;
+) => Promise<{ status: number; location?: string; contentType?: string; body: Buffer }>;
 
 const systemResolver: AssetHostResolver = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
@@ -89,7 +89,7 @@ const nodeTransport: AssetTransport = (url, { lookup, signal }) =>
       }
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
-      res.on('end', () => resolve({ status, body: Buffer.concat(chunks) }));
+      res.on('end', () => resolve({ status, contentType: res.headers['content-type'], body: Buffer.concat(chunks) }));
       res.on('error', reject);
     });
     req.on('error', reject);
@@ -172,15 +172,26 @@ async function checkUrl(rawUrl: string, allowLoopback: boolean): Promise<URL> {
   return url;
 }
 
+type GuardedDownloadOptions = { timeoutMs: number; allowLoopback?: boolean; signal?: AbortSignal };
+
 /**
  * Fetches a provider-returned asset URL, following redirects by hand so each
  * hop is checked. Throws AssetDownloadError (with the HTTP status when there
  * is one) on refusal or failure.
  */
-export async function downloadProviderAsset(
+export async function downloadProviderAsset(rawUrl: string, options: GuardedDownloadOptions): Promise<Buffer> {
+  return (await downloadGuardedUrl(rawUrl, options)).body;
+}
+
+/**
+ * The same guarded download for any URL the agent did not choose itself (a
+ * provider result, a soundtrack link from a message or a page), also
+ * returning the final response's content type.
+ */
+export async function downloadGuardedUrl(
   rawUrl: string,
-  options: { timeoutMs: number; allowLoopback?: boolean; signal?: AbortSignal },
-): Promise<Buffer> {
+  options: GuardedDownloadOptions,
+): Promise<{ body: Buffer; contentType?: string }> {
   const allowLoopback = options.allowLoopback === true;
   const timeout = AbortSignal.timeout(options.timeoutMs);
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
@@ -203,7 +214,7 @@ export async function downloadProviderAsset(
     if (res.status < 200 || res.status >= 300) {
       throw new AssetDownloadError(`download failed: HTTP ${res.status}`, res.status);
     }
-    return res.body;
+    return { body: res.body, contentType: res.contentType };
   }
   throw new AssetDownloadError(`download failed: more than ${MAX_REDIRECTS} redirects`);
 }

@@ -119,6 +119,7 @@ import {
   resolveVisionDescribeRouteForTest,
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
+import { resolveSoundtrackPath } from '../src/tools/visual/sagaRenderer/index.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../src/tools/visual/videoParams.js'
 import {
@@ -212,6 +213,7 @@ const fetchAssetTransport: AssetTransport = async (url, { signal }) => {
   return {
     status: res.status,
     location: res.headers.get('location') ?? undefined,
+    contentType: res.headers.get('content-type') ?? undefined,
     body: Buffer.from(await res.arrayBuffer()),
   }
 }
@@ -1859,6 +1861,57 @@ async function withMockedFetch<T>(
     setAssetDownloadTransportForTests(fetchAssetTransport)
     setAssetDownloadResolverForTests(testAssetResolver)
     await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Saga soundtrack URLs can come from content the agent read: same guard.
+  const workDir = path.join(os.tmpdir(), `artemis-soundtrack-guard-${Date.now()}`)
+  fs.mkdirSync(workDir, { recursive: true })
+  const AUDIO = Buffer.from('ID3fake-mp3-bytes')
+  const soundtrack = async (url: string) => {
+    const calls: string[] = []
+    const result = await withMockedFetch(
+      (requested) => {
+        calls.push(requested)
+        if (requested === 'https://music.test/redirect.mp3') {
+          return new Response(null, { status: 302, headers: { location: 'http://10.0.0.8/internal.mp3' } })
+        }
+        return new Response(AUDIO, { status: 200, headers: { 'content-type': 'audio/mpeg' } })
+      },
+      async () => {
+        try {
+          return { path: await resolveSoundtrackPath({ url }, workDir), message: '' }
+        } catch (error) {
+          return { path: undefined, message: String(error) }
+        }
+      },
+    )
+    return { ...result, calls }
+  }
+  try {
+    const ok = await soundtrack('https://music.test/song.mp3')
+    assert(
+      'saga soundtrack: a public audio URL downloads through the guard',
+      ok.path === path.join(workDir, 'soundtrack.mp3') && Buffer.compare(fs.readFileSync(ok.path), AUDIO) === 0,
+      ok.message,
+    )
+    const local = await soundtrack('http://127.0.0.1:8080/admin/export.mp3')
+    const metadata = await soundtrack('http://169.254.169.254/latest/meta-data/x.wav')
+    assert(
+      'saga soundtrack: loopback and metadata URLs are refused without a request',
+      !local.path && /private, link-local or loopback/.test(local.message) && local.calls.length === 0 &&
+        !metadata.path && /private, link-local or loopback/.test(metadata.message) && metadata.calls.length === 0,
+      `${local.message} | ${metadata.message}`,
+    )
+    const redirected = await soundtrack('https://music.test/redirect.mp3')
+    assert(
+      'saga soundtrack: a redirect to a private address is refused',
+      !redirected.path && /10\.0\.0\.8/.test(redirected.message) && redirected.calls.length === 1,
+      redirected.message,
+    )
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true })
   }
 }
 
