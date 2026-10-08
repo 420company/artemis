@@ -235,6 +235,29 @@ Rewrite the README for GitHub so it explains the product clearly to users.
 
 ---
 
+### Platform model capabilities and the vision helper
+
+Model names behind a gateway can be aliases (`gpt-6-sol` may be a text-only GLM model), so Artemis does not have to guess from the name. A provider profile in `~/.artemis/providers.json` can carry the real values:
+
+```json
+{
+  "defaultMainProfileId": "platform-main",
+  "visionProfileId": "platform-vision",
+  "profiles": [
+    { "id": "platform-main", "model": "gpt-6-sol", "supportsImages": false,
+      "contextLength": 200000, "maxOutputTokens": 16384, "capabilitiesSource": "platform" },
+    { "id": "platform-vision", "model": "vision-model", "supportsImages": true, "capabilitiesSource": "platform" }
+  ]
+}
+```
+
+- `supportsImages` always beats name inference. With `"capabilitiesSource": "platform"`, `contextLength` and `maxOutputTokens` also win over every name rule (including the GPT-5.6 / GPT-6 272K cap and `/models` metadata) in the HUD, compaction, `execute`, bridges, workflows and sub-agents, and Artemis never caps or re-detects that profile. A field left out falls back to the usual rules.
+- `max_tokens` is kept within the window: min(output limit, window − estimated prompt − margin).
+- `visionProfileId` (stored like `specialistProfileId`, project store first, then `~/.artemis`) names a profile that can see images. When the main model cannot, images attached with `--image`, uploaded on the web or sent through a chat bridge are described once by that model (all visible text transcribed, charts and tables as data, in the user's language), and the main model gets the text as "[Image N description by vision helper — …]". `view_image` returns the same kind of description. Descriptions are cached per run by image content.
+- With no vision helper and a text-only model, attached images are not an error: the model is told the plan cannot read images and continues with the text.
+
+---
+
 ### Who Artemis is for
 
 Artemis is for builders, founders, creators, designers, engineers, and operators who want a single local agent that can actually do the work.
@@ -463,6 +486,14 @@ artemis
 - `/wordup` — 保存重要上下文到记忆
 - `/soul` — 定义长期个人风格、规则和工作偏好
 - `/mcp` — 管理外部 MCP 集成
+
+---
+
+### 平台模型能力与视觉助手
+
+网关后的模型名可能只是别名（例如 `gpt-6-sol` 实际是不能看图的 GLM 模型）。`~/.artemis/providers.json` 中的 profile 可以写入真实能力：`supportsImages`、`contextLength`、`maxOutputTokens`，并标记 `"capabilitiesSource": "platform"`。带此标记时，上下文窗口和最大输出以 profile 为准，覆盖所有按模型名推断的规则（包括 GPT-5.6 / GPT-6 的 272K 上限和 `/models` 元数据），Artemis 也不会再改写该 profile；`max_tokens` 始终不超过「窗口 − 估算提示 − 余量」。
+
+顶层的 `visionProfileId`（与 `specialistProfileId` 同样存储）指向一个能看图的 profile。主模型不能看图时，`--image`、网页上传或聊天桥接发送的图片会先交给它描述一次（逐字转录可见文字，图表按数据描述，使用用户的语言），主模型收到 "[Image N description by vision helper — …]" 文本；`view_image` 也返回同样的描述，同一图片在一次运行中只描述一次。没有视觉助手时，附带图片不会让运行失败，模型会被告知当前方案无法读取图片并继续处理文字。
 
 ---
 
