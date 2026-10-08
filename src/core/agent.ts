@@ -22,6 +22,7 @@ import {
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
+import { normalizeReferenceImagesArg } from '../tools/visual/referenceImages.js';
 import { PermissionManager } from '../security/permissions.js';
 import {
   mapPermissionModeToToolAccess,
@@ -232,6 +233,24 @@ function getLooseStringArrayArg(
     }
   }
 
+  return undefined;
+}
+
+/** Reference images for generate_image; XML-style dialects deliver the array as a JSON string. */
+function getLooseReferenceImagesArg(args: Record<string, unknown>): string[] | undefined {
+  for (const key of [
+    'referenceImages',
+    'reference_images',
+    'referenceImage',
+    'reference_image',
+    'referenceImagePaths',
+    'referenceImageUrls',
+    'images',
+    'image',
+  ]) {
+    const items = normalizeReferenceImagesArg(getLooseArgValue(args, key));
+    if (items.length > 0) return items;
+  }
   return undefined;
 }
 
@@ -514,6 +533,7 @@ function buildActionFromLooseArgs(
         ),
         watermark: getLooseBooleanArg(args, 'watermark'),
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
+        referenceImages: getLooseReferenceImagesArg(args),
       };
     }
     case 'mcp_call_tool': {
@@ -1819,8 +1839,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
-    case 'request_freya_visual_asset':
-      return `request_freya_visual_asset type=${action.assetType} style=${action.preferredStyle ?? 'default'} context=${truncate(action.contextDescription, 120)}`;
     case 'agent':
       const agentSummary = `agent action=${action.action}`;
       if (action.id) {
@@ -4830,148 +4848,6 @@ You can continue executing your current tasks. The background workflow will run 
         );
       }
     }
-    case 'request_freya_visual_asset': {
-      // Legacy interactive flow: it is no longer offered to the model
-      // (generate_image / generate_video / generate_long_video replace it) and
-      // it needs a terminal menu, so without an interactive terminal (e.g.
-      // headless `artemis execute`) it fails fast instead of blocking.
-      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
-        return buildRuntimeManagedFailure(
-          'freya_visual_asset_unavailable',
-          'request_freya_visual_asset is not available in this session (it needs an interactive terminal menu). Use generate_image for images, generate_video for short videos, or generate_long_video for long-form video instead.',
-          {
-            retryable: false,
-          },
-        );
-      }
-      try {
-        const { showFreyaMenu } = await import('../cli/freyaPrompt.js')
-        const { FreyaVisualAgent } = await import('../agents/freyaAgent.js')
-        const { FreyaSearch } = await import('../tools/visual/freyaSearch.js')
-        const { ProviderStore } = await import('../providers/store.js')
-
-        // Get current visual model config
-        const providerStore = new ProviderStore(options.cwd)
-        const storeData = await providerStore.load()
-        const visualConfig = providerStore.getVisualProfile(storeData)
-
-        // Show Freya menu and get user choice
-        const menuResult = await showFreyaMenu(action, undefined, 'en', {
-          messages: session.messages,
-          astState: {},
-          taskContext: {}
-        })
-
-        switch (menuResult.assetPath) {
-          case 'configure':
-            // Never exit the process mid-run: report back so the session
-            // can continue (or the user can configure and retry).
-            options.onInfo?.('[log:info] Freya: 请运行 /config visual（或命令行 artemis config visual）配置视觉模型，然后重试。')
-            return buildRuntimeManagedFailure(
-              'freya_visual_model_configuration_requested',
-              'The user chose to configure the visual model. Ask them to run /config visual (or artemis config visual) and retry; meanwhile use generate_image or generate_video directly.',
-              {
-                retryable: false,
-              },
-            );
-
-
-          case 'generate':
-            if (!visualConfig?.enabled) {
-              options.onInfo?.('[log:warn] ⚠️ Freya: 视觉模型尚未配置。请运行 /config visual（或 artemis config visual）进行配置。')
-              return buildRuntimeManagedFailure(
-                'freya_visual_model_not_configured',
-                'Visual model not configured. Please run /config visual (or artemis config visual) first.',
-                {
-                  retryable: false,
-                },
-              );
-            }
-
-            const agent = new FreyaVisualAgent(visualConfig)
-            const expandedPrompt = await agent.expandPrompt(action.contextDescription, action.assetType)
-            const generationResult = await agent.generateAsset(expandedPrompt, action.assetType)
-            
-            if (generationResult.success && generationResult.assetPath) {
-              return {
-                ok: true,
-                output: `Visual asset generated successfully: ${generationResult.assetPath}`
-              }
-            }
-            return buildRuntimeManagedFailure(
-              'freya_visual_generation_failed',
-              `Visual asset generation failed: ${generationResult.error ?? 'unknown error'}`,
-              {
-                retryable: true,
-              },
-            );
-
-          case 'search': {
-            const expandedSearchPrompt = await (new FreyaVisualAgent(visualConfig || {
-              enabled: false,
-              image: {
-                provider: 'mock',
-                apiKey: '',
-                baseUrl: '',
-                model: 'mock',
-                defaultParams: {
-                  size: '2K',
-                  quality: 'standard',
-                  style: 'realistic',
-                  watermark: false
-                }
-              },
-              video: {
-                enabled: false,
-                provider: 'mock',
-                apiKey: '',
-                baseUrl: '',
-                model: 'mock',
-                defaultParams: {
-                  duration: '10s',
-                  resolution: '1080p',
-                  quality: 'standard',
-                  style: 'realistic',
-                  format: 'mp4',
-                  framerate: '30fps'
-                }
-              }
-            })).expandPrompt(action.contextDescription, action.assetType)
-
-            const searchDestPath = `.artemis/assets/searched_${Date.now()}.${action.assetType === 'video' ? 'mp4' : 'png'}`
-            const searchResult = await FreyaSearch.deepSearchSimilarImage(expandedSearchPrompt, searchDestPath)
-            
-            if (searchResult.success && searchResult.downloadedPath) {
-              return {
-                ok: true,
-                output: `Visual asset searched and downloaded successfully: ${searchResult.downloadedPath}`
-              }
-            }
-            return buildRuntimeManagedFailure(
-              'freya_visual_search_failed',
-              `Visual asset search failed: ${searchResult.error ?? 'unknown error'}`,
-              {
-                retryable: true,
-              },
-            );
-          }
-
-          case 'cancel':
-          default:
-            return {
-              ok: true,
-              output: 'User cancelled visual generation. Please continue without the visual asset.'
-            }
-        }
-      } catch (error) {
-        const message = `Freya visual asset request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-        return buildRuntimeManagedFailure('freya_visual_asset_failed', message, {
-          retryable: true,
-        });
-      }
-    }
     case 'delegate_task':
       if (action.role === 'builder') {
         await recordWorkflowEntry(session, options, 'Builder Task Assigned', [
@@ -6179,7 +6055,7 @@ export async function runAgent(
     options.onInfo?.(
       configured.length > 0
         ? `[visual] task needs visual assets; configured local visual API available: ${configured.join(', ')}. ${remoteFallbackRequested ? 'User requested web/search fallback.' : 'Local generate_image/generate_video/generate_long_video is required before completion.'}`
-        : '[visual] task needs visual assets; no configured local visual API found. Use Freya/web-search fallback if image assets are required.',
+        : '[visual] task needs visual assets; no configured local visual API found. generate_image/generate_video will report that setup is required.',
     );
   }
   const completionChecklist = buildRuntimeCompletionChecklist(

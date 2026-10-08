@@ -391,6 +391,8 @@ export type AgentAction =
       outputPath?: string;
       watermark?: boolean;
       runInBackground?: boolean;
+      /** Workspace image paths or http(s) URLs sent to the model as references (max 14). */
+      referenceImages?: string[];
     }
   | {
       type: 'generate_video';
@@ -643,12 +645,6 @@ export type AgentAction =
       command?: string;
     }
   | {
-      type: 'request_freya_visual_asset';
-      assetType: 'image' | 'video' | 'icon';
-      contextDescription: string;
-      preferredStyle?: string;
-    }
-  | {
       type: 'agent';
       action: 'create' | 'list' | 'run' | 'stop' | 'status' | 'result';
       id?: string;
@@ -758,7 +754,6 @@ export const ALL_AGENT_ACTION_TYPES = [
   'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
-  'request_freya_visual_asset',
   'agent',
   // ── Spotify integration ────────────────────────────────────────────────
   'spotify_play_liked',
@@ -836,7 +831,6 @@ export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
   'odin_fix_skill',
   'odin_upload_skill',
   'odin_import_cloud_skills',
-  'request_freya_visual_asset',
 ] as const satisfies readonly AgentActionType[];
 
 export type AssistantEnvelope = {

@@ -88,8 +88,6 @@ function describeAction(action: AgentAction): string {
       return `transcribe audio locally from ${action.inputPath}`;
     case 'spawn_background_workflow':
       return `spawn a detached background workflow for ${action.command}`;
-    case 'request_freya_visual_asset':
-      return `request Freya visual asset (${action.assetType})`;
     case 'agent':
       const permissionSummary = `agent action=${action.action}`;
       if (action.id) {

@@ -103,6 +103,17 @@ export function isVisualSetupRequiredError(error: unknown): boolean {
   return message.includes(VISUAL_SETUP_REQUIRED_ERROR) || /visual .*credentials not found|credentials not found/i.test(message);
 }
 
+/**
+ * Policy appended to a request that needs images or video when no visual API
+ * is configured: say so and how to configure it, never fall back to web images.
+ */
+export const VISUAL_NOT_CONFIGURED_POLICY =
+  '[Visual generation policy]\nImage/video generation is not configured, so generate_image and generate_video will fail. ' +
+  'If the task needs generated images or video, tell the user that image generation is not configured and that they can set it up with /visual ' +
+  '(or /config visual, or `artemis setup visual` in a shell) and retry. Do not substitute web-search or downloaded images unless the user explicitly asks for them, ' +
+  'and never claim an asset was generated. Vector-native graphics (icons, logos, charts, diagrams) may still be authored as SVG/CSS; ' +
+  'do not write scripts that draw placeholder photos.';
+
 export function buildVisualSetupRequiredMessage(assetKind: VisualAssetKind): string {
   const toolName = assetKind === 'image' ? 'generate_image' : 'generate_video';
   const assetLabel = assetKind === 'image' ? 'image generation' : 'video generation';

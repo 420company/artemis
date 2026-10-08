@@ -1,6 +1,8 @@
 import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import os from 'node:os';
 import path from 'node:path';
+import { ImageApiError } from '../imageGenerationFailure.js';
+import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js';
 import type { VisualModelConfig } from '../../../providers/types.js';
 import {
   defaultVisualBaseUrlForProvider,
@@ -137,12 +139,12 @@ export class OpenAIProvider implements VisualProvider {
         raw = await res.text();
       }
       if (!res.ok) {
-        throw new Error(buildOpenAIImageError({
+        throw new ImageApiError(buildOpenAIImageError({
           status: res.status,
           raw,
           baseUrl: imageConfig.baseUrl,
           model,
-        }));
+        }), res.status);
       }
 
       let payload: OpenAIImageResponse;
@@ -160,7 +162,7 @@ export class OpenAIProvider implements VisualProvider {
       const buffer = item.b64_json
         ? Buffer.from(item.b64_json, 'base64')
         : item.url
-          ? await downloadUrl(item.url)
+          ? await downloadUrl(item.url, imageConfig.baseUrl)
           : null;
       if (!buffer) {
         throw new Error('OpenAI image response contained neither b64_json nor url.');
@@ -191,6 +193,8 @@ export class OpenAIProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof ImageApiError ? error.status : undefined,
+        failureStage: error instanceof ImageApiError ? error.stage : undefined,
         generationTime: Date.now() - startTime,
       };
     }
@@ -331,12 +335,15 @@ function normalizeBaseUrl(raw: string | undefined, provider: string): string {
   return normalized;
 }
 
-async function downloadUrl(url: string): Promise<Buffer> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) });
-  if (!res.ok) {
-    throw new Error(`download failed: HTTP ${res.status}`);
+async function downloadUrl(url: string, baseUrl?: string): Promise<Buffer> {
+  try {
+    return await downloadProviderAsset(url, {
+      timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+      allowLoopback: baseUrlIsLoopback(baseUrl),
+    });
+  } catch (error) {
+    throw new ImageApiError(`Image download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download');
   }
-  return Buffer.from(await res.arrayBuffer());
 }
 
 async function postOpenAIImageGeneration(

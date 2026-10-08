@@ -1,7 +1,9 @@
 import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
-import { normalizeModelArkMediaBaseUrl } from '../../vidarMedia.js'
+import { modelArkEndpoint, normalizeModelArkMediaBaseUrl } from '../../vidarMedia.js'
+import { ImageApiError } from '../imageGenerationFailure.js'
+import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import {
   IMAGE_GENERATION_TIMEOUT_MS,
   VIDEO_CREATE_TIMEOUT_MS,
@@ -15,6 +17,7 @@ import {
   isGeneratedAudioUnsupported,
   resolveVideoModelCapabilities,
 } from '../videoCapabilities.js'
+import { checkBytePlusReferenceSupport } from '../referenceImages.js'
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
@@ -44,17 +47,18 @@ export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'
   readonly supportsImages = true
   readonly supportsVideos = true
+  readonly supportsImageReferences = true
   
   private config: VisualModelConfig
   private assetType: 'image' | 'video'
-  private credentialsPromise: Promise<{ apiKey: string; baseUrl: string }>
 
   constructor(config: VisualModelConfig, assetType: 'image' | 'video') {
     this.config = config
     this.assetType = assetType
-    this.credentialsPromise = this.resolveCredentials()
   }
 
+  // Resolved per call, inside each method's try, so a misconfigured base URL
+  // becomes a failed result instead of an unhandled rejection.
   private async resolveCredentials(): Promise<{ apiKey: string; baseUrl: string }> {
     if (this.assetType === 'image') {
       return {
@@ -72,12 +76,17 @@ export class BytePlusProvider implements VisualProvider {
   async generateImage(params: VisualGenerationParams): Promise<GenerationResult> {
     const startTime = Date.now()
     try {
-      const { apiKey, baseUrl } = await this.credentialsPromise
+      const { apiKey, baseUrl } = await this.resolveCredentials()
       const model = params.model || this.config.image.model || 'seedream-5-0-260128'
       const size = params.size || this.config.image.defaultParams.size || '2K'
       const count = params.count || 1
+      const referenceImages = params.referenceImages ?? []
+      const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length)
+      if (referenceError) {
+        throw new Error(referenceError)
+      }
       
-      const endpoint = `${baseUrl}/images/generations`
+      const endpoint = modelArkEndpoint(baseUrl, 'images/generations')
       const body: Record<string, unknown> = {
         model,
         prompt: params.prompt,
@@ -85,6 +94,12 @@ export class BytePlusProvider implements VisualProvider {
         response_format: 'url',
         watermark: params.watermark ?? this.config.image.defaultParams.watermark ?? false,
         stream: false,
+      }
+      // ModelArk `image`: one URL/data URI as a string, several as an array.
+      if (referenceImages.length === 1) {
+        body.image = referenceImages[0]
+      } else if (referenceImages.length > 1) {
+        body.image = referenceImages
       }
       
       if (count > 1) {
@@ -104,7 +119,7 @@ export class BytePlusProvider implements VisualProvider {
 
       const raw = await res.text()
       if (!res.ok) {
-        throw new Error(`API request failed (HTTP ${res.status}): ${raw.slice(0, 500)}`)
+        throw new ImageApiError(`API request failed (HTTP ${res.status}): ${raw.slice(0, 500)}`, res.status)
       }
 
       const payload = JSON.parse(raw)
@@ -118,12 +133,19 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error('Response contained no downloadable URLs.')
       }
 
-      const imageRes = await fetch(item.url, { signal: AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS) })
-      if (!imageRes.ok) {
-        throw new Error(`Image download failed: HTTP ${imageRes.status}`)
+      let buf: Buffer
+      try {
+        buf = await downloadProviderAsset(item.url, {
+          timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+          allowLoopback: baseUrlIsLoopback(baseUrl),
+        })
+      } catch (error) {
+        throw new ImageApiError(
+          `Image download failed: ${error instanceof Error ? error.message : String(error)}`,
+          undefined,
+          'download',
+        )
       }
-
-      const buf = await imageRes.arrayBuffer()
       
       const fs = await import('fs/promises')
       const path = await import('path')
@@ -133,7 +155,7 @@ export class BytePlusProvider implements VisualProvider {
       await fs.mkdir(tempDir, { recursive: true })
       const imagePath = path.join(tempDir, `byteplus_image_${Date.now()}.png`)
       
-      await fs.writeFile(imagePath, Buffer.from(buf))
+      await fs.writeFile(imagePath, buf)
 
       return {
         success: true,
@@ -155,6 +177,8 @@ export class BytePlusProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
+        httpStatus: error instanceof ImageApiError ? error.status : undefined,
+        failureStage: error instanceof ImageApiError ? error.stage : undefined,
         generationTime: Date.now() - startTime
       }
     }
@@ -163,7 +187,7 @@ export class BytePlusProvider implements VisualProvider {
   async generateVideo(params: VideoGenerationParams): Promise<GenerationResult> {
     const startTime = Date.now()
     try {
-      const { apiKey, baseUrl } = await this.credentialsPromise
+      const { apiKey, baseUrl } = await this.resolveCredentials()
       const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
       const ratio = params.ratio || '16:9'
       const duration = normalizeVideoDurationForProvider(params.duration, this.name, model)
@@ -253,7 +277,7 @@ export class BytePlusProvider implements VisualProvider {
         }
       }
 
-      const createEndpoint = `${baseUrl}/contents/generations/tasks`
+      const createEndpoint = modelArkEndpoint(baseUrl, 'contents/generations/tasks')
       const createBody = {
         model,
         content,
@@ -286,7 +310,7 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error(`No task id in response. ${createPayload.error?.message ?? ''}`.trim())
       }
 
-      const statusEndpoint = `${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`
+      const statusEndpoint = modelArkEndpoint(baseUrl, `contents/generations/tasks/${encodeURIComponent(taskId)}`)
       let videoUrl: string | undefined
       let lastStatus = 'pending'
       const maxPolls = 60
@@ -333,12 +357,16 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error(`Task ${taskId} did not finish within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const videoRes = await fetch(videoUrl, { signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)) })
-      if (!videoRes.ok) {
-        throw new Error(`Video download failed: HTTP ${videoRes.status}`)
+      let buf: Buffer
+      try {
+        buf = await downloadProviderAsset(videoUrl, {
+          timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+          allowLoopback: baseUrlIsLoopback(baseUrl),
+          signal: params.abortSignal,
+        })
+      } catch (error) {
+        throw new Error(`Video download failed: ${error instanceof Error ? error.message : String(error)}`)
       }
-
-      const buf = await videoRes.arrayBuffer()
       
       const fs = await import('fs/promises')
       const path = await import('path')
@@ -348,7 +376,7 @@ export class BytePlusProvider implements VisualProvider {
       await fs.mkdir(tempDir, { recursive: true })
       const videoPath = path.join(tempDir, `byteplus_video_${Date.now()}.mp4`)
       
-      await fs.writeFile(videoPath, Buffer.from(buf))
+      await fs.writeFile(videoPath, buf)
 
       return {
         success: true,

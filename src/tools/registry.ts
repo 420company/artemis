@@ -20,6 +20,7 @@ import { securityAuditToolDef } from '../core/securityAuditSystem.js';
 import { executeApplyPatch } from './applyPatch.js';
 import { executeDeepResearch } from './deepResearch.js';
 import { executeGenerateImage } from './generateImage.js';
+import { MAX_REFERENCE_IMAGES } from './visual/referenceImages.js';
 import { executeGenerateLongVideo } from './generateLongVideo.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
@@ -47,6 +48,19 @@ import { isToolSupportedOnHost } from './platformSupport.js';
 
 export type { ToolDefinition };
 
+// Model-facing guidance for generate_image, after BytePlus Seedream's prompt
+// guide. It is sent every turn, so keep it short.
+export const GENERATE_IMAGE_DESCRIPTION = [
+  'Generate images. You write `prompt` yourself: natural sentences for subject, action and setting, then the style or medium, keeping the style the user asked for (anime, logo, flat illustration, poster, photo...).',
+  'Add composition, camera or lighting only when they fit that style; no keyword lists or stock quality tags.',
+  'Expand a vague request into a full description that keeps the user\'s intent; ask one short question only when a key choice is truly ambiguous.',
+  'Put text to render in double quotes, exactly as it should appear.',
+  'Set size/aspect ratio with `size`, not in the prompt.',
+  'Keep the user\'s language (Chinese works well; do not translate).',
+  'When the request refers to an attached or earlier image (edit it, "this style", "like this"), pass it in `referenceImages`. Look at it first with view_image whenever that tool is available to you, then say in the prompt what to keep (subject, style, palette, lighting, composition) and what to change.',
+  'A failure says why (e.g. low balance, safety rejection): tell the user; never substitute a web image.',
+].join(' ');
+
 const AGENT_ROLE_VALUES: readonly AgentRole[] = [
   'planner',
   'researcher',
@@ -62,12 +76,9 @@ const AGENT_ROLE_VALUES: readonly AgentRole[] = [
 const RUNTIME_MANAGED_TOOL_TYPES = new Set<AgentActionType>(
   RUNTIME_MANAGED_AGENT_ACTION_TYPES,
 );
-// Action types never offered to the model. `agent` has no executor;
-// `request_freya_visual_asset` is a legacy interactive flow (terminal menu)
-// superseded by generate_image / generate_video / generate_long_video.
+// Action types never offered to the model. `agent` has no executor.
 const PROVIDER_EXCLUDED_ACTION_TYPES = new Set<AgentActionType>([
   'agent',
-  'request_freya_visual_asset',
 ]);
 const PARALLEL_READ_ACTION_TYPES = new Set<AgentActionType>([
   'list_files',
@@ -502,6 +513,10 @@ function validateGenerateImageAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateBooleanValue(action?.watermark, 'watermark', errors);
   validateBooleanValue(action?.runInBackground, 'runInBackground', errors);
+  validateStringArray(action?.referenceImages, 'referenceImages', errors);
+  if (Array.isArray(action?.referenceImages) && action.referenceImages.length > MAX_REFERENCE_IMAGES) {
+    errors.push(`referenceImages accepts at most ${MAX_REFERENCE_IMAGES} images.`);
+  }
   return errors;
 }
 
@@ -717,23 +732,6 @@ function validateTranscribeAudioAction(action: any): string[] {
   validateOptionalNonEmptyString(action?.modelPath, 'modelPath', errors);
   validateEnumString(action?.engine, 'engine', ['auto', 'whisper.cpp', 'openai-whisper'] as const, errors);
   validateOptionalNonEmptyString(action?.command, 'command', errors);
-  return errors;
-}
-
-function validateFreyaVisualAssetAction(action: any): string[] {
-  const errors: string[] = [];
-  validateEnumString(
-    action?.assetType,
-    'assetType',
-    ['image', 'video', 'icon'] as const,
-    errors,
-  );
-  validateRequiredNonEmptyString(
-    action?.contextDescription,
-    'contextDescription',
-    errors,
-  );
-  validateOptionalNonEmptyString(action?.preferredStyle, 'preferredStyle', errors);
   return errors;
 }
 
@@ -1027,7 +1025,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'generate_image',
-    description: '生成图像',
+    description: GENERATE_IMAGE_DESCRIPTION,
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1074,15 +1072,6 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateTranscribeAudioAction,
     execute: executeTranscribeAudio as any,
-  },
-  {
-    type: 'request_freya_visual_asset',
-    description: '请求 Freya 视觉资源工作流',
-    kind: 'code',
-    permissionCategory: 'execute',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateFreyaVisualAssetAction,
   },
   {
     type: 'agent',
