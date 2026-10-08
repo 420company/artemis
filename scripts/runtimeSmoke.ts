@@ -1268,6 +1268,32 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 }
 
 {
+  // A project without its own providers.json uses the global semantic-memory
+  // setting, like the main model does.
+  const tmpDir = path.join(os.tmpdir(), `artemis-memory-profile-${Date.now()}`)
+  const home = path.join(tmpDir, 'home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(path.join(home, '.artemis'), { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  fs.writeFileSync(path.join(home, '.artemis', 'providers.json'), JSON.stringify({
+    profiles: [],
+    memoryProfile: { enabled: true, provider: 'openai', config: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'embed-test' } },
+  }))
+  const previous = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME }
+  process.env.HOME = home
+  delete process.env.ARTEMIS_HOME
+  try {
+    const { getMemoryProfile } = await import('../src/core/memoryEnhancement.js')
+    const profile = await getMemoryProfile(project)
+    assert('semantic memory: a project without its own setting uses the global one', profile.enabled === true && profile.config?.model === 'embed-test', JSON.stringify(profile))
+  } finally {
+    process.env.HOME = previous.HOME
+    if (previous.ARTEMIS_HOME !== undefined) process.env.ARTEMIS_HOME = previous.ARTEMIS_HOME
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
   // Headless runs (artemis execute, the web product) know the owner: soul.md
   // reaches the system prompt, and main may save a long-term memory.
   const tmpDir = path.join(os.tmpdir(), `artemis-headless-memory-${Date.now()}`)
