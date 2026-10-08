@@ -8934,6 +8934,108 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+// ── MCP stdio transport ───────────────────────────────────────────────────────
+
+{
+  // The MCP stdio transport is newline-delimited JSON; servers built on the
+  // official SDKs read only that. Servers that read only LSP-style
+  // Content-Length frames are detected at initialize and still work. A stray
+  // non-JSON stdout line must not break a call, and must show up in the error
+  // when the server fails. A malformed frame header fails fast (it used to
+  // spin forever).
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-stdio-'))
+  type Mode = 'newline' | 'newline-noisy' | 'content-length' | 'content-length-exit'
+  const serverSource = (mode: Mode) => `
+const framed = ${mode.startsWith('content-length')}
+const write = (m) => {
+  const body = JSON.stringify(m)
+  process.stdout.write(framed ? 'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body : body + '\\n')
+}
+${mode === 'newline-noisy' ? "process.stdout.write('server starting...\\n')" : ''}
+let buf = ''
+process.stdin.on('data', (chunk) => {
+  buf += chunk
+  for (;;) {
+    let line
+    if (framed) {
+      // Strict LSP-style reader: anything else is never answered${mode === 'content-length-exit' ? ' (this one exits)' : ''}.
+      const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+      if (!m) {
+        ${mode === 'content-length-exit' ? "if (buf.length > 0) { process.stderr.write('expected Content-Length header\\n'); process.exit(1) }" : ''}
+        return
+      }
+      const end = m[0].length + Number(m[1])
+      if (buf.length < end) return
+      line = buf.slice(m[0].length, end)
+      buf = buf.slice(end)
+    } else {
+      const i = buf.indexOf('\\n')
+      if (i < 0) return
+      line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+    }
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'smoke', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] } })
+    else if (msg.method === 'tools/call') write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo:' + msg.params.arguments.text }] } })
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`
+  const stdioServer = (id: string, source: string) => {
+    const file = path.join(dir, `${id}.mjs`)
+    fs.writeFileSync(file, source)
+    return {
+      id,
+      enabled: true,
+      transport: 'stdio' as const,
+      command: process.execPath,
+      commandArgs: [file],
+      authType: 'none' as const,
+      authState: 'unknown' as const,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+  const callEcho = async (server: ReturnType<typeof stdioServer>): Promise<{ output: string; ms: number }> => {
+    const started = Date.now()
+    try {
+      return { output: (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), ms: Date.now() - started }
+    }
+  }
+  try {
+    const cases: [string, Mode][] = [
+      ['newline-delimited JSON (MCP spec, official SDKs)', 'newline'],
+      ['a server that reads only Content-Length frames (detected at initialize)', 'content-length'],
+      ['a Content-Length-only server that exits on unframed input', 'content-length-exit'],
+      ['a stray log line on stdout before the first message', 'newline-noisy'],
+    ]
+    for (const [label, mode] of cases) {
+      const { output } = await callEcho(stdioServer(`smoke-${mode}`, serverSource(mode)))
+      assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
+    }
+
+    // The detected framing is remembered: a fresh spawn skips the probe.
+    await closeCachedMcpClients()
+    const again = await callEcho(stdioServer('smoke-content-length', serverSource('content-length')))
+    assert('mcp stdio: detected Content-Length framing is reused on the next spawn', again.output.includes('echo:hi') && again.ms < 2500, `${again.ms}ms ${again.output}`)
+
+    const badHeader = await callEcho(stdioServer('smoke-bad-header', `process.stdin.on('data', () => { process.stdout.write('Content-Length: x\\r\\n\\r\\n{}') })\n`))
+    assert('mcp stdio: a malformed Content-Length header fails fast instead of hanging', /Content-Length/.test(badHeader.output) && badHeader.ms < 4000, `${badHeader.ms}ms ${badHeader.output}`)
+
+    const dying = await callEcho(stdioServer('smoke-dying', `process.stdout.write('fatal: missing API token\\n'); setTimeout(() => process.exit(1), 50)\n`))
+    assert('mcp stdio: dropped non-JSON stdout lines appear in the failure message', dying.output.includes('fatal: missing API token'), dying.output)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 console.log()
