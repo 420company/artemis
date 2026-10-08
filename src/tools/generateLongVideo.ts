@@ -13,6 +13,13 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo } from './generateVideo.js';
+import {
+  describeVideoGenerationFailure,
+  videoFailureKindOf,
+  videoFailureToolError,
+  videoFailureUserMessage,
+  type VideoGenerationFailure,
+} from './visual/videoGenerationFailure.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { describeUserImageWithVision, generateSafeBridgeKeyframe, generateSegmentKeyframe, maybeGenerateSuperVisualReference } from './visual/superVisualMode.js';
 import { parseStoryboardImageWithVision } from './visual/storyboardParser.js';
@@ -1810,6 +1817,7 @@ export async function executeGenerateLongVideo(
         let usingSegmentKeyframe = true;
         let safeBridgeKeyframeAttempted = false;
         let lastError = '';
+        let lastFailure: VideoGenerationFailure | undefined;
         let succeeded = false;
 
         for (let attempt = 0; attempt < 3 && !succeeded; attempt += 1) {
@@ -1901,12 +1909,16 @@ export async function executeGenerateLongVideo(
             break;
           }
           lastError = result.output ?? '';
+          lastFailure = describeVideoGenerationFailure({ detail: lastError }, context.locale);
+          const reportedKind = videoFailureKindOf(result.error);
+          if (reportedKind) lastFailure = { ...lastFailure, kind: reportedKind, userMessage: videoFailureUserMessage(reportedKind, context.locale) };
           const audioBlocked = isAudioSafetyError(lastError);
           const imageBlocked = isImagePrivacyError(lastError);
           const pollTimeout = isPollTimeoutErrorForTest(lastError);
           if (!audioBlocked && !imageBlocked && !pollTimeout) {
-            // Non-recoverable error — bail.
-            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：不可恢复错误，停止重试。${lastError.slice(0, 200)}`);
+            // Non-recoverable error — bail. The user sees the plain reason;
+            // the raw provider error follows for the log.
+            toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段生成失败：${lastFailure.userMessage}\n   ${lastError.slice(0, 300)}`);
             break;
           }
           if (pollTimeout) {
@@ -1966,7 +1978,12 @@ export async function executeGenerateLongVideo(
           return {
             action,
             ok: false,
-            output: `generate_long_video: segment ${segment.index}/${segments.length} failed.\n${lastError}`,
+            output: [
+              `generate_long_video: segment ${segment.index}/${segments.length} failed.`,
+              ...(lastFailure ? [`Reason: ${lastFailure.userMessage}`] : []),
+              lastError,
+            ].join('\n'),
+            ...(lastFailure ? { error: videoFailureToolError(lastFailure) } : {}),
           };
         }
 

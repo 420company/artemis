@@ -3,6 +3,7 @@ import type { VisualModelConfig } from '../../../providers/types.js'
 import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
 import { modelArkEndpoint, normalizeModelArkMediaBaseUrl } from '../../vidarMedia.js'
 import { ImageApiError } from '../imageGenerationFailure.js'
+import { GenerationApiError } from '../generationFailure.js'
 import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import {
   IMAGE_GENERATION_TIMEOUT_MS,
@@ -300,7 +301,7 @@ export class BytePlusProvider implements VisualProvider {
 
       const createRaw = await createRes.text()
       if (!createRes.ok) {
-        throw new Error(`Task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`)
+        throw new GenerationApiError(`Task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status)
       }
 
       const createPayload = JSON.parse(createRaw)
@@ -326,7 +327,7 @@ export class BytePlusProvider implements VisualProvider {
         
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
-          throw new Error(`Poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`)
+          throw new GenerationApiError(`Poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`, pollRes.status)
         }
         
         let pollPayload: any
@@ -365,7 +366,7 @@ export class BytePlusProvider implements VisualProvider {
           signal: params.abortSignal,
         })
       } catch (error) {
-        throw new Error(`Video download failed: ${error instanceof Error ? error.message : String(error)}`)
+        throw new GenerationApiError(`Video download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
       }
       
       const fs = await import('fs/promises')
@@ -402,6 +403,8 @@ export class BytePlusProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
+        httpStatus: error instanceof GenerationApiError ? error.status : undefined,
+        failureStage: error instanceof GenerationApiError ? error.stage : undefined,
         generationTime: Date.now() - startTime
       }
     }

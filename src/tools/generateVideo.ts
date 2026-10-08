@@ -22,6 +22,7 @@ import {
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
 import {
   buildVisualSetupRequiredMessage,
@@ -310,7 +311,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`,
+        ...legacyVideoFailure(`generate_video: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status, context),
       };
     }
 
@@ -349,7 +350,7 @@ export async function executeGenerateVideo(
         return {
           action,
           ok: false,
-          output: `generate_video: poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`,
+          ...legacyVideoFailure(`generate_video: poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`, pollRes.status, context),
         };
       }
       let pollPayload: TaskStatusResponse;
@@ -363,7 +364,7 @@ export async function executeGenerateVideo(
         return {
           action,
           ok: false,
-          output: `generate_video: task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim(),
+          ...legacyVideoFailure(`generate_video: task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim(), undefined, context),
         };
       }
       const maybeUrl = extractVideoUrl(pollPayload);
@@ -377,7 +378,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: task ${taskId} did not finish within ${maxPolls} polls (${(maxPolls * pollIntervalMs) / 1000}s). Last status: ${lastStatus}.`,
+        ...legacyVideoFailure(`generate_video: task ${taskId} did not finish within ${maxPolls} polls (${(maxPolls * pollIntervalMs) / 1000}s). Last status: ${lastStatus}.`, undefined, context),
       };
     }
 
@@ -407,6 +408,17 @@ export async function executeGenerateVideo(
     }
     return { action, ok: false, output: `generate_video error: ${message}` };
   }
+}
+
+/** Output and ToolError for a failed legacy ModelArk call: the raw error plus a plain reason. */
+function legacyVideoFailure(
+  output: string,
+  status: number | undefined,
+  context: ToolExecutionContext,
+): Pick<ToolExecutionResult, 'output' | 'error'> {
+  const failure = describeVideoGenerationFailure({ detail: output, status }, context.locale);
+  toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
+  return { output: `${output}\nReason: ${failure.userMessage}`, error: videoFailureToolError(failure, status) };
 }
 
 async function tryGenerateWithConfiguredVisualProvider(
@@ -587,11 +599,18 @@ async function generateVideoWithVisualProvider(
 
   if (!result.success || !result.assetPath) {
     const message = result.error ?? 'unknown error';
-    toolWarn(`⚠️ 本地视频生成 API 失败: ${message}`);
+    const failure = describeVideoGenerationFailure(
+      { detail: message, status: result.httpStatus, stage: result.failureStage },
+      context.locale,
+    );
+    // A plain reason for the user; the raw provider error stays in the log
+    // line and in the output, where Saga's retry logic reads it.
+    toolWarn(`⚠️ ${failure.userMessage}\n   ${sourceLabel}: ${failure.details}`);
     return {
       action,
       ok: false,
-      output: `generate_video: ${sourceLabel} failed: ${message}`,
+      output: `generate_video: ${sourceLabel} failed: ${message}\nReason: ${failure.userMessage}`,
+      error: videoFailureToolError(failure, result.httpStatus),
     };
   }
 
