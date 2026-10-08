@@ -293,6 +293,7 @@ import {
   describeVisualProvider,
   hasExplicitLocalVisualConsent,
   hasExplicitRemoteVisualFallback,
+  VISUAL_NOT_CONFIGURED_POLICY,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
@@ -1122,18 +1123,19 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '检测到任务需要图片/视频，但没有找到已配置且启用的本地视觉生成 API。',
           'Detected image/video needs, but no enabled local visual generation API is configured.',
         ),
-        savedPreference === 'local'
-          ? t(
-              '你之前选择了本地视觉 API，但当前配置不可用；本轮将改用网络搜索素材。请重新配置 providers.json 后再使用本地视觉生成。',
-              'Your saved preference is local visual API, but the current configuration is unavailable; this turn will use web-search assets. Reconfigure providers.json before using local visual generation again.',
-            )
-          : t(
-              '本轮如需视觉素材，将使用网络搜索素材，不会伪装成本地生成。',
-              'This turn will use web-search assets if needed and will not claim local generation.',
-            ),
+        ...(savedPreference === 'local'
+          ? [t(
+              '你之前选择了本地视觉 API，但当前配置不可用。',
+              'Your saved preference is the local visual API, but its configuration is unavailable.',
+            )]
+          : []),
+        t(
+          '图片/视频生成尚未配置：运行 /visual（或 /config visual，命令行 artemis setup visual）完成配置后重试。',
+          'Image/video generation is not configured: run /visual (or /config visual, or `artemis setup visual` in a shell), then retry.',
+        ),
         `${t('已检查配置: ', 'Checked config: ')}${checkedPaths.join(' ; ')}`,
       ])
-      return `${requestText}\n\n[Visual generation policy]\nNo configured local visual generation API is available. Use web-search assets if needed, and do not claim local generation.`
+      return `${requestText}\n\n${VISUAL_NOT_CONFIGURED_POLICY}`
     }
 
     if (hasExplicitRemoteVisualFallback(requestText)) {
