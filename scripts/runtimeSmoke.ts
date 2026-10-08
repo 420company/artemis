@@ -19,7 +19,7 @@ import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
 import { runHeadlessAgent } from '../src/services/headlessAgent.js'
 import { routeTeamRequest } from '../src/core/team.js'
-import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
+import { getAllowedActionTypesForProfile, validateProfileAction } from '../src/core/agentProfiles.js'
 import {
   createContextState,
   isCompactionBoundary,
@@ -142,7 +142,7 @@ import {
 } from '../src/utils/workspaceRoots.js'
 import { projectDirectToolNames } from '../src/core/directToolProjection.js'
 import { buildDreamBridgeText } from '../src/services/dreamComposer.js'
-import type { SessionMessage } from '../src/core/types.js'
+import type { AgentAction, SessionMessage } from '../src/core/types.js'
 import { ALL_AGENT_ACTION_TYPES, RUNTIME_MANAGED_AGENT_ACTION_TYPES } from '../src/core/types.js'
 import { resolveDataRootDir } from '../src/utils/fs.js'
 import type {
@@ -157,7 +157,7 @@ import {
   createWorkflowProgressState,
   renderWorkflowProgress,
 } from '../src/cli/workflowProgress.js'
-import { PermissionManager } from '../src/security/permissions.js'
+import { getPermissionCategoryForActionType, PermissionManager } from '../src/security/permissions.js'
 import {
   appendTaskRuntimeCommand,
 } from '../src/core/taskRuntime.js'
@@ -2978,6 +2978,600 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     else process.env.ARTEMIS_HOME = previousHome
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
+}
+
+// ── Web product tools: headless main runs (artemis execute, the web app) ──────
+// The tools main gained for the web product, as runtime data shared by the
+// blocks below.
+const WEB_MAIN_ADDED_TOOLS = [
+  'search_web',
+  'generate_image',
+  'generate_video',
+  'generate_long_video',
+  'synthesize_speech',
+  'transcribe_audio',
+  'task_output',
+  'kill_task',
+  'weather_current',
+  'weather_forecast',
+  'world_clock',
+  'time_diff',
+  'currency_convert',
+  'currency_rates',
+  'flight_lookup',
+  'browser_navigate',
+  'browser_screenshot',
+  'browser_extract_text',
+  'browser_click',
+  'browser_type',
+  'browser_form_input',
+  'browser_evaluate',
+  'browser_console',
+  'browser_requests',
+  'browser_tabs',
+  'browser_wait_for',
+  'browser_close',
+] as const
+const WEB_MAIN_EXCLUDED_TOOLS = [
+  'computer_click',
+  'computer_screenshot',
+  'calendar_list_today',
+  'reminders_add',
+  'spotify_play_liked',
+  'mcp_enable',
+  'mcp_disable',
+  'bridge_send_image',
+  'request_user_confirmation',
+  'spawn_background_workflow',
+] as const
+
+// Minimal valid arguments for each added tool, so validateToolAction and the
+// permission manager see a realistic action.
+function sampleWebToolAction(type: string): AgentAction {
+  const args: Record<string, Record<string, unknown>> = {
+    search_web: { query: 'artemis' },
+    generate_image: { prompt: 'a red fox' },
+    generate_video: { prompt: 'a red fox running' },
+    generate_long_video: { prompt: 'a red fox journey' },
+    synthesize_speech: { text: 'hello' },
+    transcribe_audio: { inputPath: 'a.wav' },
+    task_output: { taskId: 't1' },
+    kill_task: { taskId: 't1' },
+    weather_current: { location: 'Paris' },
+    weather_forecast: { location: 'Paris' },
+    world_clock: { cities: ['Paris'] },
+    time_diff: { fromCity: 'Paris', toCity: 'Tokyo' },
+    currency_convert: { amount: 1, from: 'EUR', to: 'USD' },
+    currency_rates: { base: 'EUR' },
+    flight_lookup: { callsign: 'AFR123' },
+    browser_navigate: { url: 'https://example.com' },
+    browser_type: { selector: '#q', text: 'x' },
+    browser_form_input: { selector: '#q', value: 'x' },
+    browser_evaluate: { script: '1 + 1' },
+    browser_tabs: { action: 'list' },
+    browser_wait_for: { text: 'x' },
+    browser_click: { text: 'x' },
+  }
+  return { type, ...(args[type] ?? {}) } as unknown as AgentAction
+}
+
+{
+  // (a) + (e): every added tool is allowed for main, offered as a native tool
+  // and listed in the manifest on a headless Linux host, and PRODUCER mode
+  // authorizes it. Desktop-only tools stay hidden there.
+  const linuxHeadless = { platform: 'linux', hasDisplay: false } as const
+  const snapshot = () => ({
+    nativeNames: buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main')).map((tool) => tool.name),
+    manifestNames: [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!),
+    mainPromptManifest: [...buildSystemPrompt(process.cwd(), 'PRODUCER', 'standard', 'main', true).matchAll(/^## (\S+)$/gm)].map((match) => match[1]!),
+  })
+  const linux = withToolHostEnvironment(linuxHeadless, snapshot)
+  const mac = withToolHostEnvironment({ platform: 'darwin', hasDisplay: true }, snapshot)
+
+  const notAllowed = WEB_MAIN_ADDED_TOOLS.filter((type) => !validateProfileAction('main', sampleWebToolAction(type)).allowed)
+  assert('web tools: every added tool passes validateProfileAction for main', notAllowed.length === 0, notAllowed.join(', '))
+  const invalid = WEB_MAIN_ADDED_TOOLS.filter((type) => validateToolAction(sampleWebToolAction(type)).length > 0)
+  assert('web tools: sample actions for the added tools are valid', invalid.length === 0, invalid.join(', '))
+
+  const missingNative = WEB_MAIN_ADDED_TOOLS.filter((type) => !linux.nativeNames.includes(type))
+  assert('web tools: every added tool is a main native tool on headless linux', missingNative.length === 0, missingNative.join(', '))
+  const missingManifest = WEB_MAIN_ADDED_TOOLS.filter((type) => !linux.manifestNames.includes(type) || !linux.mainPromptManifest.includes(type))
+  assert('web tools: every added tool is in the tool manifest and the main prompt manifest on headless linux', missingManifest.length === 0, missingManifest.join(', '))
+
+  const producer = new PermissionManager('PRODUCER', false)
+  const denied: string[] = []
+  for (const type of WEB_MAIN_ADDED_TOOLS) {
+    const decision = await producer.authorize(sampleWebToolAction(type))
+    if (!decision.allowed) denied.push(`${type}: ${decision.reason}`)
+  }
+  assert('web tools: PRODUCER mode authorizes every added tool', denied.length === 0, denied.join(' | '))
+  const unknownCategory = WEB_MAIN_ADDED_TOOLS.filter((type) => getPermissionCategoryForActionType(type) === 'none')
+  assert('web tools: every added tool has a real permission category', unknownCategory.length === 0, unknownCategory.join(', '))
+
+  const recovered = parseAssistantEnvelopeForSmoke([
+    'Looking it up.',
+    '<toolcall name="search_web">{"query":"artemis release notes","limit":3}</toolcall>',
+    '<toolcall name="browser_navigate">{"url":"https://example.com","extractText":true}</toolcall>',
+    '<toolcall name="weather_current">{"location":"Paris"}</toolcall>',
+  ].join('\n'))
+  const recoveredTypes = (recovered.actions ?? []).map((action) => action.type)
+  assert(
+    'web tools: native calls replayed as <toolcall> text keep search_web, browser and weather calls',
+    eq(recoveredTypes, ['search_web', 'browser_navigate', 'weather_current']) &&
+      (recovered.actions?.[0] as { query?: string } | undefined)?.query === 'artemis release notes',
+    JSON.stringify(recovered.actions),
+  )
+
+  const desktopOnly = ['computer_screenshot', 'computer_click', 'computer_doctor', 'calendar_list_today', 'calendar_add_event', 'reminders_list', 'reminders_add']
+  const leaked = desktopOnly.filter((type) =>
+    linux.nativeNames.includes(type) || linux.manifestNames.includes(type) || linux.mainPromptManifest.includes(type))
+  assert('web tools: desktop-only tools stay hidden from main on headless linux (native, manifest, prompt)', leaked.length === 0, leaked.join(', '))
+  const excludedAllowed = WEB_MAIN_EXCLUDED_TOOLS.filter((type) => validateProfileAction('main', { type } as unknown as AgentAction).allowed)
+  assert('web tools: dangerous, desktop-only and headless-useless tools stay blocked for main', excludedAllowed.length === 0, excludedAllowed.join(', '))
+  assert(
+    'web tools: main does not offer excluded tools natively or in its prompt, even on macOS',
+    WEB_MAIN_EXCLUDED_TOOLS.every((type) => !mac.nativeNames.includes(type) && !mac.mainPromptManifest.includes(type)),
+    WEB_MAIN_EXCLUDED_TOOLS.filter((type) => mac.nativeNames.includes(type) || mac.mainPromptManifest.includes(type)).join(', '),
+  )
+}
+
+// A mock host for headless runs: an OpenAI-compatible chat endpoint scripted
+// per request, and an images endpoint for the custom visual provider.
+type MockHostRequest = { path: string; body: string }
+async function withMockHeadlessHost(
+  options: {
+    /** The agent's own requests (they carry tools), numbered from 1. */
+    chat: (index: number, body: string) => string
+    /** Tool-less side requests: vision helper, memory curator, summaries. */
+    aux?: (body: string) => string
+    image?: (body: string, hostBaseUrl: string) => { status: number; json: unknown }
+    configureVisual?: boolean
+    /** BytePlus image profile on the mock host (supports referenceImages). */
+    configureBytePlusVisual?: boolean
+    /** Replaces the default providers.json written to ARTEMIS_HOME. */
+    providers?: (baseUrl: string) => unknown
+  },
+  run: (ctx: { project: string; requests: MockHostRequest[]; port: number }) => Promise<void>,
+): Promise<void> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-web-tools-'))
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  const requests: MockHostRequest[] = []
+  let chatCount = 0
+  let hostBaseUrl = ''
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => chunks.push(chunk))
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8')
+      const url = req.url ?? ''
+      requests.push({ path: url, body })
+      if (url.includes('/chat/completions')) {
+        // Side requests (the post-run memory curator, the vision helper) can
+        // interleave with the agent's; only tool-bearing requests are scripted.
+        const isAgentRequest = body.includes('"tools"')
+        if (isAgentRequest) chatCount += 1
+        else requests[requests.length - 1]!.path = `${url}#aux`
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          model: 'mock-openai-compatible',
+          choices: [{ message: { content: isAgentRequest ? options.chat(chatCount, body) : (options.aux?.(body) ?? '[]') } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }))
+        return
+      }
+      if (url === '/visual/asset.png') {
+        res.writeHead(200, { 'content-type': 'image/png' })
+        res.end(Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'))
+        return
+      }
+      if (url.startsWith('/visual/') && url.includes('/images/generations') && options.image) {
+        const reply = options.image(body, hostBaseUrl)
+        res.writeHead(reply.status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(reply.json))
+        return
+      }
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: `no route for ${url}` } }))
+    })
+  })
+  const saved = {
+    home: process.env.ARTEMIS_HOME,
+    media: process.env.ARTEMIS_MEDIA_OUTPUT_ROOT,
+    bing: process.env.BING_API_KEY,
+    google: process.env.GOOGLE_API_KEY,
+    cx: process.env.GOOGLE_CX,
+  }
+  const realFetch = globalThis.fetch
+  process.env.ARTEMIS_HOME = artemisHome
+  process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = path.join(tmpDir, 'media')
+  delete process.env.BING_API_KEY
+  delete process.env.GOOGLE_API_KEY
+  delete process.env.GOOGLE_CX
+  // Only the mock host is reachable: public search backends fail like they do
+  // on a VPS whose datacenter IP they block.
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith('http://127.0.0.1')) return realFetch(input, init)
+    throw new Error(`network unreachable from this host: ${new URL(url).host}`)
+  }) as typeof fetch
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock headless host failed to bind to a TCP port.')
+    hostBaseUrl = `http://127.0.0.1:${address.port}`
+    fs.writeFileSync(path.join(artemisHome, 'providers.json'), JSON.stringify(
+      options.providers?.(`http://127.0.0.1:${address.port}`) ?? {
+        defaultMainProfileId: 'mock-openai',
+        profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
+      },
+    ))
+    if (options.configureBytePlusVisual) {
+      await configureBytePlusImageProfile(project, `http://127.0.0.1:${address.port}/visual/api/v3`)
+    }
+    if (options.configureVisual) {
+      const store = new ProviderStore(project)
+      const data = await store.load()
+      data.visualProfile = {
+        enabled: true,
+        image: {
+          provider: 'custom',
+          apiKey: 'visual-test-key',
+          baseUrl: `http://127.0.0.1:${address.port}/visual/v1`,
+          model: 'mock-image-model',
+          defaultParams: { size: '1024x1024', quality: 'standard', style: 'realistic', watermark: false },
+        },
+        video: {
+          enabled: false,
+          provider: 'custom',
+          apiKey: '',
+          baseUrl: `http://127.0.0.1:${address.port}/visual/v1`,
+          model: 'mock-video-model',
+          defaultParams: { duration: '10s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false },
+        },
+      } as typeof data.visualProfile
+      await store.save(data)
+    }
+    await run({ project, requests, port: address.port })
+  } finally {
+    globalThis.fetch = realFetch
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    for (const [key, value] of [
+      ['ARTEMIS_HOME', saved.home],
+      ['ARTEMIS_MEDIA_OUTPUT_ROOT', saved.media],
+      ['BING_API_KEY', saved.bing],
+      ['GOOGLE_API_KEY', saved.google],
+      ['GOOGLE_CX', saved.cx],
+    ] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+const ONE_PIXEL_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+{
+  // (b) A headless image request runs generate_image end to end against a mock
+  // image endpoint. runInBackground is ignored headless: the file exists when
+  // the run returns, and the model saw the tool result before answering.
+  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+  await withMockHeadlessHost({
+    configureVisual: true,
+    chat: (index) => index === 1
+      ? [
+        'Generating the fox image.',
+        '<toolcall name="generate_image">{"prompt":"a red fox in fresh snow, golden hour","outputPath":"fox.png","runInBackground":true}</toolcall>',
+      ].join('\n')
+      : 'Done: the fox image is saved as fox.png.',
+    image: () => ({ status: 200, json: { data: [{ b64_json: ONE_PIXEL_PNG_BASE64 }] } }),
+  }, async ({ project, requests }) => {
+    const result = await runHeadlessAgent(project, 'Generate an image of a red fox in the snow.', { maxTurns: 6 })
+    const imageCalls = requests.filter((request) => request.path.includes('/images/generations'))
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
+    const saved = path.join(project, 'fox.png')
+    const savedBytes = fs.existsSync(saved) ? fs.readFileSync(saved) : Buffer.alloc(0)
+    const detail = `reply=${result.reply} turns=${result.turns} image=${imageCalls.length} chat=${chatCalls.length}`
+    assert(
+      'web tools: headless generate_image reaches the configured image endpoint once',
+      imageCalls.length === 1 && imageCalls[0]!.body.includes('a red fox in fresh snow'),
+      detail,
+    )
+    assert(
+      'web tools: headless generate_image saves the image before the run returns (no background task)',
+      savedBytes.subarray(0, 4).toString('hex') === '89504e47',
+      detail,
+    )
+    assert(
+      'web tools: headless image run ends in a couple of turns with the model answer',
+      result.turns <= 3 && chatCalls.length <= 3 && result.reply.includes('fox.png') && !result.reply.includes('Execution blocked'),
+      detail,
+    )
+    assert(
+      'web tools: the model saw the successful generate_image result',
+      chatCalls.length >= 2 && chatCalls[1]!.body.includes('Generated 1 image(s)'),
+      chatCalls[1]?.body.slice(0, 400),
+    )
+  })
+}
+
+{
+  // (b, merged main) Text-only platform model + vision helper + BytePlus
+  // references, headless: the attached photo is described by the helper,
+  // view_image returns the description, and generate_image sends the photo
+  // as a reference and saves the result before the run returns.
+  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+  let mainCalls = 0
+  let visionCalls = 0
+  await withMockHeadlessHost({
+    configureBytePlusVisual: true,
+    providers: (baseUrl) => ({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { id: 'platform-main', protocol: 'openai', baseUrl, apiKey: 'k', model: 'gpt-6-sol', supportsImages: false, contextLength: 200_000, maxOutputTokens: 8192, capabilitiesSource: 'platform' },
+        { id: 'platform-vision', protocol: 'openai', baseUrl, apiKey: 'k', model: 'vision-alias', supportsImages: true, capabilitiesSource: 'platform' },
+      ],
+    }),
+    aux: (body) => {
+      if (!body.includes('"model":"vision-alias"')) return '[]'
+      visionCalls += 1
+      return 'A watercolor painting of a lighthouse in soft blue tones.'
+    },
+    chat: (index) => {
+      mainCalls = index
+      return index === 1
+        ? [
+          'Looking at the reference, then painting the cat in the same style.',
+          '<toolcall name="view_image">{"path":"style.png"}</toolcall>',
+          '<toolcall name="generate_image">{"prompt":"a cat, watercolor, soft blue tones","referenceImages":["style.png"],"outputPath":"cat.png","runInBackground":true}</toolcall>',
+        ].join('\n')
+        : 'Done: cat.png uses the watercolor style of your photo.'
+    },
+    image: (_body, hostBase) => ({ status: 200, json: { data: [{ url: `${hostBase}/visual/asset.png` }] } }),
+  }, async ({ project, requests }) => {
+    fs.writeFileSync(path.join(project, 'style.png'), Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'))
+    const result = await runHeadlessAgent(project, 'Paint a cat in the style of this photo.', {
+      maxTurns: 6,
+      imagePaths: ['style.png'],
+    })
+    const imageCalls = requests.filter((request) => request.path.includes('/images/generations'))
+    const mainBodies = requests.filter((request) => request.path.includes('/chat/completions') && request.body.includes('"model":"gpt-6-sol"')).map((request) => request.body)
+    const imageBody = (() => { try { return JSON.parse(imageCalls[0]?.body ?? '{}') as { image?: unknown } } catch { return {} } })()
+    const saved = path.join(project, 'cat.png')
+    const detail = JSON.stringify({ reply: result.reply, turns: result.turns, vision: visionCalls, main: mainCalls, image: imageCalls.length })
+    assert(
+      'web tools + vision helper: a text-only headless model gets the attached photo described, and view_image returns the description',
+      visionCalls >= 1 &&
+        mainBodies.every((body) => !body.includes('image_url')) &&
+        mainBodies.some((body) => body.includes('Image 1 description by vision helper')) &&
+        mainBodies.some((body) => body.includes('description by vision helper') && body.includes('watercolor painting of a lighthouse')),
+      detail,
+    )
+    assert(
+      'web tools + referenceImages: headless generate_image sends the workspace photo as a reference and saves the result before returning',
+      imageCalls.length === 1 &&
+        typeof imageBody.image === 'string' && (imageBody.image as string).startsWith('data:image/png;base64,') &&
+        fs.existsSync(saved) && fs.readFileSync(saved).subarray(0, 4).toString('hex') === '89504e47' &&
+        result.reply.includes('cat.png') && !result.reply.includes('Execution blocked'),
+      detail,
+    )
+  })
+}
+
+{
+  // (c) No visual provider configured: the image request ends quickly with an
+  // honest "not configured" answer, never a 60-turn checklist loop.
+  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+  await withMockHeadlessHost({
+    chat: (index) => index === 1
+      ? '<toolcall name="generate_image">{"prompt":"a red fox in the snow"}</toolcall>'
+      : 'I could not create the image: image generation is not configured on this server. Ask the owner to set up a visual provider (artemis setup visual).',
+  }, async ({ project, requests }) => {
+    const result = await runHeadlessAgent(project, 'Generate an image of a red fox in the snow.', { maxTurns: 60 })
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
+    const detail = `reply=${result.reply} turns=${result.turns} chat=${chatCalls.length}`
+    assert(
+      'web tools: unconfigured image generation ends within a few turns, no checklist spin',
+      result.turns <= 3 && chatCalls.length <= 3 && !result.reply.includes('Execution blocked'),
+      detail,
+    )
+    assert(
+      'web tools: unconfigured image generation answers honestly from the real tool error',
+      result.reply.includes('not configured') &&
+        chatCalls.length >= 2 && chatCalls[1]!.body.includes('No usable visual API'),
+      detail,
+    )
+  })
+}
+
+{
+  // (c, guard) The visual checklist accepts a genuine provider blocker and
+  // stops demanding a tool after a bounded number of reminders.
+  async function runScripted(options: {
+    configure: 'custom-402' | 'custom-unreachable'
+    permissionMode?: 'PRODUCER' | 'read-only'
+    script: (call: number) => unknown
+  }): Promise<{ reply: string; turns: number; calls: number }> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-visual-guard-'))
+    const server = http.createServer((req, res) => {
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(402, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'Insufficient balance: top up your account to keep generating.' } }))
+      })
+    })
+    const previousHome = process.env.ARTEMIS_HOME
+    process.env.ARTEMIS_HOME = path.join(tmpDir, 'home')
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('Mock image endpoint failed to bind.')
+      const baseUrl = options.configure === 'custom-402' ? `http://127.0.0.1:${address.port}/v1` : 'http://127.0.0.1:9/v1'
+      const store = new ProviderStore(tmpDir)
+      const data = await store.load()
+      data.visualProfile = {
+        enabled: true,
+        image: { provider: 'custom', apiKey: 'k', baseUrl, model: 'img', defaultParams: { size: '1024x1024', quality: 'standard', style: 'realistic', watermark: false } },
+        video: { enabled: false, provider: 'custom', apiKey: '', baseUrl, model: 'v', defaultParams: { duration: '10s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false } },
+      } as typeof data.visualProfile
+      await store.save(data)
+      const sessions = new SessionStore(tmpDir)
+      const session = sessions.createSession({ title: 'visual guard smoke' })
+      await sessions.save(session)
+      let calls = 0
+      const provider: ChatProvider = {
+        async complete(): Promise<ProviderResponse> {
+          calls += 1
+          return { text: JSON.stringify(options.script(calls)), raw: null }
+        },
+      }
+      const result = await runAgent(session, 'Generate an image of a red fox in the snow.', {
+        cwd: tmpDir,
+        provider,
+        sessionStore: sessions,
+        permissionManager: new PermissionManager(options.permissionMode ?? 'PRODUCER', false),
+        maxTurns: 60,
+        profile: 'main',
+        allowBackgroundTools: false,
+      })
+      return { reply: result.reply, turns: result.turns, calls }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      if (previousHome === undefined) delete process.env.ARTEMIS_HOME
+      else process.env.ARTEMIS_HOME = previousHome
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  }
+
+  const balance = await runScripted({
+    configure: 'custom-402',
+    script: (call) => call === 1
+      ? { reply: 'Generating.', done: false, actions: [{ type: 'generate_image', prompt: 'a red fox in the snow' }] }
+      : { reply: 'The image provider reports an insufficient balance, so no image was created. Please top up the visual provider account.', done: true },
+  })
+  assert(
+    'visual guard: an insufficient-balance blocker is accepted and the run ends honestly',
+    balance.turns <= 2 && balance.reply.includes('insufficient balance') && !balance.reply.includes('Execution blocked'),
+    JSON.stringify(balance),
+  )
+
+  const neverCalls = await runScripted({
+    configure: 'custom-unreachable',
+    script: () => ({ reply: 'Here is a vivid description of a red fox in the snow.', done: true }),
+  })
+  assert(
+    'visual guard: a model that never calls generate_image is reminded a bounded number of times, then the run ends honestly',
+    neverCalls.turns <= 3 && neverCalls.calls <= 3 &&
+      neverCalls.reply.includes('was not generated') && !neverCalls.reply.includes('Execution blocked'),
+    JSON.stringify(neverCalls),
+  )
+
+  const readOnly = await runScripted({
+    configure: 'custom-unreachable',
+    permissionMode: 'read-only',
+    script: () => ({ reply: 'Here is a vivid description of a red fox in the snow.', done: true }),
+  })
+  {
+    // Plain writing requests ("write a haiku") are chat answers, not file
+    // tasks: no mutation reminder, no runtime note. A request that names a
+    // file still gets bounded reminders, then reports the missing file.
+    const haiku = 'Red fox in the snow, quiet paws on silver light, gone before the dawn.'
+    async function runChat(prompt: string): Promise<{ reply: string; calls: number }> {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-chat-mutation-'))
+      try {
+        const sessions = new SessionStore(tmpDir)
+        const session = sessions.createSession({ title: 'chat mutation smoke' })
+        await sessions.save(session)
+        let calls = 0
+        const provider: ChatProvider = {
+          async complete(): Promise<ProviderResponse> {
+            calls += 1
+            return { text: JSON.stringify({ reply: haiku, done: true }), raw: null }
+          },
+        }
+        const result = await runAgent(session, prompt, {
+          cwd: tmpDir,
+          provider,
+          sessionStore: sessions,
+          permissionManager: new PermissionManager('PRODUCER', false),
+          maxTurns: 60,
+          profile: 'main',
+        })
+        return { reply: result.reply, calls }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true })
+      }
+    }
+    const chatRuns = await Promise.all([
+      'Write a short haiku about foxes.',
+      'Create a packing list for a weekend in Paris.',
+      'Draft an email to my landlord about the heating.',
+    ].map(runChat))
+    assert(
+      'mutation guard: plain writing requests (poem, list, email) are answered in one turn with exactly the model answer',
+      chatRuns.every((run) => run.calls === 1 && run.reply === haiku),
+      JSON.stringify(chatRuns),
+    )
+    const fileRun = await runChat('Create notes.md with a haiku about foxes.')
+    assert(
+      'mutation guard: a request naming a file that is never written gets bounded reminders, then says which file is missing',
+      fileRun.calls === 3 && fileRun.reply.includes('Missing target files: notes.md'),
+      JSON.stringify(fileRun),
+    )
+  }
+
+  assert(
+    'visual guard: never demands generate_image when this run cannot call it (read-only)',
+    readOnly.turns === 1 && readOnly.calls === 1 && readOnly.reply.includes('vivid description'),
+    JSON.stringify(readOnly),
+  )
+}
+
+{
+  // (d) No usable search backend: search_web reports what is missing and the
+  // run ends with an honest answer instead of looping.
+  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+  await withMockHeadlessHost({
+    chat: (index) => index === 1
+      ? '<toolcall name="search_web">{"query":"latest Node.js LTS version"}</toolcall>'
+      : 'Sorry, web search is not available on this server right now (no search backend is configured), so I could not look that up.',
+  }, async ({ project, requests }) => {
+    const result = await runHeadlessAgent(project, 'Search the web for the latest Node.js LTS version.', { maxTurns: 60 })
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
+    const detail = `reply=${result.reply} turns=${result.turns} chat=${chatCalls.length}`
+    const offered = (() => {
+      try {
+        const tools = (JSON.parse(chatCalls[0]?.body ?? '{}') as { tools?: Array<{ function?: { name?: string } }> }).tools ?? []
+        return tools.map((tool) => tool.function?.name ?? '')
+      } catch {
+        return []
+      }
+    })()
+    assert(
+      'web tools: the headless model request offers search, image, video and browser tools natively, and no desktop or excluded tools',
+      ['search_web', 'generate_image', 'generate_video', 'generate_long_video', 'browser_navigate', 'browser_extract_text'].every((name) => offered.includes(name)) &&
+        offered.every((name) => !/^(computer_|calendar_|reminders_|spotify_|bridge_send_|mcp_enable|mcp_disable)/.test(name)),
+      offered.join(', '),
+    )
+    assert(
+      'web tools: headless search_web without a backend ends within a few turns, no checklist spin',
+      result.turns <= 3 && chatCalls.length <= 3 && !result.reply.includes('Execution blocked'),
+      detail,
+    )
+    assert(
+      'web tools: search_web failure tells the model which backends failed and what to configure',
+      chatCalls.length >= 2 &&
+        chatCalls[1]!.body.includes('search_web failed') &&
+        chatCalls[1]!.body.includes('GOOGLE_API_KEY') &&
+        result.reply.includes('not available'),
+      chatCalls[1]?.body.slice(-800),
+    )
+  })
 }
 
 {

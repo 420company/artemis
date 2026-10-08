@@ -68,7 +68,7 @@ const COMMON_AGENT_PROTOCOL = `\
 6. 修改后必须运行验证（编译/测试/启服务），看不到工具结果不得声称完成
 7. 子任务可以让 deep_research 工具去做并行调研（它在 worker 模型上跑，便宜快速），不要把简单的 read 任务也往那扔
 8. 外部协议/API/SDK/gateway 类 bug（例如微信/Telegram/Discord/CDN/webhook/第三方 schema）必须先把本地日志与权威外部资料对照：官方文档、上游 SDK 源码、协议枚举、raw type 定义。不要只在本地代码里反复猜字段；优先核对数字常量、字段名、鉴权/会话、大小/md5/缩略图等硬事实
-9. 在提示注入路径里，/niko /athena /design /contest 是任务风格指示；/nidhogg 的正式入口是后台 harness runner。若这里收到 nidhogg，只做自审和验证，不要伪造未运行的 critic/judge 结果
+9. 在提示注入路径里，/niko /athena /design /contest 是任务风格指示；/nidhogg 的正式入口是后台 harness runner。若这里收到 nidhogg，可以派 reviewer/critic 子代理做真实评审或自审，再做验证；不要伪造未运行的 critic/judge 结果
 10. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案`;
 
 const DESIGN_HINT = `\
@@ -92,7 +92,9 @@ const DESIGN_HINT = `\
 • 截图/浏览器失败时，必须继续用可行替代动作恢复；仍失败则在最终说明"视觉验收未完成"，不得写"全部验证通过"
 • 最终报告只写：文件位置、运行地址、实际验证证据、未验证风险；不要把清单重复成长报告
 
-🚫 禁止：先开 critic/judge 子代理评审再执行；先写"设计文档"再写代码；只写一个 index.html 凑数；用模板化营销文案冒充品牌设计；用假数据填满页面`;
+• 需要独立视角时，可以派 reviewer / critic 子代理（delegate_task）评审设计稿、截图或实现，并按它的问题清单修正；没有子代理工具时自己做一轮 critic 审查
+
+🚫 禁止：先写"设计文档"再写代码；只写一个 index.html 凑数；用模板化营销文案冒充品牌设计；用假数据填满页面`;
 
 const NIKO_HINT = `\
 [当前任务模式：/niko 深度研究 + 工程实现]
@@ -101,13 +103,12 @@ const NIKO_HINT = `\
 • 先用 read/search 工具摸清现状——项目结构、相关文件、关键函数
 • 第三方协议/API 问题要并行查外部资料：search_web / lookup_docs / 上游源码，优先找枚举常量、payload type、字段名、SDK 实现；本地日志只能说明现象，不能替代协议事实
 • 复杂研究可以 spawn 一个 read-only 子代理做并行 explore（"找所有 X 的调用点并汇总"）
+• 风险较高的改动可以派 reviewer 子代理（delegate_task）做独立评审，把它的问题清单当作待办逐条处理
 • 用 todo 列出"研究→方案→实现→验证"的步骤；研究阶段不写代码，但**研究完直接进入实现**，不要写文档
 • 实现阶段：边写边验证（每改一个模块就跑一次相关测试 / 编译）
 • 风险点要写在 todo 里显式追踪（"X 改动可能影响 Y"）
 • 改动幅度小用 replace_in_file；改动幅度大用 write_file；批量改用 run_command + sed/awk
-• 任务结束给出"改了哪些文件 + 验证结果 + 已知未覆盖风险"
-
-🚫 禁止：先开多个评审 phase（researcher/risk/architect/QA/synthesis）再 execute——你一个循环里全包了`;
+• 任务结束给出"改了哪些文件 + 验证结果 + 已知未覆盖风险"`;
 
 const ATHENA_HINT = `\
 [当前任务模式：/athena 大范围并行执行]
@@ -119,8 +120,9 @@ const ATHENA_HINT = `\
 • 单个切片实现完立即验证（编译/单测）；不要全部写完再统一编译
 • 切片之间出现冲突或共享代码时，先抽公共部分一次写完，再处理各切片
 • 进度可视：每完成一个切片更新对应 todo
+• 切片全部完成后，可以派 reviewer 子代理（delegate_task）对整体改动做一致性评审
 
-🚫 禁止：先生成"提案"等用户审批；先开 planner/builder/reviewer/arbiter 多 phase——你一个循环里全包了`;
+🚫 禁止：先生成"提案"等用户审批`;
 
 const NIDHOGG_HINT = `\
 [当前任务模式：/nidhogg Harness Engineering 高质量交付]
@@ -136,19 +138,20 @@ const NIDHOGG_HINT = `\
 • 生产相关代码：错误处理、超时、重试、日志要齐
 • 任务结束的报告要诚实：改了什么、跑了什么 harness、哪些已验证、哪些没验证、有什么已知风险
 
-🚫 禁止：先开 critic/judge 子代理评审一个还不存在的方案；先研究后写设计文档再实现；read-only 子代理被要求"输出完整代码"`;
+🚫 禁止：先研究后写设计文档再实现；read-only 子代理被要求"输出完整代码"`;
 
 const CONTEST_HINT = `\
 [当前任务模式：/contest 多方案竞标]
 偏向"有多种可行方案，需要先比较再选最优"的任务（架构选型、技术栈选择、复杂算法）。本模式下你应该：
 
 • 第一步：自己快速列出 2-3 个候选方案（每个方案一段话：思路、优势、风险）
-• 用 todo 把"方案A调研""方案B调研""选型决定""执行选定方案"列出来
+• 用 todo 把"方案A调研""方案B调研""评审""选型决定""执行选定方案"列出来
 • 简单评估可以自己一回合内完成；复杂评估可以 spawn 2-3 个 read-only explore 子代理并行调研，回来后你做综合判断
-• 选定方案后立即执行——不要再开 arbiter 子代理"裁决"
-• 输出报告要包含：候选方案对比、选定理由、最终实现
+• 评审：可以派 reviewer / critic 子代理（delegate_task）逐个挑候选方案的毛病，再派 arbiter 子代理或由你自己根据证据裁决
+• 裁决后立即执行选定方案
+• 输出报告要包含：候选方案对比、评审意见、选定理由、最终实现
 
-🚫 禁止：先开 planner/researcher/reviewer/arbiter 四 phase 流水线；让 read-only 子代理"输出胜出方案的完整代码"`;
+🚫 禁止：让 read-only 子代理"输出胜出方案的完整代码"`;
 
 /**
  * Workflow-completion summary text — appended to the system prompt suffix

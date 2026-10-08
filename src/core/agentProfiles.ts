@@ -143,6 +143,59 @@ export function getDelegatedPermissionMode(
   return 'read-only';
 }
 
+// User-facing capabilities the main profile offers on every host, including
+// a headless server (the web product runs `artemis execute` -> runAgent with
+// profile main). Host-specific filtering still happens downstream: native tool
+// schemas and the manifest only list tools isToolSupportedOnHost() accepts.
+//
+// Deliberately NOT allowed for main:
+// - computer_*, calendar_*, reminders_*: desktop/macOS-only control of the
+//   user's machine; platformSupport.ts hides them on headless hosts anyway.
+// - spotify_*: playback needs a one-time OAuth login with a loopback redirect
+//   on the machine running Artemis, which a headless VPS user cannot complete.
+// - mcp_list/mcp_enable/mcp_disable/mcp_suggest: rewrite the MCP server set,
+//   which the host platform manages (schedules, 3D); MCP tools stay callable
+//   through mcp_call_tool.
+// - bridge_send_image/bridge_send_video: push files into Telegram/Discord/
+//   WeChat chats; results reach the user through the session instead.
+// - request_user_confirmation: nobody can answer it in a headless run.
+// - spawn_background_workflow: detaches a separate agent process whose result
+//   never returns to the requesting session.
+// - agent: runtime-internal, no executor.
+const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
+  // Web search. Web pages are read with the browser tools below.
+  'search_web',
+  // Visual generation. In headless runs these execute in the foreground so
+  // the result lands in the run's reply (see RunAgentOptions.allowBackgroundTools).
+  'generate_image',
+  'generate_video',
+  'generate_long_video',
+  // Speech.
+  'synthesize_speech',
+  'transcribe_audio',
+  // Keyless public information lookups.
+  'weather_current',
+  'weather_forecast',
+  'world_clock',
+  'time_diff',
+  'currency_convert',
+  'currency_rates',
+  'flight_lookup',
+  // Playwright browser (headless on a server without a display).
+  'browser_navigate',
+  'browser_screenshot',
+  'browser_extract_text',
+  'browser_click',
+  'browser_type',
+  'browser_form_input',
+  'browser_evaluate',
+  'browser_console',
+  'browser_requests',
+  'browser_tabs',
+  'browser_wait_for',
+  'browser_close',
+];
+
 export function getAllowedActionTypesForProfile(
   profile: ExecutionProfile,
 ): AgentAction['type'][] {
@@ -162,11 +215,16 @@ export function getAllowedActionTypesForProfile(
       'replace_in_file',
       'apply_patch',
       'run_command',
+      // run_command moves long commands to the background and points the
+      // model at these two to read or stop them.
+      'task_output',
+      'kill_task',
       'delegate_task',
       'approve_builder_execution',
       // Long-term memory: the system prompt asks main to persist what the
       // user says to remember, so the tool must be allowed here too.
       'memory',
+      ...MAIN_USER_FACING_ACTION_TYPES,
     ];
   }
 
@@ -219,7 +277,7 @@ export function getProfileActionPolicyInstructions(
 ): string[] {
   if (profile === 'main') {
     return [
-      'Runtime action policy: main may use any registered tool, subject to permission mode and explicit approval requirements.',
+      'Runtime action policy: main may use the tools listed in this session, subject to permission mode and explicit approval requirements.',
     ];
   }
 

@@ -107,6 +107,10 @@ export async function runHeadlessAgent(
     // Nobody reviews a headless turn as it runs: memories the model saves
     // without naming a scope stay in this workspace.
     memoryDefaultScope: 'project',
+    // The process exits when the run returns: slow tools (image/video
+    // generation, delegated tasks) run in the foreground so their result is
+    // part of this run's reply instead of a background task that dies with it.
+    allowBackgroundTools: false,
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
     resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
