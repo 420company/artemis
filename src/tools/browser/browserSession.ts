@@ -20,6 +20,7 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
+import { detectToolHostEnvironment } from '../platformSupport.js';
 
 const PROFILE_DIR = path.join(resolveArtemisHomeDir(), 'browser-data');
 const TEMP_PROFILE_PREFIX = path.join(os.tmpdir(), 'artemis-browser-');
@@ -167,7 +168,13 @@ async function initContext(): Promise<BrowserContext> {
 
   _initPromise = (async () => {
     const { chromium } = await import('playwright');
-    const headless = process.env.ARTEMIS_BROWSER_HEADLESS === '1';
+    // Headed by default; ARTEMIS_BROWSER_HEADLESS=1 forces headless. Without
+    // a display (e.g. a headless Linux server) a headed launch can only fail,
+    // so fall back to headless there unless ARTEMIS_BROWSER_HEADLESS=0.
+    const headlessEnv = process.env.ARTEMIS_BROWSER_HEADLESS;
+    const headless =
+      headlessEnv === '1' ||
+      (headlessEnv !== '0' && !detectToolHostEnvironment().hasDisplay);
     // Platform-consistent UA — a Mac UA on a Windows host is itself a bot signal.
     const uaPlatform = process.platform === 'win32'
       ? 'Windows NT 10.0; Win64; x64'

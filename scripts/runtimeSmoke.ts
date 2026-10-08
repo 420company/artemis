@@ -21,7 +21,10 @@ import { buildContextWindow } from '../src/core/context.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
-import { buildProviderNativeFunctionTools } from '../src/core/providerNativeTools.js'
+import {
+  buildProviderNativeFunctionTools,
+  mapProviderNativeToolCallToAction,
+} from '../src/core/providerNativeTools.js'
 import { probeProviderNativeToolCalls } from '../src/providers/health.js'
 import {
   GPT_5_6_CONTEXT_LENGTH,
@@ -31,13 +34,16 @@ import {
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
-import { getDirectToolCount } from '../src/tools/directTools.js'
+import { buildDirectNativeFunctionTools, getDirectToolCount } from '../src/tools/directTools.js'
+import { withToolHostEnvironment } from '../src/tools/platformSupport.js'
+import { buildAmbientToolsHint } from '../src/tools/ambientHint.js'
 import {
   getToolDefinition,
   getProviderCallableActionTypes,
   isDirectlyExecutableTool,
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
+  renderDetailedToolManifest,
 } from '../src/tools/registry.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
@@ -179,6 +185,73 @@ assert(
   eq(providerNativeToolNames, getProviderCallableActionTypes()),
   providerNativeToolNames.join(', '),
 )
+
+{
+  // Platform-aware tool exposure: a headless Linux host must not be offered
+  // macOS/desktop-only tools, while macOS keeps the full set.
+  const desktopOnlyTools = [
+    'computer_screenshot',
+    'computer_click',
+    'computer_doctor',
+    'calendar_list_today',
+    'calendar_add_event',
+    'reminders_list',
+    'reminders_add',
+    'spotify_play_liked',
+    'spotify_pause',
+  ]
+  const coreTools = ['read_file', 'write_file', 'run_command', 'search_files', 'browser_navigate', 'weather_current']
+  const snapshot = () => {
+    const nativeNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
+    const directNames = buildDirectNativeFunctionTools().map((tool) => tool.name)
+    const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
+    const ambientHint = buildAmbientToolsHint()
+    const rejected = mapProviderNativeToolCallToAction({
+      callId: 'smoke-call',
+      name: 'computer_click',
+      arguments: '{"x":1,"y":2}',
+    })
+    return { nativeNames, directNames, manifestNames, ambientHint, rejected }
+  }
+  const linux = withToolHostEnvironment({ platform: 'linux', hasDisplay: false }, snapshot)
+  const mac = withToolHostEnvironment({ platform: 'darwin', hasDisplay: true }, snapshot)
+  const lists = (s: ReturnType<typeof snapshot>) => [s.nativeNames, s.directNames, s.manifestNames]
+
+  assert(
+    'platform tools: headless linux omits desktop/macOS-only tools from native, direct and manifest lists',
+    lists(linux).every((names) => desktopOnlyTools.every((name) => !names.includes(name))),
+    lists(linux).map((names) => names.filter((name) => desktopOnlyTools.includes(name)).join(',')).join(' | '),
+  )
+  assert(
+    'platform tools: headless linux keeps core tools in native, direct and manifest lists',
+    lists(linux).every((names) => coreTools.every((name) => names.includes(name))),
+  )
+  assert(
+    'platform tools: macOS still offers desktop/macOS tools everywhere',
+    lists(mac).every((names) => desktopOnlyTools.every((name) => names.includes(name))),
+  )
+  assert(
+    'platform tools: manifest hides executor-less capability placeholders',
+    ['http_request', 'search', 'web_scraper', 'user_interaction', 'confirm', 'file', 'system']
+      .every((name) => !linux.manifestNames.includes(name) && !mac.manifestNames.includes(name)),
+  )
+  assert(
+    'platform tools: ambient hint drops Apple Calendar/Reminders on linux only',
+    !linux.ambientHint.includes('calendar_list_today') &&
+      !linux.ambientHint.includes('reminders_add') &&
+      linux.ambientHint.includes('weather_current') &&
+      mac.ambientHint.includes('calendar_list_today') &&
+      mac.ambientHint.includes('reminders_add'),
+  )
+  assert(
+    'platform tools: native call to a hidden desktop tool is rejected as unavailable on linux',
+    !linux.rejected.ok && linux.rejected.error.code === 'tool_unavailable' && mac.rejected.ok,
+  )
+  assert(
+    'platform tools: host override is restored after the forced snapshot',
+    eq(buildProviderNativeFunctionTools().map((tool) => tool.name), providerNativeToolNames),
+  )
+}
 
 {
   const generateVideoTool = providerNativeTools.find((tool) => tool.name === 'generate_video')
@@ -516,14 +589,24 @@ assert(
   shellProjection.join(', '),
 )
 
-const ambientProjection = projectDirectToolNames([
+const ambientMessages: SessionMessage[] = [
   {
     id: 'ambient-user',
     role: 'user',
     content: '明天上午提醒我看天气，如果下雨就播放 Spotify 歌单。',
     createdAt: new Date().toISOString(),
   },
-])
+]
+// Reminders and Spotify are desktop/macOS tools, so this projection is
+// checked on a forced macOS host; the headless Linux variant follows below.
+const ambientProjection = withToolHostEnvironment(
+  { platform: 'darwin', hasDisplay: true },
+  () => projectDirectToolNames(ambientMessages),
+)
+const headlessAmbientProjection = withToolHostEnvironment(
+  { platform: 'linux', hasDisplay: false },
+  () => projectDirectToolNames(ambientMessages),
+)
 
 assert(
   'tool projection: ambient requests keep productivity, weather, and music tools',
@@ -532,6 +615,14 @@ assert(
     ambientProjection.includes('spotify_play_playlist') &&
     !ambientProjection.includes('apply_patch'),
   ambientProjection.join(', '),
+)
+
+assert(
+  'tool projection: headless linux never projects desktop-only tools',
+  headlessAmbientProjection.includes('weather_forecast') &&
+    !headlessAmbientProjection.includes('reminders_add') &&
+    !headlessAmbientProjection.includes('spotify_play_playlist'),
+  headlessAmbientProjection.join(', '),
 )
 
 const dreamProtocolDiscussionProjection = projectDirectToolNames([

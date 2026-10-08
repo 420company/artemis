@@ -19,6 +19,7 @@
  */
 
 import { isAuthenticated } from './store.js';
+import { isToolSupportedOnHost } from '../platformSupport.js';
 
 // ── Hard triggers: explicit music intent ─────────────────────────────────
 // Brain should call a spotify_* tool when these appear in user message.
@@ -73,6 +74,11 @@ export function detectMusicIntent(message: string): boolean {
  * advertise tools that won't work).
  */
 export async function buildSpotifyHint(): Promise<string> {
+  // spotify_* tools are not offered on hosts without a desktop session
+  // (headless servers), so do not advertise them or the login flow there.
+  if (!isToolSupportedOnHost('spotify_play_liked')) {
+    return '';
+  }
   const authed = await isAuthenticated();
   if (!authed) {
     return [
