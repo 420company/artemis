@@ -1635,6 +1635,43 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       estimateContextLimit('gpt-5.6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH,
   )
   assert(
+    'model context: GPT-6 family infers the GPT-5.6 window as a lower bound',
+    inferKnownModelContextLength('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      inferKnownModelContextLength('openai/gpt-6-luna') === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 400_000) === 400_000,
+  )
+  assert(
+    'model context: GLM-5.2/5.3 use 200K while GLM-5.1 keeps its entry',
+    estimateContextLimit('glm-5.2') === 200_000 &&
+      estimateContextLimit('glm-5.3') === 200_000 &&
+      estimateContextLimit('z-ai/glm-5.3') === 200_000 &&
+      estimateContextLimit('glm-5.1') === 1_000_000,
+  )
+  assert(
+    'model context: Seed 2.0 aliases use 256K, dated presets unchanged',
+    estimateContextLimit('seed-2-0-pro') === 256_000 &&
+      estimateContextLimit('seed-2-0-mini') === 256_000 &&
+      estimateContextLimit('seed-2-0-lite') === 256_000 &&
+      estimateContextLimit('seed-2-0-pro-260328') === 128_000,
+  )
+  assert(
+    'model context: Kimi K3 uses 256K, Qwen3.7 128K',
+    estimateContextLimit('kimi-k3') === 256_000 &&
+      estimateContextLimit('moonshotai/kimi-k3-preview') === 256_000 &&
+      estimateContextLimit('kimi-k2') === 128_000 &&
+      estimateContextLimit('qwen3.7') === 128_000 &&
+      estimateContextLimit('qwen3.7-max') === 128_000,
+  )
+  assert(
+    'model context: Claude 5.5 family uses the 1M window',
+    estimateContextLimit('claude-opus-5-5') === 1_000_000 &&
+      estimateContextLimit('claude-sonnet-5-5') === 1_000_000 &&
+      estimateContextLimit('claude-haiku-5-5') === 1_000_000 &&
+      estimateContextLimit('anthropic.claude-opus-5-5-v1:0') === 1_000_000 &&
+      estimateContextLimit('claude-haiku-4-5') === 200_000,
+  )
+  assert(
     'context compression: GPT-5.6 auto-compaction follows the reduced window',
     getCompressionTriggerTokens(GPT_5_6_CONTEXT_LENGTH) === 217_600,
     `trigger=${getCompressionTriggerTokens(GPT_5_6_CONTEXT_LENGTH)}`,

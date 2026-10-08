@@ -8,6 +8,17 @@ type ModelMetadata = Record<string, unknown>
 // make Artemis wait for the old 372K/1M boundary before compacting.
 export const GPT_5_6_CONTEXT_LENGTH = 272_000
 
+// Inference values for newer model families, used only when neither the
+// provider's /models metadata nor the profile configures a length. Claude 5.5
+// follows Anthropic's published 1M window; the others are conservative lower
+// bounds chosen without an authoritative source and should be raised once
+// verified.
+const GPT_6_CONTEXT_LENGTH = GPT_5_6_CONTEXT_LENGTH
+const GLM_5_X_CONTEXT_LENGTH = 200_000
+const SEED_2_0_CONTEXT_LENGTH = 256_000
+const KIMI_K3_CONTEXT_LENGTH = 256_000
+const CLAUDE_5_5_CONTEXT_LENGTH = 1_000_000
+
 export type ModelContextLengthSource = 'models-api' | 'known-model' | 'manual' | 'unknown'
 
 export type ModelContextDetectionResult = {
@@ -44,6 +55,11 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'claude-sonnet-5': 1_000_000,
   'claude-sonnet-4-6': 1_000_000,
   'claude-sonnet-4.6': 1_000_000,
+  // Claude 5.5 family: 1M context per Anthropic's current model table
+  // (Opus 5.5 / Sonnet 5.5 / Haiku 5.5).
+  'claude-opus-5-5': CLAUDE_5_5_CONTEXT_LENGTH,
+  'claude-sonnet-5-5': CLAUDE_5_5_CONTEXT_LENGTH,
+  'claude-haiku-5-5': CLAUDE_5_5_CONTEXT_LENGTH,
   'claude-haiku-4-5': 200_000,
   'claude-haiku-4-5-20251001': 200_000,
   'claude-opus-4-1-20250805': 200_000,
@@ -51,6 +67,10 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'claude-sonnet-4-20250514': 200_000,
 
   // OpenAI family
+  // GPT-6: no published window in the repo yet; use the GPT-5.6 value as a
+  // conservative lower bound (not a cap, so larger metadata values still win).
+  'gpt-6-sol': GPT_6_CONTEXT_LENGTH,
+  'gpt-6-luna': GPT_6_CONTEXT_LENGTH,
   'gpt-5.6-sol': GPT_5_6_CONTEXT_LENGTH,
   'gpt-5.6-luna': GPT_5_6_CONTEXT_LENGTH,
   'gpt-5.6-terra': GPT_5_6_CONTEXT_LENGTH,
@@ -99,11 +119,18 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'moonshot-v1-128k': 128_000,
   'moonshot-v1-32k': 32_000,
   'moonshot-v1-8k': 8_000,
+  // Kimi K3: 256K conservative lower bound (unverified).
+  'kimi-k3': KIMI_K3_CONTEXT_LENGTH,
   'kimi-k2.6': 128_000,
   'kimi-k2.5': 128_000,
   'kimi-k2': 128_000,
 
   // BytePlus / ModelArk presets
+  // Seed 2.0 un-dated aliases: 256K. The dated BytePlus presets below keep
+  // their existing 128K value until the provider limit is re-verified.
+  'seed-2-0-pro': SEED_2_0_CONTEXT_LENGTH,
+  'seed-2-0-mini': SEED_2_0_CONTEXT_LENGTH,
+  'seed-2-0-lite': SEED_2_0_CONTEXT_LENGTH,
   'seed-2-0-pro-260328': 128_000,
   'seed-2-0-lite-260228': 128_000,
   'seed-2-0-mini-260215': 128_000,
@@ -113,6 +140,10 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'seed-1-6-flash-250715': 128_000,
   'ark-code-latest': 128_000,
   'bytedance-seed-code': 128_000,
+  // GLM-5.2 / 5.3: 200K conservative lower bound (unverified; the older
+  // GLM-5 / 5.1 entries below are left as they were).
+  'glm-5.2': GLM_5_X_CONTEXT_LENGTH,
+  'glm-5.3': GLM_5_X_CONTEXT_LENGTH,
   'glm-5.1': 1_000_000,
   'glm-5-turbo': 1_000_000,
   'glm-5': 1_000_000,
@@ -139,6 +170,11 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'qwen-max': 128_000,
   'qwen-plus': 128_000,
   'qwen3-coder-next': 128_000,
+  // Qwen3.7: no authoritative window known here; 128K matches the other
+  // Qwen 3.x entries as a conservative lower bound.
+  'qwen3.7': 128_000,
+  'qwen3.7-max': 128_000,
+  'qwen3.7-plus': 128_000,
   'qwen3.6-plus': 128_000,
   'qwen3.5-plus': 128_000,
   'step-2-16k': 16_000,
@@ -166,9 +202,11 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('claude-opus-4-7') || m.includes('claude-opus-4.7')) return 1_000_000
   if (m.includes('claude-sonnet-4-6') || m.includes('claude-sonnet-4.6')) return 1_000_000
   if (m.includes('claude-haiku-4-5') || m.includes('claude-haiku-4.5')) return 200_000
+  if (/claude-[a-z]+-5[-.]5(?![0-9])/.test(m)) return CLAUDE_5_5_CONTEXT_LENGTH
   if (m.includes('claude')) return 200_000
 
   // ── OpenAI GPT ───────────────────────────────────────────────────────────
+  if (/gpt-6(?![0-9])/.test(m)) return GPT_6_CONTEXT_LENGTH
   if (m.includes('gpt-5.6')) return GPT_5_6_CONTEXT_LENGTH
   if (m.includes('gpt-5.5')) return 1_000_000
   if (m.includes('gpt-5.4')) return 1_000_000
@@ -195,6 +233,7 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('deepseek')) return 128_000
 
   // ── Kimi / Moonshot ──────────────────────────────────────────────────────
+  if (m.includes('kimi-k3')) return KIMI_K3_CONTEXT_LENGTH
   if (m.includes('kimi')) return 128_000
   if (m.includes('moonshot-v1-128k')) return 128_000
   if (m.includes('moonshot-v1-32k')) return 32_000
@@ -202,6 +241,7 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('moonshot')) return 128_000
 
   // ── GLM / Zhipu ──────────────────────────────────────────────────────────
+  if (/glm-5\.[2-9](?![0-9])/.test(m)) return GLM_5_X_CONTEXT_LENGTH
   if (m.includes('glm-5')) return 1_000_000
   if (m.includes('glm')) return 128_000
 
@@ -209,6 +249,8 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('qwen')) return 128_000
 
   // ── BytePlus / Seed / Ark ────────────────────────────────────────────────
+  // Seed 2.0 aliases without a date suffix; dated presets are exact entries.
+  if (/seed-2-0-(pro|mini|lite)$/.test(m)) return SEED_2_0_CONTEXT_LENGTH
   if (m.includes('seed-') || m.includes('ark-') || m.includes('bytedance')) return 128_000
 
   // ── Mistral ──────────────────────────────────────────────────────────────
