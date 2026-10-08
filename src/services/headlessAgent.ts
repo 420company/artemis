@@ -12,6 +12,8 @@
  */
 
 import type { PermissionModeInput } from '../security/permissionModes.js'
+import type { SessionRecord } from '../core/types.js'
+import type { SessionStore } from '../storage/sessions.js'
 
 export interface HeadlessAgentOptions {
   /** PRODUCER = full autonomous tools; read-only for analysis. Default PRODUCER. */
@@ -19,6 +21,8 @@ export interface HeadlessAgentOptions {
   /** Override the configured model for this run. */
   model?: string
   maxTurns?: number
+  /** Continue this existing session (its history becomes context) instead of creating a new one. */
+  sessionId?: string
   sessionTitle?: string
   onInfo?: (message: string) => void
 }
@@ -28,6 +32,16 @@ export interface HeadlessAgentResult {
   turns: number
   sessionId: string
   durationMs: number
+}
+
+async function loadExistingSession(sessionStore: SessionStore, sessionId: string): Promise<SessionRecord> {
+  try {
+    return await sessionStore.load(sessionId)
+  } catch (error) {
+    // A host passing a stale id must get an explicit failure, never a silent fresh session.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Session not found: ${sessionId}`)
+    throw error
+  }
 }
 
 export async function runHeadlessAgent(
@@ -56,9 +70,11 @@ export async function runHeadlessAgent(
     onInfo,
   })
   const sessionStore = new SessionStore(cwd)
-  const session = sessionStore.createSession({
-    title: opts.sessionTitle ?? `Headless: ${prompt.slice(0, 48)}`,
-  })
+  const session = opts.sessionId
+    ? await loadExistingSession(sessionStore, opts.sessionId)
+    : sessionStore.createSession({
+      title: opts.sessionTitle ?? `Headless: ${prompt.slice(0, 48)}`,
+    })
 
   const started = Date.now()
   const result = await runAgent(session, prompt, {
