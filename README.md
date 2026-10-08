@@ -30,7 +30,7 @@ It works inside your real project folder, reads the files, edits the code, runs 
 
 Artemis is designed for users who want one intelligent operator across engineering, creative production, research, automation, and daily workflows.
 
-Current npm release: **0.2.72**
+Current npm release: **0.2.80**
 
 ---
 
@@ -261,7 +261,7 @@ Artemis Code 是一个本地优先的 AI 工作区代理。它不是只给建议
 
 Artemis 面向的是希望把工程、创意、自动化、研究和日常操作交给一个统一智能操作者的人。
 
-当前 npm 版本：**0.2.72**
+当前 npm 版本：**0.2.80**
 
 ---
 

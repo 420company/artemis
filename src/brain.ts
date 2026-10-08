@@ -126,6 +126,16 @@ let providerTelemetryContext: any = null;
 let providerCwd: string | null = null;
 let session: any = null;
 let systemPromptSuffix: string = '';
+// Model used when no provider profile exists and only ANTHROPIC_API_KEY is
+// set (no profile to take a model from). Shared with the CLI model label.
+// TODO: this id is outdated; move to a current model once the env-only
+// fallback is re-validated (hosted deployments always configure a profile).
+export const ENV_FALLBACK_ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+// Cheap model summarizeOnce tries first on a single Anthropic-key profile.
+// TODO: this id is outdated and ignores the configured profile; prefer the
+// specialist/worker profile model (already used when dual-model is active)
+// or make it configurable instead of hard-coding a Haiku snapshot.
+const LEGACY_SUMMARY_MODEL = 'claude-haiku-4-5-20251001';
 // Runtime overrides from CLI flags (--model, --api-key, --base-url)
 let _modelOverride: any;
 let _apiKeyOverride: any;
@@ -498,7 +508,7 @@ async function loadProvider(cwd: string = process.cwd()) {
                 protocol: 'messages',
                 label: 'Anthropic (env)',
                 apiKey: key,
-                model: _modelOverride ?? 'claude-sonnet-4-20250514',
+                model: _modelOverride ?? ENV_FALLBACK_ANTHROPIC_MODEL,
                 baseUrl: '',
             };
         }
@@ -617,8 +627,8 @@ export async function getWorkerProvider() {
 }
 
 /**
- * Public accessor for the lead provider — used by external callers (e.g.
- * modelRouter) that need explicit access to the main/premium model.
+ * Public accessor for the lead provider, for external callers that need
+ * explicit access to the main/premium model.
  * This is the inverse of getWorkerProvider().
  */
 export async function getLeadProvider(): Promise<{ provider: any; config: any }> {
@@ -742,11 +752,11 @@ export const summarizeOnce = async (prompt: any) => {
             return block?.type === 'text' ? block.text : '';
         };
         try {
-            return await tryModel('claude-haiku-4-5-20251001');
+            return await tryModel(LEGACY_SUMMARY_MODEL);
         }
         catch (haikusErr) {
-            const mainModel = cfg.model ?? 'claude-sonnet-4-20250514';
-            if (mainModel === 'claude-haiku-4-5-20251001') throw haikusErr;
+            const mainModel = cfg.model ?? ENV_FALLBACK_ANTHROPIC_MODEL;
+            if (mainModel === LEGACY_SUMMARY_MODEL) throw haikusErr;
             return await tryModel(mainModel);
         }
     }
@@ -805,7 +815,7 @@ export function providerInfo() {
         if (!cfg) {
             const key = process.env.ANTHROPIC_API_KEY;
             if (key)
-                return `Anthropic / ${_modelOverride ?? 'claude-sonnet-4-20250514'}`;
+                return `Anthropic / ${_modelOverride ?? ENV_FALLBACK_ANTHROPIC_MODEL}`;
             return 'Not configured';
         }
         return `${cfg.protocol} / ${cfg.model ?? '?'}`;

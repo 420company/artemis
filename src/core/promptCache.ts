@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { PermissionManager } from '../security/permissions.js';
 import { buildMcpRuntimeSections } from '../mcp/runtime.js';
 import { resolveDataRootDir } from '../utils/fs.js';
+import { getToolHostKey } from '../tools/platformSupport.js';
 import {
   PROJECT_INSTRUCTION_FILENAMES,
   buildProjectInstructionFileSection,
@@ -63,6 +64,9 @@ async function buildStablePromptCacheKey(
   options: StableProviderSystemSectionsOptions,
 ): Promise<string> {
   const instructionMaxChars = getInstructionMaxChars(options.profile);
+  // Read before the awaits below: the system prompt embeds the
+  // host-dependent tool manifest.
+  const toolHost = getToolHostKey();
   const [projectInstructionSignatures, mcpConfigSignature] = await Promise.all([
     Promise.all(
       PROJECT_INSTRUCTION_FILENAMES.map(async (fileName) => [
@@ -81,6 +85,7 @@ async function buildStablePromptCacheKey(
       permissionMode: options.permissionMode,
       autonomyMode: options.autonomyMode,
       nativeToolRuntime: options.nativeToolRuntime,
+      toolHost,
       instructionMaxChars,
       projectInstructionSignatures,
       mcpConfigSignature,
