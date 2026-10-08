@@ -41,6 +41,7 @@ import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
 import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
+import { isToolSupportedOnHost } from './platformSupport.js';
 
 export type { ToolDefinition };
 
@@ -59,7 +60,13 @@ const AGENT_ROLE_VALUES: readonly AgentRole[] = [
 const RUNTIME_MANAGED_TOOL_TYPES = new Set<AgentActionType>(
   RUNTIME_MANAGED_AGENT_ACTION_TYPES,
 );
-const PROVIDER_EXCLUDED_ACTION_TYPES = new Set<AgentActionType>(['agent']);
+// Action types never offered to the model. `agent` has no executor;
+// `request_freya_visual_asset` is a legacy interactive flow (terminal menu)
+// superseded by generate_image / generate_video / generate_long_video.
+const PROVIDER_EXCLUDED_ACTION_TYPES = new Set<AgentActionType>([
+  'agent',
+  'request_freya_visual_asset',
+]);
 const PARALLEL_READ_ACTION_TYPES = new Set<AgentActionType>([
   'list_files',
   'read_file',
@@ -2008,6 +2015,13 @@ export function isToolAvailableForProvider(toolType: string): boolean {
     return false;
   }
 
+  // Desktop/macOS-only tools are not offered on hosts where they cannot work
+  // (e.g. a headless Linux server). Their executors stay registered so a
+  // stray call still gets the implementation's platform_unsupported result.
+  if (!isToolSupportedOnHost(toolType)) {
+    return false;
+  }
+
   return isDirectlyExecutableTool(toolType) || isRuntimeManagedTool(toolType);
 }
 
@@ -2041,8 +2055,28 @@ export function validateToolAction(action: any): string[] {
   return toolDef.validate ? toolDef.validate(action) : [];
 }
 
+// The prompt manifest lists only tools the model can actually use on this
+// host: tools with a direct executor or a registered agent action type that
+// is not excluded from the model. Executor-less capability placeholders
+// (file, system, http_request, search, web_scraper, user_interaction,
+// confirm) stay in the registry for metadata lookups but are not advertised,
+// since calling them can only fail.
+function isListedInModelManifest(def: ToolDefinition): boolean {
+  if (!isToolSupportedOnHost(def.type)) {
+    return false;
+  }
+  if (PROVIDER_EXCLUDED_ACTION_TYPES.has(def.type as AgentActionType)) {
+    return false;
+  }
+  return (
+    typeof def.execute === 'function' ||
+    ALL_AGENT_ACTION_TYPES.includes(def.type as AgentActionType)
+  );
+}
+
 export function renderDetailedToolManifest(): string {
   return toolDefs
+    .filter(isListedInModelManifest)
     .map((def) => {
       const details = [
         `## ${def.type}`,

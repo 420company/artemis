@@ -1,8 +1,27 @@
 import type { SessionMessage } from './types.js';
 import { listDirectToolNames } from '../tools/directTools.js';
+import { getToolHostKey } from '../tools/platformSupport.js';
 
-const ALL_DIRECT_TOOL_NAMES = listDirectToolNames();
-const ALL_DIRECT_TOOL_NAME_SET = new Set(ALL_DIRECT_TOOL_NAMES);
+// The direct tool list depends on the host (desktop/macOS-only tools are not
+// offered on headless servers), so it is resolved lazily and cached per host.
+let directToolNameCache: { hostKey: string; names: string[]; nameSet: Set<string> } | undefined;
+
+function getDirectToolNameCache(): { names: string[]; nameSet: Set<string> } {
+  const hostKey = getToolHostKey();
+  if (!directToolNameCache || directToolNameCache.hostKey !== hostKey) {
+    const names = listDirectToolNames();
+    directToolNameCache = { hostKey, names, nameSet: new Set(names) };
+  }
+  return directToolNameCache;
+}
+
+function getAllDirectToolNames(): string[] {
+  return getDirectToolNameCache().names;
+}
+
+function getAllDirectToolNameSet(): Set<string> {
+  return getDirectToolNameCache().nameSet;
+}
 
 const CORE_INSPECT_TOOLS = [
   'list_files',
@@ -254,13 +273,13 @@ function collectRecentToolNames(messages: SessionMessage[], lookback = 10): stri
     }
     scanned += 1;
 
-    if (message.role === 'tool' && message.name && ALL_DIRECT_TOOL_NAME_SET.has(message.name)) {
+    if (message.role === 'tool' && message.name && getAllDirectToolNameSet().has(message.name)) {
       result.add(message.name);
     }
 
     if (message.role === 'assistant' && message.toolCalls?.length) {
       for (const call of message.toolCalls) {
-        if (ALL_DIRECT_TOOL_NAME_SET.has(call.name)) {
+        if (getAllDirectToolNameSet().has(call.name)) {
           result.add(call.name);
         }
       }
@@ -272,7 +291,7 @@ function collectRecentToolNames(messages: SessionMessage[], lookback = 10): stri
 
 function addTools(target: Set<string>, tools: readonly string[]): void {
   for (const name of tools) {
-    if (ALL_DIRECT_TOOL_NAME_SET.has(name)) {
+    if (getAllDirectToolNameSet().has(name)) {
       target.add(name);
     }
   }
@@ -280,7 +299,7 @@ function addTools(target: Set<string>, tools: readonly string[]): void {
 
 function addRecentTools(target: Set<string>, recentToolNames: string[]): void {
   for (const name of recentToolNames) {
-    if (ALL_DIRECT_TOOL_NAME_SET.has(name)) {
+    if (getAllDirectToolNameSet().has(name)) {
       target.add(name);
     }
   }
@@ -293,7 +312,7 @@ function addRecentTools(target: Set<string>, recentToolNames: string[]): void {
 function addVerbatimToolMentions(target: Set<string>, latestUserInput: string): void {
   if (!latestUserInput) return;
   const lowerInput = latestUserInput.toLowerCase();
-  for (const name of ALL_DIRECT_TOOL_NAMES) {
+  for (const name of getAllDirectToolNames()) {
     if (lowerInput.includes(name)) {
       target.add(name);
     }
@@ -303,7 +322,7 @@ function addVerbatimToolMentions(target: Set<string>, latestUserInput: string): 
 export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   const latestUserInput = getLatestUserInput(messages);
   if (!latestUserInput) {
-    return ALL_DIRECT_TOOL_NAMES;
+    return getAllDirectToolNames();
   }
 
   const recentToolNames = collectRecentToolNames(messages);
@@ -423,17 +442,17 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
     addRecentTools(selected, recentToolNames);
   }
 
-  return ALL_DIRECT_TOOL_NAMES.filter((name) => selected.has(name));
+  return getAllDirectToolNames().filter((name) => selected.has(name));
 }
 
 export function hasFullDirectToolProjection(toolNames: Iterable<string>): boolean {
   const seen = new Set<string>();
   for (const name of toolNames) {
-    if (ALL_DIRECT_TOOL_NAME_SET.has(name)) {
+    if (getAllDirectToolNameSet().has(name)) {
       seen.add(name);
     }
   }
-  return seen.size >= ALL_DIRECT_TOOL_NAMES.length;
+  return seen.size >= getAllDirectToolNames().length;
 }
 
 export function widenProjectedDirectToolNames(
@@ -442,7 +461,7 @@ export function widenProjectedDirectToolNames(
   widenAttempt = 0,
 ): string[] {
   if (widenAttempt > 0) {
-    return [...ALL_DIRECT_TOOL_NAMES];
+    return [...getAllDirectToolNames()];
   }
 
   const widened = new Set<string>();
@@ -451,7 +470,7 @@ export function widenProjectedDirectToolNames(
   addRecentTools(widened, collectRecentToolNames(messages, 16));
 
   for (const name of currentToolNames) {
-    if (ALL_DIRECT_TOOL_NAME_SET.has(name)) {
+    if (getAllDirectToolNameSet().has(name)) {
       widened.add(name);
     }
   }
@@ -462,6 +481,6 @@ export function widenProjectedDirectToolNames(
     addTools(widened, MEDIA_TOOLS);
   }
 
-  const expanded = ALL_DIRECT_TOOL_NAMES.filter((name) => widened.has(name));
-  return expanded.length > 0 ? expanded : [...ALL_DIRECT_TOOL_NAMES];
+  const expanded = getAllDirectToolNames().filter((name) => widened.has(name));
+  return expanded.length > 0 ? expanded : [...getAllDirectToolNames()];
 }

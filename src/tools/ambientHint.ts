@@ -9,10 +9,48 @@
  * contains explicit intent. Don't auto-check weather every turn etc.
  */
 
+import {
+  getToolHostEnvironment,
+  isToolSupportedOnHost,
+  resolveBrowserLaunchMode,
+} from './platformSupport.js';
+
 export function buildAmbientToolsHint(): string {
-  // Note: macOS-only Apple tools are listed regardless of platform — the
-  // tool itself returns a platform_unsupported error gracefully on non-Mac.
-  // The brain learns from that error and stops trying.
+  // macOS-only Apple tools are only advertised where they are also offered
+  // as tools (see platformSupport.ts); on other hosts they are left out of
+  // both the tool list and this hint so the model never reaches for them.
+  const host = getToolHostEnvironment();
+  const appleToolsAvailable =
+    isToolSupportedOnHost('calendar_list_today', host) &&
+    isToolSupportedOnHost('reminders_list', host);
+
+  const appleSections = appleToolsAvailable
+    ? [
+        '### 日历（macOS Apple Calendar）',
+        '- `calendar_list_today()` — 今日事件',
+        '- `calendar_list_upcoming(daysAhead?)` — 未来 N 天',
+        '- `calendar_add_event(title, startISO, ...)` — 添加事件',
+        '- 触发词："今天有什么"、"明天日程"、"周末安排"、"加个会"、"提醒我 X 月 X 日"',
+        '',
+        '### 待办（macOS Apple Reminders）',
+        '- `reminders_list(list?)` — 列待办',
+        '- `reminders_add(title, dueISO?, ...)` — 加待办',
+        '- `reminders_complete(title)` — 标记完成',
+        '- 触发词："待办"、"提醒我"、"加进 todo"、"做完了 X"',
+        '',
+      ]
+    : [];
+  const appleDecisionRules = appleToolsAvailable
+    ? ['- 用户在 Telegram 发 "提醒我明天 9 点开会" → 直接 reminders_add（解析"明天 9 点"为 ISO 8601）']
+    : [];
+  const applePlatformRule = appleToolsAvailable
+    ? ['- macOS 工具在 Linux/Windows 上会返 platform_unsupported——一次后不再重试，告诉用户原因']
+    : [];
+  // Same decision the browser session makes, including the
+  // ARTEMIS_BROWSER_HEADLESS override.
+  const browserHeading = !resolveBrowserLaunchMode(host).headless
+    ? '## 浏览器自动化（Playwright Chromium · 本机可见窗口）'
+    : '## 浏览器自动化（Playwright Chromium · 无头模式）';
 
   return [
     '',
@@ -39,26 +77,15 @@ export function buildAmbientToolsHint(): string {
     '- `flight_lookup(callsign)` — 航司、机型、航线 + 实时位置（飞行中）',
     '- 触发词："航班 XX"、"我那个 BA12"、"飞机现在到哪了"',
     '',
-    '### 日历（macOS Apple Calendar）',
-    '- `calendar_list_today()` — 今日事件',
-    '- `calendar_list_upcoming(daysAhead?)` — 未来 N 天',
-    '- `calendar_add_event(title, startISO, ...)` — 添加事件',
-    '- 触发词："今天有什么"、"明天日程"、"周末安排"、"加个会"、"提醒我 X 月 X 日"',
-    '',
-    '### 待办（macOS Apple Reminders）',
-    '- `reminders_list(list?)` — 列待办',
-    '- `reminders_add(title, dueISO?, ...)` — 加待办',
-    '- `reminders_complete(title)` — 标记完成',
-    '- 触发词："待办"、"提醒我"、"加进 todo"、"做完了 X"',
-    '',
+    ...appleSections,
     '### 决策原则',
     '- 用户问 "今天天气" → 直接 weather_current，不要反问 "在哪个城市" 除非真的歧义',
-    '- 用户在 Telegram 发 "提醒我明天 9 点开会" → 直接 reminders_add（解析"明天 9 点"为 ISO 8601）',
+    ...appleDecisionRules,
     '- 时间表达式（"明天"、"下周三"、"3 小时后"）你自己解析成 ISO 8601 再调工具',
     '- 城市无歧义时用中文名也行，工具会自动识别（北京 / Beijing / Asia/Shanghai 都接受）',
-    '- macOS 工具在 Linux/Windows 上会返 platform_unsupported——一次后不再重试，告诉用户原因',
+    ...applePlatformRule,
     '',
-    '## 浏览器自动化（Playwright Chromium · 本机可见窗口）',
+    browserHeading,
     '当 http_request 拿到 HTML 但被反爬 / JS 动态渲染 / 需要登录 / 需要点击交互——**立刻**切到浏览器工具，不要反复重试 http_request。',
     '',
     '- `browser_navigate(url, extractText?)` — 打开 URL，默认返回页面可见文本',

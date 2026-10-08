@@ -4,6 +4,7 @@ import { buildActionParametersSchema } from '../core/providerNativeTools.js';
 import type { ProviderNativeFunctionTool } from '../providers/types.js';
 import { getToolDefinition, isDirectlyExecutableTool } from './registry.js';
 import { buildExtraToolDefs } from './extras.js';
+import { getToolHostKey, isToolSupportedOnHost } from './platformSupport.js';
 
 const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'list_files',
@@ -83,6 +84,12 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
 export const BUILTIN_DIRECT_TOOL_TYPES: readonly AgentActionType[] =
   BUILTIN_DIRECT_TOOL_CANDIDATES.filter((type) => isDirectlyExecutableTool(type));
 
+// Built-in direct tools that can work on the current host. Desktop/macOS-only
+// tools are left out on hosts such as a headless Linux server.
+function getHostDirectToolTypes(): AgentActionType[] {
+  return BUILTIN_DIRECT_TOOL_TYPES.filter((type) => isToolSupportedOnHost(type));
+}
+
 const HTTP_REQUEST_DESCRIPTION =
   'Make an HTTP request to any URL and return the response body (up to 50 KB). Use for fetching web pages, calling REST APIs, or downloading data.';
 
@@ -101,8 +108,12 @@ const HTTP_REQUEST_PARAMETERS: {
   required: ['url'],
 };
 
-let cachedDirectTools: readonly Anthropic.Tool[] | undefined;
-let cachedDirectNativeFunctionTools: readonly ProviderNativeFunctionTool[] | undefined;
+// Caches are keyed by host so a forced host environment (tests) never reuses
+// a tool list built for a different platform.
+let cachedDirectTools: { hostKey: string; tools: readonly Anthropic.Tool[] } | undefined;
+let cachedDirectNativeFunctionTools:
+  | { hostKey: string; tools: readonly ProviderNativeFunctionTool[] }
+  | undefined;
 
 function isSharedDirectTool(name: string): boolean {
   // Notebook tools are runtime-managed stateful helpers, not general provider
@@ -131,8 +142,9 @@ function filterNamedTools<T extends { name: string }>(
 }
 
 function getAllDirectTools(): readonly Anthropic.Tool[] {
-  if (!cachedDirectTools) {
-    const builtIns: Anthropic.Tool[] = BUILTIN_DIRECT_TOOL_TYPES.map((type) => {
+  const hostKey = getToolHostKey();
+  if (!cachedDirectTools || cachedDirectTools.hostKey !== hostKey) {
+    const builtIns: Anthropic.Tool[] = getHostDirectToolTypes().map((type) => {
     const toolDef = getToolDefinition(type);
     return {
       name: type,
@@ -141,22 +153,26 @@ function getAllDirectTools(): readonly Anthropic.Tool[] {
     };
   }).filter(tool => tool.description !== 'No description available');
 
-    cachedDirectTools = [
-      ...builtIns,
-      ...buildExtraToolDefs().filter((tool) => isSharedDirectTool(tool.name)),
-      {
-        name: 'http_request',
-        description: HTTP_REQUEST_DESCRIPTION,
-        input_schema: HTTP_REQUEST_PARAMETERS,
-      },
-    ];
+    cachedDirectTools = {
+      hostKey,
+      tools: [
+        ...builtIns,
+        ...buildExtraToolDefs().filter((tool) => isSharedDirectTool(tool.name)),
+        {
+          name: 'http_request',
+          description: HTTP_REQUEST_DESCRIPTION,
+          input_schema: HTTP_REQUEST_PARAMETERS,
+        },
+      ],
+    };
   }
-  return cachedDirectTools;
+  return cachedDirectTools.tools;
 }
 
 function getAllDirectNativeFunctionTools(): readonly ProviderNativeFunctionTool[] {
-  if (!cachedDirectNativeFunctionTools) {
-    const builtIns: ProviderNativeFunctionTool[] = BUILTIN_DIRECT_TOOL_TYPES.map((type) => {
+  const hostKey = getToolHostKey();
+  if (!cachedDirectNativeFunctionTools || cachedDirectNativeFunctionTools.hostKey !== hostKey) {
+    const builtIns: ProviderNativeFunctionTool[] = getHostDirectToolTypes().map((type) => {
       const toolDef = getToolDefinition(type);
       return {
         type: 'function',
@@ -175,18 +191,21 @@ function getAllDirectNativeFunctionTools(): readonly ProviderNativeFunctionTool[
         parameters: tool.input_schema as Record<string, unknown>,
       }));
 
-    cachedDirectNativeFunctionTools = [
-      ...builtIns,
-      ...extras,
-      {
-        type: 'function',
-        name: 'http_request',
-        description: HTTP_REQUEST_DESCRIPTION,
-        parameters: HTTP_REQUEST_PARAMETERS,
-      },
-    ];
+    cachedDirectNativeFunctionTools = {
+      hostKey,
+      tools: [
+        ...builtIns,
+        ...extras,
+        {
+          type: 'function',
+          name: 'http_request',
+          description: HTTP_REQUEST_DESCRIPTION,
+          parameters: HTTP_REQUEST_PARAMETERS,
+        },
+      ],
+    };
   }
-  return cachedDirectNativeFunctionTools;
+  return cachedDirectNativeFunctionTools.tools;
 }
 
 export function buildDirectTools(options?: {

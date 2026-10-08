@@ -17,11 +17,15 @@ import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
+import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
-import { buildProviderNativeFunctionTools } from '../src/core/providerNativeTools.js'
+import {
+  buildProviderNativeFunctionTools,
+  mapProviderNativeToolCallToAction,
+} from '../src/core/providerNativeTools.js'
 import { probeProviderNativeToolCalls } from '../src/providers/health.js'
 import {
   GPT_5_6_CONTEXT_LENGTH,
@@ -31,13 +35,22 @@ import {
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
-import { getDirectToolCount } from '../src/tools/directTools.js'
+import { buildDirectNativeFunctionTools, getDirectToolCount } from '../src/tools/directTools.js'
+import {
+  detectToolHostEnvironment,
+  getToolHostKey,
+  parseBooleanEnv,
+  resolveBrowserLaunchMode,
+  withToolHostEnvironment,
+} from '../src/tools/platformSupport.js'
+import { buildAmbientToolsHint } from '../src/tools/ambientHint.js'
 import {
   getToolDefinition,
   getProviderCallableActionTypes,
   isDirectlyExecutableTool,
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
+  renderDetailedToolManifest,
 } from '../src/tools/registry.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
@@ -179,6 +192,181 @@ assert(
   eq(providerNativeToolNames, getProviderCallableActionTypes()),
   providerNativeToolNames.join(', '),
 )
+
+{
+  // Platform-aware tool exposure: Linux (headless or desktop) is not offered
+  // macOS-only or desktop-automation tools, Windows keeps desktop automation
+  // but not Apple tools, and macOS keeps the full set. Spotify drives the Web
+  // API, so it is offered on every host.
+  const appleTools = ['calendar_list_today', 'calendar_add_event', 'reminders_list', 'reminders_add']
+  const automationTools = ['computer_screenshot', 'computer_click', 'computer_doctor']
+  const desktopOnlyTools = [...automationTools, ...appleTools]
+  const spotifyTools = ['spotify_play_liked', 'spotify_pause']
+  const coreTools = ['read_file', 'write_file', 'run_command', 'search_files', 'browser_navigate', 'weather_current']
+  const snapshot = () => {
+    const nativeNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
+    const directNames = buildDirectNativeFunctionTools().map((tool) => tool.name)
+    const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
+    const ambientHint = buildAmbientToolsHint()
+    const rejected = mapProviderNativeToolCallToAction({
+      callId: 'smoke-call',
+      name: 'computer_click',
+      arguments: '{"x":1,"y":2}',
+    })
+    return { nativeNames, directNames, manifestNames, ambientHint, rejected }
+  }
+  const linux = withToolHostEnvironment({ platform: 'linux', hasDisplay: false }, snapshot)
+  const linuxDesktop = withToolHostEnvironment({ platform: 'linux', hasDisplay: true }, snapshot)
+  const windows = withToolHostEnvironment({ platform: 'win32', hasDisplay: true }, snapshot)
+  const mac = withToolHostEnvironment({ platform: 'darwin', hasDisplay: true }, snapshot)
+  const lists = (s: ReturnType<typeof snapshot>) => [s.nativeNames, s.directNames, s.manifestNames]
+  const offersAll = (s: ReturnType<typeof snapshot>, tools: string[]) =>
+    lists(s).every((names) => tools.every((name) => names.includes(name)))
+  const offersNone = (s: ReturnType<typeof snapshot>, tools: string[]) =>
+    lists(s).every((names) => tools.every((name) => !names.includes(name)))
+
+  assert(
+    'platform tools: headless linux omits desktop/macOS-only tools from native, direct and manifest lists',
+    lists(linux).every((names) => desktopOnlyTools.every((name) => !names.includes(name))),
+    lists(linux).map((names) => names.filter((name) => desktopOnlyTools.includes(name)).join(',')).join(' | '),
+  )
+  assert(
+    'platform tools: headless linux keeps core tools in native, direct and manifest lists',
+    lists(linux).every((names) => coreTools.every((name) => names.includes(name))),
+  )
+  assert(
+    'platform tools: macOS still offers desktop/macOS tools everywhere',
+    offersAll(mac, desktopOnlyTools),
+  )
+  assert(
+    'platform tools: linux desktop omits Apple and desktop-automation tools, keeps core tools',
+    offersNone(linuxDesktop, desktopOnlyTools) && offersAll(linuxDesktop, coreTools),
+  )
+  assert(
+    'platform tools: windows keeps desktop automation but omits Apple tools',
+    offersAll(windows, automationTools) && offersNone(windows, appleTools) && offersAll(windows, coreTools),
+  )
+  assert(
+    'platform tools: spotify is offered on every host, including headless linux',
+    [linux, linuxDesktop, windows, mac].every((host) => offersAll(host, spotifyTools)),
+  )
+  assert(
+    'platform tools: manifest hides executor-less capability placeholders',
+    ['http_request', 'search', 'web_scraper', 'user_interaction', 'confirm', 'file', 'system']
+      .every((name) => !linux.manifestNames.includes(name) && !mac.manifestNames.includes(name)),
+  )
+  assert(
+    'platform tools: ambient hint drops Apple Calendar/Reminders on linux only',
+    !linux.ambientHint.includes('calendar_list_today') &&
+      !linux.ambientHint.includes('reminders_add') &&
+      linux.ambientHint.includes('weather_current') &&
+      mac.ambientHint.includes('calendar_list_today') &&
+      mac.ambientHint.includes('reminders_add'),
+  )
+  assert(
+    'platform tools: native call to a hidden desktop tool is rejected as unavailable on linux',
+    !linux.rejected.ok && linux.rejected.error.code === 'tool_unavailable' &&
+      !linuxDesktop.rejected.ok && windows.rejected.ok && mac.rejected.ok,
+  )
+  assert(
+    'platform tools: host cache keys differ per platform and display',
+    new Set([
+      getToolHostKey({ platform: 'linux', hasDisplay: false }),
+      getToolHostKey({ platform: 'linux', hasDisplay: true }),
+      getToolHostKey({ platform: 'win32', hasDisplay: true }),
+      getToolHostKey({ platform: 'darwin', hasDisplay: true }),
+    ]).size === 4,
+  )
+  assert(
+    'platform tools: host override is restored after the forced snapshot',
+    eq(buildProviderNativeFunctionTools().map((tool) => tool.name), providerNativeToolNames),
+  )
+}
+
+{
+  // Host detection: DISPLAY / WAYLAND_DISPLAY are trimmed, macOS and Windows
+  // always count as having a display.
+  assert(
+    'host detection: linux display comes from DISPLAY or WAYLAND_DISPLAY, whitespace ignored',
+    detectToolHostEnvironment('linux', {}).hasDisplay === false &&
+      detectToolHostEnvironment('linux', { DISPLAY: '   ', WAYLAND_DISPLAY: '' }).hasDisplay === false &&
+      detectToolHostEnvironment('linux', { DISPLAY: ' :0 ' }).hasDisplay === true &&
+      detectToolHostEnvironment('linux', { WAYLAND_DISPLAY: 'wayland-0' }).hasDisplay === true &&
+      detectToolHostEnvironment('darwin', {}).hasDisplay === true &&
+      detectToolHostEnvironment('win32', {}).hasDisplay === true,
+  )
+
+  assert(
+    'browser env: ARTEMIS_BROWSER_HEADLESS accepts 1/true/yes and 0/false/no, ignores other values',
+    ['1', 'true', 'YES', ' on '].every((value) => parseBooleanEnv(value) === true) &&
+      ['0', 'false', 'No', 'off'].every((value) => parseBooleanEnv(value) === false) &&
+      [undefined, '', '  ', 'maybe', '2'].every((value) => parseBooleanEnv(value) === undefined),
+  )
+
+  const linuxHeadless = { platform: 'linux', hasDisplay: false } as const
+  const linuxX11 = { platform: 'linux', hasDisplay: true } as const
+  const mac = { platform: 'darwin', hasDisplay: true } as const
+  const mode = (host: { platform: NodeJS.Platform; hasDisplay: boolean }, env: NodeJS.ProcessEnv) =>
+    resolveBrowserLaunchMode(host, env)
+  assert(
+    'browser env: headed with a display, headless without one, overridable either way',
+    mode(mac, {}).headless === false &&
+      mode(linuxX11, { DISPLAY: ':0' }).headless === false &&
+      mode(linuxHeadless, {}).headless === true &&
+      mode(mac, { ARTEMIS_BROWSER_HEADLESS: 'true' }).headless === true &&
+      mode(mac, { ARTEMIS_BROWSER_HEADLESS: 'yes' }).headless === true &&
+      mode(linuxHeadless, { ARTEMIS_BROWSER_HEADLESS: 'false' }).headless === false &&
+      mode(linuxHeadless, { ARTEMIS_BROWSER_HEADLESS: 'bogus' }).headless === true,
+  )
+  assert(
+    'browser env: native Wayland flag only for a headed linux browser without XWayland',
+    eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0' }).extraArgs, ['--ozone-platform=wayland']) &&
+      eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }).extraArgs, []) &&
+      eq(mode(linuxX11, { DISPLAY: ':0' }).extraArgs, []) &&
+      eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0', ARTEMIS_BROWSER_HEADLESS: '1' }).extraArgs, []) &&
+      eq(mode(mac, { WAYLAND_DISPLAY: 'wayland-0' }).extraArgs, []),
+  )
+
+  const previousHeadless = process.env.ARTEMIS_BROWSER_HEADLESS
+  const headedHeading = '浏览器自动化（Playwright Chromium · 本机可见窗口）'
+  const headlessHeading = '浏览器自动化（Playwright Chromium · 无头模式）'
+  try {
+    delete process.env.ARTEMIS_BROWSER_HEADLESS
+    const macDefault = withToolHostEnvironment(mac, buildAmbientToolsHint)
+    const linuxDefault = withToolHostEnvironment(linuxHeadless, buildAmbientToolsHint)
+    process.env.ARTEMIS_BROWSER_HEADLESS = 'true'
+    const macForcedHeadless = withToolHostEnvironment(mac, buildAmbientToolsHint)
+    assert(
+      'browser env: ambient hint heading follows the same headed/headless decision',
+      macDefault.includes(headedHeading) &&
+        linuxDefault.includes(headlessHeading) &&
+        macForcedHeadless.includes(headlessHeading) &&
+        !macForcedHeadless.includes(headedHeading),
+    )
+  } finally {
+    if (previousHeadless === undefined) delete process.env.ARTEMIS_BROWSER_HEADLESS
+    else process.env.ARTEMIS_BROWSER_HEADLESS = previousHeadless
+  }
+}
+
+{
+  // The legacy interactive Freya flow is not offered to the model anywhere.
+  const freya = 'request_freya_visual_asset'
+  const mainNativeNames = buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main'))
+    .map((tool) => tool.name)
+  const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
+  const mainPrompt = buildSystemPrompt(process.cwd(), 'accept-all', 'standard', 'main', false)
+  assert(
+    'freya: request_freya_visual_asset is not offered to main (native, direct, manifest, prompt)',
+    !providerNativeToolNames.includes(freya) &&
+      !mainNativeNames.includes(freya) &&
+      !getProviderCallableActionTypes().includes(freya) &&
+      !buildDirectNativeFunctionTools().some((tool) => tool.name === freya) &&
+      !manifestNames.includes(freya) &&
+      !mainPrompt.includes(freya) &&
+      !mapProviderNativeToolCallToAction({ callId: 'freya-call', name: freya, arguments: '{}' }).ok,
+  )
+}
 
 {
   const generateVideoTool = providerNativeTools.find((tool) => tool.name === 'generate_video')
@@ -629,14 +817,24 @@ assert(
   shellProjection.join(', '),
 )
 
-const ambientProjection = projectDirectToolNames([
+const ambientMessages: SessionMessage[] = [
   {
     id: 'ambient-user',
     role: 'user',
     content: '明天上午提醒我看天气，如果下雨就播放 Spotify 歌单。',
     createdAt: new Date().toISOString(),
   },
-])
+]
+// Reminders are macOS-only tools, so this projection is checked on a forced
+// macOS host; the headless Linux variant follows below.
+const ambientProjection = withToolHostEnvironment(
+  { platform: 'darwin', hasDisplay: true },
+  () => projectDirectToolNames(ambientMessages),
+)
+const headlessAmbientProjection = withToolHostEnvironment(
+  { platform: 'linux', hasDisplay: false },
+  () => projectDirectToolNames(ambientMessages),
+)
 
 assert(
   'tool projection: ambient requests keep productivity, weather, and music tools',
@@ -645,6 +843,14 @@ assert(
     ambientProjection.includes('spotify_play_playlist') &&
     !ambientProjection.includes('apply_patch'),
   ambientProjection.join(', '),
+)
+
+assert(
+  'tool projection: headless linux never projects macOS-only tools but keeps Spotify',
+  headlessAmbientProjection.includes('weather_forecast') &&
+    !headlessAmbientProjection.includes('reminders_add') &&
+    headlessAmbientProjection.includes('spotify_play_playlist'),
+  headlessAmbientProjection.join(', '),
 )
 
 const dreamProtocolDiscussionProjection = projectDirectToolNames([
@@ -1655,6 +1861,46 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'model context: stale GPT-5.6 metadata and cached values are capped at 272K',
     resolveEffectiveModelContextLength('gpt-5.6-sol', 372_000) === GPT_5_6_CONTEXT_LENGTH &&
       estimateContextLimit('gpt-5.6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH,
+  )
+  assert(
+    'model context: GPT-6 family is hard-capped at the GPT-5.6 272K window',
+    inferKnownModelContextLength('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      inferKnownModelContextLength('openai/gpt-6-luna') === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 400_000) === GPT_5_6_CONTEXT_LENGTH &&
+      resolveEffectiveModelContextLength('openai/gpt-6.1', 1_000_000) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 200_000) === 200_000 &&
+      estimateContextLimit('gpt-60', 400_000) === 400_000,
+  )
+  assert(
+    'model context: GLM-5.2/5.3 use 200K while GLM-5.1 keeps its entry',
+    estimateContextLimit('glm-5.2') === 200_000 &&
+      estimateContextLimit('glm-5.3') === 200_000 &&
+      estimateContextLimit('z-ai/glm-5.3') === 200_000 &&
+      estimateContextLimit('glm-5.1') === 1_000_000,
+  )
+  assert(
+    'model context: Seed 2.0 aliases use the same 128K as the dated presets',
+    estimateContextLimit('seed-2-0-pro') === 128_000 &&
+      estimateContextLimit('seed-2-0-mini') === 128_000 &&
+      estimateContextLimit('seed-2-0-lite') === 128_000 &&
+      estimateContextLimit('seed-2-0-pro-260328') === 128_000,
+  )
+  assert(
+    'model context: Kimi K3 (unverified) and Qwen3.7 use 128K',
+    estimateContextLimit('kimi-k3') === 128_000 &&
+      estimateContextLimit('moonshotai/kimi-k3-preview') === 128_000 &&
+      estimateContextLimit('kimi-k2') === 128_000 &&
+      estimateContextLimit('qwen3.7') === 128_000 &&
+      estimateContextLimit('qwen3.7-max') === 128_000,
+  )
+  assert(
+    'model context: Claude 5.5 family uses the 1M window',
+    estimateContextLimit('claude-opus-5-5') === 1_000_000 &&
+      estimateContextLimit('claude-sonnet-5-5') === 1_000_000 &&
+      estimateContextLimit('claude-haiku-5-5') === 1_000_000 &&
+      estimateContextLimit('anthropic.claude-opus-5-5-v1:0') === 1_000_000 &&
+      estimateContextLimit('claude-haiku-4-5') === 200_000,
   )
   assert(
     'context compression: GPT-5.6 auto-compaction follows the reduced window',
