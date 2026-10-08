@@ -14,7 +14,7 @@ import {
   superVisualImageLimit,
 } from '../src/tools/visual/superVisualMode.js';
 import { seedreamImageSize, seedreamPixelRange } from '../src/tools/visual/seedreamSizes.js';
-import { stripRawModeTag } from '../src/tools/generateLongVideo.js';
+import { deriveTitleFromBrief, stripRawModeTag } from '../src/tools/generateLongVideo.js';
 import { executeGenerateVideo } from '../src/tools/generateVideo.js';
 import { appendRenderingGuardrails, SAGA_VIDEO_RENDERING_GUARDRAILS } from '../src/tools/visual/renderingGuardrails.js';
 import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
@@ -29,8 +29,13 @@ async function resolutionChecks(): Promise<void> {
   assert.ok(hdTasks.every((body) => body.resolution === '1080p'), 'every segment carries the requested, normalized resolution');
   assert.match(hd.result.output, /resolution 1080p/);
 
-  const plain = await runHermeticSaga({ prompt: STORY, totalDuration: 5, ratio: '9:16', generateAudio: false });
+  const plain = await runHermeticSaga({ prompt: '《码头》夜景，方天豪走向镜头，海风吹起他的风衣。', totalDuration: 5, ratio: '9:16', generateAudio: false });
   assert.equal(plain.result.ok, true, plain.result.output);
+  // Titles and filenames come from the user's brief (CJK kept), never from the generation template.
+  assert.match(plain.result.output, /Title:\s+码头/);
+  assert.match(plain.result.output, /_\d+s_9x16_码头_saga-[^/\s]*\.mp4/);
+  assert.doesNotMatch(hd.result.output, /Generation-instruction|Title:\s+Generation instruction/);
+  assert.match(hd.result.output, /Title:\s+A young woman named Mei walks along a beach at…/);
   assert.ok(videoTaskBodies(plain.requests).every((body) => !('resolution' in body)), 'no resolution is sent unless asked for');
 
   const fourK = await runHermeticSaga({ prompt: STORY, totalDuration: 5, resolution: '4k' });
@@ -129,6 +134,17 @@ async function superVisualOnSeedream(): Promise<void> {
   assert.equal(imageBodies(t2i.requests).length, 0);
 }
 
+function titleChecks(): void {
+  assert.equal(deriveTitleFromBrief('片名：海边的女孩\n她在海边奔跑。'), '海边的女孩');
+  assert.equal(deriveTitleFromBrief('30秒短片《码头》\n[0-10秒] 夜景。'), '码头');
+  assert.equal(
+    deriveTitleFromBrief('【CHARACTER LOCK】方天豪，黑色风衣。\n时长：30秒\n[0-5秒] 镜头1：女孩推开旧影院的门，尘埃在光束里漂浮。'),
+    '女孩推开旧影院的门，尘埃在光束里漂浮',
+    'structure lines and timecodes are skipped',
+  );
+  assert.equal(deriveTitleFromBrief('[原样直传]\n---'), undefined, 'nothing usable falls back to the default title');
+}
+
 async function rawModeChecks(): Promise<void> {
   assert.equal(stripRawModeTag('海边的女孩。\n\n[原样直传]'), '海边的女孩。');
   assert.equal(stripRawModeTag('【raw直传】 kite story'), 'kite story');
@@ -196,6 +212,7 @@ async function guardrailChecks(): Promise<void> {
 }
 
 seedreamSizeChecks();
+titleChecks();
 eligibilityChecks();
 budgetChecks();
 await resolutionChecks();

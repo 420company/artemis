@@ -279,7 +279,51 @@ function trimTitle(value: string): string {
   return compacted.length > 96 ? compacted.slice(0, 96).trim() : compacted;
 }
 
-function deriveVideoTitle(action: GenerateLongVideoAction, story: string): string {
+// Lines of a brief that describe the brief rather than the film: section
+// headers, locks, specs and timecode-only lines.
+const BRIEF_META_LINE_RE = /^(?:【[^】]*】|\[[^\]]*\]|#+|CHARACTER LOCK|SCENE LOCK|STYLE LOCK|(?:时长|总时长|风格|比例|画幅|画质|分辨率|字幕|配乐|BGM|音乐|镜头机位|全局基调|画质规格|duration|ratio|aspect ratio|style|resolution|subtitles?|music)\s*[:：])/i;
+const TITLE_LINE_RE = /^(?:片名|标题|题目|作品名|title|film title)\s*[:：]\s*(.+)$/i;
+const LEADING_SHOT_MARKER_RE = /^(?:\[\s*[\d:.]+\s*[-–—~至到]\s*[\d:.]+\s*(?:秒|s|sec|seconds)?\s*\]|[\d:.]+\s*[-–—~至到]\s*[\d:.]+\s*(?:秒|s|sec|seconds)?\s*[:：]|(?:镜头|场景|段|scene|shot|segment)\s*#?\d+\s*[·:：.、-]?|第\s*\d+\s*段\s*[·:：.、-]?|[-*•]\s+)\s*/i;
+
+/** Shortens at a word boundary for spaced scripts, at a character for CJK. */
+function shortenTitle(title: string, maxChars: number): string {
+  if (title.length <= maxChars) return title;
+  const cut = title.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > maxChars / 2 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
+
+/**
+ * A title from the user's own brief: a named film (《…》 or "片名：…"), else
+ * the first sentence of the first line that is story rather than structure,
+ * with timecodes and shot markers removed. Undefined when nothing fits.
+ */
+export function deriveTitleFromBrief(brief: string): string | undefined {
+  const named = brief.match(/《([^》\n]{1,60})》/)?.[1] ?? brief.match(/「([^」\n]{1,60})」/)?.[1];
+  if (named && trimTitle(named)) return trimTitle(named);
+  for (const rawLine of brief.split(/\r?\n/)) {
+    const line = compactInline(rawLine);
+    if (!line) continue;
+    const titled = line.match(TITLE_LINE_RE)?.[1];
+    if (titled && trimTitle(titled)) return trimTitle(titled);
+  }
+  for (const rawLine of brief.split(/\r?\n/)) {
+    let line = compactInline(rawLine);
+    for (let i = 0; i < 3; i += 1) line = line.replace(LEADING_SHOT_MARKER_RE, '').trim();
+    if (!line || BRIEF_META_LINE_RE.test(line)) continue;
+    const sentence = line.split(/(?<=[。！？!?.])\s*/)[0] ?? line;
+    const title = trimTitle(sentence.replace(/[。！？!?.，,;；:：]+$/, ''));
+    if (title && /[\p{L}\p{N}]/u.test(title)) return shortenTitle(title, 48);
+  }
+  return undefined;
+}
+
+/**
+ * The video's title: the one the caller passed, a named shot, or one taken
+ * from the user's brief. Never from the generation prompt, whose first line
+ * is template text ("Generation instruction language: English.").
+ */
+function deriveVideoTitle(action: GenerateLongVideoAction, brief: string): string {
   const explicit = trimTitle(action.title ?? '');
   if (explicit) return explicit;
 
@@ -288,13 +332,7 @@ function deriveVideoTitle(action: GenerateLongVideoAction, story: string): strin
     .find((title) => title && !/^shot\s+\d+$/i.test(title));
   if (firstNamedShot) return firstNamedShot;
 
-  const firstSentence = story
-    .split(/(?<=[。！？!?.])\s+|[\n\r]+/g)
-    .map((part) => trimTitle(part))
-    .find(Boolean);
-  if (firstSentence) return firstSentence;
-
-  return 'Saga long video';
+  return deriveTitleFromBrief(brief) ?? 'Saga long video';
 }
 
 function sanitizeFilenamePart(value: string, fallback: string, maxLength = 72): string {
@@ -1067,7 +1105,7 @@ export async function executeGenerateLongVideo(
     }
     story = languageNormalized.generationText;
     toolLog(`🌐 Saga Visual Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
-    const title = deriveVideoTitle(action, story);
+    const title = deriveVideoTitle(action, rawStory);
     const generatedAt = new Date();
     const localGeneratedAt = formatLocalTimestamp(generatedAt);
     const defaultOutput = await buildDefaultLongVideoOutputPath({
