@@ -1,5 +1,6 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import path from 'node:path';
+import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
 import type { ContextBuildResult } from './context.js';
 import {
   getAllowedActionTypesForProfile,
@@ -4820,7 +4821,9 @@ function maybeRerouteToSagaLongVideo(
     totalDuration: totalDurationFromContext ?? a.duration ?? 60,
     duration: a.duration,
     ratio: a.ratio,
-    resolution: a.resolution,
+    // A resolution no provider renders (e.g. "4k") is dropped rather than
+    // failing the rerouted long video.
+    resolution: normalizeVideoResolution(a.resolution),
     model: a.model,
     projectId: projectIdFromContext,
     outputPath: a.outputPath,
