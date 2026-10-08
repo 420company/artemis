@@ -1,6 +1,7 @@
 import {
   getAgentRoleInstructions,
   getAgentRoleManifest,
+  getAllowedActionTypesForProfile,
   getProfileActionPolicyInstructions,
 } from './agentProfiles.js';
 import path from 'node:path';
@@ -44,7 +45,7 @@ export function buildSystemPrompt(
     `Execution profile: ${profile}`,
     '',
     'Tool policy:',
-    getToolManifest(),
+    getToolManifest(getAllowedActionTypesForProfile(profile)),
     ...specialistRoleManifest,
     '',
     'Operating guidelines:',
@@ -68,7 +69,9 @@ export function buildSystemPrompt(
     '- Use write_file for new files or full rewrites only when necessary.',
     '- Use delegate_task for synchronous subtasks that require the active thread to wait. Set runInBackground=true only for independent side tasks whose result is not needed until a later user turn.',
     '- generate_image/generate_video can run with runInBackground=true only when you can keep doing useful work without the generated file path. Omit runInBackground or set false when the current answer or next tool depends on the asset.',
-    '- Use spawn_background_workflow for long-running autonomous research or execution tasks you want to run asynchronously while you keep working. It instantly unblocks you.',
+    ...(getAllowedActionTypesForProfile(profile).includes('spawn_background_workflow')
+      ? ['- Use spawn_background_workflow for long-running autonomous research or execution tasks you want to run asynchronously while you keep working. It instantly unblocks you.']
+      : []),
     '- Builder delegation is a two-step flow: get a proposal first, then use approve_builder_execution only after reviewing and accepting that proposal.',
     '- Use tasks for the concrete working checklist and plan for the higher-level sequence when both are useful.',
     '- When repository evidence is provided, prefer observed facts and results over unsupported inference.',
