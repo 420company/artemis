@@ -362,6 +362,24 @@ async function main(): Promise<void> {
   });
   assert.equal(explicit.handled, true, 'explicit /saga entry should enter Saga workflow');
 
+  // Real briefs read like "workflow discussion" to the classifier (video words
+  // plus a question mark or 没有 in the dialogue). /saga must still start Saga.
+  for (const [suffix, brief] of [
+    ['brief-question', '30秒短片《码头》\n[0-10秒] 夜景，方天豪走向镜头。对白：“你还好吗？”\n[10-20秒] 他转身。\n[20-30秒] 船离开。'],
+    ['brief-negation', '视频风格：电影感。\n[0-5秒] 女孩推开门，没有人在家。\n[5-10秒] 她发现桌上的信。'],
+  ] as const) {
+    const scripted = await handleSagaLongVideoWorkflow({
+      scope: 'bridge',
+      key: `${key}-${suffix}`,
+      cwd,
+      locale: 'zh',
+      forceIntent: true,
+      text: brief,
+    });
+    assert.equal(scripted.handled, true, `explicit /saga with a real brief (${suffix}) must enter the Saga wizard`);
+    assert.match(scripted.reply, /这段视频里|In this video/i, `explicit /saga brief (${suffix}) should open with the subject-mode menu`);
+  }
+
   const supportQuestion = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-explicit`,

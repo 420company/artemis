@@ -1825,7 +1825,11 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   // "长视频", "long video", etc.). Fresh Saga entry is command-gated by the
   // caller: only an explicit /saga command sets forceIntent=true. Once a Saga
   // workflow is active, follow-up replies above can continue the wizard.
-  if (!input.forceIntent || isSagaWorkflowSupportDiscussion(text)) {
+  // An explicit /saga always starts the wizard. The support-discussion
+  // classifier must not veto it: real timecoded briefs are full of "视频",
+  // "短片", "生成" and question marks in dialogue, and a vetoed brief fell
+  // through to the plain agent, which lost the identity-source choice.
+  if (!input.forceIntent) {
     return { handled: false };
   }
   const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');
