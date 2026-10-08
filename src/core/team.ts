@@ -6,13 +6,16 @@ import type { UiLocale } from '../cli/locale.js';
 // /team is the auto-router: the user types `/team <task>` when they don't know
 // which workflow to pick, and a lightweight LLM call decides among:
 //   direct     — no workflow needed, default chat handles it
-//   niko       — general complex work needing research/risk review before execution
-//   design     — UI / visual / frontend; design must precede implementation
-//   athena     — broad multi-slice work needing coordinated parallel execution
-//   nidhogg    — correctness-critical / highest-quality requirement
+//   niko       — one agent loop: investigate, track risks, implement, verify
+//   design     — one agent loop: visual system + assets, implement, screenshot check
+//   athena     — one agent loop: independent slices edited in parallel, each verified
+//   nidhogg    — adversarial harness: generator, critic agents and a judge iterate
+//   contest    — candidate approaches, critique, verdict, then the winner is built
 //
-// Manual entrypoints (/niko /design /athena /nidhogg) remain available for
-// users who already know which workflow they want.
+// niko/design/athena/contest run as workflow hints over the normal agent loop
+// (workflowHints.ts), which may delegate reviewer/critic/arbiter sub-agents.
+// Manual entrypoints (/niko /design /athena /nidhogg /contest) remain available
+// for users who already know which workflow they want.
 
 export type TeamChoice = WorkflowMode;
 
@@ -25,11 +28,11 @@ const ROUTER_SYSTEM_PROMPT = `You are a routing dispatcher for the Artemis multi
 
 Choices (pick exactly one):
 - direct:     Simple, narrowly-scoped task with clear intent. Examples: a one-line fix, a single-file edit, a quick question, renaming a variable. The default chat agent handles it without any workflow overhead.
-- niko:       General complex engineering task that needs investigation, risk review, then execution. Examples: codebase modification, bug investigation, migration, performance optimization, moderately complex feature work. This is the default workflow for non-trivial tasks that are not clearly one of the specialized higher modes.
-- design:     UI / visual / frontend layout work. Anything where look-and-feel or component design must be planned before implementation.
-- athena:     Broad multi-slice execution across many files/modules/subsystems, especially when independent slices can run in parallel. Examples: repo-wide refactor, feature touching several independent modules, batch migration.
-- nidhogg:    Correctness-critical or highest-quality requirement. Examples: harness engineering, security-sensitive code, complex algorithm needing iterative review, production hardening, anything where bugs are very costly. Slow but most reliable (adversarial harness loop).
-- contest:    Decision-making with competing options. Examples: comparing approaches, trade-off analysis, risk evaluation, choosing between design alternatives. Proposes, critiques, and judges multiple solutions.
+- niko:       General complex engineering task. One agent investigates the code, tracks risks, then implements and verifies, optionally asking a reviewer sub-agent for an independent review. Examples: codebase modification, bug investigation, migration, performance optimization, moderately complex feature work. This is the default workflow for non-trivial tasks that are not clearly one of the specialized higher modes.
+- design:     UI / visual / frontend work. One agent sets up the visual system and asset list, generates images, builds the pages, and verifies desktop and mobile screenshots. Examples: landing page, website, component styling, brand visuals.
+- athena:     Broad multi-slice execution across many files/modules/subsystems. One agent splits the work into independent slices, edits them in parallel, and verifies each slice. Examples: repo-wide refactor, feature touching several independent modules, batch migration.
+- nidhogg:    Correctness-critical or highest-quality requirement. Runs an adversarial harness where a generator, critic agents and a judge iterate until the result passes (from the CLI it runs in the background). Examples: harness engineering, security-sensitive code, complex algorithm needing iterative review, production hardening, anything where bugs are very costly. Slow but most reliable.
+- contest:    Decision-making with competing options. Lists 2-3 candidate approaches, has them critiqued, judges them on evidence, then implements the winner. Examples: comparing approaches, trade-off analysis, risk evaluation, choosing between design alternatives.
 
 Output exactly one line of JSON, nothing else:
 {"choice":"<direct|niko|design|athena|nidhogg|contest>","reason":"<one short sentence in the SAME LANGUAGE as the user's task>"}
@@ -126,22 +129,22 @@ function determineFallbackRoute(prompt: string, cause?: string): DeterministicRo
       : choice === 'athena'
       ? '任务涉及大范围多切片协作，适合并行切片研究与协调执行。'
       : choice === 'design'
-      ? '任务明显涉及界面、视觉、前端或整站体验，需要先设计再实现。'
+      ? '任务明显涉及界面、视觉、前端或整站体验，需要视觉系统、真实素材和截图验收。'
       : choice === 'contest'
-      ? '任务核心是多方案比较、权衡或决策，适合走方案竞赛评审。'
+      ? '任务核心是多方案比较、权衡或决策，适合列出候选方案、评审并裁决后再实现。'
       : choice === 'niko'
-      ? '任务有一定复杂度，适合先研究和风险检查，再落地执行。'
+      ? '任务有一定复杂度，适合先研究代码、跟踪风险，再实现并验证。'
       : '任务范围较窄且意图清晰，直接对话处理成本最低。'
     : choice === 'nidhogg'
     ? 'The task carries correctness, reliability, security, or production risk and needs an adversarial verification loop.'
     : choice === 'athena'
     ? 'The task needs broad multi-slice coordination and parallelizable execution.'
     : choice === 'design'
-    ? 'The task is clearly about UI, visual design, frontend, or site experience and should be designed before implementation.'
+    ? 'The task is clearly about UI, visual design, frontend, or site experience and needs a visual system, real assets, and screenshot verification.'
     : choice === 'contest'
     ? 'The task is mainly about comparing options or making a trade-off decision.'
     : choice === 'niko'
-    ? 'The task is non-trivial and benefits from investigation plus risk review before execution.'
+    ? 'The task is non-trivial and benefits from investigating the code and tracking risks before implementing.'
     : 'The task is narrow and clear enough for the default chat agent.';
 
   return {
@@ -265,24 +268,24 @@ export function describeChoice(choice: TeamChoice, locale: UiLocale): string {
     return choice === 'direct'
       ? '默认对话直接处理'
       : choice === 'niko'
-      ? 'Niko 研究与风险检查 → 落地'
+      ? 'Niko 研究与风险跟踪 → 实现与验证'
       : choice === 'design'
-      ? 'Design 设计 → 实现'
+      ? 'Design 视觉系统与素材 → 实现 → 截图验收'
       : choice === 'athena'
-      ? 'Athena 切片研究 → 协调执行'
+      ? 'Athena 并行切片 → 逐片验证'
       : choice === 'nidhogg'
-      ? 'Nidhogg GAN 对抗 → 高质量收敛'
-      : 'Contest 方案对比 → 决策评审';
+      ? 'Nidhogg 生成 → 评审 → 裁决循环'
+      : 'Contest 候选方案 → 评审 → 裁决 → 实现';
   }
   return choice === 'direct'
     ? 'Default chat'
     : choice === 'niko'
-    ? 'Niko research + risk review → execute'
+    ? 'Niko research + risk tracking → implement + verify'
     : choice === 'design'
-    ? 'Design → implement'
+    ? 'Design visual system + assets → implement → screenshot check'
     : choice === 'athena'
-    ? 'Athena slice research → coordinated execution'
+    ? 'Athena parallel slices → per-slice verification'
     : choice === 'nidhogg'
-    ? 'Nidhogg GAN adversarial loop → high-quality convergence'
-    : 'Contest proposal → critique → verdict';
+    ? 'Nidhogg generator → critics → judge loop'
+    : 'Contest candidates → critique → verdict → implement';
 }
