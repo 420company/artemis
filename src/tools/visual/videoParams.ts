@@ -41,3 +41,17 @@ export function normalizeVideoDurationForProvider(
   }
   return duration;
 }
+
+const VIDEO_RESOLUTIONS = ['480p', '720p', '1080p', '4k'] as const;
+
+/**
+ * Canonical video resolution ("480p" / "720p" / "1080p" / "4k") from what a
+ * model or a config wrote ("1080P", "1080", "4K"); undefined when it is not
+ * one of them.
+ */
+export function normalizeVideoResolution(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  let value = raw.trim().toLowerCase();
+  if (/^\d+$/.test(value)) value = `${value}p`;
+  return (VIDEO_RESOLUTIONS as readonly string[]).includes(value) ? value : undefined;
+}

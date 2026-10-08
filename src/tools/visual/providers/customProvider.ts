@@ -284,11 +284,11 @@ export class CustomProvider implements VisualProvider {
       const body: Record<string, unknown> = {
         model,
         duration: durationNum,
-        resolution: videoConfig.defaultParams.resolution || '720p',
+        resolution: params.resolution || videoConfig.defaultParams.resolution || '720p',
         aspect_ratio: ratio,
         input,
         parameters: {
-          resolution: (videoConfig.defaultParams.resolution || '720p').toUpperCase(),
+          resolution: (params.resolution || videoConfig.defaultParams.resolution || '720p').toUpperCase(),
           ratio,
           duration: durationNum,
           prompt_extend: promptExtend,
@@ -500,7 +500,7 @@ export class CustomProvider implements VisualProvider {
         model,
         content,
         duration: durationNum,
-        resolution: videoConfig.defaultParams.resolution || '720p',
+        resolution: params.resolution || videoConfig.defaultParams.resolution || '720p',
         ratio,
         generate_audio: params.generateAudio !== false && /^dreamina-seedance-2/i.test(model.trim()),
         prompt_extend: promptExtend,
@@ -639,7 +639,7 @@ export class CustomProvider implements VisualProvider {
       const seconds = mapVideoSeconds(params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration))
       const size = mapVideoSize({
         ratio: params.ratio,
-        resolution: videoConfig.defaultParams.resolution,
+        resolution: params.resolution || videoConfig.defaultParams.resolution,
       })
 
       const body = new FormData()

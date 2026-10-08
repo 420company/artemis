@@ -84,7 +84,7 @@ import {
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
-import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
+import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../src/tools/visual/videoParams.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
   isPathInsideWorkspace,
@@ -2703,9 +2703,32 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         createBody.duration === 11,
       JSON.stringify(createBody),
     )
+    assert(
+      'ModelArk visual provider: sends the configured default resolution when none is asked for',
+      createBody?.resolution === '720p',
+      JSON.stringify(createBody),
+    )
+    await provider.generateVideo({ prompt: 'hd product film', model: 'dreamina-seedance-2-0-260128', resolution: '1080P' })
+    assert(
+      'ModelArk visual provider: sends the requested resolution, normalized',
+      createBody?.resolution === '1080p',
+      JSON.stringify(createBody),
+    )
   } finally {
     globalThis.fetch = originalFetch
   }
+}
+
+{
+  assert(
+    'video resolution: canonical values from loose spellings; unknown values rejected',
+    normalizeVideoResolution('1080P') === '1080p' &&
+      normalizeVideoResolution(' 720 ') === '720p' &&
+      normalizeVideoResolution('4K') === '4k' &&
+      normalizeVideoResolution('8k') === undefined &&
+      normalizeVideoResolution('') === undefined &&
+      normalizeVideoResolution(undefined) === undefined,
+  )
 }
 
 {

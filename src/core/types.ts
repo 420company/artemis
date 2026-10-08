@@ -393,6 +393,9 @@ export type AgentAction =
       model?: string;
       ratio?: string;
       duration?: number;
+      // Output resolution ("480p" / "720p" / "1080p" / "4k"); defaults to
+      // the configured video default (visualProfile.video.defaultParams).
+      resolution?: string;
       outputPath?: string;
       referenceImageUrls?: string[];
       referenceVideoUrls?: string[];

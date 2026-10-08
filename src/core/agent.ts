@@ -497,6 +497,7 @@ function buildActionFromLooseArgs(
         prompt,
         model: getLooseStringArg(args, 'model'),
         ratio: getLooseStringArg(args, 'ratio', 'aspectRatio', 'aspect_ratio'),
+        resolution: getLooseStringArg(args, 'resolution', 'rs'),
         duration: getLooseIntegerArg(args, 'duration', 'durationSeconds', 'duration_seconds'),
         outputPath: getLooseStringArg(
           args,
