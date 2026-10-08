@@ -85,6 +85,7 @@ import {
   resolveOdinSkillContext,
 } from '../odin/runtime.js';
 import {
+  McpCallCancelledError,
   McpDependencyError,
   callMcpServerTool,
   getMcpServerPrompt,
@@ -758,6 +759,24 @@ function buildActionFromLooseArgs(
         modelPath: getLooseStringArg(args, 'modelPath', 'model_path'),
         engine,
         command: getLooseStringArg(args, 'command', 'cmd'),
+      };
+    }
+    case 'memory':
+    case 'remember':
+    case 'save_memory': {
+      const raw = (getLooseStringArg(args, 'action', 'op', 'operation') ?? (lower === 'memory' ? '' : 'save')).toLowerCase();
+      const op = (['save', 'update', 'delete', 'list'] as const).find((o) => o === raw);
+      if (!op) return null;
+      const scope = getLooseStringArg(args, 'scope');
+      const category = getLooseStringArg(args, 'category') as Extract<AgentAction, { type: 'memory' }>['category'];
+      return {
+        type: 'memory',
+        action: op,
+        ...(scope === 'global' || scope === 'project' ? { scope } : {}),
+        name: getLooseStringArg(args, 'name', 'key', 'title', 'slug'),
+        description: getLooseStringArg(args, 'description', 'summary'),
+        category,
+        content: getLooseStringArg(args, 'content', 'text', 'body', 'memory'),
       };
     }
     case 'view_image':
@@ -2890,6 +2909,26 @@ async function buildProviderMessages(
     .reverse()
     .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
 
+  // Who the user is and how the agent should sound: the same user profile and
+  // soul.md the interactive chat loads, so headless runs (execute, the web
+  // product, workflows) know the owner too. Sub-agents work on narrow tasks
+  // and do without.
+  if (profile === 'main') {
+    try {
+      const [{ loadUserProfile, formatProfileForPrompt }, { loadSoul, formatSoulForPrompt }] = await Promise.all([
+        import('../memory/userProfile.js'),
+        import('../memory/soul.js'),
+      ]);
+      const [userProfile, soul] = await Promise.all([loadUserProfile(), loadSoul()]);
+      const sections = [formatProfileForPrompt(userProfile), formatSoulForPrompt(soul)]
+        .map((section) => section.trim())
+        .filter(Boolean);
+      if (sections.length > 0) systemSections.push(...sections, '');
+    } catch {
+      // Profile and persona are optional context; failures must not block the turn.
+    }
+  }
+
   try {
     const {
       ensureMemoryMigrated,
@@ -3566,6 +3605,13 @@ export type RunAgentOptions = {
   delegationDepth?: number;
   maxDelegationDepth?: number;
   appendUserMessage?: boolean;
+  /**
+   * Scope for memories the memory tool saves when the model names none.
+   * Headless runs pass 'project', so something picked up from fetched or
+   * tool content stays in this workspace unless the model explicitly saves
+   * it globally. Unset: global (interactive CLI behaviour).
+   */
+  memoryDefaultScope?: 'global' | 'project';
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -4308,9 +4354,29 @@ export async function runSpecialistAgent(
   }
 }
 
+/**
+ * A cancelled run is not a server failure: report it without marking the
+ * server unhealthy.
+ */
+function buildMcpCancelledOutcome(
+  error: unknown,
+): { ok: boolean; output: string; error?: ToolError } | undefined {
+  if (!(error instanceof McpCallCancelledError)) {
+    return undefined;
+  }
+  return {
+    ok: false,
+    output: error.message,
+    error: buildToolError('tool_run_cancelled', error.message, {
+      retryable: false,
+    }),
+  };
+}
+
 async function executeMcpToolAction(
   action: Extract<AgentAction, { type: 'mcp_call_tool' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4346,6 +4412,7 @@ async function executeMcpToolAction(
       toolName: action.toolName,
       args: action.args,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4360,6 +4427,10 @@ async function executeMcpToolAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     // Dependency missing: stop immediately, surface install prompt to user
     if (error instanceof McpDependencyError) {
       const info = error.dependencyInfo;
@@ -4378,6 +4449,7 @@ async function executeMcpToolAction(
             toolName: action.toolName,
             args: action.args,
             timeoutMs: action.timeoutMs,
+            abortSignal,
           });
           return { ok: true, output: result.output };
         } catch {
@@ -4422,6 +4494,7 @@ async function executeMcpToolAction(
 async function executeMcpReadResourceAction(
   action: Extract<AgentAction, { type: 'mcp_read_resource' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4456,6 +4529,7 @@ async function executeMcpReadResourceAction(
       cwd: options.cwd,
       uri: action.uri,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4470,6 +4544,10 @@ async function executeMcpReadResourceAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =
@@ -4493,6 +4571,7 @@ async function executeMcpReadResourceAction(
 async function executeMcpGetPromptAction(
   action: Extract<AgentAction, { type: 'mcp_get_prompt' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4528,6 +4607,7 @@ async function executeMcpGetPromptAction(
       promptName: action.promptName,
       args: action.args,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4542,6 +4622,10 @@ async function executeMcpGetPromptAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =
@@ -4677,6 +4761,7 @@ async function executeAgentAction(
           options.permissionManager.getMode(),
         ),
         sessionId: session.id,
+        memoryDefaultScope: options.memoryDefaultScope,
         viewedImages: options.viewedImages,
         context: {
           profile: options.profile ?? 'main',
@@ -4695,11 +4780,11 @@ async function executeAgentAction(
 
   switch (action.type) {
     case 'mcp_call_tool':
-      return executeMcpToolAction(action, options);
+      return executeMcpToolAction(action, options, abortSignal);
     case 'mcp_read_resource':
-      return executeMcpReadResourceAction(action, options);
+      return executeMcpReadResourceAction(action, options, abortSignal);
     case 'mcp_get_prompt':
-      return executeMcpGetPromptAction(action, options);
+      return executeMcpGetPromptAction(action, options, abortSignal);
     case 'approve_builder_execution':
       return approveBuilderExecution(session, action, options);
     case 'spawn_background_workflow': {

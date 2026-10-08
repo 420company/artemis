@@ -2554,6 +2554,204 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 }
 
 {
+  // A project without its own providers.json uses the global semantic-memory
+  // setting, like the main model does.
+  const tmpDir = path.join(os.tmpdir(), `artemis-memory-profile-${Date.now()}`)
+  const home = path.join(tmpDir, 'home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(path.join(home, '.artemis'), { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  fs.writeFileSync(path.join(home, '.artemis', 'providers.json'), JSON.stringify({
+    profiles: [],
+    memoryProfile: { enabled: true, provider: 'openai', config: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'embed-test' } },
+  }))
+  const previous = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME }
+  process.env.HOME = home
+  delete process.env.ARTEMIS_HOME
+  try {
+    const { getMemoryProfile } = await import('../src/core/memoryEnhancement.js')
+    const profile = await getMemoryProfile(project)
+    assert('semantic memory: a project without its own setting uses the global one', profile.enabled === true && profile.config?.model === 'embed-test', JSON.stringify(profile))
+  } finally {
+    if (previous.HOME === undefined) delete process.env.HOME
+    else process.env.HOME = previous.HOME
+    if (previous.ARTEMIS_HOME !== undefined) process.env.ARTEMIS_HOME = previous.ARTEMIS_HOME
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // With ARTEMIS_HOME set, the global store is $ARTEMIS_HOME/providers.json
+  // (not a workspaces/<hash> path) for the main model, the provider router,
+  // semantic memory and brain.ts alike. A setup written earlier at the
+  // workspace path of the home directory keeps working until that file exists.
+  const tmpDir = path.join(os.tmpdir(), `artemis-global-store-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  const mainProfile = (id: string) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: `sk-${id}`, model: `${id}-model` })
+  const previousArtemisHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = artemisHome
+  let legacyPath = ''
+  try {
+    const { createGlobalProviderStore } = await import('../src/providers/store.js')
+    const { resolveMainProviderConfig } = await import('../src/providers/onboarding.js')
+    const { getMemoryProfile } = await import('../src/core/memoryEnhancement.js')
+    const homePath = path.join(artemisHome, 'providers.json')
+    legacyPath = new ProviderStore(os.homedir()).getFilePath()
+    assert(
+      'global provider store: an ARTEMIS_HOME path resolves to $ARTEMIS_HOME/providers.json',
+      new ProviderStore(artemisHome).getFilePath() === homePath && legacyPath !== homePath,
+      `${new ProviderStore(artemisHome).getFilePath()} vs ${legacyPath}`,
+    )
+
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true })
+    fs.writeFileSync(legacyPath, JSON.stringify({ profiles: [mainProfile('legacy-main')], defaultMainProfileId: 'legacy-main' }))
+    const legacyMain = await resolveMainProviderConfig({ cwd: project, config: {} })
+    assert(
+      'global provider store: a setup at the old workspace path is still found while $ARTEMIS_HOME/providers.json is missing',
+      createGlobalProviderStore().getFilePath() === legacyPath && legacyMain.model === 'legacy-main-model',
+      `${createGlobalProviderStore().getFilePath()} ${legacyMain.model}`,
+    )
+
+    fs.writeFileSync(homePath, JSON.stringify({
+      profiles: [mainProfile('home-main')],
+      defaultMainProfileId: 'home-main',
+      memoryProfile: { enabled: true, provider: 'openai', config: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'embed-home' } },
+    }))
+    const homeMain = await resolveMainProviderConfig({ cwd: project, config: {} })
+    const memoryProfile = await getMemoryProfile(project)
+    assert(
+      'global provider store: main model and semantic memory read $ARTEMIS_HOME/providers.json',
+      createGlobalProviderStore().getFilePath() === homePath &&
+        homeMain.model === 'home-main-model' &&
+        memoryProfile.config?.model === 'embed-home',
+      `${createGlobalProviderStore().getFilePath()} ${homeMain.model} ${JSON.stringify(memoryProfile)}`,
+    )
+  } finally {
+    if (previousArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousArtemisHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // A real headless run (runHeadlessAgent, as `artemis execute` and the web
+  // product use) against a chat-completions server that answers in the text
+  // tool-call dialect: the loose `remember` form saves a memory, and with no
+  // scope named it stays in the project; an explicit global save goes global.
+  const tmpDir = path.join(os.tmpdir(), `artemis-headless-remember-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  let requestCount = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      requestCount += 1
+      const content = requestCount === 1
+        ? [
+          'Noted both.',
+          '<toolcall name="remember">{"name":"deploy-target","description":"Deploys go to the staging VPS first","content":"Deploy to the staging VPS before production."}</toolcall>',
+          '<toolcall name="memory">{"action":"save","scope":"global","name":"reply-language","description":"Owner wants replies in Simplified Chinese","content":"Always reply in Simplified Chinese."}</toolcall>',
+        ].join('\n')
+        : 'Saved both.'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        model: 'mock-openai-compatible',
+        choices: [{ message: { content } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }))
+    })
+  })
+  const previousArtemisHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = artemisHome
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock provider server failed to bind to a TCP port.')
+    fs.writeFileSync(path.join(artemisHome, 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-openai',
+      profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
+    }))
+    const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+    const { memoryDirForScope } = await import('../src/storage/memoryFiles.js')
+    const result = await runHeadlessAgent(project, 'Remember: deploys go to staging first, and reply in Simplified Chinese.', { maxTurns: 3 })
+    const list = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+    const projectSaved = list(memoryDirForScope(project, 'project'))
+    const globalSaved = list(memoryDirForScope(project, 'global'))
+    const detail = `reply=${result.reply} requests=${requestCount} project=${projectSaved.join(',')} global=${globalSaved.join(',')}`
+    assert(
+      'headless memory: a <toolcall name="remember"> without a scope is saved to the project, not globally',
+      projectSaved.some((f) => f.startsWith('deploy-target')) && !globalSaved.some((f) => f.startsWith('deploy-target')),
+      detail,
+    )
+    assert(
+      'headless memory: an explicit global memory save still goes global',
+      globalSaved.some((f) => f.startsWith('reply-language')),
+      detail,
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (previousArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousArtemisHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Headless runs (artemis execute, the web product) know the owner: soul.md
+  // reaches the system prompt, and main may save a long-term memory.
+  const tmpDir = path.join(os.tmpdir(), `artemis-headless-memory-${Date.now()}`)
+  const home = path.join(tmpDir, 'artemis-home')
+  fs.mkdirSync(home, { recursive: true })
+  fs.writeFileSync(path.join(home, 'soul.md'), 'Speak like a calm ship captain.')
+  const previousHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = home
+  try {
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'headless memory smoke' })
+    await store.save(session)
+    let calls = 0
+    let systemText = ''
+    const provider: ChatProvider = {
+      async complete(messages): Promise<ProviderResponse> {
+        calls += 1
+        if (calls === 1) {
+          systemText = messages.filter((m) => m.role === 'system').map((m) => String(m.content)).join('\n')
+          return {
+            text: JSON.stringify({
+              reply: 'Noted.',
+              done: false,
+              actions: [{ type: 'memory', action: 'save', name: 'reply-language', description: 'Owner wants replies in Simplified Chinese', content: 'Always reply in Simplified Chinese.' }],
+            }),
+            raw: null,
+          }
+        }
+        return { text: JSON.stringify({ reply: 'Saved.', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'Remember: always reply in Simplified Chinese.', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 3,
+      profile: 'main',
+    })
+    assert('headless memory: soul.md reaches the main system prompt', systemText.includes('Speak like a calm ship captain.'), systemText.slice(0, 400))
+    const saved = fs.existsSync(path.join(home, 'memory')) ? fs.readdirSync(path.join(home, 'memory')) : []
+    assert('headless memory: main may save a long-term memory', saved.some((f) => f.startsWith('reply-language')), saved.join(', '))
+  } finally {
+    if (previousHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
   const tmpDir = path.join(os.tmpdir(), `artemis-visual-required-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   await configureMockImageProfile(tmpDir)
@@ -9754,6 +9952,72 @@ process.stdin.on('data', (chunk) => {
 
     const dying = await callEcho(stdioServer('smoke-dying', `process.stdout.write('fatal: missing API token\\n'); setTimeout(() => process.exit(1), 50)\n`))
     assert('mcp stdio: dropped non-JSON stdout lines appear in the failure message', dying.output.includes('fatal: missing API token'), dying.output)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ── MCP call timeout and cancellation ─────────────────────────────────────────
+
+{
+  // Real tools (search, scrape, render) take longer than a probe: a call that
+  // needs ~5 s must not hit the old 4 s default. Connecting keeps a shorter
+  // budget than the call, and a cancelled run stops waiting at once (also
+  // while the server is still starting) instead of after the timeout.
+  const { callMcpServerTool, closeCachedMcpClients, resolveMcpRequestTimeouts, McpCallCancelledError } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-timeout-'))
+  const slowFile = path.join(dir, 'slow.mjs')
+  fs.writeFileSync(slowFile, `
+const write = (m) => process.stdout.write(JSON.stringify(m) + '\\n')
+let buf = ''
+process.stdin.on('data', (c) => {
+  buf += c
+  for (;;) {
+    const i = buf.indexOf('\\n')
+    if (i < 0) return
+    const line = buf.slice(0, i)
+    buf = buf.slice(i + 1)
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'slow', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'slow', inputSchema: { type: 'object' } }] } })
+    else if (msg.method === 'tools/call') setTimeout(() => write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'slow done' }] } }), 5000)
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`)
+  const silentFile = path.join(dir, 'silent.mjs')
+  fs.writeFileSync(silentFile, `process.stdin.on('data', () => {})\n`)
+  const stdioServer = (id: string, file: string) => ({ id, enabled: true, transport: 'stdio' as const, command: process.execPath, commandArgs: [file], authType: 'none' as const, authState: 'unknown' as const, createdAt: '', updatedAt: '' })
+  const callSlow = async (server: ReturnType<typeof stdioServer>, abortAfterMs?: number): Promise<{ output: string; error?: unknown; ms: number }> => {
+    const controller = new AbortController()
+    const timer = abortAfterMs === undefined ? undefined : setTimeout(() => controller.abort(), abortAfterMs)
+    const started = Date.now()
+    try {
+      const output = (await callMcpServerTool({ server, cwd: dir, toolName: 'slow', args: {}, abortSignal: controller.signal })).output
+      return { output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), error, ms: Date.now() - started }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  try {
+    const timeouts = resolveMcpRequestTimeouts(undefined)
+    assert('mcp call: default budget is 120 s for the call and 30 s for connecting', timeouts.callTimeoutMs === 120_000 && timeouts.setupTimeoutMs === 30_000, JSON.stringify(timeouts))
+    const explicit = resolveMcpRequestTimeouts(5_000)
+    assert('mcp call: an explicit shorter timeout bounds connecting too', explicit.callTimeoutMs === 5_000 && explicit.setupTimeoutMs === 5_000, JSON.stringify(explicit))
+
+    const done = await callSlow(stdioServer('slow', slowFile))
+    assert('mcp call: a 5 s tool call completes under the default call timeout', done.output.includes('slow done'), done.output)
+
+    const cancelled = await callSlow(stdioServer('slow-cancel', slowFile), 300)
+    assert('mcp call: cancelling a running tool call stops waiting at once', cancelled.error instanceof McpCallCancelledError && cancelled.ms < 2000, `${cancelled.ms}ms ${cancelled.output}`)
+
+    const cancelledConnect = await callSlow(stdioServer('silent-cancel', silentFile), 300)
+    assert('mcp call: cancelling while the server never answers initialize stops waiting at once', cancelledConnect.error instanceof McpCallCancelledError && cancelledConnect.ms < 2000, `${cancelledConnect.ms}ms ${cancelledConnect.output}`)
   } finally {
     await closeCachedMcpClients()
     fs.rmSync(dir, { recursive: true, force: true })
