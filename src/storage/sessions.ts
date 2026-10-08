@@ -9,6 +9,8 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { writeFileAtomic } from './atomicWrite.js';
+import { holdsSessionLock, withSessionLock } from './sessionLock.js';
 import type {
   AgentRole,
   AgentPhase,
@@ -32,6 +34,8 @@ import {
   isCompactionBoundary,
   normalizeContextState,
   readFullHistory,
+  readHistoryPage,
+  type HistoryPage,
   resolveContextBudget,
   spillToolResultIfLarge,
   type ContextStorage,
@@ -368,6 +372,66 @@ function normalizeHeimdallEventCollection(
     .slice(-256);
 }
 
+/** Messages per `session show` page by default. */
+export const DEFAULT_HISTORY_PAGE = 500;
+/** Longest message text `session show` returns by default. */
+const MAX_SHOWN_CHARS = 100_000;
+
+/** A message a chat UI shows: user or assistant text. */
+export function isChatVisibleMessage(message: SessionMessage): boolean {
+  return (message.role === 'user' || message.role === 'assistant') &&
+    typeof message.content === 'string' && message.content.trim().length > 0;
+}
+
+function projectChatMessage(message: SessionMessage): SessionMessage {
+  const {
+    toolCalls: _toolCalls,
+    rawContentBlocks: _raw,
+    contentBlocks: _blocks,
+    reasoningContent: _reasoning,
+    ...rest
+  } = message as SessionMessage & { contentBlocks?: unknown; reasoningContent?: unknown };
+  const content = rest.content ?? '';
+  if (content.length <= MAX_SHOWN_CHARS) return rest as SessionMessage;
+  const head = content.slice(0, Math.floor(MAX_SHOWN_CHARS * 0.7));
+  const tail = content.slice(content.length - Math.floor(MAX_SHOWN_CHARS * 0.3));
+  const omitted = content.length - head.length - tail.length;
+  return {
+    ...rest,
+    content: `${head}\n… [${omitted.toLocaleString('en-US')} chars omitted; full text: artemis session show <id> --full] …\n${tail}`,
+  } as SessionMessage;
+}
+
+/** A session file that still cannot be parsed after retries (read-only load). */
+export class SessionUnreadableError extends Error {
+  readonly code = 'session_unreadable';
+  constructor(sessionId: string, cause: unknown) {
+    super(`Session ${sessionId} could not be read (${cause instanceof Error ? cause.message : String(cause)}).`);
+    this.name = 'SessionUnreadableError';
+  }
+}
+
+type SessionFileRead = { ok: true; record: SessionRecord } | { ok: false; error: unknown };
+
+/** Read and parse a session file, retrying parse errors with a short backoff. ENOENT is thrown. */
+async function readSessionFile(filePath: string, attempts: number): Promise<SessionFileRead> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+    const raw = await readFile(filePath, 'utf8');
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { ok: true, record: parsed as SessionRecord };
+      }
+      lastError = new Error('not a session object');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
 export class SessionStore {
   private readonly cwd: string;
   private readonly rootDir: string;
@@ -527,42 +591,64 @@ export class SessionStore {
       return;
     }
     session.updatedAt = now();
-    // Conversation content: readable by the owner only.
-    await writeFile(
+    // Conversation content: readable by the owner only. Written to a temp
+    // file and renamed into place, so a concurrent reader (the web server
+    // runs `session show` without the lock) never sees half a file.
+    await writeFileAtomic(
       path.join(this.sessionDir, `${session.id}.json`),
       JSON.stringify(session, null, 2),
-      { encoding: 'utf8', mode: 0o600 },
+      { mode: 0o600 },
     );
     this.lastWritten.set(session.id, comparable);
     invalidateSessionSearchCache(this.cwd);
     await syncSessionSearchIndex(this.cwd, session);
   }
 
-  async load(sessionId: string): Promise<SessionRecord> {
+  /**
+   * Load a session.
+   *
+   * - `fresh`: read from disk even when cached (another process may have
+   *   written it; callers holding the session lock use this).
+   * - `readOnly`: never write anything (`artemis session show`). A file
+   *   that cannot be parsed raises SessionUnreadableError instead of being
+   *   quarantined.
+   *
+   * A parse error is retried a few times first (a writer from an older
+   * version may be mid-write). Only then, and only while holding the
+   * session lock, is the file moved aside.
+   */
+  async load(sessionId: string, options: { fresh?: boolean; readOnly?: boolean } = {}): Promise<SessionRecord> {
     const cached = this.sessionCache.get(sessionId);
-    if (cached) {
+    if (cached && !options.fresh) {
       return cached;
     }
 
-    await this.ensure();
+    if (!options.readOnly) await this.ensure();
     const filePath = path.join(this.sessionDir, `${sessionId}.json`);
-    const raw = await readFile(filePath, 'utf8');
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (error) {
-      return this.quarantine(sessionId, filePath, error);
+    const attempt = await readSessionFile(filePath, 4);
+    if (!attempt.ok) {
+      if (options.readOnly) {
+        throw new SessionUnreadableError(sessionId, attempt.error);
+      }
+      const lockPath = this.getLockPath(sessionId);
+      const quarantineUnderLock = async (): Promise<SessionRecord> => {
+        // Re-read under the lock: the writer may have finished meanwhile.
+        const again = await readSessionFile(filePath, 2);
+        if (again.ok) return this.adoptLoaded(sessionId, again.record);
+        return this.quarantine(sessionId, filePath, again.error);
+      };
+      return holdsSessionLock(lockPath)
+        ? quarantineUnderLock()
+        : withSessionLock(lockPath, quarantineUnderLock, { label: `Session ${sessionId}` });
     }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return this.quarantine(sessionId, filePath, new Error('not a session object'));
-    }
-    const record = parsed as SessionRecord;
+    return this.adoptLoaded(sessionId, attempt.record);
+  }
+
+  private adoptLoaded(sessionId: string, record: SessionRecord): SessionRecord {
     // The file name is the id; a missing or wrong id inside is repaired.
     if (record.id !== sessionId) record.id = sessionId;
+    // Normalized in memory only: loading never writes (the next save does).
     const normalized = this.normalizeSession(record);
-    if (normalized.mutated) {
-      await this.save(normalized.session);
-    }
     this.sessionCache.set(normalized.session.id, normalized.session);
     return normalized.session;
   }
@@ -570,7 +656,8 @@ export class SessionStore {
   /**
    * An unreadable session file must not brick the session: it is moved
    * aside to `<id>.json.corrupt-<time>` (kept for inspection) and a fresh,
-   * empty session with the same id takes its place.
+   * empty session with the same id takes its place. Called only under the
+   * session lock, after re-reading failed.
    */
   private async quarantine(sessionId: string, filePath: string, error: unknown): Promise<SessionRecord> {
     const aside = `${filePath}.corrupt-${Date.now()}`;
@@ -599,6 +686,24 @@ export class SessionStore {
    */
   async loadFullHistory(session: SessionRecord): Promise<{ messages: SessionMessage[]; archived: number }> {
     return readFullHistory(this.getContextDir(session.id), session.messages, isSyntheticHistoryMessage);
+  }
+
+  /**
+   * One page of what a chat UI renders (user and assistant text, newest
+   * last), read from the end of the archive. Tool messages, tool-call
+   * arguments, raw provider blocks and inline images are left out, and a
+   * very long text is shortened with a note (`session show --full` has it).
+   */
+  async loadHistoryPage(
+    session: SessionRecord,
+    options: { limit?: number; before?: string } = {},
+  ): Promise<HistoryPage> {
+    return readHistoryPage(this.getContextDir(session.id), session.messages, isSyntheticHistoryMessage, {
+      limit: Math.max(1, options.limit ?? DEFAULT_HISTORY_PAGE),
+      before: options.before,
+      include: isChatVisibleMessage,
+      project: projectChatMessage,
+    });
   }
 
   /** Remove a session's context directory (archive, spilled tool outputs). */

@@ -674,15 +674,27 @@ async function runQueryCommand(options: {
   const finalPrompt = mode === 'analyze'
     ? `${t('只分析不修改：调研以下问题并给出结论，不要改动任何文件或执行有副作用的命令。', 'Analysis only: investigate the question and report conclusions without modifying files or running side-effectful commands.')}\n\n${prompt}`
     : prompt
-  const result = await runHeadlessAgent(cwd, finalPrompt, {
-    permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
-    model,
-    maxTurns: options.maxTurns,
-    sessionId: options.sessionId,
-    imagePaths: options.imagePaths,
-    sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
-    onInfo: (message) => console.error(message),
-  })
+  const { SessionBusyError, SESSION_BUSY_MESSAGE, SESSION_BUSY_MESSAGE_ZH } = await import('../storage/sessionLock.js')
+  let result: Awaited<ReturnType<typeof runHeadlessAgent>>
+  try {
+    result = await runHeadlessAgent(cwd, finalPrompt, {
+      permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
+      model,
+      maxTurns: options.maxTurns,
+      sessionId: options.sessionId,
+      imagePaths: options.imagePaths,
+      sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
+      onInfo: (message) => console.error(message),
+    })
+  } catch (error) {
+    if (error instanceof SessionBusyError) {
+      // A distinct exit code (75, EX_TEMPFAIL) so a host can tell "retry
+      // later" from a failure.
+      console.error(t(SESSION_BUSY_MESSAGE_ZH, SESSION_BUSY_MESSAGE))
+      process.exit(error.exitCode)
+    }
+    throw error
+  }
   console.log()
   console.log(buildPanel(mode === 'analyze' ? t('分析结果', 'Analysis result') : t('执行结果', 'Execution result'), [
     result.reply,
@@ -1111,27 +1123,49 @@ async function runSessionCommand(options: { cwd: string; locale: UiLocale; args:
   if (sub === 'show') {
     const id = args[1]
     if (!id) {
-      console.log(t('\n  用法: artemis session show <id>', '\n  Usage: artemis session show <id>'))
+      console.log(t('\n  用法: artemis session show <id> [--limit N] [--before <id>] [--full | --live]', '\n  Usage: artemis session show <id> [--limit N] [--before <id>] [--full | --live]'))
       console.log()
       return
     }
-    const session = await store.load(id)
-    // `messages` is the whole user-visible conversation: messages moved to
-    // the transcript archive by compaction, then the live ones, without the
-    // compaction boundary or runtime-context entries. `--live` prints the
-    // stored record as is (what the model is sent).
+    // Read-only: showing a session never writes, quarantines or repairs files
+    // (the web server calls this on every open, without the session lock).
+    const session = await store.load(id, { readOnly: true })
+    const flagValue = (name: string): string | undefined => {
+      const at = args.indexOf(name)
+      return at >= 0 ? args[at + 1] : undefined
+    }
     if (args.includes('--live')) {
+      // The stored record as is (what the model is sent).
       console.log(JSON.stringify(session, null, 2))
       return
     }
-    const history = await store.loadFullHistory(session)
+    const compactions = session.messages[0]?.compaction?.index ?? 0
+    if (args.includes('--full')) {
+      // Every message ever exchanged, tool messages and raw blocks included (debugging).
+      const history = await store.loadFullHistory(session)
+      console.log(JSON.stringify({
+        ...session,
+        messages: history.messages,
+        history: { archivedMessages: history.archived, liveMessages: session.messages.length, compactions },
+      }, null, 2))
+      return
+    }
+    // Default: one page of what the chat UI renders (user and assistant
+    // text), newest last. Page back with --before <history.nextBefore>.
+    const limitArg = Number(flagValue('--limit'))
+    const page = await store.loadHistoryPage(session, {
+      limit: Number.isFinite(limitArg) && limitArg > 0 ? Math.floor(limitArg) : undefined,
+      before: flagValue('--before'),
+    })
     console.log(JSON.stringify({
       ...session,
-      messages: history.messages,
+      messages: page.messages,
       history: {
-        archivedMessages: history.archived,
         liveMessages: session.messages.length,
-        compactions: session.messages[0]?.compaction?.index ?? 0,
+        compactions,
+        returned: page.messages.length,
+        hasMore: page.hasMore,
+        ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
       },
     }, null, 2))
     return
