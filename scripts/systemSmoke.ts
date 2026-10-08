@@ -670,5 +670,32 @@ test('router: a request with images may go to a gateway profile that bridges the
   }
 });
 
+test('provider store: a load running next to saves never reads a half-written file', async () => {
+  const { ProviderStore } = await import('../src/providers/store.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-store-atomic-'));
+  try {
+    const store = new ProviderStore(path.join(dir, '.artemis'));
+    const data = await store.load();
+    data.profiles = Array.from({ length: 200 }, (_, i) => ({ id: `p${i}`, protocol: 'openai' as const, baseUrl: 'https://x.example/v1', apiKey: 'k', model: `m${i}`, label: 'x'.repeat(200) }));
+    await store.save(data);
+    // One chain keeps saving while another keeps loading, as the background
+    // telemetry write and the next run's load do.
+    const until = Date.now() + 400;
+    let loads = 0;
+    const saving = (async () => { while (Date.now() < until) await store.save(data); })();
+    const loading = (async () => {
+      while (Date.now() < until) {
+        assert.equal((await new ProviderStore(path.join(dir, '.artemis')).load()).profiles.length, 200);
+        loads += 1;
+      }
+    })();
+    await Promise.all([saving, loading]);
+    assert.ok(loads > 10, `loads ran alongside the saves (${loads})`);
+    assert.deepEqual(fs.readdirSync(path.join(dir, '.artemis')).filter((f) => f.endsWith('.tmp')), [], 'no temporary files left');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await pending;
 console.log('\n  ✔ All system smoke tests passed');

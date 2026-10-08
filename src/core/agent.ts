@@ -7504,8 +7504,8 @@ export async function runAgent(
     abortSubagentRuns(session.id);
 
     try {
-      const { compressTrajectory } = await import('./memory.js');
-      compressTrajectory(options.cwd, session, '').catch(() => {});
+      const { scheduleTrajectoryCuration } = await import('./memory.js');
+      scheduleTrajectoryCuration(options.cwd, session);
     } catch {}
 
     if (shouldOwnHeimdallState) {

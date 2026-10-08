@@ -15,9 +15,29 @@ import {
 } from '../src/cli/settings.js'
 import { applyProviderOverrides, getLeadProvider, resetSession, switchModel, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
-import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
+import { parseAssistantEnvelopeForSmoke, runAgent as runAgentNow } from '../src/core/agent.js'
+import { settleMemoryCuration } from '../src/core/memory.js'
 import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
-import { runHeadlessAgent } from '../src/services/headlessAgent.js'
+import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
+
+// A finished run starts the memory curator in the background, which reads
+// process state (cwd, ARTEMIS_HOME, provider stores) when it runs. Every run
+// here waits for it, so no curator outlives its test and touches the next
+// test's files.
+const runAgent: typeof runAgentNow = async (...args) => {
+  try {
+    return await runAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
+const runHeadlessAgent: typeof runHeadlessAgentNow = async (...args) => {
+  try {
+    return await runHeadlessAgentNow(...args)
+  } finally {
+    await settleMemoryCuration()
+  }
+}
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile, validateProfileAction } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
@@ -2891,7 +2911,6 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
       defaultMainProfileId: 'mock-openai',
       profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
     }))
-    const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
     const { memoryDirForScope } = await import('../src/storage/memoryFiles.js')
     const result = await runHeadlessAgent(project, 'Remember: deploys go to staging first, and reply in Simplified Chinese.', { maxTurns: 3 })
     const list = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
@@ -3245,7 +3264,6 @@ const ONE_PIXEL_PNG_BASE64 =
   // (b) A headless image request runs generate_image end to end against a mock
   // image endpoint. runInBackground is ignored headless: the file exists when
   // the run returns, and the model saw the tool result before answering.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     configureVisual: true,
     chat: (index) => index === 1
@@ -3290,7 +3308,6 @@ const ONE_PIXEL_PNG_BASE64 =
   // references, headless: the attached photo is described by the helper,
   // view_image returns the description, and generate_image sends the photo
   // as a reference and saves the result before the run returns.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   let mainCalls = 0
   let visionCalls = 0
   await withMockHeadlessHost({
@@ -3352,7 +3369,6 @@ const ONE_PIXEL_PNG_BASE64 =
 {
   // (c) No visual provider configured: the image request ends quickly with an
   // honest "not configured" answer, never a 60-turn checklist loop.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     chat: (index) => index === 1
       ? '<toolcall name="generate_image">{"prompt":"a red fox in the snow"}</toolcall>'
@@ -3521,7 +3537,6 @@ const ONE_PIXEL_PNG_BASE64 =
 {
   // (d) No usable search backend: search_web reports what is missing and the
   // run ends with an honest answer instead of looping.
-  const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
   await withMockHeadlessHost({
     chat: (index) => index === 1
       ? '<toolcall name="search_web">{"query":"latest Node.js LTS version"}</toolcall>'

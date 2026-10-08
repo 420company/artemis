@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js';
@@ -406,9 +407,26 @@ export class ProviderStore {
     return data;
   }
 
+  /**
+   * Writes the whole store atomically: a temporary file next to it, then a
+   * rename. A plain writeFile truncates first, so a concurrent load (another
+   * process, or this one's background telemetry write after a model call)
+   * could read an empty file and fail with "Unexpected end of JSON input".
+   */
   async save(data: ProviderStoreData): Promise<void> {
     await this.ensure();
-    await writeFile(this.filePath, JSON.stringify(data, null, 2), 'utf8');
+    const body = JSON.stringify(data, null, 2);
+    const temp = `${this.filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    await writeFile(temp, body, 'utf8');
+    try {
+      await rename(temp, this.filePath);
+    } catch (error) {
+      await rm(temp, { force: true });
+      // Windows can refuse to replace a file another process holds open.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
+      await writeFile(this.filePath, body, 'utf8');
+    }
   }
 
   async upsertProfile(profile: ProviderProfile): Promise<ProviderStoreData> {
