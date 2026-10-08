@@ -54,6 +54,8 @@ import { fitOutputTokensToWindow } from '../src/providers/capabilities.js'
 import { spawnSync } from 'node:child_process'
 import { buildRestorationSections, isSpilledToolContent, summarizeHistory, type ContextStorage } from '../src/core/compaction/index.js'
 import { withSessionLock, SessionBusyError, SESSION_BUSY_EXIT_CODE } from '../src/storage/sessionLock.js'
+import { removeStaleTempFiles } from '../src/storage/atomicWrite.js'
+import { carriedRequestNote, readHistoryPage } from '../src/core/compaction/index.js'
 import { SessionUnreadableError } from '../src/storage/sessions.js'
 import { buildMechanicalSummary, readFullHistory } from '../src/core/compaction/index.js'
 import { memoryDirForScope } from '../src/storage/memoryFiles.js'
@@ -2266,8 +2268,9 @@ function webHistory(messages: unknown): Array<{ id: string; role: string; conten
       child.stderr.on('data', (d) => { stderr += String(d) })
       const code = await new Promise<number | null>((resolve) => child.on('exit', resolve))
       assert(
-        'R2-9: artemis execute on a busy session exits 75 with "busy with another task"',
-        code === 75 && stderr.includes('busy with another task') && !/pid|host/.test(stderr.split('\n').find((l) => l.includes('busy')) ?? ''),
+        'R2-9/R3-5: artemis execute on a busy session exits 75 and prints "CLI Error: <busy message>" (the line hosts parse)',
+        code === 75 && /^CLI Error: This conversation is busy with another task; try again in a moment\.$/m.test(stderr) &&
+          !/pid|host/.test(stderr.split('\n').find((l) => l.includes('busy')) ?? ''),
         `code=${code} stderr=${stderr.slice(-200)}`,
       )
     })
@@ -2298,6 +2301,278 @@ function webHistory(messages: unknown): Array<{ id: string; role: string; conten
       estimateTokens(manyDigest) <= 6_000 && elapsed < 1_500,
     `tokens=${estimateTokens(manyDigest)} ms=${elapsed}`,
   )
+}
+
+// ── Round-3 review regressions ───────────────────────────────────────────────
+
+{
+  // R3-1: paging ends and returns each message once even when a block was
+  // archived twice (older transcripts); archiving is idempotent now.
+  const visible = (m: SessionMessage) => m.role === 'user' || m.role === 'assistant'
+  const msgs: SessionMessage[] = []
+  for (let i = 0; i < 40; i += 1) msgs.push({ id: `d${String(i).padStart(2, '0')}`, role: i % 2 ? 'assistant' : 'user', content: `msg ${i}`, createdAt: 'x' })
+  const layouts: Array<[string, SessionMessage[]]> = [
+    ['adjacent re-archive', [...msgs.slice(0, 20), ...msgs.slice(0, 20), ...msgs.slice(20)]],
+    ['single duplicate', [...msgs.slice(0, 20), msgs[5]!, ...msgs.slice(20)]],
+  ]
+  for (const [label, order] of layouts) {
+    const dir = tmpDir('r3-dup')
+    fs.writeFileSync(path.join(dir, 'transcript.jsonl'), order.map((m) => JSON.stringify({ compaction: 1, message: m })).join('\n') + '\n')
+    const seen: string[] = []
+    let before: string | undefined
+    let pages = 0
+    for (;;) {
+      const page = await readHistoryPage(dir, [], isCompactionBoundary, { limit: 5, before, include: visible })
+      seen.unshift(...page.messages.map((m) => m.id))
+      pages += 1
+      if (!page.hasMore || pages > 50) break
+      before = page.nextBefore
+    }
+    const full = await readFullHistory(dir, [], isCompactionBoundary)
+    assert(
+      `R3-1: paging a transcript with a ${label} ends, returns each message once, and matches readFullHistory`,
+      pages <= 9 && seen.length === 40 && new Set(seen).size === 40 && seen.join(',') === full.messages.map((m) => m.id).join(','),
+      `pages=${pages} returned=${seen.length} unique=${new Set(seen).size}`,
+    )
+  }
+  const unknownCursor = await readHistoryPage(tmpDir('r3-cursor'), [], isCompactionBoundary, { limit: 5, before: 'nope', include: visible })
+  assert('R3-1: an unknown cursor returns an empty last page', unknownCursor.messages.length === 0 && !unknownCursor.hasMore)
+
+  // Archiving the same block twice (crash and retry) writes it once.
+  const storage = createContextStorage(tmpDir('r3-idem'))
+  await storage.archiveMessages(msgs.slice(0, 10), { compaction: 1 })
+  await storage.archiveMessages(msgs.slice(0, 15), { compaction: 1 })
+  const fresh = createContextStorage(storage.dir) // another process
+  await fresh.archiveMessages(msgs.slice(0, 20), { compaction: 2 })
+  const ids = fs.readFileSync(storage.transcriptPath, 'utf8').trim().split('\n').map((line) => (JSON.parse(line) as { id: string }).id)
+  assert('R3-1: archiving is idempotent across retries and processes', ids.length === 20 && new Set(ids).size === 20, `lines=${ids.length}`)
+
+  // A message shortened while live keeps its original outside the
+  // chronological transcript; later compaction archives it once, in order.
+  const dir = tmpDir('r3-shrunk')
+  const shrinkStorage = createContextStorage(dir)
+  const huge = msg('user', `HUGE_START ${'内容'.repeat(30_000)} HUGE_END`)
+  const first = await manageContext({ messages: [huge], fixedTokens: 2_000, budget: resolveContextBudget({ contextWindow: 32_000 }), state: createContextState(), storage: shrinkStorage, summarize: async () => '## 1. Goals\nok' })
+  const originalsText = fs.existsSync(shrinkStorage.originalsPath) ? fs.readFileSync(shrinkStorage.originalsPath, 'utf8') : ''
+  const transcriptLines = fs.existsSync(shrinkStorage.transcriptPath) ? fs.readFileSync(shrinkStorage.transcriptPath, 'utf8').trim().split('\n').filter(Boolean) : []
+  const fullAfter = await readFullHistory(dir, first.messages, isCompactionBoundary)
+  const archivedIds = transcriptLines.map((line) => (JSON.parse(line) as { id?: string; message: SessionMessage }).id ?? (JSON.parse(line) as { message: SessionMessage }).message.id)
+  assert(
+    'R3-1: each id appears at most once in the transcript, and session show still has the full original',
+    new Set(archivedIds).size === archivedIds.length && fullAfter.messages.some((m) => m.content === huge.content) &&
+      (originalsText.includes('HUGE_END') || transcriptLines.some((line) => line.includes('HUGE_END'))),
+    `action=${first.action} transcript=${transcriptLines.length} originals=${originalsText.length}`,
+  )
+}
+
+{
+  // R3-2: work started under a lock hold that has ended does not count as
+  // holding it: it waits for the next holder instead of running inside it.
+  const dir = tmpDir('r3-als')
+  const lockPath = path.join(dir, 's.lock')
+  const events: string[] = []
+  let detached: Promise<void> | undefined
+  await withSessionLock(lockPath, async () => {
+    events.push('X')
+    detached = (async () => {
+      await new Promise((r) => setTimeout(r, 200))
+      await withSessionLock(lockPath, async () => { events.push('bg start'); await new Promise((r) => setTimeout(r, 50)); events.push('bg end') }, { timeoutMs: 3_000, pollMs: 20 })
+    })()
+  })
+  const z = (async () => {
+    await new Promise((r) => setTimeout(r, 50))
+    await withSessionLock(lockPath, async () => { events.push('Z start'); await new Promise((r) => setTimeout(r, 400)); events.push('Z end') }, { pollMs: 20 })
+  })()
+  await Promise.all([z, detached])
+  assert('R3-2: a detached task from an ended hold waits for the current holder', events.join(',') === 'X,Z start,Z end,bg start,bg end', events.join(','))
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
+{
+  // R3-2: in a hosted conversation (chat bridges) a "background" image or
+  // video tool runs in the foreground: its result cannot land in another chat.
+  for (const contextMode of ['hosted', 'interactive'] as const) {
+    const cwd = tmpDir(`r3-bg-${contextMode}`)
+    const originalCwd = process.cwd()
+    const requests: ChatBody[] = []
+    try {
+      await withMockChatServer((body, res) => {
+        requests.push(body)
+        if (requests.length === 1) {
+          reply(res, { content: '', tool_calls: [{ id: 'call_img', type: 'function', function: { name: 'generate_image', arguments: JSON.stringify({ prompt: 'a cat', runInBackground: true }) } }] })
+          return
+        }
+        reply(res, { content: 'done' })
+      }, async (baseUrl) => {
+        writeProviderProfile(cwd, baseUrl, 128_000)
+        process.chdir(cwd)
+        resetSession()
+        applyProviderOverrides({})
+        await think('画一只猫', () => {}, { cwd, permissionMode: 'accept-all', contextDir: path.join(cwd, 'ctx'), contextMode })
+      })
+      // The foreground tool may itself call the mock endpoint: look at every later request.
+      const toolResult = requests.slice(1).flatMap((body) => body.messages ?? []).find((m) => m.role === 'tool' && m.tool_call_id === 'call_img')
+      const startedInBackground = typeof toolResult?.content === 'string' && toolResult.content.includes('Background task started')
+      assert(
+        `R3-2: generate_image with runInBackground ${contextMode === 'hosted' ? 'runs in the foreground in a hosted chat' : 'still runs in the background in the interactive CLI'}`,
+        Boolean(toolResult) && startedInBackground === (contextMode === 'interactive'),
+        `found=${Boolean(toolResult)} background=${startedInBackground}`,
+      )
+    } finally {
+      process.chdir(originalCwd)
+      resetSession()
+      applyProviderOverrides({})
+      fs.rmSync(cwd, { recursive: true, force: true })
+    }
+  }
+}
+
+{
+  // R3-3: a process that used a lock once still exits on SIGTERM.
+  const dir = tmpDir('r3-sig')
+  const script = path.join(dir, 'sig.mts')
+  fs.writeFileSync(script, [
+    `import { withSessionLock } from ${JSON.stringify(path.resolve('src/storage/sessionLock.ts'))}`,
+    `await withSessionLock(${JSON.stringify(path.join(dir, 'a.lock'))}, async () => 'ok')`,
+    `setInterval(() => {}, 1000)`,
+    `console.log('ready')`,
+  ].join('\n'))
+  const { spawn } = await import('node:child_process')
+  const child = spawn(process.execPath, ['--no-warnings', path.resolve('node_modules/tsx/dist/cli.mjs'), script], { stdio: ['ignore', 'pipe', 'pipe'] })
+  await new Promise<void>((resolve) => child.stdout.on('data', (d) => { if (String(d).includes('ready')) resolve() }))
+  const started = Date.now()
+  // tsx forwards the signal to the script process.
+  child.kill('SIGTERM')
+  const exited = await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), 3_000)
+    child.on('exit', () => { clearTimeout(timer); resolve(true) })
+  })
+  if (!exited) child.kill('SIGKILL')
+  assert('R3-3: after its lock is released a process still terminates on SIGTERM', exited && Date.now() - started < 3_000, `exited=${exited}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
+{
+  // R3-4: the boundary stores a carried request as history; only the run
+  // that made it is told (unsaved runtime context) that it is still current.
+  const storage = createContextStorage(tmpDir('r3-request'))
+  const budget = resolveContextBudget({ contextWindow: 32_000 })
+  const zh = (k: number) => '这是一个关于部署服务器和数据库迁移的中文句子。'.repeat(k)
+  const request = msg('user', 'OLD_TASK: 把所有日志删除')
+  let history: SessionMessage[] = [msg('user', '你好'), msg('assistant', '你好'), request]
+  for (let i = 0; i < 60; i += 1) history.push(msg('assistant', `步骤${i} ${zh(15)}`), msg('user', `[tool:result] ${zh(15)}`))
+  const state = createContextState()
+  const result = await manageContext({ messages: history, fixedTokens: 1_000, budget, state, storage, pinnedIds: [request.id], summarize: async () => '## 1. Goals\nok' })
+  const boundary = result.messages[0]!
+  history = [...result.messages, msg('assistant', '日志已删除，任务完成。'), msg('user', 'NEW_TASK: 今天天气怎么样？')]
+  const nextRequestId = history.at(-1)!.id
+  assert(
+    'R3-4: the stored boundary keeps the carried request as history, never as "still in effect"',
+    boundary.compaction?.request?.id === request.id && boundary.content.includes('OLD_TASK') &&
+      !/still in effect|仍然有效|current task/i.test(boundary.content),
+  )
+  assert(
+    'R3-4: the "current task" note is for the same run only',
+    /仍然有效/.test(carriedRequestNote(result.messages, request.id, 'zh') ?? '') &&
+      carriedRequestNote(history, nextRequestId, 'zh') === undefined,
+  )
+}
+
+{
+  // R3-4: path A sends the note in the runtime context while the run goes
+  // on, and never saves it.
+  const cwd = tmpDir('r3-request-a')
+  const store = new SessionStore(cwd)
+  const session = store.createSession({ title: 'carried' })
+  const zh = (k: number) => '这是一个关于部署服务器和数据库迁移的中文句子。'.repeat(k)
+  for (let i = 0; i < 30; i += 1) session.messages.push(msg('user', `旧问题${i} ${zh(20)}`), msg('assistant', `旧回答${i} ${zh(20)}`))
+  await store.save(session)
+  const sent: SessionMessage[][] = []
+  let calls = 0
+  const provider: ChatProvider = {
+    contextWindow: 32_000,
+    async complete(messages) {
+      if (messages[0]?.id === 'compaction-system') return { text: summaryText, raw: null }
+      sent.push(messages)
+      calls += 1
+      // Keep the run going with reads so the history grows past the threshold.
+      if (calls < 6) return envelope(`第${calls}步 ${zh(60)}`, [{ type: 'list_files', path: '.' }])
+      return envelope('完成')
+    },
+  }
+  await runAgent(session, `CARRIED_TASK ${zh(10)}`, { cwd, provider, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 8, profile: 'main' })
+  const stored = JSON.parse(fs.readFileSync(path.join(path.dirname(store.getLockPath(session.id)), `${session.id}.json`), 'utf8')) as { messages: SessionMessage[] }
+  const anyNote = sent.some((messages) => messages.some((m) => m.content.includes('[当前任务]') || m.content.includes('[Current task]')))
+  const carried = stored.messages[0]?.compaction?.request
+  assert(
+    'R3-4: path A never stores the "current task" note',
+    !stored.messages.some((m) => m.content.includes('[当前任务]') || m.content.includes('[Current task]')),
+  )
+  assert(
+    'R3-4: when the boundary carries this run\'s request, path A sends the note in the runtime context',
+    Boolean(carried) && anyNote,
+    `carried=${Boolean(carried)} note=${anyNote} requests=${sent.length}`,
+  )
+  fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+{
+  // R3-6: temp files left by an interrupted atomic write are swept after an
+  // hour; a write in progress (fresh temp file) is left alone.
+  const cwd = tmpDir('r3-tmp')
+  const store = new SessionStore(cwd)
+  const session = store.createSession({ title: 'tmp' })
+  await store.save(session)
+  const sessionsDir = path.dirname(store.getLockPath(session.id))
+  const stale = path.join(sessionsDir, `${session.id}.json.1234.abcdef012345.tmp`)
+  const freshTmp = path.join(sessionsDir, `${session.id}.json.1235.abcdef012346.tmp`)
+  fs.writeFileSync(stale, '{')
+  fs.writeFileSync(freshTmp, '{')
+  const old = Date.now() / 1000 - 2 * 3600
+  fs.utimesSync(stale, old, old)
+  await new SessionStore(cwd).list()
+  const removedDirect = await removeStaleTempFiles(sessionsDir)
+  assert('R3-6: list() sweeps stale temp files and keeps fresh ones', !fs.existsSync(stale) && fs.existsSync(freshTmp) && removedDirect === 0)
+  fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+{
+  // R3-7: when the bridge cannot re-read the session, the turn fails with a
+  // retry message and nothing is saved from its cached copy.
+  const cwd = tmpDir('r3-bridge-read')
+  const originalCwd = process.cwd()
+  let modelCalls = 0
+  try {
+    await withMockChatServer((_body, res) => { modelCalls += 1; reply(res, { content: 'reply' }) }, async (baseUrl) => {
+      writeProviderProfile(cwd, baseUrl, 100_000)
+      process.chdir(cwd)
+      resetSession()
+      applyProviderOverrides({})
+      const store = new SessionStore(cwd)
+      const stored = store.createSession({ title: 'gone' })
+      stored.messages.push(msg('user', 'CACHED_ONLY'))
+      await store.save(stored)
+      const cached = await store.load(stored.id)
+      const filePath = path.join(path.dirname(store.getLockPath(stored.id)), `${stored.id}.json`)
+      fs.rmSync(filePath) // deleted by another process (web "delete conversation")
+      const result = await runRemoteCommand(parseRemoteCommand('hello'), {
+        binding: { storedSession: cached, permissionMode: 'read-only', rolledOver: false },
+        store,
+        locale: 'en',
+        cwd,
+      })
+      assert(
+        'R3-7: a failed fresh re-read fails the turn with a retry message instead of reviving the cached copy',
+        /Could not read this conversation from disk.*try again/.test(result.replies.join('\n')) && !fs.existsSync(filePath) && modelCalls === 0,
+        `reply=${result.replies.join(' | ').slice(0, 200)} exists=${fs.existsSync(filePath)} calls=${modelCalls}`,
+      )
+    })
+  } finally {
+    process.chdir(originalCwd)
+    resetSession()
+    applyProviderOverrides({})
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
 }
 
 if (failed > 0) {
