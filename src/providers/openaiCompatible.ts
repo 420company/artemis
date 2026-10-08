@@ -14,6 +14,7 @@ import type {
   ProviderRequestOptions,
   ProviderResponse,
 } from './types.js';
+import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
 
 function buildProviderErrorMessage(
   response: Response,
@@ -339,10 +340,17 @@ export function sanitizeToolSchema(schema: Record<string, unknown>): Record<stri
   return sanitized;
 }
 
+/**
+ * Attaches images to the newest user message in the standard Chat Completions
+ * format (`image_url` with a data URL). That is the format every
+ * OpenAI-compatible endpoint takes, including the ones that front Claude and
+ * Gemini models; vendor-native block shapes are rejected there. Models that
+ * cannot see images get a short note instead: base64 is never inlined as text.
+ */
 function injectImagesIntoMessages(
   mapped: Array<{ role: string; content: OpenAIMessageContent }>,
   attachments: import('./types.ts').ImageAttachment[],
-  config: ProviderConfig
+  supportsImages: boolean,
 ): void {
   let lastUserIdx = -1
   for (let i = mapped.length - 1; i >= 0; i -= 1) {
@@ -353,72 +361,29 @@ function injectImagesIntoMessages(
   }
   if (lastUserIdx < 0 || attachments.length === 0) return
 
-  const existingText = mapped[lastUserIdx]!.content
-  const textStr = typeof existingText === 'string' ? existingText : ''
-
-  // Detect provider variant
-  const modelLower = config.model.toLowerCase()
-  const baseUrlLower = config.baseUrl.toLowerCase()
-
-  const isDeepSeek = modelLower.includes('deepseek') || baseUrlLower.includes('deepseek')
-  const isAnthropic = modelLower.includes('claude') || baseUrlLower.includes('anthropic')
-  const isGoogle = baseUrlLower.includes('generativelanguage.googleapis.com')
-  const isQwen = modelLower.includes('qwen')
-
-  const imageBlocks: unknown[] = []
-
-  for (const img of attachments) {
-    if (isDeepSeek) {
-      // DeepSeek uses non-standard format, only accepts base64 directly in text
-      imageBlocks.push({
-        type: 'text',
-        text: `![image](data:${img.mediaType};base64,${img.data})`
-      })
-    } else if (isAnthropic) {
-      // Anthropic image format
-      imageBlocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: img.mediaType,
-          data: img.data
-        }
-      })
-    } else if (isGoogle) {
-      // Gemini format
-      imageBlocks.push({
-        inlineData: {
-          mimeType: img.mediaType,
-          data: img.data
-        }
-      })
-    } else {
-      // Standard OpenAI format - works for OpenAI, GPT-4o, Ark, Mistral, Llama 3, etc
-      imageBlocks.push({
-        type: 'image_url',
-        image_url: { url: `data:${img.mediaType};base64,${img.data}` }
-      })
+  const existing = mapped[lastUserIdx]!.content
+  if (!supportsImages) {
+    const note = describeOmittedImages(attachments.length)
+    mapped[lastUserIdx] = {
+      ...mapped[lastUserIdx]!,
+      content: typeof existing === 'string'
+        ? (existing ? `${existing}\n\n${note}` : note)
+        : [...(Array.isArray(existing) ? existing : []), { type: 'text', text: note }],
     }
+    return
   }
 
-  if (isDeepSeek) {
-    // DeepSeek does NOT support array content at all. Embed images inline.
-    mapped[lastUserIdx] = {
-      role: 'user',
-      content: textStr + '\n\n' + imageBlocks.map(b => (b as {text: string}).text).join('\n')
-    } as any
-  } else if (isGoogle) {
-    mapped[lastUserIdx] = {
-      role: 'user',
-      parts: [ { text: textStr }, ...imageBlocks ]
-    } as any
-  } else {
-    // Standard implementation
-    const textBlock = textStr ? [{ type: 'text', text: textStr }] : []
-    mapped[lastUserIdx] = {
-      role: 'user',
-      content: [...textBlock, ...imageBlocks] as any
-    }
+  const existingBlocks: Array<{ type: string; [key: string]: unknown }> =
+    typeof existing === 'string'
+      ? (existing ? [{ type: 'text', text: existing }] : [])
+      : Array.isArray(existing) ? existing : []
+  const imageBlocks = attachments.map((img) => ({
+    type: 'image_url',
+    image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+  }))
+  mapped[lastUserIdx] = {
+    ...mapped[lastUserIdx]!,
+    content: [...existingBlocks, ...imageBlocks],
   }
 }
 
@@ -493,12 +458,13 @@ function extractText(content: unknown): string {
 }
 
 export class OpenAICompatibleProvider implements ChatProvider {
-  readonly supportsImages = true;
+  readonly supportsImages: boolean;
   readonly supportsNativeToolCalls = true;
   private readonly config: ProviderConfig;
 
   constructor(config: ProviderConfig) {
     this.config = config;
+    this.supportsImages = modelSupportsImages(config);
   }
 
   // ── Streaming (SSE) ───────────────────────────────────────────────────────
@@ -512,7 +478,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model)
     const mapped = messages.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.config)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
     }
 
     const body: Record<string, unknown> = {
@@ -835,7 +801,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model);
     const mapped = messages.map((m) => mapMessage(m, { reasoningMode }));
     if (options?.imageAttachments?.length) {
-      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.config)
+      injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
     }
 
     const body: Record<string, unknown> = {

@@ -223,6 +223,8 @@ function describeAction(action: AgentAction): string {
       return `memory: ${action.action}${action.name ? ` ${action.name}` : ''}`;
     case 'task_output':
       return `read background task output ${action.taskId}`;
+    case 'view_image':
+      return `view image ${action.path}`;
     case 'kill_task':
       return `kill background task ${action.taskId}`;
     default: {

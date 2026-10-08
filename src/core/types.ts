@@ -325,6 +325,11 @@ export type AgentAction =
       tail?: number;
     }
   | {
+      /** Look at an image file: it is attached to the next model request. */
+      type: 'view_image';
+      path: string;
+    }
+  | {
       type: 'kill_task';
       taskId: string;
     }
@@ -730,6 +735,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'apply_patch',
   'run_command',
   'task_output',
+  'view_image',
   'kill_task',
   'delegate_task',
   'spawn_background_workflow',
