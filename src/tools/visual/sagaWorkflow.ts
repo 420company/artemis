@@ -7,6 +7,7 @@ import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationCon
 import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveVideoModelLimits } from './videoModelLimits.js';
+import { normalizeVideoResolution } from './videoParams.js';
 import { resolveVideoModelCapabilities } from './videoCapabilities.js';
 import type { ImageAttachment } from '../../providers/types.js';
 import {
@@ -105,6 +106,8 @@ type SagaWorkflowState = {
   soundtrackFadeInSec?: number;
   soundtrackFadeOutSec?: number;
   subtitleMode?: SubtitleMode;
+  /** "480p" / "720p" / "1080p" when the user named one; unset uses the provider default. */
+  resolution?: string;
   ratio?: SagaRatio;
   suggestedRatio?: SagaRatio;
   aiScreenwriterMode?: boolean;
@@ -556,6 +559,17 @@ async function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): P
   state.referenceVideoPaths = unique([...state.referenceVideoPaths, ...refs.videoPaths]);
   state.referenceAudioPaths = unique([...state.referenceAudioPaths, ...refs.audioPaths]);
   state.updatedAt = Date.now();
+}
+
+/** A resolution the user named ("1080p", "720P", "480 p"); 4K is not offered by any provider. */
+function extractRequestedResolution(text: string): string | undefined {
+  const match = text.match(/(?:^|[^\d])(480|720|1080)\s*[pP](?![a-zA-Z])/);
+  return match ? normalizeVideoResolution(`${match[1]}p`) : undefined;
+}
+
+function rememberRequestedResolution(state: SagaWorkflowState, text: string): void {
+  const resolution = extractRequestedResolution(text);
+  if (resolution) state.resolution = resolution;
 }
 
 async function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): Promise<void> {
@@ -1298,6 +1312,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     'colorMatch: true',
     'generateAudio: true',
     `subtitleMode: ${JSON.stringify(state.subtitleMode ?? 'auto')}`,
+    state.resolution ? `resolution: ${JSON.stringify(state.resolution)}` : '',
     preserveUserScript ? 'preserveUserScript: true' : '',
     aiScreenwriterSeed ? 'aiScreenwriterMode: true' : '',
     cleanDirect ? 'cleanDirect: true' : '',
@@ -1437,6 +1452,7 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
     colorMatch: true,
     generateAudio: true,
     subtitleMode: state.subtitleMode ?? 'auto',
+    ...(state.resolution ? { resolution: state.resolution } : {}),
     preserveUserScript,
     cleanDirect,
     referenceImageUrls: mergedRefImageUrls,
@@ -1507,6 +1523,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   // ─── continuing an active workflow ──────────────────────────────────
   if (state) {
     if (input.locale) state.locale = input.locale;
+    rememberRequestedResolution(state, text);
 
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
@@ -1870,6 +1887,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
   const multimodalCapable = await isMultimodalCapable(input.cwd);
   const next = newState(input, multimodalCapable);
+  rememberRequestedResolution(next, text);
 
   // Even on the first turn, if the user already attached references in this
   // very message (Telegram image / inline URL), we want to capture them.

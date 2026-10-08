@@ -1133,6 +1133,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           ratio: optionalStringSchema('Optional aspect ratio: 16:9 / 9:16 / 1:1.'),
           duration: integerSchema('Optional total duration in seconds.'),
           totalDuration: integerSchema('Optional total duration in seconds (preferred over duration).'),
+          resolution: optionalStringSchema(
+            'Optional output resolution of every segment: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution, since it costs several times more per segment.',
+          ),
           projectId: optionalStringSchema('Optional Saga project id. Used to resume a previous run.'),
           outputPath: optionalStringSchema('Optional final MP4 output path. Omit this unless the user explicitly requested a location; Saga otherwise creates a unique searchable filename.'),
           assemblyMode: optionalStringSchema('Optional renderer mode: auto | ffmpeg | hyperframes | saga.'),

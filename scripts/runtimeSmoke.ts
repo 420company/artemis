@@ -5125,6 +5125,23 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 {
+  const longVideoTool = providerNativeTools.find((tool) => tool.name === 'generate_long_video')
+  const recovered = parseAssistantEnvelopeForSmoke(
+    '<invoke name="generate_long_video"><parameter name="prompt">a beach at sunset</parameter><parameter name="resolution">1080P</parameter></invoke>',
+  )
+  const looseAction = (recovered.actions ?? [])[0] as any
+  assert(
+    'video resolution: generate_long_video takes resolution in its schema, its validator and loose arguments',
+    Boolean((longVideoTool?.parameters as any)?.properties?.resolution) &&
+      validateToolAction({ type: 'generate_long_video', prompt: 'x', resolution: '4k' } as any).some((e) => e.includes('resolution')) &&
+      validateToolAction({ type: 'generate_long_video', prompt: 'x', resolution: '720p' } as any).length === 0 &&
+      looseAction?.type === 'generate_long_video' &&
+      looseAction.resolution === '1080P',
+    JSON.stringify(recovered.actions),
+  )
+}
+
+{
   // OpenAI (Sora) receives the requested resolution as a size; one it cannot
   // render fails before the create request instead of silently changing.
   const originalFetch = globalThis.fetch

@@ -571,6 +571,9 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
   validateOptionalNonEmptyString(action?.title, 'title', errors);
   validateOptionalNonEmptyString(action?.story, 'story', errors);
+  if (action?.resolution !== undefined && normalizeVideoResolution(action.resolution) === undefined) {
+    errors.push('resolution must be one of 480p, 720p, 1080p');
+  }
   if (action?.shots !== undefined) {
     if (!Array.isArray(action.shots)) {
       errors.push('shots must be an array when provided.');

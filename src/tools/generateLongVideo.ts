@@ -13,6 +13,7 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo } from './generateVideo.js';
+import { normalizeVideoResolution, VIDEO_RESOLUTIONS } from './visual/videoParams.js';
 import {
   describeVideoGenerationFailure,
   videoFailureKindOf,
@@ -974,6 +975,12 @@ export async function executeGenerateLongVideo(
     const projectId = normalizeProjectId(action.projectId);
     const fps: SagaFps = (action.fps as SagaFps | undefined) ?? 30;
     const quality: SagaQuality = (action.quality as SagaQuality | undefined) ?? 'standard';
+    // Sent to the video provider only when the request asked for one, so every
+    // segment keeps the provider's default price otherwise.
+    const requestedResolution = normalizeVideoResolution(action.resolution);
+    if (action.resolution !== undefined && !requestedResolution) {
+      return { action, ok: false, output: `generate_long_video: resolution must be one of ${VIDEO_RESOLUTIONS.join(', ')}; omit it to use the provider default.` };
+    }
 
     // Side-channel recovery: saga workflow writes the FULL user story to a
     // known file before returning the action, because the agent layer
@@ -1772,6 +1779,7 @@ export async function executeGenerateLongVideo(
           model,
           ratio,
           duration: segment.duration,
+          ...(requestedResolution ? { resolution: requestedResolution } : {}),
           outputPath: segment.outputPath,
           referenceImageUrls: hasGlobalUserImageReferences ? userReferenceImageUrls : undefined,
           referenceVideoUrls: segment.index === 1 ? action.referenceVideoUrls : undefined,
@@ -2355,7 +2363,7 @@ export async function executeGenerateLongVideo(
       '',
       '📊 Stats:',
       `   · Model:        ${cleanModel}`,
-      `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s`,
+      `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s · resolution ${requestedResolution ?? 'provider default'}`,
       `   · Transitions:  ${transitionSummary}`,
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
       `   · Soundtrack:   ${soundtrackLine}`,

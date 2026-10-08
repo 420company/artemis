@@ -474,6 +474,9 @@ export type AgentAction =
       assemblyMode?: 'auto' | 'ffmpeg' | 'hyperframes' | 'saga';
       resume?: boolean;
       preserveUserScript?: boolean;
+      // Output resolution of every segment ("480p" / "720p" / "1080p"). Only
+      // sent when the user asked for one; omitted, each provider uses its default.
+      resolution?: string;
       cleanDirect?: boolean;
       chainReferenceFrames?: 'auto' | 'always' | 'off';
       crossfadeMs?: number;

@@ -469,6 +469,25 @@ async function main(): Promise<void> {
   const comboSubtitle = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认 / 自动' });
   assert.match(comboSubtitle.reply, /最后确认一下总时长|confirm the total length/i, `"默认 / 自动" should confirm the default subtitle mode: ${comboSubtitle.reply}`);
 
+  // A resolution named anywhere in the wizard reaches the generate_long_video action.
+  const hdKey = `${key}-resolution`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频，1080P 高清' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '剧情你来创造。' });
+  const hdStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '开始生成' });
+  if (/确认.*主角|confirm the lead/i.test(hdStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: 'B 海边的女孩' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '9:16' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '10秒' });
+  const hdFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '不加' });
+  assert.equal(hdFinal.handled, false, 'the resolution flow should end in a generate_long_video action');
+  assert.equal(hdFinal.action?.resolution, '1080p', 'a resolution named in the brief should reach the action');
+  assert.match(hdFinal.action?.prompt ?? '', /resolution: "1080p"/, 'workflow prompt should tell the model to pass resolution');
+  assert.equal(afterBgmSkip.action?.resolution, undefined, 'no resolution is set unless the user named one');
+
   console.log('saga workflow explicit-trigger guard ok');
 }
 
