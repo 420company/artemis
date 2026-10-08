@@ -8374,24 +8374,34 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 // ── MCP stdio transport ───────────────────────────────────────────────────────
 
 {
-  // The MCP stdio transport is newline-delimited JSON. Servers built on the
-  // official SDKs speak only that; LSP-style Content-Length frames stay
-  // accepted, and a stray non-JSON log line on stdout must not break a call.
+  // The MCP stdio transport is newline-delimited JSON; servers built on the
+  // official SDKs read only that. Servers that read only LSP-style
+  // Content-Length frames are detected at initialize and still work. A stray
+  // non-JSON stdout line must not break a call, and must show up in the error
+  // when the server fails. A malformed frame header fails fast (it used to
+  // spin forever).
   const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-stdio-'))
-  const serverSource = (framing: 'newline' | 'content-length', noisy: boolean) => `
+  type Mode = 'newline' | 'newline-noisy' | 'content-length' | 'content-length-exit'
+  const serverSource = (mode: Mode) => `
+const framed = ${mode.startsWith('content-length')}
 const write = (m) => {
   const body = JSON.stringify(m)
-  process.stdout.write(${framing === 'newline' ? "body + '\\n'" : "'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body"})
+  process.stdout.write(framed ? 'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body : body + '\\n')
 }
-${noisy ? "process.stdout.write('server starting...\\n')" : ''}
+${mode === 'newline-noisy' ? "process.stdout.write('server starting...\\n')" : ''}
 let buf = ''
 process.stdin.on('data', (chunk) => {
   buf += chunk
   for (;;) {
     let line
-    const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
-    if (m) {
+    if (framed) {
+      // Strict LSP-style reader: anything else is never answered${mode === 'content-length-exit' ? ' (this one exits)' : ''}.
+      const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+      if (!m) {
+        ${mode === 'content-length-exit' ? "if (buf.length > 0) { process.stderr.write('expected Content-Length header\\n'); process.exit(1) }" : ''}
+        return
+      }
       const end = m[0].length + Number(m[1])
       if (buf.length < end) return
       line = buf.slice(m[0].length, end)
@@ -8412,16 +8422,11 @@ process.stdin.on('data', (chunk) => {
   }
 })
 `
-  const cases: [string, 'newline' | 'content-length', boolean][] = [
-    ['newline-delimited JSON (MCP spec, official SDKs)', 'newline', false],
-    ['LSP-style Content-Length frames', 'content-length', false],
-    ['a stray log line on stdout before the first message', 'newline', true],
-  ]
-  for (const [label, framing, noisy] of cases) {
-    const file = path.join(dir, `${framing}-${noisy}.mjs`)
-    fs.writeFileSync(file, serverSource(framing, noisy))
-    const server = {
-      id: `smoke-${framing}-${noisy}`,
+  const stdioServer = (id: string, source: string) => {
+    const file = path.join(dir, `${id}.mjs`)
+    fs.writeFileSync(file, source)
+    return {
+      id,
       enabled: true,
       transport: 'stdio' as const,
       command: process.execPath,
@@ -8431,16 +8436,41 @@ process.stdin.on('data', (chunk) => {
       createdAt: '',
       updatedAt: '',
     }
-    let output = ''
-    try {
-      output = (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output
-    } catch (error) {
-      output = error instanceof Error ? error.message : String(error)
-    }
-    assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
   }
-  await closeCachedMcpClients()
-  fs.rmSync(dir, { recursive: true, force: true })
+  const callEcho = async (server: ReturnType<typeof stdioServer>): Promise<{ output: string; ms: number }> => {
+    const started = Date.now()
+    try {
+      return { output: (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), ms: Date.now() - started }
+    }
+  }
+  try {
+    const cases: [string, Mode][] = [
+      ['newline-delimited JSON (MCP spec, official SDKs)', 'newline'],
+      ['a server that reads only Content-Length frames (detected at initialize)', 'content-length'],
+      ['a Content-Length-only server that exits on unframed input', 'content-length-exit'],
+      ['a stray log line on stdout before the first message', 'newline-noisy'],
+    ]
+    for (const [label, mode] of cases) {
+      const { output } = await callEcho(stdioServer(`smoke-${mode}`, serverSource(mode)))
+      assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
+    }
+
+    // The detected framing is remembered: a fresh spawn skips the probe.
+    await closeCachedMcpClients()
+    const again = await callEcho(stdioServer('smoke-content-length', serverSource('content-length')))
+    assert('mcp stdio: detected Content-Length framing is reused on the next spawn', again.output.includes('echo:hi') && again.ms < 2500, `${again.ms}ms ${again.output}`)
+
+    const badHeader = await callEcho(stdioServer('smoke-bad-header', `process.stdin.on('data', () => { process.stdout.write('Content-Length: x\\r\\n\\r\\n{}') })\n`))
+    assert('mcp stdio: a malformed Content-Length header fails fast instead of hanging', /Content-Length/.test(badHeader.output) && badHeader.ms < 4000, `${badHeader.ms}ms ${badHeader.output}`)
+
+    const dying = await callEcho(stdioServer('smoke-dying', `process.stdout.write('fatal: missing API token\\n'); setTimeout(() => process.exit(1), 50)\n`))
+    assert('mcp stdio: dropped non-JSON stdout lines appear in the failure message', dying.output.includes('fatal: missing API token'), dying.output)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────
