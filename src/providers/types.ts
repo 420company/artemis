@@ -26,6 +26,19 @@ export type ProviderConfig = {
    * name (known vision families yes; DeepSeek and unknown models no).
    */
   supportsImages?: boolean;
+  /**
+   * Largest response the model can produce, in tokens. Only used when
+   * capabilitiesSource is 'platform'; it then replaces the name-based
+   * max_tokens defaults.
+   */
+  maxOutputTokens?: number;
+  /**
+   * 'platform' when the agent server wrote this profile's capabilities
+   * (supportsImages, contextLength, maxOutputTokens) from authoritative model
+   * data. Those values then win over every model-name heuristic, because the
+   * name may be a gateway alias (e.g. `gpt-6-sol` serving a GLM model).
+   */
+  capabilitiesSource?: 'platform';
 };
 
 export type ProviderProfileTelemetry = {
@@ -48,6 +61,7 @@ export type ProviderProfileTelemetry = {
 export type ProviderProfile = ProviderConfig & {
   id: string;
   label?: string;
+  /** Context window in tokens. Authoritative when capabilitiesSource is 'platform'. */
   contextLength?: number;
   /** Where contextLength came from. models-api means provider metadata, known-model means Artemis fallback rules. */
   contextLengthSource?: 'models-api' | 'known-model' | 'manual';
@@ -122,6 +136,11 @@ export type ProviderRequestOptions = {
    * interactive runtimes can surface a "retrying" indicator.
    */
   onRetry?: (attempt: number, delayMs: number, reason: string) => void;
+  /**
+   * Upper bound on output tokens for this one request (for example a short
+   * helper call). Never raises the profile's own limit.
+   */
+  maxOutputTokens?: number;
 };
 
 export type ProviderTarget = 'main' | AgentRole;
@@ -130,6 +149,12 @@ export type ProviderStoreData = {
   profiles: ProviderProfile[];
   defaultMainProfileId?: string;
   specialistProfileId?: string;
+  /**
+   * Profile whose model can see images. When the main model cannot, user
+   * images and view_image go through it and the main model gets a text
+   * description instead (see core/visionHelper.ts).
+   */
+  visionProfileId?: string;
   visualProfile?: VisualModelConfig;
   memoryProfile?: MemoryEnhancementConfig;
   customProviders?: CustomProviderConfig[];
@@ -404,6 +429,12 @@ export interface ChatProvider {
   readonly supportsNativeToolCalls?: boolean;
   /** True if the provider accepts image attachments via ProviderRequestOptions.imageAttachments. */
   readonly supportsImages?: boolean;
+  /**
+   * The model's context window in tokens, reported only when it is
+   * authoritative (a profile with capabilitiesSource 'platform'). Undefined
+   * means callers fall back to their own estimates.
+   */
+  readonly contextLength?: number;
   complete(
     messages: SessionMessage[],
     options?: ProviderRequestOptions,

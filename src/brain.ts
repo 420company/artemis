@@ -10,6 +10,7 @@ import { annotateProviderResponse, createTrackedProviderFromConfig, recordProvid
 import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
+import { hasPlatformCapabilities } from './providers/capabilities.js';
 import { compressMessages, type CompressResult } from './core/contextCompressor.js';
 import { estimateTokens, estimateMessageTokens, estimateMessagesTokens } from './core/tokenEstimation.js';
 import {
@@ -518,7 +519,11 @@ async function loadProvider(cwd: string = process.cwd()) {
     }
     // Apply CLI overrides
     let finalConfig = { ...config };
-    if (_modelOverride) finalConfig = { ...finalConfig, model: _modelOverride };
+    if (_modelOverride) {
+        // Platform capabilities describe the profile's own model, not an override.
+        const overridesModel = _modelOverride !== config.model;
+        finalConfig = { ...finalConfig, model: _modelOverride, ...(overridesModel ? { capabilitiesSource: undefined } : {}) };
+    }
     if (_apiKeyOverride) finalConfig = { ...finalConfig, apiKey: _apiKeyOverride };
     if (_baseUrlOverride) finalConfig = { ...finalConfig, baseUrl: _baseUrlOverride ?? undefined };
     if (_effortOverride !== undefined) finalConfig = { ...finalConfig, effort: _effortOverride ?? undefined };
@@ -910,14 +915,18 @@ export function getBifrostContextAuditReport(): string[] {
     return lines;
 }
 
-function getConfiguredContextLimit(model: string | undefined, contextLength?: number): number {
-    return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength));
+/**
+ * `authoritative` marks a platform-written contextLength (capabilitiesSource
+ * "platform"): it is used as-is, never capped or replaced by name rules.
+ */
+function getConfiguredContextLimit(model: string | undefined, contextLength?: number, authoritative = false): number {
+    return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength), authoritative);
 }
 
-function buildBudgetNote(promptTokens: any, model: any, contextLength?: number) {
+function buildBudgetNote(promptTokens: any, model: any, contextLength?: number, authoritative = false) {
     if (promptTokens <= 0)
         return '';
-    const limit = getConfiguredContextLimit(model, contextLength);
+    const limit = getConfiguredContextLimit(model, contextLength, authoritative);
     const pct = promptTokens / limit;
     if (pct < BUDGET_WARN_PCT)
         return '';
@@ -940,6 +949,7 @@ async function buildRuntimeSystemMessages(
     conversationMessages: SessionMessage[],
     model?: string,
     contextLength?: number,
+    contextAuthoritative = false,
 ): Promise<SessionMessage[]> {
     const runtimeMessages = [makeSessionMessage('system', systemPrompt)];
     if (!model) {
@@ -959,7 +969,7 @@ async function buildRuntimeSystemMessages(
     }
 
     const estimatedTokens = Math.round(estimateConversationTokens(conversationMessages));
-    const budgetNote = buildBudgetNote(estimatedTokens, model, contextLength).trim();
+    const budgetNote = buildBudgetNote(estimatedTokens, model, contextLength, contextAuthoritative).trim();
     if (budgetNote) {
         runtimeMessages.push(makeSessionMessage('system', budgetNote));
     }
@@ -1304,6 +1314,7 @@ async function compressSessionMessagesForProvider(
     onInfo?: (message: string) => void,
     forceShrink?: number,
     locale: 'en' | 'zh' = 'zh',
+    contextAuthoritative = false,
 ): Promise<{ messages: SessionMessage[]; summaryText?: string }> {
     const t = (zh: string, en: string): string => (locale === 'en' ? en : zh);
     if (!model) {
@@ -1313,7 +1324,7 @@ async function compressSessionMessagesForProvider(
     // ── 空返回急救：调用方强制把上下文压到很小，让噎住的模型拿到干净小 payload 重试。
     //    恢复记忆由硬盘上的 checkpoint 存档兜底，所以这里丢掉大量历史是安全的。
     if (forceShrink && forceShrink > 0) {
-        const fullLimit = getConfiguredContextLimit(model, contextLength);
+        const fullLimit = getConfiguredContextLimit(model, contextLength, contextAuthoritative);
         const small = Math.max(16_000, Math.floor(fullLimit * forceShrink) - Math.max(0, Math.round(reservedTokens)));
         onInfo?.(t(
             `[压缩] 空返回急救：压到约 ${Math.round(forceShrink * 100)}% 窗口后重试`,
@@ -1325,12 +1336,12 @@ async function compressSessionMessagesForProvider(
     const breaker = getCircuitBreaker(activeSession.getWorkingDirectory())
     if (isCircuitBreakerTripped(breaker)) {
       onInfo?.(t('[压缩] 断路器触发，改用机械截断', '[Compact] Circuit breaker tripped; using mechanical truncation'))
-      const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength) - Math.max(0, Math.round(reservedTokens)));
+      const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength, contextAuthoritative) - Math.max(0, Math.round(reservedTokens)));
       return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, mtLimit) };
     }
 
     const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
-    const fullLimit = getConfiguredContextLimit(model, contextLength);
+    const fullLimit = getConfiguredContextLimit(model, contextLength, contextAuthoritative);
     const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
     const tokensBefore = estimateMessagesTokens(conversationMessages)
 
@@ -1387,7 +1398,7 @@ async function compressSessionMessagesForProvider(
     try {
       const { config: workerCfg } = await loadWorkerProvider(activeSession.getWorkingDirectory());
       if (workerCfg && workerCfg !== providerConfig) {
-        summarizerTokenLimit = getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength);
+        summarizerTokenLimit = getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength, hasPlatformCapabilities(workerCfg));
       }
     } catch { /* worker unavailable — fall back to lead window */ }
 
@@ -2484,7 +2495,9 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
         contextLimit: estimateContextLimit(
             result.model ?? providerConfig?.model ?? '',
             normalizeContextLimit(providerConfig?.contextLength),
+            hasPlatformCapabilities(providerConfig),
         ),
+        contextLimitAuthoritative: hasPlatformCapabilities(providerConfig),
         promptTokens: usage.promptTokens ?? 0,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
@@ -2746,6 +2759,7 @@ export async function think(
         rawMessages,
         providerConfigVal?.model,
         providerConfigVal?.contextLength,
+        hasPlatformCapabilities(providerConfigVal),
     );
     const reservedSystemTokens = Math.round(estimateConversationTokens(systemMessages));
     let providerCompression = await compressSessionMessagesForProvider(
@@ -2760,6 +2774,7 @@ export async function think(
         onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
         undefined,
         locale,
+        hasPlatformCapabilities(providerConfigVal),
     );
     if (providerCompression.summaryText) {
         onCompressionSummary?.(providerCompression.summaryText);
@@ -2894,6 +2909,7 @@ export async function think(
                 onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
                 forceCompactFraction,
                 locale,
+                hasPlatformCapabilities(providerConfigVal),
             );
             forceCompactFraction = undefined;
             if (providerCompression.summaryText) {

@@ -31,6 +31,7 @@ import {
   GPT_5_6_CONTEXT_LENGTH,
   inferKnownModelContextLength,
   resolveEffectiveModelContextLength,
+  resolveProfileContextLength,
 } from '../src/providers/modelContext.js'
 import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
@@ -59,7 +60,7 @@ import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
 import { compressMessages, getCompressionTriggerTokens, getMicrocompactTriggerTokens } from '../src/core/contextCompressor.js'
-import { estimateContextLimit } from '../src/cli/hud.js'
+import { createHudState, estimateContextLimit, renderHud, updateHudState } from '../src/cli/hud.js'
 import {
   buildPostCompactRecoveryMessages,
   createLedger,
@@ -8932,6 +8933,169 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     )
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
+}
+
+{
+  // Platform capabilities: values the agent server wrote into the profile
+  // (capabilitiesSource "platform") beat every model-name rule, because the
+  // name can be a gateway alias (gpt-6-sol serving a GLM model).
+  const platformAlias = {
+    protocol: 'openai' as const,
+    baseUrl: 'http://127.0.0.1:9',
+    apiKey: 'k',
+    model: 'gpt-6-sol',
+    contextLength: 1_000_000,
+    maxOutputTokens: 12_345,
+    capabilitiesSource: 'platform' as const,
+  }
+  assert(
+    'platform capabilities: contextLength beats the GPT-6 cap for an alias named gpt-6-sol',
+    resolveProfileContextLength(platformAlias) === 1_000_000 &&
+      resolveProfileContextLength({ ...platformAlias, contextLength: 131_072 }) === 131_072 &&
+      estimateContextLimit('gpt-6-sol', 1_000_000, true) === 1_000_000 &&
+      new OpenAICompatibleProvider(platformAlias).contextLength === 1_000_000 &&
+      new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages' }).contextLength === 1_000_000 &&
+      new ResponsesCompatibleProvider({ ...platformAlias, protocol: 'responses' }).contextLength === 1_000_000,
+  )
+  const { capabilitiesSource: _source, ...nonPlatform } = platformAlias
+  assert(
+    'platform capabilities: non-platform profiles keep the GPT-6 / GPT-5.6 caps',
+    resolveProfileContextLength(nonPlatform) === GPT_5_6_CONTEXT_LENGTH &&
+      resolveProfileContextLength({ ...nonPlatform, model: 'gpt-5.6-sol' }) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH &&
+      new OpenAICompatibleProvider(nonPlatform).contextLength === undefined,
+  )
+
+  const hud = createHudState('gpt-6-sol')
+  updateHudState(hud, { model: 'gpt-6-sol', contextLimit: 1_000_000, contextLimitAuthoritative: true, promptTokens: 500_000 })
+  const platformHud = renderHud(hud)
+  updateHudState(hud, { model: 'gpt-6-sol', contextLimit: 1_000_000, promptTokens: 200_000 })
+  const cappedHud = renderHud(hud)
+  assert(
+    'platform capabilities: the HUD shows the platform window and still caps a non-platform one',
+    platformHud.includes('1.0M') && cappedHud.includes('272.0K') && !cappedHud.includes('1.0M'),
+    `${platformHud} | ${cappedHud}`,
+  )
+
+  // Store: the fields survive load and save; platform windows are not capped
+  // or re-detected; malformed values are dropped; visionProfileId is kept.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-caps-'))
+  try {
+    fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'platform-main',
+      visionProfileId: 'platform-vision',
+      profiles: [
+        { ...platformAlias, id: 'platform-main', supportsImages: false },
+        { ...platformAlias, id: 'platform-vision', model: 'vision-alias', supportsImages: true, maxOutputTokens: 'lots', capabilitiesSource: 'server' },
+        { ...nonPlatform, id: 'byok' },
+      ],
+    }), 'utf8')
+    const store = new ProviderStore(tmpDir)
+    const loaded = await store.load()
+    await store.save(loaded)
+    const reloaded = await store.load()
+    const main = store.getProfile(reloaded, 'platform-main')
+    const vision = store.getProfile(reloaded, 'platform-vision')
+    const byok = store.getProfile(reloaded, 'byok')
+    const refreshed = await store.refreshProfileContextLength('platform-main')
+    assert(
+      'platform capabilities: profile fields and visionProfileId survive load and save',
+      reloaded.visionProfileId === 'platform-vision' &&
+        main?.contextLength === 1_000_000 &&
+        main.maxOutputTokens === 12_345 &&
+        main.capabilitiesSource === 'platform' &&
+        main.supportsImages === false &&
+        refreshed?.contextLength === 1_000_000 &&
+        vision?.supportsImages === true &&
+        vision.maxOutputTokens === undefined &&
+        vision.capabilitiesSource === undefined &&
+        byok?.contextLength === GPT_5_6_CONTEXT_LENGTH,
+      JSON.stringify({ visionProfileId: reloaded.visionProfileId, main, vision, byok }),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+
+  // max output: the platform's maxOutputTokens replaces the name-based
+  // max_tokens on the Messages API, and a per-request limit only lowers it.
+  const bodies: Array<Record<string, unknown>> = []
+  let reply: unknown = {}
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      bodies.push(raw ? JSON.parse(raw) as Record<string, unknown> : {})
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(reply))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  try {
+    if (!address || typeof address === 'string') throw new Error('Mock max-output server failed to bind.')
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const userMessage = { id: 'u1', role: 'user' as const, content: 'hi', createdAt: new Date().toISOString() }
+    reply = { content: [{ type: 'text', text: 'ok' }], usage: {} }
+    await new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages', baseUrl }).complete([userMessage])
+    await new MessagesCompatibleProvider({ ...platformAlias, protocol: 'messages', baseUrl }).complete([userMessage], { maxOutputTokens: 1500 })
+    await new MessagesCompatibleProvider({ ...nonPlatform, protocol: 'messages', baseUrl }).complete([userMessage])
+    reply = { choices: [{ message: { content: 'ok' } }], usage: {} }
+    await new OpenAICompatibleProvider({ ...platformAlias, baseUrl }).complete([userMessage])
+    await new OpenAICompatibleProvider({ ...platformAlias, baseUrl, maxOutputTokens: 1000 }).complete([userMessage], { maxOutputTokens: 1500 })
+    assert(
+      'platform capabilities: maxOutputTokens replaces the name-based max_tokens and bounds per-request limits',
+      bodies[0]?.max_tokens === 12_345 &&
+        bodies[1]?.max_tokens === 1500 &&
+        bodies[2]?.max_tokens === 8_192 &&
+        bodies[3]?.max_tokens === undefined && bodies[3]?.max_completion_tokens === undefined &&
+        bodies[4]?.max_tokens === 1000,
+      JSON.stringify(bodies.map((b) => ({ max_tokens: b.max_tokens, max_completion_tokens: b.max_completion_tokens }))),
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // runAgent sizes its context window from the active provider's platform
+  // window: a 1M-token platform model keeps more history than the default.
+  const runWithWindow = async (contextLength: number | undefined) => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-window-'))
+    const store = new SessionStore(tmpDir)
+    const session = store.createSession({ title: 'platform window smoke' })
+    for (let i = 0; i < 60; i += 1) {
+      session.messages.push({ id: `h${i}`, role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'x'.repeat(4_000)}`, createdAt: new Date().toISOString() })
+    }
+    await store.save(session)
+    const info: string[] = []
+    const provider: ChatProvider = {
+      contextLength,
+      async complete(): Promise<ProviderResponse> {
+        return { text: JSON.stringify({ reply: 'ok', done: true }), raw: null }
+      },
+    }
+    await runAgent(session, 'continue', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 1,
+      profile: 'main',
+      onInfo: (message) => info.push(message),
+    })
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+    const line = info.find((m) => m.startsWith('[context] included='))
+    return Number(/included=(\d+)/.exec(line ?? '')?.[1] ?? NaN)
+  }
+  const defaultIncluded = await runWithWindow(undefined)
+  const platformIncluded = await runWithWindow(1_000_000)
+  assert(
+    'platform capabilities: runAgent budgets its context by the platform window',
+    platformIncluded > defaultIncluded,
+    `default=${defaultIncluded} platform=${platformIncluded}`,
+  )
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────

@@ -6504,7 +6504,8 @@ export async function runAgent(
     viewedImages.acceptsImages = modelSeesImages;
     const context = await buildContextWindow(session, profile, {
       cwd: options.cwd,
-      contextLength: options.contextLength,
+      // A platform-written window (capabilitiesSource "platform") wins.
+      contextLength: activeProvider.contextLength ?? options.contextLength,
     });
     session.summary = context.summary;
     options.onInfo?.(

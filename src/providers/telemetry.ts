@@ -343,6 +343,7 @@ export function createTrackedProviderFromConfig(
   const wrapped: ChatProvider = {
     supportsImages: provider.supportsImages,
     supportsNativeToolCalls: provider.supportsNativeToolCalls,
+    contextLength: provider.contextLength,
     async complete(messages, options) {
       const startedAt = Date.now();
       try {

@@ -13,6 +13,7 @@ import type {
   ProviderResponse,
 } from './types.js';
 import { describeOmittedImages, modelSupportsImages } from './imageSupport.js';
+import { platformContextLength, platformMaxOutputTokens } from './capabilities.js';
 
 function cleanProviderBody(body: string): string {
   return body.trim();
@@ -154,6 +155,26 @@ function resolveMaxTokens(model: string, streaming: boolean): number {
   }
   // Unknown / legacy / non-Claude gateway models: conservative ceiling.
   return 8_192;
+}
+
+/** Non-streaming requests stay short enough to finish before HTTP timeouts. */
+const NON_STREAMING_MAX_TOKENS_CEILING = 16_000;
+
+/**
+ * max_tokens for one request: the platform's maxOutputTokens when the profile
+ * has one (the model name may be an alias), else the name-based default; a
+ * per-request limit can only lower it.
+ */
+function resolveRequestMaxTokens(
+  config: ProviderConfig,
+  streaming: boolean,
+  requestLimit: number | undefined,
+): number {
+  const platformMax = platformMaxOutputTokens(config);
+  const base = platformMax !== undefined
+    ? (streaming ? platformMax : Math.min(platformMax, NON_STREAMING_MAX_TOKENS_CEILING))
+    : resolveMaxTokens(config.model, streaming);
+  return requestLimit && requestLimit > 0 ? Math.min(base, Math.floor(requestLimit)) : base;
 }
 
 // ── 413 image stripping ───────────────────────────────────────────────────────
@@ -365,11 +386,13 @@ function parseMessageJson(json: {
 export class MessagesCompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly supportsNativeToolCalls = true;
+  readonly contextLength?: number;
   private readonly config: ProviderConfig;
 
   constructor(config: ProviderConfig) {
     this.config = config;
     this.supportsImages = modelSupportsImages(config);
+    this.contextLength = platformContextLength(config);
   }
 
   private buildRequestBody(
@@ -417,7 +440,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
 
     return {
       model: this.config.model,
-      max_tokens: resolveMaxTokens(this.config.model, streaming),
+      max_tokens: resolveRequestMaxTokens(this.config, streaming, options?.maxOutputTokens),
       ...(streaming ? { stream: true } : {}),
       ...(thinking ? { thinking } : {}),
       ...(effort ? { output_config: { effort } } : {}),

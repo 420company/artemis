@@ -218,6 +218,7 @@ import type { BridgeTerminalEvent, TerminalNotification } from './bridgeNotify.j
 import { buildInteractiveCompactHero, buildInteractiveHero, APP_NAME, APP_VERSION, APP_PUBLISHER } from './branding.js'
 import { buildPanel, formatRichOutput, formatLocalFileLink, isHighEasterEggTrigger, buildHighEasterEggCompact } from './ui.js'
 import { createHudState, updateHudState, renderHud, fmtTok } from './hud.js'
+import { hasPlatformCapabilities } from '../providers/capabilities.js'
 import type { UiLocale } from './locale.js'
 import { pickLocale } from './locale.js'
 import type { PermissionMode } from './parseArgs.js'
@@ -995,6 +996,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const brainConfig = activeStore.getProfile(activeData, activeData.specialistProfileId)
   let modelLabel = opts.model ?? config?.model ?? (process.env.ANTHROPIC_API_KEY ? ENV_FALLBACK_ANTHROPIC_MODEL : '?')
   let modelContextLimit: number | undefined = opts.model ? undefined : config?.contextLength
+  // A platform-written window is shown as-is, not re-capped by model name.
+  let modelContextAuthoritative = !opts.model && hasPlatformCapabilities(config)
   let brainLabel: string | undefined = brainConfig?.model
 
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
@@ -1542,10 +1545,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     const nextBrain = nextStore.getProfile(nextData, nextData.specialistProfileId)
     modelLabel = opts.model ?? nextConfig?.model ?? (process.env.ANTHROPIC_API_KEY ? ENV_FALLBACK_ANTHROPIC_MODEL : '?')
     modelContextLimit = opts.model ? undefined : nextConfig?.contextLength
+    modelContextAuthoritative = !opts.model && hasPlatformCapabilities(nextConfig)
     brainLabel = nextBrain?.model
     hud.defaultModel = modelLabel
     hud.lastModel = modelLabel
     hud.contextLimit = modelContextLimit
+    hud.contextLimitAuthoritative = modelContextAuthoritative
     hud.brainModel = brainLabel
   }
 
@@ -1665,7 +1670,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   }
 
   // ── HUD state ───────────────────────────────────────────────────────────────
-  const hud = createHudState(modelLabel, modelContextLimit)
+  const hud = createHudState(modelLabel, modelContextLimit, modelContextAuthoritative)
   hud.permissionMode = permissionMode
   hud.brainModel = brainLabel
 
@@ -2379,9 +2384,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             switchModel(reloadConfig.model)
             modelLabel = reloadConfig.model
             modelContextLimit = reloadConfig.contextLength
+            modelContextAuthoritative = hasPlatformCapabilities(reloadConfig)
             hud.defaultModel = modelLabel
             hud.lastModel    = modelLabel
             hud.contextLimit = modelContextLimit
+            hud.contextLimitAuthoritative = modelContextAuthoritative
           }
           brainLabel = reloadBrain?.model
           hud.brainModel = brainLabel
@@ -2837,7 +2844,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           const reloadStore2 = new ProviderStore(cwd)
           const reloadData2  = await reloadStore2.load()
           modelContextLimit = reloadStore2.getDefaultMainProfile(reloadData2)?.contextLength
+          modelContextAuthoritative = hasPlatformCapabilities(reloadStore2.getDefaultMainProfile(reloadData2))
           hud.contextLimit = modelContextLimit
+          hud.contextLimitAuthoritative = modelContextAuthoritative
           brainLabel = reloadStore2.getProfile(reloadData2, reloadData2.specialistProfileId)?.model
           const mcpStore  = new McpServerStore(cwd)
           const mcpData   = await mcpStore.load()
@@ -2983,9 +2992,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         switchModel(arg)
         modelLabel = arg
         modelContextLimit = undefined
+        modelContextAuthoritative = false
         hud.defaultModel = arg
         hud.lastModel = arg
         hud.contextLimit = modelContextLimit
+        hud.contextLimitAuthoritative = modelContextAuthoritative
         appendSystemPanel(t('模型已切换', 'Model switched'), [`→ ${arg}`])
         prompt.forceRedraw()
       }
@@ -3203,10 +3214,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       
       modelLabel = main?.model ?? '?'
        modelContextLimit = main?.contextLength
+       modelContextAuthoritative = hasPlatformCapabilities(main)
        brainLabel = brain?.model
        hud.defaultModel = modelLabel
        hud.lastModel = modelLabel
        hud.contextLimit = modelContextLimit
+       hud.contextLimitAuthoritative = modelContextAuthoritative
        hud.brainModel = brainLabel
 
       appendSystemPanel(t('模型已互换', 'Models swapped'), [
@@ -3648,10 +3661,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           await saveBoth(bfData)
           modelLabel = curBrain.model
           modelContextLimit = curBrain.contextLength
+          modelContextAuthoritative = hasPlatformCapabilities(curBrain)
           brainLabel = curMain.model
           hud.defaultModel = modelLabel
           hud.lastModel = modelLabel
           hud.contextLimit = modelContextLimit
+          hud.contextLimitAuthoritative = modelContextAuthoritative
           hud.brainModel = brainLabel
           rebuildScrollBlocksFromMessages()
           appendSystemPanel(t('Bifrost  ·  role swap 完成', 'Bifrost  ·  role swap complete'), [
@@ -3728,9 +3743,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         if (newMain?.model) {
           modelLabel = newMain.model
           modelContextLimit = newMain.contextLength
+          modelContextAuthoritative = hasPlatformCapabilities(newMain)
           hud.defaultModel = modelLabel
           hud.lastModel = modelLabel
           hud.contextLimit = modelContextLimit
+          hud.contextLimitAuthoritative = modelContextAuthoritative
         }
         brainLabel = newBrain?.model
         hud.brainModel = brainLabel
@@ -5060,7 +5077,7 @@ async function handleTurn(
       if (pt > 0) {
         const { estimateContextLimit: ecl, fmtTok: ft } = await import('./hud.js')
         const model = hud.lastModel // 从 hud 中获取模型信息，因为 tokenStats 中没有 model 属性
-        const limit = ecl(model, hud.contextLimit)
+        const limit = ecl(model, hud.contextLimit, hud.contextLimitAuthoritative)
         const pct = pt / limit
         if (pct >= 0.88) {
           viewport?.appendScrollBlock({
