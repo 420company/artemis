@@ -79,6 +79,7 @@ import {
   isContextOverflowError,
   isSyntheticUserMessage,
   manageContext,
+  carriedRequestNote,
   measureContext,
   normalizeContextState,
   recordProviderUsage,
@@ -5436,7 +5437,10 @@ function describeBackgroundTaskLabel(action: AgentAction): string {
 /**
  * Fork a background-eligible action into the registry and synthesize an
  * immediate "started" outcome so the agent loop can proceed. The real result
- * is appended to the session as a `system` message when the runner resolves.
+ * is appended to the in-memory session as a `system` message when the runner
+ * resolves. That is only safe for a session nobody else writes (the
+ * interactive CLI): every shared runtime (headless/web, bridge workflow mode)
+ * passes allowBackgroundTools: false.
  */
 function startBackgroundAction(
   session: SessionRecord,
@@ -6403,6 +6407,8 @@ export async function runAgent(
     const fixedTokens =
       estimateTokens(input.system) +
       (runContext ? estimateTokens(runContext.content) + 4 : 0) +
+      // Room for the "current task" note when the boundary carries the request.
+      (runUserMessageId ? 80 : 0) +
       estimateToolSchemaTokens(input.nativeFunctionTools);
     const managed = await manageContext({
       messages: session.messages,
@@ -6443,10 +6449,18 @@ export async function runAgent(
     options.onInfo?.(
       `[context] tokens~${measured.tokens}/${currentBudget.window} threshold=${currentBudget.threshold} source=${measured.source} messages=${session.messages.length}`,
     );
+    // The boundary stores a carried request as history; while this run is
+    // going, the (unsaved) runtime context marks it as the current task.
+    const requestNote = carriedRequestNote(session.messages, runUserMessageId, contextLanguage);
+    const outgoingContext: SessionMessage | undefined = requestNote
+      ? runContext
+        ? { ...runContext, content: `${runContext.content}\n\n${requestNote}` }
+        : { id: `run-context-${session.id}-${runUserMessageId}`, role: 'user', name: RUN_CONTEXT_MESSAGE_NAME, content: requestNote, createdAt: new Date().toISOString() }
+      : runContext;
     return {
       messages: [
         { id: 'system', role: 'system', content: input.system, createdAt: new Date(0).toISOString() },
-        ...appendRunContext(session.messages, runContext),
+        ...appendRunContext(session.messages, outgoingContext),
       ],
       fixedTokens,
       sentCount: session.messages.length,

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
+import { RUNTIME_CONTEXT_MESSAGE_NAME } from './providers/runtimeContext.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,6 +28,7 @@ import {
     getCompactionSummary,
     isContextOverflowError,
     manageContext,
+    carriedRequestNote,
     measureContext,
     normalizeContextState,
     providerPromptTokens,
@@ -1542,6 +1544,10 @@ async function executeToolInner(name: any, input: any, opts: any) {
         );
     }
     const action = { type: name, ...input };
+    // Hosted conversations (chat bridges) share the brain session between
+    // chats: a background result would land in whichever chat is active when
+    // it finishes. There the tool runs in the foreground instead.
+    if (opts.allowBackgroundTools === false) delete (action as { runInBackground?: unknown }).runInBackground;
     const errors = tool.validate?.(action) ?? [];
     if (errors.length > 0)
         return buildDirectToolValidationFailure(name, errors);
@@ -1647,6 +1653,11 @@ function makeSessionMessage(
         createdAt: new Date().toISOString(),
         ...extra,
     };
+}
+
+/** A per-request note sent after the conversation (adapters split it off; never stored). */
+function makeRuntimeContextMessage(content: string): SessionMessage {
+    return { id: 'runtime-context-request', role: 'user', name: RUNTIME_CONTEXT_MESSAGE_NAME, content, createdAt: new Date(0).toISOString() };
 }
 
 function truncateForBackground(text: string, maxLength: number): string {
@@ -2209,7 +2220,8 @@ export async function think(
         reason: ManageReason,
         nativeFunctionTools: unknown[] | undefined,
     ): Promise<number> => {
-        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools);
+        // + room for the "current task" note when the boundary carries the request.
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0);
         const managed = await manageContext({
             messages: history,
             fixedTokens,
@@ -2411,8 +2423,13 @@ export async function think(
                     toolOutputs: pendingToolOutputs,
                 }
                 : {};
+            // The boundary stores a carried request as history; while this
+            // turn is going, an unsaved runtime-context note marks it current.
+            const requestNote = carriedRequestNote(history, requestMessageId, contextLanguage);
             return {
-                messages: [...systemMessages, ...history],
+                messages: requestNote
+                    ? [...systemMessages, ...history, makeRuntimeContextMessage(requestNote)]
+                    : [...systemMessages, ...history],
                 completionOptions: {
                     ...responseContinuation,
                     nativeFunctionTools,
@@ -2572,6 +2589,7 @@ export async function think(
                             onWorkspaceSwitchRequest,
                             onUserConfirmationRequest,
                             readFileHistory,
+                            allowBackgroundTools: contextMode !== 'hosted',
                         }),
                     );
                     const toolOutput = formatDirectToolOutput(toolResult);

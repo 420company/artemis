@@ -446,13 +446,38 @@ export function parseRemoteCommand(text: string, opts?: { commandSuffixPattern?:
  * (a web turn may have been saved since this bridge cached the binding), and
  * return the saved record.
  */
+/**
+ * The stored session could not be re-read under the lock. The turn fails
+ * instead of continuing from the bridge's cached copy, which could be older
+ * than what another process saved (and saving it would erase that).
+ */
+class BridgeSessionReadError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BridgeSessionReadError'
+  }
+}
+
+async function reloadStoredSession(store: SessionStore, sessionId: string, locale: UiLocale): Promise<SessionRecord> {
+  try {
+    return await store.load(sessionId, { fresh: true })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new BridgeSessionReadError(pickLocale(locale, {
+      zh: `无法从磁盘读取这个对话（${truncate(reason, 160)}），因此没有执行也没有保存任何内容。请稍后重试。`,
+      en: `Could not read this conversation from disk (${truncate(reason, 160)}), so nothing was run or saved. Please try again in a moment.`,
+    }))
+  }
+}
+
 async function updateSessionLocked(
   store: SessionStore,
   base: SessionRecord,
+  locale: UiLocale,
   change: (current: SessionRecord) => SessionRecord,
 ): Promise<SessionRecord> {
   return withSessionLock(store.getLockPath(base.id), async () => {
-    const current = await store.load(base.id, { fresh: true }).catch(() => base)
+    const current = await reloadStoredSession(store, base.id, locale)
     const next = change(current)
     await store.save(next)
     return next
@@ -462,6 +487,20 @@ async function updateSessionLocked(
 
 
 export async function runRemoteCommand(
+  command: RemoteCommand,
+  opts: RemoteCommandOptions,
+): Promise<RemoteRuntimeResult> {
+  try {
+    return await runRemoteCommandInner(command, opts)
+  } catch (error) {
+    if (!(error instanceof BridgeSessionReadError)) throw error
+    return { replies: [error.message], storedSession: opts.binding.storedSession, permissionMode: opts.binding.permissionMode }
+  }
+}
+
+type RemoteCommandOptions = Parameters<typeof runRemoteCommandInner>[1]
+
+async function runRemoteCommandInner(
   command: RemoteCommand,
   opts: {
     binding: BragiSessionBinding
@@ -502,7 +541,7 @@ export async function runRemoteCommand(
     onInfo: (message) => void Promise.resolve(opts.onProgress?.(message, 'info')).catch(() => {}),
   })
   if (storedCwd && storedCwd !== fallbackCwd && isUnsafeBridgeWorkspace(storedCwd)) {
-    binding.storedSession = await updateSessionLocked(store, binding.storedSession, (current) => ({
+    binding.storedSession = await updateSessionLocked(store, binding.storedSession, locale, (current) => ({
       ...current,
       cwd: fallbackCwd,
       updatedAt: new Date().toISOString(),
@@ -627,7 +666,7 @@ export async function runRemoteCommand(
       if (explicitWorkspace) {
         commandCwd = explicitWorkspace.workspacePath
         const pinnedCwd = commandCwd
-        binding.storedSession = await updateSessionLocked(store, binding.storedSession, (current) => ({
+        binding.storedSession = await updateSessionLocked(store, binding.storedSession, locale, (current) => ({
           ...current,
           cwd: pinnedCwd,
           updatedAt: new Date().toISOString(),
@@ -777,7 +816,7 @@ export async function runRemoteCommand(
               // Same lock as chat turns and web runs; the run starts from the
               // session as it is on disk now.
               const result = await withSessionLock(store.getLockPath(binding.storedSession.id), async () => {
-                const current = await store.load(binding.storedSession.id, { fresh: true }).catch(() => binding.storedSession)
+                const current = await reloadStoredSession(store, binding.storedSession.id, locale)
                 binding.storedSession = current
                 return runWorkflowMode(resolution.mode, current, resolution.effectivePrompt, {
                   cwd: commandCwd,
@@ -789,6 +828,10 @@ export async function runRemoteCommand(
                   resolveProvider: providerRouter.resolveProvider,
                   imageAttachments: command.images,
                   compaction: workflowCompaction,
+                  // The session is shared with web runs: a background result
+                  // appended after the lock is released would be lost or
+                  // clobber another turn. Slow tools run in the foreground.
+                  allowBackgroundTools: false,
                   onInfo: (message) => emitProgress(message, 'info'),
                 })
               })
@@ -882,7 +925,7 @@ export async function runRemoteCommand(
           }
 
           const sagaCwd = commandCwd
-          const updated = await updateSessionLocked(store, binding.storedSession, (current) => ({
+          const updated = await updateSessionLocked(store, binding.storedSession, locale, (current) => ({
             ...current,
             cwd: sagaCwd,
             updatedAt: new Date().toISOString(),
@@ -1126,7 +1169,7 @@ export async function runRemoteCommand(
         const result = await withBridgeThinkLock(() => withSessionLock(store.getLockPath(binding.storedSession.id), async () => {
           // Start from the session as it is on disk now, not the cached
           // binding: a web turn may have been saved since.
-          const current = await store.load(binding.storedSession.id, { fresh: true }).catch(() => binding.storedSession)
+          const current = await reloadStoredSession(store, binding.storedSession.id, locale)
           binding.storedSession = current
           restoreSessionStateForCwd({
             messages: current.messages,
