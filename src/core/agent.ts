@@ -3108,20 +3108,18 @@ async function buildRunContextContent(input: {
 }
 
 /**
- * Conversation messages for a request: the stored history with the per-run
- * context inserted right before the message that started the run (or after
- * the compaction boundary when that message was summarized away).
+ * Conversation messages for a request: the stored history, then the per-run
+ * context as the LAST message. It is never stored, so placing it anywhere
+ * inside the history would make the next run's history differ from this
+ * run's at that point and cost the provider's prompt cache for everything
+ * after it. At the end, system + history stay a byte-identical prefix
+ * across requests and across runs.
  */
-function insertRunContext(
+function appendRunContext(
   history: SessionMessage[],
   runContext: SessionMessage | undefined,
-  runUserMessageId: string | undefined,
 ): SessionMessage[] {
-  if (!runContext) return history;
-  const at = runUserMessageId ? history.findIndex((message) => message.id === runUserMessageId) : -1;
-  if (at >= 0) return [...history.slice(0, at), runContext, ...history.slice(at)];
-  const afterBoundary = history[0]?.compaction ? 1 : 0;
-  return [...history.slice(0, afterBoundary), runContext, ...history.slice(afterBoundary)];
+  return runContext ? [...history, runContext] : history;
 }
 
 function extractLatestUserRequest(
@@ -6320,8 +6318,12 @@ export async function runAgent(
   let currentBudget = budgetFor(options.resolveProvider?.(profile) ?? options.provider);
   const summarizerProvider = (): ChatProvider =>
     options.resolveSummarizerProvider?.() ?? options.resolveProvider?.(profile) ?? options.provider;
-  const summarize: SummarizeFn = async ({ system, prompt }) => {
-    const provider = summarizerProvider();
+  const summarize: SummarizeFn = async ({ system, prompt, attempt }) => {
+    // The retry goes to the main model when a separate worker failed; the
+    // context manager counts both attempts against one input budget.
+    const worker = summarizerProvider();
+    const main = options.resolveProvider?.(profile) ?? options.provider;
+    const provider = (attempt ?? 0) > 0 && worker !== main ? main : worker;
     const now = new Date().toISOString();
     const response = await provider.complete([
       { id: 'compaction-system', role: 'system', content: system, createdAt: now },
@@ -6414,7 +6416,15 @@ export async function runAgent(
         cwd: options.cwd,
         taskBoard: renderTaskBoardForRestore(session),
         extraPaths: session.changedFiles,
+        // Restored files go through the run's own read permission check.
+        canRead: async (absolutePath) => {
+          if (options.permissionManager.getInteractive()) return false;
+          const decision = await options.permissionManager.authorize({ type: 'read_file', path: absolutePath } as AgentAction);
+          return decision.allowed;
+        },
       },
+      // The request that started this run always stays in the live history.
+      pinnedIds: runUserMessageId ? [runUserMessageId] : undefined,
       reason: input.reason,
       proactive: options.compaction?.enabled !== false,
       language: contextLanguage,
@@ -6436,7 +6446,7 @@ export async function runAgent(
     return {
       messages: [
         { id: 'system', role: 'system', content: input.system, createdAt: new Date(0).toISOString() },
-        ...insertRunContext(session.messages, runContext, runUserMessageId),
+        ...appendRunContext(session.messages, runContext),
       ],
       fixedTokens,
       sentCount: session.messages.length,
@@ -6974,12 +6984,39 @@ export async function runAgent(
       prepared.fixedTokens,
     );
     persistContextState();
-    completion = await runNativeToolLoop(
-      activeProvider,
-      providerMessages,
-      completion,
-      nativeToolRuntime,
-    );
+    try {
+      completion = await runNativeToolLoop(
+        activeProvider,
+        providerMessages,
+        completion,
+        nativeToolRuntime,
+      );
+    } catch (error) {
+      if (!isContextOverflowError(error) || options.abortSignal?.aborted) throw error;
+      // A Responses continuation (previous_response_id) outgrew the window on
+      // the server side. Its tool results are already in the session: compact
+      // and start a fresh request without the continuation, once.
+      options.onInfo?.(`[context] tool-loop continuation rejected as too large; compacting and restarting the request`);
+      prepared = await prepareRequestMessages({
+        provider: activeProvider,
+        system: systemContent,
+        nativeFunctionTools,
+        reason: 'overflow',
+      });
+      providerMessages = prepared.messages;
+      try {
+        completion = await runNativeToolLoop(
+          activeProvider,
+          providerMessages,
+          await requestCompletion(providerMessages),
+          nativeToolRuntime,
+        );
+      } catch (retryError) {
+        if (!isContextOverflowError(retryError)) throw retryError;
+        const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
+        throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
+      }
+    }
     // Surface per-turn token usage so the workflow progress UI can attribute
     // tokens to the currently-active stage (researcher / reviewer / synthesis
     // / execute). The string format is what applyWorkflowProgressInfo parses.

@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../core/types.js';
+import { splitTrailingRuntimeContext } from './runtimeContext.js';
 import { normalizeUiLocale, type UiLocale } from '../cli/locale.js';
 import { retryFetch } from './retryFetch.js';
 import type {
@@ -403,12 +404,14 @@ export class ResponsesCompatibleProvider implements ChatProvider {
       }
       payload.input = continuation;
     } else {
-      const input: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem> = messages
+      const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
+      const input: Array<ResponsesInputItem | ResponsesFunctionCallOutputItem> = conversation
         .map(mapMessage)
         .filter((entry): entry is ResponsesInputItem => entry !== null);
       if (options?.imageAttachments?.length) {
         injectImagesIntoInput(input, options.imageAttachments, this.supportsImages);
       }
+      input.push(...runtimeContext.map(mapMessage).filter((entry): entry is ResponsesInputItem => entry !== null));
       payload.input = input;
     }
 

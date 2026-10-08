@@ -90,7 +90,11 @@ export async function runHeadlessAgent(
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
   const contextNotices: string[] = []
   const started = Date.now()
-  const result = await runAgent(session, prompt, {
+  // One run per session at a time across processes (a chat bridge may be
+  // working on the same session).
+  const { withSessionLock } = await import('../storage/sessionLock.js')
+  const compaction = await loadCompactionSettings(cwd, 'hosted')
+  const result = await withSessionLock(sessionStore.getLockPath(session.id), () => runAgent(session, prompt, {
     cwd,
     provider,
     sessionStore,
@@ -103,7 +107,7 @@ export async function runHeadlessAgent(
     contextLength: resolveProfileContextLength(providerConfig),
     // Hosted runs default to a 200K-token context cap (cost); see
     // services/compactionSettings.ts for the overrides.
-    compaction: await loadCompactionSettings(cwd, 'hosted'),
+    compaction,
     // Nobody reviews a headless turn as it runs: memories the model saves
     // without naming a scope stay in this workspace.
     memoryDefaultScope: 'project',
@@ -117,7 +121,7 @@ export async function runHeadlessAgent(
     onContextCompaction: (notice) => contextNotices.push(notice),
     onInfo: opts.onInfo,
     ...(imageAttachments.length ? { imageAttachments } : {}),
-  })
+  }), { label: `Session ${session.id}` })
 
   return {
     reply: result.reply,

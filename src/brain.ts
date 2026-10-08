@@ -760,9 +760,29 @@ export function resetSession() {
  * Bridges and the CLI swap stored sessions in and out of the single active
  * session; per-session context state must not leak from one to the next.
  */
-function resetContextState(activeSession: Session): void {
-    activeSession.deleteContext('contextState');
+function resetContextState(activeSession: Session, contextState?: unknown, sessionId?: string): void {
     activeSession.deleteContext('compressionSummary');
+    // A stored session brings its own state (anchor, breaker, compaction
+    // index, calibration); anything else starts fresh.
+    if (contextState && typeof contextState === 'object') {
+        activeSession.setContext('contextState', normalizeContextState(contextState));
+    } else {
+        activeSession.deleteContext('contextState');
+    }
+    activeSession.setContext('contextSessionId', sessionId ?? newContextSessionId());
+}
+
+function newContextSessionId(): string {
+    return `cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Context-management state of the active session, for callers that persist
+ * it with their stored session (bridges keep it in metadata.context).
+ */
+export function getActiveContextState(): ContextState | undefined {
+    const state = session?.getContext('contextState');
+    return state ? normalizeContextState(state) : undefined;
 }
 
 async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: string, auditRole: 'worker' | 'compression'): Promise<string> {
@@ -780,17 +800,13 @@ async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: st
  * model when one is configured, else the main model; falls back to the main
  * model when the worker fails. No model id is hard-coded.
  */
-const summarizeForCompaction: SummarizeFn = async ({ system, prompt }) => {
+const summarizeForCompaction: SummarizeFn = async ({ system, prompt, attempt }) => {
     const lead = await loadProvider(providerCwd ?? process.cwd());
     const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
-    if (workerCfg && workerCfg !== providerConfig && workerP) {
-        try {
-            return await completeSummaryPrompt(workerP, system, prompt, 'compression');
-        } catch {
-            /* fall back to the main model below */
-        }
-    }
-    return completeSummaryPrompt(lead, system, prompt, 'compression');
+    // First try: the worker when one is configured. The single retry goes to
+    // the main model; the context manager charges both to one input budget.
+    const useWorker = (attempt ?? 0) === 0 && workerCfg && workerCfg !== providerConfig && workerP;
+    return completeSummaryPrompt(useWorker ? workerP : lead, system, prompt, 'compression');
 };
 
 /** Context window of the model compaction summaries go to. */
@@ -829,10 +845,13 @@ export function restoreSessionForCwd(messages: any, cwd: string) {
  * re-injected: the rolling summary lives in the compaction boundary message
  * at the start of `messages`, and older sessions kept their full raw history.
  */
-export function restoreSessionStateForCwd(state: { messages: any; summary?: string }, cwd: string) {
+export function restoreSessionStateForCwd(
+    state: { messages: any; summary?: string; contextState?: unknown; sessionId?: string },
+    cwd: string,
+) {
     const activeSession = getSession(cwd);
     activeSession.restore(state.messages);
-    resetContextState(activeSession);
+    resetContextState(activeSession, state.contextState, state.sessionId);
 }
 
 /** The rolling compaction summary of the active session, if it was compacted. */
@@ -1128,9 +1147,13 @@ function prepareDirectToolContextOutput(
 }
 
 /** Context files of path B sessions that have no stored session id (per workspace). */
-function defaultContextDir(cwd: string): string {
+/**
+ * Context files of path B conversations without a stored-session directory
+ * (the interactive CLI): one directory per conversation under the workspace.
+ */
+function defaultContextDir(cwd: string, conversationId: string): string {
     const key = createHash('sha1').update(path.resolve(cwd)).digest('hex').slice(0, 12);
-    return path.join(resolveArtemisHomeDir(), 'context', key);
+    return path.join(resolveArtemisHomeDir(), 'context', key, conversationId.replace(/[^\w.-]/g, '_'));
 }
 
 function buildDirectToolError(
@@ -2139,6 +2162,7 @@ export async function think(
         requestImageAttachments = preparedImages.images;
     }
     tSession.addUser(input);
+    const requestMessageId = tSession.getMessages().at(-1)?.id;
 
     const p = await loadProvider(cwd);
     let currentCwd = cwd;
@@ -2162,7 +2186,12 @@ export async function think(
     const systemTokens = Math.round(estimateConversationTokens(systemMessages));
 
     // ── Context management (see core/compaction) ──────────────────────────
-    const contextStorage = createContextStorage(contextDir ?? defaultContextDir(cwd));
+    if (typeof tSession.getContext('contextSessionId') !== 'string') {
+        tSession.setContext('contextSessionId', newContextSessionId());
+    }
+    const contextStorage = createContextStorage(
+        contextDir ?? defaultContextDir(cwd, tSession.getContext('contextSessionId') as string),
+    );
     const contextState: ContextState = normalizeContextState(tSession.getContext('contextState'));
     tSession.setContext('contextState', contextState);
     const contextBudget = resolveContextBudget({
@@ -2190,6 +2219,8 @@ export async function think(
             summarize: summarizeForCompaction,
             summarizerWindow,
             restore: { cwd: currentCwd },
+            // This turn's request stays in the live history, however large.
+            pinnedIds: requestMessageId ? [requestMessageId] : undefined,
             reason,
             proactive: _compressionEnabled,
             language: contextLanguage,
@@ -2419,12 +2450,16 @@ export async function think(
                     maxNativeToolRounds,
                     latestUserText,
                 );
-                const forcedAttempt = await completeWithRunningInterjectionCheck(
-                    [...systemMessages, ...history, finalizerMessage],
-                    {
-                        onReasoning,
-                        guardStreamingText: false,
-                    },
+                // Same overflow recovery as any other request: compact, retry once.
+                const forcedAttempt = await requestWithOverflowRecovery(
+                    () => ({
+                        messages: [...systemMessages, ...history, finalizerMessage],
+                        completionOptions: {
+                            onReasoning,
+                            guardStreamingText: false,
+                        },
+                    }),
+                    undefined,
                 );
                 if (forcedAttempt.interrupted) {
                     widenProjectedTools();

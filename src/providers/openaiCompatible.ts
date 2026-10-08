@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
+import { splitTrailingRuntimeContext } from './runtimeContext.js'
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
   createStreamIdleGuard,
@@ -529,10 +530,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
   ): Promise<ProviderResponse> {
     const startedAt = Date.now()
     const reasoningMode = getReasoningContentMode(this.config.model)
-    const mapped = messages.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
+    const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages)
+    const mapped = conversation.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
     if (options?.imageAttachments?.length) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
     }
+    mapped.push(...(runtimeContext.map((m) => mapMessage(m, { reasoningMode })) as typeof mapped))
 
     const body: Record<string, unknown> = {
       model: this.config.model,
@@ -859,10 +862,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
   ): Promise<ProviderResponse> {
     const startedAt = Date.now();
     const reasoningMode = getReasoningContentMode(this.config.model);
-    const mapped = messages.map((m) => mapMessage(m, { reasoningMode }));
+    const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
+    const mapped = conversation.map((m) => mapMessage(m, { reasoningMode }));
     if (options?.imageAttachments?.length) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages)
     }
+    mapped.push(...runtimeContext.map((m) => mapMessage(m, { reasoningMode })));
 
     const body: Record<string, unknown> = {
       model: this.config.model,

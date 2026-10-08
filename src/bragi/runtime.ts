@@ -9,7 +9,8 @@
  * Only one concurrent task per target ID is allowed.
  */
 
-import { think, resetSession, getMessages, restoreSessionStateForCwd } from '../brain.js'
+import { think, resetSession, getMessages, getActiveContextState, restoreSessionStateForCwd } from '../brain.js'
+import { withSessionLock } from '../storage/sessionLock.js'
 import { open, readFile, unlink, writeFile, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { hostname, homedir } from 'node:os'
@@ -469,8 +470,8 @@ export async function runRemoteCommand(
   }
 ): Promise<RemoteRuntimeResult> {
   let binding = opts.binding
-  // History of the active session right after think() returned or threw.
-  let messagesAfterThink: SessionMessage[] | undefined
+  // The session saved after a failed turn (compacted history), if any.
+  const savedOnErrorRef: { current?: SessionRecord } = {}
   const { store, locale, cwd } = opts
   const storedCwd = binding.storedSession.cwd
   const fallbackCwd = storedCwd && !isUnsafeBridgeWorkspace(storedCwd)
@@ -1086,54 +1087,60 @@ export async function runRemoteCommand(
               ))
             },
           })
-        const result = await withBridgeThinkLock(async () => {
+        // The session file is locked from restore to save, so a web
+        // `artemis execute` on the same session cannot interleave with this
+        // turn. The context state (anchor, breaker, compaction index) is
+        // stored with the session in metadata.context.
+        const sessionWith = (messages: SessionMessage[], extra: Partial<SessionRecord> = {}): SessionRecord => ({
+          ...binding.storedSession,
+          ...extra,
+          messages,
+          metadata: {
+            ...(binding.storedSession.metadata ?? {}),
+            ...(getActiveContextState() ? { context: getActiveContextState() } : {}),
+          },
+          updatedAt: new Date().toISOString(),
+        })
+        const result = await withBridgeThinkLock(() => withSessionLock(store.getLockPath(binding.storedSession.id), async () => {
           restoreSessionStateForCwd({
             messages: binding.storedSession.messages,
             summary: binding.storedSession.summary,
+            contextState: binding.storedSession.metadata?.context,
+            sessionId: binding.storedSession.id,
           }, commandCwd)
           try {
-            return await thinkForBridge()
-          } finally {
+            const thought = await thinkForBridge()
             // Captured inside the lock: the active session is shared by all bridges.
-            messagesAfterThink = getMessages()
+            const after: SessionMessage[] = getMessages()
+            const updated = sessionWith(after, {
+              cwd: thought.cwd ?? binding.storedSession.cwd,
+              summary: latestCompressionSummary ?? binding.storedSession.summary ?? '',
+            })
+            await store.save(updated)
+            return { thought, updated }
+          } catch (error) {
+            const after: SessionMessage[] = getMessages()
+            // When think() compacted the history or hit a context overflow, the
+            // compacted history must be saved; otherwise the next message would
+            // restore the old oversized history and fail the same way forever.
+            const compactedDuringThink =
+              getCompactionSummary(after) !== getCompactionSummary(binding.storedSession.messages)
+            if (isContextOverflowError(error) || compactedDuringThink) {
+              savedOnErrorRef.current = sessionWith(after, {
+                summary: getCompactionSummary(after) ?? binding.storedSession.summary ?? '',
+              })
+              await store.save(savedOnErrorRef.current).catch(() => undefined)
+            }
+            throw error
           }
-        })
-        reply = result.text
-        // update session
-        const messages = messagesAfterThink ?? getMessages()
-        const updated = {
-          ...binding.storedSession,
-          cwd: result.cwd ?? binding.storedSession.cwd,
-          messages,
-          summary: latestCompressionSummary ?? binding.storedSession.summary ?? '',
-          updatedAt: new Date().toISOString(),
-        }
-        await store.save(updated)
-        return { replies: [reply], storedSession: updated, permissionMode: binding.permissionMode }
+        }, { label: t('这个会话', 'This chat session') }))
+        reply = result.thought.text
+        return { replies: [reply], storedSession: result.updated, permissionMode: binding.permissionMode }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        // When think() compacted the history or hit a context overflow, the
-        // compacted history must be saved; otherwise the next message would
-        // restore the old oversized history and fail the same way forever.
-        const compactedDuringThink = Boolean(messagesAfterThink) &&
-          getCompactionSummary(messagesAfterThink ?? []) !== getCompactionSummary(binding.storedSession.messages)
-        if (messagesAfterThink && (isContextOverflowError(err) || compactedDuringThink)) {
-          const saved = {
-            ...binding.storedSession,
-            messages: messagesAfterThink,
-            summary: getCompactionSummary(messagesAfterThink) ?? binding.storedSession.summary ?? '',
-            updatedAt: new Date().toISOString(),
-          }
-          await store.save(saved).catch(() => undefined)
-          return {
-            replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
-            storedSession: saved,
-            permissionMode: binding.permissionMode,
-          }
-        }
         return {
           replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
-          storedSession: binding.storedSession,
+          storedSession: savedOnErrorRef.current ?? binding.storedSession,
           permissionMode: binding.permissionMode,
         }
       } finally {

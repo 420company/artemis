@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../core/types.js';
+import { splitTrailingRuntimeContext } from './runtimeContext.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
   createStreamIdleGuard,
@@ -459,14 +460,18 @@ export class MessagesCompatibleProvider implements ChatProvider {
       .map((message) => message.content.trim())
       .filter(Boolean)
       .join('\n\n');
-    const messagesApiMessages = messages
-      .filter((message) => message.role !== 'system')
-      .map(mapMessage);
+    const [conversation, runtimeContext] = splitTrailingRuntimeContext(
+      messages.filter((message) => message.role !== 'system'),
+    );
+    const messagesApiMessages = conversation.map(mapMessage);
 
     if (options?.imageAttachments?.length) {
       injectImagesIntoMessages(messagesApiMessages, options.imageAttachments, this.supportsImages);
     }
+    // The breakpoint ends the cached prefix at the newest real message; the
+    // per-run context follows it uncached.
     addConversationCacheBreakpoint(messagesApiMessages);
+    messagesApiMessages.push(...runtimeContext.map(mapMessage));
 
     // Build tools in Anthropic Messages API format (input_schema, not parameters)
     const anthropicTools = options?.nativeFunctionTools?.map((t) => ({
