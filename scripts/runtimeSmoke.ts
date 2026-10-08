@@ -3603,6 +3603,7 @@ const ONE_PIXEL_PNG_BASE64 =
   // server) searches through the gateway's /v1/search with its platform key.
   const { platformSearchFromStore, searchWithPlatform, PlatformSearchError } = await import('../src/core/platformSearch.js')
   const { hasUserSearchKey } = await import('../src/core/searchTools.js')
+  const { startToolHeartbeat } = await import('../src/core/agent.js')
   const main = { id: 'executor', protocol: 'openai', baseUrl: 'https://gw.example/v1', apiKey: 'ak-main', model: 'm' }
   assert(
     'platform search: an explicit webSearch entry wins; enabled:false or another provider turns it off',
@@ -3703,6 +3704,40 @@ const ONE_PIXEL_PNG_BASE64 =
     )
   })
 
+  // Tool heartbeat: a long foreground tool reports progress so the host's
+  // no-progress watchdog can tell it from a hung engine.
+  const lines: string[] = []
+  const stop = startToolHeartbeat('generate_long_video', (m) => lines.push(m), 20)
+  await sleep(75)
+  stop()
+  const count = lines.length
+  await sleep(50)
+  assert(
+    'tool heartbeat: "[tool:<name>] progress" lines while a tool runs, none after it ends',
+    count >= 2 && lines.length === count && /^\[tool:generate_long_video\] progress \{"elapsedSeconds":\d+\}$/.test(lines[0] ?? ''),
+    lines.join(' | '),
+  )
+  const savedBeat = process.env.ARTEMIS_TOOL_HEARTBEAT_MS
+  process.env.ARTEMIS_TOOL_HEARTBEAT_MS = '1000'
+  try {
+    await withMockHeadlessHost({
+      chat: (index) => index === 1
+        ? '<toolcall name="run_command">{"command":"sleep 2.5"}</toolcall>'
+        : 'Done waiting.',
+    }, async () => {
+      const info: string[] = []
+      await runHeadlessAgent(fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-heartbeat-')), 'Wait a moment with sleep 2.5, then say done.', { maxTurns: 6, onInfo: (m) => info.push(m) })
+      const beats = info.filter((m) => /^\[tool:run_command\] progress /.test(m))
+      assert(
+        'tool heartbeat: a headless run reports progress while a slow command runs (ARTEMIS_TOOL_HEARTBEAT_MS)',
+        beats.length >= 1,
+        info.filter((m) => m.startsWith('[tool:')).join(' | '),
+      )
+    })
+  } finally {
+    if (savedBeat === undefined) delete process.env.ARTEMIS_TOOL_HEARTBEAT_MS
+    else process.env.ARTEMIS_TOOL_HEARTBEAT_MS = savedBeat
+  }
 }
 
 {

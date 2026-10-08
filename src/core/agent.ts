@@ -3808,6 +3808,13 @@ export type RunAgentOptions = {
    * background generation would be lost and its result never reach the reply.
    */
   allowBackgroundTools?: boolean;
+  /**
+   * While a foreground tool runs, report `[tool:<name>] progress` through
+   * onInfo every this many milliseconds (see startToolHeartbeat). Headless
+   * runs (`artemis execute`) set it so the host can tell a long tool from a
+   * hung engine; unset or 0: no heartbeat (interactive CLI, chat bridges).
+   */
+  toolHeartbeatMs?: number;
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -4926,6 +4933,38 @@ function maybeRerouteToSagaLongVideo(
   } satisfies Extract<AgentAction, { type: 'generate_long_video' }>;
 }
 
+/** Default interval between progress lines of a running foreground tool. */
+const TOOL_HEARTBEAT_MS = 60_000;
+
+/** The heartbeat interval: ARTEMIS_TOOL_HEARTBEAT_MS (at least 1 s), else one minute. */
+export function toolHeartbeatIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ARTEMIS_TOOL_HEARTBEAT_MS);
+  return Number.isFinite(raw) && raw >= 1_000 ? Math.floor(raw) : TOOL_HEARTBEAT_MS;
+}
+
+/**
+ * While a foreground tool runs, reports `[tool:<name>] progress
+ * {"elapsedSeconds":N}` through onInfo at a fixed interval (stderr for
+ * `artemis execute`), so a host watching for runs that stopped making
+ * progress can tell a long tool from a hung engine. Hosts that do not know
+ * the line ignore it. Returns the function that stops it. Only runs that set
+ * RunAgentOptions.toolHeartbeatMs get it.
+ */
+export function startToolHeartbeat(
+  toolName: string,
+  onInfo: ((message: string) => void) | undefined,
+  intervalMs: number = toolHeartbeatIntervalMs(),
+): () => void {
+  if (!onInfo) return () => undefined;
+  const started = Date.now();
+  const timer = setInterval(() => {
+    onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds: Math.round((Date.now() - started) / 1000) })}`);
+  }, intervalMs);
+  // Never the reason the process stays alive.
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 async function executeAgentAction(
   session: SessionRecord,
   action: AgentAction,
@@ -5657,7 +5696,18 @@ async function executeAuthorizedAction(
       return startBackgroundAction(session, hydratedAction, options);
     }
 
-    const result = await executeAgentAction(session, hydratedAction, options, abortSignal);
+    // Long tools (Saga long video, a big ffmpeg encode) can run for an hour
+    // without printing anything; a host that stops runs with no progress
+    // must still see that this one is alive.
+    const stopHeartbeat = options.toolHeartbeatMs && options.toolHeartbeatMs > 0
+      ? startToolHeartbeat(hydratedAction.type, options.onInfo, options.toolHeartbeatMs)
+      : () => undefined;
+    let result: Awaited<ReturnType<typeof executeAgentAction>>;
+    try {
+      result = await executeAgentAction(session, hydratedAction, options, abortSignal);
+    } finally {
+      stopHeartbeat();
+    }
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;
     if (options.heimdallThreadState) {
