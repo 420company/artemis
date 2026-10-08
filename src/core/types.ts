@@ -353,36 +353,6 @@ export type AgentAction =
       maxTurns?: number;
     }
   | {
-      type: 'odin_search_skills';
-      query: string;
-      scope?: 'local' | 'cloud' | 'all';
-      limit?: number;
-      autoImport?: boolean;
-    }
-  | {
-      type: 'odin_execute_task';
-      task: string;
-      searchScope?: 'local' | 'cloud' | 'all';
-      maxIterations?: number;
-    }
-  | {
-      type: 'odin_fix_skill';
-      skillId: string;
-      errorContext?: string;
-      summary?: string;
-    }
-  | {
-      type: 'odin_upload_skill';
-      skillId: string;
-      visibility?: 'local' | 'private' | 'public';
-      notes?: string;
-    }
-  | {
-      type: 'odin_import_cloud_skills';
-      query?: string;
-      limit?: number;
-    }
-  | {
       type: 'generate_image';
       prompt: string;
       model?: string;
@@ -744,11 +714,6 @@ export const ALL_AGENT_ACTION_TYPES = [
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',
-  'odin_search_skills',
-  'odin_execute_task',
-  'odin_fix_skill',
-  'odin_upload_skill',
-  'odin_import_cloud_skills',
   'generate_image',
   'generate_video',
   'generate_long_video',
@@ -826,11 +791,6 @@ export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',
-  'odin_search_skills',
-  'odin_execute_task',
-  'odin_fix_skill',
-  'odin_upload_skill',
-  'odin_import_cloud_skills',
 ] as const satisfies readonly AgentActionType[];
 
 export type AssistantEnvelope = {

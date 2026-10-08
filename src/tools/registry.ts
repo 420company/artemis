@@ -450,56 +450,6 @@ function validateApproveBuilderExecutionAction(action: any): string[] {
   return errors;
 }
 
-function validateOdinSearchSkillsAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.query, 'query', errors);
-  validateEnumString(action?.scope, 'scope', ['local', 'cloud', 'all'] as const, errors);
-  validatePositiveInteger(action?.limit, 'limit', errors);
-  validateBooleanValue(action?.autoImport, 'autoImport', errors);
-  return errors;
-}
-
-function validateOdinExecuteTaskAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.task, 'task', errors);
-  validateEnumString(
-    action?.searchScope,
-    'searchScope',
-    ['local', 'cloud', 'all'] as const,
-    errors,
-  );
-  validatePositiveInteger(action?.maxIterations, 'maxIterations', errors);
-  return errors;
-}
-
-function validateOdinFixSkillAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.skillId, 'skillId', errors);
-  validateOptionalNonEmptyString(action?.errorContext, 'errorContext', errors);
-  validateOptionalNonEmptyString(action?.summary, 'summary', errors);
-  return errors;
-}
-
-function validateOdinUploadSkillAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.skillId, 'skillId', errors);
-  validateEnumString(
-    action?.visibility,
-    'visibility',
-    ['local', 'private', 'public'] as const,
-    errors,
-  );
-  validateOptionalNonEmptyString(action?.notes, 'notes', errors);
-  return errors;
-}
-
-function validateOdinImportCloudSkillsAction(action: any): string[] {
-  const errors: string[] = [];
-  validateOptionalNonEmptyString(action?.query, 'query', errors);
-  validatePositiveInteger(action?.limit, 'limit', errors);
-  return errors;
-}
-
 function validateGenerateImageAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
@@ -977,51 +927,6 @@ const actionToolDefs: ToolDefinition[] = [
     executionMode: 'non-blocking',
     parallelSafe: false,
     validate: validateApproveBuilderExecutionAction,
-  },
-  {
-    type: 'odin_search_skills',
-    description: '搜索可用技能',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'non-blocking',
-    parallelSafe: true,
-    validate: validateOdinSearchSkillsAction,
-  },
-  {
-    type: 'odin_execute_task',
-    description: '通过 Odin 查找并执行技能任务',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinExecuteTaskAction,
-  },
-  {
-    type: 'odin_fix_skill',
-    description: '修复指定技能',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinFixSkillAction,
-  },
-  {
-    type: 'odin_upload_skill',
-    description: '上传本地技能到 Odin 云端',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinUploadSkillAction,
-  },
-  {
-    type: 'odin_import_cloud_skills',
-    description: '导入 Odin 云端技能',
-    kind: 'agent',
-    permissionCategory: 'agent',
-    executionMode: 'non-blocking',
-    parallelSafe: false,
-    validate: validateOdinImportCloudSkillsAction,
   },
   {
     type: 'generate_image',

@@ -66,16 +66,6 @@ function describeAction(action: AgentAction): string {
       return `delegate task to ${action.role}`;
     case 'approve_builder_execution':
       return `approve builder execution for session ${action.sessionId}`;
-    case 'odin_search_skills':
-      return `search skills for ${action.query}`;
-    case 'odin_execute_task':
-      return `execute task with skill: ${action.task}`;
-    case 'odin_fix_skill':
-      return `fix skill ${action.skillId}`;
-    case 'odin_upload_skill':
-      return `upload skill ${action.skillId}`;
-    case 'odin_import_cloud_skills':
-      return `import cloud skills${action.query ? ` matching "${action.query}"` : ''}`;
     case 'generate_image':
       return `generate image via BytePlus Seedream (${action.model ?? 'seedream-5-0-260128'})`;
     case 'generate_video':
