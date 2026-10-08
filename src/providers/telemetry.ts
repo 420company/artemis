@@ -344,6 +344,9 @@ export function createTrackedProviderFromConfig(
     supportsImages: provider.supportsImages,
     bridgesImages: provider.bridgesImages,
     supportsNativeToolCalls: provider.supportsNativeToolCalls,
+    model: provider.model,
+    contextWindow: provider.contextWindow,
+    maxOutputTokens: provider.maxOutputTokens,
     contextLength: provider.contextLength,
     async complete(messages, options) {
       const startedAt = Date.now();

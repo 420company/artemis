@@ -73,7 +73,7 @@ The goal is simple: you describe the outcome; Artemis does the operational work.
 
 Long work often fails because the assistant forgets. Artemis is built to preserve continuity.
 
-It maintains local memory, session state, collapse ledgers, tool evidence, and recovery context so long tasks can continue without losing the important parts. Your preferences, project conventions, workflow habits, and recurring constraints can become part of the way Artemis works with you.
+It maintains local memory, session state, compacted history with a full archive, tool evidence, and recovery context so long tasks can continue without losing the important parts. Your preferences, project conventions, workflow habits, and recurring constraints can become part of the way Artemis works with you.
 
 Useful for:
 
@@ -83,6 +83,23 @@ Useful for:
 - Repeated project maintenance
 - Returning to a task after interruption
 - Keeping your personal style and rules consistent
+
+##### How context compaction works
+
+Every conversation (web sessions, chat bridges, the CLI) goes through the same context manager (`src/core/compaction`):
+
+- **Budget.** The limit is the model's context window minus the reply reserve and a safety margin. Before each request, Artemis measures the context: the provider-reported size of the last request (cache reads and writes included) plus an estimate of what was added since. The estimate counts one token per Chinese/Japanese/Korean character.
+- **Large tool output** is written to `sessions/<id>/tool-results/`. The history keeps a preview of the head and tail with the file path, and newlines are never removed.
+- **At about 78% of the budget**, old tool results outside the recent part of the conversation become one-line placeholders that name the tool, its arguments, the size and the file to re-read. If that is not enough, everything before the most recent ~25% is summarized by the worker model (or the main model), in the conversation's language. The summary has eight sections: goals and latest instructions, decisions, files, facts and errors, preferences, completed work, pending tasks, and things to remember. The stored history becomes a "[Context compacted]" message plus the recent messages. Removed messages are appended to `sessions/<id>/transcript.jsonl`, which the agent can read. The request you are working on is never lost: when it leaves the recent part, the compacted message keeps it word for word as an earlier request (a very long one is shortened in the middle, with a note), and while that same run is still going each request to the model also says it is the current task. A later run sees it only as history.
+- **Rolling summaries.** The next compaction folds only the new messages into the previous summary. After compacting, Artemis re-attaches the task board, fresh copies of the files being worked on, and the in-flight action. Only files the agent itself read or wrote successfully are re-attached, and only if they are inside the workspace, not sensitive (keys, `.env` and similar), and allowed by the permission settings. If the summarizer fails, a mechanical summary that always fits is used instead. A very old, very long history is not sent whole: its recent part is summarized, and the older part becomes a list of your messages, one short line each. If even that is too long, the list keeps your earliest and latest messages, samples the ones in between, and says so. After 3 failures in a row the summarizer pauses, and it is tried again after 2 compactions or 30 minutes. A cancelled run does not count as a failure.
+- **Untrusted content.** The summarizer is told that tool and web output is data, not instructions, and that goals come only from your messages. The summary goes back into the conversation wrapped in `<conversation_summary>` tags, marked as data.
+- **Full history.** `artemis session show <id>` prints the conversation as a chat shows it: your messages and the agent's replies, in order, including the ones archived in `transcript.jsonl`, without tool messages, the compaction marker or per-run context. It returns the latest 500 by default; `history.hasMore` and `history.nextBefore` page back with `--before <id>` (and `--limit N`). `--full` prints every message with tool output (for debugging), and `--live` prints the stored record as it is. Showing a session never changes any file. `artemis session delete <id>` also removes the session's context files and its sub-agent sessions.
+- **Files and locking.** Session files are written to a temporary file and renamed into place, so a reader never sees half a file. Context files are readable only by you (files 0600, folders 0700). Each session's `tool-results/` folder is capped at 200MB: the oldest files the conversation no longer points to go first, and files it still points to are kept even over the cap. The CLI keeps them under `~/.artemis/context/`. Only one process runs a session at a time; a second one waits up to 30 seconds (`ARTEMIS_SESSION_LOCK_TIMEOUT_MS`), then `artemis execute` exits with code **75** and prints `CLI Error: This conversation is busy with another task; try again in a moment.` A lock whose process stopped refreshing it for a minute is taken over. If a session file still cannot be read after a few retries, it is moved aside to `<id>.json.corrupt-<time>` and the session starts fresh.
+- **Overflow recovery.** If the provider still rejects a request as too long, Artemis compacts harder, retries once, and saves the result, so a chat bridge never repeats the same overflow.
+- **Prompt caching.** The system prompt and the stored history stay byte-identical between requests and runs. Per-request context (recalled memories, activated skills, evidence) goes in a message after the conversation and is never saved, so the cached prefix is reused.
+- **Cost cap.** Hosted runs (`artemis execute`, web sessions, chat bridges) cap the context at **200K tokens** by default, so a 1M-window model compacts at about 78% of 200K instead of about 78% of 1M. The interactive CLI uses the full window. To change the cap, set `setup.agent.compression.maxContextTokens` (this wins) or the `ARTEMIS_MAX_CONTEXT_TOKENS` environment variable (for the server or provisioning). Either one also applies to the CLI. `0` or `off` removes the cap.
+- **Output reserve.** The budget reserves the model's output limit (the platform `maxOutputTokens` when set), up to a quarter of the window, plus a 5% margin. A request that fits the budget therefore always leaves the adapters room to send that `max_tokens` unchanged.
+- **Settings** (`setup.agent.compression`): `enabled: false` turns off proactive compaction (overflow recovery stays on), `threshold` changes the 78% trigger, and `maxContextTokens` sets the cap described above.
 
 #### 4. Visual generation system
 
@@ -328,7 +345,7 @@ Artemis 可以处理日常和复杂的软件工程任务：
 
 很多 AI 工具在长任务中会遗忘前文。Artemis 的设计目标是让任务可以持续推进。
 
-它会把记忆、会话状态、工具证据、压缩账本和恢复上下文保存在本地，让长时间工作不会因为中断、折叠或会话变长而失去关键线索。你的偏好、项目规则、语言风格和长期约束也可以被保留下来。
+它会把记忆、会话状态、压缩后的历史与完整归档、工具证据和恢复上下文保存在本地，让长时间工作不会因为中断、折叠或会话变长而失去关键线索。你的偏好、项目规则、语言风格和长期约束也可以被保留下来。
 
 适合用于：
 
@@ -338,6 +355,23 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - 长期项目维护
 - 中断后继续任务
 - 保持个人工作习惯和审美一致
+
+##### 上下文压缩是怎么工作的
+
+网页会话、聊天桥接和命令行都使用同一个上下文管理器（`src/core/compaction`）：
+
+- **预算**：上限是模型的上下文窗口，减去回复预留和安全余量。每次请求前，Artemis 用上一次请求由服务商报告的实际大小（包含缓存读写），加上之后新增内容的估算，来衡量当前上下文。估算时每个中日韩字符按 1 个 token 计。
+- **大的工具输出**会写入 `sessions/<id>/tool-results/`。历史中只保留开头和结尾的预览，以及文件路径；换行永远不会被删除。
+- **达到预算的约 78% 时**，最近对话之外的旧工具结果会被替换成一行占位符，写明工具、参数、大小和可以重新读取的文件。如果仍然不够，最近约 25% 之前的全部内容会由副模型（没有则用主模型）按对话所用的语言总结。摘要分为八个小节：目标与最新指令、决策、文件、事实与错误、偏好、已完成工作、待办和需要记住的事项。保存的历史变为一条「[上下文已压缩]」消息加上最近的消息。被移除的消息会追加到 `sessions/<id>/transcript.jsonl`，代理可以读取它。正在处理的请求不会丢失：它离开最近的部分后，压缩消息会把它作为之前的请求逐字保留（特别长的会从中间截短，并附说明）；同一次运行还在进行时，每次发给模型的请求都会说明这就是当前任务。之后的运行只把它当作历史。
+- **滚动摘要**：下一次压缩只把新消息合并进上一次的摘要。压缩后，Artemis 会重新附上任务清单、正在处理的文件的最新内容和进行中的动作。只会重新附上代理自己成功读取或写入过的文件，而且这些文件必须在工作区内、不是敏感文件（密钥、`.env` 等），并且权限设置允许读取。摘要模型失败时，改用一定能放进窗口的机械摘要。很早、很长的历史不会整段发送：较近的部分交给摘要模型，较早的部分变成你的消息列表，每条一行短句。如果这样仍然太长，列表会保留最早和最近的消息，中间的均匀抽取，并注明这一点。连续失败 3 次后摘要模型会暂停，在 2 次压缩或 30 分钟后再试。被取消的运行不算失败。
+- **不可信内容**：摘要模型会被告知，工具和网页输出只是数据而不是指令，目标只来自你的消息。摘要放回对话时包在 `<conversation_summary>` 标签里，并标明是数据。
+- **完整历史**：`artemis session show <id>` 按聊天界面的样子输出对话：你的消息和代理的回复，按顺序排列，包括归档在 `transcript.jsonl` 中的部分，不包括工具消息、压缩标记和每次运行的上下文。默认返回最近 500 条；用 `history.hasMore` 和 `history.nextBefore` 配合 `--before <id>`（以及 `--limit N`）向前翻页。`--full` 输出包含工具输出的全部消息（用于调试），`--live` 原样输出保存的记录。查看会话不会修改任何文件。`artemis session delete <id>` 会同时删除该会话的上下文文件和它的子代理会话。
+- **文件与加锁**：会话文件先写入临时文件再改名替换，读取方不会读到写了一半的文件。上下文文件只有你自己可以读取（文件 0600，目录 0700）。每个会话的 `tool-results/` 目录上限为 200MB：先删除对话已不再引用的最旧文件，仍被引用的文件即使超出上限也会保留。命令行把它们放在 `~/.artemis/context/` 下。同一个会话同一时间只由一个进程运行，第二个进程最多等待 30 秒（`ARTEMIS_SESSION_LOCK_TIMEOUT_MS`），之后 `artemis execute` 以退出码 **75** 结束，并输出 `CLI Error: 这个对话正在处理另一个任务，请稍后再试。`持有锁的进程一分钟没有刷新时，锁会被接管。会话文件重试几次后仍无法读取时，会被移到 `<id>.json.corrupt-<时间>`，会话重新开始。
+- **超窗恢复**：如果服务商仍然因为过长拒绝请求，Artemis 会更大力度地压缩、重试一次并保存结果，聊天桥接不会反复撞上同一个超窗错误。
+- **提示缓存**：系统提示和保存的历史在各次请求、各次运行之间保持字节完全一致。每次请求相关的上下文（召回的记忆、激活的技能、证据）放在对话之后的一条消息里，并且不会保存，因此缓存的前缀可以复用。
+- **成本上限**：托管运行（`artemis execute`、网页会话、聊天桥接）默认把上下文限制在 **200K tokens**，因此 1M 窗口的模型在 200K 的约 78% 处压缩，而不是 1M 的约 78%。交互式命令行使用完整窗口。要修改上限，可设置 `setup.agent.compression.maxContextTokens`（优先）或环境变量 `ARTEMIS_MAX_CONTEXT_TOKENS`（供服务器或部署配置使用），两者同样作用于命令行。设为 `0` 或 `off` 表示不设上限。
+- **输出预留**：预算会为模型的输出上限（设置了平台 `maxOutputTokens` 时以它为准）预留空间，最多占窗口的四分之一，另加 5% 余量。因此只要请求在预算内，适配器总能按原值发送这个 `max_tokens`。
+- **设置**（`setup.agent.compression`）：`enabled: false` 关闭主动压缩（超窗恢复仍然生效），`threshold` 调整 78% 的触发点，`maxContextTokens` 设置上面所说的上限。
 
 #### 4. 视觉生成系统
 

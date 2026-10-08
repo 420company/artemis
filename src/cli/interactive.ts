@@ -200,7 +200,7 @@ function renderLiveWorkflowViewport(state: LiveWorkflowRenderState): void {
 import path from 'node:path'
 import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
-import { think, resetSession, getMessages, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
+import { think, resetSession, getMessages, getActiveContextState, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
@@ -1724,7 +1724,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       : await sessionStore.loadLatest()
     if (loaded) {
       storedSession = loaded
-      restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary }, workspaceRoot)
+      restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary, contextState: loaded.metadata?.context, sessionId: loaded.id }, workspaceRoot)
       hud.sessionMessageCount = loaded.messages.length
       hud.sessionTotalTokens = 0
     }
@@ -3329,7 +3329,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           }
           if (loaded) {
             storedSession = loaded
-            restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary }, workspaceRoot)
+            restoreSessionStateForCwd({ messages: loaded.messages, summary: loaded.summary, contextState: loaded.metadata?.context, sessionId: loaded.id }, workspaceRoot)
             hud.sessionMessageCount = loaded.messages.length
             hud.sessionTotalTokens = 0
             rebuildScrollBlocksFromMessages()
@@ -4507,7 +4507,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // auto-save session
     const messages = getMessages()
     if (storedSession) {
-      storedSession = { ...storedSession, messages, updatedAt: new Date().toISOString() }
+      const contextState = getActiveContextState()
+      storedSession = {
+        ...storedSession,
+        messages,
+        ...(contextState ? { metadata: { ...(storedSession.metadata ?? {}), context: contextState } } : {}),
+        updatedAt: new Date().toISOString(),
+      }
     } else {
       storedSession = Object.assign(sessionStore.createSession(), { messages, summary: getCompressionSummary(workspaceRoot) ?? '' })
     }

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
+import { RUNTIME_CONTEXT_MESSAGE_NAME } from './providers/runtimeContext.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -18,23 +19,29 @@ import {
     prepareUserImagesForModel,
     type VisionHelper,
 } from './core/visionHelper.js';
-import { compressMessages, type CompressResult } from './core/contextCompressor.js';
-import { estimateTokens, estimateMessageTokens, estimateMessagesTokens } from './core/tokenEstimation.js';
+import { estimateTokens, estimateMessagesTokens, estimateToolSchemaTokens } from './core/tokenEstimation.js';
 import {
-  recordCollapse,
-  getOrCreateLedger,
-  buildPostCompactRecoveryMessages,
-  createFileStateSnapshot,
-  saveFileArtifact,
-  recordCompressionFailure,
-  recordCompressionSuccess,
-  recordCompressionTriggered,
-  getThresholdMultiplier,
-  isCircuitBreakerTripped,
-  createCircuitBreakerState,
-  recordTurnCompleted,
-} from './core/collapse/index.js';
-import type { CircuitBreakerState, CollapseEntry } from './core/collapse/index.js';
+    ContextOverflowError,
+    buildContextOverflowMessage,
+    createContextStorage,
+    detectConversationLanguage,
+    getCompactionSummary,
+    isContextOverflowError,
+    manageContext,
+    carriedRequestNote,
+    measureContext,
+    normalizeContextState,
+    providerPromptTokens,
+    recordProviderUsage,
+    resolveContextBudget,
+    resolveMaxContextTokens,
+    spillToolResultIfLarge,
+    type ContextBudget,
+    type ContextState,
+    type ContextStorage,
+    type ManageReason,
+    type SummarizeFn,
+} from './core/compaction/index.js';
 import {
     isRecoveryMessage,
     projectDirectToolNames,
@@ -141,11 +148,6 @@ let systemPromptSuffix: string = '';
 // TODO: this id is outdated; move to a current model once the env-only
 // fallback is re-validated (hosted deployments always configure a profile).
 export const ENV_FALLBACK_ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
-// Cheap model summarizeOnce tries first on a single Anthropic-key profile.
-// TODO: this id is outdated and ignores the configured profile; prefer the
-// specialist/worker profile model (already used when dual-model is active)
-// or make it configurable instead of hard-coding a Haiku snapshot.
-const LEGACY_SUMMARY_MODEL = 'claude-haiku-4-5-20251001';
 // Runtime overrides from CLI flags (--model, --api-key, --base-url)
 let _modelOverride: any;
 let _apiKeyOverride: any;
@@ -154,6 +156,10 @@ let _baseUrlOverride: any;
 let _effortOverride: any;
 let _lastPromptTokens = 0;
 let _compressionThresholdOverride: number | undefined;
+// setup.agent.compression: enabled=false turns off proactive compaction
+// (overflow recovery stays on); maxContextTokens caps the window for cost.
+let _compressionEnabled = true;
+let _compressionMaxContextTokens: number | undefined;
 // ── Dual-model worker provider ──────────────────────────────────────────────
 // When the user configures a "specialist" profile (smaller/cheaper model),
 // it's loaded here. Used for: summarization, compression, bulk digestion,
@@ -171,8 +177,16 @@ let setupToolCache:
     }
     | null = null;
 
-/** Read last recorded prompt token count (for HUD / compression decisions). */
+/**
+ * Input size of the most recent provider request (cache reads and writes
+ * included): the current context size, for the HUD. Not a sum across rounds.
+ */
 export function getLastPromptTokens() { return _lastPromptTokens; }
+
+function noteRequestPromptTokens(usage: ProviderResponse['usage'] | undefined): void {
+    const tokens = providerPromptTokens(usage) ?? usage?.promptTokens;
+    if (typeof tokens === 'number' && tokens > 0) _lastPromptTokens = tokens;
+}
 
 /** Apply CLI flag overrides. Call once before first think(). */
 export function applyProviderOverrides(opts: any) {
@@ -283,18 +297,18 @@ function buildCheckpointInstruction(locale = 'zh'): string {
     if (locale === 'en') {
         return [
             '',
-            '[Task checkpoint / anti-amnesia]',
-            '- Artemis writes your FULL task state to a local checkpoint file under ~/.artemis/checkpoints/ every time the context is compressed.',
-            "- If you have just been compressed and are unsure of the task state, list that directory and read the most recent .md (its 当前状态 / current-state block) to recover the goal, progress, and next step BEFORE continuing.",
-            '- Never restart a task from scratch when a checkpoint exists — recover from it.',
+            '[Context compaction / anti-amnesia]',
+            '- Long conversations are compacted automatically. When the history starts with a "[Context compacted]" message, it holds a structured summary of the earlier conversation (goals, decisions, files, open work) and names the archive file with the full earlier history.',
+            '- Read that archive with read_file or search_files when exact earlier details matter. Old tool results may be replaced by one-line placeholders naming the file that holds the full output.',
+            '- Never restart a task from scratch after a compaction — continue from the summary.',
         ].join('\n');
     }
     return [
         '',
-        '[任务存档 / 防失忆]',
-        '- 每次上下文被压缩时，Artemis 都会把你完整的任务状态写进本地存档文件（~/.artemis/checkpoints/ 目录下，按工作区命名）。',
-        '- 如果你刚被压缩、对当前任务状态不确定，先列出该目录、读取最新的 .md（看它的「📍 当前状态」段），恢复目标、进度、下一步，再继续。',
-        '- 有存档就别从头重做任务——从存档里恢复。',
+        '[上下文压缩 / 防失忆]',
+        '- 长对话会被自动压缩。如果历史以「[上下文已压缩]」消息开头，它包含之前对话的结构化摘要（目标、决策、文件、待办），并给出完整早期历史的归档文件路径。',
+        '- 需要原文细节时，用 read_file 或 search_files 读取该归档。旧的工具输出可能被替换为一行占位符，其中写明完整输出所在的文件。',
+        '- 压缩之后不要从头重做任务——从摘要继续。',
     ].join('\n');
 }
 
@@ -524,6 +538,8 @@ async function loadProvider(cwd: string = process.cwd()) {
     let config = store.getDefaultMainProfile(data);
     let telemetryCwd = currentCwd;
     _compressionThresholdOverride = data.setup?.agent.compression.threshold;
+    _compressionEnabled = data.setup?.agent.compression.enabled !== false;
+    _compressionMaxContextTokens = data.setup?.agent.compression.maxContextTokens;
     // 2. Fallback: try global ~/.artemis/providers.json
     if (!config) {
         const artemisHome = resolveArtemisHomeDir();
@@ -533,6 +549,8 @@ async function loadProvider(cwd: string = process.cwd()) {
         if (config) {
             telemetryCwd = artemisHome;
             _compressionThresholdOverride = globalData.setup?.agent.compression.threshold;
+            _compressionEnabled = globalData.setup?.agent.compression.enabled !== false;
+            _compressionMaxContextTokens = globalData.setup?.agent.compression.maxContextTokens;
         }
     }
     // 3. Fallback: read ANTHROPIC_API_KEY from environment
@@ -741,115 +759,113 @@ export function resetSession() {
 }
 
 /**
- * One-shot LLM call for compression/summarization — does NOT touch the active session.
- *
- * Strategy (in order):
- *  1. Anthropic → try claude-haiku (cheap), fall back to configured main model if haiku unavailable
- *  2. Any other provider → use provider's complete() with the configured model
- *
- * If everything fails, throws — caller (compressMessages) catches and downgrades to Phase 1.
+ * Bridges and the CLI swap stored sessions in and out of the single active
+ * session; per-session context state must not leak from one to the next.
  */
-export const summarizeOnce = async (prompt: any) => {
-    // ── Dual-model path: prefer specialist (worker) profile if configured ────
-    // The user explicitly set up two models for a reason — use the cheap one
-    // here. Falls back to the legacy single-model logic below on failure.
-    await loadProvider(); // make sure the lead is loaded
-    const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
-    const dualModelActive = workerCfg && workerCfg !== providerConfig;
-    if (dualModelActive) {
-        try {
-            if (workerCfg.protocol === 'messages' && typeof workerCfg.apiKey === 'string' && workerCfg.apiKey.startsWith('sk-ant')) {
-                const client = new Anthropic({ apiKey: workerCfg.apiKey, baseURL: workerCfg.baseUrl });
-                const resp = await client.messages.create({
-                    model: workerCfg.model,
-                    max_tokens: 4096,
-                    messages: [{ role: 'user', content: prompt }],
-                });
-                const block = resp.content[0];
-                return block?.type === 'text' ? block.text : '';
-            }
-            // Generic worker path
-            const sysMsg = {
-                id: 'sum-sys', role: 'system' as const,
-                content: 'You are a conversation summary assistant.', createdAt: new Date().toISOString(),
-            };
-            const userMsg = {
-                id: 'sum-usr', role: 'user' as const,
-                content: prompt, createdAt: new Date().toISOString(),
-            };
-            const result = await workerP.complete([sysMsg, userMsg]);
-            recordBifrostAudit('compression', estimateResponseUsage(result, [sysMsg, userMsg]), [sysMsg, userMsg]);
-            return result.text;
-        } catch (workerErr) {
-            // Worker failed — fall through to legacy haiku-first path on lead
-            void workerErr;
-        }
+function resetContextState(activeSession: Session, contextState?: unknown, sessionId?: string): void {
+    activeSession.deleteContext('compressionSummary');
+    // A stored session brings its own state (anchor, breaker, compaction
+    // index, calibration); anything else starts fresh.
+    if (contextState && typeof contextState === 'object') {
+        activeSession.setContext('contextState', normalizeContextState(contextState));
+    } else {
+        activeSession.deleteContext('contextState');
     }
+    activeSession.setContext('contextSessionId', sessionId ?? newContextSessionId());
+}
 
-    // ── Single-model legacy path: try haiku first, fall back to configured ──
-    const p = await loadProvider();
-    const cfg = providerConfig;
-    if (cfg?.protocol === 'messages' && cfg.apiKey?.startsWith('sk-ant')) {
-        const client = new Anthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseUrl });
-        const tryModel = async (model: any) => {
-            const resp = await client.messages.create({
-                model,
-                max_tokens: 4096,
-                messages: [{ role: 'user', content: prompt }],
-            });
-            const block = resp.content[0];
-            return block?.type === 'text' ? block.text : '';
-        };
-        try {
-            return await tryModel(LEGACY_SUMMARY_MODEL);
-        }
-        catch (haikusErr) {
-            const mainModel = cfg.model ?? ENV_FALLBACK_ANTHROPIC_MODEL;
-            if (mainModel === LEGACY_SUMMARY_MODEL) throw haikusErr;
-            return await tryModel(mainModel);
-        }
-    }
-    // ── Generic provider path ─────────────────────────────────────────────────
-    const sysMsg = {
-        id: 'sum-sys', role: 'system',
-        content: 'You are a conversation summary assistant.', createdAt: new Date().toISOString(),
-    };
-    const userMsg = {
-        id: 'sum-usr', role: 'user',
-        content: prompt, createdAt: new Date().toISOString(),
-    };
-    const result = await p.complete([sysMsg, userMsg]);
-    recordBifrostAudit('compression', estimateResponseUsage(result as ProviderResponse, [sysMsg as SessionMessage, userMsg as SessionMessage]), [sysMsg as SessionMessage, userMsg as SessionMessage]);
-    return result.text;
+function newContextSessionId(): string {
+    return `cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Context-management state of the active session, for callers that persist
+ * it with their stored session (bridges keep it in metadata.context).
+ */
+export function getActiveContextState(): ContextState | undefined {
+    const state = session?.getContext('contextState');
+    return state ? normalizeContextState(state) : undefined;
+}
+
+async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: string, auditRole: 'worker' | 'compression', abortSignal?: AbortSignal): Promise<string> {
+    const messages: SessionMessage[] = [
+        { id: 'sum-sys', role: 'system', content: system, createdAt: new Date().toISOString() },
+        { id: 'sum-usr', role: 'user', content: prompt, createdAt: new Date().toISOString() },
+    ];
+    if (abortSignal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    const result = await p.complete(messages, abortSignal ? { abortSignal } : undefined);
+    recordBifrostAudit(auditRole, estimateResponseUsage(result, messages), messages);
+    return result.text ?? '';
+}
+
+/**
+ * Summarization call used by context compaction: the worker (specialist)
+ * model when one is configured, else the main model; falls back to the main
+ * model when the worker fails. No model id is hard-coded.
+ */
+const summarizeForCompactionWith = async (
+    { system, prompt, attempt }: Parameters<SummarizeFn>[0],
+    abortSignal?: AbortSignal,
+): Promise<string> => {
+    const lead = await loadProvider(providerCwd ?? process.cwd());
+    const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
+    // First try: the worker when one is configured. The single retry goes to
+    // the main model; the context manager charges both to one input budget.
+    const useWorker = (attempt ?? 0) === 0 && workerCfg && workerCfg !== providerConfig && workerP;
+    return completeSummaryPrompt(useWorker ? workerP : lead, system, prompt, 'compression', abortSignal);
 };
+
+const summarizeForCompaction: SummarizeFn = (request) => summarizeForCompactionWith(request);
+
+/** Context window of the model compaction summaries go to. */
+async function resolveSummarizerWindow(): Promise<number | undefined> {
+    try {
+        const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
+        if (workerCfg && workerCfg !== providerConfig) {
+            return workerP?.contextWindow ?? getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength, hasPlatformCapabilities(workerCfg));
+        }
+    } catch { /* fall back to the lead window */ }
+    return undefined;
+}
+
+/**
+ * One-shot LLM call for summarization — does NOT touch the active session.
+ * Uses the worker model when configured, else the main model.
+ */
+export const summarizeOnce = async (prompt: any): Promise<string> =>
+    summarizeForCompaction({ system: 'You are a conversation summary assistant.', prompt: String(prompt ?? '') });
 
 /** Restore a saved session's messages into the active session. */
 export function restoreSession(messages: any) {
     const activeSession = getSession();
     activeSession.restore(messages);
-    activeSession.deleteContext('compressionSummary');
+    resetContextState(activeSession);
 }
 
 export function restoreSessionForCwd(messages: any, cwd: string) {
     const activeSession = getSession(cwd);
     activeSession.restore(messages);
-    activeSession.deleteContext('compressionSummary');
+    resetContextState(activeSession);
 }
 
-export function restoreSessionStateForCwd(state: { messages: any; summary?: string }, cwd: string) {
+/**
+ * Restore a stored session. `summary` is accepted for compatibility but not
+ * re-injected: the rolling summary lives in the compaction boundary message
+ * at the start of `messages`, and older sessions kept their full raw history.
+ */
+export function restoreSessionStateForCwd(
+    state: { messages: any; summary?: string; contextState?: unknown; sessionId?: string },
+    cwd: string,
+) {
     const activeSession = getSession(cwd);
     activeSession.restore(state.messages);
-    const summary = typeof state.summary === 'string' ? state.summary.trim() : '';
-    if (summary) {
-        activeSession.setContext('compressionSummary', summary);
-    } else {
-        activeSession.deleteContext('compressionSummary');
-    }
+    resetContextState(activeSession, state.contextState, state.sessionId);
 }
 
+/** The rolling compaction summary of the active session, if it was compacted. */
 export function getCompressionSummary(cwd: string = process.cwd()): string | undefined {
-    const summary = getSession(cwd).getContext('compressionSummary');
-    return typeof summary === 'string' && summary.trim() ? summary : undefined;
+    const summary = getCompactionSummary(getSession(cwd).getMessages());
+    return summary && summary.trim() ? summary : undefined;
 }
 
 /** Return current messages (for session persistence). */
@@ -875,8 +891,6 @@ export function providerInfo() {
 }
 
 // ── Context budget awareness ──────────────────────────────────────────────────
-const BUDGET_WARN_PCT = 0.70; // inject warning at 70%
-const BUDGET_ALERT_PCT = 0.88; // inject stronger warning at 88%
 const READ_FILE_HISTORY_INVALIDATING_TOOLS = new Set([
     'write_file',
     'insert_in_file',
@@ -967,22 +981,6 @@ function getConfiguredContextLimit(model: string | undefined, contextLength?: nu
     return estimateContextLimit(model ?? '', normalizeContextLimit(contextLength), authoritative);
 }
 
-function buildBudgetNote(promptTokens: any, model: any, contextLength?: number, authoritative = false) {
-    if (promptTokens <= 0)
-        return '';
-    const limit = getConfiguredContextLimit(model, contextLength, authoritative);
-    const pct = promptTokens / limit;
-    if (pct < BUDGET_WARN_PCT)
-        return '';
-    const pctStr = Math.round(pct * 100);
-    const usedStr = fmtTok(promptTokens);
-    const limStr = fmtTok(limit);
-    if (pct >= BUDGET_ALERT_PCT) {
-        return `\n\n[⚠ CONTEXT CRITICAL: ${pctStr}% used (${usedStr}/${limStr}). Give the shortest possible answer. Strongly suggest the user starts a new session.]`;
-    }
-    return `\n\n[Context usage: ${pctStr}% (${usedStr}/${limStr}). Prefer concise answers.]`;
-}
-
 function estimateConversationTokens(messages: SessionMessage[]): number {
     // 统一走 core/tokenEstimation（UTF-8 字节/4 + 图片常数），中文不再低估。
     return estimateMessagesTokens(messages);
@@ -992,8 +990,6 @@ async function buildRuntimeSystemMessages(
     systemPrompt: string,
     conversationMessages: SessionMessage[],
     model?: string,
-    contextLength?: number,
-    contextAuthoritative = false,
 ): Promise<SessionMessage[]> {
     const runtimeMessages = [makeSessionMessage('system', systemPrompt)];
     if (!model) {
@@ -1011,256 +1007,9 @@ async function buildRuntimeSystemMessages(
             runtimeMessages.push(makeSessionMessage('system', skillsSection));
         }
     }
-
-    const estimatedTokens = Math.round(estimateConversationTokens(conversationMessages));
-    const budgetNote = buildBudgetNote(estimatedTokens, model, contextLength, contextAuthoritative).trim();
-    if (budgetNote) {
-        runtimeMessages.push(makeSessionMessage('system', budgetNote));
-    }
+    // No context-usage note: it changed the system prompt every turn (breaking
+    // the prompt cache) and compaction now keeps the context within budget.
     return runtimeMessages;
-}
-
-// ── Circuit breaker state (per session) ─────────────────────────────────────
-const sessionCircuitBreakers = new Map<string, CircuitBreakerState>()
-
-function getCircuitBreaker(sessionId: string): CircuitBreakerState {
-  let state = sessionCircuitBreakers.get(sessionId)
-  if (!state) {
-    state = createCircuitBreakerState()
-    sessionCircuitBreakers.set(sessionId, state)
-  }
-  return state
-}
-
-// Tool names that count as "real progress" between compressions. If the
-// compressor keeps firing but none of these appear in the messages since
-// the last compression, it's a rumination loop and the circuit breaker
-// will escalate the compression threshold.
-const COMPRESSION_PROGRESS_TOOLS = new Set([
-  'write_file',
-  'insert_in_file',
-  'replace_in_file',
-  'apply_patch',
-  'create_file',
-  'delete_file',
-])
-
-interface ExtractedPendingIntent {
-  text: string
-  lastTool?: {
-    name: string
-    target?: string
-    toolUseId?: string
-    outcome: 'success' | 'failure' | 'pending'
-  }
-}
-
-function extractTextFromAssistant(m: SessionMessage): string {
-  let text = typeof m.content === 'string' ? m.content : ''
-  if (!text && Array.isArray(m.contentBlocks)) {
-    const textBlocks: string[] = []
-    for (const block of m.contentBlocks as unknown[]) {
-      if (block && typeof block === 'object') {
-        const b = block as { type?: string; text?: string }
-        if (b.type === 'text' && typeof b.text === 'string') textBlocks.push(b.text)
-      }
-    }
-    text = textBlocks.join('\n')
-  }
-  return text.trim()
-}
-
-/**
- * Extract a "target hint" from a tool call's input. Different tools store
- * the operand under different keys (file_path, path, command, …) — we try
- * a small ordered list and fall back to the first 120 chars of stringified
- * input. Never throws.
- */
-function extractToolTarget(toolName: string, input: unknown): string | undefined {
-  if (input == null) return undefined
-  let parsed: Record<string, unknown> | null = null
-  if (typeof input === 'string') {
-    try { parsed = JSON.parse(input) as Record<string, unknown> } catch { return input.slice(0, 120) }
-  } else if (typeof input === 'object') {
-    parsed = input as Record<string, unknown>
-  }
-  if (!parsed) return undefined
-  for (const key of ['file_path', 'filePath', 'path', 'target', 'targetFile', 'src', 'source']) {
-    const v = parsed[key]
-    if (typeof v === 'string' && v.length > 0) return v
-  }
-  if (typeof parsed.command === 'string') return parsed.command.slice(0, 120)
-  if (typeof parsed.cmd === 'string') return parsed.cmd.slice(0, 120)
-  // Last resort: stringify the smallest sensible field
-  try {
-    const s = JSON.stringify(parsed)
-    return s.length > 160 ? s.slice(0, 160) + '…' : s
-  } catch { return undefined }
-}
-
-/**
- * Inspect an assistant message for its most recent tool call (Anthropic
- * tool_use block OR OpenAI-style toolCalls). Returns the tool name + a
- * "target" hint + the tool_use id so we can later match a tool_result.
- */
-function extractLastToolCall(m: SessionMessage): { name: string; target?: string; toolUseId?: string } | null {
-  // Anthropic contentBlocks path
-  if (Array.isArray(m.contentBlocks)) {
-    for (let i = m.contentBlocks.length - 1; i >= 0; i--) {
-      const block = m.contentBlocks[i]
-      if (block && typeof block === 'object') {
-        const b = block as { type?: string; name?: string; input?: unknown; id?: string }
-        if (b.type === 'tool_use' && typeof b.name === 'string') {
-          return {
-            name: b.name,
-            target: extractToolTarget(b.name, b.input),
-            toolUseId: typeof b.id === 'string' ? b.id : undefined,
-          }
-        }
-      }
-    }
-  }
-  // OpenAI toolCalls path
-  if (Array.isArray(m.toolCalls) && m.toolCalls.length > 0) {
-    const tc = m.toolCalls[m.toolCalls.length - 1]!
-    return {
-      name: tc.name,
-      target: extractToolTarget(tc.name, tc.arguments),
-      toolUseId: tc.id,
-    }
-  }
-  return null
-}
-
-/**
- * Determine outcome of a tool_use by scanning subsequent messages for a
- * matching tool_result. Heuristics for failure detection mirror
- * looksLikeToolFailure in contextCompressor.ts.
- */
-function classifyToolOutcome(
-  messages: SessionMessage[],
-  fromIdx: number,
-  toolUseId: string | undefined,
-): 'success' | 'failure' | 'pending' {
-  for (let j = fromIdx + 1; j < messages.length; j++) {
-    const r = messages[j]!
-    if (r.role !== 'tool') continue
-    if (toolUseId && r.toolUseId && r.toolUseId !== toolUseId) continue
-    const content = (r.content ?? '').toLowerCase()
-    if (
-      content.includes('"ok": false') ||
-      content.includes('tool_invalid_arguments') ||
-      content.includes('execution error') ||
-      content.includes('error:') ||
-      content.includes('failed')
-    ) return 'failure'
-    return 'success'
-  }
-  return 'pending'
-}
-
-/**
- * Extract the last substantive assistant text from the conversation tail
- * AND, if present, structured information about the tool the model was
- * invoking. Both halves are useful: text gives intent in natural language,
- * lastTool gives the concrete operation (file path / command / outcome).
- */
-function extractLastAssistantIntent(messages: SessionMessage[]): ExtractedPendingIntent | null {
-  let text: string | null = null
-  let lastTool: ExtractedPendingIntent['lastTool'] | undefined
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!
-    if (m.role !== 'assistant') continue
-
-    if (!text) {
-      const t = extractTextFromAssistant(m)
-      if (t.length >= 20) text = t
-    }
-    if (!lastTool) {
-      const tool = extractLastToolCall(m)
-      if (tool) {
-        lastTool = {
-          name: tool.name,
-          target: tool.target,
-          toolUseId: tool.toolUseId,
-          outcome: classifyToolOutcome(messages, i, tool.toolUseId),
-        }
-      }
-    }
-    if (text && lastTool) break
-  }
-  if (!text && !lastTool) return null
-  return { text: text ?? '', lastTool }
-}
-
-/**
- * Extract the latest user message content as "current focus" — passed to the
- * worker summarizer so it can drop stale topics (e.g. "artemix read-only mode")
- * that no longer apply to the current task. Without this, previousSummary
- * propagates dead task lines indefinitely.
- */
-function extractCurrentUserFocus(messages: SessionMessage[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!
-    if (m.role !== 'user') continue
-    const text = typeof m.content === 'string' ? m.content.trim() : ''
-    if (text.length < 5) continue
-    // Skip system-style markers used for compression summary or recovery
-    if (text.startsWith('[系统：') || text.startsWith('═══')) continue
-    return text.length > 800 ? text.slice(0, 800) : text
-  }
-  return null
-}
-
-function countProgressOpsSince(
-  messages: SessionMessage[],
-  sinceMs: number,
-): number {
-  // If no prior compression timestamp, fall back to scanning the recent tail
-  // so we don't escalate spuriously on the first compression of a session.
-  const useTimestamp = sinceMs > 0
-  let count = 0
-  const start = useTimestamp ? 0 : Math.max(0, messages.length - 30)
-  for (let i = start; i < messages.length; i++) {
-    const m = messages[i]!
-    if (m.role !== 'tool' || !m.name) continue
-    if (!COMPRESSION_PROGRESS_TOOLS.has(m.name)) continue
-    if (useTimestamp) {
-      const t = m.createdAt ? new Date(m.createdAt).getTime() : 0
-      if (t && t < sinceMs) continue
-    }
-    count += 1
-  }
-  return count
-}
-
-// ── 机械兜底截断（不依赖模型）─────────────────────────────────────────────
-// 智能摘要失败 / 断路器跳闸时，保证发给模型的永远 ≤ 窗口（留 15% 余量）。
-// 保留[上次成功摘要] + [最近能塞下的若干轮]，并避开 tool_use/tool_result 配对断裂。
-function mechanicalTruncateToFit(
-    messages: SessionMessage[],
-    summaryText: string | undefined,
-    availableLimit: number,
-): SessionMessage[] {
-    const est = (m: SessionMessage) => estimateMessageTokens(m);
-    const budget = Math.floor(Math.max(8_000, availableLimit) * 0.85);
-    const summaryMsg: SessionMessage[] = summaryText
-        ? [{ id: 'mech-summary', role: 'user', content: '[早期对话已压缩为摘要]\n' + summaryText, createdAt: new Date().toISOString() } as SessionMessage]
-        : [];
-    let used = summaryMsg.reduce((s, m) => s + est(m), 0);
-    const kept: SessionMessage[] = [];
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const t = est(messages[i]!);
-        if (kept.length > 0 && used + t > budget) break;
-        kept.unshift(messages[i]!);
-        used += t;
-    }
-    // 避免开头是孤儿 tool_result（其 assistant 工具调用已被截掉），否则 provider 会 400
-    while (kept.length > 1 && ((kept[0]!.role as string) === 'tool' || (kept[0]!.role as string) === 'tool_result')) {
-        kept.shift();
-    }
-    return [...summaryMsg, ...kept];
 }
 
 // ── 防失忆存档日志（CHECKPOINT）─────────────────────────────────────────────
@@ -1313,349 +1062,6 @@ async function writeCheckpointJournal(
         ].join('\n');
         await writeFile(file, content, 'utf8');
     } catch { /* 存档绝不能拖垮主流程 */ }
-}
-
-// ── 活动状态 reminder ────────────────────────────────────────────────────────
-// full compact 重建结构时注入 tail 之前的独立小消息（非垫尾）。只在压缩前确实
-// 存在进行中动作/运行中后台任务时才生成，替代旧的 postCompactRecovery 垫尾回放。
-function buildActiveStateReminder(pendingIntent: ExtractedPendingIntent | null): string | undefined {
-    const sections: string[] = [];
-    if (pendingIntent && (pendingIntent.text.trim().length >= 10 || pendingIntent.lastTool)) {
-        const lines = ['## 进行中动作'];
-        if (pendingIntent.lastTool) {
-            const tool = pendingIntent.lastTool;
-            lines.push(`- 最近调用工具：${tool.name}${tool.target ? `（${tool.target}）` : ''}，结果：${tool.outcome}`);
-        }
-        if (pendingIntent.text.trim().length >= 10) {
-            lines.push(`- 压缩前你的原话：${pendingIntent.text.replace(/\s+/g, ' ').slice(0, 600)}`);
-        }
-        sections.push(lines.join('\n'));
-    }
-    try {
-        const running = getBackgroundTaskRegistry().listActive();
-        if (running.length > 0) {
-            sections.push([
-                '## 运行中后台任务',
-                ...running.slice(0, 8).map((task) =>
-                    `- ${task.id} [${task.kind}] ${task.label}（已运行 ${Math.round((Date.now() - task.startedAtMs) / 1000)}s）`),
-            ].join('\n'));
-        }
-    } catch { /* 后台任务注册表不可用时静默跳过 */ }
-    if (sections.length === 0) return undefined;
-    return [
-        '[系统：压缩后活动状态提醒——以下动作/任务在压缩前仍在进行，若已完成或用户已改方向请忽略]',
-        '',
-        ...sections,
-    ].join('\n');
-}
-
-async function compressSessionMessagesForProvider(
-    activeSession: Session,
-    conversationMessages: SessionMessage[],
-    model?: string,
-    contextLength?: number,
-    reservedTokens = 0,
-    onInfo?: (message: string) => void,
-    forceShrink?: number,
-    locale: 'en' | 'zh' = 'zh',
-    contextAuthoritative = false,
-): Promise<{ messages: SessionMessage[]; summaryText?: string }> {
-    const t = (zh: string, en: string): string => (locale === 'en' ? en : zh);
-    if (!model) {
-        return { messages: conversationMessages };
-    }
-
-    // ── 空返回急救：调用方强制把上下文压到很小，让噎住的模型拿到干净小 payload 重试。
-    //    恢复记忆由硬盘上的 checkpoint 存档兜底，所以这里丢掉大量历史是安全的。
-    if (forceShrink && forceShrink > 0) {
-        const fullLimit = getConfiguredContextLimit(model, contextLength, contextAuthoritative);
-        const small = Math.max(16_000, Math.floor(fullLimit * forceShrink) - Math.max(0, Math.round(reservedTokens)));
-        onInfo?.(t(
-            `[压缩] 空返回急救：压到约 ${Math.round(forceShrink * 100)}% 窗口后重试`,
-            `[Compact] Empty-reply rescue: shrunk to ~${Math.round(forceShrink * 100)}% of window, retrying`));
-        return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, small) };
-    }
-
-    // ── Circuit breaker: skip compression if tripped ────────────────────────
-    const breaker = getCircuitBreaker(activeSession.getWorkingDirectory())
-    if (isCircuitBreakerTripped(breaker)) {
-      onInfo?.(t('[压缩] 断路器触发，改用机械截断', '[Compact] Circuit breaker tripped; using mechanical truncation'))
-      const mtLimit = Math.max(32_000, getConfiguredContextLimit(model, contextLength, contextAuthoritative) - Math.max(0, Math.round(reservedTokens)));
-      return { messages: mechanicalTruncateToFit(conversationMessages, activeSession.getContext('compressionSummary') as string | undefined, mtLimit) };
-    }
-
-    const previousSummary = activeSession.getContext('compressionSummary') as string | undefined;
-    const fullLimit = getConfiguredContextLimit(model, contextLength, contextAuthoritative);
-    const availableLimit = Math.max(32_000, fullLimit - Math.max(0, Math.round(reservedTokens)));
-    const tokensBefore = estimateMessagesTokens(conversationMessages)
-
-    // ── Churn detection: pre-flight threshold escalation ───────────────────
-    // If this session has been rumination-looping (compressions firing
-    // without any Edit/Write progress in between), the breaker raised the
-    // threshold multiplier on the previous compression. Apply it here so
-    // microcompact triggers later this turn too.
-    const churnMultiplier = getThresholdMultiplier(breaker)
-
-    // ── Capture pending action + current focus BEFORE compression ──────────
-    // The last assistant text+toolcall becomes pendingAction so
-    // postCompactRecovery can replay it. The latest user message becomes
-    // currentFocus so the worker summarizer can drop stale topics.
-    const pendingIntent = extractLastAssistantIntent(conversationMessages)
-    if (pendingIntent) {
-      const pendingPayload: Record<string, unknown> = {
-        text: pendingIntent.text,
-        capturedAt: new Date().toISOString(),
-      }
-      if (pendingIntent.lastTool) {
-        // Drop toolUseId before storing — it's only useful at extraction time
-        pendingPayload.lastTool = {
-          name: pendingIntent.lastTool.name,
-          target: pendingIntent.lastTool.target,
-          outcome: pendingIntent.lastTool.outcome,
-        }
-      }
-      activeSession.setContext('pendingActionIntent', pendingPayload)
-    }
-    const currentFocus = extractCurrentUserFocus(conversationMessages)
-    const activeStateReminder = buildActiveStateReminder(pendingIntent)
-
-    // ── 真实 prompt token 优先 ─────────────────────────────────────────────
-    // provider 上一轮 usage（_lastPromptTokens）是权威用量，但它覆盖到最后一条
-    // assistant 消息为止且包含系统段：扣掉系统段预留，再把之后新增消息的估算
-    // 增量叠加上去。首轮没有 usage 时交给 compressMessages 用估算兜底。
-    let realPromptTokens: number | undefined
-    if (_lastPromptTokens > 0) {
-      let lastAssistantIdx = -1
-      for (let i = conversationMessages.length - 1; i >= 0; i--) {
-        if (conversationMessages[i]!.role === 'assistant') { lastAssistantIdx = i; break }
-      }
-      const newSinceLastCall = conversationMessages.slice(lastAssistantIdx + 1)
-      realPromptTokens = Math.max(0, _lastPromptTokens - Math.max(0, Math.round(reservedTokens)))
-        + estimateMessagesTokens(newSinceLastCall)
-    }
-
-    // ── Summarizer window: the summary prompt goes to the worker model, so
-    // size its INPUT by the worker's context window — not the lead's. A
-    // small-window worker handed a prompt sized for a 1M lead would overflow.
-    // Falls back to the lead window when no distinct worker is configured.
-    let summarizerTokenLimit = availableLimit;
-    try {
-      const { config: workerCfg } = await loadWorkerProvider(activeSession.getWorkingDirectory());
-      if (workerCfg && workerCfg !== providerConfig) {
-        summarizerTokenLimit = getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength, hasPlatformCapabilities(workerCfg));
-      }
-    } catch { /* worker unavailable — fall back to lead window */ }
-
-    let compression: CompressResult
-    try {
-      compression = await compressMessages(conversationMessages, summarizeOnce, {
-        tokenLimit: availableLimit,
-        summarizerTokenLimit,
-        previousSummary,
-        threshold: _compressionThresholdOverride,
-        churnMultiplier,
-        currentFocus: currentFocus ?? undefined,
-        lastPromptTokens: realPromptTokens,
-        activeStateReminder,
-        locale,
-        onInfo,
-      });
-    } catch (e: any) {
-      // Record failure in circuit breaker
-      const updatedBreaker = recordCompressionFailure(breaker, e.message)
-      sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
-      onInfo?.(t(
-        `[压缩] 摘要连续失败 ${updatedBreaker.consecutiveFailures}/3，改用机械截断`,
-        `[Compact] Summary failed ${updatedBreaker.consecutiveFailures}/3; using mechanical truncation`))
-      return { messages: mechanicalTruncateToFit(conversationMessages, previousSummary, availableLimit) };
-    }
-
-    if (compression.summaryText) {
-        activeSession.setContext('compressionSummary', compression.summaryText);
-        if (compression.compressed) {
-            void writeCheckpointJournal(
-                activeSession.getWorkingDirectory(),
-                compression.summaryText,
-                pendingIntent?.text,
-                currentFocus ?? undefined,
-            );
-        }
-    }
-
-    // ── Persistent Collapse Ledger: record the event ────────────────────────
-    if (compression.compressed) {
-      try {
-        const sessionId = activeSession.getWorkingDirectory()
-        const compressedIds = conversationMessages
-          .filter((m, i) => !compression.messages.some(cm => cm.id === m.id))
-          .map(m => m.id)
-
-        const entry: CollapseEntry = {
-          id: `collapse-${Date.now()}`,
-          collapsedAt: new Date().toISOString(),
-          tokensBefore: compression.tokensBefore ?? tokensBefore,
-          tokensAfter: compression.tokensAfter ?? estimateMessagesTokens(compression.messages),
-          compressedMessageIds: compressedIds,
-          summaryText: compression.summaryText,
-          mode: compression.mode === 'full_compact' || compression.summaryText ? 'full_compact' : 'microcompact',
-        }
-
-        // Capture current file states and tool context for recovery
-        const sessionTools = (activeSession.getContext('activeToolNames') as string[]) ?? []
-        const sessionMcp = (activeSession.getContext('activeMcpServers') as string[]) ?? []
-        const sessionSkills = (activeSession.getContext('activeSkills') as string[]) ?? []
-
-        // Extract file paths from tool messages in the conversation history.
-        // Two fixes vs the original loop:
-        //   (1) Track the LATEST reference timestamp per path, not the first.
-        //       Old loop did seenPaths.add() + continue, so first occurrence
-        //       won — meaning a file read 200 messages ago dominated over a
-        //       fresh re-read.
-        //   (2) Drop entries whose last reference is older than a sliding
-        //       cutoff so stale files don't keep getting reinjected.
-        const STALE_MSG_DISTANCE = 100   // skip files whose last ref is >100 messages back
-        const MAX_FILE_STATES = 8        // hard cap on snapshots stored
-        const latestRefByPath = new Map<string, { ts: number; msgIndex: number }>()
-        const latestMsgIndex = conversationMessages.length - 1
-
-        for (let mi = 0; mi < conversationMessages.length; mi++) {
-          const msg = conversationMessages[mi]!
-          if (msg.role !== 'tool' || !msg.name) continue
-          if (msg.name !== 'read_file' && msg.name !== 'write_file' && msg.name !== 'apply_patch') continue
-          try {
-            const parsed = JSON.parse(msg.content) as Record<string, unknown>
-            const fp = typeof parsed.path === 'string' ? parsed.path
-                     : typeof parsed.filePath === 'string' ? parsed.filePath
-                     : null
-            if (!fp) continue
-            const ts = msg.createdAt ? new Date(msg.createdAt).getTime() : Date.now()
-            const existing = latestRefByPath.get(fp)
-            if (!existing || ts >= existing.ts) {
-              latestRefByPath.set(fp, { ts, msgIndex: mi })
-            }
-          } catch { /* not JSON — skip */ }
-        }
-
-        // Apply TTL: drop files not referenced in the recent window
-        const survivors = [...latestRefByPath.entries()]
-          .filter(([, ref]) => (latestMsgIndex - ref.msgIndex) <= STALE_MSG_DISTANCE)
-          .sort((a, b) => b[1].ts - a[1].ts)
-          .slice(0, MAX_FILE_STATES)
-
-        const fileStates: import('./core/collapse/ledger.js').FileStateSnapshot[] = []
-        for (const [fp, ref] of survivors) {
-          try {
-            const { readFile: rf, stat: st } = await import('node:fs/promises')
-            const content = await rf(fp, 'utf-8')
-            const stats = await st(fp)
-            const snapshot = createFileStateSnapshot(fp, content, stats.mtimeMs, ref.ts)
-            // Persist full readable file content as an artifact so post-compact
-            // recovery can restore actionable snippets for long coding tasks
-            // instead of only the 800-char ledger head.
-            snapshot.artifactPath = await saveFileArtifact(sessionId, fp, content)
-            fileStates.push(snapshot)
-          } catch {
-            // File may have been deleted or is binary — create a minimal snapshot
-            fileStates.push({
-              filePath: fp,
-              contentHash: 'unavailable',
-              headContent: `[文件不可读: ${fp}]`,
-              mtimeMs: 0,
-              lastReferencedAt: ref.ts,
-            })
-          }
-        }
-
-        await recordCollapse(sessionId, entry, {
-          // Already TTL-filtered and sorted by recency above
-          fileStates,
-          // Do not persist compression summaries as plans. Old behavior stored
-          // generic conversation summaries here, then post-compact recovery
-          // re-injected stale cross-project tasks as "current plan".
-          planSnapshot: undefined,
-          activeTools: sessionTools,
-          activeMcpServers: sessionMcp,
-          activeSkills: sessionSkills,
-        })
-
-        // ── Post-compact recovery: re-inject critical context ───────────────
-        // Full compaction always gets recovery. Microcompact normally does not,
-        // unless it degraded old read_file outputs into skeletons while an
-        // in-flight action exists; that combination is where losing concrete
-        // file state most often causes "what was I doing?" loops.
-        const pendingActionStored = activeSession.getContext('pendingActionIntent') as
-          | {
-              text: string
-              capturedAt: string
-              lastTool?: { name: string; target?: string; outcome: 'success' | 'failure' | 'pending' }
-            }
-          | undefined
-        const shouldInjectRecovery = entry.mode === 'full_compact' || (
-          entry.mode === 'microcompact' &&
-          (compression.readFileSkeletonsExtracted ?? 0) > 0 &&
-          Boolean(pendingActionStored)
-        )
-        if (shouldInjectRecovery) {
-          const ledger = await getOrCreateLedger(sessionId)
-          // full compact 的进行中状态已由 activeStateReminder 在重建结构时注入
-          // （tail 之前的独立小消息），这里不再重复；微压缩不重建结构，仍由
-          // 恢复消息携带 pendingAction（保持 7/14 补丁的行为）。
-          const recoveryMessages = await buildPostCompactRecoveryMessages(ledger, {
-            pendingAction: entry.mode === 'full_compact' && activeStateReminder
-              ? undefined
-              : pendingActionStored,
-          })
-
-          if (recoveryMessages.length > 0) {
-            // 结构性修复：full compact 返回 tailStartIndex 时，恢复消息插到
-            // tail 近期原文之前——摘要/恢复内容永远不能垫在最新用户话语后面
-            // （7/14「恢复消息垫尾遮蔽真实请求」的结构性根治）。没有
-            // tailStartIndex（微压缩等）时保持旧的追加行为，isRecoveryMessage
-            // 仍会让 getLatestUserText 跳过它们。
-            const insertAt = typeof compression.tailStartIndex === 'number'
-              && compression.tailStartIndex >= 0
-              && compression.tailStartIndex <= compression.messages.length
-              ? compression.tailStartIndex
-              : compression.messages.length
-            compression.messages = [
-              ...compression.messages.slice(0, insertAt),
-              ...recoveryMessages,
-              ...compression.messages.slice(insertAt),
-            ]
-            const modeLabel = entry.mode === 'full_compact' ? '压缩' : '微压缩'
-            onInfo?.(`[恢复] 已为${modeLabel}注入 ${recoveryMessages.length} 条恢复消息（进行中状态/文件状态/工具）`)
-          }
-        }
-
-        // Record success in circuit breaker
-        let updatedBreaker = recordCompressionSuccess(breaker)
-        // ── Churn detection: did we see Edit/Write ops since last compression? ──
-        // If not, escalate the threshold multiplier so the next compression
-        // fires later and the model has more headroom to actually act.
-        const editsSinceLast = countProgressOpsSince(
-          conversationMessages,
-          updatedBreaker.lastCompressionAt,
-        )
-        const churnUpdate = recordCompressionTriggered(updatedBreaker, {
-          editsSinceLast,
-          now: Date.now(),
-        })
-        updatedBreaker = churnUpdate.state
-        if (churnUpdate.churnDetected) {
-          onInfo?.(t(
-            `[压缩] 检测到压缩振荡（5min 内 ${updatedBreaker.recentCompressionTimestamps.length} 次且无实质修改），阈值上调至 ${updatedBreaker.thresholdMultiplier.toFixed(2)}× 抑制空转`,
-            `[Compact] Compaction thrash detected (${updatedBreaker.recentCompressionTimestamps.length}× in 5min with no real edits); threshold raised to ${updatedBreaker.thresholdMultiplier.toFixed(2)}× to suppress churn`))
-        }
-        sessionCircuitBreakers.set(activeSession.getWorkingDirectory(), updatedBreaker)
-      } catch (ledgerError: any) {
-        // Ledger failure should never block the main compression flow
-        onInfo?.(t(
-          `[压缩] 历史记录写入失败（不影响本次压缩）：${ledgerError.message}`,
-          `[Compact] Ledger write failed (does not affect this compaction): ${ledgerError.message}`))
-      }
-    }
-
-    return { messages: compression.messages, summaryText: compression.summaryText };
 }
 
 // ── Tool definitions for Anthropic API ───────────────────────────────────────
@@ -1727,105 +1133,35 @@ type DirectToolContextOutput = {
     artifactPath?: string;
 };
 
-const TOOL_CONTEXT_INLINE_CHAR_LIMIT = 12_000;
-const TOOL_CONTEXT_HEAD_CHAR_BUDGET = 4_000;
-const TOOL_CONTEXT_TAIL_CHAR_BUDGET = 3_000;
-const TOOL_ARTIFACT_DIR = path.join(resolveArtemisHomeDir(), 'tmp', 'tool-results');
-
-function extractJsonEnvelopeOutput(text: string): { parsed: any; output: string } | null {
-    try {
-        const parsed = JSON.parse(text);
-        if (parsed && typeof parsed === 'object' && typeof parsed.output === 'string') {
-            return { parsed, output: parsed.output };
-        }
-    } catch {
-        /* not a JSON tool envelope */
-    }
-    return null;
+/**
+ * Tool output as it enters the history. Output above the inline budget is
+ * written to the session's tool-results directory and replaced by a preview
+ * (head and tail, newlines intact) plus the path, so nothing is cut silently.
+ */
+function prepareDirectToolContextOutput(
+    toolName: string,
+    fullOutput: string,
+    storage: ContextStorage,
+    budget: ContextBudget,
+): DirectToolContextOutput {
+    const spilled = spillToolResultIfLarge(fullOutput, {
+        storage,
+        toolName,
+        inlineTokens: budget.inlineToolResultTokens,
+        inlineReadTokens: budget.inlineReadTokens,
+        previewTokens: budget.toolPreviewTokens,
+    });
+    return { fullOutput, contextOutput: spilled.content, artifactPath: spilled.savedTo };
 }
 
-function collectHighSignalLines(text: string, maxLines = 80): string[] {
-    const patterns = [
-        /\b(error|failed|failure|exception|traceback|fatal|denied|not found|missing|warning|warn|timeout|timed out)\b/i,
-        /\b(exit_code|exit code|status|ok|sha|commit|author|date|message|filename|status_code|http|HTTP)\b/i,
-        /\b(success|succeeded|completed|passed|verified|built|done|changed|modified|created|deleted)\b/i,
-        /(?:^|[\s/])(?:src|dist|lib|bin|scripts|plugins|skills|defaults|docs|test|tests)\/[\w./@-]+/i,
-        /^[-+@]{2,}|^diff --git\b|^@@\s/,
-    ];
-    const lines = text.split('\n');
-    const picked: string[] = [];
-    const seen = new Set<string>();
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i] ?? '';
-        if (!patterns.some((pattern) => pattern.test(line))) continue;
-        const start = Math.max(0, i - 1);
-        const end = Math.min(lines.length, i + 2);
-        for (let j = start; j < end; j += 1) {
-            const candidate = (lines[j] ?? '').slice(0, 1000);
-            const key = `${j}:${candidate}`;
-            if (!seen.has(key)) {
-                seen.add(key);
-                picked.push(candidate);
-                if (picked.length >= maxLines) return picked;
-            }
-        }
-    }
-    return picked;
-}
-
-function buildLosslessToolSummary(fullOutput: string, artifactPath: string): string {
-    const envelope = extractJsonEnvelopeOutput(fullOutput);
-    const outputText = envelope?.output ?? fullOutput;
-    const head = outputText.slice(0, TOOL_CONTEXT_HEAD_CHAR_BUDGET).trimEnd();
-    const tail = outputText.slice(-TOOL_CONTEXT_TAIL_CHAR_BUDGET).trimStart();
-    const signal = collectHighSignalLines(outputText)
-        .join('\n')
-        .slice(0, 4_000)
-        .trim();
-    const omitted = Math.max(0, outputText.length - head.length - tail.length);
-    const summaryBody = [
-        '[Artemis tool result compacted for context]',
-        `Full original output saved at: ${artifactPath}`,
-        `Original chars: ${fullOutput.length}; visible output chars: ${outputText.length}; omitted chars from visible output: ${omitted}`,
-        'This compaction is evidence-preserving: if exact middle content is required, read the artifact path before making claims.',
-        signal ? '\nHigh-signal excerpts:' : undefined,
-        signal || undefined,
-        '\nHead excerpt:',
-        head,
-        '\nTail excerpt:',
-        tail,
-    ].filter((part): part is string => Boolean(part)).join('\n');
-
-    if (envelope) {
-        const compactEnvelope = {
-            ...envelope.parsed,
-            output: summaryBody,
-            artifactPath,
-            originalOutputChars: fullOutput.length,
-            contextCompacted: true,
-        };
-        return JSON.stringify(compactEnvelope, null, 2);
-    }
-
-    return summaryBody;
-}
-
-async function prepareDirectToolContextOutput(toolName: string, fullOutput: string): Promise<DirectToolContextOutput> {
-    if (fullOutput.length <= TOOL_CONTEXT_INLINE_CHAR_LIMIT) {
-        return { fullOutput, contextOutput: fullOutput };
-    }
-
-    const digest = createHash('sha256').update(fullOutput).digest('hex').slice(0, 16);
-    const safeToolName = toolName.replace(/[^a-zA-Z0-9_.-]+/g, '_').slice(0, 80) || 'tool';
-    const artifactPath = path.join(TOOL_ARTIFACT_DIR, `${Date.now()}-${safeToolName}-${digest}.txt`);
-    await mkdir(TOOL_ARTIFACT_DIR, { recursive: true });
-    await writeFile(artifactPath, fullOutput, 'utf8');
-
-    return {
-        fullOutput,
-        contextOutput: buildLosslessToolSummary(fullOutput, artifactPath),
-        artifactPath,
-    };
+/** Context files of path B sessions that have no stored session id (per workspace). */
+/**
+ * Context files of path B conversations without a stored-session directory
+ * (the interactive CLI): one directory per conversation under the workspace.
+ */
+function defaultContextDir(cwd: string, conversationId: string): string {
+    const key = createHash('sha1').update(path.resolve(cwd)).digest('hex').slice(0, 12);
+    return path.join(resolveArtemisHomeDir(), 'context', key, conversationId.replace(/[^\w.-]/g, '_'));
 }
 
 function buildDirectToolError(
@@ -2214,6 +1550,10 @@ async function executeToolInner(name: any, input: any, opts: any) {
         );
     }
     const action = { type: name, ...input };
+    // Hosted conversations (chat bridges) share the brain session between
+    // chats: a background result would land in whichever chat is active when
+    // it finishes. There the tool runs in the foreground instead.
+    if (opts.allowBackgroundTools === false) delete (action as { runInBackground?: unknown }).runInBackground;
     const errors = tool.validate?.(action) ?? [];
     if (errors.length > 0)
         return buildDirectToolValidationFailure(name, errors);
@@ -2319,6 +1659,11 @@ function makeSessionMessage(
         createdAt: new Date().toISOString(),
         ...extra,
     };
+}
+
+/** A per-request note sent after the conversation (adapters split it off; never stored). */
+function makeRuntimeContextMessage(content: string): SessionMessage {
+    return { id: 'runtime-context-request', role: 'user', name: RUNTIME_CONTEXT_MESSAGE_NAME, content, createdAt: new Date(0).toISOString() };
 }
 
 function truncateForBackground(text: string, maxLength: number): string {
@@ -2534,7 +1879,8 @@ function normalizeThinkArgs(
 function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any> {
     const usage = result.usage ?? {};
     const hasProviderPrompt = typeof usage.promptTokens === 'number' && usage.promptTokens > 0;
-    _lastPromptTokens = usage.promptTokens ?? _lastPromptTokens;
+    // promptTokens here is the turn's cumulative billing total across tool
+    // rounds; the context size is the last request's count (_lastPromptTokens).
     return {
         contextLimit: estimateContextLimit(
             result.model ?? providerConfig?.model ?? '',
@@ -2543,6 +1889,9 @@ function responseUsageAsTokenStats(result: ProviderResponse): Record<string, any
         ),
         contextLimitAuthoritative: hasPlatformCapabilities(providerConfig),
         promptTokens: usage.promptTokens ?? 0,
+        contextTokens: _lastPromptTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
         completionTokens: usage.completionTokens ?? 0,
         totalTokens: usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
         tokenUsageSource: usage.source ?? (hasProviderPrompt ? 'provider' : 'estimated'),
@@ -2743,8 +2092,22 @@ export interface ThinkOptions {
     maxNativeToolRounds?: number;
     pollRunningUserMessages?: () => string[];
     onRunningUserMessageAccepted?: (text: string) => void;
+    /** @deprecated The rolling summary now lives in the history (compaction boundary message); ignored. */
     initialCompressionSummary?: string;
+    /** Called with the new rolling summary whenever the history is compacted. */
     onCompressionSummary?: (summary: string) => void;
+    /**
+     * Directory for this conversation's context files (transcript archive,
+     * spilled tool outputs). Bridges and the CLI pass the stored session's
+     * directory; otherwise a per-workspace directory under ~/.artemis/context.
+     */
+    contextDir?: string;
+    /**
+     * 'hosted' (chat bridges) applies the hosted context cap (200K tokens by
+     * default, see resolveMaxContextTokens); 'interactive' (default, the CLI)
+     * uses the full model window unless a cap is configured.
+     */
+    contextMode?: 'hosted' | 'interactive';
     /** Cancels the run: the vision helper's image reading and the model calls. */
     abortSignal?: AbortSignal;
 }
@@ -2791,16 +2154,14 @@ export async function think(
         maxNativeToolRounds: rawMaxNativeToolRounds,
         pollRunningUserMessages,
         onRunningUserMessageAccepted,
-        initialCompressionSummary,
         onCompressionSummary,
+        contextDir,
+        contextMode = 'interactive',
         abortSignal,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
     tSession.updateSystemPrompt(buildSystemPromptText(locale));
-    if (initialCompressionSummary?.trim() && !tSession.getContext('compressionSummary')) {
-        tSession.setContext('compressionSummary', initialCompressionSummary);
-    }
     // A model that cannot see images gets bridge/pasted images as text: the
     // vision helper's descriptions, or a note when there is no helper.
     let requestImageAttachments = imageAttachments;
@@ -2827,54 +2188,100 @@ export async function think(
         requestVisionSkip = preparedImages.visionSkip;
     }
     tSession.addUser(input);
+    const requestMessageId = tSession.getMessages().at(-1)?.id;
 
     const p = await loadProvider(cwd);
     let currentCwd = cwd;
     const providerConfigVal = getProviderConfigSync();
-    let rawMessages = tSession.getMessages();
+    // The conversation as stored AND as sent: compaction rewrites it in
+    // place and writes it back to the session, so every round and every
+    // later turn starts from the compacted history.
+    let history: SessionMessage[] = tSession.getMessages();
+    const writeBack = (next: SessionMessage[]): void => {
+        history = next;
+        tSession.restore(history);
+    };
+    const appendHistory = (...messages: SessionMessage[]): void => {
+        writeBack([...history, ...messages]);
+    };
     const systemMessages = await buildRuntimeSystemMessages(
         tSession.getSystemPrompt(),
-        rawMessages,
+        history,
         providerConfigVal?.model,
-        providerConfigVal?.contextLength,
-        hasPlatformCapabilities(providerConfigVal),
     );
-    const reservedSystemTokens = Math.round(estimateConversationTokens(systemMessages));
-    let providerCompression = await compressSessionMessagesForProvider(
-        tSession,
-        rawMessages,
-        providerConfigVal?.model,
-        providerConfigVal?.contextLength,
-        reservedSystemTokens,
-        // Surface compression activity to the user via the tool-log channel
-        // (was previously silent — long sessions had no visibility into
-        // when/why the compressor fired or whether it succeeded).
-        onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
-        undefined,
-        locale,
-        hasPlatformCapabilities(providerConfigVal),
-    );
-    if (providerCompression.summaryText) {
-        onCompressionSummary?.(providerCompression.summaryText);
-    }
-    let providerConversationMessages = providerCompression.messages;
+    const systemTokens = Math.round(estimateConversationTokens(systemMessages));
 
-    const latestUserText = getLatestUserText(rawMessages);
+    // ── Context management (see core/compaction) ──────────────────────────
+    if (typeof tSession.getContext('contextSessionId') !== 'string') {
+        tSession.setContext('contextSessionId', newContextSessionId());
+    }
+    const contextStorage = createContextStorage(
+        contextDir ?? defaultContextDir(cwd, tSession.getContext('contextSessionId') as string),
+    );
+    const contextState: ContextState = normalizeContextState(tSession.getContext('contextState'));
+    tSession.setContext('contextState', contextState);
+    const contextBudget = resolveContextBudget({
+        contextWindow: p.contextWindow ?? getConfiguredContextLimit(providerConfigVal?.model, providerConfigVal?.contextLength, hasPlatformCapabilities(providerConfigVal)),
+        maxOutputTokens: p.maxOutputTokens,
+        thresholdRatio: _compressionThresholdOverride,
+        maxContextTokens: resolveMaxContextTokens({ configured: _compressionMaxContextTokens, mode: contextMode }),
+    });
+    const contextLanguage = detectConversationLanguage(history, locale);
+    const summarizerWindow = await resolveSummarizerWindow();
+    const logInfo = onToolLog ? (message: string): void => onToolLog(message, 'info') : undefined;
+    let previousResponseId: string | undefined;
+    let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
+    const manageHistory = async (
+        reason: ManageReason,
+        nativeFunctionTools: unknown[] | undefined,
+    ): Promise<number> => {
+        // + room for the "current task" note when the boundary carries the request.
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0);
+        const managed = await manageContext({
+            messages: history,
+            fixedTokens,
+            budget: contextBudget,
+            state: contextState,
+            storage: contextStorage,
+            // A cancelled run also cancels its compaction (aborts are rethrown, never counted as failures).
+            summarize: (request) => summarizeForCompactionWith(request, abortSignal),
+            summarizerWindow,
+            restore: { cwd: currentCwd },
+            // This turn's request stays in the live history, however large.
+            pinnedIds: requestMessageId ? [requestMessageId] : undefined,
+            reason,
+            proactive: _compressionEnabled,
+            language: contextLanguage,
+        });
+        if (managed.changed) {
+            writeBack(managed.messages);
+            // A server-side continuation still holds the old, larger history.
+            previousResponseId = undefined;
+            pendingToolOutputs = undefined;
+            if (managed.summary) {
+                onCompressionSummary?.(managed.summary);
+                void writeCheckpointJournal(cwd, managed.summary, undefined, getLatestUserText(history));
+            }
+        }
+        if (managed.notice) logInfo?.(managed.notice);
+        return fixedTokens;
+    };
+
+    const latestUserText = getLatestUserText(history);
     const enabledTools = await loadSetupToolEnabled(cwd);
     const supportsNativeTools = p.supportsNativeToolCalls === true && !disableNativeTools;
     const plainChat = isPlainChatRequest(latestUserText);
     let toolProjectionWidenAttempt = 0;
     let projectedToolNames = supportsNativeTools && !plainChat
         ? resolveProjectedDirectToolNames(
-            providerConversationMessages,
+            history,
             enabledTools,
             toolProjectionWidenAttempt,
             [],
         )
         : [];
-    // Persist the active tool surface so the collapse ledger can restore a
-    // truthful "可用工具" section after compaction (previously never written,
-    // so recovery always rendered an empty tool list).
+    // Persist the active tool surface so post-compaction state reflects the
+    // tools that were actually available.
     if (projectedToolNames.length > 0) {
         tSession.setContext('activeToolNames', projectedToolNames);
     }
@@ -2884,7 +2291,7 @@ export async function think(
         }
         toolProjectionWidenAttempt += 1;
         projectedToolNames = resolveProjectedDirectToolNames(
-            providerConversationMessages,
+            history,
             enabledTools,
             toolProjectionWidenAttempt,
             projectedToolNames,
@@ -2898,10 +2305,12 @@ export async function think(
     let cumulativeUsage: ProviderResponse['usage'] | undefined;
     let emittedFinalText = false;
     let unresolvedDirectToolFailure: DirectToolFailureState | null = null;
-    let previousResponseId: string | undefined;
-    let pendingToolOutputs: ProviderNativeToolOutput[] | undefined;
     let emptyFinalReplyRetryCount = 0;
-    let forceCompactFraction: number | undefined;
+    let forceCompaction = false;
+    // Interjections that arrive while a round's tool calls run wait here: an
+    // assistant tool-call turn must be followed directly by its results.
+    let toolRoundActive = false;
+    let deferredInterjections: SessionMessage[] = [];
     const absorbRunningUserMessages = (): number => {
         const updates = pollRunningUserMessages?.() ?? [];
         let accepted = 0;
@@ -2917,9 +2326,11 @@ export async function think(
                     'Treat this as the latest instruction/correction for the current in-progress task. If it changes the goal, pause or adjust before continuing.',
                 ].join('\n'),
             );
-            providerConversationMessages = [...providerConversationMessages, injected];
-            rawMessages = [...rawMessages, injected];
-            tSession.restore(rawMessages);
+            if (toolRoundActive) {
+                deferredInterjections.push(injected);
+            } else {
+                appendHistory(injected);
+            }
             onRunningUserMessageAccepted?.(text);
             accepted += 1;
         }
@@ -2971,6 +2382,38 @@ export async function think(
             abortSignal?.removeEventListener('abort', onCallerAbort);
         }
     };
+    /**
+     * One provider request with overflow recovery: a context-length rejection
+     * forces a compaction (written back to the session, so a bridge does not
+     * repeat the overflow on its next message) and one retry.
+     */
+    const requestWithOverflowRecovery = async (
+        build: () => { messages: SessionMessage[]; completionOptions: Record<string, unknown> },
+        nativeFunctionTools: unknown[] | undefined,
+    ): Promise<{ interrupted: true } | { interrupted: false; completion: ProviderResponse; sent: SessionMessage[] }> => {
+        let request = build();
+        let sent = history;
+        try {
+            const attempt = await completeWithRunningInterjectionCheck(request.messages, request.completionOptions);
+            return attempt.interrupted ? attempt : { ...attempt, sent };
+        } catch (error) {
+            if (!isContextOverflowError(error)) throw error;
+            logInfo?.(contextLanguage === 'zh'
+                ? '[上下文] 请求超出模型上下文窗口，正在压缩历史并重试一次'
+                : '[context] the provider rejected the request as too large; compacting and retrying once');
+            await manageHistory('overflow', nativeFunctionTools);
+            request = build();
+            sent = history;
+            try {
+                const attempt = await completeWithRunningInterjectionCheck(request.messages, request.completionOptions);
+                return attempt.interrupted ? attempt : { ...attempt, sent };
+            } catch (retryError) {
+                if (!isContextOverflowError(retryError)) throw retryError;
+                const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
+                throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
+            }
+        }
+    };
 
     const maxNativeToolRounds = Math.max(
         1,
@@ -2982,58 +2425,56 @@ export async function think(
     nativeRoundLoop:
     for (let round = 1; round <= maxProviderRounds; round += 1) {
         absorbRunningUserMessages();
-        if (round > 1) {
-            providerCompression = await compressSessionMessagesForProvider(
-                tSession,
-                rawMessages,
-                providerConfigVal?.model,
-                providerConfigVal?.contextLength,
-                reservedSystemTokens,
-                onToolLog ? (msg: string) => onToolLog(msg, 'info') : undefined,
-                forceCompactFraction,
-                locale,
-                hasPlatformCapabilities(providerConfigVal),
-            );
-            forceCompactFraction = undefined;
-            if (providerCompression.summaryText) {
-                onCompressionSummary?.(providerCompression.summaryText);
-            }
-            providerConversationMessages = providerCompression.messages;
-        }
         const nativeFunctionTools = supportsNativeTools && projectedToolNames.length > 0
             ? buildDirectNativeFunctionTools({ allowedToolNames: projectedToolNames })
             : undefined;
-        const responseContinuation = previousResponseId && pendingToolOutputs
-            ? {
-                previousResponseId,
-                toolOutputs: pendingToolOutputs,
-            }
-            : {};
+        // An empty reply often means the model choked on a bloated context:
+        // compact for real when the context is large, else just retry.
+        let reason: ManageReason = 'proactive';
+        if (forceCompaction) {
+            forceCompaction = false;
+            const fixed = systemTokens + estimateToolSchemaTokens(nativeFunctionTools);
+            if (measureContext(contextState, history, fixed).tokens > contextBudget.effective * 0.5) reason = 'manual';
+        }
+        const fixedTokens = await manageHistory(reason, nativeFunctionTools);
+        const buildRequest = (): { messages: SessionMessage[]; completionOptions: Record<string, unknown> } => {
+            const responseContinuation = previousResponseId && pendingToolOutputs
+                ? {
+                    previousResponseId,
+                    toolOutputs: pendingToolOutputs,
+                }
+                : {};
+            // The boundary stores a carried request as history; while this
+            // turn is going, an unsaved runtime-context note marks it current.
+            const requestNote = carriedRequestNote(history, requestMessageId, contextLanguage);
+            return {
+                messages: requestNote
+                    ? [...systemMessages, ...history, makeRuntimeContextMessage(requestNote)]
+                    : [...systemMessages, ...history],
+                completionOptions: {
+                    ...responseContinuation,
+                    nativeFunctionTools,
+                    // User-supplied images are input context, not a generated/optional
+                    // tool capability. Do not drop them just because the setup "vision"
+                    // tool group was disabled; providers that cannot handle images will
+                    // ignore/fail explicitly in their own adapter path.
+                    imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
+                    ...(round === 1 && hasImageAttachments && requestVisionSkip ? { visionSkip: requestVisionSkip } : {}),
+                    onReasoning,
+                    guardStreamingText: supportsNativeTools && !plainChat,
+                },
+            };
+        };
+        const completionAttempt = await requestWithOverflowRecovery(buildRequest, nativeFunctionTools);
         previousResponseId = undefined;
         pendingToolOutputs = undefined;
-        const providerMessages = [...systemMessages, ...providerConversationMessages];
-        const completionAttempt = await completeWithRunningInterjectionCheck(
-            providerMessages,
-            {
-                ...responseContinuation,
-                nativeFunctionTools,
-                // User-supplied images are input context, not a generated/optional
-                // tool capability. Do not drop them just because the setup "vision"
-                // tool group was disabled; providers that cannot handle images will
-                // ignore/fail explicitly in their own adapter path.
-                imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
-                ...(round === 1 && hasImageAttachments && requestVisionSkip ? { visionSkip: requestVisionSkip } : {}),
-                onReasoning,
-                guardStreamingText: supportsNativeTools && !plainChat,
-            },
-        );
         if (completionAttempt.interrupted) {
-            previousResponseId = undefined;
-            pendingToolOutputs = undefined;
             widenProjectedTools();
             continue;
         }
         const completion = completionAttempt.completion;
+        noteRequestPromptTokens(completion.usage);
+        recordProviderUsage(contextState, completion.usage, completionAttempt.sent, fixedTokens);
         cumulativeUsage = accumulateProviderUsage(cumulativeUsage, completion.usage);
         finalResult = completion;
 
@@ -3048,20 +2489,23 @@ export async function think(
                     maxNativeToolRounds,
                     latestUserText,
                 );
-                const forcedAttempt = await completeWithRunningInterjectionCheck(
-                    [...providerMessages, finalizerMessage],
-                    {
-                        onReasoning,
-                        guardStreamingText: false,
-                    },
+                // Same overflow recovery as any other request: compact, retry once.
+                const forcedAttempt = await requestWithOverflowRecovery(
+                    () => ({
+                        messages: [...systemMessages, ...history, finalizerMessage],
+                        completionOptions: {
+                            onReasoning,
+                            guardStreamingText: false,
+                        },
+                    }),
+                    undefined,
                 );
                 if (forcedAttempt.interrupted) {
-                    previousResponseId = undefined;
-                    pendingToolOutputs = undefined;
                     widenProjectedTools();
                     continue nativeRoundLoop;
                 }
                 const forcedCompletion = forcedAttempt.completion;
+                noteRequestPromptTokens(forcedCompletion.usage);
                 cumulativeUsage = accumulateProviderUsage(cumulativeUsage, forcedCompletion.usage);
                 const forcedReply = (forcedCompletion.text ?? '').trim() || [
                     '我已经停止继续调用工具。',
@@ -3080,13 +2524,7 @@ export async function think(
                     reasoningContent: finalResult.reasoningContent,
                     rawContentBlocks: finalResult.rawContentBlocks,
                 });
-                providerConversationMessages = [
-                    ...providerConversationMessages,
-                    finalizerMessage,
-                    assistantReplyMessage,
-                ];
-                rawMessages = [...rawMessages, finalizerMessage, assistantReplyMessage];
-                tSession.restore(rawMessages);
+                appendHistory(finalizerMessage, assistantReplyMessage);
                 break;
             }
             if (providerConfigVal?.protocol === 'responses' && !completion.responseId) {
@@ -3112,98 +2550,99 @@ export async function think(
                     rawContentBlocks: completion.rawContentBlocks,
                 },
             );
-            const nextProviderMessages: SessionMessage[] = [...providerConversationMessages, assistantMessage];
-            const nextRawMessages: SessionMessage[] = [...rawMessages, assistantMessage];
+            const roundMessages: SessionMessage[] = [assistantMessage];
             const toolOutputs: ProviderNativeToolOutput[] = [];
-
-            for (const call of nativeCalls) {
-                absorbRunningUserMessages();
-                let args: Record<string, unknown>;
-                try {
-                    args = parseNativeToolArguments(call);
-                } catch (error) {
-                    args = {};
-                    const message = error instanceof Error ? error.message : String(error);
-                    unresolvedDirectToolFailure = {
-                        toolName: call.name,
-                        output: message,
-                        error: buildDirectToolError(
-                            'tool_invalid_json',
-                            message,
-                            { retryable: true },
-                        ),
-                    };
-                    const output = JSON.stringify(
-                        {
-                            ok: false,
+            toolRoundActive = true;
+            try {
+                for (const call of nativeCalls) {
+                    absorbRunningUserMessages();
+                    let args: Record<string, unknown>;
+                    try {
+                        args = parseNativeToolArguments(call);
+                    } catch (error) {
+                        args = {};
+                        const message = error instanceof Error ? error.message : String(error);
+                        unresolvedDirectToolFailure = {
                             toolName: call.name,
                             output: message,
-                            error: {
-                                code: 'tool_invalid_json',
+                            error: buildDirectToolError(
+                                'tool_invalid_json',
                                 message,
-                                retryable: true,
+                                { retryable: true },
+                            ),
+                        };
+                        const output = JSON.stringify(
+                            {
+                                ok: false,
+                                toolName: call.name,
+                                output: message,
+                                error: {
+                                    code: 'tool_invalid_json',
+                                    message,
+                                    retryable: true,
+                                },
                             },
-                        },
-                        null,
-                        2,
+                            null,
+                            2,
+                        );
+                        toolOutputs.push({
+                            callId: call.callId,
+                            output,
+                        });
+                        roundMessages.push(makeSessionMessage('tool', output, {
+                            name: call.name,
+                            toolUseId: call.callId,
+                        }));
+                        continue;
+                    }
+
+                    onToolCall?.(call.name, args);
+                    if (READ_FILE_HISTORY_INVALIDATING_TOOLS.has(String(call.name))) {
+                        readFileHistory.clear();
+                    }
+                    const toolResult = attachDirectToolFailureError(
+                        call.name,
+                        await executeTool(call.name, args, {
+                            cwd: currentCwd,
+                            permissionMode,
+                            onPermissionRequest,
+                            onToolLog,
+                            updateCwd: (newCwd: string) => { currentCwd = newCwd; },
+                            onWorkspaceSwitchRequest,
+                            onUserConfirmationRequest,
+                            readFileHistory,
+                            allowBackgroundTools: contextMode !== 'hosted',
+                        }),
                     );
+                    const toolOutput = formatDirectToolOutput(toolResult);
+                    const contextPreparedOutput = prepareDirectToolContextOutput(call.name, toolOutput, contextStorage, contextBudget);
+                    onToolResult?.(call.name, toolResult.ok, toolResult.output);
+                    if (!toolResult.ok) {
+                        unresolvedDirectToolFailure = {
+                            toolName: call.name,
+                            output: toolResult.output,
+                            error: toolResult.error,
+                        };
+                    } else if (unresolvedDirectToolFailure) {
+                        unresolvedDirectToolFailure = null;
+                    }
                     toolOutputs.push({
                         callId: call.callId,
-                        output,
+                        output: contextPreparedOutput.contextOutput,
                     });
-                    const toolMessage = makeSessionMessage('tool', output, {
+                    roundMessages.push(makeSessionMessage('tool', contextPreparedOutput.contextOutput, {
                         name: call.name,
                         toolUseId: call.callId,
-                    });
-                    nextProviderMessages.push(toolMessage);
-                    nextRawMessages.push(toolMessage);
-                    continue;
+                    }));
                 }
-
-                onToolCall?.(call.name, args);
-                if (READ_FILE_HISTORY_INVALIDATING_TOOLS.has(String(call.name))) {
-                    readFileHistory.clear();
-                }
-                const toolResult = attachDirectToolFailureError(
-                    call.name,
-                    await executeTool(call.name, args, {
-                        cwd: currentCwd,
-                        permissionMode,
-                        onPermissionRequest,
-                        onToolLog,
-                        updateCwd: (newCwd: string) => { currentCwd = newCwd; },
-                        onWorkspaceSwitchRequest,
-                        onUserConfirmationRequest,
-                        readFileHistory,
-                    }),
-                );
-                const toolOutput = formatDirectToolOutput(toolResult);
-                const contextPreparedOutput = await prepareDirectToolContextOutput(call.name, toolOutput);
-                onToolResult?.(call.name, toolResult.ok, toolResult.output);
-                if (!toolResult.ok) {
-                    unresolvedDirectToolFailure = {
-                        toolName: call.name,
-                        output: toolResult.output,
-                        error: toolResult.error,
-                    };
-                } else if (unresolvedDirectToolFailure) {
-                    unresolvedDirectToolFailure = null;
-                }
-                toolOutputs.push({
-                    callId: call.callId,
-                    output: contextPreparedOutput.contextOutput,
-                });
-                const toolMessage = makeSessionMessage('tool', contextPreparedOutput.contextOutput, {
-                    name: call.name,
-                    toolUseId: call.callId,
-                });
-                nextProviderMessages.push(toolMessage);
-                nextRawMessages.push(toolMessage);
+            } finally {
+                toolRoundActive = false;
+                // Results first, then any interjection that arrived meanwhile;
+                // the history never loses either.
+                const interjections = deferredInterjections;
+                deferredInterjections = [];
+                appendHistory(...roundMessages, ...interjections);
             }
-
-            providerConversationMessages = nextProviderMessages;
-            rawMessages = nextRawMessages;
-            tSession.restore(rawMessages);
             previousResponseId = completion.responseId;
             pendingToolOutputs = toolOutputs;
             continue;
@@ -3213,17 +2652,12 @@ export async function think(
         if (supportsNativeTools && !plainChat && !reply.trim()) {
             if (emptyFinalReplyRetryCount < maxEmptyFinalReplyRetries && round < maxProviderRounds) {
                 emptyFinalReplyRetryCount += 1;
-                // 空返回 = 模型多半被臃肿上下文噎住了。重试前强制狠压一刀，
-                // 让它拿到又小又干净的 payload（记忆由 checkpoint 存档保住）。
-                forceCompactFraction = emptyFinalReplyRetryCount >= 2 ? 0.2 : 0.35;
+                forceCompaction = true;
                 onToolLog?.(
                     `Provider returned an empty final reply; requesting a no-tool final reply (retry ${emptyFinalReplyRetryCount}/${maxEmptyFinalReplyRetries}).`,
                     'warn',
                 );
-                const guardMessage = buildEmptyFinalReplyGuardMessage(latestUserText);
-                providerConversationMessages = [...providerConversationMessages, guardMessage];
-                rawMessages = [...rawMessages, guardMessage];
-                tSession.restore(rawMessages);
+                appendHistory(buildEmptyFinalReplyGuardMessage(latestUserText));
                 widenProjectedTools();
                 continue;
             }
@@ -3238,10 +2672,7 @@ export async function think(
             }
 
             if (isToolDeflection(reply)) {
-                const guardMessage = buildRuntimeGuardMessage(reply);
-                providerConversationMessages = [...providerConversationMessages, guardMessage];
-                rawMessages = [...rawMessages, guardMessage];
-                tSession.restore(rawMessages);
+                appendHistory(buildRuntimeGuardMessage(reply));
                 widenProjectedTools();
                 continue;
             }
@@ -3254,13 +2685,10 @@ export async function think(
                     );
                     unresolvedDirectToolFailure = null;
                 } else {
-                    const guardMessage = buildDirectToolFailureGuardMessage(
+                    appendHistory(buildDirectToolFailureGuardMessage(
                         unresolvedDirectToolFailure,
                         reply,
-                    );
-                    providerConversationMessages = [...providerConversationMessages, guardMessage];
-                    rawMessages = [...rawMessages, guardMessage];
-                    tSession.restore(rawMessages);
+                    ));
                     widenProjectedTools();
                     continue;
                 }
@@ -3276,13 +2704,10 @@ export async function think(
             onDelta(reply);
             emittedFinalText = true;
         }
-        const assistantReplyMessage = makeSessionMessage('assistant', reply, {
+        appendHistory(makeSessionMessage('assistant', reply, {
             reasoningContent: finalResult?.reasoningContent,
             rawContentBlocks: finalResult?.rawContentBlocks,
-        });
-        providerConversationMessages = [...providerConversationMessages, assistantReplyMessage];
-        rawMessages = [...rawMessages, assistantReplyMessage];
-        tSession.restore(rawMessages);
+        }));
         break;
     }
 
