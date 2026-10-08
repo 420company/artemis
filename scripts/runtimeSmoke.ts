@@ -8258,6 +8258,46 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+// ── MCP call timeout ──────────────────────────────────────────────────────────
+
+{
+  // Real tools (search, scrape, render) take longer than a probe: a call that
+  // needs ~5 s must not hit the old 4 s default.
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-timeout-'))
+  const file = path.join(dir, 'slow.mjs')
+  fs.writeFileSync(file, `
+const write = (m) => { const b = JSON.stringify(m); process.stdout.write('Content-Length: ' + Buffer.byteLength(b) + '\\r\\n\\r\\n' + b) }
+let buf = ''
+process.stdin.on('data', (c) => {
+  buf += c
+  for (;;) {
+    const m = /Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+    if (!m) return
+    const end = m.index + m[0].length + Number(m[1])
+    if (buf.length < end) return
+    const msg = JSON.parse(buf.slice(m.index + m[0].length, end))
+    buf = buf.slice(end)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'slow', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'slow', inputSchema: { type: 'object' } }] } })
+    else if (msg.method === 'tools/call') setTimeout(() => write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'slow done' }] } }), 5000)
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`)
+  const server = { id: 'slow', enabled: true, transport: 'stdio' as const, command: process.execPath, commandArgs: [file], authType: 'none' as const, authState: 'unknown' as const, createdAt: '', updatedAt: '' }
+  let output = ''
+  try {
+    output = (await callMcpServerTool({ server, cwd: dir, toolName: 'slow', args: {} })).output
+  } catch (error) {
+    output = error instanceof Error ? error.message : String(error)
+  }
+  assert('mcp call: a 5 s tool call completes under the default call timeout', output.includes('slow done'), output)
+  await closeCachedMcpClients()
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 console.log()

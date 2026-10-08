@@ -125,6 +125,12 @@ const CLI_MCP_PACKAGES_DIR = existsSync(path.join(USER_MCP_PACKAGES_DIR, 'node_m
   : BUNDLED_MCP_PACKAGES_DIR;
 
 const DEFAULT_TIMEOUT_MS = 4_000;
+/**
+ * Tool calls, resource reads and prompt fetches do real work (search, scrape,
+ * render, query) that routinely takes longer than a probe, and a stdio server
+ * may need a moment to start. The short default stays for probes/discovery.
+ */
+const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 const CLIENT_PROTOCOL_VERSION = '2024-11-05';
 const CLIENT_INFO = {
   name: APP_NAME,
@@ -2089,7 +2095,7 @@ export async function callMcpServerTool(options: {
   args?: Record<string, unknown>;
   timeoutMs?: number;
 }): Promise<McpToolCallResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
       const surface = await discoverManagedSurface({
@@ -2136,7 +2142,7 @@ export async function readMcpServerResource(options: {
   uri: string;
   timeoutMs?: number;
 }): Promise<McpResourceReadResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
       const surface = await discoverManagedSurface({
@@ -2216,7 +2222,7 @@ export async function getMcpServerPrompt(options: {
   args?: Record<string, unknown>;
   timeoutMs?: number;
 }): Promise<McpPromptGetResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
       const surface = await discoverManagedSurface({
