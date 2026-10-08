@@ -2093,9 +2093,16 @@ function isListedInModelManifest(def: ToolDefinition): boolean {
   );
 }
 
-export function renderDetailedToolManifest(): string {
+// allowedToolTypes narrows the manifest to what an execution profile may
+// call (see getAllowedActionTypesForProfile), so the prompt never advertises
+// a tool the runtime would reject for that profile.
+export function renderDetailedToolManifest(
+  allowedToolTypes?: readonly string[],
+): string {
+  const allowed = allowedToolTypes ? new Set(allowedToolTypes) : undefined;
   return toolDefs
     .filter(isListedInModelManifest)
+    .filter((def) => !allowed || allowed.has(def.type))
     .map((def) => {
       const details = [
         `## ${def.type}`,
@@ -2115,8 +2122,8 @@ export function renderDetailedToolManifest(): string {
     .join('\n\n');
 }
 
-export function renderToolManifest(): string {
-  return renderDetailedToolManifest();
+export function renderToolManifest(allowedToolTypes?: readonly string[]): string {
+  return renderDetailedToolManifest(allowedToolTypes);
 }
 
 export function validateToolRegistryIntegrity(): string[] {

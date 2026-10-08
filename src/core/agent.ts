@@ -19,6 +19,7 @@ import {
   getToolDefinition,
   getToolPermissionCategory,
   isParallelReadOnlyAction,
+  isToolAvailableForProvider,
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
@@ -767,6 +768,14 @@ function buildActionFromLooseArgs(
       return { type: 'view_image', path: imagePath };
     }
     default:
+      // Any other tool the model may call (search_web, browser_*, task_output,
+      // weather_*, ...): its arguments already use the schema's names, so keep
+      // them as given. Native calls from chat-completions providers arrive
+      // here as <toolcall name="..."> text; returning null would drop them
+      // silently. Malformed arguments fail validateToolAction before running.
+      if (isToolAvailableForProvider(lower)) {
+        return { ...args, type: lower } as AgentAction;
+      }
       return null;
   }
 }
@@ -1181,6 +1190,17 @@ function replyLooksLikeContinuationRequest(reply: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
+// An honest report that a capability is missing on this host: the provider
+// is not configured, out of balance or unavailable. Accepted as a blocker so
+// the run ends with that message instead of being pushed to retry.
+const GENUINE_BLOCKER_REPLY_PATTERNS: readonly RegExp[] = [
+  /\b(?:not configured|not set up|unavailable|not available|not installed|isn't configured|is not enabled)\b/i,
+  /\b(?:insufficient|not enough) (?:balance|credits?|funds|quota)\b/i,
+  /\b(?:quota|credits?|balance) (?:exceeded|exhausted|ran out|is empty)\b/i,
+  /\bout of (?:credits?|balance|quota)\b/i,
+  /(?:未配置|没有配置|不可用|余额不足|欠费|额度不足|配额已用完|未安装)/,
+];
+
 function replyLooksLikeExecutionBlocker(reply: string): boolean {
   const normalized = reply.trim();
   if (!normalized) {
@@ -1194,6 +1214,7 @@ function replyLooksLikeExecutionBlocker(reply: string): boolean {
     /\bwould take next\b/i,
     /\bif permission mode blocks\b/i,
     /(?:已被阻止|没有权限|只读模式|下一步会执行)/,
+    ...GENUINE_BLOCKER_REPLY_PATTERNS,
   ].some((pattern) => pattern.test(normalized));
 }
 
@@ -3188,6 +3209,14 @@ type VerificationState = {
 
 type CompletionContract = 'standard' | 'requires_execution_evidence';
 const MAX_PARALLEL_DELEGATE_TASKS = 4;
+// Completion-guard reminders for conditions no retry can fix (a visual tool
+// the model will not or cannot use, a terminal tool failure). After this many
+// the run ends with an honest message instead of looping to maxTurns.
+const MAX_VISUAL_CHECKLIST_REMINDERS = 2;
+const MAX_TERMINAL_FAILURE_REMINDERS = 2;
+// The workspace-mutation heuristic also matches plain chat requests ("write a
+// poem", "create a packing list"), so its reminder is bounded too.
+const MAX_MUTATION_EVIDENCE_REMINDERS = 2;
 
 type RuntimeCompletionChecklist = {
   requiresWorkspaceMutation: boolean;
@@ -3223,6 +3252,20 @@ function getNativeAllowedActionTypesForRuntime(
   );
 }
 
+// Whether this run can call a tool at all: the profile allows it, the
+// permission mode keeps it, and the host offers it. Completion guards must
+// never demand a tool that fails this check.
+function runtimeCanCallAction(
+  profile: 'main' | AgentRole,
+  permissionMode: ReturnType<PermissionManager['getMode']>,
+  type: AgentAction['type'],
+): boolean {
+  return (
+    getNativeAllowedActionTypesForRuntime(profile, permissionMode).includes(type) &&
+    isToolAvailableForProvider(type)
+  );
+}
+
 function buildRuntimeCompletionChecklist(
   userInput: string,
   profile: 'main' | AgentRole,
@@ -3231,10 +3274,14 @@ function buildRuntimeCompletionChecklist(
     imageRequired: boolean;
     videoRequired: boolean;
   },
+  // False when this run cannot edit files at all (read-only mode): the
+  // checklist must not demand changes it has no tool to make.
+  canEditWorkspace = true,
 ): RuntimeCompletionChecklist {
   const canOwnWorkspaceMutation =
-    profile === 'main' ||
-    (profile === 'builder' && session.agentPhase === 'execution');
+    canEditWorkspace &&
+    (profile === 'main' ||
+      (profile === 'builder' && session.agentPhase === 'execution'));
 
   return {
     requiresWorkspaceMutation:
@@ -3283,6 +3330,59 @@ function isTerminalVisualGenerationFailureBlocker(
     (failure.actionType === 'generate_long_video' ||
       failure.actionType === 'generate_video' ||
       failure.actionType === 'generate_image')
+  );
+}
+
+// Failures no retry inside this run can fix: the runtime refused the tool
+// (profile, permission mode, host), or a provider-backed tool reported that
+// its service is not configured, out of balance or unavailable. The
+// unresolved-failure guard still asks the model to acknowledge them, but only
+// a bounded number of times before ending the run with the real error.
+const TERMINAL_TOOL_FAILURE_CODES = new Set([
+  'tool_profile_blocked',
+  'tool_permission_denied',
+  'tool_unavailable',
+  'search_backend_unavailable',
+]);
+// Local workspace and shell tools: their errors are usually fixable by
+// another action, so their output text is not classified.
+const LOCAL_RECOVERABLE_ACTION_TYPES = new Set<AgentAction['type']>([
+  'run_command',
+  'list_files',
+  'read_file',
+  'search_files',
+  'write_file',
+  'insert_in_file',
+  'replace_in_file',
+  'apply_patch',
+]);
+const TERMINAL_TOOL_FAILURE_PATTERNS: readonly RegExp[] = [
+  /\bnot configured\b/i,
+  /\bno usable [\w\s]{0,20}api\b/i,
+  /\b(?:api key|credentials?)\b[\s\S]{0,40}\b(?:missing|not set|not configured|invalid|rejected)\b/i,
+  /\b(?:insufficient|not enough) (?:balance|credits?|funds|quota)\b/i,
+  /\b(?:quota|credits?) (?:exceeded|exhausted)\b/i,
+  /\b(?:HTTP 402|payment required)\b/i,
+  /\bnot installed\b/i,
+  /\bunsupported on this (?:host|platform)\b/i,
+  /(?:未配置|余额不足|欠费|额度不足|配额已用完|未安装|视觉模型不可用)/,
+];
+
+function isTerminalToolFailureBlocker(
+  failure: RuntimeCompletionChecklist['unresolvedToolFailure'],
+): boolean {
+  if (!failure) {
+    return false;
+  }
+  if (isTerminalVisualGenerationFailureBlocker(failure)) {
+    return true;
+  }
+  if (failure.code && TERMINAL_TOOL_FAILURE_CODES.has(failure.code)) {
+    return true;
+  }
+  return (
+    !LOCAL_RECOVERABLE_ACTION_TYPES.has(failure.actionType) &&
+    TERMINAL_TOOL_FAILURE_PATTERNS.some((pattern) => pattern.test(failure.output))
   );
 }
 
@@ -3357,6 +3457,7 @@ function replyAcknowledgesToolFailure(reply: string): boolean {
   return [
     /\b(failed|failure|error|errored|denied|denial|blocked|interrupted|interruption|cannot|can't|unable|invalid|missing|not found|permission)\b/i,
     /(?:失败|错误|报错|拒绝|被拒绝|阻止|已被阻止|中断|已中断|不能|无法|没有权限|缺少|未找到|不存在)/,
+    ...GENUINE_BLOCKER_REPLY_PATTERNS,
   ].some((pattern) => pattern.test(normalized));
 }
 
@@ -3594,6 +3695,12 @@ export type RunAgentOptions = {
    * it globally. Unset: global (interactive CLI behaviour).
    */
   memoryDefaultScope?: 'global' | 'project';
+  /**
+   * false runs tools that asked for runInBackground in the foreground.
+   * Headless runs pass false: the process exits once the run returns, so a
+   * background generation would be lost and its result never reach the reply.
+   */
+  allowBackgroundTools?: boolean;
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -5637,7 +5744,10 @@ async function executeAuthorizedAction(
     // Background dispatch for slow, self-contained tools — see
     // isBackgroundEligibleAction. The real runner is detached; we return
     // immediately so the foreground turn can proceed in parallel.
-    if (isBackgroundEligibleAction(hydratedAction)) {
+    if (
+      options.allowBackgroundTools !== false &&
+      isBackgroundEligibleAction(hydratedAction)
+    ) {
       return startBackgroundAction(session, hydratedAction, options);
     }
 
@@ -6173,8 +6283,18 @@ export async function runAgent(
       .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
       .map((entry) => describeVisualProvider(entry.config, entry.assetKind));
     const remoteFallbackRequested = hasExplicitRemoteVisualFallback(userInput);
-    localImageGenerationRequired = Boolean(configuredImage && !remoteFallbackRequested);
-    localVideoGenerationRequired = Boolean(configuredVideo && !remoteFallbackRequested);
+    // Only demand a visual tool this run can actually call.
+    const permissionMode = options.permissionManager.getMode();
+    const canCall = (type: AgentAction['type']) =>
+      runtimeCanCallAction(profile, permissionMode, type);
+    localImageGenerationRequired = Boolean(
+      configuredImage && !remoteFallbackRequested && canCall('generate_image'),
+    );
+    localVideoGenerationRequired = Boolean(
+      configuredVideo &&
+        !remoteFallbackRequested &&
+        (canCall('generate_video') || canCall('generate_long_video')),
+    );
 
     options.onInfo?.(
       configured.length > 0
@@ -6190,6 +6310,7 @@ export async function runAgent(
       imageRequired: localImageGenerationRequired,
       videoRequired: localVideoGenerationRequired,
     },
+    runtimeCanCallAction(profile, options.permissionManager.getMode(), 'write_file'),
   );
   // Continuation guard for the requires_execution_evidence contract: count how
   // many consecutive turns the model produced only intent text without tool
@@ -6203,6 +6324,11 @@ export async function runAgent(
   // fires, but it never transitions from "investigating" to "building".
   let readOnlyOnlyTurnsWithoutWrites = 0;
   let readOnlyTurnsNudgeSent = false;
+  // Reminders sent by the bounded completion guards (see the MAX_*_REMINDERS
+  // constants); past the cap the run ends honestly instead of looping.
+  let visualChecklistReminders = 0;
+  let terminalFailureReminders = 0;
+  let mutationEvidenceReminders = 0;
   let pendingTrimmedActionFollowup = false;
   // Push-based mid-turn interjection buffer. Any input surface can push into
   // the session's queue at any time; legacy pollRunningUserMessages callers are
@@ -7028,6 +7154,19 @@ export async function runAgent(
           turns: turn,
         };
       }
+      if (visualChecklistReminders >= MAX_VISUAL_CHECKLIST_REMINDERS) {
+        const lastFailure = completionChecklist.unresolvedToolFailure;
+        return {
+          reply: [
+            `The requested visual asset was not generated: ${missingLocalVisualTools.join(', ')} did not complete successfully in this run.`,
+            lastFailure
+              ? `Last tool error (${lastFailure.actionType}): ${truncate(lastFailure.output, 300)}`
+              : 'The visual generation tool was not called.',
+          ].join('\n'),
+          turns: turn,
+        };
+      }
+      visualChecklistReminders += 1;
 
       options.sessionStore.appendMessage(
         session,
@@ -7063,6 +7202,18 @@ export async function runAgent(
           ].filter(Boolean).join('\n'),
           turns: turn,
         };
+      }
+      if (isTerminalToolFailureBlocker(unresolvedToolFailure)) {
+        if (terminalFailureReminders >= MAX_TERMINAL_FAILURE_REMINDERS) {
+          return {
+            reply: [
+              `This could not be completed: ${unresolvedToolFailure.actionType} failed, and retrying will not fix it in this run.`,
+              `Error: ${truncate(unresolvedToolFailure.output, 400)}`,
+            ].join('\n'),
+            turns: turn,
+          };
+        }
+        terminalFailureReminders += 1;
       }
 
       options.sessionStore.appendMessage(
@@ -7219,6 +7370,15 @@ export async function runAgent(
           turns: turn,
         };
       }
+      if (mutationEvidenceReminders >= MAX_MUTATION_EVIDENCE_REMINDERS) {
+        // Keep the model's answer (often a direct chat answer) but say
+        // plainly that nothing in the workspace changed.
+        return {
+          reply: `${envelope.reply}\n\n(No files were created or changed in this run.)`,
+          turns: turn,
+        };
+      }
+      mutationEvidenceReminders += 1;
 
       options.sessionStore.appendMessage(
         session,
