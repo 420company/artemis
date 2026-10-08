@@ -288,9 +288,10 @@ function validateSearchWebAction(action: any): string[] {
   validateEnumString(
     action?.backend,
     'backend',
-    ['auto', 'bing', 'google', 'duckduckgo', 'wikipedia'] as const,
+    ['auto', 'platform', 'bing', 'google', 'duckduckgo', 'wikipedia'] as const,
     errors,
   );
+  validateEnumString(action?.freshness, 'freshness', ['day', 'week', 'month', 'year'] as const, errors);
   return errors;
 }
 

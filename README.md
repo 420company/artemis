@@ -274,6 +274,27 @@ Model names behind a gateway can be aliases (`gpt-6-sol` may be a text-only GLM 
 - `visionProfileId` (stored like `specialistProfileId`, project store first, then `~/.artemis`) names a profile that can see images. When the main model cannot, images attached with `--image`, uploaded on the web or sent through a chat bridge are described once by that model (all visible text transcribed, charts and tables as data, in the user's language), and the main model gets the text as "[Image N description by vision helper — …]". `view_image` returns the same kind of description. Each description is wrapped in an `<image_description>` block after a note that it is data from an image, never instructions, and text inside the image cannot close that block. Helper calls time out after 60 s and follow the run's cancellation; a failed, timed-out or cut-off image gets a "could not be read" note instead. Descriptions are cached per run by image content and the user's question. A platform-managed global vision profile (`managedBy: "platform"`) wins over a workspace store; otherwise a workspace store is trusted like it is for the main profile.
 - With no vision helper and a text-only model, attached images are not an error: the model is told the plan cannot read images and continues with the text.
 
+### Web search backends and hosted platform search
+
+`search_web` tries its backends in order and moves on when one fails or finds nothing:
+
+| Backend | Needs | Notes |
+|---|---|---|
+| `platform` | a hosted agent (see below) | The platform gateway's `POST /v1/search`, billed to the owner's platform account. Tried first on a platform-managed host when you configured no search key of your own. |
+| `duckduckgo` | nothing | HTML scraping; often blocked from datacenter IPs. |
+| `bing` | `BING_API_KEY` | |
+| `google` | `GOOGLE_API_KEY` + `GOOGLE_CX` | |
+| `wikipedia` | nothing | Encyclopedic results only. |
+
+A Bing or Google key of your own keeps today's order (the platform is not used). `backend: "platform"` asks for it by name; `freshness: "day" | "week" | "month" | "year"` limits results to recent pages (platform backend). On a hosted VPS the agent server writes the platform settings into the global `providers.json` (a workspace store cannot redirect them):
+
+```json
+"webSearch": { "provider": "platform", "enabled": true, "baseUrl": "https://<gateway>/v1",
+               "apiKey": "<platform key>", "managedBy": "platform" }
+```
+
+`"enabled": false` turns it off. Without a `webSearch` entry, a main profile marked `capabilitiesSource` or `managedBy` `"platform"` is used as the gateway, with its own base URL and key. A refused or failed platform search (balance too low, rate limited, not offered, every provider down, gateway unreachable) is reported in the tool result as it is; when a fallback backend then answers, the result starts with a note saying so. Nothing is ever made up.
+
 ---
 
 ### Who Artemis is for
@@ -529,6 +550,10 @@ artemis
 网关后的模型名可能只是别名（例如 `gpt-6-sol` 实际是不能看图的 GLM 模型）。`~/.artemis/providers.json` 中的 profile 可以写入真实能力：`supportsImages`、`contextLength`、`maxOutputTokens`，并标记 `"capabilitiesSource": "platform"`。带此标记时，上下文窗口和最大输出以 profile 为准，覆盖所有按模型名推断的规则（包括 GPT-5.6 / GPT-6 的 272K 上限和 `/models` 元数据），Artemis 也不会再改写该 profile；`max_tokens` 始终不超过「窗口 − 估算提示 − 余量」。
 
 顶层的 `visionProfileId`（与 `specialistProfileId` 同样存储）指向一个能看图的 profile。主模型不能看图时，`--image`、网页上传或聊天桥接发送的图片会先交给它描述一次（逐字转录可见文字，图表按数据描述，使用用户的语言），主模型收到 "[Image N description by vision helper — …]" 文本；`view_image` 也返回同样的描述，同一图片在一次运行中只描述一次。没有视觉助手时，附带图片不会让运行失败，模型会被告知当前方案无法读取图片并继续处理文字。
+
+### 联网搜索后端与平台搜索
+
+`search_web` 按顺序尝试各个后端，一个失败或没有结果就换下一个：平台搜索（`platform`，托管 agent 专用，经平台网关的 `POST /v1/search`，按次计入主人的平台账户）→ DuckDuckGo（免密钥，机房 IP 常被拦）→ Bing（`BING_API_KEY`）→ Google（`GOOGLE_API_KEY` + `GOOGLE_CX`）→ Wikipedia。只有在主机由平台托管、且你没有配置自己的搜索密钥时才会先用平台搜索；配置了自己的 Bing 或 Google 密钥时顺序保持不变。`backend: "platform"` 可以指定平台搜索，`freshness: "day" | "week" | "month" | "year"` 只要近期结果。托管 VPS 上由 agent 服务器把设置写进全局 `providers.json` 的 `webSearch`（`provider: "platform"`、`baseUrl`、`apiKey`、`managedBy: "platform"`；`enabled: false` 表示关闭），工作区里的配置不能改写它；没有 `webSearch` 时，标记为平台管理的主 profile 会被当作网关使用。平台搜索被拒绝或失败（余额不足、限流、未开通、所有服务商出错、网关不可达）时，工具结果如实说明原因；后备后端接着给出结果时，会在开头注明。绝不编造搜索结果。
 
 ---
 

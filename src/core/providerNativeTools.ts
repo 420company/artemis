@@ -764,7 +764,12 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           limit: integerSchema('Optional limit for returned search results.'),
           backend: {
             type: 'string',
-            description: 'Optional backend: auto, bing, google, duckduckgo, or wikipedia.',
+            description: 'Optional backend: auto (default; uses the platform search on hosted agents), platform, bing, google, duckduckgo, or wikipedia.',
+          },
+          freshness: {
+            type: 'string',
+            enum: ['day', 'week', 'month', 'year'],
+            description: 'Optional: only results published in the last day, week, month or year (news, prices, recent events).',
           },
         },
       };

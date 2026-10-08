@@ -1,17 +1,34 @@
 import type { AgentAction } from './types.js';
+import {
+  resolvePlatformSearch,
+  searchWithPlatform,
+  type PlatformFreshness,
+  type PlatformSearchConfig,
+} from './platformSearch.js';
 
 /**
  * 无配置搜索后端系统
  * 自动检测和选择可用的搜索后端，无需用户单独配置API密钥
+ *
+ * Backends, in the order `auto` tries them:
+ *   platform    the hosted platform's gateway (/v1/search, billed to the
+ *               owner's account; see platformSearch.ts). Only when the host
+ *               is platform-managed and the user configured no search key.
+ *   duckduckgo  keyless HTML scraping (often blocked from datacenter IPs)
+ *   bing        BING_API_KEY
+ *   google      GOOGLE_API_KEY + GOOGLE_CX
+ *   wikipedia   keyless, encyclopedic only
  */
 
-export type SearchBackend = 'auto' | 'bing' | 'google' | 'duckduckgo' | 'wikipedia';
+export type SearchBackend = 'auto' | 'platform' | 'bing' | 'google' | 'duckduckgo' | 'wikipedia';
 
 export interface SearchResult {
   title: string;
   url: string;
   description: string;
   position: number;
+  /** ISO date the page was published, when the backend knows it. */
+  publishedAt?: string;
 }
 
 export interface SearchResponse {
@@ -20,6 +37,67 @@ export interface SearchResponse {
     web: SearchResult[];
   };
   error?: string;
+  /** The backend that produced the results. */
+  backend?: SearchBackend;
+  /** A preferred backend failed before these results came from another one. */
+  notice?: string;
+}
+
+export interface SearchOptions {
+  /** Only recent results (honoured by the platform backend). */
+  freshness?: PlatformFreshness;
+  /**
+   * The platform backend's settings: undefined resolves them from the global
+   * providers.json, null means none (tests and callers that know).
+   */
+  platform?: PlatformSearchConfig | null;
+  signal?: AbortSignal;
+}
+
+/** Whether the user configured a keyed search backend of their own (which then keeps priority over the platform). */
+export function hasUserSearchKey(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.BING_API_KEY?.trim() || (env.GOOGLE_API_KEY?.trim() && env.GOOGLE_CX?.trim()));
+}
+
+/** The platform search settings, unless the user brought a search key of their own. */
+async function platformFor(options: SearchOptions): Promise<PlatformSearchConfig | undefined> {
+  if (options.platform === null) return undefined;
+  if (options.platform) return options.platform;
+  if (hasUserSearchKey()) return undefined;
+  return resolvePlatformSearch();
+}
+
+/** Search through the platform gateway, as a SearchResponse. */
+export async function searchWithPlatformBackend(
+  query: string,
+  limit: number,
+  config: PlatformSearchConfig | undefined,
+  options: SearchOptions = {},
+): Promise<SearchResponse> {
+  if (!config) {
+    return { success: false, data: { web: [] }, error: 'platform search is not configured on this host', backend: 'platform' };
+  }
+  try {
+    const { results } = await searchWithPlatform(query, limit, config, {
+      ...(options.freshness ? { freshness: options.freshness } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return {
+      success: true,
+      backend: 'platform',
+      data: {
+        web: results.slice(0, limit).map((r, index) => ({
+          title: r.title,
+          url: r.url,
+          description: r.snippet,
+          position: index + 1,
+          ...(r.publishedAt ? { publishedAt: r.publishedAt } : {}),
+        })),
+      },
+    };
+  } catch (error) {
+    return { success: false, data: { web: [] }, error: error instanceof Error ? error.message : String(error), backend: 'platform' };
+  }
 }
 
 /**
@@ -297,23 +375,42 @@ export async function searchWithGoogle(query: string, limit: number = 5): Promis
 export async function searchWeb(
   query: string, 
   limit: number = 5, 
-  backend: SearchBackend = 'auto'
+  backend: SearchBackend = 'auto',
+  options: SearchOptions = {},
 ): Promise<SearchResponse> {
+  if (backend === 'platform') {
+    // Asked for by name: the platform's settings even next to a user key.
+    const config = options.platform === null ? undefined : options.platform ?? (await resolvePlatformSearch());
+    return await searchWithPlatformBackend(query, limit, config, options);
+  }
   if (backend !== 'auto') {
     return await runSearchBackend(backend, query, limit);
   }
 
   // auto：按优先级尝试，失败或 0 结果时穿透到下一个后端。
   // 旧实现只挑一个后端就返回——DDG 被风控/解析为空时整个搜索直接空手。
-  const chain: SearchBackend[] = ['duckduckgo', 'bing', 'google', 'wikipedia'];
+  // On a platform-managed host without a search key of the user's own, the
+  // platform's search goes first; scraping stays as the last resort.
+  const platform = await platformFor(options);
+  const chain: SearchBackend[] = [...(platform ? (['platform'] as const) : []), 'duckduckgo', 'bing', 'google', 'wikipedia'];
   // Every backend's outcome goes into the error, so the caller can tell
   // "nothing matched" apart from "no backend is usable on this host".
   const outcomes: string[] = [];
   for (const candidate of chain) {
     try {
-      const result = await runSearchBackend(candidate, query, limit);
+      const result = candidate === 'platform'
+        ? await searchWithPlatformBackend(query, limit, platform, options)
+        : await runSearchBackend(candidate, query, limit);
       if (result.success && result.data.web.length > 0) {
-        return result;
+        const platformOutcome = outcomes.find((o) => o.startsWith('platform: '));
+        return {
+          ...result,
+          backend: result.backend ?? candidate,
+          // The platform's search failed and a fallback answered: say so, never pretend.
+          ...(platformOutcome && candidate !== 'platform'
+            ? { notice: `Platform web search failed (${platformOutcome.slice('platform: '.length)}); these results come from the ${candidate} fallback.` }
+            : {}),
+        };
       }
       outcomes.push(`${candidate}: ${result.error ?? 'no results'}`);
     } catch (error) {
@@ -324,11 +421,12 @@ export async function searchWeb(
     success: false,
     data: { web: [] },
     error: `No search backend returned results (${outcomes.join('; ')}).`,
+    ...(platform ? { backend: 'platform' as const } : {}),
   };
 }
 
 async function runSearchBackend(
-  backend: SearchBackend,
+  backend: Exclude<SearchBackend, 'platform'>,
   query: string,
   limit: number,
 ): Promise<SearchResponse> {
@@ -361,7 +459,7 @@ export function createSearchAction(query: string, limit: number = 5, backend?: S
  * 执行搜索动作
  */
 export async function executeSearchAction(action: any): Promise<SearchResponse> {
-  const { query, limit = 5, backend = 'auto' } = action;
+  const { query, limit = 5, backend = 'auto', freshness } = action;
   
-  return await searchWeb(query, limit, backend as SearchBackend);
+  return await searchWeb(query, limit, backend as SearchBackend, freshness ? { freshness } : {});
 }

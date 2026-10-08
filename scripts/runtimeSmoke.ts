@@ -3150,6 +3150,8 @@ async function withMockHeadlessHost(
     configureBytePlusVisual?: boolean
     /** Replaces the default providers.json written to ARTEMIS_HOME. */
     providers?: (baseUrl: string) => unknown
+    /** The platform gateway's POST /v1/search. */
+    search?: (body: string, authorization: string | undefined) => { status: number; json: unknown }
   },
   run: (ctx: { project: string; requests: MockHostRequest[]; port: number }) => Promise<void>,
 ): Promise<void> {
@@ -3180,6 +3182,12 @@ async function withMockHeadlessHost(
           choices: [{ message: { content: isAgentRequest ? options.chat(chatCount, body) : (options.aux?.(body) ?? '[]') } }],
           usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         }))
+        return
+      }
+      if (url === '/v1/search' && options.search) {
+        const reply = options.search(body, req.headers.authorization)
+        res.writeHead(reply.status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(reply.json))
         return
       }
       if (url === '/visual/asset.png') {
@@ -3588,6 +3596,113 @@ const ONE_PIXEL_PNG_BASE64 =
       chatCalls[1]?.body.slice(-800),
     )
   })
+}
+
+{
+  // Platform web search: a hosted VPS (providers.json written by the agent
+  // server) searches through the gateway's /v1/search with its platform key.
+  const { platformSearchFromStore, searchWithPlatform, PlatformSearchError } = await import('../src/core/platformSearch.js')
+  const { hasUserSearchKey } = await import('../src/core/searchTools.js')
+  const main = { id: 'executor', protocol: 'openai', baseUrl: 'https://gw.example/v1', apiKey: 'ak-main', model: 'm' }
+  assert(
+    'platform search: an explicit webSearch entry wins; enabled:false or another provider turns it off',
+    eq(platformSearchFromStore({ webSearch: { provider: 'platform', enabled: true, baseUrl: 'https://gw.example/v1', apiKey: 'ak-1', managedBy: 'platform' }, profiles: [] }), { baseUrl: 'https://gw.example/v1', apiKey: 'ak-1', source: 'webSearch' }) &&
+      platformSearchFromStore({ webSearch: { provider: 'platform', enabled: false, managedBy: 'platform' }, profiles: [{ ...main, capabilitiesSource: 'platform' } as never], defaultMainProfileId: 'executor' }) === undefined &&
+      platformSearchFromStore({ webSearch: { provider: 'bing' }, profiles: [] }) === undefined &&
+      platformSearchFromStore({ webSearch: { provider: 'platform', baseUrl: 'not a url', apiKey: 'k' }, profiles: [] }) === undefined,
+  )
+  assert(
+    'platform search: without a webSearch entry, only a platform-managed main profile is taken as the gateway',
+    eq(platformSearchFromStore({ profiles: [{ ...main, capabilitiesSource: 'platform' } as never], defaultMainProfileId: 'executor' }), { baseUrl: 'https://gw.example/v1', apiKey: 'ak-main', source: 'mainProfile' }) &&
+      platformSearchFromStore({ profiles: [main as never], defaultMainProfileId: 'executor' }) === undefined,
+  )
+  assert(
+    'platform search: a user search key (Bing, or Google with its CX) keeps priority over the platform',
+    hasUserSearchKey({ BING_API_KEY: 'b' }) && hasUserSearchKey({ GOOGLE_API_KEY: 'g', GOOGLE_CX: 'c' }) && !hasUserSearchKey({ GOOGLE_API_KEY: 'g' }) && !hasUserSearchKey({}),
+  )
+
+  // Error wording: each failure says what happened, nothing is made up.
+  const answer = (status: number, json: unknown, headers: Record<string, string> = {}) =>
+    (async () => new Response(JSON.stringify(json), { status, headers: { 'content-type': 'application/json', ...headers } })) as unknown as typeof fetch
+  const failure = async (impl: typeof fetch) => {
+    try {
+      await searchWithPlatform('q', 5, { baseUrl: 'https://gw.example/v1', apiKey: 'ak', source: 'webSearch' }, { fetchImpl: impl })
+      return 'resolved'
+    } catch (error) {
+      return error instanceof PlatformSearchError ? `${error.code}|${error.message}` : String(error)
+    }
+  }
+  const balance = await failure(answer(402, { error: { code: 'insufficient_balance' } }))
+  const limited = await failure(answer(429, { error: { code: 'rate_limited' } }, { 'retry-after': '7' }))
+  const unpriced = await failure(answer(503, { error: { code: 'search_unpriced' } }))
+  const upstream = await failure(answer(502, { error: { code: 'search_failed', message: 'every provider failed' } }))
+  const offline = await failure((async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch)
+  assert(
+    'platform search: balance, rate limit, unavailable, upstream failure and an unreachable gateway each get an honest message',
+    balance.startsWith('insufficient_balance|') && balance.includes('balance is too low') &&
+      limited.startsWith('rate_limited|') && limited.includes('retry in 7 s') &&
+      unpriced.startsWith('unavailable|') && unpriced.includes('search_unpriced') &&
+      upstream.startsWith('failed|') && upstream.includes('every provider failed') &&
+      offline.startsWith('unreachable|'),
+    [balance, limited, unpriced, upstream, offline].join(' / '),
+  )
+
+  const platformProviders = (baseUrl: string) => ({
+    defaultMainProfileId: 'executor',
+    profiles: [{ id: 'executor', protocol: 'openai', apiKey: 'ak-platform-key', model: 'mock-openai-compatible', baseUrl, capabilitiesSource: 'platform', contextLength: 128000 }],
+    webSearch: { provider: 'platform', enabled: true, baseUrl: `${baseUrl}/v1`, apiKey: 'ak-platform-key', managedBy: 'platform' },
+  })
+
+  // (e) A hosted run searches through the gateway: results reach the model, no fake ones.
+  let searchAuth: string | undefined
+  let searchBody = ''
+  await withMockHeadlessHost({
+    providers: platformProviders,
+    search: (body, authorization) => {
+      searchAuth = authorization
+      searchBody = body
+      return { status: 200, json: { provider: 'brave', results: [{ title: 'Monad 测试网上线', url: 'https://news.example/monad', snippet: '测试网今日开放', publishedAt: '2026-10-07T00:00:00.000Z' }] } }
+    },
+    chat: (index) => index === 1
+      ? '<toolcall name="search_web">{"query":"Monad 测试网 最新消息","limit":3,"freshness":"week"}</toolcall>'
+      : '根据搜索结果，Monad 测试网已上线。',
+  }, async ({ requests }) => {
+    const result = await runHeadlessAgent(fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-search-')), '帮我搜一下 Monad 测试网的最新消息', { maxTurns: 6 })
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
+    const sent = (() => { try { return JSON.parse(searchBody) as { query?: string; count?: number; freshness?: string } } catch { return {} } })()
+    assert(
+      'platform search: a hosted run calls the gateway /v1/search with the platform key and the query, count and freshness',
+      requests.some((r) => r.path === '/v1/search') && searchAuth === 'Bearer ak-platform-key' &&
+        sent.query === 'Monad 测试网 最新消息' && sent.count === 3 && sent.freshness === 'week',
+      `auth=${searchAuth} body=${searchBody}`,
+    )
+    assert(
+      'platform search: the gateway results (title, URL, date, snippet) are what the model gets',
+      chatCalls.length >= 2 && chatCalls[1]!.body.includes('Monad 测试网上线') && chatCalls[1]!.body.includes('https://news.example/monad') &&
+        chatCalls[1]!.body.includes('Published: 2026-10-07') && result.reply.includes('Monad'),
+      chatCalls[1]?.body.slice(-600),
+    )
+  })
+
+  // (f) The gateway refuses (balance): the tool says so and nothing is invented.
+  await withMockHeadlessHost({
+    providers: platformProviders,
+    search: () => ({ status: 402, json: { error: { code: 'insufficient_balance', message: 'Balance too low: please top up' } } }),
+    chat: (index) => index === 1
+      ? '<toolcall name="search_web">{"query":"BTC price today"}</toolcall>'
+      : '搜索暂时用不了：账户余额不足，请先充值。',
+  }, async ({ requests }) => {
+    await runHeadlessAgent(fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-platform-search-')), 'Search the BTC price today.', { maxTurns: 6 })
+    const chatCalls = requests.filter((request) => request.path.includes('/chat/completions') && !request.path.endsWith('#aux'))
+    const toolTurn = chatCalls[1]?.body ?? ''
+    assert(
+      'platform search: a refused search reports the reason (balance) and the fallback outcomes, never fake results or a setup hint',
+      toolTurn.includes('search_web failed') && toolTurn.includes('balance is too low') && toolTurn.includes('do not invent search results') &&
+        toolTurn.includes('duckduckgo') && !toolTurn.includes('GOOGLE_API_KEY with GOOGLE_CX'),
+      toolTurn.slice(-900),
+    )
+  })
+
 }
 
 {

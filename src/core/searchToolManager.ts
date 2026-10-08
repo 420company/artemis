@@ -1,4 +1,4 @@
-import { searchWeb, createSearchAction, executeSearchAction, type SearchResponse, type SearchBackend } from './searchTools.js';
+import { searchWeb, createSearchAction, executeSearchAction, type SearchResponse, type SearchBackend, type SearchOptions } from './searchTools.js';
 import type { AgentAction, SessionMessage } from './types.js';
 
 /**
@@ -28,8 +28,8 @@ export class SearchToolManager {
   /**
    * 直接搜索
    */
-  static async search(query: string, limit: number = 5, backend?: SearchBackend): Promise<SearchResponse> {
-    return await searchWeb(query, limit, backend);
+  static async search(query: string, limit: number = 5, backend?: SearchBackend, options: SearchOptions = {}): Promise<SearchResponse> {
+    return await searchWeb(query, limit, backend, options);
   }
 
   /**
