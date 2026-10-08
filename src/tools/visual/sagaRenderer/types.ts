@@ -196,6 +196,8 @@ export type SagaInspectReport = {
 
 export type SagaContinuityBible = {
   identityCard: string;
+  /** Re-renders the identity card within a smaller room (lowest-priority lines go first). */
+  fitIdentityCard?: (maxChars: number) => string;
   bible: string;
   characters: string[];
   wardrobe: string[];

@@ -204,7 +204,7 @@ async function rawModeChecks(): Promise<void> {
   assert.equal(stripRawModeTag('原样直传\n风筝'), '风筝');
   assert.equal(stripRawModeTag('她说要原样直传这段剧本。'), '她说要原样直传这段剧本。', 'the word inside a sentence stays');
   const rawStory = '[原样直传]\nA young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
-  const raw = await runHermeticSaga({ prompt: rawStory, story: rawStory, totalDuration: 10, ratio: '9:16', generateAudio: false, cleanDirect: true });
+  const raw = await runHermeticSaga({ prompt: rawStory, story: rawStory, totalDuration: 10, ratio: '9:16', generateAudio: false, rawPassthrough: true });
   assert.equal(raw.result.ok, true, raw.result.output);
   const tasks = videoTaskBodies(raw.requests);
   assert.equal(tasks.length, 2);
@@ -218,6 +218,23 @@ async function rawModeChecks(): Promise<void> {
   assert.equal(raw.requests.filter((r) => r.url.endsWith('/chat/completions')).length, 0, 'raw mode makes no narrative, rewrite or Director LLM calls');
   assert.equal(imageBodies(raw.requests).length, 0, 'raw mode generates no turnaround or keyframes');
   assert.ok(tasks.every((body) => !promptText(body).includes('Rendering rules:')), 'raw mode never gets the rendering rules');
+  assert.ok(tasks.every((body) => promptText(body).length <= 4000), 'raw prompts fit the model prompt limit');
+
+  // cleanDirect (guide §9.10) only drops the aesthetic dressing: the
+  // narrative analysis and the Super Visual turnaround still run.
+  const cleanStory = 'Use raw look / low filter / raw-seedance / clean-direct.\nA young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
+  const clean = await runHermeticSaga({ prompt: cleanStory, story: cleanStory, totalDuration: 10, ratio: '9:16', generateAudio: false, cleanDirect: true });
+  assert.equal(clean.result.ok, true, clean.result.output);
+  const cleanTasks = videoTaskBodies(clean.requests);
+  assert.ok(clean.requests.some((r) => r.url.endsWith('/chat/completions')), 'cleanDirect keeps the narrative analysis');
+  assert.ok(imageBodies(clean.requests).length >= 1 && imageBodies(clean.requests).length <= 2, 'cleanDirect keeps the turnaround but makes no keyframes');
+  for (const body of cleanTasks) {
+    const text = promptText(body);
+    assert.ok(text.length <= 4000, 'cleanDirect prompts fit the model prompt limit');
+    assert.ok(!/Fibonacci|focal point|\[STYLE-LOCK|\[AESTHETIC-LOCK|Rendering rules:/.test(text), 'cleanDirect drops the aesthetic dressing');
+    assert.ok(/\[NEGATIVE/.test(text) && /SAGA-CONTINUITY-POLICY|LOCKED-CHARACTERS|CHARACTERS:/.test(text), 'cleanDirect keeps the identity and negative locks');
+    assert.ok(!/clean-direct|raw-seedance/.test(text), 'the cleanDirect instruction line never reaches the video model');
+  }
 }
 
 async function chainAccountingChecks(): Promise<void> {

@@ -531,7 +531,25 @@ async function main(): Promise<void> {
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '10秒' });
     const rawFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '不加' });
-    assert.equal(rawFinal.action?.cleanDirect, true, '"[原样直传]" should enable raw mode');
+    assert.equal(rawFinal.action?.rawPassthrough, true, '"[原样直传]" should enable raw passthrough');
+    assert.notEqual(rawFinal.action?.cleanDirect, true, '"[原样直传]" is raw passthrough, not cleanDirect');
+
+    // The guide's cleanDirect sentence (§9.10) keeps the narrative analysis.
+    chatCalls = 0;
+    const cleanKey = `${key}-clean-direct-guide`;
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频\n请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n保留自然纹理，不要过度导演包装。' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '1' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '4' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
+    let clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '开始生成' });
+    assert.ok(chatCalls > 0, 'cleanDirect still runs the narrative analysis');
+    for (const reply of ['自动', '自动', '10秒', '不加']) {
+      if (!clean.handled) break;
+      clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: /确认.*主角|confirm the lead/i.test(clean.reply) ? 'X' : reply });
+    }
+    assert.equal(clean.handled, false, 'the cleanDirect flow should end in an action');
+    assert.equal(clean.action?.cleanDirect, true, 'the guide sentence enables cleanDirect');
+    assert.notEqual(clean.action?.rawPassthrough, true, 'the guide sentence is not raw passthrough');
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -621,6 +621,7 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateBooleanValue(action?.resume, 'resume', errors);
   validateBooleanValue(action?.preserveUserScript, 'preserveUserScript', errors);
   validateBooleanValue(action?.cleanDirect, 'cleanDirect', errors);
+  validateBooleanValue(action?.rawPassthrough, 'rawPassthrough', errors);
   validateEnumString(action?.chainReferenceFrames, 'chainReferenceFrames', ['auto', 'always', 'off'] as const, errors);
   validateEnumString(action?.continuityMode, 'continuityMode', ['auto', 'strong-vision', 'text-only'] as const, errors);
   validatePositiveInteger(action?.crossfadeMs, 'crossfadeMs', errors);

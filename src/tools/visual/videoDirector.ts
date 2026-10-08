@@ -16,6 +16,11 @@ export type VideoDirectorInput = {
    * caller appends). Defaults to the long-standing 2,600-character cap.
    */
   maxPromptChars?: number;
+  /**
+   * The user's subtitle choice. "always" drops the "no subtitles / no text
+   * overlays" negative so the requested captions are not forbidden.
+   */
+  subtitleMode?: 'auto' | 'always' | 'off';
 };
 
 export type VideoDirectorResult = {
@@ -401,11 +406,12 @@ function buildSeedanceSoundPlan(prompt: string, referenceAudioCount: number): st
   return 'Sound design: generated audio enabled; add natural ambience, material sounds, movement accents, and a restrained cinematic bed.';
 }
 
-function buildSeedanceNegativePrompt(kind: SceneKind): string {
+function buildSeedanceNegativePrompt(kind: SceneKind, subtitleMode?: VideoDirectorInput['subtitleMode']): string {
   const anatomy = kind === 'portrait'
     ? ', no extra limbs, no face drift, no broken hands'
     : '';
-  return `Negative constraints: no subtitles, no text overlays, no logos, no watermark, no random morphing, no flicker, no melting objects, no duplicate subjects${anatomy}.`;
+  const text = subtitleMode === 'always' ? '' : 'no subtitles, no text overlays, ';
+  return `Negative constraints: ${text}no logos, no watermark, no random morphing, no flicker, no melting objects, no duplicate subjects${anatomy}.`;
 }
 
 function buildSeedanceScenarioStrategy(prompt: string, kind: SceneKind): string {
@@ -444,7 +450,9 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
   const autoCreative = buildSeedanceAutoCreativeSpec(originalPrompt, kind);
   const soundPlan = buildSeedanceSoundPlan(originalPrompt, input.referenceAudioCount ?? 0);
   const scenario = buildSeedanceScenarioStrategy(originalPrompt, kind);
-  const negative = buildSeedanceNegativePrompt(kind);
+  const negative = buildSeedanceNegativePrompt(kind, input.subtitleMode);
+  const hasReferences = [input.referenceImageCount, input.referenceVideoCount, input.referenceAudioCount, input.firstFrameImageCount, input.lastFrameImageCount]
+    .some((count) => (count ?? 0) > 0);
 
   return assembleDirectedPrompt([
     { text: `Seedance 2.0 Pro optimized prompt.` },
@@ -452,7 +460,9 @@ function buildSeedanceDirectedPrompt(input: VideoDirectorInput, profile: string)
     { sourceLabel: 'Source brief: ' },
     { text: `Director profile: ${profile}.`, dropRank: 7 },
     { text: scenario, dropRank: 13 },
-    { text: `Reference usage: ${referencePlan}` },
+    // The no-reference plan is generic advice; a reference declaration says
+    // what each attached file is for and always stays.
+    hasReferences ? { text: `Reference usage: ${referencePlan}` } : { text: `Reference usage: ${referencePlan}`, dropRank: 8 },
     { text: autoCreative, dropRank: 12 },
     { text: soundPlan, dropRank: 14 },
     { text: `single clear focal point: ${focalPoint}.`, dropRank: 10 },
@@ -489,7 +499,7 @@ export function buildDirectedVideoPrompt(input: VideoDirectorInput): VideoDirect
       camera,
       lighting,
       physics,
-      constraints: buildSeedanceNegativePrompt(kind),
+      constraints: buildSeedanceNegativePrompt(kind, input.subtitleMode),
     };
   }
 

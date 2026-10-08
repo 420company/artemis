@@ -8,7 +8,7 @@ import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveVideoModelLimits } from './videoModelLimits.js';
 import { normalizeVideoResolution } from './videoParams.js';
-import { hasRawModeTag } from './rawModeTag.js';
+import { hasCleanDirectKeyword, hasRawModeTag } from './rawModeTag.js';
 import { resolveVideoModelCapabilities } from './videoCapabilities.js';
 import type { ImageAttachment } from '../../providers/types.js';
 import {
@@ -26,6 +26,8 @@ import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.j
 import type { AgentAction } from '../../core/types.js';
 import type { SagaRatio } from './sagaRenderer/types.js';
 import { extractBriefAspectRatio, normalizeAspectRatio } from './aspectRatio.js';
+import { extractSagaDialogueLines } from './sagaLanguageDirector.js';
+import { parseSagaBriefGlobals, stripBriefNoise } from './sagaBriefGlobals.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
   return explicitLocale ?? DEFAULT_UI_LOCALE;
@@ -142,8 +144,14 @@ const STORY_ENHANCE_RE = /^(?:剧情增强|增强剧情|story\s*enhance|enhance\
 const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发送分镜|storyboard|storyboard image|shot board)$/i;
 
 
-function wantsCleanDirectMode(segments: string[]): boolean {
+/** Raw passthrough: an explicit "[原样直传]" / "【raw直传】" tag. */
+function wantsRawPassthrough(segments: string[]): boolean {
   return segments.some((segment) => hasRawModeTag(segment));
+}
+
+/** cleanDirect: the guide's §9.10 keywords, unless raw passthrough already applies. */
+function wantsCleanDirectMode(segments: string[]): boolean {
+  return !wantsRawPassthrough(segments) && segments.some((segment) => hasCleanDirectKeyword(segment));
 }
 
 function hasExplicitUserScriptText(segments: string[]): boolean {
@@ -1029,11 +1037,12 @@ const NARRATIVE_CONFIDENCE_THRESHOLD = 0.7;
 async function runNarrativeAnalysis(state: SagaWorkflowState): Promise<NarrativeEntities> {
   const fullStory = combinedStoryText(state);
   const imagePaths = [...state.referenceImagePaths];
-  // Raw mode sends the script and the references to the video model as they
-  // are: no LLM and vision analysis (which would lock props and scenery from
-  // the reference backgrounds) and no "confirm the lead" question. The
-  // keyword pass only feeds downstream routing.
-  if (wantsCleanDirectMode([state.originalText, ...state.accumulatedStory])) {
+  // Raw passthrough sends the script and the references to the video model
+  // as they are: no LLM and vision analysis (which would lock props and
+  // scenery from the reference backgrounds) and no "confirm the lead"
+  // question. The keyword pass only feeds downstream routing. cleanDirect
+  // keeps the analysis: it only drops aesthetic dressing.
+  if (wantsRawPassthrough([state.originalText, ...state.accumulatedStory])) {
     return narrativeKeywordFallback({
       userText: fullStory,
       hasFaceLikelyInImages: imagePaths.length > 0,
@@ -1337,6 +1346,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   const aiScreenwriterSeed = state.aiScreenwriterMode === true;
   const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated) && !aiScreenwriterSeed;
   const cleanDirect = wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
+  const rawPassthrough = wantsRawPassthrough([state.originalText, ...sanitizedAccumulated]);
   const creativeSeedSegments = sanitizedAccumulated.length > 0 ? sanitizedAccumulated : [fullStory].filter(Boolean);
   const userScriptBlock = (sanitizedAccumulated.length > 0 || aiScreenwriterSeed)
     ? (aiScreenwriterSeed
@@ -1407,6 +1417,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     preserveUserScript ? 'preserveUserScript: true' : '',
     aiScreenwriterSeed ? 'aiScreenwriterMode: true' : '',
     cleanDirect ? 'cleanDirect: true' : '',
+    rawPassthrough ? 'rawPassthrough: true' : '',
   ];
 
   if (state.referenceImageUrls.length > 0) lines.push(`referenceImageUrls: ${JSON.stringify(state.referenceImageUrls)}`);
@@ -1484,21 +1495,33 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   return lines.join('\n');
 }
 
+/** The brief's CHARACTER LOCK / 色彩 / 光照 / 镜头机位 / VIBE lines (guide §6) as the action's continuity locks. */
+function continuityFromBrief(story: string): Extract<AgentAction, { type: 'generate_long_video' }>['continuity'] | undefined {
+  const globals = parseSagaBriefGlobals(stripBriefNoise(story));
+  const continuity = {
+    ...(globals.characters.length > 0 ? { characters: globals.characters } : {}),
+    ...(globals.palette.length > 0 ? { palette: globals.palette } : {}),
+    ...(globals.lighting ? { lighting: globals.lighting } : {}),
+    ...(globals.cameraLanguage ? { cameraLanguage: globals.cameraLanguage } : {}),
+    ...(globals.mood ? { mood: globals.mood } : {}),
+  };
+  return Object.keys(continuity).length > 0 ? continuity : undefined;
+}
+
 function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, { type: 'generate_long_video' }> {
   const prompt = buildGenerationPrompt(state);
   const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
   const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
   const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated);
-  // cleanDirect is opt-in via explicit keywords (raw-seedance / 原始质感 / etc.).
-  // It used to be auto-forced whenever preserveUserScript was true, but those
-  // two concerns are independent: preserveUserScript means "don't rewrite my
-  // text", whereas cleanDirect means "strip ALL directorial scaffolding"
-  // (Super Visual keyframes, chain frames, STYLE-LOCK, AESTHETIC-LOCK,
-  // NEGATIVE, EXPLICIT USER BRIEF LOCK, etc.). Coupling them silently broke
-  // detailed timecoded briefs by removing every quality lock.
+  // cleanDirect is opt-in via the guide's keywords (raw-seedance / 原始质感 /
+  // etc.) and raw passthrough via an explicit "[原样直传]" tag. Neither is
+  // implied by preserveUserScript ("don't rewrite my text"): coupling them
+  // silently broke detailed timecoded briefs by removing every quality lock.
   const cleanDirect = wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
+  const rawPassthrough = wantsRawPassthrough([state.originalText, ...sanitizedAccumulated]);
   const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
   const ratio = state.ratio ?? state.suggestedRatio ?? extractRatio(fullStory) ?? '16:9';
+  const briefContinuity = continuityFromBrief(fullStory);
   const projectIdMatch = prompt.match(/^projectId:\s*"([^"]+)"/m);
   const projectId = projectIdMatch?.[1] ?? `saga-${Date.now()}`;
 
@@ -1546,6 +1569,8 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
     ...(state.resolution ? { resolution: state.resolution } : {}),
     preserveUserScript,
     cleanDirect,
+    ...(rawPassthrough ? { rawPassthrough: true } : {}),
+    ...(briefContinuity ? { continuity: briefContinuity } : {}),
     referenceImageUrls: mergedRefImageUrls,
     storyboardImageUrls: [...state.storyboardImageUrls],
     referenceVideoUrls: [...state.referenceVideoUrls],

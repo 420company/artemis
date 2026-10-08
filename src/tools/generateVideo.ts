@@ -244,7 +244,9 @@ export async function executeGenerateVideo(
       typeof action.pollIntervalMs === 'number' && action.pollIntervalMs >= 1000
         ? Math.floor(action.pollIntervalMs)
         : DEFAULT_POLL_INTERVAL_MS;
-    const directed = buildDirectedVideoPrompt({
+    const directed = action.cleanDirect === true
+      ? { directedPrompt: fitVerbatimPrompt(action.prompt, 'byteplus', model), providerProfile: 'Saga cleanDirect: Director bypassed, prompt passed verbatim' }
+      : buildDirectedVideoPrompt({
       prompt: action.prompt,
       provider: 'byteplus',
       model,
@@ -256,6 +258,7 @@ export async function executeGenerateVideo(
       firstFrameImageCount: (action.firstFrameImageUrls?.length ?? 0) + (action.firstFrameImagePaths?.length ?? 0),
       lastFrameImageCount: (action.lastFrameImageUrls?.length ?? 0) + (action.lastFrameImagePaths?.length ?? 0),
       maxPromptChars: directorPromptBudget(action, 'byteplus', model),
+      subtitleMode: action.subtitleMode,
     });
     toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
@@ -412,6 +415,27 @@ export async function executeGenerateVideo(
     }
     return { action, ok: false, output: `generate_video error: ${message}` };
   }
+}
+
+/**
+ * Room generate_video needs around a Saga segment prompt outside cleanDirect /
+ * raw passthrough: the Director's fixed lines (technical spec, reference
+ * declaration, negative constraints), the dialogue note and the rendering
+ * rules. generate_long_video compiles each segment prompt within the model's
+ * limit less this, so nothing the segment needs is cut off at the end.
+ */
+export const SAGA_SEGMENT_DIRECTOR_CHARS = 1080;
+
+export function sagaSegmentPromptReserve(): number {
+  return SAGA_SEGMENT_DIRECTOR_CHARS + renderingGuardrailsLength();
+}
+
+/** A prompt sent as written still has to fit the model's prompt limit. */
+function fitVerbatimPrompt(prompt: string, provider: string, model: string): string {
+  const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
+  if (prompt.length <= limit) return prompt;
+  toolWarn(`⚠️ Saga: 提示词超过 ${model} 的长度上限（${prompt.length}/${limit}），已截断末尾。`);
+  return `${prompt.slice(0, limit - 1).trimEnd()}…`;
 }
 
 function wantsRenderingGuardrails(action: GenerateVideoAction): boolean {
@@ -586,8 +610,11 @@ async function generateVideoWithVisualProvider(
     : await normalizeSagaPromptForVideoGeneration({
         cwd: context.cwd,
         text: action.prompt,
-        enableLlmRewrite: true,
-        subtitleMode: 'auto',
+        // A Saga segment is the user's script plus its locks: the story beat
+        // goes verbatim (guide §7.7), so no LLM rewrite.
+        enableLlmRewrite: action.sagaSegment !== true,
+        subtitleMode: action.subtitleMode ?? 'auto',
+        compact: action.sagaSegment === true,
       });
   const generationPrompt = languageNormalized?.generationText ?? action.prompt;
   if (languageNormalized) {
@@ -595,8 +622,8 @@ async function generateVideoWithVisualProvider(
   }
   const directed = bypassDirector
     ? {
-        directedPrompt: action.prompt,
-        providerProfile: rawMode ? 'Raw mode: Director bypassed, prompt passed verbatim' : 'NSFW provider: Director bypassed, prompt passed verbatim',
+        directedPrompt: rawMode ? fitVerbatimPrompt(action.prompt, videoConfig.provider, model) : action.prompt,
+        providerProfile: rawMode ? 'Saga cleanDirect: Director bypassed, prompt passed verbatim' : 'NSFW provider: Director bypassed, prompt passed verbatim',
       }
     : buildDirectedVideoPrompt({
         prompt: generationPrompt,
@@ -610,6 +637,7 @@ async function generateVideoWithVisualProvider(
         firstFrameImageCount: firstFrameImageUrls.length,
         lastFrameImageCount: lastFrameImageUrls.length,
         maxPromptChars: directorPromptBudget(action, videoConfig.provider, model),
+        subtitleMode: action.subtitleMode,
       });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({

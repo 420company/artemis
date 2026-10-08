@@ -4,6 +4,7 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { SagaContinuityBible, SagaSegmentInput } from './types.js';
 import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
+import { DIALOGUE_MARKER_SOURCE, QUOTED_LINE_SOURCE } from '../sagaLanguageDirector.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -114,8 +115,7 @@ function extractGlobalContextFromStory(story: string | undefined): string {
 // they want subtitles rendered).
 function buildNegativeBlock(subtitleMode: 'auto' | 'always' | 'off' | undefined): string {
   const baseEntries = [
-    'no character identity drift',
-    'no unintended wardrobe drift for recurring characters',
+    'no identity or wardrobe drift for recurring characters',
     'no accidental jump cuts inside continuous scenes',
     'no flicker',
     'no warped anatomy',
@@ -215,22 +215,33 @@ function lockLine(label: string, items: string[], maxChars: number, separator = 
   return `${line.slice(0, Math.max(0, maxChars - 2)).trimEnd()}…]`;
 }
 
+/** Optional lines up to this rank go before the characters are shortened. */
+const IDENTITY_CARD_OPTIONAL_RANK = 7;
+
 function fitIdentityCard(entries: IdentityCardEntry[], maxChars: number): string {
   let active = entries.map((entry) => ({ ...entry }));
   const render = () => active.map((entry) => entry.text).join('\n');
-  const droppable = active
-    .filter((entry) => entry.dropRank !== undefined)
-    .sort((a, b) => (a.dropRank ?? 0) - (b.dropRank ?? 0));
-  for (const entry of droppable) {
-    if (render().length <= maxChars) break;
-    active = active.filter((candidate) => candidate !== entry);
-  }
-  // Still too long: re-fit the flexible entries (the characters) into what is left.
-  for (const entry of active) {
-    const overflow = render().length - maxChars;
-    if (overflow <= 0 || !entry.fit) continue;
-    entry.text = entry.fit(Math.max(120, entry.text.length - overflow));
-  }
+  const dropUpTo = (maxRank: number) => {
+    const droppable = active
+      .filter((entry) => entry.dropRank !== undefined && entry.dropRank <= maxRank)
+      .sort((a, b) => (a.dropRank ?? 0) - (b.dropRank ?? 0));
+    for (const entry of droppable) {
+      if (render().length <= maxChars) break;
+      active = active.filter((candidate) => candidate !== entry);
+    }
+  };
+  // Re-fit the flexible entries (the characters) into what is left.
+  const refit = (floor: number) => {
+    for (const entry of active) {
+      const overflow = render().length - maxChars;
+      if (overflow <= 0 || !entry.fit) continue;
+      entry.text = entry.fit(Math.max(floor, entry.text.length - overflow));
+    }
+  };
+  dropUpTo(IDENTITY_CARD_OPTIONAL_RANK);
+  refit(240);
+  dropUpTo(Number.POSITIVE_INFINITY);
+  refit(80);
   const card = render();
   return card.length <= maxChars ? card : `${card.slice(0, maxChars - 1).trimEnd()}…`;
 }
@@ -285,8 +296,12 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   // lines (palette, mood, camera, lighting, shared notes, props, locations)
   // are dropped, lowest priority first, when the card is still too long.
   const sharedNotes = uniqueStrings(input.shotContinuityNotes ?? []);
+  // A camera the brief locks (or states outright) and the audio lock are
+  // user instructions, not defaults: they are never dropped, and they sit
+  // before NEGATIVE so a cut prompt keeps them too.
+  const cameraIsUserLock = lockOffCamera || Boolean(input.cameraLanguage?.trim());
   const identityEntryCandidates: Array<IdentityCardEntry | undefined> = [
-    { text: '[SAGA-CONTINUITY-POLICY: character/person identity is globally locked across the long video; scene/location continuity is selective and follows the user request/story logic]' },
+    { text: '[SAGA-CONTINUITY-POLICY: every character keeps one identity across the whole video; scenes change only where the story says so]', dropRank: 10 },
     sharedNotes.length > 0 ? { text: lockLine('SHARED-CONTINUITY-NOTES', sharedNotes.slice(0, 6), 180, ' || '), dropRank: 5 } : undefined,
     characters.length > 0
       // Characters come first in the budget: their descriptions are shortened
@@ -299,21 +314,24 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     // identity (eye mask, sunglasses, signature jewelry) and must persist
     // across every shot regardless of costume changes.
     accessoriesLock.length > 0
-      ? { text: lockLine('ACCESSORY-LOCK — identity-defining, same item, position and color in every shot, never removed, lifted or swapped', accessoriesLock, 300) }
+      ? { text: lockLine('ACCESSORY-LOCK — identity-defining, same item, position and color in every shot, never removed, lifted or swapped', accessoriesLock, 300), dropRank: 9 }
       : undefined,
     {
       text: wardrobe.length > 0
         ? lockLine('LOCKED-WARDROBE', wardrobe, 160)
         : '[WARDROBE: same clothing/material cues for recurring characters unless the story explicitly changes costume]',
+      // The generic line is the first to go when the characters carry their own wardrobe.
+      dropRank: wardrobe.length === 0 && characters.length > 0 ? 6 : 8,
     },
+    cameraIsUserLock ? { text: `[CAMERA: ${clipText(cameraLanguage, 160)}]` } : undefined,
+    detectsEnvironmentalAudioOnly(input.story) ? { text: buildAudioLockBlock() } : undefined,
     { text: props.length > 0 ? lockLine('LOCKED-PROPS', props, 140) : '[PROPS: no global prop lock; preserve only props that the story treats as recurring]', dropRank: 6 },
     { text: locations.length > 0 ? lockLine('LOCKED-LOCATIONS', locations, 140) : '[LOCATIONS: no global scene lock; maintain scene continuity only when a shot is meant to continue the same place]', dropRank: 7 },
     { text: palette.length > 0 ? lockLine('PALETTE', palette, 100) : '[PALETTE: cohesive cinematic color design, but not identical colors in every shot unless requested]', dropRank: 1 },
     { text: `[LIGHTING: ${clipText(lighting, 120)}]`, dropRank: 4 },
-    { text: `[CAMERA: ${clipText(cameraLanguage, 120)}]`, dropRank: 3 },
+    cameraIsUserLock ? undefined : { text: `[CAMERA: ${clipText(cameraLanguage, 120)}]`, dropRank: 3 },
     { text: `[MOOD: ${clipText(mood, 100)}]`, dropRank: 2 },
     { text: buildNegativeBlock(input.subtitleMode) },
-    detectsEnvironmentalAudioOnly(input.story) ? { text: buildAudioLockBlock() } : undefined,
   ];
   const identityEntries = identityEntryCandidates.filter((entry): entry is IdentityCardEntry => Boolean(entry));
   const identityCard = fitIdentityCard(identityEntries, IDENTITY_CARD_MAX_CHARS);
@@ -328,6 +346,7 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
 
   return {
     identityCard,
+    fitIdentityCard: (maxChars: number) => fitIdentityCard(identityEntries, Math.min(IDENTITY_CARD_MAX_CHARS, maxChars)),
     bible,
     characters,
     wardrobe,
@@ -437,6 +456,84 @@ export function buildStartingFrameAnchor(options: {
   return lines.join('\n');
 }
 
+// Compact aesthetic locks, used when the full block does not fit the
+// model's prompt limit.
+const COMPACT_AESTHETIC_LOCKS: Record<SagaAestheticSubject, string> = {
+  human: '[AESTHETIC-LOCK: HUMAN-EDITORIAL — cinematic editorial photography, natural skin micro-texture, 35/50mm lens feel, subtle film grain; physically plausible motion; stable anatomy, hands and identity; no waxy or plastic skin, no CG look, no morphing, no flicker, no garbled text]',
+  product: '[AESTHETIC-LOCK: PRODUCT-CINEMATIC — premium commercial lighting, accurate physically based materials and reflections, crisp stable geometry; physically plausible motion; no warped text, no melting, no flicker, no unrelated logos]',
+  mixed: '[AESTHETIC-LOCK: MIXED-HUMAN-COMMERCIAL — natural skin micro-texture with premium commercial light on non-skin materials, 35/50mm lens feel, subtle film grain; stable anatomy, hands, identity and prop geometry; no waxy skin, no CG look, no morphing, no flicker, no garbled text]',
+};
+
+function compactStyleLockBlock(): string {
+  return '[STYLE-LOCK: keep the palette, lighting, lens feel, wardrobe and mood stated above identical in every shot]';
+}
+
+/**
+ * One block of a segment prompt. `keep` orders what goes when the prompt is
+ * over its limit (lowest first); `compact` is a shorter form tried before the
+ * block is left out; `clip` lets the block be cut to the room that is left.
+ * Blocks without `keep` are never dropped.
+ */
+type PromptBlock = { text: string; keep?: number; compact?: string; clip?: boolean };
+
+function renderBlocks(blocks: PromptBlock[]): string {
+  return blocks.map((block) => block.text).filter(Boolean).join('\n');
+}
+
+/**
+ * Fit the blocks within maxChars: clip the clippable ones, then use the
+ * compact forms and then leave out blocks, lowest `keep` first. The identity
+ * card is re-fitted last, so the shot content, the locks it carries and the
+ * negative constraints are never cut off at the end.
+ */
+function fitPromptBlocks(blocks: PromptBlock[], maxChars: number, refitCard?: { block: PromptBlock; fit: (room: number) => string }): string {
+  const active = blocks.map((block) => ({ ...block }));
+  const length = () => renderBlocks(active).length;
+  const byPriority = active
+    .filter((block) => block.keep !== undefined && block.text)
+    .sort((a, b) => (a.keep ?? 0) - (b.keep ?? 0));
+  for (const block of byPriority) {
+    if (length() <= maxChars) break;
+    if (!block.clip) continue;
+    const room = block.text.length - (length() - maxChars);
+    block.text = room >= 160 ? `${block.text.slice(0, room - 1).trimEnd()}…` : '';
+  }
+  for (const block of byPriority) {
+    if (length() <= maxChars) break;
+    if (block.compact && block.compact.length < block.text.length) block.text = block.compact;
+  }
+  for (const block of byPriority) {
+    if (length() <= maxChars) break;
+    block.text = '';
+  }
+  const cardIndex = refitCard ? blocks.indexOf(refitCard.block) : -1;
+  if (length() > maxChars && refitCard && cardIndex >= 0) {
+    const card = active[cardIndex]!;
+    card.text = refitCard.fit(Math.max(200, card.text.length - (length() - maxChars)));
+  }
+  const out = renderBlocks(active);
+  return out.length <= maxChars ? out : `${out.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+/** The opening-framing block without its long header and closing reminder. */
+function compactOpeningFraming(block: string): string {
+  const lines = block.split('\n').filter((line) => line.trim() && !/These positional \/ directional cues/.test(line));
+  const cues = lines.filter((line) => /^\s*·/.test(line));
+  return ['🎯 OPENING FRAMING (highest priority for the opening frame):', ...cues].join('\n');
+}
+
+function normalizeForCompare(text: string): string {
+  return text.replace(/\s+/g, '').replace(/[“”"「」]/g, '').toLowerCase();
+}
+
+/** True when the visual direction only repeats the story beat ("Follow this exact … section: <beat>"). */
+function repeatsStoryBeat(visualPrompt: string, storyBeat: string): boolean {
+  const visual = normalizeForCompare(visualPrompt);
+  const beat = normalizeForCompare(storyBeat);
+  if (!visual || !beat) return false;
+  return visual.includes(beat.slice(0, Math.min(beat.length, 200)));
+}
+
 // Compose the FINAL prompt. mode determines whether we lean on text or on
 // the chained image reference for visual handoff.
 export function compileShotPromptWithContinuity(options: {
@@ -460,10 +557,17 @@ export function compileShotPromptWithContinuity(options: {
   // but the video model also needs it: without this, the model defaults to
   // "subject centered + walking treadmill + half-body crop" regardless of
   // the brief's `画面左 5% / 中景全身 / RIGHTWARD` instructions buried in
-  // the long storyBeat. We surface it at the very top of the per-segment
-  // prompt so the video model attends to position / orientation / motion /
-  // shot size / camera at the strongest weight.
+  // the long storyBeat.
   openingFraming?: string;
+  /** Story essence and picture specs from the brief's global sections. */
+  globalExcerpt?: string;
+  /** World-anchor lines (guide §9.9) whose time range covers this segment. */
+  worldAnchor?: string;
+  /**
+   * Longest prompt to produce. Lower-priority blocks are shortened or left
+   * out to fit; without it every block is emitted in full.
+   */
+  maxChars?: number;
 }): string {
   const authored = options.authoredPrompt?.replace(/\s+/g, ' ').trim();
 
@@ -477,27 +581,17 @@ export function compileShotPromptWithContinuity(options: {
     'Do NOT make the closing-frame description the subject of the whole clip. The subject is the storyBeat.',
     '[/SCENE-PRIORITY]',
   ].join('\n');
+  const scenePriorityCompact = `[SCENE-PRIORITY: the story beat above fills all ${options.duration} s; transition hints cover only the last ~0.5 s]`;
 
   const sourceShotText = [authored, options.storyBeat, options.visualPrompt, options.continuity, options.camera, options.title]
     .filter(Boolean)
     .join(' ');
-  // Dialogue extraction — ONLY match quoted text that is preceded by an
-  // explicit dialogue marker. Prior versions used a naive any-quoted-string
-  // regex which grabbed random phrases like brand names ("Parts Unknown"),
-  // quoted concepts ("中国街道"), or product names — none of which are
-  // dialogue — and emitted them as "Quoted dialogue extracted ... preserve
-  // verbatim" instructions to the model. The model then attempted to
-  // lip-sync brand names, tripping the provider's audio content filter
-  // and burying the real dialogue lines.
-  //
-  // New rule: a quoted string is treated as dialogue ONLY when it follows
-  // a Chinese or English dialogue marker within ~20 characters:
-  //   对白:  /  对白（...）:  /  台词:  /  旁白:  /  dialogue:  /  she says:  /  voiceover:
-  // Allow surrounding markdown asterisks (**对白（...）**:) and trailing **
-  // before the colon, which is how the user script formats annotation labels.
-  const dialogueRe = /(?:\*{0,2})(?:对白|台词|旁白|dialogue|spoken\s*line|voiceover|she\s*(?:says|whispers|murmurs)|he\s*(?:says|whispers|murmurs))\s*(?:[（(][^）)]*[）)])?\s*(?:\*{0,2})\s*[:：][^"“]{0,30}["“]([^"“”]{1,120})["”]/gi;
+  // Dialogue extraction — ONLY quoted text preceded by an explicit dialogue
+  // marker (对白 / 台词 / 旁白 / dialogue / line / voiceover / she says …).
+  // Bare quotes are brand names, concepts, signs or lyrics, never speech.
+  const dialogueRe = new RegExp(`(?:\\*{0,2})(?:${DIALOGUE_MARKER_SOURCE})\\s*(?:[（(][^）)]*[）)])?\\s*(?:\\*{0,2})\\s*[:：]\\s*(?:[（(][^）)\\n]{0,60}[）)]\\s*)?${QUOTED_LINE_SOURCE}`, 'giu');
   const quotedText = Array.from(sourceShotText.matchAll(dialogueRe))
-    .map((match) => match[1]?.trim())
+    .map((match) => (match.groups?.q1 ?? match.groups?.q2 ?? match.groups?.q3 ?? match.groups?.q4)?.trim())
     .filter((value): value is string => Boolean(value));
   const hasQuotedDialogue = quotedText.length > 0;
   const hasBrandOrReadableText = /(?:logo|brand|wordmark|signage|screen|ui|interface|caption|title card|on[- ]screen text|readable text|品牌|商标|标志|招牌|屏幕|界面|字幕|标题卡|展示文字|可读文字|中文|英文|文字)/i.test(sourceShotText);
@@ -526,23 +620,38 @@ export function compileShotPromptWithContinuity(options: {
     hasBrandOrReadableText ? 'Brand/text exception: preserve user-specified brand names, screen UI, logo, and requested Chinese display text when the brief explicitly asks for them; avoid only unrelated/random text.' : '',
     '[/EXPLICIT USER BRIEF LOCK]',
   ].filter(Boolean).join('\n');
+  const explicitBriefLockCompact = `[EXPLICIT USER BRIEF LOCK: keep every named place, prop, action, wardrobe item${hasBrandOrReadableText ? ', requested sign or screen text' : ''} and marked dialogue exactly as written; never swap in a generic setting]`;
 
   // The shot's own content opens the prompt, ahead of the identity card and
   // the continuity bible (which repeats the whole source story). A prompt
-  // that has to be shortened downstream is cut from the end, so the part
-  // that differs from shot to shot must come first.
+  // that has to be shortened is cut from its lowest-priority blocks, so the
+  // part that differs from shot to shot always survives.
   const shotHeader = `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`;
-  // Capped at SHOT_CONTENT_MAX_CHARS so a very long beat cannot push the
-  // identity card and the negative constraints out of the prompt: shot
-  // content, identity card (IDENTITY_CARD_MAX_CHARS), the dialogue rules and
-  // the Director's header together fit a 4,000-character Seedance prompt.
   const storyBeatText = clipText(options.storyBeat ?? '', SHOT_CONTENT_MAX_CHARS - 400);
-  const shotContent: string[] = authored
-    ? [clipText(authored, SHOT_CONTENT_MAX_CHARS)]
+  // A timecoded shot's visual direction only repeats its beat; say it once.
+  const visualDirection = options.visualPrompt && !repeatsStoryBeat(options.visualPrompt, options.storyBeat ?? '')
+    ? `Visual direction: ${clipText(options.visualPrompt, Math.max(400, SHOT_CONTENT_MAX_CHARS - storyBeatText.length))}`
+    : '';
+  const shotContent: PromptBlock[] = authored
+    ? [{ text: clipText(authored, SHOT_CONTENT_MAX_CHARS) }]
     : [
-        `Story beat (the dominant subject for the entire ${options.duration}s): ${storyBeatText}`,
-        `Visual direction: ${clipText(options.visualPrompt ?? '', Math.max(400, SHOT_CONTENT_MAX_CHARS - storyBeatText.length))}`,
+        { text: `Story beat (the dominant subject for the entire ${options.duration}s): ${storyBeatText}` },
+        { text: visualDirection, keep: 72 },
       ];
+  const cardBlock: PromptBlock = { text: options.bible.identityCard };
+  const refitCard = options.bible.fitIdentityCard ? { block: cardBlock, fit: options.bible.fitIdentityCard } : undefined;
+  const lockedCamera = /locked-off|no camera movement|锁死/i.test(options.camera ?? '');
+  // The identity card's [CAMERA] already spells a locked camera out in full.
+  const cameraLineCompact = lockedCamera && options.camera
+    ? `Camera and motion: ${options.camera.split(/[,，;；—]/)[0]!.trim()} (as in [CAMERA])`
+    : undefined;
+  const globalBlocks: PromptBlock[] = [
+    { text: options.openingFraming ? `\n${options.openingFraming}` : '', compact: options.openingFraming ? `\n${compactOpeningFraming(options.openingFraming)}` : undefined, keep: 90 },
+    { text: options.worldAnchor ?? '', keep: 88 },
+    { text: options.globalExcerpt ?? '', keep: 80, clip: false },
+  ];
+  const bibleBlock: PromptBlock = { text: options.bible.bible, keep: 5, clip: true };
+  const finish = (blocks: PromptBlock[]) => (options.maxChars ? fitPromptBlocks(blocks, options.maxChars, refitCard) : renderBlocks(blocks));
 
   if (options.cleanDirect) {
     // cleanDirect strips DIRECTORIAL/AESTHETIC scaffolding (style lock,
@@ -553,71 +662,61 @@ export function compileShotPromptWithContinuity(options: {
     // scene-priority) — those are correctness rules, not aesthetic dressing,
     // and stripping them caused character/wardrobe/location drift across
     // long-video segments.
-    const cleanMiddle: string[] = [];
-    cleanMiddle.push(explicitBriefLock);
-    if (options.continuity) cleanMiddle.push(`Continuity requirements: ${options.continuity}`);
-    if (options.camera) cleanMiddle.push(`Camera and motion: ${options.camera}`);
-    return [
-      shotHeader,
+    return finish([
+      { text: shotHeader },
       ...shotContent,
-      options.bible.identityCard,
-      options.openingFraming ? `\n${options.openingFraming}` : '',
-      options.bible.bible,
-      scenePriority,
-      ...cleanMiddle,
-      'no watermark',
-    ].filter(Boolean).join('\n');
+      cardBlock,
+      ...globalBlocks,
+      { text: scenePriority, compact: scenePriorityCompact, keep: 60 },
+      { text: explicitBriefLock, compact: explicitBriefLockCompact, keep: 70 },
+      { text: options.continuity ? `Continuity requirements: ${options.continuity}` : '', keep: 40 },
+      { text: options.camera ? `Camera and motion: ${options.camera}` : '', compact: cameraLineCompact, keep: lockedCamera ? 86 : 50 },
+      bibleBlock,
+      { text: 'no watermark' },
+    ]);
   }
 
   const styleLock = styleLockBlock(options.bible);
+  const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
+  const aestheticCompact = COMPACT_AESTHETIC_LOCKS[detectAestheticSubject(sourceShotText, options.bible)];
 
-  const head = [
-    shotHeader,
+  const blocks: PromptBlock[] = [
+    { text: shotHeader },
     ...shotContent,
-    options.bible.identityCard,
-    options.openingFraming ? `\n${options.openingFraming}` : '',
-    options.bible.bible,
-    styleLock,
-    scenePriority,
+    cardBlock,
+    ...globalBlocks,
+    { text: styleLock, compact: compactStyleLockBlock(), keep: 55 },
+    { text: scenePriority, compact: scenePriorityCompact, keep: 60 },
+    // For text-only providers the previous shot's closing frame is described in words.
+    { text: options.mode === 'text-only' && options.startingFrameAnchor ? options.startingFrameAnchor : '', keep: 65 },
+    { text: motionContinuityGuard, keep: 35 },
+    { text: explicitBriefLock, compact: explicitBriefLockCompact, keep: 70 },
+    { text: `Continuity requirements: ${options.continuity}`, keep: 40 },
+    { text: `Camera and motion: ${options.camera}`, compact: cameraLineCompact, keep: lockedCamera ? 86 : 50 },
   ];
 
-  // For text-only providers, repeat the most identity-critical line near
-  // the top AND near the bottom. Plus inject the starting-frame anchor
-  // (which is the planner's previous-shot transition field).
-  if (options.mode === 'text-only' && options.startingFrameAnchor) {
-    head.push(options.startingFrameAnchor);
-  }
-
-  const aestheticLock = aestheticLockBlock(sourceShotText, options.bible);
-  const middle: string[] = [];
-  if (motionContinuityGuard) middle.push(motionContinuityGuard);
-  middle.push(explicitBriefLock);
-  middle.push(`Continuity requirements: ${options.continuity}`);
-  middle.push(`Camera and motion: ${options.camera}`);
-
   if (options.mode === 'strong-vision') {
-    middle.push(
-      [
+    blocks.push({
+      text: [
         '[REFERENCE-ROLE-SEPARATION]',
         'Use previous-frame references only for spatial continuity, lighting direction, and environment layout. Do not carry a previous scene subject into a new location unless the new storyBeat explicitly keeps that same subject visible. For multi-city walking scenes, preserve the subject identity and general walking rhythm, but let the body travel forward in frame instead of freezing at one position.',
         'Do not inherit waxy skin, plastic highlights, over-smoothed facial material, mannequin faces, or CG-character surface quality from previous generated frames.',
         'When user-supplied reference images are present, treat them as the authority for recurring identity, wardrobe cues, and natural facial/material character.',
         '[/REFERENCE-ROLE-SEPARATION]',
       ].join('\n'),
-    );
+      compact: '[REFERENCE-ROLE-SEPARATION: reference frames carry identity, layout and light direction only; never inherit waxy or CG skin from them]',
+      keep: 30,
+    });
   }
 
   // FRAME-OUT block — explicitly declared as low-priority closing hint, not
   // a subject directive.
-  middle.push(
-    [
-      '[FRAME-OUT (low priority, applies to final ~0.5 seconds only)]',
-      options.transition,
-      '[/FRAME-OUT]',
-    ].join('\n'),
-  );
-
-  const tail: string[] = [];
+  blocks.push({
+    text: options.transition
+      ? ['[FRAME-OUT (low priority, applies to final ~0.5 seconds only)]', options.transition, '[/FRAME-OUT]'].join('\n')
+      : '',
+    keep: 25,
+  });
 
   // Text-only mode: re-state character identity anchors at the tail so the model
   // attends to them again. Linguistic redundancy is the #1 lever for
@@ -629,8 +728,8 @@ export function compileShotPromptWithContinuity(options: {
       options.bible.props.length > 0 ? `locked-props: ${options.bible.props.join(' | ')}` : '',
       options.bible.locations.length > 0 ? `locked-locations: ${options.bible.locations.join(' | ')}` : '',
     ].filter(Boolean);
-    tail.push(
-      [
+    blocks.push({
+      text: [
         '[CONTINUITY-RESTATE — global character identity lock; preserve scene/location only when explicitly continuous]',
         ...lockedLines,
         options.bible.characters.length === 0 ? 'characters: same recurring identity as previous shot; no face/body/silhouette drift' : '',
@@ -639,27 +738,29 @@ export function compileShotPromptWithContinuity(options: {
         `camera: ${options.bible.cameraLanguage}`,
         `mood: ${options.bible.mood}`,
         '[/CONTINUITY-RESTATE]',
-      ]
-        .join('\n'),
-    );
-    tail.push(styleLock); // second appearance for text-only mode
+      ].filter(Boolean).join('\n'),
+      keep: 15,
+    });
+    blocks.push({ text: styleLock, keep: 12 }); // second appearance for text-only mode
   }
 
-  tail.push(
-    [
+  blocks.push({
+    text: [
       'Write one coherent video generation prompt. English direction is fine, but preserve any quoted dialogue, brand names, and requested on-screen Chinese text in the original language exactly.',
       'The storyBeat is the subject for the entire clip. The frame-out hints describe only the final ~0.5 s.',
       hasBrandOrReadableText
         ? 'Avoid subtitles, watermarks, and unrelated random text; user-specified logo/UI/readable text is allowed and must remain accurate.'
         : 'Avoid subtitles, readable text, logos, UI, and watermarks.',
     ].join(' '),
-  );
+    keep: 20,
+  });
 
-  // Aesthetic lock is the very last block so it survives token truncation
-  // on lower-context providers and serves as the visual quality anchor.
-  tail.push(aestheticLock);
-
-  return [...head, ...middle, ...tail].join('\n');
+  // The aesthetic lock closes the prompt as the visual quality anchor; the
+  // long continuity bible (which repeats the source story) goes before it
+  // and is the first thing shortened.
+  blocks.splice(blocks.length - 1, 0, bibleBlock);
+  blocks.push({ text: aestheticLock, compact: aestheticCompact, keep: 45 });
+  return finish(blocks);
 }
 
 // Extract the LAST frame of a finished segment as a PNG. This frame becomes
