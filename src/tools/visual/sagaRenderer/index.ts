@@ -6,6 +6,7 @@ import { inspectSagaComposition } from './inspect.js';
 import { concatWithSagaRenderer, ensureFfmpegAvailable, ensureSegmentReadable } from './concat.js';
 import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
 import { generateSagaReviewFrames } from './reviewFrames.js';
+import { downloadGuardedUrl } from '../safeDownload.js';
 import type {
   SagaCompositionSpec,
   SagaEncodeOptions,
@@ -45,19 +46,32 @@ function hasDirectAudioUrl(url: string): boolean {
   return /\.(?:mp3|wav|m4a|aac|flac|ogg)(?:[?#].*)?$/i.test(url);
 }
 
-async function resolveSoundtrackPath(soundtrack: SagaRenderRequest['soundtrack'], workDir: string): Promise<string | undefined> {
+/** Time limit for downloading a soundtrack; a full-length track fits well within it. */
+const SOUNDTRACK_DOWNLOAD_TIMEOUT_MS = 120_000;
+
+/**
+ * The local soundtrack file for a render. A soundtrack URL may come from
+ * content the agent read, so it is downloaded through the same guard as
+ * provider results: no private, link-local or loopback targets, redirects
+ * included.
+ */
+export async function resolveSoundtrackPath(soundtrack: SagaRenderRequest['soundtrack'], workDir: string): Promise<string | undefined> {
   if (!soundtrack) return undefined;
   if (soundtrack.path?.trim()) return soundtrack.path.trim();
   const url = soundtrack.url?.trim();
   if (!url) return undefined;
   if (!hasDirectAudioUrl(url)) throw new Error('soundtrackUrl must be a directly downloadable audio file URL (mp3/wav/m4a/aac/flac/ogg). Platform playback links are not supported.');
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`failed to download soundtrackUrl: HTTP ${res.status}`);
-  const contentType = res.headers.get('content-type') ?? '';
+  let downloaded: { body: Buffer; contentType?: string };
+  try {
+    downloaded = await downloadGuardedUrl(url, { timeoutMs: SOUNDTRACK_DOWNLOAD_TIMEOUT_MS });
+  } catch (error) {
+    throw new Error(`failed to download soundtrackUrl: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const contentType = downloaded.contentType ?? '';
   if (contentType && !/(?:audio|octet-stream)/i.test(contentType)) throw new Error(`soundtrackUrl did not return audio content (${contentType}).`);
   const ext = path.extname(new URL(url).pathname) || '.mp3';
   const out = path.join(workDir, `soundtrack${ext}`);
-  await writeFile(out, Buffer.from(await res.arrayBuffer()));
+  await writeFile(out, downloaded.body);
   return out;
 }
 

@@ -462,5 +462,59 @@ test('command arg splitter preserves quoted key-value values', () => {
   );
 });
 
+// The retired "Odin" skill subsystem: its name is kept only here, to assert it stays gone.
+const RETIRED_SUBSYSTEM = 'odin';
+const RETIRED_REFERENCE = new RegExp(`\\b${RETIRED_SUBSYSTEM}`, 'i');
+
+test('retired skill subsystem: CLI treats its old command like any unknown word', () => {
+  const retired = parseArgs([RETIRED_SUBSYSTEM]);
+  const unknown = parseArgs(['zz-not-a-command']);
+  assert.equal(retired.command, 'chat');
+  assert.equal(retired.command, unknown.command);
+  assert.equal(retired.prompt, RETIRED_SUBSYSTEM);
+  assert.deepEqual({ ...retired, prompt: undefined, promptArgs: undefined }, { ...unknown, prompt: undefined, promptArgs: undefined });
+  assert.equal(parseArgs([RETIRED_SUBSYSTEM, 'list']).prompt, `${RETIRED_SUBSYSTEM} list`);
+});
+
+test('retired skill subsystem: help, command catalog, slash menu and completions do not list it', async () => {
+  const catalog = await import('../src/commands/catalog.js');
+  const descriptors = await import('../src/commands/descriptors.js');
+  assert.doesNotMatch(getHelpText('en'), RETIRED_REFERENCE);
+  assert.doesNotMatch(getHelpText('zh-CN'), RETIRED_REFERENCE);
+  assert.equal(catalog.isCliCommandToken(RETIRED_SUBSYSTEM), false);
+  const surfaces = [
+    ...catalog.CLI_COMMAND_TOKENS,
+    ...catalog.getCliUsageLines(),
+    ...catalog.getCliHelpUsageLines(),
+    ...catalog.getSlashHelpLines('en'),
+    ...catalog.getSlashHelpLines('zh-CN'),
+    ...catalog.getSlashAutocompleteEntries(),
+    ...catalog.getInteractiveHelpCommands('en'),
+    ...catalog.getQuickCommandChoices('en').map((choice) => JSON.stringify(choice)),
+    ...descriptors.getCommandDescriptors().map((descriptor) => JSON.stringify(descriptor)),
+  ];
+  const leaks = surfaces.filter((line) => RETIRED_REFERENCE.test(line));
+  assert.deepEqual(leaks, []);
+});
+
+test('retired skill subsystem: no source file references it', () => {
+  const leaks: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === RETIRED_SUBSYSTEM) leaks.push(`${full}/`);
+        walk(full);
+      } else if (/\.(ts|tsx|js|mjs|cjs|json|md)$/.test(entry.name)) {
+        readFileSync(full, 'utf8').split('\n').forEach((line, index) => {
+          if (RETIRED_REFERENCE.test(line)) leaks.push(`${full}:${index + 1}`);
+        });
+      }
+    }
+  };
+  walk(resolve('src'));
+  assert.deepEqual(leaks, []);
+});
+
 await pending;
 console.log('\n  ✔ All system smoke tests passed');
