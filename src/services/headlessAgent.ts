@@ -94,7 +94,12 @@ export async function runHeadlessAgent(
   // working on the same session).
   const { withSessionLock } = await import('../storage/sessionLock.js')
   const compaction = await loadCompactionSettings(cwd, 'hosted')
-  const result = await withSessionLock(sessionStore.getLockPath(session.id), () => runAgent(session, prompt, {
+  const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => runAgent(
+    // Re-read under the lock: another process (a chat bridge) may have saved
+    // a turn between the existence check above and getting the lock.
+    opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session,
+    prompt,
+    {
     cwd,
     provider,
     sessionStore,
