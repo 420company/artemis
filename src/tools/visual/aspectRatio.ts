@@ -28,7 +28,10 @@ const LOOSE_WORDS: Array<[RegExp, SagaRatio]> = [
 ];
 
 // "画幅比例 / ratio: 9:16 竖屏", "Aspect ratio: 9:16 portrait", "**画面尺寸**：竖版".
-const LABELLED_LINE_RE = /(?:^|[\s·•*\-【[/|])(?:画幅(?:比例)?|画面(?:比例|尺寸)|比例|aspect\s*ratio|ratio)\s*(?:[】\]*]+\s*)?[:：]\s*(.+)$/i;
+// A bare "比例：" is a ratio label only when its value is nothing but a ratio
+// ("比例：1:1 还原道具尺寸" is about a prop's scale).
+const LABELLED_LINE_RE = /(?:^|[\s·•*\-【[/|])(?<label>画幅(?:比例)?|画面(?:比例|尺寸)|比例|aspect\s*ratio|ratio)\s*(?:[】\]*]+\s*)?[:：]\s*(?<value>.+)$/i;
+const RATIO_VALUE_FILLER_RE = /(?<![\d:：.])(?:16|9|1)\s*[:：xX×/]\s*(?:16|9|1)(?![\d:：.])|\d{3,5}\s*[xX×*]\s*\d{3,5}|竖屏|竖版|横屏|横版|方屏|纵向|横向|正方形|方形|portrait|landscape|vertical|horizontal|widescreen|square|[\s()（）[\]【】/|,，、;；.。*_-]+/gi;
 
 function nearestRatio(width: number, height: number): SagaRatio | undefined {
   if (!(width > 0 && height > 0)) return undefined;
@@ -93,7 +96,10 @@ export function extractBriefAspectRatio(text: string): BriefRatio | undefined {
       unlabelled.push(line);
       continue;
     }
-    const ratio = normalizeAspectRatio(match[1]);
+    const value = match.groups?.value ?? '';
+    // A label-like line that is not a ratio line is left out of the free-text scan too.
+    if (match.groups?.label === '比例' && value.replace(RATIO_VALUE_FILLER_RE, '').trim()) continue;
+    const ratio = normalizeAspectRatio(value);
     if (ratio && !labelled) labelled = ratio;
   }
   if (labelled) return { ratio: labelled, labelled: true };

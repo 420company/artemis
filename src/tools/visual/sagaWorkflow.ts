@@ -243,8 +243,9 @@ function extractBgmParamUpdates(text: string): BgmParamDiff {
   const result: BgmParamDiff = {};
   const start = parseTimeExpressionSeconds(text);
   if (typeof start === 'number' && Number.isFinite(start) && start >= 0) result.startSec = start;
-  // "环境音音量 -18dB" / "ambience volume -18dB" is the ambience level, not the music's.
-  const music = parseDbAfter(text, /(?:bgm|音乐|(?<!环境音\s*)音量|(?<!(?:ambience|ambient|environment)\s*)volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  // "环境音音量 / 环境音量 -18dB", "ambience / ambient sound volume -18dB" is the
+  // ambience level, not the music's.
+  const music = parseDbAfter(text, /(?:bgm|音乐|(?<!环境音?\s*)音量|(?<!(?:ambience|ambient|environment)(?:\s+(?:sounds?|audio|noise))?\s*)volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (music !== undefined) result.musicVolumeDb = music;
   const env = parseDbAfter(text, /(?:环境音|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (env !== undefined) result.environmentVolumeDb = env;
@@ -391,15 +392,12 @@ function extractRatio(text: string): SagaRatio | undefined {
 
 /**
  * A ratio the user has already answered: a labelled line in the brief
- * ("画幅比例 / ratio: 9:16 竖屏") or a format named in the opening request
- * line ("/saga 做一个竖屏视频"). The wizard applies it instead of asking.
+ * ("画幅比例 / ratio: 9:16 竖屏"). The wizard applies it instead of asking.
+ * Orientation words in story prose ("她把手机横屏举起") only preselect the menu.
  */
 function statedRatio(state: SagaWorkflowState): SagaRatio | undefined {
   const brief = extractBriefAspectRatio(combinedStoryText(state));
-  if (brief?.labelled) return brief.ratio;
-  const requestLine = state.originalText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? '';
-  if (requestLine.length > 200) return undefined;
-  return extractBriefAspectRatio(requestLine)?.ratio;
+  return brief?.labelled ? brief.ratio : undefined;
 }
 
 function applyRatioReplyToState(state: SagaWorkflowState, text: string): boolean {
@@ -2073,8 +2071,31 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 }
 
 // Guide §9.6: "主体模式：有主角。身份来源：纯文字。" / "Subject mode: pure visual."
-const DECLARED_SUBJECT_RE = /(?:主体模式|subject\s*mode)\s*[:：]\s*(?<value>有主角|纯视觉|无主角|has\s+(?:a\s+)?protagonist|pure\s+visual|no\s+protagonist)/i;
-const DECLARED_IDENTITY_RE = /(?:身份来源|identity\s*source)\s*[:：]\s*(?<value>三视图|角色三视图|角色图|人物图|人物照片|照片|直接(?:用)?图片|纯文字|文字描述|turnaround|three[-\s]?view|character\s*(?:image|photo)|photo|direct\s*image|text[-\s]?only|text)/i;
+// Guide §9.6 declarations. Only a line that starts with the label counts, in
+// the brief's header (before the first timecoded segment), and only when the
+// value is exactly one of the options; the same words inside story prose
+// ("档案上写着：身份来源：照片") do not switch anything.
+const DECLARED_LABEL_RE = /^(?<label>主体模式|身份来源|subject\s*mode|identity\s*source)\s*[:：]\s*(?<value>[^。；;\n]*?)\s*(?:[。.；;]|$)/i;
+const SUBJECT_VALUE_RE = /^(?:有主角|纯视觉(?:\s*\/\s*无主角)?|无主角|has\s+(?:a\s+)?protagonist|pure\s+visual(?:\s*\/\s*no\s+protagonist)?|no\s+protagonist)$/i;
+const IDENTITY_VALUE_RE = /^(?:(?:角色)?三视图(?:参考图)?|角色图|人物图|人物照片|照片|直接(?:用)?图片|纯文字|文字描述|turnaround(?:\s+(?:reference\s+)?sheet)?|three[-\s]?view(?:\s+sheet)?|character\s+(?:image|photo)|photo|direct\s+image|text[-\s]?only)$/i;
+
+function declaredSubjectAndIdentity(text: string): { subject?: string; identity?: string } {
+  const header = text.split(/^\s*\[\s*\d+(?::\d{1,2}){0,2}(?:\.\d+)?\s*(?:秒|s|sec|seconds)?\s*[-–—~至到]/m)[0] ?? '';
+  const out: { subject?: string; identity?: string } = {};
+  for (const rawLine of header.split(/\r?\n/)) {
+    // "主体模式：有主角。身份来源：纯文字。" declares both on one line.
+    let rest = rawLine.replace(/^\s*[·•*-]?\s*/, '');
+    for (let match = rest.match(DECLARED_LABEL_RE); match?.groups; match = rest.match(DECLARED_LABEL_RE)) {
+      const value = match.groups.value!.trim();
+      const isSubject = /主体模式|subject/i.test(match.groups.label!);
+      if (isSubject && SUBJECT_VALUE_RE.test(value)) out.subject ??= value.toLowerCase();
+      if (!isSubject && IDENTITY_VALUE_RE.test(value)) out.identity ??= value.toLowerCase();
+      rest = rest.slice(match[0].length).replace(/^[^。.；;\n]*?(?=主体模式|身份来源|subject\s*mode|identity\s*source|$)/i, '');
+      if (!rest) break;
+    }
+  }
+  return out;
+}
 
 /**
  * Applies a subject mode / identity source the brief declares up front, so
@@ -2082,9 +2103,7 @@ const DECLARED_IDENTITY_RE = /(?:身份来源|identity\s*source)\s*[:：]\s*(?<v
  * the brief declares neither.
  */
 function applyDeclaredSubjectAndIdentity(state: SagaWorkflowState): string | undefined {
-  const text = state.originalText;
-  const subject = text.match(DECLARED_SUBJECT_RE)?.groups?.value?.toLowerCase();
-  const identity = text.match(DECLARED_IDENTITY_RE)?.groups?.value?.toLowerCase();
+  const { subject, identity } = declaredSubjectAndIdentity(state.originalText);
   if (!subject && !identity) return undefined;
   const note = (zh: string, en: string) => pickLocale(state.locale, { zh: `📋 已按剧本设定：${zh}`, en: `📋 Taken from your brief: ${en}` });
   if (subject && /纯视觉|无主角|pure|no\s+protagonist/.test(subject)) {

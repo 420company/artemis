@@ -259,19 +259,22 @@ async function main(): Promise<void> {
   assert.equal(bgmInlineFinal.action?.soundtrackVolumeDb, -15, 'inline 音量-15dB should set soundtrackVolumeDb to -15');
   assert.equal(bgmInlineFinal.action?.soundtrackFadeOutSec, 2, 'inline 淡出2秒 should set soundtrackFadeOutSec to 2');
 
-  // "环境音音量 -18dB" sets the ambience level and leaves the music volume alone.
-  const ambienceKey = `${key}-bgm-ambience`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
-  const ambienceStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '开始生成' });
-  if (ambienceStart.handled && /确认.*主角|confirm the lead/i.test(ambienceStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: 'X' });
+  // "环境音音量 / 环境音量 / ambient sound volume -18dB" set the ambience level
+  // and leave the music volume alone.
+  for (const [index, reply] of ['环境音音量 -18dB', '环境音量 -18dB', 'ambient sound volume -18dB'].entries()) {
+    const ambienceKey = `${key}-bgm-ambience-${index}`;
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '2' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
+    const ambienceStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '开始生成' });
+    if (ambienceStart.handled && /确认.*主角|confirm the lead/i.test(ambienceStart.reply)) {
+      await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: 'X' });
+    }
+    for (const answer of ['16:9', '无字幕', '60秒', '2']) await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: answer });
+    const ambienceFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: `${bgmInlinePath} ${reply}` });
+    assert.equal(ambienceFinal.action?.environmentVolumeDb, -18, `"${reply}" sets the ambience level`);
+    assert.equal(ambienceFinal.action?.soundtrackVolumeDb, undefined, `"${reply}" never sets the music volume`);
   }
-  for (const reply of ['16:9', '无字幕', '60秒', '2']) await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: reply });
-  const ambienceFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: `${bgmInlinePath} 环境音音量 -18dB` });
-  assert.equal(ambienceFinal.action?.environmentVolumeDb, -18, '环境音音量 sets the ambience level');
-  assert.equal(ambienceFinal.action?.soundtrackVolumeDb, undefined, '环境音音量 never sets the music volume');
 
   // Guide §9.6: a declared subject mode / identity source skips those questions.
   const declaredText = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-text`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：有主角。身份来源：纯文字。\n[0-5秒] 镜头1：风筝飞过山坡。\n[5-10秒] 镜头2：风筝落进草地。' });
@@ -284,6 +287,16 @@ async function main(): Promise<void> {
   assert.match(declaredTurnaround.reply, /Taken from your brief: has a protagonist · identity source: turnaround sheet/);
   const undeclared = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-undeclared`, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我做一个关于风筝的长视频' });
   assert.match(undeclared.reply, /这段视频里/, 'without a declaration the subject question is asked');
+  // Only a header line that starts with the label and holds exactly one option counts.
+  for (const [index, text] of [
+    '【整片叙事】\n一部关于失忆侦探的短片。档案上写着：身份来源：照片。主体模式：纯视觉 是这部片子的反讽标题。\n[0-6秒] 段 1 · 侦探翻看旧档案。\n[6-12秒] 段 2 · 他抬头望向窗外。',
+    '重庆夜市，三个老同学十年后重逢。主体模式：有主角。身份来源：纯文字。\n[0-6秒] 段 1 · 夜市。\n[6-12秒] 段 2 · 重逢。',
+    '[0-6秒] 段 1 · 夜市。\n主体模式：纯视觉\n[6-12秒] 段 2 · 重逢。',
+    '主体模式：纯视觉是主题\n[0-6秒] 段 1 · 夜市。\n[6-12秒] 段 2 · 重逢。',
+  ].entries()) {
+    const prose = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-prose-${index}`, cwd, locale: 'zh-CN', forceIntent: true, text });
+    assert.match(prose.reply, /这段视频里/, `a declaration inside story prose is not an answer: ${text.slice(0, 40)}`);
+  }
 
   const bgmTuneKey = `${key}-bgm-tune`;
   const bgmTunePath = path.join(cwd, 'tune-bgm.mp3');
@@ -618,6 +631,8 @@ async function ratioCases(cwd: string, key: string): Promise<void> {
     ['1080x1920', ratioBrief('· 画面尺寸：1080x1920'), '9:16', true],
     ['unlabelled 竖屏 in request', '帮我做一个竖屏长视频', '9:16', false],
     ['unfilled template', ratioBrief('· 画幅比例 / ratio: [16:9 横屏 / 9:16 竖屏 / 1:1 方屏]'), undefined],
+    ['bare 比例 about a prop', '· 比例：1:1 还原道具尺寸\n[0-6秒] 段 1 · 桌上摆着一只青花瓷碗。', undefined],
+    ['bare 比例 with only a ratio', '· 比例：9:16\n[0-6秒] 段 1 · 桌上摆着一只青花瓷碗。', '9:16', true],
     ['人物比例 is not a label', ratioBrief('· 人物比例：9:16 竖屏 和 16:9 都试过'), undefined],
   ];
   for (const [name, text, expected, labelled] of table) {
@@ -665,6 +680,17 @@ async function ratioCases(cwd: string, key: string): Promise<void> {
   const copiedFlow = await drive('copied', ratioBrief('· 摄影机感: iPhone', '配乐起点从 1:19 开始。'), '9:16 竖屏');
   assert.match(copiedFlow.menu ?? '', /当前建议：16:9 横屏/, '"1:19" is not a 1:1 ratio');
   assert.equal(copiedFlow.ratio, '9:16', 'a line copied from the menu is accepted');
+  // Orientation words in story prose only preselect the menu; they never skip it.
+  for (const [name, text, suggestion] of [
+    ['prose-phone', '她把手机横屏举起，对着海边的落日拍视频。\n[0-6秒] 段 1 · 海边落日，女孩举着手机。\n[6-12秒] 段 2 · 她放下手机，转身离开。', '16:9 横屏'],
+    ['prose-request', '/saga 帮我做一个视频，画面要像横屏电影那样宽，但最终发抖音\n[0-6秒] 段 1 · 城市天际线。\n[6-12秒] 段 2 · 霓虹街道。', '16:9 横屏'],
+    ['prop-scale', '· 比例：1:1 还原道具尺寸\n[0-6秒] 段 1 · 桌上摆着一只青花瓷碗。\n[6-12秒] 段 2 · 镜头缓缓推近碗沿的裂纹。', '16:9 横屏'],
+  ] as const) {
+    const flow = await drive(name, text, '默认');
+    assert.ok(flow.menu, `${name}: the ratio menu is shown`);
+    assert.match(flow.menu ?? '', new RegExp(`当前建议：${suggestion}`), name);
+    assert.equal(flow.note, undefined, `${name}: no ratio is taken as stated`);
+  }
 }
 
 main().catch((error) => {
