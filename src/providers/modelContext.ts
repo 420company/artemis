@@ -8,16 +8,23 @@ type ModelMetadata = Record<string, unknown>
 // make Artemis wait for the old 372K/1M boundary before compacting.
 export const GPT_5_6_CONTEXT_LENGTH = 272_000
 
+// GPT-6 has no published window in the repo yet. Treat it like GPT-5.6:
+// 272K, enforced as the same hard cap (see capKnownModelContextLength), since
+// overestimating the window makes the provider reject requests before
+// Artemis compacts.
+const GPT_6_CONTEXT_LENGTH = GPT_5_6_CONTEXT_LENGTH
+
 // Inference values for newer model families, used only when neither the
 // provider's /models metadata nor the profile configures a length. Claude 5.5
-// follows Anthropic's published 1M window; the others are conservative lower
-// bounds chosen without an authoritative source and should be raised once
-// verified.
-const GPT_6_CONTEXT_LENGTH = GPT_5_6_CONTEXT_LENGTH
+// follows Anthropic's published 1M window. GLM-5.2/5.3 use 200K without an
+// authoritative source, below the GLM-5/5.1 entries; raise it once verified.
 const GLM_5_X_CONTEXT_LENGTH = 200_000
-const SEED_2_0_CONTEXT_LENGTH = 256_000
-const KIMI_K3_CONTEXT_LENGTH = 256_000
 const CLAUDE_5_5_CONTEXT_LENGTH = 1_000_000
+
+// Matches GPT-5.6 and GPT-6 ids (gpt-6, gpt-6-sol, gpt-6.1, ... but not gpt-60).
+function isCappedGptModel(normalizedModel: string): boolean {
+  return normalizedModel.includes('gpt-5.6') || /gpt-6(?![0-9])/.test(normalizedModel)
+}
 
 export type ModelContextLengthSource = 'models-api' | 'known-model' | 'manual' | 'unknown'
 
@@ -67,8 +74,7 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'claude-sonnet-4-20250514': 200_000,
 
   // OpenAI family
-  // GPT-6: no published window in the repo yet; use the GPT-5.6 value as a
-  // conservative lower bound (not a cap, so larger metadata values still win).
+  // GPT-6: GPT-5.6's 272K window, also enforced as a hard cap.
   'gpt-6-sol': GPT_6_CONTEXT_LENGTH,
   'gpt-6-luna': GPT_6_CONTEXT_LENGTH,
   'gpt-5.6-sol': GPT_5_6_CONTEXT_LENGTH,
@@ -119,18 +125,18 @@ const EXACT_MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   'moonshot-v1-128k': 128_000,
   'moonshot-v1-32k': 32_000,
   'moonshot-v1-8k': 8_000,
-  // Kimi K3: 256K conservative lower bound (unverified).
-  'kimi-k3': KIMI_K3_CONTEXT_LENGTH,
+  // Kimi K3: window not verified; use the K2 value until it is.
+  'kimi-k3': 128_000,
   'kimi-k2.6': 128_000,
   'kimi-k2.5': 128_000,
   'kimi-k2': 128_000,
 
   // BytePlus / ModelArk presets
-  // Seed 2.0 un-dated aliases: 256K. The dated BytePlus presets below keep
-  // their existing 128K value until the provider limit is re-verified.
-  'seed-2-0-pro': SEED_2_0_CONTEXT_LENGTH,
-  'seed-2-0-mini': SEED_2_0_CONTEXT_LENGTH,
-  'seed-2-0-lite': SEED_2_0_CONTEXT_LENGTH,
+  // Seed 2.0 un-dated aliases: same 128K as the dated presets below until
+  // the provider limit is verified.
+  'seed-2-0-pro': 128_000,
+  'seed-2-0-mini': 128_000,
+  'seed-2-0-lite': 128_000,
   'seed-2-0-pro-260328': 128_000,
   'seed-2-0-lite-260228': 128_000,
   'seed-2-0-mini-260215': 128_000,
@@ -233,7 +239,6 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('deepseek')) return 128_000
 
   // ── Kimi / Moonshot ──────────────────────────────────────────────────────
-  if (m.includes('kimi-k3')) return KIMI_K3_CONTEXT_LENGTH
   if (m.includes('kimi')) return 128_000
   if (m.includes('moonshot-v1-128k')) return 128_000
   if (m.includes('moonshot-v1-32k')) return 32_000
@@ -249,8 +254,6 @@ export function inferKnownModelContextLength(model: string): number | undefined 
   if (m.includes('qwen')) return 128_000
 
   // ── BytePlus / Seed / Ark ────────────────────────────────────────────────
-  // Seed 2.0 aliases without a date suffix; dated presets are exact entries.
-  if (/seed-2-0-(pro|mini|lite)$/.test(m)) return SEED_2_0_CONTEXT_LENGTH
   if (m.includes('seed-') || m.includes('ark-') || m.includes('bytedance')) return 128_000
 
   // ── Mistral ──────────────────────────────────────────────────────────────
@@ -282,7 +285,7 @@ export function capKnownModelContextLength(model: string, contextLength: unknown
   const normalized = normalizeContextLength(contextLength)
   if (!normalized) return undefined
   const m = normalizeKnownModelName(model)
-  return m.includes('gpt-5.6')
+  return isCappedGptModel(m)
     ? Math.min(normalized, GPT_5_6_CONTEXT_LENGTH)
     : normalized
 }

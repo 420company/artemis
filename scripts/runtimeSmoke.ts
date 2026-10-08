@@ -36,7 +36,13 @@ import { promptForProviderProfile } from '../src/providers/onboarding.js'
 import { createProviderRouter } from '../src/providers/router.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
 import { buildDirectNativeFunctionTools, getDirectToolCount } from '../src/tools/directTools.js'
-import { withToolHostEnvironment } from '../src/tools/platformSupport.js'
+import {
+  detectToolHostEnvironment,
+  getToolHostKey,
+  parseBooleanEnv,
+  resolveBrowserLaunchMode,
+  withToolHostEnvironment,
+} from '../src/tools/platformSupport.js'
 import { buildAmbientToolsHint } from '../src/tools/ambientHint.js'
 import {
   getToolDefinition,
@@ -188,19 +194,14 @@ assert(
 )
 
 {
-  // Platform-aware tool exposure: a headless Linux host must not be offered
-  // macOS/desktop-only tools, while macOS keeps the full set.
-  const desktopOnlyTools = [
-    'computer_screenshot',
-    'computer_click',
-    'computer_doctor',
-    'calendar_list_today',
-    'calendar_add_event',
-    'reminders_list',
-    'reminders_add',
-    'spotify_play_liked',
-    'spotify_pause',
-  ]
+  // Platform-aware tool exposure: Linux (headless or desktop) is not offered
+  // macOS-only or desktop-automation tools, Windows keeps desktop automation
+  // but not Apple tools, and macOS keeps the full set. Spotify drives the Web
+  // API, so it is offered on every host.
+  const appleTools = ['calendar_list_today', 'calendar_add_event', 'reminders_list', 'reminders_add']
+  const automationTools = ['computer_screenshot', 'computer_click', 'computer_doctor']
+  const desktopOnlyTools = [...automationTools, ...appleTools]
+  const spotifyTools = ['spotify_play_liked', 'spotify_pause']
   const coreTools = ['read_file', 'write_file', 'run_command', 'search_files', 'browser_navigate', 'weather_current']
   const snapshot = () => {
     const nativeNames = buildProviderNativeFunctionTools().map((tool) => tool.name)
@@ -215,8 +216,14 @@ assert(
     return { nativeNames, directNames, manifestNames, ambientHint, rejected }
   }
   const linux = withToolHostEnvironment({ platform: 'linux', hasDisplay: false }, snapshot)
+  const linuxDesktop = withToolHostEnvironment({ platform: 'linux', hasDisplay: true }, snapshot)
+  const windows = withToolHostEnvironment({ platform: 'win32', hasDisplay: true }, snapshot)
   const mac = withToolHostEnvironment({ platform: 'darwin', hasDisplay: true }, snapshot)
   const lists = (s: ReturnType<typeof snapshot>) => [s.nativeNames, s.directNames, s.manifestNames]
+  const offersAll = (s: ReturnType<typeof snapshot>, tools: string[]) =>
+    lists(s).every((names) => tools.every((name) => names.includes(name)))
+  const offersNone = (s: ReturnType<typeof snapshot>, tools: string[]) =>
+    lists(s).every((names) => tools.every((name) => !names.includes(name)))
 
   assert(
     'platform tools: headless linux omits desktop/macOS-only tools from native, direct and manifest lists',
@@ -229,7 +236,19 @@ assert(
   )
   assert(
     'platform tools: macOS still offers desktop/macOS tools everywhere',
-    lists(mac).every((names) => desktopOnlyTools.every((name) => names.includes(name))),
+    offersAll(mac, desktopOnlyTools),
+  )
+  assert(
+    'platform tools: linux desktop omits Apple and desktop-automation tools, keeps core tools',
+    offersNone(linuxDesktop, desktopOnlyTools) && offersAll(linuxDesktop, coreTools),
+  )
+  assert(
+    'platform tools: windows keeps desktop automation but omits Apple tools',
+    offersAll(windows, automationTools) && offersNone(windows, appleTools) && offersAll(windows, coreTools),
+  )
+  assert(
+    'platform tools: spotify is offered on every host, including headless linux',
+    [linux, linuxDesktop, windows, mac].every((host) => offersAll(host, spotifyTools)),
   )
   assert(
     'platform tools: manifest hides executor-less capability placeholders',
@@ -246,12 +265,88 @@ assert(
   )
   assert(
     'platform tools: native call to a hidden desktop tool is rejected as unavailable on linux',
-    !linux.rejected.ok && linux.rejected.error.code === 'tool_unavailable' && mac.rejected.ok,
+    !linux.rejected.ok && linux.rejected.error.code === 'tool_unavailable' &&
+      !linuxDesktop.rejected.ok && windows.rejected.ok && mac.rejected.ok,
+  )
+  assert(
+    'platform tools: host cache keys differ per platform and display',
+    new Set([
+      getToolHostKey({ platform: 'linux', hasDisplay: false }),
+      getToolHostKey({ platform: 'linux', hasDisplay: true }),
+      getToolHostKey({ platform: 'win32', hasDisplay: true }),
+      getToolHostKey({ platform: 'darwin', hasDisplay: true }),
+    ]).size === 4,
   )
   assert(
     'platform tools: host override is restored after the forced snapshot',
     eq(buildProviderNativeFunctionTools().map((tool) => tool.name), providerNativeToolNames),
   )
+}
+
+{
+  // Host detection: DISPLAY / WAYLAND_DISPLAY are trimmed, macOS and Windows
+  // always count as having a display.
+  assert(
+    'host detection: linux display comes from DISPLAY or WAYLAND_DISPLAY, whitespace ignored',
+    detectToolHostEnvironment('linux', {}).hasDisplay === false &&
+      detectToolHostEnvironment('linux', { DISPLAY: '   ', WAYLAND_DISPLAY: '' }).hasDisplay === false &&
+      detectToolHostEnvironment('linux', { DISPLAY: ' :0 ' }).hasDisplay === true &&
+      detectToolHostEnvironment('linux', { WAYLAND_DISPLAY: 'wayland-0' }).hasDisplay === true &&
+      detectToolHostEnvironment('darwin', {}).hasDisplay === true &&
+      detectToolHostEnvironment('win32', {}).hasDisplay === true,
+  )
+
+  assert(
+    'browser env: ARTEMIS_BROWSER_HEADLESS accepts 1/true/yes and 0/false/no, ignores other values',
+    ['1', 'true', 'YES', ' on '].every((value) => parseBooleanEnv(value) === true) &&
+      ['0', 'false', 'No', 'off'].every((value) => parseBooleanEnv(value) === false) &&
+      [undefined, '', '  ', 'maybe', '2'].every((value) => parseBooleanEnv(value) === undefined),
+  )
+
+  const linuxHeadless = { platform: 'linux', hasDisplay: false } as const
+  const linuxX11 = { platform: 'linux', hasDisplay: true } as const
+  const mac = { platform: 'darwin', hasDisplay: true } as const
+  const mode = (host: { platform: NodeJS.Platform; hasDisplay: boolean }, env: NodeJS.ProcessEnv) =>
+    resolveBrowserLaunchMode(host, env)
+  assert(
+    'browser env: headed with a display, headless without one, overridable either way',
+    mode(mac, {}).headless === false &&
+      mode(linuxX11, { DISPLAY: ':0' }).headless === false &&
+      mode(linuxHeadless, {}).headless === true &&
+      mode(mac, { ARTEMIS_BROWSER_HEADLESS: 'true' }).headless === true &&
+      mode(mac, { ARTEMIS_BROWSER_HEADLESS: 'yes' }).headless === true &&
+      mode(linuxHeadless, { ARTEMIS_BROWSER_HEADLESS: 'false' }).headless === false &&
+      mode(linuxHeadless, { ARTEMIS_BROWSER_HEADLESS: 'bogus' }).headless === true,
+  )
+  assert(
+    'browser env: native Wayland flag only for a headed linux browser without XWayland',
+    eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0' }).extraArgs, ['--ozone-platform=wayland']) &&
+      eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' }).extraArgs, []) &&
+      eq(mode(linuxX11, { DISPLAY: ':0' }).extraArgs, []) &&
+      eq(mode(linuxX11, { WAYLAND_DISPLAY: 'wayland-0', ARTEMIS_BROWSER_HEADLESS: '1' }).extraArgs, []) &&
+      eq(mode(mac, { WAYLAND_DISPLAY: 'wayland-0' }).extraArgs, []),
+  )
+
+  const previousHeadless = process.env.ARTEMIS_BROWSER_HEADLESS
+  const headedHeading = '浏览器自动化（Playwright Chromium · 本机可见窗口）'
+  const headlessHeading = '浏览器自动化（Playwright Chromium · 无头模式）'
+  try {
+    delete process.env.ARTEMIS_BROWSER_HEADLESS
+    const macDefault = withToolHostEnvironment(mac, buildAmbientToolsHint)
+    const linuxDefault = withToolHostEnvironment(linuxHeadless, buildAmbientToolsHint)
+    process.env.ARTEMIS_BROWSER_HEADLESS = 'true'
+    const macForcedHeadless = withToolHostEnvironment(mac, buildAmbientToolsHint)
+    assert(
+      'browser env: ambient hint heading follows the same headed/headless decision',
+      macDefault.includes(headedHeading) &&
+        linuxDefault.includes(headlessHeading) &&
+        macForcedHeadless.includes(headlessHeading) &&
+        !macForcedHeadless.includes(headedHeading),
+    )
+  } finally {
+    if (previousHeadless === undefined) delete process.env.ARTEMIS_BROWSER_HEADLESS
+    else process.env.ARTEMIS_BROWSER_HEADLESS = previousHeadless
+  }
 }
 
 {
@@ -730,8 +825,8 @@ const ambientMessages: SessionMessage[] = [
     createdAt: new Date().toISOString(),
   },
 ]
-// Reminders and Spotify are desktop/macOS tools, so this projection is
-// checked on a forced macOS host; the headless Linux variant follows below.
+// Reminders are macOS-only tools, so this projection is checked on a forced
+// macOS host; the headless Linux variant follows below.
 const ambientProjection = withToolHostEnvironment(
   { platform: 'darwin', hasDisplay: true },
   () => projectDirectToolNames(ambientMessages),
@@ -751,10 +846,10 @@ assert(
 )
 
 assert(
-  'tool projection: headless linux never projects desktop-only tools',
+  'tool projection: headless linux never projects macOS-only tools but keeps Spotify',
   headlessAmbientProjection.includes('weather_forecast') &&
     !headlessAmbientProjection.includes('reminders_add') &&
-    !headlessAmbientProjection.includes('spotify_play_playlist'),
+    headlessAmbientProjection.includes('spotify_play_playlist'),
   headlessAmbientProjection.join(', '),
 )
 
@@ -1768,11 +1863,14 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       estimateContextLimit('gpt-5.6-sol', 1_000_000) === GPT_5_6_CONTEXT_LENGTH,
   )
   assert(
-    'model context: GPT-6 family infers the GPT-5.6 window as a lower bound',
+    'model context: GPT-6 family is hard-capped at the GPT-5.6 272K window',
     inferKnownModelContextLength('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
       inferKnownModelContextLength('openai/gpt-6-luna') === GPT_5_6_CONTEXT_LENGTH &&
       estimateContextLimit('gpt-6-sol') === GPT_5_6_CONTEXT_LENGTH &&
-      estimateContextLimit('gpt-6-sol', 400_000) === 400_000,
+      estimateContextLimit('gpt-6-sol', 400_000) === GPT_5_6_CONTEXT_LENGTH &&
+      resolveEffectiveModelContextLength('openai/gpt-6.1', 1_000_000) === GPT_5_6_CONTEXT_LENGTH &&
+      estimateContextLimit('gpt-6-sol', 200_000) === 200_000 &&
+      estimateContextLimit('gpt-60', 400_000) === 400_000,
   )
   assert(
     'model context: GLM-5.2/5.3 use 200K while GLM-5.1 keeps its entry',
@@ -1782,16 +1880,16 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       estimateContextLimit('glm-5.1') === 1_000_000,
   )
   assert(
-    'model context: Seed 2.0 aliases use 256K, dated presets unchanged',
-    estimateContextLimit('seed-2-0-pro') === 256_000 &&
-      estimateContextLimit('seed-2-0-mini') === 256_000 &&
-      estimateContextLimit('seed-2-0-lite') === 256_000 &&
+    'model context: Seed 2.0 aliases use the same 128K as the dated presets',
+    estimateContextLimit('seed-2-0-pro') === 128_000 &&
+      estimateContextLimit('seed-2-0-mini') === 128_000 &&
+      estimateContextLimit('seed-2-0-lite') === 128_000 &&
       estimateContextLimit('seed-2-0-pro-260328') === 128_000,
   )
   assert(
-    'model context: Kimi K3 uses 256K, Qwen3.7 128K',
-    estimateContextLimit('kimi-k3') === 256_000 &&
-      estimateContextLimit('moonshotai/kimi-k3-preview') === 256_000 &&
+    'model context: Kimi K3 (unverified) and Qwen3.7 use 128K',
+    estimateContextLimit('kimi-k3') === 128_000 &&
+      estimateContextLimit('moonshotai/kimi-k3-preview') === 128_000 &&
       estimateContextLimit('kimi-k2') === 128_000 &&
       estimateContextLimit('qwen3.7') === 128_000 &&
       estimateContextLimit('qwen3.7-max') === 128_000,

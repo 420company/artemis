@@ -12,7 +12,8 @@
  * Visibility: by default we run *headed* (visible window) so the user can
  * see what brain is doing on their home Mac. This matches the ambient agent
  * mental model: "I'm in Bangkok, I can see my home Mac mirror in my mind."
- * Set ARTEMIS_BROWSER_HEADLESS=1 to override.
+ * Without a display (headless Linux) it runs headless instead.
+ * ARTEMIS_BROWSER_HEADLESS=1/true/yes or 0/false/no overrides either way.
  */
 
 import os from 'node:os';
@@ -20,7 +21,7 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
-import { detectToolHostEnvironment } from '../platformSupport.js';
+import { resolveBrowserLaunchMode } from '../platformSupport.js';
 
 const PROFILE_DIR = path.join(resolveArtemisHomeDir(), 'browser-data');
 const TEMP_PROFILE_PREFIX = path.join(os.tmpdir(), 'artemis-browser-');
@@ -168,13 +169,10 @@ async function initContext(): Promise<BrowserContext> {
 
   _initPromise = (async () => {
     const { chromium } = await import('playwright');
-    // Headed by default; ARTEMIS_BROWSER_HEADLESS=1 forces headless. Without
-    // a display (e.g. a headless Linux server) a headed launch can only fail,
-    // so fall back to headless there unless ARTEMIS_BROWSER_HEADLESS=0.
-    const headlessEnv = process.env.ARTEMIS_BROWSER_HEADLESS;
-    const headless =
-      headlessEnv === '1' ||
-      (headlessEnv !== '0' && !detectToolHostEnvironment().hasDisplay);
+    // Headed where a display exists, headless without one; the
+    // ARTEMIS_BROWSER_HEADLESS override and the Wayland flag are resolved in
+    // platformSupport.ts so the prompt hint describes the same mode.
+    const { headless, extraArgs } = resolveBrowserLaunchMode();
     // Platform-consistent UA — a Mac UA on a Windows host is itself a bot signal.
     const uaPlatform = process.platform === 'win32'
       ? 'Windows NT 10.0; Win64; x64'
@@ -188,7 +186,7 @@ async function initContext(): Promise<BrowserContext> {
       userAgent:
         `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36`,
     } as const;
-    const launchArgs = ['--disable-blink-features=AutomationControlled'];
+    const launchArgs = ['--disable-blink-features=AutomationControlled', ...extraArgs];
 
     // ARTEMIS_BROWSER_CDP_URL: attach to a real, already-running Chrome/Edge/Brave
     // started with --remote-debugging-port. Drives the user's actual browser —

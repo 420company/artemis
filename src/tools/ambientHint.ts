@@ -9,7 +9,11 @@
  * contains explicit intent. Don't auto-check weather every turn etc.
  */
 
-import { getToolHostEnvironment, isToolSupportedOnHost } from './platformSupport.js';
+import {
+  getToolHostEnvironment,
+  isToolSupportedOnHost,
+  resolveBrowserLaunchMode,
+} from './platformSupport.js';
 
 export function buildAmbientToolsHint(): string {
   // macOS-only Apple tools are only advertised where they are also offered
@@ -42,7 +46,9 @@ export function buildAmbientToolsHint(): string {
   const applePlatformRule = appleToolsAvailable
     ? ['- macOS 工具在 Linux/Windows 上会返 platform_unsupported——一次后不再重试，告诉用户原因']
     : [];
-  const browserHeading = host.hasDisplay
+  // Same decision the browser session makes, including the
+  // ARTEMIS_BROWSER_HEADLESS override.
+  const browserHeading = !resolveBrowserLaunchMode(host).headless
     ? '## 浏览器自动化（Playwright Chromium · 本机可见窗口）'
     : '## 浏览器自动化（Playwright Chromium · 无头模式）';
 
