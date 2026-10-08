@@ -532,6 +532,19 @@ async function main(): Promise<void> {
     globalThis.fetch = originalFetch;
   }
 
+  // Everyday wording in a story never switches on raw mode.
+  const casualKey = `${key}-casual-raw-words`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频：一个博主对着镜头说她的自拍从来不用美颜、不要滤镜，write a short prompt for each scene' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '纯风景：清晨的湖面，薄雾缓缓散开。' });
+  let casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '开始生成' });
+  for (const reply of ['自动', '无字幕', '10秒', '不加', '不加']) {
+    if (!casual.handled) break;
+    casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: /主角/.test(casual.reply) ? 'X' : reply });
+  }
+  assert.equal(casual.handled, false, 'the casual-words flow should end in a generate_long_video action');
+  assert.notEqual(casual.action?.cleanDirect, true, '"不要滤镜" / "short prompt" in a story must not switch on raw mode');
+
   console.log('saga workflow explicit-trigger guard ok');
 }
 
