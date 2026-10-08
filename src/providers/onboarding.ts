@@ -932,6 +932,14 @@ export async function promptForVerifiedProviderProfile(
   }
 }
 
+/**
+ * Global provider store used when the cwd has no main profile. Shared with the
+ * provider router so main and specialist profiles always come from one file.
+ */
+export function createGlobalProviderStore(): ProviderStore {
+  return new ProviderStore(homedir());
+}
+
 export async function resolveMainProviderConfig(options: {
   cwd: string;
   config: { protocol?: string; model?: string; baseUrl?: string; apiKey?: string };
@@ -949,7 +957,7 @@ export async function resolveMainProviderConfig(options: {
   const mainProfile = store.getDefaultMainProfile(data);
   if (mainProfile) return mainProfile;
 
-  const globalStore = new ProviderStore(homedir());
+  const globalStore = createGlobalProviderStore();
   const globalData = await globalStore.load();
   const globalMainProfile = globalStore.getDefaultMainProfile(globalData);
   if (globalMainProfile) return globalMainProfile;
