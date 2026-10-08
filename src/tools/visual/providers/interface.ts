@@ -13,6 +13,8 @@ export interface VisualGenerationParams {
   background?: string
   watermark?: boolean
   count?: number
+  /** Image references as http(s) URLs or base64 data URIs (generate_image only). */
+  referenceImages?: string[]
 }
 
 export interface VideoGenerationParams extends VisualGenerationParams {
@@ -55,6 +57,8 @@ export interface VisualProvider {
   readonly name: string
   readonly supportsImages: boolean
   readonly supportsVideos: boolean
+  /** True when generateImage accepts `referenceImages`. Providers without it must not be sent references. */
+  readonly supportsImageReferences?: boolean
   
   generateImage(params: VisualGenerationParams): Promise<GenerationResult>
   generateVideo?(params: VideoGenerationParams): Promise<GenerationResult>

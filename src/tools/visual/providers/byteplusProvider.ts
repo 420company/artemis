@@ -15,6 +15,7 @@ import {
   isGeneratedAudioUnsupported,
   resolveVideoModelCapabilities,
 } from '../videoCapabilities.js'
+import { checkBytePlusReferenceSupport } from '../referenceImages.js'
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
@@ -44,6 +45,7 @@ export class BytePlusProvider implements VisualProvider {
   readonly name = 'byteplus'
   readonly supportsImages = true
   readonly supportsVideos = true
+  readonly supportsImageReferences = true
   
   private config: VisualModelConfig
   private assetType: 'image' | 'video'
@@ -76,6 +78,11 @@ export class BytePlusProvider implements VisualProvider {
       const model = params.model || this.config.image.model || 'seedream-5-0-260128'
       const size = params.size || this.config.image.defaultParams.size || '2K'
       const count = params.count || 1
+      const referenceImages = params.referenceImages ?? []
+      const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length)
+      if (referenceError) {
+        throw new Error(referenceError)
+      }
       
       const endpoint = `${baseUrl}/images/generations`
       const body: Record<string, unknown> = {
@@ -85,6 +92,12 @@ export class BytePlusProvider implements VisualProvider {
         response_format: 'url',
         watermark: params.watermark ?? this.config.image.defaultParams.watermark ?? false,
         stream: false,
+      }
+      // ModelArk `image`: one URL/data URI as a string, several as an array.
+      if (referenceImages.length === 1) {
+        body.image = referenceImages[0]
+      } else if (referenceImages.length > 1) {
+        body.image = referenceImages
       }
       
       if (count > 1) {

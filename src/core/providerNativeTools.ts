@@ -1054,11 +1054,17 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['prompt'],
         properties: {
-          prompt: nonEmptyStringSchema('Text description of the image to generate.'),
+          prompt: nonEmptyStringSchema('Full natural-language description: subject, action, setting, then style/medium (the user\'s style). Text to render in "double quotes". Keep the user\'s language. No size or aspect-ratio words; use size.'),
           model: optionalStringSchema('Optional image generation model ID. Defaults to the configured visual provider model.'),
           size: {
             type: 'string',
-            description: 'Output size preset or provider-specific size. Examples: 1K, 2K, 4K, 1024x1024, 1536x1024. Default: configured visual profile size.',
+            description: 'Output size and aspect ratio: a preset (1K, 2K, 4K; square) or WxH, e.g. 2560x1440 for 16:9 or 1440x2560 for 9:16 on Seedream, 1536x1024 on gpt-image. Default: configured visual profile size.',
+          },
+          referenceImages: {
+            type: 'array',
+            maxItems: 14,
+            description: 'Images to edit or follow (style, subject, composition): workspace file paths or http(s) URLs, up to 14. Seedream 4.x/5.x only; other image providers return an error. Say in prompt what to keep and what to change.',
+            items: { type: 'string' },
           },
           quality: optionalStringSchema('Optional image quality. For gpt-image-2: low, medium, high, or auto. Default: configured visual profile quality.'),
           outputFormat: optionalStringSchema('Optional output format. For gpt-image-2: png, jpeg, or webp. Default: configured visual profile output format or png.'),
@@ -1341,21 +1347,6 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             description: 'Local engine selection. auto tries whisper.cpp first, then Python whisper.',
           },
           command: optionalStringSchema('Optional executable path/name override, e.g. whisper-cli or whisper.'),
-        },
-      };
-    case 'request_freya_visual_asset':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['assetType', 'contextDescription'],
-        properties: {
-          assetType: {
-            type: 'string',
-            description: 'Type of visual asset to request (image, video, or icon).',
-            enum: ['image', 'video', 'icon'],
-          },
-          contextDescription: nonEmptyStringSchema('Detailed description of the UI or component context.'),
-          preferredStyle: optionalStringSchema('Optional preferred visual style.'),
         },
       };
     case 'agent':

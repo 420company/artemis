@@ -1,10 +1,7 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';
 import { resolveModelArkMediaCredentials } from './vidarMedia.js';
-import FreyaSearch from './visual/freyaSearch.js';
-import { FreyaVisualAgent } from '../agents/freyaAgent.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { toolLog, toolWarn } from '../utils/log.js';
 import { createVisualProvider } from './visual/providers/interface.js';
@@ -21,14 +18,19 @@ import {
     IMAGE_GENERATION_TIMEOUT_MS,
 } from './visual/providers/timeouts.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
+import {
+    classifyImageGenerationFailure,
+    formatImageGenerationFailure,
+    type ImageGenerationFailureKind,
+} from './visual/imageGenerationFailure.js';
+import {
+    checkBytePlusReferenceSupport,
+    resolveReferenceImages,
+} from './visual/referenceImages.js';
 
 const DEFAULT_MODEL = 'seedream-5-0-260128';
 const DEFAULT_SIZE = '2K';
 const DEFAULT_SUBDIR = 'images';
-
-function allowWebFallback(action: any): boolean {
-    return action?.allowWebFallback === true;
-}
 
 function sanitizeCount(raw: unknown): number {
     if (typeof raw !== 'number' || !Number.isFinite(raw))
@@ -57,28 +59,57 @@ async function downloadUrl(url: string): Promise<Buffer> {
     return Buffer.from(ab);
 }
 
-type ImageDimensions = {
-    width: number;
-    height: number;
-};
+function failure(action: any, detail: string, options: { status?: number; source?: string } = {}) {
+    return {
+        action,
+        ok: false,
+        output: formatImageGenerationFailure({ detail, ...options }).output,
+    };
+}
 
+/**
+ * Generates images with the configured visual provider, then eligible
+ * main/secondary providers, then the legacy ModelArk (BytePlus) credentials.
+ * Every path generates a real image or fails with an actionable reason; there
+ * is no web-image substitute.
+ */
 export async function executeGenerateImage(action: any, context: any) {
+    let referenceImages: string[];
     try {
-        const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context);
+        referenceImages = await resolveReferenceImages(action.referenceImages, context, {
+            outputCount: sanitizeCount(action.count),
+        });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+            action,
+            ok: false,
+            output: `generate_image failed: invalid referenceImages. ${message}\nNo image was created.`,
+        };
+    }
+
+    try {
+        const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context, referenceImages);
         if (configuredResult) {
             return configuredResult;
         }
 
-        const fallbackProviderResult = await tryGenerateWithMainSecondaryFallbackProviders(action, context);
+        const fallbackProviderResult = await tryGenerateWithMainSecondaryFallbackProviders(action, context, referenceImages);
         if (fallbackProviderResult) {
             return fallbackProviderResult;
         }
 
-        // Legacy BytePlus env/config fallback after visualProfile and main/secondary tests.
+        // Legacy BytePlus env/config path after visualProfile and main/secondary tests.
         const { apiKey, baseUrl } = await resolveModelArkMediaCredentials(context.cwd, 'image');
         const model = action.model?.trim() || DEFAULT_MODEL;
         const size = action.size?.trim() || DEFAULT_SIZE;
         const count = sanitizeCount(action.count);
+        const source = 'BytePlus image API';
+
+        const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length);
+        if (referenceError) {
+            return { action, ok: false, output: `generate_image failed: ${referenceError}\nNo image was created.` };
+        }
 
         const endpoint = `${baseUrl}/images/generations`;
         const body: Record<string, unknown> = {
@@ -89,6 +120,11 @@ export async function executeGenerateImage(action: any, context: any) {
             watermark: Boolean(action.watermark),
             stream: false,
         };
+        if (referenceImages.length === 1) {
+            body['image'] = referenceImages[0];
+        } else if (referenceImages.length > 1) {
+            body['image'] = referenceImages;
+        }
         if (count > 1) {
             body['sequential_image_generation'] = 'auto';
             body['sequential_image_generation_options'] = { max_images: count };
@@ -106,40 +142,20 @@ export async function executeGenerateImage(action: any, context: any) {
 
         const raw = await res.text();
         if (!res.ok) {
-            if (allowWebFallback(action)) {
-                return await fallbackToDeepSearch(action, context, `BytePlus image API returned HTTP ${res.status}`);
-            }
-            return {
-                action,
-                ok: false,
-                output: `generate_image failed: BytePlus image API returned HTTP ${res.status}. Web-search fallback is disabled.`,
-            };
+            return failure(action, raw.slice(0, 1000), { status: res.status, source });
         }
 
         let payload: any;
         try {
             payload = JSON.parse(raw);
         } catch {
-            if (allowWebFallback(action)) {
-                return await fallbackToDeepSearch(action, context, 'BytePlus image API returned invalid JSON');
-            }
-            return {
-                action,
-                ok: false,
-                output: 'generate_image failed: BytePlus image API returned invalid JSON. Web-search fallback is disabled.',
-            };
+            return failure(action, `invalid JSON response: ${raw.slice(0, 200)}`, { source });
         }
 
         const items = payload.data ?? [];
         if (!items.length) {
-            if (allowWebFallback(action)) {
-                return await fallbackToDeepSearch(action, context, 'BytePlus image API returned no images');
-            }
-            return {
-                action,
-                ok: false,
-                output: 'generate_image failed: BytePlus image API returned no images. Web-search fallback is disabled.',
-            };
+            const reason = payload.error ? JSON.stringify({ error: payload.error }) : 'no images returned';
+            return failure(action, reason, { source });
         }
 
         const savedEntries: Array<{ path: string; url?: string }> = [];
@@ -169,14 +185,7 @@ export async function executeGenerateImage(action: any, context: any) {
         }
 
         if (!savedEntries.length) {
-            if (allowWebFallback(action)) {
-                return await fallbackToDeepSearch(action, context, 'BytePlus image API returned unusable image items');
-            }
-            return {
-                action,
-                ok: false,
-                output: 'generate_image failed: BytePlus image API returned unusable image items. Web-search fallback is disabled.',
-            };
+            return failure(action, 'response contained no downloadable image URLs', { source });
         }
 
         const lines = [
@@ -185,11 +194,6 @@ export async function executeGenerateImage(action: any, context: any) {
         ];
         return { action, ok: true, output: lines.join('\n') };
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (allowWebFallback(action)) {
-            toolLog('ℹ️ Visual API unavailable, falling back to deep search...');
-            return await fallbackToDeepSearch(action, context, message);
-        }
         if (isVisualSetupRequiredError(error)) {
             return {
                 action,
@@ -197,15 +201,12 @@ export async function executeGenerateImage(action: any, context: any) {
                 output: buildVisualSetupRequiredMessage('image'),
             };
         }
-        return {
-            action,
-            ok: false,
-            output: `generate_image failed: ${message}. Web-search fallback is disabled.`,
-        };
+        const message = error instanceof Error ? error.message : String(error);
+        return failure(action, message);
     }
 }
 
-async function tryGenerateWithConfiguredVisualProvider(action: any, context: any) {
+async function tryGenerateWithConfiguredVisualProvider(action: any, context: any, referenceImages: string[]) {
     const configured = await resolveConfiguredVisualProvider(context.cwd, 'image');
     if (!configured) {
         return null;
@@ -221,38 +222,51 @@ async function tryGenerateWithConfiguredVisualProvider(action: any, context: any
         };
     }
 
-    return generateImageWithVisualProvider(action, context, configured.config, provider, configured.model, 'configured visual API');
+    return generateImageWithVisualProvider(action, context, configured.config, provider, configured.model, 'configured visual API', referenceImages);
 }
 
-async function tryGenerateWithMainSecondaryFallbackProviders(action: any, context: any) {
+// Failure kinds the user has to act on; when any provider reports one, it is
+// surfaced instead of the generic "set up a visual provider" message.
+const ACTIONABLE_FAILURE_PRIORITY: ImageGenerationFailureKind[] = [
+    'insufficient_balance',
+    'content_rejected',
+    'payload_too_large',
+];
+
+async function tryGenerateWithMainSecondaryFallbackProviders(action: any, context: any, referenceImages: string[]) {
     const candidates = await resolveMainSecondaryVisualFallbackCandidates(context.cwd, 'image');
     if (!candidates.length) return null;
 
-    const failures: string[] = [];
+    const failures: Array<{ label: string; detail: string }> = [];
     for (const candidate of candidates) {
         try {
             toolLog(`🧪 测试主/副模型图片生成能力: ${candidate.label} (${candidate.provider}/${candidate.model})`);
             const provider = await createVisualProvider(candidate.config, 'image');
             if (!provider.supportsImages) {
-                failures.push(`${candidate.label}: provider does not support images`);
+                failures.push({ label: candidate.label, detail: 'provider does not support images' });
                 continue;
             }
 
-            const result = await generateImageWithVisualProvider(action, context, candidate.config, provider, candidate.model, 'main/secondary fallback');
+            const result = await generateImageWithVisualProvider(action, context, candidate.config, provider, candidate.model, 'main/secondary fallback', referenceImages);
             if (result.ok) return result;
-            failures.push(`${candidate.label}: ${result.output}`);
+            failures.push({ label: candidate.label, detail: String(result.output) });
         } catch (error) {
-            failures.push(`${candidate.label}: ${error instanceof Error ? error.message : String(error)}`);
+            failures.push({ label: candidate.label, detail: error instanceof Error ? error.message : String(error) });
         }
     }
 
-    if (allowWebFallback(action)) {
-        return await fallbackToDeepSearch(action, context, `Configured visual API missing/unusable; main/secondary visual tests failed: ${failures.join(' | ')}`);
+    for (const kind of ACTIONABLE_FAILURE_PRIORITY) {
+        const match = failures.find((entry) => classifyImageGenerationFailure({ detail: entry.detail }) === kind);
+        if (match) {
+            return { action, ok: false, output: match.detail.startsWith('generate_image failed:')
+                ? match.detail
+                : formatImageGenerationFailure({ detail: match.detail, source: match.label }).output };
+        }
     }
     return {
         action,
         ok: false,
-        output: `${buildVisualSetupRequiredMessage('image')}\n\nMain/secondary provider test results:\n${failures.map((line) => `  - ${line}`).join('\n')}`,
+        output: `${buildVisualSetupRequiredMessage('image')}\n\nMain/secondary provider test results:\n${failures.map((entry) => `  - ${entry.label}: ${entry.detail}`).join('\n')}`,
     };
 }
 
@@ -263,9 +277,18 @@ async function generateImageWithVisualProvider(
     provider: any,
     configuredModel: string,
     sourceLabel: string,
+    referenceImages: string[] = [],
 ) {
     const count = sanitizeCount(action.count);
     const imageConfig = config.image;
+    if (referenceImages.length > 0 && provider.supportsImageReferences !== true) {
+        const model = action.model?.trim() || imageConfig.model || configuredModel;
+        return {
+            action,
+            ok: false,
+            output: `generate_image failed: reference images are not supported by the ${sourceLabel} (${provider.name}/${model}). They work with BytePlus Seedream 4.x/5.x models. Retry without referenceImages (describe the reference in the prompt instead) or switch the image provider.\nNo image was created.`,
+        };
+    }
     const savedEntries: Array<{ path: string; provider: string; model: string }> = [];
     for (let i = 0; i < count; i += 1) {
         const model = action.model?.trim() || imageConfig.model || configuredModel;
@@ -282,16 +305,13 @@ async function generateImageWithVisualProvider(
             background: action.background?.trim?.() || imageConfig.defaultParams.background,
             watermark: action.watermark ?? imageConfig.defaultParams.watermark,
             count: 1,
+            ...(referenceImages.length > 0 ? { referenceImages } : {}),
         });
 
         if (!result.success || !result.assetPath) {
             const message = result.error ?? 'unknown error';
             toolWarn(`⚠️ ${sourceLabel}图片生成失败: ${message}`);
-            return {
-                action,
-                ok: false,
-                output: `generate_image failed: ${sourceLabel} failed: ${message}.`,
-            };
+            return failure(action, message, { source: sourceLabel });
         }
 
         const targetRaw = action.outputPath
@@ -339,93 +359,6 @@ function extensionForImageOutputFormat(format: string | undefined): string {
 function normalizeOutputCompression(raw: unknown): number | undefined {
     if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
     return Math.max(0, Math.min(100, Math.round(raw)));
-}
-
-async function fallbackToDeepSearch(action: any, context: any, reason?: string) {
-    try {
-        if (reason) {
-            toolWarn(`⚠️ ${reason}`);
-        }
-        toolLog('🔍 Starting deep search fallback...');
-        
-        // 使用 FreyaVisualAgent 扩展提示词
-        const config = {
-            enabled: true,
-            image: {
-                provider: 'byteplus',
-                apiKey: '',
-                baseUrl: '',
-                model: 'seedream-5-0-260128',
-                defaultParams: {
-                    style: 'realistic' as const,
-                    quality: 'standard' as const,
-                    size: '2K' as const,
-                    watermark: false
-                }
-            },
-            video: {
-                enabled: true,
-                provider: 'byteplus',
-                apiKey: '',
-                baseUrl: '',
-                model: 'seedance-1-5-pro-251215',
-                defaultParams: {
-                    quality: 'standard' as const,
-                    duration: '5s' as const,
-                    resolution: '1080p' as const,
-                    style: 'realistic' as const,
-                    format: 'mp4' as const,
-                    framerate: '30fps' as const,
-                    watermark: false
-                }
-            }
-        };
-        
-        const freyaAgent = new FreyaVisualAgent(config);
-        const expandedPrompt = await freyaAgent.expandPrompt(action.prompt, 'image');
-        
-        // 确定输出路径
-        const targetRaw = action.outputPath 
-            ? action.outputPath 
-            : buildDefaultOutputPath(context.cwd, 0, 1);
-        const { absolute } = await resolveToolPathWithWorkspaceAccess({
-            inputPath: targetRaw,
-            toolName: 'generate_image',
-            context,
-        });
-        if (context.permissionMode !== 'full-access') {
-            ensureNotSensitivePath(absolute, targetRaw);
-        }
-        await ensureDir(path.dirname(absolute));
-        
-        // 执行深度搜索
-        const searchResult = await FreyaSearch.deepSearchSimilarImage(expandedPrompt, absolute);
-        
-        if (searchResult.success && searchResult.downloadedPath) {
-            const bestResult = searchResult.searchResults?.[0];
-            const sourceLine = bestResult
-                ? `\nSource: ${bestResult.source} - ${bestResult.title}`
-                : '';
-            return { 
-                action, 
-                ok: true, 
-                output: `Fetched image via Freya web-search fallback (not generated locally): ${searchResult.downloadedPath}${sourceLine}` 
-            };
-        } else {
-            return {
-                action,
-                ok: false,
-                output: 'generate_image failed: web-search fallback did not return a usable image.',
-            };
-        }
-    } catch (fallbackError) {
-        const message = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-        return {
-            action,
-            ok: false,
-            output: `generate_image fallback failed: ${message}`
-        };
-    }
 }
 
 function appendSuffixToPath(p: string, suffix: number): string {

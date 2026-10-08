@@ -17,7 +17,6 @@ import { applyProviderOverrides, resetSession, think } from '../src/brain.js'
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
-import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
 import { buildContextWindow } from '../src/core/context.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
@@ -45,7 +44,18 @@ import {
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
   renderDetailedToolManifest,
+  validateToolAction,
+  GENERATE_IMAGE_DESCRIPTION,
 } from '../src/tools/registry.js'
+import {
+  classifyImageGenerationFailure,
+  formatImageGenerationFailure,
+} from '../src/tools/visual/imageGenerationFailure.js'
+import {
+  normalizeReferenceImagesArg,
+  resolveReferenceImages,
+  sniffImageMimeType,
+} from '../src/tools/visual/referenceImages.js'
 import { ProviderStore } from '../src/providers/store.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
@@ -251,25 +261,6 @@ assert(
   assert(
     'platform tools: host override is restored after the forced snapshot',
     eq(buildProviderNativeFunctionTools().map((tool) => tool.name), providerNativeToolNames),
-  )
-}
-
-{
-  // The legacy interactive Freya flow is not offered to the model anywhere.
-  const freya = 'request_freya_visual_asset'
-  const mainNativeNames = buildProviderNativeFunctionTools(getAllowedActionTypesForProfile('main'))
-    .map((tool) => tool.name)
-  const manifestNames = [...renderDetailedToolManifest().matchAll(/^## (\S+)$/gm)].map((match) => match[1]!)
-  const mainPrompt = buildSystemPrompt(process.cwd(), 'accept-all', 'standard', 'main', false)
-  assert(
-    'freya: request_freya_visual_asset is not offered to main (native, direct, manifest, prompt)',
-    !providerNativeToolNames.includes(freya) &&
-      !mainNativeNames.includes(freya) &&
-      !getProviderCallableActionTypes().includes(freya) &&
-      !buildDirectNativeFunctionTools().some((tool) => tool.name === freya) &&
-      !manifestNames.includes(freya) &&
-      !mainPrompt.includes(freya) &&
-      !mapProviderNativeToolCallToAction({ callId: 'freya-call', name: freya, arguments: '{}' }).ok,
   )
 }
 
@@ -1388,6 +1379,367 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+// ── generate_image: honest failures, reference images, prompt guidance ─────────
+
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+async function configureBytePlusImageProfile(cwd: string, baseUrl: string): Promise<void> {
+  const store = new ProviderStore(cwd)
+  const data = await store.load()
+  data.visualProfile = {
+    enabled: true,
+    image: {
+      provider: 'byteplus',
+      apiKey: 'test-image-key',
+      baseUrl,
+      model: 'seedream-5-0-260128',
+      defaultParams: { size: '2K', quality: 'standard', style: 'realistic', watermark: false },
+    },
+    video: {
+      enabled: false,
+      provider: 'byteplus',
+      apiKey: '',
+      baseUrl,
+      model: 'seedance-1-5-pro-251215',
+      defaultParams: {
+        duration: '10s',
+        resolution: '1080p',
+        quality: 'standard',
+        style: 'realistic',
+        format: 'mp4',
+        framerate: '30fps',
+        watermark: false,
+      },
+    },
+  }
+  await store.save(data)
+}
+
+async function withMockedFetch<T>(
+  respond: (url: string, init?: RequestInit) => Response,
+  run: (calls: Array<{ url: string; body?: string }>) => Promise<T>,
+): Promise<T> {
+  const originalFetch = globalThis.fetch
+  const calls: Array<{ url: string; body?: string }> = []
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    calls.push({ url, body: typeof init?.body === 'string' ? init.body : undefined })
+    return respond(url, init)
+  }) as typeof fetch
+  try {
+    return await run(calls)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  // Failure classification: each case gets its own actionable message.
+  const gateway402 = '{"error":{"code":"insufficient_balance","message":"Balance too low: please top up","type":"insufficient_balance"}}'
+  assert(
+    'image failure: gateway 402 is insufficient balance',
+    classifyImageGenerationFailure({ detail: gateway402, status: 402 }) === 'insufficient_balance' &&
+      classifyImageGenerationFailure({ detail: `API request failed (HTTP 402): ${gateway402}` }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: ModelArk overdue account (403 ServiceOverdue) is insufficient balance',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 403): {"error":{"code":"OperationDenied.ServiceOverdue","message":"account overdue"}}' }) === 'insufficient_balance',
+  )
+  assert(
+    'image failure: 413 is payload too large',
+    classifyImageGenerationFailure({ detail: '{"error":{"code":"payload_too_large","message":"Request body too large"}}', status: 413 }) === 'payload_too_large',
+  )
+  assert(
+    'image failure: ModelArk SensitiveContentDetected and OpenAI moderation_blocked are content rejections',
+    classifyImageGenerationFailure({ detail: 'API request failed (HTTP 400): {"error":{"code":"SensitiveContentDetected.Violence","message":"The request failed because the input text may contain sensitive information."}}' }) === 'content_rejected' &&
+      classifyImageGenerationFailure({ detail: 'OpenAI image generation failed (HTTP 400): moderation_blocked' }) === 'content_rejected',
+  )
+  assert(
+    'image failure: missing key is not configured, 401 is unauthorized, 5xx and network errors are upstream',
+    classifyImageGenerationFailure({ detail: 'Custom image API key is not configured.' }) === 'not_configured' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 401): {"error":{"code":"AuthenticationError"}}' }) === 'unauthorized' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 503): upstream busy' }) === 'upstream' &&
+      classifyImageGenerationFailure({ detail: 'fetch failed' }) === 'upstream',
+  )
+  const formatted = formatImageGenerationFailure({ detail: gateway402, status: 402, source: 'BytePlus image API' }).output
+  assert(
+    'image failure: 402 message tells the user to top up and names the source',
+    formatted.startsWith('generate_image failed: insufficient balance') &&
+      formatted.includes('top up') &&
+      formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
+      formatted.includes('Do not substitute a downloaded web image'),
+    formatted,
+  )
+}
+
+{
+  // A failed image API call returns ok:false with the right message and never
+  // falls back to a web search or downloads anything else.
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-honest-failure-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusImageProfile(tmpDir, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+  try {
+    const balance = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up","type":"insufficient_balance"}}', { status: 402 }),
+      async (calls) => ({
+        result: await executeGenerateImage({ type: 'generate_image', prompt: 'a red fox in snow, watercolor' } as any, { cwd: tmpDir } as any),
+        calls: [...calls],
+      }),
+    )
+    assert(
+      'generate_image: HTTP 402 returns ok:false with a top-up message',
+      balance.result.ok === false &&
+        String(balance.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(balance.result.output).includes('top up'),
+      String(balance.result.output),
+    )
+    assert(
+      'generate_image: HTTP 402 makes exactly one image API call and no web search',
+      balance.calls.length === 1 &&
+        balance.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
+        !balance.calls.some((call) => /bing|google|duckduckgo|search/i.test(call.url)),
+      JSON.stringify(balance.calls.map((call) => call.url)),
+    )
+
+    const generic = await withMockedFetch(
+      () => new Response('<html>Bad Gateway</html>', { status: 502 }),
+      async (calls) => ({
+        result: await executeGenerateImage({ type: 'generate_image', prompt: 'logo with the text "ACME"' } as any, { cwd: tmpDir } as any),
+        calls: [...calls],
+      }),
+    )
+    assert(
+      'generate_image: a generic upstream error returns ok:false with a retry message and no web search',
+      generic.result.ok === false &&
+        String(generic.result.output).startsWith('generate_image failed: the image service or network failed') &&
+        String(generic.result.output).includes('HTTP 502') &&
+        generic.calls.length === 1 &&
+        generic.calls.every((call) => call.url.endsWith('/images/generations')),
+      String(generic.result.output),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Reference images: parsing, containment, data URIs, unsupported providers.
+  assert(
+    'referenceImages: arrays, JSON strings and single strings normalize, de-duplicated',
+    eq(normalizeReferenceImagesArg([' a.png ', 'a.png', '', 'https://x.test/b.jpg']), ['a.png', 'https://x.test/b.jpg']) &&
+      eq(normalizeReferenceImagesArg('["a.png","b.png"]'), ['a.png', 'b.png']) &&
+      eq(normalizeReferenceImagesArg('a.png'), ['a.png']) &&
+      eq(normalizeReferenceImagesArg(undefined), []),
+  )
+  assert(
+    'referenceImages: image types are sniffed from bytes, not extensions',
+    sniffImageMimeType(PNG_1X1) === 'image/png' &&
+      sniffImageMimeType(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0])) === 'image/jpeg' &&
+      sniffImageMimeType(Buffer.from('RIFF\0\0\0\0WEBPVP8 ', 'binary')) === 'image/webp' &&
+      sniffImageMimeType(Buffer.from('API_KEY=secret\n')) === undefined,
+  )
+
+  const recovered = parseAssistantEnvelopeForSmoke(`
+<tool_calls>
+<call name="generate_image">{"prompt":"same style, but a cat","reference_images":["uploads/style.png"]}</call>
+</tool_calls>
+`)
+  const looseAction = (recovered.actions ?? [])[0] as any
+  assert(
+    'referenceImages: text tool-call recovery parses reference_images',
+    looseAction?.type === 'generate_image' && eq(looseAction.referenceImages, ['uploads/style.png']),
+    JSON.stringify(recovered.actions),
+  )
+  const nativeMapped = mapProviderNativeToolCallToAction({
+    callId: 'img-ref',
+    name: 'generate_image',
+    arguments: JSON.stringify({ prompt: 'same style, but a cat', referenceImages: ['uploads/style.png', 'https://x.test/a.png'] }),
+  })
+  assert(
+    'referenceImages: native tool call keeps referenceImages',
+    nativeMapped.ok && eq((nativeMapped.action as any).referenceImages, ['uploads/style.png', 'https://x.test/a.png']),
+    JSON.stringify(nativeMapped),
+  )
+  assert(
+    'referenceImages: validator rejects more than 14 entries and non-string entries',
+    validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: Array.from({ length: 15 }, (_, i) => `r${i}.png`) }).length > 0 &&
+      validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: [42] }).length > 0 &&
+      validateToolAction({ type: 'generate_image', prompt: 'x', referenceImages: ['a.png'] }).length === 0,
+  )
+  const imageSchema = providerNativeTools.find((tool) => tool.name === 'generate_image')?.parameters as any
+  assert(
+    'referenceImages: native schema exposes an array capped at 14',
+    imageSchema?.properties?.referenceImages?.type === 'array' && imageSchema.properties.referenceImages.maxItems === 14,
+  )
+
+  const root = path.join(os.tmpdir(), `artemis-image-refs-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(path.join(workspace, 'uploads'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, 'uploads', 'style.png'), PNG_1X1)
+  fs.writeFileSync(path.join(workspace, 'uploads', 'notes.png'), 'API_KEY=not-an-image\n')
+  fs.writeFileSync(path.join(root, 'outside.png'), PNG_1X1)
+  const context = { cwd: workspace } as any
+  const rejects = async (raw: unknown, pattern: RegExp): Promise<boolean> => {
+    try {
+      await resolveReferenceImages(raw, context)
+      return false
+    } catch (error) {
+      return pattern.test(error instanceof Error ? error.message : String(error))
+    }
+  }
+  try {
+    const resolved = await resolveReferenceImages(['uploads/style.png', 'https://x.test/a.png'], context)
+    assert(
+      'referenceImages: workspace files become data URIs and URLs pass through',
+      resolved.length === 2 &&
+        resolved[0] === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        resolved[1] === 'https://x.test/a.png',
+      JSON.stringify(resolved.map((entry) => entry.slice(0, 40))),
+    )
+    assert(
+      'referenceImages: paths outside the workspace are refused',
+      await rejects(['../outside.png'], /escapes|declined/i) &&
+        await rejects([path.join(root, 'outside.png')], /escapes|declined/i),
+    )
+    assert(
+      'referenceImages: protected paths, non-images, missing files and other schemes are refused',
+      await rejects([path.join(os.homedir(), '.ssh', 'id_rsa')], /escapes|declined|denied|protected/i) &&
+        await rejects(['uploads/notes.png'], /not a supported image/) &&
+        await rejects(['uploads/missing.png'], /not found/) &&
+        await rejects(['file:///etc/passwd'], /not supported/),
+    )
+    assert(
+      'referenceImages: more than 14, or references plus outputs over 15, are refused',
+      await rejects(Array.from({ length: 15 }, (_, i) => `https://x.test/${i}.png`), /at most 14/) &&
+        await (async () => {
+          try {
+            await resolveReferenceImages(Array.from({ length: 13 }, (_, i) => `https://x.test/${i}.png`), context, { outputCount: 3 })
+            return false
+          } catch (error) {
+            return /limit of 15/.test(String(error))
+          }
+        })(),
+    )
+
+    // The request body carries the reference as a ModelArk `image` data URI.
+    await configureBytePlusImageProfile(workspace, 'https://ark.ap-southeast.bytepluses.com/api/v3')
+    const sent = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (calls) => {
+        const result = await executeGenerateImage(
+          { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['uploads/style.png'] } as any,
+          context,
+        )
+        return { result, calls: [...calls] }
+      },
+    )
+    const sentBody = JSON.parse(sent.calls[0]?.body ?? '{}')
+    assert(
+      'referenceImages: BytePlus request body has image as a data URI',
+      sent.calls.length === 1 &&
+        sentBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
+        sentBody.prompt === 'same style, but a cat' &&
+        sent.result.ok === false,
+      JSON.stringify({ keys: Object.keys(sentBody), output: sent.result.output }),
+    )
+    const sentTwo = await withMockedFetch(
+      () => new Response('{"error":{"message":"boom"}}', { status: 500 }),
+      async (calls) => {
+        await executeGenerateImage(
+          { type: 'generate_image', prompt: 'blend these', referenceImages: ['uploads/style.png', 'https://x.test/a.png'] } as any,
+          context,
+        )
+        return [...calls]
+      },
+    )
+    const sentTwoBody = JSON.parse(sentTwo[0]?.body ?? '{}')
+    assert(
+      'referenceImages: several references are sent as an image array',
+      Array.isArray(sentTwoBody.image) && sentTwoBody.image.length === 2 && sentTwoBody.image[1] === 'https://x.test/a.png',
+    )
+
+    // Providers without reference support fail clearly instead of ignoring them.
+    for (const provider of ['openai', 'mock'] as const) {
+      const store = new ProviderStore(workspace)
+      const data = await store.load()
+      data.visualProfile!.image = {
+        ...data.visualProfile!.image,
+        provider,
+        apiKey: 'test-key',
+        baseUrl: provider === 'openai' ? 'https://api.openai.com/v1' : 'mock://local',
+        model: provider === 'openai' ? 'gpt-image-2' : 'mock-image',
+      }
+      await store.save(data)
+      const unsupported = await withMockedFetch(
+        () => new Response('{}', { status: 500 }),
+        async (calls) => ({
+          result: await executeGenerateImage(
+            { type: 'generate_image', prompt: 'same style, but a cat', referenceImages: ['uploads/style.png'] } as any,
+            context,
+          ),
+          calls: [...calls],
+        }),
+      )
+      assert(
+        `referenceImages: ${provider} provider fails clearly without calling the API`,
+        unsupported.result.ok === false &&
+          String(unsupported.result.output).includes('reference images are not supported') &&
+          unsupported.calls.length === 0,
+        String(unsupported.result.output),
+      )
+    }
+
+    // A text-to-image-only Seedream model refuses references.
+    const t2i = new BytePlusProvider(
+      {
+        enabled: true,
+        image: { provider: 'byteplus', apiKey: 'k', baseUrl: '', model: 'seedream-3-0-t2i-250415', defaultParams: { size: '2K', quality: 'standard', style: 'realistic', watermark: false } },
+        video: { enabled: false, provider: 'byteplus', apiKey: '', baseUrl: '', model: '', defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false } },
+      } as any,
+      'image',
+    )
+    const t2iResult = await withMockedFetch(
+      () => new Response('{}', { status: 500 }),
+      async (calls) => ({ result: await t2i.generateImage({ prompt: 'x', referenceImages: ['https://x.test/a.png'] }), calls: [...calls] }),
+    )
+    assert(
+      'referenceImages: Seedream 3.0 text-to-image model refuses references before calling the API',
+      !t2iResult.result.success && /text-to-image only/.test(t2iResult.result.error ?? '') && t2iResult.calls.length === 0,
+      t2iResult.result.error,
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Prompt guidance lives in the tool description, not in a rewrite of the prompt.
+  const imageTool = providerNativeTools.find((tool) => tool.name === 'generate_image')
+  const description = imageTool?.description ?? ''
+  assert(
+    'generate_image description: carries the Seedream prompt guidance',
+    description === GENERATE_IMAGE_DESCRIPTION &&
+      /natural sentences for subject, action and setting/.test(description) &&
+      /style the user asked for/.test(description) &&
+      /double quotes/.test(description) &&
+      /`size`, not in the prompt/.test(description) &&
+      /Keep the user's language/.test(description) &&
+      /`referenceImages`/.test(description) &&
+      /view_image/.test(description) &&
+      /ask one short question only/.test(description) &&
+      /never substitute a web image/.test(description),
+    description,
+  )
+  assert(
+    'generate_image description: stays short and adds no fixed photo keywords',
+    description.length < 1400 && !/Canon|f\/1\.8|photorealistic, /i.test(description),
+    `length=${description.length}`,
+  )
 }
 
 async function configureMockImageProfile(cwd: string): Promise<void> {
