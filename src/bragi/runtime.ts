@@ -17,6 +17,7 @@ import path from 'node:path'
 import { SessionStore } from '../storage/sessions.js'
 import type { SessionMessage, SessionRecord } from '../core/types.js'
 import { getCompactionSummary, isContextOverflowError } from '../core/compaction/index.js'
+import { loadCompactionSettings } from '../services/compactionSettings.js'
 import type { PermissionMode } from '../cli/parseArgs.js'
 import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
@@ -765,6 +766,7 @@ export async function runRemoteCommand(
                   ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
                   resolveProvider: providerRouter.resolveProvider,
                   imageAttachments: command.images,
+                  compaction: await loadCompactionSettings(commandCwd, 'hosted'),
                   onInfo: (message) => emitProgress(message, 'info'),
                 },
               )
@@ -911,6 +913,8 @@ export async function runRemoteCommand(
             cwd: commandCwd,
             permissionMode: binding.permissionMode,
             contextDir: store.getContextDir(binding.storedSession.id),
+            // Bridges are hosted: default 200K-token context cap (cost).
+            contextMode: 'hosted',
             onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,

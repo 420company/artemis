@@ -32,6 +32,7 @@ import {
     providerPromptTokens,
     recordProviderUsage,
     resolveContextBudget,
+    resolveMaxContextTokens,
     spillToolResultIfLarge,
     type ContextBudget,
     type ContextState,
@@ -2061,6 +2062,12 @@ export interface ThinkOptions {
      * directory; otherwise a per-workspace directory under ~/.artemis/context.
      */
     contextDir?: string;
+    /**
+     * 'hosted' (chat bridges) applies the hosted context cap (200K tokens by
+     * default, see resolveMaxContextTokens); 'interactive' (default, the CLI)
+     * uses the full model window unless a cap is configured.
+     */
+    contextMode?: 'hosted' | 'interactive';
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2107,6 +2114,7 @@ export async function think(
         onRunningUserMessageAccepted,
         onCompressionSummary,
         contextDir,
+        contextMode = 'interactive',
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2161,7 +2169,7 @@ export async function think(
         contextWindow: p.contextWindow ?? getConfiguredContextLimit(providerConfigVal?.model, providerConfigVal?.contextLength, hasPlatformCapabilities(providerConfigVal)),
         maxOutputTokens: p.maxOutputTokens,
         thresholdRatio: _compressionThresholdOverride,
-        maxContextTokens: _compressionMaxContextTokens,
+        maxContextTokens: resolveMaxContextTokens({ configured: _compressionMaxContextTokens, mode: contextMode }),
     });
     const contextLanguage = detectConversationLanguage(history, locale);
     const summarizerWindow = await resolveSummarizerWindow();

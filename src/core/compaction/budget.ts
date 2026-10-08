@@ -70,7 +70,9 @@ export function resolveContextBudget(input: ContextBudgetInput = {}): ContextBud
   // is reserved, but never more than a quarter of the window.
   const requestedOutput = positive(input.maxOutputTokens) ?? DEFAULT_RESERVED_OUTPUT
   const reservedOutput = Math.min(requestedOutput, Math.floor(window * 0.25))
-  const safetyMargin = Math.max(1_000, Math.ceil(window * 0.05))
+  // At least fitOutputTokensToWindow's margin (max(1024, 2% of the window)),
+  // so a prompt that fits `effective` always leaves room for reservedOutput.
+  const safetyMargin = Math.max(1_024, Math.ceil(window * 0.05))
   const effective = Math.max(1_000, window - reservedOutput - safetyMargin)
 
   const ratio = typeof input.thresholdRatio === 'number' && Number.isFinite(input.thresholdRatio)
@@ -95,4 +97,55 @@ export function resolveContextBudget(input: ContextBudgetInput = {}): ContextBud
     restoreTokens: clamp(Math.floor(effective * 0.08), 1_500, 30_000),
     summaryTokens: clamp(Math.floor(effective * 0.06), 1_200, 12_000),
   }
+}
+
+/**
+ * Default context cap for hosted runs (headless `artemis execute`, web
+ * sessions, chat bridges). Every turn is paid per token: without a cap a
+ * 1M-window model would carry up to ~700K tokens on every request.
+ */
+export const HOSTED_DEFAULT_MAX_CONTEXT_TOKENS = 200_000
+
+/** Environment variable the server or provisioning can set to change the cap. */
+export const MAX_CONTEXT_TOKENS_ENV = 'ARTEMIS_MAX_CONTEXT_TOKENS'
+
+export type ContextCapMode = 'hosted' | 'interactive'
+
+/**
+ * Parse a cap setting. A positive number caps; 0, "off", "none" or
+ * "unlimited" explicitly remove the cap; anything else means "not set".
+ */
+function parseCap(value: unknown): number | null | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value > 0) return Math.floor(value)
+    if (value === 0) return null
+    return undefined
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase()
+    if (!trimmed) return undefined
+    if (['0', 'off', 'none', 'unlimited', 'false'].includes(trimmed)) return null
+    const parsed = Number(trimmed.replace(/[_,]/g, ''))
+    if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed)
+  }
+  return undefined
+}
+
+/**
+ * The effective context cap, in order of precedence:
+ *   1. setup.agent.compression.maxContextTokens (per install / workspace)
+ *   2. ARTEMIS_MAX_CONTEXT_TOKENS (set by the server or provisioning)
+ *   3. the mode default: 200K for hosted runs, none for the interactive CLI
+ * Returns undefined when the full model window should be used.
+ */
+export function resolveMaxContextTokens(input: {
+  configured?: unknown
+  mode: ContextCapMode
+  env?: Record<string, string | undefined>
+}): number | undefined {
+  const configured = parseCap(input.configured)
+  if (configured !== undefined) return configured ?? undefined
+  const fromEnv = parseCap((input.env ?? process.env)[MAX_CONTEXT_TOKENS_ENV])
+  if (fromEnv !== undefined) return fromEnv ?? undefined
+  return input.mode === 'hosted' ? HOSTED_DEFAULT_MAX_CONTEXT_TOKENS : undefined
 }

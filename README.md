@@ -94,7 +94,9 @@ Every conversation (web sessions, chat bridges, the CLI) goes through the same c
 - **Rolling summaries.** The next compaction folds only the new messages into the previous summary. After compacting, Artemis re-attaches the task board, fresh copies of the files being worked on, and the in-flight action. If the summarizer fails, a mechanical summary that always fits is used instead.
 - **Overflow recovery.** If the provider still rejects a request as too long, Artemis compacts harder, retries once, and saves the result, so a chat bridge never repeats the same overflow.
 - **Prompt caching.** The system prompt stays byte-identical between requests. Per-request context (recalled memories, activated skills, evidence) goes in a message next to your request instead.
-- **Settings** (`setup.agent.compression`): `enabled: false` turns off proactive compaction, `threshold` changes the 78% trigger, and `maxContextTokens` caps the context below the model window to control cost.
+- **Cost cap.** Hosted runs (`artemis execute`, web sessions, chat bridges) cap the context at **200K tokens** by default, so a 1M-window model compacts at about 78% of 200K instead of about 78% of 1M. The interactive CLI uses the full window. To change the cap, set `setup.agent.compression.maxContextTokens` (this wins) or the `ARTEMIS_MAX_CONTEXT_TOKENS` environment variable (for the server or provisioning). Either one also applies to the CLI. `0` or `off` removes the cap.
+- **Output reserve.** The budget reserves the model's output limit (the platform `maxOutputTokens` when set), up to a quarter of the window, plus a 5% margin. A request that fits the budget therefore always leaves the adapters room to send that `max_tokens` unchanged.
+- **Settings** (`setup.agent.compression`): `enabled: false` turns off proactive compaction (overflow recovery stays on), `threshold` changes the 78% trigger, and `maxContextTokens` sets the cap described above.
 
 #### 4. Visual generation system
 
@@ -361,7 +363,9 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - **滚动摘要**：下一次压缩只把新消息合并进上一次的摘要。压缩后，Artemis 会重新附上任务清单、正在处理的文件的最新内容和进行中的动作。摘要模型失败时，改用一定能放进窗口的机械摘要。
 - **超窗恢复**：如果服务商仍然因为过长拒绝请求，Artemis 会更大力度地压缩、重试一次并保存结果，聊天桥接不会反复撞上同一个超窗错误。
 - **提示缓存**：系统提示在各次请求之间保持字节完全一致。每次请求相关的上下文（召回的记忆、激活的技能、证据）放在你的请求旁边的消息里。
-- **设置**（`setup.agent.compression`）：`enabled: false` 关闭主动压缩，`threshold` 调整 78% 的触发点，`maxContextTokens` 把上下文限制在模型窗口以下以控制成本。
+- **成本上限**：托管运行（`artemis execute`、网页会话、聊天桥接）默认把上下文限制在 **200K tokens**，因此 1M 窗口的模型在 200K 的约 78% 处压缩，而不是 1M 的约 78%。交互式命令行使用完整窗口。要修改上限，可设置 `setup.agent.compression.maxContextTokens`（优先）或环境变量 `ARTEMIS_MAX_CONTEXT_TOKENS`（供服务器或部署配置使用），两者同样作用于命令行。设为 `0` 或 `off` 表示不设上限。
+- **输出预留**：预算会为模型的输出上限（设置了平台 `maxOutputTokens` 时以它为准）预留空间，最多占窗口的四分之一，另加 5% 余量。因此只要请求在预算内，适配器总能按原值发送这个 `max_tokens`。
+- **设置**（`setup.agent.compression`）：`enabled: false` 关闭主动压缩（超窗恢复仍然生效），`threshold` 调整 78% 的触发点，`maxContextTokens` 设置上面所说的上限。
 
 #### 4. 视觉生成系统
 

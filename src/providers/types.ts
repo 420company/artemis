@@ -222,7 +222,11 @@ export type AgentSetupConfig = {
     enabled: boolean;
     /** Optional trigger ratio of the effective window (window - output reserve - margin). Default 0.78. */
     threshold?: number;
-    /** Optional cap on the context sent per request, below the model window (cost control). */
+    /**
+     * Cap on the context sent per request, below the model window (cost
+     * control). Wins over ARTEMIS_MAX_CONTEXT_TOKENS. Hosted runs default to
+     * 200K; 0 removes the cap.
+     */
     maxContextTokens?: number;
   };
   sessionReset: {

@@ -38,30 +38,6 @@ export interface HeadlessAgentResult {
   contextNotices: string[]
 }
 
-/** setup.agent.compression from the workspace store, else the global one. */
-async function loadCompactionSettings(cwd: string): Promise<{ enabled?: boolean; thresholdRatio?: number; maxContextTokens?: number }> {
-  const { ProviderStore } = await import('../providers/store.js')
-  const { resolveArtemisHomeDir } = await import('../utils/fs.js')
-  for (const root of [cwd, resolveArtemisHomeDir()]) {
-    try {
-      const data = await new ProviderStore(root).load()
-      const compression = data.setup?.agent?.compression as
-        | { enabled?: boolean; threshold?: number; maxContextTokens?: number }
-        | undefined
-      if (compression) {
-        return {
-          enabled: compression.enabled,
-          thresholdRatio: compression.threshold,
-          maxContextTokens: compression.maxContextTokens,
-        }
-      }
-    } catch {
-      /* fall through to the next store */
-    }
-  }
-  return {}
-}
-
 async function loadExistingSession(sessionStore: SessionStore, sessionId: string): Promise<SessionRecord> {
   try {
     return await sessionStore.load(sessionId)
@@ -83,6 +59,7 @@ export async function runHeadlessAgent(
   const { PermissionManager } = await import('../security/permissions.js')
   const { SessionStore } = await import('../storage/sessions.js')
   const { runAgent } = await import('../core/agent.js')
+  const { loadCompactionSettings } = await import('./compactionSettings.js')
 
   const onInfo = opts.onInfo ?? (() => undefined)
   const providerConfig = await resolveMainProviderConfig({
@@ -124,7 +101,9 @@ export async function runHeadlessAgent(
     // The main model's window; specialists with a smaller window are capped
     // further by their own provider metadata inside runAgent.
     contextLength: resolveProfileContextLength(providerConfig),
-    compaction: await loadCompactionSettings(cwd),
+    // Hosted runs default to a 200K-token context cap (cost); see
+    // services/compactionSettings.ts for the overrides.
+    compaction: await loadCompactionSettings(cwd, 'hosted'),
     // Nobody reviews a headless turn as it runs: memories the model saves
     // without naming a scope stay in this workspace.
     memoryDefaultScope: 'project',

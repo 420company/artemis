@@ -48,6 +48,9 @@ import type { SessionMessage } from '../src/core/types.js'
 import type { ChatProvider, ProviderResponse } from '../src/providers/types.js'
 import { applyProviderOverrides, getLastPromptTokens, getMessages, resetSession, restoreSessionStateForCwd, think } from '../src/brain.js'
 import { parseRemoteCommand, runRemoteCommand } from '../src/bragi/runtime.js'
+import { runHeadlessAgent } from '../src/services/headlessAgent.js'
+import { HOSTED_DEFAULT_MAX_CONTEXT_TOKENS, resolveMaxContextTokens } from '../src/core/compaction/index.js'
+import { fitOutputTokensToWindow } from '../src/providers/capabilities.js'
 
 let passed = 0
 let failed = 0
@@ -293,6 +296,21 @@ console.log('  ======================\n')
   assert('budget: an explicit cost cap limits the window', capped.window === 200_000)
   const custom = resolveContextBudget({ contextWindow: 128_000, thresholdRatio: 0.5 })
   assert('budget: compression.threshold overrides the ratio', custom.threshold === Math.floor(custom.effective * 0.5))
+}
+
+{
+  // The budget's output reserve agrees with the adapters' max_tokens fitting:
+  // a prompt that fills the effective window still gets the reserved output.
+  let worst = ''
+  for (const window of [8_000, 16_000, 32_000, 128_000, 200_000, 272_000, 1_000_000]) {
+    for (const maxOutput of [undefined, 4_096, 16_000, 64_000, 128_000, 384_000]) {
+      const budget = resolveContextBudget({ contextWindow: window, maxOutputTokens: maxOutput })
+      const limit = maxOutput ?? budget.reservedOutput
+      const fitted = fitOutputTokensToWindow(limit, window, budget.effective, true)
+      if (fitted < Math.min(limit, budget.reservedOutput)) worst ||= `window=${window} max=${maxOutput} fitted=${fitted} reserved=${budget.reservedOutput}`
+    }
+  }
+  assert('budget: reserved output matches fitOutputTokensToWindow at the effective limit', !worst, worst)
 }
 
 // ── Overflow detection ──────────────────────────────────────────────────────
@@ -1099,6 +1117,76 @@ const summaryText = summarySectionTitles('en').map((t, i) => `## ${i + 1}. ${t}\
     process.chdir(originalCwd)
     resetSession()
     applyProviderOverrides({})
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
+// ── Hosted context cap ───────────────────────────────────────────────────────
+
+{
+  assert(
+    'cost cap: hosted runs default to 200K, the interactive CLI keeps the full window',
+    resolveMaxContextTokens({ mode: 'hosted', env: {} }) === HOSTED_DEFAULT_MAX_CONTEXT_TOKENS &&
+      HOSTED_DEFAULT_MAX_CONTEXT_TOKENS === 200_000 &&
+      resolveMaxContextTokens({ mode: 'interactive', env: {} }) === undefined,
+  )
+  assert(
+    'cost cap: precedence is setup.agent.compression.maxContextTokens > ARTEMIS_MAX_CONTEXT_TOKENS > mode default',
+    resolveMaxContextTokens({ mode: 'hosted', configured: 150_000, env: { ARTEMIS_MAX_CONTEXT_TOKENS: '300000' } }) === 150_000 &&
+      resolveMaxContextTokens({ mode: 'hosted', env: { ARTEMIS_MAX_CONTEXT_TOKENS: '300_000' } }) === 300_000 &&
+      resolveMaxContextTokens({ mode: 'interactive', env: { ARTEMIS_MAX_CONTEXT_TOKENS: '120000' } }) === 120_000,
+  )
+  assert(
+    'cost cap: 0 or "off" removes the cap explicitly; junk values are ignored',
+    resolveMaxContextTokens({ mode: 'hosted', configured: 0, env: {} }) === undefined &&
+      resolveMaxContextTokens({ mode: 'hosted', env: { ARTEMIS_MAX_CONTEXT_TOKENS: 'off' } }) === undefined &&
+      resolveMaxContextTokens({ mode: 'hosted', env: { ARTEMIS_MAX_CONTEXT_TOKENS: 'lots' } }) === 200_000,
+  )
+}
+
+{
+  // A 1M-window model in headless mode compacts at ~78% of the 200K cap,
+  // not at ~78% of 1M.
+  const cwd = tmpDir('headless-cap')
+  const savedEnv = process.env.ARTEMIS_MAX_CONTEXT_TOKENS
+  delete process.env.ARTEMIS_MAX_CONTEXT_TOKENS
+  const infos: string[] = []
+  const mainSizes: number[] = []
+  try {
+    await withMockChatServer((body, res) => {
+      if (isSummaryRequest(body)) {
+        reply(res, { content: summaryText })
+        return
+      }
+      mainSizes.push(estimateTokens(body.messages.map((m) => typeof m.content === 'string' ? m.content : '').join('\n')))
+      reply(res, { content: JSON.stringify({ reply: 'done', done: true }) })
+    }, async (baseUrl) => {
+      writeProviderProfile(cwd, baseUrl, 1_000_000)
+      const store = new SessionStore(cwd)
+      const session = store.createSession({ title: 'headless cap' })
+      session.messages.push(msg('user', 'GOAL_HEADLESS_CAP'))
+      // ~160K tokens: over 78% of the capped window, far below 78% of 1M.
+      for (let i = 0; i < 80; i += 1) session.messages.push(msg(i % 2 ? 'assistant' : 'user', `turn ${i} ${'word '.repeat(1_600)}`))
+      await store.save(session)
+      const result = await runHeadlessAgent(cwd, 'continue', {
+        sessionId: session.id,
+        maxTurns: 2,
+        onInfo: (message) => infos.push(message),
+      })
+      const budget = resolveContextBudget({ contextWindow: 200_000 })
+      const contextLine = infos.find((line) => line.startsWith('[context] tokens~')) ?? ''
+      assert(
+        'cost cap: a 1M-window model in headless mode compacts at ~78% of 200K',
+        result.contextNotices.length === 1 &&
+          contextLine.includes('/200000 ') && contextLine.includes(`threshold=${budget.threshold}`) &&
+          Math.abs(budget.threshold / (budget.effective) - 0.78) < 0.01 &&
+          mainSizes.length >= 1 && mainSizes[0]! < budget.threshold,
+        `notices=${result.contextNotices.length} line=${contextLine} sent=${mainSizes[0]}`,
+      )
+    })
+  } finally {
+    if (savedEnv === undefined) delete process.env.ARTEMIS_MAX_CONTEXT_TOKENS
+    else process.env.ARTEMIS_MAX_CONTEXT_TOKENS = savedEnv
     fs.rmSync(cwd, { recursive: true, force: true })
   }
 }
