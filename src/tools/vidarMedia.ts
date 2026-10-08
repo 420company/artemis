@@ -28,8 +28,18 @@ export function normalizeModelArkMediaBaseUrl(baseUrl: string | undefined): stri
 
   try {
     const parsed = new URL(baseUrl);
-    if (!parsed.hostname.includes(MODEL_ARK_HOST_FRAGMENT)) {
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       return BYTEPLUS_VISUAL_BASE_URL;
+    }
+    if (!parsed.hostname.includes(MODEL_ARK_HOST_FRAGMENT)) {
+      // A ModelArk-compatible endpoint on another host (the platform gateway,
+      // Volcengine Ark, a relay): keep it. Rewriting it to the public BytePlus
+      // host would send this endpoint's API key to BytePlus. Only a pasted
+      // full endpoint path is trimmed back to the base.
+      const path = parsed.pathname
+        .replace(/\/(?:images\/generations|contents\/generations\/tasks)(?:\/.*)?$/, '')
+        .replace(/\/+$/, '');
+      return `${parsed.origin}${path}`;
     }
 
     const segments = parsed.pathname.split('/').filter(Boolean);

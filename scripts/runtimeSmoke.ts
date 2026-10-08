@@ -70,7 +70,7 @@ import {
   saveLedger,
   cleanupLedger,
 } from '../src/core/collapse/index.js'
-import { resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
+import { normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
 import { executeGenerateVideo } from '../src/tools/generateVideo.js'
@@ -1521,6 +1521,40 @@ async function withMockedFetch<T>(
         generic.calls.length === 1 &&
         generic.calls.every((call) => call.url.endsWith('/images/generations')),
       String(generic.result.output),
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // A ModelArk-compatible base URL on another host (the platform gateway) is
+  // kept, so its key is never sent to the public BytePlus host.
+  assert(
+    'ModelArk base URL: gateway and Volcengine hosts are kept; BytePlus paths still normalize',
+    normalizeModelArkMediaBaseUrl('https://gw.example.test/v1') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1/') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://gw.example.test/v1/images/generations') === 'https://gw.example.test/v1' &&
+      normalizeModelArkMediaBaseUrl('https://ark.cn-beijing.volces.com/api/v3') === 'https://ark.cn-beijing.volces.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('https://ark.ap-southeast.bytepluses.com/api/v3/images/generations') === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl(undefined) === 'https://ark.ap-southeast.bytepluses.com/api/v3' &&
+      normalizeModelArkMediaBaseUrl('mock://local') === 'https://ark.ap-southeast.bytepluses.com/api/v3',
+  )
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-gateway-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusImageProfile(tmpDir, 'https://gw.example.test/v1')
+  try {
+    const calls = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async (seen) => {
+        await executeGenerateImage({ type: 'generate_image', prompt: 'x' } as any, { cwd: tmpDir } as any)
+        return [...seen]
+      },
+    )
+    assert(
+      'generate_image: a byteplus profile pointed at the platform gateway calls the gateway',
+      calls.length === 1 && calls[0]!.url === 'https://gw.example.test/v1/images/generations',
+      JSON.stringify(calls.map((call) => call.url)),
     )
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true })
