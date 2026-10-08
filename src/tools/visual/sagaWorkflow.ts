@@ -573,14 +573,15 @@ const RESOLUTION_WORDS: Record<string, string> = {
 
 /**
  * A resolution from a message that is only a resolution choice ("1080p",
- * "分辨率 720P", "高清"). Resolution is never read out of story text: a
+ * "分辨率 720P", "高清"); a bare number ("720") is a duration or menu answer,
+ * not a resolution. Resolution is never read out of story text: a
  * script mentioning "一台1080P的旧显示器" must not bill every segment at
  * 1080p. 4K is not offered by any provider.
  */
 export function extractRequestedResolution(text: string): string | undefined {
   const compacted = text.trim().toLowerCase().replace(/\s+/g, '');
   if (!compacted || compacted.length > 16) return undefined;
-  const match = compacted.match(/^(?:请|用|要|改成|改为|输出|设为|画质|分辨率|清晰度|resolution|quality|[:：])*(?:(480|720|1080)p?|(标清|高清|超清|全高清|fullhd|hd|sd))(?:高清|超清|画质|分辨率|吧|的|[。.!！])*$/u);
+  const match = compacted.match(/^(?:请|用|要|改成|改为|输出|设为|画质|分辨率|清晰度|resolution|quality|[:：])*(?:(480|720|1080)p|(标清|高清|超清|全高清|fullhd|hd|sd))(?:高清|超清|画质|分辨率|吧|的|[。.!！])*$/u);
   if (!match) return undefined;
   if (match[1]) return normalizeVideoResolution(`${match[1]}p`);
   return RESOLUTION_WORDS[match[2] ?? ''];

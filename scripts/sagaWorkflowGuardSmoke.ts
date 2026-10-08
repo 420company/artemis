@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ProviderStore } from '../src/providers/store.js';
-import { handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
+import { extractRequestedResolution, handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
 import { BYTEPLUS_SEEDANCE_2_PRO_MODEL } from '../src/tools/visual/videoCapabilities.js';
 
 // Explicit /saga entry only starts the wizard when a video provider is
@@ -473,6 +473,9 @@ async function main(): Promise<void> {
   const hdKey = `${key}-resolution`;
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
   await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1' });
+  for (const bare of ['480', '720', '1080']) {
+    assert.equal(extractRequestedResolution(bare), undefined, `a bare "${bare}" is not a resolution`);
+  }
   const hdAck = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1080P' });
   assert.equal(hdAck.handled, true);
   assert.match(hdAck.reply, /1080p/, 'a resolution-only message is acknowledged');
