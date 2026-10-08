@@ -78,8 +78,8 @@ function eligibilityChecks(): void {
 }
 
 function budgetChecks(): void {
-  assert.equal(superVisualImageLimit(1), 3);
-  assert.equal(superVisualImageLimit(12), 15, 'a long video gets one turnaround, one keyframe per segment and two re-renders');
+  assert.equal(superVisualImageLimit(1), 4);
+  assert.equal(superVisualImageLimit(12), 16, 'a long video gets a turnaround and its fallback, one keyframe per segment and two re-renders');
   const budget = new SuperVisualImageBudget(2);
   budget.record();
   budget.record(1);
@@ -94,7 +94,7 @@ async function superVisualOnSeedream(): Promise<void> {
   const run = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] });
   assert.equal(run.result.ok, true, run.result.output);
   assert.match(run.result.output, /Super visual: image-to-image · userImagesUsed=1/);
-  assert.match(run.result.output, /Keyframes:\s+generated=2\/2 · images=3\/5/);
+  assert.match(run.result.output, /Keyframes:\s+generated=2\/2 · images=3\/6/);
   const images = imageBodies(run.requests);
   assert.equal(images.length, 3, 'one turnaround and one keyframe per segment');
   const refCount = (body: Record<string, any>) => Array.isArray(body.image) ? body.image.length : body.image ? 1 : 0;
@@ -104,7 +104,7 @@ async function superVisualOnSeedream(): Promise<void> {
   assert.equal(refCount(images[2]!), 2, 'segment 2 keyframe carries the turnaround and the previous frame');
   assert.ok(images.slice(1).every((body) => body.size === '1440x2560'), 'keyframes follow the 9:16 ratio');
   assert.ok(images.every((body) => String(Array.isArray(body.image) ? body.image[0] : body.image).startsWith('data:image/png;base64,')), 'references are sent as data URIs');
-  assert.ok(run.logs.some((line) => /第 2\/2 段生成图片 1 张；全片累计 3\/5 张/.test(line)), 'per-segment image counts are logged');
+  assert.ok(run.logs.some((line) => /第 2\/2 段生成图片 1 张；全片累计 3\/6 张/.test(line)), 'per-segment image counts are logged');
 
   // Images the API produced count against the cap even when their download
   // fails, and the text-to-image fallback respects the cap too.
@@ -118,6 +118,14 @@ async function superVisualOnSeedream(): Promise<void> {
   assert.ok(counted, lost.result.output);
   assert.equal(Number(counted[1]), billed, `every billed image is counted (${counted[0]}, ${billed} requests)`);
   assert.ok(billed <= Number(counted[2]), `billed images stay within the cap (${billed}/${counted[2]})`);
+
+  // A turnaround whose download fails still leaves room for its text-to-image fallback.
+  const lostTurnaround = await runHermeticSaga(
+    { prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] },
+    { imageDownloadFailsAt: [1], chatReply: 'An illustrated young woman with short black hair and a red scarf.' },
+  );
+  assert.equal(lostTurnaround.result.ok, true, lostTurnaround.result.output);
+  assert.match(lostTurnaround.result.output, /Super visual: text-to-image/, lostTurnaround.result.output.split('\n').find((line) => line.includes('Super visual')));
 
   // Safe bridge frame on the same route carries its source frame.
   await withHermeticWorkspace({}, async (cwd, requests) => {
@@ -315,6 +323,29 @@ async function richBibleBudgetChecks(): Promise<void> {
   assert.ok(final.includes('BEAT-START') && final.includes('BEAT-END'), 'the whole shot beat survives');
   assert.ok(final.includes('Dialogue handling:') && final.includes('lip-sync'), 'the dialogue rules survive');
   assert.ok(final.includes('[LOCKED-CHARACTERS:'), 'the identity card survives');
+
+  // A beat far longer than the budget is capped, so the identity card and its
+  // negative constraints still make it into the prompt.
+  const hugeBeat = 'HUGE-BEAT ' + '海浪拍打着码头，'.repeat(400);
+  const hugeShot = compileShotPromptWithContinuity({
+    bible, mode: 'strong-vision' as any, shotIndex: 2, shotCount: 6, duration: 10, title: '5-10s',
+    storyBeat: hugeBeat, visualPrompt: hugeBeat, camera: 'slow dolly in', continuity: 'same night', transition: 'cut', authoredPrompt: hugeBeat,
+  } as any);
+  const hugeNormalized = await normalizeSagaPromptForVideoGeneration({ cwd: '/nonexistent', text: hugeShot, enableLlmRewrite: false });
+  const hugeFinal = appendRenderingGuardrails(buildDirectedVideoPrompt({ prompt: hugeNormalized.generationText, provider: 'byteplus', model, duration: 10, ratio: '16:9', maxPromptChars: limit - renderingGuardrailsLength() }).directedPrompt, limit).prompt;
+  assert.ok(hugeFinal.includes('HUGE-BEAT') && hugeFinal.includes('[NEGATIVE:'), 'a huge beat cannot crowd out the negative constraints');
+
+  // Characters are shortened, not dropped, while optional lines can make room.
+  const cast = [
+    'Fang Tianhao: 35-year-old Chinese man, short black hair, old scar over the left eyebrow, broad build, long black wool trench coat',
+    'Lin Xia: 28-year-old Chinese woman, shoulder-length wavy hair, small mole under the right eye, red leather jacket, silver hoop earrings',
+    'Old Zhou: 60-year-old Chinese fisherman, grey stubble, deeply tanned wrinkled face, faded blue work jacket, straw hat',
+  ];
+  const castCard = buildContinuityBible({ story: 'x', ratio: '16:9', characters: cast, wardrobe: ['trench coat', 'red leather jacket', 'blue work jacket'] } as any).identityCard;
+  assert.ok(['Fang Tianhao', 'Lin Xia', 'Old Zhou'].every((name) => castCard.includes(name)), castCard);
+  const bigCast = buildContinuityBible({ story: 'x', ratio: '16:9', characters: Array.from({ length: 8 }, (_, i) => `Person${i}: ${'detailed description, '.repeat(6)}`) } as any).identityCard;
+  assert.ok(bigCast.length <= IDENTITY_CARD_MAX_CHARS);
+  assert.ok(Array.from({ length: 8 }, (_, i) => `Person${i}`).every((name) => bigCast.includes(name)), 'eight characters are shortened to fit rather than dropped');
 }
 
 seedreamSizeChecks();

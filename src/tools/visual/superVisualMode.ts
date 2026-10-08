@@ -917,9 +917,16 @@ export class SuperVisualImageBudget {
   }
 }
 
-/** The images one Saga run may generate: a turnaround, a keyframe per segment, and up to two safe-bridge re-renders. */
+/**
+ * Images the turnaround sheet may take: one image-to-image attempt and, if
+ * that fails (for example its result could not be downloaded), one
+ * text-to-image fallback.
+ */
+export const SUPER_VISUAL_TURNAROUND_IMAGES = 2;
+
+/** The images one Saga run may generate: the turnaround, a keyframe per segment, and up to two safe-bridge re-renders. */
 export function superVisualImageLimit(segmentCount: number): number {
-  return 1 + segmentCount + Math.min(2, segmentCount);
+  return SUPER_VISUAL_TURNAROUND_IMAGES + segmentCount + Math.min(2, segmentCount);
 }
 
 const BUDGET_REACHED = 'Super Visual image cap for this run reached';

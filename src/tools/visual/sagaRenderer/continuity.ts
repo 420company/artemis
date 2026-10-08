@@ -177,39 +177,56 @@ function buildAudioLockBlock(): string {
   return '[AUDIO-LOCK — environmental / diegetic sounds only (footsteps, wind, water, room tone, dialogue). Do NOT synthesize music, songs, scores or humming: the soundtrack is added in post-production.]';
 }
 
+/** Longest shot content (beat and visual direction) a segment prompt opens with. */
+export const SHOT_CONTENT_MAX_CHARS = 1600;
+
 /** Longest identity card a segment prompt carries. */
 export const IDENTITY_CARD_MAX_CHARS = 1200;
 
-type IdentityCardEntry = { text: string; dropRank?: number };
+/** `fit` re-renders the entry within a given room when the card is still too long. */
+type IdentityCardEntry = { text: string; dropRank?: number; fit?: (room: number) => string };
+
+/** Shortest a lock item is cut to before items are left out. */
+const MIN_LOCK_ITEM_CHARS = 40;
 
 function clipText(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
-/** "[LABEL: a | b | …]" within maxChars, dropping items from the end and saying how many. */
+/**
+ * "[LABEL: a | b | …]" within maxChars: every item is shortened to an equal
+ * share first, and items are left out (saying how many) only when even
+ * MIN_LOCK_ITEM_CHARS each does not fit.
+ */
 function lockLine(label: string, items: string[], maxChars: number, separator = ' | '): string {
-  const kept: string[] = [];
-  for (const item of items) {
-    const next = [...kept, item];
-    const more = items.length - next.length;
-    const candidate = `[${label}: ${next.join(separator)}${more > 0 ? ` (+${more} more)` : ''}]`;
-    if (candidate.length > maxChars && kept.length > 0) break;
-    kept.push(item);
+  const render = (parts: string[], more: number) => `[${label}: ${parts.join(separator)}${more > 0 ? ` (+${more} more)` : ''}]`;
+  const full = render(items, 0);
+  if (full.length <= maxChars) return full;
+  for (let count = items.length; count >= 1; count -= 1) {
+    const more = items.length - count;
+    const overhead = render(new Array<string>(count).fill(''), more).length;
+    const share = Math.floor((maxChars - overhead) / count);
+    if (share >= MIN_LOCK_ITEM_CHARS) return render(items.slice(0, count).map((item) => clipText(item, share)), more);
   }
-  const more = items.length - kept.length;
-  const line = `[${label}: ${kept.join(separator)}${more > 0 ? ` (+${more} more)` : ''}]`;
-  return line.length <= maxChars ? line : `${line.slice(0, maxChars - 2).trimEnd()}…]`;
+  const line = render(items.slice(0, 1), items.length - 1);
+  return `${line.slice(0, Math.max(0, maxChars - 2)).trimEnd()}…]`;
 }
 
 function fitIdentityCard(entries: IdentityCardEntry[], maxChars: number): string {
-  let active = [...entries];
+  let active = entries.map((entry) => ({ ...entry }));
   const render = () => active.map((entry) => entry.text).join('\n');
-  const droppable = entries
-    .filter((entry): entry is IdentityCardEntry & { dropRank: number } => entry.dropRank !== undefined)
-    .sort((a, b) => a.dropRank - b.dropRank);
+  const droppable = active
+    .filter((entry) => entry.dropRank !== undefined)
+    .sort((a, b) => (a.dropRank ?? 0) - (b.dropRank ?? 0));
   for (const entry of droppable) {
     if (render().length <= maxChars) break;
     active = active.filter((candidate) => candidate !== entry);
+  }
+  // Still too long: re-fit the flexible entries (the characters) into what is left.
+  for (const entry of active) {
+    const overflow = render().length - maxChars;
+    if (overflow <= 0 || !entry.fit) continue;
+    entry.text = entry.fit(Math.max(120, entry.text.length - overflow));
   }
   const card = render();
   return card.length <= maxChars ? card : `${card.slice(0, maxChars - 1).trimEnd()}…`;
@@ -265,14 +282,15 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
   // lines (palette, mood, camera, lighting, shared notes, props, locations)
   // are dropped, lowest priority first, when the card is still too long.
   const sharedNotes = uniqueStrings(input.shotContinuityNotes ?? []);
-  const identityEntries: IdentityCardEntry[] = [
+  const identityEntryCandidates: Array<IdentityCardEntry | undefined> = [
     { text: '[SAGA-CONTINUITY-POLICY: character/person identity is globally locked across the long video; scene/location continuity is selective and follows the user request/story logic]' },
     sharedNotes.length > 0 ? { text: lockLine('SHARED-CONTINUITY-NOTES', sharedNotes.slice(0, 6), 180, ' || '), dropRank: 5 } : undefined,
-    {
-      text: characters.length > 0
-        ? lockLine('LOCKED-CHARACTERS', characters, 300)
-        : '[CHARACTERS: same exact recurring identity as the previous shot — same face, hair, body, age, ethnicity/species, silhouette, and distinguishing features]',
-    },
+    characters.length > 0
+      // Characters come first in the budget: their descriptions are shortened
+      // to the room left after optional lines are dropped, before any
+      // character is left out.
+      ? { text: lockLine('LOCKED-CHARACTERS', characters, 600), fit: (room: number) => lockLine('LOCKED-CHARACTERS', characters, room) }
+      : { text: '[CHARACTERS: same exact recurring identity as the previous shot — same face, hair, body, age, ethnicity/species, silhouette, and distinguishing features]' },
     // Dedicated permanent-accessory lock — emitted BEFORE wardrobe/props so
     // it gets visual priority. Items here are part of the protagonist's
     // identity (eye mask, sunglasses, signature jewelry) and must persist
@@ -293,7 +311,8 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     { text: `[MOOD: ${clipText(mood, 100)}]`, dropRank: 2 },
     { text: buildNegativeBlock(input.subtitleMode) },
     detectsEnvironmentalAudioOnly(input.story) ? { text: buildAudioLockBlock() } : undefined,
-  ].filter((entry): entry is IdentityCardEntry => Boolean(entry));
+  ];
+  const identityEntries = identityEntryCandidates.filter((entry): entry is IdentityCardEntry => Boolean(entry));
   const identityCard = fitIdentityCard(identityEntries, IDENTITY_CARD_MAX_CHARS);
 
   const bible = [
@@ -510,11 +529,16 @@ export function compileShotPromptWithContinuity(options: {
   // that has to be shortened downstream is cut from the end, so the part
   // that differs from shot to shot must come first.
   const shotHeader = `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`;
+  // Capped at SHOT_CONTENT_MAX_CHARS so a very long beat cannot push the
+  // identity card and the negative constraints out of the prompt: shot
+  // content, identity card (IDENTITY_CARD_MAX_CHARS), the dialogue rules and
+  // the Director's header together fit a 4,000-character Seedance prompt.
+  const storyBeatText = clipText(options.storyBeat ?? '', SHOT_CONTENT_MAX_CHARS - 400);
   const shotContent: string[] = authored
-    ? [authored]
+    ? [clipText(authored, SHOT_CONTENT_MAX_CHARS)]
     : [
-        `Story beat (the dominant subject for the entire ${options.duration}s): ${options.storyBeat}`,
-        `Visual direction: ${options.visualPrompt}`,
+        `Story beat (the dominant subject for the entire ${options.duration}s): ${storyBeatText}`,
+        `Visual direction: ${clipText(options.visualPrompt ?? '', Math.max(400, SHOT_CONTENT_MAX_CHARS - storyBeatText.length))}`,
       ];
 
   if (options.cleanDirect) {
@@ -533,8 +557,8 @@ export function compileShotPromptWithContinuity(options: {
     return [
       shotHeader,
       ...shotContent,
-      options.openingFraming ? `\n${options.openingFraming}` : '',
       options.bible.identityCard,
+      options.openingFraming ? `\n${options.openingFraming}` : '',
       options.bible.bible,
       scenePriority,
       ...cleanMiddle,
@@ -547,8 +571,8 @@ export function compileShotPromptWithContinuity(options: {
   const head = [
     shotHeader,
     ...shotContent,
-    options.openingFraming ? `\n${options.openingFraming}` : '',
     options.bible.identityCard,
+    options.openingFraming ? `\n${options.openingFraming}` : '',
     options.bible.bible,
     styleLock,
     scenePriority,

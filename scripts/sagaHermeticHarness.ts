@@ -28,6 +28,10 @@ export type HermeticOptions = {
   imageStatus?: number;
   /** Image generations from this 1-based request number on fail with HTTP 500. */
   imageFailFrom?: number;
+  /** Answer every chat completion with this text (e.g. a character description) instead of failing. */
+  chatReply?: string;
+  /** 1-based image generations that succeed but whose result URL cannot be downloaded. */
+  imageDownloadFailsAt?: number[];
   /** Image generations from this 1-based request number on succeed, but their result URL cannot be downloaded. */
   imageDownloadFailsFrom?: number;
   /** 1-based video task creations answered with a privacy rejection of an input image. */
@@ -85,6 +89,11 @@ async function configure(cwd: string, options: HermeticOptions): Promise<void> {
       defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false },
     },
   } as any;
+  if (options.chatReply) {
+    // A vision-capable main profile, so vision descriptions are available.
+    data.profiles = [{ id: 'main', protocol: 'openai', apiKey: 'hermetic-key', baseUrl: 'https://llm.example.test/v1', model: 'gpt-4o' } as any];
+    data.defaultMainProfileId = 'main';
+  }
   await store.save(data);
 }
 
@@ -116,6 +125,7 @@ export async function withHermeticWorkspace<T>(
     }
     requests.push({ method, url, body });
     if (url.endsWith('/chat/completions')) {
+      if (options.chatReply) return json(200, { choices: [{ message: { content: options.chatReply } }] });
       // No LLM in the hermetic run: every Saga LLM step falls back.
       return json(400, { error: { message: 'no llm in hermetic smoke' } });
     }
@@ -123,7 +133,7 @@ export async function withHermeticWorkspace<T>(
       imageCounter += 1;
       if (options.imageFailFrom && imageCounter >= options.imageFailFrom) return json(500, { error: { message: 'image service down in this test' } });
       if (options.imageStatus) return json(options.imageStatus, { error: { message: 'image generation refused in this test' } });
-      if (options.imageDownloadFailsFrom && imageCounter >= options.imageDownloadFailsFrom) {
+      if ((options.imageDownloadFailsFrom && imageCounter >= options.imageDownloadFailsFrom) || options.imageDownloadFailsAt?.includes(imageCounter)) {
         return json(200, { data: [{ url: 'https://cdn.example.test/expired.png' }] });
       }
       return json(200, { data: [{ url: 'https://cdn.example.test/still.png' }] });

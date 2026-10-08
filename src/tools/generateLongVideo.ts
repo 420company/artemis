@@ -28,6 +28,7 @@ import {
   generateSafeBridgeKeyframe,
   generateSegmentKeyframe,
   maybeGenerateSuperVisualReference,
+  SUPER_VISUAL_TURNAROUND_IMAGES,
   SuperVisualImageBudget,
   superVisualImageLimit,
 } from './visual/superVisualMode.js';
@@ -1286,9 +1287,10 @@ export async function executeGenerateLongVideo(
     const explicitUserImageBypass = isDirectImageIdentity || rawMode;
     const superVisualBypass = superVisualBypassReason(identitySource, isPureEnvironment, rawMode);
 
-    // Every Super Visual image is billed: one turnaround now, and once the
-    // segments are planned, one keyframe per segment plus a small allowance.
-    const superVisualImageBudget = new SuperVisualImageBudget(1);
+    // Every Super Visual image is billed: the turnaround (an image-to-image
+    // attempt plus its text-to-image fallback) now, and once the segments are
+    // planned, one keyframe per segment plus a small allowance.
+    const superVisualImageBudget = new SuperVisualImageBudget(SUPER_VISUAL_TURNAROUND_IMAGES);
     const superVisualMode = superVisualBypass
       ? {
           enabled: false,
