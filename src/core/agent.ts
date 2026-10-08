@@ -3562,6 +3562,13 @@ export type RunAgentOptions = {
   delegationDepth?: number;
   maxDelegationDepth?: number;
   appendUserMessage?: boolean;
+  /**
+   * Scope for memories the memory tool saves when the model names none.
+   * Headless runs pass 'project', so something picked up from fetched or
+   * tool content stays in this workspace unless the model explicitly saves
+   * it globally. Unset: global (interactive CLI behaviour).
+   */
+  memoryDefaultScope?: 'global' | 'project';
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -4663,6 +4670,7 @@ async function executeAgentAction(
           options.permissionManager.getMode(),
         ),
         sessionId: session.id,
+        memoryDefaultScope: options.memoryDefaultScope,
         context: {
           profile: options.profile ?? 'main',
           runtimeId: options.rootRuntimeId,

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { release as osRelease } from 'node:os';
-import { ProviderStore } from './providers/store.js';
+import { ProviderStore, createGlobalProviderStore } from './providers/store.js';
 import { resolveArtemisHomeDir } from './utils/fs.js';
 import { annotateProviderResponse, createTrackedProviderFromConfig, recordProviderProfileTelemetry, } from './providers/telemetry.js';
 import { Session } from './core/session.js';
@@ -481,7 +481,7 @@ async function loadProvider(cwd: string = process.cwd()) {
     // 2. Fallback: try global ~/.artemis/providers.json
     if (!config) {
         const artemisHome = resolveArtemisHomeDir();
-        const globalStore = new ProviderStore(artemisHome);
+        const globalStore = createGlobalProviderStore();
         const globalData = await globalStore.load();
         config = globalStore.getDefaultMainProfile(globalData);
         if (config) {
@@ -564,7 +564,7 @@ async function loadWorkerProvider(cwd: string = providerCwd ?? process.cwd()): P
     if (!workerCfg) {
         // Try global
         const artemisHome = resolveArtemisHomeDir();
-        const globalStore = new ProviderStore(artemisHome);
+        const globalStore = createGlobalProviderStore();
         const globalData = await globalStore.load();
         workerCfg = globalStore.getProfile(globalData, globalData.specialistProfileId);
         telemetryCwd = artemisHome;

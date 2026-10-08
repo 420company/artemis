@@ -1400,8 +1400,130 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
     const profile = await getMemoryProfile(project)
     assert('semantic memory: a project without its own setting uses the global one', profile.enabled === true && profile.config?.model === 'embed-test', JSON.stringify(profile))
   } finally {
-    process.env.HOME = previous.HOME
+    if (previous.HOME === undefined) delete process.env.HOME
+    else process.env.HOME = previous.HOME
     if (previous.ARTEMIS_HOME !== undefined) process.env.ARTEMIS_HOME = previous.ARTEMIS_HOME
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // With ARTEMIS_HOME set, the global store is $ARTEMIS_HOME/providers.json
+  // (not a workspaces/<hash> path) for the main model, the provider router,
+  // semantic memory and brain.ts alike. A setup written earlier at the
+  // workspace path of the home directory keeps working until that file exists.
+  const tmpDir = path.join(os.tmpdir(), `artemis-global-store-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  const mainProfile = (id: string) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: `sk-${id}`, model: `${id}-model` })
+  const previousArtemisHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = artemisHome
+  let legacyPath = ''
+  try {
+    const { createGlobalProviderStore } = await import('../src/providers/store.js')
+    const { resolveMainProviderConfig } = await import('../src/providers/onboarding.js')
+    const { getMemoryProfile } = await import('../src/core/memoryEnhancement.js')
+    const homePath = path.join(artemisHome, 'providers.json')
+    legacyPath = new ProviderStore(os.homedir()).getFilePath()
+    assert(
+      'global provider store: an ARTEMIS_HOME path resolves to $ARTEMIS_HOME/providers.json',
+      new ProviderStore(artemisHome).getFilePath() === homePath && legacyPath !== homePath,
+      `${new ProviderStore(artemisHome).getFilePath()} vs ${legacyPath}`,
+    )
+
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true })
+    fs.writeFileSync(legacyPath, JSON.stringify({ profiles: [mainProfile('legacy-main')], defaultMainProfileId: 'legacy-main' }))
+    const legacyMain = await resolveMainProviderConfig({ cwd: project, config: {} })
+    assert(
+      'global provider store: a setup at the old workspace path is still found while $ARTEMIS_HOME/providers.json is missing',
+      createGlobalProviderStore().getFilePath() === legacyPath && legacyMain.model === 'legacy-main-model',
+      `${createGlobalProviderStore().getFilePath()} ${legacyMain.model}`,
+    )
+
+    fs.writeFileSync(homePath, JSON.stringify({
+      profiles: [mainProfile('home-main')],
+      defaultMainProfileId: 'home-main',
+      memoryProfile: { enabled: true, provider: 'openai', config: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-test', model: 'embed-home' } },
+    }))
+    const homeMain = await resolveMainProviderConfig({ cwd: project, config: {} })
+    const memoryProfile = await getMemoryProfile(project)
+    assert(
+      'global provider store: main model and semantic memory read $ARTEMIS_HOME/providers.json',
+      createGlobalProviderStore().getFilePath() === homePath &&
+        homeMain.model === 'home-main-model' &&
+        memoryProfile.config?.model === 'embed-home',
+      `${createGlobalProviderStore().getFilePath()} ${homeMain.model} ${JSON.stringify(memoryProfile)}`,
+    )
+  } finally {
+    if (previousArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousArtemisHome
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // A real headless run (runHeadlessAgent, as `artemis execute` and the web
+  // product use) against a chat-completions server that answers in the text
+  // tool-call dialect: the loose `remember` form saves a memory, and with no
+  // scope named it stays in the project; an explicit global save goes global.
+  const tmpDir = path.join(os.tmpdir(), `artemis-headless-remember-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  const project = path.join(tmpDir, 'project')
+  fs.mkdirSync(artemisHome, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+  let requestCount = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      requestCount += 1
+      const content = requestCount === 1
+        ? [
+          'Noted both.',
+          '<toolcall name="remember">{"name":"deploy-target","description":"Deploys go to the staging VPS first","content":"Deploy to the staging VPS before production."}</toolcall>',
+          '<toolcall name="memory">{"action":"save","scope":"global","name":"reply-language","description":"Owner wants replies in Simplified Chinese","content":"Always reply in Simplified Chinese."}</toolcall>',
+        ].join('\n')
+        : 'Saved both.'
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        model: 'mock-openai-compatible',
+        choices: [{ message: { content } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }))
+    })
+  })
+  const previousArtemisHome = process.env.ARTEMIS_HOME
+  process.env.ARTEMIS_HOME = artemisHome
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Mock provider server failed to bind to a TCP port.')
+    fs.writeFileSync(path.join(artemisHome, 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock-openai',
+      profiles: [{ id: 'mock-openai', protocol: 'openai', apiKey: 'test-key', model: 'mock-openai-compatible', baseUrl: `http://127.0.0.1:${address.port}` }],
+    }))
+    const { runHeadlessAgent } = await import('../src/services/headlessAgent.js')
+    const { memoryDirForScope } = await import('../src/storage/memoryFiles.js')
+    const result = await runHeadlessAgent(project, 'Remember: deploys go to staging first, and reply in Simplified Chinese.', { maxTurns: 3 })
+    const list = (dir: string) => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+    const projectSaved = list(memoryDirForScope(project, 'project'))
+    const globalSaved = list(memoryDirForScope(project, 'global'))
+    const detail = `reply=${result.reply} requests=${requestCount} project=${projectSaved.join(',')} global=${globalSaved.join(',')}`
+    assert(
+      'headless memory: a <toolcall name="remember"> without a scope is saved to the project, not globally',
+      projectSaved.some((f) => f.startsWith('deploy-target')) && !globalSaved.some((f) => f.startsWith('deploy-target')),
+      detail,
+    )
+    assert(
+      'headless memory: an explicit global memory save still goes global',
+      globalSaved.some((f) => f.startsWith('reply-language')),
+      detail,
+    )
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (previousArtemisHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = previousArtemisHome
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }

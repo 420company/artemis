@@ -1,8 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { ProviderStore } from '../providers/store.js';
+import { ProviderStore, createGlobalProviderStore } from '../providers/store.js';
 import type { MemoryEnhancementConfig } from '../providers/types.js';
 import { ensureDir, resolveDataRootDir } from '../utils/fs.js';
 
@@ -560,7 +559,7 @@ export async function getMemoryProfile(cwd: string): Promise<MemoryEnhancementCo
   }
   // A project without its own setting uses the global one, the same file the
   // main model falls back to (resolveMainProviderConfig).
-  const globalData = await new ProviderStore(homedir()).load();
+  const globalData = await createGlobalProviderStore().load();
   return globalData.memoryProfile ?? DEFAULT_MEMORY_CONFIG;
 }
 

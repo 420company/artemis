@@ -1,6 +1,8 @@
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import * as path from 'node:path';
-import { resolveDataRootDir } from '../utils/fs.js';
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js';
 import { normalizeProviderProtocol } from './factory.js';
 import type {
   ArtemisSetupConfig,
@@ -284,6 +286,11 @@ export class ProviderStore {
     this.filePath = path.join(this.rootDir, 'providers.json');
   }
 
+  /** Absolute path of the providers.json this store reads and writes. */
+  getFilePath(): string {
+    return this.filePath;
+  }
+
   async ensure(): Promise<void> {
     await ensureDir(this.rootDir);
   }
@@ -543,4 +550,27 @@ export class ProviderStore {
       (entry) => entry.id !== data.specialistProfileId,
     );
   }
+}
+
+/**
+ * The global provider store: $ARTEMIS_HOME/providers.json, or
+ * ~/.artemis/providers.json without ARTEMIS_HOME. Main-model resolution, the
+ * provider router, semantic memory and brain.ts all read this one file.
+ *
+ * With ARTEMIS_HOME set, setups written before this resolution lived at the
+ * workspace path of the home directory ($ARTEMIS_HOME/workspaces/<hash>/,
+ * where `new ProviderStore(homedir())` resolves); that file is used only
+ * while the ARTEMIS_HOME one does not exist yet.
+ */
+export function createGlobalProviderStore(): ProviderStore {
+  const store = new ProviderStore(resolveArtemisHomeDir());
+  const legacy = new ProviderStore(homedir());
+  if (
+    legacy.getFilePath() !== store.getFilePath() &&
+    !existsSync(store.getFilePath()) &&
+    existsSync(legacy.getFilePath())
+  ) {
+    return legacy;
+  }
+  return store;
 }

@@ -1769,7 +1769,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           scope: {
             type: 'string',
             enum: ['global', 'project'],
-            description: 'global: about the user, across projects (default). project: only this workspace.',
+            description: 'global: about the user, across projects. project: only this workspace. Set global explicitly for lasting facts about the user; if omitted, interactive runs save globally and headless runs to the project.',
           },
           name: optionalStringSchema('Short kebab-case slug, e.g. reply-language. Required for update and delete.'),
           description: optionalStringSchema('One concrete sentence; recall relies on it.'),

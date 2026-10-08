@@ -68,6 +68,11 @@ export type ToolExecutionContext = {
    */
   sessionId?: string;
   /**
+   * Scope the memory tool saves to when the action names none. Unset means
+   * global (interactive CLI); headless runs pass 'project'.
+   */
+  memoryDefaultScope?: 'global' | 'project';
+  /**
    * Contextual information for the tool execution
    */
   context?: any;

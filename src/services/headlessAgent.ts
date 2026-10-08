@@ -85,6 +85,9 @@ export async function runHeadlessAgent(
     maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
     profile: 'main',
     appendUserMessage: true,
+    // Nobody reviews a headless turn as it runs: memories the model saves
+    // without naming a scope stay in this workspace.
+    memoryDefaultScope: 'project',
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
     onInfo: opts.onInfo,
