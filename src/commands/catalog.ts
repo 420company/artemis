@@ -43,7 +43,6 @@ export const CLI_COMMAND_TOKENS = [
   'runtimes',
   'heimdall',
   'mcp',
-  'odin',
   'providers',
   'skills',
   'plugins',

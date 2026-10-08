@@ -112,6 +112,8 @@ import {
 import { projectDirectToolNames } from '../src/core/directToolProjection.js'
 import { buildDreamBridgeText } from '../src/services/dreamComposer.js'
 import type { SessionMessage } from '../src/core/types.js'
+import { ALL_AGENT_ACTION_TYPES, RUNTIME_MANAGED_AGENT_ACTION_TYPES } from '../src/core/types.js'
+import { resolveDataRootDir } from '../src/utils/fs.js'
 import type {
   ChatProvider,
   ProviderNativeToolOutput,
@@ -9373,6 +9375,133 @@ process.stdin.on('data', (c) => {
     await closeCachedMcpClients()
     fs.rmSync(dir, { recursive: true, force: true })
   }
+}
+
+{
+  // The retired "Odin" skill subsystem must stay gone: no tool in any table,
+  // and a leftover odin.json in the data root is neither read nor touched.
+  const retired = 'odin'
+  const retiredToolPattern = new RegExp(`\\b${retired}_`, 'i')
+  const retiredTools = ['search_skills', 'execute_task', 'fix_skill', 'upload_skill', 'import_cloud_skills'].map((name) => `${retired}_${name}`)
+  const profiles = ['main', 'planner', 'researcher', 'builder', 'reviewer', 'brainstormer', 'arbiter', 'architect', 'designer', 'qa'] as const
+  const nameLists: Record<string, string[]> = {
+    actionTypes: [...ALL_AGENT_ACTION_TYPES],
+    runtimeManaged: [...RUNTIME_MANAGED_AGENT_ACTION_TYPES],
+    providerCallable: getProviderCallableActionTypes(),
+    providerNative: buildProviderNativeFunctionTools().map((tool) => tool.name),
+    directNative: buildDirectNativeFunctionTools().map((tool) => tool.name),
+    ...Object.fromEntries(profiles.map((profile) => [`profile:${profile}`, getAllowedActionTypesForProfile(profile)])),
+  }
+  const leaks = Object.entries(nameLists).flatMap(([list, names]) =>
+    names.filter((name) => retiredToolPattern.test(name)).map((name) => `${list}:${name}`),
+  )
+  assert('retired skill tools: no tool list, profile, or native projection exposes them', leaks.length === 0, leaks.join(', '))
+  assert(
+    'retired skill tools: the detailed tool manifest does not mention them',
+    !new RegExp(`\\b${retired}\\b`, 'i').test(renderDetailedToolManifest()) && !retiredToolPattern.test(renderDetailedToolManifest()),
+  )
+  assert(
+    'retired skill tools: registry has no definition and validation rejects them as unknown',
+    retiredTools.every((type) => getToolDefinition(type) === undefined && isRuntimeManagedTool(type) === false) &&
+      retiredTools.every((type) => validateToolAction({ type, query: 'x', task: 'x', skillId: 'x' }).includes('Unknown tool type')),
+  )
+  const nativeCall = mapProviderNativeToolCallToAction({
+    callId: 'retired-call',
+    name: retiredTools[0]!,
+    arguments: '{"query":"x"}',
+  })
+  assert('retired skill tools: a provider-native call to one is rejected', nativeCall.ok === false, JSON.stringify(nativeCall))
+  assert(
+    `retired skill CLI: parseArgs(['${retired}']) behaves like any unknown command`,
+    eq(
+      { ...parseArgs([retired, 'list']), prompt: undefined, promptArgs: undefined },
+      { ...parseArgs(['zz-not-a-command', 'list']), prompt: undefined, promptArgs: undefined },
+    ) &&
+      parseArgs([retired, 'list']).command === 'chat' &&
+      parseArgs([retired, 'list']).prompt === `${retired} list`,
+    JSON.stringify(parseArgs([retired, 'list'])),
+  )
+
+  // A corrupt odin.json left in the data root by an older release must not
+  // break runAgent or a workflow run, and must be left exactly as it was.
+  const tmpDir = path.join(os.tmpdir(), `artemis-retired-skill-store-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const dataRoot = resolveDataRootDir(tmpDir)
+  fs.mkdirSync(dataRoot, { recursive: true })
+  const legacyFile = path.join(dataRoot, `${retired}.json`)
+  const corrupt = '{"version":1,"skills":[{"id":"x", this is not json'
+  fs.writeFileSync(legacyFile, corrupt)
+  const store = new SessionStore(tmpDir)
+  const session = store.createSession({ title: 'retired skill store smoke' })
+  await store.save(session)
+  const systemTexts: string[] = []
+  const infos: string[] = []
+  const provider: ChatProvider = {
+    async complete(messages, options): Promise<ProviderResponse> {
+      systemTexts.push(JSON.stringify({ messages, options }))
+      return { text: JSON.stringify({ reply: 'Done without skill hints.', done: true }), raw: null }
+    },
+  }
+  let runError: unknown
+  let reply = ''
+  try {
+    const result = await runAgent(session, 'search skills for a deploy task', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+      onInfo: (message) => infos.push(message),
+    })
+    reply = result.reply
+  } catch (error) {
+    runError = error
+  }
+  assert(
+    'retired skill store: runAgent still runs with a corrupt odin.json in the data root',
+    runError === undefined && reply.includes('Done without skill hints'),
+    runError instanceof Error ? runError.message : reply,
+  )
+  assert(
+    'retired skill store: no skill-hint section or info line reaches the run',
+    systemTexts.length > 0 &&
+      systemTexts.every((text) => !new RegExp(`\\b${retired}\\b`, 'i').test(text)) &&
+      infos.every((message) => !new RegExp(`\\b${retired}\\b`, 'i').test(message)),
+    infos.join(' | '),
+  )
+
+  let workflowError: unknown
+  let workflowReply = ''
+  try {
+    const result = await runWorkflowMode('direct', session, 'one more simple step', {
+      cwd: tmpDir,
+      provider,
+      sessionStore: store,
+      permissionManager: new PermissionManager('accept-all', false),
+      maxTurns: 2,
+      profile: 'main',
+    })
+    workflowReply = result.reply
+  } catch (error) {
+    workflowError = error
+  }
+  assert(
+    'retired skill store: a direct workflow run completes with a corrupt odin.json present',
+    workflowError === undefined && workflowReply.includes('Done without skill hints'),
+    workflowError instanceof Error ? workflowError.message : workflowReply,
+  )
+  const contextWithCwd = await buildContextWindow(session, 'main', tmpDir)
+  const contextWithoutCwd = await buildContextWindow(session, 'main')
+  assert(
+    'retired skill store: buildContextWindow gives the same result with or without a cwd',
+    eq(contextWithCwd, contextWithoutCwd),
+  )
+  assert(
+    'retired skill store: the legacy odin.json is left untouched',
+    fs.existsSync(legacyFile) && fs.readFileSync(legacyFile, 'utf8') === corrupt,
+  )
+  fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────

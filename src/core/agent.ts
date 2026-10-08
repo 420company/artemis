@@ -74,16 +74,6 @@ import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
 import { buildContextWindow } from './context.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
-  buildOdinRuntimeSection,
-  executeOdinFixSkill,
-  executeOdinSearchSkills,
-  executeOdinUploadSkill,
-  importOdinCloudSkills,
-  recordOdinWorkflowFailure,
-  recordOdinWorkflowSuccess,
-  resolveOdinSkillContext,
-} from '../odin/runtime.js';
-import {
   McpCallCancelledError,
   McpDependencyError,
   callMcpServerTool,
@@ -1797,16 +1787,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `delegate_task role=${action.role} task=${truncate(action.task, 120)}`;
     case 'approve_builder_execution':
       return `approve_builder_execution session=${action.sessionId}`;
-    case 'odin_search_skills':
-      return `odin_search_skills query=${truncate(action.query, 120)} scope=${action.scope ?? 'all'}`;
-    case 'odin_execute_task':
-      return `odin_execute_task task=${truncate(action.task, 120)}`;
-    case 'odin_fix_skill':
-      return `odin_fix_skill skillId=${action.skillId}`;
-    case 'odin_upload_skill':
-      return `odin_upload_skill skillId=${action.skillId} visibility=${action.visibility ?? 'local'}`;
-    case 'odin_import_cloud_skills':
-      return `odin_import_cloud_skills query=${action.query ?? ''} limit=${action.limit ?? 10}`;
     case 'generate_image':
       return `generate_image model=${action.model ?? 'seedream-5-0-260128'} prompt=${truncate(action.prompt, 120)}`;
     case 'generate_video':
@@ -5098,91 +5078,6 @@ You can continue executing your current tasks. The background workflow will run 
             summary: specialist.result.reply,
         }),
       };
-    case 'odin_search_skills':
-      return executeOdinSearchSkills({
-        cwd: options.cwd,
-        query: action.query,
-        scope: action.scope,
-        limit: action.limit,
-      });
-    case 'odin_execute_task': {
-      const skillContext = await resolveOdinSkillContext({
-        cwd: options.cwd,
-        task: action.task,
-        scope: action.searchScope,
-      });
-      const taskWithContext = skillContext
-        ? `${action.task}\n\n${skillContext}`
-        : action.task;
-      let specialist;
-      try {
-        specialist = await runSpecialistAgent(
-          session,
-          'researcher',
-          taskWithContext,
-          {
-            ...options,
-            maxTurns: clampTurns(
-              action.maxIterations ?? Math.max(options.maxTurns, 15),
-            ),
-          },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await recordOdinWorkflowFailure({
-          cwd: options.cwd,
-          mode: 'direct',
-          prompt: action.task,
-          error: message,
-        });
-        return buildRuntimeManagedFailure(
-          'odin_execute_task_failed',
-          `Odin task execution failed: ${message}`,
-          {
-            retryable: true,
-          },
-        );
-      }
-      await recordOdinWorkflowSuccess({
-        cwd: options.cwd,
-        mode: 'direct',
-        prompt: action.task,
-        reply: specialist.result.reply,
-        turns: specialist.result.turns,
-      });
-      return {
-        ok: true,
-        output: JSON.stringify(
-          {
-            reply: specialist.result.reply,
-            sessionId: specialist.session.id,
-            turns: specialist.result.turns,
-          },
-          null,
-          2,
-        ),
-      };
-    }
-    case 'odin_fix_skill':
-      return executeOdinFixSkill({
-        cwd: options.cwd,
-        skillId: action.skillId,
-        errorContext: action.errorContext,
-        summary: action.summary,
-      });
-    case 'odin_upload_skill':
-      return executeOdinUploadSkill({
-        cwd: options.cwd,
-        skillId: action.skillId,
-        visibility: action.visibility,
-        notes: action.notes,
-      });
-    case 'odin_import_cloud_skills':
-      return importOdinCloudSkills({
-        cwd: options.cwd,
-        query: action.query,
-        limit: action.limit,
-      });
     default:
       const message = [
         `Tool ${action.type} is marked as runtime-managed but has no runtime handler.`,
@@ -6234,11 +6129,6 @@ export async function runAgent(
     return accepted;
   };
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
-  const odinRuntimeSection = await buildOdinRuntimeSection({
-    cwd: options.cwd,
-    prompt: userInput,
-    profile,
-  });
 
   try {
     if (extensionRuntime.activeSkills.length > 0) {
@@ -6259,9 +6149,6 @@ export async function runAgent(
           .map((entry) => entry.plugin.id)
           .join(',')}`,
       );
-    }
-    if (odinRuntimeSection) {
-      options.onInfo?.('[odin] matched reusable skills for the current request');
     }
     if (extensionRuntime.gatedPlugins.length > 0) {
       options.onInfo?.(
@@ -6624,7 +6511,6 @@ export async function runAgent(
       activeProvider.supportsNativeToolCalls === true,
       [
         ...extensionRuntime.sections,
-        ...(odinRuntimeSection ? [odinRuntimeSection] : []),
         ...(modelSeesImages ? [] : [VIEW_IMAGE_UNAVAILABLE_SECTION]),
       ],
     );
