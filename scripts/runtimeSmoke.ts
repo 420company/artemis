@@ -18,7 +18,11 @@ import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent } from '../src/core/agent.js'
 import { routeTeamRequest } from '../src/core/team.js'
 import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js'
-import { buildContextWindow } from '../src/core/context.js'
+import {
+  createContextState,
+  manageContext,
+  resolveContextBudget,
+} from '../src/core/compaction/index.js'
 import { buildSystemPrompt } from '../src/core/systemPrompt.js'
 import { fromHeimdallVirtualPath } from '../src/core/heimdall.js'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
@@ -2108,12 +2112,17 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'user',
     `${'design-detail '.repeat(4_550)}${marker}${' trailing-detail'.repeat(300)}`,
   )
-  const context = await buildContextWindow(session, 'main')
-  const latestUser = context.messages.find((message) => message.role === 'user')?.content ?? ''
+  const managed = await manageContext({
+    messages: session.messages,
+    fixedTokens: 8_000,
+    budget: resolveContextBudget({ contextWindow: 128_000 }),
+    state: createContextState(),
+  })
+  const latestUser = managed.messages.find((message) => message.role === 'user')?.content ?? ''
 
   assert(
     'context window: latest design/workflow handoff preserves content near 65535 chars',
-    latestUser.includes(marker) && latestUser.length > 60_000,
+    latestUser.includes(marker) && latestUser.length > 60_000 && latestUser === session.messages[0]?.content,
     `length=${latestUser.length} marker=${latestUser.includes(marker)}`,
   )
 
@@ -2125,18 +2134,32 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   fs.mkdirSync(tmpDir, { recursive: true })
   const store = new SessionStore(tmpDir)
   const session = store.createSession({ title: 'tool intake truncation smoke' })
+  const rawOutput = `${'line\n'.repeat(5_000)}IMPORTANT_TAIL`
   const rawToolResult = JSON.stringify({
     ok: true,
     action: { type: 'run_command', command: 'npm test' },
-    output: `${'line\n'.repeat(1_400)}IMPORTANT_TAIL`,
+    output: rawOutput,
   })
   store.appendMessage(session, 'tool', rawToolResult, 'run_command')
   const stored = session.messages[0]?.content ?? ''
+  const storedEnvelope = JSON.parse(stored) as { output: string; outputSavedTo?: string }
 
   assert(
-    'session store: tool messages are truncated before entering history',
-    stored.length < rawToolResult.length && stored.includes('IMPORTANT_TAIL') && stored.includes('truncated'),
+    'session store: large tool messages are spilled to a file (preview + path) before entering history',
+    stored.length < rawToolResult.length &&
+      storedEnvelope.output.includes('IMPORTANT_TAIL') &&
+      storedEnvelope.output.includes('line\nline') &&
+      typeof storedEnvelope.outputSavedTo === 'string' &&
+      storedEnvelope.outputSavedTo.startsWith(store.getContextDir(session.id)) &&
+      fs.readFileSync(storedEnvelope.outputSavedTo, 'utf8') === rawOutput,
     `stored=${stored.length} raw=${rawToolResult.length}`,
+  )
+
+  const mediumToolResult = JSON.stringify({ ok: true, action: { type: 'run_command', command: 'npm test' }, output: 'line\n'.repeat(1_400) })
+  store.appendMessage(session, 'tool', mediumToolResult, 'run_command')
+  assert(
+    'session store: medium tool messages are kept whole (no lossy head/tail cut)',
+    session.messages[1]?.content === mediumToolResult,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -2156,12 +2179,19 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     }), 'run_command')
   }
   store.appendMessage(session, 'user', 'latest task')
-  const context = await buildContextWindow(session, 'main')
+  const budget = resolveContextBudget({ contextWindow: 32_000 })
+  const managed = await manageContext({
+    messages: session.messages,
+    fixedTokens: 4_000,
+    budget,
+    state: createContextState(),
+    storage: store.getContextStorage(session),
+  })
 
   assert(
     'context window: compacted main context stays below the send budget',
-    context.stats.approxChars <= 72_000 + 24_000,
-    `approx=${context.stats.approxChars}`,
+    managed.tokensAfter <= budget.threshold && managed.messages.at(-1)?.content === 'latest task',
+    `tokens=${managed.tokensAfter} threshold=${budget.threshold} action=${managed.action}`,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -2471,12 +2501,20 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     }), 'read_file')
   }
   store.appendMessage(session, 'user', 'latest task')
-  const context = await buildContextWindow(session, 'main', { contextLength: 1_000_000 })
+  // The cost cap is now explicit (setup.agent.compression.maxContextTokens).
+  const budget = resolveContextBudget({ contextWindow: 1_000_000, maxContextTokens: 80_000 })
+  const managed = await manageContext({
+    messages: session.messages,
+    fixedTokens: 8_000,
+    budget,
+    state: createContextState(),
+    storage: store.getContextStorage(session),
+  })
 
   assert(
     'context window: large model metadata does not expand active context past cost cap',
-    context.stats.approxChars <= 320_000,
-    `approx=${context.stats.approxChars}`,
+    budget.window === 80_000 && managed.tokensAfter <= budget.threshold,
+    `tokens=${managed.tokensAfter} threshold=${budget.threshold}`,
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })

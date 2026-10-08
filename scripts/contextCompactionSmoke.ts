@@ -39,9 +39,13 @@ import {
   estimateTokens,
   estimateToolSchemaTokens,
 } from '../src/core/tokenEstimation.js'
+import { runAgent } from '../src/core/agent.js'
+import { SessionStore } from '../src/storage/sessions.js'
+import { PermissionManager } from '../src/security/permissions.js'
 import { MessagesCompatibleProvider } from '../src/providers/messagesCompatible.js'
 import { OpenAICompatibleProvider } from '../src/providers/openaiCompatible.js'
 import type { SessionMessage } from '../src/core/types.js'
+import type { ChatProvider, ProviderResponse } from '../src/providers/types.js'
 
 let passed = 0
 let failed = 0
@@ -600,6 +604,251 @@ console.log('  ======================\n')
     decisions.filter((d) => !finalText.includes(d)).join(','),
   )
   fs.rmSync(dir, { recursive: true, force: true })
+}
+
+// ── Path A (runAgent) integration ────────────────────────────────────────────
+
+type Request = { messages: SessionMessage[]; system: string }
+
+function envelope(reply: string, actions: unknown[] = []): ProviderResponse {
+  return { text: JSON.stringify({ reply, done: actions.length === 0, ...(actions.length ? { actions } : {}) }), raw: null }
+}
+
+{
+  // The system prompt is byte-identical across turns and runs without compaction.
+  const cwd = tmpDir('stable-system')
+  fs.writeFileSync(path.join(cwd, 'notes.txt'), 'alpha\nbeta\n')
+  const store = new SessionStore(cwd)
+  const session = store.createSession({ title: 'stable system prompt' })
+  await store.save(session)
+  const requests: Request[] = []
+  let call = 0
+  const provider: ChatProvider = {
+    contextWindow: 200_000,
+    async complete(messages) {
+      requests.push({ messages, system: messages[0]!.content })
+      call += 1
+      return call % 2 === 1
+        ? envelope('reading', [{ type: 'read_file', path: 'notes.txt' }])
+        : envelope('done reading')
+    },
+  }
+  for (const input of ['first: read notes.txt', 'second: read it again', 'third: once more']) {
+    await runAgent(session, input, {
+      cwd, provider, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 4, profile: 'main',
+    })
+  }
+  const systems = new Set(requests.map((r) => r.system))
+  assert(
+    'path A: system prompt is byte-identical across 6 requests in 3 runs',
+    requests.length >= 6 && systems.size === 1,
+    `requests=${requests.length} distinct=${systems.size}`,
+  )
+  assert(
+    'path A: the system prompt carries no conversation summary or evidence digest',
+    !requests[0]!.system.includes('Conversation summary:') && !requests[0]!.system.includes('Repository evidence:'),
+  )
+  const stored = JSON.parse(fs.readFileSync(path.join(cwd, '.artemis', 'sessions', `${session.id}.json`), 'utf8')) as { metadata?: { context?: ContextState } }
+  assert('path A: context state is persisted with the session', stored.metadata?.context?.version === 1)
+  fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+{
+  // Newlines survive in user messages, assistant code blocks and tool output.
+  const cwd = tmpDir('newlines')
+  fs.writeFileSync(path.join(cwd, 'a.ts'), 'export const a = 1\nexport const b = 2\n')
+  const store = new SessionStore(cwd)
+  const session = store.createSession({ title: 'newlines' })
+  await store.save(session)
+  const requests: Request[] = []
+  let call = 0
+  const code = 'Please fix this:\n```ts\nfunction f() {\n  return 1\n}\n```'
+  const provider: ChatProvider = {
+    async complete(messages) {
+      requests.push({ messages, system: messages[0]!.content })
+      call += 1
+      return call === 1
+        ? envelope('Reading:\n```ts\nconst x = 1\n```', [{ type: 'read_file', path: 'a.ts' }])
+        : envelope('Done.\n- line one\n- line two')
+    },
+  }
+  await runAgent(session, code, { cwd, provider, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 3, profile: 'main' })
+  const second = requests[1]!.messages
+  assert(
+    'newlines: user code block reaches the provider unchanged',
+    second.some((m) => m.role === 'user' && m.content === code),
+  )
+  assert(
+    'newlines: assistant code block and tool output keep their newlines',
+    second.some((m) => m.role === 'assistant' && m.content.includes('```ts\nconst x = 1\n```')) &&
+      second.some((m) => m.role === 'tool' &&
+        (JSON.parse(m.content) as { output: string }).output.includes('1 | export const a = 1\n2 | export const b = 2')),
+  )
+  fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+{
+  // Overflow error → forced compaction → retry succeeds; the compacted
+  // history is persisted so the next run does not overflow again.
+  const cwd = tmpDir('overflow')
+  const store = new SessionStore(cwd)
+  const session = store.createSession({ title: 'overflow recovery' })
+  session.messages.push(msg('user', 'GOAL_OVERFLOW_TEST: keep the API stable'))
+  for (let i = 0; i < 70; i += 1) {
+    session.messages.push(msg('user', `question ${i} ${'context '.repeat(250)}`))
+    session.messages.push(msg('assistant', `answer ${i} ${'detail '.repeat(250)}`))
+  }
+  await store.save(session)
+  const realLimit = 60_000 // the provider's real limit is lower than the configured window
+  let rejected = 0
+  let accepted = 0
+  const summarizerLog: Array<{ system: string; prompt: string }> = []
+  const summarizerFn = markerSummarizer(summarizerLog)
+  const summarizer: ChatProvider = {
+    async complete(messages) {
+      return { text: await summarizerFn({ system: messages[0]!.content, prompt: messages[1]!.content }), raw: null }
+    },
+  }
+  const provider: ChatProvider = {
+    contextWindow: 200_000,
+    async complete(messages) {
+      const size = estimateMessagesTokens(messages)
+      if (size > realLimit) {
+        rejected += 1
+        throw Object.assign(new Error(`Server message: prompt is too long: ${size} tokens > ${realLimit} maximum`), { status: 400 })
+      }
+      accepted += 1
+      return envelope('recovered')
+    },
+  }
+  const notices: string[] = []
+  const result = await runAgent(session, 'continue please', {
+    cwd, provider, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 2, profile: 'main',
+    resolveSummarizerProvider: () => summarizer,
+    onContextCompaction: (notice) => notices.push(notice),
+  })
+  const reloaded = await new SessionStore(cwd).load(session.id)
+  assert(
+    'overflow: a context-length 400 triggers compaction and one successful retry',
+    rejected === 1 && accepted === 1 && result.reply === 'recovered',
+    `rejected=${rejected} accepted=${accepted} reply=${result.reply}`,
+  )
+  assert(
+    'overflow: the compacted history is persisted and keeps the goal',
+    isCompactionBoundary(reloaded.messages[0]) && reloaded.messages[0]!.content.includes('GOAL_OVERFLOW_TEST') &&
+      reloaded.messages.length < 141 / 2 && notices.length === 1 && notices[0]!.includes('compacted'),
+    `messages=${reloaded.messages.length} notices=${notices.join(' | ')}`,
+  )
+  // A second overflow after the forced compaction is reported clearly.
+  const alwaysTooBig: ChatProvider = {
+    async complete() {
+      throw Object.assign(new Error('prompt is too long: 999999 tokens > 1000 maximum'), { status: 400 })
+    },
+  }
+  let error: unknown
+  try {
+    await runAgent(reloaded, 'again', { cwd, provider: alwaysTooBig, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 2, profile: 'main' })
+  } catch (caught) {
+    error = caught
+  }
+  assert(
+    'overflow: a second overflow is reported as a clear context error',
+    error instanceof ContextOverflowError && /context window/.test((error as Error).message),
+    String(error),
+  )
+  fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+{
+  // A weeks-long web session (300 Chinese turns with tool output) is brought
+  // under the window on the next run, with the full history archived.
+  const cwd = tmpDir('long-web')
+  const store = new SessionStore(cwd)
+  const session = store.createSession({ title: 'long web session' })
+  session.messages.push(msg('user', '总目标 GOAL_WEB_LONG：维护电商后台，所有改动先写测试。'))
+  for (let i = 0; i < 300; i += 1) {
+    session.messages.push(msg('user', `第 ${i} 个请求：检查订单服务的日志并修复问题。`))
+    session.messages.push(msg('assistant', `已检查第 ${i} 个问题，修改了 src/order/svc${i % 12}.ts。`))
+    session.messages.push(msg('tool', JSON.stringify({ ok: true, action: { type: 'run_command', command: `npm test order${i}` }, output: `订单测试 ${i} 通过\n`.repeat(40) }, null, 2), { name: 'run_command' }))
+  }
+  await store.save(session)
+  const window = 64_000
+  const sizes: number[] = []
+  const provider: ChatProvider = {
+    contextWindow: window,
+    async complete(messages) {
+      if (messages[0]?.id === 'compaction-system') {
+        return { text: await markerSummarizer([])({ system: messages[0]!.content, prompt: messages[1]!.content }), raw: null }
+      }
+      sizes.push(estimateMessagesTokens(messages))
+      return envelope('好的，继续。')
+    },
+  }
+  await runAgent(session, '继续处理第 301 个请求', { cwd, provider, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 2, profile: 'main' })
+  const reloaded = await new SessionStore(cwd).load(session.id)
+  const archivePath = path.join(cwd, '.artemis', 'sessions', session.id, 'transcript.jsonl')
+  const archivedLines = fs.readFileSync(archivePath, 'utf8').trim().split('\n').length
+  assert(
+    'path A: a 300-turn stored session is compacted under the window on the next run',
+    sizes.length === 1 && sizes[0]! < window && isCompactionBoundary(reloaded.messages[0]) && reloaded.messages[0]!.content.includes('GOAL_WEB_LONG'),
+    `size=${sizes[0]} window=${window}`,
+  )
+  assert(
+    'path A: removed messages are in the archive named by the boundary; stored history is bounded',
+    archivedLines > 700 && reloaded.messages[0]!.content.includes(archivePath) && reloaded.messages.length < 150 &&
+      archivedLines + reloaded.messages.length - 1 >= 902,
+    `archived=${archivedLines} kept=${reloaded.messages.length}`,
+  )
+  fs.rmSync(cwd, { recursive: true, force: true })
+}
+
+{
+  // Old session files load: missing fields, legacy keys, malformed messages.
+  const cwd = tmpDir('legacy')
+  const sessionsDir = path.join(cwd, '.artemis', 'sessions')
+  fs.mkdirSync(sessionsDir, { recursive: true })
+  const id = 'legacy-session-0001'
+  const legacy = {
+    id,
+    cwd,
+    title: 'legacy',
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-02T00:00:00.000Z',
+    summary: '- user: old char summary line\n- assistant: another',
+    harnessEvents: [],
+    messages: [
+      { id: 'l1', role: 'user', content: 'GOAL_LEGACY: keep working', createdAt: '2025-01-01T00:00:01.000Z' },
+      { role: 'assistant', content: 'no id or timestamp' },
+      { id: 'l3', role: 'tool_result', content: { text: 'structured' }, createdAt: '2025-01-01T00:00:03.000Z' },
+      null,
+      { id: 'l5', role: 'narrator', content: 'unknown role' },
+      ...Array.from({ length: 200 }, (_, i) => ({ id: `big${i}`, role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'text '.repeat(300)}`, createdAt: '2025-01-01T01:00:00.000Z' })),
+    ],
+  }
+  fs.writeFileSync(path.join(sessionsDir, `${id}.json`), JSON.stringify(legacy))
+  const store = new SessionStore(cwd)
+  const loaded = await store.load(id)
+  assert(
+    'old session files: load and migrate (ids, timestamps, roles, content) without dropping usable messages',
+    loaded.messages.length === 203 &&
+      loaded.messages.every((m) => typeof m.id === 'string' && typeof m.createdAt === 'string' && typeof m.content === 'string') &&
+      loaded.messages[2]!.role === 'tool' && Array.isArray(loaded.tasks),
+    `count=${loaded.messages.length}`,
+  )
+  const result = await manageContext({
+    messages: loaded.messages,
+    fixedTokens: 3_000,
+    budget: resolveContextBudget({ contextWindow: 32_000 }),
+    state: createContextState(),
+    summarize: markerSummarizer([]),
+  })
+  assert(
+    'old session files: an oversized legacy history compacts under the window',
+    result.action === 'summary' && result.tokensAfter < resolveContextBudget({ contextWindow: 32_000 }).threshold &&
+      result.messages[0]!.content.includes('GOAL_LEGACY'),
+    `action=${result.action} after=${result.tokensAfter}`,
+  )
+  fs.rmSync(cwd, { recursive: true, force: true })
 }
 
 if (failed > 0) {

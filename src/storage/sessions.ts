@@ -25,7 +25,13 @@ import type {
   VerificationCommandRecord,
 } from '../core/types.js';
 import { isHeimdallEventKind } from '../core/types.js';
-import { smartTruncateToolContent } from '../core/session.js';
+import {
+  createContextStorage,
+  normalizeContextState,
+  resolveContextBudget,
+  spillToolResultIfLarge,
+  type ContextStorage,
+} from '../core/compaction/index.js';
 import {
   canonicalizeClaimStatement,
   synchronizeEvidenceGraph,
@@ -46,6 +52,73 @@ import {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+// Intake safety net for tool results appended without a window-aware budget
+// (runAgent spills with the active model's budget before appending).
+const DEFAULT_INTAKE_BUDGET = resolveContextBudget();
+
+const VALID_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
+
+/**
+ * Bring a stored message to the current shape. Old session files may lack
+ * ids or timestamps, carry non-string content, or use retired roles.
+ */
+function normalizeStoredMessage(
+  raw: unknown,
+  index: number,
+  fallbackCreatedAt: string,
+): { message: SessionMessage | null; mutated: boolean } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { message: null, mutated: true };
+  }
+  const candidate = raw as Record<string, unknown>;
+  let mutated = false;
+  let role = candidate.role;
+  if (role === 'tool_result') {
+    role = 'tool';
+    mutated = true;
+  }
+  if (typeof role !== 'string' || !VALID_ROLES.has(role)) {
+    return { message: null, mutated: true };
+  }
+  let content = candidate.content;
+  if (typeof content !== 'string') {
+    content = content === undefined || content === null
+      ? ''
+      : Array.isArray(content)
+        ? content
+          .map((block) => (block && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string'
+            ? (block as { text: string }).text
+            : ''))
+          .filter(Boolean)
+          .join('\n')
+        : JSON.stringify(content);
+    mutated = true;
+  }
+  let id = candidate.id;
+  if (typeof id !== 'string' || !id) {
+    id = `msg-migrated-${index}-${randomUUID().slice(0, 8)}`;
+    mutated = true;
+  }
+  let createdAt = candidate.createdAt;
+  if (typeof createdAt !== 'string' || !createdAt) {
+    createdAt = fallbackCreatedAt;
+    mutated = true;
+  }
+  if (!mutated) {
+    return { message: raw as SessionMessage, mutated: false };
+  }
+  return {
+    message: {
+      ...(candidate as unknown as SessionMessage),
+      id: id as string,
+      role: role as SessionMessage['role'],
+      content: content as string,
+      createdAt: createdAt as string,
+    },
+    mutated: true,
+  };
 }
 
 function deriveTitle(cwd: string): string {
@@ -270,6 +343,8 @@ export class SessionStore {
   private readonly evidenceDir: string;
   private readonly sessionCache = new Map<string, SessionRecord>();
   private readonly evidenceCache = new Map<string, EvidenceGraph>();
+  /** Last serialized form written per session, to skip identical rewrites. */
+  private readonly lastWritten = new Map<string, string>();
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -316,6 +391,15 @@ export class SessionStore {
     return session;
   }
 
+  /** Directory for a session's context files (transcript archive, spilled tool outputs). */
+  getContextDir(sessionId: string): string {
+    return path.join(this.sessionDir, sessionId);
+  }
+
+  getContextStorage(session: Pick<SessionRecord, 'id'>): ContextStorage {
+    return createContextStorage(this.getContextDir(session.id));
+  }
+
   appendMessage(
     session: SessionRecord,
     role: SessionMessage['role'],
@@ -325,7 +409,17 @@ export class SessionStore {
     const message: SessionMessage = {
       id: randomUUID(),
       role,
-      content: role === 'tool' ? smartTruncateToolContent(content) : content,
+      // Large tool output goes to a file under the session directory; the
+      // history keeps a preview with the path. Nothing is cut silently.
+      content: role === 'tool'
+        ? spillToolResultIfLarge(content, {
+          storage: this.getContextStorage(session),
+          toolName: name,
+          inlineTokens: DEFAULT_INTAKE_BUDGET.inlineToolResultTokens,
+          inlineReadTokens: DEFAULT_INTAKE_BUDGET.inlineReadTokens,
+          previewTokens: DEFAULT_INTAKE_BUDGET.toolPreviewTokens,
+        }).content
+        : content,
       name,
       createdAt: now(),
     };
@@ -387,13 +481,20 @@ export class SessionStore {
     if (normalized.mutated) {
       session = normalized.session;
     }
-    session.updatedAt = now();
     this.sessionCache.set(session.id, session);
+    // Skip the rewrite (and the search-index sync) when nothing changed since
+    // the last write; runAgent saves at many checkpoints per turn.
+    const comparable = JSON.stringify({ ...session, updatedAt: '' });
+    if (this.lastWritten.get(session.id) === comparable) {
+      return;
+    }
+    session.updatedAt = now();
     await writeFile(
       path.join(this.sessionDir, `${session.id}.json`),
       JSON.stringify(session, null, 2),
       'utf8',
     );
+    this.lastWritten.set(session.id, comparable);
     invalidateSessionSearchCache(this.cwd);
     await syncSessionSearchIndex(this.cwd, session);
   }
@@ -654,12 +755,34 @@ export class SessionStore {
     const normalizedAutonomyMode = normalizeSessionAutonomyMode(
       session.autonomyMode,
     );
+    // Messages: old files may hold malformed entries; keep every usable one.
+    let messagesMutated = !Array.isArray(session.messages);
+    const fallbackCreatedAt =
+      typeof session.createdAt === 'string' && session.createdAt ? session.createdAt : now();
+    const normalizedMessages: SessionMessage[] = [];
+    (Array.isArray(session.messages) ? session.messages : []).forEach((entry, index) => {
+      const result = normalizeStoredMessage(entry, index, fallbackCreatedAt);
+      if (result.mutated) messagesMutated = true;
+      if (result.message) normalizedMessages.push(result.message);
+    });
+    // Context-management state lives in metadata.context; repair it in place.
+    let metadata = session.metadata;
+    if (metadata && typeof metadata === 'object' && 'context' in metadata) {
+      const normalizedContext = normalizeContextState(metadata.context);
+      if (JSON.stringify(normalizedContext) !== JSON.stringify(metadata.context)) {
+        metadata = { ...metadata, context: normalizedContext };
+        mutated = true;
+      }
+    }
+    if (messagesMutated) mutated = true;
     const {
       harnessEvents: _legacyHarnessEvents,
       ...sessionWithoutLegacyHarness
     } = session as unknown as Record<string, unknown>;
     const nextSession: SessionRecord = {
       ...(sessionWithoutLegacyHarness as SessionRecord),
+      messages: messagesMutated ? normalizedMessages : session.messages,
+      ...(metadata !== session.metadata ? { metadata } : {}),
       autonomyMode: normalizedAutonomyMode,
       plan: Array.isArray(session.plan) ? session.plan : [],
       tasks: normalizedTasks,

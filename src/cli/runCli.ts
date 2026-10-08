@@ -697,6 +697,8 @@ async function runQueryCommand(options: {
     `Session: ${result.sessionId}`,
     `Turns: ${result.turns}`,
     `Duration: ${result.durationMs}ms`,
+    // After the block the web server parses, so it stays intact.
+    ...result.contextNotices.map((notice) => `Context: ${notice.replace(/^\[(?:context|上下文)\]\s*/, '')}`),
   ]))
   console.log()
 }
@@ -1141,6 +1143,8 @@ async function runSessionCommand(options: { cwd: string; locale: UiLocale; args:
       return
     }
     await fs.promises.unlink(path.join(resolveDataRootDir(cwd), 'sessions', `${session.id}.json`))
+    // Context files (transcript archive, spilled tool outputs) go with it.
+    await fs.promises.rm(path.join(resolveDataRootDir(cwd), 'sessions', session.id), { recursive: true, force: true })
     console.log()
     console.log(buildPanel(t('会话已删除', 'Session deleted'), [`ID: ${session.id}`]))
     console.log()

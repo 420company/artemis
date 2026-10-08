@@ -34,6 +34,32 @@ export interface HeadlessAgentResult {
   turns: number
   sessionId: string
   durationMs: number
+  /** One short line per context compaction that happened during the run. */
+  contextNotices: string[]
+}
+
+/** setup.agent.compression from the workspace store, else the global one. */
+async function loadCompactionSettings(cwd: string): Promise<{ enabled?: boolean; thresholdRatio?: number; maxContextTokens?: number }> {
+  const { ProviderStore } = await import('../providers/store.js')
+  const { resolveArtemisHomeDir } = await import('../utils/fs.js')
+  for (const root of [cwd, resolveArtemisHomeDir()]) {
+    try {
+      const data = await new ProviderStore(root).load()
+      const compression = data.setup?.agent?.compression as
+        | { enabled?: boolean; threshold?: number; maxContextTokens?: number }
+        | undefined
+      if (compression) {
+        return {
+          enabled: compression.enabled,
+          thresholdRatio: compression.threshold,
+          maxContextTokens: compression.maxContextTokens,
+        }
+      }
+    } catch {
+      /* fall through to the next store */
+    }
+  }
+  return {}
 }
 
 async function loadExistingSession(sessionStore: SessionStore, sessionId: string): Promise<SessionRecord> {
@@ -86,6 +112,8 @@ export async function runHeadlessAgent(
     name: providerConfig.model,
   })
 
+  const { resolveEffectiveModelContextLength } = await import('../providers/modelContext.js')
+  const contextNotices: string[] = []
   const started = Date.now()
   const result = await runAgent(session, prompt, {
     cwd,
@@ -95,8 +123,14 @@ export async function runHeadlessAgent(
     maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
     profile: 'main',
     appendUserMessage: true,
+    // The main model's window; specialists with a smaller window are capped
+    // further by their own provider metadata inside runAgent.
+    contextLength: resolveEffectiveModelContextLength(providerConfig.model, providerConfig.contextLength),
+    compaction: await loadCompactionSettings(cwd),
     ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
     resolveProvider: providerRouter.resolveProvider,
+    resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
+    onContextCompaction: (notice) => contextNotices.push(notice),
     onInfo: opts.onInfo,
     ...(imageAttachments.length ? { imageAttachments } : {}),
   })
@@ -106,5 +140,6 @@ export async function runHeadlessAgent(
     turns: result.turns,
     sessionId: session.id,
     durationMs: Date.now() - started,
+    contextNotices,
   }
 }

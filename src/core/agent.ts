@@ -1,6 +1,5 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import path from 'node:path';
-import type { ContextBuildResult } from './context.js';
 import {
   getAllowedActionTypesForProfile,
   validateProfileAction,
@@ -71,10 +70,26 @@ import {
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
 import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
-import { buildContextWindow } from './context.js';
+import {
+  ContextOverflowError,
+  buildContextOverflowMessage,
+  detectConversationLanguage,
+  isContextOverflowError,
+  isSyntheticUserMessage,
+  manageContext,
+  measureContext,
+  normalizeContextState,
+  recordProviderUsage,
+  resolveContextBudget,
+  spillToolResultIfLarge,
+  type ContextBudget,
+  type ContextState,
+  type ManageReason,
+  type SummarizeFn,
+} from './compaction/index.js';
+import { estimateTokens, estimateToolSchemaTokens } from './tokenEstimation.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
-  buildOdinRuntimeSection,
   executeOdinFixSkill,
   executeOdinSearchSkills,
   executeOdinUploadSkill,
@@ -2850,39 +2865,39 @@ function normalizePlan(input: unknown): PlanItem[] {
     .filter((entry): entry is PlanItem => entry !== null);
 }
 
-async function buildProviderMessages(
-  context: ContextBuildResult,
-  cwd: string,
-  permissionMode: ReturnType<PermissionManager['getMode']>,
-  autonomyMode: SessionAutonomyMode,
-  profile: 'main' | AgentRole,
-  evidenceDigest?: string,
-  nativeToolRuntime = false,
-  extensionSections: string[] = [],
-): Promise<SessionMessage[]> {
+/**
+ * The system message of a run. It must stay byte-identical between requests
+ * so providers can reuse their prompt cache: only stable sections go here
+ * (prompt, project instructions, MCP sections, the memory index). Anything
+ * that depends on the current request (recalled memories, activated skills,
+ * evidence) goes into the per-run context message instead.
+ */
+async function buildStableSystemContent(input: {
+  cwd: string;
+  permissionMode: ReturnType<PermissionManager['getMode']>;
+  autonomyMode: SessionAutonomyMode;
+  profile: 'main' | AgentRole;
+  nativeToolRuntime: boolean;
+  modelSeesImages: boolean;
+}): Promise<string> {
   const systemSections = await buildStableProviderSystemSections({
-    cwd,
-    permissionMode,
-    autonomyMode,
-    profile,
-    nativeToolRuntime,
+    cwd: input.cwd,
+    permissionMode: input.permissionMode,
+    autonomyMode: input.autonomyMode,
+    profile: input.profile,
+    nativeToolRuntime: input.nativeToolRuntime,
   });
-  const latestUserMessage = [...context.messages]
-    .reverse()
-    .find((message) => message.role === 'user' && message.content.trim())?.content.trim();
 
   try {
     const {
       ensureMemoryMigrated,
       loadIndexText,
-      listMemories,
-      recallRelevant,
       scopesCollide,
     } = await import('../storage/memoryFiles.js');
-    await ensureMemoryMigrated(cwd);
-    const collided = scopesCollide(cwd);
-    const globalIndex = await loadIndexText(cwd, 'global');
-    const projectIndex = collided ? '' : await loadIndexText(cwd, 'project');
+    await ensureMemoryMigrated(input.cwd);
+    const collided = scopesCollide(input.cwd);
+    const globalIndex = await loadIndexText(input.cwd, 'global');
+    const projectIndex = collided ? '' : await loadIndexText(input.cwd, 'project');
 
     systemSections.push(
       '🧠 Long-term memory: proactively persist durable knowledge with the memory tool — when the user states a lasting preference or correction, and after completing a significant task whose conclusions matter beyond this session. Update or delete entries the conversation has contradicted. Do not save session-only details or facts already recorded in the repo.',
@@ -2900,67 +2915,121 @@ async function buildProviderMessages(
         systemSections.push(truncate(projectIndex, 4000));
       }
       systemSections.push('');
-
-      if (latestUserMessage) {
-        const allEntries = [
-          ...(await listMemories(cwd, 'global')),
-          ...(collided ? [] : await listMemories(cwd, 'project')),
-        ];
-        const recalled = recallRelevant(latestUserMessage, allEntries, 3);
-        if (recalled.length > 0) {
-          systemSections.push('🧠 [Recalled Memories — may be stale; verify files/commands still exist before relying on them]');
-          systemSections.push(...recalled.map((entry) =>
-            `## ${entry.name} [${entry.category}]\n${truncate(entry.content, 600)}`));
-          systemSections.push('');
-        }
-      }
     }
   } catch {
     // Long-term memory is opportunistic context; failures must not block the turn.
   }
 
-  try {
-    if (latestUserMessage) {
+  systemSections.push(CONTEXT_COMPACTION_SYSTEM_NOTE);
+  if (!input.modelSeesImages) {
+    systemSections.push(VIEW_IMAGE_UNAVAILABLE_SECTION);
+  }
+  return systemSections.join('\n\n');
+}
+
+const CONTEXT_COMPACTION_SYSTEM_NOTE =
+  'Context management: long conversations are compacted automatically. When the history starts with a "[Context compacted]" message, it holds a structured summary of the earlier conversation and names the archive file with the full earlier history; read that file when exact earlier details matter. Old tool results may be replaced by one-line placeholders that name the file holding the full output.';
+
+const RUN_CONTEXT_MESSAGE_NAME = 'runtime_context';
+
+/** Task board and plan as plain text, re-attached after a compaction. */
+function renderTaskBoardForRestore(session: SessionRecord): string | undefined {
+  const lines: string[] = [];
+  const tasks = session.tasks ?? [];
+  if (tasks.length > 0) {
+    lines.push('Tasks:');
+    for (const task of tasks) lines.push(`- [${task.status}] ${task.content}`);
+  }
+  const plan = session.plan ?? [];
+  if (plan.length > 0) {
+    lines.push('Plan:');
+    for (const item of plan) lines.push(`- [${item.status}] ${item.content}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+/**
+ * Per-run context, computed once from the request that started the run and
+ * sent as a message just before that request (never in the system prompt),
+ * so the cached prefix of the conversation stays reusable.
+ */
+async function buildRunContextContent(input: {
+  cwd: string;
+  latestUserMessage?: string;
+  extensionSections: string[];
+  evidenceDigest?: string;
+}): Promise<string | undefined> {
+  const sections: string[] = [];
+  const latestUserMessage = input.latestUserMessage?.trim();
+
+  if (latestUserMessage) {
+    try {
+      const {
+        listMemories,
+        recallRelevant,
+        scopesCollide,
+      } = await import('../storage/memoryFiles.js');
+      const collided = scopesCollide(input.cwd);
+      const allEntries = [
+        ...(await listMemories(input.cwd, 'global')),
+        ...(collided ? [] : await listMemories(input.cwd, 'project')),
+      ];
+      const recalled = recallRelevant(latestUserMessage, allEntries, 3);
+      if (recalled.length > 0) {
+        sections.push([
+          '🧠 [Recalled Memories — may be stale; verify files/commands still exist before relying on them]',
+          ...recalled.map((entry) => `## ${entry.name} [${entry.category}]\n${truncate(entry.content, 600)}`),
+        ].join('\n'));
+      }
+    } catch {
+      // Opportunistic context.
+    }
+
+    try {
       const { getMemoryProfile, MemoryEnhancementFactory } = await import('./memoryEnhancement.js');
-      const memoryProfile = await getMemoryProfile(cwd);
+      const memoryProfile = await getMemoryProfile(input.cwd);
       if (memoryProfile.enabled) {
-        const memory = await MemoryEnhancementFactory.create(memoryProfile, cwd);
+        const memory = await MemoryEnhancementFactory.create(memoryProfile, input.cwd);
         await memory.initialize();
         const memories = await memory.searchMemories(latestUserMessage, 5);
         if (memories.length > 0) {
-          systemSections.push('🧠 [Enhanced Memory: Relevant Retrieved Context]');
-          systemSections.push(...memories.map((entry) => `- ${truncate(entry.text, 360)}`));
-          systemSections.push('');
+          sections.push([
+            '🧠 [Enhanced Memory: Relevant Retrieved Context]',
+            ...memories.map((entry) => `- ${truncate(entry.text, 360)}`),
+          ].join('\n'));
         }
       }
+    } catch {
+      // Enhanced memory retrieval failures must not block the turn.
     }
-  } catch {
-    // Enhanced memory is opportunistic context; retrieval failures must not block the turn.
   }
 
-  if (extensionSections.length > 0) {
-    systemSections.push(...extensionSections);
+  sections.push(...input.extensionSections.filter((section) => section.trim()));
+  if (input.evidenceDigest?.trim()) {
+    sections.push(`Repository evidence:\n${input.evidenceDigest.trim()}`);
   }
-
-  if (context.summary) {
-    systemSections.push('Conversation summary:');
-    systemSections.push(context.summary);
-  }
-
-  if (evidenceDigest) {
-    systemSections.push('Repository evidence:');
-    systemSections.push(evidenceDigest);
-  }
-
+  if (sections.length === 0) return undefined;
   return [
-    {
-      id: 'system',
-      role: 'system',
-      content: systemSections.join('\n\n'),
-      createdAt: new Date().toISOString(),
-    },
-    ...context.messages,
-  ];
+    '[Runtime context for this request — supplied by Artemis (skills, memories, evidence); background reference, not written by the user]',
+    ...sections,
+  ].join('\n\n');
+}
+
+/**
+ * Conversation messages for a request: the stored history with the per-run
+ * context inserted right before the message that started the run (or after
+ * the compaction boundary when that message was summarized away).
+ */
+function insertRunContext(
+  history: SessionMessage[],
+  runContext: SessionMessage | undefined,
+  runUserMessageId: string | undefined,
+): SessionMessage[] {
+  if (!runContext) return history;
+  const at = runUserMessageId ? history.findIndex((message) => message.id === runUserMessageId) : -1;
+  if (at >= 0) return [...history.slice(0, at), runContext, ...history.slice(at)];
+  const afterBoundary = history[0]?.compaction ? 1 : 0;
+  return [...history.slice(0, afterBoundary), runContext, ...history.slice(afterBoundary)];
 }
 
 function extractLatestUserRequest(
@@ -3102,14 +3171,15 @@ function serializeToolPayload(input: {
   toolName?: string;
   output: string;
   error?: ToolError;
-  maxChars?: number;
+  /** null keeps the whole output (large outputs are spilled to a file instead). */
+  maxChars?: number | null;
 }): string {
   return JSON.stringify(
     {
       ok: input.ok,
       ...(input.action ? { action: input.action } : {}),
       ...(input.toolName ? { toolName: input.toolName } : {}),
-      output: truncate(input.output, input.maxChars ?? 10_000),
+      output: input.maxChars === null ? input.output : truncate(input.output, input.maxChars ?? 10_000),
       ...(input.error ? { error: input.error } : {}),
     },
     null,
@@ -3117,25 +3187,23 @@ function serializeToolPayload(input: {
   );
 }
 
+/**
+ * Tool result as stored in history. The output is kept whole here; results
+ * above the inline budget are spilled to a file (preview + path) by the
+ * caller, so nothing is silently cut.
+ */
 function formatToolResult(
   action: AgentAction,
   ok: boolean,
   output: string,
   error?: ToolError,
 ): string {
-  const maxChars =
-    action.type === 'read_file' ||
-    action.type === 'mcp_read_resource' ||
-    action.type === 'mcp_get_prompt'
-      ? 24_000
-      : 10_000;
-
   return serializeToolPayload({
     action,
     ok,
     output,
     error,
-    maxChars,
+    maxChars: null,
   });
 }
 
@@ -3601,6 +3669,22 @@ export type RunAgentOptions = {
    * never abort in-flight work.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Provider for compaction summaries: the worker/specialist model when one
+   * is configured, else the main model. Defaults to the active provider.
+   */
+  resolveSummarizerProvider?: () => ChatProvider;
+  /** Context-management settings (setup.agent.compression). */
+  compaction?: {
+    /** False disables proactive compaction; overflow recovery stays on. */
+    enabled?: boolean;
+    /** Proactive trigger as a fraction of the effective window. */
+    thresholdRatio?: number;
+    /** Optional cap below the model window, for cost control. */
+    maxContextTokens?: number;
+  };
+  /** Called with a short user-facing line whenever the history is compacted. */
+  onContextCompaction?: (notice: string) => void;
 };
 
 const RUNNING_INTERJECTION_POLL_MS = 750;
@@ -6148,11 +6232,156 @@ export async function runAgent(
     return accepted;
   };
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
-  const odinRuntimeSection = await buildOdinRuntimeSection({
-    cwd: options.cwd,
-    prompt: userInput,
-    profile,
-  });
+
+  // ── Context management (see core/compaction) ──────────────────────────────
+  // The message that started this run; the per-run context goes right before it.
+  const runUserMessageId = [...session.messages]
+    .reverse()
+    .find((message) => message.role === 'user' && !isSyntheticUserMessage(message))?.id;
+  const contextStorage = options.sessionStore.getContextStorage(session);
+  const contextState: ContextState = normalizeContextState(session.metadata?.context);
+  const persistContextState = (): void => {
+    session.metadata = { ...(session.metadata ?? {}), context: contextState };
+  };
+  const contextLanguage = detectConversationLanguage(
+    session.messages,
+    options.locale === 'zh-CN' ? 'zh' : 'en',
+  );
+  const budgetFor = (provider: ChatProvider): ContextBudget => {
+    const windows = [options.contextLength, provider.contextWindow]
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    return resolveContextBudget({
+      contextWindow: windows.length > 0 ? Math.min(...windows) : undefined,
+      maxOutputTokens: provider.maxOutputTokens,
+      thresholdRatio: options.compaction?.thresholdRatio,
+      maxContextTokens: options.compaction?.maxContextTokens,
+    });
+  };
+  let currentBudget = budgetFor(options.resolveProvider?.(profile) ?? options.provider);
+  const summarizerProvider = (): ChatProvider =>
+    options.resolveSummarizerProvider?.() ?? options.resolveProvider?.(profile) ?? options.provider;
+  const summarize: SummarizeFn = async ({ system, prompt }) => {
+    const provider = summarizerProvider();
+    const now = new Date().toISOString();
+    const response = await provider.complete([
+      { id: 'compaction-system', role: 'system', content: system, createdAt: now },
+      { id: 'compaction-request', role: 'user', content: prompt, createdAt: now },
+    ], { abortSignal: options.abortSignal });
+    return response.text ?? '';
+  };
+  // Stable system content, rebuilt only when what it depends on changes.
+  let systemCache: { key: string; content: string } | undefined;
+  const getSystemContent = async (nativeTools: boolean, modelSeesImages: boolean): Promise<string> => {
+    const permissionMode = options.permissionManager.getMode();
+    const autonomyMode = session.autonomyMode ?? 'standard';
+    const key = JSON.stringify([options.cwd, permissionMode, autonomyMode, profile, nativeTools, modelSeesImages]);
+    if (systemCache?.key !== key) {
+      systemCache = {
+        key,
+        content: await buildStableSystemContent({
+          cwd: options.cwd,
+          permissionMode,
+          autonomyMode,
+          profile,
+          nativeToolRuntime: nativeTools,
+          modelSeesImages,
+        }),
+      };
+    }
+    return systemCache.content;
+  };
+  // Per-run context: computed once, so every request of the run is identical
+  // up to the newest messages.
+  let runContextMessage: SessionMessage | undefined;
+  let runContextReady = false;
+  const getRunContextMessage = async (): Promise<SessionMessage | undefined> => {
+    if (runContextReady) return runContextMessage;
+    runContextReady = true;
+    const evidenceGraph = await options.sessionStore.loadEvidenceGraph(session.rootSessionId ?? session.id);
+    const scopedEvidenceGraph = scopeEvidenceGraphForSession(evidenceGraph, session);
+    const evidenceDigest = buildEvidenceDigest(
+      scopedEvidenceGraph,
+      profile === 'main' ? 1_800 : 900,
+      profile === 'main' ? 'full' : 'compact',
+    );
+    if (evidenceDigest) {
+      options.onInfo?.(
+        `[evidence] digest claims=${scopedEvidenceGraph.claims.length} edges=${scopedEvidenceGraph.edges.length}`,
+      );
+    }
+    const content = await buildRunContextContent({
+      cwd: options.cwd,
+      latestUserMessage: userInput,
+      extensionSections: extensionRuntime.sections,
+      evidenceDigest,
+    });
+    runContextMessage = content
+      ? {
+        id: `run-context-${session.id}-${runUserMessageId ?? 'start'}`,
+        role: 'user',
+        name: RUN_CONTEXT_MESSAGE_NAME,
+        content,
+        createdAt: new Date().toISOString(),
+      }
+      : undefined;
+    return runContextMessage;
+  };
+  /**
+   * Bring the stored history within budget and build the request messages.
+   * Compaction rewrites `session.messages` and is persisted immediately.
+   */
+  const prepareRequestMessages = async (input: {
+    provider: ChatProvider;
+    system: string;
+    nativeFunctionTools: unknown[] | undefined;
+    reason: ManageReason;
+  }): Promise<{ messages: SessionMessage[]; fixedTokens: number; sentCount: number }> => {
+    currentBudget = budgetFor(input.provider);
+    const runContext = await getRunContextMessage();
+    const fixedTokens =
+      estimateTokens(input.system) +
+      (runContext ? estimateTokens(runContext.content) + 4 : 0) +
+      estimateToolSchemaTokens(input.nativeFunctionTools);
+    const managed = await manageContext({
+      messages: session.messages,
+      fixedTokens,
+      budget: currentBudget,
+      state: contextState,
+      storage: contextStorage,
+      summarize,
+      summarizerWindow: summarizerProvider().contextWindow,
+      restore: {
+        cwd: options.cwd,
+        taskBoard: renderTaskBoardForRestore(session),
+        extraPaths: session.changedFiles,
+      },
+      reason: input.reason,
+      proactive: options.compaction?.enabled !== false,
+      language: contextLanguage,
+    });
+    if (managed.changed) {
+      session.messages = managed.messages;
+      if (managed.summary) session.summary = managed.summary;
+      persistContextState();
+      await options.sessionStore.save(session);
+    }
+    if (managed.notice) {
+      options.onInfo?.(managed.notice);
+      options.onContextCompaction?.(managed.notice);
+    }
+    const measured = measureContext(contextState, session.messages, fixedTokens);
+    options.onInfo?.(
+      `[context] tokens~${measured.tokens}/${currentBudget.window} threshold=${currentBudget.threshold} source=${measured.source} messages=${session.messages.length}`,
+    );
+    return {
+      messages: [
+        { id: 'system', role: 'system', content: input.system, createdAt: new Date(0).toISOString() },
+        ...insertRunContext(session.messages, runContext, runUserMessageId),
+      ],
+      fixedTokens,
+      sentCount: session.messages.length,
+    };
+  };
 
   try {
     if (extensionRuntime.activeSkills.length > 0) {
@@ -6174,9 +6403,6 @@ export async function runAgent(
           .join(',')}`,
       );
     }
-    if (odinRuntimeSection) {
-      options.onInfo?.('[odin] matched reusable skills for the current request');
-    }
     if (extensionRuntime.gatedPlugins.length > 0) {
       options.onInfo?.(
         `[plugins] gated=${extensionRuntime.gatedPlugins
@@ -6190,12 +6416,21 @@ export async function runAgent(
       options.sessionStore.appendMessage(
         session,
         'tool',
-        formatToolResult(
-          outcome.action,
-          outcome.ok,
-          outcome.output,
-          outcome.error,
-        ),
+        spillToolResultIfLarge(
+          formatToolResult(
+            outcome.action,
+            outcome.ok,
+            outcome.output,
+            outcome.error,
+          ),
+          {
+            storage: contextStorage,
+            toolName: outcome.action.type,
+            inlineTokens: currentBudget.inlineToolResultTokens,
+            inlineReadTokens: currentBudget.inlineReadTokens,
+            previewTokens: currentBudget.toolPreviewTokens,
+          },
+        ).content,
         outcome.action.type,
       );
 
@@ -6407,12 +6642,22 @@ export async function runAgent(
         outcomes.push(outcome);
         toolOutputs.push({
           callId: call.callId,
-          output: serializeToolPayload({
-            ok: outcome.ok,
-            action: mapped.action,
-            output: outcome.output,
-            error: outcome.error,
-          }),
+          output: spillToolResultIfLarge(
+            serializeToolPayload({
+              ok: outcome.ok,
+              action: mapped.action,
+              output: outcome.output,
+              error: outcome.error,
+              maxChars: null,
+            }),
+            {
+              storage: contextStorage,
+              toolName: mapped.action.type,
+              inlineTokens: currentBudget.inlineToolResultTokens,
+              inlineReadTokens: currentBudget.inlineReadTokens,
+              previewTokens: currentBudget.toolPreviewTokens,
+            },
+          ).content,
         });
       }
 
@@ -6502,47 +6747,9 @@ export async function runAgent(
     // itself fails while the flag is off.
     const modelSeesImages = activeProvider.supportsImages === true;
     viewedImages.acceptsImages = modelSeesImages;
-    const context = await buildContextWindow(session, profile, {
-      cwd: options.cwd,
-      contextLength: options.contextLength,
-    });
-    session.summary = context.summary;
-    options.onInfo?.(
-      `[context] included=${context.stats.includedMessages}/${context.stats.totalMessages} summarized=${context.stats.summarizedMessages} chars~${context.stats.approxChars}`,
+    const latestUserRequest = extractLatestUserRequest(
+      session.messages.filter((message) => !isSyntheticUserMessage(message)),
     );
-    const evidenceGraph = await options.sessionStore.loadEvidenceGraph(
-      session.rootSessionId ?? session.id,
-    );
-    const scopedEvidenceGraph = scopeEvidenceGraphForSession(
-      evidenceGraph,
-      session,
-    );
-    const evidenceDigest = buildEvidenceDigest(
-      scopedEvidenceGraph,
-      profile === 'main' ? 1_800 : 900,
-      profile === 'main' ? 'full' : 'compact',
-    );
-    if (evidenceDigest) {
-      options.onInfo?.(
-        `[evidence] digest claims=${scopedEvidenceGraph.claims.length} edges=${scopedEvidenceGraph.edges.length}`,
-      );
-    }
-
-    const providerMessages = await buildProviderMessages(
-      context,
-      options.cwd,
-      options.permissionManager.getMode(),
-      session.autonomyMode ?? 'standard',
-      profile,
-      evidenceDigest,
-      activeProvider.supportsNativeToolCalls === true,
-      [
-        ...extensionRuntime.sections,
-        ...(odinRuntimeSection ? [odinRuntimeSection] : []),
-        ...(modelSeesImages ? [] : [VIEW_IMAGE_UNAVAILABLE_SECTION]),
-      ],
-    );
-    const latestUserRequest = extractLatestUserRequest(context.messages);
     if (turn === 1) {
       await recordHeimdallStage(
         options.sessionStore,
@@ -6613,6 +6820,17 @@ export async function runAgent(
       );
     }
     const nativeFunctionTools = nativeToolRuntime?.tools;
+    const systemContent = await getSystemContent(
+      activeProvider.supportsNativeToolCalls === true,
+      modelSeesImages,
+    );
+    let prepared = await prepareRequestMessages({
+      provider: activeProvider,
+      system: systemContent,
+      nativeFunctionTools,
+      reason: 'proactive',
+    });
+    let providerMessages = prepared.messages;
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after.
     const requestImages = takeRequestImages(
@@ -6627,14 +6845,14 @@ export async function runAgent(
     // supports it. We forward each delta as a `[stream-chunk]` info line,
     // which the workflow renderer accumulates into a per-stage live buffer
     // and shows as it arrives in the terminal UI.
-    let completion: ProviderResponse;
-    if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
+    const requestCompletion = async (messages: SessionMessage[]): Promise<ProviderResponse> => {
+      if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
         const onInfoCallback = options.onInfo;
         onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
         try {
-          completion = await completeProviderTurn(
+          return await completeProviderTurn(
             activeProvider,
-            providerMessages,
+            messages,
             {
               ...providerCallOptions,
             },
@@ -6649,11 +6867,43 @@ export async function runAgent(
         } finally {
           onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
         }
-    } else {
-      completion = await completeProviderTurn(activeProvider, providerMessages, {
+      }
+      return completeProviderTurn(activeProvider, messages, {
         ...providerCallOptions,
       });
+    };
+    let completion: ProviderResponse;
+    try {
+      completion = await requestCompletion(providerMessages);
+    } catch (error) {
+      if (!isContextOverflowError(error) || options.abortSignal?.aborted) throw error;
+      // The provider counted more than the estimate allowed for: compact
+      // hard, persist, and retry once.
+      options.onInfo?.(`[context] provider rejected the request as too large; compacting and retrying once`);
+      prepared = await prepareRequestMessages({
+        provider: activeProvider,
+        system: systemContent,
+        nativeFunctionTools,
+        reason: 'overflow',
+      });
+      providerMessages = prepared.messages;
+      try {
+        completion = await requestCompletion(providerMessages);
+      } catch (retryError) {
+        if (!isContextOverflowError(retryError)) throw retryError;
+        const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
+        throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
+      }
     }
+    // The first request of the turn carried exactly the stored history, so
+    // its provider count anchors the next measurement.
+    recordProviderUsage(
+      contextState,
+      completion.usage,
+      session.messages.slice(0, prepared.sentCount),
+      prepared.fixedTokens,
+    );
+    persistContextState();
     completion = await runNativeToolLoop(
       activeProvider,
       providerMessages,
@@ -6667,6 +6917,12 @@ export async function runAgent(
       const usageBits: string[] = [];
       if (typeof completion.usage.promptTokens === 'number') {
         usageBits.push(`prompt=${completion.usage.promptTokens}`);
+      }
+      if (typeof completion.usage.cacheReadTokens === 'number') {
+        usageBits.push(`cache_read=${completion.usage.cacheReadTokens}`);
+      }
+      if (typeof completion.usage.cacheCreationTokens === 'number') {
+        usageBits.push(`cache_write=${completion.usage.cacheCreationTokens}`);
       }
       if (typeof completion.usage.completionTokens === 'number') {
         usageBits.push(`completion=${completion.usage.completionTokens}`);
