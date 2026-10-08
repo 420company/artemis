@@ -8258,6 +8258,78 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   }
 }
 
+// ── MCP stdio transport ───────────────────────────────────────────────────────
+
+{
+  // The MCP stdio transport is newline-delimited JSON. Servers built on the
+  // official SDKs speak only that; LSP-style Content-Length frames stay
+  // accepted, and a stray non-JSON log line on stdout must not break a call.
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-stdio-'))
+  const serverSource = (framing: 'newline' | 'content-length', noisy: boolean) => `
+const write = (m) => {
+  const body = JSON.stringify(m)
+  process.stdout.write(${framing === 'newline' ? "body + '\\n'" : "'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body"})
+}
+${noisy ? "process.stdout.write('server starting...\\n')" : ''}
+let buf = ''
+process.stdin.on('data', (chunk) => {
+  buf += chunk
+  for (;;) {
+    let line
+    const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+    if (m) {
+      const end = m[0].length + Number(m[1])
+      if (buf.length < end) return
+      line = buf.slice(m[0].length, end)
+      buf = buf.slice(end)
+    } else {
+      const i = buf.indexOf('\\n')
+      if (i < 0) return
+      line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+    }
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'smoke', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] } })
+    else if (msg.method === 'tools/call') write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo:' + msg.params.arguments.text }] } })
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`
+  const cases: [string, 'newline' | 'content-length', boolean][] = [
+    ['newline-delimited JSON (MCP spec, official SDKs)', 'newline', false],
+    ['LSP-style Content-Length frames', 'content-length', false],
+    ['a stray log line on stdout before the first message', 'newline', true],
+  ]
+  for (const [label, framing, noisy] of cases) {
+    const file = path.join(dir, `${framing}-${noisy}.mjs`)
+    fs.writeFileSync(file, serverSource(framing, noisy))
+    const server = {
+      id: `smoke-${framing}-${noisy}`,
+      enabled: true,
+      transport: 'stdio' as const,
+      command: process.execPath,
+      commandArgs: [file],
+      authType: 'none' as const,
+      authState: 'unknown' as const,
+      createdAt: '',
+      updatedAt: '',
+    }
+    let output = ''
+    try {
+      output = (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output
+    } catch (error) {
+      output = error instanceof Error ? error.message : String(error)
+    }
+    assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
+  }
+  await closeCachedMcpClients()
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 console.log()

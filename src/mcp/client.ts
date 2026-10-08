@@ -1678,44 +1678,66 @@ class StdioRpcTransport implements RpcTransport {
     this.pending.clear();
   }
 
-  private drainFrames(): void {
-    while (this.buffer.length > 0) {
+  /**
+   * Takes the next complete message off the buffer, or undefined when more
+   * bytes are needed. The MCP stdio transport is newline-delimited JSON;
+   * LSP-style `Content-Length` frames are still accepted from servers that
+   * use them.
+   */
+  private nextMessage(): { body: string; framed: boolean } | undefined {
+    const head = this.buffer.subarray(0, 64).toString('utf8').trimStart();
+    if (/^content-length:/i.test(head)) {
       const separatorIndex = this.buffer.indexOf('\r\n\r\n');
       if (separatorIndex < 0) {
-        return;
+        return undefined;
       }
-
-      const headerText = this.buffer
-        .subarray(0, separatorIndex)
-        .toString('utf8');
-      const contentLengthMatch = headerText.match(/Content-Length:\s*(\d+)/i);
-      if (!contentLengthMatch) {
-        this.rejectPending(
-          new Error('stdio server returned a frame without Content-Length.'),
-        );
-        this.buffer = Buffer.alloc(0);
-        return;
-      }
-
-      const contentLength = Number.parseInt(contentLengthMatch[1] ?? '', 10);
+      const headerText = this.buffer.subarray(0, separatorIndex).toString('utf8');
+      const contentLength = Number.parseInt(
+        headerText.match(/Content-Length:\s*(\d+)/i)?.[1] ?? '',
+        10,
+      );
       const bodyStart = separatorIndex + 4;
       const bodyEnd = bodyStart + contentLength;
       if (this.buffer.length < bodyEnd) {
-        return;
+        return undefined;
       }
-
       const body = this.buffer.subarray(bodyStart, bodyEnd).toString('utf8');
       this.buffer = this.buffer.subarray(bodyEnd);
+      return { body, framed: true };
+    }
+
+    const newline = this.buffer.indexOf(0x0a);
+    if (newline < 0) {
+      return undefined;
+    }
+    const body = this.buffer.subarray(0, newline).toString('utf8').replace(/\r$/, '');
+    this.buffer = this.buffer.subarray(newline + 1);
+    return { body, framed: false };
+  }
+
+  private drainFrames(): void {
+    while (this.buffer.length > 0) {
+      const message = this.nextMessage();
+      if (!message) {
+        return;
+      }
+      if (!message.body.trim()) {
+        continue;
+      }
 
       let payload: unknown;
       try {
-        payload = JSON.parse(body) as unknown;
+        payload = JSON.parse(message.body) as unknown;
       } catch (error) {
-        this.rejectPending(
-          new Error(
-            `stdio server returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
+        // A framed message must be JSON. A stray non-JSON line is a server
+        // logging to stdout by mistake: skip it rather than fail the call.
+        if (message.framed) {
+          this.rejectPending(
+            new Error(
+              `stdio server returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        }
         continue;
       }
 
@@ -1764,7 +1786,9 @@ class StdioRpcTransport implements RpcTransport {
     const body = expectResponse
       ? buildRpcRequest(++this.requestId, method, params)
       : buildRpcNotification(method, params);
-    const frame = `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`;
+    // MCP stdio transport: one JSON-RPC message per line (JSON.stringify
+    // never emits a raw newline inside the message).
+    const frame = `${body}\n`;
 
     if (!expectResponse) {
       child.stdin.write(frame, 'utf8');
