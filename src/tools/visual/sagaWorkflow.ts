@@ -323,7 +323,12 @@ function isSagaWorkflowSupportDiscussion(text: string): boolean {
 }
 
 function extractTargetDuration(text: string): number | undefined {
-  const normalized = compact(text);
+  // A timecoded brief states its own length: the end of its last timecode,
+  // not the first "N秒" (which is usually a dialogue's "约 3 秒").
+  const timeline = timecodeTotalSeconds(text);
+  if (timeline) return timeline;
+  // "（约 3 秒，温柔低语）" describes a line or a beat, not the whole video.
+  const normalized = compact(text.replace(/（[^（）\n]*）|\([^()\n]*\)/g, ' '));
   const zhMinute = normalized.match(/(\d{1,3})\s*(?:分钟|分)/);
   if (zhMinute) return Number.parseInt(zhMinute[1] ?? '', 10) * 60;
   const zhSecond = normalized.match(/(\d{1,4})\s*秒/);
@@ -335,12 +340,32 @@ function extractTargetDuration(text: string): number | undefined {
   return undefined;
 }
 
+const TIMECODE_TOKEN_SOURCE = '\\d+(?::\\d{1,2}){0,2}(?:\\.\\d+)?';
+const TIMECODE_UNIT_SOURCE = '(?:\\s*(?:秒|s|sec|seconds))?';
+
+/** End of the last timecode ("[16-24秒]", "[1:04-1:12]", "0:08-0:16:") when a brief has two or more. */
+function timecodeTotalSeconds(text: string): number | undefined {
+  const range = `(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}\\s*[-–—~至到]\\s*(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}`;
+  const bracketed = Array.from(text.matchAll(new RegExp(`\\[\\s*${range}\\s*\\]`, 'gi')));
+  const markers = bracketed.length >= 2
+    ? bracketed
+    : Array.from(text.matchAll(new RegExp(`(?:^|\\n)\\s*${range}\\s*[:：]`, 'gi')));
+  const toSeconds = (token: string) => token.split(':').map(Number).reduce((total, part) => total * 60 + part, 0);
+  const ends = markers
+    .map((match) => ({ start: toSeconds(match[1] ?? ''), end: toSeconds(match[2] ?? '') }))
+    .filter((range) => Number.isFinite(range.end) && range.end > range.start)
+    .map((range) => range.end);
+  return ends.length >= 2 ? Math.round(Math.max(...ends)) : undefined;
+}
+
 function clampDuration(seconds: number | undefined): number | undefined {
   if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return undefined;
   return Math.max(10, Math.min(600, Math.floor(seconds)));
 }
 
 function estimateDuration(text: string): number {
+  const timeline = clampDuration(timecodeTotalSeconds(text));
+  if (timeline) return timeline;
   const chars = compact(text).length;
   if (chars > 1600) return 180;
   if (chars > 900) return 120;

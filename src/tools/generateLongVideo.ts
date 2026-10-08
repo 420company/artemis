@@ -760,6 +760,9 @@ function buildSegments(options: {
     ? plannedShots.length
     : Math.max(1, Math.ceil(options.totalSeconds / Math.max(4, Math.min(options.preferredSegmentSeconds, 6))));
   const segmentCount = Math.min(requestedSegmentCount, maxSegmentsByTotal);
+  if (plannedShots.length > segmentCount) {
+    toolWarn(`⚠️ Saga: ${plannedShots.length} 个镜头放不进 ${options.totalSeconds}s（最多 ${segmentCount} 段）；第 ${segmentCount + 1}-${plannedShots.length} 个镜头不会生成。`);
+  }
   const plannedDurationSum = plannedShots.reduce((sum, shot) => (
     typeof shot.duration === 'number' && Number.isFinite(shot.duration) ? sum + Math.max(0, shot.duration) : sum
   ), 0);
@@ -1112,7 +1115,7 @@ export async function executeGenerateLongVideo(
     const identitySource = action.identitySource;
     const limits = resolveVideoModelLimits(provider, model);
     const ratio = resolveRatio(action.ratio);
-    const totalSeconds = clampTotalSeconds(action.totalDuration ?? action.duration);
+    let totalSeconds = clampTotalSeconds(action.totalDuration ?? action.duration);
     const projectId = normalizeProjectId(action.projectId);
     const fps: SagaFps = (action.fps as SagaFps | undefined) ?? 30;
     const quality: SagaQuality = (action.quality as SagaQuality | undefined) ?? 'standard';
@@ -1180,6 +1183,26 @@ export async function executeGenerateLongVideo(
     }
     story = languageNormalized.generationText;
     toolLog(`🌐 Saga Visual Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
+    // ALWAYS parse timestamped shots first. When the user supplied an explicit
+    // [X-Y秒] timeline, that is the authoritative segmentation and takes
+    // priority over any agent-supplied shots array (which is typically empty
+    // or generic boilerplate when saga flows through the LLM).
+    // CRITICAL: parse timecodes from the ORIGINAL user text (before LLM
+    // rewrite). LLM rewrite condenses the brief into a paragraph and strips
+    // out [X-Y秒] markers, which would force the planner to default to its
+    // own segment count (totalSeconds / preferred) instead of honouring the
+    // user's intended segmentation. Generic — works for any user format.
+    const timecodeSource = languageNormalized.originalText || story;
+    const timestampedStoryShots = parseTimestampedShotsFromStory(timecodeSource, limits.maxSegmentSeconds, totalSeconds);
+    // A timecoded segment is never dropped to meet a shorter total: the
+    // brief's own timeline wins, with a warning, so every segment the user
+    // wrote is generated.
+    const timecodedSeconds = timestampedStoryShots.reduce((sum, shot) => sum + (shot.duration ?? 0), 0);
+    if (timestampedStoryShots.length >= 2 && timecodedSeconds > totalSeconds * 1.15 + 1) {
+      const kept = clampTotalSeconds(timecodedSeconds);
+      toolWarn(`⚠️ Saga: 剧本时间码共 ${timecodedSeconds}s（${timestampedStoryShots.length} 段），长于请求的 ${totalSeconds}s；按时间码生成全部分段（${kept}s），不丢弃任何一段。`);
+      totalSeconds = kept;
+    }
     const title = deriveVideoTitle(action, rawStory);
     const generatedAt = new Date();
     const localGeneratedAt = formatLocalTimestamp(generatedAt);
@@ -1211,18 +1234,7 @@ export async function executeGenerateLongVideo(
       storyboardImagePaths.push(resolved.absolute);
     }
     const storyboardParseResults: Array<{ imagePath: string; parsed: unknown }> = [];
-    // ALWAYS parse timestamped shots first. When the user supplied an explicit
-    // [X-Y秒] timeline, that is the authoritative segmentation and takes
-    // priority over any agent-supplied shots array (which is typically empty
-    // or generic boilerplate when saga flows through the LLM).
-    // CRITICAL: parse timecodes from the ORIGINAL user text (before LLM
-    // rewrite). LLM rewrite condenses the brief into a paragraph and strips
-    // out [X-Y秒] markers, which would force the planner to default to its
-    // own segment count (totalSeconds / preferred) instead of honouring the
-    // user's intended segmentation. Generic — works for any user format.
-    const timecodeSource = languageNormalized.originalText || story;
-    const timestampedStoryShots = parseTimestampedShotsFromStory(timecodeSource, limits.maxSegmentSeconds, totalSeconds);
-    let storyboardShots = timestampedStoryShots.length >= 2
+    let storyboardShots: SagaShotInput[] = timestampedStoryShots.length >= 2
       ? timestampedStoryShots
       : (action.shots?.length ? action.shots : []);
     if (timestampedStoryShots.length >= 2) {
