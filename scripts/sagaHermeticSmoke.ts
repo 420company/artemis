@@ -161,6 +161,14 @@ function titleChecks(): void {
     'structure lines and timecodes are skipped',
   );
   assert.equal(deriveTitleFromBrief('[原样直传]\n---'), undefined, 'nothing usable falls back to the default title');
+  assert.equal(deriveTitleFromBrief('帮我生成一段长视频\n\n[0-5秒] 镜头1：女孩推开旧影院的门。'), '女孩推开旧影院的门', 'request preambles are skipped');
+  assert.equal(deriveTitleFromBrief('/saga 30秒长视频\n女孩在雨中奔跑。'), '女孩在雨中奔跑');
+  assert.equal(deriveTitleFromBrief('Make me a 60 second long video.\nA girl runs in the rain.'), 'A girl runs in the rain');
+  assert.equal(deriveTitleFromBrief('00:00-00:05 女孩在雨中跳舞'), '女孩在雨中跳舞', 'mm:ss time ranges are removed whole');
+  assert.equal(deriveTitleFromBrief('Dr. Smith walks in. He sits.'), 'Dr. Smith walks in', 'abbreviations do not end the sentence');
+  assert.equal(deriveTitleFromBrief('时长：60秒\n比例：9:16\n1080p'), undefined, 'spec-only lines are not titles');
+  assert.equal(deriveTitleFromBrief('https://example.com/a.png 参考这张图'), '参考这张图');
+  assert.equal(deriveTitleFromBrief('../../etc/passwd\n女孩在雨中。'), '女孩在雨中');
 }
 
 async function directorKeepsShotContent(): Promise<void> {

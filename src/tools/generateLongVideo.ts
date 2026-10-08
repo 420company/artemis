@@ -284,7 +284,28 @@ function trimTitle(value: string): string {
 // headers, locks, specs and timecode-only lines.
 const BRIEF_META_LINE_RE = /^(?:【[^】]*】|\[[^\]]*\]|#+|CHARACTER LOCK|SCENE LOCK|STYLE LOCK|(?:时长|总时长|风格|比例|画幅|画质|分辨率|字幕|配乐|BGM|音乐|镜头机位|全局基调|画质规格|duration|ratio|aspect ratio|style|resolution|subtitles?|music)\s*[:：])/i;
 const TITLE_LINE_RE = /^(?:片名|标题|题目|作品名|title|film title)\s*[:：]\s*(.+)$/i;
-const LEADING_SHOT_MARKER_RE = /^(?:\[\s*[\d:.]+\s*[-–—~至到]\s*[\d:.]+\s*(?:秒|s|sec|seconds)?\s*\]|[\d:.]+\s*[-–—~至到]\s*[\d:.]+\s*(?:秒|s|sec|seconds)?\s*[:：]|(?:镜头|场景|段|scene|shot|segment)\s*#?\d+\s*[·:：.、-]?|第\s*\d+\s*段\s*[·:：.、-]?|[-*•]\s+)\s*/i;
+const TIME_RANGE_SOURCE = '\\d+(?::\\d{1,2}){0,2}(?:\\.\\d+)?\\s*(?:秒|s|sec|seconds)?\\s*[-–—~至到]\\s*\\d+(?::\\d{1,2}){0,2}(?:\\.\\d+)?\\s*(?:秒|s|sec|seconds)?';
+const LEADING_SHOT_MARKER_RE = new RegExp(
+  `^(?:\\[\\s*${TIME_RANGE_SOURCE}\\s*\\]|${TIME_RANGE_SOURCE}(?:\\s*[:：]|(?=\\s))|(?:镜头|场景|段|scene|shot|segment)\\s*#?\\d+\\s*[·:：.、-]?|第\\s*\\d+\\s*段\\s*[·:：.、-]?|[-*•]\\s+)\\s*`,
+  'i',
+);
+// A request line rather than story: "/saga 30秒长视频", "帮我生成一段长视频",
+// "Make me a 60 second long video." Whatever follows a colon is kept.
+const REQUEST_PREAMBLE_RE = /^(?:\/saga\b\s*)?(?:(?:请|帮我|给我|为我|我要|我想|麻烦)?\s*(?:生成|制作|做|创作|拍|来)?\s*(?:一[段个部条支])?\s*(?:\d+\s*(?:秒|分钟|s|sec|seconds?|min|minutes?)\s*(?:左右)?\s*(?:的)?)?\s*(?:长视频|视频|短片|影片|宣传片|长片)|(?:please\s+)?(?:make|generate|create|produce)\s+(?:me\s+)?(?:an?\s+)?(?:\d+[-\s]?(?:second|sec|s|minute|min)s?\s+)?(?:long[-\s]?)?(?:video|film|clip|movie))\s*(?:[:：,，。.!！]\s*|$)/iu;
+const URL_RE = /https?:\/\/\S+/giu;
+const TITLE_ABBREVIATION_RE = /(?:^|\s)(?:mr|mrs|ms|dr|prof|st|jr|sr|vs|etc|e\.g|i\.e|[a-z])\.$/i;
+
+/** The first sentence of a line; "." after an abbreviation ("Dr.") does not end it. */
+function firstSentence(line: string): string {
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i]!;
+    if ('。！？!?'.includes(char)) return line.slice(0, i + 1);
+    if (char === '.' && (i === line.length - 1 || /\s/.test(line[i + 1] ?? ''))) {
+      if (!TITLE_ABBREVIATION_RE.test(line.slice(0, i + 1))) return line.slice(0, i + 1);
+    }
+  }
+  return line;
+}
 
 /** Shortens at a word boundary for spaced scripts, at a character for CJK. */
 function shortenTitle(title: string, maxChars: number): string {
@@ -300,19 +321,26 @@ function shortenTitle(title: string, maxChars: number): string {
  * with timecodes and shot markers removed. Undefined when nothing fits.
  */
 export function deriveTitleFromBrief(brief: string): string | undefined {
-  const named = brief.match(/《([^》\n]{1,60})》/)?.[1] ?? brief.match(/「([^」\n]{1,60})」/)?.[1];
+  const text = stripRawModeTag(brief);
+  const named = text.match(/《([^》\n]{1,60})》/)?.[1];
   if (named && trimTitle(named)) return trimTitle(named);
-  for (const rawLine of brief.split(/\r?\n/)) {
+  for (const rawLine of text.split(/\r?\n/)) {
     const line = compactInline(rawLine);
     if (!line) continue;
     const titled = line.match(TITLE_LINE_RE)?.[1];
     if (titled && trimTitle(titled)) return trimTitle(titled);
   }
-  for (const rawLine of brief.split(/\r?\n/)) {
-    let line = compactInline(rawLine);
-    for (let i = 0; i < 3; i += 1) line = line.replace(LEADING_SHOT_MARKER_RE, '').trim();
+  for (const rawLine of text.split(/\r?\n/)) {
+    let line = compactInline(rawLine.replace(URL_RE, ' '));
+    for (let i = 0; i < 3; i += 1) {
+      line = line.replace(REQUEST_PREAMBLE_RE, '').replace(LEADING_SHOT_MARKER_RE, '').trim();
+    }
     if (!line || BRIEF_META_LINE_RE.test(line)) continue;
-    const sentence = line.split(/(?<=[。！？!?.])\s*/)[0] ?? line;
+    // Lines of only numbers, times, ratios or resolutions ("1080p", "9:16") are specs.
+    if (/^[\d\s:：.xX×*/%pPkK秒s-]+$/u.test(line)) continue;
+    // A bare file path is a reference, not a title.
+    if (/^(?:\.{1,2}[\\/]|~?\/|[A-Za-z]:\\)\S*$/.test(line)) continue;
+    const sentence = firstSentence(line).replace(/[（(][^（）()]{0,40}[）)]/gu, '');
     const title = trimTitle(sentence.replace(/[。！？!?.，,;；:：]+$/, ''));
     if (title && /[\p{L}\p{N}]/u.test(title)) return shortenTitle(title, 48);
   }
