@@ -1570,6 +1570,22 @@ class SseRpcTransport implements RpcTransport {
   }
 }
 
+type StdioFraming = 'newline' | 'content-length';
+
+/**
+ * How long `initialize` waits for a reply before the auto framing detection
+ * tries the other wire format. Servers on the official SDKs answer within
+ * milliseconds; a slow-starting server still gets the full timeout on the
+ * final attempt.
+ */
+const STDIO_FRAMING_PROBE_MS = 3_000;
+/** Framing that answered `initialize`, per server command, for later spawns. */
+const detectedStdioFraming = new Map<string, StdioFraming>();
+const STDIO_DIAGNOSTIC_MAX_CHARS = 64 * 1024;
+
+/** No reply in time, or the server exited before replying: worth another framing. */
+class StdioNoReplyError extends Error {}
+
 class StdioRpcTransport implements RpcTransport {
   private readonly server: McpServerConfig;
   private readonly cwd: string;
@@ -1591,11 +1607,34 @@ class StdioRpcTransport implements RpcTransport {
   private stderr = '';
   private clientInfo?: RpcClientInfo;
   private listChangedHandler?: (kind: McpListChangedKind) => void;
+  /**
+   * Wire format. The MCP stdio transport is newline-delimited JSON; older
+   * servers that only read LSP-style `Content-Length` frames are detected
+   * at `initialize` (or pinned with `stdioFraming` in the server config).
+   */
+  private framing: StdioFraming;
+  private framingSettled: boolean;
+  private readonly framingKey: string;
 
   constructor(server: McpServerConfig, cwd: string, timeoutMs: number) {
     this.server = server;
     this.cwd = cwd;
     this.timeoutMs = timeoutMs;
+    this.framingKey = JSON.stringify([server.id, server.command ?? '', server.commandArgs ?? []]);
+    const configured = server.stdioFraming;
+    const known = configured === 'newline' || configured === 'content-length'
+      ? configured
+      : detectedStdioFraming.get(this.framingKey);
+    this.framing = known ?? 'newline';
+    this.framingSettled = known !== undefined;
+  }
+
+  /** Keeps the tail of what the server wrote to stderr (and stray stdout lines) for error messages. */
+  private appendDiagnostic(text: string): void {
+    this.stderr += text;
+    if (this.stderr.length > STDIO_DIAGNOSTIC_MAX_CHARS) {
+      this.stderr = this.stderr.slice(-STDIO_DIAGNOSTIC_MAX_CHARS);
+    }
   }
 
   private resolveArg(value: string): string {
@@ -1641,7 +1680,11 @@ class StdioRpcTransport implements RpcTransport {
       },
     });
     this.child = child;
+    // Handlers ignore a process that was replaced by a framing restart.
     child.stdout.on('data', (chunk: Buffer) => {
+      if (this.child !== child) {
+        return;
+      }
       this.buffer = Buffer.concat([this.buffer, chunk]);
       if (this.buffer.length > StdioRpcTransport.MAX_BUFFER_BYTES) {
         this.rejectPending(new Error(
@@ -1653,21 +1696,41 @@ class StdioRpcTransport implements RpcTransport {
       this.drainFrames();
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      this.stderr += String(chunk);
+      if (this.child !== child) {
+        return;
+      }
+      this.appendDiagnostic(String(chunk));
     });
     child.on('error', (error) => {
+      if (this.child !== child) {
+        return;
+      }
       this.rejectPending(
         new Error(`Failed to start stdio server: ${error.message}`),
       );
     });
     child.on('close', (code) => {
+      if (this.child !== child) {
+        return;
+      }
       const message =
         this.stderr.trim() ||
         `stdio server exited${typeof code === 'number' ? ` with code ${code}` : ''}.`;
-      this.rejectPending(new Error(message));
+      this.rejectPending(new StdioNoReplyError(message));
       this.child = undefined;
       this.initialized = false;
     });
+  }
+
+  /** Kills the current process so the next send spawns a fresh one. */
+  private restartProcess(): void {
+    const child = this.child;
+    this.child = undefined;
+    this.initialized = false;
+    this.buffer = Buffer.alloc(0);
+    this.stderr = '';
+    this.rejectPending(new Error('stdio MCP transport restarted.'));
+    child?.kill();
   }
 
   private rejectPending(error: Error): void {
@@ -1678,44 +1741,79 @@ class StdioRpcTransport implements RpcTransport {
     this.pending.clear();
   }
 
-  private drainFrames(): void {
-    while (this.buffer.length > 0) {
+  /**
+   * Takes the next complete message off the buffer, or undefined when more
+   * bytes are needed. The MCP stdio transport is newline-delimited JSON;
+   * LSP-style `Content-Length` frames are still accepted from servers that
+   * use them.
+   */
+  private nextMessage():
+    | { body: string; framed: boolean }
+    | { error: string }
+    | undefined {
+    const head = this.buffer.subarray(0, 64).toString('utf8').trimStart();
+    if (/^content-length:/i.test(head)) {
       const separatorIndex = this.buffer.indexOf('\r\n\r\n');
       if (separatorIndex < 0) {
-        return;
+        return undefined;
       }
-
-      const headerText = this.buffer
-        .subarray(0, separatorIndex)
-        .toString('utf8');
-      const contentLengthMatch = headerText.match(/Content-Length:\s*(\d+)/i);
-      if (!contentLengthMatch) {
-        this.rejectPending(
-          new Error('stdio server returned a frame without Content-Length.'),
-        );
-        this.buffer = Buffer.alloc(0);
-        return;
+      const headerText = this.buffer.subarray(0, separatorIndex).toString('utf8');
+      const lengthText = headerText.match(/Content-Length:[ \t]*(\d+)[ \t]*(?:\r?\n|$)/i)?.[1];
+      const contentLength = lengthText === undefined ? Number.NaN : Number(lengthText);
+      if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+        return { error: 'stdio server returned a frame without a valid Content-Length.' };
       }
-
-      const contentLength = Number.parseInt(contentLengthMatch[1] ?? '', 10);
       const bodyStart = separatorIndex + 4;
       const bodyEnd = bodyStart + contentLength;
       if (this.buffer.length < bodyEnd) {
-        return;
+        return undefined;
       }
-
       const body = this.buffer.subarray(bodyStart, bodyEnd).toString('utf8');
       this.buffer = this.buffer.subarray(bodyEnd);
+      return { body, framed: true };
+    }
+
+    const newline = this.buffer.indexOf(0x0a);
+    if (newline < 0) {
+      return undefined;
+    }
+    const body = this.buffer.subarray(0, newline).toString('utf8').replace(/\r$/, '');
+    this.buffer = this.buffer.subarray(newline + 1);
+    return { body, framed: false };
+  }
+
+  private drainFrames(): void {
+    while (this.buffer.length > 0) {
+      const message = this.nextMessage();
+      if (!message) {
+        return;
+      }
+      if ('error' in message) {
+        // Unparseable frame header: the rest of the buffer cannot be framed.
+        this.rejectPending(new Error(message.error));
+        this.buffer = Buffer.alloc(0);
+        return;
+      }
+      if (!message.body.trim()) {
+        continue;
+      }
 
       let payload: unknown;
       try {
-        payload = JSON.parse(body) as unknown;
+        payload = JSON.parse(message.body) as unknown;
       } catch (error) {
-        this.rejectPending(
-          new Error(
-            `stdio server returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
+        // A framed message must be JSON. A stray non-JSON line is a server
+        // logging to stdout by mistake: skip it rather than fail the call.
+        if (message.framed) {
+          this.rejectPending(
+            new Error(
+              `stdio server returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        } else {
+          // Kept with stderr so a later failure shows what the server printed.
+          this.appendDiagnostic(`[stdout, not JSON-RPC] ${message.body.slice(0, 500)}\n`);
+        }
         continue;
       }
 
@@ -1754,6 +1852,7 @@ class StdioRpcTransport implements RpcTransport {
     method: string,
     params: object = {},
     expectResponse = true,
+    timeoutMs = this.timeoutMs,
   ): Promise<JsonRecord> {
     this.ensureProcess();
     const child = this.child;
@@ -1764,7 +1863,12 @@ class StdioRpcTransport implements RpcTransport {
     const body = expectResponse
       ? buildRpcRequest(++this.requestId, method, params)
       : buildRpcNotification(method, params);
-    const frame = `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`;
+    // MCP stdio transport: one JSON-RPC message per line (JSON.stringify
+    // never emits a raw newline inside the message). Content-Length frames
+    // only for servers detected or configured to need them.
+    const frame = this.framing === 'content-length'
+      ? `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`
+      : `${body}\n`;
 
     if (!expectResponse) {
       child.stdin.write(frame, 'utf8');
@@ -1775,8 +1879,8 @@ class StdioRpcTransport implements RpcTransport {
       const id = this.requestId;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`stdio MCP ${method} timed out after ${this.timeoutMs}ms.`));
-      }, this.timeoutMs);
+        reject(new StdioNoReplyError(`stdio MCP ${method} timed out after ${timeoutMs}ms.`));
+      }, timeoutMs);
 
       this.pending.set(id, {
         resolve,
@@ -1793,11 +1897,14 @@ class StdioRpcTransport implements RpcTransport {
       return this.clientInfo;
     }
 
-    const result = await this.send('initialize', {
+    const initializeParams = {
       protocolVersion: CLIENT_PROTOCOL_VERSION,
       clientInfo: CLIENT_INFO,
       capabilities: {},
-    });
+    };
+    const result = this.framingSettled
+      ? await this.send('initialize', initializeParams)
+      : await this.initializeDetectingFraming(initializeParams);
     this.clientInfo = isRecord(result.serverInfo)
       ? {
           name:
@@ -1813,6 +1920,41 @@ class StdioRpcTransport implements RpcTransport {
     await this.send('notifications/initialized', {}, false);
     this.initialized = true;
     return this.clientInfo ?? {};
+  }
+
+  /**
+   * Auto framing: newline-delimited JSON first (the MCP spec), then
+   * `Content-Length` frames for servers that only read those, then newline
+   * again with the full timeout for a server that was merely slow to start.
+   * Moves on when a probe gets no reply or the server exits; a spawn failure
+   * is final. The framing that answers is remembered for later spawns.
+   */
+  private async initializeDetectingFraming(params: object): Promise<JsonRecord> {
+    const probeMs = Math.min(this.timeoutMs, STDIO_FRAMING_PROBE_MS);
+    const attempts: Array<[StdioFraming, number]> = [
+      ['newline', probeMs],
+      ['content-length', probeMs],
+      ['newline', this.timeoutMs],
+    ];
+    let lastError: unknown;
+    for (const [index, [framing, timeoutMs]] of attempts.entries()) {
+      if (index > 0) {
+        this.restartProcess();
+      }
+      this.framing = framing;
+      try {
+        const result = await this.send('initialize', params, true, timeoutMs);
+        this.framingSettled = true;
+        detectedStdioFraming.set(this.framingKey, framing);
+        return result;
+      } catch (error) {
+        if (!(error instanceof StdioNoReplyError)) {
+          throw error;
+        }
+        lastError = error;
+      }
+    }
+    throw lastError;
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {

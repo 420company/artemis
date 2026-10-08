@@ -10,7 +10,7 @@ import {
   VIDEO_POLL_TIMEOUT_MS,
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js'
-import { normalizeVideoDurationForProvider } from '../videoParams.js'
+import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../videoParams.js'
 import {
   formatUnsupportedVideoReferences,
   getUnsupportedVideoReferences,
@@ -191,6 +191,10 @@ export class BytePlusProvider implements VisualProvider {
       const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
       const ratio = params.ratio || '16:9'
       const duration = normalizeVideoDurationForProvider(params.duration, this.name, model)
+      // Only a resolution the request asked for is sent. The configured
+      // default is not: onboarding used to write 1080p there, and sending it
+      // would bill every clip at 1080p; unset leaves the model's own default.
+      const resolution = normalizeVideoResolution(params.resolution)
       const capabilities = resolveVideoModelCapabilities(this.name, model)
       const unsupportedReferences = getUnsupportedVideoReferences(params, capabilities)
       if (unsupportedReferences.length > 0) {
@@ -279,6 +283,7 @@ export class BytePlusProvider implements VisualProvider {
         content,
         ratio,
         duration,
+        ...(resolution ? { resolution } : {}),
         generate_audio: capabilities.canGenerateAudio ? params.generateAudio !== false : false,
         watermark: params.watermark ?? this.config.video.defaultParams.watermark ?? false,
       }

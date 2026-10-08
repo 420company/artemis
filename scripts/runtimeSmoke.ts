@@ -51,6 +51,7 @@ import {
   isDirectlyExecutableTool,
   isParallelReadOnlyAction,
   isRuntimeManagedTool,
+  validateToolAction,
   renderDetailedToolManifest,
   validateToolAction,
   GENERATE_IMAGE_DESCRIPTION,
@@ -111,7 +112,7 @@ import {
 } from '../src/tools/visual/superVisualMode.js'
 import { buildSagaConstitution, runNarrativeCritic } from '../src/tools/visual/sagaNarrative.js'
 import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js'
-import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js'
+import { normalizeVideoDurationForProvider, normalizeVideoResolution } from '../src/tools/visual/videoParams.js'
 import {
   isOverbroadTrustedWorkspaceRoot,
   isPathInsideWorkspace,
@@ -3995,7 +3996,8 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
           model: 'dreamina-seedance-2-0-260128',
           defaultParams: {
             duration: '10s',
-            resolution: '720p',
+            // What older onboarding wrote for every BytePlus user.
+            resolution: '1080p',
             quality: 'standard',
             style: 'realistic',
             format: 'mp4',
@@ -4027,6 +4029,79 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
         createBody.generate_audio === true &&
         createBody.duration === 11,
       JSON.stringify(createBody),
+    )
+    assert(
+      'ModelArk visual provider: does not bill the configured 1080p default when no resolution is asked for',
+      createBody !== undefined && !('resolution' in createBody),
+      JSON.stringify(createBody),
+    )
+    await provider.generateVideo({ prompt: 'hd product film', model: 'dreamina-seedance-2-0-260128', resolution: '1080P' })
+    assert(
+      'ModelArk visual provider: sends the requested resolution, normalized',
+      createBody?.resolution === '1080p',
+      JSON.stringify(createBody),
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+{
+  assert(
+    'video resolution: canonical values from loose spellings; unknown and 4k (no provider renders it) rejected',
+    normalizeVideoResolution('1080P') === '1080p' &&
+      normalizeVideoResolution(' 720 ') === '720p' &&
+      normalizeVideoResolution('480') === '480p' &&
+      normalizeVideoResolution('4K') === undefined &&
+      normalizeVideoResolution('8k') === undefined &&
+      normalizeVideoResolution('') === undefined &&
+      normalizeVideoResolution(undefined) === undefined,
+  )
+  assert(
+    'video resolution: generate_video validation rejects 4k before any provider is called',
+    validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '4k' } as any).some((e) => e.includes('resolution')) &&
+      validateToolAction({ type: 'generate_video', prompt: 'x', resolution: '1080p' } as any).length === 0,
+  )
+}
+
+{
+  // OpenAI (Sora) receives the requested resolution as a size; one it cannot
+  // render fails before the create request instead of silently changing.
+  const originalFetch = globalThis.fetch
+  const sizes: string[] = []
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (init?.body instanceof FormData) sizes.push(String(init.body.get('size')))
+    return new Response('{"error":{"message":"stop here"}}', { status: 400 })
+  }) as typeof fetch
+  const soraProvider = (model: string) => new OpenAIProvider({
+    enabled: true,
+    image: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model: 'gpt-image-2',
+      defaultParams: { size: '1024x1024', quality: 'medium', style: 'realistic', watermark: false, outputFormat: 'png', background: 'auto' },
+    },
+    video: {
+      enabled: true,
+      provider: 'openai',
+      apiKey: 'test-key',
+      baseUrl: 'http://relay.local/v1',
+      model,
+      defaultParams: { duration: '8s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false },
+    },
+  })
+  try {
+    await soraProvider('sora-2-pro').generateVideo({ prompt: 'hd', model: 'sora-2-pro', ratio: '16:9', resolution: '1080p' })
+    const rejected480 = await soraProvider('sora-2').generateVideo({ prompt: 'small', model: 'sora-2', resolution: '480p' })
+    const rejected1080 = await soraProvider('sora-2').generateVideo({ prompt: 'hd', model: 'sora-2', resolution: '1080p' })
+    assert(
+      'OpenAI visual provider: passes a requested 1080p to pro models and rejects what Sora cannot render',
+      sizes.length === 1 &&
+        sizes[0] === '1920x1080' &&
+        rejected480.success === false && /cannot render 480p/.test(String(rejected480.error)) &&
+        rejected1080.success === false && /cannot render 1080p/.test(String(rejected1080.error)),
+      `sizes=${JSON.stringify(sizes)} 480=${rejected480.error} 1080=${rejected1080.error}`,
     )
   } finally {
     globalThis.fetch = originalFetch
@@ -9580,6 +9655,108 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       server.close((error) => (error ? reject(error) : resolve())),
     )
     fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+// ── MCP stdio transport ───────────────────────────────────────────────────────
+
+{
+  // The MCP stdio transport is newline-delimited JSON; servers built on the
+  // official SDKs read only that. Servers that read only LSP-style
+  // Content-Length frames are detected at initialize and still work. A stray
+  // non-JSON stdout line must not break a call, and must show up in the error
+  // when the server fails. A malformed frame header fails fast (it used to
+  // spin forever).
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-stdio-'))
+  type Mode = 'newline' | 'newline-noisy' | 'content-length' | 'content-length-exit'
+  const serverSource = (mode: Mode) => `
+const framed = ${mode.startsWith('content-length')}
+const write = (m) => {
+  const body = JSON.stringify(m)
+  process.stdout.write(framed ? 'Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body : body + '\\n')
+}
+${mode === 'newline-noisy' ? "process.stdout.write('server starting...\\n')" : ''}
+let buf = ''
+process.stdin.on('data', (chunk) => {
+  buf += chunk
+  for (;;) {
+    let line
+    if (framed) {
+      // Strict LSP-style reader: anything else is never answered${mode === 'content-length-exit' ? ' (this one exits)' : ''}.
+      const m = /^Content-Length: (\\d+)\\r\\n\\r\\n/.exec(buf)
+      if (!m) {
+        ${mode === 'content-length-exit' ? "if (buf.length > 0) { process.stderr.write('expected Content-Length header\\n'); process.exit(1) }" : ''}
+        return
+      }
+      const end = m[0].length + Number(m[1])
+      if (buf.length < end) return
+      line = buf.slice(m[0].length, end)
+      buf = buf.slice(end)
+    } else {
+      const i = buf.indexOf('\\n')
+      if (i < 0) return
+      line = buf.slice(0, i)
+      buf = buf.slice(i + 1)
+    }
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'smoke', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] } })
+    else if (msg.method === 'tools/call') write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo:' + msg.params.arguments.text }] } })
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`
+  const stdioServer = (id: string, source: string) => {
+    const file = path.join(dir, `${id}.mjs`)
+    fs.writeFileSync(file, source)
+    return {
+      id,
+      enabled: true,
+      transport: 'stdio' as const,
+      command: process.execPath,
+      commandArgs: [file],
+      authType: 'none' as const,
+      authState: 'unknown' as const,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+  const callEcho = async (server: ReturnType<typeof stdioServer>): Promise<{ output: string; ms: number }> => {
+    const started = Date.now()
+    try {
+      return { output: (await callMcpServerTool({ server, cwd: dir, toolName: 'echo', args: { text: 'hi' }, timeoutMs: 5000 })).output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), ms: Date.now() - started }
+    }
+  }
+  try {
+    const cases: [string, Mode][] = [
+      ['newline-delimited JSON (MCP spec, official SDKs)', 'newline'],
+      ['a server that reads only Content-Length frames (detected at initialize)', 'content-length'],
+      ['a Content-Length-only server that exits on unframed input', 'content-length-exit'],
+      ['a stray log line on stdout before the first message', 'newline-noisy'],
+    ]
+    for (const [label, mode] of cases) {
+      const { output } = await callEcho(stdioServer(`smoke-${mode}`, serverSource(mode)))
+      assert(`mcp stdio: ${label}`, output.includes('echo:hi'), output)
+    }
+
+    // The detected framing is remembered: a fresh spawn skips the probe.
+    await closeCachedMcpClients()
+    const again = await callEcho(stdioServer('smoke-content-length', serverSource('content-length')))
+    assert('mcp stdio: detected Content-Length framing is reused on the next spawn', again.output.includes('echo:hi') && again.ms < 2500, `${again.ms}ms ${again.output}`)
+
+    const badHeader = await callEcho(stdioServer('smoke-bad-header', `process.stdin.on('data', () => { process.stdout.write('Content-Length: x\\r\\n\\r\\n{}') })\n`))
+    assert('mcp stdio: a malformed Content-Length header fails fast instead of hanging', /Content-Length/.test(badHeader.output) && badHeader.ms < 4000, `${badHeader.ms}ms ${badHeader.output}`)
+
+    const dying = await callEcho(stdioServer('smoke-dying', `process.stdout.write('fatal: missing API token\\n'); setTimeout(() => process.exit(1), 50)\n`))
+    assert('mcp stdio: dropped non-JSON stdout lines appear in the failure message', dying.output.includes('fatal: missing API token'), dying.output)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 }
 

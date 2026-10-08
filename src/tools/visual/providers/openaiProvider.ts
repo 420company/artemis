@@ -20,6 +20,7 @@ import {
   VIDEO_POLL_TIMEOUT_MS,
   ASSET_DOWNLOAD_TIMEOUT_MS,
 } from './timeouts.js';
+import { assertVideoResolutionSupported } from '../videoParams.js';
 
 type OpenAIImageResponse = {
   data?: Array<{
@@ -211,10 +212,17 @@ export class OpenAIProvider implements VisualProvider {
       const model = params.model || videoConfig.model || defaultVisualModelForProvider('openai', 'video');
       const baseUrl = normalizeBaseUrl(videoConfig.baseUrl, 'openai');
       const seconds = mapOpenAIVideoSeconds(params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration));
+      // A requested resolution must be one Sora renders: 720p on every model,
+      // 1080p only on pro models (others would silently come back at 720p).
+      assertVideoResolutionSupported(
+        params.resolution,
+        isOpenAIProVideoModel(model) ? ['720p', '1080p'] : ['720p'],
+        `OpenAI video model ${model}`,
+      );
       const size = mapOpenAIVideoSize({
         model,
         ratio: params.ratio,
-        resolution: videoConfig.defaultParams.resolution,
+        resolution: params.resolution || videoConfig.defaultParams.resolution,
       });
 
       const body = new FormData();
@@ -517,13 +525,17 @@ function mapOpenAIVideoSeconds(duration: number): string {
   return String(allowed.find((value) => value >= requested) ?? allowed[allowed.length - 1]);
 }
 
+function isOpenAIProVideoModel(model: string): boolean {
+  return model.toLowerCase().includes('pro');
+}
+
 function mapOpenAIVideoSize(options: {
   model: string;
   ratio?: string;
   resolution?: string;
 }): string {
   const portrait = options.ratio === '9:16' || options.ratio === 'portrait';
-  const pro = options.model.toLowerCase().includes('pro');
+  const pro = isOpenAIProVideoModel(options.model);
   const highResolution = options.resolution === '1080p' || options.resolution === '4k';
   if (pro && highResolution) {
     return portrait ? '1080x1920' : '1920x1080';

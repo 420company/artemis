@@ -42,6 +42,7 @@ import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
 import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
+import { normalizeVideoResolution } from './visual/videoParams.js';
 import { executeViewImage } from './viewImage.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
 
@@ -526,6 +527,9 @@ function validateGenerateVideoAction(action: any): string[] {
   validateStringArray(action?.referenceNotes, 'referenceNotes', errors);
   validateOptionalNonEmptyString(action?.ratio, 'ratio', errors);
   validatePositiveInteger(action?.duration, 'duration', errors);
+  if (action?.resolution !== undefined && normalizeVideoResolution(action.resolution) === undefined) {
+    errors.push('resolution must be one of 480p, 720p, 1080p');
+  }
   validateOptionalNonEmptyString(action?.outputPath, 'outputPath', errors);
   validateStringArray(
     action?.referenceImageUrls,

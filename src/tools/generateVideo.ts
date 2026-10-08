@@ -21,7 +21,7 @@ import {
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
-import { normalizeVideoDurationForProvider } from './visual/videoParams.js';
+import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
 import {
   buildVisualSetupRequiredMessage,
   isVisualSetupRequiredError,
@@ -282,11 +282,13 @@ export async function executeGenerateVideo(
     appendReferenceContent(content, lastFrameImageUrls, 'image_url', 'last_frame');
 
     const createEndpoint = modelArkEndpoint(baseUrl, 'contents/generations/tasks');
+    const resolution = normalizeVideoResolution(action.resolution);
     const createBody = {
       model,
       content,
       ratio,
       duration,
+      ...(resolution ? { resolution } : {}),
       generate_audio: capabilities.canGenerateAudio ? action.generateAudio !== false : false,
       watermark: Boolean(action.watermark),
     };
@@ -567,6 +569,8 @@ async function generateVideoWithVisualProvider(
     model,
     ratio,
     duration,
+    // Only what the request asked for; each provider decides its own default.
+    resolution: normalizeVideoResolution(action.resolution),
     referenceImageUrls,
     referenceVideoUrls,
     referenceAudioUrls,
