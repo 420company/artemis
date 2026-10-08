@@ -357,12 +357,16 @@ export class BytePlusProvider implements VisualProvider {
         throw new Error(`Task ${taskId} did not finish within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const videoRes = await fetch(videoUrl, { signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)) })
-      if (!videoRes.ok) {
-        throw new Error(`Video download failed: HTTP ${videoRes.status}`)
+      let buf: Buffer
+      try {
+        buf = await downloadProviderAsset(videoUrl, {
+          timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+          allowLoopback: baseUrlIsLoopback(baseUrl),
+          signal: params.abortSignal,
+        })
+      } catch (error) {
+        throw new Error(`Video download failed: ${error instanceof Error ? error.message : String(error)}`)
       }
-
-      const buf = await videoRes.arrayBuffer()
       
       const fs = await import('fs/promises')
       const path = await import('path')
@@ -372,7 +376,7 @@ export class BytePlusProvider implements VisualProvider {
       await fs.mkdir(tempDir, { recursive: true })
       const videoPath = path.join(tempDir, `byteplus_video_${Date.now()}.mp4`)
       
-      await fs.writeFile(videoPath, Buffer.from(buf))
+      await fs.writeFile(videoPath, buf)
 
       return {
         success: true,

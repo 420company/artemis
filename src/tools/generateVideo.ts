@@ -4,6 +4,7 @@ import type { AgentAction } from '../core/types.js';
 import { ensureDir, ensureNotSensitivePath } from '../utils/fs.js';
 import { uploadLocalReferenceAssets } from './vidarAssetHosting.js';
 import { modelArkEndpoint, resolveModelArkMediaCredentials } from './vidarMedia.js';
+import { baseUrlIsLoopback, downloadProviderAsset } from './visual/safeDownload.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { createVisualProvider } from './visual/providers/interface.js';
@@ -76,13 +77,14 @@ function buildDefaultOutputPath(_cwd: string): string {
   return path.join(getMediaOutputRoot(), DEFAULT_SUBDIR, `${ts}.mp4`);
 }
 
-async function downloadUrl(url: string, signal?: AbortSignal): Promise<Buffer> {
-  const res = await fetch(url, {
-    signal: combineAbortSignals(signal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
+// The video URL comes from the provider's task result: download it through the
+// guard that refuses private, link-local and loopback targets.
+async function downloadUrl(url: string, baseUrl: string, signal?: AbortSignal): Promise<Buffer> {
+  return downloadProviderAsset(url, {
+    timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+    allowLoopback: baseUrlIsLoopback(baseUrl),
+    signal,
   });
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-  const ab = await res.arrayBuffer();
-  return Buffer.from(ab);
 }
 
 function extractTaskId(payload: TaskCreateResponse): string | undefined {
@@ -389,7 +391,7 @@ export async function executeGenerateVideo(
       ensureNotSensitivePath(absolute, targetRaw);
     }
 
-    const buf = await downloadUrl(videoUrl, context.abortSignal);
+    const buf = await downloadUrl(videoUrl, baseUrl, context.abortSignal);
     await ensureDir(path.dirname(absolute));
     await writeFile(absolute, buf);
 

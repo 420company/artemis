@@ -80,7 +80,15 @@ import {
   cleanupLedger,
 } from '../src/core/collapse/index.js'
 import { modelArkEndpoint, normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
-import { downloadProviderAsset, isNonPublicAddress } from '../src/tools/visual/safeDownload.js'
+import {
+  downloadProviderAsset,
+  isNonPublicAddress,
+  setAssetDownloadResolverForTests,
+  setAssetDownloadTransportForTests,
+  type AssetHostResolver,
+  type AssetTransport,
+} from '../src/tools/visual/safeDownload.js'
+import { lookup as dnsLookup } from 'node:dns/promises'
 import { sniffAnyImageType, sniffImageType } from '../src/core/imageInput.js'
 import { resolveRunCommandTimeoutMs } from '../src/tools/runCommand.js'
 import { executeGenerateImage } from '../src/tools/generateImage.js'
@@ -194,6 +202,23 @@ console.log('  ============\n')
 
 const expectedDirectToolCount = getDirectToolCount()
 const providerNativeTools = buildProviderNativeFunctionTools()
+
+// Generated-asset downloads normally go through node:http(s) with a guarded
+// DNS lookup. Most tests here mock globalThis.fetch, so route downloads
+// through fetch and resolve the reserved .test domain to a public
+// documentation address. The download-guard tests swap in the real transport.
+const fetchAssetTransport: AssetTransport = async (url, { signal }) => {
+  const res = await fetch(url, { redirect: 'manual', signal })
+  return {
+    status: res.status,
+    location: res.headers.get('location') ?? undefined,
+    body: Buffer.from(await res.arrayBuffer()),
+  }
+}
+const testAssetResolver: AssetHostResolver = async (hostname) =>
+  hostname.endsWith('.test') ? [{ address: '93.184.216.34', family: 4 }] : dnsLookup(hostname, { all: true, verbatim: true })
+setAssetDownloadTransportForTests(fetchAssetTransport)
+setAssetDownloadResolverForTests(testAssetResolver)
 const providerNativeToolNames = providerNativeTools.map((tool) => tool.name)
 
 assert(
@@ -1771,6 +1796,135 @@ async function withMockedFetch<T>(
     !loopbackAllowed.refused && loopbackAllowed.calls.length === 1,
     loopbackAllowed.message,
   )
+}
+
+{
+  // DNS rebinding: the address is checked inside the socket's lookup, so a
+  // host that resolves public for the early check and private at connect time
+  // is still refused. Uses the real node:http transport and a local server.
+  const hits: string[] = []
+  const server = http.createServer((req, res) => {
+    hits.push(req.url ?? '')
+    if (req.url === '/redirect') {
+      res.writeHead(302, { location: 'http://169.254.169.254/latest/meta-data/' })
+      res.end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'image/png' })
+    res.end(PNG_1X1)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const port = (server.address() as { port: number }).port
+  const lookups: string[] = []
+  setAssetDownloadTransportForTests(undefined)
+  const attempt = async (url: string, allowLoopback: boolean) => {
+    try {
+      const body = await downloadProviderAsset(url, { timeoutMs: 5_000, allowLoopback })
+      return { ok: true, body, message: '' }
+    } catch (error) {
+      return { ok: false, body: undefined, message: String(error) }
+    }
+  }
+  try {
+    let rebindCalls = 0
+    setAssetDownloadResolverForTests(async (hostname) => {
+      lookups.push(hostname)
+      if (hostname === 'assets.rebind.test') {
+        rebindCalls += 1
+        return [{ address: rebindCalls === 1 ? '93.184.216.34' : '127.0.0.1', family: 4 }]
+      }
+      if (hostname === 'assets.loopback.test') return [{ address: '127.0.0.1', family: 4 }]
+      return testAssetResolver(hostname)
+    })
+    const rebound = await attempt(`http://assets.rebind.test:${port}/a.png`, false)
+    assert(
+      'asset download: a host that rebinds to loopback at connect time is refused and never reached',
+      !rebound.ok && rebindCalls === 2 && /127\.0\.0\.1/.test(rebound.message) && hits.length === 0,
+      `${rebound.message} lookups=${rebindCalls} hits=${hits.length}`,
+    )
+    const viaLookup = await attempt(`http://assets.loopback.test:${port}/a.png`, true)
+    assert(
+      'asset download: the connection uses the guarded lookup (loopback base URL allowed)',
+      viaLookup.ok && Buffer.compare(viaLookup.body!, PNG_1X1) === 0 && hits.length === 1 &&
+        lookups.filter((name) => name === 'assets.loopback.test').length === 2,
+      viaLookup.message,
+    )
+    const redirect = await attempt(`http://127.0.0.1:${port}/redirect`, true)
+    assert(
+      'asset download: the real transport checks every redirect hop',
+      !redirect.ok && /169\.254\.169\.254/.test(redirect.message) && hits.length === 2 && hits[1] === '/redirect',
+      redirect.message,
+    )
+  } finally {
+    setAssetDownloadTransportForTests(fetchAssetTransport)
+    setAssetDownloadResolverForTests(testAssetResolver)
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+{
+  // Video results go through the same guard, on the provider path and the
+  // legacy ARK_API_KEY path.
+  const METADATA_VIDEO = 'http://169.254.169.254/latest/meta-data/out.mp4'
+  const videoMock = (calls: string[]) => (url: string) => {
+    calls.push(url)
+    if (url.endsWith('/contents/generations/tasks')) return new Response('{"id":"task-guard"}', { status: 200 })
+    if (url.endsWith('/contents/generations/tasks/task-guard')) {
+      return new Response(JSON.stringify({ status: 'succeeded', content: { video_url: METADATA_VIDEO } }), { status: 200 })
+    }
+    return new Response('should not be fetched', { status: 200 })
+  }
+  const root = path.join(os.tmpdir(), `artemis-video-guard-${Date.now()}`)
+  const workspace = path.join(root, 'workspace')
+  fs.mkdirSync(workspace, { recursive: true })
+  const savedEnv = { HOME: process.env.HOME, ARTEMIS_HOME: process.env.ARTEMIS_HOME, ARK_API_KEY: process.env.ARK_API_KEY }
+  process.env.HOME = path.join(root, 'home')
+  process.env.ARTEMIS_HOME = path.join(root, 'artemis-home')
+  delete process.env.ARK_API_KEY
+  fs.mkdirSync(process.env.HOME, { recursive: true })
+  try {
+    await configureBytePlusVideoProfile(workspace, 'seedance-1-5-pro-251215')
+    const providerCalls: string[] = []
+    const viaProvider = await withMockedFetch(videoMock(providerCalls), async () =>
+      executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a short wave clip', duration: 5, maxPolls: 1, pollIntervalMs: 1000 } as any,
+        { cwd: workspace } as any,
+      ),
+    )
+    assert(
+      'generate_video: the BytePlus provider refuses a private video result URL',
+      viaProvider.ok === false &&
+        /private, link-local or loopback/.test(String(viaProvider.output)) &&
+        !providerCalls.includes(METADATA_VIDEO),
+      String(viaProvider.output),
+    )
+
+    fs.rmSync(process.env.ARTEMIS_HOME!, { recursive: true, force: true })
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.mkdirSync(workspace, { recursive: true })
+    process.env.ARK_API_KEY = 'ark-test-key'
+    const legacyCalls: string[] = []
+    const viaLegacy = await withMockedFetch(videoMock(legacyCalls), async () =>
+      executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a short wave clip', duration: 5, maxPolls: 1, pollIntervalMs: 1000 } as any,
+        { cwd: workspace } as any,
+      ),
+    )
+    assert(
+      'generate_video: the legacy ARK_API_KEY path refuses a private video result URL',
+      viaLegacy.ok === false &&
+        /private, link-local or loopback/.test(String(viaLegacy.output)) &&
+        legacyCalls.some((url) => url.startsWith('https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks')) &&
+        !legacyCalls.includes(METADATA_VIDEO),
+      String(viaLegacy.output),
+    )
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 }
 
 {

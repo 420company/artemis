@@ -376,14 +376,7 @@ export class CustomProvider implements VisualProvider {
         throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const downloadRes = await fetch(videoUrl, {
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
-      })
-      if (!downloadRes.ok) {
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
-      }
-
-      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const buffer = await downloadVideoUrl(videoUrl, baseUrl, params.abortSignal)
       const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
       await writeFileEnsured(videoPath, buffer)
 
@@ -594,14 +587,7 @@ export class CustomProvider implements VisualProvider {
         throw new Error(`Custom video ${taskId} did not complete within ${maxPolls} polls. Last status: ${lastStatus}.`)
       }
 
-      const downloadRes = await fetch(videoUrl, {
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(ASSET_DOWNLOAD_TIMEOUT_MS)),
-      })
-      if (!downloadRes.ok) {
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status})`)
-      }
-
-      const buffer = Buffer.from(await downloadRes.arrayBuffer())
+      const buffer = await downloadVideoUrl(videoUrl, baseUrl, params.abortSignal)
       const videoPath = path.join(OUTPUT_DIR, `custom_video_${Date.now()}.mp4`)
       await writeFileEnsured(videoPath, buffer)
 
@@ -770,6 +756,18 @@ export function normalizeCustomVisualBaseUrlForTest(raw: string | undefined, ass
 
 function normalizeRequiredBaseUrl(raw: string | undefined, assetKind: 'image' | 'video'): string {
   return normalizeCustomVisualBaseUrlForTest(raw, assetKind)
+}
+
+async function downloadVideoUrl(url: string, baseUrl: string | undefined, signal?: AbortSignal): Promise<Buffer> {
+  try {
+    return await downloadProviderAsset(url, {
+      timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+      allowLoopback: baseUrlIsLoopback(baseUrl),
+      signal,
+    })
+  } catch (error) {
+    throw new Error(`Custom video download failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 async function downloadUrl(url: string, baseUrl?: string): Promise<Buffer> {
