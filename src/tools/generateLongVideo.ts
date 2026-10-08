@@ -797,7 +797,7 @@ function segmentPromptExtras(options: {
   duration: number;
   briefGlobals?: SagaBriefGlobals;
   maxChars?: number;
-}): { openingFraming?: string; worldAnchor?: string; globalExcerpt?: string; maxChars?: number } {
+}): { openingFraming?: string; worldAnchor?: string; globalExcerpt?: string; globalExcerptCompact?: string; maxChars?: number } {
   // OPENING FRAMING — extract per-segment position / orientation / motion /
   // shot size / camera cues from this segment's storyBeat + the wider source
   // story (scoped to this segment's slice). The block is spliced near the
@@ -816,6 +816,7 @@ function segmentPromptExtras(options: {
     ...(globals ? {
       worldAnchor: worldAnchorLinesFor(globals, options.startSeconds, options.startSeconds + options.duration) || undefined,
       globalExcerpt: formatGlobalBriefExcerpt(globals) || undefined,
+      globalExcerptCompact: formatGlobalBriefExcerpt(globals, 240) || undefined,
     } : {}),
     ...(options.maxChars ? { maxChars: options.maxChars } : {}),
   };

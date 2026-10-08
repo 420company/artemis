@@ -325,12 +325,13 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     },
     cameraIsUserLock ? { text: `[CAMERA: ${clipText(cameraLanguage, 160)}]` } : undefined,
     detectsEnvironmentalAudioOnly(input.story) ? { text: buildAudioLockBlock() } : undefined,
-    { text: props.length > 0 ? lockLine('LOCKED-PROPS', props, 140) : '[PROPS: no global prop lock; preserve only props that the story treats as recurring]', dropRank: 6 },
-    { text: locations.length > 0 ? lockLine('LOCKED-LOCATIONS', locations, 140) : '[LOCATIONS: no global scene lock; maintain scene continuity only when a shot is meant to continue the same place]', dropRank: 7 },
-    { text: palette.length > 0 ? lockLine('PALETTE', palette, 100) : '[PALETTE: cohesive cinematic color design, but not identical colors in every shot unless requested]', dropRank: 1 },
-    { text: `[LIGHTING: ${clipText(lighting, 120)}]`, dropRank: 4 },
-    cameraIsUserLock ? undefined : { text: `[CAMERA: ${clipText(cameraLanguage, 120)}]`, dropRank: 3 },
-    { text: `[MOOD: ${clipText(mood, 100)}]`, dropRank: 2 },
+    // Generic default lines go first; what the brief states goes last.
+    props.length > 0 ? { text: lockLine('LOCKED-PROPS', props, 140), dropRank: 6 } : { text: '[PROPS: no global prop lock; preserve only props that the story treats as recurring]', dropRank: 0 },
+    locations.length > 0 ? { text: lockLine('LOCKED-LOCATIONS', locations, 140), dropRank: 7 } : { text: '[LOCATIONS: no global scene lock; maintain scene continuity only when a shot is meant to continue the same place]', dropRank: 0 },
+    { text: palette.length > 0 ? lockLine('PALETTE', palette, 100) : '[PALETTE: cohesive cinematic color design, but not identical colors in every shot unless requested]', dropRank: palette.length > 0 ? 3 : 0 },
+    { text: `[LIGHTING: ${clipText(lighting, 120)}]`, dropRank: input.lighting?.trim() ? 4 : 0 },
+    cameraIsUserLock ? undefined : { text: `[CAMERA: ${clipText(cameraLanguage, 120)}]`, dropRank: 1 },
+    { text: `[MOOD: ${clipText(mood, 100)}]`, dropRank: input.mood?.trim() ? 2 : 0 },
     { text: buildNegativeBlock(input.subtitleMode) },
   ];
   const identityEntries = identityEntryCandidates.filter((entry): entry is IdentityCardEntry => Boolean(entry));
@@ -561,6 +562,8 @@ export function compileShotPromptWithContinuity(options: {
   openingFraming?: string;
   /** Story essence and picture specs from the brief's global sections. */
   globalExcerpt?: string;
+  /** A shorter excerpt, used when the full one does not fit. */
+  globalExcerptCompact?: string;
   /** World-anchor lines (guide §9.9) whose time range covers this segment. */
   worldAnchor?: string;
   /**
@@ -648,7 +651,7 @@ export function compileShotPromptWithContinuity(options: {
   const globalBlocks: PromptBlock[] = [
     { text: options.openingFraming ? `\n${options.openingFraming}` : '', compact: options.openingFraming ? `\n${compactOpeningFraming(options.openingFraming)}` : undefined, keep: 90 },
     { text: options.worldAnchor ?? '', keep: 88 },
-    { text: options.globalExcerpt ?? '', keep: 80, clip: false },
+    { text: options.globalExcerpt ?? '', compact: options.globalExcerptCompact, keep: 80 },
   ];
   const bibleBlock: PromptBlock = { text: options.bible.bible, keep: 5, clip: true };
   const finish = (blocks: PromptBlock[]) => (options.maxChars ? fitPromptBlocks(blocks, options.maxChars, refitCard) : renderBlocks(blocks));
