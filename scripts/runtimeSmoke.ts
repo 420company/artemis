@@ -9111,6 +9111,72 @@ process.stdin.on('data', (chunk) => {
   }
 }
 
+// ── MCP call timeout and cancellation ─────────────────────────────────────────
+
+{
+  // Real tools (search, scrape, render) take longer than a probe: a call that
+  // needs ~5 s must not hit the old 4 s default. Connecting keeps a shorter
+  // budget than the call, and a cancelled run stops waiting at once (also
+  // while the server is still starting) instead of after the timeout.
+  const { callMcpServerTool, closeCachedMcpClients, resolveMcpRequestTimeouts, McpCallCancelledError } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-timeout-'))
+  const slowFile = path.join(dir, 'slow.mjs')
+  fs.writeFileSync(slowFile, `
+const write = (m) => process.stdout.write(JSON.stringify(m) + '\\n')
+let buf = ''
+process.stdin.on('data', (c) => {
+  buf += c
+  for (;;) {
+    const i = buf.indexOf('\\n')
+    if (i < 0) return
+    const line = buf.slice(0, i)
+    buf = buf.slice(i + 1)
+    if (!line.trim()) continue
+    const msg = JSON.parse(line)
+    if (msg.id === undefined) continue
+    if (msg.method === 'initialize') write({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'slow', version: '1' } } })
+    else if (msg.method === 'tools/list') write({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'slow', inputSchema: { type: 'object' } }] } })
+    else if (msg.method === 'tools/call') setTimeout(() => write({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'slow done' }] } }), 5000)
+    else write({ jsonrpc: '2.0', id: msg.id, result: {} })
+  }
+})
+`)
+  const silentFile = path.join(dir, 'silent.mjs')
+  fs.writeFileSync(silentFile, `process.stdin.on('data', () => {})\n`)
+  const stdioServer = (id: string, file: string) => ({ id, enabled: true, transport: 'stdio' as const, command: process.execPath, commandArgs: [file], authType: 'none' as const, authState: 'unknown' as const, createdAt: '', updatedAt: '' })
+  const callSlow = async (server: ReturnType<typeof stdioServer>, abortAfterMs?: number): Promise<{ output: string; error?: unknown; ms: number }> => {
+    const controller = new AbortController()
+    const timer = abortAfterMs === undefined ? undefined : setTimeout(() => controller.abort(), abortAfterMs)
+    const started = Date.now()
+    try {
+      const output = (await callMcpServerTool({ server, cwd: dir, toolName: 'slow', args: {}, abortSignal: controller.signal })).output
+      return { output, ms: Date.now() - started }
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), error, ms: Date.now() - started }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  try {
+    const timeouts = resolveMcpRequestTimeouts(undefined)
+    assert('mcp call: default budget is 120 s for the call and 30 s for connecting', timeouts.callTimeoutMs === 120_000 && timeouts.setupTimeoutMs === 30_000, JSON.stringify(timeouts))
+    const explicit = resolveMcpRequestTimeouts(5_000)
+    assert('mcp call: an explicit shorter timeout bounds connecting too', explicit.callTimeoutMs === 5_000 && explicit.setupTimeoutMs === 5_000, JSON.stringify(explicit))
+
+    const done = await callSlow(stdioServer('slow', slowFile))
+    assert('mcp call: a 5 s tool call completes under the default call timeout', done.output.includes('slow done'), done.output)
+
+    const cancelled = await callSlow(stdioServer('slow-cancel', slowFile), 300)
+    assert('mcp call: cancelling a running tool call stops waiting at once', cancelled.error instanceof McpCallCancelledError && cancelled.ms < 2000, `${cancelled.ms}ms ${cancelled.output}`)
+
+    const cancelledConnect = await callSlow(stdioServer('silent-cancel', silentFile), 300)
+    assert('mcp call: cancelling while the server never answers initialize stops waiting at once', cancelledConnect.error instanceof McpCallCancelledError && cancelledConnect.ms < 2000, `${cancelledConnect.ms}ms ${cancelledConnect.output}`)
+  } finally {
+    await closeCachedMcpClients()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 console.log()

@@ -125,6 +125,73 @@ const CLI_MCP_PACKAGES_DIR = existsSync(path.join(USER_MCP_PACKAGES_DIR, 'node_m
   : BUNDLED_MCP_PACKAGES_DIR;
 
 const DEFAULT_TIMEOUT_MS = 4_000;
+/**
+ * Tool calls, resource reads and prompt fetches do real work (search, scrape,
+ * render, query) that routinely takes longer than a probe. The short default
+ * stays for probes.
+ */
+const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+/**
+ * Connecting (spawn + initialize + list) before a call: long enough for an
+ * npx/uvx server to start, short enough that a dead server fails in time.
+ */
+const DEFAULT_SETUP_TIMEOUT_MS = 30_000;
+
+/** The run was cancelled while an MCP request was in flight. */
+export class McpCallCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+/** Budgets for one call: connecting is capped at 30 s, never above the call's own budget. */
+export function resolveMcpRequestTimeouts(timeoutMs: number | undefined): {
+  callTimeoutMs: number;
+  setupTimeoutMs: number;
+} {
+  const callTimeoutMs = timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+  return {
+    callTimeoutMs,
+    setupTimeoutMs: Math.min(callTimeoutMs, DEFAULT_SETUP_TIMEOUT_MS),
+  };
+}
+
+/**
+ * Settles with `work`, or rejects when `timeoutMs` passes or `signal` aborts,
+ * whichever comes first. The caller then invalidates the client, which kills
+ * the stdio server or aborts the HTTP request still behind `work`.
+ */
+async function withDeadline<T>(
+  work: Promise<T>,
+  options: { timeoutMs: number; label: string; signal?: AbortSignal },
+): Promise<T> {
+  // The losing side may still reject later; it must not become unhandled.
+  work.catch(() => undefined);
+  if (options.signal?.aborted) {
+    throw new McpCallCancelledError(`${options.label} cancelled.`);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${options.label} timed out after ${options.timeoutMs}ms.`)),
+      options.timeoutMs,
+    );
+    if (options.signal) {
+      onAbort = () => reject(new McpCallCancelledError(`${options.label} cancelled.`));
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) {
+      options.signal?.removeEventListener('abort', onAbort);
+    }
+  }
+}
 const CLIENT_PROTOCOL_VERSION = '2024-11-05';
 const CLIENT_INFO = {
   name: APP_NAME,
@@ -2224,23 +2291,60 @@ export async function discoverMcpServerSurface(options: {
   );
 }
 
-export async function callMcpServerTool(options: {
+type ManagedRequestOptions = {
   server: McpServerConfig;
   cwd: string;
+  timeoutMs?: number;
+  /** Cancels the wait (and, via invalidation, the request) when the run is cancelled. */
+  abortSignal?: AbortSignal;
+};
+
+/**
+ * Connects (cached) within the setup budget, then runs `request` within the
+ * call budget; both waits end early when the run is cancelled.
+ */
+async function requestWithManagedClient<T>(
+  options: ManagedRequestOptions,
+  label: string,
+  request: (client: RpcTransport) => Promise<T>,
+): Promise<{ result: T; surface: McpDiscoveryResult }> {
+  const { callTimeoutMs, setupTimeoutMs } = resolveMcpRequestTimeouts(options.timeoutMs);
+  // The cached client outlives this call, so its own per-request timer must
+  // not be shorter than a later call's budget; the deadlines here enforce
+  // this call's limits.
+  const clientTimeoutMs = Math.max(callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS);
+  const surface = await withDeadline(
+    discoverManagedSurface({
+      server: options.server,
+      cwd: options.cwd,
+      timeoutMs: clientTimeoutMs,
+    }),
+    {
+      timeoutMs: setupTimeoutMs,
+      label: `MCP server ${options.server.id} initialize`,
+      signal: options.abortSignal,
+    },
+  );
+  const client = await getManagedClient(options.server, options.cwd, clientTimeoutMs);
+  const result = await withDeadline(request(client), {
+    timeoutMs: callTimeoutMs,
+    label,
+    signal: options.abortSignal,
+  });
+  return { result, surface };
+}
+
+export async function callMcpServerTool(options: ManagedRequestOptions & {
   toolName: string;
   args?: Record<string, unknown>;
-  timeoutMs?: number;
 }): Promise<McpToolCallResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
-      const surface = await discoverManagedSurface({
-        server: options.server,
-        cwd: options.cwd,
-        timeoutMs,
-      });
-      const client = await getManagedClient(options.server, options.cwd, timeoutMs);
-      const result = await client.callTool(options.toolName, options.args ?? {});
+      const { result, surface } = await requestWithManagedClient(
+        options,
+        `MCP tool ${options.toolName}`,
+        (client) => client.callTool(options.toolName, options.args ?? {}),
+      );
       return {
         output: serializeResult(result),
         raw: result,
@@ -2250,6 +2354,9 @@ export async function callMcpServerTool(options: {
       };
     } catch (error) {
       await invalidateManagedClient(options.server, options.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
       }
@@ -2272,22 +2379,16 @@ export async function callMcpServerTool(options: {
   throw new Error('MCP tool call retry loop exited unexpectedly.');
 }
 
-export async function readMcpServerResource(options: {
-  server: McpServerConfig;
-  cwd: string;
+export async function readMcpServerResource(options: ManagedRequestOptions & {
   uri: string;
-  timeoutMs?: number;
 }): Promise<McpResourceReadResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
-      const surface = await discoverManagedSurface({
-        server: options.server,
-        cwd: options.cwd,
-        timeoutMs,
-      });
-      const client = await getManagedClient(options.server, options.cwd, timeoutMs);
-      const result = await client.readResource(options.uri);
+      const { result, surface } = await requestWithManagedClient(
+        options,
+        `MCP resource ${options.uri}`,
+        (client) => client.readResource(options.uri),
+      );
       return {
         output: serializeResult(result),
         raw: result,
@@ -2297,6 +2398,9 @@ export async function readMcpServerResource(options: {
       };
     } catch (error) {
       await invalidateManagedClient(options.server, options.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
       }
@@ -2351,25 +2455,16 @@ export function extractMcpPromptSessionMessages(
   return results;
 }
 
-export async function getMcpServerPrompt(options: {
-  server: McpServerConfig;
-  cwd: string;
+export async function getMcpServerPrompt(options: ManagedRequestOptions & {
   promptName: string;
   args?: Record<string, unknown>;
-  timeoutMs?: number;
 }): Promise<McpPromptGetResult> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
     try {
-      const surface = await discoverManagedSurface({
-        server: options.server,
-        cwd: options.cwd,
-        timeoutMs,
-      });
-      const client = await getManagedClient(options.server, options.cwd, timeoutMs);
-      const result = await client.getPrompt(
-        options.promptName,
-        options.args ?? {},
+      const { result, surface } = await requestWithManagedClient(
+        options,
+        `MCP prompt ${options.promptName}`,
+        (client) => client.getPrompt(options.promptName, options.args ?? {}),
       );
       return {
         output: serializePromptResult(options.promptName, result),
@@ -2380,6 +2475,9 @@ export async function getMcpServerPrompt(options: {
       };
     } catch (error) {
       await invalidateManagedClient(options.server, options.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
       if (attempt === 0 && isMcpSessionExpiryError(error)) {
         continue;
       }

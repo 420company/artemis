@@ -84,6 +84,7 @@ import {
   resolveOdinSkillContext,
 } from '../odin/runtime.js';
 import {
+  McpCallCancelledError,
   McpDependencyError,
   callMcpServerTool,
   getMcpServerPrompt,
@@ -4290,9 +4291,29 @@ export async function runSpecialistAgent(
   }
 }
 
+/**
+ * A cancelled run is not a server failure: report it without marking the
+ * server unhealthy.
+ */
+function buildMcpCancelledOutcome(
+  error: unknown,
+): { ok: boolean; output: string; error?: ToolError } | undefined {
+  if (!(error instanceof McpCallCancelledError)) {
+    return undefined;
+  }
+  return {
+    ok: false,
+    output: error.message,
+    error: buildToolError('tool_run_cancelled', error.message, {
+      retryable: false,
+    }),
+  };
+}
+
 async function executeMcpToolAction(
   action: Extract<AgentAction, { type: 'mcp_call_tool' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4328,6 +4349,7 @@ async function executeMcpToolAction(
       toolName: action.toolName,
       args: action.args,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4342,6 +4364,10 @@ async function executeMcpToolAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     // Dependency missing: stop immediately, surface install prompt to user
     if (error instanceof McpDependencyError) {
       const info = error.dependencyInfo;
@@ -4360,6 +4386,7 @@ async function executeMcpToolAction(
             toolName: action.toolName,
             args: action.args,
             timeoutMs: action.timeoutMs,
+            abortSignal,
           });
           return { ok: true, output: result.output };
         } catch {
@@ -4404,6 +4431,7 @@ async function executeMcpToolAction(
 async function executeMcpReadResourceAction(
   action: Extract<AgentAction, { type: 'mcp_read_resource' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4438,6 +4466,7 @@ async function executeMcpReadResourceAction(
       cwd: options.cwd,
       uri: action.uri,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4452,6 +4481,10 @@ async function executeMcpReadResourceAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =
@@ -4475,6 +4508,7 @@ async function executeMcpReadResourceAction(
 async function executeMcpGetPromptAction(
   action: Extract<AgentAction, { type: 'mcp_get_prompt' }>,
   options: RunAgentOptions,
+  abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
   const { store, data, server } = await loadMcpServerState(
     options.cwd,
@@ -4510,6 +4544,7 @@ async function executeMcpGetPromptAction(
       promptName: action.promptName,
       args: action.args,
       timeoutMs: action.timeoutMs,
+      abortSignal,
     });
     const nextServer = applyMcpRuntimeSuccess({
       server: result.server,
@@ -4524,6 +4559,10 @@ async function executeMcpGetPromptAction(
       output: result.output,
     };
   } catch (error) {
+    const cancelled = buildMcpCancelledOutcome(error);
+    if (cancelled) {
+      return cancelled;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const latestData = await store.load();
     const latestServer =
@@ -4677,11 +4716,11 @@ async function executeAgentAction(
 
   switch (action.type) {
     case 'mcp_call_tool':
-      return executeMcpToolAction(action, options);
+      return executeMcpToolAction(action, options, abortSignal);
     case 'mcp_read_resource':
-      return executeMcpReadResourceAction(action, options);
+      return executeMcpReadResourceAction(action, options, abortSignal);
     case 'mcp_get_prompt':
-      return executeMcpGetPromptAction(action, options);
+      return executeMcpGetPromptAction(action, options, abortSignal);
     case 'approve_builder_execution':
       return approveBuilderExecution(session, action, options);
     case 'spawn_background_workflow': {
