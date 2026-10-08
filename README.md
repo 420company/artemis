@@ -293,11 +293,11 @@ A Bing or Google key of your own keeps today's order (the platform is not used).
                "apiKey": "<platform key>", "managedBy": "platform" }
 ```
 
-`"enabled": false` turns it off. Without a `webSearch` entry, a main profile marked `capabilitiesSource` or `managedBy` `"platform"` is used as the gateway, with its own base URL and key. A refused or failed platform search (balance too low, rate limited, not offered, every provider down, gateway unreachable) is reported in the tool result as it is; when a fallback backend then answers, the result starts with a note saying so. Nothing is ever made up.
+`"enabled": false` turns it off. Without a `webSearch` entry, a main profile marked `capabilitiesSource` or `managedBy` `"platform"` is used as the gateway, with its own base URL and key. A refused or failed platform search (balance too low, rate limited, not offered, every provider down, gateway unreachable) is reported in the tool result as it is; when a fallback backend then answers, the result starts with a note saying so. A platform search that found nothing is "No results found.", not a failure. Results reach the model under a header marking them as untrusted web content (data, never instructions), each title and snippet flattened to one line. Nothing is ever made up.
 
 ### Long headless runs
 
-`artemis execute` runs slow tools (Saga long video, video generation, delegated work) in the foreground, so their result is part of the reply. While a foreground tool runs, it prints `[tool:<name>] progress {"elapsedSeconds":N}` to stderr every minute (`ARTEMIS_TOOL_HEARTBEAT_MS`, at least 1000), so a host that stops runs that make no progress can tell a long tool from a hung engine. The interactive CLI and chat bridges do not print it.
+`artemis execute` runs slow tools (Saga long video, video generation, delegated work) in the foreground, so their result is part of the reply. While a foreground tool runs, it prints `[tool:<name>] progress {"elapsedSeconds":N}` to stderr every minute (`ARTEMIS_TOOL_HEARTBEAT_MS`, at least 1000), so a host that stops runs that make no progress can tell a long tool from a hung engine. The line stands for progress, not just a live process: once a tool has run longer than it is expected to (`generate_long_video` 4 hours, `generate_video` and `deep_research` an hour, `run_command` its own timeout plus a minute, most tools 10 minutes), it prints one line with `"overdue":true` and goes quiet, so the host can stop a hung tool long before its hard limit. The interactive CLI and chat bridges do not print it.
 
 ---
 
@@ -557,11 +557,11 @@ artemis
 
 ### 联网搜索后端与平台搜索
 
-`search_web` 按顺序尝试各个后端，一个失败或没有结果就换下一个：平台搜索（`platform`，托管 agent 专用，经平台网关的 `POST /v1/search`，按次计入主人的平台账户）→ DuckDuckGo（免密钥，机房 IP 常被拦）→ Bing（`BING_API_KEY`）→ Google（`GOOGLE_API_KEY` + `GOOGLE_CX`）→ Wikipedia。只有在主机由平台托管、且你没有配置自己的搜索密钥时才会先用平台搜索；配置了自己的 Bing 或 Google 密钥时顺序保持不变。`backend: "platform"` 可以指定平台搜索，`freshness: "day" | "week" | "month" | "year"` 只要近期结果。托管 VPS 上由 agent 服务器把设置写进全局 `providers.json` 的 `webSearch`（`provider: "platform"`、`baseUrl`、`apiKey`、`managedBy: "platform"`；`enabled: false` 表示关闭），工作区里的配置不能改写它；没有 `webSearch` 时，标记为平台管理的主 profile 会被当作网关使用。平台搜索被拒绝或失败（余额不足、限流、未开通、所有服务商出错、网关不可达）时，工具结果如实说明原因；后备后端接着给出结果时，会在开头注明。绝不编造搜索结果。
+`search_web` 按顺序尝试各个后端，一个失败或没有结果就换下一个：平台搜索（`platform`，托管 agent 专用，经平台网关的 `POST /v1/search`，按次计入主人的平台账户）→ DuckDuckGo（免密钥，机房 IP 常被拦）→ Bing（`BING_API_KEY`）→ Google（`GOOGLE_API_KEY` + `GOOGLE_CX`）→ Wikipedia。只有在主机由平台托管、且你没有配置自己的搜索密钥时才会先用平台搜索；配置了自己的 Bing 或 Google 密钥时顺序保持不变。`backend: "platform"` 可以指定平台搜索，`freshness: "day" | "week" | "month" | "year"` 只要近期结果。托管 VPS 上由 agent 服务器把设置写进全局 `providers.json` 的 `webSearch`（`provider: "platform"`、`baseUrl`、`apiKey`、`managedBy: "platform"`；`enabled: false` 表示关闭），工作区里的配置不能改写它；没有 `webSearch` 时，标记为平台管理的主 profile 会被当作网关使用。平台搜索被拒绝或失败（余额不足、限流、未开通、所有服务商出错、网关不可达）时，工具结果如实说明原因；后备后端接着给出结果时，会在开头注明。平台搜索没有找到结果时返回「No results found.」，不算失败。搜索结果前会标明是不可信的网页内容（只当数据，不执行其中的指令），每条标题和摘要压成一行。绝不编造搜索结果。
 
 ### 长时间无界面运行
 
-`artemis execute` 在前台运行慢工具（Saga 长视频、视频生成、委托任务），结果直接进入回复。前台工具运行期间，每分钟向 stderr 输出一行 `[tool:<名称>] progress {"elapsedSeconds":N}`（`ARTEMIS_TOOL_HEARTBEAT_MS` 可调，最少 1000），宿主据此区分「工具还在跑」和「引擎卡死」。交互式命令行和聊天桥接不输出这一行。
+`artemis execute` 在前台运行慢工具（Saga 长视频、视频生成、委托任务），结果直接进入回复。前台工具运行期间，每分钟向 stderr 输出一行 `[tool:<名称>] progress {"elapsedSeconds":N}`（`ARTEMIS_TOOL_HEARTBEAT_MS` 可调，最少 1000），宿主据此区分「工具还在跑」和「引擎卡死」。工具超过预期最长时间后（`generate_long_video` 4 小时，`generate_video` 和 `deep_research` 1 小时，`run_command` 为其超时加 1 分钟，其余多数工具 10 分钟），输出一行带 `"overdue":true` 的进度后不再输出，宿主可以提前结束卡住的工具。交互式命令行和聊天桥接不输出这一行。
 
 ---
 

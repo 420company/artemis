@@ -100,8 +100,12 @@ export class PlatformSearchError extends Error {
   }
 }
 
-/** Whole call, the gateway's own failover across providers included. */
-const PLATFORM_SEARCH_TIMEOUT_MS = 30_000;
+/**
+ * Whole call, the gateway's own failover across providers included. The
+ * gateway keeps one search within 25 s across all its providers, so this
+ * leaves room for the network and never gives up while it still works.
+ */
+export const PLATFORM_SEARCH_TIMEOUT_MS = 30_000;
 
 /**
  * One query through the gateway. Resolves with the results (possibly none)

@@ -396,6 +396,8 @@ export async function searchWeb(
   // Every backend's outcome goes into the error, so the caller can tell
   // "nothing matched" apart from "no backend is usable on this host".
   const outcomes: string[] = [];
+  // The platform answered and found nothing: an honest "no results", not a failure.
+  let platformFoundNothing = false;
   for (const candidate of chain) {
     try {
       const result = candidate === 'platform'
@@ -412,11 +414,13 @@ export async function searchWeb(
             : {}),
         };
       }
+      if (candidate === 'platform' && result.success) platformFoundNothing = true;
       outcomes.push(`${candidate}: ${result.error ?? 'no results'}`);
     } catch (error) {
       outcomes.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  if (platformFoundNothing) return { success: true, data: { web: [] }, backend: 'platform' };
   return {
     success: false,
     data: { web: [] },
