@@ -102,14 +102,6 @@ import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
 import { createHudState, estimateContextLimit, renderHud, updateHudState } from '../src/cli/hud.js'
-import {
-  buildPostCompactRecoveryMessages,
-  createLedger,
-  createFileStateSnapshot,
-  saveFileArtifact,
-  saveLedger,
-  cleanupLedger,
-} from '../src/core/collapse/index.js'
 import { modelArkEndpoint, normalizeModelArkMediaBaseUrl, resolveModelArkMediaCredentials } from '../src/tools/vidarMedia.js'
 import {
   downloadProviderAsset,
@@ -4250,33 +4242,6 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     result.action === 'clear_tool_results' && !summarizerCalled && result.tokensAfter < large.target,
     `action=${result.action} before=${result.tokensBefore} after=${result.tokensAfter}`,
   )
-}
-
-{
-  const sessionId = `runtime-smoke-recovery-artifact-${Date.now()}`
-  const filePath = path.join(os.tmpdir(), `artemis-recovery-artifact-${Date.now()}.ts`)
-  const marker = 'RECOVERY_ARTIFACT_MARKER_BEYOND_HEAD_800_CHARS'
-  const content = `${'header filler\n'.repeat(90)}export function recoveredFromArtifact() { return '${marker}' }\n`
-  fs.writeFileSync(filePath, content)
-  const ledger = await createLedger(sessionId)
-  const snapshot = createFileStateSnapshot(filePath, content, Date.now(), Date.now())
-  snapshot.artifactPath = await saveFileArtifact(sessionId, filePath, content)
-  ledger.fileStates = [snapshot]
-  await saveLedger(ledger)
-
-  const recovery = await buildPostCompactRecoveryMessages(ledger, {
-    pendingAction: { text: 'continue editing recovered artifact file', capturedAt: new Date().toISOString() },
-  })
-  assert(
-    'context recovery: file artifact restores actionable content beyond ledger head',
-    recovery.length === 1 &&
-      recovery[0]?.content.includes('recoveredFromArtifact') &&
-      recovery[0]?.content.includes(marker),
-    recovery[0]?.content.slice(0, 1200),
-  )
-
-  fs.rmSync(filePath, { force: true })
-  await cleanupLedger(sessionId)
 }
 
 {
@@ -9021,28 +8986,6 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   assert(
     'context compression: a small history is left untouched after an idle gap (cache-friendly)',
     untouched.action === 'none' && untouched.changed === false && untouched.messages[2]?.content.length === 5_000,
-  )
-}
-
-// ── Ledger FileStateSnapshot creation ────────────────────────────────────────
-
-{
-  const { createFileStateSnapshot, hashContent } = await import('../src/core/collapse/ledger.js')
-
-  const testContent = 'export function hello() { return "world" }\n'
-  const snapshot = createFileStateSnapshot('/tmp/test-file.ts', testContent, Date.now())
-
-  assert(
-    'collapse ledger: createFileStateSnapshot returns correct filePath',
-    snapshot.filePath === '/tmp/test-file.ts',
-  )
-  assert(
-    'collapse ledger: createFileStateSnapshot computes content hash',
-    snapshot.contentHash === hashContent(testContent),
-  )
-  assert(
-    'collapse ledger: createFileStateSnapshot captures head content',
-    snapshot.headContent === testContent,
   )
 }
 

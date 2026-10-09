@@ -240,10 +240,11 @@ const CODING_FALLBACK_TOOLS = [
   ...ENV_TIME_TOOLS,
 ] as const;
 
-// Post-compact recovery messages are injected with role 'user' and appended
-// AFTER the real user request (see collapse/postCompactRecovery.ts). They must
-// never be treated as "what the user asked for" — otherwise the projection
-// keys off the recovery blob and drops the tools the actual request needs.
+// Post-compact recovery messages (written by the old collapse recovery, which
+// core/compaction replaced; sessions stored before that can still hold them)
+// have role 'user' and sit AFTER the real user request. They must never be
+// treated as "what the user asked for" — otherwise the projection keys off
+// the recovery blob and drops the tools the actual request needs.
 const RECOVERY_MESSAGE_ID_PREFIX = 'recovery-';
 const RECOVERY_MESSAGE_HEADER = '═══ 压缩后上下文恢复 ═══';
 
