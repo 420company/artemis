@@ -146,6 +146,7 @@ function mergeSetupConfigWithDefaults(rawSetup: Partial<ArtemisSetupConfig>): Ar
       ...(rawSetup.migrations ?? {}),
     },
     ...(rawSetup.memory && typeof rawSetup.memory === 'object' ? { memory: rawSetup.memory } : {}),
+    ...(rawSetup.selfCheck && typeof rawSetup.selfCheck === 'object' ? { selfCheck: rawSetup.selfCheck } : {}),
   };
 
   // Artemis 0.1.71 originally shipped Full Setup with image generation disabled,

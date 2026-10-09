@@ -321,12 +321,28 @@ export type MemorySetupConfig = {
   };
 };
 
+/**
+ * End-of-run self-check ("verify before done", core/selfCheck.ts). Absent
+ * keys keep the defaults; ARTEMIS_SELF_CHECK=0 also turns it off.
+ */
+export type SelfCheckSetupConfig = {
+  /** Default true; false turns the self-check off. */
+  enabled?: boolean;
+  /** Extra wall time one run's self-check may add (ms). Default 240000. */
+  maxWallMs?: number;
+  /** Time cap of one check command (ms). Default 180000. */
+  commandTimeoutMs?: number;
+  /** Extra model calls per run, 0-2. Default 2. */
+  maxModelCalls?: number;
+};
+
 export type ArtemisSetupConfig = {
   agent: AgentSetupConfig;
   terminal: TerminalSetupConfig;
   voice: VoiceSetupConfig;
   tools: ToolSetupConfig;
   memory?: MemorySetupConfig;
+  selfCheck?: SelfCheckSetupConfig;
   providerRotation?: Partial<Record<string, ProviderRotationConfig>>;
   migrations?: {
     imageGenDefaultEnabled?: boolean;
