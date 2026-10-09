@@ -145,8 +145,8 @@ export class SkillRunRecorder {
   private untrustedOverBudget = false
   readonly startedAtMs = Date.now()
 
-  /** cwd: where the run's commands start (package scripts, test paths). */
-  constructor(readonly cwd?: string) {}
+  /** cwd: where the run's commands start (package scripts, test paths); follows persisted `cd`s. */
+  constructor(public cwd?: string) {}
 
   record(input: {
     tool: string
@@ -176,6 +176,9 @@ export class SkillRunRecorder {
     const step: SkillRunStep = { tool, ok: input.ok, summary: clampLine(input.summary || tool, 240) }
     const verdict = judgeRunnerResult(input.command, input.ok, input.output, { cwd: this.cwd })
     if (verdict) step.verification = verdict
+    // run_command reports a persisted directory change ("cwd: A → B"); later commands start there.
+    const moved = input.ok && input.command ? input.output?.split('\n').slice(0, 8).join('\n').match(/^cwd: .+ → (.+)$/m) : null
+    if (moved) this.cwd = moved[1]!.trim()
     if (input.ok && GENERATION_TOOLS.has(tool) && input.output) {
       const artifacts = [...new Set(input.output.match(ARTIFACT_PATH_RE) ?? [])].slice(0, 8)
       if (artifacts.length > 0) step.artifacts = artifacts
@@ -562,7 +565,7 @@ async function withLedgerLock<T>(key: string, fn: () => Promise<T>): Promise<T> 
   }
 }
 /** Longest a new run waits for the previous run's ledger hand-off. */
-const LEDGER_WAIT_MS = 5_000
+const LEDGER_WAIT_MS = 15_000
 
 function runKey(cwd: string, sessionKey: string): string {
   return `${path.resolve(cwd)}\u0000${sessionKey}`

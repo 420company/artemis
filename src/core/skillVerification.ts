@@ -16,7 +16,7 @@
  */
 
 import path from 'node:path'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 
 // ── shell commands ─────────────────────────────────────────────────────────
 
@@ -120,10 +120,15 @@ const INFO_ONLY_FLAGS = new Set([
   '--passWithNoTests', '--pass-with-no-tests', '--if-present', '--dry-run', '--dryrun', '--showConfig', '--show-config',
   '--print-config', '--just-print', '--list', '--listFiles', '--list-files', '--noop', '--no-run',
 ])
-/** Tools where -v means verbose; everywhere else it means --version. */
-const VERBOSE_V_TOOLS = new Set(['pytest', 'py.test', 'go', 'cargo', 'dotnet', 'node', 'rspec', 'phpunit', 'ctest', 'tox', 'nox', 'mix', 'flutter', 'deno', 'swift'])
-/** A package script body that does nothing worth calling a check. */
-const TRIVIAL_SCRIPT_RE = /^\s*(?:|true|:|exit\s+0|echo\b[^&|;]*|node\s+-e\s+["']?["']?)\s*$|no test specified|--passWithNoTests|--pass-with-no-tests/i
+/** Tools where -v means verbose; everywhere else (rspec, jest, eslint, tsc, …) it means --version. */
+const VERBOSE_V_TOOLS = new Set([
+  'pytest', 'py.test', 'go', 'cargo', 'dotnet', 'node', 'phpunit', 'ctest', 'tox', 'nox', 'mix', 'flutter', 'deno', 'swift',
+  'ruff', 'mypy', 'flake8', 'pylint',
+])
+/** One statement of a package script that does nothing worth calling a check. */
+const TRIVIAL_STATEMENT_RE =
+  /^(?:|true|:|exit(?:\s+0)?|echo\b.*|printf\b.*|node\s+-e\s+(["'])\s*(?:process\.exit\(\s*0?\s*\)\s*;?\s*)?\1|node\s+-e\s*(["'])\s*\2)$/
+const NO_TEST_RE = /no test specified|--passWithNoTests|--pass-with-no-tests/i
 
 /** Where a check runs: the run's working directory, for package scripts and test paths. */
 export interface RunnerContext {
@@ -142,10 +147,16 @@ function firstPositional(args: string[]): string | undefined {
   return args.find((arg) => !arg.startsWith('-'))
 }
 
-const scriptCache = new Map<string, { mtimeMs: number; scripts: Record<string, string> | null }>()
+interface PackageInfo {
+  name?: string
+  scripts: Record<string, string>
+  workspaces: string[]
+}
 
-/** package.json scripts of a directory (cached by mtime); null when there is no readable package.json. */
-function packageScripts(dir: string): Record<string, string> | null {
+const packageCache = new Map<string, { mtimeMs: number; info: PackageInfo | null }>()
+
+/** package.json of a directory (cached by mtime); null when there is none or it is unreadable. */
+function packageInfo(dir: string): PackageInfo | null {
   const file = path.join(dir, 'package.json')
   let mtimeMs: number
   try {
@@ -153,27 +164,86 @@ function packageScripts(dir: string): Record<string, string> | null {
   } catch {
     return null
   }
-  const cached = scriptCache.get(file)
-  if (cached && cached.mtimeMs === mtimeMs) return cached.scripts
-  let scripts: Record<string, string> | null = null
+  const cached = packageCache.get(file)
+  if (cached && cached.mtimeMs === mtimeMs) return cached.info
+  let info: PackageInfo | null = null
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { scripts?: Record<string, unknown> }
-    scripts = Object.fromEntries(Object.entries(parsed.scripts ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { name?: unknown; scripts?: Record<string, unknown>; workspaces?: unknown }
+    const workspaces = Array.isArray(parsed.workspaces)
+      ? parsed.workspaces
+      : (parsed.workspaces && typeof parsed.workspaces === 'object' && Array.isArray((parsed.workspaces as { packages?: unknown }).packages))
+        ? (parsed.workspaces as { packages: unknown[] }).packages
+        : []
+    info = {
+      ...(typeof parsed.name === 'string' ? { name: parsed.name } : {}),
+      scripts: Object.fromEntries(Object.entries(parsed.scripts ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
+      workspaces: workspaces.filter((entry): entry is string => typeof entry === 'string'),
+    }
   } catch {
-    scripts = null
+    info = null
   }
-  scriptCache.set(file, { mtimeMs, scripts })
-  return scripts
+  packageCache.set(file, { mtimeMs, info })
+  return info
 }
 
-/** The package script exists and its body actually runs something (not echo/true/exit 0, no info-only flags). */
+/** Workspace package directories of a monorepo root (package.json workspaces, pnpm-workspace.yaml). */
+function workspaceDirs(root: string): string[] {
+  const patterns = [...(packageInfo(root)?.workspaces ?? [])]
+  try {
+    const yaml = readFileSync(path.join(root, 'pnpm-workspace.yaml'), 'utf8')
+    for (const match of yaml.matchAll(/^\s*-\s*['"]?([^'"\n#]+?)['"]?\s*$/gm)) patterns.push(match[1]!)
+  } catch { /* not a pnpm workspace */ }
+  // No declared workspaces: the conventional layouts.
+  if (patterns.length === 0) patterns.push('packages/*', 'apps/*', 'libs/*', 'services/*')
+  const dirs = new Set<string>()
+  for (const pattern of patterns) {
+    if (pattern.startsWith('!')) continue
+    const clean = pattern.replace(/\/\*\*?$/, '').replace(/\/$/, '')
+    const base = path.resolve(root, clean)
+    if (/\/\*\*?$/.test(pattern)) {
+      try {
+        for (const entry of readdirSync(base)) {
+          const dir = path.join(base, entry)
+          if (packageInfo(dir)) dirs.add(dir)
+          if (dirs.size >= 200) break
+        }
+      } catch { /* missing dir */ }
+    } else if (packageInfo(base)) {
+      dirs.add(base)
+    }
+  }
+  return [...dirs]
+}
+
+/** Workspace packages a selector names: a path, a package name, or a simple name glob. */
+function selectWorkspaces(root: string, selector: string): string[] {
+  const cleaned = selector.replace(/^\{|\}$/g, '').replace(/\.\.\.$|^\.\.\./g, '')
+  const asPath = path.resolve(root, cleaned)
+  if (packageInfo(asPath) && (cleaned.startsWith('.') || cleaned.includes('/'))) return [asPath]
+  const pattern = new RegExp(`^${cleaned.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`)
+  return workspaceDirs(root).filter((dir) => {
+    const name = packageInfo(dir)?.name ?? ''
+    return pattern.test(name) || pattern.test(name.replace(/^@[^/]+\//, '')) || pattern.test(path.relative(root, dir))
+  })
+}
+
+/**
+ * The package script exists and its body actually runs something: not
+ * empty, not only echo/true/exit 0/`node -e "process.exit(0)"` statements,
+ * no info-only flags; a body that calls other scripts must reach a real one.
+ */
 function realScript(dir: string, name: string, depth: number): boolean {
-  const body = packageScripts(dir)?.[name]
-  if (body === undefined || TRIVIAL_SCRIPT_RE.test(body)) return false
+  const body = packageInfo(dir)?.scripts[name]
+  if (body === undefined || NO_TEST_RE.test(body)) return false
+  const statements = splitShellSegments(body).map((segment) => segment.text.trim())
+  if (statements.every((statement) => TRIVIAL_STATEMENT_RE.test(statement))) return false
   if (words(body).some((word) => INFO_ONLY_FLAGS.has(word))) return false
-  // A body that calls other scripts must reach a real one too (npm run a && npm run b).
   const nested = classifyRunnerCommand(body, { cwd: dir }, depth + 1)
-  return nested.runner || !/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?\S+/.test(body)
+  return nested.runner || !/\b(?:npm|pnpm|yarn|bun|turbo|nx|lerna)\s+(?:run\s+)?\S+/.test(body)
+}
+
+function realScriptIn(dirs: string[], name: string, depth: number): boolean {
+  return dirs.some((dir) => realScript(dir, name, depth))
 }
 
 function hasEntries(target: string): boolean {
@@ -183,6 +253,83 @@ function hasEntries(target: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Parsed npm/pnpm/yarn/bun invocation: subcommand, its arguments, and where it runs. */
+interface PackageManagerCall {
+  sub?: string
+  rest: string[]
+  dir: string
+  /** Workspace packages it runs in (null: the target dir itself). */
+  workspaces: string[] | null
+}
+
+const PM_VALUE_FLAGS: Record<string, Set<string>> = {
+  npm: new Set(['--prefix', '-C', '-w', '--workspace', '--userconfig', '--cache', '--registry', '--loglevel']),
+  pnpm: new Set(['-C', '--dir', '--filter', '-F', '--workspace-concurrency', '--reporter', '--loglevel']),
+  yarn: new Set(['--cwd']),
+  bun: new Set(['--cwd', '--filter', '-F']),
+}
+
+function parsePackageManager(head: string, args: string[], cwd: string): PackageManagerCall {
+  const valueFlags = PM_VALUE_FLAGS[head] ?? new Set<string>()
+  let dir = cwd
+  const selectors: string[] = []
+  let all = false
+  let sub: string | undefined
+  const rest: string[] = []
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!
+    if (sub !== undefined) {
+      rest.push(arg)
+      continue
+    }
+    const [flag, inline] = arg.includes('=') && arg.startsWith('-') ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg, undefined]
+    if (valueFlags.has(flag)) {
+      const value = inline ?? args[++index] ?? ''
+      if (['--prefix', '-C', '--dir', '--cwd'].includes(flag)) dir = path.resolve(dir, value)
+      else if (['-w', '--workspace', '--filter', '-F'].includes(flag)) selectors.push(value)
+      continue
+    }
+    if (['--workspaces', '-ws', '-r', '--recursive'].includes(flag)) {
+      all = true
+      continue
+    }
+    if (arg.startsWith('-')) continue
+    sub = arg
+  }
+  // Flags after the subcommand (npm test -w a, npm run lint --workspaces).
+  for (let index = 0; index < rest.length; index++) {
+    const arg = rest[index]!
+    if (arg === '--') break
+    if (head === 'npm' && (arg === '-w' || arg === '--workspace')) selectors.push(rest[index + 1] ?? '')
+    else if (head === 'npm' && arg.startsWith('--workspace=')) selectors.push(arg.slice('--workspace='.length))
+    else if (arg === '--workspaces' || arg === '-ws' || (head === 'pnpm' && (arg === '-r' || arg === '--recursive'))) all = true
+  }
+  const workspaces = selectors.length > 0
+    ? selectors.flatMap((selector) => selectWorkspaces(dir, selector))
+    : all ? workspaceDirs(dir) : null
+  return { sub, rest, dir, workspaces }
+}
+
+/** The task names a turbo/nx/lerna invocation runs, when they are check tasks. */
+function monorepoTasks(head: string, args: string[]): string[] {
+  const positional = args.filter((arg) => !arg.startsWith('-'))
+  if (head === 'turbo') return positional[0] === 'run' ? positional.slice(1) : positional.slice(0, 1)
+  if (head === 'lerna') return positional[0] === 'run' ? positional.slice(1, 2) : []
+  if (head === 'nx') {
+    const targets: string[] = []
+    for (let index = 0; index < args.length; index++) {
+      const arg = args[index]!
+      if (arg === '-t' || arg === '--target' || arg === '--targets') targets.push(...(args[index + 1] ?? '').split(','))
+      else if (/^--targets?=/.test(arg)) targets.push(...arg.slice(arg.indexOf('=') + 1).split(','))
+    }
+    if (targets.length > 0) return targets
+    if (positional[0] === 'run' && positional[1]?.includes(':')) return [positional[1].split(':')[1]!]
+    if (positional.length >= 2 && !['run-many', 'affected', 'run'].includes(positional[0]!)) return [positional[0]!]
+    return []
+  }
+  return []
 }
 
 /** True when the segment's command (its head, not an argument) runs tests, a build, lint or a type check. */
@@ -219,30 +366,53 @@ export function isRunnerSegment(segment: string, context: RunnerContext = {}, de
     const tool = basenameOf(firstPositional(rest) ?? '')
     const after = rest.slice(rest.indexOf(firstPositional(rest) ?? '') + 1)
     if (CHECK_TOOL_RE.test(tool)) return true
+    if (tool === 'turbo' || tool === 'nx' || tool === 'lerna') return isRunnerSegment([tool, ...after].join(' '), context, depth + 1)
     if (tool === 'playwright') return firstPositional(after) === 'test'
     if (tool === 'cypress') return firstPositional(after) === 'run'
     if (tool === 'prettier') return after.includes('--check')
     return false
   }
-  const scriptRun = (name: string | undefined): boolean => Boolean(name && CHECK_SCRIPT_RE.test(name) && realScript(dir, name, depth))
 
   switch (head) {
-    case 'npm': {
-      if (!sub) return false
-      if (['test', 't', 'tst'].includes(sub)) return realScript(dir, 'test', depth)
-      if (sub === 'run' || sub === 'run-script') return scriptRun(firstPositional(args.slice(args.indexOf(sub) + 1)))
-      if (sub === 'exec' || sub === 'x') return viaExecutor(args.slice(args.indexOf(sub) + 1))
-      return false
-    }
+    case 'npm':
     case 'pnpm':
     case 'yarn':
     case 'bun': {
+      const call = parsePackageManager(head, args, dir)
+      const targets = call.workspaces ?? [call.dir]
+      const script = (name: string | undefined): boolean =>
+        Boolean(name && CHECK_SCRIPT_RE.test(name) && (realScriptIn(targets, name, depth) || (call.workspaces !== null && realScript(call.dir, name, depth))))
+      const sub = call.sub
       if (!sub) return false
-      if (sub === 'run') return scriptRun(firstPositional(args.slice(args.indexOf(sub) + 1)))
-      if (sub === 'exec' || sub === 'dlx' || sub === 'x') return viaExecutor(args.slice(args.indexOf(sub) + 1))
+      if (head === 'yarn' && sub === 'workspace') {
+        // yarn workspace <name> [run] <script>
+        const [name, maybeRun, maybeScript] = call.rest.filter((arg) => !arg.startsWith('-'))
+        const dirs = name ? selectWorkspaces(call.dir, name) : []
+        const scriptName = maybeRun === 'run' ? maybeScript : maybeRun
+        return Boolean(scriptName && CHECK_SCRIPT_RE.test(scriptName) && realScriptIn(dirs, scriptName, depth))
+      }
+      if (head === 'yarn' && sub === 'workspaces') {
+        // yarn workspaces foreach [-A] run <script> / yarn workspaces run <script>
+        const positional = call.rest.filter((arg) => !arg.startsWith('-'))
+        const scriptName = positional[positional.indexOf('run') + 1]
+        return Boolean(positional.includes('run') && scriptName && CHECK_SCRIPT_RE.test(scriptName) && realScriptIn(workspaceDirs(call.dir), scriptName, depth))
+      }
+      if (['test', 't', 'tst'].includes(sub) && head !== 'bun') return script('test')
+      if (sub === 'run' || sub === 'run-script') return script(firstPositional(call.rest))
+      if (sub === 'exec' || sub === 'x' || sub === 'dlx') return viaExecutor(call.rest)
       if (head === 'bun' && sub === 'test') return true
       // pnpm/yarn/bun run package scripts by name.
-      return !['install', 'add', 'remove', 'init', 'create', 'link'].includes(sub) && scriptRun(sub)
+      if (head === 'npm' || ['install', 'add', 'remove', 'init', 'create', 'link'].includes(sub)) return false
+      return script(sub)
+    }
+    case 'turbo':
+    case 'nx':
+    case 'lerna': {
+      const tasks = monorepoTasks(head, args).filter((task) => CHECK_SCRIPT_RE.test(task))
+      if (tasks.length === 0) return false
+      if (head === 'nx') return existsSync(path.join(dir, 'nx.json'))
+      const dirs = [dir, ...workspaceDirs(dir)]
+      return tasks.every((task) => realScriptIn(dirs, task, depth))
     }
     case 'npx':
     case 'bunx':
@@ -374,14 +544,25 @@ export function classifyRunnerCommand(command: string, context: RunnerContext = 
   return { runner, statusPreserved: runner && statusPreserved }
 }
 
-/** Exit status a run_command result reports in its header, if any. */
-export function reportedExitCode(output: string | undefined): number | undefined {
-  if (!output) return undefined
-  // Only the header the tool writes (first lines), never something the command printed.
-  const head = output.split('\n').slice(0, 3).join('\n')
-  const match = head.match(/^(?:exit_code|exit code|exitCode)\s*[:=]\s*(-?\d+)/im)
-    ?? head.match(/\(exit_code:\s*(-?\d+)\)/i)
-  return match ? Number(match[1]) : undefined
+/**
+ * Exit status a run_command result reports in its own header — the
+ * "command: <the exact command>" block the tool writes first, followed by
+ * "exit_code: N" (or a background "status: … (exit_code: N)") — never a
+ * number the command itself printed.
+ */
+export function reportedExitCode(output: string | undefined, command?: string): number | undefined {
+  if (!output || command === undefined) return undefined
+  const header = `command: ${command}\n`
+  if (!output.startsWith(header)) return undefined
+  const after = output.slice(header.length).split('\n').slice(0, 6)
+  for (const line of after) {
+    const direct = line.match(/^exit_code:\s*(-?\d+)\s*$/)
+    if (direct) return Number(direct[1])
+    const background = line.match(/^status:\s*\w+\s*\(exit_code:\s*(-?\d+)\)/)
+    if (background) return Number(background[1])
+    if (/^(?:stdout|stderr):/.test(line)) break
+  }
+  return undefined
 }
 
 /** run_command moved to the background: the result says nothing about the outcome yet. */
@@ -389,23 +570,39 @@ export function outputIsBackgrounded(output: string | undefined): boolean {
   return Boolean(output && /^(?:background:\s*true|auto_backgrounded:\s*true|status:\s*running)\b/im.test(output.slice(0, 2000)))
 }
 
-/** Test-runner output that reports failures, whatever the exit status says. */
-const RUNNER_FAILURE_OUTPUT_RE =
-  /^\s*(?:FAIL|FAILED|ERROR)\b|\b[1-9]\d*\s+(?:failing|failed|failures?|errors?)\b|\bTests?:\s+\d+\s+failed|\b(?:failed|errors?)=[1-9]|^\s*✗|^not ok\b|\bBUILD FAILED\b|\berror TS\d+/m
+/**
+ * Runner summary lines that report failures — consulted only when the exit
+ * status is unknown. Ordinary log lines ("ERROR:root:…", test names that
+ * mention errors, TAP "# TODO") do not count.
+ */
+const RUNNER_FAILURE_SUMMARY_RE = new RegExp([
+  /^\s*Tests?:\s+[1-9]\d*\s+failed\b/.source, // jest
+  /^\s*Tests?\s+[1-9]\d*\s+failed\b/.source, // vitest "Tests  2 failed | 3 passed"
+  /^\s*Test Files\s+[1-9]\d*\s+failed\b/.source,
+  /^=+ .*\b[1-9]\d* (?:failed|errors?)\b.* =+$/.source, // pytest summary
+  /^FAILED \((?:failures|errors)=[1-9]/.source, // unittest
+  /^# fail [1-9]\d*$/.source, // node --test / TAP
+  /^\s*[1-9]\d* failing$/.source, // mocha
+  /^Found [1-9]\d* errors?\b/.source, // tsc --watch-style summary
+  /^\s*✖ [1-9]\d* problems? \([1-9]\d* errors?/.source, // eslint
+  /^(?:error|ERROR)(?:\[E\d+\])?: could not compile\b/.source, // cargo
+  /^--- FAIL: /.source, // go test
+  /^BUILD FAILED\b/.source,
+].join('|'), 'm')
 
 /**
- * Verdict for one tool call: undefined when it is not a check run;
- * 'pass' only for a runner whose status is preserved, that succeeded,
- * exited 0 in the foreground (when the tool reports it), and whose output
- * does not report failures.
+ * Verdict for one tool call: undefined when it is not a check run. The
+ * exit status the tool reports is authoritative; without one, the tool's
+ * ok flag decides, and failing runner summary lines turn it into a fail.
+ * 'pass' needs the runner's status preserved and a foreground run.
  */
 export function judgeRunnerResult(command: string | undefined, ok: boolean, output?: string, context: RunnerContext = {}): 'pass' | 'fail' | 'unknown' | undefined {
   if (!command) return undefined
   const info = classifyRunnerCommand(command, context)
   if (!info.runner) return undefined
-  const exit = reportedExitCode(output)
+  const exit = reportedExitCode(output, command)
   if (!ok || (exit !== undefined && exit !== 0)) return 'fail'
-  if (output && RUNNER_FAILURE_OUTPUT_RE.test(output.slice(0, 200_000))) return 'fail'
+  if (exit === undefined && output && RUNNER_FAILURE_SUMMARY_RE.test(output.slice(0, 200_000))) return 'fail'
   if (!info.statusPreserved || outputIsBackgrounded(output)) return 'unknown'
   return 'pass'
 }
@@ -426,6 +623,9 @@ const FAILURE_REPLY_PATTERNS: RegExp[] = [
 /** Failure words that are negated: "没有报错", "no errors", "no longer fails". */
 const NEGATED_FAILURE_RE =
   /没有?(?:再)?(?:任何)?(?:报错|错误|问题|失败|出错)了?|不再(?:报错|出错|失败|有问题)|不报错了|不出错了|\bno longer (?:fail(?:s|ing)?|broken|errors?|crash(?:es|ing)?)\b|\bnot (?:failing|broken|crashing)(?: anymore| any more)?\b|\bno more (?:errors?|failures?|crashes)\b|\b(?:does|do)(?:n'?t| not) (?:fail|crash|error)(?: anymore| any more)?\b|\b(?:with )?(?:0|no|zero) (?:errors?|failures?|failing tests?|issues?)\b/gi
+/** Failures the reply says are still there — a failure wherever they appear, whatever else it says. */
+const REMAINING_FAILURE_RE =
+  /\b[1-9]\d*\s+(?:\w+\s+){0,2}(?:tests?|specs?|checks?|suites?|assertions?|errors?)\s+(?:are\s+|is\s+)?(?:still\s+)?(?:failing|failed|broken|red|remain(?:ing)?)\b|\bstill (?:failing|fails|failed|broken|erroring|red|not (?:working|passing))\b|\b(?:errors?|failures?) (?:remain|persist)|还有\s*\d*\s*个?.{0,8}(?:失败|报错|错误)|仍然(?:有)?.{0,4}(?:报错|失败|错误)|依然(?:有)?.{0,4}(?:报错|失败|错误)|还是(?:有)?.{0,4}(?:报错|失败|错误)|仍有.{0,6}(?:错误|失败)|尚未通过|仍未通过/i
 /** The reply states the work succeeded. */
 const SUCCESS_REPLY_RE =
   /(?:测试|检查|构建|编译|lint)?(?:已)?(?:全部)?通过|已修复|修复了|修好了|已解决|构建成功|编译成功|部署成功|运行成功|\ball (?:\d+ )?(?:tests?|checks?|specs?) (?:now )?pass(?:ed|ing)?\b|\b(?:tests?|checks?|specs?|build|lint|typecheck) (?:now )?(?:pass(?:es|ed)?|succeed(?:s|ed)?|(?:is|are) (?:passing|green))\b|\bfixed\b|\bresolved\b|\bsucceeded\b/i
@@ -443,6 +643,7 @@ function clauses(text: string): string[] {
  */
 export function replyReportsFailure(reply: string): boolean {
   const text = reply.slice(0, 6000).replace(NEGATED_FAILURE_RE, ' ')
+  if (REMAINING_FAILURE_RE.test(text)) return true
   const hasFailure = (value: string): boolean => FAILURE_REPLY_PATTERNS.some((pattern) => pattern.test(value))
   const last = clauses(text).at(-1) ?? ''
   if (hasFailure(last)) return true
@@ -501,10 +702,11 @@ export function classifyUserFeedback(text: string): 'positive' | 'negative' | 'n
   let message = normalizeFeedbackText(text)
   for (let guard = 0; guard < 3 && POLITE_OPENER_RE.test(message); guard++) message = message.replace(POLITE_OPENER_RE, '').trim()
   if (!message) return 'neutral'
+  const asksSomething = /[?？]/.test(message)
   const bare = message.replace(/[\p{P}\p{S}\s]+/gu, ' ').trim()
-  if ((bare && SHORT_APPROVAL_RE.test(bare)) || (!bare && APPROVAL_EMOJI_RE.test(message))) return 'positive'
+  if ((bare && SHORT_APPROVAL_RE.test(bare)) || (!bare && APPROVAL_EMOJI_RE.test(message))) return asksSomething ? 'neutral' : 'positive'
 
-  const rawFirst = message.split(/[。！!？?\n；;]|[,，](?=\s*(?:另外|还有|顺便|then|also|now|and|next))/)[0] ?? ''
+  const rawFirst = message.split(/[。！!？?\n；;]|[,，](?=\s*(?:另外|还有|顺便|再|帮我|请|then|also|now|and|next|please))/)[0] ?? ''
   const firstClause = rawFirst.trim()
   if (!firstClause) return 'neutral'
   const terminator = message.slice(rawFirst.length).trimStart().charAt(0)
@@ -523,16 +725,56 @@ export function classifyUserFeedback(text: string): 'positive' | 'negative' | 'n
   if (REQUEST_START_RE.test(clause) && !feedbackWithin(2)) return 'neutral'
   if (clause.length > FEEDBACK_CLAUSE_MAX_CHARS && !feedbackWithin(10)) return 'neutral'
 
-  const isNegative = (value: string): boolean => {
-    const withoutIdioms = value.replace(POSITIVE_IDIOM_RE, ' ')
-    return NEGATED_POSITIVE_RE.test(withoutIdioms) || NEGATIVE_RE.test(withoutIdioms)
-  }
+  // The rest of a short message counts too: "谢谢！还是不行", "No errors, the page is just
+  // blank" and "Thanks! Still broken though" are complaints, whatever they open with.
+  // Questions and new requests in it ("另外…有问题吗？", "再帮我…") are not.
+  const others = otherClauses(message, firstClause)
+  if (others.some((part) => isComplaint(part))) return 'negative'
+
+  // "好的，再帮我…", "ok, now add tests": a short approval, then a new request.
+  const firstBare = clause.replace(/[\p{P}\p{S}\s]+/gu, ' ').trim()
+  if (firstBare && SHORT_APPROVAL_RE.test(firstBare) && !/[?？]/.test(rawFirst + terminator)) return 'positive'
   const contrast = clause.match(CONTRAST_RE)
   if (contrast) {
     // "thanks, but it is broken" complains; "works on staging but not prod" is unclear.
-    return isNegative(clause.slice((contrast.index ?? 0) + contrast[0].length)) ? 'negative' : 'neutral'
+    return isComplaint(clause.slice((contrast.index ?? 0) + contrast[0].length)) ? 'negative' : 'neutral'
   }
   if (isNegative(clause)) return 'negative'
+  // "No errors" is good news only when nothing else follows, or what follows is good too.
+  if (fixedNews && others.some((part) => !POSITIVE_RE.test(part) && !APPROVAL_EMOJI_RE.test(part))) return 'neutral'
   if (fixedNews || POSITIVE_RE.test(clause) || APPROVAL_EMOJI_RE.test(message)) return 'positive'
   return 'neutral'
+}
+
+function isNegative(value: string): boolean {
+  const withoutIdioms = value.replace(NEGATED_FAILURE_RE, ' ').replace(POSITIVE_IDIOM_RE, ' ')
+  return NEGATED_POSITIVE_RE.test(withoutIdioms) || NEGATIVE_RE.test(withoutIdioms)
+}
+
+/** Complaint markers beyond plain negatives: still broken, blank page, nothing renders, 还是/仍然/空白. */
+const COMPLAINT_EXTRA_RE =
+  /还是|仍然|依然|空白|白屏|没反应|没有反应|不显示|没有显示|显示不出|打不开|加载不出|\bstill\b|\bblank\b|\bnothing (?:renders|shows|happens|appears|loads|works)\b|\bempty (?:page|screen|output|file|result)\b|\bno output\b|\bdoes ?n[o']t (?:show|render|load|appear)\b/i
+
+function isComplaint(value: string): boolean {
+  const cleaned = value.replace(NEGATED_FAILURE_RE, ' ').replace(POSITIVE_IDIOM_RE, ' ')
+  return isNegative(cleaned) || COMPLAINT_EXTRA_RE.test(cleaned)
+}
+
+/** The message's clauses after its first one, minus questions and new requests. */
+function otherClauses(message: string, _firstClause: string): string[] {
+  const out: string[] = []
+  const pattern = /[^。！!？?\n；;，,:：]+([。！!？?\n；;，,:：]|$)/g
+  let first = true
+  for (const match of message.replace(/\.\s+/g, '。').matchAll(pattern)) {
+    const part = match[0].replace(/[。！!？?\n；;，,:：]$/, '').trim()
+    if (!part) continue
+    if (first) {
+      first = false
+      continue
+    }
+    const question = match[1] === '?' || match[1] === '？' || /[吗呢嘛]$/.test(part) || QUESTION_START_RE.test(part)
+    if (question || REQUEST_START_RE.test(part)) continue
+    out.push(part)
+  }
+  return out
 }

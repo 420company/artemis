@@ -109,12 +109,19 @@ export function looksLikeInjectedInstruction(line: string): boolean {
 
 // ── hosts ──────────────────────────────────────────────────────────────────
 
-/** Top-level domains recognised for bare hosts ("evil.example/simple"); file extensions such as .sh/.md/.rs are left out. */
+/**
+ * Bare hosts ("evil.example/simple", "github.com/x/y") are recognised only
+ * on public TLDs that are not also file extensions or library suffixes;
+ * a TLD that collides with one (io, ai, app, dev, sh, …: socket.io,
+ * MyTool.app) counts only when a path follows. Names ending in a file
+ * extension (parser.test.ts, README.de.md) are never hosts.
+ */
 const BARE_HOST_TLDS =
-  'com|net|org|io|dev|app|co|cn|ru|xyz|me|info|biz|cc|tk|top|site|online|tech|ai|gg|ly|us|uk|de|fr|jp|kr|in|br|nl|eu|cloud|page|link|club|pro|example|internal|local|test|invalid|localhost|lan|corp|home|svc'
+  'com|net|org|edu|gov|mil|int|cn|ru|de|uk|fr|jp|kr|in|br|nl|eu|us|ca|au|it|es|se|ch|pl|tw|hk|sg|info|biz|xyz|top|site|online|tech|cloud|page|link|club|pro|cc|tk|example|internal|corp|lan|invalid|localhost'
+const PATH_ONLY_TLDS = 'io|ai|app|dev|me|co|gg|ly|sh|so|to|tv|fm|ws|im|is|la|ms'
 const URL_RE = /\b(?:https?|ftp|file|wss?|ssh|git|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^\s"'<>`)\]]+/gi
 const BARE_HOST_RE = new RegExp(
-  `(?<![\\w@./:-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:${BARE_HOST_TLDS})(?::\\d{2,5})?(?:\\/[^\\s"'<>\`)\\]]*)?)(?![\\w-])`,
+  `(?<![\\w@./:-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:(?:${BARE_HOST_TLDS})(?::\\d{2,5})?(?:\\/[^\\s"'<>\`)\\]]*)?|(?:${PATH_ONLY_TLDS})(?::\\d{2,5})?\\/[^\\s"'<>\`)\\]]*))(?![\\w.-])`,
   'gi',
 )
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'])
@@ -198,9 +205,9 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bcredential\.helper\s+(?:store|cache)\b|\bgit\s+config\b[^\n]*\bcredential\b[^\n]*\bstore\b/,
   /\bufw\s+disable\b|\bsystemctl\s+(?:stop|disable|mask)\s+(?:firewalld|ufw|iptables|nftables|apparmor)\b|\biptables\s+-f\b|\bnft\s+flush\b|\bsetenforce\s+0\b|\bselinux\s*=\s*(?:disabled|permissive)\b|\b(?:disable|turn off|stop)\b.{0,20}\b(?:firewall|selinux|apparmor|defender|antivirus)\b|(?:关闭|禁用|停用).{0,6}(?:防火墙|selinux)/,
   // credentials and keys: reading, copying or sending them, not mentioning them
-  /\b(?:cat|less|more|head|tail|type|print|echo|copy|cp|scp|rsync|mv|move|tar|zip|upload|send|post|share|paste|dump|base64|exfiltrate|read|open|attach|include|commit|add)\b[^\n]{0,40}(?:~\/\.ssh\b|\$home\/\.ssh\b|\.ssh\/(?:id_|authorized_keys)|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|\.aws\/credentials|\.netrc\b|\.pypirc\b|\.docker\/config\.json|\.kube\/config|\.git-credentials|\bkeychain\b|\bprivate keys?\b|\.pem\b|\.p12\b)/,
+  /\b(?:cat|less|more|head|tail|type|print|echo|copy|cp|scp|rsync|mv|move|tar|zip|upload|send|post|share|paste|dump|base64|exfiltrate|read|open|attach|include|commit|add)\b[^\n]{0,40}(?:~\/\.ssh\b|\$home\/\.ssh\b|\.ssh\/(?:id_|authorized_keys)|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|\.aws\/credentials|\.netrc\b|\.pypirc\b|\.docker\/config\.json|\.kube\/config|\.git-credentials|\bkeychain\b|\bprivate keys?\b)/,
   /(?:~\/\.ssh\b|\.ssh\/id_|\bid_(?:rsa|ed25519|ecdsa)\b|\.aws\/credentials|\.git-credentials)[^\n]{0,40}\b(?:to|into|in)\b[^\n]{0,30}\b(?:output|build|dist|public|repo|commit|upload|server|channel|issue|chat)\b/,
-  /\b(?:cat|print|echo|printenv|log|dump|upload|send|post|share|paste|exfiltrate|leak|expose|commit)\b(?:\s+\S+){0,2}\s+(?:all\s+|the\s+|your\s+|my\s+)?(?:\.env\b(?![.-])|secrets?\b|credentials?\b|api[ _-]?keys?\b|passwords?\b|tokens?\b|cookies?\b|env(?:ironment)? (?:vars?|variables)\b)/,
+  /\b(?:cat|print|echo|printenv|log|dump|upload|send|post|share|paste|exfiltrate|leak|expose|commit)\b(?:\s+\S+){0,2}\s+(?:all\s+|the\s+|your\s+|my\s+)?(?:\.env\b(?![.-])|secrets?\b|credentials?\b|api[ _-]?keys?\b|passwords?\b|tokens?\b|cookies?\b|env(?:ironment)? (?:vars?|variables)\b)(?!\s+(?:expiry|expiration|expires|ttl|lifetime|age|count|length|usage|limits?|names?|types?|format|ids?|rotation|refresh(?:es)?|validation|checks?|fields?|headers?|prefix|scopes?|budget|status|errors?|metadata|hash(?:es)?|fingerprints?|time|timestamps?)\b)/,
   /\b(?:echo|print|printf|printenv|cat|log)\b[^\n]{0,20}\$\{?[a-z_]*(?:key|token|secret|password|passwd|pass)\b/,
   /(?:读取|复制|打印|上传|发送|导出|提交).{0,15}(?:\.ssh|密钥|私钥|凭据|令牌|密码|\.env)|(?:关闭|禁用|跳过).{0,10}(?:证书|ssl|tls)(?:校验|验证|检查)?/,
 ]
@@ -434,7 +441,7 @@ const SECRET_FLAG_RE = /(--(?:password|passwd|pass|pwd|token|api[-_]?key|access[
 const MYSQL_PASSWORD_RE = /(\s)-p(?![\s-])\S+/g
 const EMAIL_RE = /\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g
 const CN_MOBILE_RE = /(?<![\d.\w])1[3-9]\d{9}(?![\d.\w])/g
-const PHONE_CANDIDATE_RE = /(?<![\w.:/-])(?:\+\d{1,3}[\s-]?)?(?:\(\d{1,4}\)[\s-]?)?\d{2,4}(?:[\s-]\d{2,4}){1,4}(?![\w.:/-])/g
+const PHONE_CANDIDATE_RE = /(?<![\w.:/-])(?:\+\d{1,3}[\s-]?)?(?:\(\d{1,4}\)[\s-]?)?\d{2,8}(?:[\s-]\d{2,8}){1,4}(?![\w.:/-])/g
 const UNC_PATH_RE = /\\\\[^\s\\]+\\[^\s"'`<>|]+/g
 const HOME_VAR_PATH_RE = /(?:\$HOME|\$\{HOME\}|%USERPROFILE%|%HOMEPATH%)(?:[\\/][^\s"'`<>|;]*)?/gi
 const WINDOWS_PATH_RE = /\b[A-Za-z]:\\[^\s"'`<>|]+/g
@@ -457,9 +464,11 @@ function rewritePath(raw: string, cwd: string): string {
 }
 
 /**
- * Phone-like grouping only: an international prefix or an area code in
- * parentheses, or digit groups split by spaces/dashes that are not a
- * thousands-separated number, a version or an IP (dots never join groups).
+ * A phone number: an explicit +country prefix, an area code in
+ * parentheses, or a group of 7+ digits (a subscriber number) — never a
+ * list of short numbers (ports, sizes), a thousands-separated number, a
+ * version or an IP (dots never join groups). Chinese mobiles are matched
+ * separately.
  */
 function looksLikePhone(candidate: string): boolean {
   const trimmed = candidate.trim()
@@ -467,8 +476,7 @@ function looksLikePhone(candidate: string): boolean {
   if (digits.length < 9 || digits.length > 15) return false
   if (/^\d{1,3}(?:[ ,]\d{3})+$/.test(trimmed)) return false
   if (trimmed.startsWith('+') || /\(\d+\)/.test(trimmed)) return true
-  const groups = trimmed.split(/[\s-]+/)
-  return groups.length >= 2 && groups.length <= 5 && groups.every((group) => group.length >= 2 && group.length <= 4)
+  return trimmed.split(/[\s-]+/).some((group) => group.length >= 7)
 }
 
 function redactCore(line: string, cwd: string, user: UserLocations): string {
