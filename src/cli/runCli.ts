@@ -708,9 +708,14 @@ async function runQueryCommand(options: {
   ]))
   console.log()
   // The reply is out; give the background curators (memory, learned skills)
-  // a bounded chance to finish before this process exits.
+  // a bounded chance to finish, then exit even if one is still waiting on
+  // its model (ARTEMIS_CURATION_SETTLE_MS, default 60 s; 0 = do not wait).
   const { settleCurationsWithin, curationSettleTimeoutMs } = await import('../core/backgroundCuration.js')
-  await settleCurationsWithin(curationSettleTimeoutMs())
+  if (!(await settleCurationsWithin(curationSettleTimeoutMs()))) {
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0
+    await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
+    process.exit(code)
+  }
 }
 
 type SkillSummary = {

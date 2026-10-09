@@ -73,6 +73,11 @@ export type ToolExecutionContext = {
    */
   memoryDefaultScope?: 'global' | 'project';
   /**
+   * Learned-skill scopes load_skill may read (a chat bridge reads only its
+   * own chat's partition). Unset means the workspace's project + global.
+   */
+  learnedSkillScopes?: string[];
+  /**
    * The current agent run's queue of images to show the model on its next
    * request (view_image). Absent outside an agent run.
    */

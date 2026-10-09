@@ -981,6 +981,8 @@ async function runRemoteCommandInner(
             contextDir: store.getContextDir(binding.storedSession.id),
             // Bridges are hosted: default 200K-token context cap (cost).
             contextMode: 'hosted',
+            // Learned skills stay inside this chat: one chat never sees another's.
+            skillPartition: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
             onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
             imageAttachments: command.images,

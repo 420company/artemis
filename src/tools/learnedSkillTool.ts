@@ -8,7 +8,7 @@
  */
 
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js'
-import { listAllSkills, readSkill, recordSkillUse } from '../storage/skillStore.js'
+import { listAllSkills, readSkill, recordSkillUse, skillScopesForCwd, type SkillScope } from '../storage/skillStore.js'
 import { formatSkillForModel } from '../core/skillLearning.js'
 
 type LoadSkillAction = { type: 'load_skill'; id: string }
@@ -20,14 +20,16 @@ export async function executeLoadSkill(
   const id = String(action.id ?? '').trim()
   if (!id) return fail(action, 'load_skill requires id')
   try {
-    const skill = await readSkill(context.cwd, id)
+    const scopes = (context.learnedSkillScopes as SkillScope[] | undefined) ?? skillScopesForCwd(context.cwd)
+    const skill = await readSkill(context.cwd, id, scopes)
     if (!skill) {
-      const known = (await listAllSkills(context.cwd)).slice(0, 20).map((entry) => entry.id)
+      const known = (await listAllSkills(context.cwd, scopes)).slice(0, 20).map((entry) => entry.id)
       return fail(action, known.length
         ? `No learned skill "${id}". Known ids: ${known.join(', ')}`
         : `No learned skill "${id}" (no skills learned yet).`)
     }
-    const used = (await recordSkillUse(context.cwd, skill.id)) ?? skill
+    // Counted in the scope the skill was read from, never a same-named one elsewhere.
+    const used = (await recordSkillUse(context.cwd, skill.id, { scope: skill.scope })) ?? skill
     return { action: action as any, ok: true, output: formatSkillForModel(used) }
   } catch (err: any) {
     return fail(action, err?.message ?? 'load_skill failed')

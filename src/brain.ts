@@ -1575,6 +1575,7 @@ async function executeToolInner(name: any, input: any, opts: any) {
             requestUserConfirmation: onUserConfirmationRequest,
             readFileHistory,
             permissionMode: mapPermissionModeForToolContext(permissionMode),
+            ...(opts.learnedSkillScopes ? { learnedSkillScopes: opts.learnedSkillScopes } : {}),
         });
         return attachDirectToolFailureError(name, {
             ok: result.ok,
@@ -2117,6 +2118,12 @@ export interface ThinkOptions {
     contextMode?: 'hosted' | 'interactive';
     /** Cancels the run: the vision helper's image reading and the model calls. */
     abortSignal?: AbortSignal;
+    /**
+     * Learned-skill partition of a chat bridge (platform + chat id): the
+     * chat learns and sees only its own skills, never another chat's or the
+     * owner's. A hosted run without one does not learn or use skills.
+     */
+    skillPartition?: string;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2200,6 +2207,7 @@ async function thinkTurn(
         contextDir,
         contextMode = 'interactive',
         abortSignal,
+        skillPartition,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2272,6 +2280,9 @@ async function thinkTurn(
         userMessage: input,
         scope: 'global',
         complete: (system, prompt) => summarizeForCompactionWith({ system, prompt }),
+        ...(skillPartition ? { partition: skillPartition } : {}),
+        // Hosted (bridge) runs may serve several people: no partition, no skills.
+        disabled: contextMode === 'hosted' && !skillPartition,
     });
     skillSlot.handle = skillRun;
     skillSlot.userRequest = input;
@@ -2674,6 +2685,7 @@ async function thinkTurn(
                             onUserConfirmationRequest,
                             readFileHistory,
                             allowBackgroundTools: contextMode !== 'hosted',
+                            learnedSkillScopes: skillRun.readScopes,
                         }),
                     );
                     const toolOutput = formatDirectToolOutput(toolResult);

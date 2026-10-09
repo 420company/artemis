@@ -32,7 +32,6 @@ export async function settleCurationsWithin(timeoutMs: number): Promise<boolean>
   let timer: NodeJS.Timeout | undefined
   const timeout = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs))
-    timer.unref?.()
   })
   try {
     return await Promise.race([settleCurations().then(() => true), timeout])

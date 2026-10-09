@@ -9,16 +9,24 @@
  *   global  → <artemis home>/memory/skills/<id>.json
  *   project → <data root of cwd>/memory/skills/<id>.json
  *
- * Writes are atomic (tmp file + rename). Hard limits are enforced here, not
- * trusted to the model: at most SKILL_MAX_COUNT skills per scope (the least
- * useful one is moved to skills/.trash/ to make room), at most
- * SKILL_MAX_BYTES per serialized skill, and a new skill that matches an
- * existing one is merged into it (version bump) instead of duplicated.
+ * Chat bridges keep one partition per chat (global memory dir,
+ * skills/chats/<hash>/), so one chat's procedures never reach another.
+ *
+ * Writes are atomic (tmp file + rename) and every read-modify-write runs
+ * under a per-scope lock file (skills/.lock, shared with other processes).
+ * Hard limits are enforced here, not trusted to the model: at most
+ * SKILL_MAX_COUNT skills per scope (the least useful one moves to
+ * skills/.trash/), at most SKILL_MAX_BYTES per serialized skill, and a new
+ * skill that matches an existing one is merged into it (version bump; the
+ * previous version is kept in skills/.versions/ so a complaint can roll it
+ * back) instead of duplicated. The trash keeps the newest 50 files for at
+ * most 30 days. Listings are cached per process and invalidated by the
+ * directory's mtime.
  *
  * The skill ledger (per session, in the data root) carries what one run
- * hands to the next: the skills it loaded and, for a run that finished but
- * was not verified, the candidate that a later user confirmation may turn
- * into a skill.
+ * hands to the next user message: the skills it loaded and learned, and for
+ * a run that finished but was not verified, the candidate that an explicit
+ * confirmation may turn into a skill.
  */
 
 import { dirname, join } from 'node:path'
@@ -26,6 +34,16 @@ import { createHash } from 'node:crypto'
 import { readFile, writeFile, readdir, rename, unlink, stat } from 'node:fs/promises'
 import { ensureDir, resolveDataRootDir } from '../utils/fs.js'
 import { memoryDirForScope, scopesCollide, tokenizeForRecall, type MemoryScope } from './memoryFiles.js'
+import { withSessionLock } from './sessionLock.js'
+
+/** global / project, or one chat bridge partition ("chat-<hash>"). */
+export type SkillScope = MemoryScope | `chat-${string}`
+
+/** A skill as the ledger and the run recorder refer to it. */
+export interface SkillRef {
+  id: string
+  scope: SkillScope
+}
 
 export interface SkillRecord {
   id: string
@@ -53,7 +71,7 @@ export interface SkillRecord {
   failures: number
   version: number
   /** Directory the record was read from; not serialized. */
-  scope?: MemoryScope
+  scope?: SkillScope
 }
 
 /** Fields the curator supplies; counters and timestamps are the store's. */
@@ -87,12 +105,23 @@ const SKILLS_DIR = 'skills'
 const TRASH_DIR = '.trash'
 const SKILL_FILE_RE = /^[\p{L}\p{N}-]+\.json$/u
 
-export function skillsDirForScope(cwd: string, scope: MemoryScope): string {
-  return join(memoryDirForScope(cwd, scope), SKILLS_DIR)
+/** Partition for one chat of a bridge (platform + chat id). */
+export function chatSkillScope(partition: string): SkillScope {
+  return `chat-${createHash('sha1').update(partition).digest('hex').slice(0, 16)}`
 }
 
-/** Scopes to read for this cwd (one when both resolve to the same dir). */
-export function skillScopesForCwd(cwd: string): MemoryScope[] {
+export function skillsDirForScope(cwd: string, scope: SkillScope): string {
+  if (scope.startsWith('chat-')) return join(memoryDirForScope(cwd, 'global'), SKILLS_DIR, 'chats', scope.slice(5))
+  return join(memoryDirForScope(cwd, scope as MemoryScope), SKILLS_DIR)
+}
+
+/**
+ * Scopes a run reads, most specific first: a chat partition alone (bridges
+ * never see other chats' or the owner's global skills), else project then
+ * global (one when both resolve to the same dir).
+ */
+export function skillScopesForCwd(cwd: string, partition?: SkillScope): SkillScope[] {
+  if (partition?.startsWith('chat-')) return [partition]
   return scopesCollide(cwd) ? ['global'] : ['project', 'global']
 }
 
@@ -167,7 +196,7 @@ export function normalizeSkillDraft(raw: Partial<SkillDraft>): SkillDraft {
 }
 
 /** Parse a stored record; null when it is not a usable skill. */
-export function parseSkillRecord(raw: unknown, fallbackId: string, scope?: MemoryScope): SkillRecord | null {
+export function parseSkillRecord(raw: unknown, fallbackId: string, scope?: SkillScope): SkillRecord | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const input = raw as Record<string, unknown>
   const draft = normalizeSkillDraft(input as Partial<SkillDraft>)
@@ -218,6 +247,12 @@ export function fitSkillToBytes(record: SkillRecord, maxBytes = SKILL_MAX_BYTES)
 
 // ── IO ─────────────────────────────────────────────────────────────────────
 
+const VERSIONS_DIR = '.versions'
+const VERSIONS_KEPT = 3
+const TRASH_KEPT = 50
+const TRASH_MAX_AGE_MS = 30 * 86_400_000
+const LOCK_TIMEOUT_MS = 15_000
+
 async function atomicWrite(filePath: string, data: string): Promise<void> {
   await ensureDir(dirname(filePath))
   const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -225,12 +260,42 @@ async function atomicWrite(filePath: string, data: string): Promise<void> {
   await rename(tmp, filePath)
 }
 
-function skillFile(cwd: string, scope: MemoryScope, id: string): string {
+function skillFile(cwd: string, scope: SkillScope, id: string): string {
   return join(skillsDirForScope(cwd, scope), `${id}.json`)
 }
 
-export async function listSkills(cwd: string, scope: MemoryScope): Promise<SkillRecord[]> {
+/**
+ * Run a read-modify-write on one scope under its lock file (re-entrant in
+ * one async chain; other processes and other chains in this one wait).
+ */
+export async function withSkillLock<T>(cwd: string, scope: SkillScope, fn: () => Promise<T>): Promise<T> {
   const dir = skillsDirForScope(cwd, scope)
+  await ensureDir(dir)
+  try {
+    return await withSessionLock(join(dir, '.lock'), fn, { timeoutMs: LOCK_TIMEOUT_MS, label: `skills ${scope}` })
+  } finally {
+    listCache.delete(dir)
+  }
+}
+
+const listCache = new Map<string, { mtimeMs: number; skills: SkillRecord[] }>()
+
+function cloneRecord(record: SkillRecord): SkillRecord {
+  return { ...record, triggers: [...record.triggers], steps: [...record.steps], pitfalls: [...record.pitfalls], tools: [...record.tools] }
+}
+
+/** Skills of one scope, newest first. Cached per process until the directory changes. */
+export async function listSkills(cwd: string, scope: SkillScope): Promise<SkillRecord[]> {
+  const dir = skillsDirForScope(cwd, scope)
+  let mtimeMs: number
+  try {
+    mtimeMs = (await stat(dir)).mtimeMs
+  } catch {
+    listCache.delete(dir)
+    return []
+  }
+  const cached = listCache.get(dir)
+  if (cached && cached.mtimeMs === mtimeMs) return cached.skills.map(cloneRecord)
   let files: string[] = []
   try {
     files = (await readdir(dir)).filter((file) => SKILL_FILE_RE.test(file))
@@ -245,14 +310,15 @@ export async function listSkills(cwd: string, scope: MemoryScope): Promise<Skill
     } catch { /* unreadable or corrupt skill — skip it */ }
   }
   out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  listCache.set(dir, { mtimeMs, skills: out.map(cloneRecord) })
   return out
 }
 
-/** Skills of every scope this cwd reads; a project skill hides a global one with the same id. */
-export async function listAllSkills(cwd: string): Promise<SkillRecord[]> {
+/** Skills of the given scopes (default: what this cwd reads); an earlier scope hides a later one with the same id. */
+export async function listAllSkills(cwd: string, scopes: SkillScope[] = skillScopesForCwd(cwd)): Promise<SkillRecord[]> {
   const seen = new Set<string>()
   const out: SkillRecord[] = []
-  for (const scope of skillScopesForCwd(cwd)) {
+  for (const scope of scopes) {
     for (const skill of await listSkills(cwd, scope)) {
       if (seen.has(skill.id)) continue
       seen.add(skill.id)
@@ -262,36 +328,142 @@ export async function listAllSkills(cwd: string): Promise<SkillRecord[]> {
   return out
 }
 
-/** Find a skill by id or name, project scope first. */
-export async function readSkill(cwd: string, idOrName: string): Promise<SkillRecord | null> {
+async function readSkillIn(cwd: string, scope: SkillScope, id: string): Promise<SkillRecord | null> {
+  try {
+    return parseSkillRecord(JSON.parse(await readFile(skillFile(cwd, scope, id), 'utf8')), id, scope)
+  } catch {
+    return null
+  }
+}
+
+/** Find a skill by id or name in the given scopes (default: what this cwd reads), first match wins. */
+export async function readSkill(cwd: string, idOrName: string, scopes: SkillScope[] = skillScopesForCwd(cwd)): Promise<SkillRecord | null> {
   const id = slugifySkillId(idOrName)
-  for (const scope of skillScopesForCwd(cwd)) {
-    try {
-      const parsed = parseSkillRecord(JSON.parse(await readFile(skillFile(cwd, scope, id), 'utf8')), id, scope)
-      if (parsed) return parsed
-    } catch { /* not in this scope */ }
+  for (const scope of scopes) {
+    const found = await readSkillIn(cwd, scope, id)
+    if (found) return found
   }
   return null
 }
 
 /** Write a record to its scope (fitted to the byte cap). False when it cannot fit. */
-export async function writeSkill(cwd: string, scope: MemoryScope, record: SkillRecord): Promise<boolean> {
+export async function writeSkill(cwd: string, scope: SkillScope, record: SkillRecord): Promise<boolean> {
   const fitted = fitSkillToBytes(record)
   if (!fitted) return false
-  await atomicWrite(skillFile(cwd, scope, fitted.id), serializeSkill(fitted))
+  await withSkillLock(cwd, scope, () => atomicWrite(skillFile(cwd, scope, fitted.id), serializeSkill(fitted)))
   return true
 }
 
-/** Move a skill to skills/.trash (recoverable by hand). */
-export async function trashSkill(cwd: string, idOrName: string): Promise<SkillRecord | null> {
-  const skill = await readSkill(cwd, idOrName)
-  if (!skill?.scope) return null
-  const dir = skillsDirForScope(cwd, skill.scope)
-  const trashDir = join(dir, TRASH_DIR)
+/** Keep the newest TRASH_KEPT files of a trash dir, none older than 30 days. */
+export async function pruneSkillTrash(cwd: string, scope: SkillScope, nowMs = Date.now()): Promise<void> {
+  const trashDir = join(skillsDirForScope(cwd, scope), TRASH_DIR)
+  let files: string[] = []
+  try {
+    files = (await readdir(trashDir)).filter((file) => file.endsWith('.json'))
+  } catch {
+    return
+  }
+  const stamped: Array<{ file: string; mtime: number }> = []
+  for (const file of files) {
+    try { stamped.push({ file, mtime: (await stat(join(trashDir, file))).mtimeMs }) } catch { /* gone */ }
+  }
+  stamped.sort((a, b) => b.mtime - a.mtime)
+  for (const [index, entry] of stamped.entries()) {
+    if (index >= TRASH_KEPT || nowMs - entry.mtime > TRASH_MAX_AGE_MS) {
+      try { await unlink(join(trashDir, entry.file)) } catch { /* gone */ }
+    }
+  }
+}
+
+async function moveToTrash(cwd: string, scope: SkillScope, id: string, tag: string, nowMs = Date.now()): Promise<boolean> {
+  const trashDir = join(skillsDirForScope(cwd, scope), TRASH_DIR)
   await ensureDir(trashDir)
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  await rename(skillFile(cwd, skill.scope, skill.id), join(trashDir, `${stamp}__${skill.id}.json`))
-  return skill
+  const stamp = new Date(nowMs).toISOString().replace(/[:.]/g, '-')
+  try {
+    await rename(skillFile(cwd, scope, id), join(trashDir, `${stamp}__${tag}${id}.json`))
+  } catch {
+    return false
+  }
+  await pruneSkillTrash(cwd, scope, nowMs)
+  return true
+}
+
+/**
+ * Move a skill to skills/.trash (recoverable by hand). With a scope, only
+ * that scope is touched; without one, the first scope this cwd reads that
+ * has the skill.
+ */
+export async function trashSkill(cwd: string, idOrName: string, scope?: SkillScope): Promise<SkillRecord | null> {
+  const skill = await readSkill(cwd, idOrName, scope ? [scope] : undefined)
+  if (!skill?.scope) return null
+  const skillScope = skill.scope
+  return withSkillLock(cwd, skillScope, async () => ((await moveToTrash(cwd, skillScope, skill.id, '')) ? skill : null))
+}
+
+// ── versions (rollback after a complaint) ──────────────────────────────────
+
+function versionsDir(cwd: string, scope: SkillScope): string {
+  return join(skillsDirForScope(cwd, scope), VERSIONS_DIR)
+}
+
+async function backupSkillVersion(cwd: string, scope: SkillScope, record: SkillRecord): Promise<void> {
+  const dir = versionsDir(cwd, scope)
+  await atomicWrite(join(dir, `${record.id}.v${record.version}.json`), serializeSkill(record))
+  const versions = (await readdir(dir).catch(() => [] as string[]))
+    .map((file) => ({ file, version: Number(file.match(new RegExp(`^${record.id}\\.v(\\d+)\\.json$`))?.[1] ?? Number.NaN) }))
+    .filter((entry) => Number.isFinite(entry.version))
+    .sort((a, b) => b.version - a.version)
+  for (const stale of versions.slice(VERSIONS_KEPT)) {
+    try { await unlink(join(dir, stale.file)) } catch { /* gone */ }
+  }
+}
+
+/**
+ * Roll a skill back to the version before its last update (kept in
+ * skills/.versions/), counting a failure and adding the pitfall. Returns
+ * the restored record, or null when there is no earlier version.
+ */
+export async function restorePreviousSkillVersion(
+  cwd: string,
+  scope: SkillScope,
+  idOrName: string,
+  options: { pitfall?: string; now?: Date } = {},
+): Promise<SkillRecord | null> {
+  const id = slugifySkillId(idOrName)
+  return withSkillLock(cwd, scope, async () => {
+    const current = await readSkillIn(cwd, scope, id)
+    if (!current) return null
+    const dir = versionsDir(cwd, scope)
+    const candidates = (await readdir(dir).catch(() => [] as string[]))
+      .map((file) => ({ file, version: Number(file.match(new RegExp(`^${id}\\.v(\\d+)\\.json$`))?.[1] ?? Number.NaN) }))
+      .filter((entry) => Number.isFinite(entry.version) && entry.version < current.version)
+      .sort((a, b) => b.version - a.version)
+    const latest = candidates[0]
+    if (!latest) return null
+    let previous: SkillRecord | null = null
+    try {
+      previous = parseSkillRecord(JSON.parse(await readFile(join(dir, latest.file), 'utf8')), id, scope)
+    } catch { /* unreadable backup */ }
+    if (!previous) return null
+    const now = options.now ?? new Date()
+    const line = options.pitfall ? clampLine(options.pitfall, SKILL_LIMITS.pitfall) : ''
+    const restored: SkillRecord = {
+      ...previous,
+      uses: current.uses,
+      successes: current.successes,
+      failures: current.failures + 1,
+      ...(current.lastUsedAt ? { lastUsedAt: current.lastUsedAt } : {}),
+      pitfalls: line ? mergeListsKeepNewest(previous.pitfalls, [line], SKILL_LIMITS.pitfalls, SKILL_LIMITS.pitfall) : previous.pitfalls,
+      version: current.version + 1,
+      updatedAt: now.toISOString(),
+      scope,
+    }
+    const fitted = fitSkillToBytes(restored)
+    if (!fitted) return null
+    await atomicWrite(skillFile(cwd, scope, id), serializeSkill(fitted))
+    try { await unlink(join(dir, latest.file)) } catch { /* gone */ }
+    return fitted
+  })
 }
 
 // ── similarity, merge, utility ─────────────────────────────────────────────
@@ -370,113 +542,133 @@ export function skillUtility(skill: SkillRecord, nowMs = Date.now()): number {
 /** Trash the least useful skills until the scope has room for `incoming` more. Returns evicted ids. */
 export async function evictSkillsForCapacity(
   cwd: string,
-  scope: MemoryScope,
+  scope: SkillScope,
   options: { maxSkills?: number; incoming?: number; protectIds?: string[]; nowMs?: number } = {},
 ): Promise<string[]> {
-  const maxSkills = Math.max(1, options.maxSkills ?? SKILL_MAX_COUNT)
-  const incoming = Math.max(0, options.incoming ?? 1)
-  const protect = new Set(options.protectIds ?? [])
-  const skills = await listSkills(cwd, scope)
-  const excess = skills.length + incoming - maxSkills
-  if (excess <= 0) return []
-  const nowMs = options.nowMs ?? Date.now()
-  const candidates = skills
-    .filter((skill) => !protect.has(skill.id))
-    .sort((a, b) => skillUtility(a, nowMs) - skillUtility(b, nowMs) || a.updatedAt.localeCompare(b.updatedAt))
-  const evicted: string[] = []
-  const dir = skillsDirForScope(cwd, scope)
-  const trashDir = join(dir, TRASH_DIR)
-  for (const skill of candidates.slice(0, excess)) {
-    try {
-      await ensureDir(trashDir)
-      const stamp = new Date(nowMs).toISOString().replace(/[:.]/g, '-')
-      await rename(skillFile(cwd, scope, skill.id), join(trashDir, `${stamp}__evicted__${skill.id}.json`))
-      evicted.push(skill.id)
-    } catch { /* already gone */ }
-  }
-  return evicted
+  return withSkillLock(cwd, scope, async () => {
+    const maxSkills = Math.max(1, options.maxSkills ?? SKILL_MAX_COUNT)
+    const incoming = Math.max(0, options.incoming ?? 1)
+    const protect = new Set(options.protectIds ?? [])
+    const skills = await listSkills(cwd, scope)
+    const excess = skills.length + incoming - maxSkills
+    if (excess <= 0) return []
+    const nowMs = options.nowMs ?? Date.now()
+    const candidates = skills
+      .filter((skill) => !protect.has(skill.id))
+      .sort((a, b) => skillUtility(a, nowMs) - skillUtility(b, nowMs) || a.updatedAt.localeCompare(b.updatedAt))
+    const evicted: string[] = []
+    for (const skill of candidates.slice(0, excess)) {
+      if (await moveToTrash(cwd, scope, skill.id, 'evicted__', nowMs)) evicted.push(skill.id)
+    }
+    return evicted
+  })
 }
 
 export interface UpsertSkillResult {
   op: 'added' | 'updated' | 'rejected'
   id: string
+  scope: SkillScope
   reason?: string
   evicted?: string[]
 }
 
 /**
  * Add a distilled skill, or merge it into the existing skill it matches
- * (preferId first — the skill the run loaded — then same id, then the most
- * similar). Enforces the per-scope cap and the per-skill byte cap.
+ * (preferIds first — the skills the run loaded from this scope — then same
+ * id, then the most similar). The version an update replaces is backed up
+ * first. Enforces the per-scope cap and the per-skill byte cap; the whole
+ * read-modify-write runs under the scope's lock.
  */
 export async function upsertLearnedSkill(
   cwd: string,
-  scope: MemoryScope,
+  scope: SkillScope,
   rawDraft: Partial<SkillDraft>,
   options: { preferIds?: string[]; maxSkills?: number; now?: Date } = {},
 ): Promise<UpsertSkillResult> {
   const draft = normalizeSkillDraft(rawDraft)
   const now = options.now ?? new Date()
   const id = slugifySkillId(draft.name || draft.description)
-  if (!draft.description) return { op: 'rejected', id, reason: 'missing description' }
-  if (draft.steps.length < 2) return { op: 'rejected', id, reason: 'a skill needs at least two steps' }
+  if (!draft.description) return { op: 'rejected', id, scope, reason: 'missing description' }
+  if (draft.steps.length < 2) return { op: 'rejected', id, scope, reason: 'a skill needs at least two steps' }
 
-  const existing = await listSkills(cwd, scope)
-  const preferred = (options.preferIds ?? [])
-    .map((preferId) => existing.find((skill) => skill.id === slugifySkillId(preferId)))
-    .find((skill): skill is SkillRecord => Boolean(skill) && skillSimilarity(skill!, draft) >= SKILL_MERGE_SIMILARITY / 2)
-  const match = preferred ?? findMatchingSkill(existing, draft)
+  return withSkillLock(cwd, scope, async () => {
+    const existing = await listSkills(cwd, scope)
+    const preferred = (options.preferIds ?? [])
+      .map((preferId) => existing.find((skill) => skill.id === slugifySkillId(preferId)))
+      .find((skill): skill is SkillRecord => Boolean(skill) && skillSimilarity(skill!, draft) >= SKILL_MERGE_SIMILARITY / 2)
+    const match = preferred ?? findMatchingSkill(existing, draft)
 
-  if (match) {
-    const merged = mergeSkill(match, draft, now)
-    return (await writeSkill(cwd, scope, merged))
-      ? { op: 'updated', id: match.id }
-      : { op: 'rejected', id: match.id, reason: `skill exceeds ${SKILL_MAX_BYTES} bytes` }
-  }
+    if (match) {
+      const merged = fitSkillToBytes(mergeSkill(match, draft, now))
+      if (!merged) return { op: 'rejected' as const, id: match.id, scope, reason: `skill exceeds ${SKILL_MAX_BYTES} bytes` }
+      await backupSkillVersion(cwd, scope, match)
+      await atomicWrite(skillFile(cwd, scope, match.id), serializeSkill(merged))
+      return { op: 'updated' as const, id: match.id, scope }
+    }
 
-  const stamp = now.toISOString()
-  const record: SkillRecord = {
-    id,
-    ...draft,
-    name: draft.name || id,
-    createdAt: stamp,
-    updatedAt: stamp,
-    uses: 0,
-    successes: 0,
-    failures: 0,
-    version: 1,
-  }
-  if (!fitSkillToBytes(record)) return { op: 'rejected', id, reason: `skill exceeds ${SKILL_MAX_BYTES} bytes` }
-  const evicted = await evictSkillsForCapacity(cwd, scope, { maxSkills: options.maxSkills, incoming: 1, nowMs: now.getTime() })
-  await writeSkill(cwd, scope, record)
-  return { op: 'added', id, ...(evicted.length ? { evicted } : {}) }
+    const stamp = now.toISOString()
+    const record = fitSkillToBytes({
+      id,
+      ...draft,
+      name: draft.name || id,
+      createdAt: stamp,
+      updatedAt: stamp,
+      uses: 0,
+      successes: 0,
+      failures: 0,
+      version: 1,
+    })
+    if (!record) return { op: 'rejected' as const, id, scope, reason: `skill exceeds ${SKILL_MAX_BYTES} bytes` }
+    const evicted = await evictSkillsForCapacity(cwd, scope, { maxSkills: options.maxSkills, incoming: 1, nowMs: now.getTime() })
+    await atomicWrite(skillFile(cwd, scope, id), serializeSkill(record))
+    return { op: 'added' as const, id, scope, ...(evicted.length ? { evicted } : {}) }
+  })
+}
+
+/** Read-modify-write one skill in its scope (or the first scope that has it). */
+async function updateSkillRecord(
+  cwd: string,
+  idOrName: string,
+  scope: SkillScope | undefined,
+  change: (skill: SkillRecord) => SkillRecord,
+): Promise<SkillRecord | null> {
+  const found = await readSkill(cwd, idOrName, scope ? [scope] : undefined)
+  if (!found?.scope) return null
+  const skillScope = found.scope
+  return withSkillLock(cwd, skillScope, async () => {
+    const current = await readSkillIn(cwd, skillScope, found.id)
+    if (!current) return null
+    const next = fitSkillToBytes(change(current))
+    if (!next) return null
+    await atomicWrite(skillFile(cwd, skillScope, next.id), serializeSkill(next))
+    return { ...next, scope: skillScope }
+  })
 }
 
 /** Count a load of the skill (load_skill). Returns the updated record. */
-export async function recordSkillUse(cwd: string, idOrName: string, now = new Date()): Promise<SkillRecord | null> {
-  const skill = await readSkill(cwd, idOrName)
-  if (!skill?.scope) return null
-  const next: SkillRecord = { ...skill, uses: skill.uses + 1, lastUsedAt: now.toISOString() }
-  await writeSkill(cwd, skill.scope, next)
-  return next
+export async function recordSkillUse(
+  cwd: string,
+  idOrName: string,
+  options: { scope?: SkillScope; now?: Date } = {},
+): Promise<SkillRecord | null> {
+  const now = options.now ?? new Date()
+  return updateSkillRecord(cwd, idOrName, options.scope, (skill) => ({ ...skill, uses: skill.uses + 1, lastUsedAt: now.toISOString() }))
 }
 
 /**
- * Record how a run that loaded the skill went. A failure may carry a
- * pitfall (already sanitized by the caller), which is appended and bumps
- * the version.
+ * Record how a run that loaded the skill went, in the scope it was loaded
+ * from. A failure may carry a pitfall (already sanitized by the caller),
+ * which is appended and bumps the version.
  */
 export async function recordSkillOutcome(
   cwd: string,
   idOrName: string,
   outcome: 'success' | 'failure',
-  pitfall?: string,
-  now = new Date(),
+  options: { pitfall?: string; scope?: SkillScope; now?: Date } = {},
 ): Promise<SkillRecord | null> {
-  const skill = await readSkill(cwd, idOrName)
-  if (!skill?.scope) return null
-  const line = pitfall ? clampLine(pitfall, SKILL_LIMITS.pitfall) : ''
-  const next: SkillRecord = {
+  const now = options.now ?? new Date()
+  const line = options.pitfall ? clampLine(options.pitfall, SKILL_LIMITS.pitfall) : ''
+  return updateSkillRecord(cwd, idOrName, options.scope, (skill) => ({
     ...skill,
     successes: skill.successes + (outcome === 'success' ? 1 : 0),
     failures: skill.failures + (outcome === 'failure' ? 1 : 0),
@@ -487,9 +679,7 @@ export async function recordSkillOutcome(
         updatedAt: now.toISOString(),
       }
       : {}),
-  }
-  await writeSkill(cwd, skill.scope, next)
-  return next
+  }))
 }
 
 // ── ledger (run → next run hand-off) ───────────────────────────────────────
@@ -497,16 +687,16 @@ export async function recordSkillOutcome(
 export interface SkillLedgerEntry<TPending = unknown> {
   sessionKey: string
   createdAt: string
-  /** Skill ids the run loaded. */
-  loadedSkills: string[]
+  /** Skills the run loaded, with the scope each came from. */
+  loadedSkills: SkillRef[]
   /** The run was verified (and already credited the skills it loaded). */
   verified: boolean
   /** Candidate kept for a later user confirmation (finished, not verified). */
   pending?: TPending
 }
 
-/** A hand-off older than this is ignored. */
-export const SKILL_LEDGER_TTL_MS = 3 * 86_400_000
+/** A hand-off is for the next user message only, and only within this window. */
+export const SKILL_LEDGER_TTL_MS = 24 * 3_600_000
 const SKILL_LEDGER_MAX_FILES = 200
 
 function ledgerDir(cwd: string): string {
@@ -547,7 +737,10 @@ export async function takeSkillLedger<T>(cwd: string, sessionKey: string, nowMs 
     if (!entry || entry.sessionKey !== sessionKey) return null
     const created = Date.parse(entry.createdAt)
     if (!Number.isFinite(created) || nowMs - created > SKILL_LEDGER_TTL_MS) return null
-    return { ...entry, loadedSkills: Array.isArray(entry.loadedSkills) ? entry.loadedSkills.map(String) : [] }
+    const loadedSkills = Array.isArray(entry.loadedSkills)
+      ? entry.loadedSkills.filter((ref): ref is SkillRef => Boolean(ref && typeof ref.id === 'string' && typeof ref.scope === 'string'))
+      : []
+    return { ...entry, loadedSkills }
   } catch {
     return null
   }
