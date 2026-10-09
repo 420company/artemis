@@ -115,7 +115,7 @@ export type ContextCapMode = 'hosted' | 'interactive'
  * Parse a cap setting. A positive number caps; 0, "off", "none" or
  * "unlimited" explicitly remove the cap; anything else means "not set".
  */
-function parseCap(value: unknown): number | null | undefined {
+export function parseContextCap(value: unknown): number | null | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
     if (value > 0) return Math.floor(value)
     if (value === 0) return null
@@ -143,9 +143,9 @@ export function resolveMaxContextTokens(input: {
   mode: ContextCapMode
   env?: Record<string, string | undefined>
 }): number | undefined {
-  const configured = parseCap(input.configured)
+  const configured = parseContextCap(input.configured)
   if (configured !== undefined) return configured ?? undefined
-  const fromEnv = parseCap((input.env ?? process.env)[MAX_CONTEXT_TOKENS_ENV])
+  const fromEnv = parseContextCap((input.env ?? process.env)[MAX_CONTEXT_TOKENS_ENV])
   if (fromEnv !== undefined) return fromEnv ?? undefined
   return input.mode === 'hosted' ? HOSTED_DEFAULT_MAX_CONTEXT_TOKENS : undefined
 }

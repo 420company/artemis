@@ -1230,6 +1230,96 @@ const summaryText = summarySectionTitles('en').map((t, i) => `## ${i + 1}. ${t}\
 }
 
 {
+  // setup.agent.compression: per field, only values a providers.json really
+  // sets count; workspace > global > ARTEMIS_MAX_CONTEXT_TOKENS > default.
+  const { loadCompactionSettings, resolveCompressionSettings } = await import('../src/services/compactionSettings.js')
+  const { ProviderStore, createGlobalProviderStore } = await import('../src/providers/store.js')
+  const savedHome = process.env.ARTEMIS_HOME
+  const root = tmpDir('compression-settings')
+  const writeStore = (file: string, compression: Record<string, unknown> | undefined) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ profiles: [], ...(compression ? { setup: { agent: { compression } } } : {}) }))
+  }
+  let caseNo = 0
+  const fresh = (global?: Record<string, unknown>, workspace?: Record<string, unknown>) => {
+    caseNo += 1
+    const home = path.join(root, `home-${caseNo}`)
+    const cwd = path.join(root, `ws-${caseNo}`)
+    fs.mkdirSync(home, { recursive: true })
+    fs.mkdirSync(cwd, { recursive: true })
+    process.env.ARTEMIS_HOME = home
+    if (global) writeStore(createGlobalProviderStore().getFilePath(), global)
+    if (workspace) writeStore(new ProviderStore(cwd).getFilePath(), workspace)
+    return cwd
+  }
+  const noEnv = {}
+  try {
+    {
+      const cwd = fresh({ enabled: true, maxContextTokens: 50_000, threshold: 0.6 })
+      const settings = await loadCompactionSettings(cwd, 'hosted', { ARTEMIS_MAX_CONTEXT_TOKENS: '300000' })
+      assert('compression settings: a global-only value applies (cap and threshold) and beats the env budget',
+        settings.maxContextTokens === 50_000 && settings.thresholdRatio === 0.6 && settings.enabled !== false, JSON.stringify(settings))
+    }
+    {
+      const cwd = fresh(undefined, { maxContextTokens: 80_000 })
+      const settings = await loadCompactionSettings(cwd, 'hosted', noEnv)
+      assert('compression settings: a workspace-only value applies', settings.maxContextTokens === 80_000 && settings.thresholdRatio === undefined, JSON.stringify(settings))
+    }
+    {
+      const cwd = fresh({ maxContextTokens: 50_000, threshold: 0.6 }, { maxContextTokens: 80_000 })
+      const settings = await loadCompactionSettings(cwd, 'hosted', noEnv)
+      assert('compression settings: both set → the workspace wins per field, the global fills the rest',
+        settings.maxContextTokens === 80_000 && settings.thresholdRatio === 0.6, JSON.stringify(settings))
+    }
+    {
+      const cwd = fresh()
+      const env = { ARTEMIS_MAX_CONTEXT_TOKENS: '120000' }
+      const before = await loadCompactionSettings(cwd, 'hosted', env)
+      // Saving loaded stores (a new profile, telemetry) must not freeze defaults into the files.
+      await new ProviderStore(cwd).save(await new ProviderStore(cwd).load())
+      await createGlobalProviderStore().save(await createGlobalProviderStore().load())
+      const after = await loadCompactionSettings(cwd, 'hosted', env)
+      const onDisk = [new ProviderStore(cwd).getFilePath(), createGlobalProviderStore().getFilePath()]
+        .map((file) => JSON.parse(fs.readFileSync(file, 'utf8')).setup?.agent?.compression)
+      assert('compression settings: env-only → ARTEMIS_MAX_CONTEXT_TOKENS applies, also after both stores were saved with defaults',
+        before.maxContextTokens === 120_000 && after.maxContextTokens === 120_000 && onDisk.every((value) => value === undefined) &&
+          (await loadCompactionSettings(cwd, 'hosted', noEnv)).maxContextTokens === HOSTED_DEFAULT_MAX_CONTEXT_TOKENS &&
+          (await loadCompactionSettings(cwd, 'interactive', noEnv)).maxContextTokens === undefined,
+        JSON.stringify({ before, after, onDisk }))
+    }
+    {
+      // A workspace file an older engine saved still says enabled: true (the default it wrote everywhere).
+      const cwd = fresh({ enabled: false }, { enabled: true, threshold: 0.5 })
+      const settings = await loadCompactionSettings(cwd, 'hosted', noEnv)
+      const interactive = await resolveCompressionSettings(cwd)
+      assert('compression settings: a global enabled:false turns proactive compaction off; a stored default enabled:true does not undo it',
+        settings.enabled === false && settings.thresholdRatio === 0.5 && interactive.enabled === false, JSON.stringify({ settings, interactive }))
+    }
+    {
+      const cwd = fresh({ maxContextTokens: 'off' }, { maxContextTokens: 'lots' })
+      const settings = await loadCompactionSettings(cwd, 'hosted', { ARTEMIS_MAX_CONTEXT_TOKENS: '120000' })
+      assert('compression settings: an unreadable workspace value is skipped; an explicit global "off" removes the cap over the env',
+        settings.maxContextTokens === undefined, JSON.stringify(settings))
+    }
+    {
+      const cwd = fresh(undefined, { enabled: false, threshold: 0.55, maxContextTokens: 90_000 })
+      const store = new ProviderStore(cwd)
+      await store.save(await store.load())
+      const onDisk = JSON.parse(fs.readFileSync(store.getFilePath(), 'utf8')).setup?.agent?.compression
+      const reloaded = await store.load()
+      assert('compression settings: explicit values survive a save; load() still fills the defaults in memory',
+        JSON.stringify(onDisk) === JSON.stringify({ enabled: false, threshold: 0.55, maxContextTokens: 90_000 }) &&
+          reloaded.setup?.agent.compression.enabled === false && reloaded.setup?.agent.maxIterations === 90,
+        JSON.stringify({ onDisk, reloaded: reloaded.setup?.agent }))
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = savedHome
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   // A 1M-window model in headless mode compacts at ~78% of the 200K cap,
   // not at ~78% of 1M.
   const cwd = tmpDir('headless-cap')
