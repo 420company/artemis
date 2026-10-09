@@ -103,16 +103,17 @@ Every conversation (web sessions, chat bridges, the CLI) goes through the same c
 
 ##### Learned skills
 
-When a task verifiably succeeds, Artemis keeps the procedure it used as a **learned skill** — when to use it, the steps, pitfalls, the tools involved and how the result was checked — and offers it the next time a similar task comes up. Both the web/headless runs (`artemis execute`) and the CLI and chat bridges learn and use skills.
+When a task verifiably succeeds, Artemis keeps the procedure it used as a **learned skill** — when to use it, the steps, pitfalls, the tools involved and how the result was checked — and offers it the next time a similar task comes up. Web/headless runs (`artemis execute`), the CLI and chat bridges all learn and use skills.
 
-- **Only verified successes teach.** A run must finish without an error, use at least three tools successfully, not end on an unresolved tool failure, and have a verification signal: the last test, lint, typecheck or build command passed, a generated image/video/audio file exists, or you explicitly confirm the result in your next message ("thanks, that works"). Failed, cancelled and unverified runs never become skills.
-- **Learning happens after the reply.** The curator runs in the background and never delays the answer. A new skill that matches an existing one updates it (its version goes up) instead of adding a duplicate.
-- **Progressive disclosure.** Each request gets only a short index of the relevant skills (at most 10 entries, 800 characters: id plus one line on when to use it) in the per-request context that is never saved, so the prompt cache stays intact. The agent reads a full skill with the read-only `load_skill` tool when it needs it.
-- **Feedback.** If you say the result was wrong after a run that used a skill, the skill records a failure and your complaint is added as a pitfall. A complaint right after a run that created a new skill removes that skill again.
-- **Untrusted content stays out.** Skills are distilled only from your request and the agent's own actions; the curator never sees tool output, web pages or file contents. Lines that repeat tool output or look like injected instructions are dropped, and secrets, emails, URLs you did not give and paths outside the workspace are redacted. A loaded skill is presented to the model as reference data, not as instructions.
-- **Limits.** At most 200 skills per scope (the least useful — failing, stale, rarely used — goes to `skills/.trash/` first) and 4 KB per skill. Skills are JSON files in `~/.artemis/memory/skills/`; headless runs keep theirs in the workspace's data folder, like memories they save.
+- **Only verified successes teach.** A run must finish without an error, use at least three tools successfully, not end on an unresolved tool failure, and its reply must not report a failure ("3 tests are failing", "build failed", "测试未通过"…). It also needs one verification signal: the **last** real test, build, lint or type-check run passed — a runner such as `npm test`, `npm run build`, `npx tsc`, `pytest`, `go test`, `cargo test` or `make test` as the command itself, with its exit status intact (`npm test || true`, `npm test; echo`, `npm test | tail` without `pipefail` do not count, and a later failing run cancels an earlier pass) — or a generated image/video/audio file written during the run, or your clear confirmation in the next message ("thanks, that works"). Failed, cancelled and unverified runs never become skills.
+- **Learning happens after the reply.** The curator runs in the background and never delays the answer. A skill that matches an existing one updates it (its version goes up; the previous version is kept) instead of adding a duplicate.
+- **Progressive disclosure.** Each request gets only a short index of the relevant skills (at most 10 entries, 800 characters: id plus one line on when to use it) in the per-request context that is never saved, so the prompt cache stays intact. The agent reads a full skill with the read-only `load_skill` tool when it needs it. Skill text is shown as reference data, with brackets and line breaks neutralised.
+- **Feedback.** Only your next message counts (within 24 hours), and only when it is clearly about the previous result: a short reply like "不对，还是坏的" or "that's wrong" is a complaint; "帮我修复这个报错" or "What is wrong with foo.ts?" is a new request, not feedback. After a complaint, a skill the run used records a failure with your complaint as a pitfall; a skill the run just created is removed, and one it just updated is rolled back to the previous version — even when the complaint arrives while the curator is still working.
+- **Untrusted content stays out.** Only your own messages are trusted. The curator never sees tool output, web pages or file contents, and the agent's actions are treated as untrusted too (a page may have told it what to do). Lines that repeat any tool output from the run (all of it is fingerprinted), look like instructions to an AI (also through look-alike letters or invisible characters), change package registries, turn off TLS checks, download and run scripts, or touch credentials and keys are dropped. Secrets (also `FOO_API_KEY=…`, `--password …`, `user:pass@` in URLs), emails, phone numbers, URLs you did not write and paths outside the workspace are redacted. Your request itself is never stored; the skill keeps the curator's general one-line summary.
+- **Who sees which skills.** The CLI keeps skills in `~/.artemis/memory/skills/`; headless runs keep theirs in the workspace's data folder, like the memories they save. Each chat of a chat bridge has its own partition: a chat never sees another chat's skills or the owner's.
+- **Limits.** At most 200 skills per scope (the least useful — failing, stale, rarely used — goes to `skills/.trash/` first; the trash keeps the newest 50 for 30 days) and 4 KB per skill. Concurrent updates are serialized with a lock file.
 - **Manage them.** `artemis memory skills` lists them (with loads, successes and failures), `artemis memory skills show <id>` prints one, and `artemis memory skills rm <id>` moves one to the trash.
-- **Turn it off.** Set `setup.memory.skills.enabled` to `false` in `providers.json`, or `ARTEMIS_SKILL_LEARNING=0`. Stored skills are kept but neither learned nor offered.
+- **Turn it off.** Set `setup.memory.skills.enabled` to `false` in `providers.json`, or `ARTEMIS_SKILL_LEARNING=0`. Stored skills are kept but neither learned nor offered. After printing its result, `artemis execute` waits up to 60 s for background curators (`ARTEMIS_CURATION_SETTLE_MS`, `0` = do not wait) and then exits.
 
 #### 4. Visual generation system
 
@@ -415,14 +416,15 @@ Artemis 可以处理日常和复杂的软件工程任务：
 
 任务经过验证确实成功后，Artemis 会把这次用到的做法保存为一条**已学技能**：什么时候用、步骤、要避开的坑、用到的工具，以及如何确认结果；之后遇到类似任务时再拿出来用。网页/无界面运行（`artemis execute`）、命令行和聊天桥接都会学习并使用技能。
 
-- **只从经过验证的成功中学习**：运行必须正常结束、至少成功使用三次工具、没有停在未解决的工具失败上，并且有验证信号：最后一次测试、lint、类型检查或构建命令通过，生成的图片/视频/音频文件确实存在，或者你在下一条消息里明确确认结果（「谢谢，可以了」）。失败、被取消或未经验证的运行永远不会变成技能。
-- **回复之后才学习**：整理技能在后台进行，不会拖慢回复。新技能如果和已有技能是同一件事，会更新那条技能（版本号加一），而不是新增重复条目。
-- **按需展开**：每次请求只附带相关技能的简短索引（最多 10 条、800 个字符：id 加一句什么时候用），放在不会保存的每次请求上下文里，提示缓存不受影响。需要时，代理再用只读的 `load_skill` 工具读取完整技能。
-- **反馈**：如果在用过某条技能的运行之后你说结果不对，这条技能会记一次失败，并把你的反馈作为一个坑记下来。如果紧接着一次刚学会新技能的运行就收到反对，这条新技能会被撤回。
-- **不可信内容不会混进来**：技能只从你的请求和代理自己的操作中提炼，整理时看不到工具输出、网页或文件内容。重复工具输出的句子和像是被注入的指令会被丢弃；密钥、邮箱、你没有提供过的网址以及工作区以外的路径都会被脱敏。读取到的技能以参考数据的形式交给模型，而不是指令。
-- **上限**：每个范围最多 200 条技能（最没用的——常失败、长期没用、很少被用——先移到 `skills/.trash/`），每条最多 4 KB。技能以 JSON 文件保存在 `~/.artemis/memory/skills/`；无界面运行和它保存的记忆一样，放在工作区的数据目录里。
+- **只从经过验证的成功中学习**：运行必须正常结束、至少成功使用三次工具、没有停在未解决的工具失败上，回复也不能说明有失败（"3 tests are failing"、"build failed"、「测试未通过」等）。此外还需要一个验证信号：**最后一次**真正的测试、构建、lint 或类型检查通过——命令本身就是 `npm test`、`npm run build`、`npx tsc`、`pytest`、`go test`、`cargo test`、`make test` 这类运行器，并且退出码没有被掩盖（`npm test || true`、`npm test; echo`、没有 `pipefail` 的 `npm test | tail` 都不算，之后再失败一次也会抵消之前的通过）；或者生成的图片/视频/音频文件确实是在这次运行中写出的；或者你在下一条消息里明确确认结果（「谢谢，可以了」）。失败、被取消或未经验证的运行永远不会变成技能。
+- **回复之后才学习**：整理技能在后台进行，不会拖慢回复。新技能如果和已有技能是同一件事，会更新那条技能（版本号加一，并保留上一个版本），而不是新增重复条目。
+- **按需展开**：每次请求只附带相关技能的简短索引（最多 10 条、800 个字符：id 加一句什么时候用），放在不会保存的每次请求上下文里，提示缓存不受影响。需要时，代理再用只读的 `load_skill` 工具读取完整技能。技能内容以参考数据的形式展示，方括号和换行会被中和。
+- **反馈**：只看你的下一条消息（24 小时内），而且只有明显是在评价上一次结果时才算：像「不对，还是坏的」「that's wrong」这样的简短回复是反对；「帮我修复这个报错」「What is wrong with foo.ts?」是新请求，不算反馈。收到反对后，这次运行用过的技能记一次失败，并把你的话记为一个坑；这次运行刚新建的技能会被撤回，刚更新的技能会回滚到上一个版本——即使反对是在整理技能的过程中到达的也一样。
+- **不可信内容不会混进来**：只有你自己的消息是可信的。整理时看不到工具输出、网页或文件内容，代理执行过的操作也被当作不可信（网页可能指使过它）。与本次运行中任何工具输出重复的句子（全部输出都会做指纹）、看起来像是对 AI 下的指令（包括用形近字母或不可见字符伪装的）、修改包仓库地址、关闭 TLS 校验、下载并执行脚本、或涉及凭据和密钥的句子都会被丢弃。密钥（包括 `FOO_API_KEY=…`、`--password …`、网址里的 `user:pass@`）、邮箱、电话号码、你没有提供过的网址以及工作区以外的路径都会被脱敏。你的原始请求不会被保存，技能里只保留整理器写的一句概括。
+- **谁能看到哪些技能**：命令行把技能保存在 `~/.artemis/memory/skills/`；无界面运行和它保存的记忆一样，放在工作区的数据目录里。聊天桥接的每个会话都有自己的分区：一个聊天看不到其他聊天或主人的技能。
+- **上限**：每个范围最多 200 条技能（最没用的——常失败、长期没用、很少被用——先移到 `skills/.trash/`；回收站只保留最新 50 个、最多 30 天），每条最多 4 KB。并发更新通过锁文件串行执行。
 - **管理**：`artemis memory skills` 列出全部技能（含加载、成功和失败次数），`artemis memory skills show <id>` 查看一条，`artemis memory skills rm <id>` 把一条移到回收站。
-- **关闭**：在 `providers.json` 里把 `setup.memory.skills.enabled` 设为 `false`，或设置 `ARTEMIS_SKILL_LEARNING=0`。已保存的技能会保留，但不再学习，也不再提供。
+- **关闭**：在 `providers.json` 里把 `setup.memory.skills.enabled` 设为 `false`，或设置 `ARTEMIS_SKILL_LEARNING=0`。已保存的技能会保留，但不再学习，也不再提供。`artemis execute` 输出结果后最多等待后台整理 60 秒（`ARTEMIS_CURATION_SETTLE_MS`，`0` 表示不等待），然后退出。
 
 #### 4. 视觉生成系统
 
