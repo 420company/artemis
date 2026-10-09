@@ -27,7 +27,7 @@ import type { ChatProvider } from '../providers/types.js';
 import type { AgentAction, SessionMessage } from './types.js';
 import type { WorkflowMode } from './workflowMode.js';
 import { buildWorkflowHint } from './workflowHints.js';
-import { isClearSagaLongVideoRequest } from '../tools/visual/sagaWorkflow.js';
+import { isClearSagaLongVideoRequest, splitSagaBrief } from '../tools/visual/sagaWorkflow.js';
 
 export type AutoWorkflow = 'direct' | 'plan' | 'team' | 'compare' | 'design' | 'saga';
 /** Workflows the model can switch into with the use_workflow tool. */
@@ -180,11 +180,13 @@ const FILE_REF_RE = /(?:[\w.-]+[/\\])*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|
 const BUG_WORDING_RE = /(?:bug|报错|错误|异常|崩溃|白屏|打不开|不显示|失败|乱了|\berror\b|\bcrash|\bbroken\b|not (?:working|loading|showing))/i;
 
 // A real multi-part build object or a repo-wide change.
-const TEAM_OBJECT_RE = /(?:(?:完整的|一整套|一个完整的?).{0,12}(?:系统|项目|网站|应用|平台|商城|后台|小程序|app|App|APP)|全栈|前端.{0,24}后端|后端.{0,24}前端|多个(?:服务|子系统)|微服务|整个(?:仓库|代码库|项目)|全仓|所有(?:文件|模块)|\bfull[- ]stack (?:app|application|website|site|project|platform|product)|\bcomplete (?:\w+ ){0,3}(?:app|application|system|platform|website|project)\b|frontend.{0,40}backend|backend.{0,40}frontend|multiple (?:services|subsystems)|microservices|\bwhole (?:repo|codebase|project)|across the (?:repo|codebase|project)|every (?:file|module))/i;
+const TEAM_OBJECT_RE = /(?:(?:完整的|一整套|一个完整的?).{0,12}(?:系统|项目|网站|应用|平台|商城|后台|小程序|app|App|APP)|全栈|前端.{0,24}后端|后端.{0,24}前端|多个(?:服务|子系统)|微服务|(?:SaaS|saas)\s*平台|(?:平台|系统|项目|应用|产品)\s*[：:][^。\n]*、[^。\n]*、|整个(?:仓库|代码库|项目)|全仓|所有(?:文件|模块)|\bfull[- ]stack (?:[\w-]+ ){0,2}(?:app|application|website|site|project|platform|product)|\bcomplete (?:\w+ ){0,3}(?:app|application|system|platform|website|project)\b|frontend.{0,40}backend|backend.{0,40}frontend|multiple (?:services|subsystems)|microservices|\bSaaS (?:platform|product|app)\b|\bwhole (?:repo|codebase|project)|across the (?:repo|codebase|project)|every (?:file|module))/i;
+// A build or change verb anywhere in the message ("…，帮我搭起来").
+const BUILD_ANYWHERE_RE = /(?:搭建|搭起来|搭一个|构建|开发|实现|迁移|重构|改造|做一个|做个|写一个|\bbuild\b|\bcreate\b|\bdevelop\b|\bimplement\b|\bmigrate\b|\brefactor\b|\bport\b|\bset up\b|\bscaffold\b)/i;
 const MANY_FILES_RE = /\b(\d{1,3})\s+(?:independent\s+)?files?\b|(\d{1,3})\s*个文件/i;
 
 // Asked to PRODUCE several candidate solutions…
-const COMPARE_PRODUCE_RE = /(?:(?:给我|出|做|写|想|设计|提供|拿出|尝试|试|实现)\s*(?:两|三|四|五|几|多|2|3|4|5)\s*(?:个|种|套|版)\s*(?:不同的?)?\s*(?:方案|实现|设计|做法|版本|思路)|(?:做|出|给|用|走|来)\s*(?:个)?多(?:种)?方案|\b(?:try|write|build|implement|draft|prototype|propose|produce|give me|come up with)\b.{0,20}\b(?:two|three|four|several|multiple|a few|\d)\s+(?:different\s+|alternative\s+|competing\s+)?(?:approaches|implementations|versions|solutions|designs|prototypes|variants)\b|best[- ]of[- ]?(?:n|\d))/i;
+const COMPARE_PRODUCE_RE = /(?:(?:给我|出|做|写|想|设计|提供|拿出|尝试|试|实现)\s*(?:两|三|四|五|几|多|2|3|4|5)\s*(?:个|种|套|版)\s*[^，。,.\n]{0,6}?(?:方案|实现|设计|做法|版本|思路)|(?:设计|做|出|写)\s*(?:两|三|四|五|几|2|3|4|5)\s*(?:个|种|套|版)|(?:做|出|给|用|走|来)\s*(?:个)?多(?:种)?方案|\b(?:try|write|build|implement|draft|prototype|propose|produce|give me|come up with)\b.{0,20}\b(?:two|three|four|several|multiple|a few|\d)\s+(?:different\s+|alternative\s+|competing\s+)?(?:approaches|implementations|versions|solutions|designs|prototypes|variants)\b|best[- ]of[- ]?(?:n|\d))/i;
 // …and to pick / compare / build the best one.
 const COMPARE_CHOOSE_RE = /(?:比较|对比|选(?:出|一个|最好|最优|择)|挑|择优|评选|最好的|最优的?|胜出|\bpick\b|\bchoose\b|\bselect\b|\bthe best\b|\bcompare\b|\bevaluate\b|\bbenchmark\b|\bwinner\b)/i;
 
@@ -214,11 +216,15 @@ export interface WorkflowSignals {
   saga: boolean;
 }
 
-export function collectWorkflowSignals(input: WorkflowRouteInput, text = input.text.trim()): WorkflowSignals {
+export function collectWorkflowSignals(input: WorkflowRouteInput, fullText = input.text.trim()): WorkflowSignals {
+  // In a timecoded brief only the request before the segments counts: the
+  // segments are story content ("翻开日记的页面", "配音：…", "Cut to:").
+  const brief = splitSagaBrief(fullText);
+  const text = brief.segmentLines >= 2 ? brief.preamble : fullText;
   const fileRefs = new Set((text.match(FILE_REF_RE) ?? []).map((ref) => ref.toLowerCase())).size;
   const manyFiles = MANY_FILES_RE.exec(text);
   const fileCount = Number.parseInt(manyFiles?.[1] ?? manyFiles?.[2] ?? '0', 10);
-  const length = weightedLength(text) + (input.attachmentCount ?? 0) * 80;
+  const length = weightedLength(fullText) + (input.attachmentCount ?? 0) * 80;
   const designSurface = DESIGN_SURFACE_RE.test(text);
   const bug = BUG_WORDING_RE.test(text);
   const codeTask = CODE_TASK_RE.test(text);
@@ -230,7 +236,8 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, text = input.t
   return {
     length,
     casual: CASUAL_RE.test(text),
-    followUp: FOLLOW_UP_RE.test(text) && length < SUBSTANTIAL_LENGTH,
+    // "好的，按方案二来" is a follow-up; "好的，帮我生成一段2分钟的视频…" is a request.
+    followUp: FOLLOW_UP_RE.test(text) && length < SHORT_LENGTH,
     question,
     buildImperative,
     writing,
@@ -238,7 +245,7 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, text = input.t
     deepCode: DEEP_CODE_RE.test(text),
     codeContext,
     inCodeRepo: input.inCodeRepo === true,
-    bigProject: buildImperative && !writing && !bug && length >= TEAM_MIN_LENGTH &&
+    bigProject: (buildImperative || BUILD_ANYWHERE_RE.test(text)) && !writing && !bug && length >= TEAM_MIN_LENGTH &&
       (TEAM_OBJECT_RE.test(text) || fileCount > 5 || fileRefs > 5),
     compareExplicit: COMPARE_PRODUCE_RE.test(text) && COMPARE_CHOOSE_RE.test(text) && !PAST_MENTION_RE.test(text),
     design: designSurface && DESIGN_VERB_RE.test(text) && !bug && !writing,
@@ -246,7 +253,7 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, text = input.t
     bug,
     // Saga comes after every code / design / question check: only plain
     // creation requests for a new long video qualify.
-    saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(text),
+    saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(fullText),
   };
 }
 

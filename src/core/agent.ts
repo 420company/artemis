@@ -32,6 +32,7 @@ import {
 } from '../security/permissionModes.js';
 import { isReadOnlyCommand } from '../security/commandPolicy.js';
 import { checkDelegationBudget, type DelegationBudget } from './workflowRouter.js';
+import { hasFinishedLongVideo, isSagaSessionActive, SAGA_SESSION_TTL_MS } from './sagaSessionState.js';
 import type {
   AgentAction,
   AgentPhase,
@@ -4919,27 +4920,32 @@ function mapPermissionModeForToolContext(
 // reroute the action to `generate_long_video` so the user actually gets
 // the multi-segment Saga pipeline. This is the last-line safety net behind
 // the explicit imperative tail in the Saga prompt.
-function maybeRerouteToSagaLongVideo(
+export function maybeRerouteToSagaLongVideo(
   session: SessionRecord,
   action: AgentAction,
 ): AgentAction {
   if (action.type !== 'generate_video') return action;
-  const messages = (session as { messages?: Array<{ content?: unknown }> }).messages ?? [];
+  const messages = (session as { messages?: Array<{ role?: string; name?: string; content?: unknown; createdAt?: string }> }).messages ?? [];
+  // Only a recent, unfinished Saga counts: a wizard marker written in the
+  // last SAGA_SESSION_TTL_MS with no generated long video after it, or a
+  // confirmed web Saga in the session metadata (core/sagaSessionState.ts).
+  const recentSince = Date.now() - SAGA_SESSION_TTL_MS;
   let hasSagaMarker = false;
   let totalDurationFromContext: number | undefined;
   let projectIdFromContext: string | undefined;
-  for (const msg of messages) {
+  messages.forEach((msg, index) => {
     const content = typeof msg.content === 'string' ? msg.content : '';
-    if (!content) continue;
-    if (content.includes('[Artemis Saga long video workflow]')) {
-      hasSagaMarker = true;
-      const dur = content.match(/totalDuration:\s*(\d+)/);
-      if (dur) totalDurationFromContext = Number.parseInt(dur[1] ?? '', 10);
-      const pid = content.match(/projectId:\s*"([^"]+)"/);
-      if (pid) projectIdFromContext = pid[1];
-    }
-  }
-  if (!hasSagaMarker) return action;
+    if (!content || !content.includes('[Artemis Saga long video workflow]')) return;
+    const at = Date.parse(msg.createdAt ?? '');
+    if (Number.isFinite(at) && at < recentSince) return;
+    if (hasFinishedLongVideo(messages.slice(index + 1))) return;
+    hasSagaMarker = true;
+    const dur = content.match(/totalDuration:\s*(\d+)/);
+    if (dur) totalDurationFromContext = Number.parseInt(dur[1] ?? '', 10);
+    const pid = content.match(/projectId:\s*"([^"]+)"/);
+    if (pid) projectIdFromContext = pid[1];
+  });
+  if (!hasSagaMarker && !isSagaSessionActive(session)) return action;
   const a = action as Extract<AgentAction, { type: 'generate_video' }>;
   return {
     type: 'generate_long_video',
@@ -5057,7 +5063,7 @@ async function executeAgentAction(
   const rerouted = maybeRerouteToSagaLongVideo(session, action);
   if (rerouted !== action) {
     options.onInfo?.(
-      `🌙 Saga safety net: model emitted generate_video but conversation has [Artemis Saga long video workflow] marker — rerouting to generate_long_video.`,
+      `🌙 Saga safety net: model emitted generate_video during an active Saga long-video workflow — rerouting to generate_long_video.`,
     );
     action = rerouted;
   }

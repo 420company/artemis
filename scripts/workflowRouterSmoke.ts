@@ -26,12 +26,18 @@ import {
 } from '../src/core/workflowRouter.js';
 import { detectExplicitWorkflowIntent } from '../src/core/workflowDispatcher.js';
 import {
+  buildSagaOfferQuestion,
   handleSagaLongVideoWorkflow,
   hasActiveSagaLongVideoWorkflow,
+  isClearSagaLongVideoRequest,
+  looksLikeSagaWizardAnswer,
+  parseRequestedVideoSeconds,
   offerSagaLongVideoWorkflow,
   parseSagaOfferReply,
 } from '../src/tools/visual/sagaWorkflow.js';
-import { planHeadlessWorkflow, SAGA_CONFIRMED_MARKER } from '../src/services/headlessWorkflow.js';
+import { finishSagaIfGenerated, planHeadlessWorkflow } from '../src/services/headlessWorkflow.js';
+import { isSagaSessionActive } from '../src/core/sagaSessionState.js';
+import { maybeRerouteToSagaLongVideo } from '../src/core/agent.js';
 import { resolveWorkflowClassifierProvider } from '../src/providers/workflowClassifier.js';
 import { BYTEPLUS_SEEDANCE_2_PRO_MODEL } from '../src/tools/visual/videoCapabilities.js';
 import { ProviderStore } from '../src/providers/store.js';
@@ -361,7 +367,7 @@ async function main(): Promise<void> {
     fs.rmSync(bare, { recursive: true, force: true });
   });
 
-  await test('headless (web): Saga is asked first, confirmed with the marker, follow-ups stay, other tasks leave', async () => {
+  await test('headless (web): Saga is asked first; state, not a marker, keeps wizard answers in Saga; other turns end it', async () => {
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'artemis-router-headless-'));
     const store = new SessionStore(tmpDir);
     const session = store.createSession({ title: 'headless saga' });
@@ -371,30 +377,142 @@ async function main(): Promise<void> {
     };
     const offer = await planHeadlessWorkflow({ ...base, prompt: '帮我做一个60秒的产品宣传视频' });
     assert.equal(offer.kind, 'reply');
-    assert.match(offer.kind === 'reply' ? offer.reply : '', /Saga 长视频工作流吗/);
-    const yes = await planHeadlessWorkflow({ ...base, prompt: '1' });
-    assert.equal(yes.kind === 'run' && yes.workflow, 'saga');
-    assert.ok(yes.kind === 'run' && yes.prompt.includes('帮我做一个60秒的产品宣传视频') && yes.prompt.includes(SAGA_CONFIRMED_MARKER));
-    assert.ok(SAGA_CONFIRMED_MARKER.startsWith('[Artemis Saga long video workflow]'));
-    assert.match(yes.kind === 'run' ? yes.hint : '', /generate_long_video/);
-    const ratio = await planHeadlessWorkflow({ ...base, prompt: '9:16' });
-    assert.equal(ratio.kind === 'run' && ratio.workflow, 'saga', 'a short follow-up stays in Saga');
-    const other = await planHeadlessWorkflow({ ...base, prompt: '排查一下为什么 bridge 在 Telegram 上发图片会超时，看看 src/bragi/runtime.ts 和 src/telegram 下的上传逻辑，找到根因并修复' });
-    assert.equal(other.kind === 'run' && other.workflow, 'plan', 'another task leaves Saga');
+    const offerText = offer.kind === 'reply' ? offer.reply : '';
+    assert.match(offerText, /Saga 长视频工作流吗/);
+    assert.match(offerText, /```choices\n\{"question":.*"options":\["是，开始","不是"\]\}\n```/, 'the web gets a clickable choices card');
+    // A question about the offer drops it and is answered normally.
+    const price = await planHeadlessWorkflow({ ...base, prompt: '要多少钱？' });
+    assert.equal(price.kind === 'run' && price.workflow, 'direct');
     assert.equal(session.metadata?.workflowRouting, undefined);
+
+    await planHeadlessWorkflow({ ...base, prompt: '帮我做一个60秒的产品宣传视频' });
+    const yes = await planHeadlessWorkflow({ ...base, prompt: '是，开始' });
+    assert.equal(yes.kind === 'run' && yes.workflow, 'saga');
+    assert.equal(yes.kind === 'run' && yes.prompt, '帮我做一个60秒的产品宣传视频', 'the stored request is the user\'s own text, no marker');
+    assert.match(yes.kind === 'run' ? yes.hint : '', /generate_long_video/);
+    assert.equal(isSagaSessionActive(session), true);
+    for (const answer of ['9:16', '60秒', '2', '带字幕', '[0-8秒] 城市清晨\n[8-16秒] 主角出门']) {
+      const step = await planHeadlessWorkflow({ ...base, prompt: answer });
+      assert.equal(step.kind === 'run' && step.workflow, 'saga', `wizard answer ${answer} stays in Saga`);
+    }
+    // Unrelated direct turns end it (and do not refresh it).
+    const mail = await planHeadlessWorkflow({ ...base, prompt: '帮我写一封邮件给老板，说我明天请假' });
+    assert.equal(mail.kind === 'run' && mail.workflow, 'direct');
+    assert.equal(isSagaSessionActive(session), false);
+    const after = await planHeadlessWorkflow({ ...base, prompt: '9:16' });
+    assert.equal(after.kind === 'run' && after.workflow, 'direct');
+
+    // A generated long video ends it too.
+    await planHeadlessWorkflow({ ...base, prompt: '/saga 一个赛博朋克的清晨' });
+    assert.equal(isSagaSessionActive(session), true, '/saga is immediate');
+    const done = finishSagaIfGenerated(session, [
+      { id: 't', role: 'tool', name: 'generate_long_video', content: JSON.stringify({ ok: true, output: '/tmp/v.mp4' }), createdAt: new Date().toISOString() },
+    ]);
+    assert.equal(done, true);
+    assert.equal(isSagaSessionActive(session), false);
 
     await planHeadlessWorkflow({ ...base, prompt: 'make a 2 minute video about space exploration' });
     const no = await planHeadlessWorkflow({ ...base, prompt: 'no' });
     assert.equal(no.kind === 'run' && no.workflow, 'direct');
     assert.equal(no.kind === 'run' && no.prompt, 'make a 2 minute video about space exploration');
 
-    const explicit = await planHeadlessWorkflow({ ...base, prompt: '/saga 一个赛博朋克的清晨' });
-    assert.equal(explicit.kind === 'run' && explicit.workflow, 'saga', '/saga is immediate');
     const noVideo = await planHeadlessWorkflow({ ...base, prompt: 'make a long video', hasVideoProvider: async () => false, session: store.createSession({ title: 'x' }) });
     assert.equal(noVideo.kind === 'run' && noVideo.workflow, 'direct');
-    const goal = await planHeadlessWorkflow({ ...base, prompt: 'make a long video', autoRoute: false, session: store.createSession({ title: 'y' }) });
-    assert.equal(goal.kind === 'run' && goal.workflow, 'direct');
+    // A Goal Mode tick after a confirmed Saga ends it.
+    const goalSession = store.createSession({ title: 'y' });
+    await planHeadlessWorkflow({ ...base, session: goalSession, prompt: '帮我生成一段长视频，讲雨夜' });
+    await planHeadlessWorkflow({ ...base, session: goalSession, prompt: '1' });
+    const tick = await planHeadlessWorkflow({ ...base, session: goalSession, prompt: '[Goal tick] continue working toward goal: refactor auth module', autoRoute: false });
+    assert.equal(tick.kind === 'run' && tick.workflow, 'direct');
+    assert.equal(isSagaSessionActive(goalSession), false);
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  await test('generate_video → generate_long_video safety net: only for an active or recent, unfinished Saga', () => {
+    const video: AgentAction = { type: 'generate_video', prompt: 'a cat', duration: 10 } as AgentAction;
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+    const marker = '[Artemis Saga long video workflow]\ntotalDuration: 60';
+    const mk = (messages: Array<{ role: string; name?: string; content: string; createdAt: string }>, metadata?: Record<string, unknown>) =>
+      ({ messages: messages.map((m, i) => ({ id: `m${i}`, ...m })), metadata } as unknown as Parameters<typeof maybeRerouteToSagaLongVideo>[0]);
+    assert.equal(maybeRerouteToSagaLongVideo(mk([{ role: 'user', content: marker, createdAt: at(5) }]), video).type, 'generate_long_video', 'recent CLI/bridge wizard marker');
+    assert.equal(maybeRerouteToSagaLongVideo(mk([{ role: 'user', content: marker, createdAt: at(120) }]), video).type, 'generate_video', 'an old marker no longer reroutes');
+    assert.equal(maybeRerouteToSagaLongVideo(mk([
+      { role: 'user', content: marker, createdAt: at(5) },
+      { role: 'tool', name: 'generate_long_video', content: '{"ok":true}', createdAt: at(1) },
+    ]), video).type, 'generate_video', 'a finished Saga no longer reroutes');
+    assert.equal(maybeRerouteToSagaLongVideo(mk([], { workflowRouting: { sagaActiveAt: Date.now() - 60_000 } }), video).type, 'generate_long_video', 'confirmed web Saga in metadata');
+    assert.equal(maybeRerouteToSagaLongVideo(mk([], { workflowRouting: { sagaActiveAt: Date.now() - 2 * 3_600_000 } }), video).type, 'generate_video', 'expired web Saga');
+    assert.equal(maybeRerouteToSagaLongVideo(mk([]), video).type, 'generate_video');
+  });
+
+  await test('saga offer: whole-reply answers only; the question carries a pick line for chat buttons', () => {
+    const yes = ['1', '1.', '是', '是的', '好', '好的', '开始', '确定', '可以', 'yes', 'y', 'ok', 'okay', 'sure', '好的！', '1️⃣', '👍', '确定！', '是，开始', '1. 是，开始', 'Yes, start'];
+    const no = ['2', '不是', '不', 'no', '算了', '不要', '2. 不是', 'No'];
+    const neither = ['好的，按方案二来', '好，我再想想', '好贵啊', '可以吗？', '要不算了', '对了，顺便问一下', '是什么意思？', '开始之前我想问',
+      '1分钟太长了', 'ok but shorter', 'go away', '要多少钱？', 'yes please make it 30s', '是不是很贵', '不错', '嗯', '行', '好的，不过先别生成', 'yeah no', 'sure, but what does it cost?'];
+    for (const reply of yes) assert.equal(parseSagaOfferReply(reply), 'yes', reply);
+    for (const reply of no) assert.equal(parseSagaOfferReply(reply), 'no', reply);
+    for (const reply of neither) assert.equal(parseSagaOfferReply(reply), undefined, reply);
+    assert.match(buildSagaOfferQuestion('zh-CN'), /1\. 是，开始\n2\. 不是\n请回复编号。$/);
+    assert.match(buildSagaOfferQuestion('en'), /1\. Yes, start\n2\. No\nReply with the number\.$/);
+    for (const answer of ['9:16', '60秒', '两分钟', '1080p', '3', '默认', 'B 梦幻海滩女主角']) assert.equal(looksLikeSagaWizardAnswer(answer), true, answer);
+    for (const other of ['帮我写一封邮件', '翻译成英文', '今天天气怎么样？']) assert.equal(looksLikeSagaWizardAnswer(other), false, other);
+  });
+
+  await test('saga detection: video nouns, spelled lengths, guide briefs; exclusions only before the segments', async () => {
+    for (const [text, seconds] of [['90-second trailer', 90], ['a 2-minute film', 120], ['1.5 minutes', 90], ['一分钟', 60], ['两分钟', 120], ['九十秒', 90], ['一分半', 90], ['1分半', 90], ['one-minute ad', 60]] as const) {
+      assert.equal(parseRequestedVideoSeconds(text), seconds, text);
+    }
+    const brief = `【整片叙事】一个女孩在旧影院里重逢童年的自己。\n主体模式：有主角。身份来源：纯文字。\n[0-8秒] 女孩推开旧影院的门，灰尘在光束中飘浮。\n[8-16秒] 她走到银幕前，银幕上映出海浪。\n[16-24秒] 童年的她从银幕里走出来，轻声问："你还记得我吗？"`;
+    const base = '帮我生成一段2分钟的电影感视频。\n[0-8秒] 镜头1：女孩站在火车站台上等车。\n[8-16秒] 镜头2：她低头看手机。\n[16-24秒] 镜头3：列车进站。';
+    const cases: Array<[string, AutoWorkflow]> = [
+      ['帮我生成一个2分钟的品牌宣传片', 'saga'],
+      ['做一段60秒的旅行vlog视频', 'saga'],
+      ['Make a 90-second cinematic trailer for my game', 'saga'],
+      ['make a 2-minute cinematic short film about a lighthouse keeper', 'saga'],
+      ['生成一部 3 分钟的科幻短片，讲火星殖民', 'saga'],
+      ['我想要一个一分钟的视频，介绍我们的咖啡店', 'saga'],
+      ['帮我生成一个1分半的产品介绍视频', 'saga'],
+      ['用这张图做一个60秒的视频', 'saga'],
+      ['给我的游戏做一个 90 秒的预告片', 'saga'],
+      ['帮我做个长视频，主题是城市夜景', 'saga'],
+      ['请生成一个 2 分钟的动画短片，讲一个机器人学会画画的故事', 'saga'],
+      ['帮我生成一个两分钟的视频', 'saga'],
+      [brief, 'saga'],
+      ['【整片叙事】雨夜的东京，一只猫寻找回家的路。\n[0-8秒] 猫在便利店门口躲雨\n[8-16秒] 霓虹灯下穿过小巷\n[16-24秒] 回到主人怀里', 'saga'],
+      ['把下面的剧本做成视频：\n[0-8秒] 城市清晨\n[8-16秒] 主角出门\n[16-24秒] 地铁站相遇', 'saga'],
+      [base, 'saga'],
+      [base + '\n配音：温柔女声旁白', 'saga'],
+      ['Make a 2 minute cinematic video.\n[0-8s] A girl waits on the platform.\n[8-16s] Cut to: the train arrives.\n[16-24s] She boards.', 'saga'],
+      [base + '\n[24-32秒] 镜头4：她翻开日记的页面。', 'saga'],
+      [base.replace('低头看手机', '打开手机app'), 'saga'],
+      [base + '\n镜头建议慢推。', 'saga'],
+      [base + '\n[24-32秒] 镜头4：她回头问：你还记得我吗？', 'saga'],
+      [base + '\n需要中文字幕，加字幕', 'saga'],
+      [base + '\n[24-32秒] 镜头4：两条河流合并成一条。', 'saga'],
+      [base + '\n结尾总结：希望与重逢。', 'saga'],
+      ['好的，帮我生成一段2分钟的电影感视频，讲火车站的离别', 'saga'],
+      // Team and compare that were missed.
+      ['帮我做一个完整的电商网站，包括商品、购物车、支付和后台管理', 'team'],
+      ['帮我从零搭建一个博客系统，前端 React 后端 Node，带登录和评论', 'team'],
+      ['把整个仓库从 JavaScript 迁移到 TypeScript', 'team'],
+      ['Build a full-stack todo app with React, Express and Postgres, with auth', 'team'],
+      ['我们要做一个 SaaS 平台：用户系统、计费、管理后台、API 网关，帮我搭起来', 'team'],
+      ['给我三个缓存方案，比较后选最好的实现', 'compare'],
+      ['写三种不同的实现，benchmark 一下选最快的', 'compare'],
+      ['Try three different approaches to this parser and pick the best one', 'compare'],
+      ['出两个方案对比一下，然后实现更好的那个', 'compare'],
+      ['帮我设计三版首页，然后选一个最好的', 'compare'],
+      ['帮我做一个个人作品集网站', 'design'],
+      ['帮我修复 src/a.ts 和 src/b.ts 里的类型错误', 'plan'],
+    ];
+    const wrong: string[] = [];
+    for (const [text, expected] of cases) {
+      const route = await routeWorkflow({ text, inCodeRepo: expected === 'plan' });
+      if (route.workflow !== expected) wrong.push(`${JSON.stringify(text.slice(0, 60))} → ${route.workflow} (${route.reason}), expected ${expected}`);
+    }
+    assert.deepEqual(wrong, []);
+    assert.equal(isClearSagaLongVideoRequest('00:00-00:05 开场\n00:05-00:10 结尾'), false, 'unbracketed agenda times without video words');
   });
 
   await test('classifier provider: none without a worker profile, so the main model is never used to route', async () => {
@@ -575,7 +693,10 @@ async function main(): Promise<void> {
     assert.ok(!interactive.includes('runHintedWorkflowTurn'));
     assert.ok(!interactive.includes('buildWorkflowCompletionNote'));
     assert.ok(!/WORKFLOW_EFFORT/.test(interactive));
-    assert.match(interactive, /workflowPlaybook \? `\$\{workflowPlaybook\}\\n\\n--- USER REQUEST ---/);
+    assert.match(interactive, /workflowPlaybook \? \{ turnContext: workflowPlaybook \}/);
+    assert.ok(!interactive.includes('--- USER REQUEST ---'), 'the playbook is never part of the stored user message');
+    const brain = fs.readFileSync(path.join(process.cwd(), 'src/brain.ts'), 'utf8');
+    assert.match(brain, /const runtimeNote = \[turnContextText, skillIndexSection, requestNote\]/, 'think() sends turnContext as unsaved runtime context');
     const headless = fs.readFileSync(path.join(process.cwd(), 'src/services/headlessAgent.ts'), 'utf8');
     assert.match(headless, /delegationBudget: createDelegationBudget\(plan\.workflow\)/, 'every headless run (Goal Mode, analysis too) is bounded');
   });

@@ -3038,7 +3038,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '  default ' + t('清除设置，回到 API 默认', 'clear the setting, back to API default'),
           '',
           t('不支持该等级的模型会自动降到 high；不支持 effort 的模型忽略此设置。', 'Models missing a level clamp to high; models without effort support ignore it.'),
-          t('/nidhogg 会自动用 max（你手动设置过则不覆盖）；自动选择的工作流不会提高 effort。', '/nidhogg runs at max unless you set an effort; automatically chosen workflows never raise it.'),
+          t('/nidhogg 的后台 harness 在你没有用 /effort 或 profile 设置 effort 时使用 max；自动选择的工作流从不提高 effort。', 'The /nidhogg background harness runs at max when neither /effort nor the profile sets an effort; automatically chosen workflows never raise it.'),
         ])
       } else if (arg !== 'default' && !(levels as readonly string[]).includes(arg)) {
         appendSystemPanel(t('无效等级', 'Invalid level'), [
@@ -4433,9 +4433,9 @@ async function handleTurn(
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
   /**
-   * Playbook of a routed workflow. It goes in front of this turn's user
-   * message (never the system prompt, which stays cache-stable); the Saga
-   * and video wizards still see only the user's own text.
+   * Playbook of a routed workflow, sent as unsaved per-turn context (never
+   * the system prompt, never the stored history); the Saga and video
+   * wizards and the saved session see only the user's own text.
    */
   workflowPlaybook?: string,
 ): Promise<void> {
@@ -4843,7 +4843,9 @@ async function handleTurn(
       startPendingTick()
     }
 
-    const result = await think(workflowPlaybook ? `${workflowPlaybook}\n\n--- USER REQUEST ---\n\n${input}` : input, {
+    const result = await think(input, {
+      // The routed playbook is per-turn context: never saved in the history.
+      ...(workflowPlaybook ? { turnContext: workflowPlaybook } : {}),
       ...thinkOpts,
       locale: locale === 'zh-CN' ? 'zh' : 'en',
       cwd: thinkOpts.cwd,

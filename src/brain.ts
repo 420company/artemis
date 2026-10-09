@@ -2124,6 +2124,12 @@ export interface ThinkOptions {
      * owner's. A hosted run without one does not learn or use skills.
      */
     skillPartition?: string;
+    /**
+     * Extra context for this turn only (the playbook of an automatically
+     * chosen workflow): sent after the conversation like the skill index,
+     * never stored in the history or the saved session.
+     */
+    turnContext?: string;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2208,6 +2214,7 @@ async function thinkTurn(
         contextMode = 'interactive',
         abortSignal,
         skillPartition,
+        turnContext,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2302,7 +2309,7 @@ async function thinkTurn(
         nativeFunctionTools: unknown[] | undefined,
     ): Promise<number> => {
         // + room for the "current task" note when the boundary carries the request.
-        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) + skillIndexTokens;
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) + skillIndexTokens + turnContextTokens;
         const managed = await manageContext({
             messages: history,
             fixedTokens,
@@ -2340,6 +2347,8 @@ async function thinkTurn(
     // The index is only useful when the model can call load_skill.
     const skillIndexSection = supportsNativeTools && !plainChat ? skillRun.indexSection : '';
     const skillIndexTokens = skillIndexSection ? estimateTokens(skillIndexSection) + 4 : 0;
+    const turnContextText = turnContext?.trim() ?? '';
+    const turnContextTokens = turnContextText ? estimateTokens(turnContextText) + 4 : 0;
     const withSkillTool = (names: string[]): string[] =>
         skillIndexSection && names.length > 0 && !names.includes(LOAD_SKILL_TOOL) ? [...names, LOAD_SKILL_TOOL] : names;
     let toolProjectionWidenAttempt = 0;
@@ -2519,7 +2528,8 @@ async function thinkTurn(
             // turn is going, an unsaved runtime-context note marks it current.
             const requestNote = carriedRequestNote(history, requestMessageId, contextLanguage);
             // Learned-skill index + carried-request note: per request, never stored.
-            const runtimeNote = [skillIndexSection, requestNote].filter(Boolean).join('\n\n');
+            // Routed workflow playbook (turnContext) too: per turn, never stored.
+            const runtimeNote = [turnContextText, skillIndexSection, requestNote].filter(Boolean).join('\n\n');
             return {
                 messages: runtimeNote
                     ? [...systemMessages, ...history, makeRuntimeContextMessage(runtimeNote)]

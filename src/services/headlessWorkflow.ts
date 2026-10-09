@@ -7,10 +7,12 @@
  * is answered with a yes/no question and nothing else runs; the Saga
  * playbook starts after an explicit yes (or at once for "/saga …"). Each
  * run is a separate process, so the pending question and the active Saga
- * conversation live in the session's metadata, and the confirmed request
- * carries the `[Artemis Saga long video workflow]` marker in the stored
- * history (the generate_video → generate_long_video safety net in
- * core/agent.ts keys off it).
+ * conversation live in the session's metadata with a timestamp
+ * (core/sagaSessionState.ts); the stored messages stay the user's own. The
+ * generate_video → generate_long_video safety net in core/agent.ts reads
+ * that state. A confirmed Saga continues only for wizard-style answers
+ * ("9:16", "60秒", "1", a timecoded brief) and ends when the long video is
+ * generated or another request arrives.
  */
 
 import type { ChatProvider } from '../providers/types.js'
@@ -20,17 +22,17 @@ import {
   routeWorkflow,
   type AutoWorkflow,
 } from '../core/workflowRouter.js'
-import { buildSagaOfferQuestion, parseSagaOfferReply } from '../tools/visual/sagaWorkflow.js'
-
-const SAGA_STATE_TTL_MS = 30 * 60 * 1000
-export const SAGA_CONFIRMED_MARKER = '[Artemis Saga long video workflow] The user confirmed the Saga long-video workflow for this request.'
-
-type WorkflowRoutingState = {
-  /** A Saga question is waiting for yes / no. */
-  sagaOffer?: { text: string; at: number }
-  /** Saga was confirmed; short follow-ups ("9:16", "60秒") stay in it. */
-  sagaActiveAt?: number
-}
+import {
+  buildSagaOfferQuestion,
+  looksLikeSagaWizardAnswer,
+  parseSagaOfferReply,
+} from '../tools/visual/sagaWorkflow.js'
+import {
+  hasFinishedLongVideo,
+  readWorkflowRoutingState,
+  SAGA_SESSION_TTL_MS,
+  writeWorkflowRoutingState,
+} from '../core/sagaSessionState.js'
 
 export type HeadlessWorkflowPlan =
   | { kind: 'reply'; reply: string }
@@ -51,20 +53,8 @@ export interface PlanHeadlessWorkflowInput {
   now?: number
 }
 
-function readState(session: SessionRecord): WorkflowRoutingState {
-  const raw = session.metadata?.workflowRouting
-  return raw && typeof raw === 'object' ? { ...(raw as WorkflowRoutingState) } : {}
-}
-
-function writeState(session: SessionRecord, state: WorkflowRoutingState): void {
-  const clean: WorkflowRoutingState = {}
-  if (state.sagaOffer) clean.sagaOffer = state.sagaOffer
-  if (state.sagaActiveAt) clean.sagaActiveAt = state.sagaActiveAt
-  const metadata = { ...(session.metadata ?? {}) }
-  if (clean.sagaOffer || clean.sagaActiveAt) metadata.workflowRouting = clean
-  else delete metadata.workflowRouting
-  session.metadata = metadata
-}
+const readState = readWorkflowRoutingState
+const writeState = writeWorkflowRoutingState
 
 function sagaRun(prompt: string, cwd: string, note: string): HeadlessWorkflowPlan {
   return {
@@ -87,14 +77,14 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   let sagaDeclined = false
 
   // An answer to a pending Saga question.
-  const offer = state.sagaOffer && now - state.sagaOffer.at < SAGA_STATE_TTL_MS ? state.sagaOffer : undefined
+  const offer = state.sagaOffer && now - state.sagaOffer.at < SAGA_SESSION_TTL_MS ? state.sagaOffer : undefined
   delete state.sagaOffer
   if (offer) {
     const answer = parseSagaOfferReply(prompt)
     if (answer === 'yes') {
       state.sagaActiveAt = now
       writeState(input.session, state)
-      return sagaRun(`${offer.text}\n\n${SAGA_CONFIRMED_MARKER}`, input.cwd, 'the user confirmed Saga')
+      return sagaRun(offer.text, input.cwd, 'the user confirmed Saga')
     }
     if (answer === 'no') {
       prompt = offer.text
@@ -109,7 +99,7 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     if (story) {
       state.sagaActiveAt = now
       writeState(input.session, state)
-      return sagaRun(`${story}\n\n${SAGA_CONFIRMED_MARKER}`, input.cwd, 'explicit /saga')
+      return sagaRun(story, input.cwd, 'explicit /saga')
     }
   }
 
@@ -124,9 +114,10 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     { getClassifier: input.getClassifier, onInfo: input.onInfo },
   )
 
-  // A confirmed Saga conversation keeps short replies ("9:16", "60秒", "1").
-  const sagaActive = state.sagaActiveAt !== undefined && now - state.sagaActiveAt < SAGA_STATE_TTL_MS
-  if (sagaActive && !sagaDeclined && route.workflow === 'direct' && route.reason !== 'question') {
+  // A confirmed Saga conversation keeps wizard-style answers ("9:16",
+  // "60秒", "1", a timecoded brief); any other request ends it.
+  const sagaActive = state.sagaActiveAt !== undefined && now - state.sagaActiveAt < SAGA_SESSION_TTL_MS
+  if (sagaActive && !sagaDeclined && looksLikeSagaWizardAnswer(prompt)) {
     state.sagaActiveAt = now
     writeState(input.session, state)
     return sagaRun(route.text, input.cwd, 'continuing the confirmed Saga video')
@@ -137,8 +128,9 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     if (!sagaDeclined && (await input.hasVideoProvider())) {
       state.sagaOffer = { text: route.text, at: now }
       writeState(input.session, state)
-      const zh = /[㐀-鿿]/.test(route.text)
-      return { kind: 'reply', reply: buildSagaOfferQuestion(zh ? 'zh-CN' : 'en') }
+      const zh = /[\u3400-\u9fff]/.test(route.text)
+      // The web app renders the ```choices card as buttons.
+      return { kind: 'reply', reply: buildSagaOfferQuestion(zh ? 'zh-CN' : 'en', 'choices') }
     }
     writeState(input.session, state)
     return { kind: 'run', prompt: route.text, workflow: 'direct', hint: '' }
@@ -152,4 +144,14 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     workflow: route.workflow,
     hint: buildRoutedWorkflowHint(route.workflow, { cwd: input.cwd, userPrompt: route.text, reason: route.reason }),
   }
+}
+
+/** After a Saga run: a generated long video ends the Saga conversation. */
+export function finishSagaIfGenerated(session: SessionRecord, newMessages: SessionRecord['messages']): boolean {
+  if (!hasFinishedLongVideo(newMessages)) return false
+  const state = readState(session)
+  if (state.sagaActiveAt === undefined) return false
+  delete state.sagaActiveAt
+  writeState(session, state)
+  return true
 }

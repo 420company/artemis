@@ -95,7 +95,7 @@ export async function runHeadlessAgent(
   // Workflow routing (services/headlessWorkflow.ts): the user never names a
   // workflow; a Saga long video is only offered, never started unasked.
   const { createDelegationBudget } = await import('../core/workflowRouter.js')
-  const { planHeadlessWorkflow } = await import('./headlessWorkflow.js')
+  const { finishSagaIfGenerated, planHeadlessWorkflow } = await import('./headlessWorkflow.js')
   const { resolveWorkflowClassifierProvider } = await import('../providers/workflowClassifier.js')
   const { resolveConfiguredVisualProvider } = await import('../utils/visualGenerationConfig.js')
   const { resolveArtemisHomeDir } = await import('../utils/fs.js')
@@ -134,7 +134,8 @@ export async function runHeadlessAgent(
       await sessionStore.save(current)
       return { reply: plan.reply, turns: 0 }
     }
-    return runAgent(
+    const messagesBefore = current.messages.length
+    const runResult = await runAgent(
     current,
     // A retired workflow slash word ("/niko …") is already removed.
     plan.prompt,
@@ -172,6 +173,11 @@ export async function runHeadlessAgent(
     onInfo: opts.onInfo,
     ...(imageAttachments.length ? { imageAttachments } : {}),
   })
+    // A generated long video ends the Saga conversation of this session.
+    if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
+      await sessionStore.save(current)
+    }
+    return runResult
   }, { label: `Session ${session.id}` })
 
   return {
