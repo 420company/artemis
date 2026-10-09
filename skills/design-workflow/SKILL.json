@@ -1,0 +1,19 @@
+{
+  "id": "design-workflow",
+  "name": "design-workflow",
+  "description": "Artemis design workflow: build or restyle a website, app screen or other visual front end with a real visual system, generated assets and desktop/mobile screenshot verification.",
+  "version": "1.0.0",
+  "author": "Artemis",
+  "tags": ["design", "frontend", "ui", "website", "visual", "workflow"],
+  "entryPoint": "tool_chain",
+  "category": "design",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ]
+}

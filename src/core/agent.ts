@@ -31,6 +31,7 @@ import {
   type ToolAccessMode,
 } from '../security/permissionModes.js';
 import { isReadOnlyCommand } from '../security/commandPolicy.js';
+import { checkDelegationBudget, type DelegationBudget } from './workflowRouter.js';
 import type {
   AgentAction,
   AgentPhase,
@@ -1891,6 +1892,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
+    case 'use_workflow':
+      return `use_workflow ${action.workflow}${action.reason ? ` reason=${truncate(action.reason, 100)}` : ''}`;
     case 'agent':
       const agentSummary = `agent action=${action.action}`;
       if (action.id) {
@@ -3797,6 +3800,16 @@ export type RunAgentOptions = {
   profile?: 'main' | AgentRole;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  /**
+   * Sub-agent budget for this run, shared with its sub-agents (see
+   * core/workflowRouter.ts). Unset: no limit beyond maxTurns.
+   */
+  delegationBudget?: DelegationBudget;
+  /**
+   * Playbook of the workflow the router chose for this request. Sent in the
+   * per-run context of the top-level run only, never stored in the session.
+   */
+  workflowHint?: string;
   appendUserMessage?: boolean;
   /**
    * Scope for memories the memory tool saves when the model names none.
@@ -5047,6 +5060,16 @@ async function executeAgentAction(
           errors: validationErrors,
         },
       }),
+    };
+  }
+
+  // Cost bound of the routed workflow: refuse sub-agents past its budget.
+  const budgetRefusal = checkDelegationBudget(action, options.delegationBudget);
+  if (budgetRefusal) {
+    return {
+      ok: false,
+      output: budgetRefusal,
+      error: buildToolError('delegation_budget_exhausted', budgetRefusal, { retryable: false }),
     };
   }
 
@@ -6460,6 +6483,9 @@ export async function runAgent(
     }
     return systemCache.content;
   };
+  if (options.workflowHint?.trim() && (options.delegationDepth ?? 0) === 0) {
+    extensionRuntime.sections.unshift(options.workflowHint.trim());
+  }
   // Per-run context: computed once, so every request of the run is identical
   // up to the newest messages.
   let runContextMessage: SessionMessage | undefined;

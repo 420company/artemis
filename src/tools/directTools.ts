@@ -13,6 +13,7 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'lookup_docs',
   'search_web',
   'deep_research',
+  'use_workflow',
   'write_file',
   'insert_in_file',
   'replace_in_file',

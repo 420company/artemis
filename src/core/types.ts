@@ -386,6 +386,12 @@ export type AgentAction =
       maxTurns?: number;
     }
   | {
+      // Switch this task to a heavier workflow mid-run (see core/workflowRouter.ts).
+      type: 'use_workflow';
+      workflow: 'plan' | 'team' | 'compare' | 'design';
+      reason?: string;
+    }
+  | {
       type: 'approve_builder_execution';
       sessionId: string;
       summary?: string;
@@ -775,6 +781,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'kill_task',
   'delegate_task',
   'spawn_background_workflow',
+  'use_workflow',
   'approve_builder_execution',
   'generate_image',
   'generate_video',

@@ -985,6 +985,20 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           maxTurns: integerSchema('Optional max turns for the background workflow.'),
         },
       };
+    case 'use_workflow':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['workflow'],
+        properties: {
+          workflow: {
+            type: 'string',
+            description: 'plan, team, compare or design.',
+            enum: ['plan', 'team', 'compare', 'design'],
+          },
+          reason: optionalStringSchema('One short sentence: why the task needs this workflow.'),
+        },
+      };
     case 'approve_builder_execution':
       return {
         type: 'object',

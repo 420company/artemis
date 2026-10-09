@@ -44,6 +44,7 @@ import { executeBridgeSendVideo } from './bridgeSendVideo.js';
 import { executeRequestUserConfirmation } from './requestUserConfirmation.js';
 import { normalizeVideoResolution } from './visual/videoParams.js';
 import { executeViewImage } from './viewImage.js';
+import { executeUseWorkflow, USE_WORKFLOW_DESCRIPTION } from './useWorkflow.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
 
 export type { ToolDefinition };
@@ -440,6 +441,18 @@ function validateSpawnBackgroundWorkflowAction(action: any): string[] {
   );
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
   validatePositiveInteger(action?.maxTurns, 'maxTurns', errors);
+  return errors;
+}
+
+function validateUseWorkflowAction(action: any): string[] {
+  const errors: string[] = [];
+  validateEnumString(
+    action?.workflow,
+    'workflow',
+    ['plan', 'team', 'compare', 'design'] as const,
+    errors,
+  );
+  validateOptionalNonEmptyString(action?.reason, 'reason', errors);
   return errors;
 }
 
@@ -923,6 +936,16 @@ const actionToolDefs: ToolDefinition[] = [
     executionMode: 'non-blocking',
     parallelSafe: false,
     validate: validateSpawnBackgroundWorkflowAction,
+  },
+  {
+    type: 'use_workflow',
+    description: USE_WORKFLOW_DESCRIPTION,
+    kind: 'agent',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: validateUseWorkflowAction,
+    execute: executeUseWorkflow as any,
   },
   {
     type: 'approve_builder_execution',

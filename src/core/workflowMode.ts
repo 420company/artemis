@@ -2,6 +2,7 @@ import type { RunAgentOptions } from './agent.js';
 import { runAgent } from './agent.js';
 import { runNidhoggWorkflow } from './nidhogg.js';
 import { buildWorkflowHint } from './workflowHints.js';
+import { autoWorkflowForMode, createDelegationBudget } from './workflowRouter.js';
 import { appendTaskRuntime, createTaskRuntimeRecord, updateTaskRuntime } from './taskRuntime.js';
 import { runPluginHooks } from '../extensions/hooks.js';
 import type { RunResult, SessionRecord } from './types.js';
@@ -187,8 +188,10 @@ export async function runWorkflowMode(
         : await runAgent(
             session,
             (() => {
+              // A routed workflow carries its playbook in options.workflowHint
+              // (per-run context); an explicit one gets it in the prompt.
               const hint =
-                mode === 'direct'
+                mode === 'direct' || options.workflowHint
                   ? ''
                   : buildWorkflowHint(mode, { cwd: options.cwd, userPrompt });
               return hint
@@ -200,6 +203,10 @@ export async function runWorkflowMode(
               heimdallThreadState,
               profile: 'main',
               completionContract: 'requires_execution_evidence',
+              // Every hint workflow is bounded: at most its sub-agent budget.
+              delegationBudget:
+                options.delegationBudget ??
+                createDelegationBudget(autoWorkflowForMode(mode) ?? 'direct'),
             },
           );
 

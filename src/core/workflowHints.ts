@@ -1,14 +1,18 @@
 /**
- * Workflow hints — replaces the old phase-based pipeline with a flexible
- * "inject domain hint into brain system prompt, then run normal tool loop".
+ * Workflow hints — playbooks injected for one turn, then the normal tool loop
+ * runs under the Artemis execution protocol.
  *
- * Each /slashcommand (niko, athena, nidhogg, design, contest) now becomes a
- * domain-specific bias the brain reads at the top of its system prompt. The
- * brain's regular 24-round tool loop handles execution under the Artemis execution protocol.
- *
- * Names are preserved by user request — they have personal significance.
+ * Users never pick these by name any more: core/workflowRouter.ts chooses one
+ * from the request (or the model switches with the use_workflow tool). The
+ * internal names (niko, athena, contest, nidhogg, design) are kept by user
+ * request — they have personal significance — but never shown as commands.
+ * The design playbook lives in the design-workflow skill
+ * (skills/design-workflow/SKILL.md).
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { WorkflowMode } from './workflowMode.js';
 import { DesignSystem } from '../design/index.js';
 
@@ -30,7 +34,7 @@ export function buildWorkflowHint(
 
   switch (mode) {
     case 'design':
-      return `${baseHeader}\n\n${DESIGN_HINT}\n\n${DesignSystem.buildDesignWorkflowPrompt(context.userPrompt)}`;
+      return `${baseHeader}\n\n${loadDesignWorkflowSkill()}\n\n${DesignSystem.buildDesignWorkflowPrompt(context.userPrompt)}`;
     case 'niko':
       return `${baseHeader}\n\n${NIKO_HINT}`;
     case 'athena':
@@ -68,42 +72,46 @@ const COMMON_AGENT_PROTOCOL = `\
 6. 修改后必须运行验证（编译/测试/启服务），看不到工具结果不得声称完成
 7. 子任务可以让 deep_research 工具去做并行调研（它在 worker 模型上跑，便宜快速），不要把简单的 read 任务也往那扔
 8. 外部协议/API/SDK/gateway 类 bug（例如微信/Telegram/Discord/CDN/webhook/第三方 schema）必须先把本地日志与权威外部资料对照：官方文档、上游 SDK 源码、协议枚举、raw type 定义。不要只在本地代码里反复猜字段；优先核对数字常量、字段名、鉴权/会话、大小/md5/缩略图等硬事实
-9. 在提示注入路径里，/niko /athena /design /contest 是任务风格指示；/nidhogg 的正式入口是后台 harness runner。若这里收到 nidhogg，可以派 reviewer/critic 子代理做真实评审或自审，再做验证；不要伪造未运行的 critic/judge 结果
+9. 工作流（深度规划 / 并行分工 / 多方案对比 / 设计）由 Artemis 按任务自动选择，用户不需要也不会输入工作流名；任务中途发现比预想复杂时可调用 use_workflow 切换。子代理数量受预算限制，超出会被拒绝；不要伪造未运行的 critic/judge 结果
 10. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案`;
 
-const DESIGN_HINT = `\
-[当前任务模式：/design 视觉/前端工程]
-偏向网页、UI、品牌视觉、交互、动画类任务。本模式下你应该：
+const DESIGN_SKILL_FALLBACK = `\
+[设计工作流]
+网站/UI/视觉前端任务：先列内容事实清单（禁止虚构），建立视觉系统与资产清单，真实生成配图，实现页面，
+最后用 browser_navigate + browser_screenshot 做桌面与手机视口验收；截图失败时如实说明视觉验收未完成。`;
 
-• 先确认/创建工作目录（如用户提到 "桌面/futuretest" 之类，先 mkdir + run_command 切换工作区）
-• 用 todo 拆解：事实来源/信息架构、资产清单、风格系统、页面实现、响应式、视觉验收、收尾
-• 开始前先列"内容事实清单"：用户明确给了什么、代码库/README 里能确认什么、哪些未知。未知内容不得补成事实
-• **禁止虚构**：不要编产品名、指标、命令、安装地址、版本号、团队规模、社交链接、年份和路线图。用户只给 Artemis CLI 时，不要捏造 Nyx/Styx/Aether 这类产品；可以做"产品/项目待补充"或只介绍 Artemis
-• **生图与代码并行**：先写任务专属资产 manifest（画幅、用途、主体、风格、验证），再调 generate_image，同时写 HTML/CSS/JS
-• **视觉 prompt 必须动态生成**：每次从用户原文和项目事实中提取本轮主体、用途、受众、风格、构图、材质、光线、画幅、禁止项，再组成 generate_image/generate_video 的 prompt；不要套用固定题材词表、固定业务关键词或历史任务关键词
-• 配图要求默认 ≥3 张本地生成（hero、section background、细节素材）；若 generate_image 失败，必须明确降级，并且最终不能写"配图就绪/全部验证通过"
-• HTML 用语义化标签；CSS 用现代特性（grid/flex/clamp/aspect-ratio/container query 可用则用）；JS 只处理真实交互，不堆装饰脚本
-• 不允许写出空 styles.css 或仅有 reset 的 CSS；每个 section 都要有真正的视觉处理、明确层级和响应式状态
-• 不允许写"// TODO"、"占位文案"、href="#"、假按钮、不可达导航；所有内容必须来自用户主题或明确标注为待补充
-• 配色/字体/间距要形成系统：定义 CSS 变量集中管理，不要散在各处硬编码；核心布局不要靠大量 inline style
-• 用户要求"高级感/电影质感/迷幻艺术/高奢/孤傲/科技感"时，要翻译为可执行设计技法：负空间、材料质感、光源方向、低饱和灰阶、精细网格、尺度反差、慢动效、弱装饰、强首屏主体；不要落成普通 SaaS 卡片堆
-• 网站/应用的第一屏必须立刻表现品牌/产品/主题，不要只有口号和泛背景；移动端不能遮挡、溢出或变成散乱长文
-• 写完必须做真实验收：启动服务后至少 browser_navigate + browser_screenshot 桌面视口和手机视口；HTTP 200、文件存在、curl 成功都不是视觉验收
-• 截图/浏览器失败时，必须继续用可行替代动作恢复；仍失败则在最终说明"视觉验收未完成"，不得写"全部验证通过"
-• 最终报告只写：文件位置、运行地址、实际验证证据、未验证风险；不要把清单重复成长报告
+let designSkillCache: string | undefined;
 
-• 需要独立视角时，可以派 reviewer / critic 子代理（delegate_task）评审设计稿、截图或实现，并按它的问题清单修正；没有子代理工具时自己做一轮 critic 审查
-
-🚫 禁止：先写"设计文档"再写代码；只写一个 index.html 凑数；用模板化营销文案冒充品牌设计；用假数据填满页面`;
+/** The design playbook from skills/design-workflow/SKILL.md (front matter removed). */
+export function loadDesignWorkflowSkill(): string {
+  if (designSkillCache !== undefined) return designSkillCache;
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [
+    path.resolve(here, '../../skills/design-workflow/SKILL.md'),
+    path.resolve(process.cwd(), 'skills/design-workflow/SKILL.md'),
+  ]) {
+    try {
+      const body = readFileSync(candidate, 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+      if (body) {
+        designSkillCache = `[当前任务模式：设计工作流（视觉/前端工程），来自 design-workflow 技能]\n${body.replace(/^#[^\n]*\n+/, '')}`;
+        return designSkillCache;
+      }
+    } catch {
+      // try the next location
+    }
+  }
+  designSkillCache = DESIGN_SKILL_FALLBACK;
+  return designSkillCache;
+}
 
 const NIKO_HINT = `\
-[当前任务模式：/niko 深度研究 + 工程实现]
+[当前任务模式：深度规划（研究 → 方案 → 实现 → 验证）]
 偏向需要先研究、分析、再动手的任务（codebase 改造、复杂迁移、性能优化、bug 调查）。本模式下你应该：
 
 • 先用 read/search 工具摸清现状——项目结构、相关文件、关键函数
 • 第三方协议/API 问题要并行查外部资料：search_web / lookup_docs / 上游源码，优先找枚举常量、payload type、字段名、SDK 实现；本地日志只能说明现象，不能替代协议事实
-• 复杂研究可以 spawn 一个 read-only 子代理做并行 explore（"找所有 X 的调用点并汇总"）
-• 风险较高的改动可以派 reviewer 子代理（delegate_task）做独立评审，把它的问题清单当作待办逐条处理
+• 复杂研究可以派 1 个 read-only 子代理做并行 explore（"找所有 X 的调用点并汇总"）
+• 风险较高的改动可以派 1 个 reviewer 子代理（delegate_task）做独立评审，把它的问题清单当作待办逐条处理（子代理合计不超过预算）
 • 用 todo 列出"研究→方案→实现→验证"的步骤；研究阶段不写代码，但**研究完直接进入实现**，不要写文档
 • 实现阶段：边写边验证（每改一个模块就跑一次相关测试 / 编译）
 • 风险点要写在 todo 里显式追踪（"X 改动可能影响 Y"）
@@ -111,7 +119,7 @@ const NIKO_HINT = `\
 • 任务结束给出"改了哪些文件 + 验证结果 + 已知未覆盖风险"`;
 
 const ATHENA_HINT = `\
-[当前任务模式：/athena 大范围并行执行]
+[当前任务模式：并行分工（大范围多切片执行）]
 偏向"对一批文件/模块做相同/类似改动"或"实现一个有多个独立子模块的特性"。本模式下你应该：
 
 • 先用 list_files / search_files 圈定 scope——目标是哪些文件、哪些模块
@@ -120,12 +128,13 @@ const ATHENA_HINT = `\
 • 单个切片实现完立即验证（编译/单测）；不要全部写完再统一编译
 • 切片之间出现冲突或共享代码时，先抽公共部分一次写完，再处理各切片
 • 进度可视：每完成一个切片更新对应 todo
-• 切片全部完成后，可以派 reviewer 子代理（delegate_task）对整体改动做一致性评审
+• 真正独立、较大的切片可以交给子代理（delegate_task）并行实现，其余切片自己在同一回合并行改；子代理总数不超过预算（最多 4 个）
+• 切片全部完成后，可以派 1 个 reviewer 子代理对整体改动做一致性评审
 
 🚫 禁止：先生成"提案"等用户审批`;
 
 const NIDHOGG_HINT = `\
-[当前任务模式：/nidhogg Harness Engineering 高质量交付]
+[当前任务模式：Nidhogg Harness Engineering 高质量交付]
 偏向"做出来的东西必须正确、健壮、能上生产"。本模式下你应该：
 
 • 把仓库内 ARTEMIS.md、README、docs、测试、schema、现有实现当作事实来源；不要把长提示当百科全书
@@ -141,17 +150,26 @@ const NIDHOGG_HINT = `\
 🚫 禁止：先研究后写设计文档再实现；read-only 子代理被要求"输出完整代码"`;
 
 const CONTEST_HINT = `\
-[当前任务模式：/contest 多方案竞标]
+[当前任务模式：多方案对比（候选 → 评审 → 裁决 → 实现）]
 偏向"有多种可行方案，需要先比较再选最优"的任务（架构选型、技术栈选择、复杂算法）。本模式下你应该：
 
-• 第一步：自己快速列出 2-3 个候选方案（每个方案一段话：思路、优势、风险）
+• 第一步：自己快速列出 2-3 个候选方案（最多 3 个；每个方案一段话：思路、优势、风险）
 • 用 todo 把"方案A调研""方案B调研""评审""选型决定""执行选定方案"列出来
-• 简单评估可以自己一回合内完成；复杂评估可以 spawn 2-3 个 read-only explore 子代理并行调研，回来后你做综合判断
-• 评审：可以派 reviewer / critic 子代理（delegate_task）逐个挑候选方案的毛病，再派 arbiter 子代理或由你自己根据证据裁决
+• 简单评估自己一回合内完成；只有复杂、高风险的评估才派子代理并行调研或评审（每个候选最多 1 个，合计不超过预算）
+• 评审只做一轮：reviewer / critic 挑出各候选的毛病后，由你根据证据裁决，不要反复辩论
 • 裁决后立即执行选定方案
 • 输出报告要包含：候选方案对比、评审意见、选定理由、最终实现
 
 🚫 禁止：让 read-only 子代理"输出胜出方案的完整代码"`;
+
+const WORKFLOW_NOTE_LABELS: Record<WorkflowMode, string> = {
+  direct: '默认对话',
+  niko: '深度规划',
+  athena: '并行分工',
+  contest: '多方案对比',
+  design: '设计',
+  nidhogg: 'Nidhogg',
+};
 
 /**
  * Workflow-completion summary text — appended to the system prompt suffix
@@ -161,7 +179,7 @@ export function buildWorkflowCompletionNote(
   mode: WorkflowMode,
   outputDir?: string,
 ): string {
-  const modeLabel = mode === 'direct' ? '默认对话' : `/${mode}`;
+  const modeLabel = mode === 'direct' ? '默认对话' : WORKFLOW_NOTE_LABELS[mode];
   if (!outputDir) return `\n\n[最近工作流] 模式: ${modeLabel}, 未产生新文件。`;
   return `\n\n[最近工作流] 模式: ${modeLabel}, 输出目录: ${outputDir}。用户后续若需检查或修改，请在该目录操作。`;
 }

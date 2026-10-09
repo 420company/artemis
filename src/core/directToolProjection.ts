@@ -360,6 +360,8 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   if (looksCoding) {
     addTools(selected, EDIT_TOOLS);
     addTools(selected, TEXT_UTILITY_TOOLS);
+    // Lets a task that grows mid-way switch to a heavier workflow playbook.
+    addTools(selected, ['use_workflow']);
   }
 
   if (wantsEdit) {

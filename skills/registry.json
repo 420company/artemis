@@ -66,6 +66,17 @@
       "scope": "local",
       "confidence": 10,
       "updatedAt": "2026-04-22T20:37:00Z"
+    },
+    {
+      "id": "design-workflow",
+      "name": "Design Workflow",
+      "description": "Artemis design workflow: website / UI / visual front-end builds with a visual system, generated assets and screenshot verification. Loaded automatically when a request is routed to the design workflow.",
+      "tags": ["design", "frontend", "ui", "website", "workflow"],
+      "source": "local",
+      "status": "active",
+      "scope": "local",
+      "confidence": 10,
+      "updatedAt": "2026-10-09T00:00:00Z"
     }
   ]
 }

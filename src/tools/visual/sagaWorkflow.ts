@@ -21,7 +21,7 @@ import {
   type ProtagonistMode,
   type ProtagonistType,
 } from './sagaNarrative.js';
-import { isWorkflowSupportDiscussion } from './workflowIntent.js';
+import { hasDirectCreationRequestMarker, isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 import type { AgentAction } from '../../core/types.js';
 import type { SagaRatio } from './sagaRenderer/types.js';
@@ -44,7 +44,7 @@ export type SagaWorkflowInput = {
   imageAttachments?: ImageAttachment[];
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
   deliveryTargetId?: string;
-  // /saga explicit entry — skip the long-video intent check.
+  // Start a fresh wizard: an explicit /saga entry, or a clear long-video request (isClearSagaLongVideoRequest).
   forceIntent?: boolean;
 };
 
@@ -330,6 +330,40 @@ function isSagaWorkflowSupportDiscussion(text: string): boolean {
     workflowTerms: /(?:Saga|长视频|完整视频|generate_long_video|generate_video|视频|短片|动画|片段|video|movie|clip|工作流|流程|触发|生成)/i,
     creationSyntax: hasLongVideoIntent,
   });
+}
+
+const SAGA_VIDEO_NOUN_RE = /(?:视频|短片|影片|片子|电影|动画|镜头|分镜|video|movie|film|clip|shot|scene)/i;
+const SAGA_CREATION_VERB_RE = /(?:生成|制作|做|拍|创作|剪|产出|扩展成|做成|变成|转成|拍成|写成|generate|create|make|produce|render|shoot|turn\b[\s\S]{0,80}\binto)/i;
+const SAGA_IMPERATIVE_START_RE = /^(?:请|帮|给|把|用|将|生成|制作|做|拍|创作|来|generate|create|make|produce|render|turn|shoot|please)/i;
+const SAGA_LONG_WORDING_RE = /(?:长视频|长片|完整(?:的)?(?:视频|短片|影片)|多段(?:视频|镜头)?|分段(?:视频|生成)|多个片段|\bsaga\b|long[-\s]?(?:form\s+)?(?:video|movie|film)|multi[-\s]?(?:segment|shot|scene)\s+(?:video|movie|film)|full[-\s]?length\s+(?:video|movie|film))/i;
+
+/**
+ * A fresh message that clearly asks for a long, multi-segment video. The
+ * workflow router starts Saga for it without /saga (the wizard itself still
+ * starts only with forceIntent). Clear means a creation request plus
+ * long-video wording or a total length of a minute or more, or a timecoded
+ * brief with two or more segments. Questions about the feature or its code,
+ * bare keyword lists ("图片 视频 长视频") and short clips do not count.
+ */
+export function isClearSagaLongVideoRequest(text: string): boolean {
+  const normalized = compact(text);
+  if (!normalized) return false;
+  if (isSagaWorkflowSupportDiscussion(normalized)) return false;
+  const hasVideoNoun = SAGA_VIDEO_NOUN_RE.test(normalized);
+  if (timecodeTotalSeconds(text) !== undefined && hasVideoNoun) return true;
+  const isCreationRequest =
+    SAGA_CREATION_VERB_RE.test(normalized) &&
+    (hasDirectCreationRequestMarker(normalized) || SAGA_IMPERATIVE_START_RE.test(normalized));
+  if (!isCreationRequest || !hasVideoNoun) return false;
+  if (SAGA_LONG_WORDING_RE.test(normalized)) return true;
+  const seconds = extractTargetDuration(text);
+  return typeof seconds === 'number' && seconds >= 60;
+}
+
+/** True while a Saga wizard is waiting for answers under this scope + key. */
+export function hasActiveSagaLongVideoWorkflow(scope: SagaWorkflowScope, key: string): boolean {
+  pruneExpiredWorkflows();
+  return WORKFLOWS.has(`${scope}:${key}`);
 }
 
 function extractTargetDuration(text: string): number | undefined {
@@ -2040,9 +2074,10 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
   // ─── fresh request ──────────────────────────────────────────────────
   // Saga must never start from ordinary chat keywords ("图片", "视频",
-  // "长视频", "long video", etc.). Fresh Saga entry is command-gated by the
-  // caller: only an explicit /saga command sets forceIntent=true. Once a Saga
-  // workflow is active, follow-up replies above can continue the wizard.
+  // "长视频", "long video", etc.). Fresh Saga entry is gated by the caller:
+  // forceIntent=true comes from an explicit /saga command or from a clear
+  // long multi-segment video request (isClearSagaLongVideoRequest). Once a
+  // Saga workflow is active, follow-up replies above can continue the wizard.
   // An explicit /saga always starts the wizard. The support-discussion
   // classifier must not veto it: real timecoded briefs are full of "视频",
   // "短片", "生成" and question marks in dialogue, and a vetoed brief fell

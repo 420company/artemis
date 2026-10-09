@@ -701,3 +701,9 @@ export async function handleSeedanceMultimodalWorkflow(
 export function clearSeedanceMultimodalWorkflow(scope: SeedanceWorkflowScope, key: string): void {
   WORKFLOWS.delete(`${scope}:${key}`);
 }
+
+/** True while the multimodal video wizard is waiting for answers under this scope + key. */
+export function hasActiveSeedanceMultimodalWorkflow(scope: SeedanceWorkflowScope, key: string): boolean {
+  pruneExpiredWorkflows();
+  return WORKFLOWS.has(`${scope}:${key}`);
+}
