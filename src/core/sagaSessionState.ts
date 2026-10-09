@@ -42,8 +42,12 @@ export function isSagaSessionActive(session: Pick<SessionRecord, 'metadata'>, no
 /** A successful generate_long_video in these messages: the Saga video is done. */
 export function hasFinishedLongVideo(messages: ReadonlyArray<{ role?: string; name?: string; content?: unknown }>): boolean {
   return messages.some((message) => {
-    if (message.role !== 'tool' || message.name !== 'generate_long_video') return false;
+    if (message.role !== 'tool') return false;
     const content = typeof message.content === 'string' ? message.content : '';
-    return /"ok"\s*:\s*true/.test(content);
+    // runAgent names tool messages; other recorders may only carry the
+    // serialized action ({"action":{"type":"generate_long_video"},"ok":true}).
+    const isLongVideo = message.name === 'generate_long_video' ||
+      (!message.name && /"type"\s*:\s*"generate_long_video"/.test(content));
+    return isLongVideo && /"ok"\s*:\s*true/.test(content);
   });
 }

@@ -165,9 +165,9 @@ const FOLLOW_UP_RE = /^(?:继续|接着|然后|另外|补充|还有|再|好的|�
 const QUESTION_RE = /(?:[?？]\s*$|(?:吗|呢|么)[。!！]?\s*$|^(?:what|why|how|when|where|who|which|is|are|can|could|does|do|should|would|explain)\b|^(?:什么|怎么|为什么|为啥|哪个|哪种|是否|能不能|可不可以|有没有))/i;
 // Question words anywhere count only in a short message; a long brief may
 // mention "how" or "为什么" while asking for work.
-const QUESTION_WORD_RE = /(?:什么|怎么|为什么|为啥|哪个|哪种|哪些|是否|能不能|可不可以|有没有|区别|差别|优缺点|利弊|\b(?:explain|what|how|why|which|whether|difference|differences)\b|pros and cons|trade-?offs?|\bvs\.?\b|\bversus\b)/i;
+const QUESTION_WORD_RE = /(?:什么|怎么|为什么|为啥|谁|哪个|哪种|哪些|是否|能不能|可不可以|有没有|区别|差别|优缺点|利弊|\b(?:explain|what|how|why|who|which|whether|difference|differences)\b|pros and cons|trade-?offs?|\bvs\.?\b|\bversus\b)/i;
 // An imperative build / change request at the start of the message.
-const BUILD_IMPERATIVE_RE = /^(?:(?:请|麻烦|帮我|帮忙|给我|替我|请帮我|please)\s*,?\s*)?(?:帮我\s*)?(?:做|搭建|搭|构建|开发|实现|写|创建|建|生成|修复|修|重构|迁移|改造|设计|改版|重做|排查|调查|查一下|定位|build|create|make|develop|implement|write|fix|refactor|migrate|port|design|redesign|set up|scaffold|investigate|debug|look into|track down)/i;
+const BUILD_IMPERATIVE_RE = /^(?:(?:请|麻烦|帮我|帮忙|给我|替我|请帮我|please)\s*,?\s*)?(?:帮我\s*)?(?:做|搭建|搭|构建|开发|实现|写|创建|建|生成|修复|修|重构|迁移|改造|设计|改版|重做|排查|调查|查一下|定位|build|create|make|develop|implement|write|fix|refactor|migrate|port|design|redesign|set up|scaffold|investigate|debug|look into|track down)(?![了过])/i;
 // "Can you / 你能 …?" asks about ability: answered directly.
 const CAPABILITY_QUESTION_RE = /^(?:can you|could you|do you|are you able|你能|你会|能不能|会不会|可不可以)/i;
 // Text deliverables: articles, copy, slides, docs, plans.
@@ -181,14 +181,24 @@ const BUG_WORDING_RE = /(?:bug|报错|错误|异常|崩溃|白屏|打不开|不�
 
 // A real multi-part build object or a repo-wide change.
 const TEAM_OBJECT_RE = /(?:(?:完整的|一整套|一个完整的?).{0,12}(?:系统|项目|网站|应用|平台|商城|后台|小程序|app|App|APP)|全栈|前端.{0,24}后端|后端.{0,24}前端|多个(?:服务|子系统)|微服务|(?:SaaS|saas)\s*平台|(?:平台|系统|项目|应用|产品)\s*[：:][^。\n]*、[^。\n]*、|整个(?:仓库|代码库|项目)|全仓|所有(?:文件|模块)|\bfull[- ]stack (?:[\w-]+ ){0,2}(?:app|application|website|site|project|platform|product)|\bcomplete (?:\w+ ){0,3}(?:app|application|system|platform|website|project)\b|frontend.{0,40}backend|backend.{0,40}frontend|multiple (?:services|subsystems)|microservices|\bSaaS (?:platform|product|app)\b|\bwhole (?:repo|codebase|project)|across the (?:repo|codebase|project)|every (?:file|module))/i;
-// A build or change verb anywhere in the message ("…，帮我搭起来").
-const BUILD_ANYWHERE_RE = /(?:搭建|搭起来|搭一个|构建|开发|实现|迁移|重构|改造|做一个|做个|写一个|\bbuild\b|\bcreate\b|\bdevelop\b|\bimplement\b|\bmigrate\b|\brefactor\b|\bport\b|\bset up\b|\bscaffold\b)/i;
+// A request marker and a build verb in the same clause ("…，帮我搭起来",
+// "我要做一个完整的…"). Statements about past work ("我们重构了整个仓库",
+// "他们开发了一个平台") and who-asks ("…是谁开发的") are not requests.
+const REQUEST_MARKER_RE = /(?:^\s*(?:把|将)|帮我|帮忙|请|给我|我要|我想要|我想|你来|替我|麻烦|\blet'?s\b|\bplease\b|\bcan you\b|\bcould you\b|\bi want you to\b|\bi need you to\b)/i;
+const BUILD_VERB_RE = /(?:搭建|搭起来|搭一个|构建|开发|实现|迁移|重构|改造|做一个|做个|写一个|\bbuild\b|\bcreate\b|\bdevelop\b|\bimplement\b|\bmigrate\b|\brefactor\b|\bport\b|\bset up\b|\bscaffold\b)(?![了过])/i;
+function hasBuildRequestClause(text: string): boolean {
+  return text
+    .split(/[，,。.;；!！?？\n]+/)
+    .some((clause) => REQUEST_MARKER_RE.test(clause) && BUILD_VERB_RE.test(clause) && !/是.{0,12}的\s*$/.test(clause));
+}
 const MANY_FILES_RE = /\b(\d{1,3})\s+(?:independent\s+)?files?\b|(\d{1,3})\s*个文件/i;
 
 // Asked to PRODUCE several candidate solutions…
 const COMPARE_PRODUCE_RE = /(?:(?:给我|出|做|写|想|设计|提供|拿出|尝试|试|实现)\s*(?:两|三|四|五|几|多|2|3|4|5)\s*(?:个|种|套|版)\s*[^，。,.\n]{0,6}?(?:方案|实现|设计|做法|版本|思路)|(?:设计|做|出|写)\s*(?:两|三|四|五|几|2|3|4|5)\s*(?:个|种|套|版)|(?:做|出|给|用|走|来)\s*(?:个)?多(?:种)?方案|\b(?:try|write|build|implement|draft|prototype|propose|produce|give me|come up with)\b.{0,20}\b(?:two|three|four|several|multiple|a few|\d)\s+(?:different\s+|alternative\s+|competing\s+)?(?:approaches|implementations|versions|solutions|designs|prototypes|variants)\b|best[- ]of[- ]?(?:n|\d))/i;
 // …and to pick / compare / build the best one.
 const COMPARE_CHOOSE_RE = /(?:比较|对比|选(?:出|一个|最好|最优|择)|挑|择优|评选|最好的|最优的?|胜出|\bpick\b|\bchoose\b|\bselect\b|\bthe best\b|\bcompare\b|\bevaluate\b|\bbenchmark\b|\bwinner\b)/i;
+
+const SMALL_DELIVERABLE_RE = /(?:标题|文案|段落|句子|试卷|题目|名字|标语|口号|活动|slogan|\btitles?\b|\bcopy\b|\bemails?\b|\bnames?\b|\bheadlines?\b|\btaglines?\b)/i;
 
 // Talking about something already done ("我们之前讨论过多方案对比").
 const PAST_MENTION_RE = /(?:之前|以前|上次|已经|结果是|当时|\bpreviously\b|\bearlier\b|\balready\b|\blast time\b|\bwe (?:did|tried|compared)\b)/i;
@@ -245,9 +255,10 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, fullText = inp
     deepCode: DEEP_CODE_RE.test(text),
     codeContext,
     inCodeRepo: input.inCodeRepo === true,
-    bigProject: (buildImperative || BUILD_ANYWHERE_RE.test(text)) && !writing && !bug && length >= TEAM_MIN_LENGTH &&
+    bigProject: (buildImperative || hasBuildRequestClause(text)) && !writing && !bug && length >= TEAM_MIN_LENGTH &&
       (TEAM_OBJECT_RE.test(text) || fileCount > 5 || fileRefs > 5),
-    compareExplicit: COMPARE_PRODUCE_RE.test(text) && COMPARE_CHOOSE_RE.test(text) && !PAST_MENTION_RE.test(text),
+    // Titles, names, copy, exam papers… are small writing tasks: direct.
+    compareExplicit: COMPARE_PRODUCE_RE.test(text) && COMPARE_CHOOSE_RE.test(text) && !PAST_MENTION_RE.test(text) && !SMALL_DELIVERABLE_RE.test(text),
     design: designSurface && DESIGN_VERB_RE.test(text) && !bug && !writing,
     designSurface,
     bug,

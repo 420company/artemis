@@ -4936,8 +4936,9 @@ export function maybeRerouteToSagaLongVideo(
   messages.forEach((msg, index) => {
     const content = typeof msg.content === 'string' ? msg.content : '';
     if (!content || !content.includes('[Artemis Saga long video workflow]')) return;
+    // No usable timestamp: not known to be recent, so not counted.
     const at = Date.parse(msg.createdAt ?? '');
-    if (Number.isFinite(at) && at < recentSince) return;
+    if (!Number.isFinite(at) || at < recentSince) return;
     if (hasFinishedLongVideo(messages.slice(index + 1))) return;
     hasSagaMarker = true;
     const dur = content.match(/totalDuration:\s*(\d+)/);

@@ -244,6 +244,39 @@ async function main(): Promise<void> {
     ['帮我生成一段长视频，讲一只猫在东京的一天', 'saga'],
     ['Turn this story idea into a 60-second cinematic Saga video.', 'saga'],
     ['帮我生成一段30秒左右的视频，内容是在不同的海滩享受阳光和海风。', 'direct'],
+    // Round 3: statements, lists, transcripts and small writing tasks.
+    ['推荐几部好看的短片', 'direct'],
+    ['这个预告片什么时候上映', 'direct'],
+    ['vlog怎么剪', 'direct'],
+    ['写一个一分钟的自我介绍', 'direct'],
+    ['MV的歌词是什么', 'direct'],
+    ['帮我写一个一分钟的自我介绍视频的台词', 'direct'],
+    ['帮我做一个十分精彩的视频', 'direct'],
+    ['帮我做一个十分钟内能看完的视频清单', 'direct'],
+    ['Make a 90s-style music video', 'direct'],
+    ['make a 1980s retro video for my band', 'direct'],
+    ['帮我生成一个满分作文范文视频', 'direct'],
+    ['我想要一个3分钟的番茄钟', 'direct'],
+    ['我要一个5分钟后的提醒', 'direct'],
+    ['我需要一个60秒的广告片脚本', 'direct'],
+    ['[00:00-00:15] 张三：大家好\n[00:15-00:30] 李四：今天讨论预算\n[00:30-00:45] 王五：同意', 'direct'],
+    ['[0-5s] intro\n[5-10s] verse\n[10-20s] chorus', 'direct'],
+    ['帮我把这个字幕文件翻译成英文：\n[00:00-00:05] Hello\n[00:05-00:10] World', 'direct'],
+    ['【BGM】有什么推荐？', 'direct'],
+    ['我们公司从零搭建了一个系统，你觉得怎么样？', 'direct'],
+    ['我们公司从零搭建了一个完整的电商系统，前端后端都有。', 'direct'],
+    ['我是前端开发，后端是同事负责的', 'direct'],
+    ['上周我们重构了整个仓库', 'direct'],
+    ['他们开发了一个完整的平台，包括用户、订单、支付', 'direct'],
+    ['这个 SaaS 平台是谁开发的', 'direct'],
+    ['帮我看看这个平台：用户系统、订单、支付这三块哪块最慢', 'direct'],
+    ['我做了三个版本，你帮我选一个最好的', 'direct'],
+    ['设计三个 logo，挑一个最好的', 'compare'],
+    ['写三个标题，选最好的', 'direct'],
+    ['给我三个名字，选一个最好的', 'direct'],
+    ['出三套试卷，比较难度', 'direct'],
+    ['想三个周末活动，挑一个最好的', 'direct'],
+    ['做个60s的宣传视频', 'saga'],
   ];
   await test(`acceptance table: ${table.length} CN + EN cases route as expected without a classifier call`, async () => {
     const wrong: string[] = [];
@@ -379,7 +412,8 @@ async function main(): Promise<void> {
     assert.equal(offer.kind, 'reply');
     const offerText = offer.kind === 'reply' ? offer.reply : '';
     assert.match(offerText, /Saga 长视频工作流吗/);
-    assert.match(offerText, /```choices\n\{"question":.*"options":\["是，开始","不是"\]\}\n```/, 'the web gets a clickable choices card');
+    assert.match(offerText, /```choices\n\{"options":\["是，开始","不是"\]\}\n```/, 'the web gets a clickable choices card');
+    assert.equal(offerText.split('要用 Saga 长视频工作流吗').length, 2, 'the intro is not repeated inside the card');
     // A question about the offer drops it and is answered normally.
     const price = await planHeadlessWorkflow({ ...base, prompt: '要多少钱？' });
     assert.equal(price.kind === 'run' && price.workflow, 'direct');
@@ -443,6 +477,13 @@ async function main(): Promise<void> {
     assert.equal(maybeRerouteToSagaLongVideo(mk([], { workflowRouting: { sagaActiveAt: Date.now() - 60_000 } }), video).type, 'generate_long_video', 'confirmed web Saga in metadata');
     assert.equal(maybeRerouteToSagaLongVideo(mk([], { workflowRouting: { sagaActiveAt: Date.now() - 2 * 3_600_000 } }), video).type, 'generate_video', 'expired web Saga');
     assert.equal(maybeRerouteToSagaLongVideo(mk([]), video).type, 'generate_video');
+    const bare = (messages: unknown[]) => ({ messages } as unknown as Parameters<typeof maybeRerouteToSagaLongVideo>[0]);
+    assert.equal(maybeRerouteToSagaLongVideo(bare([{ role: 'user', content: marker }]), video).type, 'generate_video', 'a marker without a timestamp is not recent');
+    assert.equal(maybeRerouteToSagaLongVideo(bare([{ role: 'user', content: marker, createdAt: 'n/a' }]), video).type, 'generate_video');
+    assert.equal(maybeRerouteToSagaLongVideo(bare([
+      { role: 'user', content: marker, createdAt: at(2) },
+      { role: 'tool', content: '{"action":{"type":"generate_long_video"},"ok":true}' },
+    ]), video).type, 'generate_video', 'a finished video recorded without a tool name ends it too');
   });
 
   await test('saga offer: whole-reply answers only; the question carries a pick line for chat buttons', () => {
@@ -455,12 +496,13 @@ async function main(): Promise<void> {
     for (const reply of neither) assert.equal(parseSagaOfferReply(reply), undefined, reply);
     assert.match(buildSagaOfferQuestion('zh-CN'), /1\. 是，开始\n2\. 不是\n请回复编号。$/);
     assert.match(buildSagaOfferQuestion('en'), /1\. Yes, start\n2\. No\nReply with the number\.$/);
-    for (const answer of ['9:16', '60秒', '两分钟', '1080p', '3', '默认', 'B 梦幻海滩女主角']) assert.equal(looksLikeSagaWizardAnswer(answer), true, answer);
-    for (const other of ['帮我写一封邮件', '翻译成英文', '今天天气怎么样？']) assert.equal(looksLikeSagaWizardAnswer(other), false, other);
+    for (const answer of ['9:16', '60秒', '两分钟', '1080p', '3', '默认', 'b', 'B.', 'a', '生成', 'go', '10', '加字幕', 'done']) assert.equal(looksLikeSagaWizardAnswer(answer), true, answer);
+    for (const other of ['帮我写一封邮件', '翻译成英文', '今天天气怎么样？', 'a quick question about my code', 'A 股今天怎么样', 'D盘的文件帮我看看', '1. 我想先改一下剧本', 'start over with a new topic please', 'C++ 的虚函数是什么']) assert.equal(looksLikeSagaWizardAnswer(other), false, other);
   });
 
   await test('saga detection: video nouns, spelled lengths, guide briefs; exclusions only before the segments', async () => {
-    for (const [text, seconds] of [['90-second trailer', 90], ['a 2-minute film', 120], ['1.5 minutes', 90], ['一分钟', 60], ['两分钟', 120], ['九十秒', 90], ['一分半', 90], ['1分半', 90], ['one-minute ad', 60]] as const) {
+    for (const text of ['十分精彩', '90s-style', '1980s retro', 'make a 60s video']) assert.equal(parseRequestedVideoSeconds(text), undefined, text);
+    for (const [text, seconds] of [['做个60s的视频', 60], ['十分钟', 600], ['2分30秒', 150], ['90-second trailer', 90], ['a 2-minute film', 120], ['1.5 minutes', 90], ['一分钟', 60], ['两分钟', 120], ['九十秒', 90], ['一分半', 90], ['1分半', 90], ['one-minute ad', 60]] as const) {
       assert.equal(parseRequestedVideoSeconds(text), seconds, text);
     }
     const brief = `【整片叙事】一个女孩在旧影院里重逢童年的自己。\n主体模式：有主角。身份来源：纯文字。\n[0-8秒] 女孩推开旧影院的门，灰尘在光束中飘浮。\n[8-16秒] 她走到银幕前，银幕上映出海浪。\n[16-24秒] 童年的她从银幕里走出来，轻声问："你还记得我吗？"`;
@@ -505,6 +547,7 @@ async function main(): Promise<void> {
       ['帮我设计三版首页，然后选一个最好的', 'compare'],
       ['帮我做一个个人作品集网站', 'design'],
       ['帮我修复 src/a.ts 和 src/b.ts 里的类型错误', 'plan'],
+      ['把整个仓库从 JavaScript 迁移到 TypeScript', 'team'],
     ];
     const wrong: string[] = [];
     for (const [text, expected] of cases) {

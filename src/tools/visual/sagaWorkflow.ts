@@ -356,10 +356,11 @@ const SAGA_EDIT_RE = /(?:剪辑|剪成|剪掉|剪一下|剪短|裁剪|裁成|截
 // Software, tools and product surfaces about video ("视频播放器组件", "长视频平台的前端").
 const SAGA_SOFTWARE_RE = /(?:脚本|代码|程序|工具|组件|播放器|网站|网页|平台|页面|前端|后端|插件|接口|倒计时|计时器|\bapp\b|\bAPI\b|\bscript\b|\bcode\b|\btool\b|\bcomponent\b|\bwebsite\b|\bplatform\b|\bpage\b|\bplayer\b|\bplugin\b|\bcountdown\b|\btimer\b|\bfps\b|redux|python|ffmpeg|javascript|typescript)/i;
 // Text-only deliverables and work on existing text or recordings.
-const SAGA_TEXT_ONLY_RE = /(?:文案|剧本大纲|大纲|纪要|建议|总结|概括|摘要|检查|校对|改错别字|错别字|翻译|润色|just text|text only|\bplan\b|\boutline\b|\b(?:\d+|two|three|some|a few|several) ideas\b|\bideas (?:for|on|about)\b|\btips\b|\badvice\b|\bsummar|\breview\b|\bproofread|\btranslat|\btranscri|\bcaption)/i;
+const SAGA_TEXT_ONLY_RE = /(?:清单|列表|推荐|\blist\b|\brecommend|文案|剧本大纲|大纲|纪要|建议|总结|概括|摘要|检查|校对|改错别字|错别字|翻译|润色|just text|text only|\bplan\b|\boutline\b|\b(?:\d+|two|three|some|a few|several) ideas\b|\bideas (?:for|on|about)\b|\btips\b|\badvice\b|\bsummar|\breview\b|\bproofread|\btranslat|\btranscri|\bcaption)/i;
 const SAGA_QUESTION_RE = /(?:[?？]\s*$|(?:吗|呢|么)[。!！]?\s*$|^(?:how|what|why|can you|could you|do you|is it|are you)\b|^(?:你能|你会|能不能|可不可以|怎么|如何|为什么|什么是|是否))/i;
 // One timecoded segment line: "[0-8秒] …", "[0:00-0:08] …", "0-8s: …".
 const SAGA_SEGMENT_LINE_SOURCE = String.raw`^\s*(\[)?\s*\d+(?::\d{1,2}){0,2}(?:\.\d+)?\s*(?:秒|s|sec|seconds)?\s*[-–—~至到]\s*\d+(?::\d{1,2}){0,2}(?:\.\d+)?\s*(?:秒|s|sec|seconds)?\s*(\])?`;
+const SAGA_SHOT_WORD_RE = /(?:画面|运镜|特写|远景|近景|全景|推镜|拉镜|跟拍|camera|close-up|wide shot|pan|dolly)/i;
 // A brief written after the Saga guide: "【整片叙事】", "【画质规格】", "[Story]".
 const SAGA_GUIDE_HEADER_RE = /(?:【\s*(?:整片叙事|画质规格|角色设定|世界观|全片设定|音频设计|BGM)\s*】|^\s*\[\s*(?:Story|Overall story|Quality spec|Characters?)\s*\])/im;
 
@@ -368,24 +369,36 @@ const SAGA_GUIDE_HEADER_RE = /(?:【\s*(?:整片叙事|画质规格|角色设定
  * and the segments. Exclusion words (配音, 页面, 合并, 总结, "Cut to:" …)
  * only count in the preamble: inside a brief they are story content.
  */
-export function splitSagaBrief(text: string): { preamble: string; segmentLines: number; bracketedSegments: number } {
+export function splitSagaBrief(text: string): { preamble: string; segmentLines: number; bracketedSegments: number; segments: string[] } {
   const lines = text.split(/\r?\n/);
   const re = new RegExp(SAGA_SEGMENT_LINE_SOURCE, 'i');
   let first = -1;
   let segmentLines = 0;
   let bracketedSegments = 0;
+  const segments: string[] = [];
   lines.forEach((line, index) => {
     const match = re.exec(line);
     if (!match) return;
     segmentLines += 1;
     if (match[1] && match[2]) bracketedSegments += 1;
+    segments.push(line.slice(match[0].length).trim());
     if (first < 0) first = index;
   });
   return {
     preamble: (first < 0 ? text : lines.slice(0, first).join('\n')).trim(),
     segmentLines,
     bracketedSegments,
+    segments,
   };
+}
+
+// "[00:00-00:15] 张三：大家好": a transcript or subtitle file, not a brief.
+// Shot labels ("镜头1：", "Scene 2:") are brief syntax, not speakers.
+const SPEAKER_LINE_RE = /^(?!镜头|分镜|画面|场景|旁白|字幕|shot|scene|cut)[^\s：:，,。.]{1,10}\s*[：:]/i;
+function looksLikeTranscript(segments: readonly string[]): boolean {
+  if (segments.length < 2) return false;
+  const speakerLines = segments.filter((segment) => SPEAKER_LINE_RE.test(segment)).length;
+  return speakerLines * 2 >= segments.length;
 }
 
 const ZH_DIGITS: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
@@ -405,21 +418,31 @@ const EN_NUMBERS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, 
 
 /** The length asked for in a request, in seconds ("90-second", "1.5 minutes", "两分钟", "一分半"). */
 export function parseRequestedVideoSeconds(text: string): number | undefined {
-  const zh = /([\d.]+|[零〇一二两三四五六七八九十]{1,3})\s*分(?:钟)?\s*(半)?(?:\s*([\d]+|[零〇一二三四五六七八九十]{1,3})\s*秒)?/.exec(text);
+  // "两分钟", "一分半", "2分30秒"; never the adverb "十分" ("十分精彩").
+  const zh = /([\d.]+|[零〇一二两三四五六七八九十]{1,3})\s*分\s*(钟|半|(?=\s*(?:\d+|[零〇一二三四五六七八九十]{1,3})\s*秒))\s*(?:([\d]+|[零〇一二三四五六七八九十]{1,3})\s*秒)?/.exec(text);
   if (zh) {
     const minutes = parseZhNumber(zh[1] ?? '');
-    if (minutes !== undefined) return Math.round(minutes * 60 + (zh[2] ? 30 : 0) + (zh[3] ? parseZhNumber(zh[3]) ?? 0 : 0));
+    if (minutes !== undefined) return Math.round(minutes * 60 + (zh[2] === '半' ? 30 : 0) + (zh[3] ? parseZhNumber(zh[3]) ?? 0 : 0));
   }
   const zhSeconds = /([\d]+|[零〇一二两三四五六七八九十]{1,3})\s*秒/.exec(text);
   if (zhSeconds) {
     const seconds = parseZhNumber(zhSeconds[1] ?? '');
     if (seconds !== undefined) return seconds;
   }
-  const en = /\b(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|thirty|sixty|ninety)[-\s]*(minutes?|mins?|seconds?|secs?|s)\b/i.exec(text);
+  // "90-second", "2 minutes", "1.5 min", "60 s"; not decades ("90s-style",
+  // "1980s retro", "the 80s").
+  const en = /\b(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|thirty|sixty|ninety)(?:[-\s]*(minutes?|mins?|seconds?|secs?)\b|\s+(s)\b)/i.exec(text);
   if (en) {
     const value = /^\d/.test(en[1]!) ? Number(en[1]) : EN_NUMBERS[en[1]!.toLowerCase()];
     if (value === undefined) return undefined;
-    return /^m/i.test(en[2]!) ? Math.round(value * 60) : Math.round(value);
+    return /^m/i.test(en[2] ?? '') ? Math.round(value * 60) : Math.round(value);
+  }
+  // A bare "60s": seconds next to Chinese ("做个60s的视频"); in English a
+  // round "60s" / "90s" is a decade unless it is plainly a length.
+  const bare = /(^|[^\d.])(\d{1,3})s(?![a-z])(?![-\s]?(?:style|era|retro|vibe|vibes|music|look|aesthetic))(.?)/i.exec(text);
+  if (bare) {
+    const cjkNeighbour = /[\u3400-\u9fff]/.test(bare[1] ?? '') || /[\u3400-\u9fff]/.test(bare[3] ?? '');
+    if (cjkNeighbour || !/^(?:[2-9]0)$/.test(bare[2]!)) return Number(bare[2]);
   }
   return undefined;
 }
@@ -447,14 +470,17 @@ export function isClearSagaLongVideoRequest(text: string): boolean {
   if (request && isSagaWorkflowSupportDiscussion(request)) return false;
   const whole = compact(trimmed);
   const hasVideoNoun = SAGA_VIDEO_NOUN_RE.test(whole);
-  if (brief.bracketedSegments >= 2 || SAGA_GUIDE_HEADER_RE.test(trimmed)) return true;
-  if ((brief.segmentLines >= 2 || timecodeTotalSeconds(trimmed) !== undefined) && hasVideoNoun) return true;
   const isCreationRequest =
     SAGA_CREATION_VERB_RE.test(request) &&
     (hasDirectCreationRequestMarker(request) || SAGA_IMPERATIVE_START_RE.test(request));
+  if (SAGA_GUIDE_HEADER_RE.test(trimmed)) return true;
+  // Timecoded lines are a brief only with a video / shot word or a creation
+  // request, and never when they read like a transcript.
+  const timed = brief.segmentLines >= 2 || timecodeTotalSeconds(trimmed) !== undefined;
+  if (timed && !looksLikeTranscript(brief.segments) && (hasVideoNoun || SAGA_SHOT_WORD_RE.test(whole) || isCreationRequest)) return true;
   if (!isCreationRequest || !SAGA_VIDEO_NOUN_RE.test(request)) return false;
   if (SAGA_LONG_WORDING_RE.test(request)) return true;
-  const seconds = parseRequestedVideoSeconds(request) ?? extractTargetDuration(request);
+  const seconds = parseRequestedVideoSeconds(request);
   return typeof seconds === 'number' && seconds >= 60;
 }
 
@@ -508,13 +534,14 @@ const SAGA_OFFER_TEXT = {
 export function buildSagaOfferQuestion(locale?: UiLocale, format: 'numbered' | 'choices' = 'numbered'): string {
   const text = pickLocale(locale ?? DEFAULT_UI_LOCALE, { zh: 'zh', en: 'en' }) === 'zh' ? SAGA_OFFER_TEXT.zh : SAGA_OFFER_TEXT.en;
   if (format === 'choices') {
-    const card = JSON.stringify({ question: text.intro, options: [text.yes, text.no] });
+    // The intro stays as text; the card holds only the buttons.
+    const card = JSON.stringify({ options: [text.yes, text.no] });
     return `${text.intro}\n\n\`\`\`choices\n${card}\n\`\`\`\n${text.alt}`;
   }
   return `${text.intro}\n1. ${text.yes}\n2. ${text.no}\n${text.pick}`;
 }
 
-const WIZARD_ANSWER_RE = /^(?:\d{1,2}\s*[.、]?|[A-Da-d](?:\s.*)?|\d{1,2}\s*[:：x×]\s*\d{1,2}|横屏|竖屏|方屏|landscape|portrait|square|480p|720p|1080p|默认(?:\s*\/\s*自动)?|自动|带字幕|无字幕|不要字幕|加字幕|不加(?:\s*BGM)?|不要\s*BGM|开始生成|生成|跳过|没有参考|不用参考|剧情你来创造|你来写|default|auto|skip|start|go|done)[\s!！。.~]*$/i;
+const WIZARD_ANSWER_RE = /^(?:\d{1,2}\s*[.、]?|[A-Da-d]\s*[.、)）]?|\d{1,2}\s*[:：x×]\s*\d{1,2}|横屏|竖屏|方屏|landscape|portrait|square|480p|720p|1080p|默认(?:\s*\/\s*自动)?|自动|带字幕|无字幕|不要字幕|加字幕|不加(?:\s*BGM)?|不要\s*BGM|开始生成|生成|跳过|没有参考|不用参考|剧情你来创造|你来写|default|auto|skip|start|go|done)[\s!！。.~]*$/i;
 
 /**
  * A reply that answers a Saga step (a menu number, ratio, length,
