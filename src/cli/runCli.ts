@@ -707,11 +707,11 @@ async function runQueryCommand(options: {
     ...result.contextNotices.map((notice) => `Context: ${notice.replace(/^\[(?:context|上下文)\]\s*/, '')}`),
   ]))
   console.log()
-  // The reply is out; give the background curators (memory, learned skills)
-  // a bounded chance to finish, then exit even if one is still waiting on
-  // its model (ARTEMIS_CURATION_SETTLE_MS, default 60 s; 0 = do not wait).
-  const { settleCurationsWithin, curationSettleTimeoutMs } = await import('../core/backgroundCuration.js')
-  if (!(await settleCurationsWithin(curationSettleTimeoutMs()))) {
+  // The reply is out. The long-term memory curator finishes as before;
+  // learned-skill curation gets a bounded chance (ARTEMIS_CURATION_SETTLE_MS,
+  // default 60 s; 0 = do not wait), then the process exits regardless.
+  const { settleBeforeExit } = await import('../core/backgroundCuration.js')
+  if (!(await settleBeforeExit())) {
     const code = typeof process.exitCode === 'number' ? process.exitCode : 0
     await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
     process.exit(code)

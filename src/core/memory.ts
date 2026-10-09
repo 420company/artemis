@@ -38,7 +38,7 @@ type CuratorOp = {
  * provider stores) while it is still running.
  */
 export function scheduleTrajectoryCuration(cwd: string, session: SessionRecord): void {
-  trackCuration(compressTrajectory(cwd, session, ''))
+  trackCuration(compressTrajectory(cwd, session, ''), 'memory')
 }
 
 /**

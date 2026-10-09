@@ -85,6 +85,8 @@ export const SKILL_INDEX_MAX_CHARS = 800
 export const LOAD_SKILL_TOOL = 'load_skill'
 
 const MAX_RECORDED_STEPS = 60
+/** Tool output fingerprinted per run; beyond it, provenance is unknown and unknown lines are rejected. */
+export const FINGERPRINT_BUDGET_CHARS = 4_000_000
 const CURATOR_REQUEST_CHARS = 4_000
 const CURATOR_REPLY_CHARS = 1_200
 /** File-system timestamp slack when checking that an artifact was written during the run. */
@@ -137,9 +139,14 @@ const LOADED_SKILL_HEADER_RE = /Learned skill id=(\S+) scope=(\S+?)[\s,;]/
 export class SkillRunRecorder {
   readonly steps: SkillRunStep[] = []
   readonly loadedSkills: SkillRef[] = []
-  /** Fingerprints of every tool output in the run (no size budget). */
-  readonly untrusted = new UntrustedShingleFilter()
+  /** Tool output kept for fingerprinting after the reply (see fingerprint()). */
+  private untrustedTexts: string[] = []
+  private untrustedChars = 0
+  private untrustedOverBudget = false
   readonly startedAtMs = Date.now()
+
+  /** cwd: where the run's commands start (package scripts, test paths). */
+  constructor(readonly cwd?: string) {}
 
   record(input: {
     tool: string
@@ -163,11 +170,11 @@ export class SkillRunRecorder {
         if (ref && !this.loadedSkills.some((entry) => entry.id === ref.id && entry.scope === ref.scope)) this.loadedSkills.push(ref)
       }
     } else if (input.output) {
-      this.untrusted.addText(input.output)
+      this.addUntrusted(input.output)
     }
     if (this.steps.length >= MAX_RECORDED_STEPS) return
     const step: SkillRunStep = { tool, ok: input.ok, summary: clampLine(input.summary || tool, 240) }
-    const verdict = judgeRunnerResult(input.command, input.ok, input.output)
+    const verdict = judgeRunnerResult(input.command, input.ok, input.output, { cwd: this.cwd })
     if (verdict) step.verification = verdict
     if (input.ok && GENERATION_TOOLS.has(tool) && input.output) {
       const artifacts = [...new Set(input.output.match(ARTIFACT_PATH_RE) ?? [])].slice(0, 8)
@@ -176,9 +183,32 @@ export class SkillRunRecorder {
     this.steps.push(step)
   }
 
-  /** Text the agent did not write (tool output, fetched pages, file contents). */
+  /**
+   * Text the agent did not write (tool output, fetched pages, file
+   * contents). Only kept here — hashing happens after the reply, in
+   * fingerprint(). Past FINGERPRINT_BUDGET_CHARS per run the filter is
+   * marked overflowed, so every line of unknown origin is rejected.
+   */
   addUntrusted(text: string): void {
-    this.untrusted.addText(text)
+    if (!text || this.untrustedOverBudget) return
+    if (this.untrustedChars + text.length > FINGERPRINT_BUDGET_CHARS) {
+      this.untrustedOverBudget = true
+      this.untrustedTexts = []
+      return
+    }
+    this.untrustedTexts.push(text)
+    this.untrustedChars += text.length
+  }
+
+  /** Fingerprints of all tool output in the run, hashed in slices that yield to the event loop. */
+  async fingerprint(): Promise<UntrustedShingleFilter> {
+    const filter = new UntrustedShingleFilter()
+    if (this.untrustedOverBudget) {
+      filter.markOverflow()
+      return filter
+    }
+    for (const text of this.untrustedTexts) await filter.addTextChunked(text)
+    return filter
   }
 }
 
@@ -291,6 +321,7 @@ export interface SkillCurationResult {
   op: 'added' | 'updated' | 'skipped' | 'rejected'
   id?: string
   scope?: SkillScope
+  version?: number
   reason?: string
 }
 
@@ -409,7 +440,7 @@ export async function curateSkill(candidate: SkillCandidate, complete: SkillComp
     const result: UpsertSkillResult = await upsertLearnedSkill(candidate.cwd, candidate.scope, draft, { preferIds })
     return result.op === 'rejected'
       ? { op: 'rejected', id: result.id, scope: result.scope, reason: result.reason }
-      : { op: result.op, id: result.id, scope: result.scope }
+      : { op: result.op, id: result.id, scope: result.scope, ...(result.version !== undefined ? { version: result.version } : {}) }
   } catch (error) {
     return { op: 'rejected', reason: error instanceof Error ? error.message : String(error) }
   }
@@ -479,9 +510,10 @@ export function formatSkillForModel(skill: SkillRecord): string {
 
 // ── run lifecycle ──────────────────────────────────────────────────────────
 
-/** A skill one run's curation added or updated (a complaint retracts or rolls it back). */
+/** A skill one run's curation added or updated, and the version it produced (a complaint retracts or rolls back exactly that). */
 interface LearnedRef extends SkillRef {
   op: 'added' | 'updated'
+  version?: number
 }
 
 /** What one run hands to the next through the ledger. */
@@ -542,7 +574,7 @@ function makeHandle(input: { cwd: string; sessionKey: string; scope: SkillScope;
     enabled,
     readScopes: skillScopesForCwd(input.cwd, input.scope),
     indexSection,
-    recorder: new SkillRunRecorder(),
+    recorder: new SkillRunRecorder(input.cwd),
   }
 }
 
@@ -611,13 +643,23 @@ export async function beginSkillRun(input: {
   }
 }
 
+/**
+ * Undo what a rejected run learned — but only while the skill is still the
+ * version that run produced. If another session has changed it since, the
+ * complaint is recorded as a failure and pitfall instead.
+ */
 async function retractLearned(cwd: string, learned: LearnedRef, pitfall: string): Promise<void> {
-  if (learned.op === 'added') {
+  const current = await readSkill(cwd, learned.id, [learned.scope])
+  if (!current) return
+  const untouched = learned.version === undefined || current.version === learned.version
+  if (learned.op === 'added' && untouched) {
     await trashSkill(cwd, learned.id, learned.scope)
     return
   }
   // An update the user rejected: back to the version before it.
-  const restored = await restorePreviousSkillVersion(cwd, learned.scope, learned.id, { pitfall })
+  const restored = untouched
+    ? await restorePreviousSkillVersion(cwd, learned.scope, learned.id, { pitfall, ...(learned.version !== undefined ? { expectedVersion: learned.version } : {}) })
+    : null
   if (!restored) await recordSkillOutcome(cwd, learned.id, 'failure', { pitfall, scope: learned.scope })
 }
 
@@ -644,12 +686,13 @@ async function applyFeedback(
   const candidate = ledger.pending?.candidate
   if (candidate && !ledger.verified) {
     const confirmed: SkillCandidate = { ...candidate, signals: [...candidate.signals, 'the user explicitly confirmed the result'] }
-    trackCuration(curateSkill(confirmed, input.complete))
+    trackCuration(curateSkill(confirmed, input.complete), 'skill')
   }
 }
 
-function buildCandidate(handle: SkillRunHandle, trace: SkillRunTrace, signals: string[]): SkillCandidate {
+async function buildCandidate(handle: SkillRunHandle, trace: SkillRunTrace, signals: string[]): Promise<SkillCandidate> {
   const recorder = handle.recorder
+  const untrusted = await recorder.fingerprint()
   return {
     cwd: handle.cwd,
     scope: handle.scope,
@@ -659,7 +702,7 @@ function buildCandidate(handle: SkillRunHandle, trace: SkillRunTrace, signals: s
     finalReply: trace.finalReply.slice(0, CURATOR_REPLY_CHARS),
     signals,
     loadedSkills: [...recorder.loadedSkills],
-    ...(recorder.untrusted.isEmpty() ? {} : { untrustedFilter: recorder.untrusted.toBase64() }),
+    ...(untrusted.isEmpty() ? {} : { untrustedFilter: untrusted.toBase64() }),
   }
 }
 
@@ -692,7 +735,7 @@ export function finishSkillRun(
     try {
       const assessment = await assessSkillRun(trace)
       verified = assessment.verified
-      if (assessment.eligible) candidate = buildCandidate(handle, trace, assessment.signals)
+      if (assessment.eligible) candidate = await buildCandidate(handle, trace, assessment.signals)
       if (verified) {
         for (const ref of loadedSkills) await recordSkillOutcome(handle.cwd, ref.id, 'success', { scope: ref.scope })
       }
@@ -714,7 +757,7 @@ export function finishSkillRun(
       if (!verified || !candidate) return
       const result = await curateSkill(candidate, handle.complete)
       if ((result.op !== 'added' && result.op !== 'updated') || !result.id || !result.scope) return
-      const learned: LearnedRef = { id: result.id, scope: result.scope, op: result.op }
+      const learned: LearnedRef = { id: result.id, scope: result.scope, op: result.op, ...(result.version !== undefined ? { version: result.version } : {}) }
       const lateComplaint = await withLedgerLock(key, async () => {
         if (!entry.lateComplaint) await amendLedgerWithLearned(handle, entry.ledgerCreatedAt, learned)
         return entry.lateComplaint
@@ -724,7 +767,7 @@ export function finishSkillRun(
       if (inflightRuns.get(key) === entry) inflightRuns.delete(key)
     }
   })()
-  trackCuration(work)
+  trackCuration(work, 'skill')
 }
 
 /** Note a freshly learned skill in this run's hand-off, unless the next run has taken (or replaced) it. */

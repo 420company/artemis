@@ -36,9 +36,13 @@ import { clampLine, slugifySkillId, SKILL_LIMITS, type SkillDraft } from '../sto
 
 const INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u00AD\u180E]/g
 
-/** NFKC + invisible characters removed: the form a skill is stored in. */
+/**
+ * Invisible and bidi control characters removed: the form a skill is
+ * stored in. Everything else (full-width CJK punctuation, µ, Ω) is kept as
+ * written; normalisation is only for detection (normalizeForChecks).
+ */
 export function cleanSkillText(text: unknown): string {
-  return String(text ?? '').normalize('NFKC').replace(INVISIBLE_RE, '')
+  return String(text ?? '').replace(INVISIBLE_RE, '').normalize('NFC')
 }
 
 const CONFUSABLES: Record<string, string> = {
@@ -52,16 +56,28 @@ const CONFUSABLES: Record<string, string> = {
 }
 const CONFUSABLE_RE = new RegExp(`[${Object.keys(CONFUSABLES).join('')}]`, 'g')
 
-/** Lowercased, look-alikes folded to Latin: the form the checks run on. */
+/** NFKC (full-width → ASCII), lowercased, look-alikes folded to Latin: the form the checks run on. */
 export function normalizeForChecks(text: string): string {
-  return cleanSkillText(text).replace(CONFUSABLE_RE, (ch) => CONFUSABLES[ch] ?? ch).toLowerCase()
+  return cleanSkillText(text).normalize('NFKC').replace(CONFUSABLE_RE, (ch) => CONFUSABLES[ch] ?? ch).toLowerCase()
 }
 
-/** A word mixing Latin with Cyrillic/Greek letters (a homoglyph disguise). */
+/** Greek letters that are unit symbols (micro, ohm, ångström…), not a homoglyph disguise. */
+const UNIT_LETTERS = new Set(['µ', 'μ', 'Ω', 'Ω', 'Å', 'Å', 'ω', '℧'])
+
+/**
+ * A word mixing Latin with Cyrillic/Greek letters (a homoglyph disguise),
+ * checked on the text as written — not after NFKC, which would turn µ and
+ * Ω into Greek letters. Unit symbols next to digits or units ("500µs",
+ * "10kΩ") do not count.
+ */
 export function hasMixedScriptWord(text: string): boolean {
-  for (const match of cleanSkillText(text).matchAll(/\p{L}+/gu)) {
+  for (const match of cleanSkillText(text).matchAll(/[\p{L}\p{N}]+/gu)) {
     const word = match[0]
-    if (/\p{Script=Latin}/u.test(word) && /[\p{Script=Cyrillic}\p{Script=Greek}]/u.test(word)) return true
+    if (!/\p{Script=Latin}/u.test(word)) continue
+    const foreign = [...word].filter((ch) => /[\p{Script=Cyrillic}\p{Script=Greek}]/u.test(ch))
+    if (foreign.length === 0) continue
+    if (foreign.every((ch) => UNIT_LETTERS.has(ch))) continue
+    return true
   }
   return false
 }
@@ -91,39 +107,125 @@ export function looksLikeInjectedInstruction(line: string): boolean {
   return hasMixedScriptWord(line) || INJECTION_PATTERNS.some((pattern) => pattern.test(text))
 }
 
+// ── hosts ──────────────────────────────────────────────────────────────────
+
+/** Top-level domains recognised for bare hosts ("evil.example/simple"); file extensions such as .sh/.md/.rs are left out. */
+const BARE_HOST_TLDS =
+  'com|net|org|io|dev|app|co|cn|ru|xyz|me|info|biz|cc|tk|top|site|online|tech|ai|gg|ly|us|uk|de|fr|jp|kr|in|br|nl|eu|cloud|page|link|club|pro|example|internal|local|test|invalid|localhost|lan|corp|home|svc'
+const URL_RE = /\b(?:https?|ftp|file|wss?|ssh|git|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^\s"'<>`)\]]+/gi
+const BARE_HOST_RE = new RegExp(
+  `(?<![\\w@./:-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:${BARE_HOST_TLDS})(?::\\d{2,5})?(?:\\/[^\\s"'<>\`)\\]]*)?)(?![\\w-])`,
+  'gi',
+)
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'])
+
+interface ParsedLocation {
+  host: string
+  /** Lowercased host + path, no scheme, query, fragment or trailing slash. */
+  bare: string
+}
+
+function parseLocation(raw: string): ParsedLocation | null {
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`
+  try {
+    const url = new URL(withScheme)
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    if (!host) return null
+    const pathPart = url.pathname.replace(/\/+$/, '')
+    return { host, bare: `${host}${url.port ? `:${url.port}` : ''}${pathPart}`.toLowerCase() }
+  } catch {
+    return null
+  }
+}
+
+/** Every URL or bare host in a text (scheme URLs first, then bare hosts outside them). */
+export function findLocations(text: string): Array<{ raw: string; location: ParsedLocation }> {
+  const out: Array<{ raw: string; location: ParsedLocation }> = []
+  const withoutUrls = text.replace(URL_RE, (raw) => {
+    const location = parseLocation(raw)
+    if (location) out.push({ raw, location })
+    return ' '
+  })
+  for (const match of withoutUrls.matchAll(BARE_HOST_RE)) {
+    const location = parseLocation(match[1]!)
+    if (location) out.push({ raw: match[1]!, location })
+  }
+  return out
+}
+
+/** Hosts and locations the user's own text names. */
+export interface UserLocations {
+  hosts: Set<string>
+  bares: string[]
+}
+
+export function userLocations(userText: string): UserLocations {
+  const found = findLocations(normalizeForChecks(userText))
+  return { hosts: new Set(found.map((entry) => entry.location.host)), bares: found.map((entry) => entry.location.bare) }
+}
+
+/**
+ * A location the user wrote: same host (exact, never a substring — mirror.co
+ * is not mirror.com) and the same path or a path under one they gave; a
+ * bare host the user named, or a local address, also counts.
+ */
+export function userWroteLocation(location: ParsedLocation, user: UserLocations): boolean {
+  if (LOCAL_HOSTS.has(location.host) && user.hosts.has(location.host)) return true
+  if (!user.hosts.has(location.host)) return false
+  if (location.bare === location.host || /^[^/]+:\d+$/.test(location.bare)) return true
+  return user.bares.some((bare) => location.bare === bare || location.bare.startsWith(`${bare}/`))
+}
+
 // ── dangerous operations ───────────────────────────────────────────────────
 
 const REGISTRY_CHANGE_RE =
-  /\b(?:npm|pnpm|yarn|bun)\s+config\s+set\s+(?:@[\w-]+:)?registry\b|--registry[=\s]|\bregistry\s*=\s*\S|\bnpmregistryserver\b|\bpip3?\s+config\s+set\b|--(?:extra-)?index-url\b|\bindex-url\s*=|\bgem\s+sources\s+(?:-a|--add)\b|\bgoproxy\s*=|\bgo\s+env\s+-w\s+goproxy\b|\bcargo\b.{0,40}\b(?:registry|replace-with)\b/
+  /\b(?:npm|pnpm|yarn|bun)\s+config\s+set\s+(?:@[\w-]+:)?(?:registry|npmregistryserver)\b|--registry[=\s]|\bregistry\s*=\s*\S|\bnpmregistryserver\b|\bnpm_config_registry\b|\bpip3?\s+config\s+set\b|\bpip3?\s+install\b[^\n]*\s-i\s|--(?:extra-)?index-url\b|\bindex-url\s*=|\bpip_(?:extra_)?index_url\b|\bgem\s+sources\b|\bbundle\s+config\b[^\n]*\bmirror\b|\bgoproxy\s*=|\bgo\s+env\s+-w\s+goproxy\b|\bcargo\b[^\n]{0,40}\b(?:--registry|--index|registries|replace-with)\b|\[registries|\[source\.|\bpoetry\s+source\s+add\b|\buv\b[^\n]*--(?:extra-)?index\b|\bconda\s+config\s+--(?:add|set)\s+channels\b/
+const PUBLISH_RE =
+  /\b(?:npm|pnpm|yarn|bun)\s+publish\b|\bcargo\s+publish\b|\btwine\s+upload\b|\bdocker\s+push\b|\bpodman\s+push\b|\bgem\s+push\b|\bpoetry\s+publish\b|\bflit\s+publish\b|\bhelm\s+push\b/
+const FORCE_PUSH_RE = /\bgit\s+push\b[^\n]*(?:\s--force(?:-with-lease)?\b|\s-f\b|\s--mirror\b|\s\+\S)/
 const DANGEROUS_PATTERNS: RegExp[] = [
   // TLS / certificate checks off
-  /\b\w*tls_reject_unauthorized\b|\bstrict-ssl\b\s*(?:=|\s)\s*false|--insecure\b|\bcurl\b[^|;&]*\s-k\b|\bverify\s*=\s*false\b|\bpythonhttpsverify\b|\bgit_ssl_no_verify\b|\bsslverify\s*(?:=|\s)\s*false|--no-check-certificate\b|--trusted-host\b|\b(?:disable|skip|turn off|ignore|bypass)\b.{0,25}\b(?:certificate|cert|ssl|tls|https)\b.{0,15}\b(?:checks?|verification|validation|errors?)?/,
+  /\b\w*tls_reject_unauthorized\b|\bstrict-ssl\b\s*(?:=|\s)\s*false|--insecure\b|\bcurl\b[^|;&\n]*\s-[a-z]*k[a-z]*\b|\bverify\s*=\s*false\b|\bpythonhttpsverify\b|\bgit_ssl_no_verify\b|\bsslverify\s*(?:=|\s)\s*false|--no-check-certificate\b|--trusted-host\b|\b(?:disable|skip|turn off|ignore|bypass)\b.{0,25}\b(?:certificate|cert|ssl|tls|https)\b.{0,15}\b(?:checks?|verification|validation|errors?)?/,
   // download and execute
   /\b(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod|fetch)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|z|da|k|fi)?sh\b|\b(?:curl|wget|iwr|irm)\b[^\n]*\|\s*(?:sudo\s+)?(?:python3?|node|perl|ruby|php|iex|invoke-expression)\b/,
   /\b(?:ba|z)?sh\s+(?:-c\s+)?["']?\$\(\s*(?:curl|wget)|\b(?:ba|z)?sh\s+<\(\s*(?:curl|wget)|\biex\b.{0,10}\b(?:iwr|irm|invoke-webrequest|invoke-restmethod|downloadstring)\b/,
   /\b(?:curl|wget|iwr|irm)\b[^\n]*(?:&&|;|\bthen\b)\s*(?:sudo\s+)?(?:(?:ba|z|da)?sh\b|\.\/|chmod\b|python3?\b|node\b|source\b)/,
   /\bpipe\b.{0,40}\binto\s+(?:ba|z)?sh\b|\bpipe\b.{0,40}\bto\s+(?:ba|z)?sh\b/,
-  // permissions
+  // permissions, privilege, host trust, system protection
   /\bchmod\s+(?:-r\s+)?(?:0?777|a\+rwx|o\+w)\b|\bchmod\s+\+x\b.{0,60}\b(?:download|curl|wget|from the (?:web|internet|link|url))\b|\b(?:download|curl|wget)\b.{0,60}\bchmod\s+\+x\b/,
-  // credentials and keys
-  /~\/\.ssh\b|\$home\/\.ssh\b|\.ssh\/(?:id_|authorized_keys|config)|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|\.aws\/credentials|\.npmrc\b|\.netrc\b|\.pypirc\b|\.docker\/config\.json|\.kube\/config|\.git-credentials|\bkeychain\b|\bprivate keys?\b/,
-  /\b(?:cat|print|echo|upload|send|post|share|paste|dump|base64|exfiltrate|display|show|log)\b.{0,40}(?:\.env\b(?![.-])|\bcredentials?\b|\bsecrets?\b|\bapi[ _-]?keys?\b|\bpasswords?\b|\bcookies?\b)/,
-  /\b(?:copy|cp|read|move|mv|scp|rsync)\b.{0,40}\b(?:credentials?|secrets?|api[ _-]?keys?|passwords?)\b/,
-  /(?:读取|复制|打印|上传|发送|导出).{0,15}(?:\.ssh|密钥|私钥|凭据|令牌|密码|\.env)|(?:关闭|禁用|跳过).{0,10}(?:证书|ssl|tls)(?:校验|验证|检查)?/,
+  /\bsudoers\b|\bnopasswd\b|\bvisudo\b|\busermod\s+-a?g\s+(?:sudo|wheel|root|docker)\b/,
+  /\bstricthostkeychecking\s*[= ]\s*(?:no|off|accept-new)\b|\buserknownhostsfile\s*[= ]\s*\/dev\/null\b|\bssh-keyscan\b[^\n]*>>\s*\S*known_hosts/,
+  /\bcredential\.helper\s+(?:store|cache)\b|\bgit\s+config\b[^\n]*\bcredential\b[^\n]*\bstore\b/,
+  /\bufw\s+disable\b|\bsystemctl\s+(?:stop|disable|mask)\s+(?:firewalld|ufw|iptables|nftables|apparmor)\b|\biptables\s+-f\b|\bnft\s+flush\b|\bsetenforce\s+0\b|\bselinux\s*=\s*(?:disabled|permissive)\b|\b(?:disable|turn off|stop)\b.{0,20}\b(?:firewall|selinux|apparmor|defender|antivirus)\b|(?:关闭|禁用|停用).{0,6}(?:防火墙|selinux)/,
+  // credentials and keys: reading, copying or sending them, not mentioning them
+  /\b(?:cat|less|more|head|tail|type|print|echo|copy|cp|scp|rsync|mv|move|tar|zip|upload|send|post|share|paste|dump|base64|exfiltrate|read|open|attach|include|commit|add)\b[^\n]{0,40}(?:~\/\.ssh\b|\$home\/\.ssh\b|\.ssh\/(?:id_|authorized_keys)|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|\.aws\/credentials|\.netrc\b|\.pypirc\b|\.docker\/config\.json|\.kube\/config|\.git-credentials|\bkeychain\b|\bprivate keys?\b|\.pem\b|\.p12\b)/,
+  /(?:~\/\.ssh\b|\.ssh\/id_|\bid_(?:rsa|ed25519|ecdsa)\b|\.aws\/credentials|\.git-credentials)[^\n]{0,40}\b(?:to|into|in)\b[^\n]{0,30}\b(?:output|build|dist|public|repo|commit|upload|server|channel|issue|chat)\b/,
+  /\b(?:cat|print|echo|printenv|log|dump|upload|send|post|share|paste|exfiltrate|leak|expose|commit)\b(?:\s+\S+){0,2}\s+(?:all\s+|the\s+|your\s+|my\s+)?(?:\.env\b(?![.-])|secrets?\b|credentials?\b|api[ _-]?keys?\b|passwords?\b|tokens?\b|cookies?\b|env(?:ironment)? (?:vars?|variables)\b)/,
+  /\b(?:echo|print|printf|printenv|cat|log)\b[^\n]{0,20}\$\{?[a-z_]*(?:key|token|secret|password|passwd|pass)\b/,
+  /(?:读取|复制|打印|上传|发送|导出|提交).{0,15}(?:\.ssh|密钥|私钥|凭据|令牌|密码|\.env)|(?:关闭|禁用|跳过).{0,10}(?:证书|ssl|tls)(?:校验|验证|检查)?/,
 ]
 
 /**
  * Why a line describes an operation a learned skill must never carry, or
- * null. A registry change is allowed when the user's own messages name
- * the same host.
+ * null. A registry change is allowed only when every host it names is one
+ * the user's own messages name (exact host), a local registry included;
+ * publishing/pushing only when the user asked to publish and named every
+ * host involved; force-pushing only when the user asked for it.
  */
 export function dangerousOperation(line: string, userText = ''): string | null {
   const text = normalizeForChecks(line)
+  const user = userLocations(userText)
+  const userLower = normalizeForChecks(userText)
+  const hostsNamed = (): boolean => findLocations(text).every((entry) => userWroteLocation(entry.location, user) || user.hosts.has(entry.location.host))
   if (REGISTRY_CHANGE_RE.test(text)) {
-    const hosts = [...text.matchAll(/\b(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?::\d+)?/g)].map((match) => match[1]!)
-    const user = normalizeForChecks(userText)
-    if (hosts.length === 0 || !hosts.every((host) => user.includes(host))) return 'package registry change'
+    const locations = findLocations(text)
+    if (locations.length === 0 || !locations.every((entry) => user.hosts.has(entry.location.host))) return 'package registry change'
   }
+  if (PUBLISH_RE.test(text)) {
+    const asked = /\b(?:publish|release|push|upload|deploy)\b|发布|推送|上传|上线/.test(userLower)
+    if (!asked || !hostsNamed()) return 'publish to an unnamed destination'
+  }
+  if (FORCE_PUSH_RE.test(text) && !/\bforce[- ]?push|--force\b|-f\b|强制推送|强推/.test(userLower)) return 'force push'
   for (const pattern of DANGEROUS_PATTERNS) if (pattern.test(text)) return 'dangerous operation'
   return null
 }
@@ -195,6 +297,29 @@ export class UntrustedShingleFilter {
         if (this.overflow) return
       }
     }
+  }
+
+  /**
+   * addText() for large outputs, off the hot path: tokens are hashed in
+   * slices with a yield to the event loop between them, so a run's tool
+   * output never blocks the process for long.
+   */
+  async addTextChunked(text: string, tokensPerSlice = 20_000): Promise<void> {
+    if (!text || this.overflow) return
+    const tokens = contentTokens(text)
+    for (let start = 0; start < tokens.length; start++) {
+      for (const size of GRAM_SIZES) {
+        if (start + size > tokens.length) break
+        this.add(gramKey(tokens, start, size))
+        if (this.overflow) return
+      }
+      if (start > 0 && start % tokensPerSlice === 0) await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+  }
+
+  /** Give up on exact provenance (budget exceeded): every unknown line counts as copied. */
+  markOverflow(): void {
+    this.overflow = true
   }
 
   static fromTexts(texts: string[]): UntrustedShingleFilter {
@@ -305,15 +430,16 @@ export function copiedFromUntrusted(line: string, untrusted: UntrustedShingleFil
 // ── redaction ──────────────────────────────────────────────────────────────
 
 const URL_CREDENTIALS_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"`]+@/gi
-const SECRET_FLAG_RE = /(--(?:password|passwd|pass|pwd|token|api[-_]?key|access[-_]?key|secret|client[-_]secret|auth(?:-token)?)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi
+const SECRET_FLAG_RE = /(--(?:password|passwd|pass|pwd|token|api[-_]?key|access[-_]?key|secret(?:[-_]key)?|client[-_]secret|auth(?:-token)?)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi
 const MYSQL_PASSWORD_RE = /(\s)-p(?![\s-])\S+/g
 const EMAIL_RE = /\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g
-const URL_RE = /\b(?:https?|ftp|file|wss?|ssh|git|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^\s"'<>`)\]]+/gi
-const PHONE_CANDIDATE_RE = /(?<![\w./:-])\+?\(?\d[\d\s().-]{6,}\d(?![\w./:-])/g
+const CN_MOBILE_RE = /(?<![\d.\w])1[3-9]\d{9}(?![\d.\w])/g
+const PHONE_CANDIDATE_RE = /(?<![\w.:/-])(?:\+\d{1,3}[\s-]?)?(?:\(\d{1,4}\)[\s-]?)?\d{2,4}(?:[\s-]\d{2,4}){1,4}(?![\w.:/-])/g
 const UNC_PATH_RE = /\\\\[^\s\\]+\\[^\s"'`<>|]+/g
 const HOME_VAR_PATH_RE = /(?:\$HOME|\$\{HOME\}|%USERPROFILE%|%HOMEPATH%)(?:[\\/][^\s"'`<>|;]*)?/gi
 const WINDOWS_PATH_RE = /\b[A-Za-z]:\\[^\s"'`<>|]+/g
 const POSIX_PATH_RE = /(^|[\s"'`(=:,[<>|])(~?\/[\w.@+-]+(?:\/[\w.@+-]+)*\/?)/g
+const PLACEHOLDER_RE = /<(?:url|email|phone|path|redacted)>|\[REDACTED_SECRET\]/g
 
 function isInside(child: string, root: string): boolean {
   const relative = path.relative(root, child)
@@ -330,37 +456,61 @@ function rewritePath(raw: string, cwd: string): string {
   return '<path>'
 }
 
+/**
+ * Phone-like grouping only: an international prefix or an area code in
+ * parentheses, or digit groups split by spaces/dashes that are not a
+ * thousands-separated number, a version or an IP (dots never join groups).
+ */
 function looksLikePhone(candidate: string): boolean {
-  const digits = candidate.replace(/\D/g, '')
+  const trimmed = candidate.trim()
+  const digits = trimmed.replace(/\D/g, '')
   if (digits.length < 9 || digits.length > 15) return false
-  return candidate.startsWith('+') || /[\s()-]/.test(candidate.trim())
+  if (/^\d{1,3}(?:[ ,]\d{3})+$/.test(trimmed)) return false
+  if (trimmed.startsWith('+') || /\(\d+\)/.test(trimmed)) return true
+  const groups = trimmed.split(/[\s-]+/)
+  return groups.length >= 2 && groups.length <= 5 && groups.every((group) => group.length >= 2 && group.length <= 4)
 }
 
-/**
- * Redact one line. URLs survive only when the user's own text contains
- * them (scheme://host/path, compared without query, fragment or trailing
- * slash).
- */
-export function redactSkillLine(line: string, cwd: string, userTextLower: string): string {
+function redactCore(line: string, cwd: string, user: UserLocations): string {
   let text = line.replace(URL_CREDENTIALS_RE, '$1<redacted>@')
   text = redactSecrets(text)
   text = text.replace(SECRET_FLAG_RE, '$1<redacted>')
   if (/\b(?:mysql|mariadb|mysqldump|mysqladmin)\b/i.test(text)) text = text.replace(MYSQL_PASSWORD_RE, '$1-p<redacted>')
-  const urls: string[] = []
-  text = text.replace(URL_RE, (url) => {
-    const bare = url.replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase()
-    const keep = !/^file:/i.test(url) && !url.includes('<redacted>') && userTextLower.includes(bare)
-    urls.push(keep ? url.replace(/[?#].*$/, '') : '<url>')
-    return `\uE000${urls.length - 1}\uE001`
-  })
-  text = text.replace(EMAIL_RE, '<email>')
-  text = text.replace(PHONE_CANDIDATE_RE, (candidate) => (looksLikePhone(candidate) ? '<phone>' : candidate))
+  const kept: string[] = []
+  const hold = (value: string): string => {
+    kept.push(value)
+    return `\uE000${kept.length - 1}\uE001`
+  }
+  const judge = (raw: string): string => {
+    if (/^file:/i.test(raw) || raw.includes('<redacted>')) return hold('<url>')
+    const location = parseLocation(raw)
+    return hold(location && userWroteLocation(location, user) ? raw.replace(/[?#].*$/, '') : '<url>')
+  }
+  text = text.replace(URL_RE, judge)
+  text = text.replace(EMAIL_RE, () => hold('<email>'))
+  text = text.replace(BARE_HOST_RE, (raw) => judge(raw))
+  text = text.replace(CN_MOBILE_RE, () => hold('<phone>'))
+  text = text.replace(PHONE_CANDIDATE_RE, (candidate) => (looksLikePhone(candidate) ? hold('<phone>') : candidate))
   text = text.replace(UNC_PATH_RE, '<path>')
   text = text.replace(HOME_VAR_PATH_RE, (raw) => rewritePath(`~${raw.replace(/^(?:\$HOME|\$\{HOME\}|%USERPROFILE%|%HOMEPATH%)/i, '').replace(/\\/g, '/')}`, cwd))
   text = text.replace(WINDOWS_PATH_RE, (raw) => rewritePath(raw, cwd))
   // Needs a boundary before the slash and a segment after it, so "and/or" and "(~2 min)" stay.
   text = text.replace(POSIX_PATH_RE, (_match, lead: string, raw: string) => `${lead}${rewritePath(raw, cwd)}`)
-  return text.replace(/\uE000(\d+)\uE001/g, (_match, index: string) => urls[Number(index)] ?? '<url>')
+  return text.replace(/\uE000(\d+)\uE001/g, (_match, index: string) => kept[Number(index)] ?? '<url>')
+}
+
+/**
+ * Redact one line, keeping it as written. URLs and bare hosts survive only
+ * when the user's own text names the same host (and path). When the NFKC
+ * form (full-width letters folded) reveals more to redact, that form is used.
+ */
+export function redactSkillLine(line: string, cwd: string, user: UserLocations): string {
+  const asWritten = redactCore(line, cwd, user)
+  const folded = line.normalize('NFKC')
+  if (folded === line) return asWritten
+  const viaFolded = redactCore(folded, cwd, user)
+  const count = (value: string): number => value.match(PLACEHOLDER_RE)?.length ?? 0
+  return count(viaFolded) > count(asWritten) ? viaFolded : asWritten
 }
 
 // ── drafts ─────────────────────────────────────────────────────────────────
@@ -377,14 +527,14 @@ export interface SkillSanitizeContext {
 
 interface PreparedContext extends SkillSanitizeContext {
   grams: Set<string>
-  userLower: string
+  user: UserLocations
 }
 
 export function prepareSanitizeContext(ctx: SkillSanitizeContext): PreparedContext {
   return {
     ...ctx,
     grams: trustedGrams(`${ctx.userText}\n${ctx.storedSkillText ?? ''}`),
-    userLower: ctx.userText.toLowerCase(),
+    user: userLocations(ctx.userText),
   }
 }
 
@@ -401,7 +551,7 @@ export function rejectReason(line: string, ctx: PreparedContext): string | null 
 export function sanitizeSkillLine(value: unknown, ctx: PreparedContext, maxChars: number): string | null {
   const line = clampLine(cleanSkillText(value), 2_000)
   if (!line || rejectReason(line, ctx)) return null
-  const redacted = clampLine(redactSkillLine(line, ctx.cwd, ctx.userLower), maxChars)
+  const redacted = clampLine(redactSkillLine(line, ctx.cwd, ctx.user), maxChars)
   return redacted || null
 }
 

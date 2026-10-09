@@ -384,8 +384,20 @@ async function moveToTrash(cwd: string, scope: SkillScope, id: string, tag: stri
   } catch {
     return false
   }
+  await dropSkillVersions(cwd, scope, id)
   await pruneSkillTrash(cwd, scope, nowMs)
   return true
+}
+
+/** Remove the backups of a skill that is gone (trashed or evicted). */
+async function dropSkillVersions(cwd: string, scope: SkillScope, id: string): Promise<void> {
+  const dir = join(skillsDirForScope(cwd, scope), VERSIONS_DIR)
+  const prefix = `${id}.v`
+  for (const file of await readdir(dir).catch(() => [] as string[])) {
+    if (file.startsWith(prefix) && /^\d+\.json$/.test(file.slice(prefix.length))) {
+      try { await unlink(join(dir, file)) } catch { /* gone */ }
+    }
+  }
 }
 
 /**
@@ -419,24 +431,29 @@ async function backupSkillVersion(cwd: string, scope: SkillScope, record: SkillR
 }
 
 /**
- * Roll a skill back to the version before its last update (kept in
- * skills/.versions/), counting a failure and adding the pitfall. Returns
- * the restored record, or null when there is no earlier version.
+ * Roll a skill back to the version before an update (kept in
+ * skills/.versions/), counting a failure and adding the pitfall. With
+ * expectedVersion, only when the skill is still at that version (the one
+ * the rejected update produced) and the backup of exactly the version
+ * before it exists — a later update by another session is never undone.
+ * Returns the restored record, or null when nothing was rolled back.
  */
 export async function restorePreviousSkillVersion(
   cwd: string,
   scope: SkillScope,
   idOrName: string,
-  options: { pitfall?: string; now?: Date } = {},
+  options: { pitfall?: string; now?: Date; expectedVersion?: number } = {},
 ): Promise<SkillRecord | null> {
   const id = slugifySkillId(idOrName)
   return withSkillLock(cwd, scope, async () => {
     const current = await readSkillIn(cwd, scope, id)
     if (!current) return null
+    if (options.expectedVersion !== undefined && current.version !== options.expectedVersion) return null
     const dir = versionsDir(cwd, scope)
     const candidates = (await readdir(dir).catch(() => [] as string[]))
       .map((file) => ({ file, version: Number(file.match(new RegExp(`^${id}\\.v(\\d+)\\.json$`))?.[1] ?? Number.NaN) }))
-      .filter((entry) => Number.isFinite(entry.version) && entry.version < current.version)
+      .filter((entry) => Number.isFinite(entry.version) && entry.version < current.version &&
+        (options.expectedVersion === undefined || entry.version === options.expectedVersion - 1))
       .sort((a, b) => b.version - a.version)
     const latest = candidates[0]
     if (!latest) return null
@@ -568,6 +585,8 @@ export interface UpsertSkillResult {
   op: 'added' | 'updated' | 'rejected'
   id: string
   scope: SkillScope
+  /** Version the stored skill has now (added: 1; updated: the new version). */
+  version?: number
   reason?: string
   evicted?: string[]
 }
@@ -603,7 +622,7 @@ export async function upsertLearnedSkill(
       if (!merged) return { op: 'rejected' as const, id: match.id, scope, reason: `skill exceeds ${SKILL_MAX_BYTES} bytes` }
       await backupSkillVersion(cwd, scope, match)
       await atomicWrite(skillFile(cwd, scope, match.id), serializeSkill(merged))
-      return { op: 'updated' as const, id: match.id, scope }
+      return { op: 'updated' as const, id: match.id, scope, version: merged.version }
     }
 
     const stamp = now.toISOString()
@@ -621,7 +640,7 @@ export async function upsertLearnedSkill(
     if (!record) return { op: 'rejected' as const, id, scope, reason: `skill exceeds ${SKILL_MAX_BYTES} bytes` }
     const evicted = await evictSkillsForCapacity(cwd, scope, { maxSkills: options.maxSkills, incoming: 1, nowMs: now.getTime() })
     await atomicWrite(skillFile(cwd, scope, id), serializeSkill(record))
-    return { op: 'added' as const, id, scope, ...(evicted.length ? { evicted } : {}) }
+    return { op: 'added' as const, id, scope, version: record.version, ...(evicted.length ? { evicted } : {}) }
   })
 }
 
