@@ -224,6 +224,9 @@ export function getAllowedActionTypesForProfile(
       // Long-term memory: the system prompt asks main to persist what the
       // user says to remember, so the tool must be allowed here too.
       'memory',
+      // Learned skills: the runtime context lists relevant ones by id; this
+      // reads one in full (read-only).
+      'load_skill',
       ...MAIN_USER_FACING_ACTION_TYPES,
     ];
   }

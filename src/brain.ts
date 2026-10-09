@@ -55,6 +55,13 @@ import {
 import { resolveExtensionRuntime } from './extensions/runtime.js';
 import { EXTRA_TOOL_NAMES, executeExtraTool } from './tools/extras.js';
 import { buildDirectNativeFunctionTools, listDirectToolNames } from './tools/directTools.js';
+import {
+    beginSkillRun,
+    finishSkillRun,
+    summarizeToolCallForSkill,
+    LOAD_SKILL_TOOL,
+    type SkillRunHandle,
+} from './core/skillLearning.js';
 import type { ToolExecutionResult, WorkspaceSwitchRequest } from './tools/types.js';
 import { withRuntimeLogSink, type RuntimeLogLevel } from './utils/log.js';
 import {
@@ -1568,6 +1575,7 @@ async function executeToolInner(name: any, input: any, opts: any) {
             requestUserConfirmation: onUserConfirmationRequest,
             readFileHistory,
             permissionMode: mapPermissionModeForToolContext(permissionMode),
+            ...(opts.learnedSkillScopes ? { learnedSkillScopes: opts.learnedSkillScopes } : {}),
         });
         return attachDirectToolFailureError(name, {
             ok: result.ok,
@@ -2110,6 +2118,12 @@ export interface ThinkOptions {
     contextMode?: 'hosted' | 'interactive';
     /** Cancels the run: the vision helper's image reading and the model calls. */
     abortSignal?: AbortSignal;
+    /**
+     * Learned-skill partition of a chat bridge (platform + chat id): the
+     * chat learns and sees only its own skills, never another chat's or the
+     * owner's. A hosted run without one does not learn or use skills.
+     */
+    skillPartition?: string;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2123,10 +2137,45 @@ function isAbortLikeError(error: unknown): boolean {
         /aborted|abort/i.test(String(record.message ?? ''));
 }
 
+/** What a think() turn tells the learned-skills hook (core/skillLearning.ts). */
+type ThinkSkillSlot = {
+    handle?: SkillRunHandle;
+    userRequest?: string;
+    reply?: string;
+    /** The turn ended with the model's own final reply (not a fallback). */
+    completed?: boolean;
+    /** The turn ended on a tool failure it never recovered from. */
+    unresolvedFailure?: boolean;
+};
+
 export async function think(
     input: string,
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
     maybeOptions?: ThinkOptions,
+) {
+    const skillSlot: ThinkSkillSlot = {};
+    let aborted = false;
+    try {
+        return await thinkTurn(input, onDeltaOrOptions, maybeOptions, skillSlot);
+    } catch (error) {
+        aborted = isAbortLikeError(error);
+        throw error;
+    } finally {
+        // Background, after the reply: only a verified turn teaches a skill.
+        finishSkillRun(skillSlot.handle, {
+            userRequest: skillSlot.userRequest ?? input,
+            finalReply: skillSlot.reply ?? '',
+            outcome: skillSlot.completed ? 'completed' : aborted ? 'aborted' : 'error',
+            unresolvedFailure: skillSlot.unresolvedFailure === true,
+        });
+    }
+}
+
+async function thinkTurn(
+    input: string,
+    onDeltaOrOptions: ((delta: string) => void) | ThinkOptions | undefined,
+    maybeOptions: ThinkOptions | undefined,
+    skillSlot: ThinkSkillSlot,
 ) {
     // Reset the dream-system idle clock — any think() invocation means the
     // user (or a bridge user) is doing something, so don't dream now.
@@ -2158,6 +2207,7 @@ export async function think(
         contextDir,
         contextMode = 'interactive',
         abortSignal,
+        skillPartition,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2220,6 +2270,22 @@ export async function think(
     );
     const contextState: ContextState = normalizeContextState(tSession.getContext('contextState'));
     tSession.setContext('contextState', contextState);
+
+    // ── Learned skills (see core/skillLearning.ts) ────────────────────────
+    // Applies the user's feedback on the previous turn and lists the skills
+    // relevant to this request in the unsaved runtime context.
+    const skillRun = await beginSkillRun({
+        cwd,
+        sessionKey: String(tSession.getContext('contextSessionId')),
+        userMessage: input,
+        scope: 'global',
+        complete: (system, prompt) => summarizeForCompactionWith({ system, prompt }),
+        ...(skillPartition ? { partition: skillPartition } : {}),
+        // Hosted (bridge) runs may serve several people: no partition, no skills.
+        disabled: contextMode === 'hosted' && !skillPartition,
+    });
+    skillSlot.handle = skillRun;
+    skillSlot.userRequest = input;
     const contextBudget = resolveContextBudget({
         contextWindow: p.contextWindow ?? getConfiguredContextLimit(providerConfigVal?.model, providerConfigVal?.contextLength, hasPlatformCapabilities(providerConfigVal)),
         maxOutputTokens: p.maxOutputTokens,
@@ -2236,7 +2302,7 @@ export async function think(
         nativeFunctionTools: unknown[] | undefined,
     ): Promise<number> => {
         // + room for the "current task" note when the boundary carries the request.
-        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0);
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) + skillIndexTokens;
         const managed = await manageContext({
             messages: history,
             fixedTokens,
@@ -2271,14 +2337,19 @@ export async function think(
     const enabledTools = await loadSetupToolEnabled(cwd);
     const supportsNativeTools = p.supportsNativeToolCalls === true && !disableNativeTools;
     const plainChat = isPlainChatRequest(latestUserText);
+    // The index is only useful when the model can call load_skill.
+    const skillIndexSection = supportsNativeTools && !plainChat ? skillRun.indexSection : '';
+    const skillIndexTokens = skillIndexSection ? estimateTokens(skillIndexSection) + 4 : 0;
+    const withSkillTool = (names: string[]): string[] =>
+        skillIndexSection && names.length > 0 && !names.includes(LOAD_SKILL_TOOL) ? [...names, LOAD_SKILL_TOOL] : names;
     let toolProjectionWidenAttempt = 0;
     let projectedToolNames = supportsNativeTools && !plainChat
-        ? resolveProjectedDirectToolNames(
+        ? withSkillTool(resolveProjectedDirectToolNames(
             history,
             enabledTools,
             toolProjectionWidenAttempt,
             [],
-        )
+        ))
         : [];
     // Persist the active tool surface so post-compaction state reflects the
     // tools that were actually available.
@@ -2290,12 +2361,12 @@ export async function think(
             return;
         }
         toolProjectionWidenAttempt += 1;
-        projectedToolNames = resolveProjectedDirectToolNames(
+        projectedToolNames = withSkillTool(resolveProjectedDirectToolNames(
             history,
             enabledTools,
             toolProjectionWidenAttempt,
             projectedToolNames,
-        );
+        ));
         if (projectedToolNames.length > 0) {
             tSession.setContext('activeToolNames', projectedToolNames);
         }
@@ -2447,9 +2518,11 @@ export async function think(
             // The boundary stores a carried request as history; while this
             // turn is going, an unsaved runtime-context note marks it current.
             const requestNote = carriedRequestNote(history, requestMessageId, contextLanguage);
+            // Learned-skill index + carried-request note: per request, never stored.
+            const runtimeNote = [skillIndexSection, requestNote].filter(Boolean).join('\n\n');
             return {
-                messages: requestNote
-                    ? [...systemMessages, ...history, makeRuntimeContextMessage(requestNote)]
+                messages: runtimeNote
+                    ? [...systemMessages, ...history, makeRuntimeContextMessage(runtimeNote)]
                     : [...systemMessages, ...history],
                 completionOptions: {
                     ...responseContinuation,
@@ -2612,11 +2685,22 @@ export async function think(
                             onUserConfirmationRequest,
                             readFileHistory,
                             allowBackgroundTools: contextMode !== 'hosted',
+                            learnedSkillScopes: skillRun.readScopes,
                         }),
                     );
                     const toolOutput = formatDirectToolOutput(toolResult);
                     const contextPreparedOutput = prepareDirectToolContextOutput(call.name, toolOutput, contextStorage, contextBudget);
                     onToolResult?.(call.name, toolResult.ok, toolResult.output);
+                    skillRun.recorder.record({
+                        tool: String(call.name),
+                        ok: toolResult.ok,
+                        summary: summarizeToolCallForSkill(String(call.name), args),
+                        command: call.name === 'run_command'
+                            ? String(args.command ?? '')
+                            : call.name === 'npm_run' ? `npm run ${String(args.script ?? 'test')}` : undefined,
+                        output: typeof toolResult.output === 'string' ? toolResult.output : String(toolResult.output ?? ''),
+                        skillId: call.name === LOAD_SKILL_TOOL ? String(args.id ?? '') : undefined,
+                    });
                     if (!toolResult.ok) {
                         unresolvedDirectToolFailure = {
                             toolName: call.name,
@@ -2649,6 +2733,8 @@ export async function think(
         }
 
         let reply = completion.text ?? '';
+        // A runtime-written fallback or failure reply is not a completed turn.
+        let replyIsRuntimeFallback = false;
         if (supportsNativeTools && !plainChat && !reply.trim()) {
             if (emptyFinalReplyRetryCount < maxEmptyFinalReplyRetries && round < maxProviderRounds) {
                 emptyFinalReplyRetryCount += 1;
@@ -2661,6 +2747,7 @@ export async function think(
                 widenProjectedTools();
                 continue;
             }
+            replyIsRuntimeFallback = true;
             reply = [
                 '本轮模型没有返回可见的最终文本。',
                 '运行时已自动重试但提供商仍返回空文本；本轮未标记为任务完成。请直接重试上一条请求或发送更具体的下一步指令。',
@@ -2679,6 +2766,8 @@ export async function think(
 
             if (shouldGuardUnresolvedDirectToolFailure(reply, unresolvedDirectToolFailure)) {
                 if (round >= maxNativeToolRounds) {
+                    replyIsRuntimeFallback = true;
+                    skillSlot.unresolvedFailure = true;
                     reply = buildDirectToolFailureFinalReply(
                         unresolvedDirectToolFailure,
                         reply,
@@ -2708,6 +2797,9 @@ export async function think(
             reasoningContent: finalResult?.reasoningContent,
             rawContentBlocks: finalResult?.rawContentBlocks,
         }));
+        skillSlot.reply = reply;
+        skillSlot.completed = !replyIsRuntimeFallback;
+        if (unresolvedDirectToolFailure) skillSlot.unresolvedFailure = true;
         break;
     }
 

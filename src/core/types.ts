@@ -751,6 +751,8 @@ export type AgentAction =
   | { type: 'bridge_send_video'; videoPath: string; caption?: string; platform?: 'telegram' | 'discord' | 'wechat' | 'all'; targetId?: string }
   // ── Long-term memory (Mnemosyne v2) ─────────────────────────────────────
   | { type: 'memory'; action: 'save' | 'update' | 'delete' | 'list'; scope?: 'global' | 'project'; name?: string; description?: string; category?: 'preference' | 'feedback' | 'project' | 'reference' | 'skill' | 'architecture'; content?: string }
+  // ── Learned skills (procedural memory) ──────────────────────────────────
+  | { type: 'load_skill'; id: string }
   | { type: 'request_user_confirmation'; question: string; screenshotPath?: string; timeoutMs?: number };
 
 export type AgentActionType = AgentAction['type'];
@@ -843,6 +845,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'bridge_send_video',
   // ── Long-term memory ───────────────────────────────────────────────────
   'memory',
+  'load_skill',
   'request_user_confirmation',
 ] as const satisfies readonly AgentActionType[];
 
