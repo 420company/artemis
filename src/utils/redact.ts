@@ -26,9 +26,13 @@ const PEM_PRIVATE_KEY_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [
 const BEARER_TOKEN_RE = /\bBearer\s+[A-Za-z0-9._-]{16,}\b/gi
 /** Bare JWT (eyJ…header.payload.signature) with no Bearer/sk- prefix. */
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
-/** key: value / key=value shapes only; 8-char value floor avoids short false positives. */
+/**
+ * key: value / key=value shapes only; 8-char value floor avoids short false
+ * positives. The key may carry a prefix (OPENAI_API_KEY=, ARK_API_KEY=,
+ * DB_PASSWORD:), which a plain \b anchor missed because "_" is a word char.
+ */
 const SECRET_ASSIGNMENT_RE =
-  /\b(api[_-]?key|(?:access|refresh|id)[_-]token|token|secret|client[_-]secret|password)\b(\s*[:=]\s*)(["']?)[^\s"',&]{8,}/gi
+  /(?<![A-Za-z0-9])([A-Za-z0-9_-]*?(?:api[_-]?key|(?:access|refresh|id)[_-]token|token|secret|client[_-]secret|password|passwd))\b(\s*[:=]\s*)(["']?)[^\s"',&]{8,}/gi
 /** Excludes trailing punctuation so backticks/brackets around a URL survive. */
 const URL_RE = /https?:\/\/[^\s"'<>(){}[\],;`]+/g
 
