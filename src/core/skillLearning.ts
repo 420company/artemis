@@ -378,7 +378,7 @@ export function looksLikeInjectedInstruction(line: string): boolean {
 const EMAIL_RE = /\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g
 const URL_RE = /\b(?:https?|ftp|file):\/\/[^\s"'<>`)\]]+/gi
 const WINDOWS_PATH_RE = /\b[A-Za-z]:\\[^\s"'`<>|]+/g
-const POSIX_PATH_RE = /(^|[\s"'`(=:,[])((?:~|\/)(?:\/?[\w.@+-]+)+\/?)/g
+const POSIX_PATH_RE = /(^|[\s"'`(=:,[])(~?\/[\w.@+-]+(?:\/[\w.@+-]+)*\/?)/g
 
 function isInside(child: string, root: string): boolean {
   const relative = path.relative(root, child)
@@ -434,10 +434,8 @@ function sanitizeLine(value: unknown, ctx: PreparedSanitizeContext, maxChars: nu
     return `\uE000${urls.length - 1}\uE001`
   })
   line = line.replace(WINDOWS_PATH_RE, (raw) => rewritePath(raw, ctx.cwd))
-  line = line.replace(POSIX_PATH_RE, (_match, lead: string, raw: string) => {
-    // Lone "/" or short slash words like "and/or" never reach here (they need a leading boundary + segment).
-    return `${lead}${rewritePath(raw, ctx.cwd)}`
-  })
+  // Needs a boundary before the slash and a segment after it, so "and/or" and "(~2 min)" stay.
+  line = line.replace(POSIX_PATH_RE, (_match, lead: string, raw: string) => `${lead}${rewritePath(raw, ctx.cwd)}`)
   line = line.replace(/\uE000(\d+)\uE001/g, (_match, index: string) => urls[Number(index)] ?? '<url>')
   line = clampLine(line, maxChars)
   return line || null
