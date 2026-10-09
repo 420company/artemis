@@ -32,6 +32,12 @@ export interface HeadlessAgentOptions {
    * true; Goal Mode ticks pass false (their prompt is written by Artemis).
    */
   autoRoute?: boolean
+  /**
+   * End-of-run self-check ("verify before done", core/selfCheck.ts).
+   * Default true; Goal Mode ticks pass false. Never for a Saga run or a
+   * read-only analysis.
+   */
+  selfCheck?: boolean
 }
 
 export interface HeadlessAgentResult {
@@ -156,6 +162,8 @@ export async function runHeadlessAgent(
     // Hosted runs default to a 200K-token context cap (cost); see
     // services/compactionSettings.ts for the overrides.
     compaction,
+    // Verify before done: the main path checks its own work once (bounded).
+    selfCheck: opts.selfCheck !== false && !readOnly && plan.workflow !== 'saga',
     // Nobody reviews a headless turn as it runs: memories the model saves
     // without naming a scope stay in this workspace.
     memoryDefaultScope: 'project',

@@ -650,6 +650,59 @@ export function replyReportsFailure(reply: string): boolean {
   return hasFailure(text) && !SUCCESS_REPLY_RE.test(text)
 }
 
+/**
+ * An explicit claim that checks or results passed: "all tests pass", "the
+ * build succeeds", "verified", "测试全部通过", "验证通过". "Done" or "works
+ * now" alone is no claim about a check; "all tests pass except …" is none
+ * either.
+ */
+const CHECK_PASS_CLAIM_RE = new RegExp([
+  /\b(?:all\s+(?:\d+\s+)?)?(?:unit\s+|the\s+)?(?:tests?|specs?|checks?|builds?|lint(?:ing)?|type ?checks?|typecheck(?:ing)?|ci)\s+(?:now\s+|all\s+|still\s+)?(?:pass(?:es|ed|ing)?|succeed(?:s|ed)?|(?:is|are)\s+(?:passing|green|clean))\b(?!\s*,?\s*(?:except|but|apart|other than|save for))/.source,
+  /\bpass(?:es|ed|ing)?\s+(?:all\s+)?(?:the\s+)?(?:\d+\s+)?(?:tests?|checks?|specs?)\b(?!\s*,?\s*(?:except|but|apart|other than))/.source,
+  /\b(?:verified|tested)\s+(?:that|it|the|and|working|successfully)\b|\b(?:fully\s+)?(?:verified|tested)\s*[.!]/.source,
+  /\bworks\s+(?:now\s+)?(?:and|,)\s+(?:all\s+)?(?:tests?|checks?)\s+pass/.source,
+  /(?<!除了.{0,12})(?:测试|单测|检查|构建|编译|类型检查|lint)(?:用例)?(?:已经|已|都|均|全部|全都|也)*(?:通过|成功|绿了)/.source,
+  /已验证|验证通过|验证无误|跑通了/.source,
+].join('|'), 'i')
+
+/** Fixing a failure is no disclosure of one: "Fixed 3 failing tests", "修复了一个报错". */
+const FIXED_BEFORE_RE = /(?<!\b(?:fix(?:ed|es|ing)?|resolv(?:ed|es|ing)|address(?:ed|es|ing)|repair(?:ed|ing)?|clean(?:ed)?\s+up)\s+(?:the\s+|all\s+|these\s+|those\s+)?)/.source
+
+/**
+ * The reply discloses a present or future problem: a failing or unrun
+ * check, a pre-existing failure ("still fails", "1 failing test",
+ * "pre-existing failure", "tests were not run", "测试未通过", "还在报错",
+ * "没跑测试"). Fixed failures ("Fixed 3 errors", "修复了一个报错") are not.
+ */
+const DISCLOSURE_RE = new RegExp([
+  `${FIXED_BEFORE_RE}\\b\\d+\\s+(?:\\w+\\s+){0,2}(?:failing|failed)\\b`,
+  /\b\d+\s+(?:\w+\s+){0,2}(?:tests?|specs?|checks?)\s+(?:are\s+|is\s+)?(?:still\s+)?(?:failing|fail)\b/.source,
+  /\bstill\s+(?:fails?|failing|failed|broken|errors?|erroring|red)\b|\b(?:has|have|with|there\s+(?:is|are))\s+(?:a\s+|one\s+|some\s+|\d+\s+)?failing\b/.source,
+  /\b(?:tests?|builds?|checks?|ci|lint|typecheck)\s+(?:is\s+|are\s+)?(?:currently\s+|now\s+)?(?:failing|broken|red)\b/.source,
+  /\bpre-?existing\s+(?:failures?|failing|issues?|errors?|problems?)\b|\balready\s+(?:failing|broken|failed)\b|\bwas\s+(?:already\s+)?failing\b/.source,
+  /\b(?:tests?|checks?|builds?)\s+(?:were|was|have|has|are|is)?\s*(?:not|n't|never)\s+(?:been\s+|yet\s+)?(?:run|executed|verified)\b/.source,
+  /\b(?:did(?:n't| not)|could(?:n't| not)|cannot|can't)\s+run\s+(?:the\s+)?(?:tests?|checks?|build)\b|\bnot\s+(?:yet\s+)?(?:tested|verified)\b|\buntested\b|\bunverified\b/.source,
+  /\b(?:could(?:n't| not)|unable to|was not able to|failed to)\s+(?:fix|get|make|complete|finish|resolve)\b/.source,
+  /(?<!修复了?|解决了?|改好了?)(?:未通过|没通过|不通过)|未运行|没运行|没有运行|没跑|没有跑|还没跑|未测试|没有测试|没测试|未验证|没验证|没有验证|还在(?:报错|失败)|(?:仍|还|依然|仍然|还是)(?:在|有)?(?:(?!修复|解决|改好|处理)[^，。,.;；]){0,6}(?:失败|报错|错误)|(?:原本|之前|本来)就.{0,8}(?:失败|报错|错误|不通过)/.source,
+].join('|'), 'i')
+
+/** The reply discloses a present failure or an unverified state anywhere (see DISCLOSURE_RE). */
+export function replyDisclosesProblem(reply: string): boolean {
+  const text = reply.slice(0, 6000).replace(NEGATED_FAILURE_RE, ' ')
+  return DISCLOSURE_RE.test(text)
+}
+
+/**
+ * The reply explicitly claims that checks or results passed ("all tests
+ * pass", "测试全部通过", "verified"). Such a claim against a failing check
+ * is always corrected, whatever else the reply says. Used by the end-of-run
+ * self-check (core/selfCheck.ts).
+ */
+export function replyClaimsChecksPass(reply: string): boolean {
+  if (!reply.trim()) return false
+  return CHECK_PASS_CLAIM_RE.test(reply.slice(0, 6000))
+}
+
 // ── the user's next message ────────────────────────────────────────────────
 
 /** The longest leading clause still read as feedback on the previous result. */

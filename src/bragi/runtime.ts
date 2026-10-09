@@ -1004,6 +1004,13 @@ async function runRemoteCommandInner(
             skillPartition: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
             onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
+            // Verify before done (core/selfCheck.ts): one short progress line.
+            // A Saga run has its own Critic.
+            selfCheck: !sagaTookOver,
+            onSelfCheck: (message: string) => {
+              emitProgress(message)
+              recordActivity(message)
+            },
             imageAttachments: command.images,
             maxNativeToolRounds: Math.max(96, (opts.maxTurns ?? DEFAULT_AGENT_MAX_TURNS) * 3),
             pollRunningUserMessages: opts.pollRunningUserMessages,
