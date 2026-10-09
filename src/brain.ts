@@ -2597,6 +2597,8 @@ async function thinkTurn(
     /** Shows what the user has not seen yet of `full` (`shown` already went out). */
     const emitUnshown = (full: string, shown: string): void => {
         if (!onDelta || !full) return;
+        // Nothing new when the reply only lost a trailing part the user already saw.
+        if (shown && shown.trimEnd().startsWith(full.trimEnd())) return;
         const tail = shown && full.startsWith(shown) ? full.slice(shown.length) : shown ? `\n\n${full}` : full;
         if (tail) {
             onDelta(tail);

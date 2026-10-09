@@ -27,8 +27,10 @@
  *     edit, and that command is a single bare runner statement (optionally
  *     `cd <dir> &&`, harmless output pipes such as `2>&1 | tail -30`
  *     dropped; no other compound, redirect, env change, wrapper or
- *     mutating flag such as -u/--fix/--write) whose package script or make
- *     target is unchanged since it ran (parseBareCheck), it runs once more,
+ *     mutating flag such as -u/--fix/--write, no package-manager config
+ *     flag) whose npm script closure (pre/post hooks, nested scripts) or
+ *     Makefile is free of side effects and unchanged since it ran
+ *     (parseBareCheck), it runs once more,
  *     from the directory it ran in, with CI=true, through the normal tool
  *     path (permissions, sandbox, a hard time cap); the run's working
  *     directory is restored afterwards. Nothing from earlier tasks is ever
@@ -57,8 +59,8 @@
  * extra model calls (vision judge included) per run, and a wall-time cap
  * (default 4 min) that aborts an in-flight self-check turn. The fix turn
  * may make at most SELF_CHECK_FIX_MAX_TOOL_CALLS tool calls in at most
- * SELF_CHECK_FIX_MAX_ROUNDS rounds: file reads and edits, the same check
- * or read-only inspection commands (cat, ls, grep, git diff/status), one
+ * SELF_CHECK_FIX_MAX_ROUNDS rounds: file reads and edits, the same bare
+ * check as the only shell command, one
  * image regeneration when the image was wrong and enough time is left;
  * never installs, commits, pushes, deletes, sub-agents or video. The instructions travel in the unsaved
  * per-run runtime context — never the system prompt, never the stored
@@ -213,24 +215,6 @@ export function requestForbidsCommands(request: string): boolean {
   return NO_RUN_REQUEST_RE.test(text)
 }
 
-/** Read-only inspection a fix turn may run: cat, ls, grep, git diff/status/log/show… — no writes, no redirects into files. */
-export function isReadOnlyInspection(command: string): boolean {
-  const text = command.trim()
-  if (!text || /`|\$\(|<\(|>\(/.test(text)) return false
-  if (/(?:^|[^0-9&])>{1,2}(?!&)/.test(text.replace(/\d?>\s*\/dev\/null|2>&1/g, ''))) return false
-  return splitShellSegments(text).every((segment, index, all) => {
-    // Only pipes join read-only commands.
-    if (index < all.length - 1 && segment.next !== '|') return false
-    const words = segment.text.trim().split(/\s+/)
-    const head = words[0] ?? ''
-    if (['cat', 'ls', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'tree', 'pwd', 'stat', 'file', 'diff', 'sort', 'uniq', 'cut', 'nl', 'less', 'echo'].includes(head)) return true
-    if (head === 'sed') return words[1] === '-n' && !words.some((word) => /^-i/.test(word))
-    if (head === 'find') return !words.some((word) => ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fls'].includes(word))
-    if (head === 'git') return ['diff', 'status', 'log', 'show', 'blame', 'ls-files', 'grep', 'rev-parse'].includes(words[1] ?? '')
-    return false
-  })
-}
-
 /** A generation of this kind is not started with less self-check time left. */
 const MIN_IMAGE_GENERATION_MS = 90_000
 
@@ -341,33 +325,116 @@ function hashText(text: string): string {
 }
 
 /**
- * What a package-script or make runner executes: the script body or the
- * target's recipe; null when the script or target does not exist;
- * undefined when the runner calls a tool directly (pytest, cargo test, tsc).
+ * Side effects a check's script must not have: publishing, pushing,
+ * uploading, deploying, deleting, committing, network fetches, writes into
+ * files, installs, servers and watchers, and fixes/snapshot updates.
+ */
+const SCRIPT_SIDE_EFFECT_RE = new RegExp([
+  /\b(?:publish|deploy|release|upload)\b|\bgit\s+(?:push|commit|tag|reset|checkout|clean|stash)\b|\b(?:docker|helm|kubectl)\s+(?:push|apply|deploy|run)\b/.source,
+  /\b(?:curl|wget|scp|rsync|ssh|sftp|ftp|nc|netcat)\b|\b(?:rm|rmdir|mv|cp|touch|tee|chmod|chown|ln|truncate|dd|mkdir)\b|\bnpm\s+version\b|\bsemantic-release\b|\bchangeset\s+publish\b/.source,
+  /(?:^|[^0-9&>])>{1,2}(?!&)|\b\d>(?!&|\s*\/dev\/null)/.source,
+  /\b(?:eval|exec|source)\b|\$\(|`|\bsudo\b|\bnode\s+(?:-e|--eval|-p|--print)\b|\bpython3?\s+-c\b|\bsh\s+-c\b|\bbash\s+-c\b/.source,
+].join('|'), 'i')
+
+/** Package-manager and runner flags that change where or how things run, or write files. */
+const UNSAFE_ARG_RE =
+  /^(?:-[Cco]|-r|-e|-p|--(?:[\w-]*(?:prefix|dir|cwd|shell|userconfig|globalconfig|npmrc|registry|ignore-scripts|node-options|out|output|file|path|temp|tmp|log|junit|xml|html|json|cov|coverage|config|setup|require|import|loader|preload|exec|eval|plugin|env|cache|root|basetemp|snapshot)[\w-]*))(?:=.*)?$/i
+/** Package-manager flags that are known to be harmless. */
+const SAFE_PM_FLAGS = new Set(['--silent', '-s', '--quiet', '-q'])
+
+const MAX_SCRIPT_DEPTH = 3
+
+/** npm/pnpm/yarn/bun calls inside a script body: `npm run lint`, `pnpm test`, `yarn build`. */
+function nestedScriptCalls(body: string): Array<{ head: string; words: string[] } | 'unsafe'> {
+  const calls: Array<{ head: string; words: string[] } | 'unsafe'> = []
+  for (const segment of splitShellSegments(body)) {
+    const words = segment.text.trim().split(/\s+/).filter(Boolean)
+    const at = words.findIndex((word) => ['npm', 'pnpm', 'yarn', 'bun', 'npx', 'bunx'].includes(word))
+    if (at < 0) continue
+    if (at > 0 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) {
+      // A package manager behind a wrapper (xargs npm …, cross-env npm …): not screened.
+      if (!['cross-env', 'dotenv'].includes(words[0]!)) calls.push('unsafe')
+    }
+    calls.push({ head: words[at]!, words: words.slice(at) })
+  }
+  return calls
+}
+
+/** The script name a package-manager invocation runs, null when it runs none we can screen. */
+function scriptNameOf(head: string, words: string[]): string | null | undefined {
+  const args = words.slice(1)
+  const dashdash = args.indexOf('--')
+  const own = dashdash >= 0 ? args.slice(0, dashdash) : args
+  if (own.some((arg) => arg.startsWith('-') && !SAFE_PM_FLAGS.has(arg))) return null
+  const positional = own.filter((arg) => !arg.startsWith('-'))
+  let name = positional[0]
+  if (!name) return null
+  if (head === 'npx' || head === 'bunx') return undefined
+  if (name === 'run' || name === 'run-script') name = positional[1]
+  else if (head === 'bun' && name === 'test') return undefined // bun's own runner
+  else if (head === 'npm' && !['test', 't', 'tst', 'start', 'stop', 'restart'].includes(name)) return null
+  if (!name) return null
+  return name === 't' || name === 'tst' ? 'test' : name
+}
+
+/**
+ * Everything a package script runs: pre<name>, <name>, post<name>, and
+ * the same for every npm/pnpm/yarn/bun script it calls, to MAX_SCRIPT_DEPTH.
+ * null when a script is missing, too deep, calls a tool we cannot screen,
+ * or has a non-check side effect.
+ */
+function scriptClosure(name: string, scripts: Record<string, unknown>, depth: number, seen: Set<string>): string[] | null {
+  if (depth > MAX_SCRIPT_DEPTH) return null
+  if (seen.has(name)) return []
+  seen.add(name)
+  const out: string[] = []
+  for (const key of [`pre${name}`, name, `post${name}`]) {
+    const body = scripts[key]
+    if (key === name && typeof body !== 'string') return null
+    if (typeof body !== 'string') continue
+    if (SCRIPT_SIDE_EFFECT_RE.test(body) || MUTATING_FLAG_RE.test(body) || INSTALL_COMMAND_RE.test(body) || LONG_RUNNING_RE.test(body)) return null
+    if (/\bcd\s|--prefix|--dir\b|\s-C\s|--cwd|--filter|--workspace/.test(body)) return null
+    out.push(`${key}=${body}`)
+    for (const call of nestedScriptCalls(body)) {
+      if (call === 'unsafe') return null
+      const nested = scriptNameOf(call.head, call.words)
+      if (nested === null) return null
+      if (nested === undefined) continue
+      const inner = scriptClosure(nested, scripts, depth + 1, seen)
+      if (!inner) return null
+      out.push(...inner)
+    }
+  }
+  return out
+}
+
+/**
+ * What a package-script or make runner executes, screened and ready to
+ * fingerprint: the whole npm script closure (pre/post hooks and nested
+ * scripts) or the whole Makefile; null when it may not be re-run (missing,
+ * side effects, includes, prerequisites); undefined when the runner calls
+ * a tool directly (pytest, cargo test, tsc).
  */
 function scriptBodyFor(runner: string, dir: string): string | null | undefined {
   const words = runner.split(/\s+/)
   const head = words[0] ?? ''
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(head)) {
-    const positional = words.slice(1).filter((word) => !word.startsWith('-'))
-    let name = positional[0]
-    if (!name) return null
-    if (name === 'run' || name === 'run-script') name = positional[1]
-    else if (head === 'bun' && name === 'test') return undefined // bun's own runner
-    else if (head === 'npm' && !['test', 't', 'tst'].includes(name)) return null
-    if (!name) return null
-    if (name === 't' || name === 'tst') name = 'test'
+    const name = scriptNameOf(head, words)
+    if (name === null || name === undefined) return name
+    let scripts: Record<string, unknown>
     try {
-      const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }
-      const body = pkg.scripts?.[name]
-      return typeof body === 'string' ? body : null
+      scripts = (JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }).scripts ?? {}
     } catch {
       return null
     }
+    const closure = scriptClosure(name, scripts, 0, new Set())
+    return closure ? closure.join('\n') : null
   }
   if (head === 'make' || head === 'gmake') {
-    const target = words.slice(1).find((word) => !word.startsWith('-') && !word.includes('='))
-    if (!target) return null
+    const args = words.slice(1)
+    if (args.some((arg) => arg.startsWith('-') || arg.includes('='))) return null
+    const target = args[0]
+    if (!target || args.length > 1) return null
     for (const name of ['GNUmakefile', 'makefile', 'Makefile']) {
       let text: string
       try {
@@ -375,15 +442,23 @@ function scriptBodyFor(runner: string, dir: string): string | null | undefined {
       } catch {
         continue
       }
+      // Other makefiles are not screened.
+      if (/^\s*-?s?include\s/m.test(text)) return null
       const lines = text.split(/\r?\n/)
-      const start = lines.findIndex((line) => new RegExp(`^${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:(?!=)`).test(line))
+      const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const start = lines.findIndex((line) => new RegExp(`^${escaped}\\s*:(?!=)`).test(line))
       if (start < 0) return null
-      const recipe = [lines[start]!]
+      // Prerequisites run other targets: not screened.
+      if (lines[start]!.replace(new RegExp(`^${escaped}\\s*:`), '').replace(/#.*/, '').trim()) return null
+      const recipe: string[] = []
       for (const line of lines.slice(start + 1)) {
         if (!line.startsWith('\t') && line.trim() !== '') break
         recipe.push(line)
       }
-      return recipe.join('\n')
+      const body = recipe.join('\n')
+      if (SCRIPT_SIDE_EFFECT_RE.test(body) || MUTATING_FLAG_RE.test(body) || INSTALL_COMMAND_RE.test(body) || LONG_RUNNING_RE.test(body) || /\$\(MAKE\)|\bmake\b/.test(body)) return null
+      // The whole Makefile: variables and other rules can change what the recipe does.
+      return text
     }
     return null
   }
@@ -394,31 +469,37 @@ function scriptBodyFor(runner: string, dir: string): string | null | undefined {
  * The check the self-check may run again: a command the agent ran, that is
  * a single bare runner statement (optionally after `cd <dir> &&`, optionally
  * with harmless output pipes, which are dropped). Not: other compounds,
- * redirects, subshells, substitutions, env assignments or wrappers;
- * installs, watchers, servers; flags that update snapshots, fix or write
- * files; scripts or make targets that do any of these or do not exist.
+ * redirects, subshells, substitutions, quotes, non-ASCII look-alike
+ * operators, env assignments or wrappers; package-manager config flags or
+ * runner flags that move, configure or write (--prefix, --script-shell,
+ * --outputFile, --basetemp, -c …); installs, watchers, servers; flags that
+ * update snapshots, fix or write files; scripts whose closure (pre/post
+ * hooks, nested scripts) or make targets do any of these or do not exist.
  */
 export function parseBareCheck(command: string, cwd: string): BareCheck | undefined {
+  if (/[^\x20-\x7e]/.test(command)) return undefined
   const normalized = normalizeCheckCommand(command)
   let dir: string | undefined
   let runner = normalized
-  const cd = normalized.match(/^cd\s+(?:"([^"$`\\]+)"|'([^']+)'|([^\s"';&|<>()`$\\]+))\s*&&\s*([\s\S]+)$/)
+  const cd = normalized.match(/^cd\s+([\w@%+=:,./-]+)\s*&&\s*([\s\S]+)$/)
   if (cd) {
-    dir = cd[1] ?? cd[2] ?? cd[3]
-    runner = cd[4]!.trim()
+    dir = cd[1]
+    runner = cd[2]!.trim()
+  } else if (/^cd\b/.test(normalized)) {
+    return undefined
   }
-  if (!runner || /[;&|<>()`$\\\n'"]/.test(runner)) return undefined
+  if (!runner || /[;&|<>()`$\\\n'"{}*?[\]~!#]/.test(runner)) return undefined
   const words = runner.split(/\s+/)
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!) || WRAPPER_WORDS.has(words[0]!)) return undefined
   if (MUTATING_FLAG_RE.test(runner) || INSTALL_COMMAND_RE.test(runner) || LONG_RUNNING_RE.test(runner)) return undefined
+  if (words.slice(1).some((word) => UNSAFE_ARG_RE.test(word))) return undefined
   const execDir = dir ? path.resolve(cwd, dir) : cwd
   const info = classifyRunnerCommand(runner, { cwd: execDir })
   if (!info.runner || !info.statusPreserved) return undefined
   const body = scriptBodyFor(runner, execDir)
   if (body === null) return undefined
-  if (body !== undefined && (MUTATING_FLAG_RE.test(body) || INSTALL_COMMAND_RE.test(body) || LONG_RUNNING_RE.test(body))) return undefined
   return {
-    command: dir ? `cd ${shellQuote(dir)} && ${runner}` : runner,
+    command: dir ? `cd ${dir} && ${runner}` : runner,
     ...(dir ? { dir } : {}),
     runner,
     fingerprint: body ? hashText(body) : '',
@@ -1036,11 +1117,11 @@ export class SelfCheckFixPolicy {
       if (INSTALL_COMMAND_RE.test(command)) return refuse('installing packages is not allowed')
       if (args.background === true) return refuse('background commands are not allowed')
       if (LONG_RUNNING_RE.test(command)) return refuse('watchers and servers are not allowed')
-      // Only the same check again, or read-only inspection; never git push/commit, publish, rm, curl, deploy…
+      // Only the same bare check again (files are read with read_file/search_files).
       const asCheck = normalizeCheckCommand(command).replace(/(^|&&\s*)CI=true\s+/, '$1')
       const sameCheck = Boolean(this.check && (asCheck === this.check.command || asCheck === this.check.runner))
-      if (!sameCheck && !isReadOnlyInspection(command)) {
-        return refuse(this.check ? `only \`${this.check.command}\` or read-only inspection (cat, ls, grep, git diff/status) may run` : 'only read-only inspection (cat, ls, grep, git diff/status) may run')
+      if (!sameCheck) {
+        return refuse(this.check ? `the only shell command allowed is \`${this.check.command}\`; read files with read_file/search_files` : 'no shell commands are allowed; read files with read_file/search_files')
       }
       const cap = Math.max(5_000, this.commandTimeoutMs())
       const asked = Number(args.timeoutMs)
@@ -1106,6 +1187,21 @@ export interface SelfCheckRunInput {
 }
 
 type Problem = { kind: 'code' | 'unchecked' | 'image' | 'media' | 'generation'; text: string }
+
+/** A closing sentence that promises more work: "Let me re-run the tests to be sure.", "我再跑一下测试。" */
+const TRAILING_PROMISE_RE =
+  /(?:^|(?<=[.!?。！？\n]))\s*(?:(?:let me|let's|i(?:'ll| will| am going to|'m going to)|now i(?:'ll| will)|next,? i(?:'ll| will))\b|(?:我|让我|接下来我|下面我)(?:再|来|现在|接下来|马上|会|将|去)|(?:接下来|下一步|稍后)(?:我)?(?:会|将|再))[^.!?。！？\n]*[.!?。！？]?\s*$/i
+
+/** The reply without a trailing promise of further actions (a no-tool turn cannot keep it). */
+export function stripTrailingPromise(text: string): string {
+  let out = text.trimEnd()
+  for (let i = 0; i < 2; i++) {
+    const next = out.replace(TRAILING_PROMISE_RE, '').trimEnd()
+    if (next === out || !next) break
+    out = next
+  }
+  return out
+}
 
 /** The user's own words: workflow runs wrap them after a "--- USER REQUEST ---" marker. */
 export function selfCheckUserRequest(text: string): string {
@@ -1395,7 +1491,8 @@ export class SelfCheckRun {
     }
     if (this.phase === 'final') {
       this.phase = 'done'
-      return this.settle(text, false)
+      // A no-tool turn cannot act on a promise ("Let me re-run the tests…"): drop it.
+      return this.settle(stripTrailingPromise(text) || this.lastReply, false)
     }
     return { kind: 'finish', reply: text, outcome: 'skipped' }
   }
@@ -1566,7 +1663,7 @@ export class SelfCheckRun {
       lines.push(`The generated image does not match the user's request: ${this.imageProblems.join('; ')}.`)
     }
     lines.push(
-      `You have exactly ONE turn to fix this: at most ${SELF_CHECK_FIX_MAX_TOOL_CALLS} tool calls, all in this response (several at once are fine). File reads and edits only${image ? ', plus one image regeneration' : ''}; shell commands only ${this.check ? `\`${this.check.command}\` or ` : ''}read-only inspection (cat, ls, grep, git diff/status). Do not install packages, commit, push, publish, delete, start servers, delegate or generate video — such calls are refused.`,
+      `You have exactly ONE turn to fix this: at most ${SELF_CHECK_FIX_MAX_TOOL_CALLS} tool calls, all in this response (several at once are fine). File reads and edits only${image ? ', plus one image regeneration' : ''}; ${this.check ? `the only shell command allowed is \`${this.check.command}\`` : 'no shell commands'} (read files with read_file/search_files). Do not install packages, commit, push, publish, delete, start servers, delegate or generate video — such calls are refused.`,
       code ? 'Fix the cause in the code you changed. If the failure is unrelated to your change (it was failing before) or needs packages installed, change nothing and say so.' : '',
       image ? 'Call generate_image once more with a corrected prompt (fix exactly the problems above; for a wrong aspect ratio set the size/ratio parameter explicitly).' : '',
       code ? 'The runtime re-runs the check after this turn.' : '',
@@ -1598,7 +1695,7 @@ export class SelfCheckRun {
       this.codeStatus === 'pass'
         ? 'plus ONE short sentence that the self-check caught and fixed a problem.'
         : 'plus a plain statement of what still fails or is unverified. Do not claim success.',
-      'Do not call any tool in this turn (tool calls are ignored); for the JSON envelope use done=true with no actions.',
+      'Do not call any tool in this turn (tool calls are ignored); for the JSON envelope use done=true with no actions. This is your last message for this task: do not promise further actions ("let me re-run…").',
       this.languageRule(),
     )
     return lines.join('\n')
@@ -1610,7 +1707,7 @@ export class SelfCheckRun {
       'Your reply claims that checks passed, but the run\'s own evidence says otherwise:',
       ...problems.map((problem) => `- ${problem.text}`),
       'Rewrite your final reply honestly: keep what is true, state plainly what failed or was not verified (e.g. "tests were not run"), and do not claim that checks passed. It must be complete and self-contained.',
-      'Do not call any tool in this turn (tool calls are ignored); for the JSON envelope use done=true with no actions.',
+      'Do not call any tool in this turn (tool calls are ignored); for the JSON envelope use done=true with no actions. This is your last message for this task: do not promise further actions ("let me re-run…").',
       this.languageRule(),
     ].join('\n')
   }
