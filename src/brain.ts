@@ -1459,6 +1459,25 @@ async function maybeSwitchWorkspaceForExtraTool(
     return { cwd: resolution.workspacePath };
 }
 
+/** Shell commands the agent ran earlier in this conversation (oldest first), for the self-check to re-use. */
+function earlierCheckCommands(messages: SessionMessage[]): string[] {
+    const commands: string[] = [];
+    for (const message of messages.slice(-400)) {
+        if (message.role !== 'assistant' || !message.toolCalls?.length) continue;
+        for (const call of message.toolCalls) {
+            if (call.name !== 'run_command' && call.name !== 'npm_run') continue;
+            try {
+                const args = JSON.parse(call.arguments || '{}') as { command?: unknown; script?: unknown };
+                if (call.name === 'run_command' && typeof args.command === 'string') commands.push(args.command);
+                if (call.name === 'npm_run') commands.push(`npm run ${typeof args.script === 'string' ? args.script : 'test'}`);
+            } catch {
+                /* malformed arguments */
+            }
+        }
+    }
+    return commands.slice(-20);
+}
+
 // ── Tool execution with permission gate ──────────────────────────────────────
 async function executeTool(name: any, input: any, opts: any) {
     return withRuntimeLogSink(
@@ -2324,12 +2343,20 @@ async function thinkTurn(
     });
     const contextLanguage = detectConversationLanguage(history, locale);
     const selfCheckRun = selfCheckTracker && selfCheckSettings
-        ? new SelfCheckRun({ settings: selfCheckSettings, tracker: selfCheckTracker, userRequest: input, language: contextLanguage })
+        ? new SelfCheckRun({
+            settings: selfCheckSettings,
+            tracker: selfCheckTracker,
+            userRequest: input,
+            language: contextLanguage,
+            sessionCheckCommands: earlierCheckCommands(history),
+        })
         : undefined;
     /** The self-check turn scheduled for the next request, and the one in flight. */
     let selfCheckPending: Extract<SelfCheckDecision, { kind: 'turn' }> | undefined;
     let selfCheckTurn: Extract<SelfCheckDecision, { kind: 'turn' }> | undefined;
     let selfCheckExtraRounds = 0;
+    /** Aborts the in-flight self-check turn at the self-check's wall-time cap. */
+    let selfCheckAbort: { signal: AbortSignal; dispose: () => void } | undefined;
     const summarizerWindow = await resolveSummarizerWindow();
     const logInfo = onToolLog ? (message: string): void => onToolLog(message, 'info') : undefined;
     let previousResponseId: string | undefined;
@@ -2456,6 +2483,10 @@ async function thinkTurn(
         const onCallerAbort = (): void => controller.abort();
         if (abortSignal?.aborted) controller.abort();
         else abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
+        // A self-check turn also stops at the self-check's wall-time cap.
+        const selfCheckSignal = selfCheckAbort?.signal;
+        if (selfCheckSignal?.aborted) controller.abort();
+        else selfCheckSignal?.addEventListener('abort', onCallerAbort, { once: true });
         let interrupted = false;
         let polling = false;
         const poll = (): void => {
@@ -2491,6 +2522,7 @@ async function thinkTurn(
         } finally {
             clearInterval(timer);
             abortSignal?.removeEventListener('abort', onCallerAbort);
+            selfCheckSignal?.removeEventListener('abort', onCallerAbort);
         }
     };
     /**
@@ -2536,12 +2568,13 @@ async function thinkTurn(
     // The self-check runs its check like a tool call of this turn: same
     // permission gate, sandbox and tool events. The result reaches the model
     // in the self-check note (unsaved runtime context), not the history.
-    const selfCheckToolContext = () => ({
-        cwd: currentCwd,
+    const selfCheckToolContext = (cwd: string) => ({
+        cwd,
         permissionMode,
         onPermissionRequest,
         onToolLog,
-        updateCwd: (newCwd: string) => { currentCwd = newCwd; },
+        // A `cd` in the re-run check never moves this turn.
+        updateCwd: (): void => undefined,
         onWorkspaceSwitchRequest,
         onUserConfirmationRequest,
         readFileHistory,
@@ -2549,18 +2582,19 @@ async function thinkTurn(
         learnedSkillScopes: skillRun.readScopes,
     });
     const selfCheckHost: SelfCheckHost = {
-        runCommand: async (command, timeoutMs) => {
+        runCommand: async (command, timeoutMs, cwd) => {
             const args = { command, timeoutMs, killOnTimeout: true };
+            const runCwd = cwd ?? currentCwd;
             onToolCall?.('run_command', args);
             readFileHistory.clear();
             const toolResult = attachDirectToolFailureError(
                 'run_command',
-                await executeTool('run_command', args, selfCheckToolContext()),
+                await executeTool('run_command', args, selfCheckToolContext(runCwd)),
             );
             const output = typeof toolResult.output === 'string' ? toolResult.output : String(toolResult.output ?? '');
             onToolResult?.('run_command', toolResult.ok, toolResult.output);
             skillRun.recorder.record({ tool: 'run_command', ok: toolResult.ok, summary: summarizeToolCallForSkill('run_command', args), command, output });
-            selfCheckTracker?.record({ tool: 'run_command', ok: toolResult.ok, args, command, output, errorCode: toolResult.error?.code, bySelfCheck: true });
+            selfCheckTracker?.record({ tool: 'run_command', ok: toolResult.ok, args, command, output, errorCode: toolResult.error?.code, bySelfCheck: true, cwd: runCwd });
             return { ok: toolResult.ok, output, errorCode: toolResult.error?.code };
         },
         getImageJudge: () => resolveSelfCheckImageJudge(p, currentCwd),
@@ -2570,6 +2604,15 @@ async function thinkTurn(
             else onToolLog?.(message, 'info');
         },
         signal: abortSignal,
+    };
+    /** Ends the turn with a self-check reply after a tool round or an aborted self-check turn. */
+    const finishWithSelfCheck = (decision: Extract<SelfCheckDecision, { kind: 'finish' }>, base: ProviderResponse | null, shown: string): void => {
+        finalResult = { ...(base ?? { raw: null }), text: decision.reply, nativeToolCalls: [] };
+        emitUnshown(decision.reply, shown);
+        appendHistory(makeSessionMessage('assistant', decision.reply));
+        skillSlot.reply = decision.reply;
+        skillSlot.completed = true;
+        if (decision.outcome === 'still-failing' || decision.outcome === 'corrected') skillSlot.unresolvedFailure = true;
     };
     /** Shows what the user has not seen yet of `full` (`shown` already went out). */
     const emitUnshown = (full: string, shown: string): void => {
@@ -2585,6 +2628,8 @@ async function thinkTurn(
     for (let round = 1; round <= maxProviderRounds + selfCheckExtraRounds; round += 1) {
         selfCheckTurn = selfCheckPending;
         selfCheckPending = undefined;
+        selfCheckAbort?.dispose();
+        selfCheckAbort = selfCheckRun && selfCheckTurn ? selfCheckRun.turnSignal() : undefined;
         absorbRunningUserMessages();
         const nativeFunctionTools = supportsNativeTools && projectedToolNames.length > 0
             ? buildDirectNativeFunctionTools({ allowedToolNames: projectedToolNames })
@@ -2631,7 +2676,17 @@ async function thinkTurn(
                 },
             };
         };
-        const completionAttempt = await requestWithOverflowRecovery(buildRequest, nativeFunctionTools);
+        let completionAttempt: Awaited<ReturnType<typeof requestWithOverflowRecovery>>;
+        try {
+            completionAttempt = await requestWithOverflowRecovery(buildRequest, nativeFunctionTools);
+        } catch (error) {
+            // The self-check turn hit the self-check's wall-time cap: finish with what is known.
+            if (selfCheckRun && selfCheckAbort?.signal.aborted) {
+                finishWithSelfCheck(selfCheckRun.timedOut(), finalResult, '');
+                break;
+            }
+            throw error;
+        }
         previousResponseId = undefined;
         pendingToolOutputs = undefined;
         if (completionAttempt.interrupted) {
@@ -2763,6 +2818,20 @@ async function thinkTurn(
                         continue;
                     }
 
+                    // The self-check's fix turn: its tool policy, enforced here.
+                    const refusal = selfCheckTurn?.tools ? selfCheckRun?.fixPolicy?.admit(String(call.name), args) : undefined;
+                    if (refusal) {
+                        const output = JSON.stringify({
+                            ok: false,
+                            toolName: call.name,
+                            output: refusal,
+                            error: { code: 'tool_blocked_by_self_check', message: refusal, retryable: false },
+                        }, null, 2);
+                        toolOutputs.push({ callId: call.callId, output });
+                        roundMessages.push(makeSessionMessage('tool', output, { name: call.name, toolUseId: call.callId }));
+                        selfCheckTracker?.record({ tool: String(call.name), ok: false, args, errorCode: 'tool_blocked_by_self_check' });
+                        continue;
+                    }
                     onToolCall?.(call.name, args);
                     if (READ_FILE_HISTORY_INVALIDATING_TOOLS.has(String(call.name))) {
                         readFileHistory.clear();
@@ -2838,18 +2907,15 @@ async function thinkTurn(
                 // either one no-tool final turn or the end of the turn.
                 selfCheckTurn = undefined;
                 const fixText = completion.text ?? '';
-                const decision = await selfCheckRun.afterTurn(fixText, selfCheckHost);
+                const decision = selfCheckAbort?.signal.aborted
+                    ? selfCheckRun.timedOut()
+                    : await selfCheckRun.afterTurn(fixText, selfCheckHost);
                 if (decision.kind === 'turn') {
                     selfCheckPending = decision;
                     selfCheckExtraRounds += 1;
                     continue;
                 }
-                finalResult = { ...completion, text: decision.reply, nativeToolCalls: [] };
-                emitUnshown(decision.reply, completion.streamed === true ? fixText : '');
-                appendHistory(makeSessionMessage('assistant', decision.reply));
-                skillSlot.reply = decision.reply;
-                skillSlot.completed = true;
-                if (decision.outcome === 'still-failing' || decision.outcome === 'corrected') skillSlot.unresolvedFailure = true;
+                finishWithSelfCheck(decision, completion, completion.streamed === true ? fixText : '');
                 break;
             }
             continue;
@@ -2911,6 +2977,7 @@ async function thinkTurn(
         // check the work once; a fix or correction turn replaces the reply.
         const modelReply = reply;
         let storedReply = reply;
+        const wasSelfCheckTurn = Boolean(selfCheckTurn);
         if (selfCheckRun && !replyIsRuntimeFallback && (selfCheckTurn || !selfCheckRun.started)) {
             const current = selfCheckTurn;
             selfCheckTurn = undefined;
@@ -2939,9 +3006,13 @@ async function thinkTurn(
         if (reply && onDelta) {
             emitUnshown(reply, completion.streamed === true ? modelReply : '');
         }
+        // A self-check turn's reply (tool calls in it were ignored) or a reply
+        // the self-check changed is stored as text: no stray tool_use blocks,
+        // and the "Self-check:" line stays in what the next turn sees.
+        const textOnly = wasSelfCheckTurn || storedReply !== modelReply;
         appendHistory(makeSessionMessage('assistant', storedReply, {
             reasoningContent: finalResult?.reasoningContent,
-            rawContentBlocks: finalResult?.rawContentBlocks,
+            rawContentBlocks: textOnly ? undefined : finalResult?.rawContentBlocks,
         }));
         skillSlot.reply = reply;
         skillSlot.completed = !replyIsRuntimeFallback;
@@ -2949,6 +3020,7 @@ async function thinkTurn(
         break;
     }
 
+    selfCheckAbort?.dispose();
     if (!finalResult) {
         throw new Error('Provider did not return a response.');
     }

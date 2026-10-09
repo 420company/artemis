@@ -115,6 +115,7 @@ import {
 import {
   ffprobeMedia,
   loadSelfCheckSettings,
+  SELF_CHECK_FIX_MAX_ROUNDS,
   resolveSelfCheckImageJudge,
   selfCheckUserRequest,
   SelfCheckRun,
@@ -1684,6 +1685,21 @@ function requestNamesWorkspaceArtifact(input: string): boolean {
     /\b(?:files?|folders?|director(?:y|ies)|repo(?:sitory)?|codebase|projects?|code|source|scripts?|functions?|class(?:es)?|modules?|components?|packages?|librar(?:y|ies)|tests?|unit tests?|endpoints?|api|server|database|schema|migrations?|config(?:uration)?|dockerfile|makefile|readme|commit|branch|pull request|bug|build|deploy(?:ment)?|website|web ?site|web ?page|landing page|web ?app|app|application|frontend|backend|cli|plugin|extension|workspace|desktop)\b/i,
     /(?:文件|目录|文件夹|项目|仓库|代码|源码|脚本|函数|组件|模块|接口|服务器|数据库|配置|测试|部署|网站|网页|页面|前端|后端|应用|程序|插件|工作区|桌面)/,
   ].some((pattern) => pattern.test(normalized));
+}
+
+/** Shell commands the agent ran earlier in this session (oldest first), for the self-check to re-use. */
+function earlierCheckCommands(messages: SessionMessage[]): string[] {
+  const commands: string[] = [];
+  for (const message of messages.slice(-400)) {
+    if (message.role !== 'tool' || !message.content.includes('run_command')) continue;
+    try {
+      const parsed = JSON.parse(message.content) as { action?: { type?: string; command?: unknown } };
+      if (parsed.action?.type === 'run_command' && typeof parsed.action.command === 'string') commands.push(parsed.action.command);
+    } catch {
+      /* a spilled or non-JSON tool result */
+    }
+  }
+  return commands.slice(-20);
 }
 
 function isWorkspaceVerificationFollowupAction(action: AgentAction): boolean {
@@ -6520,6 +6536,7 @@ export async function runAgent(
       tracker: selfCheckTracker,
       userRequest: selfCheckUserRequest(userInput),
       language: contextLanguage,
+      sessionCheckCommands: earlierCheckCommands(session.messages),
     })
     : undefined;
   /** The self-check turn scheduled for the next request, and the one in flight. */
@@ -6527,8 +6544,11 @@ export async function runAgent(
   let selfCheckTurn: Extract<SelfCheckDecision, { kind: 'turn' }> | undefined;
   /** Turns the self-check added beyond maxTurns (at most two). */
   let selfCheckExtraTurns = 0;
-  /** A command the self-check itself runs (recorded as such). */
+  /** A command the self-check itself runs (recorded as such), and where it runs. */
   let selfCheckOwnCommand = false;
+  let selfCheckCommandCwd: string | undefined;
+  /** Aborts the in-flight self-check turn at the self-check's wall-time cap. */
+  let selfCheckAbort: { signal: AbortSignal; dispose: () => void } | undefined;
   const budgetFor = (provider: ChatProvider): ContextBudget => {
     // A platform-written window (capabilitiesSource "platform") is
     // authoritative and wins; otherwise the smaller of the caller's window
@@ -6742,6 +6762,7 @@ export async function runAgent(
         output: outcome.output,
         errorCode: outcome.error?.code,
         bySelfCheck: selfCheckOwnCommand,
+        ...(selfCheckOwnCommand && selfCheckCommandCwd ? { cwd: selfCheckCommandCwd } : {}),
       });
       skillRun?.recorder.record({
         tool: outcome.action.type,
@@ -6914,8 +6935,11 @@ export async function runAgent(
     const nativeFunctionTools =
       nativeToolRuntime?.tools ?? buildProviderNativeFunctionTools();
     let currentCompletion = completion;
+    // The self-check's fix turn: its tool policy and a round cap, enforced here.
+    const fixPolicy = selfCheckTurn?.tools ? selfCheck?.fixPolicy : undefined;
+    const maxNativeRounds = fixPolicy ? SELF_CHECK_FIX_MAX_ROUNDS : 6;
 
-    for (let nativeRound = 1; nativeRound <= 6; nativeRound += 1) {
+    for (let nativeRound = 1; nativeRound <= maxNativeRounds; nativeRound += 1) {
       const nativeCalls = currentCompletion.nativeToolCalls ?? [];
       if (nativeCalls.length === 0) {
         return currentCompletion;
@@ -6970,9 +6994,29 @@ export async function runAgent(
           continue;
         }
 
+        const refusal = fixPolicy?.admit(mapped.action.type, mapped.action as unknown as Record<string, unknown>);
+        if (refusal) {
+          const refused: ActionOutcome = {
+            action: mapped.action,
+            ok: false,
+            output: refusal,
+            error: buildToolError('tool_blocked_by_self_check', refusal, { retryable: false }),
+          };
+          outcomes.push(refused);
+          toolOutputs.push({
+            callId: call.callId,
+            output: serializeToolPayload({ ok: false, action: mapped.action, output: refusal, error: refused.error }),
+          });
+          continue;
+        }
+
         // Same options as before plus this run's image queue; a workspace
         // switch made by the tool is carried back to `options`.
-        const nativeActionOptions: RunAgentOptions = { ...options, viewedImages };
+        const nativeActionOptions: RunAgentOptions = {
+          ...options,
+          viewedImages,
+          ...(selfCheckAbort ? { abortSignal: anyAbortSignal(options.abortSignal, selfCheckAbort.signal) } : {}),
+        };
         const outcome = await executeWithRunningInterjectionCheck(
           session,
           mapped.action,
@@ -7025,6 +7069,8 @@ export async function runAgent(
       );
     }
 
+    // The fix turn's round cap: what it did stands; the self-check takes over.
+    if (fixPolicy) return { ...currentCompletion, nativeToolCalls: undefined };
     throw new Error(
       'Responses provider exceeded the maximum native tool rounds without producing a final reply.',
     );
@@ -7042,25 +7088,32 @@ export async function runAgent(
     return onChunk && typeof provider.completeStream === 'function'
       ? provider.completeStream(providerMessages, onChunk, {
         ...requestOptions,
-        abortSignal: options.abortSignal,
+        abortSignal: anyAbortSignal(options.abortSignal, selfCheckAbort?.signal),
       })
       : provider.complete(providerMessages, {
         ...requestOptions,
-        abortSignal: options.abortSignal,
+        abortSignal: anyAbortSignal(options.abortSignal, selfCheckAbort?.signal),
       });
   };
 
   // The self-check runs the check like a tool call of this run: same
   // permissions, sandbox, history and tool events, killed at its time cap.
   const selfCheckHost: SelfCheckHost = {
-    runCommand: async (command, timeoutMs) => {
+    runCommand: async (command, timeoutMs, cwd) => {
+      // Runs where the agent ran its check; a `cd` in it never moves the run.
+      const saved = { options: options.cwd, run: runOptions.cwd, session: session.cwd };
+      const runCwd = cwd ?? runOptions.cwd;
       selfCheckOwnCommand = true;
+      selfCheckCommandCwd = runCwd;
       try {
         const outcomes = await executeActionBatch(
           session,
           [{ type: 'run_command', command, timeoutMs, killOnTimeout: true }],
-          runOptions,
+          { ...runOptions, cwd: runCwd },
         );
+        options.cwd = saved.options;
+        runOptions.cwd = saved.run;
+        session.cwd = saved.session;
         await recordOutcomes(outcomes);
         await options.sessionStore.save(session);
         const outcome = outcomes[0];
@@ -7069,6 +7122,10 @@ export async function runAgent(
           : { ok: false, output: '', errorCode: 'tool_permission_denied' };
       } finally {
         selfCheckOwnCommand = false;
+        selfCheckCommandCwd = undefined;
+        options.cwd = saved.options;
+        runOptions.cwd = saved.run;
+        session.cwd = saved.session;
       }
     },
     getImageJudge: () =>
@@ -7100,6 +7157,8 @@ export async function runAgent(
   for (let turn = 1; turn <= options.maxTurns + selfCheckExtraTurns; turn += 1) {
     selfCheckTurn = selfCheckPending;
     selfCheckPending = undefined;
+    selfCheckAbort?.dispose();
+    selfCheckAbort = selfCheck && selfCheckTurn ? selfCheck.turnSignal() : undefined;
     if (options.abortSignal?.aborted) {
       throw new AgentRuntimeInterruptedError(
         options.rootRuntimeId ?? session.id,
@@ -7284,6 +7343,7 @@ export async function runAgent(
     try {
       completion = await requestCompletion(providerMessages);
     } catch (error) {
+      if (selfCheck && selfCheckAbort?.signal.aborted) return await finishAfterSelfCheck(selfCheck.timedOut(), turn);
       if (!isContextOverflowError(error) || options.abortSignal?.aborted) throw error;
       // The provider counted more than the estimate allowed for: compact
       // hard, persist, and retry once.
@@ -7298,6 +7358,7 @@ export async function runAgent(
       try {
         completion = await requestCompletion(providerMessages);
       } catch (retryError) {
+        if (selfCheck && selfCheckAbort?.signal.aborted) return await finishAfterSelfCheck(selfCheck.timedOut(), turn);
         if (!isContextOverflowError(retryError)) throw retryError;
         const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
         throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
@@ -7323,6 +7384,7 @@ export async function runAgent(
           nativeToolRuntime,
         );
     } catch (error) {
+      if (selfCheck && selfCheckAbort?.signal.aborted) return await finishAfterSelfCheck(selfCheck.timedOut(), turn);
       if (!isContextOverflowError(error) || options.abortSignal?.aborted) throw error;
       // A Responses continuation (previous_response_id) outgrew the window on
       // the server side. Its tool results are already in the session: compact
@@ -7343,6 +7405,7 @@ export async function runAgent(
           nativeToolRuntime,
         );
       } catch (retryError) {
+        if (selfCheck && selfCheckAbort?.signal.aborted) return await finishAfterSelfCheck(selfCheck.timedOut(), turn);
         if (!isContextOverflowError(retryError)) throw retryError;
         const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
         throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
@@ -7441,11 +7504,30 @@ export async function runAgent(
     if (selfCheck && selfCheckTurn) {
       const current = selfCheckTurn;
       selfCheckTurn = undefined;
-      if (current.tools && actions.length > 0) {
-        const outcomes = await executeActionBatch(session, actions, runOptions);
-        await recordOutcomes(outcomes);
-        await recordOutcomeWorkflowEntry(session, options, turn, outcomes);
+      const fixPolicy = current.tools ? selfCheck.fixPolicy : undefined;
+      if (fixPolicy && actions.length > 0) {
+        // The fix turn's policy (reads, edits, checks; no installs, sub-agents
+        // or video; a call cap), enforced on the actions, not only asked for.
+        const admitted: AgentAction[] = [];
+        const refused: ActionOutcome[] = [];
+        for (const action of actions) {
+          const refusal = fixPolicy.admit(action.type, action as unknown as Record<string, unknown>);
+          if (refusal) {
+            refused.push({ action, ok: false, output: refusal, error: buildToolError('tool_blocked_by_self_check', refusal, { retryable: false }) });
+          } else {
+            admitted.push(action);
+          }
+        }
+        const outcomes = admitted.length > 0
+          ? await executeActionBatch(session, admitted, {
+            ...runOptions,
+            ...(selfCheckAbort ? { abortSignal: anyAbortSignal(options.abortSignal, selfCheckAbort.signal) } : {}),
+          })
+          : [];
+        await recordOutcomes([...outcomes, ...refused]);
+        await recordOutcomeWorkflowEntry(session, options, turn, [...outcomes, ...refused]);
         await options.sessionStore.save(session);
+        if (selfCheckAbort?.signal.aborted) return await finishAfterSelfCheck(selfCheck.timedOut(), turn);
       }
       const decision = await selfCheck.afterTurn(envelope.reply ?? '', selfCheckHost);
       if (decision.kind === 'turn') {
@@ -8151,6 +8233,7 @@ export async function runAgent(
         : {}),
     };
   } finally {
+    selfCheckAbort?.dispose();
     detachInterjectionPollSource?.();
     // Stranded-interjection safety net: anything that arrived after the last
     // in-loop drain (or on an early-return path) is persisted into the session
