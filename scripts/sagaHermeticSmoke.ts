@@ -369,6 +369,19 @@ async function segmentDialogueAndCutChecks(): Promise<void> {
   const flow = cut.replace('结尾 INSTANT HARD CUT。', '');
   const flowRun = await runHermeticSaga({ prompt: flow, story: flow, totalDuration: 10, ratio: '9:16', generateAudio: false, identitySource: 'text_only' });
   assert.equal(images(videoTaskBodies(flowRun.requests)[1]!), 1, 'without a cut the tail frame is chained');
+  // A negated cut or a cutting rhythm inside a shot is not an incoming cut.
+  const notCut = [
+    '[0-6秒] 段 1 · 男人在走廊奔跑，机位锁死。',
+    '[6-12秒] 段 2 · 紧接上文，不要硬切：同机位、同动作方向，他继续向右奔跑。',
+    '[12-18秒] 段 3 · 节奏：每 2 秒一硬切，男人在楼梯间不同角度的剪影。',
+    '[18-24秒] 段 4 · 继续：他推开天台的门。No hard cut here, continuous take.',
+  ].join('\n');
+  const notCutRun = await runHermeticSaga({ prompt: notCut, story: notCut, totalDuration: 24, ratio: '16:9', generateAudio: false, identitySource: 'text_only' });
+  assert.equal(notCutRun.result.ok, true, notCutRun.result.output);
+  assert.deepEqual(videoTaskBodies(notCutRun.requests).map(images), [0, 1, 1, 1], 'negated cuts and cutting rhythms keep the chain');
+  const startCut = '[0-5秒] 段 1 · 女孩在雨夜街头停下。\n[5-10秒] 段 2 · INSTANT HARD CUT，东京的早晨，女孩推开窗。';
+  const startCutRun = await runHermeticSaga({ prompt: startCut, story: startCut, totalDuration: 10, ratio: '9:16', generateAudio: false, identitySource: 'text_only' });
+  assert.equal(images(videoTaskBodies(startCutRun.requests)[1]!), 0, 'a cut opening the segment is its incoming cut');
 
   // Subtitles on "auto": a segment that marks a subtitle line may show it.
   const bible = buildContinuityBible({ story: '雨夜的城市。', ratio: '9:16', subtitleMode: 'auto' });

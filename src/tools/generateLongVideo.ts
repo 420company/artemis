@@ -563,31 +563,47 @@ function parseTimeTokenToSeconds(token: string): number {
 }
 
 const WRITTEN_TRANSITIONS: Array<{ re: RegExp; kind: SagaTransitionKind }> = [
-  { re: /INSTANT\s+HARD\s+CUT|hard\s*cut|硬切/i, kind: 'cut' },
-  { re: /cross[-\s]?fade|交叉淡化|交叉溶解/i, kind: 'crossfade' },
-  { re: /\bdissolve\b|溶解|叠化/i, kind: 'dissolve' },
-  { re: /fade\s+to\s+black|fade[-\s]?out\s+to\s+black|黑场|淡出到黑/i, kind: 'fade-black' },
-  { re: /fade\s+to\s+white|白场|淡出到白/i, kind: 'fade-white' },
+  { re: /INSTANT\s+HARD\s+CUT|hard\s*cut|硬切/gi, kind: 'cut' },
+  { re: /cross[-\s]?fade|交叉淡化|交叉溶解/gi, kind: 'crossfade' },
+  { re: /\bdissolve\b|溶解|叠化/gi, kind: 'dissolve' },
+  { re: /fade\s+to\s+black|fade[-\s]?out\s+to\s+black|黑场|淡出到黑/gi, kind: 'fade-black' },
+  { re: /fade\s+to\s+white|白场|淡出到白/gi, kind: 'fade-white' },
 ];
 // "结尾 INSTANT HARD CUT", "ends with a cross-fade": the cut out of this shot.
 const OUTGOING_TRANSITION_RE = /(?:结尾|结束|收尾|末尾|ends?\s+(?:with|on|in)|at\s+the\s+end|closing|out\s*:)/i;
+// "不要硬切", "No hard cut here": the brief rules the transition out.
+const NEGATED_TRANSITION_RE = /(?:不要|不是|不用|别|避免|无|没有|禁止|\bno\b|\bnot\b|\bwithout\b|\bnever\b|\bavoid\b)[^。.!！?？\n]{0,4}$/i;
+// "每 2 秒一硬切", "cut every 2 seconds": a cutting rhythm inside the shot.
+const CUTTING_RHYTHM_RE = /(?:每\s*\d*(?:\.\d+)?\s*秒?|节奏|rhythm|every\s+\d|each\s+\d)[^。.!！?？\n]{0,8}$/i;
+
+/** The first and last sentence of a shot body (whitespace already collapsed). */
+function sentenceBounds(body: string): { firstEnd: number; lastStart: number } {
+  const ends = Array.from(body.matchAll(/[。！？!?]|\.(?=\s|$)/g), (match) => (match.index ?? 0) + 1).filter((at) => at < body.trim().length);
+  return { firstEnd: ends[0] ?? body.length, lastStart: ends[ends.length - 1] ?? 0 };
+}
 
 /**
  * A transition the brief writes into a shot (guide §9.5) becomes the
- * renderer's transition: into the next shot when the shot ends with it,
- * otherwise into this shot. The first shot's can only lead out of it.
+ * renderer's transition: written at the shot's end ("结尾硬切", "ends with a
+ * cross-fade") it leads into the next shot; written at its start (title or
+ * first sentence) it leads into this one. A negated mention ("不要硬切") or a
+ * cutting rhythm inside the shot ("每 2 秒一硬切") is not a transition.
  */
 function applyWrittenTransitions(shots: SagaShotInput[]): void {
   shots.forEach((shot, index) => {
     const body = shot.storyBeat ?? '';
+    const { firstEnd, lastStart } = sentenceBounds(body);
     for (const { re, kind } of WRITTEN_TRANSITIONS) {
-      const match = body.match(re);
-      if (!match) continue;
-      const before = body.slice(Math.max(0, (match.index ?? 0) - 12), match.index ?? 0);
-      const outgoing = index === 0 || OUTGOING_TRANSITION_RE.test(before);
-      const target = outgoing ? shots[index + 1] : shot;
-      if (target && !target.transitionKind) target.transitionKind = kind;
-      break;
+      for (const match of body.matchAll(re)) {
+        const at = match.index ?? 0;
+        const before = body.slice(Math.max(0, at - 12), at);
+        if (NEGATED_TRANSITION_RE.test(before) || CUTTING_RHYTHM_RE.test(before)) continue;
+        const outgoing = OUTGOING_TRANSITION_RE.test(before) || (at >= lastStart && lastStart > 0 && at >= firstEnd);
+        const incoming = !outgoing && at < firstEnd && index > 0;
+        const target = outgoing ? shots[index + 1] : incoming ? shot : undefined;
+        if (target && !target.transitionKind) target.transitionKind = kind;
+        if (target) return;
+      }
     }
   });
 }
