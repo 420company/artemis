@@ -1,0 +1,68 @@
+[Story]
+
+A rainy night in Chengdu's Taikoo Li. Lin Xia waits on the street for Zhou Yu, whom she has not seen in years. She drifts in from frame-left and stops in the neon reflections; Zhou Yu appears, they exchange a few words, and they finally smile under the IFS climbing-panda sculpture.
+
+═══════════════════════════════════════════════════════════════
+
+[Picture specs]
+
+· Aspect ratio: 9:16 portrait
+· Reference quality tier: Wong Kar-wai street cinema
+· Camera feel: ARRI Alexa Mini large format
+· Lens: 35mm prime
+· Palette: desaturated cool + warm neon
+· Lighting: practical lamps + neon
+· Motion intensity: smooth
+
+═══════════════════════════════════════════════════════════════
+
+[Global tone]
+
+· VIBE: restrained rainy-night reunion
+· Camera position: locked-off tripod; NO pan, NO tilt, NO zoom, NO dolly, NO handheld shake
+· CHARACTER LOCK:
+  A (Lin Xia, lead 1): 26-year-old East Asian woman, cool fair skin, oval face, black shoulder-length bob, a small silver stud in the left ear, always in a cream trench coat and black turtleneck, black-rimmed glasses
+  B (Zhou Yu, lead 2): 28-year-old East Asian man, tan skin, narrow long face, black crew cut, charcoal jacket, silver watch on the left wrist
+· Audio layers:
+  - Background music: overlay local BGM in post
+  - Ambience: rain, distant traffic, neon hum
+  - Dialogue: low, restrained, three lines
+  - AI generation outputs ambience only; music and dialogue are layered in post
+
+═══════════════════════════════════════════════════════════════
+
+[0-8sec] Segment 1 · "It was just two lovers"
+
+**Opening framing**: A is in profile, positioned at left edge ~5%, moving rightward in a slow stride; medium wide / full body; locked-off tripod.
+Sino-Ocean Taikoo Li in Chengdu, with the IFS climbing-panda sculpture visible in the distance. Wet reflective ground; a neon sign reads "neon city". A stops under a street lamp and lifts her gaze. Sustained pacing, ends with an INSTANT HARD CUT.
+
+[Sound] rain, distant traffic
+
+**dialogue (~3 sec, soft whisper)**: "I've waited so long."
+
+═══════════════════════════════════════════════════════════════
+
+[8-16sec] Segment 2 · Reunion
+
+**Opening framing**: B is facing camera, 70% horizontal, drifting left; medium shot; locked-off tripod.
+Continues from above: camera stays locked; street, lighting, wardrobe identical. B appears from the right, A turns to look at him.
+She whispers: "You finally came back."
+
+**voiceover**: "That year, we both thought we'd never meet again."
+**subtitle**: "Chengdu · 2019"
+
+═══════════════════════════════════════════════════════════════
+
+[16-24sec] Segment 3 · Release
+
+**Opening framing**: A and B, back to camera, centred in the frame, walking toward the camera; long shot; locked-off tripod.
+The two stand side by side under the IFS panda sculpture and smile at each other. The rain eases.
+**line**: "I'm back, and this time I'm not leaving."
+
+═══════════════════════════════════════════════════════════════
+
+[Appendix: dialogue recap] (optional · for human reference only)
+
+| Time | Seg | Line | Emotion |
+|---|---|---|---|
+| ~3s | Seg 1 | "I've waited so long." | soft |

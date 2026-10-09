@@ -190,7 +190,8 @@ export async function concatWithSagaRenderer(input: SagaConcatInput): Promise<Sa
   // Fast path: 1 segment, just transcode it through the encoder.
   if (input.segments.length === 1) {
     const common = await buildCommonEncodeArgs(encode);
-    const args = ['-y', '-i', input.segments[0]!.outputPath, '-vf', normalizationVf(encode), ...common.args, input.outputPath];
+    const vf = `${normalizationVf(encode)},${holdLastFrameVf(totalDuration, encode.fps)},trim=duration=${totalDuration.toFixed(3)}`;
+    const args = ['-y', '-i', input.segments[0]!.outputPath, '-vf', vf, ...common.args, input.outputPath];
     await execFileAsync(await ffmpegPath(), args, { timeout: 30 * 60_000 });
     return {
       outputPath: input.outputPath,
@@ -309,7 +310,7 @@ export async function concatWithSagaRenderer(input: SagaConcatInput): Promise<Sa
     if (startFrames > 0) tpadOptions.push(`start_mode=clone`, `start=${startFrames}`);
     if (endFrames > 0) tpadOptions.push(`stop_mode=clone`, `stop=${endFrames}`);
     const tpadChain = tpadOptions.length > 0 ? `,tpad=${tpadOptions.join(':')},setpts=PTS-STARTPTS` : '';
-    const vf = `[${i}:v]${normalizationVf(encode)},trim=duration=${segmentDurationStr},setpts=PTS-STARTPTS${colorPart}${tpadChain},setsar=1[v${i}]`;
+    const vf = `[${i}:v]${normalizationVf(encode)},${holdLastFrameVf(segmentDuration, encode.fps)},trim=duration=${segmentDurationStr},setpts=PTS-STARTPTS${colorPart}${tpadChain},setsar=1[v${i}]`;
     filterParts.push(vf);
     if (encode.audio) {
       // Audio padding for hold-frame transitions: we extend audio with a
@@ -430,6 +431,17 @@ export async function concatWithSagaRenderer(input: SagaConcatInput): Promise<Sa
     appliedTransitions: input.transitions,
     durationSeconds: Math.max(0, finalDuration),
   };
+}
+
+/**
+ * Holds a clip's last frame long enough to fill its planned duration; the
+ * trim after it cuts whatever is left over. A provider that returns a clip
+ * shorter than requested then still fills its slot on the timeline. Audio
+ * was already padded with silence, so without this a run with audio looked
+ * right while a silent run came out short.
+ */
+function holdLastFrameVf(durationSeconds: number, fps: number): string {
+  return `tpad=stop_mode=clone:stop=${Math.max(1, Math.ceil(durationSeconds * fps))}`;
 }
 
 function normalizationVf(encode: SagaEncodeOptions): string {
@@ -556,7 +568,7 @@ async function concatWithCleanFades(input: SagaConcatInput): Promise<SagaConcatR
       : '';
 
     filterParts.push(
-      `[${i}:v]${normalizationVf(encode)},trim=duration=${segDurStr},setpts=PTS-STARTPTS${colorPart}${fadeInPart}${fadeOutPart},setsar=1[v_seg_${i}]`,
+      `[${i}:v]${normalizationVf(encode)},${holdLastFrameVf(segDur, encode.fps)},trim=duration=${segDurStr},setpts=PTS-STARTPTS${colorPart}${fadeInPart}${fadeOutPart},setsar=1[v_seg_${i}]`,
     );
     if (encode.audio) {
       // Audio fades match the video fade durations. We always also keep a
@@ -764,7 +776,7 @@ async function concatWithShaderTransitions(input: SagaConcatInput): Promise<Saga
     const segDur = input.segments[i]!.duration.toFixed(3);
     const colorPart = input.colorMatch ? ',colorbalance=rs=0.02:gs=0.0:bs=-0.02' : '';
     filterParts.push(
-      `[${i}:v]${normalizationVf(encode)},trim=duration=${segDur},setpts=PTS-STARTPTS${colorPart},setsar=1[v_seg_${i}]`,
+      `[${i}:v]${normalizationVf(encode)},${holdLastFrameVf(input.segments[i]!.duration, encode.fps)},trim=duration=${segDur},setpts=PTS-STARTPTS${colorPart},setsar=1[v_seg_${i}]`,
     );
     if (encode.audio) {
       if (audioFlags[i]) {

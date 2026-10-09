@@ -2,6 +2,7 @@ import { resolveArtemisHomeDir } from '../../../utils/fs.js'
 import os from 'node:os'
 import path from 'node:path'
 import { ImageApiError } from '../imageGenerationFailure.js'
+import { GenerationApiError } from '../generationFailure.js'
 import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import type { VisualModelConfig } from '../../../providers/types.js'
 import type {
@@ -225,6 +226,8 @@ export class CustomProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof GenerationApiError ? error.status : undefined,
+        failureStage: error instanceof GenerationApiError ? error.stage : undefined,
         generationTime: Date.now() - startedAt,
       }
     }
@@ -247,7 +250,7 @@ export class CustomProvider implements VisualProvider {
       const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
       const durationNum = Math.max(1, Math.min(60, Math.floor(duration)))
       const ratio = params.ratio || '16:9'
-      const promptExtend = videoConfig.nsfw === true
+      const promptExtend = videoConfig.nsfw === true || params.promptExtend === false
         ? false
         : (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false
 
@@ -312,7 +315,7 @@ export class CustomProvider implements VisualProvider {
       })
       const createRaw = await createRes.text()
       if (!createRes.ok) {
-        throw new Error(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`)
+        throw new GenerationApiError(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`, createRes.status)
       }
 
       let createPayload: WanVideoGenerationsResponse
@@ -346,7 +349,7 @@ export class CustomProvider implements VisualProvider {
         })
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
-          throw new Error(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`)
+          throw new GenerationApiError(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`, pollRes.status)
         }
         let pollPayload: WanVideoGenerationsResponse
         try {
@@ -399,6 +402,8 @@ export class CustomProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof GenerationApiError ? error.status : undefined,
+        failureStage: error instanceof GenerationApiError ? error.stage : undefined,
         generationTime: Date.now() - startedAt,
       }
     }
@@ -421,7 +426,7 @@ export class CustomProvider implements VisualProvider {
       const duration = params.duration ?? durationStringToNumber(videoConfig.defaultParams.duration)
       const durationNum = Math.max(1, Math.min(15, Math.floor(duration)))
       const ratio = params.ratio || '16:9'
-      const promptExtend = videoConfig.nsfw === true
+      const promptExtend = videoConfig.nsfw === true || params.promptExtend === false
         ? false
         : (videoConfig.defaultParams as Record<string, unknown>).prompt_extend !== false
 
@@ -516,7 +521,7 @@ export class CustomProvider implements VisualProvider {
       })
       const createRaw = await createRes.text()
       if (!createRes.ok) {
-        throw new Error(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`)
+        throw new GenerationApiError(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`, createRes.status)
       }
 
       let createPayload: { id?: string; task_id?: string; status?: string; error?: { message?: string } }
@@ -550,7 +555,7 @@ export class CustomProvider implements VisualProvider {
         })
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
-          throw new Error(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`)
+          throw new GenerationApiError(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`, pollRes.status)
         }
         let pollPayload: {
           id?: string
@@ -610,6 +615,8 @@ export class CustomProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof GenerationApiError ? error.status : undefined,
+        failureStage: error instanceof GenerationApiError ? error.stage : undefined,
         generationTime: Date.now() - startedAt,
       }
     }
@@ -651,7 +658,7 @@ export class CustomProvider implements VisualProvider {
       })
       const createRaw = await createRes.text()
       if (!createRes.ok) {
-        throw new Error(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`)
+        throw new GenerationApiError(`Custom video create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 800)}`, createRes.status)
       }
 
       const job = parseVideoJob(createRaw)
@@ -685,7 +692,7 @@ export class CustomProvider implements VisualProvider {
         })
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
-          throw new Error(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`)
+          throw new GenerationApiError(`Custom video poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 800)}`, pollRes.status)
         }
         currentJob = parseVideoJob(pollRaw)
         if ((attempt + 1) % POLL_LOG_EVERY === 0) {
@@ -705,7 +712,7 @@ export class CustomProvider implements VisualProvider {
       })
       if (!downloadRes.ok) {
         const detail = await downloadRes.text().catch(() => '')
-        throw new Error(`Custom video download failed (HTTP ${downloadRes.status}): ${detail.slice(0, 800)}`)
+        throw new GenerationApiError(`Custom video download failed (HTTP ${downloadRes.status}): ${detail.slice(0, 800)}`, undefined, 'download')
       }
 
       const buffer = Buffer.from(await downloadRes.arrayBuffer())
@@ -731,6 +738,8 @@ export class CustomProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        httpStatus: error instanceof GenerationApiError ? error.status : undefined,
+        failureStage: error instanceof GenerationApiError ? error.stage : undefined,
         generationTime: Date.now() - startedAt,
       }
     }
@@ -766,7 +775,7 @@ async function downloadVideoUrl(url: string, baseUrl: string | undefined, signal
       signal,
     })
   } catch (error) {
-    throw new Error(`Custom video download failed: ${error instanceof Error ? error.message : String(error)}`)
+    throw new GenerationApiError(`Custom video download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
   }
 }
 

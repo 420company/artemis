@@ -14,7 +14,22 @@ export type VideoModelLimits = {
   preferredSegmentSeconds: number;
   referenceInputs: readonly ('image' | 'video' | 'audio')[];
   canGenerateAudio: boolean;
+  /**
+   * Longest prompt Artemis sends this model. ModelArk publishes no figure for
+   * Seedance; the Artemis App sent Seedance prompts of about 4,100 characters
+   * in production, so 4,000 keeps a margin. Other models get the Director's
+   * own cap, the longest prompt sent to them so far.
+   */
+  maxPromptChars: number;
 };
+
+/** The Director's cap on a directed prompt (videoDirector.ts). */
+const DIRECTED_PROMPT_CHARS = 2600;
+const SEEDANCE_PROMPT_CHARS = 4000;
+
+function maxPromptCharsFor(model: string): number {
+  return /seedance|dreamina/i.test(model) ? SEEDANCE_PROMPT_CHARS : DIRECTED_PROMPT_CHARS;
+}
 
 export function resolveVideoModelLimits(provider: string, model: string): VideoModelLimits {
   const capabilities = resolveVideoModelCapabilities(provider, model);
@@ -27,6 +42,7 @@ export function resolveVideoModelLimits(provider: string, model: string): VideoM
       preferredSegmentSeconds: 10,
       referenceInputs: capabilities.referenceInputs,
       canGenerateAudio: capabilities.canGenerateAudio,
+      maxPromptChars: maxPromptCharsFor(model),
     };
   }
 
@@ -39,6 +55,7 @@ export function resolveVideoModelLimits(provider: string, model: string): VideoM
       preferredSegmentSeconds: 8,
       referenceInputs: capabilities.referenceInputs,
       canGenerateAudio: capabilities.canGenerateAudio,
+      maxPromptChars: maxPromptCharsFor(model),
     };
   }
 
@@ -52,5 +69,6 @@ export function resolveVideoModelLimits(provider: string, model: string): VideoM
     preferredSegmentSeconds: Math.min(10, maxSegmentSeconds),
     referenceInputs: capabilities.referenceInputs,
     canGenerateAudio: capabilities.canGenerateAudio,
+    maxPromptChars: maxPromptCharsFor(model),
   };
 }

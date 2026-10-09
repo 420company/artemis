@@ -413,6 +413,19 @@ export type AgentAction =
       // the model's own default; custom/OpenAI providers use
       // visualProfile.video.defaultParams.resolution.
       resolution?: string;
+      // Saga cleanDirect / raw passthrough: the prompt goes to the provider as
+      // written (no Director, no prompt rewrite or provider-side prompt
+      // extension), cut to the model's prompt limit.
+      cleanDirect?: boolean;
+      // Set by Saga outside raw mode: append the short rendering rules
+      // (renderingGuardrails.ts) when the prompt limit allows.
+      renderingGuardrails?: boolean;
+      // Set by Saga on each segment: the compiled prompt is already the
+      // user's script plus its locks, so no LLM rewrite (guide §7.7).
+      sagaSegment?: boolean;
+      // The Saga subtitle choice, so the Director does not forbid captions
+      // the user asked for.
+      subtitleMode?: 'auto' | 'always' | 'off';
       outputPath?: string;
       referenceImageUrls?: string[];
       referenceVideoUrls?: string[];
@@ -513,7 +526,17 @@ export type AgentAction =
       assemblyMode?: 'auto' | 'ffmpeg' | 'hyperframes' | 'saga';
       resume?: boolean;
       preserveUserScript?: boolean;
+      // Output resolution of every segment ("480p" / "720p" / "1080p"). Only
+      // sent when the user asked for one; omitted, each provider uses its default.
+      resolution?: string;
+      // Guide §9.10 "原始质感 / 少滤镜 / raw-seedance / clean-direct": drop the
+      // aesthetic dressing (style / aesthetic locks, Director, rendering
+      // rules) but keep analysis, identity and continuity locks.
       cleanDirect?: boolean;
+      // "[原样直传]": the script goes to the video model as written (no
+      // analysis, Super Visual, keyframes or Director), within the model's
+      // prompt limit.
+      rawPassthrough?: boolean;
       chainReferenceFrames?: 'auto' | 'always' | 'off';
       crossfadeMs?: number;
       defaultTransition?:

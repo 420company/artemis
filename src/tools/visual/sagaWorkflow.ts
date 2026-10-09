@@ -7,6 +7,8 @@ import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationCon
 import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveVideoModelLimits } from './videoModelLimits.js';
+import { normalizeVideoResolution } from './videoParams.js';
+import { hasCleanDirectKeyword, hasRawModeTag } from './rawModeTag.js';
 import { resolveVideoModelCapabilities } from './videoCapabilities.js';
 import type { ImageAttachment } from '../../providers/types.js';
 import {
@@ -23,6 +25,9 @@ import { isWorkflowSupportDiscussion } from './workflowIntent.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 import type { AgentAction } from '../../core/types.js';
 import type { SagaRatio } from './sagaRenderer/types.js';
+import { extractBriefAspectRatio, normalizeAspectRatio } from './aspectRatio.js';
+import { extractSagaDialogueLines } from './sagaLanguageDirector.js';
+import { parseSagaBriefGlobals, stripBriefNoise } from './sagaBriefGlobals.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
   return explicitLocale ?? DEFAULT_UI_LOCALE;
@@ -105,6 +110,8 @@ type SagaWorkflowState = {
   soundtrackFadeInSec?: number;
   soundtrackFadeOutSec?: number;
   subtitleMode?: SubtitleMode;
+  /** "480p" / "720p" / "1080p" when the user named one; unset uses the provider default. */
+  resolution?: string;
   ratio?: SagaRatio;
   suggestedRatio?: SagaRatio;
   aiScreenwriterMode?: boolean;
@@ -128,7 +135,8 @@ const WORKFLOWS = new Map<string, SagaWorkflowState>();
 const WORKFLOW_TTL_MS = 30 * 60 * 1000;
 
 const CANCEL_RE = /^(?:取消|算了|停止|不要了|cancel|stop)$/i;
-const CONFIRM_DEFAULT_RE = /^(?:默认|建议|你定|自动|可以|好|好的|ok|yes|y|sure|default)$/i;
+// "默认/自动" and "default / auto" are what a menu button labelled with both sends.
+const CONFIRM_DEFAULT_RE = /^(?:默认(?:\s*\/\s*自动)?|自动(?:\s*\/\s*默认)?|建议|你定|可以|好|好的|ok|yes|y|sure|default(?:\s*\/\s*auto)?|auto(?:\s*\/\s*default)?)$/i;
 const START_RE = /^(?:开始生成|生成|done|go|start|可以生成|就这样|直接生成|跳过|没有参考|不用参考)$/i;
 const ABSTRACT_RE = /^(?:无主角|纯视觉|纯风景|抽象视觉|abstract|no lead|no character|没有主角)$/i;
 const STORY_DIRECTIVE_RE = /(?:剧情|剧本|分镜|故事|镜头|场景|情节|你来创造|你来安排|你来写|自由发挥|按.*(?:拍|生成)|create the story|write the story|story|script|shot|scene)/i;
@@ -136,9 +144,14 @@ const STORY_ENHANCE_RE = /^(?:剧情增强|增强剧情|story\s*enhance|enhance\
 const STORYBOARD_RE = /^(?:分镜图|分镜图片|图片分镜|上传分镜|发送分镜|storyboard|storyboard image|shot board)$/i;
 
 
+/** Raw passthrough: an explicit "[原样直传]" / "【raw直传】" tag. */
+function wantsRawPassthrough(segments: string[]): boolean {
+  return segments.some((segment) => hasRawModeTag(segment));
+}
+
+/** cleanDirect: the guide's §9.10 keywords, unless raw passthrough already applies. */
 function wantsCleanDirectMode(segments: string[]): boolean {
-  const text = segments.join('\n').toLowerCase();
-  return /(?:clean[-\s]?direct|raw[-\s]?seedance|raw\s*mode|直连\s*seedance|旧版质感|老版本质感|原始质感|不要滤镜|别加滤镜|少滤镜|无滤镜|干净质感|clean prompt|short prompt)/i.test(text);
+  return !wantsRawPassthrough(segments) && segments.some((segment) => hasCleanDirectKeyword(segment));
 }
 
 function hasExplicitUserScriptText(segments: string[]): boolean {
@@ -169,9 +182,7 @@ const TEXT_ONLY_IDENTITY_RE  = /^(?:4|四|④|没有图片?|纯文字|文字描�
 const SUBTITLE_AUTO_RE       = /^(?:1|一|①|自动|按需|默认|auto|automatic|as\s*needed|default)$/i;
 const SUBTITLE_ALWAYS_RE     = /^(?:2|二|②|要字幕|带字幕|有字幕|加字幕|字幕|需要字幕|always|with\s*subtitles?|subtitles?\s*on)$/i;
 const SUBTITLE_OFF_RE        = /^(?:3|三|③|不要字幕|无字幕|没字幕|去字幕|关闭字幕|off|no\s*subtitles?|subtitles?\s*off)$/i;
-const RATIO_VERTICAL_RE      = /^(?:1|一|①|9\s*[:：xX]\s*16|竖屏|纵向|portrait|vertical)$/i;
-const RATIO_HORIZONTAL_RE    = /^(?:2|二|②|16\s*[:：xX]\s*9|横屏|横向|landscape|horizontal)$/i;
-const RATIO_SQUARE_RE        = /^(?:3|三|③|1\s*[:：xX]\s*1|方屏|方形|正方形|square)$/i;
+const RATIO_MENU_INDEX_RE    = /^(?:([1一①])|([2二②])|([3三③]))[.、)）]?$/;
 const BGM_OFF_RE             = /^(?:1|一|①|不加(?:\s*(?:BGM|音乐|配乐))?|不要(?:\s*(?:BGM|音乐|配乐))?|无(?:\s*(?:BGM|音乐|配乐))?|跳过(?:\s*(?:BGM|音乐|配乐))?|不用(?:\s*(?:BGM|音乐|配乐))?|no(?:\s*(?:bgm|music|soundtrack))?|none|skip(?:\s*(?:bgm|music|soundtrack))?)$/i;
 const BGM_ADD_RE             = /^(?:2|二|②|添加|加|有|要|bgm|music|soundtrack|add)$/i;
 const BGM_ASSET_PROMPT_ZH    = '请发送本地音频路径，或直接音频文件 URL（mp3/wav/m4a/flac 等）；不加 BGM 回复 “不加”。';
@@ -232,9 +243,11 @@ function extractBgmParamUpdates(text: string): BgmParamDiff {
   const result: BgmParamDiff = {};
   const start = parseTimeExpressionSeconds(text);
   if (typeof start === 'number' && Number.isFinite(start) && start >= 0) result.startSec = start;
-  const music = parseDbAfter(text, /(?:bgm|音乐|音量|volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  // "环境音音量 / 环境音量 / 环境声音量 -18dB", "ambience / ambient sound volume -18dB" is the
+  // ambience level, not the music's.
+  const music = parseDbAfter(text, /(?:bgm|音乐|(?<!环境[音声]?\s*)音量|(?<!(?:ambience|ambient|environment)(?:\s+(?:sounds?|audio|noise))?\s*)volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (music !== undefined) result.musicVolumeDb = music;
-  const env = parseDbAfter(text, /(?:环境音|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  const env = parseDbAfter(text, /(?:环境音|环境声|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (env !== undefined) result.environmentVolumeDb = env;
   const fadeOut = text.match(/(?:淡出|fade\s*out)[^\n\d]{0,12}(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?/i);
   if (fadeOut) result.fadeOutSec = Number(fadeOut[1]);
@@ -320,7 +333,12 @@ function isSagaWorkflowSupportDiscussion(text: string): boolean {
 }
 
 function extractTargetDuration(text: string): number | undefined {
-  const normalized = compact(text);
+  // A timecoded brief states its own length: the end of its last timecode,
+  // not the first "N秒" (which is usually a dialogue's "约 3 秒").
+  const timeline = timecodeTotalSeconds(text);
+  if (timeline) return timeline;
+  // "（约 3 秒，温柔低语）" describes a line or a beat, not the whole video.
+  const normalized = compact(text.replace(/（[^（）\n]*）|\([^()\n]*\)/g, ' '));
   const zhMinute = normalized.match(/(\d{1,3})\s*(?:分钟|分)/);
   if (zhMinute) return Number.parseInt(zhMinute[1] ?? '', 10) * 60;
   const zhSecond = normalized.match(/(\d{1,4})\s*秒/);
@@ -332,12 +350,32 @@ function extractTargetDuration(text: string): number | undefined {
   return undefined;
 }
 
+const TIMECODE_TOKEN_SOURCE = '\\d+(?::\\d{1,2}){0,2}(?:\\.\\d+)?';
+const TIMECODE_UNIT_SOURCE = '(?:\\s*(?:秒|s|sec|seconds))?';
+
+/** End of the last timecode ("[16-24秒]", "[1:04-1:12]", "0:08-0:16:") when a brief has two or more. */
+function timecodeTotalSeconds(text: string): number | undefined {
+  const range = `(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}\\s*[-–—~至到]\\s*(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}`;
+  const bracketed = Array.from(text.matchAll(new RegExp(`\\[\\s*${range}\\s*\\]`, 'gi')));
+  const markers = bracketed.length >= 2
+    ? bracketed
+    : Array.from(text.matchAll(new RegExp(`(?:^|\\n)\\s*${range}\\s*[:：]`, 'gi')));
+  const toSeconds = (token: string) => token.split(':').map(Number).reduce((total, part) => total * 60 + part, 0);
+  const ends = markers
+    .map((match) => ({ start: toSeconds(match[1] ?? ''), end: toSeconds(match[2] ?? '') }))
+    .filter((range) => Number.isFinite(range.end) && range.end > range.start)
+    .map((range) => range.end);
+  return ends.length >= 2 ? Math.round(Math.max(...ends)) : undefined;
+}
+
 function clampDuration(seconds: number | undefined): number | undefined {
   if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return undefined;
   return Math.max(10, Math.min(600, Math.floor(seconds)));
 }
 
 function estimateDuration(text: string): number {
+  const timeline = clampDuration(timecodeTotalSeconds(text));
+  if (timeline) return timeline;
   const chars = compact(text).length;
   if (chars > 1600) return 180;
   if (chars > 900) return 120;
@@ -346,22 +384,61 @@ function estimateDuration(text: string): number {
 }
 
 function extractRatio(text: string): SagaRatio | undefined {
-  // Deliberately conservative: only explicit aspect-ratio / orientation words.
-  // Do NOT infer from platform names (小红书 / Instagram / YouTube / etc.);
-  // the workflow asks the user to confirm the final hard generation parameter.
-  if (/(?:9\s*[:：xX]\s*16|竖屏|纵向|portrait|vertical)/i.test(text)) return '9:16';
-  if (/(?:1\s*[:：xX]\s*1|方屏|方形|正方形|square)/i.test(text)) return '1:1';
-  if (/(?:16\s*[:：xX]\s*9|横屏|横向|landscape|horizontal)/i.test(text)) return '16:9';
-  return undefined;
+  // Deliberately conservative: a labelled ratio line first, otherwise only
+  // bounded numeric ratios and unambiguous orientation words. Never inferred
+  // from platform names (小红书 / Instagram / YouTube / etc.).
+  return extractBriefAspectRatio(text)?.ratio;
+}
+
+/**
+ * A ratio the user has already answered: a labelled line in the brief
+ * ("画幅比例 / ratio: 9:16 竖屏"). The wizard applies it instead of asking.
+ * Orientation words in story prose ("她把手机横屏举起") only preselect the menu.
+ */
+function statedRatio(state: SagaWorkflowState): SagaRatio | undefined {
+  const brief = extractBriefAspectRatio(combinedStoryText(state));
+  return brief?.labelled ? brief.ratio : undefined;
 }
 
 function applyRatioReplyToState(state: SagaWorkflowState, text: string): boolean {
-  if (RATIO_VERTICAL_RE.test(text)) state.ratio = '9:16';
-  else if (RATIO_HORIZONTAL_RE.test(text)) state.ratio = '16:9';
-  else if (RATIO_SQUARE_RE.test(text)) state.ratio = '1:1';
-  else if (CONFIRM_DEFAULT_RE.test(text)) state.ratio = state.suggestedRatio ?? '16:9';
-  else return false;
+  const index = text.trim().match(RATIO_MENU_INDEX_RE);
+  if (index) {
+    state.ratio = index[1] ? '9:16' : index[2] ? '16:9' : '1:1';
+    return true;
+  }
+  if (CONFIRM_DEFAULT_RE.test(text)) {
+    state.ratio = state.suggestedRatio ?? '16:9';
+    return true;
+  }
+  // "9:16 竖屏", "竖屏 9:16", "portrait" — anything that names exactly one
+  // ratio, including a line copied from the menu.
+  if (text.trim().length > 40) return false;
+  const ratio = normalizeAspectRatio(text);
+  if (!ratio) return false;
+  state.ratio = ratio;
   return true;
+}
+
+/**
+ * Move to the ratio step. When the brief already states the ratio it is
+ * applied with a one-line note and the subtitle question follows directly.
+ */
+function enterRatioStep(state: SagaWorkflowState): SagaWorkflowOutcome {
+  state.updatedAt = Date.now();
+  const stated = statedRatio(state);
+  if (stated) {
+    state.ratio = stated;
+    state.suggestedRatio = stated;
+    state.stage = 'awaiting_subtitle_mode';
+    const note = pickLocale(state.locale, {
+      zh: `📐 画幅：${formatRatioLabel(stated, state.locale)}（按剧本）。要改的话直接回复其它比例，例如 “16:9”。`,
+      en: `📐 Aspect ratio: ${formatRatioLabel(stated, state.locale)} (from your brief). Reply with another ratio such as "16:9" to change it.`,
+    });
+    return { handled: true, reply: `${note}\n\n${buildSubtitleModeAskMessage(state)}` };
+  }
+  state.suggestedRatio = extractRatio(combinedStoryText(state)) ?? '16:9';
+  state.stage = 'awaiting_ratio';
+  return { handled: true, reply: buildRatioAskMessage(state) };
 }
 
 // ─── Reference collection helpers ─────────────────────────────────────────
@@ -515,19 +592,77 @@ async function classifyReferences(
   };
 }
 
-function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
+async function imageContentKey(imagePath: string): Promise<string> {
+  try {
+    return 'h:' + createHash('sha256').update(await readFile(imagePath)).digest('hex');
+  } catch {
+    return 'p:' + imagePath;
+  }
+}
+
+/**
+ * Appends image paths to an accumulated list, skipping any whose bytes are
+ * already there. Across turns the same image can arrive as a pasted local
+ * path in one message and as an attachment (saved under saga-refs) in another;
+ * string comparison counted it twice. Existing entries keep their order; on a
+ * collision the stable saga-refs copy replaces a transient user path in place.
+ */
+async function appendImagePathsByContent(existing: string[], incoming: string[]): Promise<string[]> {
+  const refsDir = path.join(getMediaOutputRoot(), 'saga-refs');
+  const out: string[] = [];
+  const indexByKey = new Map<string, number>();
+  for (const imagePath of unique([...existing, ...incoming])) {
+    const key = await imageContentKey(imagePath);
+    const seenAt = indexByKey.get(key);
+    if (seenAt === undefined) {
+      indexByKey.set(key, out.length);
+      out.push(imagePath);
+    } else if (imagePath.startsWith(refsDir) && !out[seenAt]!.startsWith(refsDir)) {
+      out[seenAt] = imagePath;
+    }
+  }
+  return out;
+}
+
+async function mergeRefs(state: SagaWorkflowState, refs: ExtractedReferences): Promise<void> {
   state.referenceImageUrls = unique([...state.referenceImageUrls, ...refs.imageUrls]);
   state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
   state.referenceAudioUrls = unique([...state.referenceAudioUrls, ...refs.audioUrls]);
-  state.referenceImagePaths = unique([...state.referenceImagePaths, ...refs.imagePaths]);
+  state.referenceImagePaths = await appendImagePathsByContent(state.referenceImagePaths, refs.imagePaths);
   state.referenceVideoPaths = unique([...state.referenceVideoPaths, ...refs.videoPaths]);
   state.referenceAudioPaths = unique([...state.referenceAudioPaths, ...refs.audioPaths]);
   state.updatedAt = Date.now();
 }
 
-function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): void {
+const RESOLUTION_WORDS: Record<string, string> = {
+  标清: '480p',
+  sd: '480p',
+  高清: '1080p',
+  超清: '1080p',
+  全高清: '1080p',
+  hd: '1080p',
+  fullhd: '1080p',
+};
+
+/**
+ * A resolution from a message that is only a resolution choice ("1080p",
+ * "分辨率 720P", "高清"); a bare number ("720") is a duration or menu answer,
+ * not a resolution. Resolution is never read out of story text: a
+ * script mentioning "一台1080P的旧显示器" must not bill every segment at
+ * 1080p. 4K is not offered by any provider.
+ */
+export function extractRequestedResolution(text: string): string | undefined {
+  const compacted = text.trim().toLowerCase().replace(/\s+/g, '');
+  if (!compacted || compacted.length > 16) return undefined;
+  const match = compacted.match(/^(?:请|用|要|改成|改为|输出|设为|画质|分辨率|清晰度|resolution|quality|[:：])*(?:(480|720|1080)p|(标清|高清|超清|全高清|fullhd|hd|sd))(?:高清|超清|画质|分辨率|吧|的|[。.!！])*$/u);
+  if (!match) return undefined;
+  if (match[1]) return normalizeVideoResolution(`${match[1]}p`);
+  return RESOLUTION_WORDS[match[2] ?? ''];
+}
+
+async function mergeStoryboardRefs(state: SagaWorkflowState, refs: ExtractedReferences): Promise<void> {
   state.storyboardImageUrls = unique([...state.storyboardImageUrls, ...refs.imageUrls]);
-  state.storyboardImagePaths = unique([...state.storyboardImagePaths, ...refs.imagePaths]);
+  state.storyboardImagePaths = await appendImagePathsByContent(state.storyboardImagePaths, refs.imagePaths);
   // Non-image attachments sent while waiting for the storyboard are still useful
   // references, but image attachments are intentionally kept out of identity refs.
   state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
@@ -901,6 +1036,17 @@ const NARRATIVE_CONFIDENCE_THRESHOLD = 0.7;
 async function runNarrativeAnalysis(state: SagaWorkflowState): Promise<NarrativeEntities> {
   const fullStory = combinedStoryText(state);
   const imagePaths = [...state.referenceImagePaths];
+  // Raw passthrough sends the script and the references to the video model
+  // as they are: no LLM and vision analysis (which would lock props and
+  // scenery from the reference backgrounds) and no "confirm the lead"
+  // question. The keyword pass only feeds downstream routing. cleanDirect
+  // keeps the analysis: it only drops aesthetic dressing.
+  if (wantsRawPassthrough([state.originalText, ...state.accumulatedStory])) {
+    return narrativeKeywordFallback({
+      userText: fullStory,
+      hasFaceLikelyInImages: imagePaths.length > 0,
+    });
+  }
   const llmResult = await analyzeNarrative({
     cwd: state.cwd,
     userText: fullStory,
@@ -1150,8 +1296,44 @@ function applyProtagonistChoice(state: SagaWorkflowState, text: string): boolean
   return false;
 }
 
+// Guide §3.2: about 4-5 Chinese characters or 2-3 English words per second.
+const CHINESE_CHARS_PER_SECOND = 5;
+const ENGLISH_WORDS_PER_SECOND = 3;
+
+/**
+ * One line per timecoded segment whose marked dialogue (spoken lines and
+ * voiceover, not subtitles) needs longer than the segment lasts at a natural
+ * speech rate; such lines get cut off or sped up.
+ */
+function speechRateWarnings(text: string, locale: UiLocale): string[] {
+  const brief = stripBriefNoise(text);
+  const range = `(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}\\s*[-–—~至到]\\s*(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}`;
+  const markers = Array.from(brief.matchAll(new RegExp(`\\[\\s*${range}\\s*\\]`, 'gi')));
+  const toSeconds = (token: string) => token.split(':').map(Number).reduce((total, part) => total * 60 + part, 0);
+  const warnings: string[] = [];
+  markers.forEach((marker, index) => {
+    const start = toSeconds(marker[1] ?? '');
+    const end = toSeconds(marker[2] ?? '');
+    const seconds = end - start;
+    if (!(seconds > 0)) return;
+    const body = brief.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index ?? brief.length);
+    const spoken = extractSagaDialogueLines(body).filter((line) => line.use !== 'subtitle');
+    const han = spoken.reduce((sum, line) => sum + (line.text.match(/\p{Script=Han}/gu)?.length ?? 0), 0);
+    const words = spoken.reduce((sum, line) => sum + (line.text.replace(/\p{Script=Han}/gu, ' ').match(/[\p{L}\p{N}'’-]+/gu)?.length ?? 0), 0);
+    const needed = han / CHINESE_CHARS_PER_SECOND + words / ENGLISH_WORDS_PER_SECOND;
+    if (needed <= seconds) return;
+    const amount = [han > 0 ? `${han} ${locale === 'zh-CN' ? '字' : 'Chinese characters'}` : '', words > 0 ? `${words} ${locale === 'zh-CN' ? '个英文词' : 'words'}` : ''].filter(Boolean).join(' + ');
+    warnings.push(pickLocale(locale, {
+      zh: `⚠️ 语速提示：段 ${index + 1}（${marker[0]}，${seconds} 秒）的对白约 ${amount}，正常语速需要约 ${Math.ceil(needed)} 秒，可能说不完或被加速；建议精简台词或拉长该段。`,
+      en: `⚠️ Speech rate: segment ${index + 1} (${marker[0]}, ${seconds}s) has about ${amount} of dialogue, which takes about ${Math.ceil(needed)}s at a natural pace; it may be cut off or sped up. Shorten the lines or lengthen the segment.`,
+    }));
+  });
+  return warnings;
+}
+
 async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string> {
   const modelLine = await buildModelLine(state.cwd, state.locale);
+  const rateWarnings = speechRateWarnings(combinedStoryText(state), state.locale);
   const estimated = estimateDuration(combinedStoryText(state));
   const refsCount = refTotal(state);
   const imgs = state.referenceImageUrls.length + state.referenceImagePaths.length + state.turnaroundImagePaths.length + state.turnaroundImageUrls.length;
@@ -1166,6 +1348,7 @@ async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string
       modelLine,
       refLine,
       storyLine,
+      ...rateWarnings,
       state.prefilledDuration
         ? `我从你前面的文字里识别到 ${state.prefilledDuration} 秒；回复 "默认/自动" 就用这个。也可以重新告诉我 "60秒"、"90秒"、"2分钟"。`
         : `请告诉我视频总长度 — "60秒"、"90秒"、"2分钟" 之类都行；想让我根据剧本和素材决定就回复 "自动"（建议 ${estimated} 秒）。`,
@@ -1179,6 +1362,7 @@ async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string
     modelLine,
     refLine,
     storyLine,
+    ...rateWarnings,
     state.prefilledDuration
       ? `I detected ${state.prefilledDuration}s earlier; reply "default/auto" to use that, or give a new duration such as "60s", "90s", "2 minutes".`
       : `How long should the video be? Tell me a duration — "60s", "90s", "2 minutes" — or reply "auto" and I'll choose from the complete script/materials (suggesting ${estimated}s).`,
@@ -1199,6 +1383,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   const aiScreenwriterSeed = state.aiScreenwriterMode === true;
   const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated) && !aiScreenwriterSeed;
   const cleanDirect = wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
+  const rawPassthrough = wantsRawPassthrough([state.originalText, ...sanitizedAccumulated]);
   const creativeSeedSegments = sanitizedAccumulated.length > 0 ? sanitizedAccumulated : [fullStory].filter(Boolean);
   const userScriptBlock = (sanitizedAccumulated.length > 0 || aiScreenwriterSeed)
     ? (aiScreenwriterSeed
@@ -1265,9 +1450,11 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     'colorMatch: true',
     'generateAudio: true',
     `subtitleMode: ${JSON.stringify(state.subtitleMode ?? 'auto')}`,
+    state.resolution ? `resolution: ${JSON.stringify(state.resolution)}` : '',
     preserveUserScript ? 'preserveUserScript: true' : '',
     aiScreenwriterSeed ? 'aiScreenwriterMode: true' : '',
     cleanDirect ? 'cleanDirect: true' : '',
+    rawPassthrough ? 'rawPassthrough: true' : '',
   ];
 
   if (state.referenceImageUrls.length > 0) lines.push(`referenceImageUrls: ${JSON.stringify(state.referenceImageUrls)}`);
@@ -1345,21 +1532,33 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   return lines.join('\n');
 }
 
+/** The brief's CHARACTER LOCK / 色彩 / 光照 / 镜头机位 / VIBE lines (guide §6) as the action's continuity locks. */
+function continuityFromBrief(story: string): Extract<AgentAction, { type: 'generate_long_video' }>['continuity'] | undefined {
+  const globals = parseSagaBriefGlobals(stripBriefNoise(story));
+  const continuity = {
+    ...(globals.characters.length > 0 ? { characters: globals.characters } : {}),
+    ...(globals.palette.length > 0 ? { palette: globals.palette } : {}),
+    ...(globals.lighting ? { lighting: globals.lighting } : {}),
+    ...(globals.cameraLanguage ? { cameraLanguage: globals.cameraLanguage } : {}),
+    ...(globals.mood ? { mood: globals.mood } : {}),
+  };
+  return Object.keys(continuity).length > 0 ? continuity : undefined;
+}
+
 function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, { type: 'generate_long_video' }> {
   const prompt = buildGenerationPrompt(state);
   const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
   const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
   const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated);
-  // cleanDirect is opt-in via explicit keywords (raw-seedance / 原始质感 / etc.).
-  // It used to be auto-forced whenever preserveUserScript was true, but those
-  // two concerns are independent: preserveUserScript means "don't rewrite my
-  // text", whereas cleanDirect means "strip ALL directorial scaffolding"
-  // (Super Visual keyframes, chain frames, STYLE-LOCK, AESTHETIC-LOCK,
-  // NEGATIVE, EXPLICIT USER BRIEF LOCK, etc.). Coupling them silently broke
-  // detailed timecoded briefs by removing every quality lock.
+  // cleanDirect is opt-in via the guide's keywords (raw-seedance / 原始质感 /
+  // etc.) and raw passthrough via an explicit "[原样直传]" tag. Neither is
+  // implied by preserveUserScript ("don't rewrite my text"): coupling them
+  // silently broke detailed timecoded briefs by removing every quality lock.
   const cleanDirect = wantsCleanDirectMode([state.originalText, ...sanitizedAccumulated]);
+  const rawPassthrough = wantsRawPassthrough([state.originalText, ...sanitizedAccumulated]);
   const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
   const ratio = state.ratio ?? state.suggestedRatio ?? extractRatio(fullStory) ?? '16:9';
+  const briefContinuity = continuityFromBrief(fullStory);
   const projectIdMatch = prompt.match(/^projectId:\s*"([^"]+)"/m);
   const projectId = projectIdMatch?.[1] ?? `saga-${Date.now()}`;
 
@@ -1404,8 +1603,11 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
     colorMatch: true,
     generateAudio: true,
     subtitleMode: state.subtitleMode ?? 'auto',
+    ...(state.resolution ? { resolution: state.resolution } : {}),
     preserveUserScript,
     cleanDirect,
+    ...(rawPassthrough ? { rawPassthrough: true } : {}),
+    ...(briefContinuity ? { continuity: briefContinuity } : {}),
     referenceImageUrls: mergedRefImageUrls,
     storyboardImageUrls: [...state.storyboardImageUrls],
     referenceVideoUrls: [...state.referenceVideoUrls],
@@ -1475,6 +1677,18 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   if (state) {
     if (input.locale) state.locale = input.locale;
 
+    // A message that is only a resolution choice sets it and leaves the
+    // current step as it was.
+    const requestedResolution = extractRequestedResolution(text);
+    if (requestedResolution) {
+      state.resolution = requestedResolution;
+      state.updatedAt = Date.now();
+      return { handled: true, reply: pickLocale(state.locale, {
+        zh: `已记下：所有分段按 ${requestedResolution} 生成${requestedResolution === '1080p' ? '（费用约为默认画质的数倍）' : ''}。请继续回答上一步的问题。`,
+        en: `Noted: every segment will be generated at ${requestedResolution}${requestedResolution === '1080p' ? ' (several times the default cost)' : ''}. Please continue with the previous question.`,
+      }) };
+    }
+
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
       return { handled: true, reply: pickLocale(state.locale, { zh: '已停止本次生成流程。', en: 'This generation has been stopped.' }) };
@@ -1510,7 +1724,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       }
 
       const rememberedImageNote = maybeRememberImageReferenceNotes(state, refs, text);
-      mergeRefs(state, refs);
+      await mergeRefs(state, refs);
       if (!rememberedImageNote) maybeRememberReferenceNote(state, text);
       maybeAccumulateStory(state, text);
 
@@ -1553,10 +1767,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
           state.updatedAt = Date.now();
           return { handled: true, reply: buildProtagonistAskMessage(state) };
         }
-        state.suggestedRatio = extractRatio(combinedStoryText(state)) ?? '16:9';
-        state.stage = 'awaiting_ratio';
-        state.updatedAt = Date.now();
-        return { handled: true, reply: buildRatioAskMessage(state) };
+        return enterRatioStep(state);
       }
 
       // Acknowledge the refs and continue collecting
@@ -1632,12 +1843,12 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       // "/path/x.jpg" on its own line never gets registered as an image
       // and the "完成"/"开始生成" branch keeps re-prompting.
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
-      mergeRefs(state, refs);
+      await mergeRefs(state, refs);
       // Move newly-merged reference images into the turnaround bucket so
       // they're tagged correctly for downstream (`identitySource: 'turnaround'`
       // tells generateLongVideo to skip superVisual generation).
       if (state.referenceImagePaths.length > 0 || state.referenceImageUrls.length > 0) {
-        state.turnaroundImagePaths.push(...state.referenceImagePaths);
+        state.turnaroundImagePaths = await appendImagePathsByContent(state.turnaroundImagePaths, state.referenceImagePaths);
         state.turnaroundImageUrls.push(...state.referenceImageUrls);
         state.referenceImagePaths = [];
         state.referenceImageUrls = [];
@@ -1669,7 +1880,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       const pairedDirectImageCaption = state.identitySource === 'direct_image'
         ? maybeRememberImageReferenceNotes(state, refs, text)
         : false;
-      mergeRefs(state, refs);
+      await mergeRefs(state, refs);
       if (START_RE.test(text) || DONE_RE.test(text)) {
         if (!hasCollectedAnyImage(state)) {
           const reply = state.identitySource === 'direct_image'
@@ -1700,7 +1911,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
 
     if (state.stage === 'awaiting_storyboard_image') {
       const refs = await classifyReferences(state.cwd, text, input.imageAttachments);
-      mergeStoryboardRefs(state, refs);
+      await mergeStoryboardRefs(state, refs);
       maybeRememberReferenceNote(state, text);
       const storyboardCount = state.storyboardImageUrls.length + state.storyboardImagePaths.length;
       if (storyboardCount === 0) {
@@ -1718,10 +1929,7 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
         state.updatedAt = Date.now();
         return { handled: true, reply: buildProtagonistAskMessage(state) };
       }
-      state.suggestedRatio = extractRatio(combinedStoryText(state)) ?? '16:9';
-      state.stage = 'awaiting_ratio';
-      state.updatedAt = Date.now();
-      return { handled: true, reply: buildRatioAskMessage(state) };
+      return enterRatioStep(state);
     }
 
     if (state.stage === 'awaiting_ratio') {
@@ -1741,6 +1949,16 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       else if (SUBTITLE_AUTO_RE.test(text) || CONFIRM_DEFAULT_RE.test(text)) state.subtitleMode = 'auto';
       else {
         state.updatedAt = Date.now();
+        // The ratio note above this menu invites a different ratio here.
+        const ratioChange = text.length <= 40 ? normalizeAspectRatio(text) : undefined;
+        if (ratioChange) {
+          state.ratio = ratioChange;
+          const note = pickLocale(state.locale, {
+            zh: `📐 画幅已改为 ${formatRatioLabel(ratioChange, state.locale)}。`,
+            en: `📐 Aspect ratio changed to ${formatRatioLabel(ratioChange, state.locale)}.`,
+          });
+          return { handled: true, reply: `${note}\n\n${buildSubtitleModeAskMessage(state)}` };
+        }
         return { handled: true, reply: buildSubtitleModeAskMessage(state) };
       }
       state.stage = 'awaiting_duration';
@@ -1825,7 +2043,11 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   // "长视频", "long video", etc.). Fresh Saga entry is command-gated by the
   // caller: only an explicit /saga command sets forceIntent=true. Once a Saga
   // workflow is active, follow-up replies above can continue the wizard.
-  if (!input.forceIntent || isSagaWorkflowSupportDiscussion(text)) {
+  // An explicit /saga always starts the wizard. The support-discussion
+  // classifier must not veto it: real timecoded briefs are full of "视频",
+  // "短片", "生成" and question marks in dialogue, and a vetoed brief fell
+  // through to the plain agent, which lost the identity-source choice.
+  if (!input.forceIntent) {
     return { handled: false };
   }
   const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');
@@ -1838,10 +2060,85 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   // very message (Telegram image / inline URL), we want to capture them.
   if (multimodalCapable) {
     const refs = await classifyReferences(next.cwd, text, input.imageAttachments);
-    mergeRefs(next, refs);
+    await mergeRefs(next, refs);
   }
 
   next.stage = 'awaiting_subject_mode';
   WORKFLOWS.set(key, next);
+  const declared = applyDeclaredSubjectAndIdentity(next);
+  if (declared) return { handled: true, reply: declared };
   return { handled: true, reply: buildSubjectModeAskMessage(next) };
+}
+
+// Guide §9.6: "主体模式：有主角。身份来源：纯文字。" / "Subject mode: pure visual."
+// Guide §9.6 declarations. Only a line that starts with the label counts, in
+// the brief's header (before the first timecoded segment), and only when the
+// value is exactly one of the options; the same words inside story prose
+// ("档案上写着：身份来源：照片") do not switch anything.
+const DECLARED_LABEL_RE = /^(?<label>主体模式|身份来源|subject\s*mode|identity\s*source)\s*[:：]\s*(?<value>[^。；;\n]*?)\s*(?:[。.；;]|$)/i;
+const SUBJECT_VALUE_RE = /^(?:有主角|纯视觉(?:\s*\/\s*无主角)?|无主角|has\s+(?:a\s+)?protagonist|pure\s+visual(?:\s*\/\s*no\s+protagonist)?|no\s+protagonist)$/i;
+const IDENTITY_VALUE_RE = /^(?:(?:角色)?三视图(?:参考图)?|角色图|人物图|人物照片|照片|直接(?:用)?图片|纯文字|文字描述|turnaround(?:\s+(?:reference\s+)?sheet)?|three[-\s]?view(?:\s+sheet)?|character\s+(?:image|photo)|photo|direct\s+image|text[-\s]?only)$/i;
+
+function declaredSubjectAndIdentity(text: string): { subject?: string; identity?: string } {
+  const header = text.split(/^\s*\[\s*\d+(?::\d{1,2}){0,2}(?:\.\d+)?\s*(?:秒|s|sec|seconds)?\s*[-–—~至到]/m)[0] ?? '';
+  const out: { subject?: string; identity?: string } = {};
+  for (const rawLine of header.split(/\r?\n/)) {
+    // "主体模式：有主角。身份来源：纯文字。" declares both on one line.
+    let rest = rawLine.replace(/^\s*[·•*-]?\s*/, '');
+    for (let match = rest.match(DECLARED_LABEL_RE); match?.groups; match = rest.match(DECLARED_LABEL_RE)) {
+      const value = match.groups.value!.trim();
+      const isSubject = /主体模式|subject/i.test(match.groups.label!);
+      if (isSubject && SUBJECT_VALUE_RE.test(value)) out.subject ??= value.toLowerCase();
+      if (!isSubject && IDENTITY_VALUE_RE.test(value)) out.identity ??= value.toLowerCase();
+      rest = rest.slice(match[0].length).replace(/^[^。.；;\n]*?(?=主体模式|身份来源|subject\s*mode|identity\s*source|$)/i, '');
+      if (!rest) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Applies a subject mode / identity source the brief declares up front, so
+ * those questions are not asked. Returns the next reply, or undefined when
+ * the brief declares neither.
+ */
+function applyDeclaredSubjectAndIdentity(state: SagaWorkflowState): string | undefined {
+  const { subject, identity } = declaredSubjectAndIdentity(state.originalText);
+  if (!subject && !identity) return undefined;
+  const note = (zh: string, en: string) => pickLocale(state.locale, { zh: `📋 已按剧本设定：${zh}`, en: `📋 Taken from your brief: ${en}` });
+  if (subject && /纯视觉|无主角|pure|no\s+protagonist/.test(subject)) {
+    markAbstractPreference(state);
+    state.stage = 'collecting_refs';
+    return `${note('纯视觉（无主角）。', 'pure visual (no protagonist).')}\n\n${buildRefIntroMessage(state)}`;
+  }
+  // An identity source implies a protagonist.
+  if (!identity) {
+    if (!state.multimodalCapable) {
+      state.identitySource = 'text_only';
+      state.stage = 'collecting_refs';
+      return `${note('有主角。', 'has a protagonist.')}\n\n${buildRefIntroMessage(state)}`;
+    }
+    state.stage = 'awaiting_identity_source';
+    return `${note('有主角。', 'has a protagonist.')}\n\n${buildIdentitySourceAskMessage(state)}`;
+  }
+  if (/纯文字|文字描述|text/.test(identity) || !state.multimodalCapable) {
+    state.identitySource = 'text_only';
+    state.referenceImagePaths = [];
+    state.referenceImageUrls = [];
+    state.stage = 'collecting_refs';
+    return `${note('有主角 · 身份来源：纯文字。', 'has a protagonist · identity source: text only.')}\n\n${buildRefIntroMessage(state)}`;
+  }
+  if (/三视图|turnaround|three/.test(identity)) {
+    state.identitySource = 'turnaround';
+    state.stage = 'awaiting_turnaround_upload';
+    return `${note('有主角 · 身份来源：三视图。', 'has a protagonist · identity source: turnaround sheet.')}\n\n${buildTurnaroundUploadMessage(state)}`;
+  }
+  if (/直接|direct/.test(identity)) {
+    state.identitySource = 'direct_image';
+    state.stage = 'awaiting_character_image_upload';
+    return `${note('有主角 · 身份来源：直接用图片。', 'has a protagonist · identity source: image used directly.')}\n\n${buildDirectImageUploadMessage(state)}`;
+  }
+  state.identitySource = 'character_image';
+  state.stage = 'awaiting_character_image_upload';
+  return `${note('有主角 · 身份来源：角色图。', 'has a protagonist · identity source: character image.')}\n\n${buildCharacterImageUploadMessage(state)}`;
 }
