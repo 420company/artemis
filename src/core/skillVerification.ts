@@ -650,23 +650,49 @@ export function replyReportsFailure(reply: string): boolean {
   return hasFailure(text) && !SUCCESS_REPLY_RE.test(text)
 }
 
-/** "Done", "all set", "已完成", "测试通过": the reply says the work is finished or works. */
-const COMPLETION_CLAIM_RE =
-  /\b(?:done|complete[d]?|finished|all set|ready|works|working|implemented|fixed|resolved|succeeded|successfully|pass(?:es|ed|ing)?|green)\b|已完成|完成了|已经完成|搞定|已修复|修好了|已解决|已通过|全部通过|测试通过|成功|已生成|生成好了|已实现|没问题了/i
-/** Negated completion words ("not done yet", "未完成") are no claim. */
-const NEGATED_COMPLETION_RE =
-  /\b(?:not|isn'?t|aren'?t|wasn'?t|never)\s+(?:yet\s+|quite\s+|fully\s+)?(?:done|complete[d]?|finished|ready|working|fixed|resolved|passing)\b|未完成|没有完成|没完成|尚未完成|未成功|没有成功|不成功|未修复|没修好/gi
+/**
+ * An explicit claim that checks or results passed: "all tests pass", "the
+ * build succeeds", "verified", "测试全部通过", "验证通过". "Done" or "works
+ * now" alone is no claim about a check.
+ */
+const CHECK_PASS_CLAIM_RE = new RegExp([
+  /\b(?:all\s+(?:\d+\s+)?)?(?:unit\s+|the\s+)?(?:tests?|specs?|checks?|builds?|lint(?:ing)?|type ?checks?|typecheck(?:ing)?|ci)\s+(?:now\s+|all\s+|still\s+)?(?:pass(?:es|ed|ing)?|succeed(?:s|ed)?|(?:is|are)\s+(?:passing|green|clean))\b/.source,
+  /\bpass(?:es|ed|ing)?\s+(?:all\s+)?(?:the\s+)?(?:\d+\s+)?(?:tests?|checks?|specs?)\b/.source,
+  /\b(?:verified|tested)\s+(?:that|it|the|and|working|successfully)\b|\b(?:fully\s+)?(?:verified|tested)\s*[.!]/.source,
+  /\bworks\s+(?:now\s+)?(?:and|,)\s+(?:all\s+)?(?:tests?|checks?)\s+pass/.source,
+  /(?:测试|单测|检查|构建|编译|类型检查|lint)(?:用例)?(?:已经|已|都|均|全部|全都|也)*(?:通过|成功|绿了)/.source,
+  /已验证|验证通过|验证无误|跑通了/.source,
+].join('|'), 'i')
 
 /**
- * The reply claims the work is done or works ("Done — all tests pass",
- * "已完成，测试通过") and does not itself report a failure. Used by the
- * end-of-run self-check (core/selfCheck.ts) to spot a success claim that
- * the run's own evidence contradicts.
+ * The reply discloses a problem anywhere: a failure, failing or unrun
+ * checks, a pre-existing failure ("1 failing test", "still fails",
+ * "pre-existing failure", "tests were not run", "测试未通过", "还没跑测试").
  */
-export function replyClaimsSuccess(reply: string): boolean {
-  if (!reply.trim() || replyReportsFailure(reply)) return false
-  const text = reply.slice(0, 6000).replace(NEGATED_FAILURE_RE, ' ').replace(NEGATED_COMPLETION_RE, ' ')
-  return SUCCESS_REPLY_RE.test(text) || COMPLETION_CLAIM_RE.test(text)
+const DISCLOSURE_RE = new RegExp([
+  /\b\d+\s+(?:\w+\s+){0,2}(?:failing|failed|failures?|errors?)\b/.source,
+  /\bstill\s+(?:fails?|failing|failed|broken|errors?)\b|\b(?:has|have|with|there\s+(?:is|are))\s+(?:a\s+|one\s+|some\s+|\d+\s+)?failing\b/.source,
+  /\bpre-?existing\s+(?:failures?|failing|issues?|errors?|problems?)\b|\balready\s+(?:failing|broken|failed)\b|\bwas\s+(?:already\s+)?failing\b/.source,
+  /\b(?:tests?|checks?|builds?)\s+(?:were|was|have|has|are|is)?\s*(?:not|n't|never)\s+(?:been\s+|yet\s+)?(?:run|executed|verified)\b/.source,
+  /\b(?:did(?:n't| not)|could(?:n't| not)|cannot|can't)\s+run\s+(?:the\s+)?(?:tests?|checks?|build)\b|\bnot\s+(?:yet\s+)?(?:tested|verified)\b|\buntested\b|\bunverified\b/.source,
+  /未通过|没通过|不通过|未运行|没运行|没有运行|没跑|还没跑|未测试|没有测试|没测试|未验证|没验证|没有验证|(?:仍|还|依然|仍然|还是)(?:有)?.{0,6}(?:失败|报错|错误)|(?:原本|之前|本来)就.{0,8}(?:失败|报错|错误|不通过)/.source,
+].join('|'), 'i')
+
+/** The reply discloses a failure or an unverified state anywhere (see DISCLOSURE_RE and replyReportsFailure). */
+export function replyDisclosesProblem(reply: string): boolean {
+  const text = reply.slice(0, 6000).replace(NEGATED_FAILURE_RE, ' ')
+  return replyReportsFailure(reply) || DISCLOSURE_RE.test(text)
+}
+
+/**
+ * The reply explicitly claims that checks or results passed ("all tests
+ * pass", "测试全部通过", "verified") and discloses no problem. Used by the
+ * end-of-run self-check (core/selfCheck.ts) to spot a claim the run's own
+ * evidence contradicts.
+ */
+export function replyClaimsChecksPass(reply: string): boolean {
+  if (!reply.trim() || replyDisclosesProblem(reply)) return false
+  return CHECK_PASS_CLAIM_RE.test(reply.slice(0, 6000))
 }
 
 // ── the user's next message ────────────────────────────────────────────────
