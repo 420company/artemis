@@ -82,6 +82,16 @@ You never pick a workflow by name. For each request Artemis decides how much pro
 
 Cheap heuristics decide the clear cases; questions, follow-ups and writing tasks always take the direct path. Only a long request that matches nothing clearly gets one small classification call, and only when a worker model is configured (low effort, strict JSON, 8-second timeout); any doubt or error falls back to the direct path. Routed workflows never raise the model's effort setting. Every run has a hard sub-agent budget, and Artemis can switch itself to a heavier workflow mid-task with its `use_workflow` tool. The old `/niko`, `/athena`, `/contest`, `/design` and `/team` commands are gone: if you type one, the word is dropped and the rest is routed like any other request (it never forces a workflow).
 
+##### Verify before done
+
+Before Artemis tells you a non-trivial task is finished, it checks its own work once, the way a careful engineer would:
+
+- **When.** Only at the end of a top-level run that changed files, generated images/video/audio, or whose last test/build check failed. Chat, questions, read-only analysis, Saga runs (they have their own critic), Goal Mode ticks and sub-agents are never checked. The decision costs no model call.
+- **Code.** If no test, typecheck or lint ran after the last edit, the project's most relevant check (`npm test`, `pytest`, `cargo test`, …, or the one the run already used) runs once, through the normal tool path and its permissions, killed after 3 minutes. Installs, watchers and servers are never started. On a failure the agent gets one fix turn with the failure excerpt, then the check runs once more.
+- **Images.** The requested aspect ratio is read from the file; when a model that can see images is available, it compares the image with your request once (subjects, requested text). A clear mismatch gets one regeneration. Videos and audio: metadata only (duration, aspect ratio, audio track, via `ffprobe`), reported but never regenerated.
+- **Honest reply.** A reply that claims success while the evidence says otherwise is corrected. The reply mentions the check only when something was fixed or still fails; the CLI shows one "Self-check…" line.
+- **Bounds.** One check pass and one fix turn per run, at most 2 extra model calls, 4 minutes of extra time. The check's instructions travel in the unsaved per-run context, so the system prompt and the prompt cache are untouched. Turn it off with `ARTEMIS_SELF_CHECK=0` or `setup.selfCheck.enabled: false` in `providers.json` (`maxWallMs`, `commandTimeoutMs` and `maxModelCalls` tune the bounds).
+
 #### 3. Persistent memory and long-context stability
 
 Long work often fails because the assistant forgets. Artemis is built to preserve continuity.
@@ -405,6 +415,16 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - **Saga 长视频**——明确要求制作一段新的多段长视频时，Artemis 会先问你是否使用 Saga 长视频工作流（会产生费用），你确认后才开始；`/saga` 则直接进入。
 
 明确的情况由轻量规则直接判断；提问、追问和写作类任务一律直接处理。只有很长又看不出类型的请求，并且配置了 worker 模型时，才会做一次小的分类调用（低 effort、严格 JSON、8 秒超时），任何不确定或出错都回到直接处理。自动选择的工作流不会提高模型的 effort。每次运行都有子代理数量上限，Artemis 在任务中途发现更复杂时，也可以用 `use_workflow` 工具自己升级流程。原来的 `/niko`、`/athena`、`/contest`、`/design`、`/team` 命令已移除：如果仍然输入，斜杠词会被忽略，其余内容按普通请求路由（不会强制进入任何工作流）。
+
+##### 完成前自检
+
+Artemis 在告诉你一项非简单任务"完成了"之前，会像细心的工程师一样先检查一遍自己的工作：
+
+- **什么时候查**：只在顶层运行结束时，并且这次运行改了文件、生成了图片/视频/音频，或最后一次测试/构建检查失败。闲聊、提问、只读分析、Saga 运行（它有自己的评审）、Goal Mode 迭代和子代理都不检查。是否检查由规则判断，不调用模型。
+- **代码**：如果最后一次修改之后没有跑过测试、类型检查或 lint，就运行一次项目里最相关的检查（`npm test`、`pytest`、`cargo test` 等，或本次运行已经用过的那个），走正常的工具调用和权限，3 分钟超时即终止；从不执行安装、监听模式或启动服务。失败时给 agent 一次修复机会（附失败摘要），然后再跑一次检查。
+- **图片**：从文件头读取画幅比例；有能看图的模型时，再对照你的要求看一次（主体、要求的文字）。明显不符时重新生成一次。视频和音频只检查元数据（时长、画幅、是否有音轨，用 `ffprobe`），不符会如实说明，但不会重新生成。
+- **如实回复**：回复声称成功、但证据显示失败时，会被纠正。只有修复了问题或仍然失败时，回复里才简短提一句自检结果；命令行只显示一行"自检中…"。
+- **上限**：每次运行最多一轮检查、一次修复，额外模型调用最多 2 次，额外时间最多 4 分钟。自检说明放在不保存的每轮运行上下文里，系统提示和提示缓存不受影响。用 `ARTEMIS_SELF_CHECK=0` 或在 `providers.json` 里设置 `setup.selfCheck.enabled: false` 关闭（`maxWallMs`、`commandTimeoutMs`、`maxModelCalls` 可调整上限）。
 
 #### 3. 持久记忆与长上下文稳定性
 
