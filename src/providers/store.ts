@@ -312,6 +312,52 @@ function parseProviderStoreJson(raw: string, filePath: string): {
   }
 }
 
+/**
+ * The compression settings a providers.json actually sets
+ * (setup.agent.compression), as opposed to the defaults load() fills in.
+ * `enabled: true` is the default and older engines saved it into every
+ * providers.json, so only `enabled: false` counts as a choice.
+ */
+export type ExplicitCompressionSettings = {
+  enabled?: false;
+  threshold?: number;
+  /** As written: a number, or a string such as "off" (see parseContextCap). */
+  maxContextTokens?: number | string;
+};
+
+export function pickExplicitCompression(raw: unknown): ExplicitCompressionSettings {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  const picked: ExplicitCompressionSettings = {};
+  if (record.enabled === false) picked.enabled = false;
+  if (typeof record.threshold === 'number' && Number.isFinite(record.threshold) && record.threshold > 0) {
+    picked.threshold = record.threshold;
+  }
+  if (typeof record.maxContextTokens === 'number' || (typeof record.maxContextTokens === 'string' && record.maxContextTokens.trim())) {
+    picked.maxContextTokens = record.maxContextTokens;
+  }
+  return picked;
+}
+
+/**
+ * The store as written to disk: setup.agent.compression keeps only what
+ * differs from the defaults, so saving a loaded store (a new profile,
+ * telemetry after a model call) never turns a default into a setting that
+ * would shadow the global store or ARTEMIS_MAX_CONTEXT_TOKENS.
+ */
+function withoutDefaultCompression(data: ProviderStoreData): ProviderStoreData {
+  const agent = data.setup?.agent;
+  if (!data.setup || !agent?.compression) return data;
+  const { enabled, threshold, maxContextTokens, ...other } = agent.compression;
+  const compression: Record<string, unknown> = { ...other };
+  if (enabled === false) compression.enabled = false;
+  if (threshold !== undefined && threshold !== null) compression.threshold = threshold;
+  if (maxContextTokens !== undefined && maxContextTokens !== null) compression.maxContextTokens = maxContextTokens;
+  const { compression: _dropped, ...agentRest } = agent;
+  const nextAgent = Object.keys(compression).length > 0 ? { ...agentRest, compression } : agentRest;
+  return { ...data, setup: { ...data.setup, agent: nextAgent as typeof agent } };
+}
+
 export class ProviderStore {
   private readonly rootDir: string;
   private readonly filePath: string;
@@ -410,6 +456,19 @@ export class ProviderStore {
   }
 
   /**
+   * The compression fields this store's providers.json actually sets (not
+   * the defaults load() fills in). A missing file sets nothing; an
+   * unreadable one throws.
+   */
+  async loadExplicitCompression(): Promise<ExplicitCompressionSettings> {
+    if (!(await pathExists(this.filePath))) return {};
+    const parsed = parseProviderStoreJson(await readFile(this.filePath, 'utf8'), this.filePath).data as {
+      setup?: { agent?: { compression?: unknown } };
+    };
+    return pickExplicitCompression(parsed.setup?.agent?.compression);
+  }
+
+  /**
    * Writes the whole store atomically: a temporary file next to it, then a
    * rename. A plain writeFile truncates first, so a concurrent load (another
    * process, or this one's background telemetry write after a model call)
@@ -417,7 +476,7 @@ export class ProviderStore {
    */
   async save(data: ProviderStoreData): Promise<void> {
     await this.ensure();
-    const body = JSON.stringify(data, null, 2);
+    const body = JSON.stringify(withoutDefaultCompression(data), null, 2);
     const temp = `${this.filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temp, body, 'utf8');
     try {

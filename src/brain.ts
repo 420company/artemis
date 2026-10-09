@@ -175,7 +175,7 @@ let _compressionThresholdOverride: number | undefined;
 // setup.agent.compression: enabled=false turns off proactive compaction
 // (overflow recovery stays on); maxContextTokens caps the window for cost.
 let _compressionEnabled = true;
-let _compressionMaxContextTokens: number | undefined;
+let _compressionMaxContextTokens: number | string | undefined;
 // ── Dual-model worker provider ──────────────────────────────────────────────
 // When the user configures a "specialist" profile (smaller/cheaper model),
 // it's loaded here. Used for: summarization, compression, bulk digestion,
@@ -553,9 +553,13 @@ async function loadProvider(cwd: string = process.cwd()) {
     const data = await store.load();
     let config = store.getDefaultMainProfile(data);
     let telemetryCwd = currentCwd;
-    _compressionThresholdOverride = data.setup?.agent.compression.threshold;
-    _compressionEnabled = data.setup?.agent.compression.enabled !== false;
-    _compressionMaxContextTokens = data.setup?.agent.compression.maxContextTokens;
+    // setup.agent.compression per field: workspace > global > defaults (only
+    // values a providers.json actually sets count).
+    const { resolveCompressionSettings } = await import('./services/compactionSettings.js');
+    const compression = await resolveCompressionSettings(currentCwd).catch(() => ({} as Awaited<ReturnType<typeof resolveCompressionSettings>>));
+    _compressionThresholdOverride = compression.threshold;
+    _compressionEnabled = compression.enabled !== false;
+    _compressionMaxContextTokens = compression.maxContextTokens;
     // 2. Fallback: try global ~/.artemis/providers.json
     if (!config) {
         const artemisHome = resolveArtemisHomeDir();
@@ -564,9 +568,6 @@ async function loadProvider(cwd: string = process.cwd()) {
         config = globalStore.getDefaultMainProfile(globalData);
         if (config) {
             telemetryCwd = artemisHome;
-            _compressionThresholdOverride = globalData.setup?.agent.compression.threshold;
-            _compressionEnabled = globalData.setup?.agent.compression.enabled !== false;
-            _compressionMaxContextTokens = globalData.setup?.agent.compression.maxContextTokens;
         }
     }
     // 3. Fallback: read ANTHROPIC_API_KEY from environment
