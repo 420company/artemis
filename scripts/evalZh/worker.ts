@@ -55,9 +55,9 @@ async function wireMockProfile(baseUrl: string): Promise<void> {
 async function applySetup(job: WorkerTurnJob): Promise<void> {
   const { ProviderStore } = await import('../../src/providers/store.js')
   if (job.setup.maxContextTokens) {
-    // The workspace store: services/compactionSettings.ts reads it first, and
-    // its defaults always carry setup.agent.compression, so a value in the
-    // global store would never be reached.
+    // The workspace store, for convenience: the cap stays next to the task's
+    // workspace. A global setup.agent.compression value would apply too
+    // (services/compactionSettings.ts merges workspace > global per field).
     const store = new ProviderStore(job.cwd)
     const data = await store.load() as any
     data.setup = { ...(data.setup ?? {}), agent: { ...(data.setup?.agent ?? {}), compression: { ...(data.setup?.agent?.compression ?? {}), maxContextTokens: job.setup.maxContextTokens } } }
