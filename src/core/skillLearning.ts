@@ -132,7 +132,8 @@ const GENERATION_TOOLS = new Set([
   'generate_long_video',
   'synthesize_speech',
 ])
-const ARTIFACT_PATH_RE = /(?:[A-Za-z]:\\|\/|\.{1,2}\/)[^\s"'`<>|]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|mkv|mp3|wav|m4a|ogg|flac)\b/gi
+/** File paths of generated media in a generation tool's output. */
+export const ARTIFACT_PATH_RE = /(?:[A-Za-z]:\\|\/|\.{1,2}\/)[^\s"'`<>|]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|mkv|mp3|wav|m4a|ogg|flac)\b/gi
 const LOADED_SKILL_HEADER_RE = /Learned skill id=(\S+) scope=(\S+?)[\s,;]/
 
 /** Collects one run's tool calls. Both engine paths feed it. */
