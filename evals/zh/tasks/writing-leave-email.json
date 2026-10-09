@@ -1,0 +1,89 @@
+{
+  "id": "writing-leave-email",
+  "category": "writing",
+  "description": "写一封正式的请假邮件（日期、原因、交接、主题都要有）",
+  "turns": [
+    {
+      "prompt": "帮我写一封请假邮件给王经理：我下周三（10月15日）要去医院复查，请一天假，手上的报表工作已经交接给小李了。语气正式一点，带上邮件主题。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 6,
+    "timeoutSec": 180,
+    "budgetTokens": 150000
+  },
+  "graders": [
+    {
+      "id": "facts",
+      "type": "reply_contains",
+      "all": [
+        "王经理",
+        [
+          "10月15日",
+          "10月15号"
+        ],
+        "小李",
+        [
+          "复查",
+          "医院"
+        ]
+      ]
+    },
+    {
+      "id": "subject",
+      "type": "reply_matches",
+      "pattern": "主题|标题|Subject",
+      "flags": "i"
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    },
+    {
+      "id": "length",
+      "type": "reply_length",
+      "min": 60,
+      "max": 800
+    },
+    {
+      "id": "no-delegation",
+      "type": "tool_not_called",
+      "tool": [
+        "delegate_task",
+        "use_workflow",
+        "generate_long_video",
+        "generate_video"
+      ]
+    },
+    {
+      "id": "judge",
+      "type": "llm_judge",
+      "minScore": 4,
+      "rubric": "1. 是否具备邮件主题、称呼、正文、结尾敬语和署名；\n2. 是否写清楚请假日期（10月15日）、原因（医院复查）、时长（一天）和工作交接（已交接给小李）；\n3. 语气是否正式、礼貌、简洁，适合直接发给上级；\n4. 是否没有编造用户没提供的信息（例如具体医院、病情）。"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "say": "主题：请假申请——10月15日（周三）\n\n王经理：\n\n您好！我下周三（10月15日）需要去医院复查，特此申请请假一天。\n\n我手上的报表工作已经交接给小李，如有需要可以直接联系他，我请假期间也会留意手机消息。\n\n给您添麻烦了，感谢批准！\n\n此致\n敬礼\n\n（您的名字）\n2026年10月9日"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "facts",
+        "subject"
+      ],
+      "turns": [
+        [
+          {
+            "say": "王经理您好，我想请个假，麻烦您批准，谢谢！"
+          }
+        ]
+      ]
+    }
+  }
+}

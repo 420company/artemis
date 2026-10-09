@@ -1,0 +1,114 @@
+{
+  "id": "qa-savings-math",
+  "category": "qa",
+  "description": "日常算术问答：每天存 20 元一年存多少，再加每月 500 元",
+  "turns": [
+    {
+      "prompt": "如果我每天存 20 元，坚持一年（按 365 天算），一共能存多少钱？如果每个月再额外存 500 元，一年一共能存多少？"
+    }
+  ],
+  "limits": {
+    "maxTurns": 6,
+    "timeoutSec": 180,
+    "budgetTokens": 150000
+  },
+  "graders": [
+    {
+      "id": "answers",
+      "type": "reply_contains",
+      "all": [
+        [
+          "7300",
+          "7,300",
+          "7 300"
+        ],
+        [
+          "13300",
+          "13,300",
+          "1.33万",
+          "13 300"
+        ]
+      ]
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    },
+    {
+      "id": "no-delegation",
+      "type": "tool_not_called",
+      "tool": [
+        "delegate_task",
+        "use_workflow",
+        "generate_long_video",
+        "generate_video"
+      ]
+    },
+    {
+      "id": "direct",
+      "type": "workflow_is",
+      "workflow": "direct"
+    },
+    {
+      "id": "few-turns",
+      "type": "turns_at_most",
+      "max": 3
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "say": "每天存 20 元，一年 365 天：20 × 365 = 7300 元。\n每个月再额外存 500 元，一年多存 500 × 12 = 6000 元，合计 7300 + 6000 = 13300 元。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "answers",
+        "no-delegation",
+        "few-turns"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "use_workflow",
+                "args": {
+                  "workflow": "team",
+                  "reason": "复杂计算"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "say": "每天存 20 元，一年大约能存 7000 元左右。"
+          }
+        ]
+      ]
+    }
+  }
+}

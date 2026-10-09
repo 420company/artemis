@@ -1,0 +1,116 @@
+{
+  "id": "routing-question-direct",
+  "category": "routing",
+  "description": "普通咨询问题应直接回答：不启动团队/对比工作流，不调子代理",
+  "turns": [
+    {
+      "prompt": "Python 和 JavaScript 哪个更适合零基础的人入门？简单说说理由。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 8,
+    "timeoutSec": 180,
+    "budgetTokens": 150000
+  },
+  "graders": [
+    {
+      "id": "direct",
+      "type": "workflow_is",
+      "workflow": "direct"
+    },
+    {
+      "id": "no-team",
+      "type": "tool_not_called",
+      "tool": [
+        "delegate_task",
+        "use_workflow"
+      ]
+    },
+    {
+      "id": "no-media",
+      "type": "tool_not_called",
+      "tool": [
+        "generate_long_video",
+        "generate_video",
+        "generate_image"
+      ]
+    },
+    {
+      "id": "few-turns",
+      "type": "turns_at_most",
+      "max": 3
+    },
+    {
+      "id": "answers",
+      "type": "reply_contains",
+      "all": [
+        "Python"
+      ]
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "say": "对零基础来说更推荐先学 Python：语法接近英语、代码短、报错信息清楚，做数据处理和自动化小工具很快能看到成果。JavaScript 适合想做网页的人，但它的异步、类型转换等细节对新手更绕。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "no-team",
+        "few-turns"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "use_workflow",
+                "args": {
+                  "workflow": "compare",
+                  "reason": "比较两种语言"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "say": "综合比较后，推荐 Python。"
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,161 @@
+{
+  "id": "multistep-trip-plan",
+  "category": "multistep",
+  "description": "按规格创建旅行计划文件夹：行程.md、预算.json（金额要对上）、清单.txt",
+  "turns": [
+    {
+      "prompt": "帮我做一个三天的杭州旅行计划，按下面的要求创建文件：\n1. 新建文件夹「杭州旅行」；\n2. 里面放 行程.md：用「## 第1天」「## 第2天」「## 第3天」三个标题，每天至少写两个安排；\n3. 预算.json：格式是 {\"total\": 总预算, \"items\": [{\"name\": 项目, \"amount\": 金额}]}，总预算 3000 元，items 的金额加起来要正好等于 total；\n4. 清单.txt：出发前要带的东西，每行一项，至少 5 项。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 15,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "itinerary",
+      "type": "file_contains",
+      "path": "杭州旅行/行程.md",
+      "pattern": "##\\s*第\\s*1\\s*天[\\s\\S]*##\\s*第\\s*2\\s*天[\\s\\S]*##\\s*第\\s*3\\s*天"
+    },
+    {
+      "id": "budget",
+      "type": "json_file",
+      "path": "杭州旅行/预算.json",
+      "schema": {
+        "type": "object",
+        "required": [
+          "total",
+          "items"
+        ],
+        "properties": {
+          "total": {
+            "type": "number"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "amount"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "equals": {
+        "/total": 3000
+      },
+      "sum": {
+        "array": "/items",
+        "field": "amount",
+        "equalsPointer": "/total"
+      }
+    },
+    {
+      "id": "checklist",
+      "type": "file_contains",
+      "path": "杭州旅行/清单.txt",
+      "minLines": 5
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "杭州旅行/行程.md",
+                  "content": "# 杭州三日游\n\n## 第1天\n- 上午：西湖断桥、白堤\n- 下午：雷峰塔\n\n## 第2天\n- 上午：灵隐寺\n- 下午：龙井村喝茶\n\n## 第3天\n- 上午：河坊街\n- 下午：返程\n"
+                }
+              },
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "杭州旅行/预算.json",
+                  "content": "{\n  \"total\": 3000,\n  \"items\": [\n    {\n      \"name\": \"住宿\",\n      \"amount\": 1200\n    },\n    {\n      \"name\": \"交通\",\n      \"amount\": 600\n    },\n    {\n      \"name\": \"餐饮\",\n      \"amount\": 800\n    },\n    {\n      \"name\": \"门票\",\n      \"amount\": 400\n    }\n  ]\n}\n"
+                }
+              },
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "杭州旅行/清单.txt",
+                  "content": "身份证\n手机充电器\n雨伞\n换洗衣物\n常用药品\n"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "杭州旅行/预算.json"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已在「杭州旅行」文件夹里创建了 行程.md、预算.json（四项合计正好 3000 元）和 清单.txt（5 项）。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "budget",
+        "checklist"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "杭州旅行/行程.md",
+                  "content": "# 杭州三日游\n\n## 第1天\n- 上午：西湖断桥、白堤\n- 下午：雷峰塔\n\n## 第2天\n- 上午：灵隐寺\n- 下午：龙井村喝茶\n\n## 第3天\n- 上午：河坊街\n- 下午：返程\n"
+                }
+              },
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "杭州旅行/预算.json",
+                  "content": "{\"total\": 3000, \"items\": [{\"name\": \"住宿\", \"amount\": 1200}, {\"name\": \"交通\", \"amount\": 600}]}\n"
+                }
+              },
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "杭州旅行/清单.txt",
+                  "content": "身份证\n充电器\n雨伞\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "文件都创建好了。"
+          }
+        ]
+      ]
+    }
+  }
+}

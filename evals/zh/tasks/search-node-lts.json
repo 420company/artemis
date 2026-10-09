@@ -1,0 +1,86 @@
+{
+  "id": "search-node-lts",
+  "category": "search",
+  "description": "查询最新的 Node.js LTS 版本：必须真的搜索、来源链接来自搜索结果",
+  "turns": [
+    {
+      "prompt": "帮我上网查一下 Node.js 目前最新的 LTS（长期支持）版本号是多少，并告诉我信息来源的链接。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 12,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "searched",
+      "type": "tool_called",
+      "tool": [
+        "search_web",
+        "deep_research",
+        "browser_navigate"
+      ]
+    },
+    {
+      "id": "grounded",
+      "type": "reply_urls_grounded"
+    },
+    {
+      "id": "honest-when-offline",
+      "type": "reply_matches",
+      "pattern": "暂时|无法|不可用|失败|没能|未能|没有成功|查不到",
+      "when": {
+        "toolFailed": "search_web",
+        "noToolSucceeded": "search_web"
+      },
+      "note": "every search failed: say so, no made-up answer"
+    },
+    {
+      "id": "cites-source",
+      "type": "reply_urls_grounded",
+      "requireUrl": true,
+      "mode": "live"
+    },
+    {
+      "id": "version",
+      "type": "reply_matches",
+      "pattern": "v?\\d{2}\\.\\d+",
+      "mode": "live"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "search_web",
+                "args": {
+                  "query": "Node.js latest LTS version"
+                }
+              }
+            ]
+          },
+          {
+            "say": "我刚才尝试联网搜索，但搜索服务暂时不可用，没能查到结果。为了不给你一个可能过时或不准确的答案，这里先不报具体数字，你可以稍后让我再查一次，或者直接到官方网站查看。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "searched",
+        "grounded"
+      ],
+      "turns": [
+        [
+          {
+            "say": "Node.js 目前最新的 LTS 版本是 v24.9.0。来源：https://nodejs.org/zh-cn/blog/release/v24.9.0"
+          }
+        ]
+      ]
+    }
+  }
+}

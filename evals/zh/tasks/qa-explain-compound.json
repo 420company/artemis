@@ -1,0 +1,74 @@
+{
+  "id": "qa-explain-compound",
+  "category": "qa",
+  "description": "用通俗的话解释“复利”并举生活例子（200 字内、不用术语）",
+  "turns": [
+    {
+      "prompt": "用通俗的话给我解释一下什么是“复利”，再举一个生活中的例子。我不懂金融，别用专业术语，200 字以内。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 6,
+    "timeoutSec": 180,
+    "budgetTokens": 150000
+  },
+  "graders": [
+    {
+      "id": "topic",
+      "type": "reply_contains",
+      "all": [
+        "复利"
+      ]
+    },
+    {
+      "id": "short",
+      "type": "reply_length",
+      "max": 240
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh",
+      "minRatio": 0.8
+    },
+    {
+      "id": "no-delegation",
+      "type": "tool_not_called",
+      "tool": [
+        "delegate_task",
+        "use_workflow",
+        "generate_long_video",
+        "generate_video"
+      ]
+    },
+    {
+      "id": "judge",
+      "type": "llm_judge",
+      "minScore": 4,
+      "rubric": "1. 解释是否准确：复利就是“利息也会继续生利息”，时间越长差距越大；\n2. 是否通俗易懂、没有堆砌专业术语，不懂金融的人能看懂；\n3. 例子是否贴近日常生活且计算正确；\n4. 是否控制在 200 字左右。"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "say": "复利就是“利滚利”：你赚到的利息不取出来，下一年会和本金一起继续生利息。\n\n例子：存 1 万元，每年收益 5%。第一年多了 500 元，第二年按 10500 元算，能多 525 元，比第一年多了 25 元。时间越久，多出来的部分越多。所以越早开始存钱，复利的效果越明显。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "chinese",
+        "short"
+      ],
+      "turns": [
+        [
+          {
+            "say": "Compound interest (复利) means the interest you earn is reinvested, so that in the next period you earn interest on both the principal and the accumulated interest. Mathematically, the future value is P(1+r)^n, where P is the principal, r is the periodic rate and n is the number of periods. For example, investing 10,000 at an annual rate of 5% compounded yearly yields 10,500 after one year and 11,025 after two years, and the effect grows exponentially over long horizons, which is why starting early matters a lot for retirement savings and long-term wealth accumulation."
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "id": "vision-invoice-ocr",
+  "category": "vision",
+  "description": "从生成的发票图片里提取发票号、日期、金额并存成 JSON",
+  "generated": [
+    {
+      "kind": "invoice-png",
+      "path": "发票.png"
+    }
+  ],
+  "turns": [
+    {
+      "prompt": "这是一张发票的照片。请把发票号码、日期和总金额提取出来，保存成 发票.json，字段是 invoice_no、date、total（日期用 YYYY-MM-DD 格式，total 用数字）。",
+      "attachments": [
+        "发票.png"
+      ]
+    }
+  ],
+  "limits": {
+    "maxTurns": 10,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "extracted",
+      "type": "json_file",
+      "path": "发票.json",
+      "schema": {
+        "type": "object",
+        "required": [
+          "invoice_no",
+          "date",
+          "total"
+        ],
+        "properties": {
+          "total": {
+            "type": "number"
+          }
+        }
+      },
+      "equals": {
+        "/invoice_no": "INV-2026-0917",
+        "/date": "2026-09-17",
+        "/total": 128.5
+      }
+    },
+    {
+      "id": "reply-total",
+      "type": "reply_contains",
+      "all": [
+        [
+          "128.5",
+          "128.50"
+        ]
+      ]
+    },
+    {
+      "id": "image-sent",
+      "type": "context_contains",
+      "mode": "mock",
+      "pattern": "image_url",
+      "request": "first"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "发票.json",
+                  "content": "{\n  \"invoice_no\": \"INV-2026-0917\",\n  \"date\": \"2026-09-17\",\n  \"total\": 128.5\n}\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已提取并保存到 发票.json：发票号 INV-2026-0917，日期 2026-09-17，总金额 128.50。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "extracted",
+        "reply-total"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "发票.json",
+                  "content": "{\"invoice_no\": \"INV-2026-917\", \"date\": \"2026-09-17\", \"total\": \"128\"}\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已保存，总金额 128 元。"
+          }
+        ]
+      ]
+    }
+  }
+}

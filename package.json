@@ -66,7 +66,9 @@
     "test:workspaceIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workspaceIntentSmoke.ts",
     "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/superVisualGoldenPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/dreamLocaleSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaExplicitBriefLockSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaPollTimeoutSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/seedanceVideoDirectorSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaLanguageDirectorSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaCleanDirectDecouplingSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaBgmVariantsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaFramingSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaChatSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaHermeticSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaGuideBriefSmoke.ts && npm run test:workflowRouter",
     "test:contextReplay": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextLongTaskReplay.ts",
-    "test:workflowRouter": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowRouterSmoke.ts"
+    "test:workflowRouter": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowRouterSmoke.ts",
+    "eval:zh": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts",
+    "eval:zh:mock": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts --mock --self-test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

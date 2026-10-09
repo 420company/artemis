@@ -1,0 +1,119 @@
+{
+  "id": "file-json-convert",
+  "category": "file",
+  "description": "把文本通讯录整理成指定字段的 contacts.json",
+  "fixture": "file-json-convert",
+  "turns": [
+    {
+      "prompt": "把 通讯录.txt 整理成 JSON，保存为 contacts.json：是一个数组，每个人一个对象，包含 name、phone、department 三个字段，电话用字符串。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 12,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "schema",
+      "type": "json_file",
+      "path": "contacts.json",
+      "schema": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {
+          "type": "object",
+          "required": [
+            "name",
+            "phone",
+            "department"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phone": {
+              "type": "string",
+              "pattern": "^1\\d{10}$"
+            },
+            "department": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "values",
+      "type": "json_file",
+      "path": "contacts.json",
+      "equals": {
+        "/0/name": "张伟",
+        "/1/phone": "13912345678",
+        "/2/department": "技术部"
+      }
+    },
+    {
+      "id": "source-untouched",
+      "type": "files_unchanged"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "通讯录.txt"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "contacts.json",
+                  "content": "[\n  {\n    \"name\": \"张伟\",\n    \"phone\": \"13800138000\",\n    \"department\": \"销售部\"\n  },\n  {\n    \"name\": \"李娜\",\n    \"phone\": \"13912345678\",\n    \"department\": \"财务部\"\n  },\n  {\n    \"name\": \"王强\",\n    \"phone\": \"13700001111\",\n    \"department\": \"技术部\"\n  }\n]\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已保存 contacts.json，共 3 人：张伟、李娜、王强。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "schema",
+        "values"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "contacts.json",
+                  "content": "[{\"name\": \"张伟\", \"phone\": 13800138000}, {\"name\": \"李娜\", \"phone\": 13912345678}]\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已保存 contacts.json。"
+          }
+        ]
+      ]
+    }
+  }
+}

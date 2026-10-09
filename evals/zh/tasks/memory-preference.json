@@ -1,0 +1,114 @@
+{
+  "id": "memory-preference",
+  "category": "memory",
+  "description": "两轮：先让它记住“文件名加日期前缀”的偏好，新会话里新建文件时应自动遵守",
+  "turns": [
+    {
+      "prompt": "记住：以后帮我新建文件时，文件名前面都加上当天日期，格式像 2026-10-09_会议记录.md 这样。"
+    },
+    {
+      "prompt": "帮我新建一个会议记录文件，内容写：周会讨论了第四季度的销售目标。",
+      "newSession": true
+    }
+  ],
+  "limits": {
+    "maxTurns": 10,
+    "timeoutSec": 300,
+    "budgetTokens": 700000
+  },
+  "graders": [
+    {
+      "id": "saved",
+      "turn": 1,
+      "type": "tool_called",
+      "tool": "memory",
+      "args": {
+        "action": "save|update"
+      }
+    },
+    {
+      "id": "recalled",
+      "turn": 2,
+      "type": "context_contains",
+      "pattern": "\\d{4}-\\d{2}-\\d{2}_|YYYY-MM-DD|日期前缀|加上(当天|当日)?的?日期",
+      "request": "first",
+      "note": "the saved preference reaches the new session's first request"
+    },
+    {
+      "id": "dated-file",
+      "type": "file_glob",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}_[^/]+$",
+      "contains": "第四季度"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "memory",
+                "args": {
+                  "action": "save",
+                  "name": "file-date-prefix",
+                  "description": "新建文件时文件名加日期前缀（如 2026-10-09_会议记录.md）",
+                  "content": "用户偏好：新建文件时，文件名前面加当天日期，格式 YYYY-MM-DD_名称，例如 2026-10-09_会议记录.md。"
+                }
+              }
+            ]
+          },
+          {
+            "say": "好的，记住了：以后新建文件都会在文件名前加上当天日期。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "2026-10-09_会议记录.md",
+                  "content": "# 会议记录\n\n周会讨论了第四季度的销售目标。\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已新建 2026-10-09_会议记录.md。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "saved",
+        "recalled",
+        "dated-file"
+      ],
+      "turns": [
+        [
+          {
+            "say": "好的。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "会议记录.md",
+                  "content": "周会讨论了第四季度的销售目标。\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已新建 会议记录.md。"
+          }
+        ]
+      ]
+    }
+  }
+}
