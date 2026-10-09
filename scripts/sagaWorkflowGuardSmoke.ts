@@ -64,7 +64,7 @@ async function main(): Promise<void> {
     locale: 'zh',
     text: '帮我生成一段长视频',
   });
-  assert.equal(naturalLongVideo.handled, false, 'natural-language long-video wording must not enter Saga without /saga');
+  assert.equal(naturalLongVideo.handled, false, 'the handler never starts Saga without forceIntent (callers set it for /saga or a clear long-video request)');
 
   const explicitNaturalLongVideo = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
