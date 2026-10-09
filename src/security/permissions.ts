@@ -211,6 +211,8 @@ function describeAction(action: AgentAction): string {
       return `confirmation: ${action.question}`;
     case 'memory':
       return `memory: ${action.action}${action.name ? ` ${action.name}` : ''}`;
+    case 'load_skill':
+      return `load learned skill ${action.id}`;
     case 'task_output':
       return `read background task output ${action.taskId}`;
     case 'view_image':

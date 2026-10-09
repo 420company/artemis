@@ -707,6 +707,10 @@ async function runQueryCommand(options: {
     ...result.contextNotices.map((notice) => `Context: ${notice.replace(/^\[(?:context|上下文)\]\s*/, '')}`),
   ]))
   console.log()
+  // The reply is out; give the background curators (memory, learned skills)
+  // a bounded chance to finish before this process exits.
+  const { settleCurationsWithin, curationSettleTimeoutMs } = await import('../core/backgroundCuration.js')
+  await settleCurationsWithin(curationSettleTimeoutMs())
 }
 
 type SkillSummary = {

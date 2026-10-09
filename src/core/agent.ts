@@ -104,6 +104,12 @@ import {
 } from './visionHelper.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
 import {
+  beginSkillRun,
+  finishSkillRun,
+  type SkillCompleteFn,
+  type SkillRunHandle,
+} from './skillLearning.js';
+import {
   McpCallCancelledError,
   McpDependencyError,
   callMcpServerTool,
@@ -797,6 +803,13 @@ function buildActionFromLooseArgs(
         category,
         content: getLooseStringArg(args, 'content', 'text', 'body', 'memory'),
       };
+    }
+    case 'load_skill':
+    case 'load_learned_skill':
+    case 'read_skill': {
+      const id = getLooseStringArg(args, 'id', 'name', 'skill', 'skillId', 'skill_id');
+      if (!id?.trim()) return null;
+      return { type: 'load_skill', id };
     }
     case 'view_image':
     case 'look_at_image':
@@ -2022,6 +2035,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `request_user_confirmation "${truncate(action.question, 100)}"${action.screenshotPath ? ` screenshot=${truncate(action.screenshotPath, 80)}` : ''}`;
     case 'memory':
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
+    case 'load_skill':
+      return `load_skill ${truncate(action.id, 80)}`;
     case 'task_output':
       return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
     case 'view_image':
@@ -3052,6 +3067,8 @@ async function buildRunContextContent(input: {
   latestUserMessage?: string;
   extensionSections: string[];
   evidenceDigest?: string;
+  /** Learned skills relevant to this request (ids + one line each). */
+  skillIndexSection?: string;
 }): Promise<string | undefined> {
   const sections: string[] = [];
   const latestUserMessage = input.latestUserMessage?.trim();
@@ -3098,6 +3115,7 @@ async function buildRunContextContent(input: {
     }
   }
 
+  if (input.skillIndexSection?.trim()) sections.push(input.skillIndexSection.trim());
   sections.push(...input.extensionSections.filter((section) => section.trim()));
   if (input.evidenceDigest?.trim()) {
     sections.push(`Repository evidence:\n${input.evidenceDigest.trim()}`);
@@ -6388,6 +6406,35 @@ export async function runAgent(
   };
   const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
 
+  // ── Learned skills (see core/skillLearning.ts) ────────────────────────────
+  // The main agent applies the user's feedback on the previous run, gets the
+  // relevant skills' index for this request's runtime context, and records
+  // its tool calls so a verified run can teach a skill after the reply.
+  const skillComplete: SkillCompleteFn = async (system, prompt) => {
+    const provider = options.resolveSummarizerProvider?.() ?? options.resolveProvider?.(profile) ?? options.provider;
+    const now = new Date().toISOString();
+    const response = await provider.complete([
+      { id: 'skill-curator-system', role: 'system', content: system, createdAt: now },
+      { id: 'skill-curator-request', role: 'user', content: prompt, createdAt: now },
+    ]);
+    return response.text ?? '';
+  };
+  const skillRun: SkillRunHandle | undefined = profile === 'main'
+    ? await beginSkillRun({
+      cwd: options.cwd,
+      sessionKey: session.id,
+      userMessage: userInput,
+      // Headless runs keep what they learn in the workspace, like memories.
+      scope: options.memoryDefaultScope ?? 'global',
+      complete: skillComplete,
+    })
+    : undefined;
+  if (skillRun?.indexSection) {
+    options.onInfo?.(`[skills] learned skill index: ${skillRun.indexSection.split('\n').length - 1} entr(ies)`);
+  }
+  let skillRunCompleted = false;
+  let skillRunUnresolvedFailure = false;
+
   // ── Context management (see core/compaction) ──────────────────────────────
   // The message that started this run; the per-run context goes right before it.
   const runUserMessageId = [...session.messages]
@@ -6479,6 +6526,7 @@ export async function runAgent(
       latestUserMessage: userInput,
       extensionSections: extensionRuntime.sections,
       evidenceDigest,
+      skillIndexSection: skillRun?.indexSection,
     });
     runContextMessage = content
       ? {
@@ -6596,6 +6644,14 @@ export async function runAgent(
 
   async function recordOutcomes(outcomes: Awaited<ReturnType<typeof executeActionBatch>>): Promise<void> {
     for (const outcome of outcomes) {
+      skillRun?.recorder.record({
+        tool: outcome.action.type,
+        ok: outcome.ok,
+        summary: summarizeActionForWorkflow(outcome.action),
+        command: outcome.action.type === 'run_command' ? outcome.action.command : undefined,
+        output: outcome.output,
+        skillId: outcome.action.type === 'load_skill' ? outcome.action.id : undefined,
+      });
       options.sessionStore.appendMessage(
         session,
         'tool',
@@ -7841,6 +7897,9 @@ export async function runAgent(
         continue;
       }
 
+      skillRunCompleted = true;
+      skillRunUnresolvedFailure =
+        completionChecklist.unresolvedToolFailure !== undefined || completionChecklist.blockerAccepted;
       return {
         reply: finalReply,
         turns: turn,
@@ -7925,6 +7984,13 @@ export async function runAgent(
       const { scheduleTrajectoryCuration } = await import('./memory.js');
       scheduleTrajectoryCuration(options.cwd, session);
     } catch {}
+    // Runs in the background after the reply; only a verified run teaches.
+    finishSkillRun(skillRun, {
+      userRequest: userInput,
+      finalReply,
+      outcome: skillRunCompleted ? 'completed' : options.abortSignal?.aborted ? 'aborted' : 'incomplete',
+      unresolvedFailure: skillRunUnresolvedFailure,
+    });
 
     if (shouldOwnHeimdallState) {
       await finalizeHeimdallThreadState(heimdallThreadState);

@@ -1700,6 +1700,15 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           targetId: optionalStringSchema('Optional platform target id/chat id/channel id. Defaults to configured or live bridge targets.'),
         },
       };
+    case 'load_skill':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: {
+          id: nonEmptyStringSchema('Id of a learned skill from the "Learned skills" index in the runtime context.'),
+        },
+      };
     case 'memory':
       return {
         type: 'object',

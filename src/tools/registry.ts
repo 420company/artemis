@@ -1831,6 +1831,25 @@ const capabilityToolDefs: ToolDefinition[] = [
     execute: executeRequestUserConfirmation as any,
   },
 
+  // ── Learned skills (procedural memory) ──────────────────────────────────
+  {
+    type: 'load_skill',
+    description: 'Load a learned skill by id: a procedure Artemis distilled from an earlier verified run (when to use it, steps, pitfalls, verification). The runtime context lists the relevant ones under "Learned skills"; load one before starting a task it fits. Read-only.',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.id, 'id', errs);
+      return errs;
+    },
+    execute: (async (action: any, context: any) => {
+      const { executeLoadSkill } = await import('./learnedSkillTool.js');
+      return executeLoadSkill(action, context);
+    }) as any,
+  },
+
   // ── Long-term memory (Mnemosyne v2) ─────────────────────────────────────
   {
     type: 'memory',
