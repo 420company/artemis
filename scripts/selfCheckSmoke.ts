@@ -277,8 +277,10 @@ async function main(): Promise<void> {
     writePkg({ test: 'node --test' })
     assert('R1: a harmless runner flag after -- is fine', parseBareCheck('npm test -- --reporter=spec', cwd)?.runner === 'npm test -- --reporter=spec')
     const plain = parseBareCheck('npm test', cwd)!.fingerprint
-    writePkg({ test: 'node --test', pretest: 'echo pre' })
+    writePkg({ test: 'node --test', pretest: 'tsc --noEmit' })
     assert('R1: adding a pretest hook changes the fingerprint', parseBareCheck('npm test', cwd)!.fingerprint !== plain)
+    writePkg({ test: 'node --test', pretest: 'echo pre' })
+    assert('round 4: a hook that is not a check runner (even `echo`) refuses the re-run', parseBareCheck('npm test', cwd) === undefined)
     writePkg({ test: 'npm run lint && node --test', lint: 'eslint .' })
     const nested = parseBareCheck('npm test', cwd)!.fingerprint
     writePkg({ test: 'npm run lint && node --test', lint: 'eslint . --max-warnings 0' })
@@ -299,6 +301,42 @@ async function main(): Promise<void> {
     fs.rmSync(path.join(cwd, 'Makefile'))
     assert('minor: a closing promise is dropped from a no-tool reply',
       stripTrailingPromise('Fixed sum(). Let me re-run the tests to be sure.') === 'Fixed sum().' && stripTrailingPromise('已修复。我再跑一下测试。') === '已修复。' && stripTrailingPromise('Fixed sum().') === 'Fixed sum().')
+  }
+
+  // ── round 4: hooks and script bodies are an allowlist of check runners ─
+  {
+    const { cwd: root } = freshCase('legit', false)
+    const mk = (dir: string, scripts: Record<string, string>) => {
+      fs.mkdirSync(path.join(dir, 'test'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts }))
+      fs.writeFileSync(path.join(dir, 'test', 'a.test.js'), '')
+    }
+    const cases: Array<[Record<string, string>, Array<[string, boolean]>]> = [
+      [{ test: 'jest' }, [['npm test', true], ['npm t', true], ['npm run test', true], ['npm test -- --runInBand', true], ['npm test -- path/to/a.test.js', true], ['npm test 2>&1 | tail -40', true], ['yarn test', true], ['pnpm test', true], ['npm test -- --reporter=spec', true]]],
+      [{ test: 'vitest run' }, [['npm test', true], ['npx vitest run', false]]],
+      [{ test: 'node --test' }, [['npm test', true]]],
+      [{ typecheck: 'tsc --noEmit', lint: 'eslint .' }, [['npm run typecheck', true], ['npm run lint', true], ['tsc --noEmit', true], ['npx tsc --noEmit', false]]],
+      [{ test: 'npm run unit && npm run lint', unit: 'jest', lint: 'eslint .' }, [['npm test', true]]],
+      [{ test: 'jest', posttest: 'eslint .' }, [['npm test', true]]],
+      [{ test: 'jest', posttest: 'codecov' }, [['npm test', false]]],
+      [{ test: 'jest --coverage', posttest: 'nyc report --reporter=text-lcov | coveralls' }, [['npm test', false]]],
+      [{ test: 'node --test', posttest: 'npm run report', report: 'node scripts/coverage-report.js' }, [['npm test', false]]],
+      [{ test: 'node scripts/run-tests.js' }, [['npm test', false]]],
+      [{ test: 'jest', pretest: 'npm run build', build: 'tsc -p .' }, [['npm test', true]]],
+      [{ test: 'jest', pretest: 'npm run gen', gen: 'node scripts/gen.js' }, [['npm test', false]]],
+      [{ test: 'jest' }, [['pytest', true], ['pytest -q tests/test_a.py', true], ['python -m pytest -x', true], ['go test ./...', true], ['cargo test', true], ['make test', false]]],
+    ]
+    let index = 0
+    for (const [scripts, commands] of cases) {
+      const dir = path.join(root, `c${index++}`)
+      mk(dir, scripts)
+      for (const [command, ok] of commands) {
+        assert(`round 4: ${JSON.stringify(scripts).slice(0, 80)} ${command} → ${ok ? 're-runnable' : 'refused'}`, Boolean(parseBareCheck(command, dir)) === ok)
+      }
+    }
+    const mono = path.join(root, 'mono')
+    mk(path.join(mono, 'packages', 'foo'), { test: 'jest' })
+    assert('round 4: monorepo `cd packages/foo && npm test` stays re-runnable', Boolean(parseBareCheck('cd packages/foo && npm test', mono)))
   }
 
   // ── gating table (controller, fake host) ────────────────────────────────
@@ -923,6 +961,33 @@ async function main(): Promise<void> {
         { type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
       { reply: 'Done.', done: true }])
     assert('R1 (probe H3): a changed test script never runs under the self-check', !fs.existsSync(marker))
+    const h4 = path.join(base, 'h4')
+    mk(h4, { test: 'node --test', posttest: 'npm run report', report: 'node scripts/coverage-report.js' })
+    fs.mkdirSync(path.join(h4, 'scripts'))
+    fs.writeFileSync(path.join(h4, 'scripts', 'coverage-report.js'), "require('fs').appendFileSync('UPLOADED', 'x\\n')\n")
+    await runIn(h4, 'Run the tests, then change a.js to export 1.', [
+      { reply: 't', done: false, actions: [{ type: 'run_command', command: 'npm test' }] },
+      { reply: 'w', done: false, actions: [{ type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
+      { reply: 'Changed a.js.', done: true }])
+    assert('round 4 (probe H4): posttest → npm run report → node script is not repeated', fs.readFileSync(path.join(h4, 'UPLOADED'), 'utf8').trim().split('\n').length === 1)
+    const h5 = path.join(base, 'h5')
+    mk(h5, { test: 'node scripts/run-tests.js' })
+    fs.mkdirSync(path.join(h5, 'scripts'))
+    fs.writeFileSync(path.join(h5, 'scripts', 'run-tests.js'), "require('fs').appendFileSync('SIDE', 'x\\n')\n")
+    await runIn(h5, 'Run the tests, then change a.js to export 1.', [
+      { reply: 't', done: false, actions: [{ type: 'run_command', command: 'npm test' }] },
+      { reply: 'w', done: false, actions: [{ type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
+      { reply: 'Changed a.js.', done: true }])
+    assert('round 4 (probe H5): a test script that runs an arbitrary node script is not repeated', fs.readFileSync(path.join(h5, 'SIDE'), 'utf8').trim().split('\n').length === 1)
+    const legit = path.join(base, 'legit')
+    mk(legit, { test: 'node --test', posttest: 'node --test' })
+    await runIn(legit, 'Run the tests, then change a.js to export 1.', [
+      { reply: 't', done: false, actions: [{ type: 'run_command', command: 'npm test' }] },
+      { reply: 'w', done: false, actions: [{ type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
+      { reply: 'Changed a.js.', done: true }])
+    const legitStore = new SessionStore(legit)
+    const legitRuns = (await legitStore.load((await legitStore.list())[0]!.id)).messages.filter((m) => m.role === 'tool' && m.content.includes('CI=true npm test'))
+    assert('round 4: a check whose hooks are check runners is still re-run', legitRuns.length === 1)
   }
 
   // ── runAgent: monorepo, the re-run never moves the run (probe E) ───────
