@@ -21,6 +21,8 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'run_command',
   'task_output',
   'kill_task',
+  // Learned skills (procedural memory): read one listed in the runtime context.
+  'load_skill',
   'generate_image',
   'generate_video',
   'generate_long_video',

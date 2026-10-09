@@ -2002,6 +2002,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     setBridgePrinter(null)
     await wordupNow({ store: sessionStore, storedSession, messages: getMessages() })
     await updateUserProfileSilent(getMessages(), locale)
+    // Let a skill curation started by the last turn finish (bounded).
+    try {
+      const { settleCurationsWithin } = await import('../core/backgroundCuration.js')
+      await settleCurationsWithin(15_000)
+    } catch { /* never block exit */ }
     prompt.dispose()
     leaveInteractiveScreen()
     process.stdout.write('\x1b[?25h')

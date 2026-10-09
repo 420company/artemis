@@ -48,6 +48,11 @@ export async function runMemoryCommand(options: { cwd: string; locale: UiLocale;
 
   await ensureMemoryMigrated(cwd);
 
+  if (sub === 'skills' || sub === 'skill') {
+    await runSkillsSubcommand(cwd, rest.slice(1), t);
+    return;
+  }
+
   if (!sub || sub === 'list' || sub === 'ls') {
     const entries = await gather(cwd, scope);
     if (entries.length === 0) {
@@ -164,6 +169,66 @@ export async function runMemoryCommand(options: { cwd: string; locale: UiLocale;
     '  artemis memory rm <name>',
     '  artemis memory restore <name>',
     '  artemis memory doctor',
+    '  artemis memory skills [list | show <id> | rm <id>]',
   ]));
   console.log();
+}
+
+/** `artemis memory skills …` — view and delete learned skills (procedural memory). */
+async function runSkillsSubcommand(cwd: string, args: string[], t: (zh: string, en: string) => string): Promise<void> {
+  const { listAllSkills, readSkill, trashSkill, skillsDirForScope } = await import('../storage/skillStore.js');
+  const { formatSkillForModel, isSkillLearningEnabled } = await import('../core/skillLearning.js');
+  const action = args[0]?.toLowerCase();
+
+  if (!action || action === 'list' || action === 'ls') {
+    const skills = await listAllSkills(cwd);
+    const enabled = await isSkillLearningEnabled(cwd);
+    const status = enabled
+      ? t('技能学习：开启', 'Skill learning: on')
+      : t('技能学习：关闭（setup.memory.skills.enabled=false 或 ARTEMIS_SKILL_LEARNING=0）', 'Skill learning: off (setup.memory.skills.enabled=false or ARTEMIS_SKILL_LEARNING=0)');
+    console.log();
+    if (skills.length === 0) {
+      console.log(buildPanel(t('已学技能', 'Learned Skills'), [
+        status,
+        t('还没有学到技能：任务经过验证成功后会自动沉淀。', 'No skills learned yet: they are distilled after verified successful tasks.'),
+        t(`全局目录：${skillsDirForScope(cwd, 'global')}`, `Global dir: ${skillsDirForScope(cwd, 'global')}`),
+      ]));
+      console.log();
+      return;
+    }
+    const rows = skills.map((skill) => {
+      const scopeTag = skill.scope === 'project' ? '[P]' : '[G]';
+      const stats = `v${skill.version} ${skill.uses}u/${skill.successes}s/${skill.failures}f`;
+      return `${scopeTag} ${skill.id.padEnd(28).slice(0, 28)} ${stats.padEnd(16)} ${skill.description.slice(0, 60)}`;
+    });
+    console.log(buildPanel(t(`已学技能（${skills.length}）`, `Learned Skills (${skills.length})`), [status, '', ...rows]));
+    console.log(t(
+      '\n  u=加载次数 s=成功 f=失败 · artemis memory skills show <id> 看全文 / rm <id> 删除',
+      '\n  u=loads s=successes f=failures · artemis memory skills show <id> | rm <id>',
+    ));
+    console.log();
+    return;
+  }
+
+  const id = args[1];
+  if (action === 'show' || action === 'cat') {
+    if (!id) { console.log(t('用法：artemis memory skills show <id>', 'Usage: artemis memory skills show <id>')); return; }
+    const skill = await readSkill(cwd, id);
+    if (!skill) { console.log(t(`没找到技能 "${id}"`, `No learned skill "${id}"`)); return; }
+    console.log();
+    console.log(buildPanel(`${skill.id} · ${skill.scope ?? 'global'} · v${skill.version} · ${skill.updatedAt.slice(0, 10)}`, formatSkillForModel(skill).split('\n').slice(2)));
+    console.log();
+    return;
+  }
+
+  if (action === 'rm' || action === 'remove' || action === 'delete' || action === 'forget') {
+    if (!id) { console.log(t('用法：artemis memory skills rm <id>', 'Usage: artemis memory skills rm <id>')); return; }
+    const removed = await trashSkill(cwd, id);
+    console.log(removed
+      ? t(`已把技能 "${removed.id}" 移入回收站（${skillsDirForScope(cwd, removed.scope ?? 'global')}/.trash）`, `Moved skill "${removed.id}" to trash (${skillsDirForScope(cwd, removed.scope ?? 'global')}/.trash)`)
+      : t(`没找到技能 "${id}"`, `No learned skill "${id}"`));
+    return;
+  }
+
+  console.log(t('用法：artemis memory skills [list | show <id> | rm <id>]', 'Usage: artemis memory skills [list | show <id> | rm <id>]'));
 }

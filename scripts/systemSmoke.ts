@@ -750,5 +750,42 @@ test('provider store: an engine re-save keeps the server-written webSearch setti
   }
 });
 
+test('learned skills: load_skill is a registered read-only tool on both engine paths', async () => {
+  const { getToolDefinition, validateToolAction } = await import('../src/tools/registry.js');
+  const { getAllowedActionTypesForProfile } = await import('../src/core/agentProfiles.js');
+  const { listDirectToolNames } = await import('../src/tools/directTools.js');
+  const { ALL_AGENT_ACTION_TYPES } = await import('../src/core/types.js');
+  const def = getToolDefinition('load_skill');
+  assert.equal(def?.permissionCategory, 'read');
+  assert.ok((ALL_AGENT_ACTION_TYPES as readonly string[]).includes('load_skill'));
+  assert.ok(getAllowedActionTypesForProfile('main').includes('load_skill'));
+  assert.ok(listDirectToolNames().includes('load_skill'));
+  assert.deepEqual(validateToolAction({ type: 'load_skill', id: 'deploy-docs' }), []);
+});
+
+test('learned skills: `artemis memory skills` reaches the memory command and lists an empty store', async () => {
+  assert.equal(parseArgs(['memory', 'skills', 'list']).command, 'memory');
+  assert.equal(parseArgs(['memory', 'skills', 'rm', 'x']).prompt, 'skills rm x');
+  const { runMemoryCommand } = await import('../src/cli/memoryDashboard.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-skill-cli-'));
+  const previousHome = process.env.ARTEMIS_HOME;
+  process.env.ARTEMIS_HOME = path.join(dir, 'home');
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+  try {
+    await runMemoryCommand({ cwd: dir, locale: 'en', args: ['skills'] });
+    await runMemoryCommand({ cwd: dir, locale: 'en', args: ['skills', 'rm', 'missing'] });
+  } finally {
+    console.log = log;
+    if (previousHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = previousHome;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const text = lines.join('\n');
+  assert.match(text, /No skills learned yet/);
+  assert.match(text, /No learned skill "missing"/);
+});
+
 await pending;
 console.log('\n  ✔ All system smoke tests passed');
