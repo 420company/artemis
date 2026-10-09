@@ -4847,6 +4847,14 @@ async function handleTurn(
       // The routed playbook is per-turn context: never saved in the history.
       ...(workflowPlaybook ? { turnContext: workflowPlaybook } : {}),
       ...thinkOpts,
+      // Verify before done (core/selfCheck.ts); a Saga run has its own Critic.
+      selfCheck: !sagaTookOver,
+      onSelfCheck: (message: string) => {
+        // Close the open round first so the line lands after it in the timeline.
+        commitCurrentRound()
+        viewport?.appendScrollBlock({ kind: 'tool', text: `· ${message}` })
+        if (!viewport) console.log(message)
+      },
       locale: locale === 'zh-CN' ? 'zh' : 'en',
       cwd: thinkOpts.cwd,
       pollRunningUserMessages: runningMessageHooks?.pollRunningUserMessages,

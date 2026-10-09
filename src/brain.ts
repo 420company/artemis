@@ -62,6 +62,15 @@ import {
     LOAD_SKILL_TOOL,
     type SkillRunHandle,
 } from './core/skillLearning.js';
+import {
+    ffprobeMedia,
+    loadSelfCheckSettings,
+    resolveSelfCheckImageJudge,
+    SelfCheckRun,
+    SelfCheckTracker,
+    type SelfCheckDecision,
+    type SelfCheckHost,
+} from './core/selfCheck.js';
 import type { ToolExecutionResult, WorkspaceSwitchRequest } from './tools/types.js';
 import { withRuntimeLogSink, type RuntimeLogLevel } from './utils/log.js';
 import {
@@ -2130,6 +2139,14 @@ export interface ThinkOptions {
      * never stored in the history or the saved session.
      */
     turnContext?: string;
+    /**
+     * End-of-run self-check ("verify before done", core/selfCheck.ts): the
+     * CLI and chat bridges opt in for a normal turn (never for a Saga run).
+     * ARTEMIS_SELF_CHECK=0 / setup.selfCheck.enabled=false turn it off.
+     */
+    selfCheck?: boolean;
+    /** The self-check's one short progress line ("自检中…" / "Self-check…"); default: onToolLog. */
+    onSelfCheck?: (message: string) => void;
 }
 
 const MAX_DIRECT_NATIVE_TOOL_ROUNDS = 96;
@@ -2215,6 +2232,8 @@ async function thinkTurn(
         abortSignal,
         skillPartition,
         turnContext,
+        selfCheck: selfCheckRequested = false,
+        onSelfCheck,
     } = options;
     const readFileHistory = new Map<string, { output: string }>();
     const tSession = getSession(cwd);
@@ -2293,6 +2312,10 @@ async function thinkTurn(
     });
     skillSlot.handle = skillRun;
     skillSlot.userRequest = input;
+
+    // ── Self-check before done (see core/selfCheck.ts) ────────────────────
+    const selfCheckSettings = selfCheckRequested ? await loadSelfCheckSettings(cwd) : undefined;
+    const selfCheckTracker = selfCheckSettings?.enabled ? new SelfCheckTracker(cwd) : undefined;
     const contextBudget = resolveContextBudget({
         contextWindow: p.contextWindow ?? getConfiguredContextLimit(providerConfigVal?.model, providerConfigVal?.contextLength, hasPlatformCapabilities(providerConfigVal)),
         maxOutputTokens: p.maxOutputTokens,
@@ -2300,6 +2323,13 @@ async function thinkTurn(
         maxContextTokens: resolveMaxContextTokens({ configured: _compressionMaxContextTokens, mode: contextMode }),
     });
     const contextLanguage = detectConversationLanguage(history, locale);
+    const selfCheckRun = selfCheckTracker && selfCheckSettings
+        ? new SelfCheckRun({ settings: selfCheckSettings, tracker: selfCheckTracker, userRequest: input, language: contextLanguage })
+        : undefined;
+    /** The self-check turn scheduled for the next request, and the one in flight. */
+    let selfCheckPending: Extract<SelfCheckDecision, { kind: 'turn' }> | undefined;
+    let selfCheckTurn: Extract<SelfCheckDecision, { kind: 'turn' }> | undefined;
+    let selfCheckExtraRounds = 0;
     const summarizerWindow = await resolveSummarizerWindow();
     const logInfo = onToolLog ? (message: string): void => onToolLog(message, 'info') : undefined;
     let previousResponseId: string | undefined;
@@ -2309,7 +2339,8 @@ async function thinkTurn(
         nativeFunctionTools: unknown[] | undefined,
     ): Promise<number> => {
         // + room for the "current task" note when the boundary carries the request.
-        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) + skillIndexTokens + turnContextTokens;
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) + skillIndexTokens + turnContextTokens +
+            (selfCheckTurn ? estimateTokens(selfCheckTurn.note) + 4 : 0);
         const managed = await manageContext({
             messages: history,
             fixedTokens,
@@ -2502,8 +2533,58 @@ async function thinkTurn(
     const maxEmptyFinalReplyRetries = 2;
     const maxProviderRounds = maxNativeToolRounds + maxEmptyFinalReplyRetries;
 
+    // The self-check runs its check like a tool call of this turn: same
+    // permission gate, sandbox and tool events. The result reaches the model
+    // in the self-check note (unsaved runtime context), not the history.
+    const selfCheckToolContext = () => ({
+        cwd: currentCwd,
+        permissionMode,
+        onPermissionRequest,
+        onToolLog,
+        updateCwd: (newCwd: string) => { currentCwd = newCwd; },
+        onWorkspaceSwitchRequest,
+        onUserConfirmationRequest,
+        readFileHistory,
+        allowBackgroundTools: false,
+        learnedSkillScopes: skillRun.readScopes,
+    });
+    const selfCheckHost: SelfCheckHost = {
+        runCommand: async (command, timeoutMs) => {
+            const args = { command, timeoutMs, killOnTimeout: true };
+            onToolCall?.('run_command', args);
+            readFileHistory.clear();
+            const toolResult = attachDirectToolFailureError(
+                'run_command',
+                await executeTool('run_command', args, selfCheckToolContext()),
+            );
+            const output = typeof toolResult.output === 'string' ? toolResult.output : String(toolResult.output ?? '');
+            onToolResult?.('run_command', toolResult.ok, toolResult.output);
+            skillRun.recorder.record({ tool: 'run_command', ok: toolResult.ok, summary: summarizeToolCallForSkill('run_command', args), command, output });
+            selfCheckTracker?.record({ tool: 'run_command', ok: toolResult.ok, args, command, output, errorCode: toolResult.error?.code, bySelfCheck: true });
+            return { ok: toolResult.ok, output, errorCode: toolResult.error?.code };
+        },
+        getImageJudge: () => resolveSelfCheckImageJudge(p, currentCwd),
+        probeMedia: ffprobeMedia,
+        progress: (message) => {
+            if (onSelfCheck) onSelfCheck(message);
+            else onToolLog?.(message, 'info');
+        },
+        signal: abortSignal,
+    };
+    /** Shows what the user has not seen yet of `full` (`shown` already went out). */
+    const emitUnshown = (full: string, shown: string): void => {
+        if (!onDelta || !full) return;
+        const tail = shown && full.startsWith(shown) ? full.slice(shown.length) : shown ? `\n\n${full}` : full;
+        if (tail) {
+            onDelta(tail);
+            emittedFinalText = true;
+        }
+    };
+
     nativeRoundLoop:
-    for (let round = 1; round <= maxProviderRounds; round += 1) {
+    for (let round = 1; round <= maxProviderRounds + selfCheckExtraRounds; round += 1) {
+        selfCheckTurn = selfCheckPending;
+        selfCheckPending = undefined;
         absorbRunningUserMessages();
         const nativeFunctionTools = supportsNativeTools && projectedToolNames.length > 0
             ? buildDirectNativeFunctionTools({ allowedToolNames: projectedToolNames })
@@ -2530,9 +2611,11 @@ async function thinkTurn(
             // Learned-skill index + carried-request note: per request, never stored.
             // Routed workflow playbook (turnContext) too: per turn, never stored.
             const runtimeNote = [turnContextText, skillIndexSection, requestNote].filter(Boolean).join('\n\n');
+            // Self-check instructions: per request, never stored, after the history.
+            const requestContext = [runtimeNote, selfCheckTurn?.note].filter(Boolean).join('\n\n');
             return {
-                messages: runtimeNote
-                    ? [...systemMessages, ...history, makeRuntimeContextMessage(runtimeNote)]
+                messages: requestContext
+                    ? [...systemMessages, ...history, makeRuntimeContextMessage(requestContext)]
                     : [...systemMessages, ...history],
                 completionOptions: {
                     ...responseContinuation,
@@ -2561,9 +2644,10 @@ async function thinkTurn(
         cumulativeUsage = accumulateProviderUsage(cumulativeUsage, completion.usage);
         finalResult = completion;
 
-        const nativeCalls = completion.nativeToolCalls ?? [];
+        // A no-tool self-check turn: tool calls are ignored, never run.
+        const nativeCalls = selfCheckTurn?.tools === false ? [] : completion.nativeToolCalls ?? [];
         if (nativeCalls.length > 0) {
-            if (round >= maxNativeToolRounds) {
+            if (round >= maxNativeToolRounds && !selfCheckTurn) {
                 onToolLog?.(
                     `Native tool round budget reached (${maxNativeToolRounds}); requesting a no-tool final reply.`,
                     'warn',
@@ -2701,15 +2785,25 @@ async function thinkTurn(
                     const toolOutput = formatDirectToolOutput(toolResult);
                     const contextPreparedOutput = prepareDirectToolContextOutput(call.name, toolOutput, contextStorage, contextBudget);
                     onToolResult?.(call.name, toolResult.ok, toolResult.output);
+                    const recordedCommand = call.name === 'run_command'
+                        ? String(args.command ?? '')
+                        : call.name === 'npm_run' ? `npm run ${String(args.script ?? 'test')}` : undefined;
+                    const recordedOutput = typeof toolResult.output === 'string' ? toolResult.output : String(toolResult.output ?? '');
                     skillRun.recorder.record({
                         tool: String(call.name),
                         ok: toolResult.ok,
                         summary: summarizeToolCallForSkill(String(call.name), args),
-                        command: call.name === 'run_command'
-                            ? String(args.command ?? '')
-                            : call.name === 'npm_run' ? `npm run ${String(args.script ?? 'test')}` : undefined,
-                        output: typeof toolResult.output === 'string' ? toolResult.output : String(toolResult.output ?? ''),
+                        command: recordedCommand,
+                        output: recordedOutput,
                         skillId: call.name === LOAD_SKILL_TOOL ? String(args.id ?? '') : undefined,
+                    });
+                    selfCheckTracker?.record({
+                        tool: String(call.name),
+                        ok: toolResult.ok,
+                        args,
+                        command: recordedCommand,
+                        output: recordedOutput,
+                        errorCode: toolResult.error?.code,
                     });
                     if (!toolResult.ok) {
                         unresolvedDirectToolFailure = {
@@ -2739,13 +2833,32 @@ async function thinkTurn(
             }
             previousResponseId = completion.responseId;
             pendingToolOutputs = toolOutputs;
+            if (selfCheckRun && selfCheckTurn) {
+                // The self-check's one fix turn ran its tools: re-check, then
+                // either one no-tool final turn or the end of the turn.
+                selfCheckTurn = undefined;
+                const fixText = completion.text ?? '';
+                const decision = await selfCheckRun.afterTurn(fixText, selfCheckHost);
+                if (decision.kind === 'turn') {
+                    selfCheckPending = decision;
+                    selfCheckExtraRounds += 1;
+                    continue;
+                }
+                finalResult = { ...completion, text: decision.reply, nativeToolCalls: [] };
+                emitUnshown(decision.reply, completion.streamed === true ? fixText : '');
+                appendHistory(makeSessionMessage('assistant', decision.reply));
+                skillSlot.reply = decision.reply;
+                skillSlot.completed = true;
+                if (decision.outcome === 'still-failing' || decision.outcome === 'corrected') skillSlot.unresolvedFailure = true;
+                break;
+            }
             continue;
         }
 
         let reply = completion.text ?? '';
         // A runtime-written fallback or failure reply is not a completed turn.
         let replyIsRuntimeFallback = false;
-        if (supportsNativeTools && !plainChat && !reply.trim()) {
+        if (supportsNativeTools && !plainChat && !reply.trim() && !selfCheckTurn) {
             if (emptyFinalReplyRetryCount < maxEmptyFinalReplyRetries && round < maxProviderRounds) {
                 emptyFinalReplyRetryCount += 1;
                 forceCompaction = true;
@@ -2763,7 +2876,7 @@ async function thinkTurn(
                 '运行时已自动重试但提供商仍返回空文本；本轮未标记为任务完成。请直接重试上一条请求或发送更具体的下一步指令。',
             ].join('\n');
         }
-        if (supportsNativeTools && !plainChat && reply.trim()) {
+        if (supportsNativeTools && !plainChat && reply.trim() && !selfCheckTurn) {
             if (isPseudoToolTranscript(reply)) {
                 throw new Error(buildProviderIncompatibilityMessage());
             }
@@ -2794,16 +2907,39 @@ async function thinkTurn(
             }
         }
 
+        // Verify before done (core/selfCheck.ts): before the reply is shown,
+        // check the work once; a fix or correction turn replaces the reply.
+        const modelReply = reply;
+        let storedReply = reply;
+        if (selfCheckRun && !replyIsRuntimeFallback && (selfCheckTurn || !selfCheckRun.started)) {
+            const current = selfCheckTurn;
+            selfCheckTurn = undefined;
+            const decision = current
+                ? await selfCheckRun.afterTurn(reply, selfCheckHost)
+                : await selfCheckRun.review(reply, selfCheckHost);
+            if (decision.kind === 'turn') {
+                // A normal assistant turn in the history; the final reply comes next.
+                appendHistory(makeSessionMessage('assistant', reply, {
+                    reasoningContent: completion.reasoningContent,
+                    rawContentBlocks: completion.rawContentBlocks,
+                }));
+                selfCheckPending = decision;
+                selfCheckExtraRounds += 1;
+                continue;
+            }
+            reply = decision.reply;
+            storedReply = decision.reply;
+            if (decision.outcome === 'still-failing' || decision.outcome === 'corrected') skillSlot.unresolvedFailure = true;
+        }
         finalResult = {
             ...completion,
             text: reply,
             nativeToolCalls: [],
         };
-        if (reply && completion.streamed !== true && onDelta) {
-            onDelta(reply);
-            emittedFinalText = true;
+        if (reply && onDelta) {
+            emitUnshown(reply, completion.streamed === true ? modelReply : '');
         }
-        appendHistory(makeSessionMessage('assistant', reply, {
+        appendHistory(makeSessionMessage('assistant', storedReply, {
             reasoningContent: finalResult?.reasoningContent,
             rawContentBlocks: finalResult?.rawContentBlocks,
         }));

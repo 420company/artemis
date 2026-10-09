@@ -182,6 +182,8 @@ export async function runGoalTick(
     onInfo: opts.onInfo,
     // The tick prompt is written by Artemis, not the user: no workflow routing.
     autoRoute: false,
+    // Each tick reports its own progress; the next tick is the follow-up check.
+    selfCheck: false,
   })
 
   const parsed = parseTickReply(result.reply)
