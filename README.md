@@ -86,10 +86,11 @@ Cheap heuristics decide the clear cases; questions, follow-ups and writing tasks
 
 Before Artemis tells you a non-trivial task is finished, it checks its own work once, the way a careful engineer would:
 
-- **When.** Only at the end of a top-level run that changed files, generated images/video/audio, or whose last test/build check failed. Chat, questions, read-only analysis, Saga runs (they have their own critic), Goal Mode ticks and sub-agents are never checked. The decision costs no model call.
-- **Code.** If no test, typecheck or lint ran after the last edit, the project's most relevant check (`npm test`, `pytest`, `cargo test`, …, or the one the run already used) runs once, through the normal tool path and its permissions, killed after 3 minutes. Installs, watchers and servers are never started. On a failure the agent gets one fix turn with the failure excerpt, then the check runs once more.
-- **Images.** The requested aspect ratio is read from the file; when a model that can see images is available, it compares the image with your request once (subjects, requested text). A clear mismatch gets one regeneration. Videos and audio: metadata only (duration, aspect ratio, audio track, via `ffprobe`), reported but never regenerated.
-- **Honest reply.** A reply that claims success while the evidence says otherwise is corrected. The reply mentions the check only when something was fixed or still fails; the CLI shows one "Self-check…" line.
+- **When.** Only at the end of a top-level run that changed source files or generated images/video/audio. Data, config, lock and docs files do not count. Chat, questions, read-only analysis, Saga runs (they have their own critic), Goal Mode ticks and sub-agents are never checked. The decision costs no model call.
+- **Code — only commands the agent chose.** Artemis never runs a command the agent did not run itself. If the agent ran a test, typecheck or lint command earlier in the run (or the session) but not after its last edit, that exact command runs once more (output pipes such as `| tail` removed, `CI=true`), from the directory it ran in, through the normal tool path and its permissions, killed after 3 minutes; it never moves the run's working directory. If the agent never ran a check, nothing runs: a reply claiming "all tests pass" is corrected and names the project's check as text. "Don't run anything" in your request skips every command. A real failure after the agent's edits gets one fix turn with the failure excerpt, then the check runs once more. A failure that was already there before the first edit, missing tools or dependencies, and network errors get no fix turn.
+- **The fix turn** may read and edit files and run checks — at most 4 tool calls, never installs, servers, sub-agents or video — and is cut off at the time limit.
+- **Images.** An explicitly requested aspect ratio or orientation ("9:16", "竖版", "portrait orientation") is read from the file; when a model that can see images is available, it compares the image with your request once (subjects, requested text). A clear mismatch gets one regeneration. Videos and audio: metadata only (duration, aspect ratio, audio track when explicitly asked for, via `ffprobe`), reported but never regenerated.
+- **Honest reply.** A reply that explicitly claims checks passed while the evidence says otherwise is corrected; a reply that already mentions a failure is left alone. The reply mentions the check only when something was fixed or still fails; the CLI shows one "Self-check…" line.
 - **Bounds.** One check pass and one fix turn per run, at most 2 extra model calls, 4 minutes of extra time. The check's instructions travel in the unsaved per-run context, so the system prompt and the prompt cache are untouched. Turn it off with `ARTEMIS_SELF_CHECK=0` or `setup.selfCheck.enabled: false` in `providers.json` (`maxWallMs`, `commandTimeoutMs` and `maxModelCalls` tune the bounds).
 
 #### 3. Persistent memory and long-context stability
@@ -420,10 +421,11 @@ Artemis 可以处理日常和复杂的软件工程任务：
 
 Artemis 在告诉你一项非简单任务"完成了"之前，会像细心的工程师一样先检查一遍自己的工作：
 
-- **什么时候查**：只在顶层运行结束时，并且这次运行改了文件、生成了图片/视频/音频，或最后一次测试/构建检查失败。闲聊、提问、只读分析、Saga 运行（它有自己的评审）、Goal Mode 迭代和子代理都不检查。是否检查由规则判断，不调用模型。
-- **代码**：如果最后一次修改之后没有跑过测试、类型检查或 lint，就运行一次项目里最相关的检查（`npm test`、`pytest`、`cargo test` 等，或本次运行已经用过的那个），走正常的工具调用和权限，3 分钟超时即终止；从不执行安装、监听模式或启动服务。失败时给 agent 一次修复机会（附失败摘要），然后再跑一次检查。
-- **图片**：从文件头读取画幅比例；有能看图的模型时，再对照你的要求看一次（主体、要求的文字）。明显不符时重新生成一次。视频和音频只检查元数据（时长、画幅、是否有音轨，用 `ffprobe`），不符会如实说明，但不会重新生成。
-- **如实回复**：回复声称成功、但证据显示失败时，会被纠正。只有修复了问题或仍然失败时，回复里才简短提一句自检结果；命令行只显示一行"自检中…"。
+- **什么时候查**：只在顶层运行结束时，并且这次运行改了源代码文件，或生成了图片/视频/音频。数据、配置、锁文件和文档不算。闲聊、提问、只读分析、Saga 运行（它有自己的评审）、Goal Mode 迭代和子代理都不检查。是否检查由规则判断，不调用模型。
+- **代码——只运行 agent 自己选的命令**：Artemis 从不运行 agent 没有运行过的命令。如果 agent 在本次运行（或本会话）里跑过测试、类型检查或 lint，但最后一次修改之后没再跑，就把那条命令原样再跑一次（去掉 `| tail` 之类的输出管道，设置 `CI=true`），在它原来运行的目录里，走正常的工具调用和权限，3 分钟超时即终止，不会改变运行的工作目录。如果 agent 从没跑过检查，就什么都不运行：回复里声称"测试全部通过"会被纠正，并以文字给出项目的检查命令。请求里写了"不要运行任何命令"时，一律不运行。agent 修改后出现的真实失败会得到一次修复机会（附失败摘要），然后再跑一次检查；修改前就已失败、缺少工具或依赖、网络错误都不会触发修复。
+- **修复回合**只能读写文件和运行检查——最多 4 次工具调用，不能安装依赖、启动服务、派子代理或生成视频——超时即被中止。
+- **图片**：只有明确要求了画幅或方向（"9:16"、"竖版"、"portrait orientation"）时才从文件头核对；有能看图的模型时，再对照你的要求看一次（主体、要求的文字）。明显不符时重新生成一次。视频和音频只检查元数据（时长、画幅、明确要求时是否有音轨，用 `ffprobe`），不符会如实说明，但不会重新生成。
+- **如实回复**：回复明确声称检查通过、但证据显示失败时，会被纠正；回复里已经说明了失败的不会再改。只有修复了问题或仍然失败时，回复里才简短提一句自检结果；命令行只显示一行"自检中…"。
 - **上限**：每次运行最多一轮检查、一次修复，额外模型调用最多 2 次，额外时间最多 4 分钟。自检说明放在不保存的每轮运行上下文里，系统提示和提示缓存不受影响。用 `ARTEMIS_SELF_CHECK=0` 或在 `providers.json` 里设置 `setup.selfCheck.enabled: false` 关闭（`maxWallMs`、`commandTimeoutMs`、`maxModelCalls` 可调整上限）。
 
 #### 3. 持久记忆与长上下文稳定性
