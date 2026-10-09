@@ -101,6 +101,19 @@ Every conversation (web sessions, chat bridges, the CLI) goes through the same c
 - **Output reserve.** The budget reserves the model's output limit (the platform `maxOutputTokens` when set), up to a quarter of the window, plus a 5% margin. A request that fits the budget therefore always leaves the adapters room to send that `max_tokens` unchanged.
 - **Settings** (`setup.agent.compression`): `enabled: false` turns off proactive compaction (overflow recovery stays on), `threshold` changes the 78% trigger, and `maxContextTokens` sets the cap described above.
 
+##### Learned skills
+
+When a task verifiably succeeds, Artemis keeps the procedure it used as a **learned skill** — when to use it, the steps, pitfalls, the tools involved and how the result was checked — and offers it the next time a similar task comes up. Both the web/headless runs (`artemis execute`) and the CLI and chat bridges learn and use skills.
+
+- **Only verified successes teach.** A run must finish without an error, use at least three tools successfully, not end on an unresolved tool failure, and have a verification signal: the last test, lint, typecheck or build command passed, a generated image/video/audio file exists, or you explicitly confirm the result in your next message ("thanks, that works"). Failed, cancelled and unverified runs never become skills.
+- **Learning happens after the reply.** The curator runs in the background and never delays the answer. A new skill that matches an existing one updates it (its version goes up) instead of adding a duplicate.
+- **Progressive disclosure.** Each request gets only a short index of the relevant skills (at most 10 entries, 800 characters: id plus one line on when to use it) in the per-request context that is never saved, so the prompt cache stays intact. The agent reads a full skill with the read-only `load_skill` tool when it needs it.
+- **Feedback.** If you say the result was wrong after a run that used a skill, the skill records a failure and your complaint is added as a pitfall. A complaint right after a run that created a new skill removes that skill again.
+- **Untrusted content stays out.** Skills are distilled only from your request and the agent's own actions; the curator never sees tool output, web pages or file contents. Lines that repeat tool output or look like injected instructions are dropped, and secrets, emails, URLs you did not give and paths outside the workspace are redacted. A loaded skill is presented to the model as reference data, not as instructions.
+- **Limits.** At most 200 skills per scope (the least useful — failing, stale, rarely used — goes to `skills/.trash/` first) and 4 KB per skill. Skills are JSON files in `~/.artemis/memory/skills/`; headless runs keep theirs in the workspace's data folder, like memories they save.
+- **Manage them.** `artemis memory skills` lists them (with loads, successes and failures), `artemis memory skills show <id>` prints one, and `artemis memory skills rm <id>` moves one to the trash.
+- **Turn it off.** Set `setup.memory.skills.enabled` to `false` in `providers.json`, or `ARTEMIS_SKILL_LEARNING=0`. Stored skills are kept but neither learned nor offered.
+
 #### 4. Visual generation system
 
 Artemis includes a full visual workflow layer for image and video generation.
@@ -397,6 +410,19 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - **成本上限**：托管运行（`artemis execute`、网页会话、聊天桥接）默认把上下文限制在 **200K tokens**，因此 1M 窗口的模型在 200K 的约 78% 处压缩，而不是 1M 的约 78%。交互式命令行使用完整窗口。要修改上限，可设置 `setup.agent.compression.maxContextTokens`（优先）或环境变量 `ARTEMIS_MAX_CONTEXT_TOKENS`（供服务器或部署配置使用），两者同样作用于命令行。设为 `0` 或 `off` 表示不设上限。
 - **输出预留**：预算会为模型的输出上限（设置了平台 `maxOutputTokens` 时以它为准）预留空间，最多占窗口的四分之一，另加 5% 余量。因此只要请求在预算内，适配器总能按原值发送这个 `max_tokens`。
 - **设置**（`setup.agent.compression`）：`enabled: false` 关闭主动压缩（超窗恢复仍然生效），`threshold` 调整 78% 的触发点，`maxContextTokens` 设置上面所说的上限。
+
+##### 已学技能
+
+任务经过验证确实成功后，Artemis 会把这次用到的做法保存为一条**已学技能**：什么时候用、步骤、要避开的坑、用到的工具，以及如何确认结果；之后遇到类似任务时再拿出来用。网页/无界面运行（`artemis execute`）、命令行和聊天桥接都会学习并使用技能。
+
+- **只从经过验证的成功中学习**：运行必须正常结束、至少成功使用三次工具、没有停在未解决的工具失败上，并且有验证信号：最后一次测试、lint、类型检查或构建命令通过，生成的图片/视频/音频文件确实存在，或者你在下一条消息里明确确认结果（「谢谢，可以了」）。失败、被取消或未经验证的运行永远不会变成技能。
+- **回复之后才学习**：整理技能在后台进行，不会拖慢回复。新技能如果和已有技能是同一件事，会更新那条技能（版本号加一），而不是新增重复条目。
+- **按需展开**：每次请求只附带相关技能的简短索引（最多 10 条、800 个字符：id 加一句什么时候用），放在不会保存的每次请求上下文里，提示缓存不受影响。需要时，代理再用只读的 `load_skill` 工具读取完整技能。
+- **反馈**：如果在用过某条技能的运行之后你说结果不对，这条技能会记一次失败，并把你的反馈作为一个坑记下来。如果紧接着一次刚学会新技能的运行就收到反对，这条新技能会被撤回。
+- **不可信内容不会混进来**：技能只从你的请求和代理自己的操作中提炼，整理时看不到工具输出、网页或文件内容。重复工具输出的句子和像是被注入的指令会被丢弃；密钥、邮箱、你没有提供过的网址以及工作区以外的路径都会被脱敏。读取到的技能以参考数据的形式交给模型，而不是指令。
+- **上限**：每个范围最多 200 条技能（最没用的——常失败、长期没用、很少被用——先移到 `skills/.trash/`），每条最多 4 KB。技能以 JSON 文件保存在 `~/.artemis/memory/skills/`；无界面运行和它保存的记忆一样，放在工作区的数据目录里。
+- **管理**：`artemis memory skills` 列出全部技能（含加载、成功和失败次数），`artemis memory skills show <id>` 查看一条，`artemis memory skills rm <id>` 把一条移到回收站。
+- **关闭**：在 `providers.json` 里把 `setup.memory.skills.enabled` 设为 `false`，或设置 `ARTEMIS_SKILL_LEARNING=0`。已保存的技能会保留，但不再学习，也不再提供。
 
 #### 4. 视觉生成系统
 
