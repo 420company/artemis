@@ -243,11 +243,11 @@ function extractBgmParamUpdates(text: string): BgmParamDiff {
   const result: BgmParamDiff = {};
   const start = parseTimeExpressionSeconds(text);
   if (typeof start === 'number' && Number.isFinite(start) && start >= 0) result.startSec = start;
-  // "环境音音量 / 环境音量 -18dB", "ambience / ambient sound volume -18dB" is the
+  // "环境音音量 / 环境音量 / 环境声音量 -18dB", "ambience / ambient sound volume -18dB" is the
   // ambience level, not the music's.
-  const music = parseDbAfter(text, /(?:bgm|音乐|(?<!环境音?\s*)音量|(?<!(?:ambience|ambient|environment)(?:\s+(?:sounds?|audio|noise))?\s*)volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  const music = parseDbAfter(text, /(?:bgm|音乐|(?<!环境[音声]?\s*)音量|(?<!(?:ambience|ambient|environment)(?:\s+(?:sounds?|audio|noise))?\s*)volume)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (music !== undefined) result.musicVolumeDb = music;
-  const env = parseDbAfter(text, /(?:环境音|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
+  const env = parseDbAfter(text, /(?:环境音|环境声|ambience|ambient|environment)[^\n\d-]{0,20}(-?\d+(?:\.\d+)?)\s*dB/i);
   if (env !== undefined) result.environmentVolumeDb = env;
   const fadeOut = text.match(/(?:淡出|fade\s*out)[^\n\d]{0,12}(\d+(?:\.\d+)?)\s*(?:秒|s|sec|seconds)?/i);
   if (fadeOut) result.fadeOutSec = Number(fadeOut[1]);

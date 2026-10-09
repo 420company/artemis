@@ -259,9 +259,9 @@ async function main(): Promise<void> {
   assert.equal(bgmInlineFinal.action?.soundtrackVolumeDb, -15, 'inline 音量-15dB should set soundtrackVolumeDb to -15');
   assert.equal(bgmInlineFinal.action?.soundtrackFadeOutSec, 2, 'inline 淡出2秒 should set soundtrackFadeOutSec to 2');
 
-  // "环境音音量 / 环境音量 / ambient sound volume -18dB" set the ambience level
+  // "环境音音量 / 环境音量 / 环境声音量 / ambient sound volume -18dB" set the ambience level
   // and leave the music volume alone.
-  for (const [index, reply] of ['环境音音量 -18dB', '环境音量 -18dB', 'ambient sound volume -18dB'].entries()) {
+  for (const [index, reply] of ['环境音音量 -18dB', '环境音量 -18dB', '环境声音量 -18dB', 'ambient sound volume -18dB'].entries()) {
     const ambienceKey = `${key}-bgm-ambience-${index}`;
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
     await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '2' });
