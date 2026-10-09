@@ -1,0 +1,120 @@
+{
+  "id": "coding-format-yuan",
+  "category": "coding",
+  "description": "实现 formatYuan（千分位、两位小数、负号），跑通现有测试",
+  "fixture": "coding-format-yuan",
+  "turns": [
+    {
+      "prompt": "帮我在 utils.js 里实现 formatYuan 函数，把数字格式化成人民币金额，具体要求看 test/utils.test.js。实现完跑一下测试确认。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 20,
+    "timeoutSec": 400,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "tests-pass",
+      "type": "command_succeeds",
+      "command": "node --test",
+      "timeoutSec": 60
+    },
+    {
+      "id": "tests-untouched",
+      "type": "files_unchanged",
+      "paths": [
+        "test/utils.test.js"
+      ]
+    },
+    {
+      "id": "verified",
+      "type": "tool_called",
+      "tool": "run_command",
+      "args": {
+        "command": "test"
+      }
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "utils.js"
+                }
+              },
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "test/utils.test.js"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "utils.js",
+                  "content": "// 金额相关的小工具。\n\n/**\n * 把数字格式化成人民币金额字符串：¥ 符号、千位分隔符、保留两位小数，负数把负号放在最前面。\n * 例如 1234.5 → \"¥1,234.50\"，-56.789 → \"-¥56.79\"。\n */\nfunction formatYuan(amount) {\n  const sign = amount < 0 ? '-' : ''\n  const [integer, decimals] = Math.abs(amount).toFixed(2).split('.')\n  return `${sign}¥${integer.replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',')}.${decimals}`\n}\n\nmodule.exports = { formatYuan }\n"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "npm test"
+                }
+              }
+            ]
+          },
+          {
+            "say": "formatYuan 已实现：先取绝对值保留两位小数，再给整数部分加千位分隔符，负号放在 ¥ 前面。npm test 全部通过。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "tests-pass"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "utils.js",
+                  "content": "// 金额相关的小工具。\n\n/**\n * 把数字格式化成人民币金额字符串：¥ 符号、千位分隔符、保留两位小数，负数把负号放在最前面。\n * 例如 1234.5 → \"¥1,234.50\"，-56.789 → \"-¥56.79\"。\n */\nfunction formatYuan(amount) {\n  const sign = amount < 0 ? '-' : ''\n  const [integer, decimals] = Math.abs(amount).toFixed(2).split('.')\n  return `${sign}¥${integer}.${decimals}`\n}\n\nmodule.exports = { formatYuan }\n"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "npm test"
+                }
+              }
+            ]
+          },
+          {
+            "say": "formatYuan 已实现。"
+          }
+        ]
+      ]
+    }
+  }
+}

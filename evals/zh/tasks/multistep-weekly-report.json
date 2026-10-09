@@ -1,0 +1,126 @@
+{
+  "id": "multistep-weekly-report",
+  "category": "multistep",
+  "description": "读三天的工作日志，整理成三段式周报.md",
+  "fixture": "multistep-weekly-report",
+  "turns": [
+    {
+      "prompt": "「日志」文件夹里是我这周一到周三的工作记录。帮我整理成一份周报，保存为 周报.md，包含「本周完成」「遇到的问题」「下周计划」三个部分。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 15,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "sections",
+      "type": "file_contains",
+      "path": "周报.md",
+      "all": [
+        "本周完成",
+        "遇到的问题",
+        "下周计划"
+      ]
+    },
+    {
+      "id": "facts",
+      "type": "file_contains",
+      "path": "周报.md",
+      "all": [
+        "报价",
+        [
+          "10月20日",
+          "10月20号",
+          "10-20"
+        ],
+        "报销",
+        "客户B",
+        "打印机"
+      ]
+    },
+    {
+      "id": "logs-untouched",
+      "type": "files_unchanged"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "日志"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "日志/周一.txt"
+                }
+              },
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "日志/周二.txt"
+                }
+              },
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "日志/周三.txt"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "周报.md",
+                  "content": "# 周报（10月6日—10月8日）\n\n## 本周完成\n- 完成客户A的报价单并发给对方\n- 与供应商开会，确定交货日期为10月20日\n- 整理上个月的库存表\n- 提交9月份的报销单\n\n## 遇到的问题\n- 办公室打印机故障，报价单先发了电子版\n- 报销系统无法登录，已找IT处理恢复\n\n## 下周计划\n- 准备客户B的合同\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "周报已保存到 周报.md，包含本周完成、遇到的问题和下周计划三部分。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "sections",
+        "facts"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "周报.md",
+                  "content": "# 周报\n\n## 本周完成\n- 完成了报价单\n- 提交了报销单\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "周报写好了。"
+          }
+        ]
+      ]
+    }
+  }
+}

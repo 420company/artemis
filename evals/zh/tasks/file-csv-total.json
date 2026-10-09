@@ -1,0 +1,116 @@
+{
+  "id": "file-csv-total",
+  "category": "file",
+  "description": "整理 CSV：按产品汇总销售额、排序后写入 summary.csv",
+  "fixture": "file-csv-total",
+  "turns": [
+    {
+      "prompt": "sales.csv 是我店里这几天的销售记录。请算出每种产品的销售额（数量×单价），保存到 summary.csv，两列：产品,销售额，按销售额从高到低排序。最后告诉我哪个产品卖得最好。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 12,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "summary",
+      "type": "csv_file",
+      "path": "summary.csv",
+      "header": [
+        "产品",
+        "销售额"
+      ],
+      "rows": [
+        [
+          "橙子",
+          "102"
+        ],
+        [
+          "苹果",
+          "77"
+        ],
+        [
+          "香蕉",
+          "75"
+        ]
+      ],
+      "ordered": true
+    },
+    {
+      "id": "best-seller",
+      "type": "reply_contains",
+      "all": [
+        "橙子"
+      ]
+    },
+    {
+      "id": "source-untouched",
+      "type": "files_unchanged",
+      "paths": [
+        "sales.csv"
+      ]
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "sales.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "summary.csv",
+                  "content": "产品,销售额\n橙子,102\n苹果,77\n香蕉,75\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已生成 summary.csv：橙子 102 元、苹果 77 元、香蕉 75 元。卖得最好的是橙子（102 元）。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "summary",
+        "best-seller"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "summary.csv",
+                  "content": "产品,销售额\n苹果,77\n香蕉,75\n橙子,60\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已生成 summary.csv，卖得最好的是苹果。"
+          }
+        ]
+      ]
+    }
+  }
+}

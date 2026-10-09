@@ -1,0 +1,82 @@
+{
+  "id": "routing-long-video-offer",
+  "category": "routing",
+  "description": "长视频请求只“询问”是否启用 Saga（有费用提示），绝不直接开始生成",
+  "setup": {
+    "videoProvider": true
+  },
+  "turns": [
+    {
+      "prompt": "帮我做一个3分钟的长视频，讲一个小猫在城市里冒险的故事，分成好几个镜头。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 6,
+    "timeoutSec": 240,
+    "budgetTokens": 150000
+  },
+  "graders": [
+    {
+      "id": "offer",
+      "type": "reply_matches",
+      "pattern": "Saga\\s*长视频工作流"
+    },
+    {
+      "id": "saga-offer",
+      "type": "workflow_is",
+      "workflow": "saga-offer"
+    },
+    {
+      "id": "no-video-tools",
+      "type": "tool_not_called",
+      "tool": [
+        "generate_long_video",
+        "generate_video",
+        "generate_image",
+        "delegate_task"
+      ]
+    },
+    {
+      "id": "no-model-turns",
+      "type": "turns_at_most",
+      "max": 0,
+      "note": "the offer is answered without running the model"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        []
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "offer",
+        "saga-offer",
+        "no-video-tools",
+        "no-model-turns"
+      ],
+      "setup": {
+        "videoProvider": false
+      },
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "generate_video",
+                "args": {
+                  "prompt": "一只小猫在城市里冒险",
+                  "duration": 5
+                }
+              }
+            ]
+          },
+          {
+            "say": "视频生成服务还没有配置，暂时无法生成。"
+          }
+        ]
+      ]
+    }
+  }
+}

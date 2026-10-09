@@ -1,0 +1,129 @@
+{
+  "id": "multistep-organize",
+  "category": "multistep",
+  "description": "按类型把文件整理进「图片」「文档」两个文件夹（移动而不是复制）",
+  "fixture": "multistep-organize",
+  "turns": [
+    {
+      "prompt": "帮我整理一下这个文件夹：图片放进「图片」文件夹，文档（pdf、docx、txt、xlsx）放进「文档」文件夹。整理完告诉我每个文件夹里有哪些文件。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 15,
+    "timeoutSec": 300,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "photo-1",
+      "type": "file_exists",
+      "path": "图片/年会合影.jpg"
+    },
+    {
+      "id": "photo-2",
+      "type": "file_exists",
+      "path": "图片/风景.png"
+    },
+    {
+      "id": "doc-pdf",
+      "type": "file_exists",
+      "path": "文档/发票_2026-09.pdf"
+    },
+    {
+      "id": "doc-docx",
+      "type": "file_exists",
+      "path": "文档/合同_甲方.docx"
+    },
+    {
+      "id": "doc-xlsx",
+      "type": "file_exists",
+      "path": "文档/预算表.xlsx"
+    },
+    {
+      "id": "moved-not-copied",
+      "type": "file_absent",
+      "path": "年会合影.jpg"
+    },
+    {
+      "id": "content-kept",
+      "type": "file_contains",
+      "path": "文档/会议纪要.txt",
+      "all": [
+        "下周提交方案初稿"
+      ]
+    },
+    {
+      "id": "reported",
+      "type": "reply_contains",
+      "all": [
+        "图片",
+        "文档",
+        "年会合影"
+      ]
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "mkdir -p 图片 文档 && mv 年会合影.jpg 风景.png 图片/ && mv 发票_2026-09.pdf 合同_甲方.docx 会议纪要.txt 预算表.xlsx 文档/"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "."
+                }
+              }
+            ]
+          },
+          {
+            "say": "整理好了：\n- 图片：年会合影.jpg、风景.png\n- 文档：发票_2026-09.pdf、合同_甲方.docx、会议纪要.txt、预算表.xlsx"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "moved-not-copied",
+        "doc-pdf"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "mkdir -p 图片 && cp 年会合影.jpg 风景.png 图片/"
+                }
+              }
+            ]
+          },
+          {
+            "say": "整理好了：图片文件夹里有年会合影.jpg和风景.png，文档也整理好了。"
+          }
+        ]
+      ]
+    }
+  }
+}
