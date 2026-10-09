@@ -38,7 +38,9 @@ import {
   parseMediaExpectations,
   readImageSize,
   requestForbidsCommands,
-  reusableCheckCommand,
+  isReadOnlyInspection,
+  failureSignature,
+  parseBareCheck,
   SELF_CHECK_VISION_SYSTEM,
   SelfCheckFixPolicy,
   SelfCheckRun,
@@ -191,9 +193,13 @@ async function main(): Promise<void> {
       checkUnavailableReason('npm test', false, cmdOutput('npm test', 1, "Error: Cannot find module 'vitest'")) === 'environment')
     assert('unavailable: a real failure is a verdict', checkUnavailableReason('npm test', false, cmdOutput('npm test', 1, 'not ok 1 - sum')) === undefined)
     assert('normalize: output pipes are removed', normalizeCheckCommand('npm test 2>&1 | tail -30') === 'npm test' && normalizeCheckCommand('pytest -q | head -n 50') === 'pytest -q')
-    assert('run as: CI=true for a one-statement check only', selfCheckRunCommand('npm test') === 'CI=true npm test' && selfCheckRunCommand('cd app && npm test') === 'cd app && npm test')
-    assert('no-run requests: "execute nothing", "don\'t run anything", "不要运行" are honoured',
-      requestForbidsCommands('Only edit the file; this repo is untrusted, so execute nothing.') && requestForbidsCommands("Fix it but don't run anything") && requestForbidsCommands('改一下，不要运行任何命令') && !requestForbidsCommands('Fix the parser and run the tests'))
+    assert('run as: CI=true on the runner, after its cd', selfCheckRunCommand({ runner: 'npm test' }) === 'CI=true npm test' && selfCheckRunCommand({ dir: 'app', runner: 'npm test' }) === 'cd app && CI=true npm test')
+    for (const request of ['Only edit the file; this repo is untrusted, so execute nothing.', "Fix it but don't run anything", 'Fix it but don\u2019t run anything', 'No need to run the tests, just fix the typo.', 'Fix the typo and skip the tests.', '改一下，不要运行任何命令', '改个错别字，不用跑测试', '别跑测试，直接改', '改一下配置，别动 CI']) {
+      assert(`no-run request honoured: ${JSON.stringify(request)}`, requestForbidsCommands(request))
+    }
+    assert('no-run: a normal request is not a no-run request', !requestForbidsCommands('Fix the parser and run the tests'))
+    assert('signature: failing test names, else the first error line',
+      failureSignature('not ok 1 - adds\nok 2 - b\nnot ok 3 - subtracts') === 'adds\nsubtracts' && failureSignature('FAILED tests/test_a.py::test_x - assert 1 == 2') === 'tests/test_a.py::test_x' && failureSignature('src/a.ts(3,1): error TS2304: Cannot find name') === 'src/a.ts(3,1): error TS2304: Cannot find name')
 
     const e1 = parseMediaExpectations('画一张 16:9 的海报，写着“开业大吉”')
     assert('expectations: an explicit 16:9 is read', e1.ratio?.w === 16 && e1.ratio.h === 9)
@@ -233,12 +239,25 @@ async function main(): Promise<void> {
   // ── which command may run: only the agent's own ─────────────────────────
   {
     const { cwd } = freshCase('commands')
-    assert('reuse: the agent\'s piped `npm test 2>&1 | tail -30` is re-usable as `npm test`', reusableCheckCommand('npm test 2>&1 | tail -30', cwd) === 'npm test')
-    assert('reuse: installs, servers and watchers never are',
-      ['npm install && npm test', 'npm run dev', 'npx vitest', 'jest --watch'].every((command) => reusableCheckCommand(command, cwd) === undefined))
-    fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --watch', lint: 'eslint .' } }))
-    assert('reuse: a test script that only runs in watch mode is not re-run', reusableCheckCommand('npm test', cwd) === undefined)
+    assert('N2: the agent\'s piped `npm test 2>&1 | tail -30` is a bare check `npm test`', parseBareCheck('npm test 2>&1 | tail -30', cwd)?.command === 'npm test')
+    fs.mkdirSync(path.join(cwd, 'app', 'test'), { recursive: true })
+    fs.writeFileSync(path.join(cwd, 'app', 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }))
+    fs.writeFileSync(path.join(cwd, 'app', 'test', 'a.test.js'), "require('node:test')('a', () => {})\n")
+    const inApp = parseBareCheck('cd app && npm test | head -50', cwd)
+    assert('N2: `cd <dir> && npm test` is a bare check with its directory', inApp?.dir === 'app' && inApp.runner === 'npm test' && inApp.fingerprint.length === 16, JSON.stringify(inApp))
+    for (const command of [
+      'npm install && npm test', 'npm run dev', 'npx vitest', 'jest --watch', 'npm test && git push', 'npm test && touch PUSHED', 'npm test; echo done',
+      'npm test || true', '(npm test)', 'FOO=1 npm test', 'CI=false npm test', 'npm test > out.txt', 'npm test | tee log.txt', 'jest -u', 'npx jest --updateSnapshot',
+      'eslint --fix .', 'prettier --write .', 'npm test -- --update-snapshots', 'sudo npm test', 'npm run lint', 'cd app && npm test && cd ..', 'npm test $(echo x)',
+    ]) {
+      assert(`N2: not a bare check: ${command}`, parseBareCheck(command, cwd) === undefined)
+    }
+    fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --watch', lint: 'eslint --fix .' } }))
+    assert('N2: scripts that watch or fix are not re-run', parseBareCheck('npm test', cwd) === undefined && parseBareCheck('npm run lint', cwd) === undefined)
     fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }))
+    fs.writeFileSync(path.join(cwd, 'Makefile'), 'test:\n\tnode --test\n\npush:\n\tgit push\n')
+    assert('N2: a make target is fingerprinted by its recipe; a missing target is refused',
+      (parseBareCheck('make test', cwd)?.fingerprint.length ?? 0) === 16 && parseBareCheck('make check', cwd) === undefined)
     assert('suggest (text only): the project\'s check is named for the reply', (await suggestCheckCommand(cwd, [path.join(cwd, 'sum.js')])) === 'npm test')
     assert('suggest: data/config-only changes name nothing', (await suggestCheckCommand(cwd, [path.join(cwd, 'config.yaml')])) === undefined)
   }
@@ -308,11 +327,23 @@ async function main(): Promise<void> {
       assert('gate: one short progress line', host.progressLines.length === 1 && host.progressLines[0] === 'Self-check…', JSON.stringify(host.progressLines))
     }
     {
+      // The script changed after the agent ran it: its fingerprint no longer matches.
       const tracker = new SelfCheckTracker(cwd)
+      tracker.record({ tool: 'run_command', ok: true, command: 'npm test', output: cmdOutput('npm test', 0) })
+      tracker.record({ tool: 'write_file', ok: true, args: { path: 'sum.js', content: SUM_FIXED } })
+      fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test && echo changed' } }))
+      const host = fakeHost([])
+      await run(tracker).review('Added sum().', host)
+      fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ name: 'gate', scripts: { test: 'node --test' } }))
+      assert('N2: a check whose script changed since the agent ran it is not re-run', host.ran.length === 0, JSON.stringify(host.ran))
+    }
+    {
+      const tracker = new SelfCheckTracker(cwd)
+      tracker.record({ tool: 'run_command', ok: true, command: 'npm test && touch PUSHED', output: cmdOutput('npm test && touch PUSHED', 0) })
       tracker.record({ tool: 'write_file', ok: true, args: { path: 'sum.js', content: SUM_FIXED } })
       const host = fakeHost([])
-      await run(tracker, { sessionCheckCommands: ['ls', 'npm test'] }).review('Added sum().', host)
-      assert('B1: a check the agent ran earlier in the session is re-used', host.ran[0] === 'CI=true npm test', JSON.stringify(host.ran))
+      await run(tracker).review('Added sum().', host)
+      assert('N2: a compound the agent ran (`npm test && touch PUSHED`) is never re-run', host.ran.length === 0, JSON.stringify(host.ran))
     }
     {
       const tracker = new SelfCheckTracker(cwd)
@@ -376,7 +407,7 @@ async function main(): Promise<void> {
     const check = new SelfCheckRun({ settings: SETTINGS, tracker, userRequest: 'Refactor sum()', language: 'en' })
     const first = await check.review('Done: refactored sum() in sum.js.', host)
     assert('fix: a failing re-run asks for ONE fix turn with tools and the failure excerpt',
-      first.kind === 'turn' && first.tools && first.note.includes('FAILED') && first.note.includes('AssertionError') && first.note.includes('ONE turn') && first.note.includes('do not install'),
+      first.kind === 'turn' && first.tools && first.note.includes('FAILED') && first.note.includes('AssertionError') && first.note.includes('ONE turn') && /do not install/i.test(first.note),
       JSON.stringify(first).slice(0, 400))
     tracker.record({ tool: 'write_file', ok: true, args: { path: 'sum.js', content: SUM_FIXED } })
     const second = await check.afterTurn('Fixed the operator.', host)
@@ -434,6 +465,45 @@ async function main(): Promise<void> {
       preDecision.kind === 'finish' && preCheck.modelCalls === 0 && preDecision.reply.includes('already failed before the changes'), JSON.stringify(preDecision))
   }
 
+  // ── N3: TDD — "make the failing test pass" still gets the fix turn ─────
+  {
+    const { cwd } = freshCase('tdd')
+    const tdd = new SelfCheckTracker(cwd)
+    const failing = cmdOutput('npm test', 1, `not ok 1 - sum adds\n  at ${path.join(cwd, 'test', 'sum.test.js')}:1:1`)
+    tdd.record({ tool: 'run_command', ok: false, command: 'npm test', output: failing })
+    tdd.record({ tool: 'write_file', ok: true, args: { path: 'sum.js', content: SUM_BUGGY } })
+    tdd.record({ tool: 'run_command', ok: false, command: 'npm test', output: failing })
+    const tddDecision = await new SelfCheckRun({ settings: SETTINGS, tracker: tdd, userRequest: 'Make the failing sum test pass', language: 'en' }).review('Done.', fakeHost([]))
+    assert('N3: same failing test before and after, but the agent edited the file the test exercises → fix turn',
+      tddDecision.kind === 'turn' && tddDecision.tools, JSON.stringify(tddDecision).slice(0, 200))
+    const changed = new SelfCheckTracker(cwd)
+    changed.record({ tool: 'run_command', ok: false, command: 'npm test', output: cmdOutput('npm test', 1, 'not ok 1 - legacy') })
+    changed.record({ tool: 'write_file', ok: true, args: { path: 'parser.js', content: 'x' } })
+    changed.record({ tool: 'run_command', ok: false, command: 'npm test', output: cmdOutput('npm test', 1, 'not ok 1 - legacy\nnot ok 2 - parses') })
+    const changedDecision = await new SelfCheckRun({ settings: SETTINGS, tracker: changed, userRequest: 'implement the parser', language: 'en' }).review('Implemented the parser.', fakeHost([]))
+    assert('N3: a different failure after the edit (a new failing test) → fix turn', changedDecision.kind === 'turn' && changedDecision.tools)
+  }
+
+  // ── N4: a pass claim against a failing check is always corrected ───────
+  {
+    const { cwd } = freshCase('n4')
+    for (const reply of ['Fixed 3 errors in the parser; all tests pass.', '已修复 bug，还修复了一个报错，测试全部通过。', 'Done, all tests pass (one was failing before, now fixed).']) {
+      const tracker = new SelfCheckTracker(cwd)
+      tracker.record({ tool: 'write_file', ok: true, args: { path: 'sum.js', content: SUM_BUGGY } })
+      tracker.record({ tool: 'run_command', ok: false, command: 'npm test', output: cmdOutput('npm test', 1, 'not ok 1 - sum') })
+      const decision = await new SelfCheckRun({ settings: SETTINGS, tracker, userRequest: 'x', language: 'en' }).review(reply, fakeHost([]))
+      assert(`N4: ${JSON.stringify(reply)} against a failing check → fix turn`, decision.kind === 'turn' && decision.tools)
+      const zero = new SelfCheckTracker(cwd)
+      zero.record({ tool: 'write_file', ok: true, args: { path: 'sum.js', content: SUM_BUGGY } })
+      zero.record({ tool: 'run_command', ok: false, command: 'npm test', output: cmdOutput('npm test', 1, 'not ok 1 - sum') })
+      const line = await new SelfCheckRun({ settings: { ...SETTINGS, maxModelCalls: 0 }, tracker: zero, userRequest: 'x', language: 'en' }).review(reply, fakeHost([]))
+      assert(`N4: ${JSON.stringify(reply)} with no call left → the self-check line`, line.kind === 'finish' && /Self-check: `npm test` fails/.test(line.reply), JSON.stringify(line))
+    }
+    assert('N4: "Fixed 3 errors" / "修复了一个报错" are no disclosure; "still fails", "N failing", "未通过", "还在报错", "没跑" are',
+      !replyDisclosesProblem('Fixed 3 errors in the parser.') && !replyDisclosesProblem('修复了一个报错。') &&
+      ['It still fails on Windows.', '2 tests failing.', '测试未通过。', '还在报错。', '我没跑测试。'].every(replyDisclosesProblem))
+  }
+
   // ── honesty ─────────────────────────────────────────────────────────────
   {
     const { cwd } = freshCase('honesty')
@@ -476,7 +546,7 @@ async function main(): Promise<void> {
       .review('ok', { runCommand: async (command, timeoutMs) => { timeoutSeen = timeoutMs; return { ok: true, output: cmdOutput(command, 0) } } })
     assert('bounds: the check command gets the configured time cap', timeoutSeen === 30_000, String(timeoutSeen))
 
-    const policy = new SelfCheckFixPolicy(false, () => 60_000)
+    const policy = new SelfCheckFixPolicy(false, () => 60_000, parseBareCheck('npm test', cwd))
     const install = { command: 'npm install left-pad && npm test' }
     assert('I5: the fix turn refuses installs', /installing packages/.test(policy.admit('run_command', install) ?? ''))
     assert('I5: the fix turn refuses sub-agents and video', Boolean(policy.admit('delegate_task', {})) && Boolean(policy.admit('generate_video', {})) && Boolean(policy.admit('generate_long_video', {})) && Boolean(policy.admit('agent', {})))
@@ -488,8 +558,17 @@ async function main(): Promise<void> {
     policy.admit('write_file', {})
     policy.admit('replace_in_file', {})
     assert('I5: at most 4 tool calls', /used its tool calls/.test(policy.admit('read_file', {}) ?? ''))
-    const imagePolicy = new SelfCheckFixPolicy(true, () => 60_000)
+    const imagePolicy = new SelfCheckFixPolicy(true, () => 120_000)
     assert('I5: one image regeneration, not two', imagePolicy.admit('generate_image', {}) === undefined && Boolean(imagePolicy.admit('generate_image', {})))
+    assert('I5: no image regeneration with too little time left', /too little self-check time/.test(new SelfCheckFixPolicy(true, () => 30_000).admit('generate_image', {}) ?? ''))
+    const shell = new SelfCheckFixPolicy(false, () => 60_000, parseBareCheck('npm test', cwd))
+    for (const command of ['git push', 'git commit -am fix', 'npm publish', 'rm -rf build', 'curl https://example.com', 'npm run deploy', 'npm run lint', 'echo x > sum.js', 'sed -i s/a/b/ sum.js', 'find . -delete']) {
+      assert(`minor: the fix turn refuses \`${command}\``, Boolean(shell.admit('run_command', { command })))
+    }
+    const shell2 = new SelfCheckFixPolicy(false, () => 60_000, parseBareCheck('npm test', cwd))
+    assert('minor: the fix turn allows the same check and read-only inspection',
+      shell2.admit('run_command', { command: 'CI=true npm test' }) === undefined && shell2.admit('run_command', { command: 'cat sum.js | head -20' }) === undefined &&
+      shell2.admit('run_command', { command: 'git diff' }) === undefined && isReadOnlyInspection('grep -rn sum test') && !isReadOnlyInspection('git push'))
 
     let now = 0
     const late = new SelfCheckRun({ settings: SETTINGS, tracker: new SelfCheckTracker(cwd), userRequest: 'x', language: 'en', now: () => now })
@@ -720,6 +799,41 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── runAgent: nothing from an earlier task is re-run (round-2 probe G) ─
+  {
+    const scripted = (steps: Array<Record<string, unknown>>): ChatProvider => {
+      let i = 0
+      return { async complete() { return envelope(steps[Math.min(i++, steps.length - 1)]!) } }
+    }
+    const mk = (dir: string, testBody: string) => {
+      fs.mkdirSync(path.join(dir, 'test'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: testBody } }))
+      fs.writeFileSync(path.join(dir, 'test', 'a.test.js'), "require('node:test')('ok', () => {})\n")
+    }
+    const opts = (cwd: string, store: SessionStore, provider: ChatProvider) => ({ cwd, provider, sessionStore: store, permissionManager: new PermissionManager('PRODUCER', false), maxTurns: 6, profile: 'main' as const, selfCheck: true })
+    const { cwd: base } = freshCase('probe-g', false)
+    const repo1 = path.join(base, 'repo1')
+    mk(repo1, 'node --test')
+    const store1 = new SessionStore(repo1)
+    const s1 = store1.createSession({ title: 'g1' })
+    await store1.save(s1)
+    await runAgent(s1, 'Run the tests and push.', opts(repo1, store1, scripted([{ reply: 'running', done: false, actions: [{ type: 'run_command', command: 'npm test && touch PUSHED' }] }, { reply: 'Tests pass; pushed.', done: true }])))
+    fs.rmSync(path.join(repo1, 'PUSHED'), { force: true })
+    await runAgent(s1, 'Rename the export in a.js to sum.', opts(repo1, store1, scripted([{ reply: 'w', done: false, actions: [{ type: 'write_file', path: 'a.js', content: 'module.exports.sum = 1\n' }] }, { reply: 'Renamed.', done: true }])))
+    assert('N1 (probe G1): an earlier task\'s `npm test && touch PUSHED` is never re-run by a later task', !fs.existsSync(path.join(repo1, 'PUSHED')))
+    const repoA = path.join(base, 'repoA')
+    const repoB = path.join(base, 'repoB')
+    const pwned = path.join(base, 'PWNED_B')
+    mk(repoA, 'node --test')
+    mk(repoB, `touch ${pwned} && node --test`)
+    const storeA = new SessionStore(repoA)
+    const sA = storeA.createSession({ title: 'g2' })
+    await storeA.save(sA)
+    await runAgent(sA, 'Run the tests.', opts(repoA, storeA, scripted([{ reply: 'r', done: false, actions: [{ type: 'run_command', command: 'npm test' }] }, { reply: 'Tests pass.', done: true }])))
+    await runAgent(sA, 'Now in this other checkout, change b.js to export 2.', opts(repoB, storeA, scripted([{ reply: 'w', done: false, actions: [{ type: 'write_file', path: 'b.js', content: 'module.exports = 2\n' }] }, { reply: 'Done.', done: true }])))
+    assert('N1 (probe G2): a check from an earlier task in another repo never runs in this one', !fs.existsSync(pwned))
+  }
+
   // ── runAgent: monorepo, the re-run never moves the run (probe E) ───────
   {
     const { cwd, pkg } = monorepoCase('mono-agent')
@@ -742,7 +856,7 @@ async function main(): Promise<void> {
     await store.save(session)
     await runAgent(session, 'Add sum(a, b) in packages/foo/sum.js, test it, then simplify it', { cwd, provider, sessionStore: store, permissionManager: new PermissionManager('PRODUCER', false), maxTurns: 8, profile: 'main', selfCheck: true })
     const saved = await store.load(session.id)
-    const reruns = toolMessages(saved.messages).filter((m) => m.content.includes('cd packages/foo && npm test'))
+    const reruns = toolMessages(saved.messages).filter((m) => /cd packages\/foo && (?:CI=true )?npm test/.test(m.content))
     assert('B2 (runAgent): the fix lands in the real file; no stray packages/foo/packages/foo',
       fs.readFileSync(path.join(pkg, 'sum.js'), 'utf8') === SUM_FIXED && !fs.existsSync(path.join(pkg, 'packages')), JSON.stringify(reruns.map((m) => m.content.slice(0, 300))))
     assert('B2 (runAgent): the re-runs ran from where the agent ran its check (no nested cd)', reruns.length === 3 && !reruns.some((m) => m.content.includes('packages/foo/packages/foo')))
