@@ -124,8 +124,6 @@ export class QueryEngine {
   private costTracker: any
   private sessionManager: any
   private permissionManager: any
-  private agentSystem: any
-  private nlpSystem: any
   private speculationState: SpeculationState = { status: 'idle' }
   private contextCache: Map<string, any> = new Map()
   private executionHistory: QueryExecutionContext[] = []
