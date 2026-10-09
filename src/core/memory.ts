@@ -1,5 +1,6 @@
 import type { SessionRecord } from './types.js'
 import { summarizeOnce } from '../brain.js'
+import { settleCurations, trackCuration } from './backgroundCuration.js'
 import { getMemoryProfile, MemoryEnhancementFactory } from './memoryEnhancement.js'
 import {
   ensureMemoryMigrated,
@@ -30,9 +31,6 @@ type CuratorOp = {
   reason?: string
 }
 
-/** Curations started by finished runs and not done yet (see scheduleTrajectoryCuration). */
-const pendingCurations = new Set<Promise<void>>()
-
 /**
  * Runs the memory curator for a finished run in the background. The run does
  * not wait for it; settleMemoryCuration() does, for a host (or a test) that
@@ -40,15 +38,15 @@ const pendingCurations = new Set<Promise<void>>()
  * provider stores) while it is still running.
  */
 export function scheduleTrajectoryCuration(cwd: string, session: SessionRecord): void {
-  const curation: Promise<void> = compressTrajectory(cwd, session, '')
-    .catch(() => {})
-    .finally(() => { pendingCurations.delete(curation) })
-  pendingCurations.add(curation)
+  trackCuration(compressTrajectory(cwd, session, ''))
 }
 
-/** Resolves once every scheduled curation has finished. */
+/**
+ * Resolves once every scheduled curation has finished — long-term memory and
+ * learned skills alike (see core/backgroundCuration.ts).
+ */
 export async function settleMemoryCuration(): Promise<void> {
-  while (pendingCurations.size > 0) await Promise.allSettled([...pendingCurations])
+  await settleCurations()
 }
 
 export async function compressTrajectory(

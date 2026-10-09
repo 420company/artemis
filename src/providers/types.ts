@@ -309,11 +309,24 @@ export type ProviderRotationConfig = {
   strategy: 'fill_first' | 'round_robin' | 'random';
 };
 
+/** Long-term memory switches (Mnemosyne). Absent keys keep the defaults. */
+export type MemorySetupConfig = {
+  skills?: {
+    /**
+     * Learned skills: distil a reusable procedure from runs that verifiably
+     * succeeded and offer them to later runs. Default true; false turns
+     * learning and the skill index off (stored skills are kept).
+     */
+    enabled?: boolean;
+  };
+};
+
 export type ArtemisSetupConfig = {
   agent: AgentSetupConfig;
   terminal: TerminalSetupConfig;
   voice: VoiceSetupConfig;
   tools: ToolSetupConfig;
+  memory?: MemorySetupConfig;
   providerRotation?: Partial<Record<string, ProviderRotationConfig>>;
   migrations?: {
     imageGenDefaultEnabled?: boolean;

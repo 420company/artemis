@@ -300,6 +300,11 @@ export async function loadIndexText(cwd: string, scope: MemoryScope): Promise<st
 
 // ── recall ──────────────────────────────────────────────────────────────────
 
+/** Recall tokens: lowercase words of 2+ chars plus CJK bigrams (shared with learned skills). */
+export function tokenizeForRecall(text: string): Set<string> {
+  return tokenize(text)
+}
+
 function tokenize(text: string): Set<string> {
   const tokens = new Set<string>()
   for (const m of text.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
