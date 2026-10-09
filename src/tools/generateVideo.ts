@@ -21,8 +21,12 @@ import {
   shouldPromoteBytePlusVideoModel,
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
+import { appendRenderingGuardrails, renderingGuardrailsLength } from './visual/renderingGuardrails.js';
+import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
+import { normalizeVideoRatioArgument } from './visual/aspectRatio.js';
 import {
   buildVisualSetupRequiredMessage,
   isVisualSetupRequiredError,
@@ -230,7 +234,7 @@ export async function executeGenerateVideo(
         output: 'generate_video: selected video model cannot generate audio. Choose Seedance 2.0 Pro, or set generateAudio to false.',
       };
     }
-    const ratio = action.ratio?.trim() || DEFAULT_RATIO;
+    const ratio = normalizeVideoRatioArgument(action.ratio, DEFAULT_RATIO, toolWarn) ?? DEFAULT_RATIO;
     const duration = normalizeVideoDurationForProvider(action.duration, 'byteplus', model);
     const maxPolls =
       typeof action.maxPolls === 'number' && action.maxPolls > 0
@@ -240,7 +244,9 @@ export async function executeGenerateVideo(
       typeof action.pollIntervalMs === 'number' && action.pollIntervalMs >= 1000
         ? Math.floor(action.pollIntervalMs)
         : DEFAULT_POLL_INTERVAL_MS;
-    const directed = buildDirectedVideoPrompt({
+    const directed = action.cleanDirect === true
+      ? { directedPrompt: fitVerbatimPrompt(action.prompt, 'byteplus', model), providerProfile: 'Saga cleanDirect: Director bypassed, prompt passed verbatim' }
+      : buildDirectedVideoPrompt({
       prompt: action.prompt,
       provider: 'byteplus',
       model,
@@ -251,11 +257,13 @@ export async function executeGenerateVideo(
       referenceAudioCount: (action.referenceAudioUrls?.length ?? 0) + (action.referenceAudioPaths?.length ?? 0),
       firstFrameImageCount: (action.firstFrameImageUrls?.length ?? 0) + (action.firstFrameImagePaths?.length ?? 0),
       lastFrameImageCount: (action.lastFrameImageUrls?.length ?? 0) + (action.lastFrameImagePaths?.length ?? 0),
+      maxPromptChars: directorPromptBudget(action, 'byteplus', model),
+      subtitleMode: action.subtitleMode,
     });
     toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
 
     const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: directed.directedPrompt },
+      { type: 'text', text: withSagaRenderingGuardrails(directed.directedPrompt, action, 'byteplus', model) },
     ];
     const referenceImageUrls = [
       ...nonEmptyValues(action.referenceImageUrls),
@@ -310,7 +318,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`,
+        ...legacyVideoFailure(`generate_video: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status, context),
       };
     }
 
@@ -349,7 +357,7 @@ export async function executeGenerateVideo(
         return {
           action,
           ok: false,
-          output: `generate_video: poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`,
+          ...legacyVideoFailure(`generate_video: poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`, pollRes.status, context),
         };
       }
       let pollPayload: TaskStatusResponse;
@@ -363,7 +371,7 @@ export async function executeGenerateVideo(
         return {
           action,
           ok: false,
-          output: `generate_video: task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim(),
+          ...legacyVideoFailure(`generate_video: task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim(), undefined, context),
         };
       }
       const maybeUrl = extractVideoUrl(pollPayload);
@@ -377,7 +385,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: task ${taskId} did not finish within ${maxPolls} polls (${(maxPolls * pollIntervalMs) / 1000}s). Last status: ${lastStatus}.`,
+        ...legacyVideoFailure(`generate_video: task ${taskId} did not finish within ${maxPolls} polls (${(maxPolls * pollIntervalMs) / 1000}s). Last status: ${lastStatus}.`, undefined, context),
       };
     }
 
@@ -407,6 +415,65 @@ export async function executeGenerateVideo(
     }
     return { action, ok: false, output: `generate_video error: ${message}` };
   }
+}
+
+/**
+ * Room generate_video needs around a Saga segment prompt outside cleanDirect /
+ * raw passthrough: the Director's fixed lines (technical spec, reference
+ * declaration, negative constraints), the dialogue note and the rendering
+ * rules. generate_long_video compiles each segment prompt within the model's
+ * limit less this, so nothing the segment needs is cut off at the end.
+ */
+export const SAGA_SEGMENT_DIRECTOR_CHARS = 1080;
+
+export function sagaSegmentPromptReserve(): number {
+  return SAGA_SEGMENT_DIRECTOR_CHARS + renderingGuardrailsLength();
+}
+
+/** A prompt sent as written still has to fit the model's prompt limit. */
+function fitVerbatimPrompt(prompt: string, provider: string, model: string): string {
+  const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
+  if (prompt.length <= limit) return prompt;
+  toolWarn(`⚠️ Saga: 提示词超过 ${model} 的长度上限（${prompt.length}/${limit}），已截断末尾。`);
+  return `${prompt.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function wantsRenderingGuardrails(action: GenerateVideoAction): boolean {
+  return action.renderingGuardrails === true && action.cleanDirect !== true;
+}
+
+/**
+ * How long the Director may make the prompt: the model's limit, less room
+ * for the rendering rules when a Saga segment will get them.
+ */
+function directorPromptBudget(action: GenerateVideoAction, provider: string, model: string): number {
+  const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
+  return wantsRenderingGuardrails(action) ? limit - renderingGuardrailsLength() : limit;
+}
+
+/**
+ * A Saga segment (outside raw mode) gets the short rendering rules appended,
+ * only while the whole prompt stays within the model's prompt limit.
+ */
+function withSagaRenderingGuardrails(prompt: string, action: GenerateVideoAction, provider: string, model: string): string {
+  if (!wantsRenderingGuardrails(action)) return prompt;
+  const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
+  const guarded = appendRenderingGuardrails(prompt, limit);
+  if (guarded.added === 0) {
+    toolWarn(`⚠️ Saga: 提示词已接近 ${model} 的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
+  }
+  return guarded.prompt;
+}
+
+/** Output and ToolError for a failed legacy ModelArk call: the raw error plus a plain reason. */
+function legacyVideoFailure(
+  output: string,
+  status: number | undefined,
+  context: ToolExecutionContext,
+): Pick<ToolExecutionResult, 'output' | 'error'> {
+  const failure = describeVideoGenerationFailure({ detail: output, status }, context.locale);
+  toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
+  return { output: `${output}\nReason: ${failure.userMessage}`, error: videoFailureToolError(failure, status) };
 }
 
 async function tryGenerateWithConfiguredVisualProvider(
@@ -508,7 +575,7 @@ async function generateVideoWithVisualProvider(
       output: `generate_video: ${videoConfig.provider}/${model} cannot generate audio.${modelHint}`,
     };
   }
-  const ratio = action.ratio;
+  const ratio = normalizeVideoRatioArgument(action.ratio, undefined, toolWarn);
   const referenceImageUrls = [
     ...nonEmptyValues(action.referenceImageUrls),
     ...await localImagePathsToProviderUrls(action.referenceImagePaths, context, videoConfig.provider, model),
@@ -535,14 +602,20 @@ async function generateVideoWithVisualProvider(
   // frame" / negative constraints) reliably dilutes explicit intent into
   // generic tasteful imagery. Skip the Director and pass the user's prompt
   // verbatim so the provider can render exactly what was asked for.
-  const bypassDirector = videoConfig.nsfw === true;
+  // Saga raw mode asks for the same: the script goes to the model as written.
+  const rawMode = action.cleanDirect === true;
+  const bypassDirector = videoConfig.nsfw === true || rawMode;
   const languageNormalized = bypassDirector
     ? null
     : await normalizeSagaPromptForVideoGeneration({
         cwd: context.cwd,
         text: action.prompt,
-        enableLlmRewrite: true,
-        subtitleMode: 'auto',
+        // A Saga segment is the user's script plus its locks: the story beat
+        // goes verbatim (guide §7.7), so no LLM rewrite.
+        enableLlmRewrite: action.sagaSegment !== true,
+        subtitleMode: action.subtitleMode ?? 'auto',
+        compact: action.sagaSegment === true,
+        markedDialogueOnly: action.sagaSegment === true,
       });
   const generationPrompt = languageNormalized?.generationText ?? action.prompt;
   if (languageNormalized) {
@@ -550,8 +623,8 @@ async function generateVideoWithVisualProvider(
   }
   const directed = bypassDirector
     ? {
-        directedPrompt: action.prompt,
-        providerProfile: 'NSFW provider: Director bypassed, prompt passed verbatim',
+        directedPrompt: rawMode ? fitVerbatimPrompt(action.prompt, videoConfig.provider, model) : action.prompt,
+        providerProfile: rawMode ? 'Saga cleanDirect: Director bypassed, prompt passed verbatim' : 'NSFW provider: Director bypassed, prompt passed verbatim',
       }
     : buildDirectedVideoPrompt({
         prompt: generationPrompt,
@@ -564,10 +637,16 @@ async function generateVideoWithVisualProvider(
         referenceAudioCount: referenceAudioUrls.length,
         firstFrameImageCount: firstFrameImageUrls.length,
         lastFrameImageCount: lastFrameImageUrls.length,
+        maxPromptChars: directorPromptBudget(action, videoConfig.provider, model),
+        // Guide §3.5: on "auto", a line the brief marks as a subtitle asks
+        // for on-screen text, so the Director must not forbid it.
+        subtitleMode: (action.subtitleMode ?? 'auto') === 'auto' && languageNormalized?.dialogueLines.some((line) => line.use === 'subtitle')
+          ? 'always'
+          : action.subtitleMode,
       });
   toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
   const result = await provider.generateVideo({
-    prompt: directed.directedPrompt,
+    prompt: withSagaRenderingGuardrails(directed.directedPrompt, action, videoConfig.provider, model),
     model,
     ratio,
     duration,
@@ -578,6 +657,7 @@ async function generateVideoWithVisualProvider(
     referenceAudioUrls,
     firstFrameImageUrls,
     lastFrameImageUrls,
+    ...(rawMode ? { promptExtend: false } : {}),
     generateAudio: action.generateAudio,
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,
@@ -587,11 +667,18 @@ async function generateVideoWithVisualProvider(
 
   if (!result.success || !result.assetPath) {
     const message = result.error ?? 'unknown error';
-    toolWarn(`⚠️ 本地视频生成 API 失败: ${message}`);
+    const failure = describeVideoGenerationFailure(
+      { detail: message, status: result.httpStatus, stage: result.failureStage },
+      context.locale,
+    );
+    // A plain reason for the user; the raw provider error stays in the log
+    // line and in the output, where Saga's retry logic reads it.
+    toolWarn(`⚠️ ${failure.userMessage}\n   ${sourceLabel}: ${failure.details}`);
     return {
       action,
       ok: false,
-      output: `generate_video: ${sourceLabel} failed: ${message}`,
+      output: `generate_video: ${sourceLabel} failed: ${message}\nReason: ${failure.userMessage}`,
+      error: videoFailureToolError(failure, result.httpStatus),
     };
   }
 

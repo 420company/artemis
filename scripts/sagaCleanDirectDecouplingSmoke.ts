@@ -1,6 +1,48 @@
 import assert from 'node:assert/strict';
 import { buildContinuityBible, compileShotPromptWithContinuity } from '../src/tools/visual/sagaRenderer/continuity.js';
 import { extractSagaDialogueLines } from '../src/tools/visual/sagaLanguageDirector.js';
+import { hasCleanDirectKeyword, hasRawModeTag, stripCleanDirectInstruction } from '../src/tools/visual/rawModeTag.js';
+import { imageBodies, runHermeticSaga, videoTaskBodies } from './sagaHermeticHarness.js';
+
+/** Guide §9.10 keywords switch cleanDirect on; only an explicit tag switches raw passthrough on. */
+function triggerChecks(): void {
+  for (const text of [
+    '请用原始质感 / 少滤镜 / raw-seedance / clean-direct。',
+    'Use raw look / low filter / raw-seedance / clean-direct.',
+    '帮我生成长视频，使用旧版质感，不要滤镜，raw seedance',
+    '这次用原始质感',
+    'low-filter please',
+  ]) {
+    assert.equal(hasCleanDirectKeyword(text), true, `cleanDirect keyword in ${JSON.stringify(text)}`);
+    assert.equal(hasRawModeTag(text), false, `no raw passthrough in ${JSON.stringify(text)}`);
+  }
+  for (const text of ['她说自拍不要滤镜，也无滤镜', 'write a short prompt for each scene', '保留木头的原始质感', 'the raw look of the concrete wall']) {
+    assert.equal(hasCleanDirectKeyword(text), false, `casual wording ${JSON.stringify(text)} is not cleanDirect`);
+  }
+  for (const text of ['[原样直传]\n剧本', '【raw直传】 kite story', '原样直传\n风筝', '原样直传。', '/saga 原样直传 风筝飞过山坡', '（原样直传）剧本']) {
+    assert.equal(hasRawModeTag(text), true, `raw passthrough tag in ${JSON.stringify(text)}`);
+  }
+  for (const text of ['她说，原样直传，不要改。', '她说要原样直传这段剧本。']) {
+    assert.equal(hasRawModeTag(text), false, `mid-story ${JSON.stringify(text)} is not a tag`);
+  }
+  assert.equal(stripCleanDirectInstruction('请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n保留自然纹理。'), '保留自然纹理。');
+}
+
+/** cleanDirect keeps the analysis and the Super Visual turnaround; only the dressing goes. */
+async function upstreamChecks(): Promise<void> {
+  const story = '请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n一个叫美的年轻女人在日落时沿着海滩散步，然后坐在礁石上看海浪。';
+  const run = await runHermeticSaga({ prompt: story, story, totalDuration: 10, ratio: '9:16', generateAudio: false, cleanDirect: true });
+  assert.equal(run.result.ok, true, run.result.output);
+  assert.ok(run.requests.some((request: { url: string }) => request.url.endsWith('/chat/completions')), 'cleanDirect does not skip the narrative analysis');
+  assert.ok(imageBodies(run.requests).length >= 1, 'cleanDirect does not skip the Super Visual turnaround');
+  assert.doesNotMatch(String(run.result.output), /raw-mode-direct-to-video/);
+  for (const body of videoTaskBodies(run.requests)) {
+    const text = (body.content ?? []).filter((item: { type: string }) => item.type === 'text').map((item: { text: string }) => item.text).join('\n');
+    assert.ok(text.length <= 4000, 'cleanDirect prompts stay within the length cap');
+    assert.match(text, /\[NEGATIVE/, 'cleanDirect keeps subtitle protection');
+    assert.doesNotMatch(text, /\[STYLE-LOCK|\[AESTHETIC-LOCK|Rendering rules:|Fibonacci/, 'cleanDirect drops the aesthetic dressing');
+  }
+}
 
 // Representative excerpt from the user's JVKE golden-hour travel brief.
 // Includes timecodes [0-8秒], section headers with English song lyrics in
@@ -281,6 +323,9 @@ async function main(): Promise<void> {
   const unstructured = 'A short story about a woman walking through a single park at dusk, looking for something.';
   const unstructuredBible = buildContinuityBible({ story: unstructured, ratio: '16:9' });
   assert.match(unstructuredBible.bible, /walking through a single park/, 'unstructured briefs without timecode markers must still embed the full story (legacy behaviour)');
+
+  triggerChecks();
+  await upstreamChecks();
 
   console.log('saga cleanDirect/CAMERA/NEGATIVE decoupling smoke ok');
 }

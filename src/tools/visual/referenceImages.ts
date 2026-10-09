@@ -123,39 +123,75 @@ export async function resolveReferenceImages(
       ensureNotSensitivePath(absolute, entry);
     }
 
-    let size: number;
-    try {
-      const info = await stat(absolute);
-      if (!info.isFile()) {
-        throw new ReferenceImageError(`Reference image ${entry} is not a file.`);
-      }
-      size = info.size;
-    } catch (error) {
-      if (error instanceof ReferenceImageError) throw error;
-      throw new ReferenceImageError(`Reference image not found: ${entry}`);
-    }
-    if (size > MAX_REFERENCE_IMAGE_BYTES) {
-      throw new ReferenceImageError(
-        `Reference image ${entry} is ${formatMiB(size)}; the limit is ${formatMiB(MAX_REFERENCE_IMAGE_BYTES)} per image. Resize or compress it first.`,
-      );
-    }
+    const { dataUri, size } = await readReferenceImageAsDataUri(absolute, entry, totalBytes);
     totalBytes += size;
-    if (totalBytes > MAX_TOTAL_REFERENCE_BYTES) {
-      throw new ReferenceImageError(
-        `Reference images total more than ${formatMiB(MAX_TOTAL_REFERENCE_BYTES)}; use fewer or smaller images.`,
-      );
-    }
-
-    const buf = await readFile(absolute);
-    const mimeType = sniffImageMimeType(buf);
-    if (!mimeType) {
-      throw new ReferenceImageError(
-        `Reference image ${entry} is not a supported image (PNG, JPEG, WebP, GIF, BMP, TIFF or HEIC/HEIF).`,
-      );
-    }
-    resolved.push(`data:${mimeType};base64,${buf.toString('base64')}`);
+    resolved.push(dataUri);
   }
   return resolved;
+}
+
+/**
+ * Reads one local reference image as a data URI, with the same checks for
+ * every caller: a regular file, under the per-image cap, the running total
+ * under the total cap, and really an image Seedream accepts.
+ */
+async function readReferenceImageAsDataUri(
+  absolute: string,
+  label: string,
+  bytesSoFar: number,
+): Promise<{ dataUri: string; size: number }> {
+  let size: number;
+  try {
+    const info = await stat(absolute);
+    if (!info.isFile()) {
+      throw new ReferenceImageError(`Reference image ${label} is not a file.`);
+    }
+    size = info.size;
+  } catch (error) {
+    if (error instanceof ReferenceImageError) throw error;
+    throw new ReferenceImageError(`Reference image not found: ${label}`);
+  }
+  if (size > MAX_REFERENCE_IMAGE_BYTES) {
+    throw new ReferenceImageError(
+      `Reference image ${label} is ${formatMiB(size)}; the limit is ${formatMiB(MAX_REFERENCE_IMAGE_BYTES)} per image. Resize or compress it first.`,
+    );
+  }
+  if (bytesSoFar + size > MAX_TOTAL_REFERENCE_BYTES) {
+    throw new ReferenceImageError(
+      `Reference images total more than ${formatMiB(MAX_TOTAL_REFERENCE_BYTES)}; use fewer or smaller images.`,
+    );
+  }
+  const buf = await readFile(absolute);
+  const mimeType = sniffImageMimeType(buf);
+  if (!mimeType) {
+    throw new ReferenceImageError(
+      `Reference image ${label} is not a supported image (PNG, JPEG, WebP, GIF, BMP, TIFF or HEIC/HEIF).`,
+    );
+  }
+  return { dataUri: `data:${mimeType};base64,${buf.toString('base64')}`, size };
+}
+
+/**
+ * Data URIs for local images the pipeline itself produced or already
+ * resolved (Saga's turnaround sheets, previous-segment frames, user
+ * references resolved by generate_long_video). They are absolute paths under
+ * the project directory, so no workspace lookup applies; every other check of
+ * resolveReferenceImages does.
+ */
+export async function localImagesToReferenceDataUris(absolutePaths: readonly string[]): Promise<string[]> {
+  if (absolutePaths.length > MAX_REFERENCE_IMAGES) {
+    throw new ReferenceImageError(
+      `${absolutePaths.length} reference images; the image API accepts at most ${MAX_REFERENCE_IMAGES}.`,
+    );
+  }
+  const out: string[] = [];
+  let totalBytes = 0;
+  for (const absolute of absolutePaths) {
+    const { dataUri, size } = await readReferenceImageAsDataUri(absolute, absolute, totalBytes);
+    totalBytes += size;
+    out.push(dataUri);
+  }
+  return out;
 }
 
 /**

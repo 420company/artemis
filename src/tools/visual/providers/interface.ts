@@ -15,6 +15,8 @@ export interface VisualGenerationParams {
   count?: number
   /** Image references as http(s) URLs or base64 data URIs (generate_image only). */
   referenceImages?: string[]
+  /** Cancels the request and the result download (image generation). */
+  abortSignal?: AbortSignal
 }
 
 export interface VideoGenerationParams extends VisualGenerationParams {
@@ -23,6 +25,8 @@ export interface VideoGenerationParams extends VisualGenerationParams {
   /** "480p" / "720p" / "1080p", only when the request asked for one. */
   resolution?: string
   generateAudio?: boolean
+  /** false asks providers that rewrite prompts server-side (Wan prompt_extend) not to. */
+  promptExtend?: boolean
   referenceImageUrls?: string[]
   referenceVideoUrls?: string[]
   referenceAudioUrls?: string[]

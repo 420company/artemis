@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
 import { toolWarn } from '../../utils/log.js';
+import { postSagaChatCompletion, resolveSagaChatEndpoint } from './sagaChat.js';
 import type { ToolExecutionContext } from '../types.js';
 
 type StoryboardShot = {
@@ -120,16 +121,17 @@ export async function parseStoryboardImageWithVision(options: {
       candidates.push({ apiKey: imageApiKey, baseUrl: imageBaseUrl, chatModel: m, label: `image-provider-vision[${m}]` });
     }
   }
-  try {
-    const { ProviderStore } = await import('../../providers/store.js');
-    const store = await new ProviderStore(options.context.cwd).load();
-    const main = store?.profiles?.find((p) => p.id === (store?.defaultMainProfileId ?? 'main'));
-    const mainApiKey = main?.apiKey?.trim();
-    const mainBaseUrl = main?.baseUrl?.trim();
-    if (mainApiKey && mainBaseUrl && main?.model) {
-      candidates.push({ apiKey: mainApiKey, baseUrl: mainBaseUrl, chatModel: main.model, label: 'main-profile-vision' });
-    }
-  } catch { /* optional fallback */ }
+  // The main profile, or the configured vision profile when the main model
+  // cannot see images.
+  const chatEndpoint = await resolveSagaChatEndpoint(options.context.cwd, { needsImages: true });
+  if (chatEndpoint && chatEndpoint.source !== 'image-provider') {
+    candidates.push({
+      apiKey: chatEndpoint.apiKey,
+      baseUrl: chatEndpoint.baseUrl,
+      chatModel: chatEndpoint.model,
+      label: chatEndpoint.source === 'vision-profile' ? 'vision-profile' : 'main-profile-vision',
+    });
+  }
   if (candidates.length === 0) return null;
 
   let buffer: Buffer;
@@ -175,26 +177,23 @@ export async function parseStoryboardImageWithVision(options: {
   } as Record<string, unknown>);
 
   for (const candidate of candidates) {
-    const url = candidate.baseUrl.replace(/\/+$/, '') + '/chat/completions';
     const maxAttempts = 2;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${candidate.apiKey}` },
-          body: JSON.stringify(buildBody(candidate.chatModel)),
-          signal: AbortSignal.timeout(90_000),
-        });
+        const res = await postSagaChatCompletion(candidate, buildBody(candidate.chatModel));
+        if (!res.ok && res.status === undefined) {
+          throw new Error(res.timedOut ? `timed out: ${res.text}` : res.text);
+        }
         if (!res.ok) {
-          const errBody = await res.text().catch(() => '');
+          const errBody = res.text;
           toolWarn(`⚠️ Storyboard parser: ${candidate.label} failed (HTTP ${res.status}, attempt ${attempt + 1}/${maxAttempts}) — ${errBody.slice(0, 200)}`);
-          if (attempt < maxAttempts - 1 && (res.status === 429 || res.status >= 500)) {
+          if (attempt < maxAttempts - 1 && (res.status === 429 || (res.status ?? 0) >= 500)) {
             await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
             continue;
           }
           break;
         }
-        const text = await res.text();
+        const text = res.text;
         let parsedResponse: { choices?: Array<{ message?: { content?: unknown } }> };
         try {
           parsedResponse = JSON.parse(text);

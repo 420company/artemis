@@ -572,6 +572,9 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
   validateOptionalNonEmptyString(action?.title, 'title', errors);
   validateOptionalNonEmptyString(action?.story, 'story', errors);
+  if (action?.resolution !== undefined && normalizeVideoResolution(action.resolution) === undefined) {
+    errors.push('resolution must be one of 480p, 720p, 1080p');
+  }
   if (action?.shots !== undefined) {
     if (!Array.isArray(action.shots)) {
       errors.push('shots must be an array when provided.');
@@ -619,6 +622,7 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateBooleanValue(action?.resume, 'resume', errors);
   validateBooleanValue(action?.preserveUserScript, 'preserveUserScript', errors);
   validateBooleanValue(action?.cleanDirect, 'cleanDirect', errors);
+  validateBooleanValue(action?.rawPassthrough, 'rawPassthrough', errors);
   validateEnumString(action?.chainReferenceFrames, 'chainReferenceFrames', ['auto', 'always', 'off'] as const, errors);
   validateEnumString(action?.continuityMode, 'continuityMode', ['auto', 'strong-vision', 'text-only'] as const, errors);
   validatePositiveInteger(action?.crossfadeMs, 'crossfadeMs', errors);

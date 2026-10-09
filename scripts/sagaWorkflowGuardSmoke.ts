@@ -3,8 +3,9 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ProviderStore } from '../src/providers/store.js';
-import { handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
+import { extractRequestedResolution, handleSagaLongVideoWorkflow } from '../src/tools/visual/sagaWorkflow.js';
 import { BYTEPLUS_SEEDANCE_2_PRO_MODEL } from '../src/tools/visual/videoCapabilities.js';
+import { extractBriefAspectRatio, normalizeAspectRatio, normalizeVideoRatioArgument } from '../src/tools/visual/aspectRatio.js';
 
 // Explicit /saga entry only starts the wizard when a video provider is
 // configured (resolveConfiguredVisualProvider). Configure one in the temp
@@ -258,6 +259,45 @@ async function main(): Promise<void> {
   assert.equal(bgmInlineFinal.action?.soundtrackVolumeDb, -15, 'inline 音量-15dB should set soundtrackVolumeDb to -15');
   assert.equal(bgmInlineFinal.action?.soundtrackFadeOutSec, 2, 'inline 淡出2秒 should set soundtrackFadeOutSec to 2');
 
+  // "环境音音量 / 环境音量 / 环境声音量 / ambient sound volume -18dB" set the ambience level
+  // and leave the music volume alone.
+  for (const [index, reply] of ['环境音音量 -18dB', '环境音量 -18dB', '环境声音量 -18dB', 'ambient sound volume -18dB'].entries()) {
+    const ambienceKey = `${key}-bgm-ambience-${index}`;
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '2' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
+    const ambienceStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '开始生成' });
+    if (ambienceStart.handled && /确认.*主角|confirm the lead/i.test(ambienceStart.reply)) {
+      await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: 'X' });
+    }
+    for (const answer of ['16:9', '无字幕', '60秒', '2']) await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: answer });
+    const ambienceFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: `${bgmInlinePath} ${reply}` });
+    assert.equal(ambienceFinal.action?.environmentVolumeDb, -18, `"${reply}" sets the ambience level`);
+    assert.equal(ambienceFinal.action?.soundtrackVolumeDb, undefined, `"${reply}" never sets the music volume`);
+  }
+
+  // Guide §9.6: a declared subject mode / identity source skips those questions.
+  const declaredText = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-text`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：有主角。身份来源：纯文字。\n[0-5秒] 镜头1：风筝飞过山坡。\n[5-10秒] 镜头2：风筝落进草地。' });
+  assert.match(declaredText.reply, /已按剧本设定：有主角 · 身份来源：纯文字/);
+  assert.match(declaredText.reply, /补充其它素材/, 'text-only identity goes straight to the materials step');
+  const declaredVisual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-visual`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：纯视觉 / 无主角。\n[0-5秒] 雨中的山谷。\n[5-10秒] 云雾散开。' });
+  assert.match(declaredVisual.reply, /已按剧本设定：纯视觉/);
+  assert.doesNotMatch(declaredVisual.reply, /这段视频里/, 'the subject question is not asked again');
+  const declaredTurnaround = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-turnaround`, cwd, locale: 'en', forceIntent: true, text: 'Subject mode: has protagonist. Identity source: turnaround reference sheet; do not inherit reference-photo backgrounds.\n[0-5s] A girl opens the door.\n[5-10s] She looks back.' });
+  assert.match(declaredTurnaround.reply, /Taken from your brief: has a protagonist · identity source: turnaround sheet/);
+  const undeclared = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-undeclared`, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我做一个关于风筝的长视频' });
+  assert.match(undeclared.reply, /这段视频里/, 'without a declaration the subject question is asked');
+  // Only a header line that starts with the label and holds exactly one option counts.
+  for (const [index, text] of [
+    '【整片叙事】\n一部关于失忆侦探的短片。档案上写着：身份来源：照片。主体模式：纯视觉 是这部片子的反讽标题。\n[0-6秒] 段 1 · 侦探翻看旧档案。\n[6-12秒] 段 2 · 他抬头望向窗外。',
+    '重庆夜市，三个老同学十年后重逢。主体模式：有主角。身份来源：纯文字。\n[0-6秒] 段 1 · 夜市。\n[6-12秒] 段 2 · 重逢。',
+    '[0-6秒] 段 1 · 夜市。\n主体模式：纯视觉\n[6-12秒] 段 2 · 重逢。',
+    '主体模式：纯视觉是主题\n[0-6秒] 段 1 · 夜市。\n[6-12秒] 段 2 · 重逢。',
+  ].entries()) {
+    const prose = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-prose-${index}`, cwd, locale: 'zh-CN', forceIntent: true, text });
+    assert.match(prose.reply, /这段视频里/, `a declaration inside story prose is not an answer: ${text.slice(0, 40)}`);
+  }
+
   const bgmTuneKey = `${key}-bgm-tune`;
   const bgmTunePath = path.join(cwd, 'tune-bgm.mp3');
   await writeFile(bgmTunePath, Buffer.alloc(128, 1));
@@ -362,6 +402,24 @@ async function main(): Promise<void> {
   });
   assert.equal(explicit.handled, true, 'explicit /saga entry should enter Saga workflow');
 
+  // Real briefs read like "workflow discussion" to the classifier (video words
+  // plus a question mark or 没有 in the dialogue). /saga must still start Saga.
+  for (const [suffix, brief] of [
+    ['brief-question', '30秒短片《码头》\n[0-10秒] 夜景，方天豪走向镜头。对白：“你还好吗？”\n[10-20秒] 他转身。\n[20-30秒] 船离开。'],
+    ['brief-negation', '视频风格：电影感。\n[0-5秒] 女孩推开门，没有人在家。\n[5-10秒] 她发现桌上的信。'],
+  ] as const) {
+    const scripted = await handleSagaLongVideoWorkflow({
+      scope: 'bridge',
+      key: `${key}-${suffix}`,
+      cwd,
+      locale: 'zh',
+      forceIntent: true,
+      text: brief,
+    });
+    assert.equal(scripted.handled, true, `explicit /saga with a real brief (${suffix}) must enter the Saga wizard`);
+    assert.match(scripted.reply, /这段视频里|In this video/i, `explicit /saga brief (${suffix}) should open with the subject-mode menu`);
+  }
+
   const supportQuestion = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: `${key}-explicit`,
@@ -407,7 +465,232 @@ async function main(): Promise<void> {
   assert.equal(cyberScript.handled, true, 'active Saga must keep pasted scripts inside collecting_refs even when they mention 系统/代码/生成/视频/吗');
   assert.match(cyberScript.reply, /剧本段 1|1 script segments/, 'cyber promo script should be archived as a script segment, not fall through to brain');
 
+  // The same image sent in two turns, once as an attachment (saved under
+  // saga-refs) and once as a pasted local path, counts as one image.
+  const previousMediaRoot = process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
+  process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = await mkdtemp(path.join(os.tmpdir(), 'artemis-saga-media-'));
+  try {
+    const imageBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(256, 7)]);
+    const localImage = path.join(cwd, 'lead-photo.png');
+    await writeFile(localImage, imageBytes);
+    const dedupKey = `${key}-cross-turn-dedup`;
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: '1' });
+    const askImage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: '3' });
+    assert.equal(askImage.handled, true);
+    const firstImage = await handleSagaLongVideoWorkflow({
+      scope: 'bridge',
+      key: dedupKey,
+      cwd,
+      locale: 'zh',
+      text: '',
+      imageAttachments: [{ data: imageBytes.toString('base64'), mediaType: 'image/png' }],
+    });
+    assert.match(firstImage.reply, /已收到 1 张|Got 1 /, `first upload should count as one image: ${firstImage.reply}`);
+    const samePathAgain = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: localImage });
+    assert.match(samePathAgain.reply, /已收到 1 张|Got 1 /, `the same image pasted as a path in a later turn must not count twice: ${samePathAgain.reply}`);
+  } finally {
+    if (previousMediaRoot === undefined) delete process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
+    else process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = previousMediaRoot;
+  }
+
+  // A menu button labelled "默认/自动" confirms the default, like "默认" alone.
+  const comboKey = `${key}-default-auto-combo`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '剧情你来创造。' });
+  const comboStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '开始生成' });
+  if (/确认.*主角|confirm the lead/i.test(comboStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: 'B 海边的女孩' });
+  }
+  const comboRatio = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认/自动' });
+  assert.match(comboRatio.reply, /是否携带字幕|include subtitles/i, `"默认/自动" should confirm the default ratio: ${comboRatio.reply}`);
+  const comboSubtitle = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认 / 自动' });
+  assert.match(comboSubtitle.reply, /最后确认一下总时长|confirm the total length/i, `"默认 / 自动" should confirm the default subtitle mode: ${comboSubtitle.reply}`);
+
+  // A message that is only a resolution choice sets it; story text never does.
+  const hdKey = `${key}-resolution`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1' });
+  for (const bare of ['480', '720', '1080']) {
+    assert.equal(extractRequestedResolution(bare), undefined, `a bare "${bare}" is not a resolution`);
+  }
+  const hdAck = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1080P' });
+  assert.equal(hdAck.handled, true);
+  assert.match(hdAck.reply, /1080p/, 'a resolution-only message is acknowledged');
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '剧情你来创造。' });
+  const hdStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '开始生成' });
+  if (/确认.*主角|confirm the lead/i.test(hdStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: 'B 海边的女孩' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '9:16' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '10秒' });
+  const hdFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '不加' });
+  assert.equal(hdFinal.handled, false, 'the resolution flow should end in a generate_long_video action');
+  assert.equal(hdFinal.action?.resolution, '1080p', 'a resolution-only message should reach the action');
+  assert.match(hdFinal.action?.prompt ?? '', /resolution: "1080p"/, 'workflow prompt should tell the model to pass resolution');
+
+  const storyKey = `${key}-resolution-in-story`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频，画面里有一台1080P的旧显示器' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '[0-5秒] 一台1080P的旧显示器在桌上闪烁。 [5-10秒] 屏幕里出现 720p 的雪花画面。' });
+  const storyStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '开始生成' });
+  if (/确认.*主角|confirm the lead/i.test(storyStart.reply)) {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: 'X' });
+  }
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '10秒' });
+  const storyFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '不加' });
+  assert.equal(storyFinal.handled, false);
+  assert.equal(storyFinal.action?.resolution, undefined, 'a resolution mentioned in the story never sets the billing resolution');
+  assert.equal(afterBgmSkip.action?.resolution, undefined, 'no resolution is set unless the user named one');
+
+  // "[原样直传]" switches on raw mode, and raw mode skips the narrative LLM call.
+  const rawKey = `${key}-raw-tag`;
+  const originalFetch = globalThis.fetch;
+  let chatCalls = 0;
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+    if (String(input).endsWith('/chat/completions')) chatCalls += 1;
+    return new Response('{"error":{"message":"offline"}}', { status: 400 });
+  }) as typeof fetch;
+  try {
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频 [原样直传]' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '1' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '4' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
+    const rawStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '开始生成' });
+    assert.doesNotMatch(rawStart.reply, /确认.*主角|confirm the lead/i, 'raw mode never asks to confirm the lead');
+    assert.equal(chatCalls, 0, 'raw mode skips the narrative LLM call');
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '10秒' });
+    const rawFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '不加' });
+    assert.equal(rawFinal.action?.rawPassthrough, true, '"[原样直传]" should enable raw passthrough');
+    assert.notEqual(rawFinal.action?.cleanDirect, true, '"[原样直传]" is raw passthrough, not cleanDirect');
+
+    // The guide's cleanDirect sentence (§9.10) keeps the narrative analysis.
+    chatCalls = 0;
+    const cleanKey = `${key}-clean-direct-guide`;
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频\n请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n保留自然纹理，不要过度导演包装。' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '1' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '4' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
+    let clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '开始生成' });
+    assert.ok(chatCalls > 0, 'cleanDirect still runs the narrative analysis');
+    for (const reply of ['自动', '自动', '10秒', '不加']) {
+      if (!clean.handled) break;
+      clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: /确认.*主角|confirm the lead/i.test(clean.reply) ? 'X' : reply });
+    }
+    assert.equal(clean.handled, false, 'the cleanDirect flow should end in an action');
+    assert.equal(clean.action?.cleanDirect, true, 'the guide sentence enables cleanDirect');
+    assert.notEqual(clean.action?.rawPassthrough, true, 'the guide sentence is not raw passthrough');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // Everyday wording in a story never switches on raw mode.
+  const casualKey = `${key}-casual-raw-words`;
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频：一个博主对着镜头说她的自拍从来不用美颜、不要滤镜，write a short prompt for each scene' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '纯风景：清晨的湖面，薄雾缓缓散开。' });
+  let casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '开始生成' });
+  for (const reply of ['自动', '无字幕', '10秒', '不加', '不加']) {
+    if (!casual.handled) break;
+    casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: /主角/.test(casual.reply) ? 'X' : reply });
+  }
+  assert.equal(casual.handled, false, 'the casual-words flow should end in a generate_long_video action');
+  assert.notEqual(casual.action?.cleanDirect, true, '"不要滤镜" / "short prompt" in a story must not switch on raw mode');
+
+  await ratioCases(cwd, key);
+
   console.log('saga workflow explicit-trigger guard ok');
+}
+
+function ratioBrief(ratioLine: string, extra = '', timecodes = ['[0-8秒] 女孩推开旧影院的门。', '[8-16秒] 她走到银幕前。']): string {
+  return ['【整片叙事】', `一个女孩在废弃影院里找到童年的胶片。${extra}`, '【画质规格】', ratioLine, '· 镜头: 35mm', '【分镜】', ...timecodes].join('\n');
+}
+
+async function ratioCases(cwd: string, key: string): Promise<void> {
+  const table: Array<[string, string, string | undefined, boolean?]> = [
+    ['labelled zh', ratioBrief('· 画幅比例 / ratio: 9:16 竖屏'), '9:16', true],
+    ['labelled en', 'Aspect ratio: 9:16 portrait\n[0-8s] A girl opens the door.', '9:16', true],
+    ['labelled 1:1', ratioBrief('· 画幅比例 / ratio: 1:1 方屏'), '1:1', true],
+    ['timecodes past 1:10 with 16:9', ratioBrief('· 画幅比例 / ratio: 16:9 横屏', '', ['[0:56-1:04] 推门。', '[1:04-1:12] 走近。', '[1:12-1:20] 银幕亮起。']), '16:9', true],
+    ['unlabelled timecodes only', ratioBrief('· 镜头: 50mm', '', ['[1:04-1:12] 走近。', '[1:12-1:20] 银幕亮起。']), undefined],
+    ['BGM start 1:19', ratioBrief('· 摄影机感: iPhone', '配乐起点从 1:19 开始。'), undefined],
+    ['纵向推进', ratioBrief('· 摄影机感: iPhone', '镜头纵向推进。'), undefined],
+    ['town square', '[0-8s] A girl crosses the town square.\n[8-16s] She stops.', undefined],
+    ['portrait 85mm', '[0-8s] Close portrait of the girl, 85mm, vertical light.', undefined],
+    ['竖版', ratioBrief('· 画面尺寸：竖版'), '9:16', true],
+    ['9×16', ratioBrief('· 画面尺寸：9×16'), '9:16', true],
+    ['1080x1920', ratioBrief('· 画面尺寸：1080x1920'), '9:16', true],
+    ['unlabelled 竖屏 in request', '帮我做一个竖屏长视频', '9:16', false],
+    ['unfilled template', ratioBrief('· 画幅比例 / ratio: [16:9 横屏 / 9:16 竖屏 / 1:1 方屏]'), undefined],
+    ['bare 比例 about a prop', '· 比例：1:1 还原道具尺寸\n[0-6秒] 段 1 · 桌上摆着一只青花瓷碗。', undefined],
+    ['bare 比例 with only a ratio', '· 比例：9:16\n[0-6秒] 段 1 · 桌上摆着一只青花瓷碗。', '9:16', true],
+    ['人物比例 is not a label', ratioBrief('· 人物比例：9:16 竖屏 和 16:9 都试过'), undefined],
+  ];
+  for (const [name, text, expected, labelled] of table) {
+    const found = extractBriefAspectRatio(text);
+    assert.equal(found?.ratio, expected, `ratio case "${name}"`);
+    if (expected) assert.equal(found?.labelled, labelled, `ratio case "${name}" labelled`);
+  }
+  for (const [value, expected] of [['9:16 竖屏', '9:16'], ['竖屏 9:16', '9:16'], ['portrait', '9:16'], ['9×16', '9:16'], ['1920x1080', '16:9'], ['square', '1:1'], ['16:9 / 9:16', undefined], ['', undefined]] as const) {
+    assert.equal(normalizeAspectRatio(value), expected, `normalizeAspectRatio(${JSON.stringify(value)})`);
+  }
+  const warnings: string[] = [];
+  assert.equal(normalizeVideoRatioArgument('portrait', '16:9', (m) => warnings.push(m)), '9:16');
+  assert.equal(normalizeVideoRatioArgument('4:3', '16:9', (m) => warnings.push(m)), '4:3');
+  assert.equal(normalizeVideoRatioArgument('tall-ish', '16:9', (m) => warnings.push(m)), '16:9');
+  assert.equal(warnings.length, 1, 'an unrecognised ratio warns before defaulting');
+
+  async function drive(name: string, text: string, ratioAnswer: string): Promise<{ menu?: string; note?: string; ratio?: string }> {
+    const flowKey = `${key}-ratio-${name}`;
+    const send = (t: string, forceIntent = false) => handleSagaLongVideoWorkflow({ scope: 'bridge', key: flowKey, cwd, locale: 'zh-CN', text: t, forceIntent });
+    let out = await send(text, true);
+    let menu: string | undefined;
+    let note: string | undefined;
+    for (let step = 0; step < 12 && out.handled; step += 1) {
+      const head = out.reply.split('\n')[0] ?? '';
+      let answer = '开始生成';
+      if (/请选择视频画幅比例/.test(head)) { menu = head; answer = ratioAnswer; }
+      else if (/画幅：/.test(head)) { note = head; answer = '默认'; }
+      else if (/这段视频里/.test(out.reply)) answer = '2';
+      else if (/字幕/.test(head)) answer = '默认';
+      else if (/时长/.test(out.reply)) answer = '默认';
+      else if (/背景音乐/.test(head)) answer = '不加';
+      else if (/主角/.test(out.reply)) answer = '1';
+      out = await send(answer);
+    }
+    assert.equal(out.handled, false, `ratio flow "${name}" should end in an action: ${out.handled ? out.reply.slice(0, 300) : ""}`);
+    return { menu, note, ratio: out.action?.ratio };
+  }
+  const labelledFlow = await drive('labelled', ratioBrief('· 画幅比例 / ratio: 9:16 竖屏', '', ['[1:04-1:12] 走近。', '[1:12-1:20] 银幕亮起。']), '默认');
+  assert.equal(labelledFlow.menu, undefined, 'a labelled ratio line skips the ratio menu');
+  assert.match(labelledFlow.note ?? '', /9:16 竖屏（按剧本）/);
+  assert.equal(labelledFlow.ratio, '9:16');
+  const templateFlow = await drive('template', ratioBrief('· 画幅比例 / ratio: [16:9 横屏 / 9:16 竖屏 / 1:1 方屏]'), '竖屏 9:16');
+  assert.match(templateFlow.menu ?? '', /当前建议：16:9 横屏/, 'an unfilled template line is no answer');
+  assert.equal(templateFlow.ratio, '9:16', 'a menu reply naming the ratio and its label is accepted');
+  const copiedFlow = await drive('copied', ratioBrief('· 摄影机感: iPhone', '配乐起点从 1:19 开始。'), '9:16 竖屏');
+  assert.match(copiedFlow.menu ?? '', /当前建议：16:9 横屏/, '"1:19" is not a 1:1 ratio');
+  assert.equal(copiedFlow.ratio, '9:16', 'a line copied from the menu is accepted');
+  // Orientation words in story prose only preselect the menu; they never skip it.
+  for (const [name, text, suggestion] of [
+    ['prose-phone', '她把手机横屏举起，对着海边的落日拍视频。\n[0-6秒] 段 1 · 海边落日，女孩举着手机。\n[6-12秒] 段 2 · 她放下手机，转身离开。', '16:9 横屏'],
+    ['prose-request', '/saga 帮我做一个视频，画面要像横屏电影那样宽，但最终发抖音\n[0-6秒] 段 1 · 城市天际线。\n[6-12秒] 段 2 · 霓虹街道。', '16:9 横屏'],
+    ['prop-scale', '· 比例：1:1 还原道具尺寸\n[0-6秒] 段 1 · 桌上摆着一只青花瓷碗。\n[6-12秒] 段 2 · 镜头缓缓推近碗沿的裂纹。', '16:9 横屏'],
+  ] as const) {
+    const flow = await drive(name, text, '默认');
+    assert.ok(flow.menu, `${name}: the ratio menu is shown`);
+    assert.match(flow.menu ?? '', new RegExp(`当前建议：${suggestion}`), name);
+    assert.equal(flow.note, undefined, `${name}: no ratio is taken as stated`);
+  }
 }
 
 main().catch((error) => {

@@ -91,6 +91,7 @@ import {
   classifyImageGenerationFailure,
   formatImageGenerationFailure,
 } from '../src/tools/visual/imageGenerationFailure.js'
+import { describeVideoGenerationFailure } from '../src/tools/visual/videoGenerationFailure.js'
 import {
   normalizeReferenceImagesArg,
   resolveReferenceImages,
@@ -194,6 +195,7 @@ import {
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
 import { detectVisualGenerationNeed, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
 import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
+import { createVisualProvider } from '../src/tools/visual/providers/interface.js'
 import * as http from 'node:http'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -1677,6 +1679,85 @@ async function withMockedFetch<T>(
       formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
       formatted.includes('Do not substitute a downloaded web image'),
     formatted,
+  )
+}
+
+{
+  // Video failures share the image classifier and get a plain user message.
+  const balance = describeVideoGenerationFailure(
+    { detail: 'Task create failed (HTTP 402): {"error":{"code":"insufficient_balance","message":"Balance too low"}}', status: 402 },
+    'zh-CN',
+  )
+  assert(
+    'video failure: 402 is insufficient balance with a top-up message and the raw detail kept',
+    balance.kind === 'insufficient_balance' &&
+      balance.userMessage.includes('余额不足') &&
+      !balance.userMessage.includes('402') &&
+      balance.details.includes('insufficient_balance: Balance too low'),
+    JSON.stringify(balance),
+  )
+  assert(
+    'video failure: 429 and rate-limit text are rate_limited; poll timeouts are timeout; 5xx stays upstream',
+    describeVideoGenerationFailure({ detail: 'Task create failed (HTTP 429): slow down', status: 429 }).kind === 'rate_limited' &&
+      describeVideoGenerationFailure({ detail: 'Custom video failed: RateLimitExceeded' }).kind === 'rate_limited' &&
+      describeVideoGenerationFailure({ detail: 'Task t1 did not finish within 120 polls. Last status: running.' }).kind === 'timeout' &&
+      describeVideoGenerationFailure({ detail: 'Poll failed (HTTP 503): busy', status: 503 }).kind === 'upstream' &&
+      describeVideoGenerationFailure({ detail: 'Task create failed (HTTP 400): SensitiveContentDetected' }).kind === 'content_rejected',
+  )
+  assert(
+    'image failure: rate limits are their own kind and the status is never parsed from text',
+    classifyImageGenerationFailure({ detail: 'busy', status: 429 }) === 'rate_limited' &&
+      classifyImageGenerationFailure({ detail: 'API request failed (HTTP 429): busy' }) === 'upstream',
+  )
+
+  const tmpDir = path.join(os.tmpdir(), `artemis-generate-video-friendly-failure-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  await configureBytePlusVideoProfile(tmpDir, BYTEPLUS_SEEDANCE_2_PRO_MODEL)
+  try {
+    const result = await withMockedFetch(
+      () => new Response('{"error":{"code":"insufficient_balance","message":"Balance too low: please top up"}}', { status: 402 }),
+      async () => executeGenerateVideo(
+        { type: 'generate_video', prompt: 'a red fox running through snow', outputPath: path.join(tmpDir, 'out.mp4') } as any,
+        { cwd: tmpDir, permissionMode: 'full-access', locale: 'en' } as any,
+      ),
+    )
+    assert(
+      'generate_video: a 402 from the video API returns a top-up reason, the raw error and a video_insufficient_balance ToolError',
+      result.ok === false &&
+        result.error?.code === 'video_insufficient_balance' &&
+        result.output.includes('Reason: The video service balance is too low') &&
+        result.output.includes('HTTP 402') &&
+        (result.error?.details as any)?.httpStatus === 402,
+      `${result.output} ${JSON.stringify(result.error)}`,
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
+  // Saga raw mode asks providers that rewrite prompts server-side not to.
+  const customVideo = (model: string) => createVisualProvider({
+    enabled: true,
+    image: { provider: 'custom', apiKey: '', baseUrl: '', model: '' },
+    video: { enabled: true, provider: 'custom', apiKey: 'k', baseUrl: 'https://relay.example.test/v1', model, defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false } },
+  } as any, 'video')
+  const promptExtendSent: unknown[] = []
+  await withMockedFetch(
+    () => new Response('{"error":{"message":"stop here"}}', { status: 500 }),
+    async (calls) => {
+      for (const model of ['wan2.5-t2v-preview', 'seedance-1-0-pro-250528']) {
+        const provider = await customVideo(model)
+        await provider.generateVideo!({ prompt: 'a kite over a hill', model, promptExtend: false })
+        await provider.generateVideo!({ prompt: 'a kite over a hill', model })
+      }
+      for (const call of calls) promptExtendSent.push(JSON.parse(call.body ?? '{}').prompt_extend ?? JSON.parse(call.body ?? '{}').parameters?.prompt_extend)
+    },
+  )
+  assert(
+    'custom video provider: promptExtend:false turns off prompt_extend for Wan and Seedance relays; the default stays on',
+    JSON.stringify(promptExtendSent) === JSON.stringify([false, true, false, true]),
+    JSON.stringify(promptExtendSent),
   )
 }
 
@@ -5357,6 +5438,23 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 {
+  const longVideoTool = providerNativeTools.find((tool) => tool.name === 'generate_long_video')
+  const recovered = parseAssistantEnvelopeForSmoke(
+    '<invoke name="generate_long_video"><parameter name="prompt">a beach at sunset</parameter><parameter name="resolution">1080P</parameter></invoke>',
+  )
+  const looseAction = (recovered.actions ?? [])[0] as any
+  assert(
+    'video resolution: generate_long_video takes resolution in its schema, its validator and loose arguments',
+    Boolean((longVideoTool?.parameters as any)?.properties?.resolution) &&
+      validateToolAction({ type: 'generate_long_video', prompt: 'x', resolution: '4k' } as any).some((e) => e.includes('resolution')) &&
+      validateToolAction({ type: 'generate_long_video', prompt: 'x', resolution: '720p' } as any).length === 0 &&
+      looseAction?.type === 'generate_long_video' &&
+      looseAction.resolution === '1080P',
+    JSON.stringify(recovered.actions),
+  )
+}
+
+{
   // OpenAI (Sora) receives the requested resolution as a size; one it cannot
   // render fails before the create request instead of silently changing.
   const originalFetch = globalThis.fetch
@@ -5805,11 +5903,11 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const generateVideoSource = fs.readFileSync(path.join(process.cwd(), 'src/tools/generateVideo.ts'), 'utf8')
   assert(
     'generate_video: visual provider path sends Director prompt to video adapters',
-    /buildDirectedVideoPrompt\([\s\S]*provider:\s*videoConfig\.provider[\s\S]*prompt:\s*directed\.directedPrompt/.test(generateVideoSource),
+    /buildDirectedVideoPrompt\([\s\S]*provider:\s*videoConfig\.provider[\s\S]*prompt:\s*withSagaRenderingGuardrails\(directed\.directedPrompt,/.test(generateVideoSource),
   )
   assert(
     'generate_video: legacy BytePlus fallback sends Director prompt',
-    /provider:\s*'byteplus'[\s\S]*\{ type:\s*'text', text:\s*directed\.directedPrompt \}/.test(generateVideoSource),
+    /provider:\s*'byteplus'[\s\S]*\{ type:\s*'text', text:\s*withSagaRenderingGuardrails\(directed\.directedPrompt,/.test(generateVideoSource),
   )
 }
 

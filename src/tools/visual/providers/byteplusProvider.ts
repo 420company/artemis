@@ -3,6 +3,7 @@ import type { VisualModelConfig } from '../../../providers/types.js'
 import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, GenerationResult } from './interface.js'
 import { modelArkEndpoint, normalizeModelArkMediaBaseUrl } from '../../vidarMedia.js'
 import { ImageApiError } from '../imageGenerationFailure.js'
+import { GenerationApiError } from '../generationFailure.js'
 import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
 import {
   IMAGE_GENERATION_TIMEOUT_MS,
@@ -18,6 +19,7 @@ import {
   resolveVideoModelCapabilities,
 } from '../videoCapabilities.js'
 import { checkBytePlusReferenceSupport } from '../referenceImages.js'
+import { seedreamSizeFromKeyword } from '../seedreamSizes.js'
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
@@ -78,7 +80,8 @@ export class BytePlusProvider implements VisualProvider {
     try {
       const { apiKey, baseUrl } = await this.resolveCredentials()
       const model = params.model || this.config.image.model || 'seedream-5-0-260128'
-      const size = params.size || this.config.image.defaultParams.size || '2K'
+      // OpenAI-style size words are not ModelArk sizes; give Seedream explicit pixels.
+      const size = seedreamSizeFromKeyword(model, params.size || this.config.image.defaultParams.size || '2K')
       const count = params.count || 1
       const referenceImages = params.referenceImages ?? []
       const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length)
@@ -114,7 +117,7 @@ export class BytePlusProvider implements VisualProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS),
+        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS)),
       })
 
       const raw = await res.text()
@@ -138,6 +141,7 @@ export class BytePlusProvider implements VisualProvider {
         buf = await downloadProviderAsset(item.url, {
           timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
           allowLoopback: baseUrlIsLoopback(baseUrl),
+          signal: params.abortSignal,
         })
       } catch (error) {
         throw new ImageApiError(
@@ -300,7 +304,7 @@ export class BytePlusProvider implements VisualProvider {
 
       const createRaw = await createRes.text()
       if (!createRes.ok) {
-        throw new Error(`Task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`)
+        throw new GenerationApiError(`Task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status)
       }
 
       const createPayload = JSON.parse(createRaw)
@@ -326,7 +330,7 @@ export class BytePlusProvider implements VisualProvider {
         
         const pollRaw = await pollRes.text()
         if (!pollRes.ok) {
-          throw new Error(`Poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`)
+          throw new GenerationApiError(`Poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`, pollRes.status)
         }
         
         let pollPayload: any
@@ -365,7 +369,7 @@ export class BytePlusProvider implements VisualProvider {
           signal: params.abortSignal,
         })
       } catch (error) {
-        throw new Error(`Video download failed: ${error instanceof Error ? error.message : String(error)}`)
+        throw new GenerationApiError(`Video download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
       }
       
       const fs = await import('fs/promises')
@@ -402,6 +406,8 @@ export class BytePlusProvider implements VisualProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
+        httpStatus: error instanceof GenerationApiError ? error.status : undefined,
+        failureStage: error instanceof GenerationApiError ? error.stage : undefined,
         generationTime: Date.now() - startTime
       }
     }
