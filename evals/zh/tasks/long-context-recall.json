@@ -1,0 +1,88 @@
+{
+  "id": "long-context-recall",
+  "category": "long-context",
+  "description": "很长的中文对话触发上下文压缩后，仍记得最开始交代的项目信息",
+  "seedHistory": {
+    "kind": "long-chat",
+    "factsMessage": "先记一下我们新项目的基本信息：项目代号叫「青鸾」，总预算 38 万元，截止日期是 11 月 20 日，负责人是周敏。后面我会问你一些别的事情。",
+    "factsReply": "好的，已记下：项目代号「青鸾」，总预算 38 万元，截止日期 11 月 20 日，负责人周敏。",
+    "fillerTurns": 70
+  },
+  "setup": {
+    "maxContextTokens": 50000
+  },
+  "turns": [
+    {
+      "prompt": "回到最开始说的那个项目：它的代号、总预算和截止日期分别是什么？负责人是谁？"
+    }
+  ],
+  "limits": {
+    "maxTurns": 6,
+    "timeoutSec": 400,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "compaction",
+      "type": "compaction_happened"
+    },
+    {
+      "id": "recalled",
+      "type": "reply_contains",
+      "all": [
+        "青鸾",
+        [
+          "38万",
+          "380000",
+          "380,000",
+          "三十八万"
+        ],
+        [
+          "11月20日",
+          "11月20号"
+        ],
+        "周敏"
+      ]
+    },
+    {
+      "id": "fact-in-context",
+      "type": "context_contains",
+      "pattern": "青鸾",
+      "request": "last",
+      "note": "the fact survived compaction into what the model was sent"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "aux": [
+        {
+          "match": "summar|摘要|压缩|compact",
+          "reply": "<summary>对话开头用户交代了项目基本信息：项目代号「青鸾」，总预算 38 万元，截止日期 11 月 20 日，负责人周敏。之后用户陆续咨询了周末出游、养绿萝、租房、做饭、睡眠、理财、年会节目、手机内存、血压计、出差、孩子作业、同事分工等日常问题，助手都已给出建议，没有未完成的任务。</summary>"
+        }
+      ],
+      "turns": [
+        [
+          {
+            "say": "项目代号是「青鸾」，总预算 38 万元，截止日期 11 月 20 日，负责人是周敏。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "compaction",
+        "recalled"
+      ],
+      "setup": {
+        "maxContextTokens": 1000000
+      },
+      "turns": [
+        [
+          {
+            "say": "抱歉，时间太久了，我不记得最开始说的项目信息了。"
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -31,6 +31,9 @@ Thumbs.db
 # Saga A/B debug captures (may contain real user paths and reference media)
 .artemis-tmp/
 
+# Eval run outputs (see evals/zh/README.md)
+evals/results/
+
 # Test artifacts
 test-output/
 test-*/

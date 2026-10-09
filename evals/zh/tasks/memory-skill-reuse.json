@@ -1,0 +1,247 @@
+{
+  "id": "memory-skill-reuse",
+  "category": "memory",
+  "description": "两轮：第一轮合并 CSV 并验证（应学到技能），新会话第二轮同类任务应 load_skill 复用",
+  "fixture": "memory-skill-reuse",
+  "turns": [
+    {
+      "prompt": "data 文件夹里有几个门店的销售 CSV，帮我把它们合并成一个 merged.csv（只保留一行表头），然后运行 npm test 检查结果。"
+    },
+    {
+      "prompt": "data2 文件夹里又来了一批门店销售 CSV，跟上次一样，合并成 merged2.csv（只保留一行表头），然后运行 npm test 检查。",
+      "newSession": true
+    }
+  ],
+  "limits": {
+    "maxTurns": 15,
+    "timeoutSec": 400,
+    "budgetTokens": 700000
+  },
+  "graders": [
+    {
+      "id": "t1-verified",
+      "turn": 1,
+      "type": "tool_called",
+      "tool": "run_command",
+      "args": {
+        "command": "npm (run )?test|node check"
+      }
+    },
+    {
+      "id": "skill-indexed",
+      "turn": 2,
+      "type": "context_contains",
+      "pattern": "Learned skills — procedures distilled",
+      "request": "first",
+      "note": "turn 1 taught a skill and turn 2's request lists it"
+    },
+    {
+      "id": "skill-loaded",
+      "turn": 2,
+      "type": "tool_called",
+      "tool": "load_skill"
+    },
+    {
+      "id": "merged2",
+      "type": "file_contains",
+      "path": "merged2.csv",
+      "all": [
+        "北门店",
+        "东门店"
+      ],
+      "minLines": 4
+    },
+    {
+      "id": "checks-pass",
+      "type": "command_succeeds",
+      "command": "npm test",
+      "timeoutSec": 60
+    }
+  ],
+  "mock": {
+    "pass": {
+      "aux": [
+        {
+          "match": "distil reusable procedures",
+          "reply": "{\"op\": \"add\", \"name\": \"merge-csv-files\", \"description\": \"把一个文件夹里的多个门店销售 CSV 合并成一个文件、只保留一行表头时使用\", \"summary\": \"合并同结构的 CSV 文件并检查结果\", \"triggers\": [\"合并\", \"CSV\", \"表头\", \"门店销售\", \"merged\"], \"steps\": [\"列出文件夹里的所有 CSV 文件\", \"保留第一个文件的表头，其余文件跳过表头逐行追加到合并文件\", \"打开合并文件检查只有一行表头\", \"运行 npm test 检查合并结果\"], \"pitfalls\": [\"不要把每个文件的表头都复制进去\"], \"tools\": [\"list_files\", \"run_command\", \"read_file\"], \"verification\": \"npm test 通过\"}"
+        }
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "data"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "awk 'FNR==1 && NR!=1 {next} {print}' data/*.csv > merged.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "merged.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "npm test"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已把 data 里的 3 个 CSV 合并成 merged.csv（1 行表头 + 6 行数据），npm test 通过。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "load_skill",
+                "args": {
+                  "id": "merge-csv-files"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "data2"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "awk 'FNR==1 && NR!=1 {next} {print}' data2/*.csv > merged2.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "npm test"
+                }
+              }
+            ]
+          },
+          {
+            "say": "按之前的做法把 data2 的 CSV 合并成了 merged2.csv（1 行表头 + 3 行数据），npm test 通过。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "skill-indexed",
+        "skill-loaded"
+      ],
+      "aux": [
+        {
+          "match": "distil reusable procedures",
+          "reply": "{\"op\":\"skip\"}"
+        }
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "data"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "awk 'FNR==1 && NR!=1 {next} {print}' data/*.csv > merged.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "merged.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "npm test"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已合并成 merged.csv，npm test 通过。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "awk 'FNR==1 && NR!=1 {next} {print}' data2/*.csv > merged2.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "run_command",
+                "args": {
+                  "command": "npm test"
+                }
+              }
+            ]
+          },
+          {
+            "say": "已合并成 merged2.csv，npm test 通过。"
+          }
+        ]
+      ]
+    }
+  }
+}

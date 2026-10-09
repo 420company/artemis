@@ -1,0 +1,82 @@
+{
+  "id": "vision-shapes",
+  "category": "vision",
+  "description": "看图说出三个图形的形状、颜色和左右顺序（脚本生成的图片）",
+  "generated": [
+    {
+      "kind": "shapes-png",
+      "path": "图形.png"
+    }
+  ],
+  "turns": [
+    {
+      "prompt": "这张图片里有哪几个图形？分别是什么颜色？按从左到右的顺序说。",
+      "attachments": [
+        "图形.png"
+      ]
+    }
+  ],
+  "limits": {
+    "maxTurns": 6,
+    "timeoutSec": 240,
+    "budgetTokens": 400000
+  },
+  "graders": [
+    {
+      "id": "shapes",
+      "type": "reply_contains",
+      "all": [
+        "红",
+        [
+          "圆"
+        ],
+        "蓝",
+        [
+          "正方形",
+          "方形",
+          "方块",
+          "矩形"
+        ],
+        "绿",
+        "三角"
+      ]
+    },
+    {
+      "id": "order",
+      "type": "reply_matches",
+      "pattern": "红[\\s\\S]*蓝[\\s\\S]*绿"
+    },
+    {
+      "id": "image-sent",
+      "type": "context_contains",
+      "mode": "mock",
+      "pattern": "image_url",
+      "request": "first",
+      "note": "the engine attached the image to the model request"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "say": "从左到右一共有三个图形：\n1. 红色的圆形\n2. 蓝色的正方形\n3. 绿色的三角形"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "shapes",
+        "order"
+      ],
+      "turns": [
+        [
+          {
+            "say": "图里有一个黄色的圆和一个紫色的星形。"
+          }
+        ]
+      ]
+    }
+  }
+}
