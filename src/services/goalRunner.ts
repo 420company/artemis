@@ -180,6 +180,8 @@ export async function runGoalTick(
     maxTurns: TICK_MAX_TURNS,
     sessionTitle: `Goal ${goal.id}: ${goal.title.slice(0, 40)} · tick ${goal.iterations.length + 1}`,
     onInfo: opts.onInfo,
+    // The tick prompt is written by Artemis, not the user: no workflow routing.
+    autoRoute: false,
   })
 
   const parsed = parseTickReply(result.reply)

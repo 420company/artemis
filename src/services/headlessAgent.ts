@@ -27,6 +27,11 @@ export interface HeadlessAgentOptions {
   imagePaths?: string[]
   sessionTitle?: string
   onInfo?: (message: string) => void
+  /**
+   * Pick the workflow from the request (core/workflowRouter.ts). Default
+   * true; Goal Mode ticks pass false (their prompt is written by Artemis).
+   */
+  autoRoute?: boolean
 }
 
 export interface HeadlessAgentResult {
@@ -87,6 +92,22 @@ export async function runHeadlessAgent(
   const { loadPromptImages } = await import('../core/imageInput.js')
   const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
 
+  // Workflow routing: the user never names a workflow. Cheap heuristics
+  // first, the worker model only for ambiguous long requests, the plain path
+  // on any doubt; every routed run gets a bounded sub-agent budget.
+  const { routeWorkflow, buildRoutedWorkflowHint, createDelegationBudget } = await import('../core/workflowRouter.js')
+  const { existsSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const readOnly = (opts.permissionMode ?? 'PRODUCER') === 'read-only'
+  const route = opts.autoRoute === false || readOnly
+    ? undefined
+    : await routeWorkflow(
+      { text: prompt, attachmentCount: imageAttachments.length, inCodeRepo: existsSync(join(cwd, '.git')) },
+      { getClassifier: () => providerRouter.resolveSummarizerProvider(), onInfo },
+    )
+  if (route && route.workflow !== 'direct') onInfo(`[workflow] ${route.workflow} (${route.source}): ${route.reason}`)
+  const workflowHint = route ? buildRoutedWorkflowHint(route.workflow, { cwd, userPrompt: route.text, reason: route.reason }) : ''
+
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
   const contextNotices: string[] = []
   const started = Date.now()
@@ -98,7 +119,8 @@ export async function runHeadlessAgent(
     // Re-read under the lock: another process (a chat bridge) may have saved
     // a turn between the existence check above and getting the lock.
     opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session,
-    prompt,
+    // A retired workflow slash word ("/niko …") is removed: plain language.
+    route?.text || prompt,
     {
     cwd,
     provider,
@@ -106,6 +128,8 @@ export async function runHeadlessAgent(
     permissionManager,
     maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
     profile: 'main',
+    ...(workflowHint ? { workflowHint } : {}),
+    ...(route ? { delegationBudget: createDelegationBudget(route.workflow) } : {}),
     appendUserMessage: true,
     // The main model's window; specialists with a smaller window are capped
     // further by their own provider metadata inside runAgent.

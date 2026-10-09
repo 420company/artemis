@@ -21,7 +21,7 @@ import { appendTaskRuntime, createTaskRuntimeRecord, updateTaskRuntime } from '.
 import { getWorkflowDisplayName, getWorkflowSessionTitle, isReadOnlyWorkflow, runWorkflowMode, type WorkflowMode } from '../core/workflowMode.js';
 import type { PermissionMode } from '../core/types.js';
 import { truncate, ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js';
-import { maybeUpgradeWorkflow, recordWorkflowAdvice } from '../core/workflowAdvisor.js';
+import { AUTO_WORKFLOW_MODE, buildRoutedWorkflowHint, routeWorkflow } from '../core/workflowRouter.js';
 
 type DetachedWorkflowWorkerArgs = {
   sessionId: string;
@@ -703,24 +703,22 @@ export async function runDetachedWorkflowWorker(
       onInfo: (message) => console.error(message),
     });
 
+    // A plain background run picks its workflow like any other request
+    // (heuristics only here: no extra classifier call in the worker).
+    let routedWorkflowHint: string | undefined;
     if (args.workflow === 'direct') {
-      const advice = await maybeUpgradeWorkflow(
-        prompt,
-        undefined,
-        (message) => console.error(message),
-      );
-      if (advice) {
-        await recordWorkflowAdvice(
-          sessionStore,
-          session,
-          advice.advice,
-          advice.selected,
-        );
-        if (advice.selected !== 'direct') {
-          args.workflow = advice.selected;
-          session.title =
-            getWorkflowSessionTitle(args.workflow, cwd) ?? session.title;
-        }
+      const route = await routeWorkflow({ text: prompt }, {});
+      if (route.workflow !== 'direct' && route.workflow !== 'saga') {
+        args.workflow = AUTO_WORKFLOW_MODE[route.workflow];
+        routedWorkflowHint = buildRoutedWorkflowHint(route.workflow, { cwd, userPrompt: prompt, reason: route.reason });
+        console.error(`[workflow-router] ${route.workflow} (${route.source}): ${route.reason}`);
+        await sessionStore.appendWorkflowEntry(session, 'Workflow Router', [
+          `selected=${route.workflow}`,
+          `source=${route.source}`,
+          `reason=${route.reason}`,
+        ]);
+        session.title =
+          getWorkflowSessionTitle(args.workflow, cwd) ?? session.title;
       }
     }
 
@@ -788,6 +786,7 @@ export async function runDetachedWorkflowWorker(
 
     const result = await runWorkflowMode(args.workflow, session, prompt, {
       cwd,
+      workflowHint: routedWorkflowHint,
       provider,
       sessionStore,
       permissionManager,

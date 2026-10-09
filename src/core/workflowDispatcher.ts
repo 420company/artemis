@@ -1,21 +1,29 @@
 /**
- * Workflow dispatcher — UI-agnostic entry point for workflow slash commands.
+ * Workflow dispatcher — UI-agnostic entry point shared by the desktop CLI
+ * (interactive.ts) and the IM bridges (telegram/discord/wechat).
  *
- * Used by both the desktop CLI (interactive.ts) and the IM bridges
- * (telegram/discord/wechat) so they share the same /team routing,
- * visual-asset policy, and workflow-hint logic.
+ * Users do not pick workflows any more: core/workflowRouter.ts chooses one
+ * from the request. The only slash entries left here are /nidhogg (the
+ * background adversarial harness) and /run (direct background run); the
+ * retired /niko /athena /contest /design /team words are stripped by the
+ * router and treated as natural language.
  *
  * Design: stays out of the brain tool loop. Returns a "resolution" object
- * that callers feed into setSystemPromptSuffix() + think() (or handleTurn()
- * for the desktop UI). This keeps the dispatcher pure and testable, and lets
+ * that callers feed into setSystemPromptSuffix() + think() or
+ * runWorkflowMode(). This keeps the dispatcher pure and testable, and lets
  * each frontend keep its own progress-rendering style.
  */
 
 import type { WorkflowMode } from './workflowMode.js'
 import type { UiLocale } from '../cli/locale.js'
-import type { ChatProvider } from '../providers/types.js'
 import { buildWorkflowHint } from './workflowHints.js'
-import { routeTeamRequest, describeChoice, type TeamRoute } from './team.js'
+import {
+  AUTO_WORKFLOW_MODE,
+  buildRoutedWorkflowHint,
+  describeAutoWorkflow,
+  describeRouteReason,
+  type WorkflowRoute,
+} from './workflowRouter.js'
 import {
   detectVisualGenerationNeed,
   hasExplicitLocalVisualConsent,
@@ -26,22 +34,10 @@ import {
 } from '../utils/visualGenerationConfig.js'
 import { pickLocale } from '../cli/locale.js'
 
-export type WorkflowSlash =
-  | '/team'
-  | '/niko'
-  | '/design'
-  | '/athena'
-  | '/nidhogg'
-  | '/contest'
-  | '/run'
+export type WorkflowSlash = '/nidhogg' | '/run'
 
 export const WORKFLOW_SLASH_COMMANDS: readonly WorkflowSlash[] = [
-  '/team',
-  '/niko',
-  '/design',
-  '/athena',
   '/nidhogg',
-  '/contest',
   '/run',
 ] as const
 
@@ -71,6 +67,7 @@ export function detectWorkflowSlashCommand(text: string): WorkflowSlashMatch {
 
 const NATURAL_WORKFLOW_INTENT_RE = /(?:启用|启动|开启|进入|切到|切换到|使用|用|走|run|use|start|switch\s+to)\s*(?:工作流|模式|workflow|mode)?\s*$/i
 
+/** "/nidhogg <task>", or "用 /nidhogg 模式 …" written as a sentence. */
 export function detectExplicitWorkflowIntent(text: string): WorkflowSlashMatch {
   const slashMatch = detectWorkflowSlashCommand(text)
   if (slashMatch.command) return slashMatch
@@ -78,7 +75,7 @@ export function detectExplicitWorkflowIntent(text: string): WorkflowSlashMatch {
   const trimmed = text.trim()
   const matches: Array<{ command: WorkflowSlash; index: number }> = []
   for (const cmd of WORKFLOW_SLASH_COMMANDS) {
-    const re = new RegExp(cmd.replace('/', '\\/'), 'i')
+    const re = new RegExp(`${cmd.replace('/', '\\/')}(?![a-z])`, 'i')
     const match = re.exec(trimmed)
     if (!match) continue
     const before = trimmed.slice(0, match.index)
@@ -87,7 +84,7 @@ export function detectExplicitWorkflowIntent(text: string): WorkflowSlashMatch {
   }
   if (matches.length === 0) return { command: null, body: trimmed }
 
-  const priority: WorkflowSlash[] = ['/team', '/design', '/athena', '/niko', '/contest', '/nidhogg', '/run']
+  const priority: WorkflowSlash[] = ['/nidhogg', '/run']
   const chosen = priority.find((cmd) => matches.some((match) => match.command === cmd)) ?? matches[0]!.command
   return { command: chosen, body: trimmed, source: 'natural-language' }
 }
@@ -97,7 +94,7 @@ export function isWorkflowSlashCommand(token: string): token is WorkflowSlash {
 }
 
 export interface WorkflowResolution {
-  /** The mode to inject into the brain via system prompt suffix. */
+  /** The mode to run (internal workflow name). */
   mode: WorkflowMode
   /** Hint string ready to be passed to setSystemPromptSuffix. Empty string for 'direct'. */
   hint: string
@@ -105,15 +102,13 @@ export interface WorkflowResolution {
   effectivePrompt: string
   /** Human-readable summary of the routing/policy decisions (for chat output). */
   summary: string[]
-  /** Full team route (only present when command was /team). */
-  route?: TeamRoute
+  /** The automatic route, when the router chose the workflow. */
+  route?: WorkflowRoute
 }
 
 export interface ResolveWorkflowOptions {
   cwd: string
   locale: UiLocale
-  /** Required only for /team auto-routing. */
-  provider?: ChatProvider
   /** Optional callback for progress notifications during routing. */
   onProgress?: (message: string, level?: 'info' | 'warn' | 'error') => void | Promise<void>
   /** When true, skip interactive choices and default to local generation if configured. */
@@ -121,14 +116,9 @@ export interface ResolveWorkflowOptions {
 }
 
 /**
- * Resolve a workflow slash command (or plain chat message) into a concrete
- * workflow mode + system prompt suffix + augmented prompt. Pure async function;
- * does not call think() or mutate the brain.
- *
- *  - command=null:    plain chat; mode='direct'; visual policy still applied
- *  - command=/team:   uses LLM router to pick mode, then applies visual policy
- *  - command=/niko etc: maps directly to mode
- *  - command=/run:    treated as 'direct' (no workflow hint)
+ * Resolve an explicit workflow slash command (/nidhogg, /run) into a
+ * concrete workflow mode + system prompt suffix + augmented prompt. Pure
+ * async function; does not call think() or mutate the brain.
  */
 export async function resolveWorkflow(
   match: WorkflowSlashMatch,
@@ -137,58 +127,48 @@ export async function resolveWorkflow(
   const t = (zh: string, en: string): string => pickLocale(opts.locale, { zh, en })
   const summary: string[] = []
   let mode: WorkflowMode = 'direct'
-  let route: TeamRoute | undefined
 
-  // Phase 1: determine workflow mode
-  if (match.command === '/team') {
-    if (!match.body.trim()) {
-      throw new Error(t('用法: /team <任务描述>', 'Usage: /team <task description>'))
-    }
-    if (!opts.provider) {
-      throw new Error(t(
-        '/team 路由需要可用的 AI provider，但未提供。',
-        '/team router requires a provider but none was given.',
-      ))
-    }
-    await opts.onProgress?.(
-      t('🤝 Team 路由：AI 正在判断该走哪条工作流…', '🤝 Team router: deciding which workflow fits…'),
-      'info',
-    )
-    try {
-      route = await routeTeamRequest(match.body, opts.provider)
-      mode = route.choice
-      summary.push(t(
-        `Team 路由 → ${describeChoice(route.choice, opts.locale)}（${route.reason}）`,
-        `Team router → ${describeChoice(route.choice, opts.locale)} (${route.reason})`,
-      ))
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      summary.push(t(
-        `Team 路由失败，回落到默认会话: ${msg}`,
-        `Team router failed, falling back to direct: ${msg}`,
-      ))
-      mode = 'direct'
-    }
+  if (match.command === '/nidhogg') {
+    mode = 'nidhogg'
+    summary.push(t('工作流: Nidhogg', 'Workflow: Nidhogg'))
   } else if (match.command === '/run') {
-    mode = 'direct'
     summary.push(t('执行模式: 直接调度', 'Execution mode: direct'))
-  } else if (match.command === '/niko' || match.command === '/design' || match.command === '/athena' || match.command === '/nidhogg' || match.command === '/contest') {
-    mode = match.command.slice(1) as WorkflowMode
-    summary.push(t(`工作流: /${mode}`, `Workflow: /${mode}`))
-  } else {
-    mode = 'direct'
   }
 
-  // Phase 2: apply visual generation policy on the body
   const policyResult = await applyVisualPolicy(match.body, opts)
   if (policyResult.summary) summary.push(policyResult.summary)
   const effectivePrompt = policyResult.prompt
 
-  // Phase 3: build workflow hint string
   const hint = mode === 'direct'
     ? ''
     : buildWorkflowHint(mode, { cwd: opts.cwd, userPrompt: effectivePrompt })
 
+  return { mode, hint, effectivePrompt, summary }
+}
+
+/**
+ * Resolve a route chosen by core/workflowRouter.ts (never 'saga': Saga has
+ * its own wizard) into the same resolution shape as an explicit command.
+ */
+export async function resolveRoutedWorkflow(
+  route: WorkflowRoute,
+  opts: ResolveWorkflowOptions,
+): Promise<WorkflowResolution> {
+  const t = (zh: string, en: string): string => pickLocale(opts.locale, { zh, en })
+  const mode: WorkflowMode = route.workflow === 'saga' ? 'direct' : AUTO_WORKFLOW_MODE[route.workflow]
+  const summary: string[] = []
+  if (mode !== 'direct') {
+    summary.push(t(
+      `🧭 自动选择工作流：${describeAutoWorkflow(route.workflow, 'zh-CN')}（${describeRouteReason(route, 'zh-CN')}）`,
+      `🧭 Workflow chosen automatically: ${describeAutoWorkflow(route.workflow, 'en')} (${describeRouteReason(route, 'en')})`,
+    ))
+  }
+  const policyResult = await applyVisualPolicy(route.text, opts)
+  if (policyResult.summary) summary.push(policyResult.summary)
+  const effectivePrompt = policyResult.prompt
+  const hint = mode === 'direct'
+    ? ''
+    : buildRoutedWorkflowHint(route.workflow, { cwd: opts.cwd, userPrompt: effectivePrompt, reason: route.reason })
   return { mode, hint, effectivePrompt, summary, route }
 }
 

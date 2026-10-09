@@ -28,9 +28,11 @@ import { ensureDir, resolveArtemisHomeDir, resolveDataRootDir, truncate } from '
 import stripAnsi from 'strip-ansi'
 import {
   detectExplicitWorkflowIntent,
+  resolveRoutedWorkflow,
   resolveWorkflow,
   type WorkflowResolution,
 } from '../core/workflowDispatcher.js'
+import { createDelegationBudget, routeWorkflow } from '../core/workflowRouter.js'
 import { resolveMainProviderConfig } from '../providers/onboarding.js'
 import { ProviderStore } from '../providers/store.js'
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
@@ -44,7 +46,7 @@ import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import { sendBragiImageBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
-import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
+import { handleSagaLongVideoWorkflow, isClearSagaLongVideoRequest } from '../tools/visual/sagaWorkflow.js'
 import { executeAction } from '../tools/index.js'
 import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
@@ -316,7 +318,7 @@ async function resolveBridgeProviderRuntime(_cwd: string): Promise<BridgeProvide
 }
 
 /**
- * Provider for the /team routing call only. Same GLOBAL-only hardening as
+ * Provider for the workflow router's classifier call only. Same GLOBAL-only hardening as
  * resolveBridgeProviderRuntime, but prefers the cheaper specialist (worker)
  * profile and forces low effort — routing is a one-line JSON classification
  * that doesn't deserve the lead model's cost or thinking depth.
@@ -678,9 +680,12 @@ async function runRemoteCommandInner(
       }
 
       const sagaTrim = command.body.trimStart()
-      const sagaForceIntent = sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)
-      const sagaText = sagaForceIntent ? sagaTrim.replace(/^\/saga\s*/i, '').trim() : command.body
-      const sagaWorkflow = sagaForceIntent && !sagaText
+      const sagaExplicit = sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)
+      const sagaText = sagaExplicit ? sagaTrim.replace(/^\/saga\s*/i, '').trim() : command.body
+      // Saga also starts without /saga when the message clearly asks for a
+      // long multi-segment video (see isClearSagaLongVideoRequest).
+      const sagaForceIntent = sagaExplicit || isClearSagaLongVideoRequest(sagaText)
+      const sagaWorkflow = sagaExplicit && !sagaText
         ? { handled: true as const, reply: t(
             'Saga 长视频：请在 /saga 后跟一段故事文字。例：/saga 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
             'Saga long video: type /saga followed by a story description. Example: /saga A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
@@ -750,32 +755,17 @@ async function runRemoteCommandInner(
           void Promise.resolve(opts.onProgress?.(message, level)).catch(() => {})
         }
 
-        // Workflow slash dispatch: detect /team /niko /design /athena /nidhogg /contest /run
-        // and apply visual generation policy. Falls back to direct chat when no command.
+        // Workflow dispatch: /nidhogg and /run stay explicit. Everything else
+        // is routed automatically (core/workflowRouter.ts); a retired
+        // /niko /athena /contest /design /team word is only a hint.
         const slashMatch = detectExplicitWorkflowIntent(command.body)
         let workflowResolution: WorkflowResolution | undefined
         let providerRuntime: BridgeProviderRuntime | undefined
-        let routerRuntime: BridgeProviderRuntime | undefined
         if (slashMatch.command) {
-          if (slashMatch.command === '/team') {
-            // /team routing runs on the cheap router provider (specialist
-            // profile at low effort); the actual task still uses the lead.
-            try {
-              routerRuntime = await resolveBridgeRouterProviderRuntime()
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              await opts.onProgress?.(t(
-                `Team 路由不可用（无 provider 配置），按 direct 处理：${truncate(msg, 200)}`,
-                `Team router unavailable (no provider configured), falling back to direct: ${truncate(msg, 200)}`,
-              ), 'warn')
-            }
-          }
-
           try {
             workflowResolution = await resolveWorkflow(slashMatch, {
               cwd: commandCwd,
               locale,
-              provider: routerRuntime?.provider,
               nonInteractive: true,
               onProgress: opts.onProgress,
             })
@@ -786,7 +776,28 @@ async function runRemoteCommandInner(
               `Workflow dispatch failed: ${msg}`,
             ), 'warn')
           }
-
+        } else if (!sagaTookOver && !directSagaAction) {
+          const route = await routeWorkflow(
+            { text: command.body, attachmentCount: command.images?.length ?? 0 },
+            {
+              // The classifier runs on the cheap router provider (specialist
+              // profile at low effort), only for ambiguous long requests.
+              getClassifier: async () => (await resolveBridgeRouterProviderRuntime()).provider,
+              onInfo: (message) => emitProgress(message, 'info'),
+            },
+          )
+          if (route.workflow !== 'direct' && route.workflow !== 'saga') {
+            workflowResolution = await resolveRoutedWorkflow(route, {
+              cwd: commandCwd,
+              locale,
+              nonInteractive: true,
+              onProgress: opts.onProgress,
+            })
+          } else if (route.retiredSlash) {
+            command.body = route.text
+          }
+        }
+        if (slashMatch.command || workflowResolution) {
           if (workflowResolution && workflowResolution.summary.length > 0) {
             // Send to chat so user sees the routing decision; also mirror to CLI.
             const summaryText = workflowResolution.summary.join('\n')
@@ -797,10 +808,12 @@ async function runRemoteCommandInner(
           if (workflowResolution) {
             try {
               providerRuntime ??= await resolveBridgeProviderRuntime(commandCwd)
-              const workflowStartedText = t(
-                `已进入 /${workflowResolution.mode} 可执行工作流；将使用真实 workflow/runtime 路径，而不是普通聊天模拟。`,
-                `Entered executable /${workflowResolution.mode} workflow; using the real workflow/runtime path, not chat simulation.`,
-              )
+              const workflowStartedText = workflowResolution.route
+                ? t('⏳ 正在按该工作流处理，完成后自动送达。', '⏳ Working on it with this workflow; the result will be delivered when done.')
+                : t(
+                    `已进入 ${workflowResolution.mode} 可执行工作流；将使用真实 workflow/runtime 路径，而不是普通聊天模拟。`,
+                    `Entered executable ${workflowResolution.mode} workflow; using the real workflow/runtime path, not chat simulation.`,
+                  )
               await opts.onProgress?.(workflowStartedText, 'info')
               await opts.sendChatUpdate?.(workflowStartedText)
 
@@ -820,6 +833,10 @@ async function runRemoteCommandInner(
                 binding.storedSession = current
                 return runWorkflowMode(resolution.mode, current, resolution.effectivePrompt, {
                   cwd: commandCwd,
+                  // A routed workflow's playbook goes in the per-run context,
+                  // not into the stored user message.
+                  workflowHint: resolution.route ? resolution.hint : undefined,
+                  delegationBudget: resolution.route ? createDelegationBudget(resolution.route.workflow) : undefined,
                   provider: workflowProvider,
                   sessionStore: store,
                   permissionManager,
@@ -851,7 +868,7 @@ async function runRemoteCommandInner(
           }
         }
 
-        const effectiveBody = workflowResolution?.effectivePrompt ?? command.body
+        const effectiveBody = command.body
         const startedText = t(
           '请求已接收 · Artemis 正在后台处理，完成后将自动送达。',
           'Request received · Artemis is processing it in the background and will deliver the result once complete.',
