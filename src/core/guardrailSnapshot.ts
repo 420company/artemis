@@ -61,14 +61,12 @@ const GUARDRAIL_DESCRIPTORS: GuardrailDescriptor[] = [
   {
     path: 'src/cli/interactive.ts',
     checks: [
-      /const advice = await maybeUpgradeWorkflow\(/,
-      /const result = await runWorkflowMode\(/,
-      /permissionManager: context\.permissionManager,/,
-      /context\.ensureSpecialistProvider \?\?\s*providerRouter\.ensureSpecialistProvider/s,
-      /context\.resolveProvider \?\?\s*providerRouter\.resolveProvider/s,
+      /const autoRoute = await routeInteractiveRequest\(/,
+      /hasActiveSagaLongVideoWorkflow\('cli', root\)/,
+      /buildRoutedWorkflowHint\(autoRoute\.workflow/,
     ],
     summary:
-      'src/cli/interactive.ts routes free-form interactive input through maybeUpgradeWorkflow() and runWorkflowMode() while reusing the current session permission manager plus the active provider router for specialist resolution, so unlocked interactive runs do not silently swap permission or provider context.',
+      'src/cli/interactive.ts routes free-form input through the workflow router (skipped while a Saga or video wizard is active) and runs routed workflows as hinted turns on the same brain session.',
   },
   {
     path: 'src/channels/runtime.ts',
@@ -208,15 +206,15 @@ const GUARDRAIL_DESCRIPTORS: GuardrailDescriptor[] = [
       'src/tools/registry.ts now acts as the single source of truth for tool descriptions, permissionCategory, executionMode, validators, and detailed /tools manifest rendering, while self-auditing duplicate/missing definitions, runtime-managed executor drift, and parallelSafe invariants.',
   },
   {
-    path: 'src/core/workflowAdvisor.ts',
+    path: 'src/core/workflowRouter.ts',
     checks: [
-      /getWorkflowDisplayName/,
-      /better suited for \$\{getWorkflowDisplayName\(advice\.recommended\)\} mode/,
-      /\[advisor\] upgraded to \$\{getWorkflowDisplayName\(advice\.recommended\)\}/,
-      /recommended=\$\{getWorkflowDisplayName\(advice\.recommended\)\}/,
+      /export async function routeWorkflow/,
+      /export function checkDelegationBudget/,
+      /export const MAX_SUB_AGENTS_PER_RUN = 4/,
+      /return makeRoute\('direct', 'fallback'/,
     ],
     summary:
-      'src/core/workflowAdvisor.ts keeps the internal brainstorm workflow while rendering the public niko label in upgrade prompts, advisor logs, and workflow records.',
+      'src/core/workflowRouter.ts picks the workflow for every request (heuristics first, one strict-JSON classifier call only for ambiguous long requests, the direct path on any doubt or error) and bounds sub-agents per run.',
   },
   {
     path: 'src/tools/index.ts',

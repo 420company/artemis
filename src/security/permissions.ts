@@ -78,6 +78,8 @@ function describeAction(action: AgentAction): string {
       return `transcribe audio locally from ${action.inputPath}`;
     case 'spawn_background_workflow':
       return `spawn a detached background workflow for ${action.command}`;
+    case 'use_workflow':
+      return `switch to the ${action.workflow} workflow playbook`;
     case 'agent':
       const permissionSummary = `agent action=${action.action}`;
       if (action.id) {

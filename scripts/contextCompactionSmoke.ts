@@ -2053,7 +2053,8 @@ function webHistory(messages: unknown): Array<{ id: string; role: string; conten
         locale: 'en',
         cwd,
       })).replies.join('\n')
-      const workflowReply = await runBridge('/design a landing page')
+      // Routed to the design workflow automatically (the /design command is retired).
+      const workflowReply = await runBridge('Design a landing page for my coffee shop')
       const chatReply = await runBridge('plain chat turn')
       fs.rmSync(store.getLockPath(stored.id), { force: true })
       const replyText = `${workflowReply}\n${chatReply}`

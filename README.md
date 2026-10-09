@@ -69,6 +69,19 @@ Artemis can handle everyday and advanced engineering work:
 
 The goal is simple: you describe the outcome; Artemis does the operational work.
 
+##### Automatic workflow routing
+
+You never pick a workflow by name. For each request Artemis decides how much process the task needs:
+
+- **Direct** (default) — chat, quick questions and clear, small tasks run on the normal single-agent tool loop.
+- **Deep planning** — non-trivial engineering (investigations, migrations, refactors) is investigated and planned before editing, then verified.
+- **Parallel team** — large multi-part builds or repo-wide changes are split into independent parts, with at most 4 sub-agents per run.
+- **Compare** — when you ask Artemis to produce several candidate solutions and pick the best ("give me three approaches and implement the best one"), up to 3 candidates are weighed in one critique round; the winner is built only if you asked for an implementation. Questions such as "which is better" or "list some alternatives" are answered directly.
+- **Design** — website and UI builds follow the `design-workflow` skill: visual system, real assets, desktop and mobile screenshot checks.
+- **Saga** — for a clear request for a new long, multi-segment video, Artemis first asks whether to use the Saga long-video workflow (it costs money) and starts only after you answer yes; `/saga` starts it at once.
+
+Cheap heuristics decide the clear cases; questions, follow-ups and writing tasks always take the direct path. Only a long request that matches nothing clearly gets one small classification call, and only when a worker model is configured (low effort, strict JSON, 8-second timeout); any doubt or error falls back to the direct path. Routed workflows never raise the model's effort setting. Every run has a hard sub-agent budget, and Artemis can switch itself to a heavier workflow mid-task with its `use_workflow` tool. The old `/niko`, `/athena`, `/contest`, `/design` and `/team` commands are gone: if you type one, the word is dropped and the rest is routed like any other request (it never forces a workflow).
+
 #### 3. Persistent memory and long-context stability
 
 Long work often fails because the assistant forgets. Artemis is built to preserve continuity.
@@ -257,7 +270,7 @@ Rewrite the README for GitHub so it explains the product clearly to users.
 ### Useful commands
 
 - `/config` — Configure providers, models, keys, and preferences
-- `/team` — Let Artemis choose the best routing strategy for the task
+- `/saga` — Start the Saga long-video wizard right away (for a clear long-video request Artemis also offers it)
 - `/review` — Review the current Git diff and identify risks
 - `/nidhogg` — Run heavy or long work in the background
 - `/wordup` — Save important context into memory
@@ -379,6 +392,19 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - 排查环境、依赖和命令失败
 
 你描述目标，Artemis 负责执行过程。
+
+##### 自动选择工作流
+
+不需要记任何工作流名字。每条请求 Artemis 都会根据任务和复杂度决定用多重的流程：
+
+- **直接处理**（默认）——闲聊、简单提问和明确的小任务，走普通的单 agent 工具循环。
+- **深度规划**——有一定复杂度的工程任务（排查、迁移、重构）先调查、定方案，再实现并验证。
+- **并行分工**——大型多模块项目或全仓改动拆成独立部分并行处理，每次最多 4 个子代理。
+- **多方案对比**——只有当你明确要求产出多个方案并选出最优（"给我三个方案并选最好的实现"）时才启用：最多 3 个候选、只评审一轮；只有你要求实现时才实现胜出方案。"哪个好""列几个备选"这类问题直接回答。
+- **设计**——网站和界面类任务按 `design-workflow` 技能执行：视觉系统、真实素材、桌面和手机截图验收。
+- **Saga 长视频**——明确要求制作一段新的多段长视频时，Artemis 会先问你是否使用 Saga 长视频工作流（会产生费用），你确认后才开始；`/saga` 则直接进入。
+
+明确的情况由轻量规则直接判断；提问、追问和写作类任务一律直接处理。只有很长又看不出类型的请求，并且配置了 worker 模型时，才会做一次小的分类调用（低 effort、严格 JSON、8 秒超时），任何不确定或出错都回到直接处理。自动选择的工作流不会提高模型的 effort。每次运行都有子代理数量上限，Artemis 在任务中途发现更复杂时，也可以用 `use_workflow` 工具自己升级流程。原来的 `/niko`、`/athena`、`/contest`、`/design`、`/team` 命令已移除：如果仍然输入，斜杠词会被忽略，其余内容按普通请求路由（不会强制进入任何工作流）。
 
 #### 3. 持久记忆与长上下文稳定性
 
@@ -568,7 +594,7 @@ artemis
 ### 常用命令
 
 - `/config` — 配置模型供应商、密钥和偏好
-- `/team` — 让 Artemis 自动选择最合适的任务路线
+- `/saga` — 直接进入 Saga 长视频引导（明确要求长视频时 Artemis 也会先询问是否使用）
 - `/review` — 审查当前 Git diff，发现潜在风险
 - `/nidhogg` — 把复杂或耗时任务转入后台执行
 - `/wordup` — 保存重要上下文到记忆

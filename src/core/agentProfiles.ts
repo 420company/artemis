@@ -220,6 +220,8 @@ export function getAllowedActionTypesForProfile(
       'task_output',
       'kill_task',
       'delegate_task',
+      // Switch to a heavier workflow playbook mid-task (bounded budget).
+      'use_workflow',
       'approve_builder_execution',
       // Long-term memory: the system prompt asks main to persist what the
       // user says to remember, so the tool must be allowed here too.

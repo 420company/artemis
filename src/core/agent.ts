@@ -31,6 +31,8 @@ import {
   type ToolAccessMode,
 } from '../security/permissionModes.js';
 import { isReadOnlyCommand } from '../security/commandPolicy.js';
+import { checkDelegationBudget, type DelegationBudget } from './workflowRouter.js';
+import { hasFinishedLongVideo, isSagaSessionActive, SAGA_SESSION_TTL_MS } from './sagaSessionState.js';
 import type {
   AgentAction,
   AgentPhase,
@@ -1904,6 +1906,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
+    case 'use_workflow':
+      return `use_workflow ${action.workflow}${action.reason ? ` reason=${truncate(action.reason, 100)}` : ''}`;
     case 'agent':
       const agentSummary = `agent action=${action.action}`;
       if (action.id) {
@@ -3815,6 +3819,16 @@ export type RunAgentOptions = {
   profile?: 'main' | AgentRole;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  /**
+   * Sub-agent budget for this run, shared with its sub-agents (see
+   * core/workflowRouter.ts). Unset: no limit beyond maxTurns.
+   */
+  delegationBudget?: DelegationBudget;
+  /**
+   * Playbook of the workflow the router chose for this request. Sent in the
+   * per-run context of the top-level run only, never stored in the session.
+   */
+  workflowHint?: string;
   appendUserMessage?: boolean;
   /**
    * Scope for memories the memory tool saves when the model names none.
@@ -4906,27 +4920,33 @@ function mapPermissionModeForToolContext(
 // reroute the action to `generate_long_video` so the user actually gets
 // the multi-segment Saga pipeline. This is the last-line safety net behind
 // the explicit imperative tail in the Saga prompt.
-function maybeRerouteToSagaLongVideo(
+export function maybeRerouteToSagaLongVideo(
   session: SessionRecord,
   action: AgentAction,
 ): AgentAction {
   if (action.type !== 'generate_video') return action;
-  const messages = (session as { messages?: Array<{ content?: unknown }> }).messages ?? [];
+  const messages = (session as { messages?: Array<{ role?: string; name?: string; content?: unknown; createdAt?: string }> }).messages ?? [];
+  // Only a recent, unfinished Saga counts: a wizard marker written in the
+  // last SAGA_SESSION_TTL_MS with no generated long video after it, or a
+  // confirmed web Saga in the session metadata (core/sagaSessionState.ts).
+  const recentSince = Date.now() - SAGA_SESSION_TTL_MS;
   let hasSagaMarker = false;
   let totalDurationFromContext: number | undefined;
   let projectIdFromContext: string | undefined;
-  for (const msg of messages) {
+  messages.forEach((msg, index) => {
     const content = typeof msg.content === 'string' ? msg.content : '';
-    if (!content) continue;
-    if (content.includes('[Artemis Saga long video workflow]')) {
-      hasSagaMarker = true;
-      const dur = content.match(/totalDuration:\s*(\d+)/);
-      if (dur) totalDurationFromContext = Number.parseInt(dur[1] ?? '', 10);
-      const pid = content.match(/projectId:\s*"([^"]+)"/);
-      if (pid) projectIdFromContext = pid[1];
-    }
-  }
-  if (!hasSagaMarker) return action;
+    if (!content || !content.includes('[Artemis Saga long video workflow]')) return;
+    // No usable timestamp: not known to be recent, so not counted.
+    const at = Date.parse(msg.createdAt ?? '');
+    if (!Number.isFinite(at) || at < recentSince) return;
+    if (hasFinishedLongVideo(messages.slice(index + 1))) return;
+    hasSagaMarker = true;
+    const dur = content.match(/totalDuration:\s*(\d+)/);
+    if (dur) totalDurationFromContext = Number.parseInt(dur[1] ?? '', 10);
+    const pid = content.match(/projectId:\s*"([^"]+)"/);
+    if (pid) projectIdFromContext = pid[1];
+  });
+  if (!hasSagaMarker && !isSagaSessionActive(session)) return action;
   const a = action as Extract<AgentAction, { type: 'generate_video' }>;
   return {
     type: 'generate_long_video',
@@ -5044,7 +5064,7 @@ async function executeAgentAction(
   const rerouted = maybeRerouteToSagaLongVideo(session, action);
   if (rerouted !== action) {
     options.onInfo?.(
-      `🌙 Saga safety net: model emitted generate_video but conversation has [Artemis Saga long video workflow] marker — rerouting to generate_long_video.`,
+      `🌙 Saga safety net: model emitted generate_video during an active Saga long-video workflow — rerouting to generate_long_video.`,
     );
     action = rerouted;
   }
@@ -5065,6 +5085,16 @@ async function executeAgentAction(
           errors: validationErrors,
         },
       }),
+    };
+  }
+
+  // Cost bound of the routed workflow: refuse sub-agents past its budget.
+  const budgetRefusal = checkDelegationBudget(action, options.delegationBudget);
+  if (budgetRefusal) {
+    return {
+      ok: false,
+      output: budgetRefusal,
+      error: buildToolError('delegation_budget_exhausted', budgetRefusal, { retryable: false }),
     };
   }
 
@@ -6507,6 +6537,10 @@ export async function runAgent(
     }
     return systemCache.content;
   };
+  // Top-level main run only: sub-agents and builder passes never get it.
+  if (options.workflowHint?.trim() && profile === 'main' && (options.delegationDepth ?? 0) === 0) {
+    extensionRuntime.sections.unshift(options.workflowHint.trim());
+  }
   // Per-run context: computed once, so every request of the run is identical
   // up to the newest messages.
   let runContextMessage: SessionMessage | undefined;

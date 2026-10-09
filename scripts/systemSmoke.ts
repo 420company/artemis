@@ -32,9 +32,24 @@ test('legacy shim is absent', () => {
 
 test('help lists real workflow and utility commands', () => {
   const help = getHelpText('en');
-  for (const command of ['tool', 'analyze', 'execute', 'skill', 'audit', 'session', 'design']) {
+  for (const command of ['tool', 'analyze', 'execute', 'skill', 'audit', 'session', 'run', 'nidhogg']) {
     assert.match(help, new RegExp(`\\b${command}\\b`));
   }
+});
+
+test('retired workflow modes: help, catalog and slash surfaces no longer offer them', async () => {
+  const catalog = await import('../src/commands/catalog.js');
+  const surfaces = [
+    getHelpText('en'),
+    getHelpText('zh-CN'),
+    ...catalog.CLI_COMMAND_TOKENS,
+    ...catalog.getCliUsageLines(),
+    ...catalog.getSlashHelpLines('en'),
+    ...catalog.getSlashAutocompleteEntries(),
+    ...catalog.getInteractiveHelpCommands('en'),
+  ];
+  const leaks = surfaces.filter((line) => /(?:^|[\s/])(?:niko|athena|contest|team)\b|\/design\b|^\s*design <prompt>/im.test(line));
+  assert.deepEqual(leaks, []);
 });
 
 test('parser accepts documented utility commands', () => {
@@ -470,7 +485,7 @@ test('vision capability: profile flag first, then known vision families; DeepSee
   assert.equal(new ResponsesCompatibleProvider({ ...config, protocol: 'responses', model: 'gpt-5.4' }).supportsImages, true);
 });
 
-test('parser accepts direct workflow commands', () => {
+test('parser keeps retired workflow commands as hidden aliases', () => {
   const parsed = parseArgs(['design', 'make', 'a', 'homepage']);
   assert.equal(parsed.command, 'design');
   assert.equal(parsed.prompt, 'make a homepage');

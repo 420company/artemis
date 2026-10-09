@@ -27,6 +27,11 @@ export interface HeadlessAgentOptions {
   imagePaths?: string[]
   sessionTitle?: string
   onInfo?: (message: string) => void
+  /**
+   * Pick the workflow from the request (core/workflowRouter.ts). Default
+   * true; Goal Mode ticks pass false (their prompt is written by Artemis).
+   */
+  autoRoute?: boolean
 }
 
 export interface HeadlessAgentResult {
@@ -87,6 +92,17 @@ export async function runHeadlessAgent(
   const { loadPromptImages } = await import('../core/imageInput.js')
   const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
 
+  // Workflow routing (services/headlessWorkflow.ts): the user never names a
+  // workflow; a Saga long video is only offered, never started unasked.
+  const { createDelegationBudget } = await import('../core/workflowRouter.js')
+  const { finishSagaIfGenerated, planHeadlessWorkflow } = await import('./headlessWorkflow.js')
+  const { resolveWorkflowClassifierProvider } = await import('../providers/workflowClassifier.js')
+  const { resolveConfiguredVisualProvider } = await import('../utils/visualGenerationConfig.js')
+  const { resolveArtemisHomeDir } = await import('../utils/fs.js')
+  const { existsSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const readOnly = (opts.permissionMode ?? 'PRODUCER') === 'read-only'
+
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
   const contextNotices: string[] = []
   const started = Date.now()
@@ -94,11 +110,35 @@ export async function runHeadlessAgent(
   // working on the same session).
   const { withSessionLock } = await import('../storage/sessionLock.js')
   const compaction = await loadCompactionSettings(cwd, 'hosted')
-  const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => runAgent(
+  const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => {
     // Re-read under the lock: another process (a chat bridge) may have saved
     // a turn between the existence check above and getting the lock.
-    opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session,
-    prompt,
+    const current = opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session
+    const plan = await planHeadlessWorkflow({
+      session: current,
+      prompt,
+      cwd,
+      attachmentCount: imageAttachments.length,
+      inCodeRepo: existsSync(join(cwd, '.git')),
+      // Goal Mode ticks are written by Artemis; read-only analysis only reads.
+      autoRoute: opts.autoRoute !== false && !readOnly,
+      // Only a configured worker model classifies; never the main model.
+      getClassifier: () => resolveWorkflowClassifierProvider([cwd, resolveArtemisHomeDir()], cwd),
+      hasVideoProvider: async () => Boolean(await resolveConfiguredVisualProvider(cwd, 'video')),
+      onInfo,
+    })
+    if (plan.kind === 'reply') {
+      // The Saga question: answered without running the model.
+      sessionStore.appendMessage(current, 'user', prompt)
+      sessionStore.appendMessage(current, 'assistant', plan.reply)
+      await sessionStore.save(current)
+      return { reply: plan.reply, turns: 0 }
+    }
+    const messagesBefore = current.messages.length
+    const runResult = await runAgent(
+    current,
+    // A retired workflow slash word ("/niko …") is already removed.
+    plan.prompt,
     {
     cwd,
     provider,
@@ -106,6 +146,9 @@ export async function runHeadlessAgent(
     permissionManager,
     maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
     profile: 'main',
+    ...(plan.hint ? { workflowHint: plan.hint } : {}),
+    // Every run is bounded, routed or not (Goal Mode and analysis: direct cap).
+    delegationBudget: createDelegationBudget(plan.workflow),
     appendUserMessage: true,
     // The main model's window; specialists with a smaller window are capped
     // further by their own provider metadata inside runAgent.
@@ -129,7 +172,13 @@ export async function runHeadlessAgent(
     onContextCompaction: (notice) => contextNotices.push(notice),
     onInfo: opts.onInfo,
     ...(imageAttachments.length ? { imageAttachments } : {}),
-  }), { label: `Session ${session.id}` })
+  })
+    // A generated long video ends the Saga conversation of this session.
+    if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
+      await sessionStore.save(current)
+    }
+    return runResult
+  }, { label: `Session ${session.id}` })
 
   return {
     reply: result.reply,

@@ -11,10 +11,6 @@ import {
 
 export const CLI_COMMAND_TOKENS = [
   'run',
-  'athena',
-  'design',
-  'niko',
-  'contest',
   'nidhogg',
   'docs',
   'search-engine',

@@ -200,7 +200,8 @@ function renderLiveWorkflowViewport(state: LiveWorkflowRenderState): void {
 import path from 'node:path'
 import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
-import { think, resetSession, getMessages, getActiveContextState, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
+import { existsSync } from 'node:fs'
+import { think, resetSession, getMessages, getActiveContextState, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
@@ -263,9 +264,9 @@ import { resolveWorkspaceIntent } from './workspaceIntent.js'
 import { wordupNow } from './wordup.js'
 import { getWorkflowDisplayName } from '../core/workflowMode.js'
 import type { WorkflowMode } from '../core/workflowMode.js'
-import { buildWorkflowHint, buildWorkflowCompletionNote } from '../core/workflowHints.js'
 import { detectExplicitWorkflowIntent } from '../core/workflowDispatcher.js'
-import { routeTeamRequest, routeTeamRequestFallback, describeChoice } from '../core/team.js'
+import { resolveWorkflowClassifierProvider } from '../providers/workflowClassifier.js'
+import { AUTO_WORKFLOW_MODE, buildRoutedWorkflowHint, describeAutoWorkflow, describeRouteReason, routeWorkflow, type WorkflowRoute } from '../core/workflowRouter.js'
 import {
   applyWorkflowProgressInfo,
   createWorkflowProgressState,
@@ -276,7 +277,6 @@ import {
 } from './workflowProgress.js'
 import { resolveMainProviderConfig, ensureDoubleModelSetup } from '../providers/onboarding.js'
 import { createConsolePromptIO } from '../providers/router.js'
-import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
 import { appendDetachedWorkflowMessage, spawnDetachedWorkflow } from '../services/detachedWorkflow.js'
@@ -297,8 +297,8 @@ import {
   VISUAL_NOT_CONFIGURED_POLICY,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
-import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
-import { handleSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
+import { handleSeedanceMultimodalWorkflow, hasActiveSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
+import { handleSagaLongVideoWorkflow, hasActiveSagaLongVideoWorkflow, offerSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 
 const HOME_DIR = os.homedir()
 const DIRECT_TOOL_COUNT = getDirectToolCount()
@@ -862,8 +862,8 @@ function buildInteractiveLandingLines(options: {
     `  ${dm('tools')}   ${c(137, 180, 250, `${DIRECT_TOOL_COUNT} tools`)} ${dm('·')} ${c(203, 166, 247, `${hud.skillCount} skills`)} ${dm('·')} ${c(148, 226, 213, `${hud.mcpServerCount} MCP`)}`,
     '',
     `  ${c(245, 196, 94, bd(`✦ ${t('工作流', 'Workflows')}`))}`,
-    `    ${c(245, 196, 94, bd('/team'))} ${dm(t('← 不确定路径时交给 Team router', '← Let Team router choose the path'))}`,
-    `    ${c(148, 82, 255, bd('/niko'))} ${c(148, 82, 255, bd('/design'))} ${c(148, 82, 255, bd('/athena'))} ${c(148, 82, 255, bd('/nidhogg'))} ${c(148, 82, 255, bd('/contest'))} ${c(148, 82, 255, bd('/run'))}`,
+    `    ${dm(t('直接描述任务即可，Artemis 会按复杂度自动选择工作流', 'Just describe the task; Artemis picks the workflow by its complexity'))}`,
+    `    ${c(148, 82, 255, bd('/saga'))} ${c(148, 82, 255, bd('/nidhogg'))} ${c(148, 82, 255, bd('/run'))}`,
     '',
     `  ${c(245, 196, 94, bd(`✦ ${t('设置', 'Setup')}`))}`,
     `    ${c(148, 82, 255, bd('/bifrost'))}  ${c(148, 82, 255, bd('/config'))}  ${c(148, 82, 255, bd('/permission'))}  ${c(148, 82, 255, bd('/newborn'))}`,
@@ -1787,12 +1787,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   // Slash-command definitions for the popup menu
   const SLASH_MENU_ITEMS: SlashMenuItem[] = [
     // ── 工作流 ──
-    { value: '/team',       hint: t('AI 自动派单 (推荐)',         'AI auto-router (recommended)') },
-    { value: '/niko',       hint: t('探索方向后落地',             'Explore, then build') },
-    { value: '/design',     hint: t('先定设计，再实现',           'Shape the design, then implement') },
-    { value: '/athena',     hint: t('深研代码库并协调执行',       'Deep repo research and coordinated execution') },
     { value: '/nidhogg',    hint: t('对抗式实现硬化 / 慢但最稳',  'Adversarial hardening / slow but strongest') },
-    { value: '/contest',    hint: t('路径辩论与方案裁决',         'Path debate and selection') },
     { value: '/bifrost',    hint: t('配置思维/执行双模型',        'Setup dual brain/exec models') },
     { value: '/saga',       hint: t('Saga 长视频生成（显式进入）', 'Saga long-video generation (explicit)') },
     { value: '/run',        hint: t('后台运行工作流',             'Run workflow in background') },
@@ -2137,6 +2132,24 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     return undefined
   }
 
+  // Workflow routing for one interactive request. The classifier (only for
+  // long, ambiguous requests) runs on the cheaper specialist profile at low
+  // effort. Undefined while a Saga / video wizard is collecting answers.
+  const routeInteractiveRequest = async (requestText: string, root: string): Promise<WorkflowRoute | undefined> => {
+    if (hasActiveSagaLongVideoWorkflow('cli', root) || hasActiveSeedanceMultimodalWorkflow('cli', root)) return undefined
+    if (/^\s*\/saga(\s|$)/i.test(requestText)) return undefined
+    return routeWorkflow(
+      { text: requestText, inCodeRepo: existsSync(path.join(root, '.git')) },
+      {
+        getClassifier: async () => {
+          const classifier = await resolveWorkflowClassifierProvider([root, resolveArtemisHomeDir()], root)
+          if (classifier) appendScrollBlock({ kind: 'system', text: t('🧭 正在判断任务类型…', '🧭 Choosing a workflow for this task…') })
+          return classifier
+        },
+      },
+    )
+  }
+
   const launchDetachedWorkflow = async (
     command: 'run' | 'nidhogg',
     effectivePrompt: string,
@@ -2227,9 +2240,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       return
     }
 
-    // /team router can reassign this when it picks `direct` and falls through
-    // to the regular AI turn dispatcher below.
-    let trimmed: string = line.trim()
+    const trimmed: string = line.trim()
     if (!trimmed) continue
 
     if (activeDetachedCapture && !isRegisteredSlashCommandInput(trimmed)) {
@@ -3027,7 +3038,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '  default ' + t('清除设置，回到 API 默认', 'clear the setting, back to API default'),
           '',
           t('不支持该等级的模型会自动降到 high；不支持 effort 的模型忽略此设置。', 'Models missing a level clamp to high; models without effort support ignore it.'),
-          t('工作流会自动抬档：/nidhogg→max，/niko /athena /design→xhigh，/contest→high；你手动设置过则不覆盖。', 'Workflows auto-bump: /nidhogg→max, /niko /athena /design→xhigh, /contest→high; your explicit setting always wins.'),
+          t('/nidhogg 的后台 harness 在你没有用 /effort 或 profile 设置 effort 时使用 max；自动选择的工作流从不提高 effort。', 'The /nidhogg background harness runs at max when neither /effort nor the profile sets an effort; automatically chosen workflows never raise it.'),
         ])
       } else if (arg !== 'default' && !(levels as readonly string[]).includes(arg)) {
         appendSystemPanel(t('无效等级', 'Invalid level'), [
@@ -4186,173 +4197,12 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    // ── /team — auto-router that picks the right workflow ─────────────────────
-    // Manual entry points (/niko /design /athena /nidhogg) stay available for
-    // users who already know which workflow they want; /team is for "I don't
-    // know, you decide" — a brief LLM call picks among direct/brainstorm/
-    // design/athena/nidhogg and we dispatch accordingly.
-    const teamIntent = detectExplicitWorkflowIntent(trimmed)
-    if (teamIntent.command === '/team') {
-      const teamPrompt = teamIntent.body.trim()
-      if (!teamPrompt) {
-        appendSystemPanel(
-          t('用法', 'Usage'),
-          [`/team <${t('你的任务描述', 'your task description')}>`],
-        )
-        continue
-      }
-
-      if (!(await maybeSwitchWorkspaceForRequest(teamPrompt))) {
-        continue
-      }
-
-      await historyStore.record(trimmed).catch(() => {/* non-fatal */})
-      appendScrollBlock({ kind: 'user', text: trimmed, timestamp: timeStampLabel() })
-
-      if (!(await ensureExecutionProviderForWorkflow(workspaceRoot))) {
-        continue
-      }
-
-      // Phase 1: routing decision — render an animated scrollblock that ticks
-      // a Braille spinner + elapsed seconds while we wait for the LLM. When
-      // the call returns, we replace the block in-place with the verdict so
-      // the user sees one panel that morphs from "thinking" → "decided".
-      const routerStartedMs = Date.now()
-      const routerFrames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'] as const
-      const renderRouterWaiting = (): string => {
-        const elapsedSec = Math.floor((Date.now() - routerStartedMs) / 1000)
-        const frame = routerFrames[Math.floor(Date.now() / 100) % routerFrames.length]!
-        return [
-          `${t('Team router · 路由中', 'Team router')}`,
-          `  ${frame} ${t('intent scan → workflow routing，正在匹配任务路径', 'intent scan → workflow routing')}  (${elapsedSec}s)`,
-          `  ${t('router model 正在判断任务路径 · max 45s', 'router model is selecting the execution path · max 45s')}`,
-        ].join('\n')
-      }
-      const routerBlockIndex = appendScrollBlock({
-        kind: 'system',
-        text: renderRouterWaiting(),
-      })
-      const routerTick = setInterval(() => {
-        updateScrollBlock(routerBlockIndex, {
-          kind: 'system',
-          text: renderRouterWaiting(),
-        })
-      }, 100)
-
-      let route: Awaited<ReturnType<typeof routeTeamRequest>>
-      try {
-        // Routing is a one-line JSON classification — prefer the cheaper
-        // specialist (worker) profile when configured, and force low effort
-        // so the decision is fast regardless of the user's effort setting.
-        let routerBaseConfig: Record<string, unknown> | undefined
-        for (const root of [workspaceRoot, resolveArtemisHomeDir()]) {
-          try {
-            const routerStore = new ProviderStore(root)
-            const routerData = await routerStore.load()
-            const specialist = routerStore.getProfile(routerData, routerData.specialistProfileId)
-            if (specialist) {
-              routerBaseConfig = specialist as unknown as Record<string, unknown>
-              break
-            }
-          } catch { /* try next root */ }
-        }
-        const provConfig = (routerBaseConfig
-          ?? await resolveMainProviderConfig({ cwd: workspaceRoot, config: {} })) as Parameters<typeof createTrackedProviderFromConfig>[0]
-        const routerConfig = { ...provConfig, effort: 'low' as const }
-        const trackedProfileId =
-          typeof (provConfig as unknown as { id?: unknown }).id === 'string'
-            ? (provConfig as unknown as { id: string }).id
-            : undefined
-        const trackedProfileLabel =
-          typeof (provConfig as unknown as { label?: unknown }).label === 'string'
-            ? (provConfig as unknown as { label: string }).label
-            : trackedProfileId
-        const provider = createTrackedProviderFromConfig(routerConfig, {
-          cwd: workspaceRoot,
-          profileId: trackedProfileId,
-          profileLabel: trackedProfileLabel,
-        })
-        route = await routeTeamRequest(teamPrompt, provider)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        route = routeTeamRequestFallback(teamPrompt, `router exception: ${msg}`)
-      } finally {
-        clearInterval(routerTick)
-      }
-
-      const choiceLabel = describeChoice(route.choice, locale)
-      const routerElapsedSec = Math.floor((Date.now() - routerStartedMs) / 1000)
-      updateScrollBlock(routerBlockIndex, {
-        kind: 'system',
-        text: [
-          `${t('Team router decision · 路由决策', 'Team router decision')}  (${routerElapsedSec}s)`,
-          `  ${t('选择', 'Choice')}: ${choiceLabel}`,
-          `  ${t('理由', 'Reason')}: ${route.reason}`,
-          `  ${
-            route.choice === 'direct'
-              ? t('→ 直接走默认对话处理。', '→ Dispatching to the default chat agent.')
-              : t(
-                  `→ 启动 /${route.choice === 'niko' ? 'niko' : route.choice} 工作流。`,
-                  `→ Launching /${route.choice === 'niko' ? 'niko' : route.choice} workflow.`,
-                )
-          }`,
-        ].join('\n'),
-      })
-
-      // Phase 2: dispatch
-      if (route.choice === 'direct') {
-        // Re-inject as a normal user message: rewrite trimmed and fall through
-        // to the AI turn block below.
-        trimmed = teamPrompt
-      } else {
-        const effectiveTeamPrompt = await maybeApplyVisualGenerationPolicy(teamPrompt)
-        if (route.choice === 'nidhogg') {
-          activeDetachedCapture = await launchDetachedWorkflow('nidhogg', effectiveTeamPrompt)
-          continue
-        }
-        const runningMessages = createRunningMessageCapture()
-        const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
-          runHintedWorkflowTurn(
-            route.choice,
-            effectiveTeamPrompt,
-            workspaceRoot,
-            permissionMode,
-            locale,
-            hud,
-            {
-              appendScrollBlock,
-              insertScrollBlock,
-              updateScrollBlock,
-              removeScrollBlock,
-              requestPermission: askToolPermission,
-            },
-            handleWorkspaceSwitchRequest,
-            runningMessages.hooks,
-          ),
-          runningMessages.capture,
-        )
-        hud.sessionMessageCount = getMessages().length
-        prompt.forceRedraw()
-        nextLineOverride = nextLineFromWorkflow
-        continue
-      }
-    }
-
-    // ── workflow slash commands (/niko /athena /nidhogg /design /contest /run) ─
-    const WORKFLOW_COMMANDS: Record<string, WorkflowMode | 'run'> = {
-      '/niko':    'niko',
-      '/athena':  'athena',
-      '/nidhogg': 'nidhogg',
-      '/design':  'design',
-      '/contest': 'contest',
-      '/run':     'run',
-    }
-    const explicitWorkflowIntent = teamIntent.command === '/team' ? { command: null, body: trimmed } : detectExplicitWorkflowIntent(trimmed)
-    const workflowMatch: [string, WorkflowMode | 'run'] | undefined = explicitWorkflowIntent.command
-      ? [explicitWorkflowIntent.command, WORKFLOW_COMMANDS[explicitWorkflowIntent.command]] as [string, WorkflowMode | 'run']
-      : undefined
-    if (workflowMatch) {
-      const [cmd, mode]: [string, WorkflowMode | 'run'] = workflowMatch
+    // ── explicit workflow commands (/nidhogg /run) ───────────────────────────
+    // Other workflows are chosen automatically (see the AI turn below); the
+    // retired /niko /athena /contest /design /team words are natural language.
+    const explicitWorkflowIntent = detectExplicitWorkflowIntent(trimmed)
+    if (explicitWorkflowIntent.command) {
+      const cmd = explicitWorkflowIntent.command
       const workflowPrompt = explicitWorkflowIntent.body.trim()
       if (!workflowPrompt) {
         appendSystemPanel(
@@ -4371,50 +4221,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       appendScrollBlock({ kind: 'user', text: trimmed, timestamp: timeStampLabel() })
       const effectiveWorkflowPrompt = await maybeApplyVisualGenerationPolicy(workflowPrompt)
 
-      if (mode === 'nidhogg') {
-        // Background detached workflow
-        activeDetachedCapture = await launchDetachedWorkflow('nidhogg', effectiveWorkflowPrompt)
-      } else if (mode === 'run') {
-        // Background detached workflow
-        activeDetachedCapture = await launchDetachedWorkflow('run', effectiveWorkflowPrompt)
-      } else {
-        // Inline workflow — Artemis style: inject domain hint into brain's
-        // system prompt suffix, then run the same handleTurn loop as free-form
-        // chat. The brain's native tool loop handles execution flexibly,
-        // no rigid pipeline. mode is narrowed to WorkflowMode in this branch.
-        const wfMode: WorkflowMode = mode as WorkflowMode
-        appendSystemPanel(
-          t(`${cmd} 模式已激活`, `${cmd} mode active`),
-          [t(
-            `Brain 已注入 /${wfMode} 风格提示，进入主对话循环执行任务。`,
-            `Brain injected with /${wfMode} style hint, entering main conversation loop.`,
-          )],
-        )
-        const runningMessages = createRunningMessageCapture()
-        const nextLineFromWorkflow = await waitForRunnerOrInterrupt(
-          runHintedWorkflowTurn(
-            wfMode,
-            effectiveWorkflowPrompt,
-            workspaceRoot,
-            permissionMode,
-            locale,
-            hud,
-            {
-              appendScrollBlock,
-              insertScrollBlock,
-              updateScrollBlock,
-              removeScrollBlock,
-              requestPermission: askToolPermission,
-            },
-            handleWorkspaceSwitchRequest,
-            runningMessages.hooks,
-          ),
-          runningMessages.capture,
-        )
-        hud.sessionMessageCount = getMessages().length
-        prompt.forceRedraw()
-        nextLineOverride = nextLineFromWorkflow
-      }
+      // Both run as background detached workflows.
+      activeDetachedCapture = await launchDetachedWorkflow(
+        cmd === '/nidhogg' ? 'nidhogg' : 'run',
+        effectiveWorkflowPrompt,
+      )
       continue
     }
 
@@ -4475,21 +4286,58 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
 
     // ── user message ─────────────────────────────────────────────────────────
     const visibleDispatchText = dispatchText
-    const effectiveDispatchText = await maybeApplyVisualGenerationPolicy(dispatchText)
     appendScrollBlock({ kind: 'user', text: visibleDispatchText, timestamp: timeStampLabel() })
 
+    // ── automatic workflow routing (core/workflowRouter.ts) ─────────────────
+    // The user never names a workflow: the router picks one from the request,
+    // or the plain path. A running Saga / video wizard keeps its own replies.
+    const autoRoute = await routeInteractiveRequest(dispatchText, workspaceRoot)
+    if (autoRoute?.workflow === 'saga') {
+      // A long-video request is only an offer: Saga starts after "1 / 是".
+      const question = await offerSagaLongVideoWorkflow({
+        scope: 'cli',
+        key: workspaceRoot,
+        cwd: workspaceRoot,
+        text: autoRoute.text,
+        locale,
+      })
+      if (question) {
+        appendScrollBlock({ kind: 'system', text: question })
+        continue
+      }
+    }
+    const effectiveDispatchText = await maybeApplyVisualGenerationPolicy(autoRoute?.text || dispatchText)
+    const routedMode = autoRoute && autoRoute.workflow !== 'direct' && autoRoute.workflow !== 'saga'
+      ? AUTO_WORKFLOW_MODE[autoRoute.workflow]
+      : undefined
+    if (autoRoute && routedMode) {
+      appendSystemPanel(t('自动选择工作流', 'Workflow chosen automatically'), [
+        `${describeAutoWorkflow(autoRoute.workflow, locale)} · ${describeRouteReason(autoRoute, locale)}`,
+      ])
+    }
+
     const runningMessages = createRunningMessageCapture()
+    const turnViewport = {
+      appendScrollBlock,
+      insertScrollBlock,
+      updateScrollBlock,
+      removeScrollBlock,
+      requestPermission: askToolPermission,
+    }
 
     // Run AI generation and next prompt read concurrently.
     // DECSTBM scroll-region isolation keeps AI output (scroll region) and the
     // prompt (fixed zone) from interfering with each other.
-    const nextLineFromGeneration = await waitForRunnerOrInterrupt(handleTurn(effectiveDispatchText, locale, hud, workspaceRoot, permissionMode, {
-        appendScrollBlock,
-        insertScrollBlock,
-        updateScrollBlock,
-        removeScrollBlock,
-        requestPermission: askToolPermission,
-      }, handleWorkspaceSwitchRequest, runningMessages.hooks), runningMessages.capture)
+    const nextLineFromGeneration = await waitForRunnerOrInterrupt(
+      handleTurn(
+        effectiveDispatchText,
+        locale, hud, workspaceRoot, permissionMode, turnViewport, handleWorkspaceSwitchRequest, runningMessages.hooks,
+        autoRoute && routedMode
+          ? buildRoutedWorkflowHint(autoRoute.workflow, { cwd: workspaceRoot, userPrompt: effectiveDispatchText, reason: autoRoute.reason })
+          : undefined,
+      ),
+      runningMessages.capture,
+    )
 
     hud.sessionMessageCount = getMessages().length
     prompt.forceRedraw()
@@ -4584,6 +4432,12 @@ async function handleTurn(
   viewport?: ScrollViewportController,
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
+  /**
+   * Playbook of a routed workflow, sent as unsaved per-turn context (never
+   * the system prompt, never the stored history); the Saga and video
+   * wizards and the saved session see only the user's own text.
+   */
+  workflowPlaybook?: string,
 ): Promise<void> {
   // /saga <content> — explicit Saga long-video entry. Strip the prefix and
   // force-flag the workflow so it skips intent detection (the user has
@@ -4624,6 +4478,8 @@ async function handleTurn(
     }
     return
   }
+  // The user answered a Saga offer with "no": go on with the original request.
+  if (sagaWorkflow.replayText !== undefined) input = sagaWorkflow.replayText
   // When Saga rewrites the body to a long-video generation prompt, skip
   // the Seedance multimodal workflow. Saga's rewritten prompt mentions
   // "video" / "Seedance" / "references" and would otherwise re-trigger
@@ -4988,6 +4844,8 @@ async function handleTurn(
     }
 
     const result = await think(input, {
+      // The routed playbook is per-turn context: never saved in the history.
+      ...(workflowPlaybook ? { turnContext: workflowPlaybook } : {}),
       ...thinkOpts,
       locale: locale === 'zh-CN' ? 'zh' : 'en',
       cwd: thinkOpts.cwd,
@@ -5142,115 +5000,6 @@ async function handleTurn(
   }
 }
 
-/**
- * Run a workflow command as a hint-injected turn through the brain's normal
- * main loop. Replaces the old phase-based pipeline with an Artemis style
- * flow: inject a domain hint into the brain's system prompt, then let the
- * brain's native tool loop handle the task end-to-end.
- *
- * The brain decides when to call tools, when to spawn sub-agents, when to
- * generate images — all in a single Artemis conversation.
- */
-// Workflow ↔ effort coupling: each workflow implies a reasoning-effort level
-// matching its quality/cost positioning. Applied only when the user hasn't
-// pinned an effort themselves (via /effort or the profile); providers clamp
-// levels the model doesn't support, so this is always safe to send.
-const WORKFLOW_EFFORT: Partial<Record<WorkflowMode, 'low' | 'medium' | 'high' | 'xhigh' | 'max'>> = {
-  niko: 'xhigh',
-  athena: 'xhigh',
-  design: 'xhigh',
-  contest: 'high',
-  nidhogg: 'max',
-}
-
-async function userPinnedEffort(cwd: string): Promise<boolean> {
-  if (getCurrentEffort() !== undefined) return true
-  // Provider may not be loaded yet — mirror brain.ts resolution (cwd → global)
-  // to check whether the active profile carries an explicit effort.
-  try {
-    for (const root of [cwd, resolveArtemisHomeDir()]) {
-      const store = new ProviderStore(root)
-      const data = await store.load()
-      const profile = store.getDefaultMainProfile(data)
-      if (profile) return (profile as { effort?: string }).effort !== undefined
-    }
-  } catch { /* assume not pinned */ }
-  return false
-}
-
-async function runHintedWorkflowTurn(
-  mode: WorkflowMode,
-  userPrompt: string,
-  cwd: string,
-  permissionMode: PermissionMode,
-  locale: UiLocale,
-  hud: ReturnType<typeof createHudState>,
-  viewport: ScrollViewportController,
-  onWorkspaceSwitchRequest: (request: WorkspaceSwitchRequest) => Promise<boolean>,
-  runningMessageHooks?: RunningMessageHooks,
-): Promise<void> {
-  const previousSuffix = getSystemPromptSuffix()
-  const hint = buildWorkflowHint(mode, { cwd, userPrompt })
-  setSystemPromptSuffix(previousSuffix ? `${previousSuffix}\n\n${hint}` : hint)
-
-  const suggestedEffort = WORKFLOW_EFFORT[mode]
-  const appliedEffort = suggestedEffort && !(await userPinnedEffort(cwd)) ? suggestedEffort : undefined
-  if (appliedEffort) switchEffort(appliedEffort)
-
-  const msgIndexBefore = getMessages().length
-
-  try {
-    await handleTurn(
-      userPrompt,
-      locale,
-      hud,
-      cwd,
-      permissionMode,
-      viewport,
-      onWorkspaceSwitchRequest,
-      runningMessageHooks,
-    )
-  } finally {
-    // Walk new tool messages to find files written, compute common output dir.
-    const newMessages = getMessages().slice(msgIndexBefore)
-    const writePaths: string[] = []
-    for (const msg of newMessages) {
-      if ((msg as { role?: string }).role !== 'tool') continue
-      const name = (msg as { name?: string }).name
-      if (name !== 'write_file' && name !== 'replace_in_file' && name !== 'insert_in_file') continue
-      try {
-        const parsed = JSON.parse((msg as { content: string }).content) as {
-          ok?: boolean
-          action?: { path?: string }
-        }
-        if (parsed.ok && parsed.action?.path) writePaths.push(parsed.action.path)
-      } catch {
-        /* ignore unparseable tool result */
-      }
-    }
-    let outputDir: string | undefined
-    if (writePaths.length > 0) {
-      const dirs = writePaths.map((p) => path.dirname(p))
-      let common = dirs[0]!
-      for (const d of dirs.slice(1)) {
-        while (!d.startsWith(common + path.sep) && d !== common) {
-          common = path.dirname(common)
-          if (common === path.dirname(common)) break
-        }
-      }
-      outputDir = common
-    }
-
-    // Restore suffix to baseline + append a completion note so subsequent
-    // free-form turns know where the workflow's output lives.
-    setSystemPromptSuffix(previousSuffix + buildWorkflowCompletionNote(mode, outputDir))
-    // Drop the workflow's temporary effort bump; free-form turns go back to
-    // the user's own setting (API default when they never pinned one).
-    if (appliedEffort) switchEffort(undefined)
-  }
-}
-
-
 async function saveSession(
   store: SessionStore,
   session: SessionRecord | null,
@@ -5294,12 +5043,9 @@ function renderHelp(locale: UiLocale): string {
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
   const commands = [
-    `/team <任务>       ${t('Team router 自动选择 workflow', 'Team router selects the workflow')}`,
-    `/niko <任务>       ${t('探索路径 → 收敛执行', 'Explore paths → execute')}`,
-    `/design <任务>     ${t('UI / frontend design → implementation', 'UI / frontend design → implementation')}`,
-    `/athena <任务>     ${t('repo research + 协调执行', 'repo research + coordinated execution')}`,
+    `${t('直接描述任务：Artemis 按任务和复杂度自动选择工作流（直接处理 / 深度规划 / 并行分工 / 多方案对比 / 设计 / Saga 长视频）', 'Just describe the task: Artemis picks the workflow from the task and its complexity (direct / plan / team / compare / design / Saga long video)')}`,
+    `/saga <故事>       ${t('直接进入 Saga 长视频（明确要长视频时也会先询问是否使用）', 'Start Saga long video now (a clear long-video request is also offered it, with a yes/no question)')}`,
     `/nidhogg <任务>    ${t('adversarial hardening / iterative convergence（slow）', 'adversarial hardening / iterative convergence (slow)')}`,
-    `/contest <任务>    ${t('debate paths → 裁决 → execute', 'debate paths → select → execute')}`,
     `/bifrost           ${t('dual-model：exec + brain', 'dual-model: exec + brain')}`,
     `/run <任务>        ${t('后台执行 background workflow', 'background workflow')}`,
     ``,

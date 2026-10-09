@@ -172,7 +172,7 @@ export class DesignSystem {
       .join('\n');
 
     return `
-你正在执行 Artemis /design 工作流。用户原始需求如下：
+你正在执行 Artemis 设计工作流。用户原始需求如下：
 
 ${userPrompt}
 

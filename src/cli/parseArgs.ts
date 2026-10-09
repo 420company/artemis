@@ -66,6 +66,9 @@ export interface ParsedArgs {
   setup: boolean
 }
 
+// athena / design / niko / contest are hidden aliases kept for old scripts:
+// they open chat with "/<name> <prompt>", which the workflow router treats as
+// natural language with a hint (see core/workflowRouter.ts).
 const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
   'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
@@ -106,11 +109,7 @@ ${t('命令', 'Commands')}:
   config [section]  ${t('查看配置；或用 --setup / section 进入配置向导', 'View config; use --setup or a section to enter setup')}
   doctor            ${t('检查环境健康状况', 'Check environment health')}
   resume [id]       ${t('恢复会话', 'Resume a session')}
-  run <prompt>      ${t('执行一次普通任务工作流', 'Run a single task workflow')}
-  design <prompt>   ${t('执行设计工作流', 'Run the design workflow')}
-  athena <prompt>   ${t('执行研究/规划工作流', 'Run the research/planning workflow')}
-  niko <prompt>     ${t('执行工程构建工作流', 'Run the engineering build workflow')}
-  contest <prompt>  ${t('执行多方案竞赛工作流', 'Run the multi-variant contest workflow')}
+  run <prompt>      ${t('执行一次任务；工作流按任务和复杂度自动选择', 'Run a task; the workflow is chosen automatically from the task and its complexity')}
   nidhogg <prompt>  ${t('执行深度批判/审查工作流', 'Run the critique/review workflow')}
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}

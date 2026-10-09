@@ -38,7 +38,7 @@ const runHeadlessAgent: typeof runHeadlessAgentNow = async (...args) => {
     await settleMemoryCuration()
   }
 }
-import { routeTeamRequest } from '../src/core/team.js'
+import { routeWorkflow } from '../src/core/workflowRouter.js'
 import { getAllowedActionTypesForProfile, validateProfileAction } from '../src/core/agentProfiles.js'
 import {
   createContextState,
@@ -4804,7 +4804,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const designSource = source('src/design/index.ts')
   const nidhoggSource = source('src/core/nidhogg.ts')
   const workflowSource = source('src/core/workflowMode.ts')
-  const teamSource = source('src/core/team.ts')
+  const routerSource = source('src/core/workflowRouter.ts')
   const interactiveSource = source('src/cli/interactive.ts')
   const bragiSource = source('src/bragi/runtime.ts')
   const browserToolsSource = source('src/tools/browser/browserTools.ts')
@@ -4829,9 +4829,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       nidhoggSource.includes("const DEFAULT_CRITICS: CriticKind[] = ['spec', 'test_adversary', 'security', 'architecture']"),
   )
   assert(
-    'workflow routing: /team only routes to executable workflow modes',
-    teamSource.includes("const VALID_CHOICES") &&
-      teamSource.includes("'niko',") &&
+    'workflow routing: the automatic router only maps to executable workflow modes',
+    routerSource.includes('export const AUTO_WORKFLOW_MODE') &&
+      routerSource.includes("plan: 'niko',") &&
       workflowSource.includes("mode === 'nidhogg'") &&
       workflowSource.includes('buildWorkflowHint(mode') &&
       workflowSource.includes(': await runAgent(') &&
@@ -4839,16 +4839,15 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   )
   assert(
     'interactive routing: path intent is trusted before team/workflow/direct execution',
-    interactiveSource.includes('maybeSwitchWorkspaceForRequest(teamPrompt)') &&
-      interactiveSource.includes('maybeSwitchWorkspaceForRequest(workflowPrompt)') &&
+    interactiveSource.includes('maybeSwitchWorkspaceForRequest(workflowPrompt)') &&
       interactiveSource.includes('maybeSwitchWorkspaceForRequest(trimmed)') &&
       interactiveSource.includes('runWorkspaceTrustDialog({') &&
       interactiveSource.includes('refreshProjectInstructionsForWorkspace(workspaceRoot)'),
   )
   assert(
     'interactive routing: /nidhogg uses the detached harness runner instead of hint-only mode',
-    interactiveSource.includes("launchDetachedWorkflow('nidhogg', effectiveTeamPrompt)") &&
-      interactiveSource.includes("launchDetachedWorkflow('nidhogg', effectiveWorkflowPrompt)") &&
+    interactiveSource.includes("cmd === '/nidhogg' ? 'nidhogg' : 'run'") &&
+      interactiveSource.includes('effectiveWorkflowPrompt,') &&
       interactiveSource.includes("Nidhogg Harness 已启动"),
   )
   assert(
@@ -4911,7 +4910,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       implementationCalls += 1
       designHintReceived =
         designHintReceived ||
-        latestUser.includes('[当前任务模式：/design 视觉/前端工程]')
+        latestUser.includes('[当前任务模式：设计工作流（视觉/前端工程），来自 design-workflow 技能]')
       if (implementationCalls === 1) {
         executionToolNames = toolNames
         return {
@@ -5053,23 +5052,27 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 }
 
 {
+  // The classifier is never consulted for a clear website/UI build: the
+  // heuristics route it to design even when a classifier would say team.
+  let classifierCalls = 0
   const provider: ChatProvider = {
     async complete(): Promise<ProviderResponse> {
+      classifierCalls += 1
       return {
-        text: JSON.stringify({ choice: 'athena', reason: '误判为大规模任务。' }),
+        text: JSON.stringify({ workflow: 'team', complexity: 'high', reason: '误判为大规模任务。' }),
         raw: null,
       }
     },
   }
-  const route = await routeTeamRequest(
-    '在桌面建立一个文件夹“69420”，然后进入该文件夹，并设为工作区，编写一个卖丝袜的电商网站，UI要高级毛玻璃质感。',
-    provider,
+  const route = await routeWorkflow(
+    { text: '在桌面建立一个文件夹“69420”，然后进入该文件夹，并设为工作区，编写一个卖丝袜的电商网站，UI要高级毛玻璃质感。' },
+    { getClassifier: () => provider },
   )
 
   assert(
-    '/team routing: website/UI build requests override an Athena misroute to design',
-    route.choice === 'design',
-    JSON.stringify(route),
+    'workflow routing: website/UI build requests route to design without a classifier call',
+    route.workflow === 'design' && route.source === 'heuristic' && classifierCalls === 0,
+    JSON.stringify({ route, classifierCalls }),
   )
 }
 
