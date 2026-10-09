@@ -18,13 +18,21 @@ import {
   createDelegationBudget,
   gateClassifierVerdict,
   collectWorkflowSignals,
+  looksLikeSagaRequest,
   parseClassifierReply,
   routeWorkflow,
   stripRetiredWorkflowSlash,
   type AutoWorkflow,
 } from '../src/core/workflowRouter.js';
 import { detectExplicitWorkflowIntent } from '../src/core/workflowDispatcher.js';
-import { handleSagaLongVideoWorkflow, isClearSagaLongVideoRequest } from '../src/tools/visual/sagaWorkflow.js';
+import {
+  handleSagaLongVideoWorkflow,
+  hasActiveSagaLongVideoWorkflow,
+  offerSagaLongVideoWorkflow,
+  parseSagaOfferReply,
+} from '../src/tools/visual/sagaWorkflow.js';
+import { planHeadlessWorkflow, SAGA_CONFIRMED_MARKER } from '../src/services/headlessWorkflow.js';
+import { resolveWorkflowClassifierProvider } from '../src/providers/workflowClassifier.js';
 import { BYTEPLUS_SEEDANCE_2_PRO_MODEL } from '../src/tools/visual/videoCapabilities.js';
 import { ProviderStore } from '../src/providers/store.js';
 import { executeAction } from '../src/tools/index.js';
@@ -62,62 +70,181 @@ const AMBIGUOUS_LONG =
   'follow-ups slip, and new members cannot find the history. I want a better way of working here: ' +
   'something that captures decisions and owners, reminds people, and lets newcomers catch up quickly. ' +
   'Please think about what we should set up and get it going for us.';
+// The same, but an engineering request (an editing verb, no file references).
+const AMBIGUOUS_ENGINEERING =
+  'Our nightly export job sometimes writes the same customer rows twice when the upstream API is slow. ' +
+  'It started after we moved the job to the new scheduler last month, and support keeps finding duplicates ' +
+  'in the monthly invoices. Nobody on the team remembers exactly how the retries were set up back then. ' +
+  'Please fix this properly so that it cannot happen again, and tell me what you changed.';
 
 async function main(): Promise<void> {
   console.log('\n  workflowRouterSmoke');
   console.log('  ==================');
 
-  // ── classification table ──────────────────────────────────────────────────
-  const table: Array<[string, AutoWorkflow]> = [
-    // casual chat
+  // ── acceptance table ──────────────────────────────────────────────────────
+  // The review's 77-case route table (expected routes after its decisions:
+  // questions, idea lists, writing tasks and retired slash words never reach
+  // the expensive workflows; Saga is only for new long-video requests), plus
+  // its Saga false-positive, question/writing and slash-command probes.
+  const table: Array<[string, AutoWorkflow, boolean?]> = [
+    // [message, expected, inCodeRepo]
     ['你好', 'direct'],
     ['在吗', 'direct'],
     ['thanks!', 'direct'],
-    // quick questions
+    ['今天天气怎么样？', 'direct'],
+    ['什么是 React Server Components？', 'direct'],
+    ['帮我把 README.md 里的错别字改一下', 'direct'],
+    ['fix the typo in src/index.ts', 'direct'],
+    ['帮我修复 src/a.ts 和 src/b.ts 里的类型错误', 'plan', true],
+    ['重构一下整个仓库的日志模块，迁移到 pino，所有文件都要改', 'team', true],
+    ['帮我做个完整的电商网站', 'team'],
+    ['帮我做个完整的电商网站，前端用 React，后端 Node，带登录和数据库', 'team'],
+    ['帮我做一个个人博客网站', 'design'],
+    ['给我三个方案', 'direct'],
+    ['给我三个方案，怎么给这个服务加缓存', 'direct'],
+    ['对比一下A和B', 'direct'],
+    ['对比一下 Vue 和 React 哪个好？', 'direct'],
+    ['Redis 和 Memcached 有什么区别？', 'direct'],
+    ['what are the pros and cons of Rust vs Go?', 'direct'],
+    ['which approach is better for caching, LRU or LFU?', 'direct'],
+    ['给我三个标题建议', 'direct'],
+    ['帮我起三个名字', 'direct'],
+    ['帮我设计一个 logo', 'direct'],
+    ['帮我设计一个落地页', 'design'],
+    ['这个网站打不开了，报错 500', 'direct'],
+    ['首页样式乱了，帮我修一下', 'direct'],
+    ['生成一个15秒的视频，猫在跳舞', 'direct'],
+    ['帮我做一个30秒的产品宣传视频', 'direct'],
+    ['帮我做一个60秒的产品宣传视频', 'saga'],
+    ['帮我生成一个1分钟的短片，讲一个宇航员回家的故事', 'saga'],
+    ['长视频是什么', 'direct'],
+    ['长视频是什么？', 'direct'],
+    ['saga怎么用', 'direct'],
+    ['saga 怎么用？', 'direct'],
+    ['帮我写个saga的代码', 'direct'],
+    ['帮我写个 saga 模式的 redux 代码', 'direct'],
+    ['用 redux-saga 实现一个登录流程', 'direct'],
+    ['帮我实现一个 saga pattern 的分布式事务', 'direct'],
+    ['图片 视频 长视频', 'direct'],
+    ['我之前用 /team 很好用', 'direct'],
+    ['看看 https://github.com/foo/team 这个仓库', 'direct'],
+    ['/team 帮我把这个项目的测试补全', 'direct'],
+    ['/niko 研究一下这个 bug', 'plan'],
+    ['/contest 怎么做缓存', 'direct'],
+    ['/athena hi', 'direct'],
+    ['/design', 'direct'],
+    ['继续', 'direct'],
+    ['1', 'direct'],
+    ['9:16', 'direct'],
+    ['默认', 'direct'],
+    ['好的，按方案二来', 'direct'],
+    ['0-5s 镜头一：城市清晨\n5-10s 镜头二：主角出门', 'saga'],
+    ['00:00-00:05 开场\n00:05-00:10 结尾', 'direct'],
+    ['0-5s 开场\n5-10s 结尾，帮我写成文案', 'direct'],
+    ['会议纪要：0-5s 讨论预算；5-10s 讨论视频方案', 'direct'],
+    ['请把这个视频的 00:10-00:20 和 00:30-00:40 剪掉', 'direct'],
+    ['make a 2 minute video about space exploration', 'saga'],
+    ['make a long video', 'saga'],
+    ['how do I make a long video?', 'direct'],
+    ['can you make long videos?', 'direct'],
+    ['你能做长视频吗', 'direct'],
+    ['你能生成1分钟的视频吗？', 'direct'],
+    ['帮我把这段 90 秒的视频剪成 30 秒', 'direct'],
+    ['帮我总结一下这个 60 分钟的视频', 'direct'],
+    ['写一个视频脚本，大概 2 分钟', 'direct'],
+    ['帮我写一个 3 分钟的视频文案', 'direct'],
+    ['给我做个视频，1分钟左右，介绍我们公司', 'saga'],
+    ['Write a test for parser.ts', 'direct'],
+    ['帮我分析一下这三个方案哪个好：A用Redis，B用本地缓存，C用CDN', 'direct'],
+    ['帮我比较一下这两种做法', 'direct'],
+    ['评估一下我们的技术选型', 'direct'],
+    ['我们之前讨论过多方案对比，结果是用 A', 'direct'],
+    ['frontend and backend are both broken after the deploy, error 500 everywhere', 'direct'],
+    ['build a dashboard for our sales data', 'design'],
+    ['帮我写一篇关于完整的电商网站的文章', 'direct'],
+    ['完整的项目文档在哪里？', 'direct'],
+    ['从零开始学 Python 应该怎么做', 'direct'],
+    ['帮我做个完整的PPT', 'direct'],
+    // Saga false positives: editing / converting footage, software about
+    // video, text-only deliverables, reviews of timecoded text.
+    ['帮我把这段 90 秒的视频剪成 30 秒', 'direct'],
+    ['把这个 2 分钟的视频加上中文字幕', 'direct'],
+    ['帮我把这个长视频剪成几个短视频', 'direct'],
+    ['帮我把 video.mp4 转成 gif，大概 1 分钟', 'direct'],
+    ['帮我做一个长视频平台的前端页面', 'design'],
+    ['帮我做一个视频网站，首页放 60 秒的宣传片', 'design'],
+    ['用 ffmpeg 把这个 3 分钟的视频压缩一下', 'direct'],
+    ['帮我总结这个视频的内容：\n00:00-01:30：介绍产品\n01:30-03:00：演示功能', 'direct'],
+    ['这是我的分镜脚本，帮我检查有没有错别字：\n[0-5秒] 城市清晨\n[5-10秒] 主角出门', 'direct'],
+    ['[0-8秒] 城市清晨，主角醒来\n[8-16秒] 主角出门，镜头跟随', 'saga'],
+    ['0-8s: 城市清晨，主角醒来\n8-16s: 主角出门，镜头跟随', 'saga'],
+    ['Make a 90 second highlight reel from these clips', 'direct'],
+    ['please render the scene in 60fps', 'direct'],
+    ['make the video 2 minutes shorter', 'direct'],
+    ['帮我写一个生成长视频的 Python 脚本', 'direct'],
+    ['帮我做一个长视频剪辑工具', 'direct'],
+    ['做一个 1 分钟倒计时的网页', 'design'],
+    ['帮我做一个 60 秒倒计时动画', 'direct'],
+    ['给我拍一段 1 分钟的 vlog 的拍摄建议', 'direct'],
+    ['帮我把这一分钟的会议录像做成纪要', 'direct'],
+    ['turn this 5 minute podcast into a summary', 'direct'],
+    ['create a 10 minute workout plan video script', 'direct'],
+    ['Generate a long video explanation of how transformers work? no, just text please', 'direct'],
+    ['把这个电影的前 2 分钟翻译成中文', 'direct'],
+    ['帮我做一个完整的视频播放器组件', 'direct'],
+    // Questions, idea lists and writing tasks.
+    ['我是做前端的，后端不太懂，能解释一下 REST 吗？', 'direct'],
+    ['前端和后端分别要写什么？', 'direct'],
+    ['I write frontend code; what does a backend engineer do?', 'direct'],
+    ['what does full-stack mean?', 'direct'],
+    ['端到端测试是什么？怎么写？', 'direct'],
+    ['全栈工程师要学什么？', 'direct'],
+    ['帮我写一个从零开始的学习计划', 'direct'],
+    ['帮我做个PPT介绍我们的网站', 'direct'],
+    ['网站首页的文案帮我写一下', 'direct'],
+    ['帮我写一段 landing page 的文案', 'direct'],
+    ['write the copy for our homepage', 'direct'],
+    ['make the website copy more friendly', 'direct'],
+    ['Explain the trade-offs between REST and GraphQL', 'direct'],
+    ['compare these two options for me: postgres or mysql?', 'direct'],
+    ['你觉得这三个方案哪个好？', 'direct'],
+    ['帮我列出几种不同的做法', 'direct'],
+    ['give me 3 ideas for a birthday party', 'direct'],
+    ['suggest two options for dinner', 'direct'],
+    ['list several alternatives to Notion', 'direct'],
+    ['/athena 你好', 'direct'],
+    ['/contest 1+1等于几', 'direct'],
+    // Slash commands are never Saga.
+    ['/nidhogg 帮我写一个生成长视频的 Python 脚本', 'direct'],
+    ['/run 帮我做一个60秒的视频', 'direct'],
+    ['/nidhogg 重构 saga 长视频模块，把多段视频生成改成并行', 'direct'],
+    ['/niko 帮我写个生成长视频的脚本', 'plan'],
+    ['/team 帮我做一个长视频剪辑工具', 'direct'],
+    ['/design 帮我生成一段长视频，讲海边的一天', 'direct'],
+    // Correct routes that must stay.
     ['Python 里 list 和 tuple 有什么区别？', 'direct'],
-    ['What is a closure in JavaScript?', 'direct'],
-    ['React vs Vue 哪个好？', 'direct'],
-    // small coding tasks stay on the plain path
-    ['把 README 里的拼写错误改一下', 'direct'],
-    ['fix the typo in src/app.ts', 'direct'],
     ['帮我写一个 Python 脚本，把这个目录里的图片都转成 webp', 'direct'],
     ['把这 2 个实现合并一下', 'direct'],
-    ['merge these two implementations into one', 'direct'],
-    ['帮我写一个完整的工具函数', 'direct'],
     ['帮我完整地检查一下这个项目', 'direct'],
-    // non-trivial engineering → deep planning
     ['排查一下为什么 bridge 在 Telegram 上发图片会超时，看看 src/bragi/runtime.ts 和 src/telegram 下的上传逻辑，找到根因并修复', 'plan'],
     ['Investigate why the session lock times out under load and fix the root cause in the storage layer', 'plan'],
-    // big projects → bounded parallel team
-    ['帮我做个完整的待办事项项目，前端用 React，后端用 Node，带登录和测试', 'team'],
     ['Build a complete full-stack e-commerce app with a React frontend, a Node backend, auth and tests', 'team'],
     ['Refactor the auth module across the whole codebase to use the new token service', 'team'],
-    // explicit multi-option asks → compare
-    ['给我三个方案比较一下', 'compare'],
-    ['这个缓存层怎么做比较好？给我 3 个方案对比优缺点', 'compare'],
-    ['Compare three approaches for caching API responses and recommend one', 'compare'],
-    ['Give me two different approaches to rate limiting this API', 'compare'],
-    // design
-    ['帮我设计一个咖啡店的落地页，要有高级感', 'design'],
+    ['给我三个方案比较一下，选最好的实现', 'compare'],
+    ['Try three different approaches to the cache layer and pick the best one', 'compare'],
     ['Design a landing page for my coffee shop', 'design'],
     ['在桌面建立一个文件夹“69420”，然后进入该文件夹，并设为工作区，编写一个卖丝袜的电商网站，UI要高级毛玻璃质感。', 'design'],
-    ['网站打不开了，报错 500', 'direct'],
-    // long video → Saga
+    ['帮我设计一个咖啡店的落地页，要有高级感', 'design'],
     ['帮我生成一段长视频，讲一只猫在东京的一天', 'saga'],
-    ['Make a 2 minute video about a day in Tokyo', 'saga'],
-    ['把这个故事想法扩展成 60 秒 Saga 电影感视频。', 'saga'],
     ['Turn this story idea into a 60-second cinematic Saga video.', 'saga'],
-    // ...but not short clips, keyword lists or questions about the feature
     ['帮我生成一段30秒左右的视频，内容是在不同的海滩享受阳光和海风。', 'direct'],
-    ['图片 视频 长视频', 'direct'],
-    ['为什么长视频生成失败了？', 'direct'],
   ];
-  await test('classification table: CN + EN heuristics pick the expected workflow without a classifier call', async () => {
+  await test(`acceptance table: ${table.length} CN + EN cases route as expected without a classifier call`, async () => {
     const wrong: string[] = [];
-    for (const [text, expected] of table) {
-      const route = await routeWorkflow({ text }, { getClassifier: neverClassifier });
-      if (route.workflow !== expected || route.source !== 'heuristic') {
-        wrong.push(`${text} → ${route.workflow}/${route.source} (${route.reason}), expected ${expected}`);
+    for (const [text, expected, inCodeRepo] of table) {
+      const route = await routeWorkflow({ text, inCodeRepo: inCodeRepo ?? false }, { getClassifier: neverClassifier });
+      if (route.workflow !== expected) {
+        wrong.push(`${JSON.stringify(text)} → ${route.workflow}/${route.source} (${route.reason}), expected ${expected}`);
       }
     }
     assert.deepEqual(wrong, []);
@@ -127,59 +254,43 @@ async function main(): Promise<void> {
     const essay = '帮我修改这篇文章，让语气更正式一些，同时保留原来的结构。文章内容如下：今天我们团队完成了一个重要的里程碑，经过三个月的努力，新版本终于上线了，大家都很开心，感谢每一位同事的付出，接下来我们还会继续努力，把产品做得更好。';
     const route = await routeWorkflow({ text: essay });
     assert.equal(route.workflow, 'direct');
-    assert.equal(route.source, 'fallback');
   });
 
-  await test('user-facing reasons are localized for known heuristics and slash hints', async () => {
+  await test('user-facing reasons are localized for known heuristics', async () => {
     const { describeRouteReason } = await import('../src/core/workflowRouter.js');
     const plan = await routeWorkflow({ text: 'Investigate why the session lock times out under load and fix the root cause in the storage layer' });
     assert.equal(describeRouteReason(plan, 'zh-CN'), '需要先调查的工程任务');
     assert.equal(describeRouteReason(plan, 'en'), plan.reason);
-    const hinted = await routeWorkflow({ text: '/contest 缓存方案' });
-    assert.equal(describeRouteReason(hinted, 'zh-CN'), '按 /contest 提示');
+    const hinted = await routeWorkflow({ text: '/niko 研究一下这个 bug' });
+    assert.equal(describeRouteReason(hinted, 'zh-CN'), '按 /niko 提示');
   });
 
-  await test('signals: attachments add size, a repo lowers the bar for deep engineering work', () => {
+  await test('signals: attachments add size, a repo lowers the bar for deep engineering work', async () => {
     const plain = collectWorkflowSignals({ text: '看看这个' });
     const withImages = collectWorkflowSignals({ text: '看看这个', attachmentCount: 2 });
     assert.ok(withImages.length > plain.length);
-    const text = '重构一下 session 存储的锁逻辑';
-    assert.equal(collectWorkflowSignals({ text, inCodeRepo: true }).inCodeRepo, true);
-  });
-
-  await test('signals: a repo makes a short refactor request a planning task', async () => {
     const text = '重构一下 session 存储层的锁超时和重试处理逻辑';
     assert.equal((await routeWorkflow({ text, inCodeRepo: true })).workflow, 'plan');
     assert.equal((await routeWorkflow({ text, inCodeRepo: false })).workflow, 'direct');
   });
 
   // ── retired slash words ──────────────────────────────────────────────────
-  await test('retired slash words are stripped and only used as a hint', async () => {
+  await test('retired slash words are stripped and never force a workflow', async () => {
     assert.deepEqual(stripRetiredWorkflowSlash('/niko 帮我看看这个函数'), { text: '帮我看看这个函数', retiredSlash: '/niko', hint: 'plan' });
-    assert.deepEqual(stripRetiredWorkflowSlash('/CONTEST pick a queue'), { text: 'pick a queue', retiredSlash: '/contest', hint: 'compare' });
-    assert.equal(stripRetiredWorkflowSlash('/athena refactor x').hint, 'team');
-    assert.equal(stripRetiredWorkflowSlash('/design a hero section').hint, 'design');
-    // /team carries no hint: the router decides from the text.
-    assert.deepEqual(stripRetiredWorkflowSlash('/team 做个网站'), { text: '做个网站', retiredSlash: '/team', hint: undefined });
-    // Other commands and look-alikes are not touched.
+    assert.equal(stripRetiredWorkflowSlash('/CONTEST pick a queue').retiredSlash, '/contest');
     for (const text of ['/help', '/new', '/model gpt', '/saga 一个故事', '/designer foo', '/nidhogg harden it', 'niko fix it']) {
       assert.equal(stripRetiredWorkflowSlash(text).retiredSlash, undefined, text);
       assert.equal(stripRetiredWorkflowSlash(text).text, text);
     }
-
-    const hinted = await routeWorkflow({ text: '/niko 帮我看看这个函数' }, { getClassifier: neverClassifier });
-    assert.equal(hinted.workflow, 'plan');
-    assert.equal(hinted.source, 'slash-hint');
-    assert.equal(hinted.text, '帮我看看这个函数');
+    const plain = await routeWorkflow({ text: '/niko 帮我看看这个函数' }, { getClassifier: neverClassifier });
+    assert.equal(plain.workflow, 'direct', 'the /niko hint only applies to engineering requests');
+    assert.equal(plain.text, '帮我看看这个函数');
     const team = await routeWorkflow({ text: '/team 做个网站' }, { getClassifier: neverClassifier });
     assert.equal(team.workflow, 'design');
     assert.equal(team.text, '做个网站');
-    // A bare retired word passes the message on unchanged, on the plain path.
     const bare = await routeWorkflow({ text: '/athena' }, { getClassifier: neverClassifier });
     assert.equal(bare.workflow, 'direct');
     assert.equal(bare.text, '/athena');
-    // A Saga request wins over a retired hint.
-    assert.equal((await routeWorkflow({ text: '/design 帮我生成一段长视频，讲海边的一天' })).workflow, 'saga');
   });
 
   await test('dispatcher: only /nidhogg and /run remain explicit workflow commands', () => {
@@ -192,8 +303,8 @@ async function main(): Promise<void> {
     assert.equal(detectExplicitWorkflowIntent('/nidhoggx').command, null);
   });
 
-  // ── Saga ──────────────────────────────────────────────────────────────────
-  await test('saga: clear natural-language requests start the wizard; /saga still does; others do not', async () => {
+  // ── Saga: offer, confirm, decline ─────────────────────────────────────────
+  await test('saga: a natural request is only offered; the wizard starts after yes, /saga starts at once', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'artemis-router-saga-'));
     const store = new ProviderStore(cwd);
     const data = await store.load();
@@ -203,37 +314,100 @@ async function main(): Promise<void> {
       video: { enabled: true, provider: 'byteplus', apiKey: 'smoke-key', baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3', model: BYTEPLUS_SEEDANCE_2_PRO_MODEL },
     };
     await store.save(data);
+    const send = (key: string, text: string, forceIntent = false) =>
+      handleSagaLongVideoWorkflow({ scope: 'bridge', key, cwd, locale: 'zh-CN', text, forceIntent });
+    const request = '帮我生成一段长视频，讲一只猫在东京的一天';
+    assert.equal(looksLikeSagaRequest(request), true);
 
-    // What the bridge and CLI do: forceIntent = explicit /saga || clear request.
-    const start = (key: string, text: string, explicit = false) => handleSagaLongVideoWorkflow({
-      scope: 'bridge', key, cwd, locale: 'zh-CN', text,
-      forceIntent: explicit || isClearSagaLongVideoRequest(text),
-    });
-    const natural = await start('natural', '帮我生成一段长视频，讲一只猫在东京的一天');
-    assert.equal(natural.handled, true);
-    assert.match(natural.handled ? natural.reply : '', /这段视频里/);
-    const explicit = await start('explicit', '一个赛博朋克的清晨', true);
-    assert.equal(explicit.handled, true);
-    const brief = await start('brief', '[0-5秒] 镜头1：女孩推开旧影院的门。\n[5-10秒] 镜头2：她走到银幕前，银幕上映出海浪。');
-    assert.equal(brief.handled, true, 'a timecoded multi-segment brief starts Saga');
-    for (const text of [
-      '帮我生成一段30秒左右的视频，你的角色现在叫饼干姐姐，亚洲女性，内容是在不同的海滩享受阳光和海风。',
-      '图片 视频 长视频',
-      '为什么长视频生成失败了？',
-      'Saga 长视频的代码逻辑有问题，帮我修复',
-      '这个解析器处理 [0-5秒] [5-10秒] 的格式有 bug',
-    ]) {
-      assert.equal(isClearSagaLongVideoRequest(text), false, text);
-      assert.equal((await start(`neg-${text.length}`, text)).handled, false, text);
-    }
+    // Without an offer the wizard never starts by itself.
+    assert.equal((await send('plain', request)).handled, false);
+
+    // Offer → "1" → wizard.
+    const question = await offerSagaLongVideoWorkflow({ scope: 'bridge', key: 'yes', cwd, locale: 'zh-CN', text: request });
+    assert.match(question ?? '', /要用 Saga 长视频工作流吗[\s\S]*1\. 是，开始[\s\S]*2\. 不是/);
+    assert.equal(hasActiveSagaLongVideoWorkflow('bridge', 'yes'), true, 'a pending offer keeps replies away from the router');
+    const yes = await send('yes', '1');
+    assert.equal(yes.handled, true);
+    assert.match(yes.handled ? yes.reply : '', /这段视频里/);
+
+    // Offer → "不是" → the original request goes on the normal path.
+    await offerSagaLongVideoWorkflow({ scope: 'bridge', key: 'no', cwd, locale: 'zh-CN', text: request });
+    const no = await send('no', '不是');
+    assert.equal(no.handled, false);
+    assert.equal(!no.handled && no.replayText, request);
+    assert.equal(hasActiveSagaLongVideoWorkflow('bridge', 'no'), false);
+
+    // Offer → an unrelated message: the offer lapses, the message is not consumed.
+    await offerSagaLongVideoWorkflow({ scope: 'bridge', key: 'other', cwd, locale: 'zh-CN', text: request });
+    const other = await send('other', '帮我查一下明天的天气');
+    assert.equal(other.handled, false);
+    assert.equal(!other.handled && other.replayText, undefined);
+    assert.equal(hasActiveSagaLongVideoWorkflow('bridge', 'other'), false);
+
+    // /saga: immediate.
+    assert.equal((await send('explicit', '一个赛博朋克的清晨', true)).handled, true);
+
+    // Slash-prefixed messages are never offered Saga.
+    assert.equal(looksLikeSagaRequest('/nidhogg 帮我写一个生成长视频的 Python 脚本'), false);
+    assert.equal(looksLikeSagaRequest('/run 帮我做一个60秒的视频'), false);
+
+    // No video provider: no offer.
+    const bare = await mkdtemp(path.join(os.tmpdir(), 'artemis-router-saga-none-'));
+    assert.equal(await offerSagaLongVideoWorkflow({ scope: 'bridge', key: 'none', cwd: bare, locale: 'zh-CN', text: request }), undefined);
+    for (const reply of ['1', '是', '好的', 'yes', '1. 是，开始']) assert.equal(parseSagaOfferReply(reply), 'yes', reply);
+    for (const reply of ['2', '不是', 'no', '算了']) assert.equal(parseSagaOfferReply(reply), 'no', reply);
+    assert.equal(parseSagaOfferReply('帮我做个网站'), undefined);
     fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  await test('headless (web): Saga is asked first, confirmed with the marker, follow-ups stay, other tasks leave', async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'artemis-router-headless-'));
+    const store = new SessionStore(tmpDir);
+    const session = store.createSession({ title: 'headless saga' });
+    const base = {
+      session, cwd: tmpDir, attachmentCount: 0, inCodeRepo: false, autoRoute: true,
+      getClassifier: async () => undefined, hasVideoProvider: async () => true,
+    };
+    const offer = await planHeadlessWorkflow({ ...base, prompt: '帮我做一个60秒的产品宣传视频' });
+    assert.equal(offer.kind, 'reply');
+    assert.match(offer.kind === 'reply' ? offer.reply : '', /Saga 长视频工作流吗/);
+    const yes = await planHeadlessWorkflow({ ...base, prompt: '1' });
+    assert.equal(yes.kind === 'run' && yes.workflow, 'saga');
+    assert.ok(yes.kind === 'run' && yes.prompt.includes('帮我做一个60秒的产品宣传视频') && yes.prompt.includes(SAGA_CONFIRMED_MARKER));
+    assert.ok(SAGA_CONFIRMED_MARKER.startsWith('[Artemis Saga long video workflow]'));
+    assert.match(yes.kind === 'run' ? yes.hint : '', /generate_long_video/);
+    const ratio = await planHeadlessWorkflow({ ...base, prompt: '9:16' });
+    assert.equal(ratio.kind === 'run' && ratio.workflow, 'saga', 'a short follow-up stays in Saga');
+    const other = await planHeadlessWorkflow({ ...base, prompt: '排查一下为什么 bridge 在 Telegram 上发图片会超时，看看 src/bragi/runtime.ts 和 src/telegram 下的上传逻辑，找到根因并修复' });
+    assert.equal(other.kind === 'run' && other.workflow, 'plan', 'another task leaves Saga');
+    assert.equal(session.metadata?.workflowRouting, undefined);
+
+    await planHeadlessWorkflow({ ...base, prompt: 'make a 2 minute video about space exploration' });
+    const no = await planHeadlessWorkflow({ ...base, prompt: 'no' });
+    assert.equal(no.kind === 'run' && no.workflow, 'direct');
+    assert.equal(no.kind === 'run' && no.prompt, 'make a 2 minute video about space exploration');
+
+    const explicit = await planHeadlessWorkflow({ ...base, prompt: '/saga 一个赛博朋克的清晨' });
+    assert.equal(explicit.kind === 'run' && explicit.workflow, 'saga', '/saga is immediate');
+    const noVideo = await planHeadlessWorkflow({ ...base, prompt: 'make a long video', hasVideoProvider: async () => false, session: store.createSession({ title: 'x' }) });
+    assert.equal(noVideo.kind === 'run' && noVideo.workflow, 'direct');
+    const goal = await planHeadlessWorkflow({ ...base, prompt: 'make a long video', autoRoute: false, session: store.createSession({ title: 'y' }) });
+    assert.equal(goal.kind === 'run' && goal.workflow, 'direct');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  await test('classifier provider: none without a worker profile, so the main model is never used to route', async () => {
+    const empty = await mkdtemp(path.join(os.tmpdir(), 'artemis-router-noworker-'));
+    assert.equal(await resolveWorkflowClassifierProvider([empty], empty), undefined);
+    fs.rmSync(empty, { recursive: true, force: true });
   });
 
   // ── classifier: only for ambiguous, substantial requests ─────────────────
   await test('classifier: ambiguous long request asks the classifier once and follows a sound verdict', async () => {
     const calls = { count: 0 };
     const route = await routeWorkflow(
-      { text: AMBIGUOUS_LONG },
+      { text: AMBIGUOUS_ENGINEERING },
       { getClassifier: () => fixedClassifier('{"workflow":"plan","complexity":"medium","reason":"needs a plan"}', calls) },
     );
     assert.equal(calls.count, 1);
@@ -244,10 +418,20 @@ async function main(): Promise<void> {
   await test('classifier: expensive verdicts without heuristic support are stepped down', async () => {
     const calls = { count: 0 };
     const team = await routeWorkflow(
+      { text: AMBIGUOUS_ENGINEERING },
+      { getClassifier: () => fixedClassifier('{"workflow":"team","complexity":"high","reason":"big"}', calls) },
+    );
+    assert.equal(team.workflow, 'plan', 'team needs a real multi-part build object; engineering steps down to plan');
+    const teamProse = await routeWorkflow(
       { text: AMBIGUOUS_LONG },
       { getClassifier: () => fixedClassifier('{"workflow":"team","complexity":"high","reason":"big"}', calls) },
     );
-    assert.equal(team.workflow, 'plan', 'team needs bigProject or a very large request');
+    assert.equal(teamProse.workflow, 'direct', 'non-engineering prose never gets plan or team');
+    const planProse = await routeWorkflow(
+      { text: AMBIGUOUS_LONG },
+      { getClassifier: () => fixedClassifier('{"workflow":"plan","complexity":"high","reason":"plan"}', calls) },
+    );
+    assert.equal(planProse.workflow, 'direct');
     const compare = await routeWorkflow(
       { text: AMBIGUOUS_LONG },
       { getClassifier: () => fixedClassifier('{"workflow":"compare","complexity":"medium","reason":"options"}', calls) },
@@ -259,13 +443,16 @@ async function main(): Promise<void> {
     );
     assert.equal(design.workflow, 'direct', 'design needs a UI surface in the request');
     const low = await routeWorkflow(
-      { text: AMBIGUOUS_LONG },
+      { text: AMBIGUOUS_ENGINEERING },
       { getClassifier: () => fixedClassifier('{"workflow":"plan","complexity":"low","reason":"easy"}', calls) },
     );
     assert.equal(low.workflow, 'direct');
 
     const signals = collectWorkflowSignals({ text: 'x' });
     assert.equal(gateClassifierVerdict({ workflow: 'team', complexity: 'high', reason: '' }, { ...signals, bigProject: true }), 'team');
+    // A long continuation of the conversation never reaches the classifier.
+    const followUp = await routeWorkflow({ text: `继续，${AMBIGUOUS_LONG}` }, { getClassifier: neverClassifier });
+    assert.equal(followUp.workflow, 'direct');
     assert.equal(gateClassifierVerdict({ workflow: 'compare', complexity: 'high', reason: '' }, { ...signals, compareExplicit: true }), 'compare');
   });
 
@@ -297,6 +484,16 @@ async function main(): Promise<void> {
       assert.equal(route.workflow, 'direct', reply);
       assert.equal(route.source, 'fallback', reply);
     }
+    // Enough output room for the JSON when a model spends a few tokens first.
+    let maxOutputTokens = 0;
+    const recording: ChatProvider = {
+      async complete(_messages, options) {
+        maxOutputTokens = options?.maxOutputTokens ?? 0;
+        return { text: '{"workflow":"direct","complexity":"low"}', raw: null };
+      },
+    };
+    await routeWorkflow({ text: AMBIGUOUS_LONG }, { getClassifier: () => recording });
+    assert.ok(maxOutputTokens >= 300, String(maxOutputTokens));
     const throwingFactory = await routeWorkflow({ text: AMBIGUOUS_LONG }, { getClassifier: () => { throw new Error('no profile'); } });
     assert.equal(throwingFactory.workflow, 'direct');
     const none = await routeWorkflow({ text: AMBIGUOUS_LONG });
@@ -346,7 +543,18 @@ async function main(): Promise<void> {
     assert.equal(budget.used, MAX_SUB_AGENTS_PER_RUN);
     // No budget: nothing is limited (explicit /nidhogg and tests keep their behaviour).
     assert.equal(checkDelegationBudget(delegate, undefined), undefined);
-    assert.equal(createDelegationBudget('saga').limit, 0);
+    // Builder execution passes count too.
+    const builder = createDelegationBudget('direct');
+    const approve: AgentAction = { type: 'approve_builder_execution', sessionId: 's1' };
+    checkDelegationBudget(approve, builder);
+    checkDelegationBudget(approve, builder);
+    assert.match(checkDelegationBudget(approve, builder) ?? '', /budget used up/);
+    // A Saga run never grows into a multi-agent workflow.
+    const saga = createDelegationBudget('saga');
+    assert.equal(saga.limit, 0);
+    checkDelegationBudget({ type: 'use_workflow', workflow: 'team' }, saga);
+    assert.equal(saga.limit, 0);
+    assert.ok(checkDelegationBudget(delegate, saga));
   });
 
   await test('playbooks: routed hints carry the budget and no slash command names', () => {
@@ -360,6 +568,16 @@ async function main(): Promise<void> {
     assert.match(buildRoutedWorkflowHint('saga', { cwd: '/tmp', userPrompt: 'x' }), /generate_long_video/);
     assert.match(buildRoutedWorkflowHint('design', { cwd: '/tmp', userPrompt: 'x' }), /design-workflow 技能/);
     assert.equal(buildRoutedWorkflowHint('direct', { cwd: '/tmp', userPrompt: 'x' }), '');
+  });
+
+  await test('CLI: playbooks go in the turn message, not the system prompt; no notes pile up; no effort bump', () => {
+    const interactive = fs.readFileSync(path.join(process.cwd(), 'src/cli/interactive.ts'), 'utf8');
+    assert.ok(!interactive.includes('runHintedWorkflowTurn'));
+    assert.ok(!interactive.includes('buildWorkflowCompletionNote'));
+    assert.ok(!/WORKFLOW_EFFORT/.test(interactive));
+    assert.match(interactive, /workflowPlaybook \? `\$\{workflowPlaybook\}\\n\\n--- USER REQUEST ---/);
+    const headless = fs.readFileSync(path.join(process.cwd(), 'src/services/headlessAgent.ts'), 'utf8');
+    assert.match(headless, /delegationBudget: createDelegationBudget\(plan\.workflow\)/, 'every headless run (Goal Mode, analysis too) is bounded');
   });
 
   // ── use_workflow tool ─────────────────────────────────────────────────────

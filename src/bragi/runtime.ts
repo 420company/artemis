@@ -32,9 +32,9 @@ import {
   resolveWorkflow,
   type WorkflowResolution,
 } from '../core/workflowDispatcher.js'
-import { createDelegationBudget, routeWorkflow } from '../core/workflowRouter.js'
+import { createDelegationBudget, looksLikeSagaRequest, routeWorkflow } from '../core/workflowRouter.js'
+import { resolveWorkflowClassifierProvider } from '../providers/workflowClassifier.js'
 import { resolveMainProviderConfig } from '../providers/onboarding.js'
-import { ProviderStore } from '../providers/store.js'
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
@@ -46,7 +46,7 @@ import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import { sendBragiImageBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
-import { handleSagaLongVideoWorkflow, isClearSagaLongVideoRequest } from '../tools/visual/sagaWorkflow.js'
+import { handleSagaLongVideoWorkflow, offerSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 import { executeAction } from '../tools/index.js'
 import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
@@ -315,35 +315,6 @@ async function resolveBridgeProviderRuntime(_cwd: string): Promise<BridgeProvide
     profileLabel: trackedProfileLabel,
   })
   return { config, provider }
-}
-
-/**
- * Provider for the workflow router's classifier call only. Same GLOBAL-only hardening as
- * resolveBridgeProviderRuntime, but prefers the cheaper specialist (worker)
- * profile and forces low effort — routing is a one-line JSON classification
- * that doesn't deserve the lead model's cost or thinking depth.
- */
-async function resolveBridgeRouterProviderRuntime(): Promise<BridgeProviderRuntime> {
-  let baseConfig: Record<string, unknown> | undefined
-  try {
-    const store = new ProviderStore(resolveArtemisHomeDir())
-    const data = await store.load()
-    const specialist = store.getProfile(data, data.specialistProfileId)
-    if (specialist) baseConfig = specialist as unknown as Record<string, unknown>
-  } catch { /* fall back to the main profile */ }
-  const config = (baseConfig
-    ?? await resolveMainProviderConfig({ cwd: homedir(), config: {} })) as Parameters<typeof createTrackedProviderFromConfig>[0]
-  const routerConfig = { ...config, effort: 'low' as const }
-  const trackedProfileId =
-    typeof (config as unknown as { id?: unknown }).id === 'string'
-      ? (config as unknown as { id: string }).id
-      : undefined
-  const provider = createTrackedProviderFromConfig(routerConfig, {
-    cwd: homedir(),
-    profileId: trackedProfileId,
-    profileLabel: trackedProfileId,
-  })
-  return { config: routerConfig as BridgeProviderRuntime['config'], provider }
 }
 
 // ─── types ────────────────────────────────────────────────────────────────────
@@ -682,9 +653,7 @@ async function runRemoteCommandInner(
       const sagaTrim = command.body.trimStart()
       const sagaExplicit = sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)
       const sagaText = sagaExplicit ? sagaTrim.replace(/^\/saga\s*/i, '').trim() : command.body
-      // Saga also starts without /saga when the message clearly asks for a
-      // long multi-segment video (see isClearSagaLongVideoRequest).
-      const sagaForceIntent = sagaExplicit || isClearSagaLongVideoRequest(sagaText)
+      const sagaKey = `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`
       const sagaWorkflow = sagaExplicit && !sagaText
         ? { handled: true as const, reply: t(
             'Saga 长视频：请在 /saga 后跟一段故事文字。例：/saga 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
@@ -692,20 +661,49 @@ async function runRemoteCommandInner(
           ) }
         : await handleSagaLongVideoWorkflow({
             scope: 'bridge',
-            key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+            key: sagaKey,
             cwd: commandCwd,
             text: sagaText,
             locale,
             imageAttachments: command.images,
             deliveryPlatform: opts.bridgePlatform,
             deliveryTargetId: opts.targetId,
-            forceIntent: sagaForceIntent,
+            // Only /saga starts the wizard at once; see the offer below.
+            forceIntent: sagaExplicit,
           })
       if (sagaWorkflow.handled) {
         return {
           replies: [sagaWorkflow.reply],
           storedSession: binding.storedSession,
           permissionMode: binding.permissionMode,
+        }
+      }
+      // The user declined (or could not start) a Saga offer: go on with the
+      // original request on the normal path, without offering Saga again.
+      const sagaOfferAnswered = sagaWorkflow.replayText !== undefined
+      if (sagaWorkflow.replayText !== undefined) command.body = sagaWorkflow.replayText
+      // A plain message (never a slash command) that looks like a request
+      // for a new long video: ask before spending anything on generation.
+      if (
+        !sagaOfferAnswered && !sagaExplicit && !sagaWorkflow.prompt && !sagaWorkflow.action &&
+        looksLikeSagaRequest(command.body)
+      ) {
+        const question = await offerSagaLongVideoWorkflow({
+          scope: 'bridge',
+          key: sagaKey,
+          cwd: commandCwd,
+          text: command.body,
+          locale,
+          imageAttachments: command.images,
+          deliveryPlatform: opts.bridgePlatform,
+          deliveryTargetId: opts.targetId,
+        })
+        if (question) {
+          return {
+            replies: [question],
+            storedSession: binding.storedSession,
+            permissionMode: binding.permissionMode,
+          }
         }
       }
       // When Saga has rewritten the body to a long-video generation prompt,
@@ -727,10 +725,12 @@ async function runRemoteCommandInner(
       }
       const directSagaAction = sagaWorkflow.action
 
+      // A prompt rewritten by a wizard is never routed again.
+      let wizardRewrote = sagaTookOver
       if (!sagaTookOver) {
         const seedanceWorkflow = await handleSeedanceMultimodalWorkflow({
           scope: 'bridge',
-          key: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+          key: sagaKey,
           cwd: commandCwd,
           text: command.body,
           locale,
@@ -747,6 +747,7 @@ async function runRemoteCommandInner(
         }
         if (seedanceWorkflow.prompt) {
           command.body = seedanceWorkflow.prompt
+          wizardRewrote = true
         }
       }
 
@@ -757,7 +758,7 @@ async function runRemoteCommandInner(
 
         // Workflow dispatch: /nidhogg and /run stay explicit. Everything else
         // is routed automatically (core/workflowRouter.ts); a retired
-        // /niko /athena /contest /design /team word is only a hint.
+        // /niko /athena /contest /design /team word is dropped.
         const slashMatch = detectExplicitWorkflowIntent(command.body)
         let workflowResolution: WorkflowResolution | undefined
         let providerRuntime: BridgeProviderRuntime | undefined
@@ -776,13 +777,14 @@ async function runRemoteCommandInner(
               `Workflow dispatch failed: ${msg}`,
             ), 'warn')
           }
-        } else if (!sagaTookOver && !directSagaAction) {
+        } else if (!wizardRewrote && !directSagaAction) {
           const route = await routeWorkflow(
             { text: command.body, attachmentCount: command.images?.length ?? 0 },
             {
               // The classifier runs on the cheap router provider (specialist
               // profile at low effort), only for ambiguous long requests.
-              getClassifier: async () => (await resolveBridgeRouterProviderRuntime()).provider,
+              // Global profiles only (same hardening as the chat provider).
+              getClassifier: () => resolveWorkflowClassifierProvider([resolveArtemisHomeDir()], commandCwd),
               onInfo: (message) => emitProgress(message, 'info'),
             },
           )

@@ -49,7 +49,17 @@ export type SagaWorkflowInput = {
 };
 
 export type SagaWorkflowOutcome =
-  | { handled: false; prompt?: string; action?: Extract<AgentAction, { type: 'generate_long_video' }> }
+  | {
+      handled: false;
+      prompt?: string;
+      action?: Extract<AgentAction, { type: 'generate_long_video' }>;
+      /**
+       * The user answered a Saga offer: continue on the normal path with this
+       * (the original request) instead of the short reply, without offering
+       * Saga again.
+       */
+      replayText?: string;
+    }
   | { handled: true; reply: string };
 
 type SagaWorkflowStage =
@@ -312,6 +322,9 @@ function pruneExpiredWorkflows(): void {
   for (const [key, workflow] of WORKFLOWS) {
     if (now - workflow.updatedAt > WORKFLOW_TTL_MS) WORKFLOWS.delete(key);
   }
+  for (const [key, offer] of PENDING_SAGA_OFFERS) {
+    if (now - offer.createdAt > WORKFLOW_TTL_MS) PENDING_SAGA_OFFERS.delete(key);
+  }
 }
 
 function hasLongVideoIntent(text: string): boolean {
@@ -333,24 +346,38 @@ function isSagaWorkflowSupportDiscussion(text: string): boolean {
 }
 
 const SAGA_VIDEO_NOUN_RE = /(?:视频|短片|影片|片子|电影|动画|镜头|分镜|video|movie|film|clip|shot|scene)/i;
-const SAGA_CREATION_VERB_RE = /(?:生成|制作|做|拍|创作|剪|产出|扩展成|做成|变成|转成|拍成|写成|generate|create|make|produce|render|shoot|turn\b[\s\S]{0,80}\binto)/i;
+const SAGA_CREATION_VERB_RE = /(?:生成|制作|做|拍|创作|产出|扩展成|做成|变成|拍成|generate|create|make|produce|render|shoot|turn\b[\s\S]{0,80}\binto)/i;
 const SAGA_IMPERATIVE_START_RE = /^(?:请|帮|给|把|用|将|生成|制作|做|拍|创作|来|generate|create|make|produce|render|turn|shoot|please)/i;
 const SAGA_LONG_WORDING_RE = /(?:长视频|长片|完整(?:的)?(?:视频|短片|影片)|多段(?:视频|镜头)?|分段(?:视频|生成)|多个片段|\bsaga\b|long[-\s]?(?:form\s+)?(?:video|movie|film)|multi[-\s]?(?:segment|shot|scene)\s+(?:video|movie|film)|full[-\s]?length\s+(?:video|movie|film))/i;
+// Work on existing footage: editing, cutting, converting, subtitling, dubbing.
+const SAGA_EDIT_RE = /(?:剪辑|剪成|剪掉|剪一下|剪短|裁剪|裁成|截取|截成|转成|转换|转码|压缩|加字幕|配字幕|配音|拼接|合并|倍速|\bshorter\b|\btrim\b|\bcut\b|\bconvert\b|\bcompress\b|\btranscode\b|\bsubtitle|\bdub\b|highlight reel|from (?:these|those|my|the) (?:clips|videos|footage))/i;
+// Software, tools and product surfaces about video ("视频播放器组件", "长视频平台的前端").
+const SAGA_SOFTWARE_RE = /(?:脚本|代码|程序|工具|组件|播放器|网站|网页|平台|页面|前端|后端|插件|接口|倒计时|计时器|\bapp\b|\bAPI\b|\bscript\b|\bcode\b|\btool\b|\bcomponent\b|\bwebsite\b|\bplatform\b|\bpage\b|\bplayer\b|\bplugin\b|\bcountdown\b|\btimer\b|\bfps\b|redux|python|ffmpeg|javascript|typescript)/i;
+// Text-only deliverables and work on existing text or recordings.
+const SAGA_TEXT_ONLY_RE = /(?:文案|剧本大纲|大纲|纪要|建议|总结|概括|摘要|检查|校对|改错别字|错别字|翻译|润色|just text|text only|\bplan\b|\boutline\b|\b(?:\d+|two|three|some|a few|several) ideas\b|\bideas (?:for|on|about)\b|\btips\b|\badvice\b|\bsummar|\breview\b|\bproofread|\btranslat|\btranscri|\bcaption)/i;
+const SAGA_QUESTION_RE = /(?:[?？]\s*$|(?:吗|呢|么)[。!！]?\s*$|^(?:how|what|why|can you|could you|do you|is it|are you)\b|^(?:你能|你会|能不能|可不可以|怎么|如何|为什么|什么是|是否))/i;
+const SAGA_BRIEF_LINE_RE = /^\s*\[?\s*\d+(?::\d{1,2}){0,2}(?:\.\d+)?\s*(?:秒|s|sec|seconds)?\s*[-–—~至到]\s*\d+(?::\d{1,2}){0,2}(?:\.\d+)?\s*(?:秒|s|sec|seconds)?\s*\]?/gim;
 
 /**
- * A fresh message that clearly asks for a long, multi-segment video. The
- * workflow router starts Saga for it without /saga (the wizard itself still
- * starts only with forceIntent). Clear means a creation request plus
- * long-video wording or a total length of a minute or more, or a timecoded
- * brief with two or more segments. Questions about the feature or its code,
- * bare keyword lists ("图片 视频 长视频") and short clips do not count.
+ * A fresh message that clearly asks Artemis to make a new long,
+ * multi-segment video. The workflow router then OFFERS Saga (the user
+ * confirms before anything is generated; see offerSagaLongVideoWorkflow).
+ * Clear means a creation request plus long-video wording or a total length
+ * of a minute or more, or a brief with two or more timecoded segments.
+ * Not: questions, editing or converting existing footage, software or tools
+ * about video, text-only deliverables (copy, scripts, summaries, reviews,
+ * translations), bare keyword lists, or clips shorter than a minute.
  */
 export function isClearSagaLongVideoRequest(text: string): boolean {
   const normalized = compact(text);
-  if (!normalized) return false;
+  // Empty, or a slash command: /saga is handled explicitly, others are not Saga.
+  if (!normalized || normalized.startsWith('/')) return false;
+  if (SAGA_QUESTION_RE.test(normalized)) return false;
+  if (SAGA_EDIT_RE.test(normalized) || SAGA_SOFTWARE_RE.test(normalized) || SAGA_TEXT_ONLY_RE.test(normalized)) return false;
   if (isSagaWorkflowSupportDiscussion(normalized)) return false;
   const hasVideoNoun = SAGA_VIDEO_NOUN_RE.test(normalized);
-  if (timecodeTotalSeconds(text) !== undefined && hasVideoNoun) return true;
+  const briefLines = text.match(SAGA_BRIEF_LINE_RE)?.length ?? 0;
+  if ((briefLines >= 2 || timecodeTotalSeconds(text) !== undefined) && hasVideoNoun) return true;
   const isCreationRequest =
     SAGA_CREATION_VERB_RE.test(normalized) &&
     (hasDirectCreationRequestMarker(normalized) || SAGA_IMPERATIVE_START_RE.test(normalized));
@@ -360,10 +387,58 @@ export function isClearSagaLongVideoRequest(text: string): boolean {
   return typeof seconds === 'number' && seconds >= 60;
 }
 
-/** True while a Saga wizard is waiting for answers under this scope + key. */
+// ── Confirmation before a natural-language Saga start ─────────────────────
+// A Saga run spends real money (one paid generation per segment), so a
+// request that only looks like one is answered with a yes/no question first;
+// the wizard starts after an explicit yes. /saga skips the question.
+
+type PendingSagaOffer = {
+  text: string;
+  imageAttachments?: ImageAttachment[];
+  createdAt: number;
+};
+
+const PENDING_SAGA_OFFERS = new Map<string, PendingSagaOffer>();
+// Short replies to the numbered question ("1", "1. 是，开始", "好的", "no").
+const SAGA_OFFER_YES_RE = /^(?:1|①|是|对|好|可以|开始|确认|要|用吧|yes|y|yeah|yep|sure|ok|okay|start|go)/i;
+const SAGA_OFFER_NO_RE = /^(?:2|②|不|否|算了|取消|别|no|n\b|nope|cancel|don't|do not)/i;
+
+export function parseSagaOfferReply(text: string): 'yes' | 'no' | undefined {
+  const reply = compact(text);
+  // A longer message is a new request, not an answer.
+  if (!reply || reply.length > 16) return undefined;
+  if (SAGA_OFFER_NO_RE.test(reply) || /不是|不要|不用/.test(reply)) return 'no';
+  if (SAGA_OFFER_YES_RE.test(reply)) return 'yes';
+  return undefined;
+}
+
+export function buildSagaOfferQuestion(locale?: UiLocale): string {
+  return pickLocale(locale ?? DEFAULT_UI_LOCALE, {
+    zh: '看起来你想做一段长视频，要用 Saga 长视频工作流吗？（会按分段调用视频生成，产生费用）\n1. 是，开始\n2. 不是',
+    en: 'It looks like you want a long video. Use the Saga long-video workflow? (It generates the video segment by segment, which costs money.)\n1. Yes, start\n2. No',
+  });
+}
+
+/**
+ * Ask before starting Saga for a natural-language request. Returns the
+ * question to send, or undefined when no video provider is configured (then
+ * the request just takes the normal path).
+ */
+export async function offerSagaLongVideoWorkflow(input: SagaWorkflowInput): Promise<string | undefined> {
+  if (!(await resolveConfiguredVisualProvider(input.cwd, 'video'))) return undefined;
+  pruneExpiredWorkflows();
+  PENDING_SAGA_OFFERS.set(normalizeKey(input), {
+    text: input.text,
+    imageAttachments: input.imageAttachments,
+    createdAt: Date.now(),
+  });
+  return buildSagaOfferQuestion(input.locale);
+}
+
+/** True while a Saga wizard or a Saga offer is waiting for an answer under this scope + key. */
 export function hasActiveSagaLongVideoWorkflow(scope: SagaWorkflowScope, key: string): boolean {
   pruneExpiredWorkflows();
-  return WORKFLOWS.has(`${scope}:${key}`);
+  return WORKFLOWS.has(`${scope}:${key}`) || PENDING_SAGA_OFFERS.has(`${scope}:${key}`);
 }
 
 function extractTargetDuration(text: string): number | undefined {
@@ -1705,6 +1780,27 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   pruneExpiredWorkflows();
   const key = normalizeKey(input);
   const text = input.text.trim();
+
+  // ─── answer to a Saga offer ─────────────────────────────────────────
+  const offer = PENDING_SAGA_OFFERS.get(key);
+  if (offer) {
+    PENDING_SAGA_OFFERS.delete(key);
+    const answer = input.forceIntent ? undefined : parseSagaOfferReply(text);
+    if (answer === 'yes') {
+      const started = await handleSagaLongVideoWorkflow({
+        ...input,
+        text: offer.text,
+        imageAttachments: offer.imageAttachments ?? input.imageAttachments,
+        forceIntent: true,
+      });
+      return started.handled || started.prompt || started.action
+        ? started
+        : { handled: false, replayText: offer.text };
+    }
+    if (answer === 'no') return { handled: false, replayText: offer.text };
+    // Anything else is a new message: the offer lapses and it is handled below.
+  }
+
   const state = WORKFLOWS.get(key);
 
   // ─── continuing an active workflow ──────────────────────────────────

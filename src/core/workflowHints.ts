@@ -157,29 +157,7 @@ const CONTEST_HINT = `\
 • 用 todo 把"方案A调研""方案B调研""评审""选型决定""执行选定方案"列出来
 • 简单评估自己一回合内完成；只有复杂、高风险的评估才派子代理并行调研或评审（每个候选最多 1 个，合计不超过预算）
 • 评审只做一轮：reviewer / critic 挑出各候选的毛病后，由你根据证据裁决，不要反复辩论
-• 裁决后立即执行选定方案
-• 输出报告要包含：候选方案对比、评审意见、选定理由、最终实现
+• 用户明确要求实现（如"选最好的实现"）时，裁决后实现选定方案；否则只给出对比与推荐，并询问是否实现
+• 输出报告要包含：候选方案对比、评审意见、选定理由（实现了的话再加最终实现）
 
 🚫 禁止：让 read-only 子代理"输出胜出方案的完整代码"`;
-
-const WORKFLOW_NOTE_LABELS: Record<WorkflowMode, string> = {
-  direct: '默认对话',
-  niko: '深度规划',
-  athena: '并行分工',
-  contest: '多方案对比',
-  design: '设计',
-  nidhogg: 'Nidhogg',
-};
-
-/**
- * Workflow-completion summary text — appended to the system prompt suffix
- * after a workflow ends so subsequent free-form turns know where to look.
- */
-export function buildWorkflowCompletionNote(
-  mode: WorkflowMode,
-  outputDir?: string,
-): string {
-  const modeLabel = mode === 'direct' ? '默认对话' : WORKFLOW_NOTE_LABELS[mode];
-  if (!outputDir) return `\n\n[最近工作流] 模式: ${modeLabel}, 未产生新文件。`;
-  return `\n\n[最近工作流] 模式: ${modeLabel}, 输出目录: ${outputDir}。用户后续若需检查或修改，请在该目录操作。`;
-}

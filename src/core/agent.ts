@@ -6483,7 +6483,8 @@ export async function runAgent(
     }
     return systemCache.content;
   };
-  if (options.workflowHint?.trim() && (options.delegationDepth ?? 0) === 0) {
+  // Top-level main run only: sub-agents and builder passes never get it.
+  if (options.workflowHint?.trim() && profile === 'main' && (options.delegationDepth ?? 0) === 0) {
     extensionRuntime.sections.unshift(options.workflowHint.trim());
   }
   // Per-run context: computed once, so every request of the run is identical

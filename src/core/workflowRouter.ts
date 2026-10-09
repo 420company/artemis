@@ -105,13 +105,16 @@ export interface RouteWorkflowOptions {
 }
 
 export const CLASSIFIER_TIMEOUT_MS = 8_000;
-const CLASSIFIER_MAX_OUTPUT_TOKENS = 120;
+// Room for the JSON even when a model spends a few tokens before it.
+const CLASSIFIER_MAX_OUTPUT_TOKENS = 400;
 
 // ── Retired slash commands ───────────────────────────────────────────────────
 
 /**
  * Old workflow slash words. A message that still starts with one is treated
- * as natural language: the word is removed and only used as a routing hint.
+ * as natural language: the word is removed and the rest is routed through
+ * every gate. Only /niko's cheap planning hint is honoured, for engineering
+ * requests; the others never force a workflow.
  */
 const RETIRED_WORKFLOW_SLASH_HINTS: Readonly<Record<string, AutoWorkflow | undefined>> = {
   '/niko': 'plan',
@@ -141,7 +144,7 @@ export function stripRetiredWorkflowSlash(text: string): {
 
 // ── Heuristic signals ────────────────────────────────────────────────────────
 
-const CJK_RE = /[\u3400-\u9fff]/g;
+const CJK_RE = /[㐀-鿿]/g;
 
 /** Rough size of a request: a CJK character carries about three Latin characters of content. */
 function weightedLength(text: string): number {
@@ -151,39 +154,59 @@ function weightedLength(text: string): number {
 }
 
 const SHORT_LENGTH = 60;
+const TEAM_MIN_LENGTH = 24;
 const SUBSTANTIAL_LENGTH = 240;
-const LARGE_LENGTH = 900;
 
 const CASUAL_RE = /^(?:hi|hello|hey|yo|thanks|thank you|thx|ok|okay|cool|nice|great|good (?:morning|night)|bye|你好|您好|嗨|哈喽|在吗|在不在|谢谢|多谢|好的|好|嗯|嗯嗯|哈哈+|晚安|早安|早上好|辛苦了|收到|明白了?)[\s!！.。~～?？]*$/i;
+// Follow-ups of an ongoing conversation stay on the plain path.
+const FOLLOW_UP_RE = /^(?:继续|接着|然后|另外|补充|还有|再|好的|好|对|不对|不是|按|就按|continue|go on|also|and |then |ok,|okay,|yes|no\b)/i;
 
-const CODE_TASK_RE = /(?:实现|重构|迁移|修复|修一下|修改|排查|调试|优化|改造|集成|接入|部署|编写|写(?:一个|个)?(?:脚本|函数|接口|测试|模块|插件)|加(?:一个|个)?功能|新增功能|\bimplement|\brefactor|\bmigrat|\bfix\b|\bdebug|\binvestigat|\boptimi[sz]e|\bintegrat|\bport\b|\badd (?:a |an )?(?:feature|endpoint|test|module)|\bwrite (?:a |an )?(?:test|script|function|module|parser))/i;
+// Questions, including "explain / compare / which is better" asks.
+const QUESTION_RE = /(?:[?？]\s*$|(?:吗|呢|么)[。!！]?\s*$|^(?:what|why|how|when|where|who|which|is|are|can|could|does|do|should|would|explain)\b|^(?:什么|怎么|为什么|为啥|哪个|哪种|是否|能不能|可不可以|有没有))/i;
+// Question words anywhere count only in a short message; a long brief may
+// mention "how" or "为什么" while asking for work.
+const QUESTION_WORD_RE = /(?:什么|怎么|为什么|为啥|哪个|哪种|哪些|是否|能不能|可不可以|有没有|区别|差别|优缺点|利弊|\b(?:explain|what|how|why|which|whether|difference|differences)\b|pros and cons|trade-?offs?|\bvs\.?\b|\bversus\b)/i;
+// An imperative build / change request at the start of the message.
+const BUILD_IMPERATIVE_RE = /^(?:(?:请|麻烦|帮我|帮忙|给我|替我|请帮我|please)\s*,?\s*)?(?:帮我\s*)?(?:做|搭建|搭|构建|开发|实现|写|创建|建|生成|修复|修|重构|迁移|改造|设计|改版|重做|排查|调查|查一下|定位|build|create|make|develop|implement|write|fix|refactor|migrate|port|design|redesign|set up|scaffold|investigate|debug|look into|track down)/i;
+// "Can you / 你能 …?" asks about ability: answered directly.
+const CAPABILITY_QUESTION_RE = /^(?:can you|could you|do you|are you able|你能|你会|能不能|会不会|可不可以)/i;
+// Text deliverables: articles, copy, slides, docs, plans.
+const WRITING_RE = /(?:文章|文案|稿子|作文|小说|诗|PPT|ppt|幻灯片|演示文稿|文档|报告|简历|邮件|介绍|说明书|学习计划|\barticle\b|\bcopy\b|\bessay\b|\bblog post\b|\bslides?\b|\bdeck\b|\bpoem\b|\bemail\b|\breport\b|\bresume\b)/i;
+
+const CODE_TASK_RE = /(?:实现|重构|迁移|修复|修一下|修改|排查|调试|优化|改造|集成|接入|部署|编写|写.{0,12}(?:脚本|函数|接口|测试|模块|插件|代码|程序)|加(?:一个|个)?功能|新增功能|\bimplement|\brefactor|\bmigrat|\bfix\b|\bdebug|\binvestigat|\boptimi[sz]e|\bintegrat|\bport\b|\badd (?:a |an )?(?:feature|endpoint|test|module)|\bwrite (?:a |an )?(?:test|script|function|module|parser))/i;
 const DEEP_CODE_RE = /(?:重构|迁移|排查|调查|根因|性能|架构|改造|内存泄漏|竞态|并发|\brefactor|\bmigrat|\binvestigat|root cause|performance|architecture|memory leak|race condition|concurren)/i;
 const CODE_CONTEXT_RE = /(?:```|\bstack ?trace\b|Traceback|\bat [\w.<>]+ \(|仓库|代码库|\brepo(?:sitory)?\b|\bcodebase\b|\bPR\b|pull request|\bcommit\b|分支|\bbranch\b)/i;
 const FILE_REF_RE = /(?:[\w.-]+[/\\])*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|go|rs|css|scss|html|vue|svelte|yml|yaml|toml|java|kt|swift|rb|php|c|cc|cpp|h|sql|sh)\b/gi;
+const BUG_WORDING_RE = /(?:bug|报错|错误|异常|崩溃|白屏|打不开|不显示|失败|乱了|\berror\b|\bcrash|\bbroken\b|not (?:working|loading|showing))/i;
 
-const BIG_PROJECT_RE = /(?:(?:完整的|一整套).{0,16}(?:项目|系统|应用|平台|网站|app|App|APP|产品)|从零(?:开始)?(?:搭建|做|构建|实现|开发|写)|端到端|全栈|整个(?:项目|代码库|仓库|系统|应用)|全仓|全量(?:迁移|重构|替换)|跨(?:多个)?模块|多个(?:模块|服务|子系统|包)|批量(?:修改|替换|迁移|重构)|所有(?:文件|模块|接口|页面)|前端.{0,20}后端|后端.{0,20}前端|\bwhole (?:repo|codebase|project|app)|across the (?:repo|codebase|project)|\bend[- ]to[- ]end\b|\bfull[- ]stack\b|from scratch|multiple (?:modules|services|packages|subsystems)|every (?:file|module|endpoint)|frontend.{0,40}backend|backend.{0,40}frontend|complete (?:\w+ ){0,3}(?:project|app|application|system|platform|product))/i;
-const FULL_STACK_RE = /(?:前端.{0,20}后端|后端|全栈|数据库|接口|登录|鉴权|\bbackend\b|full[- ]stack|\bAPI\b|database|\bauth)/i;
-const BUILD_INTENT_RE = /(?:做|搭建|构建|开发|实现|写|创建|建|迁移|重构|改造|替换|\bbuild|\bcreate|\bmake|\bdevelop|\bimplement|\bwrite|\bmigrate|\brefactor|\bport|\bship)/i;
+// A real multi-part build object or a repo-wide change.
+const TEAM_OBJECT_RE = /(?:(?:完整的|一整套|一个完整的?).{0,12}(?:系统|项目|网站|应用|平台|商城|后台|小程序|app|App|APP)|全栈|前端.{0,24}后端|后端.{0,24}前端|多个(?:服务|子系统)|微服务|整个(?:仓库|代码库|项目)|全仓|所有(?:文件|模块)|\bfull[- ]stack (?:app|application|website|site|project|platform|product)|\bcomplete (?:\w+ ){0,3}(?:app|application|system|platform|website|project)\b|frontend.{0,40}backend|backend.{0,40}frontend|multiple (?:services|subsystems)|microservices|\bwhole (?:repo|codebase|project)|across the (?:repo|codebase|project)|every (?:file|module))/i;
 const MANY_FILES_RE = /\b(\d{1,3})\s+(?:independent\s+)?files?\b|(\d{1,3})\s*个文件/i;
 
-const COMPARE_EXPLICIT_RE = /(?:(?:两|三|四|五|几|多|2|3|4|5)\s*(?:个|种|套|版)\s*(?:不同的?)?\s*(?:方案|思路|做法|选项|候选)|(?:给我|列出|提供|出|想|设计|做|写|来)\s*(?:两|三|四|五|几|多|2|3|4|5)\s*(?:个|种|套|版)\s*(?:不同的?)?\s*(?:设计|实现|架构)|多方案|多种方案|方案(?:对比|比较|选型|PK|pk|评估)|(?:对比|比较|评估|权衡)(?:一下)?.{0,12}(?:方案|做法|实现方式|架构|选项|技术栈)|技术选型|best[- ]of[- ]?(?:n|\d)|(?:compare|evaluate|weigh|contrast)\b.{0,50}\b(?:approaches|options|designs|solutions|alternatives|architectures|proposals|implementations)|(?:give|propose|suggest|sketch|draft|offer|show|list|come up with|brainstorm)\b.{0,20}\b(?:two|three|four|several|multiple|a few|\d)\s+(?:\w+\s+)?(?:approaches|options|alternatives|designs|solutions|proposals|implementations|ideas)\b|\b(?:two|three|four|several|multiple|\d)\s+(?:different|alternative|competing)\s+(?:approaches|options|designs|solutions|proposals|implementations|architectures)\b|pros and cons|trade-?offs? (?:between|of)|which (?:approach|option|architecture|design) (?:is|would be) (?:best|better))/i;
+// Asked to PRODUCE several candidate solutions…
+const COMPARE_PRODUCE_RE = /(?:(?:给我|出|做|写|想|设计|提供|拿出|尝试|试|实现)\s*(?:两|三|四|五|几|多|2|3|4|5)\s*(?:个|种|套|版)\s*(?:不同的?)?\s*(?:方案|实现|设计|做法|版本|思路)|(?:做|出|给|用|走|来)\s*(?:个)?多(?:种)?方案|\b(?:try|write|build|implement|draft|prototype|propose|produce|give me|come up with)\b.{0,20}\b(?:two|three|four|several|multiple|a few|\d)\s+(?:different\s+|alternative\s+|competing\s+)?(?:approaches|implementations|versions|solutions|designs|prototypes|variants)\b|best[- ]of[- ]?(?:n|\d))/i;
+// …and to pick / compare / build the best one.
+const COMPARE_CHOOSE_RE = /(?:比较|对比|选(?:出|一个|最好|最优|择)|挑|择优|评选|最好的|最优的?|胜出|\bpick\b|\bchoose\b|\bselect\b|\bthe best\b|\bcompare\b|\bevaluate\b|\bbenchmark\b|\bwinner\b)/i;
 
-const DESIGN_SURFACE_RE = /(?:网站|网页|官网|落地页|着陆页|首页|主页|界面|前端页面|页面设计|仪表盘|设计稿|视觉稿|组件库|设计系统|\bUI\b|\bUX\b|landing ?page|website|web ?page|homepage|home page|user interface|\bfrontend\b|front-end|dashboard|design system|web app)/i;
-const DESIGN_VERB_RE = /(?:做|设计|搭建|创建|写|生成|制作|重新设计|美化|改版|重做|打造|\bbuild|\bdesign|\bcreate|\bmake|\bredesign|\bcraft|\brestyle|\bpolish)/i;
-const BUG_WORDING_RE = /(?:bug|报错|错误|异常|崩溃|白屏|打不开|不显示|失败|\berror\b|\bcrash|\bbroken\b|not (?:working|loading|showing))/i;
+// Talking about something already done ("我们之前讨论过多方案对比").
+const PAST_MENTION_RE = /(?:之前|以前|上次|已经|结果是|当时|\bpreviously\b|\bearlier\b|\balready\b|\blast time\b|\bwe (?:did|tried|compared)\b)/i;
 
-const QUESTION_RE = /(?:[?？]\s*$|^(?:what|why|how|when|where|who|which|is|are|can|could|does|do|should)\b|^(?:什么|为什么|为啥|怎么|如何|哪个|哪些|是不是|能不能|可不可以|有没有)|(?:是什么|吗|呢|么)[?？。!！]?\s*$)/i;
+const DESIGN_SURFACE_RE = /(?:页面|网页|网站|官网|落地页|着陆页|首页|主页|界面|仪表盘|海报|视觉稿|设计稿|原型|组件库|设计系统|\bUI\b|\bUX\b|landing ?page|website|web ?page|homepage|home page|user interface|dashboard|poster|mockup|wireframe|prototype|design system|web app)/i;
+const DESIGN_VERB_RE = /(?:做|设计|搭建|创建|生成|制作|编写|开发|写|改版|重新设计|重做|美化|打造|\bbuild|\bdesign|\bcreate|\bmake|\bredesign|\bcraft|\brestyle|\bmock up)/i;
+const CONTINUATION_START_RE = /^(?:继续|接着|然后|另外|补充|continue|go on)/i;
 
 export interface WorkflowSignals {
   length: number;
   casual: boolean;
+  followUp: boolean;
   question: boolean;
+  buildImperative: boolean;
+  writing: boolean;
   codeTask: boolean;
   deepCode: boolean;
   codeContext: number;
   inCodeRepo: boolean;
   bigProject: boolean;
-  fullStack: boolean;
   compareExplicit: boolean;
   design: boolean;
   designSurface: boolean;
@@ -199,21 +222,31 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, text = input.t
   const designSurface = DESIGN_SURFACE_RE.test(text);
   const bug = BUG_WORDING_RE.test(text);
   const codeTask = CODE_TASK_RE.test(text);
+  const writing = WRITING_RE.test(text);
+  const buildImperative = BUILD_IMPERATIVE_RE.test(text);
+  const asksQuestion = QUESTION_RE.test(text) || (length < SUBSTANTIAL_LENGTH && QUESTION_WORD_RE.test(text));
+  const question = asksQuestion && !(buildImperative && !CAPABILITY_QUESTION_RE.test(text));
+  const codeContext = fileRefs + (CODE_CONTEXT_RE.test(text) ? 1 : 0);
   return {
     length,
     casual: CASUAL_RE.test(text),
-    question: QUESTION_RE.test(text),
+    followUp: FOLLOW_UP_RE.test(text) && length < SUBSTANTIAL_LENGTH,
+    question,
+    buildImperative,
+    writing,
     codeTask,
     deepCode: DEEP_CODE_RE.test(text),
-    codeContext: fileRefs + (CODE_CONTEXT_RE.test(text) ? 1 : 0),
+    codeContext,
     inCodeRepo: input.inCodeRepo === true,
-    bigProject: (BIG_PROJECT_RE.test(text) || fileCount > 5 || fileRefs > 5) && BUILD_INTENT_RE.test(text),
-    fullStack: FULL_STACK_RE.test(text),
-    compareExplicit: COMPARE_EXPLICIT_RE.test(text),
-    design: designSurface && DESIGN_VERB_RE.test(text) && !bug,
+    bigProject: buildImperative && !writing && !bug && length >= TEAM_MIN_LENGTH &&
+      (TEAM_OBJECT_RE.test(text) || fileCount > 5 || fileRefs > 5),
+    compareExplicit: COMPARE_PRODUCE_RE.test(text) && COMPARE_CHOOSE_RE.test(text) && !PAST_MENTION_RE.test(text),
+    design: designSurface && DESIGN_VERB_RE.test(text) && !bug && !writing,
     designSurface,
     bug,
-    saga: isClearSagaLongVideoRequest(text),
+    // Saga comes after every code / design / question check: only plain
+    // creation requests for a new long video qualify.
+    saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(text),
   };
 }
 
@@ -231,16 +264,18 @@ export type HeuristicVerdict =
   | { kind: 'clear'; workflow: AutoWorkflow; reason: string }
   | { kind: 'ambiguous'; reason: string };
 
-/** Heuristics only: a clear workflow, or "ambiguous" when the request is substantial but unclassified. */
+/**
+ * Heuristics only: a clear workflow, or "ambiguous" when the request is
+ * substantial but unclassified. Order matters: chat, follow-ups and
+ * questions never reach the expensive workflows, and Saga is checked last.
+ */
 export function classifyWorkflowHeuristically(signals: WorkflowSignals): HeuristicVerdict {
-  if (signals.saga) return { kind: 'clear', workflow: 'saga', reason: 'clear request for a long multi-segment video' };
   if (signals.casual) return { kind: 'clear', workflow: 'direct', reason: 'casual chat' };
-  if (signals.compareExplicit) return { kind: 'clear', workflow: 'compare', reason: 'explicit request to weigh several solutions' };
-  // A full-stack product is a team job even when it has a UI; a website alone is design.
-  if (signals.design && !(signals.bigProject && signals.fullStack)) {
-    return { kind: 'clear', workflow: 'design', reason: 'builds or restyles a website / UI' };
-  }
+  if (signals.followUp) return { kind: 'clear', workflow: 'direct', reason: 'follow-up' };
+  if (signals.question) return { kind: 'clear', workflow: 'direct', reason: 'question' };
+  if (signals.compareExplicit) return { kind: 'clear', workflow: 'compare', reason: 'asked for several candidate solutions and the best one' };
   if (signals.bigProject) return { kind: 'clear', workflow: 'team', reason: 'large multi-part build or change' };
+  if (signals.design) return { kind: 'clear', workflow: 'design', reason: 'builds or restyles a website / UI' };
   if (signals.codeTask && signals.deepCode && signals.length >= (signals.inCodeRepo ? SHORT_LENGTH : SHORT_LENGTH * 1.5)) {
     return { kind: 'clear', workflow: 'plan', reason: 'engineering task that needs investigation first' };
   }
@@ -249,13 +284,22 @@ export function classifyWorkflowHeuristically(signals: WorkflowSignals): Heurist
   if (signals.codeTask && (signals.codeContext >= 2 || (signals.length >= SUBSTANTIAL_LENGTH && (signals.codeContext >= 1 || signals.inCodeRepo)))) {
     return { kind: 'clear', workflow: 'plan', reason: 'non-trivial engineering task' };
   }
-  if (signals.length < SUBSTANTIAL_LENGTH) {
-    return { kind: 'clear', workflow: 'direct', reason: signals.question ? 'quick question' : 'small, clear request' };
-  }
-  if (signals.question && !signals.codeTask && signals.length < LARGE_LENGTH) {
-    return { kind: 'clear', workflow: 'direct', reason: 'question' };
+  if (signals.saga) return { kind: 'clear', workflow: 'saga', reason: 'clear request for a long multi-segment video' };
+  if (signals.length < SUBSTANTIAL_LENGTH || signals.writing) {
+    return { kind: 'clear', workflow: 'direct', reason: 'small, clear request' };
   }
   return { kind: 'ambiguous', reason: 'substantial request without a clear workflow signal' };
+}
+
+/**
+ * Sync check used before the Saga wizard on bridges and the CLI: does this
+ * plain message (no slash command) look like a request for a new long video?
+ */
+export function looksLikeSagaRequest(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith('/')) return false;
+  const verdict = classifyWorkflowHeuristically(collectWorkflowSignals({ text: trimmed }));
+  return verdict.kind === 'clear' && verdict.workflow === 'saga';
 }
 
 // ── Classifier (ambiguous, substantial requests only) ───────────────────────
@@ -267,9 +311,9 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'direct: answer it or do it with normal tools. The default for anything simple or unclear.',
   'plan: non-trivial engineering that needs investigation and a plan before editing.',
   'team: a large build or change with several independent parts worth parallel sub-agents.',
-  'compare: the user wants several alternative solutions weighed before one is chosen.',
+  'compare: the user explicitly asks you to produce several alternative solutions and pick the best one.',
   'design: building or restyling a website, app screen or other visual front end.',
-  'When unsure, choose direct.',
+  'Questions, explanations, writing tasks and follow-ups are direct. When unsure, choose direct.',
 ].join('\n');
 
 const CLASSIFIER_WORKFLOWS = new Set(['direct', 'plan', 'team', 'compare', 'design']);
@@ -310,16 +354,16 @@ export function parseClassifierReply(raw: string): ClassifierVerdict | null {
  * heuristics also see size or stakes. Otherwise it is stepped down.
  */
 export function gateClassifierVerdict(verdict: ClassifierVerdict, signals: WorkflowSignals): AutoWorkflow {
+  const engineering = signals.codeTask || signals.deepCode || signals.codeContext > 0 || signals.inCodeRepo;
   if (verdict.workflow === 'team') {
-    if (verdict.complexity === 'high' && (signals.bigProject || signals.length >= LARGE_LENGTH)) return 'team';
-    return verdict.complexity === 'low' ? 'direct' : 'plan';
+    if (verdict.complexity === 'high' && signals.bigProject) return 'team';
+    return verdict.complexity !== 'low' && engineering ? 'plan' : 'direct';
   }
   if (verdict.workflow === 'compare') {
-    if (verdict.complexity !== 'low' && signals.compareExplicit) return 'compare';
-    return verdict.complexity === 'high' ? 'plan' : 'direct';
+    return verdict.complexity !== 'low' && signals.compareExplicit ? 'compare' : 'direct';
   }
-  if (verdict.workflow === 'design') return signals.designSurface ? 'design' : 'direct';
-  if (verdict.workflow === 'plan') return verdict.complexity === 'low' ? 'direct' : 'plan';
+  if (verdict.workflow === 'design') return signals.design ? 'design' : 'direct';
+  if (verdict.workflow === 'plan') return verdict.complexity !== 'low' && engineering ? 'plan' : 'direct';
   return 'direct';
 }
 
@@ -380,14 +424,26 @@ export async function routeWorkflow(
     return makeRoute('direct', 'fallback', 'signal error', text, stripped.retiredSlash);
   }
 
-  // A retired slash word is a hint, not a command; a Saga request still wins.
-  if (stripped.hint && !signals.saga) {
-    return makeRoute(stripped.hint, 'slash-hint', `hint from ${stripped.retiredSlash}`, text, stripped.retiredSlash);
-  }
-
+  // A retired slash word never forces a workflow and never leads to Saga:
+  // the rest goes through every gate. Only the cheap planning hint of /niko
+  // is honoured, and only for an engineering request.
+  // Any other slash command ("/run …") is never a Saga offer either.
+  if (stripped.retiredSlash || text.startsWith('/')) signals = { ...signals, saga: false };
   const verdict = classifyWorkflowHeuristically(signals);
+  if (
+    stripped.hint === 'plan' &&
+    verdict.kind === 'clear' && verdict.workflow === 'direct' &&
+    !signals.question && !signals.casual && !signals.followUp &&
+    (signals.codeTask || signals.bug || signals.deepCode)
+  ) {
+    return makeRoute('plan', 'slash-hint', `hint from ${stripped.retiredSlash}`, text, stripped.retiredSlash);
+  }
   if (verdict.kind === 'clear') {
     return makeRoute(verdict.workflow, 'heuristic', verdict.reason, text, stripped.retiredSlash);
+  }
+  // A long continuation of the conversation is not a new task.
+  if (CONTINUATION_START_RE.test(text)) {
+    return makeRoute('direct', 'heuristic', 'follow-up', text, stripped.retiredSlash);
   }
 
   let provider: ChatProvider | undefined;
@@ -423,9 +479,9 @@ const SAGA_PLAYBOOK = [
 function describeBudget(workflow: AutoWorkflow, budget: WorkflowBudget): string {
   const lines = [
     `[Workflow budget — ${workflow}]`,
-    `- At most ${budget.maxSubAgents} sub-agent(s) (delegate_task / spawn_background_workflow) in this run; the runtime refuses more.`,
+    `- At most ${budget.maxSubAgents} sub-agent(s) (delegate_task / spawn_background_workflow / approve_builder_execution) in this run; the runtime refuses more.`,
   ];
-  if (budget.maxCandidates) lines.push(`- Weigh at most ${budget.maxCandidates} candidate solutions; one critique round, then decide and build the winner.`);
+  if (budget.maxCandidates) lines.push(`- Weigh at most ${budget.maxCandidates} candidate solutions; one critique round, then recommend one. Build it only if the user asked for an implementation; otherwise ask.`);
   if (budget.maxRounds > 0 && !budget.maxCandidates) lines.push(`- At most ${budget.maxRounds} review round(s); then finish.`);
   lines.push('- Where sub-agents are unavailable, do the same steps yourself in this thread. Never invent a review or critique that did not run.');
   return lines.join('\n');
@@ -480,6 +536,8 @@ export function createDelegationBudget(workflow: AutoWorkflow): DelegationBudget
 export function checkDelegationBudget(action: AgentAction, budget: DelegationBudget | undefined): string | undefined {
   if (!budget) return undefined;
   if (action.type === 'use_workflow') {
+    // A Saga run makes a video; it never grows into a multi-agent workflow.
+    if (budget.workflow === 'saga') return undefined;
     const cap = Math.min(MAX_SUB_AGENTS_PER_RUN, WORKFLOW_BUDGETS[action.workflow]?.maxSubAgents ?? 0);
     if (cap > budget.limit) {
       budget.limit = cap;
@@ -487,7 +545,13 @@ export function checkDelegationBudget(action: AgentAction, budget: DelegationBud
     }
     return undefined;
   }
-  if (action.type !== 'delegate_task' && action.type !== 'spawn_background_workflow') return undefined;
+  // Every child agent run counts: delegated specialists, detached workflows
+  // and builder execution passes.
+  if (
+    action.type !== 'delegate_task' &&
+    action.type !== 'spawn_background_workflow' &&
+    action.type !== 'approve_builder_execution'
+  ) return undefined;
   if (budget.used >= budget.limit) {
     return `Sub-agent budget used up (${budget.used} of ${budget.limit} for the ${budget.workflow} workflow). Do not start more sub-agents in this run; finish the remaining work yourself in this thread.`;
   }
@@ -497,7 +561,9 @@ export function checkDelegationBudget(action: AgentAction, budget: DelegationBud
 
 const HEURISTIC_REASONS_ZH: Readonly<Record<string, string>> = {
   'clear request for a long multi-segment video': '明确要求多段长视频',
-  'explicit request to weigh several solutions': '明确要求比较多个方案',
+  'asked for several candidate solutions and the best one': '明确要求产出多个方案并选出最优',
+  'question': '提问',
+  'follow-up': '追问',
   'builds or restyles a website / UI': '要做或改网站 / 界面',
   'large multi-part build or change': '多模块的大型构建或改动',
   'engineering task that needs investigation first': '需要先调查的工程任务',

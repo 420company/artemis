@@ -201,7 +201,7 @@ import path from 'node:path'
 import * as os from 'node:os'
 import { stat, unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { think, resetSession, getMessages, getActiveContextState, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, getSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
+import { think, resetSession, getMessages, getActiveContextState, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
 import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
@@ -264,8 +264,8 @@ import { resolveWorkspaceIntent } from './workspaceIntent.js'
 import { wordupNow } from './wordup.js'
 import { getWorkflowDisplayName } from '../core/workflowMode.js'
 import type { WorkflowMode } from '../core/workflowMode.js'
-import { buildWorkflowHint, buildWorkflowCompletionNote } from '../core/workflowHints.js'
 import { detectExplicitWorkflowIntent } from '../core/workflowDispatcher.js'
+import { resolveWorkflowClassifierProvider } from '../providers/workflowClassifier.js'
 import { AUTO_WORKFLOW_MODE, buildRoutedWorkflowHint, describeAutoWorkflow, describeRouteReason, routeWorkflow, type WorkflowRoute } from '../core/workflowRouter.js'
 import {
   applyWorkflowProgressInfo,
@@ -277,7 +277,6 @@ import {
 } from './workflowProgress.js'
 import { resolveMainProviderConfig, ensureDoubleModelSetup } from '../providers/onboarding.js'
 import { createConsolePromptIO } from '../providers/router.js'
-import { createTrackedProviderFromConfig } from '../providers/telemetry.js'
 import { createProviderRouter } from '../providers/router.js'
 import { PermissionManager } from '../security/permissions.js'
 import { appendDetachedWorkflowMessage, spawnDetachedWorkflow } from '../services/detachedWorkflow.js'
@@ -299,7 +298,7 @@ import {
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { handleSeedanceMultimodalWorkflow, hasActiveSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
-import { handleSagaLongVideoWorkflow, hasActiveSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
+import { handleSagaLongVideoWorkflow, hasActiveSagaLongVideoWorkflow, offerSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
 
 const HOME_DIR = os.homedir()
 const DIRECT_TOOL_COUNT = getDirectToolCount()
@@ -2138,22 +2137,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       { text: requestText, inCodeRepo: existsSync(path.join(root, '.git')) },
       {
         getClassifier: async () => {
-          appendScrollBlock({ kind: 'system', text: t('🧭 正在判断任务类型…', '🧭 Choosing a workflow for this task…') })
-          let routerBaseConfig: Record<string, unknown> | undefined
-          for (const storeRoot of [root, resolveArtemisHomeDir()]) {
-            try {
-              const routerStore = new ProviderStore(storeRoot)
-              const routerData = await routerStore.load()
-              const specialist = routerStore.getProfile(routerData, routerData.specialistProfileId)
-              if (specialist) {
-                routerBaseConfig = specialist as unknown as Record<string, unknown>
-                break
-              }
-            } catch { /* try next root */ }
-          }
-          const provConfig = (routerBaseConfig
-            ?? await resolveMainProviderConfig({ cwd: root, config: {} })) as Parameters<typeof createTrackedProviderFromConfig>[0]
-          return createTrackedProviderFromConfig({ ...provConfig, effort: 'low' as const }, { cwd: root })
+          const classifier = await resolveWorkflowClassifierProvider([root, resolveArtemisHomeDir()], root)
+          if (classifier) appendScrollBlock({ kind: 'system', text: t('🧭 正在判断任务类型…', '🧭 Choosing a workflow for this task…') })
+          return classifier
         },
       },
     )
@@ -3047,7 +3033,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           '  default ' + t('清除设置，回到 API 默认', 'clear the setting, back to API default'),
           '',
           t('不支持该等级的模型会自动降到 high；不支持 effort 的模型忽略此设置。', 'Models missing a level clamp to high; models without effort support ignore it.'),
-          t('工作流会自动抬档：Nidhogg→max，自动选中的规划/并行/设计→xhigh，多方案对比→high；你手动设置过则不覆盖。', 'Workflows auto-bump: Nidhogg→max, auto-chosen plan/team/design→xhigh, compare→high; your explicit setting always wins.'),
+          t('/nidhogg 会自动用 max（你手动设置过则不覆盖）；自动选择的工作流不会提高 effort。', '/nidhogg runs at max unless you set an effort; automatically chosen workflows never raise it.'),
         ])
       } else if (arg !== 'default' && !(levels as readonly string[]).includes(arg)) {
         appendSystemPanel(t('无效等级', 'Invalid level'), [
@@ -4301,6 +4287,20 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // The user never names a workflow: the router picks one from the request,
     // or the plain path. A running Saga / video wizard keeps its own replies.
     const autoRoute = await routeInteractiveRequest(dispatchText, workspaceRoot)
+    if (autoRoute?.workflow === 'saga') {
+      // A long-video request is only an offer: Saga starts after "1 / 是".
+      const question = await offerSagaLongVideoWorkflow({
+        scope: 'cli',
+        key: workspaceRoot,
+        cwd: workspaceRoot,
+        text: autoRoute.text,
+        locale,
+      })
+      if (question) {
+        appendScrollBlock({ kind: 'system', text: question })
+        continue
+      }
+    }
     const effectiveDispatchText = await maybeApplyVisualGenerationPolicy(autoRoute?.text || dispatchText)
     const routedMode = autoRoute && autoRoute.workflow !== 'direct' && autoRoute.workflow !== 'saga'
       ? AUTO_WORKFLOW_MODE[autoRoute.workflow]
@@ -4324,26 +4324,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // DECSTBM scroll-region isolation keeps AI output (scroll region) and the
     // prompt (fixed zone) from interfering with each other.
     const nextLineFromGeneration = await waitForRunnerOrInterrupt(
-      autoRoute && routedMode
-        ? runHintedWorkflowTurn(
-            routedMode,
-            effectiveDispatchText,
-            workspaceRoot,
-            permissionMode,
-            locale,
-            hud,
-            turnViewport,
-            handleWorkspaceSwitchRequest,
-            runningMessages.hooks,
-            buildRoutedWorkflowHint(autoRoute.workflow, { cwd: workspaceRoot, userPrompt: effectiveDispatchText, reason: autoRoute.reason }),
-          )
-        : handleTurn(
-            // A clear long-video request starts Saga exactly like /saga.
-            autoRoute?.workflow === 'saga' && !/^\s*\/saga(\s|$)/i.test(effectiveDispatchText)
-              ? `/saga ${effectiveDispatchText}`
-              : effectiveDispatchText,
-            locale, hud, workspaceRoot, permissionMode, turnViewport, handleWorkspaceSwitchRequest, runningMessages.hooks,
-          ),
+      handleTurn(
+        effectiveDispatchText,
+        locale, hud, workspaceRoot, permissionMode, turnViewport, handleWorkspaceSwitchRequest, runningMessages.hooks,
+        autoRoute && routedMode
+          ? buildRoutedWorkflowHint(autoRoute.workflow, { cwd: workspaceRoot, userPrompt: effectiveDispatchText, reason: autoRoute.reason })
+          : undefined,
+      ),
       runningMessages.capture,
     )
 
@@ -4440,6 +4427,12 @@ async function handleTurn(
   viewport?: ScrollViewportController,
   onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>,
   runningMessageHooks?: RunningMessageHooks,
+  /**
+   * Playbook of a routed workflow. It goes in front of this turn's user
+   * message (never the system prompt, which stays cache-stable); the Saga
+   * and video wizards still see only the user's own text.
+   */
+  workflowPlaybook?: string,
 ): Promise<void> {
   // /saga <content> — explicit Saga long-video entry. Strip the prefix and
   // force-flag the workflow so it skips intent detection (the user has
@@ -4480,6 +4473,8 @@ async function handleTurn(
     }
     return
   }
+  // The user answered a Saga offer with "no": go on with the original request.
+  if (sagaWorkflow.replayText !== undefined) input = sagaWorkflow.replayText
   // When Saga rewrites the body to a long-video generation prompt, skip
   // the Seedance multimodal workflow. Saga's rewritten prompt mentions
   // "video" / "Seedance" / "references" and would otherwise re-trigger
@@ -4843,7 +4838,7 @@ async function handleTurn(
       startPendingTick()
     }
 
-    const result = await think(input, {
+    const result = await think(workflowPlaybook ? `${workflowPlaybook}\n\n--- USER REQUEST ---\n\n${input}` : input, {
       ...thinkOpts,
       locale: locale === 'zh-CN' ? 'zh' : 'en',
       cwd: thinkOpts.cwd,
@@ -4998,117 +4993,6 @@ async function handleTurn(
   }
 }
 
-/**
- * Run a workflow command as a hint-injected turn through the brain's normal
- * main loop. Replaces the old phase-based pipeline with an Artemis style
- * flow: inject a domain hint into the brain's system prompt, then let the
- * brain's native tool loop handle the task end-to-end.
- *
- * The brain decides when to call tools, when to spawn sub-agents, when to
- * generate images — all in a single Artemis conversation.
- */
-// Workflow ↔ effort coupling: each workflow implies a reasoning-effort level
-// matching its quality/cost positioning. Applied only when the user hasn't
-// pinned an effort themselves (via /effort or the profile); providers clamp
-// levels the model doesn't support, so this is always safe to send.
-const WORKFLOW_EFFORT: Partial<Record<WorkflowMode, 'low' | 'medium' | 'high' | 'xhigh' | 'max'>> = {
-  niko: 'xhigh',
-  athena: 'xhigh',
-  design: 'xhigh',
-  contest: 'high',
-  nidhogg: 'max',
-}
-
-async function userPinnedEffort(cwd: string): Promise<boolean> {
-  if (getCurrentEffort() !== undefined) return true
-  // Provider may not be loaded yet — mirror brain.ts resolution (cwd → global)
-  // to check whether the active profile carries an explicit effort.
-  try {
-    for (const root of [cwd, resolveArtemisHomeDir()]) {
-      const store = new ProviderStore(root)
-      const data = await store.load()
-      const profile = store.getDefaultMainProfile(data)
-      if (profile) return (profile as { effort?: string }).effort !== undefined
-    }
-  } catch { /* assume not pinned */ }
-  return false
-}
-
-async function runHintedWorkflowTurn(
-  mode: WorkflowMode,
-  userPrompt: string,
-  cwd: string,
-  permissionMode: PermissionMode,
-  locale: UiLocale,
-  hud: ReturnType<typeof createHudState>,
-  viewport: ScrollViewportController,
-  onWorkspaceSwitchRequest: (request: WorkspaceSwitchRequest) => Promise<boolean>,
-  runningMessageHooks?: RunningMessageHooks,
-  /** Playbook chosen by the workflow router; defaults to the mode's own hint. */
-  hintOverride?: string,
-): Promise<void> {
-  const previousSuffix = getSystemPromptSuffix()
-  const hint = hintOverride ?? buildWorkflowHint(mode, { cwd, userPrompt })
-  setSystemPromptSuffix(previousSuffix ? `${previousSuffix}\n\n${hint}` : hint)
-
-  const suggestedEffort = WORKFLOW_EFFORT[mode]
-  const appliedEffort = suggestedEffort && !(await userPinnedEffort(cwd)) ? suggestedEffort : undefined
-  if (appliedEffort) switchEffort(appliedEffort)
-
-  const msgIndexBefore = getMessages().length
-
-  try {
-    await handleTurn(
-      userPrompt,
-      locale,
-      hud,
-      cwd,
-      permissionMode,
-      viewport,
-      onWorkspaceSwitchRequest,
-      runningMessageHooks,
-    )
-  } finally {
-    // Walk new tool messages to find files written, compute common output dir.
-    const newMessages = getMessages().slice(msgIndexBefore)
-    const writePaths: string[] = []
-    for (const msg of newMessages) {
-      if ((msg as { role?: string }).role !== 'tool') continue
-      const name = (msg as { name?: string }).name
-      if (name !== 'write_file' && name !== 'replace_in_file' && name !== 'insert_in_file') continue
-      try {
-        const parsed = JSON.parse((msg as { content: string }).content) as {
-          ok?: boolean
-          action?: { path?: string }
-        }
-        if (parsed.ok && parsed.action?.path) writePaths.push(parsed.action.path)
-      } catch {
-        /* ignore unparseable tool result */
-      }
-    }
-    let outputDir: string | undefined
-    if (writePaths.length > 0) {
-      const dirs = writePaths.map((p) => path.dirname(p))
-      let common = dirs[0]!
-      for (const d of dirs.slice(1)) {
-        while (!d.startsWith(common + path.sep) && d !== common) {
-          common = path.dirname(common)
-          if (common === path.dirname(common)) break
-        }
-      }
-      outputDir = common
-    }
-
-    // Restore suffix to baseline + append a completion note so subsequent
-    // free-form turns know where the workflow's output lives.
-    setSystemPromptSuffix(previousSuffix + buildWorkflowCompletionNote(mode, outputDir))
-    // Drop the workflow's temporary effort bump; free-form turns go back to
-    // the user's own setting (API default when they never pinned one).
-    if (appliedEffort) switchEffort(undefined)
-  }
-}
-
-
 async function saveSession(
   store: SessionStore,
   session: SessionRecord | null,
@@ -5153,7 +5037,7 @@ function renderHelp(locale: UiLocale): string {
 
   const commands = [
     `${t('直接描述任务：Artemis 按任务和复杂度自动选择工作流（直接处理 / 深度规划 / 并行分工 / 多方案对比 / 设计 / Saga 长视频）', 'Just describe the task: Artemis picks the workflow from the task and its complexity (direct / plan / team / compare / design / Saga long video)')}`,
-    `/saga <故事>       ${t('Saga 长视频（明确要长视频时也会自动进入）', 'Saga long video (also starts automatically for a clear long-video request)')}`,
+    `/saga <故事>       ${t('直接进入 Saga 长视频（明确要长视频时也会先询问是否使用）', 'Start Saga long video now (a clear long-video request is also offered it, with a yes/no question)')}`,
     `/nidhogg <任务>    ${t('adversarial hardening / iterative convergence（slow）', 'adversarial hardening / iterative convergence (slow)')}`,
     `/bifrost           ${t('dual-model：exec + brain', 'dual-model: exec + brain')}`,
     `/run <任务>        ${t('后台执行 background workflow', 'background workflow')}`,
