@@ -250,11 +250,16 @@ const SPEAKER_LINE_RE = new RegExp(
   `(?:^|\\n|(?<=[。！？!?]))[ \\t]*[*_]*(?<name>${SPEAKER_NAME_SOURCE})[*_]*[ \\t]*[:：][ \\t]*(?:[（(][^）)\\n]{0,60}[）)][ \\t]*)?${QUOTED_LINE_SOURCE}`,
   'gu',
 );
-const EN_SPEECH_VERBS = 'says|said|asks|asked|whispers|whispered|shouts|shouted|replies|replied|yells|yelled|murmurs|murmured|mutters|muttered|calls|called|cries|cried|answers|answered|sings|sang';
+// "calls" and "sings" are left out: 'He calls "the Red Room" home', 'She sings "Moon River"'.
+const EN_SPEECH_VERBS = 'says|said|asks|asked|whispers|whispered|shouts|shouted|replies|replied|yells|yelled|murmurs|murmured|mutters|muttered|cries|cried|answers|answered';
+// People a speech verb can follow as "the …" ("The old man asks"); "the
+// report / newspaper / radio / clock says" is not a speaker.
+const PERSON_NOUN_SOURCE = '(?:(?:old|young|little|tired|elderly|other)[ \\t]+)?(?:man|woman|men|women|girl|boy|child|kid|mother|father|mom|dad|mum|wife|husband|son|daughter|brother|sister|grandmother|grandfather|grandma|grandpa|teacher|officer|narrator|stranger|guard|soldier|doctor|nurse|host|hostess|driver|waiter|waitress|detective|captain|lady|gentleman|friend|neighbou?r|priest|boss|girlfriend|boyfriend|student|clerk|announcer|reporter|anchor|stewardess|pilot|chef|cop|nun|monk|king|queen|prince|princess|lead|hero|heroine|protagonist)';
 // "Elias says: “…”", "Lin Xia whispers “…”", "the old man asks: “…”". Case-
-// sensitive, so a name is one to three capitalised words.
+// sensitive, so a name is one to three capitalised words, not after "the" /
+// "a" ("The Bible says" is a book).
 const EN_SPEAKER_VERB_RE = new RegExp(
-  `(?<![\\p{L}])(?<name>[Ss]he|[Hh]e|[Tt]hey|[A-Z][\\p{Ll}'’-]+(?:[ \\t]+[A-Z][\\p{Ll}'’-]+){0,2}|(?:[Tt]he|[Aa]n?)[ \\t]+(?:\\p{Ll}+[ \\t]+)?\\p{Ll}+)[ \\t]+(?:${EN_SPEECH_VERBS})(?:[ \\t]+(?:softly|quietly|loudly|gently|firmly|coldly))?[ \\t]*[:,]?[ \\t]*(?:\\([^)\\n]{0,40}\\)[ \\t]*)?${QUOTED_LINE_SOURCE}`,
+  `(?<![\\p{L}])(?<name>[Ss]he|[Hh]e|[Tt]hey|(?<!\\b(?:[Tt]he|[Aa]n?)[ \\t]+)(?!(?:The|An?)\\b)[A-Z][\\p{Ll}'’-]+(?:[ \\t]+[A-Z][\\p{Ll}'’-]+){0,2}|(?:[Tt]he|[Aa]n?|[Hh]is|[Hh]er|[Tt]heir|[Mm]y|[Oo]ur)[ \\t]+${PERSON_NOUN_SOURCE})[ \\t]+(?:${EN_SPEECH_VERBS})(?:[ \\t]+(?:softly|quietly|loudly|gently|firmly|coldly))?[ \\t]*[:,]?[ \\t]*(?:\\([^)\\n]{0,40}\\)[ \\t]*)?${QUOTED_LINE_SOURCE}`,
   'gu',
 );
 // "“Just Elias,” he says." — the speaker after the line.
@@ -269,7 +274,7 @@ const ZH_SPEAKER_VERB_RE = new RegExp(
   'gu',
 );
 // Words that end in a speech verb but name something else: "小说“…”", "呐喊“…”".
-const NOT_SPEECH_VERB_RE = /(?:小|传|听|据|解|学|演|游|劝|胡|评)说|(?:疑|顾|学|访|提|质)问|呐喊|回答[题案]/u;
+const NOT_SPEECH_VERB_RE = /(?:小|传|听|据|解|学|演|游|劝|胡|评)说|(?:疑|顾|学|访|提|质)问|呐喊|回答[题案]|俗话|常言|老话|古人|报告|新闻|报纸|数据|文件|广告|标语|海报|通知|公告|书上|网上|大家都|人们常|人们都|有人说/u;
 // Text shown on screen is never speech: "招牌写着：“老火锅。”", "the sign says".
 const DISPLAY_TEXT_RE = /写着|写道|写了|印着|显示|标着|刻着|贴着|打着|亮着|招牌|标题|字幕|歌词|屏幕上|\b(?:sign|signs|screen|caption|poster|banner|title|card|label|text|board|billboard|note|headline|plaque|display|message|letter|page|menu|notice|graffiti|tattoo|song|lyrics?)\b|\breads?\b/iu;
 
@@ -321,7 +326,7 @@ export function extractSagaDialogueLines(text: string, options: { knownSpeakers?
   }
   for (const match of text.matchAll(SPEAKER_LINE_RE)) {
     const name = match.groups?.name?.trim() ?? '';
-    if (!isSpeakerName(name) || DISPLAY_TEXT_RE.test(name) || new RegExp(`^(?:${DIALOGUE_MARKER_SOURCE})$`, 'iu').test(name)) continue;
+    if (!isSpeakerName(name) || DISPLAY_TEXT_RE.test(name) || NOT_SPEECH_VERB_RE.test(name) || new RegExp(`^(?:${DIALOGUE_MARKER_SOURCE})$`, 'iu').test(name)) continue;
     // A label ("参考：“Parts Unknown”") is not a speaker: the name must be a
     // known character, or the quote a sentence.
     const quoted = quotedLineOf(match.groups) ?? '';

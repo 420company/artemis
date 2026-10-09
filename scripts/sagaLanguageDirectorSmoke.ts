@@ -194,6 +194,27 @@ async function main(): Promise<void> {
     ['招牌写着："老火锅。"', []],
     ['他读过的小说“边城”。', []],
     ['霓虹街道“不夜城”', []],
+    // Not people, or not speech (round-4 review).
+    ['The report says: "Revenue up 20%."', []],
+    ['The label on the jar says "POISON."', []],
+    ['The newspaper says: "WAR IS OVER."', []],
+    ['The Bible says: "Love thy neighbour."', []],
+    ['He calls "the Red Room" home.', []],
+    ['She sings "Moon River" softly.', []],
+    ['The radio says "Storm warning tonight."', []],
+    ['The clock says "3 AM."', []],
+    ['The forecast says "rain".', []],
+    ['俗话说“好事多磨。”', []],
+    ['大家都说“这里闹鬼。”', []],
+    ['报告说：“营收增长。”', []],
+    ['新闻说：“台风来了。”', []],
+    ['数据显示：“增长了百分之二十。”', []],
+    ['他说明了“项目进度”。', []],
+    ['他说着走进了房间，墙上贴着“福”字。', []],
+    ['他把这里叫做“鬼楼”。', []],
+    ['镜头说明：“慢推”', []],
+    ['The tired soldier says: "We made it."', ['We made it.']],
+    ['His mother asks: "Are you hungry?"', ['Are you hungry?']],
   ];
   for (const [text, expected, use] of cases) {
     const found = extractSagaDialogueLines(text);
