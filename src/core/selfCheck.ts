@@ -79,6 +79,7 @@ import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import {
   classifyRunnerCommand,
+  isRunnerSegment,
   judgeRunnerResult,
   replyClaimsChecksPass,
   replyDisclosesProblem,
@@ -344,22 +345,6 @@ const SAFE_PM_FLAGS = new Set(['--silent', '-s', '--quiet', '-q'])
 
 const MAX_SCRIPT_DEPTH = 3
 
-/** npm/pnpm/yarn/bun calls inside a script body: `npm run lint`, `pnpm test`, `yarn build`. */
-function nestedScriptCalls(body: string): Array<{ head: string; words: string[] } | 'unsafe'> {
-  const calls: Array<{ head: string; words: string[] } | 'unsafe'> = []
-  for (const segment of splitShellSegments(body)) {
-    const words = segment.text.trim().split(/\s+/).filter(Boolean)
-    const at = words.findIndex((word) => ['npm', 'pnpm', 'yarn', 'bun', 'npx', 'bunx'].includes(word))
-    if (at < 0) continue
-    if (at > 0 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) {
-      // A package manager behind a wrapper (xargs npm …, cross-env npm …): not screened.
-      if (!['cross-env', 'dotenv'].includes(words[0]!)) calls.push('unsafe')
-    }
-    calls.push({ head: words[at]!, words: words.slice(at) })
-  }
-  return calls
-}
-
 /** The script name a package-manager invocation runs, null when it runs none we can screen. */
 function scriptNameOf(head: string, words: string[]): string | null | undefined {
   const args = words.slice(1)
@@ -380,10 +365,13 @@ function scriptNameOf(head: string, words: string[]): string | null | undefined 
 /**
  * Everything a package script runs: pre<name>, <name>, post<name>, and
  * the same for every npm/pnpm/yarn/bun script it calls, to MAX_SCRIPT_DEPTH.
- * null when a script is missing, too deep, calls a tool we cannot screen,
- * or has a non-check side effect.
+ * An allowlist: every body (hooks included) must be recognised check
+ * runners (jest, vitest, node --test, tsc, eslint, pytest, …) or calls to
+ * scripts that are themselves all runners, joined only by `&&`. Anything
+ * else — a coverage upload, `node scripts/report.js`, a pipe — refuses the
+ * re-run; so do side effects and directory switches. null when refused.
  */
-function scriptClosure(name: string, scripts: Record<string, unknown>, depth: number, seen: Set<string>): string[] | null {
+function scriptClosure(name: string, scripts: Record<string, unknown>, dir: string, depth: number, seen: Set<string>): string[] | null {
   if (depth > MAX_SCRIPT_DEPTH) return null
   if (seen.has(name)) return []
   seen.add(name)
@@ -395,14 +383,26 @@ function scriptClosure(name: string, scripts: Record<string, unknown>, depth: nu
     if (SCRIPT_SIDE_EFFECT_RE.test(body) || MUTATING_FLAG_RE.test(body) || INSTALL_COMMAND_RE.test(body) || LONG_RUNNING_RE.test(body)) return null
     if (/\bcd\s|--prefix|--dir\b|\s-C\s|--cwd|--filter|--workspace/.test(body)) return null
     out.push(`${key}=${body}`)
-    for (const call of nestedScriptCalls(body)) {
-      if (call === 'unsafe') return null
-      const nested = scriptNameOf(call.head, call.words)
-      if (nested === null) return null
-      if (nested === undefined) continue
-      const inner = scriptClosure(nested, scripts, depth + 1, seen)
-      if (!inner) return null
-      out.push(...inner)
+    const segments = splitShellSegments(body)
+    if (segments.some((segment, index) => segment.next !== (index === segments.length - 1 ? 'end' : '&&'))) return null
+    for (const segment of segments) {
+      const words = segment.text.trim().split(/\s+/).filter(Boolean)
+      while (words[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])) words.shift()
+      if (words.length === 0) return null
+      if (['npm', 'pnpm', 'yarn', 'bun'].includes(words[0]!)) {
+        const nested = scriptNameOf(words[0]!, words)
+        if (nested === null) return null
+        if (nested === undefined) {
+          if (!isRunnerSegment(words.join(' '), { cwd: dir })) return null
+          continue
+        }
+        const inner = scriptClosure(nested, scripts, dir, depth + 1, seen)
+        if (!inner) return null
+        out.push(...inner)
+        continue
+      }
+      // A direct tool: only a recognised check runner.
+      if (!isRunnerSegment(words.join(' '), { cwd: dir })) return null
     }
   }
   return out
@@ -427,7 +427,7 @@ function scriptBodyFor(runner: string, dir: string): string | null | undefined {
     } catch {
       return null
     }
-    const closure = scriptClosure(name, scripts, 0, new Set())
+    const closure = scriptClosure(name, scripts, dir, 0, new Set())
     return closure ? closure.join('\n') : null
   }
   if (head === 'make' || head === 'gmake') {
