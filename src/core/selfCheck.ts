@@ -23,18 +23,24 @@
  *
  * What it checks:
  *   - code: it never runs a command the agent did not choose. When the
- *     agent ran a test/build/lint check in this run (or earlier in the
- *     session) but not after its last edit, that exact command runs once
- *     more (harmless output pipes such as `2>&1 | tail -30` removed), from
- *     the directory it ran in, with CI=true, through the normal tool path
- *     (permissions, sandbox, a hard time cap); the run's working directory
- *     is restored afterwards. When the agent never ran a check, nothing
- *     runs: a reply claiming that tests passed is corrected, and the
- *     correction names the project's check as text. "Don't run anything"
- *     in the request skips every command. A real failure after the agent's
- *     own edits gets one fix turn and one re-run; a check that already
- *     failed before the first edit (pre-existing) does not, and neither do
- *     environment failures (missing tools or dependencies, network).
+ *     agent ran a test/build/lint check in THIS run but not after its last
+ *     edit, and that command is a single bare runner statement (optionally
+ *     `cd <dir> &&`, harmless output pipes such as `2>&1 | tail -30`
+ *     dropped; no other compound, redirect, env change, wrapper or
+ *     mutating flag such as -u/--fix/--write) whose package script or make
+ *     target is unchanged since it ran (parseBareCheck), it runs once more,
+ *     from the directory it ran in, with CI=true, through the normal tool
+ *     path (permissions, sandbox, a hard time cap); the run's working
+ *     directory is restored afterwards. Nothing from earlier tasks is ever
+ *     re-run. When the agent never ran such a check, nothing runs: a reply
+ *     claiming that tests passed is corrected, and the correction names the
+ *     project's check as text. "Don't run anything" / "skip the tests" /
+ *     "不用跑" in the request skips every command. A real failure after the
+ *     agent's own edits gets one fix turn and one re-run; a failure that
+ *     was already there before the first edit, with the same failing tests
+ *     and none of the edited files involved, does not (a test the agent
+ *     was asked to make pass does), and neither do environment failures
+ *     (missing tools or dependencies, network).
  *   - images: an explicitly requested aspect ratio or orientation ("9:16",
  *     "竖版", "portrait orientation") is read from the file header; a
  *     vision-capable model judges key subjects and requested text once. A
@@ -42,17 +48,19 @@
  *   - video/audio: metadata only (ffprobe): duration, aspect ratio, audio
  *     track. A mismatch is reported, never regenerated (cost).
  *   - the reply: an explicit claim that checks passed which the evidence
- *     contradicts is corrected by the agent (one no-tool turn) or, past the
- *     budget, by a short line. A reply that discloses a failure anywhere is
- *     not an overclaim.
+ *     contradicts is always corrected — by the fix turn, the agent (one
+ *     no-tool turn) or, past the budget, a short line — whatever else the
+ *     reply says. A reply that discloses a present failure ("still fails",
+ *     "2 failing", "未通过", "没跑") and claims no pass is left alone.
  *
  * Bounds: at most one check pass, one fix turn and SELF_CHECK_MAX_MODEL_CALLS
  * extra model calls (vision judge included) per run, and a wall-time cap
  * (default 4 min) that aborts an in-flight self-check turn. The fix turn
  * may make at most SELF_CHECK_FIX_MAX_TOOL_CALLS tool calls in at most
- * SELF_CHECK_FIX_MAX_ROUNDS rounds: file reads and edits, check commands
- * (no installs, no background), one image regeneration when the image was
- * wrong; never sub-agents or video. The instructions travel in the unsaved
+ * SELF_CHECK_FIX_MAX_ROUNDS rounds: file reads and edits, the same check
+ * or read-only inspection commands (cat, ls, grep, git diff/status), one
+ * image regeneration when the image was wrong and enough time is left;
+ * never installs, commits, pushes, deletes, sub-agents or video. The instructions travel in the unsaved
  * per-run runtime context — never the system prompt, never the stored
  * history — so the prompt cache prefix stays put.
  *
@@ -66,6 +74,7 @@ import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { open, rm } from 'node:fs/promises'
 import { promisify } from 'node:util'
+import { createHash } from 'node:crypto'
 import {
   classifyRunnerCommand,
   judgeRunnerResult,
@@ -196,12 +205,34 @@ export const INSTALL_COMMAND_RE =
 const LONG_RUNNING_RE = /--watch\b(?!All=false|=false)|\bwatch\b|\b(?:dev|serve|start|preview)\b/i
 /** "Don't run anything", "execute nothing", "不要运行": no command at all. */
 const NO_RUN_REQUEST_RE =
-  /\b(?:do\s+not|don'?t|never|without)\s+(?:run(?:ning)?|execut(?:e|ing))\b|\b(?:execute|run)\s+nothing\b|\bno\s+(?:commands?|execution)\b|\buntrusted\b|不要(?:运行|执行|跑)|别(?:运行|执行|跑)|不许(?:运行|执行)|禁止(?:运行|执行)|不(?:能|可以|要)(?:运行|执行)任何|不可信|不受信任/i
+  /\b(?:do\s+not|don'?t|never|without)\s+(?:run(?:ning)?|execut(?:e|ing)|test(?:ing)?)\b|\b(?:execute|run)\s+nothing\b|\bno\s+(?:commands?|execution)\b|\bno\s+need\s+to\s+(?:run|test|execute)\b|\bskip\s+(?:the\s+|running\s+(?:the\s+)?)?(?:tests?|checks?|build|ci)\b|\buntrusted\b|不要(?:运行|执行|跑)|别(?:运行|执行|跑)|不用(?:运行|执行|跑)|无需(?:运行|执行|跑)|不需要(?:运行|执行|跑)|不许(?:运行|执行)|禁止(?:运行|执行)|不(?:能|可以|要)(?:运行|执行)任何|别动\s*CI|不要动\s*CI|不可信|不受信任/i
 
-/** The request forbids running commands. */
+/** The request forbids running commands ("execute nothing", "skip the tests", "不用跑", "别动 CI"). */
 export function requestForbidsCommands(request: string): boolean {
-  return NO_RUN_REQUEST_RE.test(request.slice(0, 8000))
+  const text = request.slice(0, 8000).replace(/[\u2018\u2019\u201B\u2032]/g, "'").replace(/[\u201C\u201D\u2033]/g, '"')
+  return NO_RUN_REQUEST_RE.test(text)
 }
+
+/** Read-only inspection a fix turn may run: cat, ls, grep, git diff/status/log/show… — no writes, no redirects into files. */
+export function isReadOnlyInspection(command: string): boolean {
+  const text = command.trim()
+  if (!text || /`|\$\(|<\(|>\(/.test(text)) return false
+  if (/(?:^|[^0-9&])>{1,2}(?!&)/.test(text.replace(/\d?>\s*\/dev\/null|2>&1/g, ''))) return false
+  return splitShellSegments(text).every((segment, index, all) => {
+    // Only pipes join read-only commands.
+    if (index < all.length - 1 && segment.next !== '|') return false
+    const words = segment.text.trim().split(/\s+/)
+    const head = words[0] ?? ''
+    if (['cat', 'ls', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'tree', 'pwd', 'stat', 'file', 'diff', 'sort', 'uniq', 'cut', 'nl', 'less', 'echo'].includes(head)) return true
+    if (head === 'sed') return words[1] === '-n' && !words.some((word) => /^-i/.test(word))
+    if (head === 'find') return !words.some((word) => ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fls'].includes(word))
+    if (head === 'git') return ['diff', 'status', 'log', 'show', 'blame', 'ls-files', 'grep', 'rev-parse'].includes(words[1] ?? '')
+    return false
+  })
+}
+
+/** A generation of this kind is not started with less self-check time left. */
+const MIN_IMAGE_GENERATION_MS = 90_000
 
 export interface SelfCheckStep {
   seq: number
@@ -227,6 +258,8 @@ export interface SelfCheckStep {
   output?: string
   /** Run by the self-check itself. */
   bySelfCheck?: boolean
+  /** The agent's command as a re-runnable bare check, with its script fingerprint when it ran. */
+  check?: BareCheck
 }
 
 export interface SelfCheckRecordInput {
@@ -285,49 +318,133 @@ export function normalizeCheckCommand(command: string): string {
   return out
 }
 
-/** The package-script body a command runs (`npm test`, `cd app && npm run lint`), when it runs one. */
-function scriptBody(command: string, cwd: string): string | undefined {
-  const match = command.match(/^\s*(?:cd\s+(["']?)([^"'\s]+)\1\s*&&\s*)?(?:npm|pnpm|yarn|bun)\s+(?:run(?:-script)?\s+)?([\w:.-]+)/)
-  if (!match) return undefined
-  const dir = match[2] ? path.resolve(cwd, match[2]) : cwd
-  const name = match[3] === 't' || match[3] === 'tst' ? 'test' : match[3]!
-  try {
-    const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }
-    const body = pkg.scripts?.[name]
-    return typeof body === 'string' ? body : undefined
-  } catch {
-    return undefined
-  }
+/** Flags that make a check change files or keep running: snapshot updates, auto-fixes, writes, watch mode. */
+const MUTATING_FLAG_RE =
+  /(?:^|\s)(?:-u|--update-?snapshots?|--updateSnapshot|--snapshot-update|--fix(?:=\S*)?|--fix-dry-run=false|--write|--ci=false|-w|--watch(?!All=false)\S*|--bless|--accept|--overwrite)(?=\s|$)/i
+/** Words that make a statement more than a bare runner (wrappers, env changes). */
+const WRAPPER_WORDS = new Set(['sudo', 'env', 'nohup', 'exec', 'time', 'nice', 'command', 'timeout', 'xargs', 'eval', 'source', '.'])
+
+/** A check the agent ran that the self-check may run again, as it ran it. */
+export interface BareCheck {
+  /** As the agent ran it, output pipes removed: `npm test`, `cd app && npm test`. */
+  command: string
+  /** The `cd <dir> &&` prefix's directory, when there is one. */
+  dir?: string
+  /** The single runner statement. */
+  runner: string
+  /** Hash of what the runner's script runs (package.json script, Makefile target); '' when it runs a tool directly. */
+  fingerprint: string
 }
 
-/** One shell statement: the CI=true prefix applies to the whole command. */
-function isSimpleCommand(command: string): boolean {
-  return splitShellSegments(command).length === 1
+function hashText(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16)
 }
 
 /**
- * The command a self-check may re-run: an agent-chosen check, its output
- * pipes removed, still a real check with its exit status intact; never a
- * watcher, server or install, and never a script that only works in watch
- * mode.
+ * What a package-script or make runner executes: the script body or the
+ * target's recipe; null when the script or target does not exist;
+ * undefined when the runner calls a tool directly (pytest, cargo test, tsc).
  */
-export function reusableCheckCommand(command: string, cwd: string): string | undefined {
-  const normalized = normalizeCheckCommand(command)
-  if (!normalized || INSTALL_COMMAND_RE.test(normalized) || LONG_RUNNING_RE.test(normalized)) return undefined
-  const info = classifyRunnerCommand(normalized, { cwd })
-  if (!info.runner || !info.statusPreserved) return undefined
-  const body = scriptBody(normalized, cwd)
-  if (body !== undefined) {
-    if (LONG_RUNNING_RE.test(body) || INSTALL_COMMAND_RE.test(body)) return undefined
-    // react-scripts test watches unless CI is set or --watchAll=false.
-    if (/\breact-scripts\s+test\b/.test(body) && !/--watchAll=false|\bCI=/.test(body) && !isSimpleCommand(normalized)) return undefined
+function scriptBodyFor(runner: string, dir: string): string | null | undefined {
+  const words = runner.split(/\s+/)
+  const head = words[0] ?? ''
+  if (['npm', 'pnpm', 'yarn', 'bun'].includes(head)) {
+    const positional = words.slice(1).filter((word) => !word.startsWith('-'))
+    let name = positional[0]
+    if (!name) return null
+    if (name === 'run' || name === 'run-script') name = positional[1]
+    else if (head === 'bun' && name === 'test') return undefined // bun's own runner
+    else if (head === 'npm' && !['test', 't', 'tst'].includes(name)) return null
+    if (!name) return null
+    if (name === 't' || name === 'tst') name = 'test'
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }
+      const body = pkg.scripts?.[name]
+      return typeof body === 'string' ? body : null
+    } catch {
+      return null
+    }
   }
-  return normalized
+  if (head === 'make' || head === 'gmake') {
+    const target = words.slice(1).find((word) => !word.startsWith('-') && !word.includes('='))
+    if (!target) return null
+    for (const name of ['GNUmakefile', 'makefile', 'Makefile']) {
+      let text: string
+      try {
+        text = readFileSync(path.join(dir, name), 'utf8')
+      } catch {
+        continue
+      }
+      const lines = text.split(/\r?\n/)
+      const start = lines.findIndex((line) => new RegExp(`^${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:(?!=)`).test(line))
+      if (start < 0) return null
+      const recipe = [lines[start]!]
+      for (const line of lines.slice(start + 1)) {
+        if (!line.startsWith('\t') && line.trim() !== '') break
+        recipe.push(line)
+      }
+      return recipe.join('\n')
+    }
+    return null
+  }
+  return undefined
 }
 
-/** How the self-check runs a reused check: with CI=true when it is one statement. */
-export function selfCheckRunCommand(command: string): string {
-  return isSimpleCommand(command) && !/^\s*CI=/.test(command) ? `CI=true ${command}` : command
+/**
+ * The check the self-check may run again: a command the agent ran, that is
+ * a single bare runner statement (optionally after `cd <dir> &&`, optionally
+ * with harmless output pipes, which are dropped). Not: other compounds,
+ * redirects, subshells, substitutions, env assignments or wrappers;
+ * installs, watchers, servers; flags that update snapshots, fix or write
+ * files; scripts or make targets that do any of these or do not exist.
+ */
+export function parseBareCheck(command: string, cwd: string): BareCheck | undefined {
+  const normalized = normalizeCheckCommand(command)
+  let dir: string | undefined
+  let runner = normalized
+  const cd = normalized.match(/^cd\s+(?:"([^"$`\\]+)"|'([^']+)'|([^\s"';&|<>()`$\\]+))\s*&&\s*([\s\S]+)$/)
+  if (cd) {
+    dir = cd[1] ?? cd[2] ?? cd[3]
+    runner = cd[4]!.trim()
+  }
+  if (!runner || /[;&|<>()`$\\\n'"]/.test(runner)) return undefined
+  const words = runner.split(/\s+/)
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!) || WRAPPER_WORDS.has(words[0]!)) return undefined
+  if (MUTATING_FLAG_RE.test(runner) || INSTALL_COMMAND_RE.test(runner) || LONG_RUNNING_RE.test(runner)) return undefined
+  const execDir = dir ? path.resolve(cwd, dir) : cwd
+  const info = classifyRunnerCommand(runner, { cwd: execDir })
+  if (!info.runner || !info.statusPreserved) return undefined
+  const body = scriptBodyFor(runner, execDir)
+  if (body === null) return undefined
+  if (body !== undefined && (MUTATING_FLAG_RE.test(body) || INSTALL_COMMAND_RE.test(body) || LONG_RUNNING_RE.test(body))) return undefined
+  return {
+    command: dir ? `cd ${shellQuote(dir)} && ${runner}` : runner,
+    ...(dir ? { dir } : {}),
+    runner,
+    fingerprint: body ? hashText(body) : '',
+  }
+}
+
+/** How the self-check runs a re-used check: the runner with CI=true, after its `cd`. */
+export function selfCheckRunCommand(check: Pick<BareCheck, 'dir' | 'runner'>): string {
+  return check.dir ? `cd ${shellQuote(check.dir)} && CI=true ${check.runner}` : `CI=true ${check.runner}`
+}
+
+/** What a failure looks like: the failing test names, else its first error line. */
+export function failureSignature(output: string): string {
+  const names = new Set<string>()
+  for (const line of output.replace(/\r/g, '').split('\n')) {
+    const match = line.match(/^\s*not ok \d+ - (.+?)\s*(?:#.*)?$/) ??
+      line.match(/^FAILED\s+(\S+)/) ??
+      line.match(/^\s*(?:✕|×|✗)\s+(.+?)(?:\s+\(\d+\s*m?s\))?\s*$/) ??
+      line.match(/^\s*●\s+(.+?)\s*$/) ??
+      line.match(/^--- FAIL: (\S+)/) ??
+      line.match(/^test (\S+) \.\.\. FAILED/)
+    if (match?.[1]) names.add(match[1].trim())
+  }
+  if (names.size > 0) return [...names].sort().join('\n')
+  const first = output.split('\n').find((line) => /\berror\b|\bfail/i.test(line) && !/^\s*(?:command|exit_code|cwd):/.test(line))
+  return first?.trim() ?? ''
 }
 
 /** Collects one run's tool calls for the end-of-run self-check. */
@@ -371,6 +488,10 @@ export class SelfCheckTracker {
     }
     if (input.command) {
       step.command = input.command
+      if (!input.bySelfCheck) {
+        const check = parseBareCheck(input.command, cwd)
+        if (check) step.check = check
+      }
       const unavailable = checkUnavailableReason(input.command, input.ok, output, input.errorCode)
       const verdict = unavailable ? undefined : judgeRunnerResult(input.command, input.ok, output, { cwd })
       if (unavailable && classifyRunnerCommand(normalizeCheckCommand(input.command), { cwd }).runner) step.unavailable = true
@@ -438,6 +559,14 @@ export interface SelfCheckGate {
   audios: string[]
   /** A media tool failed and the file was not produced some other way. */
   failedMedia?: SelfCheckStep
+}
+
+function fileExistsDir(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function fileExists(file: string): boolean {
@@ -885,7 +1014,10 @@ export class SelfCheckFixPolicy {
 
   constructor(
     private readonly allowImage: boolean,
+    /** Time left for the self-check: caps commands, and an image regeneration needs MIN_IMAGE_GENERATION_MS. */
     private readonly commandTimeoutMs: () => number,
+    /** The bare check the fix turn may run again (see parseBareCheck). */
+    private readonly check?: BareCheck,
   ) {}
 
   /** undefined when the call may run (its arguments may be tightened in place); otherwise the refusal. */
@@ -896,6 +1028,7 @@ export class SelfCheckFixPolicy {
     if (tool === 'generate_image') {
       if (!this.allowImage) return refuse('no image regeneration was asked for')
       if (this.images >= 1) return refuse('only one image regeneration is allowed')
+      if (this.commandTimeoutMs() < MIN_IMAGE_GENERATION_MS) return refuse('too little self-check time is left for an image generation')
       if (args.runInBackground === true) args.runInBackground = false
       this.images += 1
     } else if (tool === 'run_command') {
@@ -903,6 +1036,12 @@ export class SelfCheckFixPolicy {
       if (INSTALL_COMMAND_RE.test(command)) return refuse('installing packages is not allowed')
       if (args.background === true) return refuse('background commands are not allowed')
       if (LONG_RUNNING_RE.test(command)) return refuse('watchers and servers are not allowed')
+      // Only the same check again, or read-only inspection; never git push/commit, publish, rm, curl, deploy…
+      const asCheck = normalizeCheckCommand(command).replace(/(^|&&\s*)CI=true\s+/, '$1')
+      const sameCheck = Boolean(this.check && (asCheck === this.check.command || asCheck === this.check.runner))
+      if (!sameCheck && !isReadOnlyInspection(command)) {
+        return refuse(this.check ? `only \`${this.check.command}\` or read-only inspection (cat, ls, grep, git diff/status) may run` : 'only read-only inspection (cat, ls, grep, git diff/status) may run')
+      }
       const cap = Math.max(5_000, this.commandTimeoutMs())
       const asked = Number(args.timeoutMs)
       args.timeoutMs = Number.isFinite(asked) && asked > 0 ? Math.min(asked, cap) : cap
@@ -963,8 +1102,6 @@ export interface SelfCheckRunInput {
   /** The user's own request (a workflow wrapper is cut off). */
   userRequest: string
   language: 'zh' | 'en'
-  /** Check commands the agent ran earlier in this session (oldest first), for re-use. */
-  sessionCheckCommands?: string[]
   now?: () => number
 }
 
@@ -985,6 +1122,9 @@ export class SelfCheckRun {
   /** The agent's check (normalized) and where it ran. */
   private command?: string
   private commandCwd?: string
+  /** The bare check the self-check may run (see parseBareCheck). */
+  private check?: BareCheck
+  private lastFailureOutput = ''
   private codeStatus: 'none' | 'pass' | 'fail' | 'unchecked' | 'unavailable' = 'none'
   /** No source change: only an explicit "checks pass" claim is corrected. */
   private readOnlyFailure = false
@@ -1077,27 +1217,38 @@ export class SelfCheckRun {
     }
   }
 
-  /** The agent's own check to re-run (this run first, then earlier in the session), with where it ran. */
-  private reusableCheck(): { command: string; cwd: string; step?: SelfCheckStep } | undefined {
-    const tracker = this.input.tracker
-    const own = tracker.steps.filter((step) => step.command && !step.bySelfCheck && !step.unavailable)
+  /**
+   * The agent's own check from THIS run to run again: the latest bare check
+   * it ran, whose directory still exists and whose script (package.json
+   * script or make target) is unchanged since it ran.
+   */
+  private reusableCheck(): { check: BareCheck; cwd: string } | undefined {
+    const own = this.input.tracker.steps.filter((step) => step.check && !step.bySelfCheck && !step.unavailable)
     for (const step of [...own].reverse()) {
-      const command = reusableCheckCommand(step.command!, step.cwd)
-      if (command) return { command, cwd: step.cwd, step }
-    }
-    for (const earlier of [...(this.input.sessionCheckCommands ?? [])].reverse()) {
-      const command = reusableCheckCommand(earlier, tracker.initialCwd)
-      if (command) return { command, cwd: tracker.initialCwd }
+      if (!fileExistsDir(step.cwd)) continue
+      const now = parseBareCheck(step.check!.command, step.cwd)
+      if (!now || now.command !== step.check!.command || now.fingerprint !== step.check!.fingerprint) continue
+      return { check: now, cwd: step.cwd }
     }
     return undefined
   }
 
-  /** The same check failed before the agent's first edit in this run. */
-  private failedBeforeFirstEdit(command: string, firstEditSeq: number | undefined): boolean {
+  /**
+   * The failure was there before the agent's first edit: the same check
+   * failed then with the same failing tests (or first error line), and none
+   * of the files the agent edited shows up in the failure. A test the agent
+   * was asked to make pass (TDD) therefore still gets the fix turn.
+   */
+  private failedBeforeFirstEdit(command: string, firstEditSeq: number | undefined, failureOutput: string, edited: string[]): boolean {
     if (firstEditSeq === undefined) return false
-    return this.input.tracker.steps.some((step) =>
+    const after = failureSignature(failureOutput)
+    if (!after) return false
+    const before = this.input.tracker.steps.find((step) =>
       !step.bySelfCheck && step.seq < firstEditSeq && step.verdict === 'fail' && step.command &&
-      normalizeCheckCommand(step.command) === command)
+      normalizeCheckCommand(step.command) === command && failureSignature(step.output ?? '') === after)
+    if (!before) return false
+    const stems = edited.map((file) => path.basename(file).replace(/\.[^.]+$/, '')).filter((stem) => stem.length >= 3)
+    return !stems.some((stem) => failureOutput.includes(stem))
   }
 
   private async reviewInner(reply: string, host: SelfCheckHost): Promise<SelfCheckDecision> {
@@ -1114,18 +1265,24 @@ export class SelfCheckRun {
       this.commandCwd = gate.lastCheck.cwd
       this.failureSummary = summarizeCheckFailure(gate.lastCheck.output ?? '')
       this.failureExit = reportedExitCode(gate.lastCheck.output, gate.lastCheck.command)
-      this.preExisting = this.failedBeforeFirstEdit(this.command, gate.firstEditSeq)
+      this.preExisting = this.failedBeforeFirstEdit(this.command, gate.firstEditSeq, gate.lastCheck.output ?? '', gate.changedFiles)
+      // Only a bare check, unchanged since it ran, may be re-run after a fix.
+      const again = gate.lastCheck.check && !requestForbidsCommands(this.input.userRequest)
+        ? parseBareCheck(gate.lastCheck.check.command, gate.lastCheck.cwd)
+        : undefined
+      if (again && again.fingerprint === gate.lastCheck.check!.fingerprint) this.check = again
     } else if (gate.code === 'unchecked') {
       this.codeStatus = 'unchecked'
       const reuse = requestForbidsCommands(this.input.userRequest) ? undefined : this.reusableCheck()
       if (reuse && !host.signal?.aborted && this.timeLeft() >= MIN_COMMAND_MS) {
         this.showProgress(host)
-        this.command = reuse.command
+        this.check = reuse.check
+        this.command = reuse.check.command
         this.commandCwd = reuse.cwd
-        const result = await this.runCheck(reuse.command, reuse.cwd, host)
+        const result = await this.runCheck(host)
         if (result === 'fail') {
           this.failureFoundBySelfCheck = true
-          this.preExisting = this.failedBeforeFirstEdit(reuse.command, gate.firstEditSeq)
+          this.preExisting = this.failedBeforeFirstEdit(reuse.check.command, gate.firstEditSeq, this.lastFailureOutput, gate.changedFiles)
         }
         if (result === 'unavailable') this.codeStatus = 'unavailable'
       } else {
@@ -1162,7 +1319,7 @@ export class SelfCheckRun {
     // A pre-existing failure, or one the agent saw and its reply discloses,
     // was a deliberate stop: no fix turn.
     const codeFixable = this.codeStatus === 'fail' && gate.sourceChanged && !this.readOnlyFailure && !this.preExisting &&
-      (this.failureFoundBySelfCheck || !replyDisclosesProblem(reply))
+      (this.failureFoundBySelfCheck || !replyDisclosesProblem(reply) || replyClaimsChecksPass(reply))
     const imageFixable = this.imageProblems.length > 0
     if ((codeFixable || imageFixable) && this.canCallModel() && !host.signal?.aborted) {
       this.showProgress(host)
@@ -1170,7 +1327,7 @@ export class SelfCheckRun {
       this.phase = 'fix'
       this.fixStartSeq = this.input.tracker.lastSeq
       this.finalTurnPlanned = codeFixable && this.calls < this.input.settings.maxModelCalls
-      this.policy = new SelfCheckFixPolicy(imageFixable, () => Math.min(this.input.settings.commandTimeoutMs, this.timeLeft()))
+      this.policy = new SelfCheckFixPolicy(imageFixable, () => Math.min(this.input.settings.commandTimeoutMs, this.timeLeft()), this.check)
       return { kind: 'turn', tools: true, note: this.fixNote(codeFixable, imageFixable) }
     }
     return this.settle(reply, true)
@@ -1217,8 +1374,8 @@ export class SelfCheckRun {
         if (ownCheck && ownCheck.verdict !== 'unknown') {
           this.applyVerdict(ownCheck.verdict!, ownCheck.output ?? '', ownCheck.command)
           rechecked = true
-        } else if (this.command && !host.signal?.aborted && this.timeLeft() >= MIN_COMMAND_MS) {
-          rechecked = (await this.runCheck(this.command, this.commandCwd, host)) !== 'unavailable'
+        } else if (this.check && !host.signal?.aborted && this.timeLeft() >= MIN_COMMAND_MS) {
+          rechecked = (await this.runCheck(host)) !== 'unavailable'
         }
         if (!rechecked) {
           this.codeStatus = 'unavailable'
@@ -1259,11 +1416,14 @@ export class SelfCheckRun {
     }
   }
 
-  /** Re-runs the agent's check through the host; 'unavailable' when it gave no verdict about the code. */
-  private async runCheck(command: string, cwd: string | undefined, host: SelfCheckHost): Promise<'pass' | 'fail' | 'unavailable'> {
+  /** Re-runs the agent's bare check through the host, from where it ran; 'unavailable' when it gave no verdict about the code. */
+  private async runCheck(host: SelfCheckHost): Promise<'pass' | 'fail' | 'unavailable'> {
+    if (!this.check) return 'unavailable'
+    const cwd = this.commandCwd
     const timeoutMs = Math.max(MIN_COMMAND_MS, Math.min(this.input.settings.commandTimeoutMs, this.timeLeft()))
-    const runAs = selfCheckRunCommand(command)
+    const runAs = selfCheckRunCommand(this.check)
     const result = await host.runCommand(runAs, timeoutMs, cwd)
+    if (!result.ok) this.lastFailureOutput = result.output
     const verdict = checkUnavailableReason(runAs, result.ok, result.output, result.errorCode)
       ? undefined
       : judgeRunnerResult(runAs, result.ok, result.output, { cwd: cwd ?? this.input.tracker.cwd })
@@ -1406,7 +1566,7 @@ export class SelfCheckRun {
       lines.push(`The generated image does not match the user's request: ${this.imageProblems.join('; ')}.`)
     }
     lines.push(
-      `You have exactly ONE turn to fix this: at most ${SELF_CHECK_FIX_MAX_TOOL_CALLS} tool calls, all in this response (several at once are fine). File reads and edits only${image ? ', plus one image regeneration' : ''}; do not install packages, start servers, delegate or generate video — such calls are refused.`,
+      `You have exactly ONE turn to fix this: at most ${SELF_CHECK_FIX_MAX_TOOL_CALLS} tool calls, all in this response (several at once are fine). File reads and edits only${image ? ', plus one image regeneration' : ''}; shell commands only ${this.check ? `\`${this.check.command}\` or ` : ''}read-only inspection (cat, ls, grep, git diff/status). Do not install packages, commit, push, publish, delete, start servers, delegate or generate video — such calls are refused.`,
       code ? 'Fix the cause in the code you changed. If the failure is unrelated to your change (it was failing before) or needs packages installed, change nothing and say so.' : '',
       image ? 'Call generate_image once more with a corrected prompt (fix exactly the problems above; for a wrong aspect ratio set the size/ratio parameter explicitly).' : '',
       code ? 'The runtime re-runs the check after this turn.' : '',

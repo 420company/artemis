@@ -1687,21 +1687,6 @@ function requestNamesWorkspaceArtifact(input: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
-/** Shell commands the agent ran earlier in this session (oldest first), for the self-check to re-use. */
-function earlierCheckCommands(messages: SessionMessage[]): string[] {
-  const commands: string[] = [];
-  for (const message of messages.slice(-400)) {
-    if (message.role !== 'tool' || !message.content.includes('run_command')) continue;
-    try {
-      const parsed = JSON.parse(message.content) as { action?: { type?: string; command?: unknown } };
-      if (parsed.action?.type === 'run_command' && typeof parsed.action.command === 'string') commands.push(parsed.action.command);
-    } catch {
-      /* a spilled or non-JSON tool result */
-    }
-  }
-  return commands.slice(-20);
-}
-
 function isWorkspaceVerificationFollowupAction(action: AgentAction): boolean {
   switch (action.type) {
     case 'list_files':
@@ -6536,7 +6521,6 @@ export async function runAgent(
       tracker: selfCheckTracker,
       userRequest: selfCheckUserRequest(userInput),
       language: contextLanguage,
-      sessionCheckCommands: earlierCheckCommands(session.messages),
     })
     : undefined;
   /** The self-check turn scheduled for the next request, and the one in flight. */

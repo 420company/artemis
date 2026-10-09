@@ -1459,25 +1459,6 @@ async function maybeSwitchWorkspaceForExtraTool(
     return { cwd: resolution.workspacePath };
 }
 
-/** Shell commands the agent ran earlier in this conversation (oldest first), for the self-check to re-use. */
-function earlierCheckCommands(messages: SessionMessage[]): string[] {
-    const commands: string[] = [];
-    for (const message of messages.slice(-400)) {
-        if (message.role !== 'assistant' || !message.toolCalls?.length) continue;
-        for (const call of message.toolCalls) {
-            if (call.name !== 'run_command' && call.name !== 'npm_run') continue;
-            try {
-                const args = JSON.parse(call.arguments || '{}') as { command?: unknown; script?: unknown };
-                if (call.name === 'run_command' && typeof args.command === 'string') commands.push(args.command);
-                if (call.name === 'npm_run') commands.push(`npm run ${typeof args.script === 'string' ? args.script : 'test'}`);
-            } catch {
-                /* malformed arguments */
-            }
-        }
-    }
-    return commands.slice(-20);
-}
-
 // ── Tool execution with permission gate ──────────────────────────────────────
 async function executeTool(name: any, input: any, opts: any) {
     return withRuntimeLogSink(
@@ -2348,7 +2329,6 @@ async function thinkTurn(
             tracker: selfCheckTracker,
             userRequest: input,
             language: contextLanguage,
-            sessionCheckCommands: earlierCheckCommands(history),
         })
         : undefined;
     /** The self-check turn scheduled for the next request, and the one in flight. */
