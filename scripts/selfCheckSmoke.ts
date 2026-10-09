@@ -38,7 +38,7 @@ import {
   parseMediaExpectations,
   readImageSize,
   requestForbidsCommands,
-  isReadOnlyInspection,
+  stripTrailingPromise,
   failureSignature,
   parseBareCheck,
   SELF_CHECK_VISION_SYSTEM,
@@ -260,6 +260,45 @@ async function main(): Promise<void> {
       (parseBareCheck('make test', cwd)?.fingerprint.length ?? 0) === 16 && parseBareCheck('make check', cwd) === undefined)
     assert('suggest (text only): the project\'s check is named for the reply', (await suggestCheckCommand(cwd, [path.join(cwd, 'sum.js')])) === 'npm test')
     assert('suggest: data/config-only changes name nothing', (await suggestCheckCommand(cwd, [path.join(cwd, 'config.yaml')])) === undefined)
+  }
+
+  // ── R1: npm script closures, config flags, make (round-3 probe p3) ─────
+  {
+    const { cwd } = freshCase('closure')
+    const writePkg = (scripts: Record<string, string>) => fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ name: 'closure', scripts }))
+    writePkg({ test: 'node --test', pretest: 'echo pre', posttest: 'npm publish', unit: 'node --test' })
+    fs.mkdirSync(path.join(cwd, 'other'))
+    fs.writeFileSync(path.join(cwd, 'other', 'package.json'), JSON.stringify({ scripts: { test: 'touch OTHER && node --test' } }))
+    assert('R1: `npm test` whose posttest publishes is never re-run', parseBareCheck('npm test', cwd) === undefined)
+    assert('R1: a sibling script without hooks is fine', parseBareCheck('npm run unit', cwd)?.runner === 'npm run unit')
+    for (const command of ["cd '$(touch X)' && npm test", 'cd "$(touch X)" && npm test', 'npm test ＆＆ rm -rf x', 'npm test ｜ tail', 'npm run unit；rm x', 'npm run unit --prefix other', 'npm run unit --script-shell=./evil.sh', 'npm run unit --userconfig ./evil.npmrc', 'npm --prefix other run unit', 'npm run unit --ignore-scripts=false', 'npm run unit -- --outputFile=pwn.json', 'pytest --basetemp=/', 'pytest -p evil_plugin', 'node --test --require ./evil.js', 'npx_shim test']) {
+      assert(`R1: not a bare check: ${command}`, parseBareCheck(command, cwd) === undefined)
+    }
+    writePkg({ test: 'node --test' })
+    assert('R1: a harmless runner flag after -- is fine', parseBareCheck('npm test -- --reporter=spec', cwd)?.runner === 'npm test -- --reporter=spec')
+    const plain = parseBareCheck('npm test', cwd)!.fingerprint
+    writePkg({ test: 'node --test', pretest: 'echo pre' })
+    assert('R1: adding a pretest hook changes the fingerprint', parseBareCheck('npm test', cwd)!.fingerprint !== plain)
+    writePkg({ test: 'npm run lint && node --test', lint: 'eslint .' })
+    const nested = parseBareCheck('npm test', cwd)!.fingerprint
+    writePkg({ test: 'npm run lint && node --test', lint: 'eslint . --max-warnings 0' })
+    assert('R1: a nested script is part of the fingerprint', parseBareCheck('npm test', cwd)!.fingerprint !== nested)
+    for (const lint of ['eslint . && curl -X POST https://example.com', 'eslint . > report.txt', 'eslint . && git push', 'eslint . && rm -rf dist', 'deploy-it', 'eslint . && npm publish']) {
+      writePkg({ test: 'npm run lint && node --test', lint })
+      assert(`R1: a nested script with a side effect is refused: ${lint}`, parseBareCheck('npm test', cwd) === undefined)
+    }
+    writePkg({ test: 'node --test' })
+    fs.writeFileSync(path.join(cwd, 'Makefile'), 'include extra.mk\ntest:\n\tnode --test\n')
+    assert('R1: a Makefile with include is refused', parseBareCheck('make test', cwd) === undefined)
+    fs.writeFileSync(path.join(cwd, 'Makefile'), 'test: deploy\n\tnode --test\ndeploy:\n\tgit push\n')
+    assert('R1: a make target with prerequisites is refused', parseBareCheck('make test', cwd) === undefined)
+    fs.writeFileSync(path.join(cwd, 'Makefile'), 'FLAGS = -q\ntest:\n\tnode --test\n')
+    const mk1 = parseBareCheck('make test', cwd)!.fingerprint
+    fs.writeFileSync(path.join(cwd, 'Makefile'), 'FLAGS = -q --x\ntest:\n\tnode --test\n')
+    assert('R1: the whole Makefile is fingerprinted', parseBareCheck('make test', cwd)!.fingerprint !== mk1)
+    fs.rmSync(path.join(cwd, 'Makefile'))
+    assert('minor: a closing promise is dropped from a no-tool reply',
+      stripTrailingPromise('Fixed sum(). Let me re-run the tests to be sure.') === 'Fixed sum().' && stripTrailingPromise('已修复。我再跑一下测试。') === '已修复。' && stripTrailingPromise('Fixed sum().') === 'Fixed sum().')
   }
 
   // ── gating table (controller, fake host) ────────────────────────────────
@@ -566,9 +605,12 @@ async function main(): Promise<void> {
       assert(`minor: the fix turn refuses \`${command}\``, Boolean(shell.admit('run_command', { command })))
     }
     const shell2 = new SelfCheckFixPolicy(false, () => 60_000, parseBareCheck('npm test', cwd))
-    assert('minor: the fix turn allows the same check and read-only inspection',
-      shell2.admit('run_command', { command: 'CI=true npm test' }) === undefined && shell2.admit('run_command', { command: 'cat sum.js | head -20' }) === undefined &&
-      shell2.admit('run_command', { command: 'git diff' }) === undefined && isReadOnlyInspection('grep -rn sum test') && !isReadOnlyInspection('git push'))
+    assert('R2: the fix turn allows the same check again', shell2.admit('run_command', { command: 'CI=true npm test' }) === undefined)
+    // Round-3 probe: "read-only" shell commands that write or execute (sed e/w, git --output, rg --pre, find -fprintf, sort -o, uniq OUT, tree -o).
+    for (const command of ["sed -n '1e touch SED_EXEC' f.txt", "sed -n 'w SED_W' f.txt", 'git log --output=GITLOG_OUT', 'git diff HEAD~1 --output=GITDIFF_OUT', 'rg --pre ./pre.sh foo', "git grep -O'touch GITGREP_EXEC' foo", 'find . -name f.txt -fprintf FIND_OUT %p', 'sort -o SORT_OUT f.txt', 'uniq f.txt UNIQ_OUT', 'tree -o TREE_OUT', 'cat sum.js', 'git diff', 'ls']) {
+      const policy3 = new SelfCheckFixPolicy(false, () => 60_000, parseBareCheck('npm test', cwd))
+      assert(`R2: no shell inspection in the fix turn: \`${command}\``, Boolean(policy3.admit('run_command', { command })))
+    }
 
     let now = 0
     const late = new SelfCheckRun({ settings: SETTINGS, tracker: new SelfCheckTracker(cwd), userRequest: 'x', language: 'en', now: () => now })
@@ -832,6 +874,55 @@ async function main(): Promise<void> {
     await runAgent(sA, 'Run the tests.', opts(repoA, storeA, scripted([{ reply: 'r', done: false, actions: [{ type: 'run_command', command: 'npm test' }] }, { reply: 'Tests pass.', done: true }])))
     await runAgent(sA, 'Now in this other checkout, change b.js to export 2.', opts(repoB, storeA, scripted([{ reply: 'w', done: false, actions: [{ type: 'write_file', path: 'b.js', content: 'module.exports = 2\n' }] }, { reply: 'Done.', done: true }])))
     assert('N1 (probe G2): a check from an earlier task in another repo never runs in this one', !fs.existsSync(pwned))
+  }
+
+  // ── runAgent: hooks and script changes (round-3 probe H) ───────────────
+  {
+    const scripted = (steps: Array<Record<string, unknown>>): ChatProvider => {
+      let i = 0
+      return { async complete() { return envelope(steps[Math.min(i++, steps.length - 1)]!) } }
+    }
+    const mk = (dir: string, scripts: Record<string, string>) => {
+      fs.mkdirSync(path.join(dir, 'test'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', scripts }, null, 2))
+      fs.writeFileSync(path.join(dir, 'test', 'a.test.js'), "require('node:test')('ok', () => {})\n")
+    }
+    const runIn = async (cwd: string, prompt: string, steps: Array<Record<string, unknown>>) => {
+      const store = new SessionStore(cwd)
+      const s = store.createSession({ title: 'h' })
+      await store.save(s)
+      return runAgent(s, prompt, { cwd, provider: scripted(steps), sessionStore: store, permissionManager: new PermissionManager('PRODUCER', false), maxTurns: 8, profile: 'main', selfCheck: true })
+    }
+    const { cwd: base } = freshCase('probe-h', false)
+    const h1 = path.join(base, 'h1')
+    mk(h1, { test: 'node --test', posttest: 'echo x >> PUBLISHED' })
+    await runIn(h1, 'Run the tests, then change a.js to export 1.', [
+      { reply: 't', done: false, actions: [{ type: 'run_command', command: 'npm test' }] },
+      { reply: 'w', done: false, actions: [{ type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
+      { reply: 'Changed a.js.', done: true }])
+    assert('R1 (probe H1): a posttest side effect is not repeated by the self-check', fs.readFileSync(path.join(h1, 'PUBLISHED'), 'utf8').trim().split('\n').length === 1)
+    const h2 = path.join(base, 'h2')
+    mk(h2, { test: 'node --test', pretest: 'echo pre' })
+    await runIn(h2, 'Run the tests, then set up the pretest hook and change a.js to export 1.', [
+      { reply: 't', done: false, actions: [{ type: 'run_command', command: 'npm test' }] },
+      { reply: 'w', done: false, actions: [
+        { type: 'write_file', path: 'package.json', content: JSON.stringify({ name: 'x', scripts: { test: 'node --test', pretest: 'node -v' } }) },
+        { type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
+      { reply: 'Done.', done: true }])
+    const h2Store = new SessionStore(h2)
+    const h2Sessions = await h2Store.list()
+    const h2Runs = (await h2Store.load(h2Sessions[0]!.id)).messages.filter((m) => m.role === 'tool' && m.content.includes('CI=true'))
+    assert('R1 (probe H2): a pretest hook changed after the agent\'s check means no re-run', h2Runs.length === 0)
+    const h3 = path.join(base, 'h3')
+    const marker = path.join(base, 'TEST_CHANGED')
+    mk(h3, { test: 'node --test' })
+    await runIn(h3, 'Run the tests, then change a.js to export 1.', [
+      { reply: 't', done: false, actions: [{ type: 'run_command', command: 'npm test' }] },
+      { reply: 'w', done: false, actions: [
+        { type: 'write_file', path: 'package.json', content: JSON.stringify({ name: 'x', scripts: { test: `touch ${marker} && node --test` } }) },
+        { type: 'write_file', path: 'a.js', content: 'module.exports = 1\n' }] },
+      { reply: 'Done.', done: true }])
+    assert('R1 (probe H3): a changed test script never runs under the self-check', !fs.existsSync(marker))
   }
 
   // ── runAgent: monorepo, the re-run never moves the run (probe E) ───────
