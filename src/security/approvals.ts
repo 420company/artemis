@@ -355,7 +355,7 @@ export function describeApprovalNeed(need: ApprovalNeed, locale: UiLocale): { ti
           title: t(locale, '付款或购买', 'Make a payment or purchase'),
           summary: d.amount
             ? t(locale, `金额：${d.amount}${d.merchant ? `，收款方：${d.merchant}` : ''}`, `Amount: ${d.amount}${d.merchant ? `, to ${d.merchant}` : ''}`)
-            : t(locale, '这一步会花钱，只有你同意后才会进行。', 'This step spends money and runs only if you approve.'),
+            : t(locale, '这一步会付款，只有你同意后才会进行。', 'This step makes a payment and runs only if you approve.'),
         }
       case 'publish':
         return {
