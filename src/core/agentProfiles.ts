@@ -194,6 +194,8 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  // Asks the owner to take over the live browser (sign in, a check).
+  'browser_request_handoff',
 ];
 
 export function getAllowedActionTypesForProfile(

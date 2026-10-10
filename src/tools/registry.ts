@@ -1481,22 +1481,22 @@ const capabilityToolDefs: ToolDefinition[] = [
       validateRequiredNonEmptyString(a?.url, 'url', errs);
       return errs;
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserNavigate } = await import('./browser/browserTools.js');
-      return executeBrowserNavigate(a);
+      return executeBrowserNavigate(a, context);
     }) as any,
   },
   {
     type: 'browser_screenshot',
-    description: '对当前浏览器页面截图。fullPage 控制是否截全页；width/height 可切换桌面或手机视口。返回截图路径和基础布局审计。',
+    description: '对当前浏览器页面截图。fullPage 控制是否截全页；width/height 可切换桌面或手机视口。返回截图路径和基础布局审计；截图本身会附在你的下一步里，你能直接看到。',
     kind: 'code',
     permissionCategory: 'read',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: () => [],
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserScreenshot } = await import('./browser/browserTools.js');
-      return executeBrowserScreenshot(a);
+      return executeBrowserScreenshot(a, context);
     }) as any,
   },
   {
@@ -1507,9 +1507,9 @@ const capabilityToolDefs: ToolDefinition[] = [
     executionMode: 'blocking',
     parallelSafe: false,
     validate: () => [],
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserExtract } = await import('./browser/browserTools.js');
-      return executeBrowserExtract(a);
+      return executeBrowserExtract(a, context);
     }) as any,
   },
   {
@@ -1524,9 +1524,9 @@ const capabilityToolDefs: ToolDefinition[] = [
       if (!a?.selector && !a?.text && !hasCoords) return ['need selector, text, or x+y'];
       return [];
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserClick } = await import('./browser/browserTools.js');
-      return executeBrowserClick(a);
+      return executeBrowserClick(a, context);
     }) as any,
   },
   {
@@ -1541,9 +1541,9 @@ const capabilityToolDefs: ToolDefinition[] = [
       validateRequiredNonEmptyString(a?.selector, 'selector', errs);
       return errs;
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserFormInput } = await import('./browser/browserTools.js');
-      return executeBrowserFormInput(a);
+      return executeBrowserFormInput(a, context);
     }) as any,
   },
   {
@@ -1558,9 +1558,9 @@ const capabilityToolDefs: ToolDefinition[] = [
       validateRequiredNonEmptyString(a?.script, 'script', errs);
       return errs;
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserEvaluate } = await import('./browser/browserTools.js');
-      return executeBrowserEvaluate(a);
+      return executeBrowserEvaluate(a, context);
     }) as any,
   },
   {
@@ -1601,9 +1601,9 @@ const capabilityToolDefs: ToolDefinition[] = [
       if (a?.action === 'switch' && typeof a?.index !== 'number') return ['switch needs index'];
       return [];
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserTabs } = await import('./browser/browserTools.js');
-      return executeBrowserTabs(a);
+      return executeBrowserTabs(a, context);
     }) as any,
   },
   {
@@ -1619,9 +1619,9 @@ const capabilityToolDefs: ToolDefinition[] = [
       if (typeof a?.text !== 'string') errs.push('text required');
       return errs;
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserType } = await import('./browser/browserTools.js');
-      return executeBrowserType(a);
+      return executeBrowserType(a, context);
     }) as any,
   },
   {
@@ -1635,9 +1635,27 @@ const capabilityToolDefs: ToolDefinition[] = [
       if (!a?.selector && !a?.text) return ['need selector or text'];
       return [];
     },
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserWait } = await import('./browser/browserTools.js');
-      return executeBrowserWait(a);
+      return executeBrowserWait(a, context);
+    }) as any,
+  },
+  {
+    type: 'browser_request_handoff',
+    description: '请用户接管浏览器完成你不能或不该做的一步（登录、短信/2FA 验证码、人机验证），然后等用户点「交还」。reason 用用户的语言写清要做什么，例如「请登录你的淘宝账号，完成后点交还」。用户交还后返回当前页面；超时（timeoutSeconds，默认 600）则返回提示。只在有实时浏览器视图时有效。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      validateRequiredNonEmptyString(a?.reason, 'reason', errs);
+      if (a?.timeoutSeconds !== undefined && typeof a.timeoutSeconds !== 'number') errs.push('timeoutSeconds must be a number');
+      return errs;
+    },
+    execute: (async (a: any, context: any) => {
+      const { executeBrowserRequestHandoff } = await import('./browser/browserTools.js');
+      return executeBrowserRequestHandoff(a, context);
     }) as any,
   },
   {
@@ -1648,9 +1666,9 @@ const capabilityToolDefs: ToolDefinition[] = [
     executionMode: 'blocking',
     parallelSafe: false,
     validate: () => [],
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserClose } = await import('./browser/browserTools.js');
-      return executeBrowserClose(a);
+      return executeBrowserClose(a, context);
     }) as any,
   },
 

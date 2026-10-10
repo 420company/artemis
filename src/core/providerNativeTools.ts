@@ -1625,6 +1625,16 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
       };
     case 'browser_close':
       return { type: 'object', additionalProperties: false, properties: {} };
+    case 'browser_request_handoff':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['reason'],
+        properties: {
+          reason: nonEmptyStringSchema("What the user should do in the browser, in the user's language, e.g. \"Please sign in to your account, then hand the browser back.\""),
+          timeoutSeconds: { type: 'integer', minimum: 30, maximum: 1800, description: 'How long to wait for the user. Default: 600.' },
+        },
+      };
 
 
     case 'computer_screenshot':

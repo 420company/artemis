@@ -3104,6 +3104,7 @@ const WEB_MAIN_ADDED_TOOLS = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  'browser_request_handoff',
 ] as const
 const WEB_MAIN_EXCLUDED_TOOLS = [
   'computer_click',
@@ -3144,6 +3145,7 @@ function sampleWebToolAction(type: string): AgentAction {
     browser_tabs: { action: 'list' },
     browser_wait_for: { text: 'x' },
     browser_click: { text: 'x' },
+    browser_request_handoff: { reason: 'Please sign in, then hand the browser back.' },
   }
   return { type, ...(args[type] ?? {}) } as unknown as AgentAction
 }
@@ -4847,9 +4849,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'browser tools: context-closed retry restores current URL and covers click/type/wait',
     browserToolsSource.includes('restoreUrlOnRetry') &&
       browserToolsSource.includes('await page.goto(restoreUrl') &&
-      /executeBrowserClick[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource) &&
-      /executeBrowserType[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource) &&
-      /executeBrowserWait[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource),
+      /runBrowserClick[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource) &&
+      /runBrowserType[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource) &&
+      /runBrowserWait[\s\S]*withPageRetry[\s\S]*restoreUrlOnRetry/.test(browserToolsSource),
   )
 }
 

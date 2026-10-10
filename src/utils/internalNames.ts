@@ -137,6 +137,7 @@ const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: 
   generate_video: { zh: '生成视频', en: 'Generating a video', outputZh: '视频已生成', outputEn: 'Your video is ready' },
   generate_image: { zh: '生成图片', en: 'Generating an image', outputZh: '图片已生成', outputEn: 'Your image is ready' },
   browser_screenshot: { zh: '网页截图', en: 'Taking a screenshot', outputZh: '网页截图', outputEn: 'Screenshot' },
+  browser_request_handoff: { zh: '请你接管浏览器', en: 'Asking you to take over the browser' },
   bridge_send_video: { zh: '发送视频', en: 'Sending the video' },
   bridge_send_image: { zh: '发送图片', en: 'Sending the image' },
   bridge_send_file: { zh: '发送文件', en: 'Sending the file' },

@@ -710,6 +710,9 @@ async function runQueryCommand(options: {
     ...result.contextNotices.map((notice) => `Context: ${notice.replace(/^\[(?:context|上下文)\]\s*/, '')}`),
   ]))
   console.log()
+  // Live browser mode: let go of the shared browser, which stays open for the
+  // owner and the next run (a CDP connection would keep this process alive).
+  await import('../tools/browser/browserSession.js').then((m) => m.releaseBrowser()).catch(() => undefined)
   // The reply is out. The long-term memory curator finishes as before;
   // learned-skill curation gets a bounded chance (ARTEMIS_CURATION_SETTLE_MS,
   // default 60 s; 0 = do not wait), then the process exits regardless.

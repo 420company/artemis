@@ -14,14 +14,30 @@
  * mental model: "I'm in Bangkok, I can see my home Mac mirror in my mind."
  * Without a display (headless Linux) it runs headless instead.
  * ARTEMIS_BROWSER_HEADLESS=1/true/yes or 0/false/no overrides either way.
+ *
+ * Live mode (ARTEMIS_BROWSER_LIVE_DIR set, as on the online platform): the
+ * process connects to one shared, long-lived browser that the owner can
+ * watch and take over from the web app instead of launching its own; see
+ * liveBrowser.ts.
  */
 
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveBrowserLaunchMode } from '../platformSupport.js';
+import {
+  LIVE_FILES,
+  agentEndpoint,
+  browserIdleMs,
+  ensureHost,
+  liveDir,
+  readJsonFile,
+  writeTabReport,
+  type TabReport,
+} from './liveBrowser.js';
 
 const PROFILE_DIR = path.join(resolveArtemisHomeDir(), 'browser-data');
 const TEMP_PROFILE_PREFIX = path.join(os.tmpdir(), 'artemis-browser-');
@@ -31,6 +47,8 @@ let _context: BrowserContext | null = null;
 let _activePage: Page | null = null;
 let _initPromise: Promise<BrowserContext> | null = null;
 let _ephemeralBrowser: Browser | null = null;
+/** Live mode (liveBrowser.ts): the shared browser this process is connected to. */
+let _liveBrowser: Browser | null = null;
 
 // ── console / network event buffers ────────────────────────────────────────
 // Ring buffers so the brain can debug pages ("what did the console say?",
@@ -164,6 +182,7 @@ async function initContext(): Promise<BrowserContext> {
     _context = null;
     _activePage = null;
     _initPromise = null;
+    _liveBrowser = null;
   }
   if (_initPromise) return _initPromise;
 
@@ -173,20 +192,38 @@ async function initContext(): Promise<BrowserContext> {
     // ARTEMIS_BROWSER_HEADLESS override and the Wayland flag are resolved in
     // platformSupport.ts so the prompt hint describes the same mode.
     const { headless, extraArgs } = resolveBrowserLaunchMode();
-    // Platform-consistent UA — a Mac UA on a Windows host is itself a bot signal.
-    const uaPlatform = process.platform === 'win32'
-      ? 'Windows NT 10.0; Win64; x64'
-      : process.platform === 'darwin'
-        ? 'Macintosh; Intel Mac OS X 14_5_0'
-        : 'X11; Linux x86_64';
     const contextOptions = {
       viewport: { width: 1280, height: 800 },
       locale: 'zh-CN',
       timezoneId: 'Asia/Bangkok',
-      userAgent:
-        `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36`,
+      userAgent: browserUserAgent(),
     } as const;
     const launchArgs = ['--disable-blink-features=AutomationControlled', ...extraArgs];
+
+    // Live mode: the shared, long-lived browser the owner can watch and take
+    // over from the web app (liveBrowser.ts). Its profile is its own, so a
+    // non-live browser elsewhere never holds its lock.
+    const live = liveDir();
+    if (live) {
+      const executable = process.env.ARTEMIS_BROWSER_EXECUTABLE?.trim() || chromium.executablePath();
+      if (!fs.existsSync(executable)) throw new Error(`Executable doesn't exist at ${executable}`);
+      const host = await ensureHost({
+        liveDir: live,
+        executable,
+        profileDir: `${PROFILE_DIR}-live`,
+        headless,
+        args: extraArgs,
+        userAgent: browserUserAgent(),
+        idleMs: browserIdleMs(),
+      });
+      const browser = await chromium.connectOverCDP(agentEndpoint(host));
+      _liveBrowser = browser;
+      const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
+      ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      attachContextListeners(ctx);
+      _context = ctx;
+      return ctx;
+    }
 
     // ARTEMIS_BROWSER_CDP_URL: attach to a real, already-running Chrome/Edge/Brave
     // started with --remote-debugging-port. Drives the user's actual browser —
@@ -310,6 +347,16 @@ async function initContext(): Promise<BrowserContext> {
   return _initPromise;
 }
 
+/** Platform-consistent UA: a Mac UA on a Windows host is itself a bot signal. */
+function browserUserAgent(): string {
+  const uaPlatform = process.platform === 'win32'
+    ? 'Windows NT 10.0; Win64; x64'
+    : process.platform === 'darwin'
+      ? 'Macintosh; Intel Mac OS X 14_5_0'
+      : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36`;
+}
+
 export async function getBrowserContext(): Promise<BrowserContext> {
   return initContext();
 }
@@ -335,11 +382,79 @@ export async function getActivePage(): Promise<Page> {
 
   const pages = ctx.pages().filter(p => !p.isClosed());
   if (pages.length > 0) {
-    _activePage = pages[pages.length - 1]!;
+    // Live mode: carry on in the tab the agent (or the user) used last.
+    _activePage = (await pageForTarget(readLiveTab()?.targetId)) ?? pages[pages.length - 1]!;
     return _activePage;
   }
   _activePage = await ctx.newPage();
   return _activePage;
+}
+
+/** True when this process drives the shared live browser. */
+export function isLiveBrowser(): boolean {
+  return liveDir() !== undefined;
+}
+
+function readLiveTab(): TabReport | undefined {
+  const dir = liveDir();
+  return dir ? readJsonFile<TabReport>(path.join(dir, LIVE_FILES.tab)) : undefined;
+}
+
+const _targetIds = new WeakMap<Page, string>();
+
+/** The DevTools target id of a page (cached). */
+export async function targetIdOf(page: Page): Promise<string | undefined> {
+  const known = _targetIds.get(page);
+  if (known) return known;
+  try {
+    const session = await page.context().newCDPSession(page);
+    const { targetInfo } = await session.send('Target.getTargetInfo') as { targetInfo: { targetId: string } };
+    await session.detach().catch(() => undefined);
+    _targetIds.set(page, targetInfo.targetId);
+    return targetInfo.targetId;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The open page with this target id, if any. */
+export async function pageForTarget(targetId: string | undefined): Promise<Page | undefined> {
+  if (!targetId || !_context) return undefined;
+  for (const page of _context.pages()) {
+    if (!page.isClosed() && (await targetIdOf(page)) === targetId) return page;
+  }
+  return undefined;
+}
+
+/** Make the tab with this target id the active one (after the user handed back). */
+export async function focusTarget(targetId: string | undefined): Promise<Page | undefined> {
+  const page = await pageForTarget(targetId);
+  if (page) _activePage = page;
+  return page;
+}
+
+/** Live mode: tell the viewer which tab the agent works in. */
+export async function reportActiveTab(): Promise<void> {
+  const dir = liveDir();
+  const page = _activePage;
+  if (!dir || !page || page.isClosed()) return;
+  const targetId = await targetIdOf(page);
+  writeTabReport(dir, { ...(targetId ? { targetId } : {}), url: page.url(), title: await page.title().catch(() => '') });
+}
+
+/**
+ * Before this process exits: in live mode, disconnect from the shared
+ * browser (it stays open for the owner and the next run). Otherwise nothing.
+ */
+export async function releaseBrowser(): Promise<void> {
+  if (!_liveBrowser) return;
+  const browser = _liveBrowser;
+  _liveBrowser = null;
+  _context = null;
+  _activePage = null;
+  _initPromise = null;
+  // A browser reached over CDP is only disconnected by close().
+  await Promise.race([browser.close().catch(() => undefined), new Promise((r) => setTimeout(r, 3_000))]);
 }
 
 /** Replace the active page reference (e.g. after explicit new tab open). */
@@ -417,8 +532,9 @@ export async function closeActivePage(): Promise<void> {
   _activePage = null;
 }
 
-/** Hard shutdown — only call on Artemis exit. */
+/** Hard shutdown — only call on Artemis exit. In live mode it only disconnects. */
 export async function closeBrowser(): Promise<void> {
+  if (_liveBrowser) return releaseBrowser();
   if (_context) {
     await _context.close().catch(() => undefined);
     _context = null;

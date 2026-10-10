@@ -734,6 +734,7 @@ export type AgentAction =
   | { type: 'browser_tabs'; action: 'list' | 'new' | 'switch' | 'close'; index?: number; url?: string }
   | { type: 'browser_wait_for'; selector?: string; text?: string; timeoutMs?: number }
   | { type: 'browser_close' }
+  | { type: 'browser_request_handoff'; reason: string; timeoutSeconds?: number }
   // ── Computer / desktop automation (macOS + Windows best effort) ──────
   | { type: 'computer_screenshot'; outputPath?: string }
   | { type: 'computer_click'; x: number; y: number }
@@ -829,6 +830,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  'browser_request_handoff',
   // ── Computer / desktop automation ───────────────────────────────────
   'computer_screenshot',
   'computer_click',

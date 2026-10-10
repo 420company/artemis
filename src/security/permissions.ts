@@ -171,6 +171,8 @@ function describeAction(action: AgentAction): string {
       return `browser: wait for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':
       return 'browser: close';
+    case 'browser_request_handoff':
+      return 'browser: ask the user to take over';
     // ── Computer / desktop automation ───────────────────────────────────
     case 'computer_screenshot':
       return 'computer: screenshot';
