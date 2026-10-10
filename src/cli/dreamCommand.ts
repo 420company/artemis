@@ -1,0 +1,254 @@
+/**
+ * `artemis dream` — compose one dream headlessly and exit.
+ *
+ * For hosts that schedule dreams themselves (a server's nightly job) instead
+ * of the interactive idle watcher. It never prompts: it reads the configured
+ * main model and visual profile from providers.json, writes the diary (and
+ * the picture, and optionally a short video) into the dream store, copies
+ * them into `--out <dir>` when given, and prints one machine-readable line:
+ *
+ *   [dream:result] {"v":1,"status":"ok"|"skipped"|"failed",...}
+ *
+ * Options:
+ *   --out <dir>          also copy the diary/picture/video here
+ *   --no-image           diary only
+ *   --video              also render a short video from the dream (off by default)
+ *   --date YYYY-MM-DD    the material is that local day's sessions (default: the last 24 hours)
+ *   --since-hours <n>    the material is the last n hours (1-168)
+ *   --require-activity   skip (status "skipped", reason "no_activity") when no session was active in the window
+ *   --locale zh-CN|en    language of the diary
+ *   --push               also push to configured chat bridges (off by default; the host delivers)
+ *   --json               print only the result line
+ *
+ * Exit code: 0 when the dream was written or skipped, 1 when it failed, 2 on bad arguments.
+ */
+import { copyFile, mkdir, readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import type { UiLocale } from './locale.js'
+
+export const DREAM_RESULT_MARKER = '[dream:result]'
+
+export interface DreamCommandOptions {
+  outDir?: string
+  image: boolean
+  video: boolean
+  date?: string
+  sinceHours?: number
+  requireActivity: boolean
+  locale?: UiLocale
+  push: boolean
+  json: boolean
+}
+
+export interface DreamCommandResult {
+  v: 1
+  status: 'ok' | 'skipped' | 'failed'
+  /** Why it was skipped or failed (for logs; not meant for end users). */
+  reason?: string
+  id?: string
+  /** Local day the material comes from (YYYY-MM-DD). */
+  day: string
+  createdAt?: string
+  title?: string
+  /** The diary text, without its title and the distilled notes. */
+  diary?: string
+  preview?: string
+  learned?: string[]
+  diaryPath?: string
+  imagePath?: string
+  videoPath?: string
+  /** Why no picture/video was made, when one was asked for. */
+  imageNote?: string
+  videoNote?: string
+  locale: UiLocale
+  /** Engine sessions active in the window. */
+  sessions: number
+}
+
+export class DreamArgsError extends Error {}
+
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+export function parseDreamArgs(args: readonly string[]): DreamCommandOptions {
+  const options: DreamCommandOptions = { image: true, video: false, requireActivity: false, push: false, json: false }
+  const rest = [...args]
+  while (rest.length > 0) {
+    const cur = rest.shift()!
+    const [flag, inline] = cur.startsWith('--') && cur.includes('=') ? [cur.slice(0, cur.indexOf('=')), cur.slice(cur.indexOf('=') + 1)] : [cur, undefined]
+    const value = (): string => {
+      const v = inline ?? rest.shift()
+      if (v === undefined || v === '' || (inline === undefined && v.startsWith('--'))) throw new DreamArgsError(`${flag} requires a value`)
+      return v
+    }
+    switch (flag) {
+      case '--out': options.outDir = path.resolve(value()); break
+      case '--no-image': options.image = false; break
+      case '--image': options.image = true; break
+      case '--video': options.video = true; break
+      case '--no-video': options.video = false; break
+      case '--require-activity': options.requireActivity = true; break
+      case '--push': options.push = true; break
+      case '--json': options.json = true; break
+      case '--locale': {
+        const v = value().toLowerCase()
+        if (v.startsWith('zh')) options.locale = 'zh-CN'
+        else if (v.startsWith('en')) options.locale = 'en'
+        else throw new DreamArgsError('--locale must be zh-CN or en')
+        break
+      }
+      case '--date': {
+        const v = value()
+        const m = DATE_RE.exec(v)
+        const d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined
+        if (!m || !d || d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])) throw new DreamArgsError('--date must be YYYY-MM-DD')
+        options.date = v
+        break
+      }
+      case '--since-hours': {
+        const n = Number(value())
+        if (!Number.isFinite(n) || n < 1 || n > 168) throw new DreamArgsError('--since-hours must be between 1 and 168')
+        options.sinceHours = n
+        break
+      }
+      default:
+        throw new DreamArgsError(`Unknown option for dream: ${cur}`)
+    }
+  }
+  if (options.date && options.sinceHours !== undefined) throw new DreamArgsError('Give either --date or --since-hours, not both')
+  return options
+}
+
+/** Local YYYY-MM-DD of a time. */
+export function localDay(at: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+}
+
+/** The window whose sessions are the dream's material, and the day it is named after. */
+export function dreamWindow(options: Pick<DreamCommandOptions, 'date' | 'sinceHours'>, now: Date = new Date()): { sinceMs: number; untilMs: number; day: string } {
+  if (options.date) {
+    const m = DATE_RE.exec(options.date)!
+    const start = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+    const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + 1)
+    return { sinceMs: start.getTime(), untilMs: Math.min(end.getTime() - 1, now.getTime()), day: options.date }
+  }
+  const hours = options.sinceHours ?? 24
+  return { sinceMs: now.getTime() - hours * 3_600_000, untilMs: now.getTime(), day: localDay(now) }
+}
+
+/** Title, diary body and distilled notes of a composed dream's markdown. */
+export function splitDreamMarkdown(md: string): { title?: string; diary: string } {
+  const text = md.replace(/^<!--[\s\S]*?-->\s*/, '').trim()
+  const titleMatch = /^#\s+(.+)$/m.exec(text)
+  const title = titleMatch?.[1]?.trim()
+  const diary = text
+    .replace(/^#\s+.+\n*/m, '')
+    .replace(/#{2,4}\s*(?:学到了什么|What I learned)[\s\S]*$/i, '')
+    .trim()
+  return { ...(title ? { title } : {}), diary }
+}
+
+export function formatDreamResultLine(result: DreamCommandResult): string {
+  return `${DREAM_RESULT_MARKER} ${JSON.stringify(result)}`
+}
+
+async function copyInto(outDir: string | undefined, file: string | undefined, day: string): Promise<string | undefined> {
+  if (!file || !existsSync(file)) return undefined
+  if (!outDir) return file
+  await mkdir(outDir, { recursive: true })
+  const base = path.basename(file)
+  const target = path.join(outDir, base.startsWith(day) ? base : `${day}_${base}`)
+  await copyFile(file, target)
+  return target
+}
+
+export async function runDreamCommand(input: {
+  cwd: string
+  locale: UiLocale
+  args: readonly string[]
+  /** Overrides for tests. */
+  now?: () => Date
+  write?: (line: string) => void
+  status?: (line: string) => void
+}): Promise<{ exitCode: number; result?: DreamCommandResult }> {
+  const write = input.write ?? ((line: string) => process.stdout.write(`${line}\n`))
+  let options: DreamCommandOptions
+  try {
+    options = parseDreamArgs(input.args)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`dream: ${message}\n`)
+    return { exitCode: 2 }
+  }
+  const locale = options.locale ?? input.locale
+  const status = options.json ? () => undefined : (input.status ?? ((line: string) => process.stderr.write(`${line}\n`)))
+  const now = input.now?.() ?? new Date()
+  const window = dreamWindow(options, now)
+  const { countRecentSessions } = await import('../services/dreamStore.js')
+  const sessions = await countRecentSessions({ cwd: input.cwd, sinceMs: window.sinceMs, untilMs: window.untilMs })
+  const finish = (result: DreamCommandResult, exitCode: number) => {
+    write(formatDreamResultLine(result))
+    return { exitCode, result }
+  }
+  if (options.requireActivity && sessions === 0) {
+    return finish({ v: 1, status: 'skipped', reason: 'no_activity', day: window.day, locale, sessions }, 0)
+  }
+
+  const { composeDream } = await import('../services/dreamComposer.js')
+  let composed
+  try {
+    composed = await composeDream({
+      cwd: input.cwd,
+      trigger: 'scheduled',
+      locale,
+      window: { sinceMs: window.sinceMs, untilMs: window.untilMs },
+      onStatus: status,
+      // The host decides when to dream and where it goes: never the idle cap or bridges here.
+      configOverride: { enabled: true, mode: options.image ? 'vision' : 'text', pushToBridges: options.push },
+    })
+  } catch (err) {
+    composed = { ok: false, reason: err instanceof Error ? err.message : String(err) }
+  }
+  if (!composed.ok || !composed.entry) {
+    return finish({ v: 1, status: 'failed', reason: composed.reason ?? 'unknown', day: window.day, locale, sessions }, 1)
+  }
+
+  let entry = composed.entry
+  let videoNote: string | undefined
+  if (options.video) {
+    try {
+      const { generateDreamVideo } = await import('../services/dreamVideo.js')
+      const video = await generateDreamVideo({ cwd: input.cwd, id: entry.id, locale, onStatus: status })
+      if (video.ok && video.entry) entry = video.entry
+      else videoNote = video.reason ?? 'no video'
+    } catch (err) {
+      videoNote = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  const md = await readFile(entry.mdPath, 'utf8').catch(() => '')
+  const { title, diary } = splitDreamMarkdown(md)
+  const diaryPath = await copyInto(options.outDir, entry.mdPath, window.day)
+  const imagePath = await copyInto(options.outDir, entry.imagePath, window.day)
+  const videoPath = await copyInto(options.outDir, entry.videoPath, window.day)
+  return finish({
+    v: 1,
+    status: 'ok',
+    id: entry.id,
+    day: window.day,
+    createdAt: entry.createdAt,
+    ...(title ? { title } : {}),
+    diary,
+    preview: entry.preview,
+    ...(entry.learned?.length ? { learned: entry.learned } : {}),
+    ...(diaryPath ? { diaryPath } : {}),
+    ...(imagePath ? { imagePath } : {}),
+    ...(videoPath ? { videoPath } : {}),
+    ...(options.image && !imagePath && composed.imageNote ? { imageNote: composed.imageNote } : {}),
+    ...(options.image && !imagePath && !composed.imageNote ? { imageNote: 'no image' } : {}),
+    ...(videoNote ? { videoNote } : {}),
+    locale,
+    sessions,
+  }, 0)
+}

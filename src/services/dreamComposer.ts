@@ -50,6 +50,8 @@ export interface ComposeDreamOptions {
   onStatus?: (text: string) => void
   /** UI language used to compose and distill the dream. */
   locale?: UiLocale
+  /** Which sessions count as the day's material (default: the last 24h, workspace and global). */
+  window?: { sinceMs?: number; untilMs?: number }
 }
 
 export interface ComposeDreamResult {
@@ -160,7 +162,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   options.onStatus?.(t('🌙 收集白天素材…', '🌙 Gathering daytime traces…'))
 
   // ── gather context ──────────────────────────────────────────────────────
-  const sessionDigest = await gatherRecentSessionDigest(8)
+  const sessionDigest = await gatherRecentSessionDigest(8, { cwd: options.cwd, ...(options.window ?? {}) })
   const memoryDigest = await gatherMemoryDigest()
   const gitDigest = await gatherGitDigest(options.cwd)
 

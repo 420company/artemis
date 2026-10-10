@@ -17,7 +17,7 @@
  */
 
 import path from 'node:path'
-import { resolveArtemisHomeDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { mkdir, readFile, writeFile, readdir, unlink, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
@@ -305,32 +305,69 @@ export async function findLatestDreamImage(): Promise<string | null> {
   }
 }
 
+/** Which sessions count as "today" for a dream: modified inside the window. */
+export interface DreamActivityWindow {
+  /** Workspace whose engine sessions count too (headless runs keep them there). */
+  cwd?: string
+  /** Start of the window, ms since epoch (default: 24 hours before `untilMs`). */
+  sinceMs?: number
+  /** End of the window, ms since epoch (default: now). */
+  untilMs?: number
+}
+
 /**
- * Best-effort: scan ~/.artemis/sessions/*.json for sessions touched in the
- * last 24h. Used by the composer to gather "what did the user work on today".
+ * Session directories a dream reads: the workspace's own data root (where
+ * headless runs such as `artemis execute` keep their sessions) and the
+ * global ~/.artemis/sessions, without duplicates.
+ */
+function dreamSessionDirs(cwd: string | undefined): string[] {
+  const dirs = [
+    ...(cwd ? [path.join(resolveDataRootDir(cwd), 'sessions')] : []),
+    path.join(resolveArtemisHomeDir(), 'sessions'),
+  ].map((dir) => path.resolve(dir))
+  return [...new Set(dirs)]
+}
+
+/** Session files modified inside the window, newest first. */
+async function listRecentSessionFiles(window: DreamActivityWindow = {}): Promise<Array<{ file: string; mtime: number }>> {
+  const untilMs = window.untilMs ?? Date.now()
+  const sinceMs = window.sinceMs ?? untilMs - 24 * 60 * 60 * 1000
+  const recent: Array<{ file: string; mtime: number }> = []
+  for (const dir of dreamSessionDirs(window.cwd)) {
+    if (!existsSync(dir)) continue
+    const files = await readdir(dir).catch(() => [] as string[])
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue
+      const file = path.join(dir, f)
+      try {
+        const st = await stat(file)
+        if (st.mtimeMs >= sinceMs && st.mtimeMs <= untilMs) recent.push({ file, mtime: st.mtimeMs })
+      } catch { /* skip */ }
+    }
+  }
+  return recent.sort((a, b) => b.mtime - a.mtime)
+}
+
+/** How many engine sessions were active in the window (0 = nothing to dream about). */
+export async function countRecentSessions(window: DreamActivityWindow = {}): Promise<number> {
+  return (await listRecentSessionFiles(window)).length
+}
+
+/**
+ * Best-effort: scan the workspace's and ~/.artemis's sessions/*.json for
+ * sessions touched in the window (default: the last 24h). Used by the
+ * composer to gather "what did the user work on today".
  * Only returns light metadata + the first/last user message of each session
  * — never the full transcript — to keep prompts small and avoid leaking
  * arbitrary chat content into the dream LLM call.
  */
-export async function gatherRecentSessionDigest(maxSessions = 8): Promise<string[]> {
-  const sessionsDir = path.join(resolveArtemisHomeDir(), 'sessions')
-  if (!existsSync(sessionsDir)) return []
-  const files = await readdir(sessionsDir).catch(() => [])
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000
-  const recent: Array<{ file: string; mtime: number }> = []
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue
-    try {
-      const st = await stat(path.join(sessionsDir, f))
-      if (st.mtimeMs >= cutoff) recent.push({ file: f, mtime: st.mtimeMs })
-    } catch { /* skip */ }
-  }
-  recent.sort((a, b) => b.mtime - a.mtime)
+export async function gatherRecentSessionDigest(maxSessions = 8, window: DreamActivityWindow = {}): Promise<string[]> {
+  const recent = await listRecentSessionFiles(window)
 
   const digests: string[] = []
   for (const { file } of recent.slice(0, maxSessions)) {
     try {
-      const raw = JSON.parse(await readFile(path.join(sessionsDir, file), 'utf8'))
+      const raw = JSON.parse(await readFile(file, 'utf8'))
       const title: string = typeof raw?.title === 'string' ? raw.title : 'untitled session'
       const cwd: string = typeof raw?.cwd === 'string' ? raw.cwd : '?'
       const messages: unknown = raw?.messages ?? []
