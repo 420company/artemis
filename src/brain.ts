@@ -12,6 +12,8 @@ import { Session } from './core/session.js';
 import type { SessionMessage, SessionRecord, AgentAction, AssistantEnvelope } from './core/types.js';
 import { estimateContextLimit, fmtTok, normalizeContextLimit } from './cli/hud.js';
 import { hasPlatformCapabilities } from './providers/capabilities.js';
+import { createAuxiliaryProvider } from './providers/auxiliaryModels.js';
+import type { AuxiliaryModelTask, ChatProvider as AuxChatProvider } from './providers/types.js';
 import {
     appendImageNote,
     loadVisionHelper,
@@ -642,12 +644,13 @@ function getProviderConfigSync() {
  */
 async function loadWorkerProvider(cwd: string = providerCwd ?? process.cwd()): Promise<{ provider: any; config: any }> {
     const requestedCwd = path.resolve(cwd);
+    // Load the lead first: it is the fallback, and loadProvider() drops the
+    // cached worker when providers.json changed since it was built. Checking
+    // the cache before this would hand back a stale worker.
+    await loadProvider(requestedCwd);
     if (workerProvider && workerProviderConfig && workerProviderCwd === requestedCwd) {
         return { provider: workerProvider, config: workerProviderConfig };
     }
-
-    // Make sure the lead is loaded so we can fall back to it
-    await loadProvider(requestedCwd);
 
     // Try cwd-local
     const currentCwd = requestedCwd;
@@ -695,8 +698,17 @@ export function resetWorkerProvider() {
     workerProviderCwd = null;
 }
 
-/** True if a distinct specialist profile is configured (different from main). */
-export function hasDualModel(): boolean {
+/**
+ * True if a distinct specialist profile is configured (a different model from
+ * main). Loads both profiles first, so the answer reflects providers.json even
+ * when nothing has asked for the worker yet in this process.
+ */
+export async function hasDualModel(cwd: string = providerCwd ?? process.cwd()): Promise<boolean> {
+    try {
+        await loadWorkerProvider(cwd);
+    } catch {
+        return false;
+    }
     if (!workerProviderConfig || !providerConfig) return false;
     if (workerProviderConfig === providerConfig) return false;
     // Same provider object reference is identity; deep model check guards
@@ -816,16 +828,42 @@ async function completeSummaryPrompt(p: ChatProvider, system: string, prompt: st
     return result.text ?? '';
 }
 
+// Explicit auxiliaryModels routes, per task and cwd, rebuilt when the
+// provider stores change (same stamp as the lead provider).
+const auxiliaryRouteCache = new Map<string, { stamp: string | null; value: { provider: AuxChatProvider; config: any } | undefined }>();
+
 /**
- * Summarization call used by context compaction: the worker (specialist)
- * model when one is configured, else the main model; falls back to the main
- * model when the worker fails. No model id is hard-coded.
+ * The provider an explicit `auxiliaryModels[task]` route names, or undefined
+ * for `auto`/no route (callers then use the worker, then the main model).
+ */
+async function loadAuxiliaryRoute(task: AuxiliaryModelTask): Promise<{ provider: AuxChatProvider; config: any } | undefined> {
+    const cwd = path.resolve(providerCwd ?? process.cwd());
+    await loadProvider(cwd);
+    const key = `${task}\u0000${cwd}`;
+    const cached = auxiliaryRouteCache.get(key);
+    if (cached && cached.stamp === providerStoreStamp) return cached.value;
+    const resolved = await createAuxiliaryProvider(task, cwd, { explicitOnly: true }).catch(() => undefined);
+    const value = resolved ? { provider: resolved.provider, config: resolved.profile } : undefined;
+    auxiliaryRouteCache.set(key, { stamp: providerStoreStamp, value });
+    return value;
+}
+
+/**
+ * Summarization call used by context compaction and other helper tasks: the
+ * task's auxiliaryModels route when one is set, else the worker (specialist)
+ * model when one is configured, else the main model. The retry (attempt 1)
+ * always goes to the main model. No model id is hard-coded.
  */
 const summarizeForCompactionWith = async (
     { system, prompt, attempt }: Parameters<SummarizeFn>[0],
     abortSignal?: AbortSignal,
+    task: AuxiliaryModelTask = 'compression',
 ): Promise<string> => {
     const lead = await loadProvider(providerCwd ?? process.cwd());
+    if ((attempt ?? 0) === 0) {
+        const route = await loadAuxiliaryRoute(task);
+        if (route) return completeSummaryPrompt(route.provider, system, prompt, 'compression', abortSignal);
+    }
     const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
     // First try: the worker when one is configured. The single retry goes to
     // the main model; the context manager charges both to one input budget.
@@ -833,11 +871,13 @@ const summarizeForCompactionWith = async (
     return completeSummaryPrompt(useWorker ? workerP : lead, system, prompt, 'compression', abortSignal);
 };
 
-const summarizeForCompaction: SummarizeFn = (request) => summarizeForCompactionWith(request);
-
 /** Context window of the model compaction summaries go to. */
 async function resolveSummarizerWindow(): Promise<number | undefined> {
     try {
+        const route = await loadAuxiliaryRoute('compression');
+        if (route) {
+            return route.provider.contextWindow ?? getConfiguredContextLimit(route.config.model, route.config.contextLength, hasPlatformCapabilities(route.config));
+        }
         const { provider: workerP, config: workerCfg } = await loadWorkerProvider();
         if (workerCfg && workerCfg !== providerConfig) {
             return workerP?.contextWindow ?? getConfiguredContextLimit(workerCfg.model, workerCfg.contextLength, hasPlatformCapabilities(workerCfg));
@@ -848,10 +888,18 @@ async function resolveSummarizerWindow(): Promise<number | undefined> {
 
 /**
  * One-shot LLM call for summarization — does NOT touch the active session.
- * Uses the worker model when configured, else the main model.
+ * Uses the task's auxiliaryModels route, else the worker model, else the main
+ * model; when the first choice fails, retries once on the main model.
  */
-export const summarizeOnce = async (prompt: any): Promise<string> =>
-    summarizeForCompaction({ system: 'You are a conversation summary assistant.', prompt: String(prompt ?? '') });
+export const summarizeOnce = async (prompt: any, task: AuxiliaryModelTask = 'compression'): Promise<string> => {
+    const request = { system: 'You are a conversation summary assistant.', prompt: String(prompt ?? '') };
+    try {
+        return await summarizeForCompactionWith({ ...request, attempt: 0 }, undefined, task);
+    } catch (err) {
+        if ((err as { name?: string } | null)?.name === 'AbortError') throw err;
+        return summarizeForCompactionWith({ ...request, attempt: 1 }, undefined, task);
+    }
+};
 
 /** Restore a saved session's messages into the active session. */
 export function restoreSession(messages: any) {

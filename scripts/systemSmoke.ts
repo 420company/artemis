@@ -244,6 +244,156 @@ test('vision helper: visionProfileId resolves like specialistProfileId (cwd stor
   }
 });
 
+test('auxiliary models: a task route wins, then the worker, then main; a platform-managed global route beats a workspace one', async () => {
+  const { resolveAuxiliaryProfile } = await import('../src/providers/auxiliaryModels.js');
+  const { resolveDataRootDir } = await import('../src/utils/fs.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-aux-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  const writeStore = (dir: string, data: unknown) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'providers.json'), JSON.stringify(data));
+  };
+  const profile = (id: string, model: string, extra: Record<string, unknown> = {}) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model, ...extra });
+  try {
+    const home = path.join(root, 'home');
+    process.env.ARTEMIS_HOME = home;
+    const project = path.join(root, 'project');
+    fs.mkdirSync(project, { recursive: true });
+    writeStore(home, { defaultMainProfileId: 'main', profiles: [profile('main', 'main-model')] });
+    let got = await resolveAuxiliaryProfile('compression', project);
+    assert.equal(got?.source, 'main', 'nothing else configured: the main profile');
+    assert.equal(await resolveAuxiliaryProfile('compression', project, { skipMain: true }), undefined);
+
+    writeStore(home, { defaultMainProfileId: 'main', specialistProfileId: 'worker', profiles: [profile('main', 'main-model'), profile('worker', 'worker-model')] });
+    got = await resolveAuxiliaryProfile('compression', project);
+    assert.deepEqual([got?.source, got?.profile.id], ['worker', 'worker'], 'the worker before main');
+    assert.equal(await resolveAuxiliaryProfile('compression', project, { explicitOnly: true }), undefined, 'no route: explicitOnly finds nothing');
+
+    writeStore(home, {
+      defaultMainProfileId: 'main', specialistProfileId: 'worker',
+      profiles: [profile('main', 'main-model'), profile('worker', 'worker-model'), profile('cheap', 'cheap-model', { capabilitiesSource: 'platform', contextLength: 32000 })],
+      auxiliaryModels: {
+        compression: { mode: 'provider', providerProfileId: 'cheap' },
+        web_extract: { mode: 'custom', protocol: 'anthropic', baseUrl: 'https://extract.example', apiKey: 'x', model: 'extract-model' },
+        title_generation: { mode: 'auto' },
+        flush_memories: { mode: 'provider', providerProfileId: 'cheap', model: 'other-model' },
+        vision: { mode: 'provider', providerProfileId: 'missing' },
+      },
+    });
+    got = await resolveAuxiliaryProfile('compression', project);
+    assert.deepEqual([got?.source, got?.profile.id, got?.profile.model], ['auxiliary', 'cheap', 'cheap-model']);
+    got = await resolveAuxiliaryProfile('web_extract', project);
+    assert.deepEqual([got?.source, got?.profile.protocol, got?.profile.baseUrl, got?.profile.model], ['auxiliary', 'messages', 'https://extract.example', 'extract-model']);
+    assert.equal((await resolveAuxiliaryProfile('title_generation', project))?.source, 'worker', 'auto falls through to the worker');
+    assert.equal((await resolveAuxiliaryProfile('vision', project))?.source, 'worker', 'a route to a missing profile falls through');
+    got = await resolveAuxiliaryProfile('flush_memories', project);
+    assert.equal(got?.profile.model, 'other-model', 'a provider route may override the model');
+    assert.equal(got?.profile.capabilitiesSource, undefined, 'platform capabilities do not describe the override model');
+    assert.equal(got?.profile.contextLength, undefined);
+
+    // A workspace store routes compression elsewhere: it wins over a plain global route...
+    const plain = JSON.parse(fs.readFileSync(path.join(home, 'providers.json'), 'utf8'));
+    plain.profiles = plain.profiles.map((p: { id: string }) => p.id === 'cheap' ? profile('cheap', 'cheap-model') : p);
+    writeStore(home, plain);
+    writeStore(resolveDataRootDir(project), { profiles: [profile('local', 'local-model')], auxiliaryModels: { compression: { mode: 'provider', providerProfileId: 'local' } } });
+    assert.equal((await resolveAuxiliaryProfile('compression', project))?.profile.id, 'local');
+    // ...but not over a platform-managed global one.
+    const globalData = JSON.parse(fs.readFileSync(path.join(home, 'providers.json'), 'utf8'));
+    globalData.profiles = globalData.profiles.map((p: { id: string }) => p.id === 'cheap' ? { ...p, managedBy: 'platform' } : p);
+    writeStore(home, globalData);
+    assert.equal((await resolveAuxiliaryProfile('compression', project))?.profile.id, 'cheap', 'the platform route keeps helper traffic');
+    // accept() filters candidates (e.g. the vision task needs a model that sees images).
+    assert.equal((await resolveAuxiliaryProfile('compression', project, { accept: (p) => p.model === 'main-model' }))?.source, 'main');
+  } finally {
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('auxiliary models: the vision route and the worker feed the vision helper; the platform vision profile stays first', async () => {
+  const { resolveVisionProfile } = await import('../src/core/visionHelper.js');
+  const { resolveDataRootDir } = await import('../src/utils/fs.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-aux-vision-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  const writeStore = (dir: string, data: unknown) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'providers.json'), JSON.stringify(data));
+  };
+  const profile = (id: string, model: string, extra: Record<string, unknown> = {}) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model, ...extra });
+  try {
+    const home = path.join(root, 'home');
+    process.env.ARTEMIS_HOME = home;
+    const project = path.join(root, 'project');
+    fs.mkdirSync(project, { recursive: true });
+    // No vision setting: a worker that sees images becomes the helper; a text-only one does not.
+    writeStore(home, { defaultMainProfileId: 'main', specialistProfileId: 'worker', profiles: [profile('main', 'text-main', { supportsImages: false }), profile('worker', 'eye-worker', { supportsImages: true })] });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'worker');
+    writeStore(home, { defaultMainProfileId: 'main', specialistProfileId: 'worker', profiles: [profile('main', 'text-main', { supportsImages: false }), profile('worker', 'blind-worker', { supportsImages: false })] });
+    assert.equal(await resolveVisionProfile(project), undefined, 'main is never its own helper');
+
+    // An auxiliaryModels.vision route wins over visionProfileId.
+    writeStore(home, {
+      defaultMainProfileId: 'main', visionProfileId: 'eye',
+      profiles: [profile('main', 'text-main', { supportsImages: false }), profile('eye', 'eye-a', { supportsImages: true }), profile('eye2', 'eye-b', { supportsImages: true })],
+      auxiliaryModels: { vision: { mode: 'provider', providerProfileId: 'eye2' } },
+    });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'eye2');
+
+    // A workspace route never overrides a platform-managed global vision profile.
+    writeStore(home, { defaultMainProfileId: 'main', visionProfileId: 'pv', profiles: [profile('main', 'text-main', { supportsImages: false }), profile('pv', 'eye-p', { supportsImages: true, managedBy: 'platform' })] });
+    writeStore(resolveDataRootDir(project), { profiles: [profile('mine', 'eye-m', { supportsImages: true })], auxiliaryModels: { vision: { mode: 'provider', providerProfileId: 'mine' } } });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'pv');
+  } finally {
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('auxiliary models: the compression route becomes the router summarizer; hasDualModel reads providers.json before the worker loads', async () => {
+  const { createProviderRouter } = await import('../src/providers/router.js');
+  const { hasDualModel } = await import('../src/brain.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-aux-router-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  const profile = (id: string, model: string) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model });
+  const fake = (name: string) => ({ name, supportsNativeToolCalls: true, async complete() { return { text: name, raw: null }; } });
+  try {
+    const home = path.join(root, 'home');
+    process.env.ARTEMIS_HOME = home;
+    fs.mkdirSync(home, { recursive: true });
+    const write = (data: unknown) => fs.writeFileSync(path.join(home, 'providers.json'), JSON.stringify(data));
+    const base = { defaultMainProfileId: 'main', specialistProfileId: 'worker', profiles: [profile('main', 'main-model'), profile('worker', 'worker-model'), profile('cheap', 'cheap-model')] };
+    const make = (cwd: string) => createProviderRouter({ cwd, mainProvider: fake('main') as never, createProviderFromProfile: (p) => fake(p.id) as never });
+
+    const p1 = path.join(root, 'p1');
+    fs.mkdirSync(p1);
+    write(base);
+    assert.equal(((await make(p1)).resolveSummarizerProvider() as unknown as { name: string }).name, 'worker', 'no route: the worker summarizes');
+    assert.equal(await hasDualModel(p1), true, 'a distinct specialist is seen without loading the worker first');
+    write({ defaultMainProfileId: 'main', profiles: [profile('main', 'main-model')] });
+    assert.equal(await hasDualModel(p1), false, 'a rewritten providers.json drops the cached worker');
+
+    const p2 = path.join(root, 'p2');
+    fs.mkdirSync(p2);
+    write({ ...base, auxiliaryModels: { compression: { mode: 'provider', providerProfileId: 'cheap' } } });
+    assert.equal(((await make(p2)).resolveSummarizerProvider() as unknown as { name: string }).name, 'cheap', 'the compression route summarizes');
+
+    const p3 = path.join(root, 'p3');
+    fs.mkdirSync(p3);
+    write({ defaultMainProfileId: 'main', profiles: [profile('main', 'main-model')] });
+    assert.equal(await hasDualModel(p3), false, 'no specialist: single model');
+    const p4 = path.join(root, 'p4');
+    fs.mkdirSync(p4);
+    write({ defaultMainProfileId: 'main', specialistProfileId: 'same', profiles: [profile('main', 'main-model'), profile('same', 'main-model')] });
+    assert.equal(await hasDualModel(p4), false, 'a specialist on the same model is not a second model');
+  } finally {
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('vision helper: image text cannot escape its <image_description> block (prompt injection)', async () => {
   const { createVisionHelper, prepareUserImagesForModel } = await import('../src/core/visionHelper.js');
   const { IMAGE_DESCRIPTION_DATA_NOTE } = await import('../src/core/imageDescription.js');
