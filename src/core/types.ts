@@ -899,6 +899,8 @@ export type SessionRecord = {
   stickyNativeMcpTools?: string[];
   heimdallEvents?: HeimdallEventRecord[];
   metadata?: Record<string, any>;
+  /** Approval requests of this conversation (security/approvals.ts); the latest 50. */
+  approvals?: import('../security/approvals.js').PendingApproval[];
   createdAt: string;
   updatedAt: string;
   messages: SessionMessage[];

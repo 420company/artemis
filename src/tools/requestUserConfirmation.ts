@@ -5,6 +5,10 @@ export async function executeRequestUserConfirmation(
   action: Extract<AgentAction, { type: 'request_user_confirmation' }>,
   context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
+  // Answered through the approval gate: the owner approved this exact question.
+  if (context.approvedKinds?.includes('confirmation')) {
+    return { action, ok: true, output: 'User confirmed. Continue with the requested action.' };
+  }
   if (!context.requestUserConfirmation) {
     return {
       action,

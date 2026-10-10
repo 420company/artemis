@@ -45,6 +45,11 @@ export type ToolExecutionContext = {
     timeoutMs?: number;
   }) => Promise<boolean>;
   /**
+   * Approval kinds already approved for this exact action by the run's
+   * approval gate (security/approvals.ts): the tool must not ask again.
+   */
+  approvedKinds?: import('../security/approvals.js').ApprovalKind[];
+  /**
    * Abort signal controlled by the runtime. Long-running tools should stop
    * promptly when the user interjects during execution so the agent can
    * re-plan with the new instruction instead of waiting for the tool to finish.

@@ -52,6 +52,13 @@ export function isSensitivePath(absolute: string): boolean {
   const base = basename(absolute).toLowerCase()
   if (base === '.env' || base.startsWith('.env.') || base === '.netrc') return true
   if (base === 'providers.json' || base === 'bragi.json' || base === 'vercel.json') return true
+  // The approval key, and the owner's approval policy in a data dir (security/approvals.ts).
+  if (base === 'approvals.key') return true
+  if (base === 'approvals.json') {
+    const parent = resolve(dirname(absolute))
+    const dataHome = resolveArtemisHomeDir()
+    if (basename(parent) === '.artemis' || parent === dataHome || parent.startsWith(`${dataHome}${sep}`)) return true
+  }
   return false
 }
 

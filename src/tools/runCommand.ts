@@ -7,6 +7,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { AgentAction } from '../core/types.js';
 import { invalidateWalkFilesCache, resolveArtemisHomeDir, truncate } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
+import { AGENT_TOOL_ENV, commandAnswersApproval } from '../security/approvals.js';
 import {
   appendCaptureChunk,
   closeCaptureLog,
@@ -56,11 +57,13 @@ function readSavedVercelToken(): string | null {
  * spawn so `/vercel logout` takes effect immediately without restart.
  */
 function buildSpawnEnv(command: string): NodeJS.ProcessEnv {
-  if (process.env.VERCEL_TOKEN) return process.env;
-  if (!isVercelInvocation(command)) return process.env;
+  // Marks the agent's own shell: approval answers are refused from inside it.
+  const base: NodeJS.ProcessEnv = { ...process.env, [AGENT_TOOL_ENV]: '1' };
+  if (process.env.VERCEL_TOKEN) return base;
+  if (!isVercelInvocation(command)) return base;
   const token = readSavedVercelToken();
-  if (!token) return process.env;
-  return { ...process.env, VERCEL_TOKEN: token };
+  if (!token) return base;
+  return { ...base, VERCEL_TOKEN: token };
 }
 
 // ── sensitive command guard ───────────────────────────────────────────────────
@@ -80,6 +83,7 @@ const SENSITIVE_PATH_PATTERNS = [
   /\.claude[/\\]/,
   /providers\.json/,
   /bragi\.json/,
+  /approvals\.key/,
   /\.env($|[\s"'.])/,
   /\.netrc/,
   /\.ssh[/\\]/,
@@ -114,21 +118,21 @@ function commandAccessesAllowedArtemisDiagnosticPath(cmd: string): boolean {
 // High-signal "remote payload → shell" pipelines and reverse-shell patterns.
 // Each matcher is deliberately conservative (must contain a distinguishing
 // construct) so benign commands don't trip it.
-const DANGEROUS_SHELL_PATTERNS: { re: RegExp; reason: string }[] = [
+const DANGEROUS_SHELL_PATTERNS: { re: RegExp; reason: string; reasonZh: string }[] = [
   { re: /\bcurl\b[^|;&`]{0,200}\|\s*(bash|sh|zsh|ksh|dash)\b/i,
-    reason: 'pipes curl output directly into a shell' },
+    reason: 'pipes curl output directly into a shell', reasonZh: '会把从网上下载的脚本直接交给命令行执行' },
   { re: /\bwget\b[^|;&`]{0,200}\|\s*(bash|sh|zsh|ksh|dash)\b/i,
-    reason: 'pipes wget output directly into a shell' },
+    reason: 'pipes wget output directly into a shell', reasonZh: '会把从网上下载的脚本直接交给命令行执行' },
   { re: /\b(base64|xxd|openssl\s+base64)\b[^|;`]{0,200}-d[^|;`]{0,200}\|\s*(bash|sh|zsh|ksh)\b/i,
-    reason: 'decodes a base64 payload and pipes it into a shell' },
+    reason: 'decodes a base64 payload and pipes it into a shell', reasonZh: '会解码一段隐藏的内容并直接执行' },
   { re: /\beval\s+["'$(`][^"']*\b(curl|wget|fetch)\b/i,
-    reason: 'evals the output of a remote fetch' },
+    reason: 'evals the output of a remote fetch', reasonZh: '会直接执行从网上取回的内容' },
   { re: /\bbash\s+-i\b[^|]{0,200}>&?\s*\/dev\/tcp\//,
-    reason: 'opens an interactive reverse shell over /dev/tcp' },
+    reason: 'opens an interactive reverse shell over /dev/tcp', reasonZh: '会向外部打开一个远程控制通道' },
   { re: /\bmkfifo\b[\s\S]{0,200}\bnc\b/,
-    reason: 'sets up a named-pipe reverse shell via nc' },
+    reason: 'sets up a named-pipe reverse shell via nc', reasonZh: '会向外部打开一个远程控制通道' },
   { re: /\bnc\b[^|]{0,200}-e\s+\/?(?:bin\/)?(bash|sh|zsh)\b/i,
-    reason: 'uses nc -e to expose a shell' },
+    reason: 'uses nc -e to expose a shell', reasonZh: '会把命令行暴露给外部连接' },
 ]
 
 function expandForInspection(cmd: string): string {
@@ -151,8 +155,13 @@ function commandAccessesSensitivePath(cmd: string): boolean {
 }
 
 function commandMatchesDangerousPattern(cmd: string): string | null {
-  for (const { re, reason } of DANGEROUS_SHELL_PATTERNS) {
-    if (re.test(cmd)) return reason
+  return describeDangerousCommand(cmd)?.reason ?? null
+}
+
+/** The high-risk shell classifier, with a plain-language reason in both languages (approvals use it). */
+export function describeDangerousCommand(cmd: string): { reason: string; reasonZh: string } | null {
+  for (const { re, reason, reasonZh } of DANGEROUS_SHELL_PATTERNS) {
+    if (re.test(cmd)) return { reason, reasonZh }
   }
   return null
 }
@@ -493,7 +502,19 @@ export async function executeRunCommand(
     })
   }
 
-  const dangerousReason = commandMatchesDangerousPattern(action.command)
+  // Only the owner answers approval requests, never the agent's own shell.
+  if (commandAnswersApproval(action.command)) {
+    return Promise.resolve({
+      action,
+      ok: false,
+      output: 'Access denied: approval requests are answered by the owner only, never from a command.',
+      error: { code: 'approval_self_answer', message: 'Approval requests are answered by the owner only.', retryable: false },
+    })
+  }
+
+  // Already approved for this exact command (policy "allow", an approved
+  // request, or an interactive yes from the run's approval gate).
+  const dangerousReason = context.approvedKinds?.includes('shell_high_risk') ? null : commandMatchesDangerousPattern(action.command)
   if (dangerousReason) {
     if (!context.requestUserConfirmation) {
       return Promise.resolve({
