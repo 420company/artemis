@@ -14,7 +14,7 @@ import type {
 } from '../providers/types.js';
 import type { UiLocale } from '../cli/locale.js';
 import { executeAction } from '../tools/index.js';
-import { resolveRunCommandTimeoutMs } from '../tools/runCommand.js';
+import { describeDangerousCommand, resolveRunCommandTimeoutMs } from '../tools/runCommand.js';
 import type { WorkspaceSwitchRequest } from '../tools/types.js';
 import {
   getToolDefinition,
@@ -26,6 +26,16 @@ import {
 import type { ToolError } from '../tools/types.js';
 import { normalizeReferenceImagesArg } from '../tools/visual/referenceImages.js';
 import { PermissionManager } from '../security/permissions.js';
+import {
+  ApprovalRuntime,
+  approvalLocaleFor,
+  loadApprovalPolicy,
+  publicApproval,
+  runInApprovalScope,
+  type ApprovalGrant,
+  type ApprovalKind,
+  type ApprovalRequest,
+} from '../security/approvals.js';
 import {
   mapPermissionModeToToolAccess,
   type ToolAccessMode,
@@ -3946,6 +3956,28 @@ export type RunAgentOptions = {
   };
   /** Called with a short user-facing line whenever the history is compacted. */
   onContextCompaction?: (notice: string) => void;
+  /**
+   * Approval gate settings (security/approvals.ts). Without them the gate
+   * still applies the owner's policy and asks through
+   * requestUserConfirmation when there is one; otherwise ask-mode actions
+   * are refused.
+   */
+  approvals?: {
+    /** Headless host: stop the run at an ask-mode action (a pending request) instead of refusing it. */
+    suspend?: boolean;
+    /** sha256 of the host's per-run secret, stored with each request. */
+    hostBinding?: string;
+    /** A resume: the one approved action that may pass, once. */
+    grant?: ApprovalGrant;
+    /** A chat bridge's own chat (sending media there is the reply, not an outbound send). */
+    ownChat?: { platform?: string; targetId?: string };
+    /** Language of approval titles; default from the latest user message. */
+    locale?: UiLocale;
+    /** This run continues after an approved action that already ran (it counts as the run's work). */
+    resumed?: { action: AgentAction; ok: boolean };
+  };
+  /** Internal: this run's approval gate (runAgent creates it; children get their own). */
+  approvalRuntime?: ApprovalRuntime;
 };
 
 const RUNNING_INTERJECTION_POLL_MS = 750;
@@ -5077,6 +5109,7 @@ async function executeAgentAction(
   action: AgentAction,
   options: RunAgentOptions,
   abortSignal?: AbortSignal,
+  approvedKinds?: ApprovalKind[],
 ): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
   // Saga long-video safety reroute. Runs before validation so the rerouted
   // action is the one validated and dispatched.
@@ -5127,6 +5160,7 @@ async function executeAgentAction(
         locale: options.locale,
         abortSignal,
         requestUserConfirmation: options.requestUserConfirmation,
+        ...(approvedKinds?.length ? { approvedKinds } : {}),
         updateCwd: async (newCwd) => {
           options.cwd = newCwd;
           session.cwd = newCwd;
@@ -5614,7 +5648,8 @@ function startBackgroundAction(
     kind,
     label,
     abortController,
-    runner: () => executeAgentAction(session, hydratedAction, options, abortController.signal),
+    runner: () => runInApprovalScope(options.approvalRuntime, hydratedAction, () =>
+      executeAgentAction(session, hydratedAction, options, abortController.signal)),
     isFailureResult: (result) => result.ok !== true,
     onComplete: async (result, record) => {
       const elapsedSec = Math.max(
@@ -5792,6 +5827,22 @@ async function executeAuthorizedAction(
       );
     }
 
+    // The approval gate (security/approvals.ts): policy, interactive ask, or
+    // a pending request that stops the run before anything sensitive runs.
+    const approvedKinds: ApprovalKind[] = [];
+    if (options.approvalRuntime) {
+      const gate = await options.approvalRuntime.checkAction(hydratedAction, options.cwd);
+      if (!gate.ok) {
+        if (!gate.pending) options.onInfo?.(`[tool:${hydratedAction.type}] denied`);
+        await recordHeimdallActionEvent(session, options, 'action_denied', hydratedAction, {
+          reason: gate.error.code,
+          denied_by: 'approval_gate',
+        });
+        return { action: hydratedAction, ok: false, output: gate.output, error: gate.error };
+      }
+      if (gate.approvedKind) approvedKinds.push(gate.approvedKind);
+    }
+
     options.onInfo?.(`[tool:${hydratedAction.type}] running`);
     await recordHeimdallActionEvent(
       session,
@@ -5821,7 +5872,8 @@ async function executeAuthorizedAction(
       : () => undefined;
     let result: Awaited<ReturnType<typeof executeAgentAction>>;
     try {
-      result = await executeAgentAction(session, hydratedAction, options, abortSignal);
+      result = await runInApprovalScope(options.approvalRuntime, hydratedAction, () =>
+        executeAgentAction(session, hydratedAction, options, abortSignal, approvedKinds));
     } finally {
       stopHeartbeat();
     }
@@ -6212,6 +6264,19 @@ async function executeActionBatch(
   }
 
   for (const action of actions) {
+    // A step of this turn waits for the owner's approval: nothing after it runs.
+    if (options.approvalRuntime?.pending) {
+      await flushReadOnlyBatch();
+      await flushDelegateBatch();
+      const message = `Not run: an earlier step of this turn is waiting for the owner's approval (${options.approvalRuntime.pending.id}). Decide what to do after the owner answers.`;
+      outcomes.push({
+        action,
+        ok: false,
+        output: message,
+        error: buildToolError('approval_waiting', message, { retryable: false }),
+      });
+      continue;
+    }
     const tool = getToolDefinition(action.type);
     const canParallelize =
       action.type === 'delegate_task' && tool?.parallelSafe === true;
@@ -6263,7 +6328,105 @@ async function executeActionBatch(
  */
 export type AgentRunResult = RunResult & {
   pendingInterjections?: string[];
+  /** The run stopped here: this request waits for the owner (headless suspension). */
+  approval?: ApprovalRequest;
 };
+
+/**
+ * Resume after the owner answered an approval request (security/approvals.ts):
+ * approve runs exactly the stored action, once, outside the model loop;
+ * deny runs nothing. Either way the outcome is recorded in the session as
+ * the tool result the model reads when the run continues. The caller has
+ * already validated the request and marked it decided.
+ */
+export async function recordApprovalAnswer(
+  session: SessionRecord,
+  answer: {
+    request: ApprovalRequest;
+    action: AgentAction;
+    grant: ApprovalGrant;
+    decision: 'approve' | 'deny';
+    reason?: string;
+  },
+  options: RunAgentOptions,
+): Promise<{ ok: boolean; output: string }> {
+  const { request, action, decision } = answer;
+  if (decision === 'deny') {
+    const lines = [
+      `The owner DENIED approval ${request.id} (${request.title}). The action did not run.`,
+      ...(answer.reason?.trim() ? [`Owner's reason: ${truncate(answer.reason.trim(), 500)}`] : []),
+      'Do not retry it or try another way to do the same thing. Tell the owner briefly what you will do instead, or stop.',
+    ];
+    const output = lines.join('\n');
+    options.sessionStore.appendMessage(
+      session,
+      'tool',
+      formatToolResult(action, false, output, buildToolError('approval_denied', output, { retryable: false })),
+      action.type,
+    );
+    await options.sessionStore.save(session);
+    return { ok: false, output };
+  }
+  const approvalRuntime = new ApprovalRuntime({
+    cwd: options.cwd,
+    locale: request.locale,
+    policy: loadApprovalPolicy(options.cwd),
+    grant: answer.grant,
+    dangerousCommand: describeDangerousCommand,
+  });
+  const outcome = await executeAuthorizedAction(session, action, { ...options, approvalRuntime }, false, options.abortSignal);
+  const output = [
+    `The owner APPROVED request ${request.id} (${request.title}); the approved action ran exactly as requested. Its result:`,
+    outcome.output,
+  ].join('\n');
+  options.sessionStore.appendMessage(session, 'tool', formatToolResult(outcome.action, outcome.ok, output, outcome.error), action.type);
+  await options.sessionStore.save(session);
+  return { ok: outcome.ok, output: outcome.output };
+}
+
+/**
+ * This run's approval gate. Only the top-level main run of a headless host
+ * may stop at a request (suspend); sub-agents and nested runs refuse instead
+ * and report back, so the main agent can ask the owner itself.
+ */
+function createRunApprovalRuntime(
+  session: SessionRecord,
+  userInput: string,
+  options: RunAgentOptions,
+  profile: 'main' | AgentRole,
+): ApprovalRuntime {
+  const settings = options.approvals ?? {};
+  const topLevel = profile === 'main' && (options.delegationDepth ?? 0) === 0 && !session.parentSessionId;
+  const lastUser = [...session.messages].reverse().find((m) => m.role === 'user' && !isSyntheticUserMessage(m))?.content;
+  const locale = settings.locale ?? approvalLocaleFor(lastUser ?? userInput, options.locale ?? 'en');
+  const confirm = options.requestUserConfirmation;
+  return new ApprovalRuntime({
+    cwd: options.cwd,
+    locale,
+    policy: loadApprovalPolicy(options.cwd),
+    ...(confirm ? { ask: (question: string) => confirm({ question, timeoutMs: 10 * 60_000 }) } : {}),
+    ...(settings.suspend && topLevel && !confirm
+      ? {
+        suspend: {
+          session,
+          persist: () => options.sessionStore.save(session),
+          emit: (line: string) => options.onInfo?.(line),
+          ...(settings.hostBinding ? { hostBinding: settings.hostBinding } : {}),
+        },
+      }
+      : {}),
+    ...(settings.grant && topLevel ? { grant: settings.grant } : {}),
+    ...(settings.ownChat ? { ownChat: settings.ownChat } : {}),
+    dangerousCommand: describeDangerousCommand,
+  });
+}
+
+/** The run stopped at an approval request: the reply it ends with. */
+function suspendedRunResult(runtime: ApprovalRuntime | undefined, finalReply: string, turn: number): AgentRunResult | undefined {
+  const pending = runtime?.pending;
+  if (!pending) return undefined;
+  return { reply: finalReply, turns: turn, approval: publicApproval(pending) };
+}
 
 export async function runAgent(
   session: SessionRecord,
@@ -6330,6 +6493,7 @@ export async function runAgent(
     ...options,
     heimdallThreadState,
     viewedImages,
+    approvalRuntime: createRunApprovalRuntime(session, userInput, options, profile),
   };
   if (shouldOwnHeimdallState) {
     await recordHeimdallStage(
@@ -6410,6 +6574,14 @@ export async function runAgent(
     completionContract === 'requires_execution_evidence' ||
       (session.changedFiles?.length ?? 0) > 0,
   );
+  // A resume after an approval: the approved action ran just before this run
+  // (recordApprovalAnswer) and is this request's work, not a missing step.
+  const resumed = options.approvals?.resumed;
+  if (resumed?.ok && isConcreteExecutionAction(resumed.action)) {
+    completionChecklist.mutationEvidenceObserved = true;
+  }
+  // Denied (or it failed): the owner's answer is the blocker; the run may end without the work.
+  if (resumed && !resumed.ok) completionChecklist.blockerAccepted = true;
   // Continuation guard for the requires_execution_evidence contract: count how
   // many consecutive turns the model produced only intent text without tool
   // actions, then inject stronger runtime guidance instead of ending early.
@@ -7089,6 +7261,8 @@ export async function runAgent(
       const runCwd = cwd ?? runOptions.cwd;
       selfCheckOwnCommand = true;
       selfCheckCommandCwd = runCwd;
+      // The self-check's own command never stops the run for an approval.
+      if (runOptions.approvalRuntime) runOptions.approvalRuntime.suspendable = false;
       try {
         const outcomes = await executeActionBatch(
           session,
@@ -7105,6 +7279,7 @@ export async function runAgent(
           ? { ok: outcome.ok, output: outcome.output, errorCode: outcome.error?.code }
           : { ok: false, output: '', errorCode: 'tool_permission_denied' };
       } finally {
+        if (runOptions.approvalRuntime) runOptions.approvalRuntime.suspendable = true;
         selfCheckOwnCommand = false;
         selfCheckCommandCwd = undefined;
         options.cwd = saved.options;
@@ -7511,6 +7686,8 @@ export async function runAgent(
         await recordOutcomes([...outcomes, ...refused]);
         await recordOutcomeWorkflowEntry(session, options, turn, [...outcomes, ...refused]);
         await options.sessionStore.save(session);
+        const suspended = suspendedRunResult(runOptions.approvalRuntime, finalReply, turn);
+        if (suspended) return suspended;
         if (selfCheckAbort?.signal.aborted) return await finishAfterSelfCheck(selfCheck.timedOut(), turn);
       }
       const decision = await selfCheck.afterTurn(envelope.reply ?? '', selfCheckHost);
@@ -8195,6 +8372,9 @@ export async function runAgent(
     await recordOutcomeWorkflowEntry(session, options, turn, outcomes);
 
     await options.sessionStore.save(session);
+    // Stopped at an approval request: nothing more runs until the owner answers.
+    const suspended = suspendedRunResult(runOptions.approvalRuntime, finalReply, turn);
+    if (suspended) return suspended;
   }
 
     const maxTurnReply =

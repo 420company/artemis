@@ -158,7 +158,6 @@ export function getDelegatedPermissionMode(
 //   through mcp_call_tool.
 // - bridge_send_image/bridge_send_video: push files into Telegram/Discord/
 //   WeChat chats; results reach the user through the session instead.
-// - request_user_confirmation: nobody can answer it in a headless run.
 // - spawn_background_workflow: detaches a separate agent process whose result
 //   never returns to the requesting session.
 // - agent: runtime-internal, no executor.
@@ -194,6 +193,10 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  // Ask the owner before a sensitive step. Interactive hosts ask at once; a
+  // headless run stops at a pending approval the host shows as a card and
+  // resumes with the answer (security/approvals.ts).
+  'request_user_confirmation',
 ];
 
 export function getAllowedActionTypesForProfile(

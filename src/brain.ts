@@ -54,6 +54,9 @@ import {
 } from './core/backgroundTasks.js';
 import { resolveExtensionRuntime } from './extensions/runtime.js';
 import { EXTRA_TOOL_NAMES, executeExtraTool } from './tools/extras.js';
+import { ApprovalRuntime, classifyDirectToolNeed, loadApprovalPolicy, type ApprovalKind } from './security/approvals.js';
+import { describeDangerousCommand } from './tools/runCommand.js';
+import { normalizeUiLocale } from './cli/locale.js';
 import { buildDirectNativeFunctionTools, listDirectToolNames } from './tools/directTools.js';
 import {
     beginSkillRun,
@@ -1461,6 +1464,33 @@ async function maybeSwitchWorkspaceForExtraTool(
     return { cwd: resolution.workspacePath };
 }
 
+/**
+ * The approval gate for a direct tool call (security/approvals.ts): the
+ * owner's policy, then the host's confirmation (the CLI dialog, or the chat
+ * bridge asking in the chat). A host without one refuses ask-mode actions.
+ */
+async function checkDirectToolApproval(
+    name: string,
+    input: Record<string, unknown>,
+    opts: any,
+): Promise<{ failure?: DirectToolResult; approvedKinds?: ApprovalKind[] }> {
+    const cwd = String(opts.cwd ?? process.cwd());
+    const confirm = opts.onUserConfirmationRequest as ((r: { question: string; timeoutMs?: number }) => Promise<boolean>) | undefined;
+    const runtime = new ApprovalRuntime({
+        cwd,
+        locale: normalizeUiLocale(opts.locale === 'zh' ? 'zh-CN' : opts.locale === 'en' ? 'en' : undefined),
+        policy: loadApprovalPolicy(cwd),
+        ...(confirm ? { ask: (question: string) => confirm({ question, timeoutMs: 10 * 60_000 }) } : {}),
+        ...(opts.approvalOwnChat ? { ownChat: opts.approvalOwnChat } : {}),
+        dangerousCommand: describeDangerousCommand,
+    });
+    const need = classifyDirectToolNeed(name, input, runtime.classifyContext);
+    if (!need) return {};
+    const gate = await runtime.check(need, { type: name, ...input } as AgentAction);
+    if (!gate.ok) return { failure: buildDirectToolFailure(gate.error.code, gate.output, { retryable: false }) };
+    return gate.approvedKind ? { approvedKinds: [gate.approvedKind] } : {};
+}
+
 // ── Tool execution with permission gate ──────────────────────────────────────
 async function executeTool(name: any, input: any, opts: any) {
     return withRuntimeLogSink(
@@ -1497,6 +1527,9 @@ async function executeToolInner(name: any, input: any, opts: any) {
             return buildDirectToolFailure('tool_permission_denied', denied, {
                 retryable: false,
             });
+        const approval = await checkDirectToolApproval(String(name), argsRecord, opts);
+        if (approval.failure)
+            return approval.failure;
         const workspace = await maybeSwitchWorkspaceForExtraTool(name, argsRecord, {
             cwd,
             updateCwd,
@@ -1557,6 +1590,9 @@ async function executeToolInner(name: any, input: any, opts: any) {
         return buildDirectToolFailure('tool_permission_denied', denied, {
             retryable: false,
         });
+    const approval = await checkDirectToolApproval(String(name), argsRecord, opts);
+    if (approval.failure)
+        return approval.failure;
     if (tool.executionMode === 'non-blocking' || !tool.execute) {
         return buildDirectToolFailure(
             'tool_runtime_managed',
@@ -1584,6 +1620,7 @@ async function executeToolInner(name: any, input: any, opts: any) {
             updateCwd,
             requestWorkspaceSwitch: onWorkspaceSwitchRequest,
             requestUserConfirmation: onUserConfirmationRequest,
+            ...(approval.approvedKinds ? { approvedKinds: approval.approvedKinds } : {}),
             readFileHistory,
             permissionMode: mapPermissionModeForToolContext(permissionMode),
             ...(opts.learnedSkillScopes ? { learnedSkillScopes: opts.learnedSkillScopes } : {}),
@@ -2108,6 +2145,8 @@ export interface ThinkOptions {
     visionHelper?: VisionHelper | null;
     onWorkspaceSwitchRequest?: (request: WorkspaceSwitchRequest) => Promise<boolean>;
     onUserConfirmationRequest?: (request: { question: string; screenshotPath?: string; timeoutMs?: number }) => Promise<boolean>;
+    /** A chat bridge's own chat: media sent back there is the reply, not an outbound send (security/approvals.ts). */
+    approvalOwnChat?: { platform?: string; targetId?: string };
     maxNativeToolRounds?: number;
     pollRunningUserMessages?: () => string[];
     onRunningUserMessageAccepted?: (text: string) => void;
@@ -2225,6 +2264,7 @@ async function thinkTurn(
         visionHelper,
         onWorkspaceSwitchRequest,
         onUserConfirmationRequest,
+        approvalOwnChat,
         maxNativeToolRounds: rawMaxNativeToolRounds,
         pollRunningUserMessages,
         onRunningUserMessageAccepted,
@@ -2832,6 +2872,8 @@ async function thinkTurn(
                             onUserConfirmationRequest,
                             readFileHistory,
                             allowBackgroundTools: contextMode !== 'hosted',
+                            approvalOwnChat,
+                            locale,
                             learnedSkillScopes: skillRun.readScopes,
                         }),
                     );

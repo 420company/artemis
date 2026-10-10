@@ -57,6 +57,8 @@ export interface ParsedArgs {
   imagePaths?: string[]
   /** execute/analyze: what the user picked in the app (--intent video|long_video|image|research|reminder). */
   intent?: string
+  /** execute: answer a pending approval request of --session (--approve <id> | --deny <id> [--reason <text>]). */
+  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string }
   resumeLast: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
@@ -116,6 +118,7 @@ ${t('命令', 'Commands')}:
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
   execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder states what the user picked)')}
+                    ${t('需要你同意的操作会暂停（退出码 10）；用 --session <id> --approve <请求id> 同意，或 --deny <请求id> [--reason <理由>] 拒绝', 'Actions that need approval pause the run (exit code 10); answer with --session <id> --approve <request id>, or --deny <request id> [--reason <text>]')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
   session           ${t('管理会话记录', 'Manage session records')}
@@ -142,6 +145,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let sessionId: string | undefined
   const imagePaths: string[] = []
   let intent: string | undefined
+  let approvalAnswer: ParsedArgs['approvalAnswer']
+  let approvalReason: string | undefined
   let resumeLast = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
@@ -226,6 +231,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
       intent = v.trim()
       continue
     }
+    if (command === 'execute' && (cur === '--approve' || cur === '--deny')) {
+      const v = args.shift()?.trim()
+      if (!v || !/^apr_[0-9a-f]{20}$/.test(v)) throw new Error(`execute ${cur} requires an approval request id (apr_…).`)
+      if (approvalAnswer) throw new Error('execute takes one --approve or --deny at a time.')
+      approvalAnswer = { id: v, decision: cur === '--approve' ? 'approve' : 'deny' }
+      continue
+    }
+    if (command === 'execute' && cur === '--reason') {
+      const v = args.shift()
+      if (v === undefined) throw new Error('execute --reason requires a text.')
+      approvalReason = v.slice(0, 2_000)
+      continue
+    }
     if ((command === 'execute' || command === 'analyze') && cur === '--image') {
       const v = args.shift()
       if (!v?.trim()) throw new Error(`${command} --image requires a file path.`)
@@ -252,6 +270,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     promptParts.push(cur)
   }
 
+  if (approvalAnswer && !sessionId) throw new Error(`execute --${approvalAnswer.decision} requires --session <id>.`)
+  if (approvalReason !== undefined && approvalAnswer?.decision !== 'deny') throw new Error('execute --reason goes with --deny.')
+  if (approvalAnswer && approvalReason?.trim()) approvalAnswer.reason = approvalReason.trim()
   return {
     command, cwd, model, baseUrl, apiKey,
     prompt: promptParts.length > 0 ? promptParts.join(' ') : undefined,
@@ -260,6 +281,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     autoDrive, testProviders, background, setup,
     ...(imagePaths.length ? { imagePaths } : {}),
     ...(intent !== undefined ? { intent } : {}),
+    ...(approvalAnswer ? { approvalAnswer } : {}),
   }
 }
 
