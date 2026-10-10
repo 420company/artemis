@@ -234,7 +234,7 @@ export async function renderSagaProject(request: SagaRenderRequest): Promise<Sag
   });
 
   if (lintReport.errors > 0) {
-    throw new Error(`saga lint failed before render:\n${formatLintReport(lintReport)}`);
+    throw new Error(`composition lint failed before render:\n${formatLintReport(lintReport)}`);
   }
 
   const inspectReport = inspectSagaComposition({

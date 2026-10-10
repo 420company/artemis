@@ -158,8 +158,8 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     remote: '/nidhogg <task>',
     autocomplete: true,
     desc: {
-      zh: '启动 Nidhogg 工作流：对抗式打磨实现，逐轮逼近最优',
-      en: 'Start the Nidhogg workflow: harden the implementation through adversarial rounds',
+      zh: '对抗式打磨：逐轮打磨实现，慢但最稳',
+      en: 'Adversarial hardening: improve the implementation round by round (slow but thorough)',
     },
   },
   {
@@ -198,8 +198,8 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     autocomplete: true,
     quickValue: '/heimdall',
     desc: {
-      zh: '查看或控制 Heimdall 引擎线程、上传区、阻塞状态与事件流',
-      en: 'Inspect or control Heimdall engine threads, uploads, blocked states, and event streams',
+      zh: '查看或控制引擎线程、上传区、阻塞状态与事件流',
+      en: 'Inspect or control engine threads, uploads, blocked states, and event streams',
     },
   },
   {

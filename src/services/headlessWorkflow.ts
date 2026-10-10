@@ -25,6 +25,7 @@ import {
 import {
   buildSagaOfferQuestion,
   looksLikeSagaWizardAnswer,
+  parseLongVideoCommand,
   parseSagaOfferReply,
 } from '../tools/visual/sagaWorkflow.js'
 import {
@@ -47,11 +48,47 @@ export interface PlanHeadlessWorkflowInput {
   /** false: no routing at all (Goal Mode ticks, read-only analysis). */
   autoRoute: boolean
   getClassifier: () => Promise<ChatProvider | undefined>
+  /**
+   * What the user picked in the app before sending (`artemis execute
+   * --intent <name>`): long_video, image, research or reminder. Unknown
+   * names are ignored with a warning. Its hint goes in the per-run context,
+   * never into the stored message.
+   */
+  intent?: string
   /** Whether a video provider is configured (Saga can run at all). */
   hasVideoProvider: () => Promise<boolean>
   onInfo?: (message: string) => void
   now?: number
 }
+
+export const HEADLESS_INTENTS = ['long_video', 'image', 'research', 'reminder'] as const
+export type HeadlessIntent = (typeof HEADLESS_INTENTS)[number]
+
+/** A known intent name ("long-video", "Long_Video" and "longvideo" count), or undefined. */
+export function normalizeHeadlessIntent(raw: string | undefined): HeadlessIntent | undefined {
+  const key = (raw ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_')
+  if (key === 'longvideo') return 'long_video'
+  return (HEADLESS_INTENTS as readonly string[]).includes(key) ? key as HeadlessIntent : undefined
+}
+
+const INTENT_PLAIN_WORDS = 'When you talk to the user, describe what you do in plain words; never name workflows, tools, models or providers.'
+
+const IMAGE_INTENT_HINT = [
+  '[Run context — the user chose "image" in the app; this is not part of their message]',
+  'The user wants an image. Make it with generate_image from their description (ask one short question only when the subject is missing).',
+  'Say 「生成图片」 / "making your image" to the user. ' + INTENT_PLAIN_WORDS,
+].join('\n')
+
+const RESEARCH_INTENT_NOTE = [
+  '[Run context — the user chose "research" in the app; this is not part of their message]',
+  'The user wants a researched answer: look things up, compare sources and cite them; do not answer from memory alone. ' + INTENT_PLAIN_WORDS,
+].join('\n')
+
+const REMINDER_INTENT_HINT = [
+  '[Run context — the user chose "reminder" in the app; this is not part of their message]',
+  'The user wants something to happen later or repeatedly. Create it with the schedule tool (schedule_create from the artemis_online tools) and write the scheduled prompt as a complete instruction.',
+  'Confirm in plain words when it runs, how often and what it will do. If no scheduling tool is available, say so plainly instead of pretending. ' + INTENT_PLAIN_WORDS,
+].join('\n')
 
 const readState = readWorkflowRoutingState
 const writeState = writeWorkflowRoutingState
@@ -76,6 +113,35 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   let prompt = input.prompt
   let sagaDeclined = false
 
+  // An intent the user picked in the app wins over routing and any pending
+  // question: it is an explicit choice for this message.
+  if (input.intent !== undefined) {
+    const intent = normalizeHeadlessIntent(input.intent)
+    if (!intent) {
+      input.onInfo?.(`[intent] unknown intent "${input.intent}" ignored; known: ${HEADLESS_INTENTS.join(', ')}`)
+    } else if (!input.autoRoute) {
+      input.onInfo?.(`[intent] "${intent}" ignored for a read-only or unrouted run`)
+    } else {
+      delete state.sagaOffer
+      delete state.sagaActiveAt
+      const text = intent === 'long_video' ? (parseLongVideoCommand(prompt) ?? prompt).trim() : prompt
+      if (intent === 'long_video' && text) {
+        // Same as an explicit long-video command: no question first.
+        state.sagaActiveAt = now
+        writeState(input.session, state)
+        return sagaRun(text, input.cwd, 'the user chose a long video')
+      }
+      writeState(input.session, state)
+      if (intent === 'image') return { kind: 'run', prompt, workflow: 'direct', hint: IMAGE_INTENT_HINT }
+      if (intent === 'reminder') return { kind: 'run', prompt, workflow: 'direct', hint: REMINDER_INTENT_HINT }
+      if (intent === 'research') {
+        const hint = buildRoutedWorkflowHint('plan', { cwd: input.cwd, userPrompt: prompt, reason: 'the user chose research' })
+        return { kind: 'run', prompt, workflow: 'plan', hint: `${hint}\n\n${RESEARCH_INTENT_NOTE}` }
+      }
+      // long_video with no text: fall through to the normal path.
+    }
+  }
+
   // An answer to a pending Saga question.
   const offer = state.sagaOffer && now - state.sagaOffer.at < SAGA_SESSION_TTL_MS ? state.sagaOffer : undefined
   delete state.sagaOffer
@@ -84,7 +150,7 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     if (answer === 'yes') {
       state.sagaActiveAt = now
       writeState(input.session, state)
-      return sagaRun(offer.text, input.cwd, 'the user confirmed Saga')
+      return sagaRun(offer.text, input.cwd, 'the user confirmed the long video')
     }
     if (answer === 'no') {
       prompt = offer.text
@@ -92,14 +158,13 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     }
   }
 
-  // "/saga …" is an explicit, immediate entry.
-  const explicitSaga = /^\s*\/saga(?:\s|$)/i.exec(prompt)
-  if (explicitSaga) {
-    const story = prompt.slice(explicitSaga[0].length).trim()
+  // "/longvideo …" (or the older "/saga …") is an explicit, immediate entry.
+  const story = parseLongVideoCommand(prompt)
+  if (story !== undefined) {
     if (story) {
       state.sagaActiveAt = now
       writeState(input.session, state)
-      return sagaRun(story, input.cwd, 'explicit /saga')
+      return sagaRun(story, input.cwd, 'explicit long-video command')
     }
   }
 
@@ -120,7 +185,7 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   if (sagaActive && !sagaDeclined && looksLikeSagaWizardAnswer(prompt)) {
     state.sagaActiveAt = now
     writeState(input.session, state)
-    return sagaRun(route.text, input.cwd, 'continuing the confirmed Saga video')
+    return sagaRun(route.text, input.cwd, 'continuing the confirmed long video')
   }
   delete state.sagaActiveAt
 

@@ -35,6 +35,20 @@ export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiL
 
 export type SagaWorkflowScope = 'cli' | 'bridge';
 
+/**
+ * The explicit long-video command. "/longvideo" (and "/长视频") is what help
+ * and menus show; "/saga" keeps working as input (the brief guide uses it)
+ * but is never shown.
+ */
+export const LONG_VIDEO_COMMAND = '/longvideo';
+const LONG_VIDEO_COMMAND_RE = /^\s*\/(?:saga|longvideo|long-video|长视频)(?=\s|$)/i;
+
+/** The story after an explicit long-video command ('' when none was given), or undefined for other text. */
+export function parseLongVideoCommand(text: string): string | undefined {
+  const match = LONG_VIDEO_COMMAND_RE.exec(text);
+  return match ? text.slice(match[0].length).trim() : undefined;
+}
+
 export type SagaWorkflowInput = {
   scope: SagaWorkflowScope;
   key: string;
@@ -499,8 +513,10 @@ const PENDING_SAGA_OFFERS = new Map<string, PendingSagaOffer>();
 // Only a whole-reply answer counts; "好的，按方案二来", "好贵啊", "1分钟太长了",
 // "ok but shorter" are new messages (the offer lapses and they are handled
 // normally). The option labels count too: web buttons send them.
-const SAGA_OFFER_YES_RE = /^(?:1|1\.|①|1️⃣|是|是的|好|好的|开始|确定|确认|可以|yes|y|ok|okay|sure|👍|✅|(?:1\.?\s*)?是[，,]\s*开始|(?:1\.?\s*)?yes,?\s*start)[\s!！。.~👍✅]*$/iu;
-const SAGA_OFFER_NO_RE = /^(?:2|2\.|②|2️⃣|不是|不|不要|不用|否|算了|取消|no|n|nope|cancel|(?:2\.?\s*)?不是|(?:2\.?\s*)?no)[\s!！。.~]*$/iu;
+// Old labels ("是，开始" / "不是" / "Yes, start" / "No") still count: a web
+// page or chat history rendered before the wording change sends them.
+const SAGA_OFFER_YES_RE = /^(?:1|1\.|①|1️⃣|是|是的|好|好的|开始|确定|确认|可以|yes|y|ok|okay|sure|👍|✅|(?:1\.?\s*)?(?:是|好)[，,]\s*开始|(?:1\.?\s*)?yes,?\s*(?:start|go ahead)|(?:1\.?\s*)?go ahead)[\s!！。.~👍✅]*$/iu;
+const SAGA_OFFER_NO_RE = /^(?:2|2\.|②|2️⃣|不是|不|不要|不用|不用了|否|算了|取消|no|n|nope|cancel|no thanks|(?:2\.?\s*)?(?:不是|不用了?)|(?:2\.?\s*)?no(?:,?\s*thanks)?)[\s!！。.~]*$/iu;
 
 export function parseSagaOfferReply(text: string): 'yes' | 'no' | undefined {
   const reply = text.trim();
@@ -511,18 +527,18 @@ export function parseSagaOfferReply(text: string): 'yes' | 'no' | undefined {
 
 const SAGA_OFFER_TEXT = {
   zh: {
-    intro: '看起来你想做一段长视频，要用 Saga 长视频工作流吗？（会按分段调用视频生成，产生费用）',
-    yes: '是，开始',
-    no: '不是',
+    intro: '要我帮你做成一段完整的长视频吗？',
+    yes: '好，开始',
+    no: '不用了',
     pick: '请回复编号。',
-    alt: '也可以直接回复 1（是）或 2（不是）。',
+    alt: '也可以直接回复 1（好，开始）或 2（不用了）。',
   },
   en: {
-    intro: 'It looks like you want a long video. Use the Saga long-video workflow? (It generates the video segment by segment, which costs money.)',
-    yes: 'Yes, start',
-    no: 'No',
+    intro: 'Shall I make this into one complete long video?',
+    yes: 'Yes, go ahead',
+    no: 'No thanks',
     pick: 'Reply with the number.',
-    alt: 'You can also reply 1 (yes) or 2 (no).',
+    alt: 'You can also reply 1 (yes, go ahead) or 2 (no thanks).',
   },
 };
 
@@ -1013,11 +1029,10 @@ async function buildModelLine(cwd: string, locale: UiLocale = 'zh-CN'): Promise<
     });
   }
   const limits = resolveVideoModelLimits(configured.config.video.provider, configured.model);
-  // Strip provider prefix from user-visible model line.
-  const modelOnly = String(configured.model).replace(/^[^/]+\//, '');
+  // No model or provider name: users see what happens, not which vendor runs it.
   return pickLocale(locale, {
-    zh: `当前视频模型：${modelOnly}，单段上限约 ${limits.maxSegmentSeconds} 秒，Saga 会自动拆成多段再合成。`,
-    en: `Current video model: ${modelOnly}, per-segment cap ≈ ${limits.maxSegmentSeconds}s; Saga splits into multiple segments and stitches.`,
+    zh: `每段画面最长约 ${limits.maxSegmentSeconds} 秒，我会自动分成多段生成，再合成一条完整视频。`,
+    en: `Each segment is at most about ${limits.maxSegmentSeconds}s; I split the video into segments and join them into one.`,
   });
 }
 
@@ -1229,7 +1244,7 @@ function buildRefIntroMessage(state: SagaWorkflowState): string {
   const idTag = state.identitySource
     ? pickLocale(state.locale, {
         zh: `· 身份来源：${state.identitySource === 'turnaround' ? '三视图' : state.identitySource === 'character_image' ? '角色照片' : state.identitySource === 'direct_image' ? '直接图片' : '纯文字'}`,
-        en: `· identity: ${state.identitySource}`,
+        en: `· identity: ${state.identitySource === 'turnaround' ? 'turnaround sheet' : state.identitySource === 'character_image' ? 'character photo' : state.identitySource === 'direct_image' ? 'image used directly' : 'text only'}`,
       })
     : pickLocale(state.locale, { zh: '· 纯视觉模式', en: '· pure-visual mode' });
   return pickLocale(state.locale, {
@@ -1627,7 +1642,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
   const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
   const ratio = state.ratio ?? state.suggestedRatio ?? extractRatio(fullStory) ?? '16:9';
-  const projectId = `saga-${Date.now()}`;
+  const projectId = `video-${Date.now()}`;
   const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
   const aiScreenwriterSeed = state.aiScreenwriterMode === true;
   const preserveUserScript = hasExplicitUserScriptText(sanitizedAccumulated) && !aiScreenwriterSeed;
@@ -1656,7 +1671,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
         '',
         buildSagaConstitution(state.narrative),
         '',
-        '[Saga Narrative Entity Map — pass this through to generate_long_video as `narrativeEntities` so the planner and critic can use it]',
+        '[Narrative Entity Map — pass this through to generate_long_video as `narrativeEntities` so the shot planner and story check can use it]',
         JSON.stringify({
           protagonist: state.narrative.protagonist,
           supportingCharacters: state.narrative.supportingCharacters,
@@ -1717,12 +1732,12 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   if (state.referenceNotes.length > 0) lines.push(`referenceNotes: ${JSON.stringify(state.referenceNotes)}`);
 
   lines.push(
-    'Before calling the tool, act as the Saga producer with cinematic-director discipline:',
+    'Before calling the tool, act as the long-video producer with cinematic discipline:',
     '0. USER REFERENCE IMAGE RULE — If the user supplied an image and described it as a character/person/form/avatar/image/形象/角色/人物, treat that image as the GLOBAL CHARACTER IDENTITY reference, not merely as a first-frame scene. Extract the subject identity from the image and carry it through every shot. Do not replace the subject with unrelated real people.',
     '1. CHARACTER IDENTITY LOCK — Character/person consistency is a GLOBAL HARD RULE. If a person, character, mascot, user-provided new image, or recurring subject appears in this long video, lock their face, age, ethnicity/species, build, hair, distinguishing features, silhouette, and wardrobe/material cues across every shot unless the user explicitly asks for transformation or multiple different identities.',
     aiScreenwriterSeed ? '1a. AI SCREENWRITER MODE — The user explicitly asked Artemis/AI to create the story from partial inspiration. Expand sparse notes into a complete cinematic plot with clear beginning, development, climax/payoff, and shot-level visible action. Preserve concrete anchors; do not treat the seed as a finished script.' : '',
     '1b. INTENT-AWARE NARRATIVE EXPANSION — You MUST prioritize user-specified anchors (scene changes, wardrobe, specific events). If the user provided script segments, use them as hard visual anchors. If the user is silent about a duration, you are ENCOURAGED to "hallucinate" and expand the story logically, but do NOT execute unauthorized teleportation (scene jumps) unless it serves a thematic or specified purpose. Your "imagination" should fill the non-specified gaps (background activity, physics, secondary actions) while respecting the primary scene continuity established by the user.',
-    '2. CONTINUITY MODE — Saga auto-selects strong-vision (image-ref capable) vs text-only based on the configured model. You do not configure this.',
+    '2. CONTINUITY MODE — The pipeline auto-selects strong-vision (image-ref capable) vs text-only based on the configured model. You do not configure this.',
     preserveUserScript
       ? '3. SHOTS — The user supplied an explicit script. Do NOT replace, rewrite, or substitute the plot. If you provide a shots array, each storyBeat must be a faithful slice of the user script in the same order; only add camera/motion detail around the original action.'
       : '3. SHOTS — Plan a structured shots array. Each shot: title, duration, storyBeat, visualPrompt, camera, continuity, transition, optional transitionKind.',
@@ -1732,7 +1747,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '    Always include continuous environmental motion when the story actually contains moving elements: hair tossed by wind, fabric/cape flowing, particles drifting, rain streaks, fog rolling, light flickering, water rippling, dust motes, leaves falling, fireflies, mist rising, smoke curling. Do not force camera motion or background motion when the user explicitly locks the camera or wants a static tableau. In multi-city walking scenes, keep the camera stable and let only the subject and environment move naturally.',
     '    Always describe at least ONE deliberate body movement per ~3 s of clip duration — never let a shot be a single static pose.',
     '    Prefer 4–6 s action-dense shots over long static shots when the duration allows; if a clip is longer than 6 s, split it into another physical action beat instead of holding one pose.',
-    '    storyBeat may NOT be: identity-preservation rules, generic continuity language, or "the character stands/sits/looks" with no movement. Saga rejects boilerplate storyBeats and falls back to story chunks.',
+    '    storyBeat may NOT be: identity-preservation rules, generic continuity language, or "the character stands/sits/looks" with no movement. The pipeline rejects boilerplate storyBeats and falls back to story chunks.',
     '4. CINEMATIC VOCABULARY — Use industry terms (35mm/50mm lens, golden hour, volumetric beams, ray-traced reflections, IMAX 70mm grain, Arri Alexa LogC). For camera, prefer ACTIVE camera language: tracking shot, dolly-in, dolly-out, crane down, gimbal arc, whip pan, snorricam, handheld follow, parallax push. Avoid "locked-off" / "static" / "establishing only" unless the scene is genuinely meant to be still.',
     '5. HEAD/TAIL VISUAL ECHO — Write each shot N\'s `transition` as a concrete description of its closing frame (in mid-action, not a freeze); open shot N+1\'s `visualPrompt` with a matching opening-frame description that visually rhymes. The body momentum, gaze/covered-face direction, hair/fabric flow, and camera direction should continue across the cut so the transition feels alive rather than mechanical.',
     '6. SMART TRANSITIONS — Do NOT default to "crossfade" (fade-to-black) for every shot. Act as a professional editor to select `transitionKind` for each shot N (into shot N+1):',
@@ -1744,7 +1759,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '   - STYLIZED (kind="shader-glitch", "shader-ridged-burn", "shader-domain-warp"): Use for dream sequences, digital glitch themes, or magical transitions.',
     '   [Full Transition Catalog: cut, crossfade, dissolve, light-leak, fade-black, fade-white, wipe-left, wipe-right, slide-up, push-left, push-right, circle-open, circle-close, blur, zoom-in, zoom-out, flash, speed-ramp, whip-pan, whip-pan-left, match-cut, glitch, cinematic-fade, iris-pulse, shader-light-leak, shader-whip-pan, shader-glitch, shader-cinematic-zoom, shader-domain-warp, shader-ridged-burn, shader-sdf-iris, shader-ripple-waves, shader-gravitational-lens, shader-chromatic-split, shader-swirl-vortex, shader-thermal-distortion, shader-flash-through-white, shader-cross-warp-morph]',
     '7. SCENE-PRIORITY — storyBeat dominates the full clip duration; transition field describes only the closing 0.5 s.',
-    '8. PHYSICS & FAILURE GUARDS — Saga\'s aesthetic-lock auto-appends physics anchors (no morphing/flickering/melting, anatomically correct).',
+    '8. PHYSICS & FAILURE GUARDS — The aesthetic lock auto-appends physics anchors (no morphing/flickering/melting, anatomically correct).',
     '9. SCENE-JUMP HANDLING — When the story has a hard location jump, insert at least one transition shot that bridges the two locations through a shared visual element.',
     '10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot must stay within the detected provider segment limit.',
     `11. SUBTITLE MODE — User selected ${state.subtitleMode ?? 'auto'}: ${state.subtitleMode === 'always' ? 'render readable subtitles/captions for dialogue and voiceover, preserving original text/language.' : state.subtitleMode === 'off' ? 'do not render dialogue as on-screen subtitles; keep dialogue as audio/lip-sync unless the user explicitly authored a subtitle line.' : 'only add subtitles/on-screen text when the user explicitly requested them.'}`,
@@ -1754,7 +1769,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     const sendArgs = [
       state.deliveryPlatform ? `platform: ${JSON.stringify(state.deliveryPlatform)}` : undefined,
       state.deliveryTargetId ? `targetId: ${JSON.stringify(state.deliveryTargetId)}` : undefined,
-      'caption: "Saga long video is ready"',
+      `caption: ${JSON.stringify(pickLocale(state.locale, { zh: '🎬 长视频已生成', en: '🎬 Your long video is ready' }))}`,
     ].filter(Boolean).join(', ');
     lines.push(`After generate_long_video succeeds, immediately call bridge_send_video using the exact final video path from the tool output, with { ${sendArgs} }.`);
   }
@@ -1773,8 +1788,9 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     'You MUST call the tool named: generate_long_video',
     'You MUST NOT call: generate_video',
     'generate_long_video is exposed in your tool list. Verify by reading the tool list before generating; if you do not see it, that is a context-compression artifact, not a real absence — call generate_long_video anyway and the runtime will resolve it.',
-    'If you call generate_video instead of generate_long_video, the result will be a single short clip (capped at 15s by the configured provider) that ignores Saga\'s continuity engine, transitions, and audio normalization, and the user will see a broken output. This is a hard failure mode.',
-    'Saga\'s long-video pipeline is the only correct path for this request. generate_long_video. Not generate_video. generate_long_video.',
+    'If you call generate_video instead of generate_long_video, the result will be a single short clip (capped at 15s by the configured provider) that ignores the long-video continuity engine, transitions, and audio normalization, and the user will see a broken output. This is a hard failure mode.',
+    'The long-video pipeline is the only correct path for this request. generate_long_video. Not generate_video. generate_long_video.',
+    'When you talk to the user, say 「制作长视频」 / "making your long video"; never name this workflow, the tool, the pipeline, the model or the provider.',
     '═══════════════════════════════════════════════════════════════',
   );
 
@@ -1809,7 +1825,7 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
   const ratio = state.ratio ?? state.suggestedRatio ?? extractRatio(fullStory) ?? '16:9';
   const briefContinuity = continuityFromBrief(fullStory);
   const projectIdMatch = prompt.match(/^projectId:\s*"([^"]+)"/m);
-  const projectId = projectIdMatch?.[1] ?? `saga-${Date.now()}`;
+  const projectId = projectIdMatch?.[1] ?? `video-${Date.now()}`;
 
   // Side-channel: write the FULL story to a known file before returning.
   // The agent layer (LLM tool-call serialization) sometimes truncates a long
@@ -1954,8 +1970,8 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
       state.resolution = requestedResolution;
       state.updatedAt = Date.now();
       return { handled: true, reply: pickLocale(state.locale, {
-        zh: `已记下：所有分段按 ${requestedResolution} 生成${requestedResolution === '1080p' ? '（费用约为默认画质的数倍）' : ''}。请继续回答上一步的问题。`,
-        en: `Noted: every segment will be generated at ${requestedResolution}${requestedResolution === '1080p' ? ' (several times the default cost)' : ''}. Please continue with the previous question.`,
+        zh: `已记下：所有分段按 ${requestedResolution} 生成。请继续回答上一步的问题。`,
+        en: `Noted: every segment will be generated at ${requestedResolution}. Please continue with the previous question.`,
       }) };
     }
 

@@ -1087,7 +1087,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   })
   assert(
     'Seedance workflow: Pro video config asks for multimodal references before generation',
-    first.handled && first.reply.includes('Seedance 2.0 Pro') && first.reply.includes('图片参考'),
+    first.handled && first.reply.includes('图片、视频、音频参考') && first.reply.includes('添加') && !/seedance/i.test(first.reply),
     JSON.stringify(first),
   )
 
@@ -1144,7 +1144,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   })
   assert(
     'Seedance workflow: direct generation asks for duration instead of defaulting immediately',
-    durationFirst.handled && durationFirst.reply.includes('请选择 Seedance 2.0 Pro 视频时长'),
+    durationFirst.handled && durationFirst.reply.includes('请选择视频时长') && !/seedance/i.test(durationFirst.reply),
     JSON.stringify(durationFirst),
   )
   const durationSecond = await handleSeedanceMultimodalWorkflow({
@@ -1241,7 +1241,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   })
   assert(
     'Seedance workflow: explicit dream-to-video request still triggers generation flow',
-    dreamVideoRequest.handled && dreamVideoRequest.reply.includes('Seedance 2.0 Pro'),
+    dreamVideoRequest.handled && dreamVideoRequest.reply.includes('参考') && !/seedance/i.test(dreamVideoRequest.reply),
     JSON.stringify(dreamVideoRequest),
   )
 
@@ -1666,7 +1666,7 @@ async function withMockedFetch<T>(
   const formatted = formatImageGenerationFailure({ detail: gateway402, status: 402, source: 'BytePlus image API' }).output
   assert(
     'image failure: 402 message tells the user to top up and names the source',
-    formatted.startsWith('generate_image failed: insufficient balance') &&
+    formatted.startsWith('Image generation failed: insufficient balance') &&
       formatted.includes('top up') &&
       formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
       formatted.includes('Do not substitute a downloaded web image'),
@@ -1770,7 +1770,7 @@ async function withMockedFetch<T>(
     assert(
       'generate_image: HTTP 402 returns ok:false with a top-up message',
       balance.result.ok === false &&
-        String(balance.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(balance.result.output).startsWith('Image generation failed: insufficient balance') &&
         String(balance.result.output).includes('top up'),
       String(balance.result.output),
     )
@@ -1792,7 +1792,7 @@ async function withMockedFetch<T>(
     assert(
       'generate_image: a generic upstream error returns ok:false with a retry message and no web search',
       generic.result.ok === false &&
-        String(generic.result.output).startsWith('generate_image failed: the image service or network failed') &&
+        String(generic.result.output).startsWith('Image generation failed: the image service or network failed') &&
         String(generic.result.output).includes('HTTP 502') &&
         generic.calls.length === 1 &&
         generic.calls.every((call) => call.url.endsWith('/images/generations')),
@@ -2124,7 +2124,7 @@ async function withMockedFetch<T>(
     assert(
       'generate_image: a 403 on the result download is download_failed, not rejected credentials',
       downloadFailed.result.ok === false &&
-        String(downloadFailed.result.output).startsWith('generate_image failed: the image was generated') &&
+        String(downloadFailed.result.output).startsWith('Image generation failed: the image was generated') &&
         !String(downloadFailed.result.output).includes('rejected the credentials') &&
         downloadFailed.calls.length === 2,
       String(downloadFailed.result.output),
@@ -2147,7 +2147,7 @@ async function withMockedFetch<T>(
     assert(
       'generate_image: count 2 with the second failing returns the saved image plus the reason',
       partial.ok === true &&
-        partialOutput.startsWith('Generated 1 of 2 requested image(s) via configured visual API:') &&
+        partialOutput.startsWith('Generated 1 of 2 requested image(s):') &&
         partialOutput.includes(path.join('out', 'light-1.png')) &&
         partialOutput.includes('The other 1 image(s) failed: insufficient balance') &&
         !partialOutput.includes('No image was created') &&
@@ -2179,7 +2179,7 @@ async function withMockedFetch<T>(
         legacy.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
         legacyBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
         legacy.result.ok === false &&
-        String(legacy.result.output).startsWith('generate_image failed: insufficient balance') &&
+        String(legacy.result.output).startsWith('Image generation failed: insufficient balance') &&
         String(legacy.result.output).includes('BytePlus image API failed (HTTP 402)'),
       JSON.stringify({ calls: legacy.calls.map((call) => call.url), output: legacy.result.output }),
     )
@@ -2189,7 +2189,7 @@ async function withMockedFetch<T>(
     assert(
       'generate_image legacy ARK_API_KEY path: a 403 download is download_failed',
       legacyDownload.ok === false &&
-        String(legacyDownload.output).startsWith('generate_image failed: the image was generated'),
+        String(legacyDownload.output).startsWith('Image generation failed: the image was generated'),
       String(legacyDownload.output),
     )
     const legacyTooLarge = await withMockedFetch(
@@ -4813,7 +4813,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
     'interactive routing: /nidhogg uses the detached harness runner instead of hint-only mode',
     interactiveSource.includes("cmd === '/nidhogg' ? 'nidhogg' : 'run'") &&
       interactiveSource.includes('effectiveWorkflowPrompt,') &&
-      interactiveSource.includes("Nidhogg Harness 已启动"),
+      interactiveSource.includes("对抗式打磨已启动"),
   )
   assert(
     'interactive routing: handleTurn preserves the supplied workspace cwd',

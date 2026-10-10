@@ -224,14 +224,14 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: selected video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}. Choose Seedance 2.0 Pro for full multimodal reference input.`,
+        output: `Video generation: the selected video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}. Configure a video model that accepts multimodal references.`,
       };
     }
     if (isGeneratedAudioUnsupported(action, capabilities)) {
       return {
         action,
         ok: false,
-        output: 'generate_video: selected video model cannot generate audio. Choose Seedance 2.0 Pro, or set generateAudio to false.',
+        output: 'Video generation: the selected video model cannot generate audio. Configure a video model with audio output, or set generateAudio to false.',
       };
     }
     const ratio = normalizeVideoRatioArgument(action.ratio, DEFAULT_RATIO, toolWarn) ?? DEFAULT_RATIO;
@@ -260,7 +260,7 @@ export async function executeGenerateVideo(
       maxPromptChars: directorPromptBudget(action, 'byteplus', model),
       subtitleMode: action.subtitleMode,
     });
-    toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
+    toolLog('🎞️ 已优化视频提示词。');
 
     const content: Array<Record<string, unknown>> = [
       { type: 'text', text: withSagaRenderingGuardrails(directed.directedPrompt, action, 'byteplus', model) },
@@ -318,7 +318,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        ...legacyVideoFailure(`generate_video: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status, context),
+        ...legacyVideoFailure(`Video generation: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status, context),
       };
     }
 
@@ -329,7 +329,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: could not parse create response: ${createRaw.slice(0, 500)}`,
+        output: `Video generation: could not parse create response: ${createRaw.slice(0, 500)}`,
       };
     }
 
@@ -338,7 +338,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        output: `generate_video: no task id in response. ${createPayload.error?.message ?? ''}`.trim(),
+        output: `Video generation: no task id in response. ${createPayload.error?.message ?? ''}`.trim(),
       };
     }
 
@@ -357,7 +357,7 @@ export async function executeGenerateVideo(
         return {
           action,
           ok: false,
-          ...legacyVideoFailure(`generate_video: poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`, pollRes.status, context),
+          ...legacyVideoFailure(`Video generation: poll failed (HTTP ${pollRes.status}): ${pollRaw.slice(0, 500)}`, pollRes.status, context),
         };
       }
       let pollPayload: TaskStatusResponse;
@@ -371,7 +371,7 @@ export async function executeGenerateVideo(
         return {
           action,
           ok: false,
-          ...legacyVideoFailure(`generate_video: task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim(), undefined, context),
+          ...legacyVideoFailure(`Video generation: task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim(), undefined, context),
         };
       }
       const maybeUrl = extractVideoUrl(pollPayload);
@@ -385,7 +385,7 @@ export async function executeGenerateVideo(
       return {
         action,
         ok: false,
-        ...legacyVideoFailure(`generate_video: task ${taskId} did not finish within ${maxPolls} polls (${(maxPolls * pollIntervalMs) / 1000}s). Last status: ${lastStatus}.`, undefined, context),
+        ...legacyVideoFailure(`Video generation: task ${taskId} did not finish within ${maxPolls} polls (${(maxPolls * pollIntervalMs) / 1000}s). Last status: ${lastStatus}.`, undefined, context),
       };
     }
 
@@ -406,14 +406,14 @@ export async function executeGenerateVideo(
     return {
       action,
       ok: true,
-      output: `Generated video via ${model} (task ${taskId}) saved to ${absolute}`,
+      output: `Generated video (task ${taskId}) saved to ${absolute}`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (isVisualSetupRequiredError(error)) {
       return { action, ok: false, output: buildVisualSetupRequiredMessage('video') };
     }
-    return { action, ok: false, output: `generate_video error: ${message}` };
+    return { action, ok: false, output: `Video generation error: ${message}` };
   }
 }
 
@@ -434,7 +434,7 @@ export function sagaSegmentPromptReserve(): number {
 function fitVerbatimPrompt(prompt: string, provider: string, model: string): string {
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   if (prompt.length <= limit) return prompt;
-  toolWarn(`⚠️ Saga: 提示词超过 ${model} 的长度上限（${prompt.length}/${limit}），已截断末尾。`);
+  toolWarn(`⚠️ 提示词超过视频模型的长度上限（${prompt.length}/${limit}），已截断末尾。`);
   return `${prompt.slice(0, limit - 1).trimEnd()}…`;
 }
 
@@ -460,7 +460,7 @@ function withSagaRenderingGuardrails(prompt: string, action: GenerateVideoAction
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   const guarded = appendRenderingGuardrails(prompt, limit);
   if (guarded.added === 0) {
-    toolWarn(`⚠️ Saga: 提示词已接近 ${model} 的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
+    toolWarn(`⚠️ 提示词已接近视频模型的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
   }
   return guarded.prompt;
 }
@@ -490,7 +490,7 @@ async function tryGenerateWithConfiguredVisualProvider(
     return {
       action,
       ok: false,
-      output: `generate_video: configured visual provider does not support video generation: ${configured.provider}`,
+      output: 'Video generation: the configured visual service does not support video generation.',
     };
   }
 
@@ -514,7 +514,7 @@ async function tryGenerateWithMainSecondaryFallbackProviders(
   const failures: string[] = [];
   for (const candidate of candidates) {
     try {
-      toolLog(`🧪 测试主/副模型视频生成能力: ${candidate.label} (${candidate.provider}/${candidate.model})`);
+      toolLog(`🧪 测试主/副模型视频生成能力: ${candidate.label}`);
       const provider = await createVisualProvider(candidate.config, 'video');
       if (!provider.supportsVideos || !provider.generateVideo) {
         failures.push(`${candidate.label}: provider does not support videos`);
@@ -544,35 +544,33 @@ async function generateVideoWithVisualProvider(
   config: any,
   provider: any,
   model: string,
-  sourceLabel: string,
+  _sourceLabel: string,
 ): Promise<ToolExecutionResult> {
   const videoConfig = config.video;
-  // Strip the provider prefix from user-facing status; users don't need
-  // to see the upstream brand name. Internal logs still capture it via
-  // saga-plan.json / saga-manifest.json.
-  const userFacingModel = String(model).replace(/^[^/]+\//, '');
-  toolLog(`🎬 ${sourceLabel} · 视频模型: ${userFacingModel}`);
+  // No provider or model name in user-facing status; the project plan and
+  // manifest files record both.
+  toolLog('🎬 开始生成视频。');
   const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model);
   const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model);
   const unsupportedReferences = getUnsupportedVideoReferences(action, capabilities);
   if (unsupportedReferences.length > 0) {
     const modelHint = isBytePlusProvider(videoConfig.provider)
-      ? ' Choose Seedance 2.0 Pro for full multimodal reference input.'
+      ? ' Configure a video model that accepts multimodal references.'
       : ' Use this provider with a text-only prompt, or configure a model that accepts reference assets.';
     return {
       action,
       ok: false,
-      output: `generate_video: ${videoConfig.provider}/${model} does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}.${modelHint}`,
+      output: `Video generation: the configured video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}.${modelHint}`,
     };
   }
   if (isGeneratedAudioUnsupported(action, capabilities)) {
     const modelHint = isBytePlusProvider(videoConfig.provider)
-      ? ' Choose Seedance 2.0 Pro, or set generateAudio to false.'
+      ? ' Configure a video model with audio output, or set generateAudio to false.'
       : ' Disable generateAudio, or configure a model that supports audio output.';
     return {
       action,
       ok: false,
-      output: `generate_video: ${videoConfig.provider}/${model} cannot generate audio.${modelHint}`,
+      output: `Video generation: the configured video model cannot generate audio.${modelHint}`,
     };
   }
   const ratio = normalizeVideoRatioArgument(action.ratio, undefined, toolWarn);
@@ -619,7 +617,7 @@ async function generateVideoWithVisualProvider(
       });
   const generationPrompt = languageNormalized?.generationText ?? action.prompt;
   if (languageNormalized) {
-    toolLog(`🌐 Video Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
+    toolLog(`🌐 Generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
   }
   const directed = bypassDirector
     ? {
@@ -644,7 +642,7 @@ async function generateVideoWithVisualProvider(
           ? 'always'
           : action.subtitleMode,
       });
-  toolLog(`🎞️ Artemis Director 已优化视频提示词: ${directed.providerProfile}`);
+  toolLog('🎞️ 已优化视频提示词。');
   const result = await provider.generateVideo({
     prompt: withSagaRenderingGuardrails(directed.directedPrompt, action, videoConfig.provider, model),
     model,
@@ -673,11 +671,11 @@ async function generateVideoWithVisualProvider(
     );
     // A plain reason for the user; the raw provider error stays in the log
     // line and in the output, where Saga's retry logic reads it.
-    toolWarn(`⚠️ ${failure.userMessage}\n   ${sourceLabel}: ${failure.details}`);
+    toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
     return {
       action,
       ok: false,
-      output: `generate_video: ${sourceLabel} failed: ${message}\nReason: ${failure.userMessage}`,
+      output: `Video generation failed: ${message}\nReason: ${failure.userMessage}`,
       error: videoFailureToolError(failure, result.httpStatus),
     };
   }
@@ -694,6 +692,6 @@ async function generateVideoWithVisualProvider(
   return {
     action,
     ok: true,
-    output: `Generated video via ${sourceLabel} ${result.modelInfo?.provider ?? provider.name}/${result.modelInfo?.model ?? model} saved to ${savedPath}`,
+    output: `Generated video saved to ${savedPath}`,
   };
 }

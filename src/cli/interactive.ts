@@ -289,6 +289,7 @@ import { getDirectToolCount } from '../tools/directTools.js'
 import type { WorkspaceSwitchRequest } from '../tools/types.js'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
+import { describeToolForUser, scrubInternalNames, userVisibleMessageText } from '../utils/internalNames.js'
 import {
   detectVisualGenerationNeed,
   describeVisualProvider,
@@ -298,7 +299,7 @@ import {
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { handleSeedanceMultimodalWorkflow, hasActiveSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
-import { handleSagaLongVideoWorkflow, hasActiveSagaLongVideoWorkflow, offerSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
+import { handleSagaLongVideoWorkflow, hasActiveSagaLongVideoWorkflow, LONG_VIDEO_COMMAND, offerSagaLongVideoWorkflow, parseLongVideoCommand } from '../tools/visual/sagaWorkflow.js'
 
 const HOME_DIR = os.homedir()
 const DIRECT_TOOL_COUNT = getDirectToolCount()
@@ -555,7 +556,7 @@ function buildScrollBlocksFromMessages(messages: SessionMessage[]): ScrollBlock[
   for (const msg of messages) {
     if (msg.role === 'system') continue
     if (msg.role === 'user') {
-      blocks.push({ kind: 'user', text: msg.content, timestamp: timestampFor(msg.createdAt) || undefined })
+      blocks.push({ kind: 'user', text: userVisibleMessageText(msg.content), timestamp: timestampFor(msg.createdAt) || undefined })
       continue
     }
     if (msg.role === 'assistant') {
@@ -563,8 +564,8 @@ function buildScrollBlocksFromMessages(messages: SessionMessage[]): ScrollBlock[
       continue
     }
     if (msg.role === 'tool') {
-      const toolHeader = msg.name ? `[tool:${msg.name}]` : '[tool]'
-      blocks.push({ kind: 'tool', text: `${toolHeader}\n${msg.content}` })
+      const toolHeader = msg.name ? `[${describeToolForUser(msg.name, 'en')}]` : '[tool]'
+      blocks.push({ kind: 'tool', text: `${toolHeader}\n${scrubInternalNames(msg.content)}` })
     }
   }
   return blocks
@@ -863,7 +864,7 @@ function buildInteractiveLandingLines(options: {
     '',
     `  ${c(245, 196, 94, bd(`✦ ${t('工作流', 'Workflows')}`))}`,
     `    ${dm(t('直接描述任务即可，Artemis 会按复杂度自动选择工作流', 'Just describe the task; Artemis picks the workflow by its complexity'))}`,
-    `    ${c(148, 82, 255, bd('/saga'))} ${c(148, 82, 255, bd('/nidhogg'))} ${c(148, 82, 255, bd('/run'))}`,
+    `    ${c(148, 82, 255, bd('/longvideo'))} ${c(148, 82, 255, bd('/nidhogg'))} ${c(148, 82, 255, bd('/run'))}`,
     '',
     `  ${c(245, 196, 94, bd(`✦ ${t('设置', 'Setup')}`))}`,
     `    ${c(148, 82, 255, bd('/bifrost'))}  ${c(148, 82, 255, bd('/config'))}  ${c(148, 82, 255, bd('/permission'))}  ${c(148, 82, 255, bd('/newborn'))}`,
@@ -1789,10 +1790,10 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     // ── 工作流 ──
     { value: '/nidhogg',    hint: t('对抗式实现硬化 / 慢但最稳',  'Adversarial hardening / slow but strongest') },
     { value: '/bifrost',    hint: t('配置思维/执行双模型',        'Setup dual brain/exec models') },
-    { value: '/saga',       hint: t('Saga 长视频生成（显式进入）', 'Saga long-video generation (explicit)') },
+    { value: '/longvideo',  hint: t('制作长视频（直接进入）', 'Make a long video (start now)') },
     { value: '/run',        hint: t('后台运行工作流',             'Run workflow in background') },
     // ── 系统 & 技能 ──
-    { value: '/heimdall',   hint: t('Heimdall 线程控制面',        'Heimdall thread control plane') },
+    { value: '/heimdall',   hint: t('线程控制面',                 'Thread control plane') },
     { value: '/mcp',        hint: t('MCP 服务管理',              'Manage MCP servers') },
     { value: '/skills',     hint: t('技能库搜索与推荐',           'Search and recommend skills') },
     { value: '/dream',      hint: t('立即编织梦境（日记 + 可用时配图）', 'Compose a dream now (diary + image when available)') },
@@ -1841,6 +1842,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   const REGISTERED_SLASH_COMMANDS = new Set<string>([
     ...SLASH_MENU_ITEMS.map((item) => item.value.split(/\s+/, 1)[0].toLowerCase()),
     '/quit',
+    // Older spelling of /longvideo: still accepted, never listed.
+    '/saga',
   ])
 
   const leadingSlashCommandToken = (text: string): string | null => {
@@ -2137,7 +2140,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
   // effort. Undefined while a Saga / video wizard is collecting answers.
   const routeInteractiveRequest = async (requestText: string, root: string): Promise<WorkflowRoute | undefined> => {
     if (hasActiveSagaLongVideoWorkflow('cli', root) || hasActiveSeedanceMultimodalWorkflow('cli', root)) return undefined
-    if (/^\s*\/saga(\s|$)/i.test(requestText)) return undefined
+    if (parseLongVideoCommand(requestText) !== undefined) return undefined
     return routeWorkflow(
       { text: requestText, inCodeRepo: existsSync(path.join(root, '.git')) },
       {
@@ -2177,7 +2180,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       })
       appendSystemPanel(
         command === 'nidhogg'
-          ? t('Nidhogg Harness 已启动', 'Nidhogg Harness launched')
+          ? t('对抗式打磨已启动', 'Adversarial hardening launched')
           : t('后台任务已启动', 'Background task launched'),
         [
           `Session: ${result.sessionId.slice(0, 8)}`,
@@ -2211,7 +2214,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           })
           appendScrollBlock({
             kind: 'user',
-            text: `${cleanLine}\n\n${t('↳ 纠错已接收：Nidhogg 会立即同步到当前对抗循环。', '↳ Correction received: Nidhogg will immediately sync it into the current adversarial loop.')}`,
+            text: `${cleanLine}\n\n${t('↳ 纠错已接收：会立即同步到当前打磨循环。', '↳ Correction received: it will be synced into the current hardening loop right away.')}`,
             timestamp: timeStampLabel(),
           })
           prompt.forceRedraw()
@@ -4444,13 +4447,12 @@ async function handleTurn(
   // already declared intent by typing the slash command).
   let sagaForceIntent = false
   let sagaInput = input
-  const sagaTrim = input.trimStart()
-  if (sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)) {
-    const stripped = sagaTrim.replace(/^\/saga\s*/i, '').trim()
+  const stripped = parseLongVideoCommand(input)
+  if (stripped !== undefined) {
     if (!stripped) {
       const reply = pickLocale(locale, {
-        zh: 'Saga 长视频：请在 /saga 后跟一段故事文字（中英文均可）。例：/saga 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
-        en: 'Saga long video: type /saga followed by a story description. Example: /saga A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
+        zh: `制作长视频：请在 ${LONG_VIDEO_COMMAND} 后接一段故事文字（中英文均可）。例：${LONG_VIDEO_COMMAND} 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。`,
+        en: `Long video: type ${LONG_VIDEO_COMMAND} followed by a story. Example: ${LONG_VIDEO_COMMAND} A cyberpunk morning, the protagonist sips coffee on a neon-lit street.`,
       })
       viewport?.appendScrollBlock({ kind: 'system', text: reply })
       if (!viewport) console.log(reply)
@@ -4491,8 +4493,8 @@ async function handleTurn(
     viewport?.appendScrollBlock({
       kind: 'system',
       text: pickLocale(locale, {
-        zh: `🌙 Saga 长视频工作流已接管：注入导演级 System Prompt (${sagaWorkflow.prompt.length} 字符)。`,
-        en: `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars).`,
+        zh: '🌙 素材已收齐，开始制作长视频。',
+        en: '🌙 Materials collected; starting your long video.',
       }),
     })
   }
@@ -4500,14 +4502,14 @@ async function handleTurn(
     viewport?.appendScrollBlock({
       kind: 'system',
       text: pickLocale(locale, {
-        zh: `🔧 正在直接运行工具：generate_long_video · ${sagaWorkflow.action.totalDuration ?? sagaWorkflow.action.duration ?? 60}s`,
-        en: `🔧 Running tool directly: generate_long_video · ${sagaWorkflow.action.totalDuration ?? sagaWorkflow.action.duration ?? 60}s`,
+        zh: `🎬 正在制作长视频 · ${sagaWorkflow.action.totalDuration ?? sagaWorkflow.action.duration ?? 60} 秒`,
+        en: `🎬 Making your long video · ${sagaWorkflow.action.totalDuration ?? sagaWorkflow.action.duration ?? 60}s`,
       }),
     })
     if (!viewport) {
       console.log(pickLocale(locale, {
-        zh: '正在直接运行工具：generate_long_video',
-        en: 'Running tool directly: generate_long_video',
+        zh: '正在制作长视频',
+        en: 'Making your long video',
       }))
     }
 
@@ -4561,8 +4563,8 @@ async function handleTurn(
     }
 
     const text = pickLocale(locale, {
-      zh: `${result.ok ? '✅' : '⚠️'} 长视频${result.ok ? '生成完成' : '生成失败'}：\n${String(result.output).slice(0, 1600)}`,
-      en: `${result.ok ? '✅' : '⚠️'} Long video ${result.ok ? 'generation completed' : 'generation failed'}:\n${String(result.output).slice(0, 1600)}`,
+      zh: `${result.ok ? '✅' : '⚠️'} 长视频${result.ok ? '生成完成' : '生成失败'}：\n${scrubInternalNames(String(result.output)).slice(0, 1600)}`,
+      en: `${result.ok ? '✅' : '⚠️'} Long video ${result.ok ? 'generation completed' : 'generation failed'}:\n${scrubInternalNames(String(result.output)).slice(0, 1600)}`,
     })
     viewport?.appendScrollBlock({ kind: 'system', text })
     if (!viewport) console.log(text)
@@ -5051,8 +5053,8 @@ function renderHelp(locale: UiLocale): string {
   const t = (zh: string, en: string) => pickLocale(locale, { zh, en })
 
   const commands = [
-    `${t('直接描述任务：Artemis 按任务和复杂度自动选择工作流（直接处理 / 深度规划 / 并行分工 / 多方案对比 / 设计 / Saga 长视频）', 'Just describe the task: Artemis picks the workflow from the task and its complexity (direct / plan / team / compare / design / Saga long video)')}`,
-    `/saga <故事>       ${t('直接进入 Saga 长视频（明确要长视频时也会先询问是否使用）', 'Start Saga long video now (a clear long-video request is also offered it, with a yes/no question)')}`,
+    `${t('直接描述任务：Artemis 按任务和复杂度自动选择工作方式（直接处理 / 深度规划 / 并行分工 / 多方案对比 / 设计 / 长视频）', 'Just describe the task: Artemis picks the approach from the task and its complexity (direct / plan / team / compare / design / long video)')}`,
+    `/longvideo <故事>  ${t('直接开始制作长视频（明确要长视频时也会先问你一句）', 'Start a long video now (a clear long-video request also gets a yes/no question first)')}`,
     `/nidhogg <任务>    ${t('adversarial hardening / iterative convergence（slow）', 'adversarial hardening / iterative convergence (slow)')}`,
     `/bifrost           ${t('dual-model：exec + brain', 'dual-model: exec + brain')}`,
     `/run <任务>        ${t('后台执行 background workflow', 'background workflow')}`,

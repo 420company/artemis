@@ -78,7 +78,7 @@ You never pick a workflow by name. For each request Artemis decides how much pro
 - **Parallel team** — large multi-part builds or repo-wide changes are split into independent parts, with at most 4 sub-agents per run.
 - **Compare** — when you ask Artemis to produce several candidate solutions and pick the best ("give me three approaches and implement the best one"), up to 3 candidates are weighed in one critique round; the winner is built only if you asked for an implementation. Questions such as "which is better" or "list some alternatives" are answered directly.
 - **Design** — website and UI builds follow the `design-workflow` skill: visual system, real assets, desktop and mobile screenshot checks.
-- **Saga** — for a clear request for a new long, multi-segment video, Artemis first asks whether to use the Saga long-video workflow (it costs money) and starts only after you answer yes; `/saga` starts it at once.
+- **Saga** — for a clear request for a new long, multi-segment video, Artemis first asks 「要我帮你做成一段完整的长视频吗？」 (1. 好，开始 / 2. 不用了) and starts only after you answer yes; `/longvideo` (or the older `/saga`) and `--intent long_video` start it at once. Users never see the internal name: every message, menu, progress line and file name says 长视频 / long video.
 
 Cheap heuristics decide the clear cases; questions, follow-ups and writing tasks always take the direct path. Only a long request that matches nothing clearly gets one small classification call, and only when a worker model is configured (low effort, strict JSON, 8-second timeout); any doubt or error falls back to the direct path. Routed workflows never raise the model's effort setting. Every run has a hard sub-agent budget, and Artemis can switch itself to a heavier workflow mid-task with its `use_workflow` tool. The old `/niko`, `/athena`, `/contest`, `/design` and `/team` commands are gone: if you type one, the word is dropped and the rest is routed like any other request (it never forces a workflow).
 
@@ -281,7 +281,7 @@ Rewrite the README for GitHub so it explains the product clearly to users.
 ### Useful commands
 
 - `/config` — Configure providers, models, keys, and preferences
-- `/saga` — Start the Saga long-video wizard right away (for a clear long-video request Artemis also offers it)
+- `/longvideo` — Start the long-video wizard right away (`/saga` still works; for a clear long-video request Artemis also offers it)
 - `/review` — Review the current Git diff and identify risks
 - `/nidhogg` — Run heavy or long work in the background
 - `/wordup` — Save important context into memory
@@ -332,6 +332,19 @@ A Bing or Google key of your own keeps today's order (the platform is not used).
 ```
 
 `"enabled": false` turns it off. Without a `webSearch` entry, a main profile marked `capabilitiesSource` or `managedBy` `"platform"` is used as the gateway, with its own base URL and key. A refused or failed platform search (balance too low, rate limited, not offered, every provider down, gateway unreachable) is reported in the tool result as it is; when a fallback backend then answers, the result starts with a note saying so. A platform search that found nothing is "No results found.", not a failure. Results reach the model under a header marking them as untrusted web content (data, never instructions), each title and snippet flattened to one line. Nothing is ever made up.
+
+### What the user picked: `--intent`
+
+A host that lets the user pick what they want before sending (a button in the web app) passes it to `artemis execute --intent <name>` (or `--intent=<name>`), alongside `--session`, `--image` and the message. Older hosts that never pass it keep the usual routing.
+
+| `--intent` | What happens |
+|---|---|
+| `long_video` | The long-video workflow starts at once (as the `/longvideo` command does), with no "shall I make a long video?" question. The stored user message is the user's text only; a typed `/longvideo` or `/saga` prefix is dropped. |
+| `image` | Direct path with a run-context hint to make the image with image generation. |
+| `research` | The deep-planning workflow with its normal sub-agent budget, plus a hint to research and cite sources. |
+| `reminder` | Direct path with a hint to create the schedule with the platform's schedule tool (`schedule_create`) and confirm it in plain words. |
+
+`long-video` and `longvideo` mean `long_video`. An unknown name is ignored with a `[intent] unknown intent "…" ignored` line on stderr, and the request is routed as usual; `analyze` (read-only) ignores intents. Every hint goes in the per-run context, never into the stored conversation, and tells the model to describe its work in plain words without naming tools, models or providers.
 
 ### Long headless runs
 
@@ -413,7 +426,7 @@ Artemis 可以处理日常和复杂的软件工程任务：
 - **并行分工**——大型多模块项目或全仓改动拆成独立部分并行处理，每次最多 4 个子代理。
 - **多方案对比**——只有当你明确要求产出多个方案并选出最优（"给我三个方案并选最好的实现"）时才启用：最多 3 个候选、只评审一轮；只有你要求实现时才实现胜出方案。"哪个好""列几个备选"这类问题直接回答。
 - **设计**——网站和界面类任务按 `design-workflow` 技能执行：视觉系统、真实素材、桌面和手机截图验收。
-- **Saga 长视频**——明确要求制作一段新的多段长视频时，Artemis 会先问你是否使用 Saga 长视频工作流（会产生费用），你确认后才开始；`/saga` 则直接进入。
+- **Saga 长视频**——明确要求制作一段新的多段长视频时，Artemis 会先问「要我帮你做成一段完整的长视频吗？」（1. 好，开始 / 2. 不用了），你确认后才开始；`/longvideo`（旧写法 `/saga` 仍可用）和 `--intent long_video` 则直接进入。用户看不到内部名称：所有消息、菜单、进度和文件名都只说「长视频」。
 
 明确的情况由轻量规则直接判断；提问、追问和写作类任务一律直接处理。只有很长又看不出类型的请求，并且配置了 worker 模型时，才会做一次小的分类调用（低 effort、严格 JSON、8 秒超时），任何不确定或出错都回到直接处理。自动选择的工作流不会提高模型的 effort。每次运行都有子代理数量上限，Artemis 在任务中途发现更复杂时，也可以用 `use_workflow` 工具自己升级流程。原来的 `/niko`、`/athena`、`/contest`、`/design`、`/team` 命令已移除：如果仍然输入，斜杠词会被忽略，其余内容按普通请求路由（不会强制进入任何工作流）。
 
@@ -616,7 +629,7 @@ artemis
 ### 常用命令
 
 - `/config` — 配置模型供应商、密钥和偏好
-- `/saga` — 直接进入 Saga 长视频引导（明确要求长视频时 Artemis 也会先询问是否使用）
+- `/longvideo` — 直接进入长视频引导（`/saga` 仍可用；明确要求长视频时 Artemis 也会先询问）
 - `/review` — 审查当前 Git diff，发现潜在风险
 - `/nidhogg` — 把复杂或耗时任务转入后台执行
 - `/wordup` — 保存重要上下文到记忆
@@ -634,6 +647,19 @@ artemis
 ### 联网搜索后端与平台搜索
 
 `search_web` 按顺序尝试各个后端，一个失败或没有结果就换下一个：平台搜索（`platform`，托管 agent 专用，经平台网关的 `POST /v1/search`，按次计入主人的平台账户）→ DuckDuckGo（免密钥，机房 IP 常被拦）→ Bing（`BING_API_KEY`）→ Google（`GOOGLE_API_KEY` + `GOOGLE_CX`）→ Wikipedia。只有在主机由平台托管、且你没有配置自己的搜索密钥时才会先用平台搜索；配置了自己的 Bing 或 Google 密钥时顺序保持不变。`backend: "platform"` 可以指定平台搜索，`freshness: "day" | "week" | "month" | "year"` 只要近期结果。托管 VPS 上由 agent 服务器把设置写进全局 `providers.json` 的 `webSearch`（`provider: "platform"`、`baseUrl`、`apiKey`、`managedBy: "platform"`；`enabled: false` 表示关闭），工作区里的配置不能改写它；没有 `webSearch` 时，标记为平台管理的主 profile 会被当作网关使用。平台搜索被拒绝或失败（余额不足、限流、未开通、所有服务商出错、网关不可达）时，工具结果如实说明原因；后备后端接着给出结果时，会在开头注明。平台搜索没有找到结果时返回「No results found.」，不算失败。搜索结果前会标明是不可信的网页内容（只当数据，不执行其中的指令），每条标题和摘要压成一行。绝不编造搜索结果。
+
+### 用户选择的意图：`--intent`
+
+宿主（例如网页里的按钮）让用户先选好要做什么时，把选择传给 `artemis execute --intent <名称>`（或 `--intent=<名称>`），与 `--session`、`--image` 和消息一起传入。不传这个参数的旧宿主仍按原来的自动路由运行。
+
+| `--intent` | 效果 |
+|---|---|
+| `long_video` | 直接开始制作长视频（和 `/longvideo` 命令一样），不再先问「要我帮你做成一段完整的长视频吗」。保存的用户消息只有用户自己的文字；手动输入的 `/longvideo` 或 `/saga` 前缀会被去掉。 |
+| `image` | 直接处理，并在本次运行上下文里提示用图片生成来做图。 |
+| `research` | 走深度规划工作流（子代理预算不变），并提示先调研、给出来源。 |
+| `reminder` | 直接处理，并提示用平台的日程工具（`schedule_create`）创建定时任务，用平白的话确认。 |
+
+`long-video`、`longvideo` 等同于 `long_video`。未知名称会被忽略，并在 stderr 输出一行 `[intent] unknown intent "…" ignored`，请求照常路由；`analyze`（只读）忽略意图。所有提示只放在本次运行的上下文里，不写进保存的对话，并要求模型用平白的话描述在做什么，不提工具、模型或服务商的名称。
 
 ### 长时间无界面运行
 

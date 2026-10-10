@@ -72,6 +72,9 @@ const TOOL_META: Record<string, ToolMeta> = {
   search_files:    { labelZh: '搜索', labelEn: 'Searching', rgb: [235, 205, 100], icon: '◈' },
   lookup_docs:     { labelZh: '查文档', labelEn: 'Docs',    rgb: [200, 140, 250], icon: '§' },
   http_request:    { labelZh: '网络', labelEn: 'Fetch',     rgb: [230, 120, 200], icon: '◉' },
+  generate_image:  { labelZh: '图片', labelEn: 'Image',     rgb: [245, 160, 120], icon: '✦' },
+  generate_video:  { labelZh: '视频', labelEn: 'Video',     rgb: [245, 160, 120], icon: '✦' },
+  generate_long_video: { labelZh: '长视频', labelEn: 'Video', rgb: [245, 160, 120], icon: '✦' },
 }
 
 const FALLBACK_META: ToolMeta = { labelZh: '工具', labelEn: 'Tool', rgb: [160, 160, 160], icon: '⚙' }

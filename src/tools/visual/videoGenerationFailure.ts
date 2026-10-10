@@ -58,8 +58,8 @@ const USER_MESSAGES: Record<GenerationFailureKind, { zh: string; en: string }> =
     en: 'The video service rejected the API key. Check the video service key (/config visual).',
   },
   download_failed: {
-    zh: '视频已生成（可能已计费），但下载失败，请稍后重试。',
-    en: 'The video was generated (and may have been billed) but could not be downloaded. Try again shortly.',
+    zh: '视频已生成，但下载失败，请稍后重试。',
+    en: 'The video was generated but could not be downloaded. Try again shortly.',
   },
   timeout: {
     zh: '视频生成服务在规定时间内没有完成，可能是排队拥堵，请稍后重新发起生成。',

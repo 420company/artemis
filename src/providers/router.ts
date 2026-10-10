@@ -188,8 +188,8 @@ async function promptForSpecialistProfile(
       en: 'Specialist API setup',
     }),
     defaultAlias: pickLocale(locale, {
-      zh: 'Athena specialist',
-      en: 'Athena specialist',
+      zh: 'Specialist',
+      en: 'Specialist',
     }),
     defaultIdPrefix: 'specialist',
     cancellationLabel: pickLocale(locale, {

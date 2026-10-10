@@ -125,6 +125,7 @@ const BASE_SYSTEM_PROMPT = `\
 - 进度展示要分段：完成调查、修改、验证、生成资产等有意义阶段后，给一个短更新；不要复读原始工具日志
 - 因为用户已经看到了分段进度，任务结束时只做短收束：是否完成 + 关键文件/产物 + 验证结果；不要再输出完整流水账或很长的最终清单，除非用户明确要求
 - 除非用户要求，否则不要长篇解释常识
+- 对用户说话时绝不提内部系统、工作流、工具、模型或服务商的名称：不说 Saga、Super Visual/超级视觉、导演/评审/宪法等内部环节名、Seedance、Seedream、BytePlus/ModelArk、工具代码名（如 generate_long_video、generate_image）或模型 ID。用平白的话描述在做什么，例如「制作长视频」「生成图片」「生成视频」「保持画面一致性」「规划分镜」；文件路径照实给出。用户自己先提到某个名字、或明确问用了什么服务时，可以如实回答
 `;
 
 function buildLocaleInstruction(locale: 'en' | 'zh' = 'zh'): string {

@@ -63,6 +63,8 @@ import {
   syncSessionSearchIndex,
 } from './sessionSearch.js';
 
+import { userVisibleMessageText } from '../utils/internalNames.js';
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -391,6 +393,9 @@ function projectChatMessage(message: SessionMessage): SessionMessage {
     reasoningContent: _reasoning,
     ...rest
   } = message as SessionMessage & { contentBlocks?: unknown; reasoningContent?: unknown };
+  // A wizard-built generation prompt stored as the user's turn shows as the
+  // user's own story; its internal blocks and markers are for the model only.
+  if (rest.role === 'user' && rest.content) rest.content = userVisibleMessageText(rest.content);
   const content = rest.content ?? '';
   if (content.length <= MAX_SHOWN_CHARS) return rest as SessionMessage;
   const head = content.slice(0, Math.floor(MAX_SHOWN_CHARS * 0.7));

@@ -25,7 +25,7 @@ let relaySickUntil = 0;
 function isRelaySick(): boolean { return Date.now() < relaySickUntil; }
 function markRelaySick(reason: string): void {
   relaySickUntil = Date.now() + RELAY_SICK_COOLDOWN_MS;
-  toolWarn(`⚠️ Super Visual: 标记 image relay 为 sick（10 分钟内跳过三视图生成）— 原因: ${reason.slice(0, 160)}`);
+  toolWarn(`⚠️ 画面一致性：标记 image relay 为 sick（10 分钟内跳过三视图生成）— 原因: ${reason.slice(0, 160)}`);
 }
 import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
@@ -587,7 +587,7 @@ export async function generateSafeBridgeKeyframe(options: {
   if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
   if (!await fileExists(options.sourceFramePath)) return { ok: false, reason: 'source frame not found' };
 
-  const superVisualDir = path.join(options.projectDir, 'super-visual');
+  const superVisualDir = path.join(options.projectDir, 'consistency');
   await mkdir(superVisualDir, { recursive: true });
   const prompt = buildSafeBridgeKeyframePrompt({
     shotIndex: options.shotIndex,
@@ -622,15 +622,15 @@ export async function generateSafeBridgeKeyframe(options: {
 
 function imageReferenceArtifactPath(projectDir: string, sourceAssetPath: string | undefined): string {
   const ext = sourceAssetPath ? path.extname(sourceAssetPath) : '';
-  return path.join(projectDir, 'super-visual', `character-turnaround${ext || '.png'}`);
+  return path.join(projectDir, 'consistency', `character-turnaround${ext || '.png'}`);
 }
 
 function segmentKeyframePath(projectDir: string, shotIndex: number, ext: string = '.png'): string {
-  return path.join(projectDir, 'super-visual', `segment-${String(shotIndex).padStart(3, '0')}-keyframe${ext}`);
+  return path.join(projectDir, 'consistency', `segment-${String(shotIndex).padStart(3, '0')}-keyframe${ext}`);
 }
 
 function safeBridgeKeyframePath(projectDir: string, shotIndex: number, ext: string = '.png'): string {
-  return path.join(projectDir, 'super-visual', `segment-${String(shotIndex).padStart(3, '0')}-safe-bridge${ext}`);
+  return path.join(projectDir, 'consistency', `segment-${String(shotIndex).padStart(3, '0')}-safe-bridge${ext}`);
 }
 
 // ─── OpenAI image edit helper (multipart) ─────────────────────────────────
@@ -712,10 +712,10 @@ async function maybeCompressForUpload(filePath: string, plan: UploadCompressionP
     ], { timeout: 60_000 });
     const fs = await import('node:fs/promises');
     const newStat = await fs.stat(compressedPath);
-    toolLog(`🗜️  Super Visual: 上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 当前批次 ${plan.inputCount} 张 / ${(plan.totalInputBytes / (1024 * 1024)).toFixed(1)}MB。`);
+    toolLog(`🗜️  画面一致性：上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 当前批次 ${plan.inputCount} 张 / ${(plan.totalInputBytes / (1024 * 1024)).toFixed(1)}MB。`);
     return compressedPath;
   } catch (error) {
-    toolWarn(`⚠️ Super Visual: 图片压缩失败（${error instanceof Error ? error.message.slice(0, 160) : String(error)}），使用原图。`);
+    toolWarn(`⚠️ 画面一致性：图片压缩失败（${error instanceof Error ? error.message.slice(0, 160) : String(error)}），使用原图。`);
     return filePath;
   }
 }
@@ -1210,7 +1210,7 @@ async function describeUserImageWithGeminiVision(options: {
     });
     const raw = await res.text();
     if (!res.ok) {
-      toolWarn(`⚠️ Super Visual: Gemini vision-describe 失败（HTTP ${res.status}，model=${options.model}）— ${raw.slice(0, 200)}`);
+      toolWarn(`⚠️ 画面一致性：图片识别失败（HTTP ${res.status}）— ${raw.slice(0, 200)}`);
       return null;
     }
     type GeminiPart = { text?: unknown };
@@ -1218,7 +1218,7 @@ async function describeUserImageWithGeminiVision(options: {
     const text = parsed.candidates?.[0]?.content?.parts?.map((part) => typeof part.text === 'string' ? part.text : '').join(' ').replace(/\s+/g, ' ').trim();
     return text || null;
   } catch (err) {
-    toolWarn(`⚠️ Super Visual: Gemini vision-describe 网络/解析异常 — ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+    toolWarn(`⚠️ 画面一致性：图片识别网络/解析异常 — ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
     return null;
   }
 }
@@ -1348,7 +1348,7 @@ export async function describeUserImageWithVision(options: {
       }
       if (!res.ok) {
         const errBody = res.text;
-        toolWarn(`⚠️ Super Visual: vision-describe 失败（HTTP ${res.status}，model=${body.model}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
+        toolWarn(`⚠️ 画面一致性：图片识别失败（HTTP ${res.status}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
         // 404 / 400 with model-not-found / 503 from a model-missing relay
         // means THIS model isn't served — try the next fallback in the chain.
         const looksLikeModelMissing = res.status === 404
@@ -1356,7 +1356,7 @@ export async function describeUserImageWithVision(options: {
           || (res.status === 503 && visionFallbacks.length > 0)
         if (looksLikeModelMissing && visionFallbacks.length > 0) {
           const nextModel = visionFallbacks.shift()!;
-          toolWarn(`⚠️ Super Visual: 切换到下一个 vision 候选模型: ${nextModel}`);
+          toolWarn('⚠️ 画面一致性：换用另一个图片识别模型重试。');
           chatModel = nextModel;
           continue;  // retry immediately with new model, same attempt counter
         }
@@ -1369,22 +1369,22 @@ export async function describeUserImageWithVision(options: {
       const text = res.text;
       let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
       try { parsed = JSON.parse(text); } catch {
-        toolWarn(`⚠️ Super Visual: vision-describe 响应 JSON 解析失败（尝试 ${attempt + 1}/${maxAttempts}）`);
+        toolWarn(`⚠️ 画面一致性：vision-describe 响应 JSON 解析失败（尝试 ${attempt + 1}/${maxAttempts}）`);
         return null;
       }
       const content = parsed?.choices?.[0]?.message?.content;
       if (typeof content !== 'string') {
-        toolWarn(`⚠️ Super Visual: vision-describe 返回空内容（尝试 ${attempt + 1}/${maxAttempts}）`);
+        toolWarn(`⚠️ 画面一致性：vision-describe 返回空内容（尝试 ${attempt + 1}/${maxAttempts}）`);
         return null;
       }
       const trimmed = content.replace(/\s+/g, ' ').trim();
       if (trimmed.length === 0) {
-        toolWarn(`⚠️ Super Visual: vision-describe 返回空白描述（尝试 ${attempt + 1}/${maxAttempts}）`);
+        toolWarn(`⚠️ 画面一致性：vision-describe 返回空白描述（尝试 ${attempt + 1}/${maxAttempts}）`);
         return null;
       }
       return trimmed;
     } catch (err) {
-      toolWarn(`⚠️ Super Visual: vision-describe 网络异常（尝试 ${attempt + 1}/${maxAttempts}）— ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+      toolWarn(`⚠️ 画面一致性：vision-describe 网络异常（尝试 ${attempt + 1}/${maxAttempts}）— ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
       if (attempt < maxAttempts - 1) {
         await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
         continue;
@@ -1411,7 +1411,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     return { enabled: false, reason: 'disabled by request' };
   }
 
-  const superVisualDir = path.join(options.projectDir, 'super-visual');
+  const superVisualDir = path.join(options.projectDir, 'consistency');
   await mkdir(superVisualDir, { recursive: true });
 
   // Resolve user images (paths + URLs) into local files we can post.
@@ -1488,7 +1488,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       ].join('\n'),
       'utf8',
     );
-    toolLog(`✅ Super Visual: 已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}${photorealOutputRequested ? '（写实输出路径）' : ''}`);
+    toolLog(`✅ 画面一致性：已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}${photorealOutputRequested ? '（写实输出路径）' : ''}`);
     return {
       enabled: true,
       provider: 'provided-reference',
@@ -1535,7 +1535,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     };
   }
 
-  toolLog(`🎨 Super Visual: 准备调用 ${imageProviderName ?? 'image'}/${resolvedImageModel} 生成角色三视图（含身份锁）...`);
+  toolLog(`🎨 画面一致性：正在生成角色三视图（含身份锁）...`);
 
   // Vision-derived character description from the FIRST user image. This
   // gives the textual side a grounded ground-truth so identity survives
@@ -1587,7 +1587,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       : visionDescription
         ? (visionRealHit ? 'illustrated' : 'photoreal')
         : 'illustrated';
-    toolLog(`🎨 Super Visual: 角色三视图风格 = ${effectiveStyle}${imageNsfw ? '（NSFW provider，允许写实）' : ''}`);
+    toolLog(`🎨 画面一致性：角色三视图风格 = ${effectiveStyle}${imageNsfw ? '（NSFW provider，允许写实）' : ''}`);
   }
   await writeFile(promptPath, prompt, 'utf8');
 
@@ -1609,7 +1609,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       options.imageBudget?.record();
       const referenceImagePath = imageReferenceArtifactPath(options.projectDir, '.png');
       await writeFile(referenceImagePath, edit.buffer);
-      toolLog(`✅ Super Visual: 角色三视图就绪（image-to-image，基于 ${userInputs.length} 张用户图）→ ${referenceImagePath}`);
+      toolLog(`✅ 画面一致性：角色三视图就绪（image-to-image，基于 ${userInputs.length} 张用户图）→ ${referenceImagePath}`);
       return {
         enabled: true,
         provider: describeVisualProvider(imageConfigured.config, 'image'),
@@ -1636,11 +1636,11 @@ export async function maybeGenerateSuperVisualReference(options: {
     //      Generating an unrelated character turnaround would mislead
     //      downstream — better to fail clean and let the SV-disabled
     //      fallback in generateLongVideo handle it.
-    toolWarn(`⚠️ Super Visual: image-to-image 失败（${edit.error.slice(0, 200)}）。`);
+    toolWarn(`⚠️ 画面一致性：image-to-image 失败（${edit.error.slice(0, 200)}）。`);
     if (!visionDescription) {
       const errorText = `image-to-image failed and no vision description available; refusing to fabricate an unrelated turnaround. Detail: ${edit.error.slice(0, 200)}`;
       if (/HTTP 5\d\d|upstream_error|rate.?limit|429|timeout|timed out|aborted/i.test(edit.error)) markRelaySick(edit.error);
-      toolWarn(`⚠️ Super Visual: 没有 vision-describe 兜底，跳过 text-to-image fallback（避免生成与原图无关的角色）。`);
+      toolWarn(`⚠️ 画面一致性：没有 vision-describe 兜底，跳过 text-to-image fallback（避免生成与原图无关的角色）。`);
       return {
         enabled: false,
         reason: errorText,
@@ -1648,7 +1648,7 @@ export async function maybeGenerateSuperVisualReference(options: {
         resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
       };
     }
-    toolLog(`🛟 Super Visual: 用 vision-describe 文字身份重建 text-to-image prompt 后回退。`);
+    toolLog(`🛟 画面一致性：用 vision-describe 文字身份重建 text-to-image prompt 后回退。`);
   }
 
   // Mode B: text-to-image via the existing provider helper.
@@ -1688,7 +1688,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     if (/HTTP 5\d\d|upstream_error|rate.?limit|429/i.test(errorText)) {
       markRelaySick(errorText);
     }
-    toolWarn(`⚠️ Super Visual: 角色三视图生成失败 — ${errorText}。Saga 将改用用户原图作为身份锚。`);
+    toolWarn(`⚠️ 画面一致性：角色三视图生成失败 — ${errorText}。将改用用户原图作为身份锚。`);
     return {
       enabled: false,
       reason: `Image-2 character turnaround generation failed: ${errorText}`,
@@ -1699,7 +1699,7 @@ export async function maybeGenerateSuperVisualReference(options: {
   options.imageBudget?.record();
   const referenceImagePath = imageReferenceArtifactPath(options.projectDir, result.assetPath);
   await writeFile(referenceImagePath, await readFile(result.assetPath));
-  toolLog(`✅ Super Visual: 角色三视图就绪（text-to-image fallback）→ ${referenceImagePath}`);
+  toolLog(`✅ 画面一致性：角色三视图就绪（text-to-image fallback）→ ${referenceImagePath}`);
   return {
     enabled: true,
     provider: describeVisualProvider(imageConfigured.config, 'image'),
@@ -1781,7 +1781,7 @@ export async function generateSegmentKeyframe(options: {
   }
   if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
 
-  const superVisualDir = path.join(options.projectDir, 'super-visual');
+  const superVisualDir = path.join(options.projectDir, 'consistency');
   await mkdir(superVisualDir, { recursive: true });
 
   const turnaroundExists = await fileExists(options.turnaroundPath);
@@ -1813,9 +1813,9 @@ export async function generateSegmentKeyframe(options: {
       if (restored?.trim()) {
         visionDescription = restored.trim();
         await writeFile(visionPath, visionDescription, 'utf8');
-        toolLog('🎨 Super Visual: 已为分段关键帧补写 VISUAL TRUTH（character-vision-description.txt）');
+        toolLog('🎨 画面一致性：已为分段关键帧补写 VISUAL TRUTH（character-vision-description.txt）');
       } else if (options.realPersonInput) {
-        toolWarn('⚠️ Super Visual: realPersonInput=true 但无法恢复 VISUAL TRUTH；将继续使用安全三视图与温和风格继承，不再强制漫画化关键帧。');
+        toolWarn('⚠️ 画面一致性：realPersonInput=true 但无法恢复 VISUAL TRUTH；将继续使用安全三视图与温和风格继承，不再强制漫画化关键帧。');
       }
     }
   }

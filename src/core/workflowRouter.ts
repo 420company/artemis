@@ -487,8 +487,9 @@ export async function routeWorkflow(
 // ── Playbooks and budgets ────────────────────────────────────────────────────
 
 const SAGA_PLAYBOOK = [
-  '[Workflow: Saga long video]',
-  'The user asked for a long, multi-segment video. Produce it with generate_long_video (the Saga engine), not generate_video.',
+  '[Workflow: long video]',
+  'The user asked for a long, multi-segment video. Produce it with generate_long_video, not generate_video.',
+  '- When you talk to the user, call it 「制作长视频」 / "making your long video". Never mention workflow, tool, engine, model or provider names.',
   "- Treat a script or timecoded brief the user wrote as authoritative (preserveUserScript: true); otherwise expand the idea into a brief yourself.",
   '- Take the total duration, aspect ratio and subtitle wishes from the request; ask one short question only when a required choice is missing and cannot be defaulted.',
   '- Report the output file path and any segment that failed; never claim a video exists without the tool result.',
@@ -511,7 +512,7 @@ export function buildRoutedWorkflowHint(
   context: { cwd: string; userPrompt: string; reason?: string },
 ): string {
   if (workflow === 'direct') return '';
-  const header = `[Artemis chose this workflow automatically${context.reason ? `: ${context.reason}` : ''}. The user did not name it; do not mention workflow names unless asked.]`;
+  const header = `[Artemis chose this workflow automatically${context.reason ? `: ${context.reason}` : ''}. The user did not name it. Never mention workflow, playbook, tool, model or provider names to the user; describe what you do in plain words.]`;
   if (workflow === 'saga') return `${header}\n\n${SAGA_PLAYBOOK}`;
   const hint = buildWorkflowHint(AUTO_WORKFLOW_MODE[workflow], { cwd: context.cwd, userPrompt: context.userPrompt });
   return `${header}\n\n${hint}\n\n${describeBudget(workflow, WORKFLOW_BUDGETS[workflow])}`;
@@ -604,7 +605,7 @@ export function describeAutoWorkflow(workflow: AutoWorkflow, locale: 'zh-CN' | '
     case 'team': return zh ? '并行分工：拆成独立部分并行处理（有上限）' : 'Parallel team: independent parts in parallel (bounded)';
     case 'compare': return zh ? '多方案对比：最多 3 个候选，评审后实施最优' : 'Compare: up to 3 candidates, critique, build the best';
     case 'design': return zh ? '设计：视觉系统、素材、实现与截图验收' : 'Design: visual system, assets, build, screenshot check';
-    case 'saga': return zh ? 'Saga 长视频' : 'Saga long video';
+    case 'saga': return zh ? '长视频' : 'Long video';
     default: return zh ? '直接处理' : 'Direct';
   }
 }

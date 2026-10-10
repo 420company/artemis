@@ -522,7 +522,7 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
   try {
     const res = await postSagaChatCompletion(chat, body);
     if (!res.ok) {
-      toolWarn(`⚠️ Saga Visual Director English rewrite skipped: LLM ${res.timedOut ? res.text : res.status ?? res.text}`);
+      toolWarn(`⚠️ English prompt rewrite skipped: LLM ${res.timedOut ? res.text : res.status ?? res.text}`);
       return { originalText, generationText: fallback, bodyText: fallbackBody, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
     }
     const content = chatCompletionContent(res.text);
@@ -554,7 +554,7 @@ export async function normalizeSagaPromptForVideoGeneration(options: {
       usedLlmRewrite: true,
     };
   } catch (error) {
-    toolWarn(`⚠️ Saga Visual Director English rewrite skipped: ${error instanceof Error ? error.message : String(error)}`);
+    toolWarn(`⚠️ English prompt rewrite skipped: ${error instanceof Error ? error.message : String(error)}`);
     return { originalText, generationText: fallback, bodyText: fallbackBody, generationLanguage: 'en', dialogueLines, usedLlmRewrite: false };
   }
 }

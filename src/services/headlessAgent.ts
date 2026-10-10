@@ -38,6 +38,12 @@ export interface HeadlessAgentOptions {
    * read-only analysis.
    */
   selfCheck?: boolean
+  /**
+   * What the user picked in the app (`--intent`): long_video, image,
+   * research or reminder (services/headlessWorkflow.ts). Unknown names are
+   * ignored with a warning on onInfo.
+   */
+  intent?: string
 }
 
 export interface HeadlessAgentResult {
@@ -132,6 +138,7 @@ export async function runHeadlessAgent(
       getClassifier: () => resolveWorkflowClassifierProvider([cwd, resolveArtemisHomeDir()], cwd),
       hasVideoProvider: async () => Boolean(await resolveConfiguredVisualProvider(cwd, 'video')),
       onInfo,
+      ...(opts.intent !== undefined ? { intent: opts.intent } : {}),
     })
     if (plan.kind === 'reply') {
       // The Saga question: answered without running the model.

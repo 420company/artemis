@@ -1027,7 +1027,7 @@ export async function runNidhoggWorkflow(
   const synthesisPrompt = [
     `Original task: ${activeUserPrompt.trim()}`,
     '',
-    `Nidhogg adversarial loop completed after ${rounds.length} round(s).`,
+    `The adversarial review loop completed after ${rounds.length} round(s).`,
     `Final verdict: ${finalVerdict}`,
     `Final score: ${finalScore.toFixed(2)}`,
     `Approved: ${approved}`,
