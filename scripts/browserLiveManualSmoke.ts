@@ -183,7 +183,7 @@ async function main(): Promise<void> {
   assert.equal(fs.existsSync(path.join(liveDir, 'viewer.json')), false);
   console.log('  ✓ the host exits on SIGTERM and removes its files');
   server.close();
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   console.log('\nbrowser live manual smoke: passed');
 }
 

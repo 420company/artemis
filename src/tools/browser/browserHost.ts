@@ -110,8 +110,19 @@ async function main(): Promise<void> {
   const shutdown = async (code: number) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // Files go only once Chromium has exited and released the profile, so a
+    // host started next never finds the profile still locked.
+    const exited = new Promise<void>((resolve) => {
+      if (chrome.exitCode !== null || chrome.signalCode !== null) resolve();
+      else chrome.once('exit', () => resolve());
+    });
+    const within = (ms: number) => Promise.race([exited, new Promise((r) => setTimeout(r, ms))]);
     await Promise.race([router.call('Browser.close').catch(() => undefined), new Promise((r) => setTimeout(r, 3_000))]);
-    if (chrome.exitCode === null) chrome.kill('SIGTERM');
+    await within(3_000);
+    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM');
+    await within(3_000);
+    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGKILL');
+    await within(2_000);
     cleanup();
     process.exit(code);
   };
