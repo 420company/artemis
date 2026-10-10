@@ -18,7 +18,6 @@ import {
 } from '../tools/visual/sagaNarrative.js'
 import {
   buildVisualSetupRequiredMessage,
-  describeVisualProvider,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import type { UiLocale } from '../cli/locale.js'
@@ -143,7 +142,7 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
     referenceImageCount: 0,
   })
 
-  options.onStatus?.(`${t('🌙 生成梦境视频', '🌙 Generating dream video')}: ${describeVisualProvider(configured.config, 'video')}…`)
+  options.onStatus?.(t('🌙 正在生成梦境视频…', '🌙 Generating dream video…'))
   const result = await provider.generateVideo({
     prompt: directed.directedPrompt,
     model,

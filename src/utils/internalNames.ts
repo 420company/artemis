@@ -101,9 +101,12 @@ export function findInternalNames(text: string): InternalNameHit[] {
 
 /**
  * A file path or URL: it names a real file and is never rewritten (a
- * rewritten path points nowhere).
+ * rewritten path points nowhere). Only a token that starts like a path
+ * (/, ~, ./, ../, a drive letter, a scheme://) or a bare file name with an
+ * extension counts; "byteplus/seedream-5-0" or "Seedance/Seedream" is a
+ * provider/model pair, not a path, and is scrubbed.
  */
-const PATH_TOKEN_RE = /\S*[/\\]\S*|\S+\.[A-Za-z][A-Za-z0-9]{0,4}(?=$|[\s"'`)\]）】,，。;；:：])/g;
+const PATH_TOKEN_RE = /(?<![^\s"'`(（[【:：=,，])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+|(?:~|\.{1,2})?[/\\]\S*|[A-Za-z]:[/\\]\S*|[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,4}(?=$|[\s"'`)\]）】,，。;；:：]))/g;
 
 /**
  * Last-line scrubber for progress and error text Artemis itself writes

@@ -292,7 +292,6 @@ import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
 import { describeToolForUser, scrubInternalNames, userVisibleMessageText } from '../utils/internalNames.js'
 import {
   detectVisualGenerationNeed,
-  describeVisualProvider,
   hasExplicitLocalVisualConsent,
   hasExplicitRemoteVisualFallback,
   VISUAL_NOT_CONFIGURED_POLICY,
@@ -1099,7 +1098,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       need.video ? await resolveConfiguredVisualProvider(workspaceRoot, 'video') : null,
     ].filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
 
-    const configuredText = configured.map((entry) => describeVisualProvider(entry.config, entry.assetKind)).join(', ')
+    // What is set up, never which provider or model runs it.
+    const configuredText = t(
+      configured.map((entry) => entry.assetKind === 'image' ? '已配置图片生成' : '已配置视频生成').join('、'),
+      configured.map((entry) => entry.assetKind === 'image' ? 'image generation configured' : 'video generation configured').join(', '),
+    )
     const settings = await opts.settingsStore.load()
     const savedPreference = settings.visualAssetPreference
 

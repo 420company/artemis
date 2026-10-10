@@ -8,7 +8,7 @@
 // would see. Progress lines are checked as the user receives them (through a
 // runtime log sink).
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fixturePng, runHermeticSaga, withHermeticWorkspace } from './sagaHermeticHarness.js';
@@ -219,6 +219,23 @@ await test('scrubber: never touches paths, titles, user names, ordinary words or
   ];
   for (const text of unchanged) assert.equal(scrubInternalNames(text), text, text);
   assert.equal(scrubInternalNames('BytePlus  failed at /x/seedream/a.png'), 'provider  failed at /x/seedream/a.png', 'only the name changes');
+  // provider/model pairs are not paths: they are scrubbed, the real path after them is kept.
+  for (const text of ['  [1] byteplus/seedream-5-0-260128: /tmp/out/a.png', 'Seedance/Seedream', 'model=byteplus/dreamina-seedance-2-0-260128', 'via openai/gpt-image-2, then BytePlus/Seedream 4.0']) {
+    const after = scrubInternalNames(text);
+    expectClean(`provider/model pair "${text}"`, after);
+  }
+  assert.match(scrubInternalNames('  [1] byteplus/seedream-5-0-260128: /tmp/out/a.png'), /: \/tmp\/out\/a\.png$/);
+  for (const path of ['./seedance/a.mp4', '../seedream/b.png', '~/seedance/c.mp4', 'D:\\seedance\\d.mp4', 'file:///x/seedance.mp4']) {
+    assert.equal(scrubInternalNames(`saved ${path}`), `saved ${path}`, path);
+  }
+});
+
+await test('status panels never print the configured provider or model', () => {
+  // The CLI visual-asset panel and the dream-video status line used to print
+  // "byteplus/dreamina-…"; they now say what is set up, not who runs it.
+  for (const file of ['src/cli/interactive.ts', 'src/services/dreamVideo.ts', 'src/core/workflowDispatcher.ts']) {
+    assert.doesNotMatch(readFileSync(file, 'utf8'), /describeVisualProvider\(/, `${file} prints a provider/model description`);
+  }
 });
 
 await test('raw service errors reach users as plain sentences', () => {
@@ -501,12 +518,15 @@ await test('long-video, image and video tools without a configured provider', as
 });
 
 await test('image and single-clip video tools: success and failure results', async () => {
-  for (const options of [{}, { imageStatus: 500 }, { rejectVideoCreates: [1, 2, 3] }]) {
+  for (const options of [{}, { imageStatus: 500 }, { rejectVideoCreates: [1, 2, 3] }, { imageDownloadFailsAt: [2] }]) {
     await withHermeticWorkspace(options, async (cwd) => {
       const logs: string[] = [];
       await withRuntimeLogSink((entry) => { logs.push(entry.message); }, async () => {
         const context = { cwd, permissionMode: 'full-access', sessionId: 'guard', locale: 'en', requestWorkspaceSwitch: async () => true } as any;
         expectClean(`image ${JSON.stringify(options)}`, (await executeGenerateImage({ type: 'generate_image', prompt: STORY_EN }, context)).output);
+        // Two images, one of which cannot be downloaded: the partial success lists paths only.
+        const partial = await executeGenerateImage({ type: 'generate_image', prompt: STORY_EN, count: 2 }, context);
+        expectClean(`partial image ${JSON.stringify(options)}`, partial.output);
         expectClean(`video ${JSON.stringify(options)}`, (await executeGenerateVideo({ type: 'generate_video', prompt: STORY_EN, duration: 5, maxPolls: 3, pollIntervalMs: 1000 } as any, context)).output);
       });
       logs.forEach((line, index) => expectClean(`tools ${JSON.stringify(options)}: progress line ${index + 1}`, line));

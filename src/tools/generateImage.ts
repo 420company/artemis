@@ -355,7 +355,7 @@ async function generateImageWithVisualProvider(
             if (savedEntries.length > 0) {
                 return partialSuccess(
                     action,
-                    savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.provider}/${entry.model}: ${entry.path}`),
+                    savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.path}`),
                     count,
                     sourceLabel,
                     failed,
