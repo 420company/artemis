@@ -58,13 +58,12 @@ export function isBytePlusProvider(provider: string | undefined): boolean {
 
 /** Seedance 2.5 (any vendor prefix: "dreamina-seedance-2-5-…", "seedance_2.5", "Seedance 2.5 Pro"). */
 export function isSeedance25Model(model: string | undefined): boolean {
-  return /seedance[-_ ]?2[._-]?5(?!\d)/i.test(model ?? '');
+  return /seedance[-_ ]?2[._ -]?5(?!\d)/i.test(model ?? '');
 }
 
 /** Seedance 2.0 only. Use isSeedance2xModel for the 2.x family. */
 export function isSeedance2Model(model: string | undefined): boolean {
-  const key = normalize(model);
-  return key.includes('dreamina-seedance-2-0') || key.includes('seedance-2-0');
+  return /seedance[-_ ]?2[._ -]?0(?!\d)/i.test(model ?? '');
 }
 
 /** Seedance 2.0 or 2.5: multimodal references and generated audio. */
@@ -73,7 +72,12 @@ export function isSeedance2xModel(model: string | undefined): boolean {
 }
 
 export function isSeedance15Model(model: string | undefined): boolean {
-  return normalize(model).includes('seedance-1-5');
+  return /seedance[-_ ]?1[._ -]?5(?!\d)/i.test(model ?? '');
+}
+
+/** Seedance 1.0 ("seedance-1-0-pro", "Seedance 1.0 Lite"). */
+export function isSeedance10Model(model: string | undefined): boolean {
+  return /seedance[-_ ]?1[._ -]?0(?!\d)/i.test(model ?? '');
 }
 
 /**
@@ -130,7 +134,7 @@ function builtinProfile(provider: string, model: string): Omit<VideoModelProfile
   if (isSeedance15Model(model)) {
     return { ...base, family: 'seedance-1.5', minClipSeconds: 4, maxClipSeconds: 12, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: true };
   }
-  if (key.includes('seedance-1-0')) {
+  if (isSeedance10Model(model)) {
     return { ...base, family: 'seedance-1.0', minClipSeconds: 4, maxClipSeconds: 10, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: false };
   }
   if (/^wan2\.[67]-/.test(key)) {

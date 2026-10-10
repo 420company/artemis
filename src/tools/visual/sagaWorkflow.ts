@@ -434,9 +434,26 @@ function parseZhNumber(raw: string): number | undefined {
 const EN_NUMBERS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, ninety: 90, sixty: 60, thirty: 30 };
 
 /** The length asked for in a request, in seconds ("90-second", "1.5 minutes", "两分钟", "一分半"). */
+// "总共60秒", "总长 2 分钟", "total 90 seconds": the whole video's length.
+const TOTAL_LENGTH_LABEL_RE = /(?:总共|一共|总长(?:度)?|总时长|全片|整片|合计|in total|total(?:\s+length)?(?:\s+of)?)\s*[:：]?\s*/i;
+// "每段5秒", "每个镜头 8 秒", "each shot 5 seconds", "per segment 10s": a part's length, not the video's.
+const PER_PART_LENGTH_RE = /(?:每(?:一)?(?:段|个?镜头|镜|个?片段|幕)|(?:each|per)\s+(?:segment|shot|clip|scene|part))\s*[:：]?\s*(?:约|大约|about|around)?\s*[\d.零〇一二两三四五六七八九十]+\s*(?:秒|s\b|sec(?:ond)?s?\b|分钟|minutes?)/gi;
+
+/** The length asked for in a request, in seconds ("90-second", "1.5 minutes", "两分钟", "一分半", "总共60秒"). */
 export function parseRequestedVideoSeconds(text: string): number | undefined {
-  // "两分钟", "一分半", "2分30秒"; never the adverb "十分" ("十分精彩").
-  const zh = /([\d.]+|[零〇一二两三四五六七八九十]{1,3})\s*分\s*(钟|半|(?=\s*(?:\d+|[零〇一二三四五六七八九十]{1,3})\s*秒))\s*(?:([\d]+|[零〇一二三四五六七八九十]{1,3})\s*秒)?/.exec(text);
+  // A labelled total wins over every other length in the request.
+  const total = TOTAL_LENGTH_LABEL_RE.exec(text);
+  if (total) {
+    const value = parseLengthOnce(text.slice(total.index + total[0].length, total.index + total[0].length + 24));
+    if (value !== undefined) return value;
+  }
+  return parseLengthOnce(text.replace(PER_PART_LENGTH_RE, ' '));
+}
+
+function parseLengthOnce(text: string): number | undefined {
+  // "两分钟", "一分半", "2分30秒", "一分两秒", "半分钟"; never the adverb "十分" ("十分精彩").
+  if (/半\s*分钟/.test(text)) return 30;
+  const zh = /([\d.]+|[零〇一二两三四五六七八九十]{1,3})\s*分\s*(钟|半|(?=\s*(?:\d+|[零〇一二两三四五六七八九十]{1,3})\s*秒))\s*(?:([\d]+|[零〇一二两三四五六七八九十]{1,3})\s*秒)?/.exec(text);
   if (zh) {
     const minutes = parseZhNumber(zh[1] ?? '');
     if (minutes !== undefined) return Math.round(minutes * 60 + (zh[2] === '半' ? 30 : 0) + (zh[3] ? parseZhNumber(zh[3]) ?? 0 : 0));
@@ -454,12 +471,15 @@ export function parseRequestedVideoSeconds(text: string): number | undefined {
     if (value === undefined) return undefined;
     return /^m/i.test(en[2] ?? '') ? Math.round(value * 60) : Math.round(value);
   }
-  // A bare "60s": seconds next to Chinese ("做个60s的视频"); in English a
-  // round "60s" / "90s" is a decade unless it is plainly a length.
-  const bare = /(^|[^\d.])(\d{1,3})s(?![a-z])(?![-\s]?(?:style|era|retro|vibe|vibes|music|look|aesthetic))(.?)/i.exec(text);
+  // A bare "60s": seconds next to Chinese ("做个60s的视频") or before a video
+  // word ("make a 30s video", "a 60s clip"); otherwise a round "60s" / "90s"
+  // is a decade ("80s music"), any other number is seconds.
+  const bare = /(^|[^\d.])(\d{1,3})s(?![a-z])(?![-\s]?(?:style|era|retro|vibe|vibes|music|look|aesthetic|fashion|songs?|hits?))(.?)/i.exec(text);
   if (bare) {
-    const cjkNeighbour = /[\u3400-\u9fff]/.test(bare[1] ?? '') || /[\u3400-\u9fff]/.test(bare[3] ?? '');
-    if (cjkNeighbour || !/^(?:[2-9]0)$/.test(bare[2]!)) return Number(bare[2]);
+    const after = text.slice((bare.index ?? 0) + bare[0].length - (bare[3] ? bare[3].length : 0));
+    const cjkNeighbour = /[㐀-鿿]/.test(bare[1] ?? '') || /[㐀-鿿]/.test(bare[3] ?? '');
+    const videoWordAfter = /^[\s-]*(?:long\s+)?(?:video|clip|film|movie|trailer|teaser|ad|promo|reel|short|vlog|animation|loop)\b/i.test(after);
+    if (cjkNeighbour || videoWordAfter || !/^(?:[2-9]0)$/.test(bare[2]!)) return Number(bare[2]);
   }
   return undefined;
 }
@@ -1062,7 +1082,11 @@ function buildModelLine(state: SagaWorkflowState): string {
 
 /** Lengths the duration step offers, each with how many segments it takes on this model. */
 export function longVideoDurationChoices(maxClipSeconds: number, minClipSeconds = 4): Array<{ seconds: number; segments: number }> {
-  return [30, 60, 90, 120].map((seconds) => ({ seconds, segments: segmentCountFor(seconds, maxClipSeconds, minClipSeconds) }));
+  // A long video is longer than one clip: the examples start above L.
+  return [30, 60, 90, 120, 180, 240]
+    .filter((seconds) => seconds > maxClipSeconds)
+    .slice(0, 4)
+    .map((seconds) => ({ seconds, segments: segmentCountFor(seconds, maxClipSeconds, minClipSeconds) }));
 }
 
 function formatSecondsLabel(seconds: number, locale: UiLocale): string {

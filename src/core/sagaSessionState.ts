@@ -17,7 +17,7 @@ export type WorkflowRoutingState = {
   /** Saga was confirmed (or continued) at this time; cleared when it ends. */
   sagaActiveAt?: number;
   /** The user chose "video" without a length: "how long?" is waiting for an answer. */
-  videoLengthQuestion?: { text: string; at: number };
+  videoLengthQuestion?: { text: string; at: number; retried?: boolean };
 };
 
 export function readWorkflowRoutingState(session: Pick<SessionRecord, 'metadata'>): WorkflowRoutingState {

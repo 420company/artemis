@@ -119,18 +119,24 @@ function buildVideoLengthQuestion(maxClipSeconds: number, zh: boolean): string {
   return `${zh ? '要做多长的视频？' : 'How long should the video be?'}\n\n\`\`\`choices\n${card}\n\`\`\`\n${zh ? '也可以直接回复时长，例如“20 秒”。' : 'You can also reply with a length, e.g. "20 seconds".'}`
 }
 
-/** The answer to "how long?": a length in seconds, 'longer', or undefined when the reply is something else. */
-function parseVideoLengthAnswer(reply: string, maxClipSeconds: number, zh: boolean): number | 'longer' | undefined {
-  const text = reply.trim()
-  const choices = videoLengthChoices(maxClipSeconds, zh)
-  const index = /^([1-9])[.、)）]?$/.exec(text)
-  if (index) {
-    const choice = choices[Number(index[1]) - 1]
-    return choice ? (choice.seconds ?? 'longer') : undefined
-  }
-  if (/^(?:更长|更长[，,]?\s*我来说|再长|长一点|longer|longer,?\s*i'?ll say)[\s!！。.~]*$/i.test(text)) return 'longer'
+/**
+ * The answer to "how long?": a length in seconds, 'longer', or undefined
+ * when the reply is not a length. Buttons send their labels ("10 秒",
+ * "1 分钟"), so a bare number is seconds ("5", "20"), never a button index.
+ */
+export function parseVideoLengthAnswer(reply: string): number | 'longer' | undefined {
+  const text = reply.trim().replace(/[\s!！。.~]+$/u, '')
+  if (/^(?:更长|更长[，,]?\s*我来说|再长(?:一点|些)?|长一点|longer|longer,?\s*i'?ll say)$/i.test(text)) return 'longer'
+  const bare = /^(\d{1,3})$/.exec(text)
+  if (bare) return Number(bare[1]) > 0 ? Number(bare[1]) : undefined
   if (text.length > 24) return undefined
-  return parseRequestedVideoSeconds(text)
+  const seconds = parseRequestedVideoSeconds(text)
+  return seconds !== undefined && seconds > 0 ? seconds : undefined
+}
+
+function buildVideoLengthRetry(maxClipSeconds: number, zh: boolean): string {
+  const card = JSON.stringify({ options: videoLengthChoices(maxClipSeconds, zh).map((choice) => choice.label) })
+  return `${zh ? '没看懂想要多长，请选一个时长，或直接回复秒数，例如“20”。' : 'I did not catch the length. Pick one, or reply with a number of seconds such as "20".'}\n\n\`\`\`choices\n${card}\n\`\`\``
 }
 
 const readState = readWorkflowRoutingState
@@ -156,12 +162,21 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   let prompt = input.prompt
   let sagaDeclined = false
 
-  // An answer to "how long should the video be?" (the video intent).
-  const lengthQuestion = state.videoLengthQuestion && now - state.videoLengthQuestion.at < SAGA_SESSION_TTL_MS ? state.videoLengthQuestion : undefined
-  delete state.videoLengthQuestion
+  // An answer to "how long should the video be?" (the video intent). Only
+  // for a routed run: a read-only analysis or a Goal Mode tick leaves the
+  // question waiting.
+  const lengthQuestion = input.autoRoute && state.videoLengthQuestion && now - state.videoLengthQuestion.at < SAGA_SESSION_TTL_MS ? state.videoLengthQuestion : undefined
+  if (lengthQuestion) delete state.videoLengthQuestion
   if (lengthQuestion && (input.intent === undefined || normalizeHeadlessIntent(input.intent) === 'video')) {
     const L = await input.videoClipSeconds?.()
-    const answer = L === undefined ? undefined : parseVideoLengthAnswer(prompt, L, /[\u3400-\u9fff]/.test(lengthQuestion.text))
+    const answer = L === undefined ? undefined : parseVideoLengthAnswer(prompt)
+    if (L !== undefined && answer === undefined && !lengthQuestion.retried && prompt.trim().length <= 24) {
+      // A short reply that is not a length: ask once more, briefly. A longer
+      // message is a new request and goes on as usual.
+      state.videoLengthQuestion = { ...lengthQuestion, at: now, retried: true }
+      writeState(input.session, state)
+      return { kind: 'reply', reply: buildVideoLengthRetry(L, /[\u3400-\u9fff]/.test(lengthQuestion.text)) }
+    }
     if (L !== undefined && answer !== undefined) {
       if (answer !== 'longer' && answer <= L) {
         writeState(input.session, state)

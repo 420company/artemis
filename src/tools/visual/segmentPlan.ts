@@ -18,9 +18,14 @@ export function planSegmentDurations(
   minClipSeconds: number = MIN_SEGMENT_SECONDS,
 ): number[] {
   const min = Math.max(1, Math.floor(minClipSeconds));
-  const max = Math.max(min, Math.floor(maxClipSeconds));
-  const total = Math.max(min, Math.round(Number.isFinite(totalSeconds) ? totalSeconds : min));
-  const count = Math.max(1, Math.ceil(total / max));
+  const max = Math.max(1, Math.floor(maxClipSeconds));
+  const raw = Number.isFinite(totalSeconds) ? Math.max(min, totalSeconds) : min;
+  const total = Math.round(raw);
+  // Enough segments that none is longer than L (an unrounded 12.4 s on L=12
+  // is two), but never so many that one falls below the minimum: then fewer,
+  // longer segments, and the total stays exact.
+  let count = Math.max(1, Math.ceil(raw / max - 1e-9));
+  while (count > 1 && Math.floor(total / count) < min) count -= 1;
   const base = Math.floor(total / count);
   const extra = total - base * count;
   return Array.from({ length: count }, (_, index) => base + (index < extra ? 1 : 0));
@@ -33,12 +38,35 @@ export function segmentCountFor(totalSeconds: number, maxClipSeconds: number, mi
 
 const QUOTED_RE = /“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"/g;
 
-/** Sentences of a beat, kept with their closing punctuation; a quoted line is never cut. */
-function sentencesOf(text: string): string[] {
+/**
+ * Sentences of a beat, with their closing punctuation and nothing dropped:
+ * joined back together they are the beat. A sentence ends at 。！？；!?;
+ * (and the closing quotes after them), or at a "." followed by a space or
+ * the end; "3.5", "example.com" and "Wait..." inside a sentence stay put,
+ * and a quoted line is never cut.
+ */
+export function sentencesOf(text: string): string[] {
   const quotes: string[] = [];
-  const masked = text.replace(QUOTED_RE, (quote) => `\uE000${quotes.push(quote) - 1}\uE001`);
-  return (masked.match(/[^。！？!?；;.]+(?:[。！？!?；;]+|\.(?=\s|$)|$)/g) ?? [masked])
-    .map((sentence) => sentence.replace(/\uE000(\d+)\uE001/g, (_, index: string) => quotes[Number(index)] ?? '').trim())
+  const masked = text.replace(QUOTED_RE, (quote) => `${quotes.push(quote) - 1}`);
+  const sentences: string[] = [];
+  let current = '';
+  for (let index = 0; index < masked.length; index += 1) {
+    const char = masked[index]!;
+    current += char;
+    const next = masked[index + 1] ?? '';
+    const closer = /[”」』"')）\]】]/;
+    let ends = false;
+    if (/[。！？；!?;]/.test(char)) ends = !/[。！？；!?;]/.test(next) && !closer.test(next);
+    else if (closer.test(char)) ends = /[。！？；!?;.]/.test(masked[index - 1] ?? '') && !closer.test(next) && (next === '' || /\s/.test(next) || next.charCodeAt(0) > 0x7f);
+    else if (char === '.') ends = next === '' || /\s/.test(next);
+    if (ends) {
+      sentences.push(current);
+      current = '';
+    }
+  }
+  if (current) sentences.push(current);
+  return sentences
+    .map((sentence) => sentence.replace(/(\d+)/g, (_, at: string) => quotes[Number(at)] ?? '').trim())
     .filter(Boolean);
 }
 
@@ -92,12 +120,16 @@ export function splitLongShots<T extends SplittableShot>(
     const span = typeof shot.timecodeStart === 'number' && typeof shot.timecodeEnd === 'number'
       ? shot.timecodeEnd - shot.timecodeStart
       : shot.duration;
-    const length = typeof span === 'number' && Number.isFinite(span) ? Math.round(span) : undefined;
-    if (length === undefined || length <= maxClipSeconds) {
+    // The unrounded length decides: 12.4 s does not fit a 12 s clip.
+    if (typeof span !== 'number' || !Number.isFinite(span) || span <= maxClipSeconds) {
       out.push(shot);
       continue;
     }
-    const durations = planSegmentDurations(length, maxClipSeconds, minClipSeconds);
+    const durations = planSegmentDurations(span, maxClipSeconds, minClipSeconds);
+    if (durations.length <= 1) {
+      out.push(shot);
+      continue;
+    }
     const beats = splitBeatText(shot.storyBeat ?? '', durations.length);
     let cursor = typeof shot.timecodeStart === 'number' ? shot.timecodeStart : undefined;
     durations.forEach((duration, index) => {

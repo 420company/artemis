@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 import { ProviderStore } from '../src/providers/store.js';
-import { planSegmentDurations, splitLongShots } from '../src/tools/visual/segmentPlan.js';
+import { planSegmentDurations, sentencesOf, splitBeatText, splitLongShots } from '../src/tools/visual/segmentPlan.js';
 import { resolveVideoModelCapabilities, resolveVideoModelProfile } from '../src/tools/visual/videoCapabilities.js';
 import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js';
@@ -17,17 +17,18 @@ import {
   handleSagaLongVideoWorkflow,
   longVideoDurationChoices,
   offerSagaLongVideoWorkflow,
+  parseRequestedVideoSeconds,
 } from '../src/tools/visual/sagaWorkflow.js';
 import { handleSeedanceMultimodalWorkflow, singleClipChoices } from '../src/tools/visual/seedanceWorkflow.js';
 import { looksLikeSagaRequest, routeWorkflow } from '../src/core/workflowRouter.js';
-import { planHeadlessWorkflow, videoLengthChoices } from '../src/services/headlessWorkflow.js';
+import { parseVideoLengthAnswer, planHeadlessWorkflow, videoLengthChoices } from '../src/services/headlessWorkflow.js';
 import { SessionStore } from '../src/storage/sessions.js';
 import { findInternalNames } from '../src/utils/internalNames.js';
 
 const SEEDANCE_20 = 'dreamina-seedance-2-0-260128';
 // No public 2.5 id is pinned here: any id matching /seedance[-_ ]?2[._-]?5/ is 2.5.
 const SEEDANCE_25 = 'dreamina-seedance-2-5-260901';
-const COST_RE = /费用|计费|收费|价格|\bcosts?\b|\bbilled\b|\bprice\b|\bmoney\b/i;
+const COST_RE = /费用|计费|收费|扣费|价格|余额|充值|\bcosts?\b|\bbilled\b|\bprice\b|\bmoney\b/i;
 
 let passed = 0;
 async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
@@ -95,6 +96,65 @@ await test('platform overrides: video.capabilities wins for its model only', () 
   assert.equal(normalizeVideoDurationForProvider(25, 'custom', 'my-video-v1', { maxClipSeconds: 20 }), 20);
   assert.equal(normalizeVideoDurationForProvider(7, 'byteplus', SEEDANCE_20, { allowedDurations: [5, 10] }), 5, 'snapped to an allowed length');
   assert.equal(resolveVideoModelProfile('byteplus', SEEDANCE_20, { maxClipSeconds: -3 }).maxClipSeconds, 15, 'a bad value keeps the built-in');
+});
+
+await test('segment math edge cases: minimum, unrounded spans, sentences never dropped', () => {
+  assert.deepEqual(planSegmentDurations(7, 5, 4), [7], 'L below twice the minimum: fewer, longer parts, never one under 4 s');
+  assert.deepEqual(planSegmentDurations(9, 5, 4), [5, 4]);
+  for (const [total, L] of [[7, 5], [13, 6], [61, 15], [44, 30], [119, 30]] as const) {
+    const plan = planSegmentDurations(total, L, 4);
+    assert.equal(plan.reduce((sum, value) => sum + value, 0), total, `${total} on L=${L}: total stays exact`);
+    assert.ok(plan.length === 1 || plan.every((value) => value >= 4), `${total} on L=${L}: ${plan}`);
+  }
+  const split = splitLongShots([{ title: 'a', storyBeat: '他走进来。他坐下。', timecodeStart: 0, timecodeEnd: 12.4 }], 12);
+  assert.equal(split.length, 2, '12.4 s does not fit a 12 s clip');
+  const samples = [
+    'He walks 3.5 meters forward. Then he stops.',
+    'Wait... the door opens. Nobody is there!',
+    'Visit example.com for details. Then leave',
+    '今天3.5度。她说：“好冷啊！我们回去吧。”然后转身离开',
+    '镜头拉远；城市亮起灯？没有人回答！',
+    'No terminator at all',
+    '“A quoted line. With two sentences.” He nods.',
+    'v1.2.3 ships today. ok',
+  ];
+  for (const text of samples) {
+    const sentences = sentencesOf(text);
+    assert.equal(sentences.join('').replace(/\s+/g, ''), text.replace(/\s+/g, ''), `nothing dropped: ${JSON.stringify(sentences)}`);
+    for (const parts of [2, 3]) {
+      const pieces = splitBeatText(text, parts);
+      if (sentences.length >= parts) assert.equal(pieces.join('').replace(/\s+/g, ''), text.replace(/\s+/g, ''), `${parts} parts of ${text}`);
+    }
+  }
+  assert.deepEqual(sentencesOf('He walks 3.5 meters forward. Then he stops.'), ['He walks 3.5 meters forward.', 'Then he stops.']);
+});
+
+await test('model families: separator-tolerant ids', () => {
+  for (const id of ['seedance-2.0', 'seedance_2_0', 'Seedance 2.0 Pro', SEEDANCE_20]) assert.equal(resolveVideoModelProfile('byteplus', id).maxClipSeconds, 15, id);
+  for (const id of ['seedance-1.5-pro', 'seedance-1-5-pro-251215', 'Seedance 1.5']) assert.equal(resolveVideoModelProfile('byteplus', id).maxClipSeconds, 12, id);
+  assert.equal(resolveVideoModelProfile('byteplus', 'seedance-1.0-lite').family, 'seedance-1.0');
+  assert.equal(resolveVideoModelProfile('byteplus', 'seedance 2.5').maxClipSeconds, 30);
+});
+
+await test('length parsing: totals win, 两 and 半分钟, "30s video" is seconds', () => {
+  for (const [text, seconds] of [
+    ['make a 30s video of the sea', 30],
+    ['a 60s clip about cats', 60],
+    ['make a 45s video', 45],
+    ['一分两秒的视频', 62],
+    ['半分钟的视频', 30],
+    ['每段5秒，总共60秒', 60],
+    ['总时长 2 分钟，每个镜头 8 秒', 120],
+    ['each shot 5 seconds, 90 seconds in total', 90],
+  ] as const) assert.equal(parseRequestedVideoSeconds(text), seconds, text);
+  assert.equal(parseRequestedVideoSeconds('a 90s style music video'), undefined, 'a decade, not a length');
+  assert.equal(parseRequestedVideoSeconds('80s music vibe'), undefined);
+  assert.deepEqual(parseVideoLengthAnswer('5'), 5);
+  assert.deepEqual(parseVideoLengthAnswer('20'), 20);
+  assert.deepEqual(parseVideoLengthAnswer('半分钟'), 30);
+  assert.deepEqual(parseVideoLengthAnswer('1 分钟'), 60);
+  assert.deepEqual(parseVideoLengthAnswer('更长，我来说'), 'longer');
+  assert.equal(parseVideoLengthAnswer('嗯'), undefined);
 });
 
 await test('segment plans: fewest even segments of at most L (2.0 vs 2.5)', () => {
@@ -198,7 +258,9 @@ await test('long-video wizard: the segment cap and duration choices state L (zh 
       await say(locale === 'zh-CN' ? '取消' : 'cancel');
     }
   }
-  assert.deepEqual(longVideoDurationChoices(30), [{ seconds: 30, segments: 1 }, { seconds: 60, segments: 2 }, { seconds: 90, segments: 3 }, { seconds: 120, segments: 4 }]);
+  // A long video is longer than one clip: on 30 s clips the examples start at a minute.
+  assert.deepEqual(longVideoDurationChoices(30), [{ seconds: 60, segments: 2 }, { seconds: 90, segments: 3 }, { seconds: 120, segments: 4 }, { seconds: 180, segments: 6 }]);
+  assert.deepEqual(longVideoDurationChoices(15).map((choice) => choice.seconds), [30, 60, 90, 120]);
   assert.deepEqual(longVideoDurationChoices(15).map((choice) => choice.segments), [2, 4, 6, 8]);
 });
 
@@ -274,9 +336,33 @@ await test('headless --intent video: single clip, long video or one length quest
     assert.match(answerMinute.kind === 'run' ? answerMinute.hint : '', /60-second video for their previous request/);
     const third = fresh();
     await planHeadlessWorkflow({ ...base, session: third, prompt: '帮我做一个小猫跳舞的视频' });
-    const byIndex = await planHeadlessWorkflow({ ...base, intent: undefined, session: third, prompt: '3' });
-    assert.equal(byIndex.kind === 'run' && byIndex.workflow, L === 30 ? 'direct' : 'direct', 'the third choice (L s) is one clip');
-    assert.match(byIndex.kind === 'run' ? byIndex.hint : '', new RegExp(`duration: ${L}`));
+    // A typed bare number is seconds, never a button index: "5" is a 5 s clip.
+    const five = await planHeadlessWorkflow({ ...base, intent: undefined, session: third, prompt: '5' });
+    assert.equal(five.kind === 'run' && five.workflow, 'direct', `"5" on L=${L} is one 5 s clip`);
+    assert.match(five.kind === 'run' ? five.hint : '', /duration: 5\)/);
+    for (const [reply, seconds] of [['20', 20], ['半分钟', 30], ['一分两秒', 62], ['30 秒', 30]] as const) {
+      const session = fresh();
+      await planHeadlessWorkflow({ ...base, session, prompt: '帮我做一个小猫跳舞的视频' });
+      const plan = await planHeadlessWorkflow({ ...base, intent: undefined, session, prompt: reply });
+      assert.equal(plan.kind === 'run' && plan.workflow, seconds <= L ? 'direct' : 'saga', `"${reply}" on L=${L}`);
+    }
+    // Not a length: asked once more (the question stays), then the answer counts.
+    const unclear = fresh();
+    await planHeadlessWorkflow({ ...base, session: unclear, prompt: '帮我做一个小猫跳舞的视频' });
+    const retry = await planHeadlessWorkflow({ ...base, intent: undefined, session: unclear, prompt: '嗯' });
+    assert.equal(retry.kind, 'reply', 'an unclear answer is asked again, not run as a prompt');
+    plain(retry.kind === 'reply' ? retry.reply : '', `length retry L=${L}`);
+    const afterRetry = await planHeadlessWorkflow({ ...base, intent: undefined, session: unclear, prompt: '10' });
+    assert.equal(afterRetry.kind === 'run' && afterRetry.workflow, 'direct');
+    assert.match(afterRetry.kind === 'run' ? afterRetry.hint : '', /Their request: 帮我做一个小猫跳舞的视频/);
+    // A read-only run leaves the question waiting.
+    const waiting = fresh();
+    await planHeadlessWorkflow({ ...base, session: waiting, prompt: '帮我做一个小猫跳舞的视频' });
+    const readOnly = await planHeadlessWorkflow({ ...base, intent: undefined, autoRoute: false, session: waiting, prompt: '10' });
+    assert.equal(readOnly.kind === 'run' && readOnly.workflow, 'direct');
+    assert.equal(readOnly.kind === 'run' && readOnly.hint, '', 'no video hint on a read-only run');
+    assert.ok((waiting.metadata?.workflowRouting as { videoLengthQuestion?: unknown; sagaActiveAt?: unknown } | undefined)?.videoLengthQuestion, 'the question is still pending');
+    assert.equal((waiting.metadata?.workflowRouting as { sagaActiveAt?: unknown } | undefined)?.sagaActiveAt, undefined);
     if (L === 30) {
       const longer = fresh();
       await planHeadlessWorkflow({ ...base, session: longer, prompt: '帮我做一个小猫跳舞的视频' });
