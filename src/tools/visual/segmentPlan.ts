@@ -21,11 +21,12 @@ export function planSegmentDurations(
   const max = Math.max(1, Math.floor(maxClipSeconds));
   const raw = Number.isFinite(totalSeconds) ? Math.max(min, totalSeconds) : min;
   const total = Math.round(raw);
-  // Enough segments that none is longer than L (an unrounded 12.4 s on L=12
-  // is two), but never so many that one falls below the minimum: then fewer,
-  // longer segments, and the total stays exact.
+  // L is the video model's hard limit: enough segments that none is longer
+  // (an unrounded 12.4 s on L=12 is two). The minimum is soft: fewer, longer
+  // segments when that still keeps every one within L, else parts below it
+  // (11 s on L=5 is 4+4+3). The total stays exact.
   let count = Math.max(1, Math.ceil(raw / max - 1e-9));
-  while (count > 1 && Math.floor(total / count) < min) count -= 1;
+  while (count > 1 && Math.floor(total / count) < min && Math.ceil(total / (count - 1)) <= max) count -= 1;
   const base = Math.floor(total / count);
   const extra = total - base * count;
   return Array.from({ length: count }, (_, index) => base + (index < extra ? 1 : 0));

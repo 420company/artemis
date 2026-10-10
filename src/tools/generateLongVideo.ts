@@ -548,11 +548,11 @@ function sanitizeInline(value: string | undefined, fallback: string): string {
   return normalized || fallback;
 }
 
+/** A shot length within the model's clip limit (hard); 4 s is a soft floor that a short limit may go under. */
 function normalizeShotDuration(value: number | undefined, fallback: number, maxSegmentSeconds: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return Math.max(4, Math.min(maxSegmentSeconds, Math.floor(fallback)));
-  }
-  return Math.max(4, Math.min(maxSegmentSeconds, Math.floor(value)));
+  const softMin = maxSegmentSeconds >= 8 ? 4 : 1;
+  const raw = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return Math.min(maxSegmentSeconds, Math.max(softMin, Math.floor(raw)));
 }
 
 function distributeDurations(totalSeconds: number, segmentCount: number, maxSegmentSeconds: number): number[] {
@@ -893,7 +893,7 @@ function buildSegments(options: {
   // Cap segment count so the per-shot 4s floor can never push the total past the
   // requested duration: a 5s request with 3 script sub-beats must NOT become 3×4s=12s.
   // floor(total/4) = the most shots that fit at the 4s minimum; merge beyond that.
-  const maxSegmentsByTotal = Math.max(1, Math.floor(options.totalSeconds / 4));
+  const maxSegmentsByTotal = Math.max(1, Math.floor(options.totalSeconds / 4), Math.ceil(options.totalSeconds / Math.max(1, options.maxSegmentSeconds)));
   // Without planned shots: the fewest segments of at most the model's longest clip.
   const evenPlan = planSegmentDurations(options.totalSeconds, options.maxSegmentSeconds, options.minSegmentSeconds);
   const requestedSegmentCount = plannedShots.length > 0 ? plannedShots.length : evenPlan.length;

@@ -99,15 +99,23 @@ await test('platform overrides: video.capabilities wins for its model only', () 
 });
 
 await test('segment math edge cases: minimum, unrounded spans, sentences never dropped', () => {
-  assert.deepEqual(planSegmentDurations(7, 5, 4), [7], 'L below twice the minimum: fewer, longer parts, never one under 4 s');
+  // L is a hard limit; the 4 s minimum is soft when L is under 8 s.
+  assert.deepEqual(planSegmentDurations(7, 5, 4), [4, 3]);
   assert.deepEqual(planSegmentDurations(9, 5, 4), [5, 4]);
-  for (const [total, L] of [[7, 5], [13, 6], [61, 15], [44, 30], [119, 30]] as const) {
+  assert.deepEqual(planSegmentDurations(11, 5, 4), [4, 4, 3]);
+  assert.deepEqual(planSegmentDurations(7, 4, 4), [4, 3]);
+  assert.deepEqual(planSegmentDurations(6, 5, 4), [3, 3]);
+  assert.deepEqual(planSegmentDurations(20, 15, 4), [10, 10]);
+  for (const [total, L] of [[7, 5], [11, 5], [6, 5], [7, 4], [13, 6], [61, 15], [44, 30], [119, 30], [600, 7]] as const) {
     const plan = planSegmentDurations(total, L, 4);
     assert.equal(plan.reduce((sum, value) => sum + value, 0), total, `${total} on L=${L}: total stays exact`);
-    assert.ok(plan.length === 1 || plan.every((value) => value >= 4), `${total} on L=${L}: ${plan}`);
+    assert.ok(plan.every((value) => value <= L), `${total} on L=${L}: no part is longer than L (${plan})`);
+    if (L >= 8) assert.ok(plan.every((value) => value >= 4), `${total} on L=${L}: no part under 4 s (${plan})`);
   }
   const split = splitLongShots([{ title: 'a', storyBeat: '他走进来。他坐下。', timecodeStart: 0, timecodeEnd: 12.4 }], 12);
   assert.equal(split.length, 2, '12.4 s does not fit a 12 s clip');
+  const six = splitLongShots([{ title: 'b', storyBeat: '他走进来。他坐下。', duration: 6 }], 5);
+  assert.deepEqual(six.map((shot) => shot.duration), [3, 3], 'a 6 s shot on L=5 is split, not kept whole');
   const samples = [
     'He walks 3.5 meters forward. Then he stops.',
     'Wait... the door opens. Nobody is there!',
@@ -148,6 +156,13 @@ await test('length parsing: totals win, 两 and 半分钟, "30s video" is second
     ['each shot 5 seconds, 90 seconds in total', 90],
   ] as const) assert.equal(parseRequestedVideoSeconds(text), seconds, text);
   assert.equal(parseRequestedVideoSeconds('a 90s style music video'), undefined, 'a decade, not a length');
+  for (const decade of ['a 70s film', 'an 80s movie', 'the 90s video game era', '做个90s风格的视频', 'a 60s look', '80年代风']) {
+    assert.equal(parseRequestedVideoSeconds(decade), undefined, decade);
+  }
+  for (const [text, seconds] of [['a 30s video', 30], ['做个60s的视频', 60], ['a 45s film', 45], ['60s video about games', 60]] as const) {
+    assert.equal(parseRequestedVideoSeconds(text), seconds, text);
+  }
+  for (const [reply, seconds] of [['10s', 10], ['20 秒', 20], ['15 sec', 15], ['30 seconds', 30]] as const) assert.equal(parseVideoLengthAnswer(reply), seconds, reply);
   assert.equal(parseRequestedVideoSeconds('80s music vibe'), undefined);
   assert.deepEqual(parseVideoLengthAnswer('5'), 5);
   assert.deepEqual(parseVideoLengthAnswer('20'), 20);
@@ -355,6 +370,43 @@ await test('headless --intent video: single clip, long video or one length quest
     const afterRetry = await planHeadlessWorkflow({ ...base, intent: undefined, session: unclear, prompt: '10' });
     assert.equal(afterRetry.kind === 'run' && afterRetry.workflow, 'direct');
     assert.match(afterRetry.kind === 'run' ? afterRetry.hint : '', /Their request: 帮我做一个小猫跳舞的视频/);
+    // "不用了" / "cancel": the question ends with a short acknowledgement.
+    for (const cancel of ['不用了', 'cancel', '取消']) {
+      const session = fresh();
+      await planHeadlessWorkflow({ ...base, session, prompt: '帮我做一个小猫跳舞的视频' });
+      const reply = await planHeadlessWorkflow({ ...base, intent: undefined, session, prompt: cancel });
+      assert.equal(reply.kind, 'reply', cancel);
+      plain(reply.kind === 'reply' ? reply.reply : '', `cancel ${cancel}`);
+      assert.equal((session.metadata?.workflowRouting as { videoLengthQuestion?: unknown } | undefined)?.videoLengthQuestion, undefined, 'the question is gone');
+    }
+    // A reply with real content is a new request, handled as usual.
+    const freshRequest = fresh();
+    await planHeadlessWorkflow({ ...base, session: freshRequest, prompt: '帮我做一个小猫跳舞的视频' });
+    const weather = await planHeadlessWorkflow({ ...base, intent: undefined, session: freshRequest, prompt: '帮我查一下明天上海的天气怎么样' });
+    assert.equal(weather.kind === 'run' && weather.workflow, 'direct');
+    assert.equal(weather.kind === 'run' && weather.prompt, '帮我查一下明天上海的天气怎么样');
+    assert.doesNotMatch(weather.kind === 'run' ? weather.hint : '', /generate_video/, 'not treated as the video answer');
+    assert.equal((freshRequest.metadata?.workflowRouting as { videoLengthQuestion?: unknown } | undefined)?.videoLengthQuestion, undefined);
+    // With a sticky --intent video, two unclear replies never loop or replace the request.
+    const sticky = fresh();
+    await planHeadlessWorkflow({ ...base, session: sticky, prompt: '帮我做一个小猫跳舞的视频' });
+    const first = await planHeadlessWorkflow({ ...base, session: sticky, prompt: '嗯' });
+    assert.equal(first.kind, 'reply');
+    assert.equal((sticky.metadata?.workflowRouting as { videoLengthQuestion?: { text?: string } } | undefined)?.videoLengthQuestion?.text, '帮我做一个小猫跳舞的视频', 'the original request is kept');
+    const second = await planHeadlessWorkflow({ ...base, session: sticky, prompt: '嗯' });
+    assert.equal(second.kind, 'reply');
+    assert.equal((sticky.metadata?.workflowRouting as { videoLengthQuestion?: unknown } | undefined)?.videoLengthQuestion, undefined, 'no third question');
+    assert.doesNotMatch(second.kind === 'reply' ? second.reply : '', /```choices/);
+    // A length far above the choices is confirmed once, then clamped.
+    const huge = fresh();
+    await planHeadlessWorkflow({ ...base, session: huge, prompt: '帮我做一个小猫跳舞的视频' });
+    const confirm = await planHeadlessWorkflow({ ...base, intent: undefined, session: huge, prompt: '999' });
+    assert.equal(confirm.kind, 'reply');
+    assert.match(confirm.kind === 'reply' ? confirm.reply : '', /要做 10 分钟这么长吗？/);
+    plain(confirm.kind === 'reply' ? confirm.reply : '', 'long confirmation');
+    const go = await planHeadlessWorkflow({ ...base, intent: undefined, session: huge, prompt: '好，开始' });
+    assert.equal(go.kind === 'run' && go.workflow, 'saga');
+    assert.match(go.kind === 'run' ? go.hint : '', /600-second video/);
     // A read-only run leaves the question waiting.
     const waiting = fresh();
     await planHeadlessWorkflow({ ...base, session: waiting, prompt: '帮我做一个小猫跳舞的视频' });

@@ -119,6 +119,42 @@ function buildVideoLengthQuestion(maxClipSeconds: number, zh: boolean): string {
   return `${zh ? '要做多长的视频？' : 'How long should the video be?'}\n\n\`\`\`choices\n${card}\n\`\`\`\n${zh ? '也可以直接回复时长，例如“20 秒”。' : 'You can also reply with a length, e.g. "20 seconds".'}`
 }
 
+/** Longest video; a longer answer is clamped (as the long-video tool does). */
+const MAX_VIDEO_SECONDS = 600
+/** Answers above this are confirmed once before anything starts. */
+const MAX_VIDEO_SECONDS_WITHOUT_CONFIRMATION = 300
+
+/** A short reply that is neither a length nor a request ("嗯", "随便", "?", "ok"). */
+function isUnclearShortReply(reply: string): boolean {
+  const text = reply.trim()
+  if (!text) return true
+  const cjk = text.match(/[\u3400-\u9fff]/g)?.length ?? 0
+  const words = text.split(/\s+/).filter((word) => /[A-Za-z]/.test(word)).length
+  return cjk <= 4 && words <= 2 && text.length <= 12
+}
+
+/** Runs the video the user chose a length for: one clip up to L, else a long video. */
+function startChosenVideo(
+  input: PlanHeadlessWorkflowInput,
+  state: ReturnType<typeof readWorkflowRoutingState>,
+  now: number,
+  prompt: string,
+  question: { text: string },
+  answer: number | 'longer',
+  L: number | undefined,
+): HeadlessWorkflowPlan {
+  if (answer !== 'longer' && L !== undefined && answer <= L) {
+    writeState(input.session, state)
+    return { kind: 'run', prompt, workflow: 'direct', hint: videoSingleClipHint(answer, L, question.text) }
+  }
+  state.sagaActiveAt = now
+  writeState(input.session, state)
+  const reason = answer === 'longer'
+    ? `the user chose a long video for their previous request ("${question.text.slice(0, 200)}"); ask for the length if it is still missing`
+    : `the user chose a ${answer}-second video for their previous request ("${question.text.slice(0, 200)}")`
+  return sagaRun(prompt, input.cwd, reason)
+}
+
 /**
  * The answer to "how long?": a length in seconds, 'longer', or undefined
  * when the reply is not a length. Buttons send their labels ("10 秒",
@@ -127,7 +163,7 @@ function buildVideoLengthQuestion(maxClipSeconds: number, zh: boolean): string {
 export function parseVideoLengthAnswer(reply: string): number | 'longer' | undefined {
   const text = reply.trim().replace(/[\s!！。.~]+$/u, '')
   if (/^(?:更长|更长[，,]?\s*我来说|再长(?:一点|些)?|长一点|longer|longer,?\s*i'?ll say)$/i.test(text)) return 'longer'
-  const bare = /^(\d{1,3})$/.exec(text)
+  const bare = /^(\d{1,3})\s*(?:s|秒|secs?|seconds?)?$/i.exec(text)
   if (bare) return Number(bare[1]) > 0 ? Number(bare[1]) : undefined
   if (text.length > 24) return undefined
   const seconds = parseRequestedVideoSeconds(text)
@@ -169,25 +205,49 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   if (lengthQuestion) delete state.videoLengthQuestion
   if (lengthQuestion && (input.intent === undefined || normalizeHeadlessIntent(input.intent) === 'video')) {
     const L = await input.videoClipSeconds?.()
-    const answer = L === undefined ? undefined : parseVideoLengthAnswer(prompt)
-    if (L !== undefined && answer === undefined && !lengthQuestion.retried && prompt.trim().length <= 24) {
-      // A short reply that is not a length: ask once more, briefly. A longer
-      // message is a new request and goes on as usual.
-      state.videoLengthQuestion = { ...lengthQuestion, at: now, retried: true }
-      writeState(input.session, state)
-      return { kind: 'reply', reply: buildVideoLengthRetry(L, /[\u3400-\u9fff]/.test(lengthQuestion.text)) }
-    }
-    if (L !== undefined && answer !== undefined) {
-      if (answer !== 'longer' && answer <= L) {
+    const zh = /[\u3400-\u9fff]/.test(lengthQuestion.text)
+    const reply = prompt.trim()
+    // A very long length asked once more first ("要做 10 分钟这么长吗？").
+    if (lengthQuestion.confirmSeconds !== undefined) {
+      const confirm = parseSagaOfferReply(reply)
+      if (confirm === 'yes') return startChosenVideo(input, state, now, prompt, lengthQuestion, lengthQuestion.confirmSeconds, L)
+      if (confirm === 'no') {
         writeState(input.session, state)
-        return { kind: 'run', prompt, workflow: 'direct', hint: videoSingleClipHint(answer, L, lengthQuestion.text) }
+        return { kind: 'reply', reply: zh ? '好的，先不做了。需要时告诉我想要多长就行。' : 'OK, no video for now. Tell me the length whenever you like.' }
       }
-      state.sagaActiveAt = now
-      writeState(input.session, state)
-      const reason = answer === 'longer'
-        ? `the user chose a long video for their previous request ("${lengthQuestion.text.slice(0, 200)}"); ask for the length if it is still missing`
-        : `the user chose a ${answer}-second video for their previous request ("${lengthQuestion.text.slice(0, 200)}")`
-      return sagaRun(prompt, input.cwd, reason)
+    }
+    const answer = L === undefined ? undefined : parseVideoLengthAnswer(reply)
+    if (L !== undefined && answer !== undefined) {
+      if (answer !== 'longer' && answer > MAX_VIDEO_SECONDS_WITHOUT_CONFIRMATION && lengthQuestion.confirmSeconds === undefined) {
+        const seconds = Math.min(answer, MAX_VIDEO_SECONDS)
+        state.videoLengthQuestion = { text: lengthQuestion.text, at: now, retried: lengthQuestion.retried, confirmSeconds: seconds }
+        writeState(input.session, state)
+        const minutes = Math.round((seconds / 60) * 10) / 10
+        const card = JSON.stringify({ options: zh ? ['好，开始', '不用了'] : ['Yes, go ahead', 'No thanks'] })
+        return { kind: 'reply', reply: `${zh ? `要做 ${minutes} 分钟这么长吗？` : `Make it ${minutes} minutes long?`}\n\n\`\`\`choices\n${card}\n\`\`\`` }
+      }
+      return startChosenVideo(input, state, now, prompt, lengthQuestion, answer === 'longer' ? 'longer' : Math.min(answer, MAX_VIDEO_SECONDS), L)
+    }
+    if (L !== undefined) {
+      if (parseSagaOfferReply(reply) === 'no') {
+        // "不用了" / "cancel": the question ends here.
+        writeState(input.session, state)
+        return { kind: 'reply', reply: zh ? '好的，先不做了。' : 'OK, no video then.' }
+      }
+      if (isUnclearShortReply(reply)) {
+        if (!lengthQuestion.retried) {
+          // Ask once more, briefly; the request stays the original one.
+          state.videoLengthQuestion = { text: lengthQuestion.text, at: now, retried: true }
+          writeState(input.session, state)
+          return { kind: 'reply', reply: buildVideoLengthRetry(L, zh) }
+        }
+        // Asked twice already: stop asking rather than loop.
+        writeState(input.session, state)
+        return { kind: 'reply', reply: zh ? '好的，先不做了。想做的时候告诉我时长就行。' : 'OK, I will leave it for now. Tell me the length whenever you like.' }
+      }
+      // Anything else is a new request: the question is dropped and the
+      // message is handled as usual below (a sticky video intent classifies
+      // the new text on its own).
     }
   }
 

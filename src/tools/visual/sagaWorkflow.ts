@@ -450,6 +450,8 @@ export function parseRequestedVideoSeconds(text: string): number | undefined {
   return parseLengthOnce(text.replace(PER_PART_LENGTH_RE, ' '));
 }
 
+const DECADE_CUE_RE = /^(?:[\s-]*(?:video\s+)?(?:films?|movies?|cinema|games?|era|style|looks?|vibes?|fashion|music|songs?|hits?|aesthetic|retro|nostalgia)\b|\s*(?:的)?\s*(?:风格|年代|复古|怀旧|风))/i;
+
 function parseLengthOnce(text: string): number | undefined {
   // "两分钟", "一分半", "2分30秒", "一分两秒", "半分钟"; never the adverb "十分" ("十分精彩").
   if (/半\s*分钟/.test(text)) return 30;
@@ -477,6 +479,9 @@ function parseLengthOnce(text: string): number | undefined {
   const bare = /(^|[^\d.])(\d{1,3})s(?![a-z])(?![-\s]?(?:style|era|retro|vibe|vibes|music|look|aesthetic|fashion|songs?|hits?))(.?)/i.exec(text);
   if (bare) {
     const after = text.slice((bare.index ?? 0) + bare[0].length - (bare[3] ? bare[3].length : 0));
+    // A round decade before an era word is a decade: "a 70s film", "an 80s
+    // movie", "the 90s video game era", 「90s风格」.
+    if (/^[1-9]0$/.test(bare[2]!) && DECADE_CUE_RE.test(after)) return undefined;
     const cjkNeighbour = /[㐀-鿿]/.test(bare[1] ?? '') || /[㐀-鿿]/.test(bare[3] ?? '');
     const videoWordAfter = /^[\s-]*(?:long\s+)?(?:video|clip|film|movie|trailer|teaser|ad|promo|reel|short|vlog|animation|loop)\b/i.test(after);
     if (cjkNeighbour || videoWordAfter || !/^(?:[2-9]0)$/.test(bare[2]!)) return Number(bare[2]);
