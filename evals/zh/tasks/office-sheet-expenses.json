@@ -1,0 +1,294 @@
+{
+  "id": "office-sheet-expenses",
+  "category": "office",
+  "description": "把开支 CSV 整理成 Excel：明细、公式合计（数值要对）、按类别汇总的饼图",
+  "fixture": "office-sheet-expenses",
+  "turns": [
+    {
+      "prompt": "开支.csv 是我家九月的开支，帮我整理成 Excel：按日期列出明细，最后一行用公式算合计，再加一个按类别汇总的饼图。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 16,
+    "timeoutSec": 420,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "workbook",
+      "type": "office_file",
+      "pattern": "\\.xlsx$",
+      "kind": "xlsx",
+      "contains": [
+        "合计",
+        "餐饮"
+      ],
+      "minFormulas": 1,
+      "numbers": [
+        3280
+      ],
+      "minCharts": 1
+    },
+    {
+      "id": "made-with-tool",
+      "type": "tool_called",
+      "tool": "create_spreadsheet",
+      "ok": true
+    },
+    {
+      "id": "source-untouched",
+      "type": "files_unchanged",
+      "paths": [
+        "开支.csv"
+      ]
+    },
+    {
+      "id": "total-in-reply",
+      "type": "reply_contains",
+      "all": [
+        [
+          "3280",
+          "3,280"
+        ]
+      ]
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "开支.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "create_spreadsheet",
+                "args": {
+                  "path": "outputs/九月开支.xlsx",
+                  "spec": {
+                    "theme": "minimal",
+                    "sheets": [
+                      {
+                        "name": "九月明细",
+                        "columns": [
+                          {
+                            "header": "日期",
+                            "format": "date"
+                          },
+                          {
+                            "header": "类别"
+                          },
+                          {
+                            "header": "金额",
+                            "format": "cny"
+                          }
+                        ],
+                        "rows": [
+                          [
+                            "2026-09-01",
+                            "餐饮",
+                            320
+                          ],
+                          [
+                            "2026-09-03",
+                            "交通",
+                            85
+                          ],
+                          [
+                            "2026-09-05",
+                            "日用",
+                            146
+                          ],
+                          [
+                            "2026-09-08",
+                            "餐饮",
+                            268
+                          ],
+                          [
+                            "2026-09-12",
+                            "教育",
+                            1200
+                          ],
+                          [
+                            "2026-09-15",
+                            "交通",
+                            92
+                          ],
+                          [
+                            "2026-09-20",
+                            "餐饮",
+                            415
+                          ],
+                          [
+                            "2026-09-26",
+                            "日用",
+                            754
+                          ],
+                          [
+                            {
+                              "value": "合计",
+                              "bold": true
+                            },
+                            null,
+                            "=SUM(C2:C9)"
+                          ]
+                        ],
+                        "autoFilter": true
+                      },
+                      {
+                        "name": "按类别",
+                        "columns": [
+                          {
+                            "header": "类别"
+                          },
+                          {
+                            "header": "金额",
+                            "format": "cny"
+                          }
+                        ],
+                        "rows": [
+                          [
+                            "餐饮",
+                            "=SUMIF('九月明细'!B2:B9,A2,'九月明细'!C2:C9)"
+                          ],
+                          [
+                            "交通",
+                            "=SUMIF('九月明细'!B2:B9,A3,'九月明细'!C2:C9)"
+                          ],
+                          [
+                            "日用",
+                            "=SUMIF('九月明细'!B2:B9,A4,'九月明细'!C2:C9)"
+                          ],
+                          [
+                            "教育",
+                            "=SUMIF('九月明细'!B2:B9,A5,'九月明细'!C2:C9)"
+                          ]
+                        ],
+                        "charts": [
+                          {
+                            "type": "pie",
+                            "title": "九月开支构成",
+                            "categories": "A2:A5",
+                            "series": [
+                              {
+                                "values": "B2:B5"
+                              }
+                            ],
+                            "position": "D2"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "已整理好：outputs/九月开支.xlsx。明细 8 笔，合计 3280 元（公式自动计算）；“按类别”表里有汇总和饼图，教育 1200 元占比最高。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "workbook",
+        "total-in-reply"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "create_spreadsheet",
+                "args": {
+                  "path": "outputs/九月开支.xlsx",
+                  "spec": {
+                    "sheets": [
+                      {
+                        "name": "九月",
+                        "columns": [
+                          {
+                            "header": "日期"
+                          },
+                          {
+                            "header": "类别"
+                          },
+                          {
+                            "header": "金额"
+                          }
+                        ],
+                        "rows": [
+                          [
+                            "2026-09-01",
+                            "餐饮",
+                            "320"
+                          ],
+                          [
+                            "2026-09-03",
+                            "交通",
+                            "85"
+                          ],
+                          [
+                            "2026-09-05",
+                            "日用",
+                            "146"
+                          ],
+                          [
+                            "2026-09-08",
+                            "餐饮",
+                            "268"
+                          ],
+                          [
+                            "2026-09-12",
+                            "教育",
+                            "1200"
+                          ],
+                          [
+                            "2026-09-15",
+                            "交通",
+                            "92"
+                          ],
+                          [
+                            "2026-09-20",
+                            "餐饮",
+                            "415"
+                          ],
+                          [
+                            "2026-09-26",
+                            "日用",
+                            "754"
+                          ],
+                          [
+                            "合计",
+                            "",
+                            "3000"
+                          ]
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "已整理好：outputs/九月开支.xlsx，合计 3000 元。"
+          }
+        ]
+      ]
+    }
+  }
+}

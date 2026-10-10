@@ -9,6 +9,7 @@ import {
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
 import { getToolHostKey } from '../tools/platformSupport.js';
+import { officeToolSchema } from '../tools/office/descriptions.js';
 import {
   McpServerStore,
   type McpPromptDescriptor,
@@ -1296,6 +1297,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    case 'create_presentation':
+    case 'create_document':
+    case 'create_spreadsheet':
+      return officeToolSchema(type);
     case 'transcribe_audio':
       return {
         type: 'object',

@@ -523,6 +523,9 @@ const TOOL_LABELS: Record<string, { en: string; zh: string }> = {
   delegate_task: { en: 'Delegate', zh: '委托' },
   lookup_docs: { en: 'Docs', zh: '查文档' },
   deep_research: { en: 'Research', zh: '深度研究' },
+  create_presentation: { en: 'Slides', zh: '幻灯片' },
+  create_document: { en: 'Document', zh: '文档' },
+  create_spreadsheet: { en: 'Spreadsheet', zh: '表格' },
 };
 
 function toolLabel(tool: string, locale: UiLocale): string {

@@ -52,7 +52,7 @@
     "test:compaction": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextCompactionSmoke.ts",
     "test:queryEngine": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/queryEngineSmoke.ts",
     "test:features": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/featureSmoke.ts",
-    "test:all": "npm run test:system && npm run test:prompt && npm run test:runtime && npm run test:queryEngine && npm run test:features && npm run test:workspaceIntent && npm run test:workflowIntent",
+    "test:all": "npm run test:system && npm run test:prompt && npm run test:runtime && npm run test:queryEngine && npm run test:features && npm run test:workspaceIntent && npm run test:workflowIntent && npm run test:office",
     "test": "npm run test:system",
     "release:check": "npm run typecheck && npm run lint && npm run test:all && npm run build && npm pack --dry-run",
     "release:git": "git push origin main --follow-tags",
@@ -66,6 +66,7 @@
     "test:workspaceIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workspaceIntentSmoke.ts",
     "test:workflowIntent": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowIntentSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaWorkflowGuardSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/localMediaPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaReferenceAndPropsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/superVisualGoldenPathSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/dreamLocaleSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaExplicitBriefLockSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaPollTimeoutSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/seedanceVideoDirectorSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaLanguageDirectorSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaCleanDirectDecouplingSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaBgmVariantsSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaFramingSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaChatSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaHermeticSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/sagaGuideBriefSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/videoDurationSmoke.ts && npm run test:workflowRouter && npm run test:internalNames",
     "test:contextReplay": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextLongTaskReplay.ts",
+    "test:office": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/officeDocsSmoke.ts",
     "test:internalNames": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/internalNamesGuardSmoke.ts",
     "test:workflowRouter": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowRouterSmoke.ts",
     "eval:zh": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts",
@@ -79,7 +80,9 @@
     "blessed": "^0.1.81",
     "cheerio": "^1.2.0",
     "commander": "^14.0.3",
+    "docx": "9.7.2",
     "emoji-regex": "^10.6.0",
+    "exceljs": "4.4.0",
     "fast-json-stringify": "^5.0.0",
     "get-east-asian-width": "^1.5.0",
     "heic-convert": "^2.1.0",
@@ -87,6 +90,7 @@
     "openai": "^6.34.0",
     "pg": "^8.13.1",
     "playwright": "^1.59.1",
+    "pptxgenjs": "4.0.1",
     "prom-client": "^15.1.3",
     "redis": "^4.7.0",
     "strip-ansi": "^7.2.0",
@@ -118,5 +122,13 @@
   "license": "MIT",
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "pptxgenjs": {
+      "image-size": "2.0.4"
+    },
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }

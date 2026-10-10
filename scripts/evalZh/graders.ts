@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { summarizeOffice } from './office.js'
 import type {
   EvalMode,
   Grader,
@@ -415,6 +416,38 @@ function gradeOne(grader: Grader, id: string, ctx: GradeContext): Verdict {
       const hits = replies().map((turn) => (probeId ? turn.probes[probeId]?.[where] : undefined))
       if (replies().every((turn) => turn.mainRequests === 0)) return { pass: false, detail: 'no main-model request was made' }
       return { pass: hits.length > 0 && hits.every(Boolean), detail: `/${grader.pattern}/ ${hits.every(Boolean) ? 'found' : 'not found'} in the ${where} main-model request` }
+    }
+    case 'office_file': {
+      const re = new RegExp(grader.pattern, grader.flags ?? '')
+      const files = listFiles(ctx.workspace).filter((file) => re.test(file) && !(file in ctx.fixtureHashes) && !/(^|\/)\./.test(file))
+      if (files.length === 0) return { pass: false, detail: `no new file matches /${grader.pattern}/` }
+      const problemsOf = (file: string): string[] => {
+        let summary
+        try {
+          summary = summarizeOffice(path.join(ctx.workspace, file))
+        } catch (error) {
+          return [`does not open: ${error instanceof Error ? error.message : String(error)}`]
+        }
+        const problems: string[] = []
+        if (grader.kind && summary.kind !== grader.kind) problems.push(`is ${summary.kind}, not ${grader.kind}`)
+        if (grader.minParts !== undefined && summary.parts < grader.minParts) problems.push(`${summary.parts} slides/sheets (min ${grader.minParts})`)
+        if (grader.maxParts !== undefined && summary.parts > grader.maxParts) problems.push(`${summary.parts} slides/sheets (max ${grader.maxParts})`)
+        const all = `${summary.partTexts.join('\n')}\n${summary.chartText}`
+        for (const needle of grader.contains ?? []) if (!needleHit(all, needle)) problems.push(`missing "${needleLabel(needle)}"`)
+        if (grader.part !== undefined) {
+          const partText = summary.partTexts[grader.part - 1]
+          if (partText === undefined) problems.push(`no slide/sheet ${grader.part}`)
+          else for (const needle of grader.partContains ?? []) if (!needleHit(partText, needle)) problems.push(`slide/sheet ${grader.part} missing "${needleLabel(needle)}"`)
+        }
+        if (grader.minFormulas !== undefined && summary.formulas < grader.minFormulas) problems.push(`${summary.formulas} formulas (min ${grader.minFormulas})`)
+        if (grader.minCharts !== undefined && summary.charts < grader.minCharts) problems.push(`${summary.charts} charts (min ${grader.minCharts})`)
+        for (const n of grader.numbers ?? []) if (!summary.numbers.some((v) => Math.abs(v - n) < 0.01)) problems.push(`no cell equals ${n}`)
+        return problems
+      }
+      const results = files.map((file) => ({ file, problems: problemsOf(file) }))
+      const good = results.find((r) => r.problems.length === 0)
+      if (good) return { pass: true, detail: `${good.file} ok` }
+      return { pass: false, detail: results.slice(0, 3).map((r) => `${r.file}: ${r.problems.join('; ')}`).join(' | ') }
     }
     case 'llm_judge': {
       if (!ctx.judge) return { skip: 'judge did not run' }

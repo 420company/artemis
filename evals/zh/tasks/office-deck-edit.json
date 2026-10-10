@@ -1,0 +1,211 @@
+{
+  "id": "office-deck-edit",
+  "category": "office",
+  "description": "两轮：先做 5 页咖啡店介绍 PPT，再只改第 3 页标题（应在原文件上修改，其他页不变）",
+  "turns": [
+    {
+      "prompt": "做一个介绍我们咖啡店「拾光咖啡」的PPT，5页：封面、品牌故事、招牌饮品、门店分布、联系我们。保存为 咖啡店介绍.pptx。"
+    },
+    {
+      "prompt": "把第3页的标题改成「人气单品」，其他不变。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 16,
+    "timeoutSec": 420,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "slide-3",
+      "type": "office_file",
+      "pattern": "咖啡店介绍\\.pptx$",
+      "kind": "pptx",
+      "minParts": 5,
+      "maxParts": 5,
+      "part": 3,
+      "partContains": [
+        "人气单品"
+      ],
+      "contains": [
+        "品牌故事",
+        "门店分布",
+        "联系我们"
+      ]
+    },
+    {
+      "id": "edited-with-tool",
+      "type": "tool_called",
+      "turn": 2,
+      "tool": "create_presentation",
+      "ok": true
+    },
+    {
+      "id": "one-file",
+      "type": "office_file",
+      "pattern": "\\.pptx$",
+      "maxParts": 5,
+      "note": "no second deck with extra slides"
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh",
+      "turn": "all"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "create_presentation",
+                "args": {
+                  "path": "咖啡店介绍.pptx",
+                  "spec": {
+                    "title": "拾光咖啡",
+                    "theme": "warm",
+                    "slides": [
+                      {
+                        "layout": "title",
+                        "title": "拾光咖啡",
+                        "subtitle": "每一杯，都值得慢慢喝"
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "品牌故事",
+                        "bullets": [
+                          "2019 年创立于杭州",
+                          "坚持自家烘焙"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "招牌饮品",
+                        "bullets": [
+                          "桂花拿铁",
+                          "冷萃耶加雪菲"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "门店分布",
+                        "bullets": [
+                          "杭州 6 家",
+                          "上海 2 家"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "联系我们",
+                        "bullets": [
+                          "电话：0571-8888 0000"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "已做好：咖啡店介绍.pptx，共 5 页。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "create_presentation",
+                "args": {
+                  "path": "咖啡店介绍.pptx",
+                  "edits": [
+                    {
+                      "op": "set",
+                      "path": "/slides/2/title",
+                      "value": "人气单品"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "say": "已把第 3 页标题改成「人气单品」，其他页没动：咖啡店介绍.pptx。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "slide-3",
+        "edited-with-tool"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "create_presentation",
+                "args": {
+                  "path": "咖啡店介绍.pptx",
+                  "spec": {
+                    "title": "拾光咖啡",
+                    "theme": "warm",
+                    "slides": [
+                      {
+                        "layout": "title",
+                        "title": "拾光咖啡",
+                        "subtitle": "每一杯，都值得慢慢喝"
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "品牌故事",
+                        "bullets": [
+                          "2019 年创立于杭州",
+                          "坚持自家烘焙"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "招牌饮品",
+                        "bullets": [
+                          "桂花拿铁",
+                          "冷萃耶加雪菲"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "门店分布",
+                        "bullets": [
+                          "杭州 6 家",
+                          "上海 2 家"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "联系我们",
+                        "bullets": [
+                          "电话：0571-8888 0000"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "已做好：咖啡店介绍.pptx，共 5 页。"
+          }
+        ],
+        [
+          {
+            "say": "好的，第 3 页的标题已经改成「人气单品」了。"
+          }
+        ]
+      ]
+    }
+  }
+}

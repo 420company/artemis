@@ -25,6 +25,8 @@ import { executeGenerateLongVideo } from './generateLongVideo.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
+import { executeOfficeDocument } from './officeDocuments.js';
+import { CREATE_DOCUMENT_DESCRIPTION, CREATE_PRESENTATION_DESCRIPTION, CREATE_SPREADSHEET_DESCRIPTION, validateOfficeAction } from './office/descriptions.js';
 import { executeInsertInFile } from './insertInFile.js';
 import { executeListFiles } from './listFiles.js';
 import { executeLookupDocs } from './lookupDocs.js';
@@ -1005,6 +1007,36 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateTranscribeAudioAction,
     execute: executeTranscribeAudio as any,
+  },
+  {
+    type: 'create_presentation',
+    description: CREATE_PRESENTATION_DESCRIPTION,
+    kind: 'write',
+    permissionCategory: 'write',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateOfficeAction as any,
+    execute: executeOfficeDocument as any,
+  },
+  {
+    type: 'create_document',
+    description: CREATE_DOCUMENT_DESCRIPTION,
+    kind: 'write',
+    permissionCategory: 'write',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateOfficeAction as any,
+    execute: executeOfficeDocument as any,
+  },
+  {
+    type: 'create_spreadsheet',
+    description: CREATE_SPREADSHEET_DESCRIPTION,
+    kind: 'write',
+    permissionCategory: 'write',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateOfficeAction as any,
+    execute: executeOfficeDocument as any,
   },
   {
     type: 'agent',

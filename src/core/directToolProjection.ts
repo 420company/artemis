@@ -108,6 +108,14 @@ const MEDIA_TOOLS = [
   'generate_long_video',
 ] as const;
 
+const OFFICE_TOOLS = [
+  'create_presentation',
+  'create_document',
+  'create_spreadsheet',
+  // Decks and reports often want a picture or two.
+  'generate_image',
+] as const;
+
 const BROWSER_TOOLS = [
   'browser_navigate',
   'browser_screenshot',
@@ -199,6 +207,9 @@ const ENV_TIME_REQUEST_RE =
 
 const MEDIA_REQUEST_RE =
   /(?:\b(image|png|jpg|jpeg|gif|svg|icon|logo|banner|poster|screenshot|video|mp4|animation|avatar|illustration|wallpaper|artwork|generate_image|generate_video|generate_long_video)\b|图片|图像|截图|视频|图标|标志|海报|画图|画一张|插画|头像|形象|封面|配图|壁纸|表情包)/i;
+
+const OFFICE_REQUEST_RE =
+  /(?:\b(ppt|pptx|slides?|deck|presentation|keynote|docx|word document|report|excel|xlsx|spreadsheet|workbook|create_presentation|create_document|create_spreadsheet)\b|幻灯片|演示文稿|演示稿|汇报|路演|PPT|文档|报告|方案书|表格|电子表格|工作簿|Excel|Word)/i;
 
 const BROWSER_REQUEST_RE =
   /(?:\b(browser|browse|navigate|click|type|screenshot|extract text|web page|webpage|page automation)\b|浏览器|网页自动化|打开网页|点击|输入到|网页截图|提取网页)/i;
@@ -346,6 +357,7 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   const wantsEnvTime = ENV_TIME_REQUEST_RE.test(latestUserInput);
   const wantsMedia = MEDIA_REQUEST_RE.test(latestUserInput);
   const wantsBrowser = BROWSER_REQUEST_RE.test(latestUserInput);
+  const wantsOffice = OFFICE_REQUEST_RE.test(latestUserInput);
   const wantsMusic = MUSIC_REQUEST_RE.test(latestUserInput);
   const wantsProductivity = PRODUCTIVITY_REQUEST_RE.test(latestUserInput);
   const wantsAmbientInfo = AMBIENT_INFO_REQUEST_RE.test(latestUserInput);
@@ -404,6 +416,10 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
 
   if (wantsBrowser) {
     addTools(selected, BROWSER_TOOLS);
+  }
+
+  if (wantsOffice) {
+    addTools(selected, OFFICE_TOOLS);
   }
 
   if (wantsMusic) {
@@ -482,6 +498,9 @@ export function widenProjectedDirectToolNames(
   addVerbatimToolMentions(widened, latestUserInput);
   if (MEDIA_REQUEST_RE.test(latestUserInput)) {
     addTools(widened, MEDIA_TOOLS);
+  }
+  if (OFFICE_REQUEST_RE.test(latestUserInput)) {
+    addTools(widened, OFFICE_TOOLS);
   }
 
   const expanded = getAllDirectToolNames().filter((name) => widened.has(name));

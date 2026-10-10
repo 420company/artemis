@@ -673,6 +673,10 @@ export type AgentAction =
       rate?: number;
       pitch?: number;
     }
+  // ── Office documents (tools/officeDocuments.ts) ─────────────────────────
+  | { type: 'create_presentation'; path?: string; spec?: Record<string, unknown>; edits?: Array<Record<string, unknown>>; pdf?: boolean; theme?: string }
+  | { type: 'create_document'; path?: string; spec?: Record<string, unknown>; markdown?: string; edits?: Array<Record<string, unknown>>; pdf?: boolean; theme?: string }
+  | { type: 'create_spreadsheet'; path?: string; spec?: Record<string, unknown>; edits?: Array<Record<string, unknown>>; pdf?: boolean; theme?: string }
   | {
       type: 'transcribe_audio';
       inputPath: string;
@@ -790,6 +794,9 @@ export const ALL_AGENT_ACTION_TYPES = [
   'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
+  'create_presentation',
+  'create_document',
+  'create_spreadsheet',
   'agent',
   // ── Spotify integration ────────────────────────────────────────────────
   'spotify_play_liked',

@@ -36,6 +36,7 @@ import {
   SAGA_SESSION_TTL_MS,
   writeWorkflowRoutingState,
 } from '../core/sagaSessionState.js'
+import { buildOfficeHint, detectOfficeRequest } from '../tools/office/officeHint.js'
 
 export type HeadlessWorkflowPlan =
   | { kind: 'reply'; reply: string }
@@ -52,7 +53,8 @@ export interface PlanHeadlessWorkflowInput {
   getClassifier: () => Promise<ChatProvider | undefined>
   /**
    * What the user picked in the app before sending (`artemis execute
-   * --intent <name>`): video, long_video, image, research or reminder.
+   * --intent <name>`): video, long_video, image, research, reminder,
+   * slides, document or spreadsheet.
    * Unknown names are ignored with a warning. Its hint goes in the per-run
    * context, never into the stored message.
    */
@@ -65,13 +67,28 @@ export interface PlanHeadlessWorkflowInput {
   now?: number
 }
 
-export const HEADLESS_INTENTS = ['video', 'long_video', 'image', 'research', 'reminder'] as const
+export const HEADLESS_INTENTS = ['video', 'long_video', 'image', 'research', 'reminder', 'slides', 'document', 'spreadsheet'] as const
 export type HeadlessIntent = (typeof HEADLESS_INTENTS)[number]
 
-/** A known intent name ("long-video", "Long_Video" and "longvideo" count), or undefined. */
+const INTENT_ALIASES: Record<string, HeadlessIntent> = {
+  longvideo: 'long_video',
+  ppt: 'slides',
+  pptx: 'slides',
+  deck: 'slides',
+  presentation: 'slides',
+  doc: 'document',
+  docx: 'document',
+  word: 'document',
+  report: 'document',
+  sheet: 'spreadsheet',
+  excel: 'spreadsheet',
+  xlsx: 'spreadsheet',
+}
+
+/** A known intent name ("long-video", "Long_Video" and "longvideo" count; "ppt", "excel"… too), or undefined. */
 export function normalizeHeadlessIntent(raw: string | undefined): HeadlessIntent | undefined {
   const key = (raw ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_')
-  if (key === 'longvideo') return 'long_video'
+  if (INTENT_ALIASES[key]) return INTENT_ALIASES[key]
   return (HEADLESS_INTENTS as readonly string[]).includes(key) ? key as HeadlessIntent : undefined
 }
 
@@ -295,6 +312,9 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
       writeState(input.session, state)
       if (intent === 'image') return { kind: 'run', prompt, workflow: 'direct', hint: IMAGE_INTENT_HINT }
       if (intent === 'reminder') return { kind: 'run', prompt, workflow: 'direct', hint: REMINDER_INTENT_HINT }
+      if (intent === 'slides' || intent === 'document' || intent === 'spreadsheet') {
+        return { kind: 'run', prompt, workflow: 'direct', hint: buildOfficeHint(intent, true) }
+      }
       if (intent === 'research') {
         const hint = buildRoutedWorkflowHint('plan', { cwd: input.cwd, userPrompt: prompt, reason: 'the user chose research' })
         return { kind: 'run', prompt, workflow: 'plan', hint: `${hint}\n\n${RESEARCH_INTENT_NOTE}` }
@@ -364,11 +384,14 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
 
   writeState(input.session, state)
   if (route.workflow !== 'direct') input.onInfo?.(`[workflow] ${route.workflow} (${route.source}): ${route.reason}`)
+  const routedHint = buildRoutedWorkflowHint(route.workflow, { cwd: input.cwd, userPrompt: route.text, reason: route.reason })
+  // A plain request for a deck, document or spreadsheet gets the office playbook too.
+  const office = detectOfficeRequest(route.text)
   return {
     kind: 'run',
     prompt: route.text,
     workflow: route.workflow,
-    hint: buildRoutedWorkflowHint(route.workflow, { cwd: input.cwd, userPrompt: route.text, reason: route.reason }),
+    hint: office ? [routedHint, buildOfficeHint(office, false)].filter(Boolean).join('\n\n') : routedHint,
   }
 }
 
