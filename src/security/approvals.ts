@@ -22,7 +22,7 @@
  * Tools that need an approval for something only they know about (a
  * purchase, a publish) call `requireApproval(kind, request)` from inside
  * their execute function; the same policy, suspension and single-use checks
- * apply. See docs/APPROVALS.md for the protocol.
+ * apply. See src/docs/APPROVALS.md for the protocol.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
