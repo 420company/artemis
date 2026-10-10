@@ -330,7 +330,7 @@ export async function analyzeNarrative(options: {
       break;
     }
     if (res.timedOut) {
-      toolWarn(`⚠️ Saga 叙事分析: LLM ${res.text}`);
+      toolWarn(`⚠️ 剧情分析: LLM ${res.text}`);
       return null;
     }
     if (res.status === undefined) {
@@ -341,7 +341,7 @@ export async function analyzeNarrative(options: {
       return null;
     }
     if (!transientStatuses.has(res.status) || attempt === 3) {
-      toolWarn(`⚠️ Saga 叙事分析: LLM ${res.status} — ${res.text.slice(0, 160)}`);
+      toolWarn(`⚠️ 剧情分析: LLM ${res.status} — ${res.text.slice(0, 160)}`);
       return null;
     }
     await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
@@ -498,7 +498,7 @@ export function buildSagaConstitution(entities: NarrativeEntities): string {
 
   const lines: string[] = [
     '═══════════════════════════════════════════════════════════════',
-    '[Saga Narrative Constitution — MUST OBEY]',
+    '[Narrative Rules — MUST OBEY]',
     '═══════════════════════════════════════════════════════════════',
     `Protagonist mode: ${mode.toUpperCase()}`,
     `Protagonist (the "god" of this video): ${protagonistLabel} (type=${protagonist.type}, confidence=${protagonist.confidence.toFixed(2)})`,
@@ -989,7 +989,7 @@ export async function appendNarrativeLibraryEntry(options: {
     await mkdir(path.dirname(target), { recursive: true });
     await appendFile(target, JSON.stringify(options.entry) + '\n', 'utf8');
   } catch (error) {
-    toolWarn(`⚠️ Saga 叙事库写入失败：${error instanceof Error ? error.message : String(error)}`);
+    toolWarn(`⚠️ 剧情记录写入失败：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -1033,7 +1033,7 @@ export function emitNarrativeStatus(entities: NarrativeEntities): void {
     wm.continuityRules?.length && 'continuity-rules',
     wm.exclusions?.length && 'exclusions',
   ].filter(Boolean).length;
-  toolLog(`🧠 Saga 叙事分析 (${entities.source}): mode=${entities.mode} · 主角=${entities.protagonist.name}(${entities.protagonist.type}) · 置信度=${c}% · 道具=${entities.props.length} · 关系=${entities.relationships.length} · 动作=${entities.actions.length} · 配饰=${entities.protagonistAccessories.length} · world-model=${wmFields} 字段`);
+  toolLog(`🧠 剧情分析 (${entities.source}): mode=${entities.mode} · 主角=${entities.protagonist.name}(${entities.protagonist.type}) · 置信度=${c}% · 道具=${entities.props.length} · 关系=${entities.relationships.length} · 动作=${entities.actions.length} · 配饰=${entities.protagonistAccessories.length} · world-model=${wmFields} 字段`);
 }
 
 // ─── Prompt sanitizer (forbidden → safe equivalent) ───────────────────────

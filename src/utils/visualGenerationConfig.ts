@@ -115,7 +115,6 @@ export const VISUAL_NOT_CONFIGURED_POLICY =
   'do not write scripts that draw placeholder photos.';
 
 export function buildVisualSetupRequiredMessage(assetKind: VisualAssetKind): string {
-  const toolName = assetKind === 'image' ? 'generate_image' : 'generate_video';
   const assetLabel = assetKind === 'image' ? 'image generation' : 'video generation';
   const zhAssetLabel = assetKind === 'image' ? '图片生成' : '视频生成';
 
@@ -124,7 +123,6 @@ export function buildVisualSetupRequiredMessage(assetKind: VisualAssetKind): str
     `状态   : 当前无法使用${zhAssetLabel}。`,
     '',
     'What happened / 发生了什么',
-    `  - Requested tool: ${toolName}`,
     '  - No usable visual API was found in workspace or home config.',
     '  - Artemis also tried eligible main/secondary providers before fallback.',
     '',
@@ -133,7 +131,7 @@ export function buildVisualSetupRequiredMessage(assetKind: VisualAssetKind): str
     '',
     'Manual setup / 手动配置',
     '  1. Run: artemis setup visual',
-    '  2. Choose: BytePlus / OpenAI / Google / Custom API',
+    '  2. Choose your image/video service provider',
     '  3. Enter: API Key, Base URL, image/video model name',
     '  4. Retry the generation request.',
     '',

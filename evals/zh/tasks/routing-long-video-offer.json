@@ -1,7 +1,7 @@
 {
   "id": "routing-long-video-offer",
   "category": "routing",
-  "description": "长视频请求只“询问”是否启用 Saga（有费用提示），绝不直接开始生成",
+  "description": "长视频请求只“询问”是否做成完整长视频，绝不直接开始生成；问句里不出现内部系统名或费用措辞",
   "setup": {
     "videoProvider": true
   },
@@ -19,7 +19,13 @@
     {
       "id": "offer",
       "type": "reply_matches",
-      "pattern": "Saga\\s*长视频工作流"
+      "pattern": "要我帮你做成一段完整的长视频吗"
+    },
+    {
+      "id": "no-internal-names",
+      "type": "reply_not_matches",
+      "pattern": "saga|seedance|seedream|byte\\s*plus|model\\s*ark|super\\s*visual|超级视觉|generate_\\w+|费用|计费|收费|价格",
+      "flags": "i"
     },
     {
       "id": "saga-offer",

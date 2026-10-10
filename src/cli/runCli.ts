@@ -316,6 +316,7 @@ export async function runCli(argv: string[]): Promise<void> {
       maxTurns: options.maxTurnsExplicit ? options.maxTurns : undefined,
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,
+      intent: options.intent,
     })
     return
   }
@@ -658,6 +659,7 @@ async function runQueryCommand(options: {
   maxTurns?: number
   sessionId?: string
   imagePaths?: string[]
+  intent?: string
 }): Promise<void> {
   const { cwd, locale, prompt, mode, model } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
@@ -685,6 +687,7 @@ async function runQueryCommand(options: {
       imagePaths: options.imagePaths,
       sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
       onInfo: (message) => console.error(message),
+      ...(options.intent !== undefined ? { intent: options.intent } : {}),
     })
   } catch (error) {
     if (error instanceof SessionBusyError) {
@@ -1429,7 +1432,7 @@ async function runBragiCommand(options: {
   if (!sub || sub === 'help') {
     console.log()
     console.log(buildPanel(
-      t('Bragi 远程桥', 'Bragi remote bridge'),
+      t('远程桥', 'Remote bridge'),
       [
         t('子命令:', 'Subcommands:'),
         '  artemis bragi telegram            ' + t('启动 Telegram bridge', 'Start Telegram bridge'),
@@ -1527,7 +1530,7 @@ async function runBragiCommand(options: {
 
   console.log()
   console.log(buildPanel(
-    t('未知 Bragi 子命令', 'Unknown Bragi subcommand'),
+    t('未知远程桥子命令', 'Unknown bridge subcommand'),
     [`"${sub}" — ` + t('运行 artemis bragi help 查看可用命令。', 'Run artemis bragi help for available commands.')]
   ))
   console.log()

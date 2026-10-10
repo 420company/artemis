@@ -978,7 +978,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'generate_long_video',
-    description: 'Saga 长视频生产链：把长故事拆成多个短视频片段，逐段调用已配置的视频模型生成，再用 Hyperframes/FFmpeg 合成为完整 MP4。',
+    description: '长视频制作：把长故事拆成多个短视频片段，逐段调用已配置的视频模型生成，再合成为一条完整 MP4。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',

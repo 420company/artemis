@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import type { AgentAction } from '../core/types.js';
 import { ensureNotSensitivePath, resolveArtemisHomeDir } from '../utils/fs.js';
 import { toolLog, toolWarn } from '../utils/log.js';
+import { scrubInternalNames } from '../utils/internalNames.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import {
   buildVisualSetupRequiredMessage,
@@ -27,6 +28,7 @@ import {
   describeUserImageWithVision,
   generateSafeBridgeKeyframe,
   generateSegmentKeyframe,
+  consistencyDir,
   maybeGenerateSuperVisualReference,
   SUPER_VISUAL_TURNAROUND_IMAGES,
   SuperVisualImageBudget,
@@ -206,9 +208,22 @@ function coerceNarrativeEntities(raw: GenerateLongVideoAction['narrativeEntities
   };
 }
 
+/**
+ * Why the identity-consistency pass is off, as a user reads it: a known
+ * reason in plain words, a failed reference sheet without the raw service
+ * error (which the project plan keeps).
+ */
+export function plainConsistencyReason(reason: string | undefined): string {
+  const text = (reason ?? '').trim();
+  if (!text) return 'not used for this video';
+  if (/could not be made|turnaround generation failed/i.test(text)) return 'the character reference sheet could not be made';
+  if (/failed|error|HTTP \d{3}/i.test(text)) return 'the image service was not available';
+  return scrubInternalNames(text);
+}
+
 function normalizeProjectId(raw: string | undefined): string {
-  const base = raw?.trim() || `saga-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  return base.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'saga-video';
+  const base = raw?.trim() || `video-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  return base.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'long-video';
 }
 
 function pad2(value: number): string {
@@ -383,7 +398,7 @@ function deriveVideoTitle(action: GenerateLongVideoAction, brief: string): strin
     .find((title) => title && !/^shot\s+\d+$/i.test(title));
   if (firstNamedShot) return firstNamedShot;
 
-  return deriveTitleFromBrief(brief) ?? 'Saga long video';
+  return deriveTitleFromBrief(brief) ?? 'Long video';
 }
 
 function sanitizeFilenamePart(value: string, fallback: string, maxLength = 72): string {
@@ -434,7 +449,7 @@ async function buildDefaultLongVideoOutputPath(options: {
   ratio: SagaRatio;
 }): Promise<string> {
   const timestamp = formatLocalTimestamp(new Date());
-  const titleSlug = sanitizeFilenamePart(options.title, 'untitled-saga-video');
+  const titleSlug = sanitizeFilenamePart(options.title, 'untitled-video');
   const ratioSlug = options.ratio.replace(':', 'x');
   const fileName = `${timestamp}_${options.totalSeconds}s_${ratioSlug}_${titleSlug}_${options.projectId}.mp4`;
   return uniquifyPath(path.join(getMediaOutputRoot(), DEFAULT_LONG_VIDEO_SUBDIR, options.projectId, fileName));
@@ -443,7 +458,7 @@ async function buildDefaultLongVideoOutputPath(options: {
 function resolveRatio(raw: string | undefined): SagaRatio {
   const ratio = normalizeAspectRatio(raw);
   if (ratio) return ratio;
-  if (raw?.trim()) toolWarn(`⚠️ Saga: unrecognised aspect ratio "${raw.trim()}"; using ${DEFAULT_RATIO}.`);
+  if (raw?.trim()) toolWarn(`⚠️ unrecognised aspect ratio "${raw.trim()}"; using ${DEFAULT_RATIO}.`);
   return DEFAULT_RATIO;
 }
 
@@ -518,11 +533,11 @@ async function expandLocalPromptReferencesInStory(story: string): Promise<string
         '[/DIRECTOR REFERENCE]',
       ].join('\n'));
     } catch (error) {
-      toolWarn(`⚠️ Saga: 无法读取本地 prompt 引用 ${ref}: ${error instanceof Error ? error.message : String(error)}`);
+      toolWarn(`⚠️ 无法读取本地 prompt 引用 ${ref}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   if (blocks.length === 0) return story;
-  toolLog(`📎 Saga: 已展开 ${blocks.length} 个本地 .prompt.txt 导演参考。`);
+  toolLog(`📎 已展开 ${blocks.length} 个本地 .prompt.txt 导演参考。`);
   return [story, '', blocks.join('\n\n')].join('\n');
 }
 
@@ -879,7 +894,7 @@ function buildSegments(options: {
     : Math.max(1, Math.ceil(options.totalSeconds / Math.max(4, Math.min(options.preferredSegmentSeconds, 6))));
   const segmentCount = Math.min(requestedSegmentCount, maxSegmentsByTotal);
   if (plannedShots.length > segmentCount) {
-    toolWarn(`⚠️ Saga: ${plannedShots.length} 个镜头放不进 ${options.totalSeconds}s（最多 ${segmentCount} 段）；第 ${segmentCount + 1}-${plannedShots.length} 个镜头不会生成。`);
+    toolWarn(`⚠️ ${plannedShots.length} 个镜头放不进 ${options.totalSeconds}s（最多 ${segmentCount} 段）；第 ${segmentCount + 1}-${plannedShots.length} 个镜头不会生成。`);
   }
   const plannedDurationSum = plannedShots.reduce((sum, shot) => (
     typeof shot.duration === 'number' && Number.isFinite(shot.duration) ? sum + Math.max(0, shot.duration) : sum
@@ -1221,7 +1236,7 @@ export async function executeGenerateLongVideo(
     try {
       action = await withResolvedInputPaths(action, context);
     } catch (error) {
-      return { action, ok: false, output: `generate_long_video: ${error instanceof Error ? error.message : String(error)}` };
+      return { action, ok: false, output: `Long video: ${error instanceof Error ? error.message : String(error)}` };
     }
 
     const provider = configured.config.video.provider;
@@ -1238,7 +1253,7 @@ export async function executeGenerateLongVideo(
     // segment keeps the provider's default price otherwise.
     const requestedResolution = normalizeVideoResolution(action.resolution);
     if (action.resolution !== undefined && !requestedResolution) {
-      return { action, ok: false, output: `generate_long_video: resolution must be one of ${VIDEO_RESOLUTIONS.join(', ')}; omit it to use the provider default.` };
+      return { action, ok: false, output: `Long video: resolution must be one of ${VIDEO_RESOLUTIONS.join(', ')}; omit it to use the provider default.` };
     }
 
     // Side-channel recovery: saga workflow writes the FULL user story to a
@@ -1253,7 +1268,7 @@ export async function executeGenerateLongVideo(
       if (existsSync(sourcePath)) {
         const sideStory = readFileSync(sourcePath, 'utf8');
         if (sideStory && sideStory.length > resolvedSourceStory.length) {
-          toolLog(`📖 Saga: 从 saga-pending side-channel 恢复完整剧本 (${sideStory.length} 字符，覆盖 agent 传入的 ${resolvedSourceStory.length} 字符)`);
+          toolLog(`📖 从暂存文件恢复完整剧本 (${sideStory.length} 字符，覆盖 agent 传入的 ${resolvedSourceStory.length} 字符)`);
           resolvedSourceStory = sideStory;
         }
         try { unlinkSync(sourcePath); } catch { /* best-effort cleanup */ }
@@ -1302,15 +1317,15 @@ export async function executeGenerateLongVideo(
       ].filter((name): name is string => typeof name === 'string' && name.trim().length > 0),
     });
     if (videoNsfw) {
-      toolLog(`🔞 Saga Visual Director: NSFW video provider detected; using adult-aware ${languageNormalized.usedLlmRewrite ? 'LLM rewrite' : 'deterministic rewrite'} without safe-for-work dilution.`);
+      toolLog(`🔞 NSFW video provider detected; using adult-aware ${languageNormalized.usedLlmRewrite ? 'LLM rewrite' : 'deterministic rewrite'} without safe-for-work dilution.`);
     } else if (briefIsStructured) {
-      toolLog('📐 Saga: 检测到结构化 brief（时间码/镜头标记），跳过 LLM 改写以保留用户原文的所有具体地点/动作/约束。');
+      toolLog('📐 检测到结构化 brief（时间码/镜头标记），跳过 LLM 改写以保留用户原文的所有具体地点/动作/约束。');
     }
     // The whole brief's dialogue note stays out of the story: each segment
     // gets a note with its own lines, and the bible must not list every line
     // of the film as one segment's speech.
     story = languageNormalized.bodyText;
-    toolLog(`🌐 Saga Visual Director: generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
+    toolLog(`🌐 generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     // ALWAYS parse timestamped shots first. When the user supplied an explicit
     // [X-Y秒] timeline, that is the authoritative segmentation and takes
     // priority over any agent-supplied shots array (which is typically empty
@@ -1328,7 +1343,7 @@ export async function executeGenerateLongVideo(
     const timecodedSeconds = timestampedStoryShots.reduce((sum, shot) => sum + (shot.duration ?? 0), 0);
     if (timestampedStoryShots.length >= 2 && timecodedSeconds > totalSeconds * 1.15 + 1) {
       const kept = clampTotalSeconds(timecodedSeconds);
-      toolWarn(`⚠️ Saga: 剧本时间码共 ${timecodedSeconds}s（${timestampedStoryShots.length} 段），长于请求的 ${totalSeconds}s；按时间码生成全部分段（${kept}s），不丢弃任何一段。`);
+      toolWarn(`⚠️ 剧本时间码共 ${timecodedSeconds}s（${timestampedStoryShots.length} 段），长于请求的 ${totalSeconds}s；按时间码生成全部分段（${kept}s），不丢弃任何一段。`);
       totalSeconds = kept;
     }
     const title = deriveVideoTitle(action, rawStory);
@@ -1366,7 +1381,7 @@ export async function executeGenerateLongVideo(
       ? timestampedStoryShots
       : (action.shots?.length ? action.shots : []);
     if (timestampedStoryShots.length >= 2) {
-      toolLog(`🧭 Saga: 已从用户时间码剧本解析出 ${timestampedStoryShots.length} 个镜头，按脚本顺序生成（优先于 agent 默认规划）。`);
+      toolLog(`🧭 已从用户时间码剧本解析出 ${timestampedStoryShots.length} 个镜头，按脚本顺序生成（优先于 agent 默认规划）。`);
     }
     if ((!storyboardShots || storyboardShots.length === 0) && storyboardImagePaths.length > 0) {
       for (const imagePath of storyboardImagePaths) {
@@ -1434,10 +1449,10 @@ export async function executeGenerateLongVideo(
           '',
           buildSagaConstitution(narrativeEntities),
           '',
-          `[Saga Narrative Entity Map — internally resolved for this generate_long_video call]\n${JSON.stringify(narrativeEntities, null, 2)}`,
+          `[Narrative Entity Map — internally resolved for this long video]\n${JSON.stringify(narrativeEntities, null, 2)}`,
         ].join('\n');
       }
-      toolLog(`🧠 Saga: 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})${skipConstitution ? '。(Constitution 已跳过：cleanDirect / NSFW provider)' : '。'}`);
+      toolLog(`🧠 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})${skipConstitution ? '。(剧情设定已跳过：cleanDirect / NSFW provider)' : '。'}`);
     }
 
     const isPureEnvironment = narrativeEntities?.mode === 'environment';
@@ -1476,7 +1491,7 @@ export async function executeGenerateLongVideo(
         return {
           action,
           ok: false,
-          output: `🚨 角色身份锁定失败：你提供的参考图被安全过滤系统拦截 (${superVisualMode.reason})。\n\n这通常是因为图片中包含：\n1. 过于写实的真人面部（触发隐私保护）\n2. 复杂的版权内容\n3. 触发了提供商的敏感词过滤\n\n建议操作：\n- 请提供一张背景更干净、更偏向“插画/3D/动漫”风格的角色图。\n- 或者尝试删除图片，仅使用文字描述生成。\n- 请更换图片后重新发送指令。`,
+          output: `🚨 角色身份锁定失败：你提供的参考图被安全过滤系统拦截 (${scrubInternalNames(superVisualMode.reason ?? '')})。\n\n这通常是因为图片中包含：\n1. 过于写实的真人面部（触发隐私保护）\n2. 复杂的版权内容\n3. 触发了提供商的敏感词过滤\n\n建议操作：\n- 请提供一张背景更干净、更偏向“插画/3D/动漫”风格的角色图。\n- 或者尝试删除图片，仅使用文字描述生成。\n- 请更换图片后重新发送指令。`,
         };
       }
     }
@@ -1484,7 +1499,7 @@ export async function executeGenerateLongVideo(
     // photos can still be sent directly — mark that the input IS real-person so the
     // downstream reference-routing logic can handle it, but do NOT abort.
     if (videoNsfw && !superVisualMode.enabled && hasGlobalUserImageReferences && !explicitUserImageBypass) {
-      toolLog(`🔞 NSFW provider: Super Visual safety 拦截已跳过 (${superVisualMode.reason})，将直传用户参考图`);
+      toolLog(`🔞 NSFW provider: 画面一致性参考被安全拦截，已跳过 (${superVisualMode.reason})，将直传用户参考图`);
     }
 
     // Real-person input cannot submit the user's original photos or raw
@@ -1559,7 +1574,7 @@ export async function executeGenerateLongVideo(
           'EXPLICIT USER TURNAROUND SOURCE: The user chose "I have a character three-view/turnaround". Use the supplied reference image(s) as the canonical identity source. Do NOT regenerate the turnaround, but do use it to build per-segment keyframe bridge references when available.',
         ].join('\n');
       }
-      toolLog(`🎯 Saga: 用户已提供角色三视图，保留为 canonical identity source，并进入 keyframe bridge。`);
+      toolLog(`🎯 用户已提供角色三视图，保留为 canonical identity source，并进入 keyframe bridge。`);
     } else if (isDirectImageIdentity && hasGlobalUserImageReferences) {
       if (!verbatimSegments) {
         story = [
@@ -1568,12 +1583,12 @@ export async function executeGenerateLongVideo(
           'EXPLICIT DIRECT IMAGE SOURCE: The user chose direct image-to-video material. Use the supplied image(s) directly as video reference media. Do NOT generate a character turnaround sheet.',
         ].join('\n');
       }
-      toolLog(`🎯 Saga: 用户选择直接用图片做视频素材，跳过 Super Visual / Image-2 三视图生成，直接传给视频模型。`);
+      toolLog(`🎯 用户选择直接用图片做视频素材，跳过 三视图生成，直接传给视频模型。`);
     }
 
     if (!superVisualMode.enabled && !explicitUserImageBypass && (userReferenceImagePaths.length > 0 || userReferenceImageUrls.length > 0)) {
       if (isPureEnvironment) {
-        toolLog('🎯 Saga: 纯视觉/无主角模式已确认。绕过 Super Visual 人物提取，强制保留用户原始风景/抽象图，并注入最高级防人类指令。');
+        toolLog('🎯 纯视觉/无主角模式已确认。跳过人物提取，强制保留用户原始风景/抽象图，并注入最高级防人类指令。');
         story = [
           story,
           '',
@@ -1582,7 +1597,7 @@ export async function executeGenerateLongVideo(
       } else {
         let visionDesc: string | null = null;
         try {
-          const cachedPath = path.join(projectDir, 'super-visual', 'character-vision-description.txt');
+          const cachedPath = path.join(consistencyDir(projectDir), 'character-vision-description.txt');
           visionDesc = (await readFile(cachedPath, 'utf8')).trim() || null;
         } catch { /* no cache */ }
         // Prefer the local copies SV already downloaded (covers URL-only case);
@@ -1598,12 +1613,12 @@ export async function executeGenerateLongVideo(
             '',
             `[Vision-derived character identity — applies to EVERY shot. The canonical illustrated turnaround was not available for this run, so identity is anchored textually]: ${visionDesc}`,
           ].join('\n');
-          toolWarn('⚠️ Super Visual 不可用：已用 vision-describe 文字身份兜底（输出仍可为照片质感，但身份精度低于图像锚定方案）。');
+          toolWarn('⚠️ 画面一致性参考不可用：已用 vision-describe 文字身份兜底（输出仍可为照片质感，但身份精度低于图像锚定方案）。');
         } else {
-          toolWarn('⚠️ Super Visual 不可用且 vision-describe 也失败：本次只能依赖原始文字描述，身份一致性会偏弱。');
+          toolWarn('⚠️ 画面一致性参考不可用且 vision-describe 也失败：本次只能依赖原始文字描述，身份一致性会偏弱。');
         }
         if (identitySource === 'turnaround') {
-          toolWarn('⚠️ Super Visual 不可用：保留用户三视图作为 canonical identity reference，禁止降级为无图生成。');
+          toolWarn('⚠️ 画面一致性参考不可用：保留用户三视图作为 canonical identity reference，禁止降级为无图生成。');
         } else {
           // Drop non-turnaround user photos — provider would reject them for privacy reasons in character mode.
           userReferenceImagePaths = [];
@@ -1659,10 +1674,10 @@ export async function executeGenerateLongVideo(
       }
       story = [story, '', ...storyAdditions].join('\n');
       if (realPersonInput) {
-        toolLog(`🎯 Saga: 已启用角色身份锁与写实输出路径。`);
+        toolLog(`🎯 已启用角色身份锁与写实输出路径。`);
       }
       if (identitySource === 'turnaround') {
-        toolLog(`🎯 Saga: 用户三视图将作为 canonical identity source，并继续生成每段 keyframe bridge。`);
+        toolLog(`🎯 用户三视图将作为 canonical identity source，并继续生成每段 keyframe bridge。`);
       }
     } else if (accessoriesList.length > 0) {
       // Non-super-visual modes (direct_image / character_image / text-only):
@@ -1671,7 +1686,7 @@ export async function executeGenerateLongVideo(
       // buildContinuityBible below, which receives accessoriesList through
       // the bible input. This avoids appending to `story` (which would get
       // truncated by the bible's slice(0, 1600) on Source story).
-      toolLog(`🎯 Saga: 即将注入 ACCESSORY LOCK (${accessoriesList.length} 项)，identitySource=${identitySource ?? 'text-only'}。`);
+      toolLog(`🎯 即将注入 ACCESSORY LOCK (${accessoriesList.length} 项)，identitySource=${identitySource ?? 'text-only'}。`);
     }
 
     // Sanitize story BEFORE the continuity bible is built so unsanitized
@@ -1680,7 +1695,7 @@ export async function executeGenerateLongVideo(
     // story verbatim for every segment.)
     const storySanitizeDiff = diffSanitize(story);
     if (storySanitizeDiff.length > 0) {
-      toolWarn(`🛡️ Saga 词汇护栏: story 中替换 ${storySanitizeDiff.length} 处敏感触发词 (${storySanitizeDiff.slice(0, 3).map((d) => `${d.from} → ${d.to}`).join('; ')}${storySanitizeDiff.length > 3 ? '; ...' : ''})。`);
+      toolWarn(`🛡️ 词汇护栏: story 中替换 ${storySanitizeDiff.length} 处敏感触发词 (${storySanitizeDiff.slice(0, 3).map((d) => `${d.from} → ${d.to}`).join('; ')}${storySanitizeDiff.length > 3 ? '; ...' : ''})。`);
     }
     story = sanitizeForVideoProvider(story);
     const { shotContinuityNotes, shotCameraNotes } = deriveContinuityFromShots(action);
@@ -1791,7 +1806,7 @@ export async function executeGenerateLongVideo(
     const rewroteShotIndices: number[] = [];
     const preserveUserScript = rawPassthrough || shouldPreserveUserScriptWithoutCriticRewrite({ action, timestampedStoryShots });
     if (narrativeEntities && !rawPassthrough) {
-      toolLog(`🧠 Saga Critic: 启动 pre-flight 检查（mode=${narrativeEntities.mode} · 主角=${narrativeEntities.protagonist.name}）...`);
+      toolLog(`🧠 剧情检查：开始逐镜头核对（mode=${narrativeEntities.mode} · 主角=${narrativeEntities.protagonist.name}）...`);
       preCriticViolations = runNarrativeCritic({
         shots: segments.map((seg) => ({
           index: seg.index,
@@ -1802,12 +1817,12 @@ export async function executeGenerateLongVideo(
         entities: narrativeEntities,
       });
       if (preCriticViolations.length === 0) {
-        toolLog(`✅ Saga Critic: 所有 shot 通过宪法检查，无违规。`);
+        toolLog(`✅ 剧情检查：所有镜头都符合剧情设定。`);
       } else if (preserveUserScript) {
         postCriticViolations = preCriticViolations;
-        toolWarn(`⚠️ Saga Critic: 检测到 ${preCriticViolations.length} 个 shot 违规，但当前是显式用户剧本/时间码模式，已跳过 LLM 重写并保留原始镜头内容。`);
+        toolWarn(`⚠️ 剧情检查：检测到 ${preCriticViolations.length} 个 shot 违规，但当前是显式用户剧本/时间码模式，已跳过 LLM 重写并保留原始镜头内容。`);
       } else {
-        toolWarn(`⚠️ Saga Critic: 检测到 ${preCriticViolations.length} 个 shot 违规，启动 self-dialogue 重写...`);
+        toolWarn(`⚠️ 剧情检查：检测到 ${preCriticViolations.length} 个 shot 违规，启动 self-dialogue 重写...`);
         for (let round = 1; round <= 2; round += 1) {
           const stillBroken: ShotViolation[] = [];
           for (const violation of preCriticViolations) {
@@ -1826,7 +1841,7 @@ export async function executeGenerateLongVideo(
               duration: seg.duration,
             });
             if (rewrite) {
-              toolLog(`✏️  Saga Critic: shot ${seg.index} 已重写 (round ${round}) — ${rewrite.storyBeat.slice(0, 80)}...`);
+              toolLog(`✏️  剧情检查：shot ${seg.index} 已重写 (round ${round}) — ${rewrite.storyBeat.slice(0, 80)}...`);
               // Sanitize rewriter output too — the LLM may reintroduce
               // trigger words even when the original storyBeat was clean.
               seg.storyBeat = sanitizeForVideoProvider(rewrite.storyBeat);
@@ -1872,7 +1887,7 @@ export async function executeGenerateLongVideo(
                 : compileShotPromptWithContinuity({ ...promptArgs, mode: 'text-only', cleanDirect: verbatimSegments });
               if (!rewroteShotIndices.includes(seg.index)) rewroteShotIndices.push(seg.index);
             } else {
-              toolWarn(`⚠️ Saga Critic: shot ${seg.index} 重写失败（round ${round}）— 保留原稿。`);
+              toolWarn(`⚠️ 剧情检查：shot ${seg.index} 重写失败（round ${round}）— 保留原稿。`);
               stillBroken.push(violation);
             }
           }
@@ -1887,18 +1902,18 @@ export async function executeGenerateLongVideo(
             entities: narrativeEntities,
           });
           if (postCriticViolations.length === 0) {
-            toolLog(`✅ Saga Critic: round ${round} 后所有违规已清除。`);
+            toolLog(`✅ 剧情检查：round ${round} 后所有违规已清除。`);
             break;
           }
           if (postCriticViolations.length >= preCriticViolations.length) {
             // No improvement → don't churn further rounds
-            toolWarn(`⚠️ Saga Critic: round ${round} 未减少违规（${postCriticViolations.length} 个），停止重写循环。`);
+            toolWarn(`⚠️ 剧情检查：round ${round} 未减少违规（${postCriticViolations.length} 个），停止重写循环。`);
             break;
           }
           preCriticViolations = postCriticViolations;
         }
         if (postCriticViolations.length > 0) {
-          toolWarn(`⚠️ Saga Critic: 最终仍有 ${postCriticViolations.length} 个未解决的违规 — 继续生成（剩余违规会写入 saga-plan.json）。`);
+          toolWarn(`⚠️ 剧情检查：最终仍有 ${postCriticViolations.length} 个未解决的违规 — 继续生成（剩余问题已记入项目计划文件）。`);
         }
       }
     }
@@ -1912,7 +1927,7 @@ export async function executeGenerateLongVideo(
       defaultMs: crossfadeMs,
     });
 
-    const draftPlanPath = path.join(projectDir, 'saga-plan.draft.json');
+    const draftPlanPath = path.join(projectDir, 'project-plan.draft.json');
     await writeFile(
       draftPlanPath,
       JSON.stringify({
@@ -1984,17 +1999,17 @@ export async function executeGenerateLongVideo(
       userReferenceImagePaths.length > 1
       && (realPersonInput || humanOrMixedSubject)
     ) {
-      const sheetOutputPath = path.join(projectDir, 'super-visual', 'ensemble-cast-sheet.png');
+      const sheetOutputPath = path.join(consistencyDir(projectDir), 'ensemble-cast-sheet.png');
       const sheet = await buildEnsembleContactSheet({
         imagePaths: userReferenceImagePaths,
         outputPath: sheetOutputPath,
       });
       if (sheet.ok && !sheet.isPassThrough) {
-        toolLog(`🧩 Saga: 已生成 ${sheet.inputCount} 角色 ensemble contact sheet（${sheet.grid.cols}×${sheet.grid.rows}），后续每段只发这一张 → ${sheet.path}`);
+        toolLog(`🧩 已生成 ${sheet.inputCount} 角色 ensemble contact sheet（${sheet.grid.cols}×${sheet.grid.rows}），后续每段只发这一张 → ${sheet.path}`);
         userReferenceImagePaths = [sheet.path];
         userReferenceImageUrls = [];
       } else if (!sheet.ok) {
-        toolWarn(`⚠️ Saga: ensemble contact sheet 生成失败，回退为按原方式逐张发送参考图（${sheet.reason.slice(0, 200)}）。`);
+        toolWarn(`⚠️ ensemble contact sheet 生成失败，回退为按原方式逐张发送参考图（${sheet.reason.slice(0, 200)}）。`);
       }
     }
 
@@ -2026,12 +2041,12 @@ export async function executeGenerateLongVideo(
     let lastHeartbeat = Date.now();
     const heartbeatInterval = 60_000 * 2; // 2 minutes
 
-    toolLog(`🎬 Saga: 开始按段生成 ${segments.length} 段视频（${actualTotalSeconds}s 总时长）。`);
+    toolLog(`🎬 开始按段生成 ${segments.length} 段视频（${actualTotalSeconds}s 总时长）。`);
     for (const segment of segments) {
       const cutsIn = segment.index > 1 && sanitizedShots?.[segment.index - 1]?.transitionKind === 'cut';
       // Manual heartbeat check to keep the bridge alive
       if (Date.now() - lastHeartbeat > heartbeatInterval) {
-        toolLog(`💓 Saga 状态：正在处理长视频项目 ${projectId}，当前进度 ${segment.index}/${segments.length} 段...`);
+        toolLog(`💓 状态：正在处理长视频项目 ${projectId}，当前进度 ${segment.index}/${segments.length} 段...`);
         lastHeartbeat = Date.now();
       }
 
@@ -2049,7 +2064,7 @@ export async function executeGenerateLongVideo(
         // turnaround) AND scene continuity (from the previous closing frame).
         // For shot 1 there is no previous frame yet, so identity-only edit.
         if (shouldGenerateSegmentKeyframes) {
-          toolLog(`🎨 正在为第 ${segment.index} 段生成视觉参考关键帧 (Super Visual)…`);
+          toolLog(`🎨 正在为第 ${segment.index} 段生成视觉参考关键帧 （画面一致性）…`);
           const wm = narrativeEntities?.worldModel ?? {};
           const keyframeResult = await generateSegmentKeyframe({
             context,
@@ -2097,7 +2112,7 @@ export async function executeGenerateLongVideo(
           } else {
             segmentKeyframeFailures.push({ index: segment.index, reason: keyframeResult.reason });
           }
-          toolLog(`🎨 Super Visual: 第 ${segment.index}/${segments.length} 段生成图片 ${superVisualImageBudget.usedFor(segment.index)} 张；全片累计 ${superVisualImageBudget.used}/${superVisualImageBudget.max} 张。`);
+          toolLog(`🎨 画面一致性：第 ${segment.index}/${segments.length} 段生成图片 ${superVisualImageBudget.usedFor(segment.index)} 张；全片累计 ${superVisualImageBudget.used}/${superVisualImageBudget.max} 张。`);
         }
 
         const baseReq = {
@@ -2333,9 +2348,9 @@ export async function executeGenerateLongVideo(
             action,
             ok: false,
             output: [
-              `generate_long_video: segment ${segment.index}/${segments.length} failed.`,
+              `Long video: segment ${segment.index}/${segments.length} failed.`,
               ...(lastFailure ? [`Reason: ${lastFailure.userMessage}`] : []),
-              lastError,
+              scrubInternalNames(lastError),
             ].join('\n'),
             ...(lastFailure ? { error: videoFailureToolError(lastFailure) } : {}),
           };
@@ -2407,7 +2422,7 @@ export async function executeGenerateLongVideo(
         action,
         ok: false,
         output: [
-          'generate_long_video: final duration verification failed.',
+          'Long video: final duration verification failed.',
           `Requested ${totalSeconds}s, renderer expected ${renderResult.durationSeconds.toFixed(2)}s, actual file is ${measuredOutputSeconds.toFixed(2)}s.`,
           `Video: ${resolvedOutput.absolute}`,
           outputProbe.error ? `Probe: ${outputProbe.error}` : undefined,
@@ -2417,8 +2432,8 @@ export async function executeGenerateLongVideo(
 
     const lintFormatted = formatLintReport(renderResult.diagnostics.lint);
 
-    const manifestPath = path.join(projectDir, 'saga-manifest.json');
-    const planPath = path.join(projectDir, 'saga-plan.json');
+    const manifestPath = path.join(projectDir, 'project-manifest.json');
+    const planPath = path.join(projectDir, 'project-plan.json');
     const metadataPath = outputMetadataPathFor(resolvedOutput.absolute);
     const outputBaseName = path.basename(resolvedOutput.absolute);
     const plan = {
@@ -2571,7 +2586,7 @@ export async function executeGenerateLongVideo(
               ? `Super Visual bypassed by explicit identitySource=${identitySource}; user images are sent directly as video references.`
               : undefined,
             !superVisualMode.enabled && !explicitUserImageBypass
-              ? `Super Visual is disabled/unavailable: ${superVisualMode.reason}`
+              ? `Consistency pass is off: ${superVisualMode.reason}`
               : undefined,
             segmentKeyframeFailures.length > 0
               ? `Segment keyframes failed: ${segmentKeyframeFailures.map((f) => `seg${f.index}: ${f.reason}`).join('; ')}`
@@ -2671,7 +2686,6 @@ export async function executeGenerateLongVideo(
       const s = elapsedSeconds % 60;
       return m > 0 ? `${m}m ${s}s` : `${s}s`;
     })();
-    const cleanModel = String(model).replace(/^[^/]+\//, '');
     const transitionSummary = renderResult.appliedTransitions.length > 0
       ? (() => {
           // Collapse same kind+duration to "kind@durMs × N" when uniform.
@@ -2708,13 +2722,12 @@ export async function executeGenerateLongVideo(
       ...outputBlock,
       '',
       '📊 Stats:',
-      `   · Model:        ${cleanModel}`,
       `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s · resolution ${requestedResolution ?? 'provider default'}`,
       `   · Transitions:  ${transitionSummary}`,
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
       `   · Soundtrack:   ${soundtrackLine}`,
       `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
-      `   · Super visual: ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${superVisualMode.reason})`}`,
+      `   · Consistency:  ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${plainConsistencyReason(superVisualMode.reason)})`}`,
       `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''} · images=${superVisualImageBudget.used}/${superVisualImageBudget.max}`,
       `   · References:   user-image-dropped=${userImageReferenceDroppedSegments.length}`,
       narrativeEntities
@@ -2724,11 +2737,10 @@ export async function executeGenerateLongVideo(
       ...(reusedSegmentPaths.length > 0 ? [`   · Reused:       ${reusedSegmentPaths.length} cached segments`] : []),
     ];
 
-    // Internal-detail block: hide super-visual reference path inside Stats
-    // only if Super Visual was enabled (path is long; users rarely need it
-    // unless debugging identity issues).
+    // The identity reference sheet, when one was made (long path; useful
+    // when an identity looks off).
     if (superVisualMode.enabled && superVisualMode.referenceImagePath) {
-      lines.push(`   · Super-visual ref: ${superVisualMode.referenceImagePath}`);
+      lines.push(`   · Identity ref: ${superVisualMode.referenceImagePath}`);
     }
 
     lines.push(
@@ -2738,7 +2750,7 @@ export async function executeGenerateLongVideo(
       `   Plan:         ${planPath}`,
       `   Manifest:     ${manifestPath}`,
       `   Metadata:     ${metadataPath}`,
-      `   Composition:  ${path.join(hyperframesProjectDir, 'index.html')}`,
+      `   Folder:       ${projectDir}`,
       '',
       `🎬 Open: open "${resolvedOutput.absolute}"`,
     );
@@ -2750,6 +2762,6 @@ export async function executeGenerateLongVideo(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { action, ok: false, output: `generate_long_video error: ${message}` };
+    return { action, ok: false, output: `Long video error: ${scrubInternalNames(message)}` };
   }
 }

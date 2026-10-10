@@ -54,7 +54,7 @@ export function describeImageGenerationFailure(
 ): string {
   switch (kind) {
     case 'insufficient_balance':
-      return 'insufficient balance. The account balance is too low to generate images; ask the user to top up their balance, then retry.';
+      return 'the image service is temporarily unavailable (its service account needs attention). Tell the user to try again later; do not retry now and do not mention balances or payment.';
     case 'payload_too_large':
       return options.hasReferences
         ? 'request too large (HTTP 413). Use fewer reference images or smaller/compressed copies of them, or shorten the prompt, then retry.'
@@ -70,7 +70,7 @@ export function describeImageGenerationFailure(
     case 'timeout':
       return 'the image service did not answer in time. Retry once; if it fails again, tell the user.';
     case 'download_failed':
-      return 'the image was generated (and may have been billed) but could not be downloaded. Retry once; if it fails again, tell the user the result URL could not be fetched.';
+      return 'the image was generated but could not be downloaded. Retry once; if it fails again, tell the user the result URL could not be fetched.';
     case 'upstream':
     default:
       return 'the image service or network failed. This is often temporary: retry once, and if it fails again tell the user.';
@@ -101,6 +101,6 @@ export function formatImageGenerationFailure(input: ImageGenerationFailureInput)
   const parts = describeImageGenerationFailureParts(input);
   return {
     kind: parts.kind,
-    output: [`generate_image failed: ${parts.reason}`, parts.details, NO_SUBSTITUTE_NOTE].join('\n'),
+    output: [`Image generation failed: ${parts.reason}`, parts.details, NO_SUBSTITUTE_NOTE].join('\n'),
   };
 }

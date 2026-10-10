@@ -205,14 +205,14 @@ export async function lintSagaComposition(input: SagaLintInput): Promise<SagaLin
 
 export function formatLintReport(report: SagaLintReport): string {
   if (report.findings.length === 0) {
-    return 'saga lint: 0 errors, 0 warnings';
+    return 'lint: 0 errors, 0 warnings';
   }
   const lines: string[] = [];
   for (const finding of report.findings) {
     const prefix = finding.level === 'error' ? 'ERROR' : finding.level === 'warning' ? 'WARN' : 'INFO';
     lines.push(`[${prefix}] ${finding.code}: ${finding.message}`);
   }
-  lines.push(`saga lint summary: ${report.errors} errors, ${report.warnings} warnings, ${report.infos} infos`);
+  lines.push(`lint summary: ${report.errors} errors, ${report.warnings} warnings, ${report.infos} infos`);
   return lines.join('\n');
 }
 

@@ -46,12 +46,13 @@ import { isTaskRuntimeActiveStatus } from '../core/taskRuntime.js'
 import { sendBragiImageBroadcast } from './imageBroadcast.js'
 import { DEFAULT_AGENT_MAX_TURNS } from '../cli/branding.js'
 import { handleSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
-import { handleSagaLongVideoWorkflow, offerSagaLongVideoWorkflow } from '../tools/visual/sagaWorkflow.js'
+import { handleSagaLongVideoWorkflow, offerSagaLongVideoWorkflow, parseLongVideoCommand } from '../tools/visual/sagaWorkflow.js'
 import { executeAction } from '../tools/index.js'
 import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
 import { broadcastToBridges } from '../services/bridgeNotifier.js'
 import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
+import { describeToolForUser, describeToolOutputForUser, scrubInternalNames } from '../utils/internalNames.js'
 import { existsSync, statSync } from 'node:fs'
 
 // ─── display helpers ──────────────────────────────────────────────────────────
@@ -650,14 +651,14 @@ async function runRemoteCommandInner(
         ), 'info')
       }
 
-      const sagaTrim = command.body.trimStart()
-      const sagaExplicit = sagaTrim === '/saga' || /^\/saga(\s|$)/i.test(sagaTrim)
-      const sagaText = sagaExplicit ? sagaTrim.replace(/^\/saga\s*/i, '').trim() : command.body
+      const sagaCommandStory = parseLongVideoCommand(command.body)
+      const sagaExplicit = sagaCommandStory !== undefined
+      const sagaText = sagaExplicit ? sagaCommandStory : command.body
       const sagaKey = `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`
       const sagaWorkflow = sagaExplicit && !sagaText
         ? { handled: true as const, reply: t(
-            'Saga 长视频：请在 /saga 后跟一段故事文字。例：/saga 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
-            'Saga long video: type /saga followed by a story description. Example: /saga A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
+            '制作长视频：请在 /longvideo 后接一段故事文字。例：/longvideo 一个赛博朋克的清晨，主角在霓虹街道上喝咖啡。',
+            'Long video: type /longvideo followed by a story. Example: /longvideo A cyberpunk morning, the protagonist sips coffee on a neon-lit street.',
           ) }
         : await handleSagaLongVideoWorkflow({
             scope: 'bridge',
@@ -717,8 +718,8 @@ async function runRemoteCommandInner(
         command.body = sagaWorkflow.prompt
         await opts.onProgress?.(
           t(
-            `🌙 Saga 长视频工作流已接管：注入导演级 System Prompt (${sagaWorkflow.prompt.length} 字符)。`,
-            `🌙 Saga long-video workflow engaged: injected director-level System Prompt (${sagaWorkflow.prompt.length} chars).`,
+            '🌙 素材已收齐，开始制作长视频。',
+            '🌙 Materials collected; starting your long video.',
           ),
           'info',
         )
@@ -813,8 +814,8 @@ async function runRemoteCommandInner(
               const workflowStartedText = workflowResolution.route
                 ? t('⏳ 正在按该工作流处理，完成后自动送达。', '⏳ Working on it with this workflow; the result will be delivered when done.')
                 : t(
-                    `已进入 ${workflowResolution.mode} 可执行工作流；将使用真实 workflow/runtime 路径，而不是普通聊天模拟。`,
-                    `Entered executable ${workflowResolution.mode} workflow; using the real workflow/runtime path, not chat simulation.`,
+                    '⏳ 已开始处理，完成后自动送达。',
+                    '⏳ Working on it; the result will be delivered when done.',
                   )
               await opts.onProgress?.(workflowStartedText, 'info')
               await opts.sendChatUpdate?.(workflowStartedText)
@@ -880,8 +881,8 @@ async function runRemoteCommandInner(
 
         if (directSagaAction) {
           await opts.onProgress?.(t(
-            `🔧 正在直接运行工具：generate_long_video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
-            `🔧 Running tool directly: generate_long_video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
+            `🎬 正在制作长视频 · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60} 秒`,
+            `🎬 Making your long video · ${directSagaAction.totalDuration ?? directSagaAction.duration ?? 60}s`,
           ), 'info')
 
           // Pipe toolLog/toolWarn/toolError to the bridge so users on Telegram
@@ -924,8 +925,8 @@ async function runRemoteCommandInner(
             clearInterval(heartbeatTimer)
           }
           const msg = t(
-            `${result.ok ? '✅' : '⚠️'} 工具${result.ok ? '完成' : '失败'}：generate_long_video${summarizeToolOutput(result.output)}`,
-            `${result.ok ? '✅' : '⚠️'} Tool ${result.ok ? 'completed' : 'failed'}: generate_long_video${summarizeToolOutput(result.output)}`,
+            `${result.ok ? '✅ 长视频制作完成' : '⚠️ 长视频制作失败'}${summarizeToolOutput(scrubInternalNames(String(result.output ?? '')))}`,
+            `${result.ok ? '✅ Long video finished' : '⚠️ Long video failed'}${summarizeToolOutput(scrubInternalNames(String(result.output ?? '')))}`,
           )
           await opts.onProgress?.(msg, result.ok ? 'info' : 'warn')
 
@@ -935,7 +936,7 @@ async function runRemoteCommandInner(
               try {
                 const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
                 await broadcastToBridges({
-                  text: t('🎬 Saga 长视频已生成。', '🎬 Saga long video generated.'),
+                  text: t('🎬 长视频已生成。', '🎬 Your long video is ready.'),
                   videoPath,
                   source: 'tool:generate_long_video',
                 })
@@ -952,7 +953,7 @@ async function runRemoteCommandInner(
           return {
             replies: [result.ok
               ? buildLongVideoMobileCompletionReply(result.output, locale)
-              : t(`长视频生成失败：\n${truncate(result.output, 1200)}`, `Long video generation failed:\n${truncate(result.output, 1200)}`)],
+              : t(`长视频生成失败：\n${truncate(scrubInternalNames(String(result.output ?? '')), 1200)}`, `Long video generation failed:\n${truncate(scrubInternalNames(String(result.output ?? '')), 1200)}`)],
             storedSession: updated,
             permissionMode: binding.permissionMode,
           }
@@ -1104,16 +1105,16 @@ async function runRemoteCommandInner(
             },
             onToolCall: (name, args) => {
               const msg = t(
-                `🔧 正在运行工具：${String(name)}${summarizeToolArgs(args)}`,
-                `🔧 Running tool: ${String(name)}${summarizeToolArgs(args)}`,
+                `🔧 ${describeToolForUser(String(name), 'zh-CN')}${summarizeToolArgs(args)}`,
+                `🔧 ${describeToolForUser(String(name), 'en')}${summarizeToolArgs(args)}`,
               )
               emitProgress(msg)
               recordActivity(msg)
             },
             onToolResult: (name, ok, output) => {
               const msg = t(
-                `${ok ? '✅' : '⚠️'} 工具${ok ? '完成' : '失败'}：${String(name)}${summarizeToolOutput(output)}`,
-                `${ok ? '✅' : '⚠️'} Tool ${ok ? 'completed' : 'failed'}: ${String(name)}${summarizeToolOutput(output)}`,
+                `${ok ? '✅ 完成' : '⚠️ 失败'}：${describeToolForUser(String(name), 'zh-CN')}${summarizeToolOutput(scrubInternalNames(String(output ?? '')))}`,
+                `${ok ? '✅ Done' : '⚠️ Failed'}: ${describeToolForUser(String(name), 'en')}${summarizeToolOutput(scrubInternalNames(String(output ?? '')))}`,
               )
               emitProgress(msg, ok ? 'info' : 'warn')
               recordActivity(msg)
@@ -1130,8 +1131,8 @@ async function runRemoteCommandInner(
                       const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
                       await broadcastToBridges({
                         text: t(
-                          `🖼 工具产出：${String(name)}`,
-                          `🖼 Tool output: ${String(name)}`,
+                          `🖼 ${describeToolOutputForUser(String(name), 'zh-CN')}`,
+                          `🖼 ${describeToolOutputForUser(String(name), 'en')}`,
                         ),
                         imagePath,
                         source: `tool:${String(name)}`,
@@ -1146,8 +1147,8 @@ async function runRemoteCommandInner(
                       const { broadcastToBridges } = await import('../services/bridgeNotifier.js')
                       await broadcastToBridges({
                         text: t(
-                          `🎬 工具产出：${String(name)}`,
-                          `🎬 Tool output: ${String(name)}`,
+                          `🎬 ${describeToolOutputForUser(String(name), 'zh-CN')}`,
+                          `🎬 ${describeToolOutputForUser(String(name), 'en')}`,
                         ),
                         videoPath,
                         source: `tool:${String(name)}`,

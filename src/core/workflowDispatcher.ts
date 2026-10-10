@@ -30,7 +30,6 @@ import {
   hasExplicitRemoteVisualFallback,
   VISUAL_NOT_CONFIGURED_POLICY,
   resolveConfiguredVisualProvider,
-  describeVisualProvider,
 } from '../utils/visualGenerationConfig.js'
 import { pickLocale } from '../cli/locale.js'
 
@@ -130,7 +129,7 @@ export async function resolveWorkflow(
 
   if (match.command === '/nidhogg') {
     mode = 'nidhogg'
-    summary.push(t('工作流: Nidhogg', 'Workflow: Nidhogg'))
+    summary.push(t('工作方式：对抗式打磨（慢但最稳）', 'Approach: adversarial hardening (slow but thorough)'))
   } else if (match.command === '/run') {
     summary.push(t('执行模式: 直接调度', 'Execution mode: direct'))
   }
@@ -202,14 +201,12 @@ async function applyVisualPolicy(
     }
   }
 
-  const configuredText = configured.map(c => describeVisualProvider(c.config, c.assetKind)).join(', ')
-
   if (hasExplicitRemoteVisualFallback(prompt)) {
     return {
       prompt: `${prompt}\n\n[Visual generation policy]\nThe user explicitly requested online/search visual assets. Do not call generate_image/generate_video unless the user asks again.`,
       summary: t(
-        `视觉素材策略：用户要求网络/搜索素材；本地 API 已配置 (${configuredText})`,
-        `Visual policy: user requested web-search assets; local API configured (${configuredText})`,
+        '视觉素材：按你的要求使用网络素材',
+        'Visual assets: using web assets as you asked',
       ),
     }
   }
@@ -219,8 +216,8 @@ async function applyVisualPolicy(
     return {
       prompt: `${prompt}\n\n[Visual generation policy]\nUser allowed local visual generation. Photographic / product / editorial / lifestyle assets MUST be produced via generate_image (or generate_video when appropriate). Icons, logos, UI controls, loaders, geometric or abstract decoration, charts, diagrams, and other vector-native graphics MAY be authored as SVG/CSS directly — these are the right tool for those jobs and are not violations. The forbidden pattern is substituting hand-authored SVG/canvas/procedural code for what should be a real photograph (e.g. writing a node/python script that draws "product images" instead of calling generate_image). If generate_image returns an error, report it to the user explicitly and ask whether to retry or switch to web-search; do not silently fall back to SVG placeholders for photographic subjects.`,
       summary: t(
-        `视觉素材策略：本地视觉 API 已启用 (${configuredText})`,
-        `Visual policy: local visual API enabled (${configuredText})`,
+        '视觉素材：图片/视频会直接生成',
+        'Visual assets: images and videos will be generated',
       ),
     }
   }

@@ -55,6 +55,8 @@ export interface ParsedArgs {
   sessionId?: string
   /** execute/analyze: images the user attached to the prompt (--image, repeatable). */
   imagePaths?: string[]
+  /** execute/analyze: what the user picked in the app (--intent long_video|image|research|reminder). */
+  intent?: string
   resumeLast: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
@@ -113,7 +115,7 @@ ${t('命令', 'Commands')}:
   nidhogg <prompt>  ${t('执行深度批判/审查工作流', 'Run the critique/review workflow')}
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
-  execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
+  execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent long_video|image|research|reminder 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent long_video|image|research|reminder states what the user picked)')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
   session           ${t('管理会话记录', 'Manage session records')}
@@ -139,6 +141,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const promptParts: string[] = []
   let sessionId: string | undefined
   const imagePaths: string[] = []
+  let intent: string | undefined
   let resumeLast = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
@@ -217,6 +220,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       sessionId = extracted
       continue
     }
+    if ((command === 'execute' || command === 'analyze') && (cur === '--intent' || cur.startsWith('--intent='))) {
+      const v = cur === '--intent' ? args.shift() : cur.slice('--intent='.length)
+      if (!v?.trim()) throw new Error(`${command} --intent requires a name (long_video, image, research or reminder).`)
+      intent = v.trim()
+      continue
+    }
     if ((command === 'execute' || command === 'analyze') && cur === '--image') {
       const v = args.shift()
       if (!v?.trim()) throw new Error(`${command} --image requires a file path.`)
@@ -250,6 +259,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     sessionId, resumeLast, maxTurns, maxTurnsExplicit, permissionMode, permissionModeExplicit,
     autoDrive, testProviders, background, setup,
     ...(imagePaths.length ? { imagePaths } : {}),
+    ...(intent !== undefined ? { intent } : {}),
   }
 }
 

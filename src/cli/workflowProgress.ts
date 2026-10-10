@@ -128,7 +128,7 @@ function createStages(mode: WorkflowMode, locale: UiLocale): WorkflowStage[] {
       return [
         makeStage('boot', l('启动工作流', 'Boot workflow'), 'active', now),
         makeStage('generate', l('锻造实现候选', 'Forge implementation'), 'pending'),
-        makeStage('critique', l('批评团与收敛评估', 'Critic gauntlet + convergence'), 'pending'),
+        makeStage('critique', l('批评团与收敛评估', 'Review rounds + convergence'), 'pending'),
         makeStage('synthesis', l('综合硬化结果', 'Synthesize hardening result'), 'pending'),
       ];
     default:
@@ -871,8 +871,8 @@ export function applyWorkflowProgressInfo(
           state,
           'art',
           pickLocale(state.locale, {
-            zh: 'art-director 正在建立视觉方向、材质、摄影和高级感边界。',
-            en: 'Art director is establishing visual direction, material, photography, and quality boundaries.',
+            zh: '正在建立视觉方向、材质、摄影和高级感边界。',
+            en: 'Establishing the visual direction, material, photography, and quality boundaries.',
           }),
         );
         return;
@@ -1023,7 +1023,7 @@ export function applyWorkflowProgressInfo(
         const [, r, total] = genDone;
         state.note = pickLocale(state.locale, {
           zh: `第 ${r}/${total} 轮 · 候选已生成，准备进入批评团`,
-          en: `Round ${r}/${total} · candidate ready, preparing critic gauntlet`,
+          en: `Round ${r}/${total} · candidate ready, preparing review`,
         });
         return;
       }
@@ -1037,7 +1037,7 @@ export function applyWorkflowProgressInfo(
           'critique',
           pickLocale(state.locale, {
             zh: `第 ${r}/${total} 轮 · ${count} 个批评者并行评估 (${kindsRaw!.trim()})`,
-            en: `Round ${r}/${total} · running ${count} critics in parallel (${kindsRaw!.trim()})`,
+            en: `Round ${r}/${total} · running ${count} reviewers in parallel (${kindsRaw!.trim()})`,
           }),
         );
         return;
@@ -1048,7 +1048,7 @@ export function applyWorkflowProgressInfo(
         const [, r, kind] = criticStart;
         state.note = pickLocale(state.locale, {
           zh: `第 ${r} 轮 · ${kind} 评审中…`,
-          en: `Round ${r} · ${kind} critic reviewing…`,
+          en: `Round ${r} · ${kind} reviewer at work…`,
         });
         return;
       }
@@ -1070,7 +1070,7 @@ export function applyWorkflowProgressInfo(
           state,
           pickLocale(state.locale, {
             zh: `第 ${r} 轮 · ${kind} 评审超时，使用中性分继续`,
-            en: `Round ${r} · ${kind} critic timed out, neutral score used`,
+            en: `Round ${r} · ${kind} reviewer timed out, neutral score used`,
           }),
         );
         return;
@@ -1081,7 +1081,7 @@ export function applyWorkflowProgressInfo(
         const [, r, total] = poolDone;
         state.note = pickLocale(state.locale, {
           zh: `第 ${r}/${total} 轮 · 批评团结束，准备进入收敛判断`,
-          en: `Round ${r}/${total} · critic gauntlet finished, preparing convergence check`,
+          en: `Round ${r}/${total} · review finished, preparing convergence check`,
         });
         return;
       }

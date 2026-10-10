@@ -535,7 +535,7 @@ function buildHeroFooter(locale: UiLocale, providerMissing?: boolean): string {
   // Compact one-line categories so the full hero (logo width ≈ 64) still fits
   // the user's terminal. Descriptions are reachable via /help; here we only
   // need to surface the entry points.
-  const workflows = ['/saga', '/nidhogg', '/run']
+  const workflows = ['/longvideo', '/nidhogg', '/run']
   const settings  = ['/bifrost', '/config', '/permission', '/newborn']
   const sep = dim(' ')
   const workflowLine = workflows.map(cmd).join(sep)
@@ -565,7 +565,7 @@ function buildCompactTips(locale: UiLocale): string[] {
   const star = rgb(245, 196, 94, '  ✦')
   const arrow = rgb(82, 196, 255, bold('  ▶'))
   return [
-    `${star} ${t('工作流', 'Workflows')}: ${dim(t('自动选择', 'chosen automatically'))} ${cmd('/saga')} ${cmd('/nidhogg')} ${cmd('/run')}`,
+    `${star} ${t('工作流', 'Workflows')}: ${dim(t('自动选择', 'chosen automatically'))} ${cmd('/longvideo')} ${cmd('/nidhogg')} ${cmd('/run')}`,
     `${star} ${t('设置', 'Setup')}: ${cmd('/bifrost')} ${cmd('/config')} ${cmd('/permission')} ${cmd('/newborn')}`,
     '',
     `${arrow} ${bold(rgb(166, 227, 161, t('直接输入文字开始对话', 'Have a nice trip')))} ${dim(t('·  / 浏览命令', '·  / browse commands'))}`,

@@ -10,6 +10,7 @@
  * scroll block so the renderer doesn't strip them.
  */
 
+import { scrubInternalNames } from '../utils/internalNames.js'
 import type { UiLocale } from './locale.js'
 import { stringWidth } from '../input/stringWidth.js'
 
@@ -72,6 +73,9 @@ const TOOL_META: Record<string, ToolMeta> = {
   search_files:    { labelZh: '搜索', labelEn: 'Searching', rgb: [235, 205, 100], icon: '◈' },
   lookup_docs:     { labelZh: '查文档', labelEn: 'Docs',    rgb: [200, 140, 250], icon: '§' },
   http_request:    { labelZh: '网络', labelEn: 'Fetch',     rgb: [230, 120, 200], icon: '◉' },
+  generate_image:  { labelZh: '图片', labelEn: 'Image',     rgb: [245, 160, 120], icon: '✦' },
+  generate_video:  { labelZh: '视频', labelEn: 'Video',     rgb: [245, 160, 120], icon: '✦' },
+  generate_long_video: { labelZh: '长视频', labelEn: 'Video', rgb: [245, 160, 120], icon: '✦' },
 }
 
 const FALLBACK_META: ToolMeta = { labelZh: '工具', labelEn: 'Tool', rgb: [160, 160, 160], icon: '⚙' }
@@ -168,8 +172,11 @@ export function formatToolDone(options: {
   }
 
   // Error: show a short error line under the label for quick scanning.
-  const errLine = output.split('\n').find(l => l.trim()) ?? ''
-  const trimmed = errLine.slice(0, 140)
+  // The plain reason when the tool gave one, else its first line; vendor,
+  // model and tool code names never reach the screen (paths stay as they are).
+  const reasonLine = output.match(/^Reason:\s*(.+)$/m)?.[1]
+  const errLine = reasonLine ?? output.split('\n').find(l => l.trim()) ?? ''
+  const trimmed = scrubInternalNames(errLine).slice(0, 140)
   return `${icon} ${label} ${target}  ${timing}\n  ${color(trimmed, `${ESC}[31m`)}`
 }
 

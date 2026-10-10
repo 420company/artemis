@@ -5,6 +5,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { inspect } from 'node:util'
 import { redactText } from './redact.js'
+import { scrubInternalNames } from './internalNames.js'
 
 export type RuntimeLogLevel = 'info' | 'warn' | 'error'
 
@@ -41,7 +42,9 @@ export function emitRuntimeLog(level: RuntimeLogLevel, ...args: unknown[]): void
 
   const sink = runtimeLogSink.getStore()
   if (sink) {
-    void Promise.resolve(sink({ level, message })).catch(() => {})
+    // A sink shows progress to the user (CLI, chat bridges, web): internal
+    // engine / vendor / tool names never reach them.
+    void Promise.resolve(sink({ level, message: scrubInternalNames(message) })).catch(() => {})
     return
   }
 

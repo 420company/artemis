@@ -117,7 +117,7 @@ function buildPublicUrl(config: ResolvedAssetHostingConfig, objectKey: string): 
 
 function requiredConfigError(): Error {
   return new Error(
-    'generate_video: local video/audio references need Vidar asset hosting. Configure visualProfile.assetHosting or VIDAR_ASSET_* environment variables for an S3/R2-compatible public bucket.',
+    'Video generation: local video/audio references need media asset hosting. Configure visualProfile.assetHosting or VIDAR_ASSET_* environment variables for an S3/R2-compatible public bucket.',
   );
 }
 
@@ -211,7 +211,7 @@ async function putS3Object(config: ResolvedAssetHostingConfig, objectKey: string
 
   if (!res.ok) {
     const raw = await res.text().catch(() => '');
-    throw new Error(`generate_video: Vidar asset upload failed (HTTP ${res.status}): ${raw.slice(0, 500)}`);
+    throw new Error(`Video generation: reference upload failed (HTTP ${res.status}): ${raw.slice(0, 500)}`);
   }
 }
 
@@ -235,7 +235,7 @@ export async function uploadLocalReferenceAssets(
     });
     const info = await stat(resolved.absolute);
     if (info.size > config.maxUploadBytes) {
-      throw new Error(`generate_video: local ${kind} reference is too large for Vidar asset upload (${Math.round(info.size / 1024 / 1024)} MB > ${Math.round(config.maxUploadBytes / 1024 / 1024)} MB): ${rawPath}`);
+      throw new Error(`Video generation: local ${kind} reference is too large to upload (${Math.round(info.size / 1024 / 1024)} MB > ${Math.round(config.maxUploadBytes / 1024 / 1024)} MB): ${rawPath}`);
     }
     let body: Buffer = Buffer.from(await readFile(resolved.absolute));
     let uploadPath = resolved.absolute;

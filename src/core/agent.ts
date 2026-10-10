@@ -5083,7 +5083,7 @@ async function executeAgentAction(
   const rerouted = maybeRerouteToSagaLongVideo(session, action);
   if (rerouted !== action) {
     options.onInfo?.(
-      `🌙 Saga safety net: model emitted generate_video during an active Saga long-video workflow — rerouting to generate_long_video.`,
+      '🌙 Long-video safety net: a single-clip video call during an active long-video request was rerouted to the long-video tool.',
     );
     action = rerouted;
   }

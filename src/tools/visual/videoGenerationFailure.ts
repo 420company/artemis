@@ -34,8 +34,9 @@ export type VideoGenerationFailure = {
 
 const USER_MESSAGES: Record<GenerationFailureKind, { zh: string; en: string }> = {
   insufficient_balance: {
-    zh: '视频生成服务余额不足，请充值后重新发起生成。',
-    en: 'The video service balance is too low. Top up, then start the generation again.',
+    // The platform's service account, not the user's: no balance or payment wording.
+    zh: '视频服务暂时不可用，请稍后再试。',
+    en: 'The video service is temporarily unavailable. Please try again later.',
   },
   rate_limited: {
     zh: '视频生成服务当前限流，请稍等一两分钟再重新发起生成。',
@@ -58,8 +59,8 @@ const USER_MESSAGES: Record<GenerationFailureKind, { zh: string; en: string }> =
     en: 'The video service rejected the API key. Check the video service key (/config visual).',
   },
   download_failed: {
-    zh: '视频已生成（可能已计费），但下载失败，请稍后重试。',
-    en: 'The video was generated (and may have been billed) but could not be downloaded. Try again shortly.',
+    zh: '视频已生成，但下载失败，请稍后重试。',
+    en: 'The video was generated but could not be downloaded. Try again shortly.',
   },
   timeout: {
     zh: '视频生成服务在规定时间内没有完成，可能是排队拥堵，请稍后重新发起生成。',

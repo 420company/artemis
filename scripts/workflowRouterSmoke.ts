@@ -35,7 +35,7 @@ import {
   offerSagaLongVideoWorkflow,
   parseSagaOfferReply,
 } from '../src/tools/visual/sagaWorkflow.js';
-import { finishSagaIfGenerated, planHeadlessWorkflow } from '../src/services/headlessWorkflow.js';
+import { finishSagaIfGenerated, normalizeHeadlessIntent, planHeadlessWorkflow } from '../src/services/headlessWorkflow.js';
 import { isSagaSessionActive } from '../src/core/sagaSessionState.js';
 import { maybeRerouteToSagaLongVideo } from '../src/core/agent.js';
 import { resolveWorkflowClassifierProvider } from '../src/providers/workflowClassifier.js';
@@ -46,6 +46,7 @@ import { getAllowedActionTypesForProfile } from '../src/core/agentProfiles.js';
 import { listDirectToolNames } from '../src/tools/directTools.js';
 import { runAgent } from '../src/core/agent.js';
 import { SessionStore } from '../src/storage/sessions.js';
+import { parseArgs } from '../src/cli/parseArgs.js';
 import { PermissionManager } from '../src/security/permissions.js';
 import type { ChatProvider, ProviderResponse } from '../src/providers/types.js';
 import type { AgentAction } from '../src/core/types.js';
@@ -363,7 +364,7 @@ async function main(): Promise<void> {
 
     // Offer → "1" → wizard.
     const question = await offerSagaLongVideoWorkflow({ scope: 'bridge', key: 'yes', cwd, locale: 'zh-CN', text: request });
-    assert.match(question ?? '', /要用 Saga 长视频工作流吗[\s\S]*1\. 是，开始[\s\S]*2\. 不是/);
+    assert.match(question ?? '', /要我帮你做成一段完整的长视频吗[\s\S]*1\. 好，开始[\s\S]*2\. 不用了/);
     assert.equal(hasActiveSagaLongVideoWorkflow('bridge', 'yes'), true, 'a pending offer keeps replies away from the router');
     const yes = await send('yes', '1');
     assert.equal(yes.handled, true);
@@ -411,9 +412,10 @@ async function main(): Promise<void> {
     const offer = await planHeadlessWorkflow({ ...base, prompt: '帮我做一个60秒的产品宣传视频' });
     assert.equal(offer.kind, 'reply');
     const offerText = offer.kind === 'reply' ? offer.reply : '';
-    assert.match(offerText, /Saga 长视频工作流吗/);
-    assert.match(offerText, /```choices\n\{"options":\["是，开始","不是"\]\}\n```/, 'the web gets a clickable choices card');
-    assert.equal(offerText.split('要用 Saga 长视频工作流吗').length, 2, 'the intro is not repeated inside the card');
+    assert.match(offerText, /要我帮你做成一段完整的长视频吗/);
+    assert.doesNotMatch(offerText, /saga|费用|计费/i, 'no internal name and no cost wording');
+    assert.match(offerText, /```choices\n\{"options":\["好，开始","不用了"\]\}\n```/, 'the web gets a clickable choices card');
+    assert.equal(offerText.split('要我帮你做成一段完整的长视频吗').length, 2, 'the intro is not repeated inside the card');
     // A question about the offer drops it and is answered normally.
     const price = await planHeadlessWorkflow({ ...base, prompt: '要多少钱？' });
     assert.equal(price.kind === 'run' && price.workflow, 'direct');
@@ -462,6 +464,56 @@ async function main(): Promise<void> {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  await test('headless --intent: long_video starts at once, image/reminder get a run-context hint, research plans, unknown is ignored', async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'artemis-router-intent-'));
+    const store = new SessionStore(tmpDir);
+    const infos: string[] = [];
+    const base = {
+      cwd: tmpDir, attachmentCount: 0, inCodeRepo: false, autoRoute: true,
+      getClassifier: async () => undefined, hasVideoProvider: async () => true, onInfo: (message: string) => infos.push(message),
+    };
+    // long_video: no question first, the stored request is the user's own text.
+    const longSession = store.createSession({ title: 'intent long video' });
+    const longVideo = await planHeadlessWorkflow({ ...base, session: longSession, intent: 'long_video', prompt: '一只小猫在雨夜的城市里冒险' });
+    assert.equal(longVideo.kind, 'run', 'no offer for an explicit long-video intent');
+    assert.equal(longVideo.kind === 'run' && longVideo.workflow, 'saga');
+    assert.equal(longVideo.kind === 'run' && longVideo.prompt, '一只小猫在雨夜的城市里冒险');
+    assert.equal(isSagaSessionActive(longSession), true);
+    const prefixed = await planHeadlessWorkflow({ ...base, session: store.createSession({ title: 'p' }), intent: 'long-video', prompt: '/saga 雨夜' });
+    assert.equal(prefixed.kind === 'run' && prefixed.prompt, '雨夜', 'a typed command prefix is not stored');
+    // A wizard answer after it stays in the long video.
+    const step = await planHeadlessWorkflow({ ...base, session: longSession, prompt: '9:16' });
+    assert.equal(step.kind === 'run' && step.workflow, 'saga');
+
+    for (const [intent, workflow, hintPattern] of [
+      ['image', 'direct', /generate_image/],
+      ['reminder', 'direct', /schedule_create/],
+      ['research', 'plan', /Workflow budget — plan[\s\S]*researched answer/],
+    ] as const) {
+      const session = store.createSession({ title: `intent ${intent}` });
+      const plan = await planHeadlessWorkflow({ ...base, session, intent, prompt: '帮我做一个3分钟的长视频，讲雨夜' });
+      assert.equal(plan.kind, 'run', `${intent}: an explicit intent is never answered with the long-video question`);
+      assert.equal(plan.kind === 'run' && plan.workflow, workflow, intent);
+      assert.equal(plan.kind === 'run' && plan.prompt, '帮我做一个3分钟的长视频，讲雨夜', `${intent}: the hint is not part of the stored message`);
+      assert.match(plan.kind === 'run' ? plan.hint : '', hintPattern, intent);
+      assert.match(plan.kind === 'run' ? plan.hint : '', /never name workflows, tools, models or providers/);
+    }
+    const unknown = await planHeadlessWorkflow({ ...base, session: store.createSession({ title: 'u' }), intent: 'teleport', prompt: '帮我写一封请假邮件' });
+    assert.equal(unknown.kind === 'run' && unknown.workflow, 'direct');
+    assert.ok(infos.some((line) => /unknown intent "teleport" ignored/.test(line)), 'an unknown intent warns');
+    const readOnly = await planHeadlessWorkflow({ ...base, session: store.createSession({ title: 'r' }), intent: 'long_video', autoRoute: false, prompt: '雨夜' });
+    assert.equal(readOnly.kind === 'run' && readOnly.workflow, 'direct', 'a read-only run never starts generation');
+    assert.equal(normalizeHeadlessIntent('LongVideo'), 'long_video');
+    assert.equal(normalizeHeadlessIntent('Long_Video'), 'long_video');
+    assert.equal(normalizeHeadlessIntent('nope'), undefined);
+    // The CLI flag.
+    assert.equal(parseArgs(['execute', '--session', '11111111-1111-4111-8111-111111111111', '--intent', 'image', 'draw a cat']).intent, 'image');
+    assert.equal(parseArgs(['execute', '--intent=research', 'compare databases']).intent, 'research');
+    assert.equal(parseArgs(['execute', '--intent=research', 'compare databases']).prompt, 'compare databases');
+    assert.equal(parseArgs(['execute', 'hello']).intent, undefined);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   await test('generate_video → generate_long_video safety net: only for an active or recent, unfinished Saga', () => {
     const video: AgentAction = { type: 'generate_video', prompt: 'a cat', duration: 10 } as AgentAction;
     const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
@@ -494,8 +546,10 @@ async function main(): Promise<void> {
     for (const reply of yes) assert.equal(parseSagaOfferReply(reply), 'yes', reply);
     for (const reply of no) assert.equal(parseSagaOfferReply(reply), 'no', reply);
     for (const reply of neither) assert.equal(parseSagaOfferReply(reply), undefined, reply);
-    assert.match(buildSagaOfferQuestion('zh-CN'), /1\. 是，开始\n2\. 不是\n请回复编号。$/);
-    assert.match(buildSagaOfferQuestion('en'), /1\. Yes, start\n2\. No\nReply with the number\.$/);
+    assert.match(buildSagaOfferQuestion('zh-CN'), /^要我帮你做成一段完整的长视频吗？\n1\. 好，开始\n2\. 不用了\n请回复编号。$/);
+    assert.match(buildSagaOfferQuestion('en'), /1\. Yes, go ahead\n2\. No thanks\nReply with the number\.$/);
+    for (const reply of ['好，开始', '1. 好，开始', 'Yes, go ahead']) assert.equal(parseSagaOfferReply(reply), 'yes', reply);
+    for (const reply of ['不用了', '2. 不用了', 'No thanks']) assert.equal(parseSagaOfferReply(reply), 'no', reply);
     for (const answer of ['9:16', '60秒', '两分钟', '1080p', '3', '默认', 'b', 'B.', 'a', '生成', 'go', '10', '加字幕', 'done']) assert.equal(looksLikeSagaWizardAnswer(answer), true, answer);
     for (const other of ['帮我写一封邮件', '翻译成英文', '今天天气怎么样？', 'a quick question about my code', 'A 股今天怎么样', 'D盘的文件帮我看看', '1. 我想先改一下剧本', 'start over with a new topic please', 'C++ 的虚函数是什么']) assert.equal(looksLikeSagaWizardAnswer(other), false, other);
   });

@@ -39,7 +39,7 @@ async function resolutionChecks(): Promise<void> {
   assert.equal(plain.result.ok, true, plain.result.output);
   // Titles and filenames come from the user's brief (CJK kept), never from the generation template.
   assert.match(plain.result.output, /Title:\s+码头/);
-  assert.match(plain.result.output, /_\d+s_9x16_码头_saga-[^/\s]*\.mp4/);
+  assert.match(plain.result.output, /_\d+s_9x16_码头_video-[^/\s]*\.mp4/);
   assert.doesNotMatch(hd.result.output, /Generation-instruction|Title:\s+Generation instruction/);
   assert.match(hd.result.output, /Title:\s+A young woman named Mei walks along a beach at…/);
   assert.ok(videoTaskBodies(plain.requests).every((body) => !('resolution' in body)), 'no resolution is sent unless asked for');
@@ -94,7 +94,7 @@ async function superVisualOnSeedream(): Promise<void> {
   // Hosted-style config (BytePlus Seedream images) now runs Super Visual.
   const run = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] });
   assert.equal(run.result.ok, true, run.result.output);
-  assert.match(run.result.output, /Super visual: image-to-image · userImagesUsed=1/);
+  assert.match(run.result.output, /Consistency:  image-to-image · userImagesUsed=1/);
   assert.match(run.result.output, /Keyframes:\s+generated=2\/2 · images=3\/6/);
   const images = imageBodies(run.requests);
   assert.equal(images.length, 3, 'one turnaround and one keyframe per segment');
@@ -126,7 +126,7 @@ async function superVisualOnSeedream(): Promise<void> {
     { imageDownloadFailsAt: [1], chatReply: 'An illustrated young woman with short black hair and a red scarf.' },
   );
   assert.equal(lostTurnaround.result.ok, true, lostTurnaround.result.output);
-  assert.match(lostTurnaround.result.output, /Super visual: text-to-image/, lostTurnaround.result.output.split('\n').find((line) => line.includes('Super visual')));
+  assert.match(lostTurnaround.result.output, /Consistency:  text-to-image/, lostTurnaround.result.output.split('\n').find((line) => line.includes('Consistency')));
 
   // Safe bridge frame on the same route carries its source frame.
   await withHermeticWorkspace({}, async (cwd, requests) => {
@@ -147,7 +147,7 @@ async function superVisualOnSeedream(): Promise<void> {
       turnaroundPath: source, imageBudget: spent,
     });
     assert.equal(skipped.ok, false);
-    assert.match(skipped.ok ? '' : skipped.reason, /image cap/);
+    assert.match(skipped.ok ? '' : skipped.reason, /image limit/);
     assert.equal(requests.length, before);
   });
 
@@ -157,7 +157,7 @@ async function superVisualOnSeedream(): Promise<void> {
     { imageModel: 'seedream-3-0-t2i-250415' },
   );
   assert.equal(t2i.result.ok, true, t2i.result.output);
-  assert.match(t2i.result.output, /Super visual: off \(the image model cannot generate from reference images/);
+  assert.match(t2i.result.output, /Consistency:  off \(the image model cannot generate from reference images/);
   assert.equal(imageBodies(t2i.requests).length, 0);
 }
 

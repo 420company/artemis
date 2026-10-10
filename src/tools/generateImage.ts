@@ -8,7 +8,6 @@ import { createVisualProvider } from './visual/providers/interface.js';
 import { saveGeneratedAssetToWorkspace } from './visual/saveGeneratedAsset.js';
 import {
     buildVisualSetupRequiredMessage,
-    describeVisualProvider,
     isVisualSetupRequiredError,
     resolveConfiguredVisualProvider,
     resolveMainSecondaryVisualFallbackCandidates,
@@ -70,7 +69,7 @@ function partialSuccess(
     action: any,
     savedLines: string[],
     requested: number,
-    sourceLabel: string,
+    _sourceLabel: string,
     failed: ImageGenerationFailureInput,
 ) {
     const parts = describeImageGenerationFailureParts(failed);
@@ -78,7 +77,7 @@ function partialSuccess(
         action,
         ok: true,
         output: [
-            `Generated ${savedLines.length} of ${requested} requested image(s) via ${sourceLabel}:`,
+            `Generated ${savedLines.length} of ${requested} requested image(s):`,
             ...savedLines,
             `The other ${requested - savedLines.length} image(s) failed: ${parts.reason}`,
             parts.details,
@@ -103,7 +102,7 @@ export async function executeGenerateImage(action: any, context: any) {
         return {
             action,
             ok: false,
-            output: `generate_image failed: invalid referenceImages. ${message}\nNo image was created.`,
+            output: `Image generation failed: invalid referenceImages. ${message}\nNo image was created.`,
         };
     }
 
@@ -128,7 +127,7 @@ export async function executeGenerateImage(action: any, context: any) {
 
         const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length);
         if (referenceError) {
-            return { action, ok: false, output: `generate_image failed: ${referenceError}\nNo image was created.` };
+            return { action, ok: false, output: `Image generation failed: ${referenceError}\nNo image was created.` };
         }
 
         const endpoint = modelArkEndpoint(baseUrl, 'images/generations');
@@ -225,7 +224,7 @@ export async function executeGenerateImage(action: any, context: any) {
             return partialSuccess(action, savedLines, items.length, model, { detail: downloadError, source, stage: 'download' });
         }
         const lines = [
-            `Generated ${savedEntries.length} image(s) via ${model}:`,
+            `Generated ${savedEntries.length} image(s):`,
             ...savedLines,
         ];
         return { action, ok: true, output: lines.join('\n') };
@@ -250,11 +249,11 @@ async function tryGenerateWithConfiguredVisualProvider(action: any, context: any
 
     const provider = await createVisualProvider(configured.config, 'image');
     if (!provider.supportsImages) {
-        toolWarn(`⚠️ 已配置的视觉提供商不支持图片生成: ${configured.provider}`);
+        toolWarn('⚠️ 已配置的视觉服务不支持图片生成。');
         return {
             action,
             ok: false,
-            output: `generate_image failed: configured visual provider does not support image generation: ${configured.provider}`,
+            output: 'Image generation failed: the configured visual service does not support image generation.',
         };
     }
 
@@ -276,7 +275,7 @@ async function tryGenerateWithMainSecondaryFallbackProviders(action: any, contex
     const failures: Array<{ label: string; detail: string }> = [];
     for (const candidate of candidates) {
         try {
-            toolLog(`🧪 测试主/副模型图片生成能力: ${candidate.label} (${candidate.provider}/${candidate.model})`);
+            toolLog(`🧪 测试主/副模型图片生成能力: ${candidate.label}`);
             const provider = await createVisualProvider(candidate.config, 'image');
             if (!provider.supportsImages) {
                 failures.push({ label: candidate.label, detail: 'provider does not support images' });
@@ -294,7 +293,7 @@ async function tryGenerateWithMainSecondaryFallbackProviders(action: any, contex
     for (const kind of ACTIONABLE_FAILURE_PRIORITY) {
         const match = failures.find((entry) => classifyImageGenerationFailure({ detail: entry.detail }) === kind);
         if (match) {
-            return { action, ok: false, output: match.detail.startsWith('generate_image failed:')
+            return { action, ok: false, output: match.detail.startsWith('Image generation failed:')
                 ? match.detail
                 : formatImageGenerationFailure({ detail: match.detail, source: match.label }).output };
         }
@@ -318,18 +317,17 @@ async function generateImageWithVisualProvider(
     const count = sanitizeCount(action.count);
     const imageConfig = config.image;
     if (referenceImages.length > 0 && provider.supportsImageReferences !== true) {
-        const model = action.model?.trim() || imageConfig.model || configuredModel;
         return {
             action,
             ok: false,
-            output: `generate_image failed: reference images are not supported by the ${sourceLabel} (${provider.name}/${model}). They work with BytePlus Seedream 4.x/5.x models. Retry without referenceImages (describe the reference in the prompt instead) or switch the image provider.\nNo image was created.`,
+            output: `Image generation failed: reference images are not supported by the configured image model. Retry without referenceImages (describe the reference in the prompt instead) or switch the image provider.\nNo image was created.`,
         };
     }
     const savedEntries: Array<{ path: string; provider: string; model: string }> = [];
     for (let i = 0; i < count; i += 1) {
         const model = action.model?.trim() || imageConfig.model || configuredModel;
         const outputFormat = normalizeImageOutputFormat(action.outputFormat) || imageConfig.defaultParams.outputFormat;
-        toolLog(`🎨 使用${sourceLabel}生成图片: ${describeVisualProvider(config, 'image')}`);
+        toolLog('🎨 开始生成图片。');
         const result = await provider.generateImage({
             prompt: action.prompt,
             model,
@@ -357,7 +355,7 @@ async function generateImageWithVisualProvider(
             if (savedEntries.length > 0) {
                 return partialSuccess(
                     action,
-                    savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.provider}/${entry.model}: ${entry.path}`),
+                    savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.path}`),
                     count,
                     sourceLabel,
                     failed,
@@ -387,8 +385,8 @@ async function generateImageWithVisualProvider(
         action,
         ok: true,
         output: [
-            `Generated ${savedEntries.length} image(s) via ${sourceLabel}:`,
-            ...savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.provider}/${entry.model}: ${entry.path}`),
+            `Generated ${savedEntries.length} image(s):`,
+            ...savedEntries.map((entry, idx) => `  [${idx + 1}] ${entry.path}`),
         ].join('\n'),
     };
 }

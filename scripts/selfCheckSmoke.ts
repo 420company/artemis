@@ -716,7 +716,7 @@ async function main(): Promise<void> {
 
     const failedThenMade = new SelfCheckTracker(cwd)
     const out = path.join(cwd, 'cover.png')
-    failedThenMade.record({ tool: 'generate_image', ok: false, args: { prompt: 'cover', outputPath: out }, output: 'generate_image failed: timeout' })
+    failedThenMade.record({ tool: 'generate_image', ok: false, args: { prompt: 'cover', outputPath: out }, output: 'Image generation failed: timeout' })
     fs.writeFileSync(out, pngHeader(100, 100))
     failedThenMade.record({ tool: 'run_command', ok: true, command: `ffmpeg -i in.png ${out}`, output: cmdOutput(`ffmpeg -i in.png ${out}`, 0) })
     assert('minor: a failed generation whose file was produced another way is not reported', !gateSelfCheck(failedThenMade).failedMedia)
