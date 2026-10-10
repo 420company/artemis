@@ -26,9 +26,12 @@ import { buildDirectedVideoPrompt } from '../src/tools/visual/videoDirector.js';
 import { renderingGuardrailsLength } from '../src/tools/visual/renderingGuardrails.js';
 
 const STORY = 'A young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
+// A platform declaration of 5-second clips: 10 s becomes two segments, which
+// the chain, keyframe and retry checks need.
+const FIVE_SECOND_CLIPS = { videoCapabilities: { maxClipSeconds: 5 } };
 
 async function resolutionChecks(): Promise<void> {
-  const hd = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', resolution: '1080P', generateAudio: false });
+  const hd = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', resolution: '1080P', generateAudio: false }, FIVE_SECOND_CLIPS);
   assert.equal(hd.result.ok, true, hd.result.output);
   const hdTasks = videoTaskBodies(hd.requests);
   assert.equal(hdTasks.length, 2);
@@ -92,7 +95,7 @@ function budgetChecks(): void {
 
 async function superVisualOnSeedream(): Promise<void> {
   // Hosted-style config (BytePlus Seedream images) now runs Super Visual.
-  const run = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] });
+  const run = await runHermeticSaga({ prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] }, FIVE_SECOND_CLIPS);
   assert.equal(run.result.ok, true, run.result.output);
   assert.match(run.result.output, /Consistency:  image-to-image · userImagesUsed=1/);
   assert.match(run.result.output, /Keyframes:\s+generated=2\/2 · images=3\/6/);
@@ -111,7 +114,7 @@ async function superVisualOnSeedream(): Promise<void> {
   // fails, and the text-to-image fallback respects the cap too.
   const lost = await runHermeticSaga(
     { prompt: STORY, totalDuration: 30, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] },
-    { imageDownloadFailsFrom: 2 },
+    { imageDownloadFailsFrom: 2, ...FIVE_SECOND_CLIPS },
   );
   assert.equal(lost.result.ok, true, lost.result.output);
   const billed = imageBodies(lost.requests).length;
@@ -123,7 +126,7 @@ async function superVisualOnSeedream(): Promise<void> {
   // A turnaround whose download fails still leaves room for its text-to-image fallback.
   const lostTurnaround = await runHermeticSaga(
     { prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] },
-    { imageDownloadFailsAt: [1], chatReply: 'An illustrated young woman with short black hair and a red scarf.' },
+    { imageDownloadFailsAt: [1], chatReply: 'An illustrated young woman with short black hair and a red scarf.', ...FIVE_SECOND_CLIPS },
   );
   assert.equal(lostTurnaround.result.ok, true, lostTurnaround.result.output);
   assert.match(lostTurnaround.result.output, /Consistency:  text-to-image/, lostTurnaround.result.output.split('\n').find((line) => line.includes('Consistency')));
@@ -205,7 +208,7 @@ async function rawModeChecks(): Promise<void> {
   assert.equal(stripRawModeTag('原样直传\n风筝'), '风筝');
   assert.equal(stripRawModeTag('她说要原样直传这段剧本。'), '她说要原样直传这段剧本。', 'the word inside a sentence stays');
   const rawStory = '[原样直传]\nA young woman named Mei walks along a beach at sunset, then sits on a rock and watches the waves.';
-  const raw = await runHermeticSaga({ prompt: rawStory, story: rawStory, totalDuration: 10, ratio: '9:16', generateAudio: false, rawPassthrough: true });
+  const raw = await runHermeticSaga({ prompt: rawStory, story: rawStory, totalDuration: 10, ratio: '9:16', generateAudio: false, rawPassthrough: true }, FIVE_SECOND_CLIPS);
   assert.equal(raw.result.ok, true, raw.result.output);
   const tasks = videoTaskBodies(raw.requests);
   assert.equal(tasks.length, 2);
@@ -256,7 +259,7 @@ async function chainAccountingChecks(): Promise<void> {
   // without any frame from segment 1. It must not be reported as chained.
   const run = await runHermeticSaga(
     { prompt: STORY, totalDuration: 10, ratio: '9:16', generateAudio: false, referenceImagePaths: [fixturePng()] },
-    { rejectVideoCreates: [2], imageFailFrom: 4 },
+    { rejectVideoCreates: [2], imageFailFrom: 4, ...FIVE_SECOND_CLIPS },
   );
   assert.equal(run.result.ok, true, run.result.output);
   const tasks = videoTaskBodies(run.requests);

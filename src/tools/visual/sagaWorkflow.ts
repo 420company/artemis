@@ -3,13 +3,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
 import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
-import { resolveVideoModelLimits } from './videoModelLimits.js';
 import { normalizeVideoResolution } from './videoParams.js';
 import { hasCleanDirectKeyword, hasRawModeTag } from './rawModeTag.js';
-import { resolveVideoModelCapabilities } from './videoCapabilities.js';
 import type { ImageAttachment } from '../../providers/types.js';
 import {
   analyzeNarrative,
@@ -28,6 +25,9 @@ import type { SagaRatio } from './sagaRenderer/types.js';
 import { extractBriefAspectRatio, normalizeAspectRatio } from './aspectRatio.js';
 import { extractSagaDialogueLines } from './sagaLanguageDirector.js';
 import { parseSagaBriefGlobals, stripBriefNoise } from './sagaBriefGlobals.js';
+import { resolveActiveVideoProfile } from './activeVideoModel.js';
+import { segmentCountFor, splitLongShots } from './segmentPlan.js';
+import type { VideoModelProfile } from './videoCapabilities.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
   return explicitLocale ?? DEFAULT_UI_LOCALE;
@@ -104,6 +104,9 @@ type SagaWorkflowState = {
   originalText: string;
   stage: SagaWorkflowStage;
   multimodalCapable: boolean;
+  /** L: the active video model's longest clip; segment plans and menus derive from it. */
+  maxClipSeconds: number;
+  minClipSeconds: number;
   // collected references
   referenceImageUrls: string[];
   referenceVideoUrls: string[];
@@ -473,8 +476,9 @@ export function parseRequestedVideoSeconds(text: string): number | undefined {
  * translations), bare keyword lists, or clips shorter than a minute. These
  * exclusions apply to the request, not to the content of a brief's segments.
  */
-export function isClearSagaLongVideoRequest(text: string): boolean {
+export function isClearSagaLongVideoRequest(text: string, options: { maxClipSeconds?: number } = {}): boolean {
   const trimmed = text.trim();
+  const L = options.maxClipSeconds;
   // Empty, or a slash command: /saga is handled explicitly, others are not Saga.
   if (!trimmed || trimmed.startsWith('/')) return false;
   const brief = splitSagaBrief(trimmed.replace(SAGA_LEADING_ACK_RE, ''));
@@ -487,15 +491,39 @@ export function isClearSagaLongVideoRequest(text: string): boolean {
   const isCreationRequest =
     SAGA_CREATION_VERB_RE.test(request) &&
     (hasDirectCreationRequestMarker(request) || SAGA_IMPERATIVE_START_RE.test(request));
+  // With the active model's longest clip (L) known, a stated length decides:
+  // up to L is one clip, longer is a long video.
+  const statedSeconds = parseRequestedVideoSeconds(request);
+  const fitsOneClip = L !== undefined && statedSeconds !== undefined && statedSeconds <= L;
+  // A brief with its own segments stays a long video whatever its length.
   if (SAGA_GUIDE_HEADER_RE.test(trimmed)) return true;
   // Timecoded lines are a brief only with a video / shot word or a creation
   // request, and never when they read like a transcript.
   const timed = brief.segmentLines >= 2 || timecodeTotalSeconds(trimmed) !== undefined;
   if (timed && !looksLikeTranscript(brief.segments) && (hasVideoNoun || SAGA_SHOT_WORD_RE.test(whole) || isCreationRequest)) return true;
   if (!isCreationRequest || !SAGA_VIDEO_NOUN_RE.test(request)) return false;
+  if (fitsOneClip) return false;
   if (SAGA_LONG_WORDING_RE.test(request)) return true;
   const seconds = parseRequestedVideoSeconds(request);
-  return typeof seconds === 'number' && seconds >= 60;
+  // Without a known L the old fixed bar (a minute) applies.
+  return typeof seconds === 'number' && (L !== undefined ? seconds > L : seconds >= 60);
+}
+
+/**
+ * How a video request fits the active model: 'single' when it states a
+ * length up to L (one plain clip), 'long' when it states more than L or is a
+ * brief with two or more timecoded segments, 'unknown' when it states no length.
+ */
+export function classifyVideoRequestLength(text: string, maxClipSeconds: number): { kind: 'single' | 'long' | 'unknown'; seconds?: number } {
+  const trimmed = text.trim().replace(SAGA_LEADING_ACK_RE, '');
+  const brief = splitSagaBrief(trimmed);
+  // Two or more timecoded segments (or a guide-style brief) are a long video.
+  if (brief.segmentLines >= 2 || timecodeTotalSeconds(trimmed) !== undefined || SAGA_GUIDE_HEADER_RE.test(trimmed)) {
+    return { kind: 'long', seconds: timecodeTotalSeconds(trimmed) };
+  }
+  const seconds = parseRequestedVideoSeconds(brief.preamble || trimmed);
+  if (seconds !== undefined) return { kind: seconds <= maxClipSeconds ? 'single' : 'long', seconds };
+  return { kind: 'unknown' };
 }
 
 // ── Confirmation before a natural-language Saga start ─────────────────────
@@ -581,7 +609,10 @@ export function looksLikeSagaWizardAnswer(text: string): boolean {
  * the request just takes the normal path).
  */
 export async function offerSagaLongVideoWorkflow(input: SagaWorkflowInput): Promise<string | undefined> {
-  if (!(await resolveConfiguredVisualProvider(input.cwd, 'video'))) return undefined;
+  const profile = await resolveActiveVideoProfile(input.cwd);
+  if (!profile) return undefined;
+  // A request that states a length the model renders in one clip is a plain video.
+  if (!isClearSagaLongVideoRequest(input.text, { maxClipSeconds: profile.maxClipSeconds })) return undefined;
   pruneExpiredWorkflows();
   PENDING_SAGA_OFFERS.set(normalizeKey(input), {
     text: input.text,
@@ -1020,20 +1051,30 @@ function combinedStoryText(state: SagaWorkflowState): string {
 
 // ─── Replies ─────────────────────────────────────────────────────────────
 
-async function buildModelLine(cwd: string, locale: UiLocale = 'zh-CN'): Promise<string> {
-  const configured = await resolveConfiguredVisualProvider(cwd, 'video');
-  if (!configured) {
-    return pickLocale(locale, {
-      zh: '当前没有检测到可用视频模型配置。',
-      en: 'No usable video model is currently configured.',
-    });
-  }
-  const limits = resolveVideoModelLimits(configured.config.video.provider, configured.model);
-  // No model or provider name: users see what happens, not which vendor runs it.
-  return pickLocale(locale, {
-    zh: `每段画面最长约 ${limits.maxSegmentSeconds} 秒，我会自动分成多段生成，再合成一条完整视频。`,
-    en: `Each segment is at most about ${limits.maxSegmentSeconds}s; I split the video into segments and join them into one.`,
+function buildModelLine(state: SagaWorkflowState): string {
+  // L of the active model; no model or provider name: users see what
+  // happens, not which vendor runs it.
+  return pickLocale(state.locale, {
+    zh: `每段画面最长 ${state.maxClipSeconds} 秒，我会按需要分成尽量少的几段生成，再合成一条完整视频。`,
+    en: `Each segment can be up to ${state.maxClipSeconds}s; I use as few segments as the length needs and join them into one video.`,
   });
+}
+
+/** Lengths the duration step offers, each with how many segments it takes on this model. */
+export function longVideoDurationChoices(maxClipSeconds: number, minClipSeconds = 4): Array<{ seconds: number; segments: number }> {
+  return [30, 60, 90, 120].map((seconds) => ({ seconds, segments: segmentCountFor(seconds, maxClipSeconds, minClipSeconds) }));
+}
+
+function formatSecondsLabel(seconds: number, locale: UiLocale): string {
+  if (locale === 'zh-CN') return seconds % 60 === 0 && seconds >= 60 ? `${seconds / 60}分钟` : `${seconds}秒`;
+  return seconds % 60 === 0 && seconds >= 60 ? `${seconds / 60} minute${seconds === 60 ? '' : 's'}` : `${seconds}s`;
+}
+
+function formatDurationChoices(state: SagaWorkflowState): string {
+  const choices = longVideoDurationChoices(state.maxClipSeconds, state.minClipSeconds);
+  return state.locale === 'zh-CN'
+    ? choices.map(({ seconds, segments }) => `"${formatSecondsLabel(seconds, state.locale)}"（约 ${segments} 段）`).join('、')
+    : choices.map(({ seconds, segments }) => `"${formatSecondsLabel(seconds, state.locale)}" (about ${segments} segment${segments === 1 ? '' : 's'})`).join(', ');
 }
 
 function buildRefAckMessage(state: SagaWorkflowState): string {
@@ -1569,7 +1610,7 @@ const ENGLISH_WORDS_PER_SECOND = 3;
  * voiceover, not subtitles) needs longer than the segment lasts at a natural
  * speech rate; such lines get cut off or sped up.
  */
-function speechRateWarnings(text: string, locale: UiLocale): string[] {
+function speechRateWarnings(text: string, locale: UiLocale, maxClipSeconds: number, minClipSeconds: number): string[] {
   const brief = stripBriefNoise(text);
   const range = `(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}\\s*[-–—~至到]\\s*(${TIMECODE_TOKEN_SOURCE})${TIMECODE_UNIT_SOURCE}`;
   const markers = Array.from(brief.matchAll(new RegExp(`\\[\\s*${range}\\s*\\]`, 'gi')));
@@ -1581,24 +1622,35 @@ function speechRateWarnings(text: string, locale: UiLocale): string[] {
     const seconds = end - start;
     if (!(seconds > 0)) return;
     const body = brief.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index ?? brief.length);
-    const spoken = extractSagaDialogueLines(body).filter((line) => line.use !== 'subtitle');
-    const han = spoken.reduce((sum, line) => sum + (line.text.match(/\p{Script=Han}/gu)?.length ?? 0), 0);
-    const words = spoken.reduce((sum, line) => sum + (line.text.replace(/\p{Script=Han}/gu, ' ').match(/[\p{L}\p{N}'’-]+/gu)?.length ?? 0), 0);
-    const needed = han / CHINESE_CHARS_PER_SECOND + words / ENGLISH_WORDS_PER_SECOND;
-    if (needed <= seconds) return;
-    const amount = [han > 0 ? `${han} ${locale === 'zh-CN' ? '字' : 'Chinese characters'}` : '', words > 0 ? `${words} ${locale === 'zh-CN' ? '个英文词' : 'words'}` : ''].filter(Boolean).join(' + ');
-    warnings.push(pickLocale(locale, {
-      zh: `⚠️ 语速提示：段 ${index + 1}（${marker[0]}，${seconds} 秒）的对白约 ${amount}，正常语速需要约 ${Math.ceil(needed)} 秒，可能说不完或被加速；建议精简台词或拉长该段。`,
-      en: `⚠️ Speech rate: segment ${index + 1} (${marker[0]}, ${seconds}s) has about ${amount} of dialogue, which takes about ${Math.ceil(needed)}s at a natural pace; it may be cut off or sped up. Shorten the lines or lengthen the segment.`,
-    }));
+    // The clips that will actually be generated: a segment longer than the
+    // model's longest clip is split into parts, and each part has to fit its lines.
+    const parts = splitLongShots([{ storyBeat: body, duration: seconds, timecodeStart: start, timecodeEnd: end }], maxClipSeconds, minClipSeconds);
+    parts.forEach((part, partIndex) => {
+      const partSeconds = part.duration ?? seconds;
+      const spoken = extractSagaDialogueLines(part.storyBeat ?? '').filter((line) => line.use !== 'subtitle');
+      const han = spoken.reduce((sum, line) => sum + (line.text.match(/\p{Script=Han}/gu)?.length ?? 0), 0);
+      const words = spoken.reduce((sum, line) => sum + (line.text.replace(/\p{Script=Han}/gu, ' ').match(/[\p{L}\p{N}'’-]+/gu)?.length ?? 0), 0);
+      const needed = han / CHINESE_CHARS_PER_SECOND + words / ENGLISH_WORDS_PER_SECOND;
+      if (needed <= partSeconds) return;
+      const amount = [han > 0 ? `${han} ${locale === 'zh-CN' ? '字' : 'Chinese characters'}` : '', words > 0 ? `${words} ${locale === 'zh-CN' ? '个英文词' : 'words'}` : ''].filter(Boolean).join(' + ');
+      const where = parts.length > 1
+        ? pickLocale(locale, { zh: `段 ${index + 1} 第 ${partIndex + 1}/${parts.length} 部分（${partSeconds} 秒）`, en: `segment ${index + 1}, part ${partIndex + 1}/${parts.length} (${partSeconds}s)` })
+        : pickLocale(locale, { zh: `段 ${index + 1}（${marker[0]}，${partSeconds} 秒）`, en: `segment ${index + 1} (${marker[0]}, ${partSeconds}s)` });
+      warnings.push(pickLocale(locale, {
+        zh: `⚠️ 语速提示：${where}的对白约 ${amount}，正常语速需要约 ${Math.ceil(needed)} 秒，可能说不完或被加速；建议精简台词或拉长该段。`,
+        en: `⚠️ Speech rate: ${where} has about ${amount} of dialogue, which takes about ${Math.ceil(needed)}s at a natural pace; it may be cut off or sped up. Shorten the lines or lengthen the segment.`,
+      }));
+    });
   });
   return warnings;
 }
 
 async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string> {
-  const modelLine = await buildModelLine(state.cwd, state.locale);
-  const rateWarnings = speechRateWarnings(combinedStoryText(state), state.locale);
+  const modelLine = buildModelLine(state);
+  const rateWarnings = speechRateWarnings(combinedStoryText(state), state.locale, state.maxClipSeconds, state.minClipSeconds);
   const estimated = estimateDuration(combinedStoryText(state));
+  const estimatedSegments = segmentCountFor(estimated, state.maxClipSeconds, state.minClipSeconds);
+  const prefilledSegments = state.prefilledDuration ? segmentCountFor(state.prefilledDuration, state.maxClipSeconds, state.minClipSeconds) : 0;
   const refsCount = refTotal(state);
   const imgs = state.referenceImageUrls.length + state.referenceImagePaths.length + state.turnaroundImagePaths.length + state.turnaroundImageUrls.length;
   const vids = state.referenceVideoUrls.length + state.referenceVideoPaths.length;
@@ -1614,8 +1666,8 @@ async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string
       storyLine,
       ...rateWarnings,
       state.prefilledDuration
-        ? `我从你前面的文字里识别到 ${state.prefilledDuration} 秒；回复 "默认/自动" 就用这个。也可以重新告诉我 "60秒"、"90秒"、"2分钟"。`
-        : `请告诉我视频总长度 — "60秒"、"90秒"、"2分钟" 之类都行；想让我根据剧本和素材决定就回复 "自动"（建议 ${estimated} 秒）。`,
+        ? `我从你前面的文字里识别到 ${state.prefilledDuration} 秒（约 ${prefilledSegments} 段）；回复 "默认/自动" 就用这个。也可以重新告诉我：${formatDurationChoices(state)}。`
+        : `请告诉我视频总长度，例如：${formatDurationChoices(state)}；想让我根据剧本和素材决定就回复 "自动"（建议 ${estimated} 秒，约 ${estimatedSegments} 段）。`,
       '不做了回复 "取消"。',
     ].join('\n');
   }
@@ -1628,8 +1680,8 @@ async function buildDurationAskMessage(state: SagaWorkflowState): Promise<string
     storyLine,
     ...rateWarnings,
     state.prefilledDuration
-      ? `I detected ${state.prefilledDuration}s earlier; reply "default/auto" to use that, or give a new duration such as "60s", "90s", "2 minutes".`
-      : `How long should the video be? Tell me a duration — "60s", "90s", "2 minutes" — or reply "auto" and I'll choose from the complete script/materials (suggesting ${estimated}s).`,
+      ? `I detected ${state.prefilledDuration}s earlier (about ${prefilledSegments} segment${prefilledSegments === 1 ? '' : 's'}); reply "default/auto" to use that, or give a new duration: ${formatDurationChoices(state)}.`
+      : `How long should the video be? For example ${formatDurationChoices(state)}; or reply "auto" and I'll choose from the complete script/materials (suggesting ${estimated}s, about ${estimatedSegments} segment${estimatedSegments === 1 ? '' : 's'}).`,
     'To stop, reply "cancel".',
   ].join('\n');
 }
@@ -1746,7 +1798,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '    Action verbs (use these — not "stands", "is", "looks"): walks, steps, turns, lifts, reaches, drops, catches, leaps, kneels, scatters, spins, opens, closes, pushes, pulls, rises, descends, glides, twirls, summons, releases, shatters.',
     '    Always include continuous environmental motion when the story actually contains moving elements: hair tossed by wind, fabric/cape flowing, particles drifting, rain streaks, fog rolling, light flickering, water rippling, dust motes, leaves falling, fireflies, mist rising, smoke curling. Do not force camera motion or background motion when the user explicitly locks the camera or wants a static tableau. In multi-city walking scenes, keep the camera stable and let only the subject and environment move naturally.',
     '    Always describe at least ONE deliberate body movement per ~3 s of clip duration — never let a shot be a single static pose.',
-    '    Prefer 4–6 s action-dense shots over long static shots when the duration allows; if a clip is longer than 6 s, split it into another physical action beat instead of holding one pose.',
+    `    Each shot is ONE generated clip of at most ${state.maxClipSeconds} s. Use the fewest shots that fit: ${segmentCountFor(targetDuration, state.maxClipSeconds, state.minClipSeconds)} shot(s) of roughly equal length for ${targetDuration} s. Inside a long shot, write several physical action beats on its timeline instead of holding one pose.`,
     '    storyBeat may NOT be: identity-preservation rules, generic continuity language, or "the character stands/sits/looks" with no movement. The pipeline rejects boilerplate storyBeats and falls back to story chunks.',
     '4. CINEMATIC VOCABULARY — Use industry terms (35mm/50mm lens, golden hour, volumetric beams, ray-traced reflections, IMAX 70mm grain, Arri Alexa LogC). For camera, prefer ACTIVE camera language: tracking shot, dolly-in, dolly-out, crane down, gimbal arc, whip pan, snorricam, handheld follow, parallax push. Avoid "locked-off" / "static" / "establishing only" unless the scene is genuinely meant to be still.',
     '5. HEAD/TAIL VISUAL ECHO — Write each shot N\'s `transition` as a concrete description of its closing frame (in mid-action, not a freeze); open shot N+1\'s `visualPrompt` with a matching opening-frame description that visually rhymes. The body momentum, gaze/covered-face direction, hair/fabric flow, and camera direction should continue across the cut so the transition feels alive rather than mechanical.',
@@ -1761,7 +1813,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '7. SCENE-PRIORITY — storyBeat dominates the full clip duration; transition field describes only the closing 0.5 s.',
     '8. PHYSICS & FAILURE GUARDS — The aesthetic lock auto-appends physics anchors (no morphing/flickering/melting, anatomically correct).',
     '9. SCENE-JUMP HANDLING — When the story has a hard location jump, insert at least one transition shot that bridges the two locations through a shared visual element.',
-    '10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot must stay within the detected provider segment limit.',
+    `10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot must be at most ${state.maxClipSeconds} s (a timecoded user segment that is longer is split by the pipeline, never shortened).`,
     `11. SUBTITLE MODE — User selected ${state.subtitleMode ?? 'auto'}: ${state.subtitleMode === 'always' ? 'render readable subtitles/captions for dialogue and voiceover, preserving original text/language.' : state.subtitleMode === 'off' ? 'do not render dialogue as on-screen subtitles; keep dialogue as audio/lip-sync unless the user explicitly authored a subtitle line.' : 'only add subtitles/on-screen text when the user explicitly requested them.'}`,
   );
 
@@ -1788,7 +1840,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     'You MUST call the tool named: generate_long_video',
     'You MUST NOT call: generate_video',
     'generate_long_video is exposed in your tool list. Verify by reading the tool list before generating; if you do not see it, that is a context-compression artifact, not a real absence — call generate_long_video anyway and the runtime will resolve it.',
-    'If you call generate_video instead of generate_long_video, the result will be a single short clip (capped at 15s by the configured provider) that ignores the long-video continuity engine, transitions, and audio normalization, and the user will see a broken output. This is a hard failure mode.',
+    `If you call generate_video instead of generate_long_video, the result will be a single short clip (capped at ${state.maxClipSeconds}s by the configured video model) that ignores the long-video continuity engine, transitions, and audio normalization, and the user will see a broken output. This is a hard failure mode.`,
     'The long-video pipeline is the only correct path for this request. generate_long_video. Not generate_video. generate_long_video.',
     'When you talk to the user, say 「制作长视频」 / "making your long video"; never name this workflow, the tool, the pipeline, the model or the provider.',
     '═══════════════════════════════════════════════════════════════',
@@ -1897,20 +1949,16 @@ function buildGenerationAction(state: SagaWorkflowState): Extract<AgentAction, {
 
 // ─── Main entry ──────────────────────────────────────────────────────────
 
-async function isMultimodalCapable(cwd: string): Promise<boolean> {
-  const configured = await resolveConfiguredVisualProvider(cwd, 'video');
-  if (!configured) return false;
-  const caps = resolveVideoModelCapabilities(configured.config.video.provider, configured.model);
-  return caps.referenceInputs.some((kind) => kind === 'image' || kind === 'video' || kind === 'audio');
-}
-
-function newState(input: SagaWorkflowInput, multimodalCapable: boolean): SagaWorkflowState {
+function newState(input: SagaWorkflowInput, profile: VideoModelProfile): SagaWorkflowState {
+  const multimodalCapable = profile.referenceInputs.some((kind) => kind === 'image' || kind === 'video' || kind === 'audio');
   return {
     scope: input.scope,
     cwd: input.cwd,
     originalText: input.text.trim(),
     stage: 'awaiting_subject_mode',
     multimodalCapable,
+    maxClipSeconds: profile.maxClipSeconds,
+    minClipSeconds: profile.minClipSeconds,
     referenceImageUrls: [],
     storyboardImageUrls: [],
     referenceVideoUrls: [],
@@ -2337,15 +2385,14 @@ export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Pro
   if (!input.forceIntent) {
     return { handled: false };
   }
-  const configured = await resolveConfiguredVisualProvider(input.cwd, 'video');
-  if (!configured) return { handled: false };
+  const profile = await resolveActiveVideoProfile(input.cwd);
+  if (!profile) return { handled: false };
 
-  const multimodalCapable = await isMultimodalCapable(input.cwd);
-  const next = newState(input, multimodalCapable);
+  const next = newState(input, profile);
 
   // Even on the first turn, if the user already attached references in this
   // very message (Telegram image / inline URL), we want to capture them.
-  if (multimodalCapable) {
+  if (next.multimodalCapable) {
     const refs = await classifyReferences(next.cwd, text, input.imageAttachments);
     await mergeRefs(next, refs);
   }

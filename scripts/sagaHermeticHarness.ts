@@ -36,6 +36,8 @@ export type HermeticOptions = {
   imageDownloadFailsFrom?: number;
   /** 1-based video task creations answered with a privacy rejection of an input image. */
   rejectVideoCreates?: number[];
+  /** What the platform declares for the video model (visualProfile.video.capabilities). */
+  videoCapabilities?: Record<string, unknown>;
 };
 
 const fixtureDir = path.join(root, 'fixtures');
@@ -50,6 +52,23 @@ execFileSync('ffmpeg', [
 const pngPath = path.join(fixtureDir, 'still.png');
 execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=512x512', '-frames:v', '1', pngPath]);
 const clipBytes = readFileSync(clipPath);
+// Every mocked video task returns a clip of the length it asked for, so the
+// final render matches the segment plan (a 15-second segment gets 15 s).
+const clipsBySeconds = new Map<number, Buffer>([[5, clipBytes]]);
+function clipOf(seconds: number): Buffer {
+  const cached = clipsBySeconds.get(seconds);
+  if (cached) return cached;
+  const out = path.join(fixtureDir, `clip-${seconds}.mp4`);
+  execFileSync('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', `testsrc=size=320x568:rate=24:duration=${seconds}`,
+    '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+    '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', out,
+  ]);
+  const bytes = readFileSync(out);
+  clipsBySeconds.set(seconds, bytes);
+  return bytes;
+}
 const pngBytes = readFileSync(pngPath);
 
 /** A real PNG on disk, for reference-image inputs. */
@@ -87,6 +106,7 @@ async function configure(cwd: string, options: HermeticOptions): Promise<void> {
       baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
       model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
       defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false },
+      ...(options.videoCapabilities ? { capabilities: options.videoCapabilities } : {}),
     },
   } as any;
   if (options.chatReply) {
@@ -115,6 +135,7 @@ export async function withHermeticWorkspace<T>(
   let taskCounter = 0;
   let imageCounter = 0;
   let createCounter = 0;
+  const taskSeconds = new Map<string, number>();
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -144,12 +165,16 @@ export async function withHermeticWorkspace<T>(
         return json(400, { error: { code: 'InputImageSensitiveContentDetected', message: 'The request failed because the input image may contain real person.' } });
       }
       taskCounter += 1;
+      const seconds = Number.isFinite(Number(body.duration)) && Number(body.duration) > 0 ? Math.round(Number(body.duration)) : 5;
+      taskSeconds.set(`task-${taskCounter}`, seconds);
       return json(200, { id: `task-${taskCounter}` });
     }
-    if (/\/contents\/generations\/tasks\/task-\d+$/.test(url)) {
-      return json(200, { status: 'succeeded', content: { video_url: 'https://cdn.example.test/clip.mp4' } });
+    const task = /\/contents\/generations\/tasks\/(task-\d+)$/.exec(url);
+    if (task) {
+      return json(200, { status: 'succeeded', content: { video_url: `https://cdn.example.test/clip-${taskSeconds.get(task[1]!) ?? 5}.mp4` } });
     }
-    if (url === 'https://cdn.example.test/clip.mp4') return new Response(clipBytes, { status: 200, headers: { 'Content-Type': 'video/mp4' } });
+    const clip = /^https:\/\/cdn\.example\.test\/clip-(\d+)\.mp4$/.exec(url);
+    if (clip) return new Response(clipOf(Number(clip[1])), { status: 200, headers: { 'Content-Type': 'video/mp4' } });
     if (url === 'https://cdn.example.test/expired.png') return new Response('gone', { status: 403 });
     if (url === 'https://cdn.example.test/still.png') return new Response(pngBytes, { status: 200, headers: { 'Content-Type': 'image/png' } });
     return new Response(`unexpected request ${method} ${url}`, { status: 500 });

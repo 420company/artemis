@@ -1,10 +1,8 @@
+import { resolveVideoModelProfile, type VideoCapabilityOverrides } from './videoCapabilities.js';
+
 const DEFAULT_VIDEO_DURATION = 5;
 const MIN_VIDEO_DURATION = 1;
 const MAX_VIDEO_DURATION = 60;
-const BYTEPLUS_SEEDANCE_2_MIN_DURATION = 4;
-const BYTEPLUS_SEEDANCE_2_MAX_DURATION = 15;
-const BYTEPLUS_SEEDANCE_1_5_MIN_DURATION = 4;
-const BYTEPLUS_SEEDANCE_1_5_MAX_DURATION = 12;
 
 export function sanitizeVideoDuration(raw: number | undefined): number {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_VIDEO_DURATION;
@@ -14,32 +12,28 @@ export function sanitizeVideoDuration(raw: number | undefined): number {
   return n;
 }
 
+/**
+ * A clip length the model accepts: clamped to its clip range for a known
+ * model (videoCapabilities.ts) or a platform declaration, and snapped to the
+ * nearest allowed length when the model only takes some. Other models get the
+ * request as it is.
+ */
 export function normalizeVideoDurationForProvider(
   raw: number | undefined,
   provider?: string,
   model?: string,
+  overrides?: VideoCapabilityOverrides,
 ): number {
   const duration = sanitizeVideoDuration(raw);
-  const key = `${provider ?? ''}/${model ?? ''}`.toLowerCase();
-  if (
-    (key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina')) &&
-    (key.includes('dreamina-seedance-2-0') || key.includes('seedance-2-0'))
-  ) {
-    return Math.min(
-      BYTEPLUS_SEEDANCE_2_MAX_DURATION,
-      Math.max(BYTEPLUS_SEEDANCE_2_MIN_DURATION, duration),
-    );
-  }
-  if (
-    (key.includes('byteplus') || key.includes('seedance') || key.includes('dreamina')) &&
-    key.includes('seedance-1-5')
-  ) {
-    return Math.min(
-      BYTEPLUS_SEEDANCE_1_5_MAX_DURATION,
-      Math.max(BYTEPLUS_SEEDANCE_1_5_MIN_DURATION, duration),
-    );
-  }
-  return duration;
+  const profile = resolveVideoModelProfile(provider ?? '', model ?? '', overrides);
+  // Only the Seedance 1.5 / 2.x clip ranges are enforced from the built-in
+  // table; other models are clamped only when the platform declares a range.
+  const enforced = profile.source === 'platform' || ['seedance-2.5', 'seedance-2.0', 'seedance-1.5'].includes(profile.family);
+  if (!enforced) return duration;
+  const clamped = Math.min(profile.maxClipSeconds, Math.max(profile.minClipSeconds, duration));
+  const allowed = profile.allowedDurations;
+  if (!allowed || allowed.length === 0) return clamped;
+  return allowed.reduce((best, value) => (Math.abs(value - clamped) < Math.abs(best - clamped) ? value : best), allowed[0]!);
 }
 
 /**

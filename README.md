@@ -177,6 +177,31 @@ Saga can:
 
 Saga is designed for users who want to say: “Make this into a real video,” then be guided through the right creative and technical steps.
 
+**Clip length decides everything.** Each video model has a longest single clip, *L* (Seedance 2.0: 15 s; Seedance 2.5 — any model id matching `seedance-2-5` / `seedance_2.5` / `Seedance 2.5`: 30 s; Seedance 1.5: 12 s; other models: 10 s unless declared). A request that states a length up to *L* is one plain clip (no long-video question); a longer one, or a brief with two or more timecoded segments, is a long video. Without timecodes a long video is the fewest segments of at most *L*, as even as whole seconds allow (60 s on 2.5 → 2 × 30 s; 75 s → 3 × 25 s). A timecoded segment longer than *L* is split into even parts at sentence boundaries (a quoted line stays whole, in one part), never cut short. The wizard's segment note, its duration examples (“1分钟（约 2 段）”), speech-rate warnings, keyframe image caps and progress all follow the same plan.
+
+**Declaring a model's limits (platform).** The platform can declare what the configured video model does in `visualProfile.video.capabilities` (global or workspace `providers.json`); every field is optional and wins over the built-in table:
+
+```json
+"video": {
+  "provider": "byteplus",
+  "model": "dreamina-seedance-2-5-…",
+  "capabilities": {
+    "maxClipSeconds": 30,
+    "minClipSeconds": 4,
+    "allowedDurations": [5, 10, 15, 20, 30],
+    "maxPromptChars": 4000,
+    "ratios": ["16:9", "9:16", "1:1"],
+    "resolutions": ["480p", "720p", "1080p"],
+    "referenceInputs": ["image", "video", "audio"],
+    "firstFrame": true,
+    "canGenerateAudio": true,
+    "model": "dreamina-seedance-2-5-…"
+  }
+}
+```
+
+`model` inside `capabilities`, when set, limits the declaration to that model id. A tier on a model with 30-second clips needs only `{ "maxClipSeconds": 30 }`.
+
 #### 6. Brief authoring and AI screenwriter mode
 
 Artemis can work with both complete scripts and partial inspiration.
@@ -339,7 +364,8 @@ A host that lets the user pick what they want before sending (a button in the we
 
 | `--intent` | What happens |
 |---|---|
-| `long_video` | The long-video workflow starts at once (as the `/longvideo` command does), with no "shall I make a long video?" question. The stored user message is the user's text only; a typed `/longvideo` or `/saga` prefix is dropped. |
+| `video` | The user chose 生成视频. A stated length up to the model's longest clip *L* is one plain clip; a longer length, or a brief with two or more timecoded segments, starts the long-video workflow at once (no confirmation question); no length → one question 「要做多长的视频？」 with a choices card derived from *L* (L=30: 5 秒 / 10 秒 / 30 秒 / 1 分钟 / 更长，我来说; L=15: 5 秒 / 10 秒 / 15 秒 / 30 秒 / 1 分钟), and the answer (a label, its number or a typed length) routes the same way. |
+| `long_video` | Forces the long-video workflow at once (as the `/longvideo` command does), with no question. The stored user message is the user's text only; a typed `/longvideo` or `/saga` prefix is dropped. |
 | `image` | Direct path with a run-context hint to make the image with image generation. |
 | `research` | The deep-planning workflow with its normal sub-agent budget, plus a hint to research and cite sources. |
 | `reminder` | Direct path with a hint to create the schedule with the platform's schedule tool (`schedule_create`) and confirm it in plain words. |
@@ -525,6 +551,10 @@ Saga 可以：
 
 Saga 适合用户直接说：“把这个想法做成一条真正的视频。”然后由 Artemis 引导完成创作和技术流程。
 
+**单段时长决定一切。** 每个视频模型都有单段最长时长 *L*（Seedance 2.0：15 秒；Seedance 2.5——模型 id 匹配 `seedance-2-5` / `seedance_2.5` / `Seedance 2.5` 即可：30 秒；Seedance 1.5：12 秒；其它模型未声明时 10 秒）。写明时长不超过 *L* 的请求生成一段普通视频（不问是否做长视频）；更长的，或剧本里有两段及以上时间码的，走长视频。没有时间码时，长视频切成尽量少、每段不超过 *L*、长度尽量均匀的段（2.5 上 60 秒 → 2 × 30 秒；75 秒 → 3 × 25 秒）。超过 *L* 的时间码段按句子平均拆开（引号里的台词不拆、只放在其中一段），绝不截短。引导里的单段说明、时长示例（“1分钟（约 2 段）”）、语速提示、关键帧图片上限和进度都按同一份分段计划。
+
+**由平台声明模型能力。** 平台可以在 `visualProfile.video.capabilities`（全局或工作区的 `providers.json`）里声明当前视频模型的能力；所有字段都可选，优先于内置表：`maxClipSeconds`（单段最长秒数 *L*）、`minClipSeconds`、`allowedDurations`、`maxPromptChars`、`ratios`、`resolutions`、`referenceInputs`、`firstFrame`、`canGenerateAudio`，以及可选的 `model`（只对这个模型 id 生效）。使用 30 秒单段模型的档位只需发送 `{ "maxClipSeconds": 30 }`。
+
 #### 6. 剧本说明书与 AI 编剧模式
 
 Artemis 可以处理完整剧本，也可以处理只有一句话的灵感。
@@ -654,7 +684,8 @@ artemis
 
 | `--intent` | 效果 |
 |---|---|
-| `long_video` | 直接开始制作长视频（和 `/longvideo` 命令一样），不再先问「要我帮你做成一段完整的长视频吗」。保存的用户消息只有用户自己的文字；手动输入的 `/longvideo` 或 `/saga` 前缀会被去掉。 |
+| `video` | 用户选了「生成视频」。写明的时长不超过当前模型的单段上限 *L* 时生成一段普通视频；更长，或剧本里有两段及以上时间码，直接进入长视频制作（不再确认）；没写时长时只问一次「要做多长的视频？」，按钮选项由 *L* 决定（L=30：5 秒 / 10 秒 / 30 秒 / 1 分钟 / 更长，我来说；L=15：5 秒 / 10 秒 / 15 秒 / 30 秒 / 1 分钟），按回答（按钮文字、编号或手写时长）同样处理。 |
+| `long_video` | 强制直接开始制作长视频（和 `/longvideo` 命令一样），不提问。保存的用户消息只有用户自己的文字；手动输入的 `/longvideo` 或 `/saga` 前缀会被去掉。 |
 | `image` | 直接处理，并在本次运行上下文里提示用图片生成来做图。 |
 | `research` | 走深度规划工作流（子代理预算不变），并提示先调研、给出来源。 |
 | `reminder` | 直接处理，并提示用平台的日程工具（`schedule_create`）创建定时任务，用平白的话确认。 |

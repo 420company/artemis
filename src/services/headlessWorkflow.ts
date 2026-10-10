@@ -24,8 +24,10 @@ import {
 } from '../core/workflowRouter.js'
 import {
   buildSagaOfferQuestion,
+  classifyVideoRequestLength,
   looksLikeSagaWizardAnswer,
   parseLongVideoCommand,
+  parseRequestedVideoSeconds,
   parseSagaOfferReply,
 } from '../tools/visual/sagaWorkflow.js'
 import {
@@ -50,18 +52,20 @@ export interface PlanHeadlessWorkflowInput {
   getClassifier: () => Promise<ChatProvider | undefined>
   /**
    * What the user picked in the app before sending (`artemis execute
-   * --intent <name>`): long_video, image, research or reminder. Unknown
-   * names are ignored with a warning. Its hint goes in the per-run context,
-   * never into the stored message.
+   * --intent <name>`): video, long_video, image, research or reminder.
+   * Unknown names are ignored with a warning. Its hint goes in the per-run
+   * context, never into the stored message.
    */
   intent?: string
+  /** L, the configured video model's longest single clip (undefined: no video model). */
+  videoClipSeconds?: () => Promise<number | undefined>
   /** Whether a video provider is configured (Saga can run at all). */
   hasVideoProvider: () => Promise<boolean>
   onInfo?: (message: string) => void
   now?: number
 }
 
-export const HEADLESS_INTENTS = ['long_video', 'image', 'research', 'reminder'] as const
+export const HEADLESS_INTENTS = ['video', 'long_video', 'image', 'research', 'reminder'] as const
 export type HeadlessIntent = (typeof HEADLESS_INTENTS)[number]
 
 /** A known intent name ("long-video", "Long_Video" and "longvideo" count), or undefined. */
@@ -90,6 +94,45 @@ const REMINDER_INTENT_HINT = [
   'Confirm in plain words when it runs, how often and what it will do. If no scheduling tool is available, say so plainly instead of pretending. ' + INTENT_PLAIN_WORDS,
 ].join('\n')
 
+function videoSingleClipHint(seconds: number | undefined, maxClipSeconds: number | undefined, original?: string): string {
+  return [
+    '[Run context — the user chose "video" in the app; this is not part of their message]',
+    original ? `Their request: ${original}` : undefined,
+    `Make ONE video clip with generate_video${seconds ? ` (duration: ${seconds})` : ''}; it fits in a single clip${maxClipSeconds ? ` (the video model renders up to ${maxClipSeconds} s per clip)` : ''}. Do not start a long video.`,
+    'Say 「生成视频」 / "making your video" to the user. ' + INTENT_PLAIN_WORDS,
+  ].filter(Boolean).join('\n')
+}
+
+/** Length choices for "how long?", derived from L: [5, 10, L, 30, 60], plus "longer" when that leaves fewer than five. */
+export function videoLengthChoices(maxClipSeconds: number, zh: boolean): Array<{ label: string; seconds?: number }> {
+  const seconds = Array.from(new Set([5, 10, maxClipSeconds, 30, 60].filter((value) => value >= 1))).sort((a, b) => a - b)
+  const label = (value: number) => (zh
+    ? (value % 60 === 0 ? `${value / 60} 分钟` : `${value} 秒`)
+    : (value % 60 === 0 ? `${value / 60} minute${value === 60 ? '' : 's'}` : `${value} seconds`))
+  const choices: Array<{ label: string; seconds?: number }> = seconds.map((value) => ({ label: label(value), seconds: value }))
+  if (choices.length < 5) choices.push({ label: zh ? '更长，我来说' : "Longer, I'll say" })
+  return choices
+}
+
+function buildVideoLengthQuestion(maxClipSeconds: number, zh: boolean): string {
+  const card = JSON.stringify({ options: videoLengthChoices(maxClipSeconds, zh).map((choice) => choice.label) })
+  return `${zh ? '要做多长的视频？' : 'How long should the video be?'}\n\n\`\`\`choices\n${card}\n\`\`\`\n${zh ? '也可以直接回复时长，例如“20 秒”。' : 'You can also reply with a length, e.g. "20 seconds".'}`
+}
+
+/** The answer to "how long?": a length in seconds, 'longer', or undefined when the reply is something else. */
+function parseVideoLengthAnswer(reply: string, maxClipSeconds: number, zh: boolean): number | 'longer' | undefined {
+  const text = reply.trim()
+  const choices = videoLengthChoices(maxClipSeconds, zh)
+  const index = /^([1-9])[.、)）]?$/.exec(text)
+  if (index) {
+    const choice = choices[Number(index[1]) - 1]
+    return choice ? (choice.seconds ?? 'longer') : undefined
+  }
+  if (/^(?:更长|更长[，,]?\s*我来说|再长|长一点|longer|longer,?\s*i'?ll say)[\s!！。.~]*$/i.test(text)) return 'longer'
+  if (text.length > 24) return undefined
+  return parseRequestedVideoSeconds(text)
+}
+
 const readState = readWorkflowRoutingState
 const writeState = writeWorkflowRoutingState
 
@@ -113,6 +156,26 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   let prompt = input.prompt
   let sagaDeclined = false
 
+  // An answer to "how long should the video be?" (the video intent).
+  const lengthQuestion = state.videoLengthQuestion && now - state.videoLengthQuestion.at < SAGA_SESSION_TTL_MS ? state.videoLengthQuestion : undefined
+  delete state.videoLengthQuestion
+  if (lengthQuestion && (input.intent === undefined || normalizeHeadlessIntent(input.intent) === 'video')) {
+    const L = await input.videoClipSeconds?.()
+    const answer = L === undefined ? undefined : parseVideoLengthAnswer(prompt, L, /[\u3400-\u9fff]/.test(lengthQuestion.text))
+    if (L !== undefined && answer !== undefined) {
+      if (answer !== 'longer' && answer <= L) {
+        writeState(input.session, state)
+        return { kind: 'run', prompt, workflow: 'direct', hint: videoSingleClipHint(answer, L, lengthQuestion.text) }
+      }
+      state.sagaActiveAt = now
+      writeState(input.session, state)
+      const reason = answer === 'longer'
+        ? `the user chose a long video for their previous request ("${lengthQuestion.text.slice(0, 200)}"); ask for the length if it is still missing`
+        : `the user chose a ${answer}-second video for their previous request ("${lengthQuestion.text.slice(0, 200)}")`
+      return sagaRun(prompt, input.cwd, reason)
+    }
+  }
+
   // An intent the user picked in the app wins over routing and any pending
   // question: it is an explicit choice for this message.
   if (input.intent !== undefined) {
@@ -125,6 +188,29 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
       delete state.sagaOffer
       delete state.sagaActiveAt
       const text = intent === 'long_video' ? (parseLongVideoCommand(prompt) ?? prompt).trim() : prompt
+      delete state.videoLengthQuestion
+      if (intent === 'video') {
+        // The user chose a video; whether it is one clip or a long video
+        // follows from the length and the model's longest clip (L).
+        const L = await input.videoClipSeconds?.()
+        if (L === undefined) {
+          writeState(input.session, state)
+          return { kind: 'run', prompt, workflow: 'direct', hint: videoSingleClipHint(undefined, undefined) }
+        }
+        const fit = classifyVideoRequestLength(prompt, L)
+        if (fit.kind === 'long') {
+          state.sagaActiveAt = now
+          writeState(input.session, state)
+          return sagaRun(prompt, input.cwd, 'the user chose a video longer than one clip')
+        }
+        if (fit.kind === 'single') {
+          writeState(input.session, state)
+          return { kind: 'run', prompt, workflow: 'direct', hint: videoSingleClipHint(fit.seconds, L) }
+        }
+        state.videoLengthQuestion = { text: prompt, at: now }
+        writeState(input.session, state)
+        return { kind: 'reply', reply: buildVideoLengthQuestion(L, /[\u3400-\u9fff]/.test(prompt)) }
+      }
       if (intent === 'long_video' && text) {
         // Same as an explicit long-video command: no question first.
         state.sagaActiveAt = now
@@ -175,7 +261,7 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
   }
 
   const route = await routeWorkflow(
-    { text: prompt, attachmentCount: input.attachmentCount, inCodeRepo: input.inCodeRepo },
+    { text: prompt, attachmentCount: input.attachmentCount, inCodeRepo: input.inCodeRepo, maxClipSeconds: await input.videoClipSeconds?.() },
     { getClassifier: input.getClassifier, onInfo: input.onInfo },
   )
 

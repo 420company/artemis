@@ -16,6 +16,8 @@ export type WorkflowRoutingState = {
   sagaOffer?: { text: string; at: number };
   /** Saga was confirmed (or continued) at this time; cleared when it ends. */
   sagaActiveAt?: number;
+  /** The user chose "video" without a length: "how long?" is waiting for an answer. */
+  videoLengthQuestion?: { text: string; at: number };
 };
 
 export function readWorkflowRoutingState(session: Pick<SessionRecord, 'metadata'>): WorkflowRoutingState {
@@ -27,8 +29,9 @@ export function writeWorkflowRoutingState(session: Pick<SessionRecord, 'metadata
   const clean: WorkflowRoutingState = {};
   if (state.sagaOffer) clean.sagaOffer = state.sagaOffer;
   if (state.sagaActiveAt) clean.sagaActiveAt = state.sagaActiveAt;
+  if (state.videoLengthQuestion) clean.videoLengthQuestion = state.videoLengthQuestion;
   const metadata = { ...(session.metadata ?? {}) };
-  if (clean.sagaOffer || clean.sagaActiveAt) metadata.workflowRouting = clean;
+  if (clean.sagaOffer || clean.sagaActiveAt || clean.videoLengthQuestion) metadata.workflowRouting = clean;
   else delete metadata.workflowRouting;
   session.metadata = metadata;
 }
