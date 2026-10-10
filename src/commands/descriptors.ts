@@ -155,7 +155,7 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     group: 'workflow',
     cli: 'nidhogg <prompt> [--bg]',
     slash: '/nidhogg <task>',
-    remote: '/nidhogg <task>',
+    // Hidden from chat bridges (/help, command menus): works as typed, never listed there.
     autocomplete: true,
     desc: {
       zh: '对抗式打磨：逐轮打磨实现，慢但最稳',
@@ -194,7 +194,7 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     group: 'workflow',
     cli: 'heimdall [show|threads [n]|events [--tail <n>] [--after <offset>]|follow [--after <offset>] [--timeout <seconds>]|upload <path...>|cleanup] [sessionId|--last] [--json]',
     slash: '/heimdall [threads [n]|events [n] [--after <offset>]|follow [--after <offset>] [--timeout <seconds>]|upload <path...>|cleanup]',
-    remote: '/heimdall [threads [n]|events [n] [--after <offset>]|follow [--after <offset>] [--timeout <seconds>]|upload <path...>|cleanup]',
+    // Hidden from chat bridges (/help, command menus): works as typed, never listed there.
     autocomplete: true,
     quickValue: '/heimdall',
     desc: {
@@ -373,7 +373,7 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     group: 'models',
     cli: 'bifrost',
     slash: '/bifrost',
-    remote: '/bifrost',
+    // Hidden from chat bridges (/help, command menus): works as typed, never listed there.
     autocomplete: true,
     quickValue: '/bifrost',
     desc: { zh: 'Configure Raven and dual-model mode', en: 'Configure Raven and dual-model mode' },

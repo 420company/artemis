@@ -1,4 +1,5 @@
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
@@ -9,11 +10,23 @@ import type { ToolExecutionContext } from '../types.js';
 import { toolLog, toolWarn } from '../../utils/log.js';
 import { createVisualProvider, type GenerationResult } from './providers/interface.js';
 
+/**
+ * Where a project keeps its reference sheet, keyframes and vision notes:
+ * `consistency/`, or `super-visual/` for a project made before the rename,
+ * so an old project resumes from its saved images instead of redoing them.
+ */
+export function consistencyDir(projectDir: string): string {
+  const current = path.join(projectDir, 'consistency');
+  const legacy = path.join(projectDir, 'super-visual');
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
+}
+
 // Process-wide relay-health short-circuit. When the configured image relay
 // returns persistent transient errors (HTTP 502/429 upstream_error) for both
 // /images/edits and /images/generations, we mark it sick and skip Super
 // Visual mode for `RELAY_SICK_COOLDOWN_MS` to avoid burning ~13 minutes per
 // long-video run. Reset on daemon restart.
+
 const RELAY_SICK_COOLDOWN_MS = 10 * 60 * 1000;
 const IMAGE_EDIT_TOTAL_TIMEOUT_MS = 7 * 60 * 1000;
 const SEGMENT_KEYFRAME_EDIT_TIMEOUT_MS = IMAGE_EDIT_TOTAL_TIMEOUT_MS + 15_000;
@@ -587,7 +600,7 @@ export async function generateSafeBridgeKeyframe(options: {
   if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
   if (!await fileExists(options.sourceFramePath)) return { ok: false, reason: 'source frame not found' };
 
-  const superVisualDir = path.join(options.projectDir, 'consistency');
+  const superVisualDir = consistencyDir(options.projectDir);
   await mkdir(superVisualDir, { recursive: true });
   const prompt = buildSafeBridgeKeyframePrompt({
     shotIndex: options.shotIndex,
@@ -622,15 +635,15 @@ export async function generateSafeBridgeKeyframe(options: {
 
 function imageReferenceArtifactPath(projectDir: string, sourceAssetPath: string | undefined): string {
   const ext = sourceAssetPath ? path.extname(sourceAssetPath) : '';
-  return path.join(projectDir, 'consistency', `character-turnaround${ext || '.png'}`);
+  return path.join(consistencyDir(projectDir), `character-turnaround${ext || '.png'}`);
 }
 
 function segmentKeyframePath(projectDir: string, shotIndex: number, ext: string = '.png'): string {
-  return path.join(projectDir, 'consistency', `segment-${String(shotIndex).padStart(3, '0')}-keyframe${ext}`);
+  return path.join(consistencyDir(projectDir), `segment-${String(shotIndex).padStart(3, '0')}-keyframe${ext}`);
 }
 
 function safeBridgeKeyframePath(projectDir: string, shotIndex: number, ext: string = '.png'): string {
-  return path.join(projectDir, 'consistency', `segment-${String(shotIndex).padStart(3, '0')}-safe-bridge${ext}`);
+  return path.join(consistencyDir(projectDir), `segment-${String(shotIndex).padStart(3, '0')}-safe-bridge${ext}`);
 }
 
 // ─── OpenAI image edit helper (multipart) ─────────────────────────────────
@@ -929,7 +942,7 @@ export function superVisualImageLimit(segmentCount: number): number {
   return SUPER_VISUAL_TURNAROUND_IMAGES + segmentCount + Math.min(2, segmentCount);
 }
 
-const BUDGET_REACHED = 'Super Visual image cap for this run reached';
+const BUDGET_REACHED = 'image limit for this video reached';
 
 type ConfiguredImageProvider = NonNullable<Awaited<ReturnType<typeof resolveConfiguredVisualProvider>>>;
 
@@ -1411,7 +1424,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     return { enabled: false, reason: 'disabled by request' };
   }
 
-  const superVisualDir = path.join(options.projectDir, 'consistency');
+  const superVisualDir = consistencyDir(options.projectDir);
   await mkdir(superVisualDir, { recursive: true });
 
   // Resolve user images (paths + URLs) into local files we can post.
@@ -1530,7 +1543,7 @@ export async function maybeGenerateSuperVisualReference(options: {
   if (isRelaySick() && options.action.superVisualMode !== 'on') {
     return {
       enabled: false,
-      reason: `Super Visual skipped: image relay marked sick within last ${Math.ceil(RELAY_SICK_COOLDOWN_MS / 60000)} min (will retry next run after cooldown).`,
+      reason: `the image service failed recently; skipped for ${Math.ceil(RELAY_SICK_COOLDOWN_MS / 60000)} minutes`,
       resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
     };
   }
@@ -1618,7 +1631,7 @@ export async function maybeGenerateSuperVisualReference(options: {
         promptPath,
         mode: 'image-to-image',
         userImagesUsed: userInputs.length,
-        reason: `generated character turnaround from ${userInputs.length} user image(s) via ${describeVisualProvider(imageConfigured.config, 'image')} image-to-image`,
+        reason: `generated character turnaround from ${userInputs.length} user image(s) (image-to-image)`,
         inputIsRealPerson: inputLooksRealPerson,
       };
     }
@@ -1691,7 +1704,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     toolWarn(`⚠️ 画面一致性：角色三视图生成失败 — ${errorText}。将改用用户原图作为身份锚。`);
     return {
       enabled: false,
-      reason: `Image-2 character turnaround generation failed: ${errorText}`,
+      reason: `the character reference sheet could not be made (${errorText})`,
       inputIsRealPerson: inputLooksRealPerson,
       resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
     };
@@ -1710,8 +1723,8 @@ export async function maybeGenerateSuperVisualReference(options: {
     mode: 'text-to-image',
     userImagesUsed: 0,
     reason: useEditMode
-      ? `generated character turnaround text-to-image (image edit fallback) via ${describeVisualProvider(imageConfigured.config, 'image')}`
-      : `generated character turnaround text-to-image via ${describeVisualProvider(imageConfigured.config, 'image')}`,
+      ? 'generated character turnaround text-to-image (image edit fallback)'
+      : 'generated character turnaround text-to-image',
     inputIsRealPerson: inputLooksRealPerson,
   };
 }
@@ -1781,7 +1794,7 @@ export async function generateSegmentKeyframe(options: {
   }
   if (options.imageBudget && !options.imageBudget.canGenerate()) return { ok: false, reason: BUDGET_REACHED };
 
-  const superVisualDir = path.join(options.projectDir, 'consistency');
+  const superVisualDir = consistencyDir(options.projectDir);
   await mkdir(superVisualDir, { recursive: true });
 
   const turnaroundExists = await fileExists(options.turnaroundPath);

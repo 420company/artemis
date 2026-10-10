@@ -10,6 +10,7 @@
  * scroll block so the renderer doesn't strip them.
  */
 
+import { scrubInternalNames } from '../utils/internalNames.js'
 import type { UiLocale } from './locale.js'
 import { stringWidth } from '../input/stringWidth.js'
 
@@ -171,8 +172,11 @@ export function formatToolDone(options: {
   }
 
   // Error: show a short error line under the label for quick scanning.
-  const errLine = output.split('\n').find(l => l.trim()) ?? ''
-  const trimmed = errLine.slice(0, 140)
+  // The plain reason when the tool gave one, else its first line; vendor,
+  // model and tool code names never reach the screen (paths stay as they are).
+  const reasonLine = output.match(/^Reason:\s*(.+)$/m)?.[1]
+  const errLine = reasonLine ?? output.split('\n').find(l => l.trim()) ?? ''
+  const trimmed = scrubInternalNames(errLine).slice(0, 140)
   return `${icon} ${label} ${target}  ${timing}\n  ${color(trimmed, `${ESC}[31m`)}`
 }
 

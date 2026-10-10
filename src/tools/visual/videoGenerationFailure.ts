@@ -34,8 +34,9 @@ export type VideoGenerationFailure = {
 
 const USER_MESSAGES: Record<GenerationFailureKind, { zh: string; en: string }> = {
   insufficient_balance: {
-    zh: '视频生成服务余额不足，请充值后重新发起生成。',
-    en: 'The video service balance is too low. Top up, then start the generation again.',
+    // The platform's service account, not the user's: no balance or payment wording.
+    zh: '视频服务暂时不可用，请稍后再试。',
+    en: 'The video service is temporarily unavailable. Please try again later.',
   },
   rate_limited: {
     zh: '视频生成服务当前限流，请稍等一两分钟再重新发起生成。',

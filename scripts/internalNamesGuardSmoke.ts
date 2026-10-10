@@ -8,7 +8,7 @@
 // would see. Progress lines are checked as the user receives them (through a
 // runtime log sink).
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fixturePng, runHermeticSaga, withHermeticWorkspace } from './sagaHermeticHarness.js';
@@ -26,6 +26,7 @@ import {
   describeToolForUser,
   describeToolOutputForUser,
   findInternalNames,
+  INTERNAL_NAME_PATTERNS,
   scrubInternalNames,
   userVisibleMessageText,
 } from '../src/utils/internalNames.js';
@@ -37,7 +38,9 @@ import { buildRemoteCommandHelpSections } from '../src/commands/catalog.js';
 import { planHeadlessWorkflow } from '../src/services/headlessWorkflow.js';
 import { SessionStore } from '../src/storage/sessions.js';
 import { parseRemoteCommand, runRemoteCommand } from '../src/bragi/runtime.js';
-import { executeGenerateLongVideo } from '../src/tools/generateLongVideo.js';
+import { executeGenerateLongVideo, plainConsistencyReason } from '../src/tools/generateLongVideo.js';
+import { consistencyDir } from '../src/tools/visual/superVisualMode.js';
+import { formatToolDone } from '../src/cli/toolRender.js';
 import { executeGenerateImage } from '../src/tools/generateImage.js';
 import { executeGenerateVideo } from '../src/tools/generateVideo.js';
 import { withRuntimeLogSink } from '../src/utils/log.js';
@@ -47,7 +50,7 @@ import type { UiLocale } from '../src/cli/locale.js';
 const EXTRA_DENYLIST: Array<{ name: string; re: RegExp }> = [
   { name: 'retired subsystem', re: /\bodin\b/i },
   // No fee / price wording in prompts and progress (billing has its own UI).
-  { name: 'cost wording', re: /费用|计费|收费|扣费|价格|\bcosts?\b|\bbilled\b|\bprices?\b|\bmoney\b/i },
+  { name: 'cost wording', re: /费用|计费|收费|扣费|价格|余额|充值|\bcosts?\b|\bbilled\b|\bprices?\b|\bmoney\b|\btop[\s-]?up\b/i },
 ];
 
 let checked = 0;
@@ -81,6 +84,20 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 }
 
 const LOCALES: UiLocale[] = ['zh-CN', 'en'];
+
+/** Names the scrubber must rewrite, as they appear in raw service errors. */
+const SCRUB_SAMPLES: Record<string, string[]> = {
+  'Super Visual': ['Super Visual', 'super_visual', 'super-visual pass', '超级视觉'],
+  Seedance: ['dreamina-seedance-2-0-260128', 'Seedance 2.0', 'seedance_2.5'],
+  Seedream: ['seedream-5-0-260128', 'Seedream 4.0'],
+  Dreamina: ['dreamina-seedance-2-0', 'Dreamina'],
+  BytePlus: ['BytePlus', 'byteplus', 'Byte Plus', 'ark.bytepluses'],
+  ModelArk: ['ModelArk', 'Model Ark'],
+  Hyperframes: ['Hyperframes'],
+  Vidar: ['Vidar'],
+  'tool code name': ['generate_long_video', 'generate_image', 'bridge_send_video', 'use_workflow', 'delegate_task'],
+  'model id': ['Image-2', 'gpt-image-2', 'gpt-image-1.5', 'doubao-seedream', 'kling-v2.1', 'veo-3.1-fast', 'sora-2'],
+};
 const STORY_ZH = '一只橘色小猫在雨夜的城市里冒险，穿过霓虹街道，最后在屋顶上看见日出。';
 const STORY_EN = 'An orange kitten explores a rainy city at night, crosses neon streets, and watches the sunrise from a rooftop.';
 
@@ -151,6 +168,18 @@ await test('string tables: setup-required and generation failure messages', () =
   for (const input of details) expectClean(`image failure ${input.detail}`, formatImageGenerationFailure(input).output);
 });
 
+await test('chat bridges: /help and the command menu list no internal command names', async () => {
+  for (const locale of LOCALES) {
+    for (const section of buildRemoteCommandHelpSections(locale)) {
+      for (const line of section.lines) expectClean(`remote help line ${locale}`, line);
+    }
+  }
+  const remoteCommands = getCommandDescriptors({ surface: 'remote' }).map((descriptor) => descriptor.remote ?? '');
+  for (const hidden of ['/nidhogg', '/bifrost', '/heimdall']) {
+    assert.ok(!remoteCommands.some((command) => command.startsWith(hidden)), `${hidden} is not listed for chat bridges`);
+  }
+});
+
 await test('string tables: command descriptions (help, menus, chat /help)', () => {
   for (const descriptor of getCommandDescriptors()) {
     // Command syntax the user types ("artemis bragi telegram") is input, not a name we show off.
@@ -163,11 +192,57 @@ await test('string tables: command descriptions (help, menus, chat /help)', () =
   }
 });
 
-await test('scrubber: internal names in progress lines become plain words', () => {
-  const line = '🎨 Saga: Super Visual 第 1 段 · Saga Critic: ok · BytePlus dreamina-seedance-2-0-260128 / seedream-5-0-260128 · generate_long_video';
+await test('scrubber: vendor, model and tool names become plain words', () => {
+  const line = '🎨 Super Visual 第 1 段 · BytePlus dreamina-seedance-2-0-260128 / seedream-5-0-260128 · generate_long_video · Image-2 · gpt-image-2 · kling-v2 · veo-3 · Vidar asset upload · ModelArk · hyperframes';
   const scrubbed = scrubInternalNames(line);
   expectClean('scrubbed progress line', scrubbed);
   assert.match(scrubbed, /第 1 段/);
+  // Every pattern the scrubber handles: whatever the guard finds, the scrubber removes.
+  for (const pattern of INTERNAL_NAME_PATTERNS.filter((entry) => entry.scrub)) {
+    for (const sample of SCRUB_SAMPLES[pattern.name] ?? []) {
+      const after = scrubInternalNames(`error: ${sample} failed`);
+      assert.deepEqual(findInternalNames(after).filter((hit) => hit.name === pattern.name), [], `${pattern.name}: "${sample}" → "${after}"`);
+    }
+  }
+});
+
+await test('scrubber: never touches paths, titles, user names, ordinary words or spacing', () => {
+  const unchanged = [
+    'Title: The Saga of Thor',
+    '   /m/long-videos/video-1/2026_10s_9x16_The-Saga-of-Thor_video-1.mp4',
+    'C:\\Users\\me\\seedance\\clip.mp4',
+    'saved to /tmp/seedance-tests/out.mp4 and seedance.mp4',
+    'https://cdn.example.test/dreamina-seedance/clip.mp4',
+    'Critic said ok; Bragi Ragnarsson walks into the gateway of Odin',
+    '  · indented    with   gaps\n    and a second line',
+    'A critical image-to-image step',
+  ];
+  for (const text of unchanged) assert.equal(scrubInternalNames(text), text, text);
+  assert.equal(scrubInternalNames('BytePlus  failed at /x/seedream/a.png'), 'provider  failed at /x/seedream/a.png', 'only the name changes');
+});
+
+await test('raw service errors reach users as plain sentences', () => {
+  expectClean('consistency off reason', plainConsistencyReason('the character reference sheet could not be made (Image-2 relay: HTTP 502 upstream_error from gpt-image-2)'));
+  assert.equal(plainConsistencyReason('Image-2 character turnaround generation failed: HTTP 500'), 'the character reference sheet could not be made');
+  assert.match(plainConsistencyReason('image model cannot generate from reference images'), /cannot generate from reference images/);
+  for (const output of [
+    'Video generation: reference upload failed (HTTP 403): <Error>AccessDenied</Error>',
+    'Video generation failed: BytePlus dreamina-seedance-2-0-260128 returned HTTP 500\nReason: The video service had a temporary error. Try again later.',
+    'Image generation failed: model gpt-image-2 refused the prompt (Image-2 relay)',
+    'Long video error: ModelArk task for seedance-2-0 timed out',
+  ]) {
+    const row = formatToolDone({ name: 'generate_video', args: {}, ok: false, output, durationMs: 1200, locale: 'en' }).replace(/\u001b\[[0-9;]*m/g, '');
+    expectClean(`failed tool row for "${output.slice(0, 30)}"`, row);
+  }
+});
+
+await test('old projects resume from the legacy reference folder', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'artemis-guard-legacy-'));
+  const legacy = path.join(root, 'old');
+  mkdirSync(path.join(legacy, 'super-visual'), { recursive: true });
+  assert.equal(consistencyDir(legacy), path.join(legacy, 'super-visual'));
+  const fresh = path.join(root, 'new');
+  assert.equal(consistencyDir(fresh), path.join(fresh, 'consistency'));
 });
 
 // ── Wizard flows (long video) ──────────────────────────────────────────────
@@ -321,6 +396,8 @@ await test('chat bridge: /longvideo, /saga, the offer and the wizard as a chat u
       } as any)).replies.join('\n');
       const zh = locale === 'zh-CN';
       for (const text of [
+        '/help',
+        '/status',
         '/longvideo',
         '/saga',
         `/longvideo ${zh ? STORY_ZH : STORY_EN}`,

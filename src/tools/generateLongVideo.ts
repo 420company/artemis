@@ -28,6 +28,7 @@ import {
   describeUserImageWithVision,
   generateSafeBridgeKeyframe,
   generateSegmentKeyframe,
+  consistencyDir,
   maybeGenerateSuperVisualReference,
   SUPER_VISUAL_TURNAROUND_IMAGES,
   SuperVisualImageBudget,
@@ -205,6 +206,19 @@ function coerceNarrativeEntities(raw: GenerateLongVideoAction['narrativeEntities
     modeRationale: typeof raw.modeRationale === 'string' ? raw.modeRationale : '',
     source,
   };
+}
+
+/**
+ * Why the identity-consistency pass is off, as a user reads it: a known
+ * reason in plain words, a failed reference sheet without the raw service
+ * error (which the project plan keeps).
+ */
+export function plainConsistencyReason(reason: string | undefined): string {
+  const text = (reason ?? '').trim();
+  if (!text) return 'not used for this video';
+  if (/could not be made|turnaround generation failed/i.test(text)) return 'the character reference sheet could not be made';
+  if (/failed|error|HTTP \d{3}/i.test(text)) return 'the image service was not available';
+  return scrubInternalNames(text);
 }
 
 function normalizeProjectId(raw: string | undefined): string {
@@ -1583,7 +1597,7 @@ export async function executeGenerateLongVideo(
       } else {
         let visionDesc: string | null = null;
         try {
-          const cachedPath = path.join(projectDir, 'consistency', 'character-vision-description.txt');
+          const cachedPath = path.join(consistencyDir(projectDir), 'character-vision-description.txt');
           visionDesc = (await readFile(cachedPath, 'utf8')).trim() || null;
         } catch { /* no cache */ }
         // Prefer the local copies SV already downloaded (covers URL-only case);
@@ -1985,7 +1999,7 @@ export async function executeGenerateLongVideo(
       userReferenceImagePaths.length > 1
       && (realPersonInput || humanOrMixedSubject)
     ) {
-      const sheetOutputPath = path.join(projectDir, 'consistency', 'ensemble-cast-sheet.png');
+      const sheetOutputPath = path.join(consistencyDir(projectDir), 'ensemble-cast-sheet.png');
       const sheet = await buildEnsembleContactSheet({
         imagePaths: userReferenceImagePaths,
         outputPath: sheetOutputPath,
@@ -2572,7 +2586,7 @@ export async function executeGenerateLongVideo(
               ? `Super Visual bypassed by explicit identitySource=${identitySource}; user images are sent directly as video references.`
               : undefined,
             !superVisualMode.enabled && !explicitUserImageBypass
-              ? `Super Visual is disabled/unavailable: ${superVisualMode.reason}`
+              ? `Consistency pass is off: ${superVisualMode.reason}`
               : undefined,
             segmentKeyframeFailures.length > 0
               ? `Segment keyframes failed: ${segmentKeyframeFailures.map((f) => `seg${f.index}: ${f.reason}`).join('; ')}`
@@ -2713,7 +2727,7 @@ export async function executeGenerateLongVideo(
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
       `   · Soundtrack:   ${soundtrackLine}`,
       `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
-      `   · Consistency:  ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${scrubInternalNames(superVisualMode.reason ?? '')})`}`,
+      `   · Consistency:  ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${plainConsistencyReason(superVisualMode.reason)})`}`,
       `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''} · images=${superVisualImageBudget.used}/${superVisualImageBudget.max}`,
       `   · References:   user-image-dropped=${userImageReferenceDroppedSegments.length}`,
       narrativeEntities

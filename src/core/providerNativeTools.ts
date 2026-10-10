@@ -1060,7 +1060,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           ratio: optionalStringSchema('Optional aspect ratio (e.g., 16:9).'),
           duration: integerSchema('Optional duration in seconds (1-60).'),
           resolution: optionalStringSchema(
-            'Optional output resolution: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution, since it costs several times more.',
+            'Optional output resolution: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution (higher quality, much slower).',
           ),
           outputPath: optionalStringSchema('Optional local file path to save the generated video.'),
           referenceImageUrls: {
@@ -1153,7 +1153,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           duration: integerSchema('Optional total duration in seconds.'),
           totalDuration: integerSchema('Optional total duration in seconds (preferred over duration).'),
           resolution: optionalStringSchema(
-            'Optional output resolution of every segment: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution, since it costs several times more per segment.',
+            'Optional output resolution of every segment: 480p, 720p or 1080p. Omit it to use the provider default; use 1080p only when the user asks for HD / high resolution (higher quality, much slower per segment).',
           ),
           projectId: optionalStringSchema('Optional project id. Used to resume a previous run.'),
           outputPath: optionalStringSchema('Optional final MP4 output path. Omit this unless the user explicitly requested a location; the pipeline otherwise creates a unique searchable filename.'),

@@ -15,26 +15,40 @@
  */
 
 /**
- * Internal names, case-insensitive. Word-bounded where the name is also an
- * English word ("critic" must not match "critical", "gateway" in a user's own
- * text is not checked — only text Artemis writes is).
+ * One internal name: `re` finds it in user-facing text (the guard tests);
+ * `scrub`, when set, is how the last-line scrubber rewrites it. Only names
+ * that can never be ordinary words get a `scrub` (vendor and model ids,
+ * snake_case tool names); the others ("Saga", "Critic", "Bragi" — also a
+ * title, a word or a character's name) are removed at their source instead,
+ * and the guard tests fail when one reaches a user.
  */
-export const INTERNAL_NAME_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
+export type InternalNamePattern = {
+  name: string;
+  re: RegExp;
+  scrub?: { re: RegExp; to: string };
+};
+
+/** Internal names, case-insensitive; word-bounded where the name is also an English word. */
+export const INTERNAL_NAME_PATTERNS: ReadonlyArray<InternalNamePattern> = [
   { name: 'Saga', re: /saga/i },
-  { name: 'Super Visual', re: /super[\s_-]?visual|超级视觉/i },
-  { name: 'Seedance', re: /seedance/i },
-  { name: 'Seedream', re: /seedream/i },
-  { name: 'Dreamina', re: /dreamina/i },
-  { name: 'BytePlus', re: /byte[\s-]?plus|bytepluses/i },
-  { name: 'ModelArk', re: /model[\s-]?ark/i },
+  {
+    name: 'Super Visual',
+    re: /super[\s_-]?visual|超级视觉/i,
+    scrub: { re: /super[\s_-]?visual|超级视觉/gi, to: 'consistency' },
+  },
+  { name: 'Seedance', re: /seedance/i, scrub: { re: /[\w.-]*seedance[\w.-]*/gi, to: 'video model' } },
+  { name: 'Seedream', re: /seedream/i, scrub: { re: /[\w.-]*seedream[\w.-]*/gi, to: 'image model' } },
+  { name: 'Dreamina', re: /dreamina/i, scrub: { re: /[\w.-]*dreamina[\w.-]*/gi, to: 'video model' } },
+  { name: 'BytePlus', re: /byte[\s-]?plus|bytepluses/i, scrub: { re: /\bbyte[\s-]?plus(?:es)?\b/gi, to: 'provider' } },
+  { name: 'ModelArk', re: /model[\s-]?ark/i, scrub: { re: /\bmodel[\s-]?ark\b/gi, to: 'provider' } },
   { name: 'Nidhogg', re: /nidhogg/i },
   { name: 'Mnemosyne', re: /mnemosyne/i },
   { name: 'Bragi', re: /bragi/i },
   { name: 'Freya', re: /\bfreya\b/i },
   { name: 'Heimdall', re: /heimdall/i },
   { name: 'Bifrost', re: /bifrost/i },
-  { name: 'Hyperframes', re: /hyperframes/i },
-  { name: 'Vidar', re: /\bvidar\b/i },
+  { name: 'Hyperframes', re: /hyperframes/i, scrub: { re: /\bhyperframes\b/gi, to: 'renderer' } },
+  { name: 'Vidar', re: /\bvidar\b/i, scrub: { re: /\bvidar\b/gi, to: 'media' } },
   { name: 'Director', re: /\bdirector\b/i },
   { name: 'Critic', re: /\bcritic\b/i },
   { name: 'Constitution', re: /\bconstitution\b/i },
@@ -44,9 +58,32 @@ export const INTERNAL_NAME_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }>
   {
     name: 'tool code name',
     re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|use_workflow|delegate_task|spawn_background_workflow)\b/i,
+    scrub: {
+      re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|use_workflow|delegate_task|spawn_background_workflow)\b/gi,
+      to: '',
+    },
   },
-  { name: 'model id', re: /\b(?:gpt-image-\d|image-2\b|doubao-|kling-|veo-\d|sora-\d)/i },
+  {
+    name: 'model id',
+    re: /\b(?:gpt-image-\d|image-2\b|doubao-|kling-|veo-\d|sora-\d)/i,
+    scrub: { re: /\b(?:gpt-image-\d[\w.-]*|image-2\b|doubao-[\w.-]*|kling-[\w.-]*|veo-\d[\w.-]*|sora-\d[\w.-]*)/gi, to: 'model' },
+  },
 ];
+
+const TOOL_WORDS: Readonly<Record<string, string>> = {
+  generate_long_video: 'long video',
+  generate_video: 'video',
+  generate_image: 'image',
+  generate_music: 'music',
+  generate_speech: 'speech',
+  bridge_send_video: 'send video',
+  bridge_send_image: 'send image',
+  bridge_send_file: 'send file',
+  bridge_send_message: 'send message',
+  use_workflow: 'workflow switch',
+  delegate_task: 'sub-task',
+  spawn_background_workflow: 'background task',
+};
 
 export type InternalNameHit = { name: string; match: string; index: number };
 
@@ -63,30 +100,33 @@ export function findInternalNames(text: string): InternalNameHit[] {
 }
 
 /**
- * Last-line scrubber for progress text Artemis itself writes (tool progress
- * lines, routing notes): internal names become plain words. Never applied to
- * the user's own words or the model's reply.
+ * A file path or URL: it names a real file and is never rewritten (a
+ * rewritten path points nowhere).
+ */
+const PATH_TOKEN_RE = /\S*[/\\]\S*|\S+\.[A-Za-z][A-Za-z0-9]{0,4}(?=$|[\s"'`)\]）】,，。;；:：])/g;
+
+/**
+ * Last-line scrubber for progress and error text Artemis itself writes
+ * (tool progress, raw service errors): vendor, model and tool code names
+ * become plain words. Paths and URLs are never touched, nor are names that
+ * are also ordinary words (those are removed where they are written), and
+ * whitespace changes only around a replacement. Never applied to the user's
+ * own words or to the model's reply.
  */
 export function scrubInternalNames(text: string): string {
   if (!text) return text;
-  return text
-    // "Saga's pipeline", "Saga Visual Director:", "Saga Critic:", "Saga 状态："
-    .replace(/\bSaga(?:'s)?\s+Visual\s+Director\s*[:：]?\s*/g, '')
-    .replace(/\bSaga(?:'s)?\s+(?:Narrative\s+)?Critic\s*[:：]?\s*/g, '')
-    .replace(/\b(?:Visual\s+)?Director\s+(?=pass|rewrite|optimi[sz]ation)/gi, '')
-    .replace(/\bSaga(?:'s)?\b\s*[:：]?\s*/g, '')
-    .replace(/super[\s_-]?visual/gi, 'consistency')
-    .replace(/超级视觉/g, '画面一致性')
-    .replace(/\b[\w.-]*seedance[\w.-]*/gi, 'video model')
-    .replace(/\b[\w.-]*seedream[\w.-]*/gi, 'image model')
-    .replace(/\b(?:BytePlus|bytepluses|ModelArk)\b/gi, 'provider')
-    .replace(/\b(?:Nidhogg|Mnemosyne|Bragi|Heimdall|Bifrost|Hyperframes|Vidar)\b\s*/gi, '')
-    .replace(/\bCritic\b/g, 'review')
-    .replace(/\bConstitution\b/g, 'story rules')
-    .replace(/\bgenerate_long_video\b/g, 'long video')
-    .replace(/\bgenerate_video\b/g, 'video')
-    .replace(/\bgenerate_image\b/g, 'image')
-    .replace(/[ \t]{2,}/g, ' ');
+  const kept: string[] = [];
+  let out = text.replace(PATH_TOKEN_RE, (token) => `${kept.push(token) - 1}`);
+  for (const { scrub } of INTERNAL_NAME_PATTERNS) {
+    if (!scrub) continue;
+    out = out.replace(scrub.re, (match) => {
+      const to = scrub.to || TOOL_WORDS[match.toLowerCase()] || '';
+      return to;
+    });
+  }
+  // "provider  provider" style doubles and the gap a removed word leaves.
+  out = out.replace(/\b(video model|image model|provider|model)(?:[\s/]+\1\b)+/g, '$1');
+  return out.replace(/(\d+)/g, (_, index: string) => kept[Number(index)] ?? '');
 }
 
 const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: string; outputEn?: string }>> = {

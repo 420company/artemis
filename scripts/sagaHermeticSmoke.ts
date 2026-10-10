@@ -147,7 +147,7 @@ async function superVisualOnSeedream(): Promise<void> {
       turnaroundPath: source, imageBudget: spent,
     });
     assert.equal(skipped.ok, false);
-    assert.match(skipped.ok ? '' : skipped.reason, /image cap/);
+    assert.match(skipped.ok ? '' : skipped.reason, /image limit/);
     assert.equal(requests.length, before);
   });
 

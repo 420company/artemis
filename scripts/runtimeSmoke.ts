@@ -1388,7 +1388,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
 
   assert(
     'generate_video: local video/audio references fail before API call without asset hosting',
-    result.ok === false && String(result.output).includes('local video/audio references need Vidar asset hosting'),
+    result.ok === false && String(result.output).includes('local video/audio references need media asset hosting'),
     String(result.output),
   )
 
@@ -1666,8 +1666,8 @@ async function withMockedFetch<T>(
   const formatted = formatImageGenerationFailure({ detail: gateway402, status: 402, source: 'BytePlus image API' }).output
   assert(
     'image failure: 402 message tells the user to top up and names the source',
-    formatted.startsWith('Image generation failed: insufficient balance') &&
-      formatted.includes('top up') &&
+    formatted.startsWith('Image generation failed: the image service is temporarily unavailable') &&
+      formatted.includes('try again later') && !/top up|balance/i.test(formatted.split('\n')[0]!) &&
       formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
       formatted.includes('Do not substitute a downloaded web image'),
     formatted,
@@ -1683,7 +1683,7 @@ async function withMockedFetch<T>(
   assert(
     'video failure: 402 is insufficient balance with a top-up message and the raw detail kept',
     balance.kind === 'insufficient_balance' &&
-      balance.userMessage.includes('余额不足') &&
+      balance.userMessage.includes('暂时不可用') && !/余额|充值/.test(balance.userMessage) &&
       !balance.userMessage.includes('402') &&
       balance.details.includes('insufficient_balance: Balance too low'),
     JSON.stringify(balance),
@@ -1717,7 +1717,7 @@ async function withMockedFetch<T>(
       'generate_video: a 402 from the video API returns a top-up reason, the raw error and a video_insufficient_balance ToolError',
       result.ok === false &&
         result.error?.code === 'video_insufficient_balance' &&
-        result.output.includes('Reason: The video service balance is too low') &&
+        result.output.includes('Reason: The video service is temporarily unavailable') &&
         result.output.includes('HTTP 402') &&
         (result.error?.details as any)?.httpStatus === 402,
       `${result.output} ${JSON.stringify(result.error)}`,
@@ -1770,7 +1770,7 @@ async function withMockedFetch<T>(
     assert(
       'generate_image: HTTP 402 returns ok:false with a top-up message',
       balance.result.ok === false &&
-        String(balance.result.output).startsWith('Image generation failed: insufficient balance') &&
+        String(balance.result.output).startsWith('Image generation failed: the image service is temporarily unavailable') &&
         String(balance.result.output).includes('top up'),
       String(balance.result.output),
     )
@@ -2149,7 +2149,7 @@ async function withMockedFetch<T>(
       partial.ok === true &&
         partialOutput.startsWith('Generated 1 of 2 requested image(s):') &&
         partialOutput.includes(path.join('out', 'light-1.png')) &&
-        partialOutput.includes('The other 1 image(s) failed: insufficient balance') &&
+        partialOutput.includes('The other 1 image(s) failed: the image service is temporarily unavailable') &&
         !partialOutput.includes('No image was created') &&
         fs.existsSync(path.join(workspace, 'out', 'light-1.png')),
       partialOutput,
@@ -2179,7 +2179,7 @@ async function withMockedFetch<T>(
         legacy.calls[0]!.url === 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations' &&
         legacyBody.image === `data:image/png;base64,${PNG_1X1.toString('base64')}` &&
         legacy.result.ok === false &&
-        String(legacy.result.output).startsWith('Image generation failed: insufficient balance') &&
+        String(legacy.result.output).startsWith('Image generation failed: the image service is temporarily unavailable') &&
         String(legacy.result.output).includes('BytePlus image API failed (HTTP 402)'),
       JSON.stringify({ calls: legacy.calls.map((call) => call.url), output: legacy.result.output }),
     )

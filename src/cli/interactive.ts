@@ -565,7 +565,7 @@ function buildScrollBlocksFromMessages(messages: SessionMessage[]): ScrollBlock[
     }
     if (msg.role === 'tool') {
       const toolHeader = msg.name ? `[${describeToolForUser(msg.name, 'en')}]` : '[tool]'
-      blocks.push({ kind: 'tool', text: `${toolHeader}\n${scrubInternalNames(msg.content)}` })
+      blocks.push({ kind: 'tool', text: `${toolHeader}\n${msg.content}` })
     }
   }
   return blocks
