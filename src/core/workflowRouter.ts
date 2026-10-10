@@ -83,6 +83,12 @@ export interface WorkflowRouteInput {
   attachmentCount?: number;
   /** The workspace is a code repository (has .git). */
   inCodeRepo?: boolean;
+  /**
+   * L, the configured video model's longest single clip. A video request
+   * that states a length up to L is a plain clip; longer is a long video.
+   * Unknown: a minute is the bar.
+   */
+  maxClipSeconds?: number;
 }
 
 export interface WorkflowRoute {
@@ -264,7 +270,7 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, fullText = inp
     bug,
     // Saga comes after every code / design / question check: only plain
     // creation requests for a new long video qualify.
-    saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(fullText),
+    saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(fullText, { maxClipSeconds: input.maxClipSeconds }),
   };
 }
 
@@ -313,10 +319,10 @@ export function classifyWorkflowHeuristically(signals: WorkflowSignals): Heurist
  * Sync check used before the Saga wizard on bridges and the CLI: does this
  * plain message (no slash command) look like a request for a new long video?
  */
-export function looksLikeSagaRequest(text: string): boolean {
+export function looksLikeSagaRequest(text: string, maxClipSeconds?: number): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.startsWith('/')) return false;
-  const verdict = classifyWorkflowHeuristically(collectWorkflowSignals({ text: trimmed }));
+  const verdict = classifyWorkflowHeuristically(collectWorkflowSignals({ text: trimmed, maxClipSeconds }));
   return verdict.kind === 'clear' && verdict.workflow === 'saga';
 }
 

@@ -52,6 +52,7 @@ import { mapPermissionModeToToolAccess } from '../security/permissionModes.js'
 import { loadDreamIndex, readDreamBody } from '../services/dreamStore.js'
 import { broadcastToBridges } from '../services/bridgeNotifier.js'
 import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
+import { resolveActiveVideoClipSeconds } from '../tools/visual/activeVideoModel.js'
 import { describeToolForUser, describeToolOutputForUser, scrubInternalNames } from '../utils/internalNames.js'
 import { existsSync, statSync } from 'node:fs'
 
@@ -687,7 +688,7 @@ async function runRemoteCommandInner(
       // for a new long video: ask before spending anything on generation.
       if (
         !sagaOfferAnswered && !sagaExplicit && !sagaWorkflow.prompt && !sagaWorkflow.action &&
-        looksLikeSagaRequest(command.body)
+        looksLikeSagaRequest(command.body, await resolveActiveVideoClipSeconds(commandCwd))
       ) {
         const question = await offerSagaLongVideoWorkflow({
           scope: 'bridge',
@@ -780,7 +781,7 @@ async function runRemoteCommandInner(
           }
         } else if (!wizardRewrote && !directSagaAction) {
           const route = await routeWorkflow(
-            { text: command.body, attachmentCount: command.images?.length ?? 0 },
+            { text: command.body, attachmentCount: command.images?.length ?? 0, maxClipSeconds: await resolveActiveVideoClipSeconds(commandCwd) },
             {
               // The classifier runs on the cheap router provider (specialist
               // profile at low effort), only for ambiguous long requests.

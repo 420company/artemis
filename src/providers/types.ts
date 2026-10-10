@@ -403,8 +403,31 @@ export type VisualModelConfig = {
      *  Artemis will pass user reference images directly without illustrated
      *  safety-derivative intermediaries. */
     nsfw?: boolean;
+    /**
+     * What the platform declares about this video model; wins over the
+     * built-in table (tools/visual/videoCapabilities.ts). E.g. a tier on a
+     * model that renders 30-second clips sends { "maxClipSeconds": 30 }.
+     */
+    capabilities?: VideoCapabilityDeclaration;
   };
   assetHosting?: VidarAssetHostingConfig;
+};
+
+/** `visualProfile.video.capabilities`: every field optional. */
+export type VideoCapabilityDeclaration = {
+  /** Applies only when the configured video model is this id. */
+  model?: string;
+  /** Longest single clip, in seconds (L). Requests up to L are one clip. */
+  maxClipSeconds?: number;
+  minClipSeconds?: number;
+  /** Discrete clip lengths, when the model only accepts some. */
+  allowedDurations?: number[];
+  maxPromptChars?: number;
+  ratios?: string[];
+  resolutions?: string[];
+  referenceInputs?: Array<'image' | 'video' | 'audio'>;
+  firstFrame?: boolean;
+  canGenerateAudio?: boolean;
 };
 
 export type ImageGenerationParams = {

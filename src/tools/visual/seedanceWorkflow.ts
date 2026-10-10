@@ -6,7 +6,10 @@ import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationCon
 import {
   BYTEPLUS_SEEDANCE_2_PRO_MODEL,
   isBytePlusProvider,
-  resolveVideoModelCapabilities,
+  isSeedance25Model,
+  resolveVideoModelProfile,
+  videoCapabilityOverridesFromConfig,
+  type VideoModelProfile,
 } from './videoCapabilities.js';
 import {
   analyzeNarrative,
@@ -57,6 +60,9 @@ type SeedanceWorkflowState = {
   referenceVideoPaths: string[];
   referenceAudioPaths: string[];
   duration?: number;
+  /** The configured multimodal video model and the clip lengths offered for it. */
+  model: string;
+  clipChoices: number[];
   generateAudio: boolean;
   locale: UiLocale;
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
@@ -78,8 +84,20 @@ type ExtractedReferences = {
 const WORKFLOWS = new Map<string, SeedanceWorkflowState>();
 const WORKFLOW_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_SEEDANCE_DURATION = 5;
-const MIN_SEEDANCE_2_DURATION = 4;
-const MAX_SEEDANCE_2_DURATION = 15;
+/** Seedance 2.0 keeps its four lengths; other models offer lengths up to their longest clip (L). */
+const SEEDANCE_2_0_CLIP_CHOICES = [4, 5, 10, 15];
+
+export function singleClipChoices(profile: Pick<VideoModelProfile, 'family' | 'allowedDurations' | 'minClipSeconds' | 'maxClipSeconds'>): number[] {
+  if (profile.allowedDurations && profile.allowedDurations.length > 0) return [...profile.allowedDurations];
+  if (profile.family === 'seedance-2.0' && profile.maxClipSeconds === 15) return SEEDANCE_2_0_CLIP_CHOICES;
+  const choices = [5, 10, 15, 20, 30].filter((value) => value >= profile.minClipSeconds && value <= profile.maxClipSeconds);
+  if (!choices.includes(profile.maxClipSeconds)) choices.push(profile.maxClipSeconds);
+  return choices.sort((a, b) => a - b);
+}
+
+function formatChoices(choices: number[], locale: UiLocale): string {
+  return locale === 'zh-CN' ? `${choices.join('、')} 秒` : `${choices.slice(0, -1).join(', ')}${choices.length > 1 ? ', or ' : ''}${choices[choices.length - 1]} seconds`;
+}
 
 const DIRECT_GENERATE_RE = /^(?:直接生成|只用文字|不用参考|不需要|跳过|开始生成|生成|done|go|start)$/i;
 const DIRECT_GENERATE_PREFIX_RE = /^(?:直接生成|只用文字|不用参考|不需要参考|跳过参考|start\b|go\b)/i;
@@ -241,13 +259,13 @@ function referenceCount(state: SeedanceWorkflowState): number {
   return state.referenceImageUrls.length + state.referenceVideoUrls.length + state.referenceAudioUrls.length + state.referenceImagePaths.length + state.referenceVideoPaths.length + state.referenceAudioPaths.length;
 }
 
-function extractDuration(text: string): number | undefined {
+function extractDuration(text: string, choices: number[]): number | undefined {
   if (DEFAULT_DURATION_RE.test(text.trim())) return DEFAULT_SEEDANCE_DURATION;
   const match = text.match(/(?:时长|duration)?\s*(\d{1,2})\s*(?:秒|s|sec|seconds)?/i);
   if (!match) return undefined;
   const raw = Number.parseInt(match[1], 10);
   if (!Number.isFinite(raw)) return undefined;
-  return Math.min(MAX_SEEDANCE_2_DURATION, Math.max(MIN_SEEDANCE_2_DURATION, raw));
+  return Math.min(Math.max(...choices), Math.max(Math.min(...choices), raw));
 }
 
 function extractRawDuration(text: string): number | undefined {
@@ -258,21 +276,21 @@ function extractRawDuration(text: string): number | undefined {
   return Number.isFinite(raw) ? raw : undefined;
 }
 
-function isAllowedSeedanceDuration(raw: number): boolean {
-  return raw === 4 || raw === 5 || raw === 10 || raw === 15;
+function isAllowedSeedanceDuration(raw: number, choices: number[]): boolean {
+  return choices.includes(raw);
 }
 
 function buildInvalidDurationMessage(state: SeedanceWorkflowState, raw: number): string {
   return pickLocale(state.locale, {
     zh: [
-      `单段视频目前只支持 4、5、10、15 秒；你回复的是 ${raw} 秒。`,
-      '请回复：4、5、10、15 秒；或回复“默认/跳过”使用 5 秒。',
-      '如果你要 20 秒以上，请重新发起“生成20秒长视频”，我会帮你分段制作成一条完整的长视频。',
+      `单段视频可以是 ${formatChoices(state.clipChoices, state.locale)}；你回复的是 ${raw} 秒。`,
+      `请回复：${formatChoices(state.clipChoices, state.locale)}；或回复“默认/跳过”使用 ${DEFAULT_SEEDANCE_DURATION} 秒。`,
+      `如果你要超过 ${Math.max(...state.clipChoices)} 秒，请重新发起，例如“生成一段 1 分钟的长视频”，我会帮你分段制作成一条完整的长视频。`,
     ].join('\n'),
     en: [
-      `A single video clip can currently be 4, 5, 10, or 15 seconds; you replied ${raw} seconds.`,
-      'Reply with 4, 5, 10, or 15 seconds; or reply "default/skip" to use 5 seconds.',
-      'For 20s or longer, start a new request like "generate a 20s long video" and I will make it as one long video, segment by segment.',
+      `A single video clip can be ${formatChoices(state.clipChoices, state.locale)}; you replied ${raw} seconds.`,
+      `Reply with ${formatChoices(state.clipChoices, state.locale)}; or reply "default/skip" to use ${DEFAULT_SEEDANCE_DURATION} seconds.`,
+      `For more than ${Math.max(...state.clipChoices)} seconds, start a new request like "make a 1 minute long video" and I will make it as one long video, segment by segment.`,
     ].join('\n'),
   });
 }
@@ -411,13 +429,13 @@ function buildDurationMessage(state: SeedanceWorkflowState): string {
     zh: [
       '最后确认：请选择视频时长。',
       `已收集参考素材 ${referenceCount(state)} 个。`,
-      '可回复：4、5、10、15 秒；或回复“默认/跳过”使用 5 秒。',
+      `可回复：${formatChoices(state.clipChoices, state.locale)}；或回复“默认/跳过”使用 ${DEFAULT_SEEDANCE_DURATION} 秒。`,
       '默认生成有声视频；如果不要声音，请明确说“静音/无声”。',
     ].join('\n'),
     en: [
       'Final confirmation: choose the video length.',
       `Collected ${referenceCount(state)} reference item(s).`,
-      'Reply with 4, 5, 10, or 15 seconds; or reply "default/skip" to use 5 seconds.',
+      `Reply with ${formatChoices(state.clipChoices, state.locale)}; or reply "default/skip" to use ${DEFAULT_SEEDANCE_DURATION} seconds.`,
       'Audio is generated by default; say "silent/no audio" if you do not want sound.',
     ].join('\n'),
   });
@@ -474,7 +492,7 @@ function buildGenerationPrompt(state: SeedanceWorkflowState): string {
     '',
     '[Artemis multimodal video workflow]',
     'When you talk to the user, say 「生成视频」 / "making your video"; never name this workflow, the tool, the model or the provider.',
-    `Use generate_video with model "${BYTEPLUS_SEEDANCE_2_PRO_MODEL}".`,
+    `Use generate_video with model "${state.model}".`,
     `duration: ${state.duration ?? DEFAULT_SEEDANCE_DURATION}`,
     `generateAudio: ${state.generateAudio}`,
     ...(dreamVideoPath ? [`outputPath: ${JSON.stringify(dreamVideoPath)}`] : []),
@@ -511,18 +529,16 @@ function buildGenerationPrompt(state: SeedanceWorkflowState): string {
   return lines.join('\n');
 }
 
-async function hasSeedance2ProVideoConfig(cwd: string): Promise<boolean> {
+/** The configured model when it is a multimodal Seedance 2.x model (2.0 Pro or 2.5), with its clip choices. */
+async function multimodalVideoModel(cwd: string): Promise<{ model: string; clipChoices: number[] } | undefined> {
   const configured = await resolveConfiguredVisualProvider(cwd, 'video');
-  if (!configured) return false;
-  if (!isBytePlusProvider(configured.config.video.provider)) return false;
+  if (!configured) return undefined;
+  if (!isBytePlusProvider(configured.config.video.provider)) return undefined;
   const model = configured.config.video.model || configured.model;
-  if (model !== BYTEPLUS_SEEDANCE_2_PRO_MODEL) return false;
-  const capabilities = resolveVideoModelCapabilities(configured.config.video.provider, model);
-  return (
-    capabilities.referenceInputs.includes('image') &&
-    capabilities.referenceInputs.includes('video') &&
-    capabilities.referenceInputs.includes('audio')
-  );
+  if (model !== BYTEPLUS_SEEDANCE_2_PRO_MODEL && !isSeedance25Model(model)) return undefined;
+  const profile = resolveVideoModelProfile(configured.config.video.provider, model, videoCapabilityOverridesFromConfig(configured.config));
+  const multimodal = ['image', 'video', 'audio'].every((kind) => profile.referenceInputs.includes(kind as 'image'));
+  return multimodal ? { model, clipChoices: singleClipChoices(profile) } : undefined;
 }
 
 export async function handleSeedanceMultimodalWorkflow(
@@ -601,11 +617,11 @@ export async function handleSeedanceMultimodalWorkflow(
       if (!rawDuration && !wantsAudio(text) && !wantsSilence(text)) {
         return { handled: true, reply: buildDurationMessage(state) };
       }
-      if (rawDuration && !isAllowedSeedanceDuration(rawDuration)) {
+      if (rawDuration && !isAllowedSeedanceDuration(rawDuration, state.clipChoices)) {
         state.updatedAt = Date.now();
         return { handled: true, reply: buildInvalidDurationMessage(state, rawDuration) };
       }
-      const duration = rawDuration ? extractDuration(text) : undefined;
+      const duration = rawDuration ? extractDuration(text, state.clipChoices) : undefined;
       state.duration = duration ?? DEFAULT_SEEDANCE_DURATION;
       if (wantsAudio(text)) state.generateAudio = true;
       if (wantsSilence(text)) state.generateAudio = false;
@@ -631,7 +647,8 @@ export async function handleSeedanceMultimodalWorkflow(
     return { handled: false };
   }
 
-  if (!(await hasSeedance2ProVideoConfig(input.cwd))) {
+  const videoModel = await multimodalVideoModel(input.cwd);
+  if (!videoModel) {
     return { handled: false };
   }
 
@@ -649,6 +666,8 @@ export async function handleSeedanceMultimodalWorkflow(
     referenceImagePaths: refs.imagePaths,
     referenceVideoPaths: refs.videoPaths,
     referenceAudioPaths: refs.audioPaths,
+    model: videoModel.model,
+    clipChoices: videoModel.clipChoices,
     generateAudio: !wantsSilence(text),
     locale: input.locale ?? DEFAULT_UI_LOCALE,
     deliveryPlatform: input.deliveryPlatform,
@@ -666,7 +685,7 @@ export async function handleSeedanceMultimodalWorkflow(
 
   if (latestDream) {
     nextState.stage = 'choosing_dream_source';
-    const requestedDuration = extractDuration(text);
+    const requestedDuration = extractDuration(text, nextState.clipChoices);
     if (requestedDuration) nextState.duration = requestedDuration;
     WORKFLOWS.set(key, nextState);
     return {

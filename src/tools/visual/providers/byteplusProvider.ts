@@ -17,6 +17,7 @@ import {
   getUnsupportedVideoReferences,
   isGeneratedAudioUnsupported,
   resolveVideoModelCapabilities,
+  videoCapabilityOverridesFromConfig,
 } from '../videoCapabilities.js'
 import { checkBytePlusReferenceSupport } from '../referenceImages.js'
 import { seedreamSizeFromKeyword } from '../seedreamSizes.js'
@@ -194,20 +195,21 @@ export class BytePlusProvider implements VisualProvider {
       const { apiKey, baseUrl } = await this.resolveCredentials()
       const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
       const ratio = params.ratio || '16:9'
-      const duration = normalizeVideoDurationForProvider(params.duration, this.name, model)
+      const capabilityOverrides = model === this.config.video.model ? videoCapabilityOverridesFromConfig(this.config) : undefined
+      const duration = normalizeVideoDurationForProvider(params.duration, this.name, model, capabilityOverrides)
       // Only a resolution the request asked for is sent. The configured
       // default is not: onboarding used to write 1080p there, and sending it
       // would bill every clip at 1080p; unset leaves the model's own default.
       const resolution = normalizeVideoResolution(params.resolution)
-      const capabilities = resolveVideoModelCapabilities(this.name, model)
+      const capabilities = resolveVideoModelCapabilities(this.name, model, capabilityOverrides)
       const unsupportedReferences = getUnsupportedVideoReferences(params, capabilities)
       if (unsupportedReferences.length > 0) {
         throw new Error(
-          `The selected video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}. Choose Seedance 2.0 Pro for full multimodal reference input.`,
+          `The selected video model does not accept ${formatUnsupportedVideoReferences(unsupportedReferences)}. Configure a video model that accepts multimodal references.`,
         )
       }
       if (isGeneratedAudioUnsupported(params, capabilities)) {
-        throw new Error('The selected video model cannot generate audio. Choose Seedance 2.0 Pro, or set generateAudio to false.')
+        throw new Error('The selected video model cannot generate audio. Configure a video model with audio output, or set generateAudio to false.')
       }
       
       const content: Array<Record<string, unknown>> = [

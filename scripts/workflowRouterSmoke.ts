@@ -555,8 +555,9 @@ async function main(): Promise<void> {
   });
 
   await test('saga detection: video nouns, spelled lengths, guide briefs; exclusions only before the segments', async () => {
-    for (const text of ['十分精彩', '90s-style', '1980s retro', 'make a 60s video']) assert.equal(parseRequestedVideoSeconds(text), undefined, text);
-    for (const [text, seconds] of [['做个60s的视频', 60], ['十分钟', 600], ['2分30秒', 150], ['90-second trailer', 90], ['a 2-minute film', 120], ['1.5 minutes', 90], ['一分钟', 60], ['两分钟', 120], ['九十秒', 90], ['一分半', 90], ['1分半', 90], ['one-minute ad', 60]] as const) {
+    for (const text of ['十分精彩', '90s-style', '1980s retro', 'an 80s music video', 'the 60s']) assert.equal(parseRequestedVideoSeconds(text), undefined, text);
+    // A round "60s" before a video word is a length, not a decade.
+    for (const [text, seconds] of [['make a 60s video', 60], ['a 30s clip', 30], ['做个60s的视频', 60], ['十分钟', 600], ['2分30秒', 150], ['90-second trailer', 90], ['a 2-minute film', 120], ['1.5 minutes', 90], ['一分钟', 60], ['两分钟', 120], ['九十秒', 90], ['一分半', 90], ['1分半', 90], ['one-minute ad', 60]] as const) {
       assert.equal(parseRequestedVideoSeconds(text), seconds, text);
     }
     const brief = `【整片叙事】一个女孩在旧影院里重逢童年的自己。\n主体模式：有主角。身份来源：纯文字。\n[0-8秒] 女孩推开旧影院的门，灰尘在光束中飘浮。\n[8-16秒] 她走到银幕前，银幕上映出海浪。\n[16-24秒] 童年的她从银幕里走出来，轻声问："你还记得我吗？"`;

@@ -64,6 +64,8 @@ import {
   renderSagaProject,
 } from './visual/sagaRenderer/index.js';
 import { extractOpeningFramingRegex, formatOpeningFramingBlock } from './visual/sagaFraming.js';
+import { planSegmentDurations, splitLongShots } from './visual/segmentPlan.js';
+import { videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
 import { formatGlobalBriefExcerpt, parseSagaBriefGlobals, stripBriefNoise, worldAnchorLinesFor } from './visual/sagaBriefGlobals.js';
 import type { SagaContinuityMode } from './visual/sagaRenderer/continuity.js';
@@ -546,11 +548,11 @@ function sanitizeInline(value: string | undefined, fallback: string): string {
   return normalized || fallback;
 }
 
+/** A shot length within the model's clip limit (hard); 4 s is a soft floor that a short limit may go under. */
 function normalizeShotDuration(value: number | undefined, fallback: number, maxSegmentSeconds: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return Math.max(4, Math.min(maxSegmentSeconds, Math.floor(fallback)));
-  }
-  return Math.max(4, Math.min(maxSegmentSeconds, Math.floor(value)));
+  const softMin = maxSegmentSeconds >= 8 ? 4 : 1;
+  const raw = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return Math.min(maxSegmentSeconds, Math.max(softMin, Math.floor(raw)));
 }
 
 function distributeDurations(totalSeconds: number, segmentCount: number, maxSegmentSeconds: number): number[] {
@@ -664,7 +666,9 @@ function parseTimestampedShotsFromStory(
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    const duration = Math.max(4, Math.min(maxSegmentSeconds, Math.round(end - start)));
+    // Kept at the written length: a segment longer than the model's clip is
+    // split later (splitLongShots), never cut short.
+    const duration = Math.max(4, Math.round(end - start));
     const title = `${Math.round(start)}-${Math.round(end)}s`;
     const cameraMatch = body.match(/(?:镜头|camera)[:：]\s*([^。.!！?\n]+)/i);
     const transitionMatch = body.match(/(?:转场|transition)[:：]\s*([^。.!！?\n]+)/i);
@@ -870,6 +874,7 @@ function buildSegments(options: {
   hyperframesProjectDir: string;
   totalSeconds: number;
   maxSegmentSeconds: number;
+  minSegmentSeconds?: number;
   preferredSegmentSeconds: number;
   ratio: SagaRatio;
   continuityInput: ReturnType<typeof buildContinuityBible>;
@@ -888,10 +893,10 @@ function buildSegments(options: {
   // Cap segment count so the per-shot 4s floor can never push the total past the
   // requested duration: a 5s request with 3 script sub-beats must NOT become 3×4s=12s.
   // floor(total/4) = the most shots that fit at the 4s minimum; merge beyond that.
-  const maxSegmentsByTotal = Math.max(1, Math.floor(options.totalSeconds / 4));
-  const requestedSegmentCount = plannedShots.length > 0
-    ? plannedShots.length
-    : Math.max(1, Math.ceil(options.totalSeconds / Math.max(4, Math.min(options.preferredSegmentSeconds, 6))));
+  const maxSegmentsByTotal = Math.max(1, Math.floor(options.totalSeconds / 4), Math.ceil(options.totalSeconds / Math.max(1, options.maxSegmentSeconds)));
+  // Without planned shots: the fewest segments of at most the model's longest clip.
+  const evenPlan = planSegmentDurations(options.totalSeconds, options.maxSegmentSeconds, options.minSegmentSeconds);
+  const requestedSegmentCount = plannedShots.length > 0 ? plannedShots.length : evenPlan.length;
   const segmentCount = Math.min(requestedSegmentCount, maxSegmentsByTotal);
   if (plannedShots.length > segmentCount) {
     toolWarn(`⚠️ ${plannedShots.length} 个镜头放不进 ${options.totalSeconds}s（最多 ${segmentCount} 段）；第 ${segmentCount + 1}-${plannedShots.length} 个镜头不会生成。`);
@@ -908,7 +913,9 @@ function buildSegments(options: {
     && Math.abs(plannedDurationSum - options.totalSeconds) <= Math.max(2, options.totalSeconds * 0.15);
   const durations = usePlannedDurations
     ? plannedShots.map((shot) => normalizeShotDuration(shot.duration, options.preferredSegmentSeconds, options.maxSegmentSeconds))
-    : distributeDurations(options.totalSeconds, segmentCount, options.maxSegmentSeconds);
+    : plannedShots.length === 0 && segmentCount === evenPlan.length
+      ? evenPlan
+      : distributeDurations(options.totalSeconds, segmentCount, options.maxSegmentSeconds);
   const segments: SagaSegment[] = [];
 
   // Resolve all per-shot fields up front so we can use shot N-1's transition
@@ -1243,7 +1250,12 @@ export async function executeGenerateLongVideo(
     const model = action.model?.trim() || configured.model || configured.config.video.model;
     const videoNsfw = configured.nsfw === true || configured.config.video.nsfw === true;
     const identitySource = action.identitySource;
-    const limits = resolveVideoModelLimits(provider, model);
+    // L comes from the model's profile, or from what the platform declares
+    // for the configured model (visualProfile.video.capabilities).
+    const capabilityOverrides = model === (configured.model || configured.config.video.model)
+      ? videoCapabilityOverridesFromConfig(configured.config)
+      : undefined;
+    const limits = resolveVideoModelLimits(provider, model, capabilityOverrides);
     const ratio = resolveRatio(action.ratio);
     let totalSeconds = clampTotalSeconds(action.totalDuration ?? action.duration);
     const projectId = normalizeProjectId(action.projectId);
@@ -1767,6 +1779,15 @@ export async function executeGenerateLongVideo(
     // Sanitize per-shot author-facing fields (storyBeat / visualPrompt /
     // camera / continuity / transition / prompt). Story itself was already
     // sanitized before continuityBible was built.
+    // A written or planned shot longer than the model's longest clip becomes
+    // even parts (never truncated); the same list drives segments and transitions.
+    if (storyboardShots && storyboardShots.length > 0) {
+      const before = storyboardShots.length;
+      storyboardShots = splitLongShots(storyboardShots, limits.maxSegmentSeconds, limits.minSegmentSeconds);
+      if (storyboardShots.length > before) {
+        toolLog(`✂️ 有 ${storyboardShots.length - before} 个镜头超过单段上限 ${limits.maxSegmentSeconds} 秒，已按句子拆成更短的连续段落（共 ${storyboardShots.length} 段）。`);
+      }
+    }
     const sanitizedShots = storyboardShots?.map((shot) => ({
       ...shot,
       storyBeat: shot.storyBeat ? sanitizeForVideoProvider(shot.storyBeat) : shot.storyBeat,
@@ -1783,6 +1804,7 @@ export async function executeGenerateLongVideo(
       hyperframesProjectDir,
       totalSeconds,
       maxSegmentSeconds: limits.maxSegmentSeconds,
+      minSegmentSeconds: limits.minSegmentSeconds,
       preferredSegmentSeconds: Math.min(limits.preferredSegmentSeconds, limits.maxSegmentSeconds),
       ratio,
       continuityInput: continuityBible,

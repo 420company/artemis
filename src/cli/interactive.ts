@@ -289,6 +289,7 @@ import { getDirectToolCount } from '../tools/directTools.js'
 import type { WorkspaceSwitchRequest } from '../tools/types.js'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { withRuntimeLogSink, type RuntimeLogEntry } from '../utils/log.js'
+import { resolveActiveVideoClipSeconds } from '../tools/visual/activeVideoModel.js'
 import { describeToolForUser, scrubInternalNames, userVisibleMessageText } from '../utils/internalNames.js'
 import {
   detectVisualGenerationNeed,
@@ -2145,7 +2146,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     if (hasActiveSagaLongVideoWorkflow('cli', root) || hasActiveSeedanceMultimodalWorkflow('cli', root)) return undefined
     if (parseLongVideoCommand(requestText) !== undefined) return undefined
     return routeWorkflow(
-      { text: requestText, inCodeRepo: existsSync(path.join(root, '.git')) },
+      { text: requestText, inCodeRepo: existsSync(path.join(root, '.git')), maxClipSeconds: await resolveActiveVideoClipSeconds(root) },
       {
         getClassifier: async () => {
           const classifier = await resolveWorkflowClassifierProvider([root, resolveArtemisHomeDir()], root)

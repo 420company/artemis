@@ -18,6 +18,7 @@ import {
   isGeneratedAudioUnsupported,
   requiresGeneratedAudio,
   resolveVideoModelCapabilities,
+  videoCapabilityOverridesFromConfig,
   shouldPromoteBytePlusVideoModel,
 } from './visual/videoCapabilities.js';
 import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
@@ -550,8 +551,9 @@ async function generateVideoWithVisualProvider(
   // No provider or model name in user-facing status; the project plan and
   // manifest files record both.
   toolLog('🎬 开始生成视频。');
-  const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model);
-  const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model);
+  const capabilityOverrides = model === videoConfig.model ? videoCapabilityOverridesFromConfig(config) : undefined;
+  const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model, capabilityOverrides);
+  const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model, capabilityOverrides);
   const unsupportedReferences = getUnsupportedVideoReferences(action, capabilities);
   if (unsupportedReferences.length > 0) {
     const modelHint = isBytePlusProvider(videoConfig.provider)

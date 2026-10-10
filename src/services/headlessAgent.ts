@@ -39,7 +39,7 @@ export interface HeadlessAgentOptions {
    */
   selfCheck?: boolean
   /**
-   * What the user picked in the app (`--intent`): long_video, image,
+   * What the user picked in the app (`--intent`): video, long_video, image,
    * research or reminder (services/headlessWorkflow.ts). Unknown names are
    * ignored with a warning on onInfo.
    */
@@ -110,6 +110,7 @@ export async function runHeadlessAgent(
   const { finishSagaIfGenerated, planHeadlessWorkflow } = await import('./headlessWorkflow.js')
   const { resolveWorkflowClassifierProvider } = await import('../providers/workflowClassifier.js')
   const { resolveConfiguredVisualProvider } = await import('../utils/visualGenerationConfig.js')
+  const { resolveActiveVideoClipSeconds } = await import('../tools/visual/activeVideoModel.js')
   const { resolveArtemisHomeDir } = await import('../utils/fs.js')
   const { existsSync } = await import('node:fs')
   const { join } = await import('node:path')
@@ -137,6 +138,7 @@ export async function runHeadlessAgent(
       // Only a configured worker model classifies; never the main model.
       getClassifier: () => resolveWorkflowClassifierProvider([cwd, resolveArtemisHomeDir()], cwd),
       hasVideoProvider: async () => Boolean(await resolveConfiguredVisualProvider(cwd, 'video')),
+      videoClipSeconds: () => resolveActiveVideoClipSeconds(cwd),
       onInfo,
       ...(opts.intent !== undefined ? { intent: opts.intent } : {}),
     })

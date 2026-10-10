@@ -1,4 +1,4 @@
-import type { VisualModelConfig } from '../../providers/types.js';
+import type { VideoCapabilityDeclaration, VisualModelConfig } from '../../providers/types.js';
 
 export type VideoReferenceKind = 'image' | 'video' | 'audio';
 
@@ -56,106 +56,169 @@ export function isBytePlusProvider(provider: string | undefined): boolean {
   return normalize(provider) === 'byteplus';
 }
 
+/** Seedance 2.5 (any vendor prefix: "dreamina-seedance-2-5-…", "seedance_2.5", "Seedance 2.5 Pro"). */
+export function isSeedance25Model(model: string | undefined): boolean {
+  return /seedance[-_ ]?2[._ -]?5(?!\d)/i.test(model ?? '');
+}
+
+/** Seedance 2.0 only. Use isSeedance2xModel for the 2.x family. */
 export function isSeedance2Model(model: string | undefined): boolean {
-  const key = normalize(model);
-  return key.includes('dreamina-seedance-2-0') || key.includes('seedance-2-0');
+  return /seedance[-_ ]?2[._ -]?0(?!\d)/i.test(model ?? '');
+}
+
+/** Seedance 2.0 or 2.5: multimodal references and generated audio. */
+export function isSeedance2xModel(model: string | undefined): boolean {
+  return isSeedance2Model(model) || isSeedance25Model(model);
 }
 
 export function isSeedance15Model(model: string | undefined): boolean {
-  return normalize(model).includes('seedance-1-5');
+  return /seedance[-_ ]?1[._ -]?5(?!\d)/i.test(model ?? '');
+}
+
+/** Seedance 1.0 ("seedance-1-0-pro", "Seedance 1.0 Lite"). */
+export function isSeedance10Model(model: string | undefined): boolean {
+  return /seedance[-_ ]?1[._ -]?0(?!\d)/i.test(model ?? '');
+}
+
+/**
+ * What the platform (or an operator) declares about the configured video
+ * model, written as `visualProfile.video.capabilities` in providers.json.
+ * Every field is optional and wins over the built-in table; `model`, when
+ * set, limits the override to that model id.
+ */
+export type VideoCapabilityOverrides = VideoCapabilityDeclaration;
+
+/** Everything Artemis needs to know about one video model, in one place. */
+export type VideoModelProfile = {
+  provider: string;
+  model: string;
+  family: 'seedance-2.5' | 'seedance-2.0' | 'seedance-1.5' | 'seedance-1.0' | 'wan' | 'other';
+  minClipSeconds: number;
+  /** L: the longest single clip. Requests up to L are one clip; longer ones are a long video. */
+  maxClipSeconds: number;
+  allowedDurations?: readonly number[];
+  maxPromptChars: number;
+  ratios: readonly string[];
+  resolutions: readonly string[];
+  referenceInputs: readonly VideoReferenceKind[];
+  firstFrame: boolean;
+  canGenerateAudio: boolean;
+  /** 'platform' when an override changed anything. */
+  source: 'builtin' | 'platform';
+};
+
+/**
+ * Longest prompt Artemis sends a model. ModelArk publishes no figure for
+ * Seedance; the Artemis App sent Seedance prompts of about 4,100 characters
+ * in production, so 4,000 keeps a margin. Other models get the directed
+ * prompt cap (videoDirector.ts), the longest prompt sent to them so far.
+ */
+const SEEDANCE_PROMPT_CHARS = 4000;
+const DIRECTED_PROMPT_CHARS = 2600;
+const SEEDANCE_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
+const COMMON_RATIOS = ['16:9', '9:16', '1:1'] as const;
+const RESOLUTIONS = ['480p', '720p', '1080p'] as const;
+/** Unknown models: a conservative clip length most video APIs accept. */
+const OTHER_MAX_CLIP_SECONDS = 10;
+
+function builtinProfile(provider: string, model: string): Omit<VideoModelProfile, 'source'> {
+  const key = normalize(model);
+  const seedancePrompt = /seedance|dreamina/.test(key) ? SEEDANCE_PROMPT_CHARS : DIRECTED_PROMPT_CHARS;
+  const base = { provider, model, maxPromptChars: seedancePrompt, resolutions: RESOLUTIONS };
+  if (isSeedance25Model(model)) {
+    return { ...base, family: 'seedance-2.5', minClipSeconds: 4, maxClipSeconds: 30, ratios: SEEDANCE_RATIOS, referenceInputs: ['image', 'video', 'audio'], firstFrame: true, canGenerateAudio: true };
+  }
+  if (isSeedance2Model(model)) {
+    return { ...base, family: 'seedance-2.0', minClipSeconds: 4, maxClipSeconds: 15, ratios: SEEDANCE_RATIOS, referenceInputs: ['image', 'video', 'audio'], firstFrame: true, canGenerateAudio: true };
+  }
+  if (isSeedance15Model(model)) {
+    return { ...base, family: 'seedance-1.5', minClipSeconds: 4, maxClipSeconds: 12, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: true };
+  }
+  if (isSeedance10Model(model)) {
+    return { ...base, family: 'seedance-1.0', minClipSeconds: 4, maxClipSeconds: 10, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: false };
+  }
+  if (/^wan2\.[67]-/.test(key)) {
+    const referenceInputs: VideoReferenceKind[] = key.includes('-r2v')
+      ? ['image', 'video']
+      : key.includes('-i2v') ? ['image'] : [];
+    return {
+      ...base,
+      family: 'wan',
+      minClipSeconds: 4,
+      maxClipSeconds: 10,
+      ratios: COMMON_RATIOS,
+      referenceInputs,
+      firstFrame: key.includes('-i2v'),
+      canGenerateAudio: key.startsWith('wan2.6-') && key.includes('audio'),
+    };
+  }
+  return { ...base, family: 'other', minClipSeconds: 4, maxClipSeconds: OTHER_MAX_CLIP_SECONDS, ratios: COMMON_RATIOS, referenceInputs: [], firstFrame: false, canGenerateAudio: false };
+}
+
+function positiveSeconds(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 600 ? Math.floor(value) : undefined;
+}
+
+function stringList(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim())
+    ? value.map((item: string) => item.trim())
+    : undefined;
+}
+
+/** The video profile of a provider/model, with the platform's overrides applied. */
+export function resolveVideoModelProfile(
+  provider: string,
+  model: string,
+  overrides?: VideoCapabilityOverrides,
+): VideoModelProfile {
+  const builtin = builtinProfile(provider, model);
+  if (!overrides || (overrides.model && normalize(overrides.model) !== normalize(model))) {
+    return { ...builtin, source: 'builtin' };
+  }
+  const maxClipSeconds = positiveSeconds(overrides.maxClipSeconds) ?? builtin.maxClipSeconds;
+  const minClipSeconds = Math.min(positiveSeconds(overrides.minClipSeconds) ?? builtin.minClipSeconds, maxClipSeconds);
+  const allowed = Array.isArray(overrides.allowedDurations)
+    ? overrides.allowedDurations.map(positiveSeconds).filter((value): value is number => value !== undefined && value <= maxClipSeconds).sort((a, b) => a - b)
+    : undefined;
+  const referenceInputs = Array.isArray(overrides.referenceInputs)
+    ? overrides.referenceInputs.filter((kind): kind is VideoReferenceKind => kind === 'image' || kind === 'video' || kind === 'audio')
+    : undefined;
+  return {
+    ...builtin,
+    minClipSeconds,
+    maxClipSeconds,
+    ...(allowed && allowed.length > 0 ? { allowedDurations: allowed } : {}),
+    maxPromptChars: typeof overrides.maxPromptChars === 'number' && Number.isFinite(overrides.maxPromptChars) && overrides.maxPromptChars >= 200
+      ? Math.floor(overrides.maxPromptChars)
+      : builtin.maxPromptChars,
+    ratios: stringList(overrides.ratios) ?? builtin.ratios,
+    resolutions: stringList(overrides.resolutions)?.map((value) => value.toLowerCase()) ?? builtin.resolutions,
+    referenceInputs: referenceInputs ?? builtin.referenceInputs,
+    firstFrame: typeof overrides.firstFrame === 'boolean' ? overrides.firstFrame : builtin.firstFrame,
+    canGenerateAudio: typeof overrides.canGenerateAudio === 'boolean' ? overrides.canGenerateAudio : builtin.canGenerateAudio,
+    source: 'platform',
+  };
+}
+
+/** The platform's declared capabilities for the configured video model, if any. */
+export function videoCapabilityOverridesFromConfig(
+  config: Partial<VisualModelConfig> | undefined,
+): VideoCapabilityOverrides | undefined {
+  const raw: unknown = config?.video?.capabilities;
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as VideoCapabilityOverrides : undefined;
 }
 
 export function resolveVideoModelCapabilities(
   provider: string,
   model: string,
+  overrides?: VideoCapabilityOverrides,
 ): VideoModelCapabilities {
-  const providerKey = normalize(provider);
-  if (providerKey === 'byteplus') {
-    if (isSeedance2Model(model)) {
-      return {
-        provider,
-        model,
-        referenceInputs: ['image', 'video', 'audio'],
-        canGenerateAudio: true,
-      };
-    }
-    if (isSeedance15Model(model)) {
-      return {
-        provider,
-        model,
-        referenceInputs: ['image'],
-        canGenerateAudio: true,
-      };
-    }
-  }
-
-  // Seedance models via custom provider (e.g. OpenCrow)
-  const modelKey = normalize(model)
-  if (isSeedance2Model(model)) {
-    return {
-      provider,
-      model,
-      referenceInputs: ['image', 'video', 'audio'],
-      canGenerateAudio: true,
-    }
-  }
-  if (isSeedance15Model(model)) {
-    return {
-      provider,
-      model,
-      referenceInputs: ['image'],
-      canGenerateAudio: true,
-    }
-  }
-  if (modelKey.includes('seedance-1-0')) {
-    return {
-      provider,
-      model,
-      referenceInputs: ['image'],
-      canGenerateAudio: false,
-    }
-  }
-
-  // Wan 2.x models via custom provider
-  if (modelKey.startsWith('wan2.7-r2v') || modelKey.startsWith('wan2.6-r2v')) {
-    return {
-      provider,
-      model,
-      referenceInputs: ['image', 'video'],
-      canGenerateAudio: false,
-    }
-  }
-  if (modelKey.startsWith('wan2.7-i2v') || modelKey.startsWith('wan2.6-i2v')) {
-    return {
-      provider,
-      model,
-      referenceInputs: ['image'],
-      canGenerateAudio: false,
-    }
-  }
-  if (modelKey.startsWith('wan2.7-t2v') || modelKey.startsWith('wan2.6-t2v')) {
-    return {
-      provider,
-      model,
-      referenceInputs: [],
-      canGenerateAudio: false,
-    }
-  }
-  // Wan 2.6-t2v / i2v with audio support
-  if (modelKey.startsWith('wan2.6-') && modelKey.includes('audio')) {
-    return {
-      provider,
-      model,
-      referenceInputs: modelKey.includes('i2v') ? ['image'] : [],
-      canGenerateAudio: true,
-    }
-  }
-
+  const profile = resolveVideoModelProfile(provider, model, overrides);
   return {
     provider,
     model,
-    referenceInputs: [],
-    canGenerateAudio: false,
+    referenceInputs: profile.referenceInputs,
+    canGenerateAudio: profile.canGenerateAudio,
   };
 }
 
@@ -178,7 +241,7 @@ export function shouldPromoteBytePlusVideoModel(
     isBytePlusProvider(config.video.provider) &&
     !action.model?.trim() &&
     (hasMultimodalVideoReferences(action) || requiresGeneratedAudio(action)) &&
-    !isSeedance2Model(config.video.model)
+    !isSeedance2xModel(config.video.model)
   );
 }
 
