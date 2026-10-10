@@ -1665,9 +1665,9 @@ async function withMockedFetch<T>(
   )
   const formatted = formatImageGenerationFailure({ detail: gateway402, status: 402, source: 'BytePlus image API' }).output
   assert(
-    'image failure: 402 message tells the user to top up and names the source',
+    'image failure: 402 reads as a temporary outage (no top-up wording) and names the source',
     formatted.startsWith('Image generation failed: the image service is temporarily unavailable') &&
-      formatted.includes('try again later') && !/top up|balance/i.test(formatted.split('\n')[0]!) &&
+      formatted.includes('try again later') && !/top up/i.test(formatted.split('\n')[0]!) &&
       formatted.includes('BytePlus image API failed (HTTP 402): insufficient_balance: Balance too low') &&
       formatted.includes('Do not substitute a downloaded web image'),
     formatted,
