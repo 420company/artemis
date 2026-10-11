@@ -5,6 +5,7 @@ import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
+import { convertToSpeechWav, FfmpegMissingError } from './audioChunks.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -132,9 +133,29 @@ function normalizeText(text: string): string {
     .trim();
 }
 
+/** Whether a local Whisper engine is installed (the platform's fallback). */
+export async function localSttAvailable(options: Pick<LocalSttOptions, 'engine' | 'command'> = {}): Promise<boolean> {
+  try {
+    await resolveExecutable({ inputPath: '', ...options });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function transcribeWithWhisperCpp(command: string, inputPath: string, options: LocalSttOptions): Promise<LocalSttResult> {
   const modelPath = await resolveWhisperCppModel(options);
   const outBase = path.join(os.tmpdir(), `artemis-stt-${Date.now()}`);
+  // whisper.cpp reads WAV best (older builds nothing else): convert video
+  // and other audio first when ffmpeg is there, else try the file as it is.
+  if (path.extname(inputPath).toLowerCase() !== '.wav') {
+    try {
+      await convertToSpeechWav(inputPath, `${outBase}.wav`);
+      inputPath = `${outBase}.wav`;
+    } catch (error) {
+      if (!(error instanceof FfmpegMissingError)) throw error;
+    }
+  }
   const args = ['-m', modelPath, '-f', inputPath, '-otxt', '-of', outBase];
   if (options.language?.trim()) {
     args.push('-l', options.language.trim());

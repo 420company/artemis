@@ -27,7 +27,9 @@ export async function executeSynthesizeSpeech(
   const result = await synthesizeEdgeTts({
     cwd: context.cwd,
     text: action.text,
-    voice: action.voice ?? tts?.voice,
+    voice: action.voice,
+    // The configured voice unless it cannot speak this text (an English voice for Chinese).
+    configuredVoice: tts?.voice,
     language: action.language,
     outputPath: action.outputPath,
     rate: action.rate,

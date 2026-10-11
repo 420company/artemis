@@ -1275,9 +1275,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         required: ['text'],
         properties: {
           text: nonEmptyStringSchema('Text to synthesize into speech.'),
-          voice: optionalStringSchema('Optional Microsoft Edge voice name, e.g. en-US-AriaNeural or zh-CN-XiaoxiaoNeural. Defaults to setup configuration.'),
+          voice: optionalStringSchema('Optional Microsoft Edge voice name. Chinese: zh-CN-XiaoxiaoNeural (female, warm; default for Chinese text), zh-CN-XiaoyiNeural (female, lively), zh-CN-YunxiNeural (male, conversational), zh-CN-YunjianNeural (male, deep), zh-CN-YunyangNeural (male, news), zh-TW-HsiaoChenNeural, zh-HK-HiuMaanNeural (Cantonese). English: en-US-AvaMultilingualNeural, en-US-AndrewMultilingualNeural, en-US-AriaNeural (default), en-US-GuyNeural, en-GB-SoniaNeural. Omit it to pick one that fits the text.'),
           language: optionalStringSchema('Optional BCP-47 language code, e.g. en-US or zh-CN.'),
-          outputPath: optionalStringSchema('Optional local MP3 output path. Defaults to .artemis/tts/{timestamp}.mp3 relative to cwd.'),
+          outputPath: optionalStringSchema('Optional local MP3 output path. Defaults to an audio folder next to the other generated media, where the user can play and download it. Long text is spoken in full (in pieces joined into one MP3).'),
           playAudio: {
             type: 'boolean',
             description: 'On macOS, play the generated MP3 after synthesis. Default: false for tool calls.',
@@ -1302,12 +1302,12 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['inputPath'],
         properties: {
-          inputPath: nonEmptyStringSchema('Local audio file path to transcribe. Supports formats accepted by the installed local Whisper engine.'),
-          language: optionalStringSchema('Optional language hint, e.g. en, zh, ja. Empty lets Whisper auto-detect.'),
+          inputPath: nonEmptyStringSchema('Local audio or video file to transcribe (wav, mp3, m4a, ogg, webm, mp4, mov, ...; the audio track of a video is used). Long recordings are split at pauses and transcribed in full, with timestamps per part. Uses platform speech recognition when the host has it, else local Whisper.'),
+          language: optionalStringSchema('Optional language hint, e.g. en, zh, ja. Empty lets the recogniser auto-detect.'),
           model: {
             type: 'string',
             enum: ['tiny', 'base', 'small', 'medium', 'large-v3'],
-            description: 'Local Whisper model size. Defaults to setup configuration or base.',
+            description: 'Local Whisper model size (forces local Whisper). Defaults to setup configuration or base.',
           },
           modelPath: optionalStringSchema('Optional whisper.cpp ggml model path, e.g. /path/to/ggml-base.bin.'),
           engine: {
