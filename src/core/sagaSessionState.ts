@@ -18,6 +18,8 @@ export type WorkflowRoutingState = {
   sagaActiveAt?: number;
   /** The user chose "video" without a length: "how long?" is waiting for an answer. */
   videoLengthQuestion?: { text: string; at: number; retried?: boolean; confirmSeconds?: number };
+  /** A real-world task (core/operatorPlaybook.ts) was being carried out at this time. */
+  operatorActiveAt?: number;
 };
 
 export function readWorkflowRoutingState(session: Pick<SessionRecord, 'metadata'>): WorkflowRoutingState {
@@ -30,8 +32,9 @@ export function writeWorkflowRoutingState(session: Pick<SessionRecord, 'metadata
   if (state.sagaOffer) clean.sagaOffer = state.sagaOffer;
   if (state.sagaActiveAt) clean.sagaActiveAt = state.sagaActiveAt;
   if (state.videoLengthQuestion) clean.videoLengthQuestion = state.videoLengthQuestion;
+  if (state.operatorActiveAt) clean.operatorActiveAt = state.operatorActiveAt;
   const metadata = { ...(session.metadata ?? {}) };
-  if (clean.sagaOffer || clean.sagaActiveAt || clean.videoLengthQuestion) metadata.workflowRouting = clean;
+  if (clean.sagaOffer || clean.sagaActiveAt || clean.videoLengthQuestion || clean.operatorActiveAt) metadata.workflowRouting = clean;
   else delete metadata.workflowRouting;
   session.metadata = metadata;
 }

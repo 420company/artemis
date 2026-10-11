@@ -194,6 +194,14 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  // Short progress messages the user sees while the run goes on
+  // (core/agentUpdates.ts); hosts without a live channel refuse them.
+  'post_update',
+  // Set up a server the agent rented for the user: keys and passwords in the
+  // credential store, SSH bootstrap, hardening, VPN, checks.
+  'server_setup',
+  // One-time codes sent to the agent's own mailbox/phone, when the host has one.
+  'get_verification_code',
 ];
 
 export function getAllowedActionTypesForProfile(

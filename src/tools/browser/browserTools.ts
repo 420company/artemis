@@ -374,7 +374,9 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
       if (action.value === undefined) {
         return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
       }
-      await el.fill(action.value, { timeout: 10_000 });
+      const typed = await withCredentials(action.value);
+      if (!typed.ok) return typed.result;
+      await el.fill(typed.text, { timeout: 10_000 });
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
     }, { restoreUrlOnRetry: true });
   } catch (err) {
@@ -503,6 +505,16 @@ export interface BrowserTypeAction {
   pressEnter?: boolean;
 }
 
+/** Resolves `{{credential:<name>}}` placeholders (security/credentialStore.ts) just before typing. */
+async function withCredentials(text: string): Promise<{ ok: true; text: string } | { ok: false; result: ToolResult }> {
+  if (!text.includes('{{credential:')) return { ok: true, text };
+  const { resolveCredentialPlaceholders } = await import('../../security/credentialStore.js');
+  const resolved = await resolveCredentialPlaceholders(text);
+  if (resolved.ok) return { ok: true, text: resolved.text };
+  const message = `No stored password or token named ${resolved.missing.join(', ')}. Create one with server_setup create_password, or ask the user to type it in the browser themselves.`;
+  return { ok: false, result: { ok: false, output: message, error: { code: 'credential_not_found', message } } };
+}
+
 export async function executeBrowserType(action: BrowserTypeAction): Promise<ToolResult> {
   if (!action.selector) {
     return {
@@ -514,9 +526,12 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
   try {
     return await withPageRetry(async (page) => {
       const el = page.locator(action.selector).first();
+      // `{{credential:<name>}}` types a stored password; the history keeps the placeholder.
+      const typed = await withCredentials(action.text);
+      if (!typed.ok) return typed.result;
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first
-      await el.fill(action.text);
+      await el.fill(typed.text);
       if (action.pressEnter) {
         await el.press('Enter');
         await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);

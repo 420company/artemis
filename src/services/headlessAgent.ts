@@ -116,6 +116,12 @@ export async function runHeadlessAgent(
   const { join } = await import('node:path')
   const readOnly = (opts.permissionMode ?? 'PRODUCER') === 'read-only'
 
+  // Live updates and status for the host (core/agentUpdates.ts, core/agentStatus.ts):
+  // one stderr line each, through onInfo.
+  const { AgentUpdateChannel } = await import('../core/agentUpdates.js')
+  const { AgentStatusReporter } = await import('../core/agentStatus.js')
+  const agentUpdates = readOnly ? undefined : new AgentUpdateChannel({ emit: onInfo })
+  const agentStatus = new AgentStatusReporter(onInfo)
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
   const contextNotices: string[] = []
   const started = Date.now()
@@ -143,6 +149,7 @@ export async function runHeadlessAgent(
       ...(opts.intent !== undefined ? { intent: opts.intent } : {}),
     })
     if (plan.kind === 'reply') {
+      agentStatus.finish()
       // The Saga question: answered without running the model.
       sessionStore.appendMessage(current, 'user', prompt)
       sessionStore.appendMessage(current, 'assistant', plan.reply)
@@ -150,6 +157,7 @@ export async function runHeadlessAgent(
       return { reply: plan.reply, turns: 0 }
     }
     const messagesBefore = current.messages.length
+    agentStatus.thinking()
     const runResult = await runAgent(
     current,
     // A retired workflow slash word ("/niko …") is already removed.
@@ -187,6 +195,8 @@ export async function runHeadlessAgent(
     resolveProvider: providerRouter.resolveProvider,
     resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
     onContextCompaction: (notice) => contextNotices.push(notice),
+    ...(agentUpdates ? { agentUpdates } : {}),
+    onToolActivity: (event) => agentStatus.onToolActivity(event),
     onInfo: opts.onInfo,
     ...(imageAttachments.length ? { imageAttachments } : {}),
   })
@@ -194,6 +204,9 @@ export async function runHeadlessAgent(
     if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
       await sessionStore.save(current)
     }
+    // The run is over. (A run that stops at an approval request reports
+    // statusForApprovalKind(kind) here instead, so the owner sees what waits.)
+    agentStatus.finish()
     return runResult
   }, { label: `Session ${session.id}` })
 

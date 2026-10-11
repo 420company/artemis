@@ -47,6 +47,11 @@ export type SessionMessage = {
     savedTo?: string;
     clearedAt: string;
   };
+  /**
+   * Set on the tool result of a delivered post_update: the chat history
+   * shows it as an assistant message of its own (core/agentUpdates.ts).
+   */
+  agentUpdate?: { id: string; text: string };
 };
 
 export type CompactionBoundaryInfo = {
@@ -759,7 +764,13 @@ export type AgentAction =
   | { type: 'memory'; action: 'save' | 'update' | 'delete' | 'list'; scope?: 'global' | 'project'; name?: string; description?: string; category?: 'preference' | 'feedback' | 'project' | 'reference' | 'skill' | 'architecture'; content?: string }
   // ── Learned skills (procedural memory) ──────────────────────────────────
   | { type: 'load_skill'; id: string }
-  | { type: 'request_user_confirmation'; question: string; screenshotPath?: string; timeoutMs?: number };
+  | { type: 'request_user_confirmation'; question: string; screenshotPath?: string; timeoutMs?: number }
+  /** A short progress message shown to the user at once, while the run goes on (core/agentUpdates.ts). */
+  | { type: 'post_update'; text: string }
+  /** Keys, passwords, SSH bootstrap, VPN setup and checks for a server the agent set up (tools/serverSetup). */
+  | ({ type: 'server_setup' } & Omit<import('../tools/serverSetup/serverSetup.js').ServerSetupAction, 'type'>)
+  /** A one-time code sent to the agent's own mailbox or phone (tools/verificationCodes.ts). */
+  | { type: 'get_verification_code'; channel?: 'email' | 'sms' | 'which'; sender?: string; timeoutSeconds?: number };
 
 export type AgentActionType = AgentAction['type'];
 
@@ -854,6 +865,9 @@ export const ALL_AGENT_ACTION_TYPES = [
   'memory',
   'load_skill',
   'request_user_confirmation',
+  'post_update',
+  'server_setup',
+  'get_verification_code',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [

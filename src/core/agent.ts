@@ -2060,6 +2060,12 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `view_image ${truncate(action.path, 120)}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
+    case 'post_update':
+      return `post_update "${truncate(action.text, 80)}"`;
+    case 'server_setup':
+      return `server_setup ${action.action}${'host' in action && action.host ? ` ${action.host}` : ''}${'server' in action && action.server ? ` ${action.server}` : ''}`;
+    case 'get_verification_code':
+      return `get_verification_code ${action.channel ?? 'which'}${action.sender ? ` from ${truncate(action.sender, 40)}` : ''}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
@@ -3869,6 +3875,14 @@ export type RunAgentOptions = {
    * hung engine; unset or 0: no heartbeat (interactive CLI, chat bridges).
    */
   toolHeartbeatMs?: number;
+  /**
+   * Delivers post_update messages to the user while the run goes on
+   * (core/agentUpdates.ts). Headless hosts pass one per run; without it the
+   * tool reports that live updates are unavailable.
+   */
+  agentUpdates?: import('./agentUpdates.js').AgentUpdateChannel;
+  /** Each tool call's start and end, for the live status line (core/agentStatus.ts). */
+  onToolActivity?: (event: import('./agentStatus.js').ToolActivityEvent) => void;
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -5021,6 +5035,9 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   mcp_call_tool: 30 * 60_000,
   synthesize_speech: 30 * 60_000,
   transcribe_audio: 30 * 60_000,
+  // wait_ready polls up to 30 minutes; harden / install_wireguard install packages.
+  server_setup: 31 * 60_000,
+  get_verification_code: 11 * 60_000,
 };
 
 /**
@@ -5138,6 +5155,7 @@ async function executeAgentAction(
         sessionId: session.id,
         memoryDefaultScope: options.memoryDefaultScope,
         viewedImages: options.viewedImages,
+        ...(options.agentUpdates ? { postUpdate: (text: string) => options.agentUpdates!.post(text) } : {}),
         context: {
           profile: options.profile ?? 'main',
           runtimeId: options.rootRuntimeId,
@@ -5710,6 +5728,18 @@ function startBackgroundAction(
   };
 }
 
+type ToolActivityAction = import('./agentStatus.js').ToolActivityEvent['action'];
+let toolActivitySeq = 0;
+
+/** A status listener never breaks a run. */
+function notifyToolActivity(options: RunAgentOptions, event: import('./agentStatus.js').ToolActivityEvent): void {
+  try {
+    options.onToolActivity?.(event);
+  } catch {
+    // ignored
+  }
+}
+
 async function executeAuthorizedAction(
   session: SessionRecord,
   action: AgentAction,
@@ -5717,6 +5747,8 @@ async function executeAuthorizedAction(
   preAuthorized = false,
   abortSignal?: AbortSignal,
 ): Promise<ActionOutcome> {
+  let activityCallId: string | undefined;
+  let activityOk: boolean | undefined;
   try {
     if (abortSignal?.aborted) {
       const message = 'Action skipped: the run was cancelled before this tool started.';
@@ -5793,6 +5825,10 @@ async function executeAuthorizedAction(
     }
 
     options.onInfo?.(`[tool:${hydratedAction.type}] running`);
+    if (options.onToolActivity) {
+      activityCallId = `call_${++toolActivitySeq}`;
+      notifyToolActivity(options, { phase: 'start', callId: activityCallId, action: hydratedAction as unknown as ToolActivityAction });
+    }
     await recordHeimdallActionEvent(
       session,
       options,
@@ -5868,6 +5904,7 @@ async function executeAuthorizedAction(
         output_excerpt: truncate(result.output, 160),
       },
     );
+    activityOk = result.ok;
     return classifyActionOutcomeFailure({
       action: completedAction,
       ok: result.ok,
@@ -5887,6 +5924,10 @@ async function executeAuthorizedAction(
       },
     );
     return buildGuardrailFailureOutcome(action, error);
+  } finally {
+    if (activityCallId) {
+      notifyToolActivity(options, { phase: 'end', callId: activityCallId, action: action as unknown as ToolActivityAction, ...(activityOk !== undefined ? { ok: activityOk } : {}) });
+    }
   }
 }
 
@@ -6776,6 +6817,13 @@ export async function runAgent(
         ).content,
         outcome.action.type,
       );
+      if (outcome.ok && outcome.action.type === 'post_update' && options.agentUpdates) {
+        // The chat history shows a delivered update as a message of its own,
+        // under the id the live stream used.
+        const delivered = options.agentUpdates.claim(outcome.action.text);
+        const stored = session.messages.at(-1);
+        if (delivered && stored?.role === 'tool') stored.agentUpdate = { id: delivered.id, text: delivered.text };
+      }
 
       if (
         outcome.ok &&

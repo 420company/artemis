@@ -221,6 +221,12 @@ function describeAction(action: AgentAction): string {
       return `view image ${action.path}`;
     case 'kill_task':
       return `kill background task ${action.taskId}`;
+    case 'post_update':
+      return 'tell the user about progress';
+    case 'server_setup':
+      return `server setup: ${action.action}${'host' in action && action.host ? ` on ${action.host}` : ''}`;
+    case 'get_verification_code':
+      return `read a verification code (${action.channel ?? 'which'})`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

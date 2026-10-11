@@ -151,6 +151,9 @@ const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: 
   deep_research: { zh: '深入调研', en: 'Researching' },
   delegate_task: { zh: '分派子任务', en: 'Delegating a sub-task' },
   use_workflow: { zh: '调整工作方式', en: 'Adjusting the approach' },
+  server_setup: { zh: '设置服务器', en: 'Setting up the server' },
+  get_verification_code: { zh: '收取验证码', en: 'Getting the verification code' },
+  post_update: { zh: '告诉你进展', en: 'Updating you' },
 };
 
 /** What a tool call does, in plain words, for progress lines users see. */
