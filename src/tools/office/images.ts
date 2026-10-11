@@ -97,16 +97,3 @@ export async function loadImage(requested: string, cwd: string): Promise<LoadedI
   if (!info || info.width <= 0 || info.height <= 0) return { error: `image ${requested}: use a PNG, JPEG or GIF` };
   return { data, ...info };
 }
-
-/** The crop (fractions of each side) that makes an image cover a box of aspect `boxAspect` (w/h). */
-export function coverCrop(width: number, height: number, boxAspect: number): { left: number; right: number; top: number; bottom: number } {
-  const aspect = width / height;
-  if (aspect > boxAspect) {
-    const keep = boxAspect / aspect;
-    const side = (1 - keep) / 2;
-    return { left: side, right: side, top: 0, bottom: 0 };
-  }
-  const keep = aspect / boxAspect;
-  const side = (1 - keep) / 2;
-  return { left: 0, right: 0, top: side, bottom: side };
-}
