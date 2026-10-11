@@ -18,10 +18,13 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 | `payment` | MCP tools that pay, buy, order, transfer, trade; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | MCP tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
 
-Modes per kind: `ask` (每次询问), `allow` (总是允许), `deny` (禁止). The owner sets
-them in 权限与安全; the server writes them to the engine's policy file,
-`<engine data root>/approvals.json` (`{"version":1,"modes":{…},"ttlMinutes":1440}`).
-The engine also reads `~/.artemis/approvals.json`; the workspace file wins.
+Modes per kind: `ask` (每次询问), `allow` (总是允许), `deny` (禁止). The engine
+reads `~/.artemis/approvals.json` and `<engine data root>/approvals.json`
+(`{"version":1,"modes":{…},"ttlMinutes":1440}`; the workspace file wins), then
+`ARTEMIS_APPROVAL_POLICY` (same JSON), which wins over both. The web server
+keeps the owner's choices from 权限与安全 in its own data dir
+(`<DATA_DIR>/approval-policy.json`, where the agent cannot write once agents
+are isolated) and passes them to every run in that variable.
 Requests expire after 24 hours unless `ttlMinutes` says otherwise.
 
 ## Protocol (engine ⇄ host)
