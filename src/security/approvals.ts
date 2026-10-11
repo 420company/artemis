@@ -96,6 +96,12 @@ export const APPROVAL_HOST_SECRET_ENV = 'ARTEMIS_APPROVAL_SECRET'
 export const AGENT_TOOL_ENV = 'ARTEMIS_AGENT_TOOL'
 /** `off` turns headless suspension off (ask-mode actions are refused instead). */
 export const APPROVALS_ENV = 'ARTEMIS_APPROVALS'
+/**
+ * The host's copy of the owner's policy (`{"modes":{…},"ttlMinutes":…}`),
+ * applied over the policy files. A host keeps it where the agent cannot
+ * write (the web server's own data dir) and passes it with every run.
+ */
+export const APPROVAL_POLICY_ENV = 'ARTEMIS_APPROVAL_POLICY'
 
 export interface ApprovalPolicy {
   modes: Record<ApprovalKind, ApprovalMode>
@@ -112,7 +118,15 @@ export function isApprovalKind(value: unknown): value is ApprovalKind {
 
 function readPolicyFile(file: string): Partial<{ modes: Record<string, unknown>; ttlMinutes: unknown }> | undefined {
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    return parsePolicy(readFileSync(file, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+function parsePolicy(text: string): Partial<{ modes: Record<string, unknown>; ttlMinutes: unknown }> | undefined {
+  try {
+    const raw = JSON.parse(text) as unknown
     return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, never>) : undefined
   } catch {
     return undefined
@@ -121,15 +135,17 @@ function readPolicyFile(file: string): Partial<{ modes: Record<string, unknown>;
 
 /**
  * The policy for a workspace: defaults, then `<home>/approvals.json`, then
- * `<workspace data root>/approvals.json`. Unknown kinds and modes are
+ * `<workspace data root>/approvals.json`, then the host's copy in
+ * ARTEMIS_APPROVAL_POLICY (which wins). Unknown kinds and modes are
  * ignored; `confirmation` always asks.
  */
-export function loadApprovalPolicy(cwd: string): ApprovalPolicy {
+export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process.env): ApprovalPolicy {
   const modes: Record<ApprovalKind, ApprovalMode> = { ...DEFAULT_APPROVAL_MODES }
   let ttlMs = DEFAULT_APPROVAL_TTL_MS
   const files = [path.join(resolveArtemisHomeDir(), APPROVAL_POLICY_FILE), path.join(resolveDataRootDir(cwd), APPROVAL_POLICY_FILE)]
-  for (const file of [...new Set(files)]) {
-    const data = readPolicyFile(file)
+  const sources = [...new Set(files)].map((file) => readPolicyFile(file))
+  if (env[APPROVAL_POLICY_ENV]?.trim()) sources.push(parsePolicy(env[APPROVAL_POLICY_ENV]))
+  for (const data of sources) {
     if (!data) continue
     const given = data.modes && typeof data.modes === 'object' ? data.modes : {}
     for (const [kind, mode] of Object.entries(given)) {
@@ -156,6 +172,14 @@ export interface ApprovalRequest {
   expiresAt: string
   sessionId: string
   locale: UiLocale
+  /**
+   * sha256 of the exact stored action (and of a tool's payload). The host
+   * keeps it in its own store and sends it back with the answer
+   * (`--expect-digest`), so an action changed in the session files is refused
+   * whatever the session says.
+   */
+  actionDigest: string
+  payloadDigest?: string
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'invalid'
@@ -165,10 +189,6 @@ export interface PendingApproval extends ApprovalRequest {
   status: ApprovalStatus
   /** The exact action to run on approval. */
   action: AgentAction
-  /** sha256 of the canonical action. */
-  actionDigest: string
-  /** For a tool's own requireApproval(): sha256 of the canonical payload it asked about. */
-  payloadDigest?: string
   /** sha256 of the host secret, when the run had one. */
   hostBinding?: string
   /** HMAC over everything above that matters; any change makes the record unusable. */
@@ -261,6 +281,8 @@ export function publicApproval(record: PendingApproval): ApprovalRequest {
     expiresAt: record.expiresAt,
     sessionId: record.sessionId,
     locale: record.locale,
+    actionDigest: record.actionDigest,
+    ...(record.payloadDigest ? { payloadDigest: record.payloadDigest } : {}),
   }
 }
 
@@ -844,7 +866,7 @@ export class ApprovalResumeError extends Error {
 export function validateApprovalAnswer(
   session: SessionRecord,
   id: string,
-  options: { now?: Date; hostSecret?: string } = {},
+  options: { now?: Date; hostSecret?: string; expectedDigest?: string } = {},
 ): PendingApproval {
   const record = (session.approvals ?? []).find((r) => r.id === id)
   if (!record || !APPROVAL_ID_PATTERN.test(id)) throw new ApprovalResumeError('approval_not_found', `No approval request ${id} in this conversation.`)
@@ -857,7 +879,17 @@ export function validateApprovalAnswer(
     record.status = 'invalid'
     throw new ApprovalResumeError('approval_tampered', `Approval ${id} does not match what was requested; it cannot be used.`)
   }
+  // The host's own copy of the digest: an action edited in the session files
+  // (with a recomputed digest and MAC) still does not match it.
+  if (options.expectedDigest !== undefined && (!/^[0-9a-f]{64}$/.test(options.expectedDigest) || !safeEqualHex(options.expectedDigest, record.actionDigest))) {
+    record.status = 'invalid'
+    throw new ApprovalResumeError('approval_tampered', `Approval ${id} does not match what the host was shown; it cannot be used.`)
+  }
   if (record.hostBinding) {
+    // A host-bound request is answered with the host's own copy of the digest too.
+    if (options.expectedDigest === undefined) {
+      throw new ApprovalResumeError('approval_unauthorized', `Approval ${id} must be answered with the digest its host stored (--expect-digest).`)
+    }
     const given = hostBindingOf(options.hostSecret)
     if (!given || !safeEqualHex(given, record.hostBinding)) {
       throw new ApprovalResumeError('approval_unauthorized', `Approval ${id} can only be answered by the host that requested it.`)

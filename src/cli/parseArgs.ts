@@ -58,7 +58,7 @@ export interface ParsedArgs {
   /** execute/analyze: what the user picked in the app (--intent video|long_video|image|research|reminder). */
   intent?: string
   /** execute: answer a pending approval request of --session (--approve <id> | --deny <id> [--reason <text>]). */
-  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string }
+  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string }
   resumeLast: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
@@ -118,7 +118,7 @@ ${t('命令', 'Commands')}:
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
   execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder states what the user picked)')}
-                    ${t('需要你同意的操作会暂停（退出码 10）；用 --session <id> --approve <请求id> 同意，或 --deny <请求id> [--reason <理由>] 拒绝', 'Actions that need approval pause the run (exit code 10); answer with --session <id> --approve <request id>, or --deny <request id> [--reason <text>]')}
+                    ${t('需要你同意的操作会暂停（退出码 10）；用 --session <id> --approve <请求id> 同意，或 --deny <请求id> [--reason <理由>] 拒绝；--expect-digest <actionDigest> 核对请求未被改动', 'Actions that need approval pause the run (exit code 10); answer with --session <id> --approve <request id>, or --deny <request id> [--reason <text>]; --expect-digest <actionDigest> checks the request was not changed')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
   session           ${t('管理会话记录', 'Manage session records')}
@@ -147,6 +147,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let intent: string | undefined
   let approvalAnswer: ParsedArgs['approvalAnswer']
   let approvalReason: string | undefined
+  let expectDigest: string | undefined
   let resumeLast = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
@@ -238,6 +239,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       approvalAnswer = { id: v, decision: cur === '--approve' ? 'approve' : 'deny' }
       continue
     }
+    if (command === 'execute' && cur === '--expect-digest') {
+      const v = args.shift()?.trim().toLowerCase()
+      if (!v || !/^[0-9a-f]{64}$/.test(v)) throw new Error('execute --expect-digest requires the request\'s actionDigest (64 hex characters).')
+      expectDigest = v
+      continue
+    }
     if (command === 'execute' && cur === '--reason') {
       const v = args.shift()
       if (v === undefined) throw new Error('execute --reason requires a text.')
@@ -273,6 +280,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (approvalAnswer && !sessionId) throw new Error(`execute --${approvalAnswer.decision} requires --session <id>.`)
   if (approvalReason !== undefined && approvalAnswer?.decision !== 'deny') throw new Error('execute --reason goes with --deny.')
   if (approvalAnswer && approvalReason?.trim()) approvalAnswer.reason = approvalReason.trim()
+  if (expectDigest !== undefined && !approvalAnswer) throw new Error('execute --expect-digest goes with --approve or --deny.')
+  if (approvalAnswer && expectDigest) approvalAnswer.expectDigest = expectDigest
   return {
     command, cwd, model, baseUrl, apiKey,
     prompt: promptParts.length > 0 ? promptParts.join(' ') : undefined,

@@ -35,7 +35,7 @@ Requests expire after 24 hours unless `ttlMinutes` says otherwise.
    ```
    [approval-request] {"id":"apr_<20 hex>","kind":"shell_high_risk","title":"…","summary":"…",
      "details":{"command":"…"},"risk":"high","createdAt":"…","expiresAt":"…",
-     "sessionId":"<uuid>","locale":"zh-CN"}
+     "sessionId":"<uuid>","locale":"zh-CN","actionDigest":"<sha256 of the stored action>"}
    ```
 
    The summary panel is printed as usual (one plain line says what waits) and
@@ -44,7 +44,11 @@ Requests expire after 24 hours unless `ttlMinutes` says otherwise.
    never leaves the engine.
 
 2. **Answer.** `artemis execute --session <id> --approve <request id>` or
-   `--deny <request id> [--reason <text>]` (no message). Under the session
+   `--deny <request id> [--reason <text>]` (no message), with
+   `--expect-digest <actionDigest>`: the digest the host stored when the
+   request arrived. The engine refuses the answer unless the stored action
+   still has that digest, so an action rewritten in the session files (even
+   with a recomputed digest and MAC) is never run. Under the session
    lock the engine checks the request exists, is pending, has not expired,
    still matches its HMAC (any edit of the stored action, digest or expiry
    makes it unusable), and — when the run was host-bound — that the caller
@@ -95,6 +99,14 @@ approve, deny, expiry, replay, tamper, host binding, `requireApproval`, CLI flag
 and a headless end-to-end run.
 
 ## Limits
+
+**Full integrity depends on agent isolation** (`docs/AGENT_ISOLATION.md` in
+artemis-online, status "proposed"). Today the agent and the server run as the
+same Unix user, so a determined agent could reach the server's data dir. The
+approvals store lives in the server's configured data dir (`DATA_DIR`, never a
+hard-coded path) and the engine checks the host's stored digest and host
+secret, so once the server runs as its own user with a 0700 data dir the agent
+can neither forge nor answer a request.
 
 
 The agent runs as the same Unix user as the server on a VPS; the key file,

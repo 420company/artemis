@@ -661,7 +661,7 @@ async function runQueryCommand(options: {
   sessionId?: string
   imagePaths?: string[]
   intent?: string
-  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string }
+  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string }
 }): Promise<void> {
   const { cwd, locale, prompt, mode, model } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en

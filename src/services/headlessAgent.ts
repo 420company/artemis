@@ -57,7 +57,7 @@ export interface HeadlessAgentOptions {
    * message: approve runs exactly the stored action once, deny runs nothing;
    * then the model continues. `prompt` is ignored.
    */
-  answer?: { id: string; decision: 'approve' | 'deny'; reason?: string }
+  answer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string }
 }
 
 export interface HeadlessAgentResult {
@@ -184,7 +184,10 @@ export async function runHeadlessAgent(
       // marked used under the lock, before anything runs: an answer works once.
       let record
       try {
-        record = validateApprovalAnswer(current, opts.answer.id, { hostSecret: opts.approvals?.hostSecret })
+        record = validateApprovalAnswer(current, opts.answer.id, {
+          hostSecret: opts.approvals?.hostSecret,
+          ...(opts.answer.expectDigest ? { expectedDigest: opts.answer.expectDigest } : {}),
+        })
       } catch (error) {
         // An expired or altered request is marked so; it can never be used.
         if (error instanceof ApprovalResumeError && (error.code === 'approval_expired' || error.code === 'approval_tampered')) await sessionStore.save(current)

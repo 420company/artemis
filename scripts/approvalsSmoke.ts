@@ -9,6 +9,7 @@
  *
  * Run: node --no-warnings node_modules/tsx/dist/cli.mjs scripts/approvalsSmoke.ts
  */
+import { createHmac } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -21,7 +22,9 @@ import type { ChatProvider, ProviderResponse } from '../src/providers/types.js'
 import {
   APPROVAL_ID_PATTERN,
   APPROVAL_REQUEST_PREFIX,
+  approvalKey,
   approvalPolicyPath,
+  canonicalJson,
   ApprovalResumeError,
   ApprovalRuntime,
   classifyApprovalNeed,
@@ -140,6 +143,9 @@ async function freshSession(dir: string): Promise<{ store: SessionStore; session
   assert('policy: the model\'s own questions always ask', merged.modes.confirmation === 'ask')
   assert('policy: an unknown mode is ignored', merged.modes.shell_high_risk === 'ask')
   assert('policy: ttlMinutes sets the expiry', merged.ttlMs === 30 * 60_000)
+  const hosted = loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ modes: { outbound_send: 'allow', confirmation: 'deny' } }) })
+  assert('policy: the host\'s copy wins over the files (and still cannot silence questions)', hosted.modes.outbound_send === 'allow' && hosted.modes.confirmation === 'ask' && hosted.modes.payment === 'deny')
+  assert('policy: a broken host copy is ignored', loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: '{nope' }).modes.outbound_send === 'deny')
   fs.rmSync(path.join(process.env.ARTEMIS_HOME!, 'approvals.json'))
   assert('policy files and the key are protected from the agent\'s file tools',
     isSensitivePath(approvalPolicyPath(dir)) && isSensitivePath(path.join(dir, '.artemis', 'approvals.json')) && isSensitivePath(path.join(process.env.ARTEMIS_HOME!, 'approvals.key')) && !isSensitivePath(path.join(dir, 'docs', 'approvals.json')))
@@ -201,6 +207,7 @@ let suspendedStore: SessionStore | undefined
   assert('suspend: the request is stored in the session, pending', record?.status === 'pending' && record.action.type === 'run_command' && (record.action as { command: string }).command === RISKY)
   assert('suspend: [approval-request] carries the public record, not the action',
     event.id === record?.id && event.kind === 'shell_high_risk' && typeof event.expiresAt === 'string' && !('action' in event) && !('mac' in event), printed)
+  assert('suspend: the event carries the action digest the host keeps', event.actionDigest === record?.actionDigest && /^[0-9a-f]{64}$/.test(String(event.actionDigest)))
   assert('suspend: title and summary follow the owner\'s language', /高风险命令/.test(String(event.title)) && /同意/.test(String(event.summary)), `${event.title} ${event.summary}`)
   assert('suspend: what the owner sees has no internal names', findInternalNames(`${event.title} ${event.summary}`).length === 0)
   const toolMessage = session.messages.find((m) => m.role === 'tool' && /Waiting for the owner's approval/.test(m.content))
@@ -288,14 +295,25 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('tamper: a changed action is refused, even with a matching digest', await throwsCode(() => validateApprovalAnswer(onDisk, record.id), 'approval_tampered'))
   const forged = { ...record, expiresAt: new Date(Date.now() + 365 * 86400_000).toISOString() }
   assert('tamper: a stretched expiry is refused', await throwsCode(() => validateApprovalAnswer({ ...session, approvals: [forged] }, record.id), 'approval_tampered'))
+  // Worse: the key leaked, and the action, its digest and the MAC were all rewritten.
+  const forgedRecord = { ...record, action: { type: 'run_command', command: 'rm -rf ~' } as AgentAction }
+  forgedRecord.actionDigest = digestOf(forgedRecord.action)
+  forgedRecord.mac = createHmac('sha256', approvalKey()).update(canonicalJson({
+    v: 1, id: forgedRecord.id, sessionId: forgedRecord.sessionId, kind: forgedRecord.kind, createdAt: forgedRecord.createdAt,
+    expiresAt: forgedRecord.expiresAt, actionDigest: forgedRecord.actionDigest, payloadDigest: null, hostBinding: null,
+  })).digest('hex')
+  assert('tamper: a fully re-signed session record passes the engine\'s own check…', validateApprovalAnswer({ ...session, approvals: [{ ...forgedRecord }] }, record.id).id === record.id)
+  assert('tamper: …but not the digest the host stored', await throwsCode(() => validateApprovalAnswer({ ...session, approvals: [{ ...forgedRecord }] }, record.id, { expectedDigest: record.actionDigest }), 'approval_tampered'))
+  assert('tamper: the host\'s digest of the real action passes', validateApprovalAnswer({ ...session, approvals: [{ ...record }] }, record.id, { expectedDigest: record.actionDigest }).id === record.id)
   assert('tamper: an unknown id is refused', await throwsCode(() => validateApprovalAnswer(session, 'apr_ffffffffffffffffffff'), 'approval_not_found'))
 }
 {
   const secret = 'host-secret-0123456789abcdef'
   const { session, record } = await suspendOnce('host', { hostBinding: hostBindingOf(secret) })
-  assert('host binding: an answer without the host secret is refused', await throwsCode(() => validateApprovalAnswer(session, record.id), 'approval_unauthorized'))
-  assert('host binding: a wrong secret is refused', await throwsCode(() => validateApprovalAnswer(session, record.id, { hostSecret: 'another-secret-0123456789' }), 'approval_unauthorized'))
-  assert('host binding: the host\'s own secret is accepted', validateApprovalAnswer(session, record.id, { hostSecret: secret }).id === record.id)
+  assert('host binding: an answer without the host secret is refused', await throwsCode(() => validateApprovalAnswer(session, record.id, { expectedDigest: record.actionDigest }), 'approval_unauthorized'))
+  assert('host binding: a wrong secret is refused', await throwsCode(() => validateApprovalAnswer(session, record.id, { hostSecret: 'another-secret-0123456789', expectedDigest: record.actionDigest }), 'approval_unauthorized'))
+  assert('host binding: the secret alone is not enough (the host\'s digest is required)', await throwsCode(() => validateApprovalAnswer(session, record.id, { hostSecret: secret }), 'approval_unauthorized'))
+  assert('host binding: the host\'s own secret and digest are accepted', validateApprovalAnswer(session, record.id, { hostSecret: secret, expectedDigest: record.actionDigest }).id === record.id)
   process.env.ARTEMIS_APPROVAL_SECRET = secret
   resetHostApprovalSecretForTests()
   const taken = takeHostApprovalSecret()
@@ -395,6 +413,11 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   let reasonAlone = false
   try { parseArgs(['execute', '--session', sid, '--approve', id, '--reason', 'x']) } catch { reasonAlone = true }
   assert('cli: --reason goes with --deny only', reasonAlone)
+  const digest = 'a'.repeat(64)
+  assert('cli: --expect-digest parses with an answer', parseArgs(['execute', '--session', sid, '--approve', id, '--expect-digest', digest]).approvalAnswer?.expectDigest === digest)
+  let digestAlone = false
+  try { parseArgs(['execute', '--session', sid, '--expect-digest', digest, 'hi']) } catch { digestAlone = true }
+  assert('cli: --expect-digest goes with an answer only', digestAlone)
   assert('cli: the help lists --approve (hosts probe it)', /--approve\b/.test(getHelpText('en')) && /--deny\b/.test(getHelpText('zh-CN')))
 }
 
@@ -428,16 +451,16 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     const id = first.approval!.id
     let refused = ''
     try {
-      await runHeadlessAgent(project, '', { sessionId: first.sessionId, answer: { id, decision: 'approve' }, approvals: { suspend: true } })
+      await runHeadlessAgent(project, '', { sessionId: first.sessionId, answer: { id, decision: 'approve', expectDigest: first.approval!.actionDigest }, approvals: { suspend: true } })
     } catch (error) {
       refused = error instanceof ApprovalResumeError ? error.code : String(error)
     }
     assert('headless: another host (no secret) cannot answer', refused === 'approval_unauthorized' && !fs.existsSync(path.join(project, 'marker.txt')), refused)
-    const second = await runHeadlessAgent(project, '', { sessionId: first.sessionId, maxTurns: 4, selfCheck: false, answer: { id, decision: 'approve' }, approvals: { suspend: true, hostSecret: secret } })
+    const second = await runHeadlessAgent(project, '', { sessionId: first.sessionId, maxTurns: 4, selfCheck: false, answer: { id, decision: 'approve', expectDigest: first.approval!.actionDigest }, approvals: { suspend: true, hostSecret: secret } })
     assert('headless: approve runs the stored command and the model continues', fs.existsSync(path.join(project, 'marker.txt')) && second.reply === '安装脚本已经运行完毕。' && !second.approval, second.reply)
     let replay = ''
     try {
-      await runHeadlessAgent(project, '', { sessionId: first.sessionId, answer: { id, decision: 'approve' }, approvals: { suspend: true, hostSecret: secret } })
+      await runHeadlessAgent(project, '', { sessionId: first.sessionId, answer: { id, decision: 'approve', expectDigest: first.approval!.actionDigest }, approvals: { suspend: true, hostSecret: secret } })
     } catch (error) {
       replay = error instanceof ApprovalResumeError ? error.code : String(error)
     }
