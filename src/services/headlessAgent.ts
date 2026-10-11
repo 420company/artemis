@@ -44,6 +44,13 @@ export interface HeadlessAgentOptions {
    * ignored with a warning on onInfo.
    */
   intent?: string
+  /**
+   * Retry: take the conversation's last exchange (the owner's last message
+   * and everything after it) out first, then run. An empty prompt runs the
+   * same message again, with the intent and images it had; a prompt replaces
+   * it (edit and resend). Needs `sessionId`.
+   */
+  retry?: boolean
 }
 
 export interface HeadlessAgentResult {
@@ -78,6 +85,7 @@ export async function runHeadlessAgent(
   const { runAgent, toolHeartbeatIntervalMs } = await import('../core/agent.js')
   const { loadCompactionSettings } = await import('./compactionSettings.js')
 
+  if (opts.retry && !opts.sessionId) throw new Error('A retry needs the session it continues (--session <id>).')
   const onInfo = opts.onInfo ?? (() => undefined)
   const providerConfig = await resolveMainProviderConfig({
     cwd,
@@ -102,7 +110,9 @@ export async function runHeadlessAgent(
   // cannot see images does not: runAgent hands the images to the vision
   // helper, or tells the model they could not be read right now.
   const { loadPromptImages } = await import('../core/imageInput.js')
-  const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
+  // A retry reads its message, intent and images from the session, under the lock.
+  const imageAttachments = opts.retry ? [] : await loadPromptImages(opts.imagePaths ?? [], cwd)
+  const sessionTurns = await import('../storage/sessionTurns.js')
 
   // Workflow routing (services/headlessWorkflow.ts): the user never names a
   // workflow; a Saga long video is only offered, never started unasked.
@@ -127,11 +137,43 @@ export async function runHeadlessAgent(
     // Re-read under the lock: another process (a chat bridge) may have saved
     // a turn between the existence check above and getting the lock.
     const current = opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session
+    let runPrompt = prompt
+    let runIntent = opts.intent
+    let runImagePaths = opts.imagePaths ?? []
+    let runImages = imageAttachments
+    if (opts.retry) {
+      const { toolHasSideEffects } = await import('./toolSideEffects.js')
+      const lookup = sessionTurns.findLastExchange(current, toolHasSideEffects)
+      if (!lookup.ok) throw new sessionTurns.SessionRewindError(lookup.reason)
+      const { exchange } = lookup
+      if (!prompt.trim()) {
+        runPrompt = exchange.recorded?.prompt ?? current.messages[exchange.startIndex]!.content
+        if (!runImagePaths.length) runImagePaths = (exchange.recorded?.imagePaths ?? []).filter((file) => existsSync(file))
+      }
+      runIntent = opts.intent ?? exchange.recorded?.intent
+      // Images first: one that cannot be read fails the retry before anything is removed.
+      runImages = await loadPromptImages(runImagePaths, cwd)
+      sessionTurns.removeExchange(current, exchange)
+      await sessionStore.save(current)
+      onInfo(`[session] retry: removed the last exchange (${exchange.messageCount} messages)`)
+    }
+    const knownIds = new Set(current.messages.map((message) => message.id))
+    const recordTurn = async () => {
+      const asked = sessionTurns.firstNewOwnerMessage(current.messages, knownIds)
+      if (!asked) return
+      sessionTurns.recordLastTurn(current, {
+        userMessageId: asked.id,
+        prompt: runPrompt,
+        ...(runIntent !== undefined ? { intent: runIntent } : {}),
+        ...(runImagePaths.length ? { imagePaths: runImagePaths } : {}),
+      })
+      await sessionStore.save(current)
+    }
     const plan = await planHeadlessWorkflow({
       session: current,
-      prompt,
+      prompt: runPrompt,
       cwd,
-      attachmentCount: imageAttachments.length,
+      attachmentCount: runImages.length,
       inCodeRepo: existsSync(join(cwd, '.git')),
       // Goal Mode ticks are written by Artemis; read-only analysis only reads.
       autoRoute: opts.autoRoute !== false && !readOnly,
@@ -140,13 +182,14 @@ export async function runHeadlessAgent(
       hasVideoProvider: async () => Boolean(await resolveConfiguredVisualProvider(cwd, 'video')),
       videoClipSeconds: () => resolveActiveVideoClipSeconds(cwd),
       onInfo,
-      ...(opts.intent !== undefined ? { intent: opts.intent } : {}),
+      ...(runIntent !== undefined ? { intent: runIntent } : {}),
     })
     if (plan.kind === 'reply') {
       // The Saga question: answered without running the model.
-      sessionStore.appendMessage(current, 'user', prompt)
+      sessionStore.appendMessage(current, 'user', runPrompt)
       sessionStore.appendMessage(current, 'assistant', plan.reply)
       await sessionStore.save(current)
+      await recordTurn()
       return { reply: plan.reply, turns: 0 }
     }
     const messagesBefore = current.messages.length
@@ -188,12 +231,14 @@ export async function runHeadlessAgent(
     resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
     onContextCompaction: (notice) => contextNotices.push(notice),
     onInfo: opts.onInfo,
-    ...(imageAttachments.length ? { imageAttachments } : {}),
+    ...(runImages.length ? { imageAttachments: runImages } : {}),
   })
     // A generated long video ends the Saga conversation of this session.
     if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
       await sessionStore.save(current)
     }
+    // What a later retry needs: where this turn starts and what it was asked with.
+    await recordTurn()
     return runResult
   }, { label: `Session ${session.id}` })
 

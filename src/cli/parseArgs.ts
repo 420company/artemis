@@ -57,6 +57,8 @@ export interface ParsedArgs {
   imagePaths?: string[]
   /** execute/analyze: what the user picked in the app (--intent video|long_video|image|research|reminder). */
   intent?: string
+  /** execute: take the session's last exchange out and run again (--retry; a prompt replaces the last message). */
+  retry?: boolean
   resumeLast: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
@@ -116,9 +118,10 @@ ${t('命令', 'Commands')}:
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
   execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder states what the user picked)')}
+                    ${t('--retry 配合 --session：撤下上一轮再执行（不带 query 即原样重发，带 query 即编辑后重发）', '--retry with --session: takes the last exchange out and runs again (no query: the same message; a query: the edited message)')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
-  session           ${t('管理会话记录', 'Manage session records')}
+  session           ${t('管理会话记录（list/show/search/last-turn/undo/delete）', 'Manage session records (list/show/search/last-turn/undo/delete)')}
   gateway           ${t('管理第三方通讯后台服务/登录自启', 'Manage messaging background service / login auto-start')}
   version           ${t('显示版本', 'Show version')}
   help              ${t('显示帮助', 'Show help')}
@@ -142,6 +145,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let sessionId: string | undefined
   const imagePaths: string[] = []
   let intent: string | undefined
+  let retry = false
   let resumeLast = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
@@ -226,6 +230,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       intent = v.trim()
       continue
     }
+    if (command === 'execute' && cur === '--retry') { retry = true; continue }
     if ((command === 'execute' || command === 'analyze') && cur === '--image') {
       const v = args.shift()
       if (!v?.trim()) throw new Error(`${command} --image requires a file path.`)
@@ -260,6 +265,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     autoDrive, testProviders, background, setup,
     ...(imagePaths.length ? { imagePaths } : {}),
     ...(intent !== undefined ? { intent } : {}),
+    ...(retry ? { retry } : {}),
   }
 }
 
