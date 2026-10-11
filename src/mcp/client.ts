@@ -16,6 +16,7 @@ import type {
   McpServerSurface,
   McpToolDescriptor,
 } from './store.js';
+import { McpServerStore } from './store.js';
 import {
   ensureMcpOAuthAccessToken,
   persistMcpServerUpdate,
@@ -2334,16 +2335,53 @@ async function requestWithManagedClient<T>(
   return { result, surface };
 }
 
+/** The server refused the request's credential (HTTP 401/403). */
+function isMcpAuthRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bHTTP 40[13]\b/.test(message);
+}
+
+/**
+ * The same server's entry as the store holds it now, when its credential
+ * changed since `server` was loaded: a host that manages the connection
+ * (a platform server rotating its token, say) rewrites the entry, and a
+ * refused call is retried once with the new one instead of failing.
+ */
+async function reloadRotatedCredential(
+  server: McpServerConfig,
+  cwd: string,
+): Promise<McpServerConfig | undefined> {
+  if (server.transport === 'stdio' || server.authType === 'oauth') {
+    return undefined;
+  }
+  try {
+    const fresh = (await new McpServerStore(cwd).load()).servers.find(
+      (entry) => entry.id === server.id,
+    );
+    if (!fresh || !fresh.enabled) {
+      return undefined;
+    }
+    const credential = (entry: McpServerConfig) =>
+      JSON.stringify([entry.url, entry.bearerToken ?? null, entry.headers ?? null]);
+    return credential(fresh) !== credential(server) ? fresh : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function callMcpServerTool(options: ManagedRequestOptions & {
   toolName: string;
   args?: Record<string, unknown>;
 }): Promise<McpToolCallResult> {
-  for (let attempt = 0; attempt <= 1; attempt += 1) {
+  let request = options;
+  let retriedSession = false;
+  let retriedCredential = false;
+  for (;;) {
     try {
       const { result, surface } = await requestWithManagedClient(
-        options,
-        `MCP tool ${options.toolName}`,
-        (client) => client.callTool(options.toolName, options.args ?? {}),
+        request,
+        `MCP tool ${request.toolName}`,
+        (client) => client.callTool(request.toolName, request.args ?? {}),
       );
       return {
         output: serializeResult(result),
@@ -2353,30 +2391,40 @@ export async function callMcpServerTool(options: ManagedRequestOptions & {
         server: surface.server,
       };
     } catch (error) {
-      await invalidateManagedClient(options.server, options.cwd);
+      await invalidateManagedClient(request.server, request.cwd);
       if (error instanceof McpCallCancelledError) {
         throw error;
       }
-      if (attempt === 0 && isMcpSessionExpiryError(error)) {
+      if (!retriedSession && isMcpSessionExpiryError(error)) {
+        retriedSession = true;
         continue;
+      }
+      if (!retriedCredential && isMcpAuthRejection(error)) {
+        retriedCredential = true;
+        const fresh = await reloadRotatedCredential(request.server, request.cwd);
+        if (fresh) {
+          request = { ...request, server: fresh };
+          continue;
+        }
       }
       // Detect missing runtime/executable — do not retry, surface to user
       if (isMissingExecutableError(error)) {
-        const req = detectDependencyRequirement(options.server);
+        const req = detectDependencyRequirement(request.server);
         if (req) {
           throw new McpDependencyError(
-            options.server,
-            buildDependencyInfo(options.server, req),
+            request.server,
+            buildDependencyInfo(request.server, req),
           );
         }
       }
+      const message = error instanceof Error ? error.message : String(error);
       throw new Error(
-        error instanceof Error ? error.message : String(error),
+        isMcpAuthRejection(error)
+          ? `${message}\nMCP server ${request.server.id} refused the credential. If the owner connected this service in an app, it may need to be reconnected there.`
+          : message,
       );
     }
   }
-
-  throw new Error('MCP tool call retry loop exited unexpectedly.');
 }
 
 export async function readMcpServerResource(options: ManagedRequestOptions & {

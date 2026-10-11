@@ -11943,6 +11943,92 @@ process.stdin.on('data', (c) => {
   }
 }
 
+// ── MCP: connected services (artemis-online connectors) ─────────────────────────
+
+{
+  // A projected MCP tool the model writes as text (hyphens and all) is called on its server.
+  const { resolveProjectedMcpToolName } = await import('../src/core/providerNativeTools.js')
+  const recovered = parseAssistantEnvelopeForSmoke(
+    '<toolcall name="mcp__notion__API-post-search">{"query":"roadmap"}</toolcall>\n' +
+      '<toolcall name="mcp__google_calendar__list_events">{"args":{"timeMin":"2026-10-10T00:00:00Z"}}</toolcall>',
+  )
+  const [search, events] = (recovered.actions ?? []) as any[]
+  assert(
+    'mcp projection: text tool calls with projected names reach the server and tool',
+    recovered.actions?.length === 2 &&
+      search?.type === 'mcp_call_tool' &&
+      search.serverId === 'notion' &&
+      search.toolName === 'API-post-search' &&
+      search.args?.query === 'roadmap' &&
+      events?.serverId === 'google_calendar' &&
+      events.toolName === 'list_events' &&
+      events.args?.timeMin === '2026-10-10T00:00:00Z',
+    JSON.stringify(recovered),
+  )
+  assert(
+    'mcp projection: a name that is not a projected tool resolves to nothing',
+    resolveProjectedMcpToolName('mcp__') === undefined && resolveProjectedMcpToolName('mcp_call_tool') === undefined,
+  )
+}
+
+{
+  // A host that rotates an MCP server's token (the artemis-online server does at every start)
+  // rewrites the entry; a call refused with the old token is retried once with the new one.
+  const { McpServerStore } = await import('../src/mcp/store.js')
+  const { callMcpServerTool, closeCachedMcpClients } = await import('../src/mcp/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-mcp-rotate-'))
+  let accepted = 'token-new-placeholder'
+  const server = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => (raw += c))
+    req.on('end', () => {
+      if (req.headers.authorization !== `Bearer ${accepted}`) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end('{"error":"invalid_token"}')
+        return
+      }
+      const msg = JSON.parse(raw)
+      if (msg.id === undefined) {
+        res.writeHead(202)
+        res.end()
+        return
+      }
+      const result =
+        msg.method === 'initialize'
+          ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'rotating', version: '1' } }
+          : msg.method === 'tools/list'
+            ? { tools: [{ name: 'ping', inputSchema: { type: 'object' } }] }
+            : msg.method === 'tools/call'
+              ? { content: [{ type: 'text', text: 'pong' }] }
+              : {}
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`
+  try {
+    const store = new McpServerStore(dir)
+    const stale = await store.add({ id: 'rotating', enabled: true, transport: 'streamable-http', url, authType: 'bearer', authState: 'configured', bearerToken: 'token-old-placeholder' })
+    assert('mcp store: the server list is private to its user (0600)', (fs.statSync(store.getFilePath()).mode & 0o077) === 0, (fs.statSync(store.getFilePath()).mode & 0o777).toString(8))
+    await store.add({ ...stale, bearerToken: accepted })
+    const result = await callMcpServerTool({ server: stale, cwd: dir, toolName: 'ping', args: {} })
+    assert('mcp call: a token the host rotated is picked up after a 401', result.output.includes('pong'), result.output)
+    accepted = 'token-elsewhere-placeholder'
+    let refused = ''
+    try {
+      await callMcpServerTool({ server: (await store.load()).servers.find((s) => s.id === 'rotating')!, cwd: dir, toolName: 'ping', args: {} })
+    } catch (error) {
+      refused = error instanceof Error ? error.message : String(error)
+    }
+    assert('mcp call: a credential still refused says it may need reconnecting', /HTTP 401/.test(refused) && /reconnected/.test(refused), refused)
+  } finally {
+    await closeCachedMcpClients()
+    server.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 {
   // The retired "Odin" skill subsystem must stay gone: no tool in any table,
   // and a leftover odin.json in the data root is neither read nor touched.

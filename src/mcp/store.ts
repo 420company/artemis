@@ -707,7 +707,8 @@ export class McpServerStore {
     // never leaves a partial / corrupt JSON file.
     const tmp = `${this.filePath}.tmp`;
     try {
-      await writeFile(tmp, JSON.stringify(normalized, null, 2), 'utf8');
+      // 0600: entries may carry bearer tokens (audit §5.1); only the owner reads them.
+      await writeFile(tmp, JSON.stringify(normalized, null, 2), { encoding: 'utf8', mode: 0o600 });
       await rename(tmp, this.filePath);
       const info = await stat(this.filePath);
       McpServerStore.cache.set(this.filePath, {
