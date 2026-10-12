@@ -234,6 +234,9 @@ export async function runHeadlessAgent(
     }
     const messagesBefore = current.messages.length
     agentStatus.thinking()
+    // Talking about trading: the platform's trading playbook rides along for this turn.
+    const { withTradingPlaybook } = await import('../core/tradingPlaybook.js')
+    const workflowHint = plan.workflow === 'saga' ? plan.hint : withTradingPlaybook(plan.hint, plan.prompt)
     let runResult
     try {
     runResult = await runAgent(
@@ -247,7 +250,7 @@ export async function runHeadlessAgent(
     permissionManager,
     maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
     profile: 'main',
-    ...(plan.hint ? { workflowHint: plan.hint } : {}),
+    ...(workflowHint ? { workflowHint } : {}),
     // Every run is bounded, routed or not (Goal Mode and analysis: direct cap).
     delegationBudget: createDelegationBudget(plan.workflow),
     appendUserMessage: true,

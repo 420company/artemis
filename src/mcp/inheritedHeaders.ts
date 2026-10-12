@@ -14,12 +14,41 @@
  *
  *   { "<server id>": { "<header name>": "<value>", ... }, ... }
  *
+ * or, binding each server's headers to the URL the host expects for it:
+ *
+ *   { "v": 2, "servers": { "<server id>": { "url": "<url>", "headers": { ... } } } }
+ *
+ * An entry may instead be bound to a target that is not an MCP server (the
+ * host's own-key model proxy, providers/openaiCompatible.ts runHeadersFor):
+ * in v1 its headers carry the target as `x-artemis-target`, in v2 the entry
+ * is `{ "target": "<url>", "headers": { ... } }`. Such an entry is never
+ * handed to an MCP server, whatever its id (inheritedTargetHeaders gives it
+ * to the model proxy client only). A v2 entry with neither `url` nor
+ * `target` is for the engine itself (the credential broker's claim,
+ * security/credentialStore.ts): inheritedInternalHeaders reads it, and no
+ * MCP server ever gets it.
+ *
+ * A v2 entry may also say what the host's own entry must hold (`surface`:
+ * the server names and version it reports, and a digest of every tool it
+ * serves, toolDigest below). The MCP store then disables, for this
+ * process, an entry under that id whose URL or surface is anything else
+ * (ownedEntryProblem): text the agent wrote into the host's entry (a tool
+ * description, a schema, a server name) never reaches the prompt or the
+ * model's tool definitions, even if it was swapped in after the host
+ * checked the file.
+ *
+ * Server ids match exactly (an entry the agent added as `Artemis-Online`
+ * does not get `artemis_online`'s headers), and with v2 the headers go only
+ * to an entry whose URL is the one the host named: an entry pointed
+ * somewhere else, or a look-alike, never carries the run's token.
+ *
  * The engine reads it once at startup, before any tool can run, keeps it in
  * memory only, closes the descriptor (so no child process inherits it) and
  * drops the variable from its environment (so no child tries to read it).
  * Hosts pass a socket (a pipe end of a socketpair): /proc/<pid>/fd/<n> of a
  * socket cannot be opened by another process, unlike a pipe or a file.
  */
+import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, readSync } from 'node:fs';
 
 export const MCP_HEADERS_FD_ENV = 'ARTEMIS_MCP_HEADERS_FD';
@@ -30,15 +59,29 @@ const MAX_BYTES = 64 * 1024;
 const WAIT_LIMIT_MS = 5_000;
 
 let loaded = false;
-const headersByServer = new Map<string, Record<string, string>>();
+type OwnedSurface = { names: string[]; version?: string; tools: Set<string> };
+type ServerHeaders = { url?: string; target?: string; internal?: boolean; headers: Record<string, string>; surface?: OwnedSurface };
 
-/** Same normalization as the per-server ARTEMIS_MCP_<ID>_* variables. */
-function normalizeServerId(id: string): string {
-  return id
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+/**
+ * The field of a v1 entry that binds its headers to one target URL (the
+ * host's own-key model proxy). Such an entry is never handed to an MCP
+ * server, whatever its id.
+ */
+export const TARGET_FIELD = 'x-artemis-target';
+const headersByServer = new Map<string, ServerHeaders>();
+
+/** URLs compare without a trailing slash. */
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
+function cleanHeaders(headers: unknown): Record<string, string> | undefined {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return undefined;
+  const clean: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+    if (typeof value === 'string' && name.trim()) clean[name.trim().toLowerCase()] = value.trim();
+  }
+  return clean;
 }
 
 function sleepSync(ms: number): void {
@@ -72,21 +115,44 @@ function readToEnd(fd: number): Buffer {
   return Buffer.concat(chunks);
 }
 
-function parse(text: string): Map<string, Record<string, string>> {
-  const result = new Map<string, Record<string, string>>();
+function parse(text: string): Map<string, ServerHeaders> {
+  const result = new Map<string, ServerHeaders>();
   if (!text.trim()) return result;
   const parsed = JSON.parse(text) as unknown;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('per-run MCP headers must be a JSON object');
   }
-  for (const [serverId, headers] of Object.entries(parsed as Record<string, unknown>)) {
-    const id = normalizeServerId(serverId);
-    if (!id || !headers || typeof headers !== 'object' || Array.isArray(headers)) continue;
-    const clean: Record<string, string> = {};
-    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
-      if (typeof value === 'string' && name.trim()) clean[name.trim().toLowerCase()] = value.trim();
+  const object = parsed as Record<string, unknown>;
+  if (object.v === 2) {
+    const servers = object.servers;
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error('per-run MCP headers (v2) need a servers object');
+    for (const [serverId, entry] of Object.entries(servers as Record<string, unknown>)) {
+      const id = serverId.trim();
+      const { url, target, headers, surface } = (entry && typeof entry === 'object' ? entry : {}) as { url?: unknown; target?: unknown; headers?: unknown; surface?: unknown };
+      const clean = cleanHeaders(headers);
+      // Target-bound: for the model proxy client only, never an MCP server.
+      if (id && clean && typeof target === 'string' && target.trim()) {
+        const { [TARGET_FIELD]: _ignored, ...rest } = clean;
+        result.set(id, { target: target.trim(), headers: rest });
+        continue;
+      }
+      if (!id || !clean) continue;
+      // Neither a URL nor a target: for the engine itself, never an MCP server.
+      if (typeof url !== 'string' || !url.trim()) {
+        result.set(id, { internal: true, headers: clean });
+        continue;
+      }
+      const owned = parseSurface(surface);
+      result.set(id, { url: normalizeUrl(url), headers: clean, ...(owned ? { surface: owned } : {}) });
     }
-    result.set(id, { ...(result.get(id) ?? {}), ...clean });
+    return result;
+  }
+  for (const [serverId, headers] of Object.entries(object)) {
+    const id = serverId.trim();
+    const clean = cleanHeaders(headers);
+    if (!id || !clean) continue;
+    const { [TARGET_FIELD]: target, ...rest } = { ...(result.get(id)?.headers ?? {}), ...clean };
+    result.set(id, target ? { target, headers: rest } : { headers: rest });
   }
   return result;
 }
@@ -128,25 +194,129 @@ export function loadInheritedMcpHeaders(env: NodeJS.ProcessEnv = process.env): s
 }
 
 /**
- * The field of an entry that binds its headers to one target URL (the host's
- * own-key model proxy, providers/openaiCompatible.ts runHeadersFor). Such an
- * entry is never handed to an MCP server, whatever its id.
+ * The per-run headers for this MCP server (a copy; empty when none were
+ * given): the server id must match exactly, and when the host bound them to
+ * a URL, `url` (the entry's own) must be that URL.
  */
-export const TARGET_FIELD = 'x-artemis-target';
+export function inheritedMcpHeaders(serverId: string, url: string | undefined): Record<string, string> {
+  const entry = headersByServer.get(serverId.trim());
+  // A target-bound or engine-internal entry never goes to an MCP server.
+  if (!entry || entry.target !== undefined || entry.internal) return {};
+  if (entry.url !== undefined && (url === undefined || normalizeUrl(url) !== entry.url)) return {};
+  return { ...entry.headers };
+}
 
-/** The per-run headers for this MCP server (a copy; empty when none were given, or when the entry is bound to a target). */
-export function inheritedMcpHeaders(serverId: string): Record<string, string> {
-  const entry = headersByServer.get(normalizeServerId(serverId));
-  if (!entry || TARGET_FIELD in entry) return {};
-  return { ...entry };
+function parseSurface(value: unknown): OwnedSurface | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const v = value as { names?: unknown; version?: unknown; tools?: unknown };
+  const names = Array.isArray(v.names) ? v.names.filter((n): n is string => typeof n === 'string') : [];
+  const tools = Array.isArray(v.tools) ? v.tools.filter((t): t is string => typeof t === 'string') : [];
+  return { names, ...(typeof v.version === 'string' ? { version: v.version } : {}), tools: new Set(tools) };
+}
+
+/** JSON with object keys sorted (the same text on the host's side and here). */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
+}
+
+const collapse = (value: unknown): string => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '');
+
+/**
+ * A tool as it reaches the prompt and the model's tool definitions: its
+ * texts, schema and flags. The host (artemis-online engineEntries.ts)
+ * computes the same digest for each tool it serves.
+ */
+export function toolDigest(tool: { name?: unknown; title?: unknown; description?: unknown; searchHint?: unknown; inputSchema?: unknown; readOnly?: unknown; destructive?: unknown; openWorld?: unknown; alwaysLoad?: unknown }): string {
+  const text = canonicalJson([
+    typeof tool.name === 'string' ? tool.name.trim() : '',
+    collapse(tool.title),
+    typeof tool.description === 'string' ? tool.description.trim() : '',
+    collapse(tool.searchHint),
+    tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : null,
+    tool.readOnly === true,
+    tool.destructive === true,
+    tool.openWorld === true,
+    tool.alwaysLoad === true,
+  ]);
+  return createHash('sha256').update(text).digest('hex').slice(0, 32);
+}
+
+/**
+ * Why an MCP entry the host owns (named in a v2 payload with a surface)
+ * must not be used as it is: another URL, or a surface with anything the
+ * host does not serve. Undefined when it is fine, or not the host's.
+ */
+export function ownedEntryProblem(server: { id: string; url?: string; surface?: { serverName?: string; serverVersion?: string; tools?: unknown[]; resources?: unknown[]; prompts?: unknown[]; commands?: unknown[] } }): string | undefined {
+  const owned = headersByServer.get(server.id.trim());
+  if (!owned?.surface) return undefined;
+  if (owned.url !== undefined && (server.url === undefined || normalizeUrl(server.url) !== owned.url)) return 'its URL is not the host\'s';
+  const surface = server.surface;
+  if (!surface) return undefined;
+  if (surface.serverName !== undefined && !owned.surface.names.includes(surface.serverName)) return 'another server name';
+  if (surface.serverVersion !== undefined && owned.surface.version !== undefined && surface.serverVersion !== owned.surface.version) return 'another server version';
+  for (const list of [surface.resources, surface.prompts, surface.commands]) if (list && list.length > 0) return 'resources, prompts or commands the host does not serve';
+  for (const tool of surface.tools ?? []) {
+    if (!owned.surface.tools.has(toolDigest(tool as Record<string, unknown>))) return `a tool the host does not serve as listed (${String((tool as { name?: unknown }).name).slice(0, 40)})`;
+  }
+  return undefined;
+}
+
+/**
+ * The ids the host owns: v2 entries that name a surface. The MCP store
+ * checks the raw entries of these before it de-duplicates them
+ * (ownedRawEntriesProblem).
+ */
+export function ownedServerIds(): string[] {
+  return [...headersByServer.entries()].filter(([, entry]) => entry.surface !== undefined).map(([id]) => id);
+}
+
+const HOST_UNSET_FIELDS = ['command', 'commandArgs', 'args', 'environment', 'env', 'headers', 'workingDirectory', 'cwd'] as const;
+
+/**
+ * Why the raw entries (as they are in mcp-servers.json, before the store
+ * normalises ids and keeps the first of each) that normalise to an id the
+ * host owns must not be used. The store keeps the first entry per
+ * normalised id, so a look-alike (`ARTEMIS_ONLINE`, ` artemis_online`)
+ * placed first would stand in for the host's entry: every such entry is
+ * disabled unless it is the single, exact entry the host writes, with that
+ * very id, transport streamable-http and no command, environment, working
+ * directory or headers of its own. Undefined when it is fine.
+ */
+export function ownedRawEntriesProblem(ownedId: string, raws: unknown[]): string | undefined {
+  if (raws.length !== 1) return `${raws.length} entries share its id (look-alike ids)`;
+  const raw = raws[0] && typeof raws[0] === 'object' ? (raws[0] as Record<string, unknown>) : {};
+  if (raw.id !== ownedId) return 'a look-alike id';
+  if (raw.transport !== 'streamable-http') return 'another transport than the host\'s';
+  for (const field of HOST_UNSET_FIELDS) {
+    const value = raw[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value as object).length === 0) continue;
+    return `a ${field} the host does not set`;
+  }
+  return undefined;
+}
+
+/**
+ * An entry for the engine itself (not an MCP server, not a target): a v2
+ * entry with neither, or a v1 entry (v1 does not tell them apart).
+ */
+export function inheritedInternalHeaders(id: string): Record<string, string> {
+  const entry = headersByServer.get(id.trim());
+  if (!entry || entry.target !== undefined || (!entry.internal && entry.url !== undefined)) return {};
+  return { ...entry.headers };
 }
 
 /** A target-bound entry: the URL its headers may go to, and the headers (without the target). */
 export function inheritedTargetHeaders(id: string): { target: string; headers: Record<string, string> } | undefined {
-  const entry = headersByServer.get(normalizeServerId(id));
-  if (!entry || !entry[TARGET_FIELD]) return undefined;
-  const { [TARGET_FIELD]: target, ...headers } = entry;
-  return { target: target!, headers };
+  const entry = headersByServer.get(id.trim());
+  if (!entry?.target) return undefined;
+  return { target: entry.target, headers: { ...entry.headers } };
 }
 
 /** For tests: forget what was loaded, so the next load reads again. */

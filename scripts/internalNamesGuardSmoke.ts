@@ -45,6 +45,7 @@ import { executeGenerateImage } from '../src/tools/generateImage.js';
 import { executeGenerateVideo } from '../src/tools/generateVideo.js';
 import { withRuntimeLogSink } from '../src/utils/log.js';
 import type { UiLocale } from '../src/cli/locale.js';
+import { TRADING_PLAYBOOK } from '../src/core/tradingPlaybook.js';
 
 // The shared denylist plus a retired subsystem name the source tree may not spell out.
 const EXTRA_DENYLIST: Array<{ name: string; re: RegExp }> = [
@@ -102,6 +103,19 @@ const STORY_ZH = '一只橘色小猫在雨夜的城市里冒险，穿过霓虹�
 const STORY_EN = 'An orange kitten explores a rainy city at night, crosses neon streets, and watches the sunrise from a rooftop.';
 
 // ── Static string tables ───────────────────────────────────────────────────
+
+await test('trading playbook: no internal server id, vendor or fee wording', () => {
+  // The playbook is about markets, so prices are its subject: only fee and balance wording is out here.
+  const denylist: Array<{ name: string; re: RegExp }> = [
+    { name: 'internal server id', re: /artemis[_-]online/i },
+    { name: 'data vendor', re: /\b(?:6551|opennews|newsliquid|stlouisfed|defillama|defi ?llama|polymarket|whale ?alert|alternative\.me|coinglass|cryptopanic|asterdex|aster|binance|okx|bybit)\b/i },
+    { name: 'fee wording', re: /费用|计费|收费|扣费|余额|充值|\bbilled\b|\bmoney\b|\btop[\s-]?up\b/i },
+  ];
+  checked += 1;
+  const hits = [...findInternalNames(TRADING_PLAYBOOK).map((hit) => `${hit.name} ("${hit.match}")`), ...denylist.filter(({ re }) => re.test(TRADING_PLAYBOOK)).map(({ name }) => name)];
+  if (hits.length > 0) failures.push(`trading playbook: ${hits.join(', ')}`);
+});
+
 
 await test('string tables: long-video offer question (zh/en, numbered/choices)', () => {
   for (const locale of LOCALES) {

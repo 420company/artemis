@@ -43,7 +43,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
-import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
+import { inheritedInternalHeaders } from '../mcp/inheritedHeaders.js';
 
 export type CredentialKind = 'password' | 'username' | 'ssh_key' | 'token';
 export const CREDENTIAL_KINDS: readonly CredentialKind[] = ['password', 'username', 'ssh_key', 'token'];
@@ -542,7 +542,7 @@ export function registerCredentialStore(store: CredentialStore | undefined): voi
  * once (claimCredentialBroker trades it for the run's ticket, kept in this
  * process only).
  */
-export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env, inherited: Record<string, string> = inheritedMcpHeaders(CREDENTIAL_ENTRY)): void {
+export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env, inherited: Record<string, string> = inheritedInternalHeaders(CREDENTIAL_ENTRY)): void {
   const raw = env.ARTEMIS_CREDENTIAL_BROKER?.trim();
   delete env.ARTEMIS_CREDENTIAL_BROKER;
   let url = inherited['x-credential-broker'] ?? '';
