@@ -17,7 +17,7 @@ import { applyProviderOverrides, getLastPromptTokens, getLeadProvider, resetSess
 import { extractVideoPathsFromToolOutput } from '../src/bragi/runtime.js'
 import { parseAssistantEnvelopeForSmoke, runAgent as runAgentNow } from '../src/core/agent.js'
 import { settleMemoryCuration } from '../src/core/memory.js'
-import { createVisionHelper, type VisionHelper } from '../src/core/visionHelper.js'
+import { createVisionHelper, resolveVisionProfile, type VisionHelper } from '../src/core/visionHelper.js'
 import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
 
 // A finished run starts the memory curator in the background, which reads
@@ -97,7 +97,8 @@ import {
   resolveReferenceImages,
   sniffImageMimeType,
 } from '../src/tools/visual/referenceImages.js'
-import { ProviderStore } from '../src/providers/store.js'
+import { ProviderStore, runProfileOverride } from '../src/providers/store.js'
+import { resolveAuxiliaryProfile } from '../src/providers/auxiliaryModels.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { searchSessions } from '../src/storage/sessionSearch.js'
 import { Session } from '../src/core/session.js'
@@ -185,7 +186,7 @@ import {
   resetProjectInstructionFileCacheForTests,
 } from '../src/core/instructionFile.js'
 import { isPlausibleTelegramBotToken, normalizeTelegramBotToken } from '../src/telegram/client.js'
-import { detectVisualGenerationNeed, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
+import { detectVisualGenerationNeed, resolveConfiguredVisualProvider, resolveMainSecondaryVisualFallbackCandidates, VISUAL_NOT_CONFIGURED_POLICY } from '../src/utils/visualGenerationConfig.js'
 import { normalizeCustomVisualBaseUrlForTest } from '../src/tools/visual/providers/customProvider.js'
 import { createVisualProvider } from '../src/tools/visual/providers/interface.js'
 import * as http from 'node:http'
@@ -678,6 +679,101 @@ assert(
   )
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // Profiles a host routes one run to (the owner's own key for coding or subtasks) serve only
+  // their own targets: never the main conversation, never as its fallback, and only from the
+  // global store the host writes ($ARTEMIS_HOME), never from a workdir providers.json.
+  const tmpDir = path.join(os.tmpdir(), `artemis-run-profile-router-${Date.now()}`)
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  fs.mkdirSync(path.join(tmpDir, 'work', '.artemis'), { recursive: true })
+  fs.mkdirSync(artemisHome, { recursive: true })
+  const workdir = path.join(tmpDir, 'work')
+  const proxy = 'http://127.0.0.1:8789/llm'
+  const testProfile = (id: string, baseUrl = 'http://127.0.0.1:9/v1') => ({ id, protocol: 'openai', baseUrl, apiKey: `token-${id}`, model: `${id}-model` })
+  const saved = { b: process.env.ARTEMIS_BUILDER_PROFILE, s: process.env.ARTEMIS_SPECIALIST_PROFILE, home: process.env.ARTEMIS_HOME }
+  process.env.ARTEMIS_BUILDER_PROFILE = 'byo_coding'
+  process.env.ARTEMIS_SPECIALIST_PROFILE = 'byo_subtasks'
+  process.env.ARTEMIS_HOME = artemisHome
+  const workdirStoreFile = new ProviderStore(workdir).getFilePath()
+  fs.mkdirSync(path.dirname(workdirStoreFile), { recursive: true })
+  // The host's global store: the platform profile and the own-key profiles at the proxy.
+  fs.writeFileSync(
+    path.join(artemisHome, 'providers.json'),
+    JSON.stringify({ profiles: [testProfile('executor'), testProfile('byo_coding', `${proxy}/api_coding`), testProfile('byo_subtasks', `${proxy}/api_subtasks`)], defaultMainProfileId: 'executor' }),
+  )
+  // The agent's workdir store: a main profile, and own-key profiles of its own pointed at a listener of its own.
+  fs.writeFileSync(
+    workdirStoreFile,
+    JSON.stringify({ profiles: [testProfile('executor'), testProfile('byo_coding', 'http://127.0.0.1:7777/agent'), testProfile('byo_subtasks', 'http://127.0.0.1:7777/agent')], defaultMainProfileId: 'executor' }),
+  )
+  const used: string[] = []
+  const stub = (id: string, fail = false): ChatProvider => ({
+    supportsNativeToolCalls: true,
+    async complete(): Promise<ProviderResponse> {
+      used.push(id)
+      if (fail) throw new Error(`${id} failed`)
+      return { text: 'ok', raw: null }
+    },
+  })
+  try {
+    const failingMain = stub('main', true)
+    const router = await createProviderRouter({ cwd: workdir, mainProvider: failingMain, createProviderFromProfile: (profile) => stub(`${profile.id}@${profile.baseUrl}`) })
+    const msg = [{ id: 'u', role: 'user' as const, content: 'implement the feature', createdAt: new Date().toISOString() }]
+    used.length = 0
+    await router.resolveProvider('main', 'implement and deploy the feature').complete(msg).catch(() => undefined)
+    assert('run profile router: the main conversation never falls back to an own-key builder or subtask profile', !used.some((u) => u.startsWith('byo_')), used.join(','))
+    used.length = 0
+    await router.resolveProvider('builder').complete(msg)
+    assert('run profile router: builder work goes to the global builder profile first', used[0] === `byo_coding@${proxy}/api_coding`, used.join(','))
+    used.length = 0
+    await router.resolveProvider('planner').complete(msg)
+    assert('run profile router: specialist work goes to the global subtask profile first', used[0] === `byo_subtasks@${proxy}/api_subtasks`, used.join(','))
+    assert('run profile router: a workdir own-key profile is never used', !used.some((u) => u.includes('7777')), used.join(','))
+
+    const { runHeadersFor } = await import('../src/providers/openaiCompatible.js')
+    assert('run profile: a profile without runHeadersFrom sends no run headers', Object.keys(runHeadersFor({}, `${proxy}/api_x/chat/completions`)).length === 0)
+    // The host's per-run headers for the own-key profile, as handed over on a descriptor:
+    // bound to the proxy's URL for that connection.
+    const { loadInheritedMcpHeaders, resetInheritedMcpHeadersForTest, inheritedMcpHeaders, MCP_HEADERS_FD_ENV } = await import('../src/mcp/inheritedHeaders.js')
+    const headersFile = path.join(tmpDir, 'run-headers.json')
+    fs.writeFileSync(headersFile, JSON.stringify({ byo_api_x: { 'x-run-context': 'run-token-placeholder', 'x-byo-grant': 'grant-placeholder', 'x-artemis-target': `${proxy}/api_x` } }))
+    resetInheritedMcpHeadersForTest()
+    const headersFd = fs.openSync(headersFile, 'r')
+    const headersEnv: NodeJS.ProcessEnv = { [MCP_HEADERS_FD_ENV]: String(headersFd) }
+    assert('run profile: the per-run headers load', loadInheritedMcpHeaders(headersEnv) === undefined)
+    const managed = { id: 'byo_api_x', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' }
+    const legit = runHeadersFor(managed, `${proxy}/api_x/chat/completions`)
+    assert('run profile: the own-key profile at the proxy sends its run headers, never the target', legit['x-byo-grant'] === 'grant-placeholder' && legit['x-run-context'] === 'run-token-placeholder' && !('x-artemis-target' in legit), JSON.stringify(Object.keys(legit)))
+    assert('run profile: the messages endpoint at the proxy too', runHeadersFor(managed, `${proxy}/api_x/v1/messages`)['x-byo-grant'] === 'grant-placeholder')
+    // providers.json is the agent's to edit: a profile it adds (a main profile pointed at the
+    // model proxy, say) gets no run headers, so the proxy refuses it.
+    assert('run profile: a forged non-own-key profile borrowing runHeadersFrom sends nothing', Object.keys(runHeadersFor({ id: 'main-via-proxy', runHeadersFrom: 'byo_api_x' }, `${proxy}/api_x/chat/completions`)).length === 0)
+    assert('run profile: an own-key profile borrowing another entry sends nothing', Object.keys(runHeadersFor({ id: 'byo_api_y', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' }, `${proxy}/api_x/chat/completions`)).length === 0)
+    // An own-key profile pointed elsewhere (a workdir one, or the global one with its baseUrl changed)
+    // gets nothing: the headers go only to the target the host named.
+    for (const [why, url] of [
+      ['a workdir own-key profile at a listener of the agent', 'http://127.0.0.1:7777/agent/chat/completions'],
+      ['the global profile with a tampered baseUrl', 'https://evil.example/llm/api_x/chat/completions'],
+      ['another connection under the proxy', `${proxy}/api_x_other/chat/completions`],
+      ['a path that climbs out', `${proxy}/api_x/../api_y/chat/completions`],
+      ['credentials in the URL', 'http://127.0.0.1:8789@evil.example/llm/api_x/chat/completions'],
+    ] as const) {
+      assert(`run profile: ${why} gets no run headers`, Object.keys(runHeadersFor(managed, url)).length === 0, url)
+    }
+    // A target-bound entry never goes to an MCP server, whatever its id.
+    assert('run profile: an MCP server named like the own-key entry gets no headers', Object.keys(inheritedMcpHeaders('byo_api_x', `${proxy}/api_x`)).length === 0 && Object.keys(inheritedMcpHeaders('byo_api_x', undefined)).length === 0)
+    resetInheritedMcpHeadersForTest()
+  } finally {
+    if (saved.b === undefined) delete process.env.ARTEMIS_BUILDER_PROFILE
+    else process.env.ARTEMIS_BUILDER_PROFILE = saved.b
+    if (saved.s === undefined) delete process.env.ARTEMIS_SPECIALIST_PROFILE
+    else process.env.ARTEMIS_SPECIALIST_PROFILE = saved.s
+    if (saved.home === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = saved.home
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
 }
 
 {
@@ -1493,6 +1589,76 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
     JSON.stringify(outcome),
   )
   fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+{
+  // The owner's own key (artemis-online's byo_* profiles) serves coding tasks and subtasks only:
+  // never the main conversation (no run override of it), helper tasks, vision, images or video,
+  // even when a store names such a profile for them.
+  const tmpRoot = path.join(os.tmpdir(), `artemis-own-key-${Date.now()}`)
+  const fakeHome = path.join(tmpRoot, 'home')
+  const projectCwd = path.join(tmpRoot, 'project')
+  fs.mkdirSync(path.join(fakeHome, '.artemis'), { recursive: true })
+  fs.mkdirSync(projectCwd, { recursive: true })
+  const ownKey = { id: 'byo_api_anthropic', label: 'Anthropic (own key)', protocol: 'openai' as const, baseUrl: 'http://127.0.0.1:8789/llm/api_anthropic', apiKey: 'engine-token-placeholder', model: 'own-model', supportsImages: true, managedBy: 'artemis-online-connectors' }
+  const platform = { id: 'executor', label: 'Platform', protocol: 'openai' as const, baseUrl: 'https://gateway.example.invalid/v1', apiKey: 'model-key-placeholder', model: 'platform-chat', supportsImages: true }
+  const visualProfile = {
+    enabled: true,
+    image: { provider: 'openai', apiKey: 'platform-visual-key-placeholder', baseUrl: 'https://gateway.example.invalid/v1', model: 'platform-image', defaultParams: { size: '1024x1024', quality: 'standard', style: 'realistic', watermark: false } },
+    video: { enabled: false, provider: 'openai', apiKey: '', baseUrl: 'https://gateway.example.invalid/v1', model: 'platform-video', defaultParams: { duration: '10s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '30fps', watermark: false } },
+  }
+  const write = (stored: Record<string, unknown>) => fs.writeFileSync(path.join(fakeHome, '.artemis', 'providers.json'), JSON.stringify(stored))
+  const saved = { home: process.env.HOME, artemisHome: process.env.ARTEMIS_HOME, main: process.env.ARTEMIS_MAIN_PROFILE, builder: process.env.ARTEMIS_BUILDER_PROFILE, specialist: process.env.ARTEMIS_SPECIALIST_PROFILE }
+  const restore = (name: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+  process.env.HOME = fakeHome
+  delete process.env.ARTEMIS_HOME
+  try {
+    // An ordinary setup: the platform profile is the default, ours sits beside it.
+    write({ profiles: [ownKey, platform], defaultMainProfileId: 'executor', visualProfile })
+    process.env.ARTEMIS_MAIN_PROFILE = 'byo_api_anthropic'
+    process.env.ARTEMIS_BUILDER_PROFILE = 'byo_api_anthropic'
+    process.env.ARTEMIS_SPECIALIST_PROFILE = 'byo_api_anthropic'
+    const store = new ProviderStore(path.join(fakeHome, '.artemis'))
+    let data = await store.load()
+    assert('own key: a run setting cannot make it the main conversation model', store.getDefaultMainProfile(data)?.id === 'executor')
+    const visual = await resolveConfiguredVisualProvider(projectCwd, 'image')
+    assert('own key: images stay on the platform visual profile', visual?.config.image.apiKey === 'platform-visual-key-placeholder', JSON.stringify(visual?.config.image ?? null))
+
+    // A store that names it for everything: the main, specialist, vision and helper routes.
+    write({
+      profiles: [ownKey, platform],
+      defaultMainProfileId: 'byo_api_anthropic',
+      specialistProfileId: 'byo_api_anthropic',
+      visionProfileId: 'byo_api_anthropic',
+      auxiliaryModels: { compression: { mode: 'provider', providerProfileId: 'byo_api_anthropic' }, vision: { mode: 'provider', providerProfileId: 'byo_api_anthropic' } },
+      visualProfile,
+    })
+    data = await store.load()
+    assert('own key: never the main model, even as the saved default', store.getDefaultMainProfile(data)?.id === 'executor', store.getDefaultMainProfile(data)?.id)
+    assert('own key: never the worker (helper roles), even as the saved specialist', store.getWorkerProfile(data) === undefined, store.getWorkerProfile(data)?.id)
+    const candidates = [...(await resolveMainSecondaryVisualFallbackCandidates(projectCwd, 'image')), ...(await resolveMainSecondaryVisualFallbackCandidates(projectCwd, 'video'))]
+    assert('own key: never an image or video fallback', candidates.every((c) => !c.profileId.startsWith('byo_')), JSON.stringify(candidates.map((c) => c.profileId)))
+    const compression = await resolveAuxiliaryProfile('compression', projectCwd)
+    assert('own key: helper tasks (compression) never use it', compression?.profile.id !== 'byo_api_anthropic', compression?.profile.id)
+    const extract = await resolveAuxiliaryProfile('web_extract', projectCwd)
+    assert('own key: helper tasks (web extraction) never use it', extract?.profile.id !== 'byo_api_anthropic', extract?.profile.id)
+    const vision = await resolveVisionProfile(projectCwd)
+    assert('own key: the vision helper never uses it', vision?.profile.id !== 'byo_api_anthropic', vision?.profile.id)
+    // Coding tasks and subtasks may (the router test below covers which roles).
+    assert('own key: coding and subtask overrides are read', runProfileOverride('ARTEMIS_BUILDER_PROFILE') === 'byo_api_anthropic' && runProfileOverride('ARTEMIS_SPECIALIST_PROFILE') === 'byo_api_anthropic')
+    process.env.ARTEMIS_BUILDER_PROFILE = '../etc'
+    assert('own key: a malformed override name is ignored', runProfileOverride('ARTEMIS_BUILDER_PROFILE') === undefined)
+  } finally {
+    restore('HOME', saved.home)
+    restore('ARTEMIS_HOME', saved.artemisHome)
+    restore('ARTEMIS_MAIN_PROFILE', saved.main)
+    restore('ARTEMIS_BUILDER_PROFILE', saved.builder)
+    restore('ARTEMIS_SPECIALIST_PROFILE', saved.specialist)
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  }
 }
 
 {

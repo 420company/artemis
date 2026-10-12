@@ -32,6 +32,8 @@ export interface GradeContext {
   /** Probe id of each context_contains grader, by grader id. */
   probeIds: Record<string, string>
   judge?: JudgeOutcome
+  /** One verdict per llm_judge grader id, when a task judges several turns. */
+  judges?: Record<string, JudgeOutcome>
   env: NodeJS.ProcessEnv
 }
 
@@ -239,6 +241,96 @@ function conditionHolds(condition: GraderCondition, turns: TurnTrace[]): boolean
   return true
 }
 
+// ── errand helpers ─────────────────────────────────────────────────────────
+
+/** Prose outside fenced blocks. */
+function proseOf(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, ' ')
+}
+
+/** Questions put to the user: question marks in prose; a choices/confirm card alone counts as one. */
+export function countQuestions(text: string): number {
+  const prose = proseOf(text)
+  const marks = (prose.match(/[？?](?![\w/=&])/g) ?? []).length
+  const cards = (text.match(/```(?:choices|confirm)\b/g) ?? []).length
+  return Math.max(marks, marks === 0 && cards > 0 ? 1 : 0)
+}
+
+const HOWTO_PHRASES = /(?:你|您)(?:可以|需要|得|要|只需|先)(?:先|自己|直接)?(?:去|到|在|打开|登录|登陆|访问|前往|进入|注册|下载|安装|搜索)|按(?:照)?(?:以下|下面|如下)(?:的)?步骤|步骤如下|操作步骤|具体步骤|教程如下|(?:you can|you should|you'll need to|you need to|you must|first,? go to)\s+(?:go to|head|visit|open|log ?in|sign ?up|download|install|click|create|buy|run)/i
+const HOWTO_LINE = /^\s*(?:[-*•]|\d+[.)、．]|第[一二三四五六七八九十\d]+步[:：]?)\s*(?:\*\*)?(?:你|您)?(?:可以|需要)?(?:先|然后|再|接着|最后)?(?:打开|登录|登陆|进入|前往|访问|点击|注册|选择|填写|输入|下载|安装|复制|粘贴|搜索|找到|提交|付款|支付|设置|扫码|绑定)/
+
+/** Phrasings that hand the work to the user whoever says them ("推荐你上 X 买", "你去 X 开一台", "再自己装"). */
+const HOWTO_STRONG = [
+  /(?:推荐|建议)(?:你|您)(?:直接|先|自己)?(?:上|去|到|在|用)[^。！？\n]{0,30}?(?:买|开|租|注册|下单|装|搭|申请|购买)/,
+  /(?:你|您)(?:就|直接|自己|先|再)?(?:去|到)[^，。！？\n]{0,24}?(?:开一?台|买|租|注册|下单|申请|创建|登录|下载|安装|搭|装)/,
+  /(?:你|您)(?:再|就|得|要|需要|可以)?自己(?:动手)?(?:装|安装|搭|配置|部署|设置|操作)/,
+  /(?<![我不无必用])再自己(?:动手)?(?:装|安装|搭|配置|部署|设置)/,
+  // "建议到 X 控制台新建实例…之后…就行": advice to go somewhere and make or buy it, even without 你.
+  /(?:建议|推荐)(?:你|您)?(?:直接|先|自己)?(?:到|去|在|上|登录|登陆)[^。！？\n]{0,30}?(?:控制台|后台|官网|面板|网站|网页|App|APP|app)[^。！？\n]{0,30}?(?:新建|创建|购买|下单|注册|开通|开一?台|租|申请)/,
+  // "麻烦您自行登录 X 后台创建…", "请自己去…注册".
+  /(?:麻烦|请|劳烦)(?:你|您)?(?:自行|自己|亲自)(?:去|到|在|登录|登陆|打开|访问|前往)?[^。！？\n]{0,30}?(?:新建|创建|购买|下单|注册|开通|安装|设置|配置|填写|提交|申请|开一?台)/,
+  // A bare purchase link for the user: "去这里买就行：https://…".
+  /(?<![我们])(?:去|到|在|上)(?:这里|这儿|这个(?:链接|网址|网站|页面))[^。！？\n]{0,8}?(?:买|购买|下单|注册|开通|租)/,
+  /(?:买|购买|下单|注册|开通)(?:就行|就可以|即可|就好)[^。！？\n]{0,4}?(?:https?:\/\/|www\.)/,
+  // English imperatives at the start of a sentence or list item.
+  /(?:^|[.!?。！？]\s*|\n\s*(?:[-*•]|\d+[.)])?\s*)(?:(?:first|then|next|finally|just|simply),?\s+)?(?:head (?:over )?to|go (?:over )?to|navigate to|sign up (?:at|on|for|with)|create an account (?:at|on|with)|log ?in to|ssh into|run (?:the following|these|this command))\b/i,
+]
+
+/** Sequences for the user ("先…然后…最后…", "在 App 里…就行", "「我的」→「设置」") unless the agent says it does them. */
+const HOWTO_SEQUENCE = /先[^。！？\n]{1,40}?(?:然后|再|接着)[^。！？\n]{1,40}?(?:最后|就行|就可以|即可|就好)/
+const HOWTO_IN_APP = /(?:在|用|到|上|打开)[^，。！？\n]{0,12}(?:App|APP|app|官网|小程序|网站|公众号|网页|后台)[^。！？\n]{0,24}?(?:交|充值|付款|支付|购买|下单|办理|预约|注册|登录|退订|取消|续费|关闭|提交)[^。！？\n]{0,16}?(?:即可|就行|就可以|就好|就能)/
+const HOWTO_MENU_PATH = /「[^」]{1,16}」\s*(?:→|->|>|＞|－>)\s*「[^」]{1,16}」/
+const AGENT_DOES_IT = /(?:^|[，,])\s*(?:我|我们|我来|我会|我这边|我已|已经帮你|这边)|我(?:会|来|先|去|就|帮|替|已经|这边|们)/
+
+/** Shell commands in a fence, for the user to type. Cards (choices, confirm, vpn) are not commands. */
+const SHELL_FENCE = /```(?:bash|sh|shell|zsh|console|terminal|powershell|ps1|cmd|bat)\b|```[^\n]*\n\s*(?:\$\s|sudo\s|apt(?:-get)?\s|yum\s|dnf\s|curl\s|wget\s|ssh\s|scp\s|npm\s|pip3?\s|git\s|docker\s|systemctl\s|wg(?:-quick)?\s|ufw\s|chmod\s|bash\s)/i
+
+function sentencesOf(prose: string): string[] {
+  return prose.split(/(?<=[。！？!?])|\n/).map((s) => s.trim()).filter(Boolean)
+}
+
+/** Instructions the user would have to follow by hand (lines, phrases or commands). */
+export function howToSteps(text: string): string[] {
+  const prose = proseOf(text)
+  const found: string[] = []
+  const phrase = HOWTO_PHRASES.exec(prose)
+  if (phrase) found.push(phrase[0])
+  for (const pattern of HOWTO_STRONG) {
+    const hit = pattern.exec(prose)
+    if (hit) found.push(hit[0].trim().slice(0, 40))
+  }
+  for (const sentence of sentencesOf(prose)) {
+    if (AGENT_DOES_IT.test(sentence)) continue
+    const hit = HOWTO_SEQUENCE.exec(sentence) ?? HOWTO_IN_APP.exec(sentence) ?? HOWTO_MENU_PATH.exec(sentence)
+    if (hit) found.push(hit[0].slice(0, 40))
+  }
+  const shell = SHELL_FENCE.exec(text)
+  if (shell) found.push(`commands to run: ${shell[0].replace(/\s+/g, ' ').slice(0, 30)}`)
+  const lines = prose.split(/\n/).filter((line) => HOWTO_LINE.test(line))
+  if (lines.length >= 2) found.push(...lines.map((line) => line.trim().slice(0, 40)))
+  return found
+}
+
+const AMOUNT = String.raw`(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)`
+const PRICE = new RegExp(
+  String.raw`(?:US\$|HK\$|NT\$|S\$|A\$|C\$|USD\s?|HKD\s?|RMB\s?|CNY\s?|EUR\s?|GBP\s?|JPY\s?|[¥￥$€£])\s?` + AMOUNT +
+    '|' + AMOUNT + String.raw`\s?(?:元|美元|美金|刀(?![片具])|块钱|块\s?(?=[/每一]?(?:个?月|年))|欧元|英镑|港币|港元|日元|新台币|USD|HKD|RMB|CNY|EUR|GBP|JPY|dollars?\b|bucks\b|\/月|\/年|\/mo\b|\/month\b|\/yr\b|一个月|每月|per month)`,
+  'gi',
+)
+
+function amountOf(raw: string): number {
+  return Number(raw.replace(/,(?=\d{3}\b)/g, ''))
+}
+
+/** The amounts of money a text names, as numbers ("$5.00" → 5, "5刀" → 5, "HK$1,299" → 1299). */
+export function extractPrices(text: string): number[] {
+  return [...text.matchAll(PRICE)].map((m) => amountOf(m[1] ?? m[2] ?? '')).filter((n) => Number.isFinite(n))
+}
+
+function numbersIn(text: string): Set<number> {
+  return new Set([...text.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g)].map((m) => amountOf(m[0])))
+}
+
 // ── the graders ────────────────────────────────────────────────────────────
 
 type Verdict = { pass: boolean; detail: string } | { skip: string }
@@ -417,6 +509,40 @@ function gradeOne(grader: Grader, id: string, ctx: GradeContext): Verdict {
       if (replies().every((turn) => turn.mainRequests === 0)) return { pass: false, detail: 'no main-model request was made' }
       return { pass: hits.length > 0 && hits.every(Boolean), detail: `/${grader.pattern}/ ${hits.every(Boolean) ? 'found' : 'not found'} in the ${where} main-model request` }
     }
+    case 'reply_no_howto': {
+      const bad = replies().map((turn, i) => ({ i, steps: howToSteps(turn.reply) })).filter((r) => r.steps.length)
+      return { pass: bad.length === 0, detail: bad.length ? `instructions to the user: ${bad.map((r) => r.steps.slice(0, 3).join(' / ')).join(' | ')}` : 'no how-to steps for the user' }
+    }
+    case 'questions_at_most': {
+      const counts = replies().map((turn) => countQuestions(turn.reply))
+      return { pass: counts.length > 0 && counts.every((n) => n <= grader.max), detail: `questions per reply: ${counts.join(', ')} (max ${grader.max})` }
+    }
+    case 'first_tool_is': {
+      const wanted = toolNames(grader.tool)
+      const firsts = replies().map((turn) => turn.tools.find((event) => !event.agent)?.name ?? 'none')
+      return { pass: firsts.length > 0 && firsts.every((name) => wanted.includes(name)), detail: `first tool: ${firsts.join(', ')} (wanted ${wanted.join('|')})` }
+    }
+    case 'events_emitted': {
+      const prefix = `[${grader.event}] `
+      const events = toolTurns().flatMap((turn) => turn.events ?? []).filter((line) => line.startsWith(prefix)).map((line) => {
+        try {
+          return JSON.parse(line.slice(prefix.length)) as Record<string, unknown>
+        } catch {
+          return {}
+        }
+      })
+      const matching = events.filter((event) => Object.entries(grader.fields ?? {}).every(([key, pattern]) => new RegExp(pattern).test(String(event[key] ?? ''))))
+      const min = grader.min ?? 1
+      return { pass: matching.length >= min, detail: `${matching.length} matching ${grader.event} event(s) of ${events.length} (min ${min})` }
+    }
+    case 'reply_prices_grounded': {
+      const prices = extractPrices(replyText())
+      const seen = numbersIn(toolTurns().flatMap((turn) => turn.tools.map((event) => event.output ?? '')).join('\n'))
+      for (const allowed of grader.allow ?? []) seen.add(Number(allowed))
+      const invented = prices.filter((n) => !seen.has(n))
+      if (grader.requirePrice && prices.length === 0) return { pass: false, detail: 'no price in the reply' }
+      return { pass: invented.length === 0, detail: invented.length ? `prices not seen in any tool result: ${invented.join(', ')}` : `${prices.length} price(s), all seen in tool results` }
+    }
     case 'office_file': {
       const re = new RegExp(grader.pattern, grader.flags ?? '')
       const files = listFiles(ctx.workspace).filter((file) => re.test(file) && !(file in ctx.fixtureHashes) && !/(^|\/)\./.test(file))
@@ -450,10 +576,11 @@ function gradeOne(grader: Grader, id: string, ctx: GradeContext): Verdict {
       return { pass: false, detail: results.slice(0, 3).map((r) => `${r.file}: ${r.problems.join('; ')}`).join(' | ') }
     }
     case 'llm_judge': {
-      if (!ctx.judge) return { skip: 'judge did not run' }
-      if (ctx.judge.score === undefined) return { pass: false, detail: `judge error: ${ctx.judge.error ?? 'no score'}` }
+      const judge = ctx.judges?.[id] ?? ctx.judge
+      if (!judge) return { skip: 'judge did not run' }
+      if (judge.score === undefined) return { pass: false, detail: `judge error: ${judge.error ?? 'no score'}` }
       const min = grader.minScore ?? 4
-      return { pass: ctx.judge.score >= min, detail: `score ${ctx.judge.score}/5 (min ${min}): ${ctx.judge.reasons ?? ''}`.slice(0, 400) }
+      return { pass: judge.score >= min, detail: `score ${judge.score}/5 (min ${min}): ${judge.reasons ?? ''}`.slice(0, 400) }
     }
   }
 }

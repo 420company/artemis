@@ -18,6 +18,8 @@ import { buildLongChat } from './assets.js'
 import { buildJudgePrompt, JUDGE_SYSTEM, parseJudgeReply } from './judge.js'
 import { TrafficMeter } from './meter.js'
 import { startMockServer, type MockServerHandle } from './mockServer.js'
+import { installMockBrowser, startMockWeb, withMockWeb, type MockWebHandle } from './mockWeb.js'
+import { fileURLToPath } from 'node:url'
 import type {
   JudgeOutcome,
   ToolEvent,
@@ -35,6 +37,7 @@ const emit = (event: Record<string, unknown>): void => {
 }
 
 const MOCK_PROFILE_ID = 'eval-mock'
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DUMMY_VIDEO_BASE_URL = 'http://127.0.0.1:9/eval-dummy-video'
 const TRANSCRIPT_ENTRY_CHARS = 4_000
 const TOOL_OUTPUT_CHARS = 20_000
@@ -147,9 +150,24 @@ async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
   })
   meter.install()
 
+  // Errand tasks: an offline web of made-up shops, and a fake SSH server.
+  let web: MockWebHandle | undefined
+  let steps = job.mock?.steps ?? []
+  if (job.setup.mockWeb) {
+    web = await startMockWeb(path.join(REPO, 'evals', 'zh', 'fixtures', job.setup.mockWeb), path.join(job.cwd, '.mock-web-port'))
+    await installMockBrowser(web.baseUrl, path.join(job.cwd, '.mock-web-page.json'))
+    steps = withMockWeb(steps, web.baseUrl)
+  }
+  if (job.setup.fakeSsh) {
+    process.env.ARTEMIS_SSH_BIN = path.join(REPO, 'scripts', 'fixtures', 'fakeSsh.mjs')
+    process.env.ARTEMIS_SSH_FAKE_LOG = path.join(job.cwd, '.fake-ssh.log')
+    process.env.ARTEMIS_SSH_FAKE_STATE = path.join(job.cwd, '.fake-ssh-state.json')
+    if (job.serversReinstalled?.length) process.env.ARTEMIS_SSH_FAKE_REINSTALLED = job.serversReinstalled.join(',')
+  }
+
   let mock: MockServerHandle | undefined
   if (job.mode === 'mock') {
-    mock = await startMockServer(job.mock?.steps ?? [], job.mock?.aux ?? [])
+    mock = await startMockServer(steps, job.mock?.aux ?? [])
     await wireMockProfile(mock.baseUrl)
   }
   await applySetup(job)
@@ -230,6 +248,7 @@ async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
   }
 
   await mock?.close()
+  await web?.close()
   return {
     prompt: job.prompt,
     reply,
@@ -247,6 +266,7 @@ async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
     blockedHosts: [...meter.blockedHosts],
     ...(error ? { error } : {}),
     infoTail: infos.filter((line) => !/^\[stream-/.test(line)).slice(-40),
+    events: infos.filter((line) => /^\[agent-(?:update|status)\] /.test(line)),
   }
 }
 

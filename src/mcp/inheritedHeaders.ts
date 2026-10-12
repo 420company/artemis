@@ -18,6 +18,16 @@
  *
  *   { "v": 2, "servers": { "<server id>": { "url": "<url>", "headers": { ... } } } }
  *
+ * An entry may instead be bound to a target that is not an MCP server (the
+ * host's own-key model proxy, providers/openaiCompatible.ts runHeadersFor):
+ * in v1 its headers carry the target as `x-artemis-target`, in v2 the entry
+ * is `{ "target": "<url>", "headers": { ... } }`. Such an entry is never
+ * handed to an MCP server, whatever its id (inheritedTargetHeaders gives it
+ * to the model proxy client only). A v2 entry with neither `url` nor
+ * `target` is for the engine itself (the credential broker's claim,
+ * security/credentialStore.ts): inheritedInternalHeaders reads it, and no
+ * MCP server ever gets it.
+ *
  * A v2 entry may also say what the host's own entry must hold (`surface`:
  * the server names and version it reports, and a digest of every tool it
  * serves, toolDigest below). The MCP store then disables, for this
@@ -50,7 +60,14 @@ const WAIT_LIMIT_MS = 5_000;
 
 let loaded = false;
 type OwnedSurface = { names: string[]; version?: string; tools: Set<string> };
-type ServerHeaders = { url?: string; headers: Record<string, string>; surface?: OwnedSurface };
+type ServerHeaders = { url?: string; target?: string; internal?: boolean; headers: Record<string, string>; surface?: OwnedSurface };
+
+/**
+ * The field of a v1 entry that binds its headers to one target URL (the
+ * host's own-key model proxy). Such an entry is never handed to an MCP
+ * server, whatever its id.
+ */
+export const TARGET_FIELD = 'x-artemis-target';
 const headersByServer = new Map<string, ServerHeaders>();
 
 /** URLs compare without a trailing slash. */
@@ -111,10 +128,20 @@ function parse(text: string): Map<string, ServerHeaders> {
     if (!servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error('per-run MCP headers (v2) need a servers object');
     for (const [serverId, entry] of Object.entries(servers as Record<string, unknown>)) {
       const id = serverId.trim();
-      const { url, headers, surface } = (entry && typeof entry === 'object' ? entry : {}) as { url?: unknown; headers?: unknown; surface?: unknown };
+      const { url, target, headers, surface } = (entry && typeof entry === 'object' ? entry : {}) as { url?: unknown; target?: unknown; headers?: unknown; surface?: unknown };
       const clean = cleanHeaders(headers);
-      // v2 always names the URL: without one, the headers go nowhere.
-      if (!id || !clean || typeof url !== 'string' || !url.trim()) continue;
+      // Target-bound: for the model proxy client only, never an MCP server.
+      if (id && clean && typeof target === 'string' && target.trim()) {
+        const { [TARGET_FIELD]: _ignored, ...rest } = clean;
+        result.set(id, { target: target.trim(), headers: rest });
+        continue;
+      }
+      if (!id || !clean) continue;
+      // Neither a URL nor a target: for the engine itself, never an MCP server.
+      if (typeof url !== 'string' || !url.trim()) {
+        result.set(id, { internal: true, headers: clean });
+        continue;
+      }
       const owned = parseSurface(surface);
       result.set(id, { url: normalizeUrl(url), headers: clean, ...(owned ? { surface: owned } : {}) });
     }
@@ -124,7 +151,8 @@ function parse(text: string): Map<string, ServerHeaders> {
     const id = serverId.trim();
     const clean = cleanHeaders(headers);
     if (!id || !clean) continue;
-    result.set(id, { headers: { ...(result.get(id)?.headers ?? {}), ...clean } });
+    const { [TARGET_FIELD]: target, ...rest } = { ...(result.get(id)?.headers ?? {}), ...clean };
+    result.set(id, target ? { target, headers: rest } : { headers: rest });
   }
   return result;
 }
@@ -172,7 +200,8 @@ export function loadInheritedMcpHeaders(env: NodeJS.ProcessEnv = process.env): s
  */
 export function inheritedMcpHeaders(serverId: string, url: string | undefined): Record<string, string> {
   const entry = headersByServer.get(serverId.trim());
-  if (!entry) return {};
+  // A target-bound or engine-internal entry never goes to an MCP server.
+  if (!entry || entry.target !== undefined || entry.internal) return {};
   if (entry.url !== undefined && (url === undefined || normalizeUrl(url) !== entry.url)) return {};
   return { ...entry.headers };
 }
@@ -234,6 +263,23 @@ export function ownedEntryProblem(server: { id: string; url?: string; surface?: 
     if (!owned.surface.tools.has(toolDigest(tool as Record<string, unknown>))) return `a tool the host does not serve as listed (${String((tool as { name?: unknown }).name).slice(0, 40)})`;
   }
   return undefined;
+}
+
+/**
+ * An entry for the engine itself (not an MCP server, not a target): a v2
+ * entry with neither, or a v1 entry (v1 does not tell them apart).
+ */
+export function inheritedInternalHeaders(id: string): Record<string, string> {
+  const entry = headersByServer.get(id.trim());
+  if (!entry || entry.target !== undefined || (!entry.internal && entry.url !== undefined)) return {};
+  return { ...entry.headers };
+}
+
+/** A target-bound entry: the URL its headers may go to, and the headers (without the target). */
+export function inheritedTargetHeaders(id: string): { target: string; headers: Record<string, string> } | undefined {
+  const entry = headersByServer.get(id.trim());
+  if (!entry?.target) return undefined;
+  return { target: entry.target, headers: { ...entry.headers } };
 }
 
 /** For tests: forget what was loaded, so the next load reads again. */

@@ -1,0 +1,137 @@
+{
+  "id": "errand-deploy-site",
+  "category": "errand",
+  "description": "把我的网站部署上线：自己看网站文件、查托管方案和价格，推荐一个并一次问清；不给用户写部署教程",
+  "fixture": "errand-deploy-site",
+  "setup": {
+    "mockWeb": "web-hosting"
+  },
+  "turns": [
+    {
+      "prompt": "把我的网站部署上线"
+    }
+  ],
+  "limits": {
+    "maxTurns": 12,
+    "timeoutSec": 300,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "playbook",
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "ack-first",
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "inspected",
+      "type": "tool_called",
+      "tool": [
+        "list_files",
+        "read_file",
+        "search_files"
+      ]
+    },
+    {
+      "id": "researched",
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web"
+      ]
+    },
+    {
+      "id": "recommend",
+      "type": "reply_matches",
+      "pattern": "推荐|建议"
+    },
+    {
+      "id": "prices-grounded",
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "one-question",
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "no-howto",
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "site-intact",
+      "type": "files_unchanged"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，先看看你的网站文件，再找合适的地方放上线。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "list_files",
+                "args": {
+                  "path": "site"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/index.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "看过了：site 里是两个纯静态页面（首页和关于页），不需要服务器程序。\n\n- **静页托管 · 免费版**：$0/月，自动 HTTPS，支持绑定自己的域名——最适合你。\n- 帆云 VPS：$5.00/月，要自己维护，没必要。\n\n我推荐用免费版：我来注册、上传、开 HTTPS，上线后把网址发给你并打开检查一遍。要不要顺便绑定你自己的域名？没有的话先用它送的免费网址。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "ack-first",
+        "inspected",
+        "researched",
+        "recommend",
+        "one-question",
+        "no-howto"
+      ],
+      "turns": [
+        [
+          {
+            "say": "部署网站的步骤如下：\n1. 注册一个托管平台账号\n2. 登录后点击「新建站点」\n3. 上传 site 文件夹\n你用的是什么框架？有域名吗？"
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1135,6 +1135,50 @@ test('per-run MCP headers: a bad descriptor variable is refused and removed, std
   }
 });
 
+test('per-run MCP headers (v2): URL-bound MCP servers, target-bound own-key entries and engine-internal entries in one payload', async () => {
+  const { loadInheritedMcpHeaders, inheritedMcpHeaders, inheritedTargetHeaders, inheritedInternalHeaders, resetInheritedMcpHeadersForTest } = await import('../src/mcp/inheritedHeaders.js');
+  const { runHeadersFor } = await import('../src/providers/openaiCompatible.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-headers-'));
+  try {
+    for (const format of ['v2', 'v1'] as const) {
+      resetInheritedMcpHeadersForTest();
+      const proxy = 'http://127.0.0.1:8789/llm';
+      const payload = format === 'v2'
+        ? {
+            v: 2,
+            servers: {
+              artemis_online: { url: 'http://127.0.0.1:8787/mcp', headers: { 'x-run-context': 'tok' } },
+              byo_api_x: { target: `${proxy}/api_x`, headers: { 'x-run-context': 'tok', 'x-byo-grant': 'grant' } },
+              artemis_credentials: { headers: { 'x-credential-broker': 'http://127.0.0.1:8787/agent/credentials', 'x-credential-claim': 'claim' } },
+            },
+          }
+        : { byo_api_x: { 'x-run-context': 'tok', 'x-byo-grant': 'grant', 'x-artemis-target': `${proxy}/api_x` } };
+      const file = path.join(dir, `${format}.json`);
+      fs.writeFileSync(file, JSON.stringify(payload));
+      assert.equal(loadInheritedMcpHeaders({ ARTEMIS_MCP_HEADERS_FD: String(fs.openSync(file, 'r')) }), undefined, format);
+      // The own-key entry goes to its proxy target only, through the model client; never to an MCP server.
+      assert.deepEqual(inheritedTargetHeaders('byo_api_x'), { target: `${proxy}/api_x`, headers: { 'x-run-context': 'tok', 'x-byo-grant': 'grant' } }, format);
+      for (const url of [`${proxy}/api_x`, 'http://127.0.0.1:8787/mcp', undefined]) assert.deepEqual(inheritedMcpHeaders('byo_api_x', url), {}, `${format} ${url}`);
+      const managed = { id: 'byo_api_x', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' };
+      assert.equal(runHeadersFor(managed, `${proxy}/api_x/chat/completions`)['x-byo-grant'], 'grant', format);
+      assert.deepEqual(runHeadersFor(managed, 'https://evil.example/llm/api_x/chat/completions'), {}, format);
+      if (format === 'v2') {
+        // The MCP server: bound to its URL.
+        assert.deepEqual(inheritedMcpHeaders('artemis_online', 'http://127.0.0.1:8787/mcp'), { 'x-run-context': 'tok' });
+        assert.deepEqual(inheritedMcpHeaders('artemis_online', `${proxy}/api_x`), {});
+        assert.equal(inheritedTargetHeaders('artemis_online'), undefined);
+        // The engine's own entry: for the engine only, never an MCP server named like it.
+        assert.equal(inheritedInternalHeaders('artemis_credentials')['x-credential-claim'], 'claim');
+        for (const url of ['http://127.0.0.1:8787/agent/credentials', undefined]) assert.deepEqual(inheritedMcpHeaders('artemis_credentials', url), {});
+        assert.deepEqual(inheritedInternalHeaders('artemis_online'), {});
+      }
+    }
+  } finally {
+    resetInheritedMcpHeadersForTest();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('per-run MCP headers (v2): an owned entry whose surface is not what the host serves is disabled; printed state words stay enums', async () => {
   const { loadInheritedMcpHeaders, resetInheritedMcpHeadersForTest, toolDigest } = await import('../src/mcp/inheritedHeaders.js');
   const { McpServerStore } = await import('../src/mcp/store.js');

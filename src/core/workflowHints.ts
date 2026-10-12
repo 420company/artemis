@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WorkflowMode } from './workflowMode.js';
 import { DesignSystem } from '../design/index.js';
+import { OPERATOR_PRINCIPLE } from './operatorPlaybook.js';
 
 export interface WorkflowHintContext {
   cwd: string;
@@ -73,7 +74,8 @@ const COMMON_AGENT_PROTOCOL = `\
 7. 子任务可以让 deep_research 工具去做并行调研（它在 worker 模型上跑，便宜快速），不要把简单的 read 任务也往那扔
 8. 外部协议/API/SDK/gateway 类 bug（例如微信/Telegram/Discord/CDN/webhook/第三方 schema）必须先把本地日志与权威外部资料对照：官方文档、上游 SDK 源码、协议枚举、raw type 定义。不要只在本地代码里反复猜字段；优先核对数字常量、字段名、鉴权/会话、大小/md5/缩略图等硬事实
 9. 工作流（深度规划 / 并行分工 / 多方案对比 / 设计）由 Artemis 按任务自动选择，用户不需要也不会输入工作流名；任务中途发现比预想复杂时可调用 use_workflow 切换。子代理数量受预算限制，超出会被拒绝；不要伪造未运行的评审结果。对用户只用平白的话描述在做什么，不要提工作流、工具、模型或服务商的内部名称
-10. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案`;
+10. 任务结束最多两句话总结：做了什么 + 文件在哪。不要罗列每一步——清单和工具结果已经记录在案
+${OPERATOR_PRINCIPLE}`;
 
 const DESIGN_SKILL_FALLBACK = `\
 [设计工作流]

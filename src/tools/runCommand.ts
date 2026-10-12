@@ -485,6 +485,21 @@ export async function executeRunCommand(
     action.timeoutMs,
   );
 
+  // A limit, not a guard: a literal match on the names of the agent's
+  // credential and VPN profile folders only catches a command that names
+  // them plainly; a shell can build the name (quotes, variables, globs). What
+  // keeps these secrets from the agent's user is where they live: a hosted
+  // engine's credentials, SSH sessions and VPN profiles are the server's
+  // (security/credentialStore.ts, tools/serverSetup), out of this user's
+  // reach. A local engine's own files belong to its user anyway.
+  if (/agent-credentials|vpn-profiles/.test(expandForInspection(action.command))) {
+    return Promise.resolve({
+      action,
+      ok: false,
+      output: 'Access denied: command references a protected path.',
+    })
+  }
+
   if (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command)) {
     return Promise.resolve({
       action,
