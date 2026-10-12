@@ -381,6 +381,11 @@ await test('credentials: the hosted broker is taken out of the environment and a
   assert.equal(calls[0].headers['x-credential-ticket'], 'run-ticket');
   const refused = await broker.use('vpn-k', { type: 'ssh', host: '203.0.113.11', as: 'key' });
   assert.equal(!refused.ok && refused.code, 'wrong_host');
+  // A secret the owner holds the key to: the run gets the unlock card to show, not a value.
+  const lockedBroker = new BrokerCredentialStore('http://127.0.0.1:1/agent/credentials', {}, async () => new Response(JSON.stringify({ error: 'locked', message: 'Locked. Put this card in your reply:\n```unlock\n{"id":"ul_0123456789abcdef0123"}\n```' }), { status: 423 }));
+  const locked = await lockedBroker.use('owner-0123456789ab', { type: 'web', origin: 'https://shop.example', field: 'password' });
+  assert.equal(!locked.ok && locked.code, 'locked');
+  assert.match(!locked.ok ? locked.message : '', /```unlock/);
 });
 
 // ── reply envelope ──────────────────────────────────────────────────────
@@ -406,6 +411,7 @@ await test('status at the end: a confirmation card waits for the owner (L2)', ()
   assert.equal(statusAtEnd(card({ title: '把周报发给张三', confirm: '发送' })).activity, 'waiting_send_approval');
   // Asked the owner for their own password: waiting for them to type it into the card.
   assert.deepEqual(statusAtEnd('需要你的帆云主机密码：\n\n```secret\n{"id":"sr_0123456789abcdef0123"}\n```'), { phase: 'waiting_user', activity: 'waiting_secret' });
+  assert.deepEqual(statusAtEnd('需要你解锁：\n\n```unlock\n{"id":"ul_0123456789abcdef0123"}\n```'), { phase: 'waiting_user', activity: 'waiting_unlock' });
   assert.equal(statusAtEnd(card({ title: '删除旧文件夹' })).activity, 'waiting_confirmation');
   assert.equal(statusAtEnd('都好了。').phase, 'done');
   assert.equal(statusAtEnd('```confirm\nnot json\n```').phase, 'done');

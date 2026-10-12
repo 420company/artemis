@@ -68,7 +68,7 @@ export type CredentialPurpose =
   | { type: 'ssh'; host: string; as: 'key' | 'password' }
   | { type: 'internal'; use: 'vpn' };
 
-export type CredentialErrorCode = 'invalid_name' | 'not_found' | 'exists' | 'wrong_kind' | 'wrong_origin' | 'wrong_host' | 'unavailable';
+export type CredentialErrorCode = 'invalid_name' | 'not_found' | 'exists' | 'wrong_kind' | 'wrong_origin' | 'wrong_host' | 'unavailable' | 'locked';
 
 export type UseResult = { ok: true; secret: string; info: CredentialInfo } | { ok: false; code: CredentialErrorCode; message: string };
 
@@ -411,7 +411,7 @@ export class BrokerCredentialStore implements CredentialStore {
     }
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) {
-      const code = typeof data.error === 'string' && (['invalid_name', 'not_found', 'exists', 'wrong_kind', 'wrong_origin', 'wrong_host'] as string[]).includes(data.error) ? (data.error as CredentialErrorCode) : 'unavailable';
+      const code = typeof data.error === 'string' && (['invalid_name', 'not_found', 'exists', 'wrong_kind', 'wrong_origin', 'wrong_host', 'locked'] as string[]).includes(data.error) ? (data.error as CredentialErrorCode) : 'unavailable';
       throw new CredentialError(code, typeof data.message === 'string' ? data.message : `Credential service error ${res.status}`);
     }
     return data as T;

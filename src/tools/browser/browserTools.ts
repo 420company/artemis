@@ -691,6 +691,7 @@ export async function resolveCredentialValue(
   if (field === 'other') return refuse('credential_refused', 'Stored credentials only go into a password field (or a username/email field for a username). Nothing was typed.');
   const used = await useCredential(match[1]!, { type: 'web', origin, field });
   if (!used.ok) {
+    if (used.code === 'locked') return refuse('credential_locked', used.message);
     return refuse(used.code === 'not_found' ? 'credential_not_found' : 'credential_refused', used.code === 'not_found'
       ? `No stored credential named ${match[1]}. Make a password with server_setup create_password (with the site's origin), or hand this step to the user.`
       : `${used.message} Nothing was typed.`);
