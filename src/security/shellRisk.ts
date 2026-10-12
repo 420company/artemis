@@ -16,7 +16,7 @@
  * as elsewhere.
  */
 
-import { existsSync, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, statSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { realPathOf } from '../utils/fs.js'
@@ -757,6 +757,30 @@ export const DESTRUCTIVE_TOKEN =
 /** Places whose files run later on their own: login scripts, autostart entries, services, cron, SSH keys. */
 const STARTUP_PATH =
   /(?:^|\/)(?:\.bashrc|\.bash_profile|\.bash_login|\.profile|\.zshrc|\.zprofile|\.zshenv|\.xprofile|\.xinitrc|\.config\/autostart\/|\.config\/systemd\/|\.config\/fish\/|\.local\/share\/applications\/|\.ssh\/)|^\/etc\/(?:profile|bash\.bashrc|cron|systemd\/|init\.d\/|rc\.local|xdg\/autostart\/|sudoers)|^\/var\/spool\/cron\//
+/** Command directories in the home (and on PATH) the agent can write: a new file there shadows a command. */
+function writableCommandDirs(): string[] {
+  const home = homedir()
+  const dirs = new Set(['bin', '.local/bin', '.cargo/bin', 'go/bin', '.npm-global/bin', '.bun/bin', '.deno/bin', '.yarn/bin'].map((d) => path.join(home, d)))
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) continue
+    try {
+      accessSync(dir, fsConstants.W_OK)
+      dirs.add(dir)
+    } catch {
+      // Not writable for this user: nothing new can appear there.
+    }
+  }
+  return [...dirs].map((dir) => realPathOf(dir))
+}
+
+/** A path (a directory ends with `/`) where a new file runs later: STARTUP_PATH, or a command directory the agent can write. */
+function isStartupPath(target: string): boolean {
+  if (STARTUP_PATH.test(target)) return true
+  const directory = target.endsWith('/') ? target.slice(0, -1) : path.dirname(target)
+  const real = realPathOf(directory)
+  return writableCommandDirs().some((dir) => real === dir) || /\/(?:\.local\/bin|bin)$/.test(directory) && directory.startsWith('/home/')
+}
+
 /** Inline code writing a file it names literally: `open('/etc/x', 'w')`, `Path('/etc/x').write_text(…)`. */
 const LITERAL_FILE_WRITES = [
   /\bopen\s*\(\s*(['"])([^'"]+)\1\s*,\s*(['"])[^'"]*[wax+][^'"]*\3[^)]*\)/g,
@@ -851,11 +875,12 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     try {
       isDirectory = statSync(absolute).isDirectory()
     } catch {
-      // A new file where something runs later (a login script, an autostart entry, a unit) asks too.
-      if (STARTUP_PATH.test(absolute) || STARTUP_PATH.test(`${absolute}/`)) outside.add(known)
+      // A new file where something runs later (a login script, an autostart entry, a unit, a
+      // command in a PATH directory the agent can write: `cp x ~/bin/ls`) asks too.
+      if (isStartupPath(absolute) || isStartupPath(`${absolute}/`)) outside.add(known)
       return
     }
-    if (isDirectory && STARTUP_PATH.test(`${absolute}/`)) {
+    if (isDirectory && isStartupPath(`${absolute}/`)) {
       outside.add(known)
       return
     }
