@@ -32,7 +32,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { writeGeneratedAssets } from './evalZh/assets.js'
-import { cjkRatio, countListItems, extractUrls, gradeTask, graderId, jsonPointer, listFiles, parseCsv, sha256File, validateSchema } from './evalZh/graders.js'
+import { cjkRatio, countListItems, extractPrices, extractUrls, gradeTask, graderId, howToSteps, jsonPointer, listFiles, parseCsv, sha256File, validateSchema } from './evalZh/graders.js'
 import { parseJudgeReply } from './evalZh/judge.js'
 import { extractUsage } from './evalZh/meter.js'
 import { addUsage, renderComparison, renderMarkdown, summarize } from './evalZh/report.js'
@@ -64,6 +64,7 @@ const GRADER_TYPES: readonly GraderType[] = [
   'reply_list_items', 'reply_urls_grounded', 'file_exists', 'file_absent', 'file_glob', 'file_contains',
   'files_unchanged', 'json_file', 'csv_file', 'command_succeeds', 'tool_called', 'tool_not_called',
   'turns_at_most', 'workflow_is', 'compaction_happened', 'context_contains', 'llm_judge', 'office_file',
+  'reply_no_howto', 'questions_at_most', 'first_tool_is', 'events_emitted', 'reply_prices_grounded',
 ]
 
 // ── options ─────────────────────────────────────────────────────────────────
@@ -439,9 +440,11 @@ async function runTask(task: EvalTask, variant: 'pass' | 'fail', ctx: RunContext
   let status: TaskStatus | undefined
   let error: string | undefined
   let sessionId: string | undefined
+  const reinstalled = new Set<string>()
   for (let index = 0; index < task.turns.length; index++) {
     const turn = task.turns[index]!
     if (turn.newSession) sessionId = undefined
+    for (const host of turn.serversReinstalled ?? []) reinstalled.add(host)
     const outFile = path.join(root, `turn-${index + 1}.json`)
     const outcome = await runWorker<TurnTrace>({
       kind: 'turn',
@@ -455,6 +458,7 @@ async function runTask(task: EvalTask, variant: 'pass' | 'fail', ctx: RunContext
       ...(index === 0 && task.seedHistory ? { seedHistory: task.seedHistory } : {}),
       probes,
       ...(ctx.mode === 'mock' ? { mock: { steps: script.turns[index] ?? [], aux: script.aux ?? [] } } : {}),
+      ...(reinstalled.size ? { serversReinstalled: [...reinstalled] } : {}),
       outFile,
     }, workspace, env, timeoutMs, path.join(root, 'worker.log'), ctx.budget, usage.inputTokens + usage.outputTokens, taskBudget)
     addUsage(usage, outcome.usage)
@@ -475,20 +479,28 @@ async function runTask(task: EvalTask, variant: 'pass' | 'fail', ctx: RunContext
     }
   }
 
+  // Live mode: each llm_judge grader scores the turn it names (the last by default).
   let judge: JudgeOutcome | undefined
-  const judgeGrader = task.graders.find((grader) => grader.type === 'llm_judge')
-  if (!status && judgeGrader && judgeGrader.type === 'llm_judge' && ctx.mode === 'live') {
-    const last = turns[turns.length - 1]!
-    const outcome = await runWorker<JudgeOutcome>({
-      kind: 'judge', mode: ctx.mode, cwd: workspace, request: last.prompt, reply: last.reply, rubric: judgeGrader.rubric, outFile: path.join(root, 'judge.json'),
-    }, workspace, env, 120_000, path.join(root, 'worker.log'), ctx.budget, usage.inputTokens + usage.outputTokens, taskBudget)
-    addUsage(usage, outcome.usage)
-    judge = outcome.output ?? { error: outcome.detail ?? outcome.status, usage: outcome.usage }
+  const judges: Record<string, JudgeOutcome> = {}
+  if (!status && ctx.mode === 'live') {
+    for (const [index, grader] of task.graders.entries()) {
+      if (grader.type !== 'llm_judge') continue
+      const at = typeof grader.turn === 'number' ? grader.turn - 1 : turns.length - 1
+      const judged = turns[at]
+      if (!judged) continue
+      const id = graderId(grader, index)
+      const outcome = await runWorker<JudgeOutcome>({
+        kind: 'judge', mode: ctx.mode, cwd: workspace, request: judged.prompt, reply: judged.reply, rubric: grader.rubric, outFile: path.join(root, `judge-${id.replace(/[^\w-]/g, '_')}.json`),
+      }, workspace, env, 120_000, path.join(root, 'worker.log'), ctx.budget, usage.inputTokens + usage.outputTokens, taskBudget)
+      addUsage(usage, outcome.usage)
+      judges[id] = outcome.output ?? { error: outcome.detail ?? outcome.status, usage: outcome.usage }
+      judge ??= judges[id]
+    }
   }
 
   const graders: GraderResult[] = status
     ? []
-    : gradeTask(task.graders, { mode: ctx.mode, workspace, fixtureHashes, turns, probeIds, ...(judge ? { judge } : {}), env })
+    : gradeTask(task.graders, { mode: ctx.mode, workspace, fixtureHashes, turns, probeIds, ...(judge ? { judge, judges } : {}), env })
   const graded = graders.filter((grader) => grader.status !== 'skip')
   const passed = graded.filter((grader) => grader.status === 'pass').length
   const finalStatus: TaskStatus = status ?? (graded.every((grader) => grader.status === 'pass') ? 'pass' : 'fail')
@@ -553,6 +565,27 @@ function unitChecks(): string[] {
   check('usage: openai JSON', JSON.stringify(extractUsage('{"usage":{"prompt_tokens":10,"completion_tokens":3}}')) === JSON.stringify({ input: 10, output: 3 }))
   check('usage: anthropic SSE', JSON.stringify(extractUsage('data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":20,"output_tokens":1}}}\n\ndata: {"type":"message_delta","usage":{"output_tokens":42}}')) === JSON.stringify({ input: 25, output: 42 }))
   check('usage: none', extractUsage('{"choices":[]}') === undefined)
+  // M6: paraphrased instructions are caught; the agent describing its own plan is not.
+  const howto = [
+    '先去青盘官网用邮箱注册，然后在邮箱里点验证链接，最后设置好密码就能用了。',
+    '你去帆云主机开一台东京的服务器，选 Debian 12。',
+    '推荐你上帆云主机买一台 1核1GB 的，再自己装个 WordPress。',
+    'Head over to the registrar, search the name and buy it.',
+    '装好以后运行：\n```bash\nsudo apt install wireguard\n```',
+    '```\n$ wg-quick up wg0\n```',
+    '在运营商 App 里选好金额付款就行。',
+    '进入「我的」→「会员中心」→「自动续费」关闭即可。',
+  ]
+  for (const text of howto) check(`howto caught: ${text.slice(0, 24)}`, howToSteps(text).length > 0)
+  const doing = [
+    '我先去比一比几家的价格，然后挑一台最合适的，最后装好 VPN 把二维码给你。',
+    '我推荐 **帆云东京**：流量够用、注册最省事。',
+    '手机扫码导入：手机上打开 WireGuard App，扫上面的二维码就能连上。',
+    '这一步需要登录你的账号，我打开登录页后把浏览器交给你登一下，登好我来关掉，可以吗？',
+    '```vpn\n{"server":"vpn-tokyo-1","device":"phone"}\n```',
+  ]
+  for (const text of doing) check(`no howto: ${text.slice(0, 24)}`, howToSteps(text).length === 0)
+  check('prices: 5刀, dollars, HKD, thousands', JSON.stringify(extractPrices('大概 5刀一个月，或者 12 dollars；港区 HKD 39，年付 HK$1,299；两块硬盘')) === JSON.stringify([5, 12, 39, 1299]))
   const task = (id: string, status: TaskStatus, score: number): TaskResult => ({ id, category: 'qa', description: '', status, score, graders: [], turns: [], usage: { requests: 1, inputTokens: 100, outputTokens: 10 }, durationMs: 1000 })
   const run = (tasks: TaskResult[]): RunResults => ({ version: 1, startedAt: '', finishedAt: '', mode: 'mock', options: {}, summary: summarize(tasks, 1000), tasks })
   const comparison = renderComparison(run([task('a', 'pass', 1), task('b', 'fail', 0.5)]), run([task('a', 'fail', 0.5), task('b', 'fail', 0.5), task('c', 'pass', 1)]))

@@ -1,0 +1,983 @@
+{
+  "id": "errand-do-not-instruct",
+  "category": "errand",
+  "description": "十个日常代办请求：被动助手会给操作步骤；合格的回答要么直接开始办（先回应、再查），要么只问一个合在一起的问题",
+  "fixture": "errand-sheet",
+  "setup": {
+    "mockWeb": "web-errands"
+  },
+  "turns": [
+    {
+      "prompt": "帮我注册一个青盘云盘账号",
+      "newSession": false
+    },
+    {
+      "prompt": "帮我买个域名指向我的网站",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我把这个表格整理好发给张三",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我订一张下周五去上海的机票",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我开一台服务器装个博客",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我把下个月的话费交了",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我预约周三下午的牙医",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我寄个快递到北京",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我退订那个视频会员",
+      "newSession": true
+    },
+    {
+      "prompt": "帮我续费我的域名",
+      "newSession": true
+    }
+  ],
+  "limits": {
+    "maxTurns": 10,
+    "timeoutSec": 240,
+    "budgetTokens": 4000000
+  },
+  "graders": [
+    {
+      "id": "q1-playbook",
+      "turn": 1,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q1-no-howto",
+      "turn": 1,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q1-one-question",
+      "turn": 1,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q1-ack-first",
+      "turn": 1,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q1-acted",
+      "turn": 1,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q1-prices-grounded",
+      "turn": 1,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q2-playbook",
+      "turn": 2,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q2-no-howto",
+      "turn": 2,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q2-one-question",
+      "turn": 2,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q2-ack-first",
+      "turn": 2,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q2-acted",
+      "turn": 2,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q2-prices-grounded",
+      "turn": 2,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q3-playbook",
+      "turn": 3,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q3-no-howto",
+      "turn": 3,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q3-one-question",
+      "turn": 3,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q3-ack-first",
+      "turn": 3,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q3-acted",
+      "turn": 3,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q3-prices-grounded",
+      "turn": 3,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q4-playbook",
+      "turn": 4,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q4-no-howto",
+      "turn": 4,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q4-one-question",
+      "turn": 4,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q4-ack-first",
+      "turn": 4,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q4-acted",
+      "turn": 4,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q4-prices-grounded",
+      "turn": 4,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q5-playbook",
+      "turn": 5,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q5-no-howto",
+      "turn": 5,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q5-one-question",
+      "turn": 5,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q5-ack-first",
+      "turn": 5,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q5-acted",
+      "turn": 5,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q5-prices-grounded",
+      "turn": 5,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q6-playbook",
+      "turn": 6,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q6-no-howto",
+      "turn": 6,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q6-one-question",
+      "turn": 6,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q6-ack-first",
+      "turn": 6,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q6-acted",
+      "turn": 6,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q6-prices-grounded",
+      "turn": 6,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q7-playbook",
+      "turn": 7,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q7-no-howto",
+      "turn": 7,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q7-one-question",
+      "turn": 7,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q7-ack-first",
+      "turn": 7,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q7-acted",
+      "turn": 7,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q7-prices-grounded",
+      "turn": 7,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q8-playbook",
+      "turn": 8,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q8-no-howto",
+      "turn": 8,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q8-one-question",
+      "turn": 8,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q8-ack-first",
+      "turn": 8,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q8-acted",
+      "turn": 8,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q8-prices-grounded",
+      "turn": 8,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q9-playbook",
+      "turn": 9,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q9-no-howto",
+      "turn": 9,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q9-one-question",
+      "turn": 9,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q9-ack-first",
+      "turn": 9,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q9-acted",
+      "turn": 9,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q9-prices-grounded",
+      "turn": 9,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q10-playbook",
+      "turn": 10,
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "q10-no-howto",
+      "turn": 10,
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "q10-one-question",
+      "turn": 10,
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "q10-ack-first",
+      "turn": 10,
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "q10-acted",
+      "turn": 10,
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web",
+        "read_file",
+        "list_files"
+      ]
+    },
+    {
+      "id": "q10-prices-grounded",
+      "turn": 10,
+      "type": "reply_prices_grounded"
+    },
+    {
+      "id": "q1-judge-does-it",
+      "turn": 1,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q2-judge-does-it",
+      "turn": 2,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q3-judge-does-it",
+      "turn": 3,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q4-judge-does-it",
+      "turn": 4,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q5-judge-does-it",
+      "turn": 5,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q6-judge-does-it",
+      "turn": 6,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q7-judge-does-it",
+      "turn": 7,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q8-judge-does-it",
+      "turn": 8,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q9-judge-does-it",
+      "turn": 9,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    },
+    {
+      "id": "q10-judge-does-it",
+      "turn": 10,
+      "type": "llm_judge",
+      "mode": "live",
+      "rubric": "判断助手这次回复是在\"替用户把事情办了\"，还是在\"教用户自己去办\"。高分：已经动手（查了真实的价格/时间/页面），只在付款确认、用户本人才能输入的秘密、实名认证、真正的个人偏好这些环节找用户，并且把要问的合成一个问题、附上默认建议。低分：给操作步骤或教程、让用户自己去某个网站/App 办、给用户要运行的命令、换个说法把活推回给用户（\"先…然后…最后…\"\"你去 X 开一台\"\"推荐你上 X 买再自己装\"），或者编造没查到的价格。",
+      "minScore": 4,
+      "note": "在线模式：评审模型判断是在办事还是在教用户"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去给你注册青盘云盘。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/drive.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "青盘云盘注册只要一个邮箱，注册时会发验证码。我用哪个邮箱帮你注册？密码我会生成一个强密码存好，不会发在聊天里。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，先查查你网站名字的域名还能不能注册。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/domains.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "查到 linshouzuo.com 可以注册，首年 ¥55/年、续费 ¥79/年；linshouzuo.cn 首年 ¥29/年。我推荐 .com，好记也更正式。买下后我直接把它指向你的网站并检查能打开，付款前给你看账单。就买 linshouzuo.com 可以吗？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，先把表格整理好。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "read_file",
+                "args": {
+                  "path": "销售表.csv"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "销售汇总.csv",
+                  "content": "姓名,部门,销售额\n赵敏,华北,15100\n王芳,华东,17100\n李强,华南,11800\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "表格整理好了：按人汇总，赵敏 15100、王芳 17100、李强 11800，已存成 销售汇总.csv。发出去之前要确认一下：张三的邮箱是哪个？发送前我会把邮件内容给你过目。"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去查下周五（10月23日）去上海的航班。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/flights.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "10月23日 北京→上海 我查到：08:00 CA1501 ¥820、12:00 MU5102 ¥690（只剩 3 张）、19:30 HO1252 ¥560。我推荐 12:00 那班：时间适中、价格中等。出票需要乘机人姓名和身份证号，按这班订可以吗？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去找台合适的服务器来装博客。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/blog.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "找到一款 1核1GB 的服务器，$5.00/月，预装 Debian 12，装博客够用。我来开机、装好博客、配好 HTTPS，弄完把网址和后台账号给你。付款前会给你看账单，就用这款可以吗？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去看看充值的面额。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/phone.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "可以充 ¥50（实付 ¥49.8）、¥100（实付 ¥99.5）或 ¥200（实付 ¥199）。我按你平常的用量先充 ¥100，付款前请你确认。要充值的手机号是哪个？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去查周三下午还能约的时间。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/dentist.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "周三（10月14日）下午 14:00 和 15:30 还有号，16:30 已满，初诊检查 ¥80。我推荐 14:00。预约需要姓名和手机号，用哪个名字和号码帮你约？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去看看寄到北京的价格。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/courier.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "寄北京：标快 ¥12 起（1kg 内，次日达），特快 ¥23 起。我推荐标快。我来下单并约上门取件，需要寄件地址、收件人姓名电话和大概重量——一起发给我就行，可以吗？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去会员管理页看看。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/membership.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "找到了：连续包月 ¥25/月，下次 10月20日扣费，可以关闭自动续费。这一步需要登录你的账号，我打开登录页后把浏览器交给你登一下，登好我来关掉，可以吗？"
+          }
+        ],
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去查一下域名的到期时间。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/renew.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "linshouzuo.com 11月02日到期，续费一年 ¥79。续费需要登录域名账号：我打开登录页后把浏览器交给你登录，然后我来续费并把账单给你确认，可以吗？"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "q1-no-howto",
+        "q1-one-question",
+        "q1-ack-first",
+        "q1-acted",
+        "q2-no-howto",
+        "q2-one-question",
+        "q2-ack-first",
+        "q2-acted",
+        "q3-no-howto",
+        "q3-one-question",
+        "q3-ack-first",
+        "q3-acted",
+        "q4-no-howto",
+        "q4-one-question",
+        "q4-ack-first",
+        "q4-acted",
+        "q5-no-howto",
+        "q5-one-question",
+        "q5-ack-first",
+        "q5-acted",
+        "q6-no-howto",
+        "q6-one-question",
+        "q6-ack-first",
+        "q6-acted",
+        "q7-no-howto",
+        "q7-one-question",
+        "q7-ack-first",
+        "q7-acted",
+        "q8-no-howto",
+        "q8-one-question",
+        "q8-ack-first",
+        "q8-acted",
+        "q9-no-howto",
+        "q9-one-question",
+        "q9-ack-first",
+        "q9-acted",
+        "q10-no-howto",
+        "q10-one-question",
+        "q10-ack-first",
+        "q10-acted"
+      ],
+      "turns": [
+        [
+          {
+            "say": "注册不难：先去青盘云盘官网用邮箱注册，然后到邮箱里点验证链接，最后设置好密码就能用了。有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "你去域名注册商那里搜一下网站名字买下来，在 DNS 设置里加一条 A 记录指向服务器 IP 就好。有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "Head over to your mail app, attach the sheet and send it to 张三. 有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "机票的话，在航司官网或者订票 App 里选好航班付款就行，下周五的票现在还挺多。有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "推荐你上帆云主机买一台 1核1GB 的服务器，再自己装个 WordPress，装好以后运行：\n```bash\nsudo apt update && sudo apt install -y nginx php-fpm mariadb-server\n```\n有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "话费可以在运营商的 App 里交：选好要充的金额，付款就可以了。有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "牙医预约的话，打开诊所的公众号，选周三下午的时段提交即可。有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "你可以按以下步骤自己完成：\n1. 打开快递公司的小程序\n2. 填写寄件人和收件人信息\n3. 选择上门取件并付款\n有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "退订很简单：进入「我的」→「会员中心」→「自动续费管理」，关闭即可。有问题再问我？还需要别的帮助吗？"
+          }
+        ],
+        [
+          {
+            "say": "You'll need to log in to your registrar and renew the domain from the dashboard. 有问题再问我？还需要别的帮助吗？"
+          }
+        ]
+      ]
+    }
+  }
+}

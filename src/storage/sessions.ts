@@ -381,11 +381,26 @@ const MAX_SHOWN_CHARS = 100_000;
 
 /** A message a chat UI shows: user or assistant text. */
 export function isChatVisibleMessage(message: SessionMessage): boolean {
+  // A progress message the agent posted mid-run (core/agentUpdates.ts).
+  if (message.role === 'tool') return typeof message.agentUpdate?.text === 'string' && message.agentUpdate.text.trim().length > 0;
   return (message.role === 'user' || message.role === 'assistant') &&
     typeof message.content === 'string' && message.content.trim().length > 0;
 }
 
-function projectChatMessage(message: SessionMessage): SessionMessage {
+/** What the chat shows for a stored message; an update shows as an assistant message of kind "update". */
+export type ChatHistoryMessage = SessionMessage & { kind?: 'update'; updateId?: string };
+
+function projectChatMessage(message: SessionMessage): ChatHistoryMessage {
+  if (message.role === 'tool' && message.agentUpdate) {
+    return {
+      id: message.id,
+      role: 'assistant',
+      content: message.agentUpdate.text,
+      createdAt: message.createdAt,
+      kind: 'update',
+      updateId: message.agentUpdate.id,
+    };
+  }
   const {
     toolCalls: _toolCalls,
     rawContentBlocks: _raw,
