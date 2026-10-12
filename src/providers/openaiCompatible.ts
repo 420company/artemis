@@ -2,6 +2,7 @@
 import type { SessionMessage } from '../core/types.js';
 import { splitTrailingRuntimeContext } from './runtimeContext.js'
 import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
+import { isOwnKeyProfile } from './store.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
   createStreamIdleGuard,
@@ -153,9 +154,15 @@ function buildProviderTransportErrorMessage(
 
 type OpenAIMessageContent = string | Array<{ type: string; [key: string]: unknown }>;
 
-/** The per-run headers a profile asks for (runHeadersFrom), from what the host handed over at startup. */
-export function runHeadersFor(config: { runHeadersFrom?: string }): Record<string, string> {
-  return config.runHeadersFrom ? inheritedMcpHeaders(config.runHeadersFrom) : {};
+/**
+ * The per-run headers a profile asks for (runHeadersFrom), from what the host
+ * handed over at startup. Only a profile of the owner's own key, for its own
+ * entry: providers.json is the agent's to edit, and a profile it adds (say, a
+ * main profile pointed at the model proxy) must not borrow those headers.
+ */
+export function runHeadersFor(config: { id?: string; managedBy?: string; runHeadersFrom?: string }): Record<string, string> {
+  if (!config.runHeadersFrom || config.runHeadersFrom !== config.id || !isOwnKeyProfile(config)) return {};
+  return inheritedMcpHeaders(config.runHeadersFrom);
 }
 
 export function buildApiKeyHeaders(

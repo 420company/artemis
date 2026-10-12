@@ -156,7 +156,7 @@ export async function resolveAuxiliaryProfile(
   const notOwnKey = (profile: ProviderProfile | undefined) => (profile && !isOwnKeyProfile(profile) ? profile : undefined);
   const pickers: Array<(entry: LoadedStore) => ProviderProfile | undefined> = [
     ({ store, data }) => notOwnKey(profileForAuxiliaryRoute(task, data.auxiliaryModels?.[task], store, data)),
-    ({ store, data }) => notOwnKey(store.getProfile(data, data.specialistProfileId)),
+    ({ store, data }) => notOwnKey(store.getWorkerProfile(data)),
     ({ store, data }) => notOwnKey(store.getDefaultMainProfile(data)),
   ];
   // The platform owns helper routing when its global store has a say in any tier.

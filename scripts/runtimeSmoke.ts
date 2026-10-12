@@ -718,6 +718,21 @@ assert(
     assert('run profile router: specialist work goes to the subtask profile first', used[0] === 'byo_subtasks', used.join(','))
     const { runHeadersFor } = await import('../src/providers/openaiCompatible.js')
     assert('run profile: a profile without runHeadersFrom sends no run headers', Object.keys(runHeadersFor({})).length === 0)
+    // The host's per-run headers for the own-key profile, as handed over on a descriptor.
+    const { loadInheritedMcpHeaders, resetInheritedMcpHeadersForTest, MCP_HEADERS_FD_ENV } = await import('../src/mcp/inheritedHeaders.js')
+    const headersFile = path.join(tmpDir, 'run-headers.json')
+    fs.writeFileSync(headersFile, JSON.stringify({ byo_api_x: { 'x-run-context': 'run-token-placeholder', 'x-byo-grant': 'grant-placeholder' } }))
+    resetInheritedMcpHeadersForTest()
+    const headersFd = fs.openSync(headersFile, 'r')
+    const headersEnv: NodeJS.ProcessEnv = { [MCP_HEADERS_FD_ENV]: String(headersFd) }
+    assert('run profile: the per-run headers load', loadInheritedMcpHeaders(headersEnv) === undefined)
+    const managed = { id: 'byo_api_x', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' }
+    assert('run profile: the own-key profile sends its run headers', runHeadersFor(managed)['x-byo-grant'] === 'grant-placeholder')
+    // providers.json is the agent's to edit: a profile it adds (a main profile pointed at the
+    // model proxy, say) gets no run headers, so the proxy refuses it.
+    assert('run profile: a forged non-own-key profile borrowing runHeadersFrom sends nothing', Object.keys(runHeadersFor({ id: 'main-via-proxy', runHeadersFrom: 'byo_api_x' })).length === 0)
+    assert('run profile: an own-key profile borrowing another entry sends nothing', Object.keys(runHeadersFor({ id: 'byo_api_y', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' })).length === 0)
+    resetInheritedMcpHeadersForTest()
   } finally {
     if (saved.b === undefined) delete process.env.ARTEMIS_BUILDER_PROFILE
     else process.env.ARTEMIS_BUILDER_PROFILE = saved.b
@@ -1589,6 +1604,7 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
     })
     data = await store.load()
     assert('own key: never the main model, even as the saved default', store.getDefaultMainProfile(data)?.id === 'executor', store.getDefaultMainProfile(data)?.id)
+    assert('own key: never the worker (helper roles), even as the saved specialist', store.getWorkerProfile(data) === undefined, store.getWorkerProfile(data)?.id)
     const candidates = [...(await resolveMainSecondaryVisualFallbackCandidates(projectCwd, 'image')), ...(await resolveMainSecondaryVisualFallbackCandidates(projectCwd, 'video'))]
     assert('own key: never an image or video fallback', candidates.every((c) => !c.profileId.startsWith('byo_')), JSON.stringify(candidates.map((c) => c.profileId)))
     const compression = await resolveAuxiliaryProfile('compression', projectCwd)

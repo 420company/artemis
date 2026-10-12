@@ -668,6 +668,16 @@ export class ProviderStore {
     return data.profiles.find((entry) => entry.id === id);
   }
 
+  /**
+   * The worker (specialist) profile: helper roles and specialists use it, so
+   * it is never a profile of the owner's own key (that key serves only the
+   * subtasks and coding tasks the host routes to it per run).
+   */
+  getWorkerProfile(data: ProviderStoreData): ProviderProfile | undefined {
+    const profile = this.getProfile(data, data.specialistProfileId);
+    return isOwnKeyProfile(profile) ? undefined : profile;
+  }
+
   getDefaultMainProfile(data: ProviderStoreData): ProviderProfile | undefined {
     // The main conversation never runs on a profile of the owner's own key
     // (isOwnKeyProfile): that key serves coding tasks and subtasks only, and

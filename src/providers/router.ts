@@ -220,7 +220,7 @@ export async function createProviderRouter(
   let data = await store.load();
   if (
     !store.getDefaultMainProfile(data) &&
-    !store.getProfile(data, data.specialistProfileId)
+    !store.getWorkerProfile(data)
   ) {
     const globalStore = createGlobalProviderStore();
     const globalData = await globalStore.load();
@@ -231,7 +231,7 @@ export async function createProviderRouter(
   }
   const uiLocale = (await new CliSettingsStore(options.cwd).load()).uiLocale;
   const mainProfile = store.getDefaultMainProfile(data);
-  let specialistProfile = store.getProfile(data, data.specialistProfileId);
+  let specialistProfile = store.getWorkerProfile(data);
   // Per-run routing by the host (the owner's own key for coding or subtasks):
   // never a fallback for the main conversation or other targets.
   const subtaskProfile = store.getProfile(data, runProfileOverride('ARTEMIS_SPECIALIST_PROFILE') ?? '');

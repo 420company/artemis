@@ -991,7 +991,7 @@ export function formatDoubleModelStatus(
   locale: UiLocale = 'en',
 ): string {
   const main = store.getDefaultMainProfile(data);
-  const brain = store.getProfile(data, data.specialistProfileId);
+  const brain = store.getWorkerProfile(data);
   return [
     pickLocale(locale, { zh: 'Doublekill 状态', en: 'Doublekill status' }),
     main
@@ -1025,7 +1025,7 @@ export async function ensureDoubleModelSetup(options: {
   const store = new ProviderStore(options.cwd);
   let data = await store.load();
   let main = store.getDefaultMainProfile(data);
-  let brain = store.getProfile(data, data.specialistProfileId);
+  let brain = store.getWorkerProfile(data);
 
   if (main && brain) {
     return { mainProfile: main, specialistProfile: brain, message: formatDoubleModelStatus(store, data, locale) };
