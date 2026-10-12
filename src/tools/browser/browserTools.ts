@@ -15,6 +15,7 @@
  * input not piped through tool results yet).
  */
 
+import { hasIdentityPlaceholder, hasLiveIdentitySecrets, hasTypedIdentitySecrets, LIVE_SECRET_REFUSAL, onIdentityLiveWindow, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -25,6 +26,7 @@ import {
   readConsoleBuffer,
   readNetworkBuffer,
   clearEventBuffers,
+  setEventCaptureGate,
   listTabs,
   openTab,
   switchTab,
@@ -32,6 +34,12 @@ import {
 } from './browserSession.js';
 import type { Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
+
+// Sign-up passwords (security/identityCredentials.ts): nothing is recorded in the
+// console / request logs while one is live, and both logs are cleared when one goes
+// live and when it stops being live, so nothing from around that window is read later.
+setEventCaptureGate(() => !hasLiveIdentitySecrets());
+onIdentityLiveWindow(() => clearEventBuffers('all'));
 
 export interface ToolResult {
   ok: boolean;
@@ -113,6 +121,8 @@ export async function executeBrowserNavigate(action: BrowserNavigateAction): Pro
       error: { code: 'invalid_input', message: 'url required' },
     };
   }
+  // A script URL is a page script too.
+  if (hasLiveIdentitySecrets() && /^\s*(javascript|vbscript):/i.test(action.url)) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
       const waitUntil = action.waitFor ?? 'domcontentloaded';
@@ -219,6 +229,37 @@ async function collectLayoutAudit(page: Awaited<ReturnType<typeof getActivePage>
   }
 }
 
+/** What a field is and which page (its own frame) it is on: a sign-up password goes only into a password field of its site. */
+async function fieldInfo(el: import('playwright').Locator): Promise<{ inputType: string; frameUrl: string }> {
+  return el.evaluate((node) => ({
+    inputType: node instanceof HTMLInputElement ? node.type.toLowerCase() : node.tagName.toLowerCase(),
+    frameUrl: location.href,
+  }), undefined, { timeout: 10_000 });
+}
+
+/** Marks a field a sign-up password was typed into (screenshots mask it; a switch to text blocks them). */
+async function markSecretField(el: import('playwright').Locator): Promise<void> {
+  await el.evaluate((node, attr) => node.setAttribute(attr, '1'), SECRET_FIELD_ATTRIBUTE).catch(() => undefined);
+}
+
+/**
+ * Once a sign-up password was typed: refuse when a marked field is no longer
+ * a password field (switched to text, it would show in the picture); else
+ * the fields to mask, in every frame.
+ */
+async function secretScreenshotGuard(page: import('playwright').Page): Promise<{ ok: true; mask: import('playwright').Locator[] } | { ok: false; message: string }> {
+  if (!hasTypedIdentitySecrets()) return { ok: true, mask: [] };
+  const mask: import('playwright').Locator[] = [];
+  for (const frame of page.frames()) {
+    const exposed = await frame
+      .evaluate((attr) => [...document.querySelectorAll(`[${attr}]`)].some((n) => !(n instanceof HTMLInputElement) || n.type.toLowerCase() !== 'password'), SECRET_FIELD_ATTRIBUTE)
+      .catch(() => false);
+    if (exposed) return { ok: false, message: 'A password field on this page shows its text; no screenshot while it does.' };
+    mask.push(frame.locator(`[${SECRET_FIELD_ATTRIBUTE}], input[type="password"]`));
+  }
+  return { ok: true, mask };
+}
+
 export async function executeBrowserScreenshot(action: BrowserScreenshotAction): Promise<ToolResult> {
   try {
     return await withPageRetry(async (page) => {
@@ -230,10 +271,12 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
       await fsp.mkdir(SCREENSHOT_DIR, { recursive: true });
       const filename = `screenshot-${Date.now()}.png`;
       const filepath = path.join(SCREENSHOT_DIR, filename);
+      const guard = await secretScreenshotGuard(page);
+      if (!guard.ok) return { ok: false, output: guard.message, error: { code: 'secret_visible', message: guard.message } };
       // On a site where a stored credential was typed, a page echoing it is masked in the picture too.
       const unmask = await maskSecretsForScreenshot(page);
       try {
-        await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
+        await page.screenshot({ path: filepath, fullPage: action.fullPage === true, ...(guard.mask.length ? { mask: guard.mask } : {}) });
       } finally {
         await unmask();
       }
@@ -438,14 +481,26 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
       if (action.value === undefined) {
         return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
       }
-      const typed = await withCredentials(action.value, page.url(), el);
+      // A sign-up's password (the identity module), else a stored credential: each under its own rules.
+      const identityTyped = await resolveIdentityPlaceholders(action.value, hasIdentityPlaceholder(action.value) ? await fieldInfo(el) : undefined);
+      if (!identityTyped.ok) return { ok: false, output: identityTyped.message, error: { code: 'credential_refused', message: identityTyped.message } };
+      const typed = identityTyped.secret ? { ok: true as const, text: identityTyped.text, credential: 'signup' } : await withCredentials(action.value, page.url(), el);
       if (!typed.ok) return typed.result;
       await el.fill(typed.text, { timeout: 10_000 });
+      if (identityTyped.secret || typed.credential) await markSecretField(el);
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
     }, { restoreUrlOnRetry: true });
   } catch (err) {
     return pwError(err);
   }
+}
+
+/**
+ * While a sign-up password is live (security/identityCredentials.ts): page
+ * scripts and the console / request logs are refused outright, not filtered.
+ */
+function liveSecretRefusal(): ToolResult {
+  return { ok: false, output: LIVE_SECRET_REFUSAL, error: { code: 'secret_guard', message: LIVE_SECRET_REFUSAL } };
 }
 
 // ── browser_evaluate ────────────────────────────────────────────────────
@@ -464,6 +519,8 @@ export async function executeBrowserEvaluate(action: BrowserEvaluateAction): Pro
       error: { code: 'invalid_input', message: 'script required' },
     };
   }
+  // While a sign-up password is live, no page script runs at all, whatever it says.
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
       // A script could read a credential typed on this site and send it anywhere.
@@ -501,6 +558,7 @@ export interface BrowserConsoleAction {
 }
 
 export async function executeBrowserConsole(action: BrowserConsoleAction): Promise<ToolResult> {
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     const entries = readConsoleBuffer(action.pattern, action.limit ?? 50);
     if (action.clear) clearEventBuffers('console');
@@ -522,6 +580,7 @@ export interface BrowserRequestsAction {
 }
 
 export async function executeBrowserRequests(action: BrowserRequestsAction): Promise<ToolResult> {
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     const entries = readNetworkBuffer(action.pattern, action.limit ?? 50);
     if (action.clear) clearEventBuffers('network');
@@ -594,7 +653,7 @@ type FieldLocator = { evaluate: <R>(fn: (node: Element) => R, arg?: undefined, o
  * the value is typed as is. The history keeps the placeholder; the secret is
  * scrubbed from every tool result (security/credentialStore.ts).
  */
-async function withCredentials(text: string, pageUrl: string, el: FieldLocator): Promise<{ ok: true; text: string } | { ok: false; result: ToolResult }> {
+async function withCredentials(text: string, pageUrl: string, el: FieldLocator): Promise<{ ok: true; text: string; credential?: string } | { ok: false; result: ToolResult }> {
   return resolveCredentialValue(text, pageUrl, () =>
     el.evaluate((node) => {
       const input = node as HTMLInputElement;
@@ -655,12 +714,16 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
   try {
     return await withPageRetry(async (page) => {
       const el = page.locator(action.selector).first();
-      // `{{credential:<name>}}` types a stored password; the history keeps the placeholder.
-      const typed = await withCredentials(action.text, page.url(), el);
+      // `{{credential:signup-…}}` (a sign-up's password, the identity module) or `{{credential:<name>}}`
+      // (a stored credential): typed only where its rules allow; the history keeps the placeholder.
+      const identityTyped = await resolveIdentityPlaceholders(action.text, hasIdentityPlaceholder(action.text) ? await fieldInfo(el) : undefined);
+      if (!identityTyped.ok) return { ok: false, output: identityTyped.message, error: { code: 'credential_refused', message: identityTyped.message } };
+      const typed = identityTyped.secret ? { ok: true as const, text: identityTyped.text, credential: 'signup' } : await withCredentials(action.text, page.url(), el);
       if (!typed.ok) return typed.result;
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first
       await el.fill(typed.text);
+      if (identityTyped.secret || typed.credential) await markSecretField(el);
       if (action.pressEnter) {
         await el.press('Enter');
         await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);

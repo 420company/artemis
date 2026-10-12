@@ -774,7 +774,18 @@ export type AgentAction =
   /** Keys, passwords, SSH bootstrap, VPN setup and checks for a server the agent set up (tools/serverSetup). */
   | ({ type: 'server_setup' } & Omit<import('../tools/serverSetup/serverSetup.js').ServerSetupAction, 'type'>)
   /** A one-time code sent to the agent's own mailbox or phone (tools/verificationCodes.ts). */
-  | { type: 'get_verification_code'; channel?: 'email' | 'sms' | 'which'; sender?: string; timeoutSeconds?: number };
+  | { type: 'get_verification_code'; channel?: 'email' | 'sms' | 'which'; sender?: string; timeoutSeconds?: number }
+  // ── Agent identity on a hosted platform (tools/agentIdentity.ts) ────────
+  | { type: 'agent_mail_address' }
+  | { type: 'list_emails'; from_contains?: string; subject_contains?: string; limit?: number }
+  | { type: 'wait_for_email'; from_contains?: string; subject_contains?: string; timeout_seconds?: number }
+  | { type: 'read_email'; id: string }
+  | { type: 'extract_verification'; id: string; site?: string }
+  | { type: 'begin_signup'; site: string; purpose: string; free?: boolean; wait_seconds?: number }
+  | { type: 'finish_signup'; signup_id: string; outcome: 'created' | 'failed' | 'abandoned'; username?: string; login_url?: string; note?: string }
+  | { type: 'get_sms_number'; country: string; signup_id?: string; wait_seconds?: number }
+  | { type: 'wait_for_sms'; sender_contains?: string; timeout_seconds?: number }
+  | { type: 'ask_owner_for_code'; site: string; channel?: 'sms' | 'email' | 'authenticator' | 'other'; hint?: string; timeout_seconds?: number };
 
 export type AgentActionType = AgentAction['type'];
 
@@ -875,6 +886,16 @@ export const ALL_AGENT_ACTION_TYPES = [
   'post_update',
   'server_setup',
   'get_verification_code',
+  'agent_mail_address',
+  'list_emails',
+  'wait_for_email',
+  'read_email',
+  'extract_verification',
+  'begin_signup',
+  'finish_signup',
+  'get_sms_number',
+  'wait_for_sms',
+  'ask_owner_for_code',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
