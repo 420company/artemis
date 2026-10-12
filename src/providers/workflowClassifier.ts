@@ -18,7 +18,7 @@ export async function resolveWorkflowClassifierProvider(
     try {
       const store = new ProviderStore(root)
       const data = await store.load()
-      const specialist = store.getProfile(data, data.specialistProfileId)
+      const specialist = store.getWorkerProfile(data)
       if (!specialist) continue
       const config = { ...(specialist as unknown as ProviderConfig), effort: 'low' as const }
       const profileId = typeof (specialist as { id?: unknown }).id === 'string' ? (specialist as { id: string }).id : undefined

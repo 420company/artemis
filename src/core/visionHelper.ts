@@ -35,7 +35,7 @@ import type { SessionMessage } from './types.js';
 import type { ChatProvider, ImageAttachment, ProviderProfile } from '../providers/types.js';
 import { fitImagesToRequest, imageByteSize, MAX_IMAGE_BYTES } from './imageInput.js';
 import { modelSupportsImages } from '../providers/imageSupport.js';
-import { ProviderStore, createGlobalProviderStore } from '../providers/store.js';
+import { ProviderStore, createGlobalProviderStore, isOwnKeyProfile } from '../providers/store.js';
 import { isPlatformManagedProfile, profileForAuxiliaryRoute, resolveAuxiliaryProfile } from '../providers/auxiliaryModels.js';
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
@@ -388,7 +388,9 @@ export async function resolveVisionProfile(cwd: string): Promise<VisionProfileCa
   // workspace wins, and an explicit auxiliaryModels.vision route comes before
   // visionProfileId within the same store.
   const platform = [globalRoute, global].find((c) => c && isPlatformManagedProfile(c.profile));
-  const chosen = platform ?? localRoute ?? local ?? globalRoute ?? global;
+  // A helper task never runs on the owner's own key (isOwnKeyProfile): such a setting counts as none.
+  const usable = (c: VisionProfileCandidate | null) => (c && !isOwnKeyProfile(c.profile) ? c : null);
+  const chosen = usable(platform ?? null) ?? usable(localRoute) ?? usable(local) ?? usable(globalRoute) ?? usable(global);
   if (chosen) return modelSupportsImages(chosen.profile) ? chosen : undefined;
   // No vision setting at all: the worker describes images when it can see
   // them (a main model that sees them never asks for a helper).

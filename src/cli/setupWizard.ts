@@ -752,7 +752,7 @@ async function configureBundleSettings(options: { cwd: string; locale: UiLocale;
   const providerStore = new ProviderStore(cwd)
   const data = await providerStore.load()
   const main = providerStore.getDefaultMainProfile(data)
-  const secondary = providerStore.getProfile(data, data.specialistProfileId)
+  const secondary = providerStore.getWorkerProfile(data)
 
   sectionTitle(tr(locale, '文字润色 / Bundle', 'Prompt Polishing / Bundle'), [
     tr(

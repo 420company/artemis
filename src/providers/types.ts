@@ -51,6 +51,13 @@ export type ProviderConfig = {
    * name may be a gateway alias (e.g. `gpt-6-sol` serving a GLM model).
    */
   capabilitiesSource?: 'platform';
+  /**
+   * Send this profile's requests with the per-run headers the host handed
+   * over for this id (src/mcp/inheritedHeaders.ts): artemis-online's local
+   * model proxy for the owner's own keys requires the run's context header,
+   * so the profile's token alone (readable by the agent) is not enough.
+   */
+  runHeadersFrom?: string;
 };
 
 export type ProviderProfileTelemetry = {

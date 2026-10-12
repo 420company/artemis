@@ -994,7 +994,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     }
   }
 
-  const brainConfig = activeStore.getProfile(activeData, activeData.specialistProfileId)
+  const brainConfig = activeStore.getWorkerProfile(activeData)
   let modelLabel = opts.model ?? config?.model ?? (process.env.ANTHROPIC_API_KEY ? ENV_FALLBACK_ANTHROPIC_MODEL : '?')
   let modelContextLimit: number | undefined = opts.model ? undefined : config?.contextLength
   // A platform-written window is shown as-is, not re-capped by model name.
@@ -1548,7 +1548,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       }
     }
 
-    const nextBrain = nextStore.getProfile(nextData, nextData.specialistProfileId)
+    const nextBrain = nextStore.getWorkerProfile(nextData)
     modelLabel = opts.model ?? nextConfig?.model ?? (process.env.ANTHROPIC_API_KEY ? ENV_FALLBACK_ANTHROPIC_MODEL : '?')
     modelContextLimit = opts.model ? undefined : nextConfig?.contextLength
     modelContextAuthoritative = !opts.model && hasPlatformCapabilities(nextConfig)
@@ -2402,7 +2402,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           const reloadStore = new ProviderStore(cwd)
           const reloadData = await reloadStore.load()
           const reloadConfig = reloadStore.getDefaultMainProfile(reloadData)
-          const reloadBrain = reloadStore.getProfile(reloadData, reloadData.specialistProfileId)
+          const reloadBrain = reloadStore.getWorkerProfile(reloadData)
           if (reloadConfig?.model) {
             switchModel(reloadConfig.model)
             modelLabel = reloadConfig.model
@@ -2870,7 +2870,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           modelContextAuthoritative = hasPlatformCapabilities(reloadStore2.getDefaultMainProfile(reloadData2))
           hud.contextLimit = modelContextLimit
           hud.contextLimitAuthoritative = modelContextAuthoritative
-          brainLabel = reloadStore2.getProfile(reloadData2, reloadData2.specialistProfileId)?.model
+          brainLabel = reloadStore2.getWorkerProfile(reloadData2)?.model
           const mcpStore  = new McpServerStore(cwd)
           const mcpData   = await mcpStore.load()
           hud.mcpServerCount = mcpData.servers.filter(s => s.enabled).length
@@ -3233,7 +3233,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       // Update in-memory state
       activeData = data
       const main = activeStore.getProfile(data, data.defaultMainProfileId)
-      const brain = activeStore.getProfile(data, data.specialistProfileId)
+      const brain = activeStore.getWorkerProfile(data)
       
       modelLabel = main?.model ?? '?'
        modelContextLimit = main?.contextLength
@@ -3525,13 +3525,13 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         let bfGlobalData = await bfGlobalStore.load()
         const localHasAny = Boolean(
           bfStore.getDefaultMainProfile(bfData) ||
-          bfStore.getProfile(bfData, bfData.specialistProfileId)
+          bfStore.getWorkerProfile(bfData)
         )
         if (!localHasAny) {
           bfData = JSON.parse(JSON.stringify(bfGlobalData)) as typeof bfGlobalData
         }
         const curMain = bfStore.getDefaultMainProfile(bfData)
-        const curBrain = bfStore.getProfile(bfData, bfData.specialistProfileId)
+        const curBrain = bfStore.getWorkerProfile(bfData)
 
         const fmtProfile = (p: typeof curMain): string =>
           p ? `${p.label ?? p.id}  (${p.model})` : t('未配置', 'not configured')
@@ -3762,7 +3762,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           await bfGlobalStore.save(bfData)
         }
         const newMain = bfStore.getDefaultMainProfile(bfData)
-        const newBrain = bfStore.getProfile(bfData, bfData.specialistProfileId)
+        const newBrain = bfStore.getWorkerProfile(bfData)
         if (newMain?.model) {
           modelLabel = newMain.model
           modelContextLimit = newMain.contextLength
@@ -3845,7 +3845,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const provStore = new ProviderStore(cwd)
         const provData  = await provStore.load()
         const mainCfg   = provStore.getDefaultMainProfile(provData)
-        const brainCfg  = provStore.getProfile(provData, provData.specialistProfileId)
+        const brainCfg  = provStore.getWorkerProfile(provData)
         if (!mainCfg && !brainCfg) {
           appendSystemPanel(t('Bundle 无法润色', 'Bundle cannot polish'),
             [t('请先配置 Provider（/config 或 /bifrost）。', 'Configure a provider first (/config or /bifrost).')])
@@ -4256,7 +4256,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         const provStore = new ProviderStore(cwd)
         const provData  = await provStore.load()
         const mainCfg   = provStore.getDefaultMainProfile(provData)
-        const brainCfg  = provStore.getProfile(provData, provData.specialistProfileId)
+        const brainCfg  = provStore.getWorkerProfile(provData)
         if (mainCfg || brainCfg) {
           bundleWaiter = startWaitingPanel(t('Bundle polishing · 润色中', 'Bundle polishing...'), [
             t('pre-send polish 正在处理刚才的输入。', 'pre-send polish running'),

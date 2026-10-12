@@ -127,9 +127,26 @@ export function loadInheritedMcpHeaders(env: NodeJS.ProcessEnv = process.env): s
   }
 }
 
-/** The per-run headers for this MCP server (a copy; empty when none were given). */
+/**
+ * The field of an entry that binds its headers to one target URL (the host's
+ * own-key model proxy, providers/openaiCompatible.ts runHeadersFor). Such an
+ * entry is never handed to an MCP server, whatever its id.
+ */
+export const TARGET_FIELD = 'x-artemis-target';
+
+/** The per-run headers for this MCP server (a copy; empty when none were given, or when the entry is bound to a target). */
 export function inheritedMcpHeaders(serverId: string): Record<string, string> {
-  return { ...(headersByServer.get(normalizeServerId(serverId)) ?? {}) };
+  const entry = headersByServer.get(normalizeServerId(serverId));
+  if (!entry || TARGET_FIELD in entry) return {};
+  return { ...entry };
+}
+
+/** A target-bound entry: the URL its headers may go to, and the headers (without the target). */
+export function inheritedTargetHeaders(id: string): { target: string; headers: Record<string, string> } | undefined {
+  const entry = headersByServer.get(normalizeServerId(id));
+  if (!entry || !entry[TARGET_FIELD]) return undefined;
+  const { [TARGET_FIELD]: target, ...headers } = entry;
+  return { target: target!, headers };
 }
 
 /** For tests: forget what was loaded, so the next load reads again. */
