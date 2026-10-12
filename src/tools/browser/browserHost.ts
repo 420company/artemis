@@ -58,8 +58,6 @@ import { attachWebSocket, handshakeResponse } from './wsFrames.js';
 const MAX_CLIENTS = 8;
 /** Connection slots agent-token clients may not take (kept for the owner's view). */
 const VIEWER_RESERVED = 2;
-/** An agent-token connection silent this long may give its slot to a new viewer. */
-const AGENT_IDLE_EVICT_MS = 60_000;
 /** A paused tab resumes this long after the last typing at the latest (ARTEMIS_BROWSER_SECRET_PAUSE_MS). */
 const SECRET_PAUSE_MS = 3 * 60_000;
 /** And never stays paused longer than this in all. */
@@ -659,13 +657,18 @@ async function main(): Promise<void> {
   const agentToken = randomBytes(32).toString('base64url');
   const viewerToken = randomBytes(32).toString('base64url');
   type Socket = ReturnType<typeof attachWebSocket>;
-  /** Open connections, with their role, router client and when they last sent a message (not a pong). */
+  /**
+   * Open connections, with their role, router client and when they last
+   * sent a message (not a pong), as a sequence number: never a tie, unlike
+   * a clock.
+   */
   interface SocketInfo {
     role: ClientRole;
     clientId: number;
     lastMessage: number;
   }
   const sockets = new Map<Socket, SocketInfo>();
+  let messageSeq = 0;
   let agentSockets = 0;
   server = http.createServer((_req, res) => {
     // No HTTP discovery endpoints: only the WebSocket upgrade with a token.
@@ -685,19 +688,16 @@ async function main(): Promise<void> {
     }
     if (sockets.size >= MAX_CLIENTS && role === 'viewer') {
       // Full: a new viewer (the platform server reconnecting) takes the place
-      // of an agent-token connection idle for a while, else of a viewer that
-      // shows nothing; never of a viewer streaming a page to someone.
-      const now = Date.now();
-      const pick = (ok: (info: SocketInfo) => boolean) => {
-        let found: Socket | undefined;
-        for (const [ws, info] of sockets) {
-          if (ok(info) && (!found || info.lastMessage < sockets.get(found)!.lastMessage)) found = ws;
-        }
-        return found;
-      };
-      const evict =
-        pick((info) => info.role === 'agent' && now - info.lastMessage > AGENT_IDLE_EVICT_MS) ??
-        pick((info) => info.role === 'viewer' && !router.hasScreencast(info.clientId));
+      // of the quietest viewer that shows nothing. Never a viewer streaming a
+      // page to someone, and never an engine run's connection: a run may be
+      // idle for long while it is still open (waiting for the owner in
+      // browser_request_handoff, or for an email); a run that is gone has
+      // closed its connection, or stops answering pings and is dropped.
+      let evict: Socket | undefined;
+      for (const [ws, info] of sockets) {
+        if (info.role !== 'viewer' || router.hasScreencast(info.clientId)) continue;
+        if (!evict || info.lastMessage < sockets.get(evict)!.lastMessage) evict = ws;
+      }
       if (evict) {
         sockets.delete(evict);
         evict.close();
@@ -709,12 +709,12 @@ async function main(): Promise<void> {
       return;
     }
     socket.write(accept);
-    const info: SocketInfo = { role, clientId: 0, lastMessage: Date.now() };
+    const info: SocketInfo = { role, clientId: 0, lastMessage: ++messageSeq };
     // The callbacks only fire on later socket events, after `client` exists.
     const ws = attachWebSocket(
       socket,
       (text) => {
-        info.lastMessage = Date.now();
+        info.lastMessage = ++messageSeq;
         client.receive(text);
       },
       () => {

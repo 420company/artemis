@@ -553,7 +553,9 @@ async function main(): Promise<void> {
     assert.equal(m.check(urlValuePart(`https://site.example/#${encodeURIComponent(password)}`)), 'yes');
     assert.equal(m.check(`Welcome ${password}`), 'yes');
     assert.equal(m.check(urlValuePart('https://site.example/login?user=me')), 'no');
-    assert.equal(urlValuePart('https://site.example/a/b'), '', 'only the query and fragment of a URL are checked');
+    assert.equal(urlValuePart('https://site.example/a/b?c#d'), '/a/b?c#d', 'path, query and fragment are checked; not the scheme and host');
+    assert.equal(urlValuePart('https://site.example'), '');
+    assert.equal(m.check(urlValuePart(`https://site.example/reset/${encodeURIComponent(password)}/confirm`)), 'yes', 'a password in the path');
     assert.equal(m.check(''), 'no');
     assert.equal(parseFingerprintSet({ salt: 'x', hashes: [] }), undefined);
     assert.equal(parseFingerprintSet({ salt: 'a'.repeat(22), hashes: [{ n: 2, r: 1, h: '0'.repeat(32) }] }), undefined, 'short variants are not accepted');

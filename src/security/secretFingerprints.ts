@@ -14,8 +14,8 @@
  * Matching must stay cheap, since a page can change its URL and title many
  * times a second and the host serves every client from one thread: the
  * rolling hash slides over the text in one pass per variant length, and
- * the HMAC is only computed where it hits. Only a URL's query and fragment
- * are checked (where a form or a script puts values), and the title. Work
+ * the HMAC is only computed where it hits. A URL's path, query and
+ * fragment are checked (not its scheme and host), and the title. Work
  * is bounded per text and per second; past that, `check` answers
  * 'unknown', and callers fail closed (they blank the text).
  */
@@ -89,12 +89,16 @@ export function parseFingerprintSet(raw: unknown): FingerprintSet | undefined {
   return hashes.length ? { salt: value.salt, hashes } : undefined;
 }
 
-/** The part of a URL a password lands in: its query and fragment (empty without either). */
+/**
+ * The part of a URL a password can land in: everything after the origin
+ * (path, query and fragment). The scheme and host are left out.
+ */
 export function urlValuePart(url: string): string {
-  const q = url.indexOf('?');
-  const f = url.indexOf('#');
-  const at = q === -1 ? f : f === -1 ? q : Math.min(q, f);
-  return at === -1 ? '' : url.slice(at);
+  const scheme = url.indexOf('://');
+  if (scheme === -1) return url;
+  const rest = url.slice(scheme + 3);
+  const at = rest.search(/[/?#]/);
+  return at === -1 ? '' : rest.slice(at);
 }
 
 interface CompiledSet {

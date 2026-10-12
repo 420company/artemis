@@ -102,11 +102,25 @@ class Viewer {
       this.ws.onerror = () => reject(new Error('viewer connection refused'));
     });
   }
-  send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<any> {
+  /** Fails (instead of hanging the smoke) when no answer comes within `timeoutMs`. */
+  send(method: string, params: Record<string, unknown> = {}, sessionId?: string, timeoutMs = 30_000): Promise<any> {
     const id = this.nextId++;
-    return new Promise((resolve) => {
-      this.pending.set(id, resolve);
-      this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`no answer to ${method} within ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pending.set(id, (m) => {
+        clearTimeout(timer);
+        resolve(m);
+      });
+      try {
+        this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
   close(): void {
@@ -414,23 +428,26 @@ async function main(): Promise<void> {
     }
   }
   assert.ok(refusedAt >= 0, 'agent connections are limited');
-  // The viewer token can be read by the agent too: slots filled with quiet viewer
-  // connections give way to a new viewer (the platform server reconnecting).
+  // The viewer token can be read by the agent too: slots filled with viewer connections
+  // that show nothing give way to a new viewer (the platform server reconnecting). The
+  // owner's view, which streams a page, and the engine runs' connections, never do.
+  const shownTab = live.readJsonFile<{ targetId: string }>(path.join(liveDir, 'tab.json'))!.targetId;
+  const streamSession = (await viewer.send('Target.attachToTarget', { targetId: shownTab, flatten: true })).result.sessionId as string;
+  await viewer.send('Page.startScreencast', { format: 'jpeg', quality: 40, maxWidth: 640, maxHeight: 400 }, streamSession);
   const fillers: Viewer[] = [];
   for (let i = 0; i < 4; i++) {
-    // The real viewer is active (the platform server acknowledges frames many times a second).
-    await viewer.send('Target.getTargets');
     const c = new Viewer(`ws://127.0.0.1:${viewerInfo.port}/cdp/${viewerInfo.token}`);
     await c.open().then(() => fillers.push(c), () => undefined);
   }
-  await viewer.send('Target.getTargets');
   const reserved = new Viewer(`ws://127.0.0.1:${viewerInfo.port}/cdp/${viewerInfo.token}`);
   await reserved.open();
-  const stillWorks = await viewer.send('Target.getTargets');
-  assert.ok(stillWorks.result, 'the active viewer was not the one evicted');
+  const stillWorks = await viewer.send('Target.getTargets', {}, undefined, 10_000);
+  assert.ok(stillWorks.result, 'the streaming viewer was not the one evicted');
+  for (const c of extra) assert.ok((await c.send('Browser.getVersion', {}, undefined, 10_000)).result, 'an engine run\'s connection was not evicted');
+  await viewer.send('Page.stopScreencast', {}, streamSession);
   reserved.close();
   for (const c of [...extra, ...fillers]) c.close();
-  console.log(`  ✓ agent connections stop at ${refusedAt} open; with every slot taken a new viewer still connects`);
+  console.log(`  ✓ agent connections stop at ${refusedAt} open; with every slot taken a new viewer still connects (never in place of a streaming view or a run)`);
 
   // A stored credential (security/credentialStore.ts, origin-bound) is guarded like a sign-up
   // password: its tab is paused before typing, and a GET form's URL with it never reaches the
