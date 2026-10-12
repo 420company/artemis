@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+import { realpathSync } from 'node:fs'
 import { access, mkdir, readdir, readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -94,14 +95,36 @@ export function resolveDataRootDir(cwd: string): string {
   return join(normalized, '.artemis')
 }
 
+function isWithinPath(root: string, target: string): boolean {
+  const relativePath = relative(root, target)
+  return relativePath === '' || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+}
+
+/** The real path: symlinks followed as far as the path exists, the rest appended. */
+export function realPathOf(target: string): string {
+  let current = resolve(target)
+  const rest: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync.native(current), ...rest.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return join(current, ...rest.reverse())
+      rest.push(basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * `inputPath` inside `root`, both as written and through symlinks: a link
+ * in the workspace that points outside (`link/sub`, or the link itself)
+ * does not count as inside.
+ */
 export function resolveInsideRoot(root: string, inputPath: string): string {
   const normalizedRoot = resolve(root)
   const absolute = resolve(normalizedRoot, inputPath)
-  const relativePath = relative(normalizedRoot, absolute)
-  if (
-    relativePath === '' ||
-    (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
-  ) {
+  if (isWithinPath(normalizedRoot, absolute) && isWithinPath(realPathOf(normalizedRoot), realPathOf(absolute))) {
     return absolute
   }
   throw new Error(`Path escapes working directory: ${inputPath}`)

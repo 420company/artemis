@@ -8,6 +8,7 @@ import type { AgentAction } from '../core/types.js';
 import { invalidateWalkFilesCache, resolveArtemisHomeDir, truncate } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { AGENT_TOOL_ENV, commandAnswersApproval } from '../security/approvals.js';
+import { describeHighRiskCommand } from '../security/shellRisk.js';
 import {
   appendCaptureChunk,
   closeCaptureLog,
@@ -103,37 +104,25 @@ const SENSITIVE_PATH_PATTERNS = [
   /\bid_(rsa|ed25519|ecdsa|dsa)\b/,
 ]
 
-function commandAccessesAllowedArtemisDiagnosticPath(cmd: string): boolean {
-  const expanded = expandForInspection(cmd).replace(/\\/g, '/')
-  const home = homedir().replace(/\\/g, '/')
-  const allowed = [
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/dreams`,
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.log`,
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.launchd.log`,
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.launchd.err.log`,
-  ]
-  return allowed.some(path => expanded.includes(path))
+/**
+ * The Artemis paths the agent may read in a command (its dreams and gateway
+ * logs) are cut out of the command text before the sensitive-path check, so
+ * naming one never exempts the rest of the command (or a "../" after it).
+ */
+function withoutAllowedArtemisDiagnosticPaths(expanded: string): string {
+  const root = resolveArtemisHomeDir().replace(/\\/g, '/')
+  const allowed = [`${root}/dreams`, `${root}/gateway.log`, `${root}/gateway.launchd.log`, `${root}/gateway.launchd.err.log`]
+  let rest = expanded
+  for (const entry of allowed) {
+    rest = rest.split(entry).map((part, index) => {
+      if (index === 0) return part
+      const tail = /^[^\s;&|]*/.exec(part)?.[0] ?? ''
+      // A tail that climbs out (or is not this entry's own path) stays and is checked.
+      return /\.\./.test(tail) || !(tail === '' || tail.startsWith('/')) ? `${entry}${part}` : part.slice(tail.length)
+    }).join('')
+  }
+  return rest
 }
-
-// High-signal "remote payload → shell" pipelines and reverse-shell patterns.
-// Each matcher is deliberately conservative (must contain a distinguishing
-// construct) so benign commands don't trip it.
-const DANGEROUS_SHELL_PATTERNS: { re: RegExp; reason: string; reasonZh: string }[] = [
-  { re: /\bcurl\b[^|;&`]{0,200}\|\s*(bash|sh|zsh|ksh|dash)\b/i,
-    reason: 'pipes curl output directly into a shell', reasonZh: '会把从网上下载的脚本直接交给命令行执行' },
-  { re: /\bwget\b[^|;&`]{0,200}\|\s*(bash|sh|zsh|ksh|dash)\b/i,
-    reason: 'pipes wget output directly into a shell', reasonZh: '会把从网上下载的脚本直接交给命令行执行' },
-  { re: /\b(base64|xxd|openssl\s+base64)\b[^|;`]{0,200}-d[^|;`]{0,200}\|\s*(bash|sh|zsh|ksh)\b/i,
-    reason: 'decodes a base64 payload and pipes it into a shell', reasonZh: '会解码一段隐藏的内容并直接执行' },
-  { re: /\beval\s+["'$(`][^"']*\b(curl|wget|fetch)\b/i,
-    reason: 'evals the output of a remote fetch', reasonZh: '会直接执行从网上取回的内容' },
-  { re: /\bbash\s+-i\b[^|]{0,200}>&?\s*\/dev\/tcp\//,
-    reason: 'opens an interactive reverse shell over /dev/tcp', reasonZh: '会向外部打开一个远程控制通道' },
-  { re: /\bmkfifo\b[\s\S]{0,200}\bnc\b/,
-    reason: 'sets up a named-pipe reverse shell via nc', reasonZh: '会向外部打开一个远程控制通道' },
-  { re: /\bnc\b[^|]{0,200}-e\s+\/?(?:bin\/)?(bash|sh|zsh)\b/i,
-    reason: 'uses nc -e to expose a shell', reasonZh: '会把命令行暴露给外部连接' },
-]
 
 function expandForInspection(cmd: string): string {
   const home = homedir().replace(/\\/g, '/')
@@ -149,21 +138,26 @@ function expandForInspection(cmd: string): string {
 }
 
 function commandAccessesSensitivePath(cmd: string): boolean {
-  if (commandAccessesAllowedArtemisDiagnosticPath(cmd)) return false
-  const expanded = expandForInspection(cmd)
+  const expanded = withoutAllowedArtemisDiagnosticPaths(expandForInspection(cmd).replace(/\\/g, '/'))
   return SENSITIVE_PATH_PATTERNS.some(re => re.test(expanded))
+}
+
+/** The approval key: never named in a command, whatever the permission mode. */
+function commandTouchesApprovalSecrets(cmd: string): boolean {
+  return /approvals\.key\b/i.test(expandForInspection(cmd))
 }
 
 function commandMatchesDangerousPattern(cmd: string): string | null {
   return describeDangerousCommand(cmd)?.reason ?? null
 }
 
-/** The high-risk shell classifier, with a plain-language reason in both languages (approvals use it). */
+/**
+ * The high-risk shell classifier (security/shellRisk.ts: remote code,
+ * hidden code, uploads, reverse shells), with a plain-language reason in
+ * both languages. Best effort; approvals use it.
+ */
 export function describeDangerousCommand(cmd: string): { reason: string; reasonZh: string } | null {
-  for (const { re, reason, reasonZh } of DANGEROUS_SHELL_PATTERNS) {
-    if (re.test(cmd)) return { reason, reasonZh }
-  }
-  return null
+  return describeHighRiskCommand(cmd)
 }
 
 const TIMEOUT_PREVIEW_CHARS = 4_000;
@@ -494,7 +488,7 @@ export async function executeRunCommand(
     action.timeoutMs,
   );
 
-  if (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command)) {
+  if (commandTouchesApprovalSecrets(action.command) || (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command))) {
     return Promise.resolve({
       action,
       ok: false,
