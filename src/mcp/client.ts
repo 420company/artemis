@@ -20,6 +20,7 @@ import {
   ensureMcpOAuthAccessToken,
   persistMcpServerUpdate,
 } from './oauth.js';
+import { inheritedMcpHeaders } from './inheritedHeaders.js';
 import {
   type McpDependencyInfo,
   buildDependencyInfo,
@@ -263,6 +264,8 @@ function resolveStaticServerHeaders(server: McpServerConfig): Record<string, str
       // Ignore malformed env header overrides and continue with the stored config.
     }
   }
+  // Per-run headers the host handed over on a descriptor (never the environment).
+  Object.assign(headers, inheritedMcpHeaders(server.id));
 
   return headers;
 }
