@@ -231,15 +231,28 @@ export function platformAssetHostingFromStore(data: Partial<ProviderStoreData> |
   if (hosting && hosting.provider === 'platform' && !hosting.enabled) return undefined;
   // An own bucket is configured: that one is used, not the platform's.
   if (hosting && hosting.provider !== 'platform' && hosting.enabled) return undefined;
-  const isUrl = (v: unknown): v is string => typeof v === 'string' && /^https?:\/\/\S+$/i.test(v.trim());
+  const httpsOrigin = (v: unknown): string | undefined => {
+    if (typeof v !== 'string') return undefined;
+    try {
+      const url = new URL(v.trim());
+      return url.protocol === 'https:' ? url.origin : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const isKey = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
-  if (hosting?.provider === 'platform' && isUrl(hosting.baseUrl) && isKey(hosting.apiKey)) {
-    return { baseUrl: hosting.baseUrl.trim(), apiKey: hosting.apiKey.trim() };
-  }
+  // The platform is the gateway the platform-managed main profile talks to (https only):
+  // its key goes nowhere else.
   const profiles = Array.isArray(data.profiles) ? data.profiles : [];
   const main = profiles.find((p) => p?.id === (data.defaultMainProfileId ?? 'executor'));
   const managed = !!main && (main.capabilitiesSource === 'platform' || main.managedBy === 'platform');
-  if (!managed || !isUrl(main?.baseUrl) || !isKey(main?.apiKey)) return undefined;
+  const platformOrigin = managed ? httpsOrigin(main?.baseUrl) : undefined;
+  if (!platformOrigin) return undefined;
+  if (hosting?.provider === 'platform' && hosting.baseUrl !== undefined) {
+    if (httpsOrigin(hosting.baseUrl) !== platformOrigin || !isKey(hosting.apiKey)) return undefined;
+    return { baseUrl: hosting.baseUrl.trim(), apiKey: hosting.apiKey.trim() };
+  }
+  if (!isKey(main?.apiKey)) return undefined;
   return { baseUrl: main!.baseUrl.trim(), apiKey: main!.apiKey.trim() };
 }
 

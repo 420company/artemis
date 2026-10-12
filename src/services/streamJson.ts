@@ -9,9 +9,8 @@
  *   {"v":1,"seq":3,"type":"tool_start","callId":"call_4","tool":"read_file","label":"读取文件","detail":"src/app.ts"}
  *   {"v":1,"seq":4,"type":"tool_end","callId":"call_4","tool":"read_file","status":"ok"}
  *   {"v":1,"seq":5,"type":"subagent_start","agent":{"id":"a1","role":"researcher"},"task":"…"}
- *   {"v":1,"seq":6,"type":"subagent_delta","agent":{"id":"a1","role":"researcher"},"text":"…"}
  *   {"v":1,"seq":7,"type":"tool_start","callId":"call_5","tool":"search_web","agent":{"id":"a1","role":"researcher"},…}
- *   {"v":1,"seq":8,"type":"subagent_end","agent":{"id":"a1","role":"researcher"},"ok":true}
+ *   {"v":1,"seq":8,"type":"subagent_end","agent":{"id":"a1","role":"researcher"},"ok":true,"summary":"…"}
  *   {"v":1,"seq":9,"type":"usage","inputTokens":1200,"outputTokens":300}
  *   {"v":1,"seq":10,"type":"heartbeat","tool":"generate_long_video","callId":"call_6","elapsedSeconds":60}
  *   {"v":1,"seq":11,"type":"segment","job":"long_video","index":2,"total":6,"status":"done"}
@@ -36,7 +35,7 @@
  * fields may be added within version 1; a breaking change bumps `v`.
  */
 
-import { describeToolForUser } from '../utils/internalNames.js';
+import { describeToolForUser, scrubInternalNamesStrict } from '../utils/internalNames.js';
 import type { AgentRef, ProgressEvent } from '../core/progressEvents.js';
 
 export const STREAM_JSON_VERSION = 1;
@@ -44,6 +43,20 @@ export const OUTPUT_FORMATS = ['text', 'stream-json'] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 const APPROVAL_LINE = /^\[approval-request\] (\{.*\})\s*$/;
+/** The longest reply a result carries (characters). */
+export const MAX_RESULT_REPLY_CHARS = 2 * 1024 * 1024;
+export const REDIRECTED_STDOUT_PREFIX = '[stdout]';
+
+/** Bytes something else wrote to stdout, as prefixed stderr lines. */
+export function redirectedStdout(chunk: unknown): string {
+  const text = typeof chunk === 'string' ? chunk : chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : String(chunk);
+  const lines = text.split(/\r\n|\r|\n/);
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines.map((line) => `${REDIRECTED_STDOUT_PREFIX} ${line}\n`).join('');
+}
+
+/** Progress text, scrubbed once more on its way out (it is already, at its source). */
+const clean = (text: unknown): string | undefined => (typeof text === 'string' && text ? scrubInternalNamesStrict(text) : undefined);
 
 type Json = Record<string, unknown>;
 
@@ -64,11 +77,18 @@ export class StreamJsonWriter {
     if (options.write) {
       this.writeLine = options.write;
     } else {
-      // Stdout is the stream's alone: anything else written there goes to stderr.
+      // Stdout is the stream's alone: anything else written there goes to
+      // stderr, each line prefixed, so it can never start a protocol line
+      // (`[approval-request] …`, `[tool:…]`) the host reads there.
       const stdout = process.stdout;
       const original = stdout.write.bind(stdout) as (chunk: string) => boolean;
-      const stderrWrite = process.stderr.write.bind(process.stderr) as typeof process.stderr.write;
-      stdout.write = ((chunk: unknown, ...rest: unknown[]) => (stderrWrite as (...args: unknown[]) => boolean)(chunk, ...rest)) as typeof stdout.write;
+      const stderrWrite = process.stderr.write.bind(process.stderr) as (chunk: string) => boolean;
+      stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+        stderrWrite(redirectedStdout(chunk));
+        const done = rest.find((arg) => typeof arg === 'function') as ((error?: Error | null) => void) | undefined;
+        if (done) queueMicrotask(() => done());
+        return true;
+      }) as typeof stdout.write;
       this.restoreStdout = () => {
         stdout.write = original as typeof stdout.write;
       };
@@ -129,17 +149,19 @@ export class StreamJsonWriter {
     switch (event.type) {
       case 'text_delta':
         if (!event.text) return;
-        if (agent) this.emit('subagent_delta', { agent, text: event.text });
-        // Only the main agent's text is the answer; another profile's (a
-        // review pass run without a sub-agent wrapper) is not shown.
-        else if ((event.profile ?? 'main') === 'main') this.emit('text_delta', { text: event.text });
+        // Only the main agent's text is the answer. A sub-agent's raw text is
+        // never streamed (it is model output, chunked mid-word, and could name
+        // internal systems); its scrubbed summary comes with subagent_end.
+        // Another profile's text (a review pass without a sub-agent wrapper)
+        // is not shown either.
+        if (!agent && (event.profile ?? 'main') === 'main') this.emit('text_delta', { text: event.text });
         return;
       case 'tool_start':
         this.emit('tool_start', {
           callId: event.callId,
           tool: event.tool,
           label: describeToolForUser(event.tool, this.locale),
-          ...(event.detail ? { detail: event.detail } : {}),
+          ...(clean(event.detail) ? { detail: clean(event.detail) } : {}),
           ...by,
         });
         return;
@@ -148,7 +170,7 @@ export class StreamJsonWriter {
           callId: event.callId,
           tool: event.tool,
           status: event.status,
-          ...(event.summary ? { summary: event.summary } : {}),
+          ...(clean(event.summary) ? { summary: clean(event.summary) } : {}),
           ...(event.artifacts?.length ? { artifacts: event.artifacts } : {}),
           ...by,
         });
@@ -163,15 +185,15 @@ export class StreamJsonWriter {
         });
         return;
       case 'todo':
-        this.emit('todo', { items: event.items, ...by });
+        this.emit('todo', { items: event.items.map((item) => ({ ...item, content: clean(item.content) ?? '' })), ...by });
         return;
       case 'subagent_start': {
         // The started agent's parent is the innermost agent of the path, if any.
-        this.emit('subagent_start', { agent: event.agent, ...(agent ? { parent: agent.id } : {}), ...(event.task ? { task: event.task } : {}) });
+        this.emit('subagent_start', { agent: event.agent, ...(agent ? { parent: agent.id } : {}), ...(clean(event.task) ? { task: clean(event.task) } : {}) });
         return;
       }
       case 'subagent_end':
-        this.emit('subagent_end', { agent: event.agent, ok: event.ok, ...(event.summary ? { summary: event.summary } : {}) });
+        this.emit('subagent_end', { agent: event.agent, ok: event.ok, ...(clean(event.summary) ? { summary: clean(event.summary) } : {}) });
         return;
       case 'usage': {
         const { type: _type, agents: _agents, ...counts } = event;
@@ -179,8 +201,8 @@ export class StreamJsonWriter {
         return;
       }
       case 'segment': {
-        const { type: _type, agents: _agents, ...segment } = event;
-        this.emit('segment', { ...segment, ...by });
+        const { type: _type, agents: _agents, label, ...segment } = event;
+        this.emit('segment', { ...segment, ...(clean(label) ? { label: clean(label) } : {}), ...by });
         return;
       }
       default:
@@ -188,13 +210,20 @@ export class StreamJsonWriter {
     }
   }
 
-  /** The run's end: what the closing panel says without the flag. */
+  /**
+   * The run's end: what the closing panel says without the flag. The
+   * session and turn count come first in the line (a host that cannot take a
+   * huge line can still read them); a reply over MAX_RESULT_REPLY_CHARS is
+   * cut, with `replyTruncated`.
+   */
   result(fields: { sessionId: string; turns: number; durationMs: number; reply: string; approval?: unknown; contextNotices?: string[] }): void {
+    const truncated = fields.reply.length > MAX_RESULT_REPLY_CHARS;
     this.emit('result', {
       sessionId: fields.sessionId,
       turns: fields.turns,
       durationMs: fields.durationMs,
-      reply: fields.reply,
+      reply: truncated ? fields.reply.slice(0, MAX_RESULT_REPLY_CHARS) : fields.reply,
+      ...(truncated ? { replyTruncated: true } : {}),
       ...(fields.approval ? { approval: fields.approval } : {}),
       ...(fields.contextNotices?.length ? { contextNotices: fields.contextNotices } : {}),
     });

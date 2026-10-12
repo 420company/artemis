@@ -4556,6 +4556,8 @@ export async function approveBuilderExecution(
   await options.sessionStore.save(parentSession);
 
   let result;
+  const executionAgent = nextAgentRef('builder');
+  options.onInfo?.('[agent:builder] execution running', { type: 'subagent_start', agent: executionAgent, ...(userText(delegatedTask) ? { task: userText(delegatedTask) } : {}) });
   try {
     result = await withSubagentCoordination(parentSession, options, (coordination) =>
       runAgent(
@@ -4573,13 +4575,15 @@ export async function approveBuilderExecution(
           maxTurns: clampTurns(action.maxTurns ?? Math.max(options.maxTurns, 15)),
           profile: 'builder',
           appendUserMessage: true,
-          onInfo: childInfo(options.onInfo, '[agent:builder]', nextAgentRef('builder')),
+          onInfo: childInfo(options.onInfo, '[agent:builder]', executionAgent),
         },
       ),
     );
+    options.onInfo?.('[agent:builder] execution done', { type: 'subagent_end', agent: executionAgent, ok: true, ...(userText(result.reply) ? { summary: userText(result.reply) } : {}) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const interrupted = isAgentRuntimeInterruptedError(error);
+    options.onInfo?.(`[agent:builder] execution ${interrupted ? 'interrupted' : 'failed'}`, { type: 'subagent_end', agent: executionAgent, ok: false });
     await syncSessionRecordInPlace(parentSession, options.sessionStore);
     updateTaskRuntime(parentSession, executionRuntime.id, {
       status: interrupted ? 'interrupted' : 'failed',

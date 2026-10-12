@@ -19,7 +19,7 @@
  */
 
 import { scrubSecrets } from '../security/credentialStore.js';
-import { scrubInternalNames } from '../utils/internalNames.js';
+import { scrubInternalNamesStrict } from '../utils/internalNames.js';
 import type { AgentAction, TaskItem } from './types.js';
 
 /** One sub-agent in an event's path (outermost first). */
@@ -109,10 +109,10 @@ export function maskTokens(text: string): string {
     .replace(/\b(?:sk|ak|pk|rk|ghp|gho|ghs|xox[abprs])[-_][A-Za-z0-9_-]{12,}/g, '••••');
 }
 
-/** Text a host may show the owner: one line, bounded, no stored secret or token, no internal name. */
+/** Text a host may show the owner: one line, bounded, no stored secret or token, no internal name (strict: paths too). */
 export function userText(text: unknown, max = MAX_DETAIL): string | undefined {
   if (typeof text !== 'string') return undefined;
-  const cleaned = clip(scrubInternalNames(maskTokens(scrubSecrets(text))), max);
+  const cleaned = clip(scrubInternalNamesStrict(maskTokens(scrubSecrets(text))), max);
   return cleaned || undefined;
 }
 

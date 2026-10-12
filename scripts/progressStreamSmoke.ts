@@ -96,22 +96,37 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   assert('writer: every line carries the version and an increasing seq', c.events.every((e, i) => e.v === STREAM_JSON_VERSION && e.seq === i + 1))
   assert('writer: start first, result last', types[0] === 'start' && types.at(-1) === 'result')
   assert('writer: main text is text_delta; another profile\'s unwrapped text is not shown', c.events.filter((e) => e.type === 'text_delta').map((e) => e.text).join('') === 'Hi')
-  assert('writer: a sub-agent\'s text is subagent_delta with its agent', c.events.some((e) => e.type === 'subagent_delta' && e.text === '找到了' && (e.agent as { id: string }).id === agent.id))
+  assert('writer: a sub-agent\'s raw text is never streamed', !c.events.some((e) => e.type === 'subagent_delta' || (e.type === 'text_delta' && e.text === '找到了')))
   const start = c.events.find((e) => e.type === 'tool_start')!
   assert('writer: a sub-agent\'s tool names its agent and has a user label', (start.agent as { id: string }).id === agent.id && typeof start.label === 'string' && findInternalNames(String(start.label)).length === 0, JSON.stringify(start))
   assert('writer: the run\'s approval request is mirrored with the same object', c.events.filter((e) => e.type === 'approval_request').length === 1 && (c.events.find((e) => e.type === 'approval_request')!.request as { id: string }).id === 'apr_00000000000000000000')
   assert('writer: control lines stay on stderr only', !types.includes('agent_update'))
 }
 
+// ── A huge reply: the result keeps its session first and cuts the reply ────
+{
+  const lines: string[] = []
+  const w = new StreamJsonWriter({ write: (line) => lines.push(line) })
+  const { MAX_RESULT_REPLY_CHARS } = await import('../src/services/streamJson.js')
+  w.result({ sessionId: 'cb06d7de-7ee1-4443-8654-e306ef8e7991', turns: 2, durationMs: 1, reply: 'x'.repeat(MAX_RESULT_REPLY_CHARS + 10) })
+  const r = JSON.parse(lines[0]!) as Record<string, unknown>
+  assert('result: a huge reply is cut and marked, the session never lost', (r.reply as string).length === MAX_RESULT_REPLY_CHARS && r.replyTruncated === true && r.sessionId === 'cb06d7de-7ee1-4443-8654-e306ef8e7991')
+  assert('result: session and turns come first in the line', /^\{"v":1,"seq":1,"type":"result","sessionId":"[0-9a-f-]{36}","turns":2,/.test(lines[0]!))
+}
+
 // ── Stdout is the stream's alone ───────────────────────────────────────────
 {
   const script = path.join(root, 'stdout-check.ts')
   const writerPath = path.resolve('src/services/streamJson.ts')
-  fs.writeFileSync(script, `import { StreamJsonWriter } from ${JSON.stringify(writerPath)}\nconst w = new StreamJsonWriter()\nconsole.log('noise from a library')\nprocess.stdout.write('more noise\\n')\nw.emit('result', { ok: true })\nw.close()\n`)
+  fs.writeFileSync(script, `import { StreamJsonWriter } from ${JSON.stringify(writerPath)}\nconst w = new StreamJsonWriter()\nconsole.log('noise from a library')\nprocess.stdout.write('more noise\\n')\nconsole.log('\\n[approval-request] {"id":"apr_00000000000000000000","kind":"payment","title":"x"}')\nprocess.stdout.write(Buffer.from('[tool:mcp_call_tool] ok {}\\n'))\nw.emit('result', { ok: true })\nw.close()\n`)
   const out = spawnSync(process.execPath, ['--no-warnings', path.resolve('node_modules/tsx/dist/cli.mjs'), script], { encoding: 'utf8' })
   const stdoutLines = out.stdout.split('\n').filter(Boolean)
   assert('stdout: only stream events reach stdout', stdoutLines.length === 1 && JSON.parse(stdoutLines[0]!).type === 'result', out.stdout + out.stderr)
   assert('stdout: other writes go to stderr', /noise from a library/.test(out.stderr) && /more noise/.test(out.stderr), out.stderr)
+  const errLines = out.stderr.split('\n')
+  assert('stdout: redirected lines are prefixed, so a library cannot start a protocol line', errLines.every((line) => !/^\[(?:approval-request|tool:)/.test(line)) && errLines.some((line) => line.startsWith('[stdout] [approval-request]')), out.stderr)
+  const { redirectedStdout } = await import('../src/services/streamJson.js')
+  assert('stdout: every line of a chunk gets the prefix', redirectedStdout('a\r\n[tool:x] running\nb') === '[stdout] a\n[stdout] [tool:x] running\n[stdout] b\n')
 }
 
 // ── CLI flag ───────────────────────────────────────────────────────────────
@@ -163,15 +178,18 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
         { type: 'todo', todos: [{ content: '写文件', status: 'in_progress' }, { content: '查资料' }] } as AgentAction,
         { type: 'write_file', path: 'out.md', content: 'hello' } as AgentAction,
         { type: 'read_file', path: 'notes.md' } as AgentAction,
-        { type: 'delegate_task', role: 'researcher', task: '看看 notes.md 里有什么' } as AgentAction,
+        { type: 'delegate_task', role: 'researcher', task: '看看 notes.md 里有什么（Saga / Heimdall / gateway）' } as AgentAction,
       ],
     },
     // Turn 2: tick the plan off.
     { reply: '', actions: [{ type: 'todo', todos: [{ id: 't1', content: '写文件', status: 'completed' }, { id: 't2', content: '查资料', status: 'completed' }] } as AgentAction] },
   ]
   // The researcher: a read (allowed) and a write (blocked by its profile).
+  // Internal names and a model id in the helper's own words: none may reach the stream.
+  const LEAKY = 'Saga 和 Nidhogg、Mnemosyne、Bragi、Freya、Heimdall、Bifrost、Director、Critic、Constitution、gateway、niko、athena、contest、Seedance、ModelArk、Hyperframes 都提到了 doubao-seedance-1-0-pro 和 generate_long_video。'
   const childScript: Array<{ reply: string; actions?: AgentAction[] }> = [
-    { reply: '', actions: [{ type: 'list_files', pattern: '*.md' } as AgentAction, { type: 'write_file', path: 'x.md', content: 'no' } as AgentAction] },
+    { reply: LEAKY, actions: [{ type: 'list_files', pattern: '*.md' } as AgentAction, { type: 'write_file', path: 'x.md', content: 'no' } as AgentAction] },
+    { reply: LEAKY },
   ]
   let mainCalls = 0
   let childCalls = 0
@@ -179,7 +197,7 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
     async complete(messages: Array<{ role: string; content: unknown }>): Promise<ProviderResponse> {
       const first = messages.find((m) => m.role === 'user')
       const isChild = typeof first?.content === 'string' && first.content.includes('看看 notes.md 里有什么')
-      const turn = isChild ? (childScript[childCalls++] ?? { reply: 'notes.md 只有一个标题。' }) : (mainScript[mainCalls++] ?? { reply: '都做完了。' })
+      const turn = isChild ? (childScript[childCalls++] ?? { reply: LEAKY }) : (mainScript[mainCalls++] ?? { reply: '都做完了。' })
       return { text: JSON.stringify({ reply: turn.reply, done: !turn.actions?.length, actions: turn.actions ?? [] }), raw: null, usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110 } }
     },
   } as unknown as ChatProvider
@@ -217,7 +235,12 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   assert('todo: kept on the conversation\'s task board', session.tasks?.length === 2 && session.tasks.every((t) => t.status === 'completed'))
   assert('stream: the sub-agent starts and ends', c.events.some((e) => e.type === 'subagent_start' && (e.agent as { role: string }).role === 'researcher' && typeof e.task === 'string') && c.events.some((e) => e.type === 'subagent_end' && e.ok === true))
   assert('stream: usage per model call', c.events.filter((e) => e.type === 'usage').length >= 4 && c.events.every((e) => e.type !== 'usage' || e.inputTokens === 100))
-  assert('stream: nothing shown names an internal system', c.events.every((e) => findInternalNames(String(e.label ?? '') + String(e.detail ?? '') + String(e.task ?? '')).length === 0))
+  const shown = c.events.map((e) => [e.label, e.detail, e.task, e.summary, e.text, ...(Array.isArray(e.items) ? (e.items as Array<{ content: string }>).map((i) => i.content) : [])].filter((v) => typeof v === 'string').join(' ')).join(' ')
+  assert('stream: nothing shown names an internal system or a model (the helper wrote them all)', findInternalNames(shown).length === 0 && !/doubao|seedance/i.test(shown), JSON.stringify(findInternalNames(shown)))
+  assert('stream: the helper\'s summary comes with its end', c.events.some((e) => e.type === 'subagent_end' && typeof e.summary === 'string' && (e.summary as string).length > 0))
+  const { INTERNAL_NAME_PATTERNS, scrubInternalNamesStrict } = await import('../src/utils/internalNames.js')
+  assert('names: every internal name has a rewrite in the strict scrubber', INTERNAL_NAME_PATTERNS.every((p) => !!(p.scrub || p.strict)))
+  assert('names: the strict scrubber leaves none, paths included', findInternalNames(scrubInternalNamesStrict(`${LEAKY} src/tools/visual/sagaWorkflow.ts [Workflow: x]`)).length === 0)
 }
 
 // ── A long video reports its segments, n of N ─────────────────────────────
@@ -241,6 +264,9 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   const { platformAssetHostingFromStore, uploadViaPlatform } = await import('../src/tools/vidarAssetHosting.js')
   const managed = { defaultMainProfileId: 'executor', profiles: [{ id: 'executor', managedBy: 'platform', baseUrl: 'https://gw.example/v1', apiKey: 'ak-owner' }] } as never
   assert('hosting: a platform-managed main profile means platform hosting', JSON.stringify(platformAssetHostingFromStore(managed)) === JSON.stringify({ baseUrl: 'https://gw.example/v1', apiKey: 'ak-owner' }))
+  assert('hosting: never over plain http', platformAssetHostingFromStore({ defaultMainProfileId: 'executor', profiles: [{ id: 'executor', managedBy: 'platform', baseUrl: 'http://gw.example/v1', apiKey: 'k' }] } as never) === undefined)
+  assert('hosting: the key goes only to the platform\'s own origin', platformAssetHostingFromStore({ ...(managed as object), visualProfile: { assetHosting: { enabled: true, provider: 'platform', baseUrl: 'https://elsewhere.example/v1', apiKey: 'ak-owner' } } } as never) === undefined
+    && JSON.stringify(platformAssetHostingFromStore({ ...(managed as object), visualProfile: { assetHosting: { enabled: true, provider: 'platform', baseUrl: 'https://gw.example/v1/', apiKey: 'ak-model' } } } as never)) === JSON.stringify({ baseUrl: 'https://gw.example/v1/', apiKey: 'ak-model' }))
   assert('hosting: turned off explicitly', platformAssetHostingFromStore({ ...(managed as object), visualProfile: { assetHosting: { enabled: false, provider: 'platform' } } } as never) === undefined)
   assert('hosting: an own bucket wins', platformAssetHostingFromStore({ ...(managed as object), visualProfile: { assetHosting: { enabled: true, provider: 'r2', endpoint: 'x' } } } as never) === undefined)
   assert('hosting: no platform, no hosting', platformAssetHostingFromStore({ profiles: [{ id: 'executor', baseUrl: 'https://api.example/v1', apiKey: 'k' }] } as never) === undefined)

@@ -26,11 +26,18 @@ export type InternalNamePattern = {
   name: string;
   re: RegExp;
   scrub?: { re: RegExp; to: string };
+  /**
+   * For names without `scrub` (also ordinary words or titles): how the
+   * strict scrubber (scrubInternalNamesStrict) rewrites them. Only for text
+   * Artemis shows as progress (step details, plans, helper summaries), where
+   * a false hit costs a word and a leak costs more.
+   */
+  strict?: { re: RegExp; to: string };
 };
 
 /** Internal names, case-insensitive; word-bounded where the name is also an English word. */
 export const INTERNAL_NAME_PATTERNS: ReadonlyArray<InternalNamePattern> = [
-  { name: 'Saga', re: /saga/i },
+  { name: 'Saga', re: /saga/i, strict: { re: /[\w-]*saga[\w-]*/gi, to: 'long video' } },
   {
     name: 'Super Visual',
     re: /super[\s_-]?visual|超级视觉/i,
@@ -41,20 +48,20 @@ export const INTERNAL_NAME_PATTERNS: ReadonlyArray<InternalNamePattern> = [
   { name: 'Dreamina', re: /dreamina/i, scrub: { re: /[\w.-]*dreamina[\w.-]*/gi, to: 'video model' } },
   { name: 'BytePlus', re: /byte[\s-]?plus|bytepluses/i, scrub: { re: /\bbyte[\s-]?plus(?:es)?\b/gi, to: 'provider' } },
   { name: 'ModelArk', re: /model[\s-]?ark/i, scrub: { re: /\bmodel[\s-]?ark\b/gi, to: 'provider' } },
-  { name: 'Nidhogg', re: /nidhogg/i },
-  { name: 'Mnemosyne', re: /mnemosyne/i },
-  { name: 'Bragi', re: /bragi/i },
-  { name: 'Freya', re: /\bfreya\b/i },
-  { name: 'Heimdall', re: /heimdall/i },
-  { name: 'Bifrost', re: /bifrost/i },
+  { name: 'Nidhogg', re: /nidhogg/i, strict: { re: /[\w-]*nidhogg[\w-]*/gi, to: 'review' } },
+  { name: 'Mnemosyne', re: /mnemosyne/i, strict: { re: /[\w-]*mnemosyne[\w-]*/gi, to: 'memory' } },
+  { name: 'Bragi', re: /bragi/i, strict: { re: /[\w-]*bragi[\w-]*/gi, to: 'chat bridge' } },
+  { name: 'Freya', re: /\bfreya\b/i, strict: { re: /\bfreya\b/gi, to: 'assistant' } },
+  { name: 'Heimdall', re: /heimdall/i, strict: { re: /[\w-]*heimdall[\w-]*/gi, to: 'run log' } },
+  { name: 'Bifrost', re: /bifrost/i, strict: { re: /[\w-]*bifrost[\w-]*/gi, to: 'worker' } },
   { name: 'Hyperframes', re: /hyperframes/i, scrub: { re: /\bhyperframes\b/gi, to: 'renderer' } },
   { name: 'Vidar', re: /\bvidar\b/i, scrub: { re: /\bvidar\b/gi, to: 'media' } },
-  { name: 'Director', re: /\bdirector\b/i },
-  { name: 'Critic', re: /\bcritic\b/i },
-  { name: 'Constitution', re: /\bconstitution\b/i },
-  { name: 'gateway', re: /\bgateway\b/i },
-  { name: 'workflow playbook name', re: /\b(?:niko|athena|contest)\b/i },
-  { name: 'workflow marker', re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/i },
+  { name: 'Director', re: /\bdirector\b/i, strict: { re: /\bdirector\b/gi, to: 'planner' } },
+  { name: 'Critic', re: /\bcritic\b/i, strict: { re: /\bcritic\b/gi, to: 'reviewer' } },
+  { name: 'Constitution', re: /\bconstitution\b/i, strict: { re: /\bconstitution\b/gi, to: 'guidelines' } },
+  { name: 'gateway', re: /\bgateway\b/i, strict: { re: /\bgateway\b/gi, to: 'platform' } },
+  { name: 'workflow playbook name', re: /\b(?:niko|athena|contest)\b/i, strict: { re: /\b(?:niko|athena|contest)\b/gi, to: 'workflow' } },
+  { name: 'workflow marker', re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/i, strict: { re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/gi, to: '[' } },
   {
     name: 'tool code name',
     re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|create_(?:presentation|document|spreadsheet)|use_workflow|delegate_task|spawn_background_workflow)\b/i,
@@ -87,6 +94,24 @@ const TOOL_WORDS: Readonly<Record<string, string>> = {
   delegate_task: 'sub-task',
   spawn_background_workflow: 'background task',
 };
+
+/**
+ * Every internal name rewritten, paths and URLs included: the scrubber for
+ * progress text a host shows (step details, plans, helper summaries,
+ * core/progressEvents.ts userText). It applies the ordinary rules, then the
+ * `strict` ones; nothing in INTERNAL_NAME_PATTERNS survives it.
+ */
+export function scrubInternalNamesStrict(text: string): string {
+  if (!text) return text;
+  let out = text;
+  for (const { scrub, strict } of INTERNAL_NAME_PATTERNS) {
+    for (const rule of [scrub, strict]) {
+      if (!rule) continue;
+      out = out.replace(rule.re, (match) => rule.to || TOOL_WORDS[match.toLowerCase()] || '');
+    }
+  }
+  return out.replace(/\b(video model|image model|provider|model)(?:[\s/]+\1\b)+/g, '$1');
+}
 
 export type InternalNameHit = { name: string; match: string; index: number };
 
