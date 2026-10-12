@@ -1,5 +1,5 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
-import { redactIdentitySecrets } from '../security/identityCredentials.js';
+import { redactIdentitySecretsDeep } from '../security/identityCredentials.js';
 import path from 'node:path';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
 import {
@@ -5849,9 +5849,10 @@ async function executeAuthorizedAction(
     } finally {
       stopHeartbeat();
     }
-    // A sign-up password typed through its placeholder never comes back in a result (a page echoing
-    // it, a script reading the field): it goes back to the placeholder before anything records it.
-    if (typeof result.output === 'string') result = { ...result, output: redactIdentitySecrets(result.output) };
+    // A sign-up password typed through its placeholder never comes back in a result: the whole outcome
+    // (output, error message, details, anything nested) goes back to placeholders before it is recorded
+    // or sent to the model, in every form a page or URL may echo it (security/identityCredentials.ts).
+    result = redactIdentitySecretsDeep(result);
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;
     if (options.heimdallThreadState) {
@@ -5913,7 +5914,7 @@ async function executeAuthorizedAction(
           error instanceof Error ? truncate(error.message, 160) : truncate(String(error), 160),
       },
     );
-    return buildGuardrailFailureOutcome(action, error);
+    return redactIdentitySecretsDeep(buildGuardrailFailureOutcome(action, error));
   }
 }
 

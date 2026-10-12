@@ -15,7 +15,7 @@
  * input not piped through tool results yet).
  */
 
-import { resolveIdentityPlaceholders } from '../../security/identityCredentials.js';
+import { evaluateTouchesSecrets, hasIdentityPlaceholder, hasLiveIdentitySecrets, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -220,6 +220,37 @@ async function collectLayoutAudit(page: Awaited<ReturnType<typeof getActivePage>
   }
 }
 
+/** What a field is and which page (its own frame) it is on: a sign-up password goes only into a password field of its site. */
+async function fieldInfo(el: import('playwright').Locator): Promise<{ inputType: string; frameUrl: string }> {
+  return el.evaluate((node) => ({
+    inputType: node instanceof HTMLInputElement ? node.type.toLowerCase() : node.tagName.toLowerCase(),
+    frameUrl: location.href,
+  }), undefined, { timeout: 10_000 });
+}
+
+/** Marks a field a sign-up password was typed into (screenshots mask it; a switch to text blocks them). */
+async function markSecretField(el: import('playwright').Locator): Promise<void> {
+  await el.evaluate((node, attr) => node.setAttribute(attr, '1'), SECRET_FIELD_ATTRIBUTE).catch(() => undefined);
+}
+
+/**
+ * While a sign-up password is live: refuse when a marked field is no longer
+ * a password field (switched to text, it would show in the picture); else
+ * the fields to mask, in every frame.
+ */
+async function secretScreenshotGuard(page: import('playwright').Page): Promise<{ ok: true; mask: import('playwright').Locator[] } | { ok: false; message: string }> {
+  if (!hasLiveIdentitySecrets()) return { ok: true, mask: [] };
+  const mask: import('playwright').Locator[] = [];
+  for (const frame of page.frames()) {
+    const exposed = await frame
+      .evaluate((attr) => [...document.querySelectorAll(`[${attr}]`)].some((n) => !(n instanceof HTMLInputElement) || n.type.toLowerCase() !== 'password'), SECRET_FIELD_ATTRIBUTE)
+      .catch(() => false);
+    if (exposed) return { ok: false, message: 'A password field on this page shows its text; no screenshot while it does.' };
+    mask.push(frame.locator(`[${SECRET_FIELD_ATTRIBUTE}], input[type="password"]`));
+  }
+  return { ok: true, mask };
+}
+
 export async function executeBrowserScreenshot(action: BrowserScreenshotAction): Promise<ToolResult> {
   try {
     return await withPageRetry(async (page) => {
@@ -231,7 +262,9 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
       await fsp.mkdir(SCREENSHOT_DIR, { recursive: true });
       const filename = `screenshot-${Date.now()}.png`;
       const filepath = path.join(SCREENSHOT_DIR, filename);
-      await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
+      const guard = await secretScreenshotGuard(page);
+      if (!guard.ok) return { ok: false, output: guard.message, error: { code: 'secret_visible', message: guard.message } };
+      await page.screenshot({ path: filepath, fullPage: action.fullPage === true, ...(guard.mask.length ? { mask: guard.mask } : {}) });
       const audit = await collectLayoutAudit(page);
       return {
         ok: true,
@@ -375,9 +408,10 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
       if (action.value === undefined) {
         return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
       }
-      const typed = await resolveIdentityPlaceholders(action.value);
-      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_not_found', message: typed.message } };
+      const typed = await resolveIdentityPlaceholders(action.value, hasIdentityPlaceholder(action.value) ? await fieldInfo(el) : undefined);
+      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_refused', message: typed.message } };
       await el.fill(typed.text, { timeout: 10_000 });
+      if (typed.secret) await markSecretField(el);
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
     }, { restoreUrlOnRetry: true });
   } catch (err) {
@@ -400,6 +434,11 @@ export async function executeBrowserEvaluate(action: BrowserEvaluateAction): Pro
       output: 'script 必填',
       error: { code: 'invalid_input', message: 'script required' },
     };
+  }
+  // While a sign-up password is live, a script must not be able to read it back (a value, form data, a type switch).
+  if (evaluateTouchesSecrets(action.script)) {
+    const message = 'This script could read a password typed on this page; not run while a sign-up password is in use. Read the page with browser_extract_text instead.';
+    return { ok: false, output: message, error: { code: 'secret_guard', message } };
   }
   try {
     return await withPageRetry(async (page) => {
@@ -517,12 +556,14 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
   try {
     return await withPageRetry(async (page) => {
       const el = page.locator(action.selector).first();
-      // `{{credential:signup-…}}` types a sign-up's saved password; the history keeps the placeholder.
-      const typed = await resolveIdentityPlaceholders(action.text);
-      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_not_found', message: typed.message } };
+      // `{{credential:signup-…}}` types a sign-up's saved password (into a password field of its site);
+      // the history keeps the placeholder.
+      const typed = await resolveIdentityPlaceholders(action.text, hasIdentityPlaceholder(action.text) ? await fieldInfo(el) : undefined);
+      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_refused', message: typed.message } };
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first
       await el.fill(typed.text);
+      if (typed.secret) await markSecretField(el);
       if (action.pressEnter) {
         await el.press('Enter');
         await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);

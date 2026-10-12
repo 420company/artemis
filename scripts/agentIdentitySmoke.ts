@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { forgetIdentityCredentials, redactIdentitySecrets, resolveIdentityPlaceholders } from '../src/security/identityCredentials.js';
+import { evaluateTouchesSecrets, forgetIdentityCredentials, redactIdentitySecrets, redactIdentitySecretsDeep, resolveIdentityPlaceholders } from '../src/security/identityCredentials.js';
 import {
   executeAgentIdentity,
   fenceUntrusted,
@@ -34,6 +34,7 @@ const seen: Seen[] = [];
 let signupPolls = 0;
 let requestPolls = 0;
 let credentialFetches = 0;
+let nonces = 0;
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
   const chunks: Buffer[] = [];
@@ -58,10 +59,15 @@ const server = createServer(async (req, res) => {
     if (signupPolls < 2) return send(200, { status: 'pending', signupId: 'su_00000000000000000001' });
     return send(200, { status: 'approved', signupId: 'su_00000000000000000001', site: 'example.com', email: 'mk7q2wd9@agentmail.test', credential: '{{credential:signup-su_00000000000000000001}}', expiresAt: '2026-10-11T10:00:00Z' });
   }
+  if (p === '/agent-identity/signups/su_00000000000000000001/credential-nonce') {
+    nonces += 1;
+    return send(200, { nonce: `nonce-${nonces}`, expiresInSeconds: 60 });
+  }
   if (p === '/agent-identity/signups/su_00000000000000000001/credential') {
+    if (req.headers['x-identity-nonce'] !== `nonce-${nonces}`) return send(403, { error: 'nonce_required', message: 'A fresh one-time nonce is required' });
     credentialFetches += 1;
     if (credentialFetches > 1) return send(409, { error: 'already_issued', message: 'The password was already handed to the browser once' });
-    return send(200, { password: 'Gq7!pX2#mT9vK4wZ8eLr', login: 'mk7q2wd9@agentmail.test' });
+    return send(200, { password: 'Gq7!pX2#mT9vK4wZ8eLr', login: 'mk7q2wd9@agentmail.test', site: 'example.com' });
   }
   if (p === '/agent-identity/mail/m_00000000000000000004') {
     return send(200, {
@@ -166,18 +172,33 @@ process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = JSON.stringify({ 'x-run-co
   assert.ok(!r.output.includes('Gq7!'), 'the password never reaches the model');
   assert.match(r.output, /type \{\{credential:signup-su_00000000000000000001\}\} into the password field/);
   assert.equal(credentialFetches, 0, 'nothing fetched until the browser types');
+  assert.equal(signupPolls, 2, 'waited through a pending answer');
   // The browser tool resolves the placeholder: fetched once, kept for a "confirm password" field.
-  const typed = await resolveIdentityPlaceholders('{{credential:signup-su_00000000000000000001}}');
-  assert.deepEqual(typed, { ok: true, text: 'Gq7!pX2#mT9vK4wZ8eLr' });
-  assert.deepEqual(await resolveIdentityPlaceholders('again {{credential:signup-su_00000000000000000001}}'), { ok: true, text: 'again Gq7!pX2#mT9vK4wZ8eLr' });
+  const P = '{{credential:signup-su_00000000000000000001}}';
+  const onSite = { inputType: 'password', frameUrl: 'https://www.example.com/signup' };
+  // Not a password field, or another site: refused before anything is fetched.
+  assert.equal((await resolveIdentityPlaceholders(P, { inputType: 'text', frameUrl: onSite.frameUrl })).ok, false);
+  assert.equal((await resolveIdentityPlaceholders(P, { inputType: 'password', frameUrl: 'https://example.com.evil.test/x' })).ok, false);
+  assert.equal((await resolveIdentityPlaceholders(P)).ok, false, 'no field info: refused');
+  assert.equal(credentialFetches, 0);
+  const typed = await resolveIdentityPlaceholders(P, onSite);
+  assert.deepEqual(typed, { ok: true, text: 'Gq7!pX2#mT9vK4wZ8eLr', secret: true });
+  assert.equal(nonces, 1, 'a one-time nonce first');
+  assert.deepEqual(await resolveIdentityPlaceholders(`again ${P}`, { inputType: 'password', frameUrl: 'https://accounts.example.com/confirm' }), { ok: true, text: 'again Gq7!pX2#mT9vK4wZ8eLr', secret: true });
   assert.equal(credentialFetches, 1);
-  // Whatever echoes it (a page, a script reading the field) is redacted before it is recorded.
-  assert.equal(redactIdentitySecrets('field value: Gq7!pX2#mT9vK4wZ8eLr'), 'field value: {{credential:signup-su_00000000000000000001}}');
+  // The cache is bound to the site.
+  assert.equal((await resolveIdentityPlaceholders(P, { inputType: 'password', frameUrl: 'https://other.example.org/' })).ok, false);
+  // Whatever echoes it, in any encoding, is redacted; and so is a whole outcome, error messages included.
+  for (const echo of ['Gq7!pX2#mT9vK4wZ8eLr', encodeURIComponent('Gq7!pX2#mT9vK4wZ8eLr'), new URLSearchParams({ p: 'Gq7!pX2#mT9vK4wZ8eLr' }).toString().slice(2), JSON.stringify('Gq7!pX2#mT9vK4wZ8eLr').slice(1, -1), [...'Gq7!pX2#mT9vK4wZ8eLr'].reverse().join(''), [...'Gq7!pX2#mT9vK4wZ8eLr'].join(' ')]) {
+    assert.equal(redactIdentitySecrets(`value: ${echo}`), `value: ${P}`, echo);
+  }
+  assert.deepEqual(redactIdentitySecretsDeep({ ok: false, output: 'x', error: { code: 'e', message: 'Error: Gq7!pX2#mT9vK4wZ8eLr', details: { url: `https://x/?p=${encodeURIComponent('Gq7!pX2#mT9vK4wZ8eLr')}` } } }), { ok: false, output: 'x', error: { code: 'e', message: `Error: ${P}`, details: { url: `https://x/?p=${P}` } } });
+  assert.equal(evaluateTouchesSecrets("document.querySelector('#p').value"), true);
+  assert.equal(evaluateTouchesSecrets('document.title'), false);
   forgetIdentityCredentials();
-  const again = await resolveIdentityPlaceholders('{{credential:signup-su_00000000000000000001}}');
+  const again = await resolveIdentityPlaceholders(P, onSite);
   assert.equal(again.ok, false, 'the host hands it out once');
   assert.equal(redactIdentitySecrets('nothing to hide'), 'nothing to hide');
-  assert.equal(signupPolls, 2, 'waited through a pending answer');
 }
 {
   const r = await executeAgentIdentity({ type: 'wait_for_email', from_contains: 'example.com', timeout_seconds: 5 }, context);
