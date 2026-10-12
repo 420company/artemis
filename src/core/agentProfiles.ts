@@ -173,6 +173,8 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   // Speech.
   'synthesize_speech',
   'transcribe_audio',
+  // Phone calls for the owner (each one approved by the owner first).
+  'place_call',
   // Keyless public information lookups.
   'weather_current',
   'weather_forecast',

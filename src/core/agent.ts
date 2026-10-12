@@ -784,6 +784,28 @@ function buildActionFromLooseArgs(
         pitch: getLooseNumberArg(args, 'pitch'),
       };
     }
+    case 'place_call':
+    case 'phone_call':
+    case 'make_call': {
+      const to = getLooseStringArg(args, 'to', 'number', 'phone', 'phoneNumber', 'phone_number');
+      const goal = getLooseStringArg(args, 'goal', 'purpose', 'task');
+      if (!to?.trim() || !goal?.trim()) return null;
+      const language = getLooseStringArg(args, 'language', 'lang');
+      const maxMinutes = getLooseNumberArg(args, 'maxMinutes', 'max_minutes');
+      return {
+        type: 'place_call',
+        to,
+        goal,
+        brief: getLooseStringArg(args, 'brief', 'context', 'background'),
+        ...(language === 'en' || language === 'zh' ? { language } : {}),
+        allowedFacts: getLooseStringArrayArg(args, 'allowedFacts', 'allowed_facts'),
+        forbidden: getLooseStringArrayArg(args, 'forbidden', 'forbiddenFacts', 'forbidden_facts', 'do_not_share'),
+        mayAgreeTo: getLooseStringArrayArg(args, 'mayAgreeTo', 'may_agree_to'),
+        calleeName: getLooseStringArg(args, 'calleeName', 'callee_name', 'callee'),
+        onBehalfOf: getLooseStringArg(args, 'onBehalfOf', 'on_behalf_of'),
+        ...(maxMinutes !== undefined ? { maxMinutes } : {}),
+      };
+    }
     case 'transcribe_audio':
     case 'stt':
     case 'speech_to_text': {
@@ -1435,6 +1457,7 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'generate_long_video':
     case 'synthesize_speech':
     case 'transcribe_audio':
+    case 'place_call':
       return true;
     case 'run_command':
       return !runCommandLooksReadOnlyForExecutionEvidence(action.command);
@@ -1864,6 +1887,9 @@ function buildToolUiPayload(
     case 'transcribe_audio':
       payload.path = action.inputPath;
       break;
+    case 'place_call':
+      payload.goal = action.goal;
+      break;
     default:
       break;
   }
@@ -1915,6 +1941,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `synthesize_speech voice=${action.voice ?? 'configured'} text=${truncate(action.text, 120)}`;
     case 'transcribe_audio':
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
+    case 'place_call':
+      return `place_call goal=${truncate(action.goal, 120)}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
     case 'use_workflow':
@@ -5021,6 +5049,8 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   mcp_call_tool: 30 * 60_000,
   synthesize_speech: 30 * 60_000,
   transcribe_audio: 30 * 60_000,
+  // Waiting for the owner's approval (15 min) and a call of up to an hour.
+  place_call: 80 * 60_000,
 };
 
 /**

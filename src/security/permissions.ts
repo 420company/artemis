@@ -76,6 +76,8 @@ function describeAction(action: AgentAction): string {
       return `synthesize speech with configured TTS${action.outputPath ? ` to ${action.outputPath}` : ''}`;
     case 'transcribe_audio':
       return `transcribe audio locally from ${action.inputPath}`;
+    case 'place_call':
+      return `phone ${action.to} for the owner (after the owner approves)`;
     case 'spawn_background_workflow':
       return `spawn a detached background workflow for ${action.command}`;
     case 'use_workflow':

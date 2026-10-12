@@ -1296,6 +1296,24 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    case 'place_call':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['to', 'goal'],
+        properties: {
+          to: nonEmptyStringSchema('Phone number with its country code, e.g. +86 21 6123 4567 or +1 415 555 0100.'),
+          goal: nonEmptyStringSchema('What the call must achieve, in one or two sentences, e.g. "Book a table for 4 this Friday at 19:00".'),
+          brief: optionalStringSchema('Background the assistant on the call may use (who is calling, preferences, context).'),
+          language: { type: 'string', enum: ['zh', 'en'], description: 'Language of the call: zh (Mandarin) or en. Default: the owner\'s language.' },
+          allowedFacts: { type: 'array', items: { type: 'string' }, description: 'Facts it may tell the other side (name for the booking, a callback number). Nothing else is shared.' },
+          forbidden: { type: 'array', items: { type: 'string' }, description: 'Facts it must not share and things it must not do.' },
+          mayAgreeTo: { type: 'array', items: { type: 'string' }, description: 'Alternatives it may accept (e.g. "19:00-20:30", "outdoor seats are fine").' },
+          calleeName: optionalStringSchema('Who is being called (the restaurant or shop name).'),
+          onBehalfOf: optionalStringSchema('How to name the owner on the call (e.g. "Mr. Li"); omit to say "my client".'),
+          maxMinutes: { type: 'integer', minimum: 1, maximum: 60, description: 'Longest the call may last, in minutes (the platform may cap it lower).' },
+        },
+      };
     case 'transcribe_audio':
       return {
         type: 'object',

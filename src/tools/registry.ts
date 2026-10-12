@@ -25,6 +25,7 @@ import { executeGenerateLongVideo } from './generateLongVideo.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
+import { executePlaceCall, PLACE_CALL_DESCRIPTION } from './phoneCall/placeCall.js';
 import { executeInsertInFile } from './insertInFile.js';
 import { executeListFiles } from './listFiles.js';
 import { executeLookupDocs } from './lookupDocs.js';
@@ -692,6 +693,19 @@ function validateSynthesizeSpeechAction(action: any): string[] {
   return errors;
 }
 
+function validatePlaceCallAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.to, 'to', errors);
+  validateRequiredNonEmptyString(action?.goal, 'goal', errors);
+  if (action?.language !== undefined && action.language !== 'zh' && action.language !== 'en') errors.push('language must be "zh" or "en"');
+  if (action?.maxMinutes !== undefined && (typeof action.maxMinutes !== 'number' || action.maxMinutes < 1 || action.maxMinutes > 60)) errors.push('maxMinutes must be 1-60');
+  for (const field of ['allowedFacts', 'forbidden', 'mayAgreeTo']) {
+    const value = action?.[field];
+    if (value !== undefined && (!Array.isArray(value) || value.some((v: unknown) => typeof v !== 'string'))) errors.push(`${field} must be a list of text`);
+  }
+  return errors;
+}
+
 function validateTranscribeAudioAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.inputPath, 'inputPath', errors);
@@ -1005,6 +1019,16 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateTranscribeAudioAction,
     execute: executeTranscribeAudio as any,
+  },
+  {
+    type: 'place_call',
+    description: PLACE_CALL_DESCRIPTION,
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validatePlaceCallAction,
+    execute: ((action: any, context: any) => executePlaceCall(action, context)) as any,
   },
   {
     type: 'agent',
