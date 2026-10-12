@@ -32,6 +32,13 @@ export type LastTurnRecord = {
   intent?: string;
   imagePaths?: string[];
   at: string;
+  /**
+   * Set while the run is going (recorded as soon as the owner's message is
+   * stored) and cleared when it ends. A run that was stopped, failed or killed
+   * leaves it set: its turn still counts, though it may not end the history
+   * the way it would have.
+   */
+  open?: boolean;
 };
 
 /** One tool the exchange used, and whether running it again changes something. */
@@ -55,6 +62,9 @@ export type LastExchangeLookup =
   | { ok: true; exchange: LastExchange }
   | { ok: false; reason: 'empty' | 'compacted' };
 
+/** Why there is nothing to take back: an empty conversation, a turn moved out by compaction, or (with a turn id) a newer turn. */
+export type RewindReason = 'empty' | 'compacted' | 'changed';
+
 /**
  * Decides whether one tool use changes something outside the conversation.
  * `action` is the tool's arguments as recorded (its `type` is the tool name).
@@ -72,12 +82,18 @@ function readRecord(session: SessionRecord): LastTurnRecord | undefined {
     ...(typeof raw.intent === 'string' ? { intent: raw.intent } : {}),
     ...(Array.isArray(raw.imagePaths) ? { imagePaths: raw.imagePaths.filter((p): p is string => typeof p === 'string') } : {}),
     at: typeof raw.at === 'string' ? raw.at : '',
+    ...(raw.open === true ? { open: true } : {}),
   };
 }
 
 /** A message the owner wrote (not a runtime note, reminder or compaction entry). */
 function isOwnerMessage(message: SessionMessage): boolean {
   return message.role === 'user' && !isSyntheticUserMessage(message) && Boolean(message.content?.trim());
+}
+
+/** Same normalization as the native MCP tool names (core/providerNativeTools.ts). */
+function projectionPart(name: string): string {
+  return name.trim().replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
 }
 
 function parseJsonObject(text: string | undefined): Record<string, unknown> | undefined {
@@ -90,13 +106,20 @@ function parseJsonObject(text: string | undefined): Record<string, unknown> | un
   }
 }
 
-/** The tools an exchange used, one entry per name; a name counts as side-effecting if any use was. */
+/**
+ * The tools an exchange used, one entry per name; a name counts as
+ * side-effecting if any use was. MCP calls are named `mcp__<server>__<tool>`
+ * so a host can say what they did.
+ */
 export function exchangeTools(messages: readonly SessionMessage[], classify: SideEffectClassifier): ExchangeTool[] {
   const byName = new Map<string, boolean>();
   const note = (name: string, action: Record<string, unknown> | undefined) => {
     if (!name) return;
     const effect = classify(name, action);
-    byName.set(name, (byName.get(name) ?? false) || effect);
+    const shown = name === 'mcp_call_tool' && typeof action?.serverId === 'string' && typeof action?.toolName === 'string'
+      ? `mcp__${projectionPart(action.serverId)}__${projectionPart(action.toolName)}`
+      : name;
+    byName.set(shown, (byName.get(shown) ?? false) || effect);
   };
   for (const message of messages) {
     if (message.role === 'assistant') {
@@ -125,14 +148,17 @@ export function findLastExchange(session: SessionRecord, classify: SideEffectCla
   const record = readRecord(session);
   let startIndex = -1;
   let recorded: LastTurnRecord | undefined;
-  if (record && messages.at(-1)?.id === record.lastMessageId) {
+  // A finished turn's record holds while nothing came after it; one whose run never
+  // finished (stopped, failed, killed) holds as long as its message is there.
+  if (record && (messages.at(-1)?.id === record.lastMessageId || record.open)) {
     const at = messages.findIndex((message) => message.id === record.userMessageId);
-    if (at < 0) {
+    if (at >= 0) {
+      startIndex = at;
+      recorded = record;
+    } else if (messages.some((message) => Boolean(message.compaction))) {
       // The turn is still the latest one, but its start went to the archive.
       return { ok: false, reason: 'compacted' };
     }
-    startIndex = at;
-    recorded = record;
   }
   if (startIndex < 0) {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -187,10 +213,14 @@ export function removeExchange(session: SessionRecord, exchange: Pick<LastExchan
   return removed;
 }
 
-/** Records the turn a headless run just finished (in memory; the caller saves). */
+/**
+ * Records a headless run's turn (in memory; the caller saves): `open` while
+ * the run goes on, closed (with the message it ended at) when it is over.
+ */
 export function recordLastTurn(
   session: SessionRecord,
   turn: { userMessageId: string; prompt: string; intent?: string; imagePaths?: string[] },
+  options: { open?: boolean } = {},
 ): void {
   const last = session.messages.at(-1);
   if (!last) return;
@@ -201,6 +231,7 @@ export function recordLastTurn(
     ...(turn.intent ? { intent: turn.intent } : {}),
     ...(turn.imagePaths?.length ? { imagePaths: [...turn.imagePaths] } : {}),
     at: new Date().toISOString(),
+    ...(options.open ? { open: true } : {}),
   };
   session.metadata = { ...(session.metadata ?? {}), [LAST_TURN_METADATA_KEY]: record };
 }
@@ -212,13 +243,55 @@ export function firstNewOwnerMessage(messages: readonly SessionMessage[], before
 
 /** `artemis execute --retry` and `session undo` exit with this when there is nothing to take back (sysexits EX_DATAERR). */
 export const NOTHING_TO_REWIND_EXIT_CODE = 65;
+/** ...and with this when the last exchange is not the one the host named (`--retry-of` / `--turn`): a newer turn came in. */
+export const TURN_CHANGED_EXIT_CODE = 66;
 
 export class SessionRewindError extends Error {
-  readonly exitCode = NOTHING_TO_REWIND_EXIT_CODE;
-  constructor(readonly reason: 'empty' | 'compacted') {
+  readonly exitCode: number;
+  constructor(readonly reason: RewindReason) {
     super(reason === 'empty'
       ? 'Nothing to take back: the conversation has no message yet.'
-      : 'The last message was moved out of the live history to save space; it can no longer be taken back.');
+      : reason === 'compacted'
+        ? 'The last message was moved out of the live history to save space; it can no longer be taken back.'
+        : 'The conversation changed: its last exchange is not the one asked about.');
     this.name = 'SessionRewindError';
+    this.exitCode = reason === 'changed' ? TURN_CHANGED_EXIT_CODE : NOTHING_TO_REWIND_EXIT_CODE;
   }
+}
+
+/**
+ * The last exchange, checked against the turn the host confirmed (its
+ * owner message id): throws SessionRewindError when there is none or it is
+ * another one.
+ */
+export function lastExchangeFor(session: SessionRecord, classify: SideEffectClassifier, expectedTurnId?: string): LastExchange {
+  const lookup = findLastExchange(session, classify);
+  if (!lookup.ok) throw new SessionRewindError(lookup.reason);
+  if (expectedTurnId !== undefined && lookup.exchange.userMessage.id !== expectedTurnId) throw new SessionRewindError('changed');
+  return lookup.exchange;
+}
+
+const ATTACHMENT_LINE = /^Attached file: (.+)$/;
+
+/**
+ * A resent prompt without the attachments that are gone since (deleted
+ * from the workspace): their `Attached file:` lines are dropped and one
+ * plain note says which, in the prompt's language, so the agent can tell
+ * the owner instead of failing on a missing file.
+ */
+export function dropMissingAttachments(prompt: string, exists: (file: string) => boolean): { prompt: string; missing: string[] } {
+  const missing: string[] = [];
+  const kept = prompt.split('\n').filter((line) => {
+    const file = ATTACHMENT_LINE.exec(line)?.[1]?.trim();
+    if (!file || exists(file)) return true;
+    missing.push(file);
+    return false;
+  });
+  if (missing.length === 0) return { prompt, missing };
+  const names = missing.map((file) => file.split('/').pop() || file);
+  const chinese = /[㐀-鿿]/.test(prompt);
+  const note = chinese
+    ? `（重新发送时，这些附件已经被删除，无法再用：${names.join('、')}。请告诉用户。）`
+    : `(Resent without these attachments, which were deleted since: ${names.join(', ')}. Tell the user.)`;
+  return { prompt: `${kept.join('\n').trimEnd()}\n\n${note}`, missing };
 }

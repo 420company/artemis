@@ -22,6 +22,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export type ReportSource = { index: number; url: string; title: string };
 
@@ -94,7 +95,8 @@ export function slugify(title: string): string {
 function safeUrl(raw: string): string | undefined {
   try {
     const url = new URL(raw.trim());
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : undefined;
+    // Parentheses would end a Markdown link early: percent-encoded, they mean the same URL.
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString().replace(/\(/g, '%28').replace(/\)/g, '%29') : undefined;
   } catch {
     return undefined;
   }
@@ -415,14 +417,32 @@ export type PdfPrinter = (htmlPath: string, pdfPath: string) => Promise<boolean>
 
 export const chromiumPdfPrinter: PdfPrinter = async (htmlPath, pdfPath) => {
   let browser: import('playwright').Browser | undefined;
+  let gaveUp = false;
   const timeout = new Promise<false>((resolve) => setTimeout(() => resolve(false), 60_000).unref());
+  const page = pathToFileURL(htmlPath).href;
   const print = (async () => {
     try {
       const { chromium } = await import('playwright');
-      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-      const page = await browser.newPage();
-      await page.goto(`file://${htmlPath}`, { waitUntil: 'load', timeout: 30_000 });
-      await page.pdf({ path: pdfPath, format: 'A4', printBackground: true, margin: { top: '18mm', bottom: '18mm', left: '16mm', right: '16mm' } });
+      const launched = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+      browser = launched;
+      // A launch that outlived the timeout is closed at once instead of left running.
+      if (gaveUp) {
+        await launched.close().catch(() => undefined);
+        return false;
+      }
+      // The report is static: no scripts, and nothing but the report file itself is loaded.
+      const context = await launched.newContext({ javaScriptEnabled: false });
+      const isReport = (url: string) => {
+        try {
+          return url.startsWith('file:') && path.resolve(fileURLToPath(url)) === path.resolve(htmlPath);
+        } catch {
+          return false;
+        }
+      };
+      await context.route('**/*', (route) => (isReport(route.request().url()) ? route.continue() : route.abort()));
+      const tab = await context.newPage();
+      await tab.goto(page, { waitUntil: 'load', timeout: 30_000 });
+      await tab.pdf({ path: pdfPath, format: 'A4', printBackground: true, margin: { top: '18mm', bottom: '18mm', left: '16mm', right: '16mm' } });
       return true;
     } catch {
       return false;
@@ -431,6 +451,7 @@ export const chromiumPdfPrinter: PdfPrinter = async (htmlPath, pdfPath) => {
   try {
     return await Promise.race([print, timeout]);
   } finally {
+    gaveUp = true;
     await browser?.close().catch(() => undefined);
   }
 };

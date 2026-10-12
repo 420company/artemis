@@ -23,11 +23,14 @@ import * as path from 'node:path'
 import { settleMemoryCuration } from '../src/core/memory.js'
 import type { SessionMessage, SessionRecord } from '../src/core/types.js'
 import { runHeadlessAgent } from '../src/services/headlessAgent.js'
-import { toolHasSideEffects } from '../src/services/toolSideEffects.js'
+import { createSideEffectClassifier, toolHasSideEffects } from '../src/services/toolSideEffects.js'
 import { buildSnippet, matchText, searchConversations } from '../src/storage/conversationSearch.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import {
+  dropMissingAttachments,
   findLastExchange,
+  lastExchangeFor,
+  TURN_CHANGED_EXIT_CODE,
   LAST_TURN_METADATA_KEY,
   NOTHING_TO_REWIND_EXIT_CODE,
   recordLastTurn,
@@ -154,11 +157,52 @@ console.log('\nsession turns')
   recordLastTurn(recordTarget, { userMessageId: recordTarget.messages[0]!.id, prompt: 'q' })
   assert('recording a turn keeps where it ends', recordTarget.metadata?.[LAST_TURN_METADATA_KEY]?.lastMessageId === recordTarget.messages[1]!.id)
 
-  assert('side effects: unknown tools count; read tools, read-only MCP calls and confirmations do not',
+  assert('side effects: unknown tools count; read tools and confirmations do not; research does',
     toolHasSideEffects('some_new_tool', undefined) && !toolHasSideEffects('search_web', undefined) &&
-      !toolHasSideEffects('mcp_call_tool', { readOnly: true }) && toolHasSideEffects('mcp_call_tool', {}) &&
       !toolHasSideEffects('request_user_confirmation', undefined) && toolHasSideEffects('generate_image', undefined) &&
-      toolHasSideEffects('run_command', { command: 'rm -rf build' }))
+      toolHasSideEffects('run_command', { command: 'rm -rf build' }) && toolHasSideEffects('deep_research', { query: 'q' }))
+  assert('side effects: a model saying readOnly is not believed; the MCP server\'s descriptor is',
+    toolHasSideEffects('mcp_call_tool', { serverId: 'artemis_online', toolName: 'publish_request', readOnly: true }) &&
+      !toolHasSideEffects('mcp_call_tool', { serverId: 'artemis_online', toolName: 'trigger_list', readOnly: false }, new Set(['mcp__artemis_online__trigger_list'])) &&
+      toolHasSideEffects('mcp__artemis_online__trigger_create', undefined, new Set(['mcp__artemis_online__trigger_list'])) &&
+      !toolHasSideEffects('mcp__artemis_online__trigger_list', undefined, new Set(['mcp__artemis_online__trigger_list'])))
+  {
+    const mcpTurn = session([
+      msg('user', 'publish it'),
+      msg('assistant', '', { toolCalls: [{ id: 'c1', name: 'mcp__artemis_online__publish_request', arguments: '{}' }] }),
+      toolResult({ type: 'mcp_call_tool', serverId: 'artemis_online', toolName: 'trigger_create', readOnly: true }),
+      msg('assistant', 'done'),
+    ])
+    const found = findLastExchange(mcpTurn, toolHasSideEffects)
+    assert('MCP tools are named mcp__<server>__<tool> and count as side effects (publish, triggers)',
+      found.ok && JSON.stringify(found.exchange.tools) === JSON.stringify([
+        { name: 'mcp__artemis_online__publish_request', sideEffect: true },
+        { name: 'mcp__artemis_online__trigger_create', sideEffect: true },
+      ]), JSON.stringify(found))
+    let changed: unknown
+    try {
+      lastExchangeFor(mcpTurn, toolHasSideEffects, 'some-older-message')
+    } catch (error) {
+      changed = error
+    }
+    assert('a turn id that is not the last exchange is refused (exit 66)', changed instanceof SessionRewindError && changed.reason === 'changed' && changed.exitCode === TURN_CHANGED_EXIT_CODE)
+    assert('the confirmed turn id passes', lastExchangeFor(mcpTurn, toolHasSideEffects, mcpTurn.messages[0]!.id).startIndex === 0)
+    const open = session([...mcpTurn.messages, msg('user', 'Run the check again.'), msg('assistant', 'ok')], {
+      [LAST_TURN_METADATA_KEY]: { userMessageId: mcpTurn.messages[0]!.id, lastMessageId: mcpTurn.messages[0]!.id, prompt: 'publish it', intent: 'research', at: '', open: true },
+    })
+    const fromOpen = findLastExchange(open, toolHasSideEffects)
+    assert('a run that never finished (open record) still marks where its turn starts, with its intent',
+      fromOpen.ok && fromOpen.exchange.startIndex === 0 && fromOpen.exchange.recorded?.intent === 'research', JSON.stringify(fromOpen))
+  }
+  {
+    const resent = dropMissingAttachments('看看这张图\n\nAttached file: uploads/a.png\nAttached file: uploads/gone.png', (file) => file.endsWith('a.png'))
+    assert('a resent prompt leaves deleted attachments out and says so in its language',
+      JSON.stringify(resent.missing) === '["uploads/gone.png"]' && resent.prompt.includes('Attached file: uploads/a.png') &&
+        !resent.prompt.includes('Attached file: uploads/gone.png') && resent.prompt.includes('gone.png') && resent.prompt.includes('已经被删除'),
+      resent.prompt)
+    const same = dropMissingAttachments('hello', () => false)
+    assert('a prompt without missing files is resent as is', same.prompt === 'hello' && same.missing.length === 0)
+  }
   assert('`execute --retry` parses; other commands ignore it as a flag',
     parseArgs(['execute', '--session', '0f4c2b1e-5d6a-4e7f-8a9b-0c1d2e3f4a5b', '--retry']).retry === true &&
       parseArgs(['execute', '--session', '0f4c2b1e-5d6a-4e7f-8a9b-0c1d2e3f4a5b', '--retry']).prompt === undefined &&
@@ -169,14 +213,21 @@ console.log('\nsession turns')
 
 type ChatBody = { messages: Array<{ role: string; content: unknown }> }
 
-async function withMockChatServer(handler: (body: ChatBody) => string, run: (baseUrl: string) => Promise<void>): Promise<void> {
+/** The mock model; a handler answering null fails the request (HTTP 400). */
+async function withMockChatServer(handler: (body: ChatBody) => string | null, run: (baseUrl: string) => Promise<void>): Promise<void> {
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (c) => chunks.push(c as Buffer))
     req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as ChatBody
+      const content = handler(body)
+      if (content === null) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'invalid request', code: 'invalid_request' } }))
+        return
+      }
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ model: 'mock-chat-model', choices: [{ message: { content: handler(body) } }], usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 } }))
+      res.end(JSON.stringify({ model: 'mock-chat-model', choices: [{ message: { content } }], usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 } }))
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -207,8 +258,13 @@ console.log('\nheadless retry')
   delete process.env.ARTEMIS_HOME
   const asked: string[] = []
   try {
+    let failNext = false
     await withMockChatServer((body) => {
       const text = lastUserText(body)
+      if (failNext && /QUESTION_FAIL/.test(text)) {
+        failNext = false
+        return null
+      }
       if (/QUESTION/.test(text)) asked.push(text.match(/QUESTION_[A-Z_]+/)?.[0] ?? text)
       return JSON.stringify({ reply: `answer to ${text.match(/QUESTION_[A-Z_]+/)?.[0] ?? 'that'}`, done: true })
     }, async (baseUrl) => {
@@ -244,6 +300,32 @@ console.log('\nheadless retry')
       const visible = afterEdit.messages.filter((m) => m.role === 'assistant' && m.content.trim())
       assert('the replaced reply is gone', !visible.some((m) => /QUESTION_TWO/.test(m.content)), JSON.stringify(visible.map((m) => m.content)))
 
+      // A run that fails: its turn is still recorded (with its intent), so a retry asks the same.
+      const other = (await run('QUESTION_THREE', {})).sessionId
+      failNext = true
+      try {
+        await run('QUESTION_FAIL', { sessionId: other, intent: 'image' })
+      } catch {
+        // The model refused the request: the run failed.
+      }
+      const failed = await new SessionStore(cwd).load(other, { fresh: true })
+      const failedRecord = failed.metadata?.[LAST_TURN_METADATA_KEY]
+      assert('a failed run leaves its turn recorded with its intent, closed', failedRecord?.prompt === 'QUESTION_FAIL' && failedRecord?.intent === 'image' && failedRecord?.open === undefined, JSON.stringify(failedRecord))
+      asked.length = 0
+      await run('', { sessionId: other, retry: true, retryOf: failedRecord?.userMessageId })
+      const afterFail = await new SessionStore(cwd).load(other, { fresh: true })
+      assert('retrying the failed run asks the same once more, with the same intent',
+        asked.includes('QUESTION_FAIL') && afterFail.metadata?.[LAST_TURN_METADATA_KEY]?.intent === 'image' &&
+          afterFail.messages.filter((m) => m.role === 'user' && m.content === 'QUESTION_FAIL').length === 1,
+        JSON.stringify(afterFail.messages.map((m) => [m.role, m.content.slice(0, 30)])))
+      let stale: unknown
+      try {
+        await run('', { sessionId: other, retry: true, retryOf: failedRecord?.userMessageId })
+      } catch (error) {
+        stale = error
+      }
+      assert('a retry naming a turn that was already replaced is refused (exit 66)', stale instanceof SessionRewindError && stale.exitCode === TURN_CHANGED_EXIT_CODE)
+
       let refused: unknown
       const emptySession = new SessionStore(cwd)
       const blank = emptySession.createSession({ title: 'blank' })
@@ -260,7 +342,10 @@ console.log('\nheadless retry')
       const last = await cli('last-turn', sessionId)
       const lastJson = JSON.parse(last.stdout) as { turn: { userMessage: { content: string }; sideEffects: boolean; tools: unknown[] } }
       assert('`session last-turn` prints the exchange as JSON', last.status === 0 && lastJson.turn.userMessage.content === 'QUESTION_EDITED' && lastJson.turn.sideEffects === false, last.stdout + last.stderr)
-      const undo = await cli('undo', sessionId)
+      const wrongTurn = await cli('undo', sessionId, '--turn', 'not-the-last-turn')
+      assert('`session undo --turn` with another turn changes nothing and exits 66', wrongTurn.status === TURN_CHANGED_EXIT_CODE && /"reason":"changed"/.test(wrongTurn.stdout), `${wrongTurn.status} ${wrongTurn.stdout}`)
+      const turnId = (JSON.parse(last.stdout) as { turn: { turnId: string } }).turn.turnId
+      const undo = await cli('undo', sessionId, '--turn', turnId)
       const undoJson = JSON.parse(undo.stdout) as { ok: boolean; remainingMessages: number; removed: { userMessage: { content: string } } }
       assert('`session undo` removes the last exchange and says what is left', undo.status === 0 && undoJson.ok && undoJson.removed.userMessage.content === 'QUESTION_EDITED' && undoJson.remainingMessages === 2, undo.stdout + undo.stderr)
       const shown = await cli('show', sessionId)
@@ -279,12 +364,41 @@ console.log('\nheadless retry')
   }
 }
 
+console.log('\nMCP descriptors')
+{
+  const cwd = tmpDir('mcp')
+  try {
+    fs.mkdirSync(path.join(cwd, '.artemis'), { recursive: true })
+    const at = new Date().toISOString()
+    fs.writeFileSync(path.join(cwd, '.artemis', 'mcp-servers.json'), JSON.stringify({
+      servers: [{
+        id: 'artemis_online', enabled: true, transport: 'streamable-http', url: 'http://127.0.0.1:9/mcp', authType: 'none', authState: 'configured',
+        surface: { tools: [{ name: 'trigger_list', readOnly: true }, { name: 'trigger_create' }, { name: 'publish_request', readOnly: false }], resources: [], prompts: [] },
+        createdAt: at, updatedAt: at,
+      }],
+    }))
+    const classify = await createSideEffectClassifier(cwd)
+    assert('the classifier reads read-only tools from the MCP server descriptors in the workspace',
+      !classify('mcp__artemis_online__trigger_list', undefined) && classify('mcp__artemis_online__trigger_create', undefined) &&
+        classify('mcp_call_tool', { serverId: 'artemis_online', toolName: 'publish_request', readOnly: true }) &&
+        !classify('mcp_call_tool', { serverId: 'artemis_online', toolName: 'trigger_list' }))
+    const bare = tmpDir('mcp-none')
+    const none = await createSideEffectClassifier(bare)
+    assert('without MCP configuration every MCP tool counts, and none is created', none('mcp__x__y', undefined) && !fs.existsSync(path.join(bare, '.artemis', 'mcp-servers.json')))
+    fs.rmSync(bare, { recursive: true, force: true })
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true })
+  }
+}
+
 console.log('\nconversation search')
 {
   assert('matching: a phrase as typed, else every word; ranges for each',
     JSON.stringify(matchText('Deploy the report, then the deploy log', 'deploy')) === JSON.stringify([[0, 6], [28, 34]]) &&
       JSON.stringify(matchText('log of the deploy', 'deploy log')) === JSON.stringify([[0, 3], [11, 17]]) &&
       matchText('nothing here', 'deploy') === null)
+  const turkish = matchText('İstanbul report', 'report')
+  assert('matching: ranges point into the original text when lowercasing changes its length', JSON.stringify(turkish) === JSON.stringify([[9, 15]]), JSON.stringify(turkish))
   assert('matching: a Chinese word inside a sentence', JSON.stringify(matchText('请帮我写一份市场研究报告', '研究报告')) === JSON.stringify([[8, 12]]))
   const long = `${'前文'.repeat(60)}关键结论在这里${'后文'.repeat(120)}`
   const ranges = matchText(long, '关键结论')!
@@ -309,7 +423,7 @@ console.log('\nconversation search')
     await store.save(helper)
     // An archived page: compaction moved the start of conversation c to its transcript.
     const c = store.createSession({ title: 'c' })
-    const archived = [msg('user', 'old archived question about lighthouses'), msg('assistant', 'archived answer')]
+    const archived = [msg('user', 'old archived question about lighthouses and zebracrossings'), msg('assistant', 'archived answer')]
     fs.mkdirSync(store.getContextDir(c.id), { recursive: true })
     fs.writeFileSync(path.join(store.getContextDir(c.id), 'transcript.jsonl'), archived.map((m) => JSON.stringify({ compaction: 1, message: m })).join('\n') + '\n')
     c.messages.push(msg('user', 'lighthouses again'), msg('assistant', 'more on lighthouses'))
@@ -321,6 +435,9 @@ console.log('\nconversation search')
       JSON.stringify(zh))
     const en = await searchConversations(cwd, 'revenue')
     assert('search: English words through the full-text index', en.length === 1 && en[0]!.sessionId === b.id && en[0]!.hits.length === 2)
+    const onlyArchived = await searchConversations(cwd, 'zebracrossings')
+    assert('search: a word found only in an archived page is found by the global search too',
+      onlyArchived.length === 1 && onlyArchived[0]!.sessionId === c.id && onlyArchived[0]!.hits[0]!.newerCount === 3, JSON.stringify(onlyArchived))
     const deep = await searchConversations(cwd, 'lighthouses', { sessionId: c.id })
     assert('search: archived pages are searched too, with how many messages are newer',
       deep[0]?.matchCount === 3 && deep[0]!.hits.at(-1)!.newerCount === 3,

@@ -51,6 +51,12 @@ export interface HeadlessAgentOptions {
    * it (edit and resend). Needs `sessionId`.
    */
   retry?: boolean
+  /**
+   * With `retry`: the owner message id of the exchange the host asked to
+   * replace. Checked under the session lock; another last exchange fails
+   * the retry (SessionRewindError 'changed') instead of replacing it.
+   */
+  retryOf?: string
 }
 
 export interface HeadlessAgentResult {
@@ -123,7 +129,7 @@ export async function runHeadlessAgent(
   const { resolveActiveVideoClipSeconds } = await import('../tools/visual/activeVideoModel.js')
   const { resolveArtemisHomeDir } = await import('../utils/fs.js')
   const { existsSync } = await import('node:fs')
-  const { join } = await import('node:path')
+  const { isAbsolute, join } = await import('node:path')
   const readOnly = (opts.permissionMode ?? 'PRODUCER') === 'read-only'
 
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
@@ -142,13 +148,17 @@ export async function runHeadlessAgent(
     let runImagePaths = opts.imagePaths ?? []
     let runImages = imageAttachments
     if (opts.retry) {
-      const { toolHasSideEffects } = await import('./toolSideEffects.js')
-      const lookup = sessionTurns.findLastExchange(current, toolHasSideEffects)
-      if (!lookup.ok) throw new sessionTurns.SessionRewindError(lookup.reason)
-      const { exchange } = lookup
+      const { createSideEffectClassifier } = await import('./toolSideEffects.js')
+      const exchange = sessionTurns.lastExchangeFor(current, await createSideEffectClassifier(cwd), opts.retryOf)
       if (!prompt.trim()) {
         runPrompt = exchange.recorded?.prompt ?? current.messages[exchange.startIndex]!.content
         if (!runImagePaths.length) runImagePaths = (exchange.recorded?.imagePaths ?? []).filter((file) => existsSync(file))
+        // Files deleted since the first time are left out, and the agent is told so.
+        const resent = sessionTurns.dropMissingAttachments(runPrompt, (file) => existsSync(isAbsolute(file) ? file : join(cwd, file)))
+        if (resent.missing.length) {
+          runPrompt = resent.prompt
+          onInfo(`[session] retry: ${resent.missing.length} attachment(s) no longer exist and were left out`)
+        }
       }
       runIntent = opts.intent ?? exchange.recorded?.intent
       // Images first: one that cannot be read fails the retry before anything is removed.
@@ -158,15 +168,33 @@ export async function runHeadlessAgent(
       onInfo(`[session] retry: removed the last exchange (${exchange.messageCount} messages)`)
     }
     const knownIds = new Set(current.messages.map((message) => message.id))
+    // What a later retry needs: where this turn starts and what it was asked
+    // with. Recorded as soon as the owner's message is stored (marked open),
+    // so a run that fails, is stopped or killed can still be retried as asked;
+    // closed with the message the turn ended at once the run is over.
+    const turnFields = () => ({
+      prompt: runPrompt,
+      ...(runIntent !== undefined ? { intent: runIntent } : {}),
+      ...(runImagePaths.length ? { imagePaths: runImagePaths } : {}),
+    })
+    let turnMessageId: string | undefined
+    const appendMessage = sessionStore.appendMessage.bind(sessionStore)
+    sessionStore.appendMessage = (target, role, content, name) => {
+      const updated = appendMessage(target, role, content, name)
+      if (turnMessageId === undefined && target === current && role === 'user') {
+        const asked = sessionTurns.firstNewOwnerMessage(current.messages, knownIds)
+        if (asked) {
+          turnMessageId = asked.id
+          // Saved with the message by the caller's next save.
+          sessionTurns.recordLastTurn(current, { userMessageId: asked.id, ...turnFields() }, { open: true })
+        }
+      }
+      return updated
+    }
     const recordTurn = async () => {
-      const asked = sessionTurns.firstNewOwnerMessage(current.messages, knownIds)
-      if (!asked) return
-      sessionTurns.recordLastTurn(current, {
-        userMessageId: asked.id,
-        prompt: runPrompt,
-        ...(runIntent !== undefined ? { intent: runIntent } : {}),
-        ...(runImagePaths.length ? { imagePaths: runImagePaths } : {}),
-      })
+      sessionStore.appendMessage = appendMessage
+      if (turnMessageId === undefined) return
+      sessionTurns.recordLastTurn(current, { userMessageId: turnMessageId, ...turnFields() })
       await sessionStore.save(current)
     }
     const plan = await planHeadlessWorkflow({
@@ -193,7 +221,9 @@ export async function runHeadlessAgent(
       return { reply: plan.reply, turns: 0 }
     }
     const messagesBefore = current.messages.length
-    const runResult = await runAgent(
+    let runResult
+    try {
+    runResult = await runAgent(
     current,
     // A retired workflow slash word ("/niko …") is already removed.
     plan.prompt,
@@ -237,8 +267,10 @@ export async function runHeadlessAgent(
     if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
       await sessionStore.save(current)
     }
-    // What a later retry needs: where this turn starts and what it was asked with.
-    await recordTurn()
+    } finally {
+      // Closed whether the run answered or failed (a killed process leaves it open).
+      await recordTurn().catch(() => undefined)
+    }
     return runResult
   }, { label: `Session ${session.id}` })
 

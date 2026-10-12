@@ -10,9 +10,12 @@
  * a page at a time can page back far enough to show it.
  */
 
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { searchSessionCandidates } from './sessionSearch.js';
 import { isChatVisibleMessage, SessionStore } from './sessions.js';
 import { userVisibleMessageText } from '../utils/internalNames.js';
+import { resolveDataRootDir } from '../utils/fs.js';
 
 export type MessageHit = {
   messageId: string;
@@ -61,8 +64,28 @@ export function queryTerms(query: string): string[] {
  * Whether `text` matches: the whole query as typed, or every term somewhere.
  * Returns the ranges to highlight (all occurrences of the phrase or terms).
  */
+/**
+ * `text` lowercased one code unit group at a time, with where each lowered
+ * position came from: lowercasing can change the length ("İ" → "i̇"), and
+ * the highlights must point into the original text.
+ */
+function lowerWithMap(text: string): { lower: string; origin: number[] } {
+  let lower = '';
+  const origin: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    const code = text.codePointAt(i)!;
+    const width = code > 0xffff ? 2 : 1;
+    const lowered = text.slice(i, i + width).toLowerCase();
+    for (let k = 0; k < lowered.length; k += 1) origin.push(i);
+    lower += lowered;
+    i += width;
+  }
+  origin.push(text.length);
+  return { lower, origin };
+}
+
 export function matchText(text: string, query: string): Array<[number, number]> | null {
-  const lower = text.toLowerCase();
+  const { lower, origin } = lowerWithMap(text);
   const phrase = query.trim().slice(0, MAX_QUERY_CHARS).toLowerCase();
   const terms = queryTerms(query);
   if (!phrase) return null;
@@ -76,7 +99,10 @@ export function matchText(text: string, query: string): Array<[number, number]> 
     for (;;) {
       const at = lower.indexOf(needle, from);
       if (at < 0) break;
-      ranges.push([at, at + needle.length]);
+      // Back to positions in the original text (the end: just past the last matched character).
+      const endOrigin = origin[at + needle.length - 1]!;
+      const endWidth = (text.codePointAt(endOrigin) ?? 0) > 0xffff ? 2 : 1;
+      ranges.push([origin[at]!, endOrigin + endWidth]);
       from = at + needle.length;
     }
   }
@@ -112,6 +138,32 @@ export function buildSnippet(text: string, ranges: Array<[number, number]>): { s
   return { snippet: `${lead}${flat.slice(start, end)}${tail}`, highlights };
 }
 
+/** Sessions whose transcript archive mentions the query (the phrase, or each term somewhere). */
+async function sessionsWithArchivedMatch(cwd: string, query: string): Promise<string[]> {
+  const sessionDir = path.join(resolveDataRootDir(cwd), 'sessions');
+  const phrase = query.trim().slice(0, MAX_QUERY_CHARS).toLowerCase();
+  const terms = queryTerms(query);
+  let entries: string[];
+  try {
+    entries = await readdir(sessionDir);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const entry of entries) {
+    if (entry.endsWith('.json') || entry.endsWith('.lock')) continue;
+    let text: string;
+    try {
+      text = (await readFile(path.join(sessionDir, entry, 'transcript.jsonl'), 'utf8')).toLowerCase();
+    } catch {
+      continue;
+    }
+    // The archive is JSON as written by JSON.stringify: non-ASCII text stays as is, so a plain search works.
+    if (text.includes(phrase) || (terms.length > 0 && terms.every((term) => text.includes(term)))) found.push(entry);
+  }
+  return found;
+}
+
 export async function searchConversations(
   cwd: string,
   query: string,
@@ -124,6 +176,11 @@ export async function searchConversations(
   const candidates = options.sessionId
     ? [options.sessionId]
     : await searchSessionCandidates(cwd, query, { maxResults: Math.max(limit * 2, 24) });
+  if (!options.sessionId && candidates.length < limit * 2) {
+    // The index holds the live history only: pages compaction moved to a
+    // session's transcript archive are looked through as well.
+    for (const id of await sessionsWithArchivedMatch(cwd, query)) if (!candidates.includes(id)) candidates.push(id);
+  }
 
   const matches: ConversationMatch[] = [];
   for (const sessionId of candidates) {

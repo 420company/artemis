@@ -318,6 +318,7 @@ export async function runCli(argv: string[]): Promise<void> {
       imagePaths: options.imagePaths,
       intent: options.intent,
       retry: options.retry,
+      retryOf: options.retryOf,
     })
     return
   }
@@ -662,6 +663,7 @@ async function runQueryCommand(options: {
   imagePaths?: string[]
   intent?: string
   retry?: boolean
+  retryOf?: string
 }): Promise<void> {
   const { cwd, locale, mode, model } = options
   const prompt = options.prompt ?? ''
@@ -698,10 +700,11 @@ async function runQueryCommand(options: {
       onInfo: (message) => console.error(message),
       ...(options.intent !== undefined ? { intent: options.intent } : {}),
       ...(retry ? { retry: true } : {}),
+      ...(retry && options.retryOf ? { retryOf: options.retryOf } : {}),
     })
   } catch (error) {
     if (error instanceof SessionRewindError) {
-      // Exit 65: nothing to retry (the host shows it; nothing was run or changed).
+      // Exit 65: nothing to retry; 66: the last exchange is another one (nothing was run or changed).
       console.error(`CLI Error: ${error.message}`)
       process.exit(error.exitCode)
     }
@@ -1243,8 +1246,8 @@ export async function runSessionCommand(options: { cwd: string; locale: UiLocale
     }
     const session = await store.load(id, { readOnly: true })
     const { findLastExchange } = await import('../storage/sessionTurns.js')
-    const { toolHasSideEffects } = await import('../services/toolSideEffects.js')
-    const lookup = findLastExchange(session, toolHasSideEffects)
+    const { createSideEffectClassifier } = await import('../services/toolSideEffects.js')
+    const lookup = findLastExchange(session, await createSideEffectClassifier(cwd))
     console.log(JSON.stringify(lookup.ok
       ? { sessionId: session.id, turn: describeExchange(lookup.exchange) }
       : { sessionId: session.id, turn: null, reason: lookup.reason }, null, 2))
@@ -1255,20 +1258,23 @@ export async function runSessionCommand(options: { cwd: string; locale: UiLocale
   if (sub === 'undo') {
     const id = args[1]
     if (!id) {
-      console.log(t('\n  用法: artemis session undo <id>', '\n  Usage: artemis session undo <id>'))
+      console.log(t('\n  用法: artemis session undo <id> [--turn <消息 id>]', '\n  Usage: artemis session undo <id> [--turn <message id>]'))
       console.log()
       return
     }
     // Fails with ENOENT (like `show`) for an unknown session, before taking the lock.
     await store.load(id, { readOnly: true })
     const { withSessionLock, SessionBusyError, SESSION_BUSY_MESSAGE, SESSION_BUSY_MESSAGE_ZH } = await import('../storage/sessionLock.js')
-    const { findLastExchange, removeExchange, SessionRewindError } = await import('../storage/sessionTurns.js')
-    const { toolHasSideEffects } = await import('../services/toolSideEffects.js')
+    const { lastExchangeFor, removeExchange, SessionRewindError } = await import('../storage/sessionTurns.js')
+    const { createSideEffectClassifier } = await import('../services/toolSideEffects.js')
+    const classify = await createSideEffectClassifier(cwd)
+    // `--turn <message id>`: only that exchange (the one the owner confirmed) is taken back.
+    const turn = flagValue('--turn')
     try {
       const outcome = await withSessionLock(store.getLockPath(id), async () => {
         const session = await store.load(id, { fresh: true })
-        const lookup = findLastExchange(session, toolHasSideEffects)
-        if (!lookup.ok) throw new SessionRewindError(lookup.reason)
+        const exchange = lastExchangeFor(session, classify, turn)
+        const lookup = { exchange }
         removeExchange(session, lookup.exchange)
         await store.save(session)
         const history = await store.loadFullHistory(session)
@@ -1342,7 +1348,7 @@ export async function runSessionCommand(options: { cwd: string; locale: UiLocale
     'artemis session show <id>',
     'artemis session search <query> [--session <id>]',
     'artemis session last-turn <id>',
-    'artemis session undo <id>',
+    'artemis session undo <id> [--turn <message id>]',
     'artemis session delete <id>',
   ]))
   console.log()
@@ -1351,6 +1357,8 @@ export async function runSessionCommand(options: { cwd: string; locale: UiLocale
 /** The last exchange as hosts read it: the owner's message, the reply, and the tools it used. */
 function describeExchange(exchange: import('../storage/sessionTurns.js').LastExchange) {
   return {
+    /** What hosts send back (`--retry-of`, `undo --turn`) so only this exchange is replaced. */
+    turnId: exchange.userMessage.id,
     userMessage: exchange.userMessage,
     ...(exchange.reply ? { reply: { ...exchange.reply, content: exchange.reply.content.slice(0, 2_000) } } : {}),
     messageCount: exchange.messageCount,

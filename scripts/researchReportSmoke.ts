@@ -56,6 +56,12 @@ console.log('\ncitations')
   assert('unknown numbers, inline code and existing links stay as written', linked.includes('See [9]') && linked.includes('`code [2]`') && linked.includes('[2023](https://x.org)'), linked)
   const fenced = linkCitations('```\nvalue [1]\n```\nafter [1]', sources)
   assert('code blocks are never rewritten', fenced.startsWith('```\nvalue [1]\n```') && fenced.endsWith('after [[1]](https://example.org/a "Battery outlook 2026")'), fenced)
+  const paren = buildResearchReport({ question: 'q', body: 'See [1].', sources: [{ index: 1, url: 'https://en.wikipedia.org/wiki/Mercury_(planet)', title: 'Mercury (planet)' }] })
+  assert('a source URL with parentheses keeps working as a link (citation, list and page)',
+    paren.markdown.includes('[[1]](https://en.wikipedia.org/wiki/Mercury_%28planet%29 "Mercury (planet)")') &&
+      paren.markdown.includes('1. [Mercury (planet)](https://en.wikipedia.org/wiki/Mercury_%28planet%29)') &&
+      paren.html.includes('href="https://en.wikipedia.org/wiki/Mercury_%28planet%29"') && !paren.html.includes('planet%29)'),
+    paren.markdown)
   const unsafe = linkCitations('x [3]', sources)
   assert('a source with an unsafe URL is not linked', unsafe === 'x [3]', unsafe)
 }
