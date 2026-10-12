@@ -262,8 +262,11 @@ function tail(text: string): string {
   return clean.length > OUTPUT_TAIL ? `…${clean.slice(-OUTPUT_TAIL)}` : clean;
 }
 
-/** How a session logs in: the name of a stored SSH key, or of a stored server password. */
-type SshAuth = { key: string } | { password: string };
+/**
+ * How a session logs in: the name of a stored SSH key, or of a stored server
+ * password with the key it installs (a password only bootstraps the key).
+ */
+type SshAuth = { key: string } | { password: string; installKey: string };
 
 /** One session with a script; a credential problem comes back as the tool's failure. */
 type Ssh = (script: string, timeoutMs: number) => Promise<SshRun | ServerSetupResult>;
@@ -294,7 +297,7 @@ function sshWith(ctx: ServerSetupContext, store: CredentialStore, t: Target, aut
   return async (script, timeoutMs) => {
     if (!CREDENTIAL_NAME.test(name)) return fail('invalid_input', 'key' in auth ? 'key must be the name of a key made with create_key' : 'password must be the name of a stored password');
     if (store.ssh) {
-      const r = await store.ssh({ name, as, host: t.host, user: t.user, port: t.port, script, timeoutMs }, ctx.abortSignal);
+      const r = await store.ssh({ name, as, ...('installKey' in auth ? { installKey: auth.installKey } : {}), host: t.host, user: t.user, port: t.port, script, timeoutMs }, ctx.abortSignal);
       if (!r.ok) return r.code === 'unavailable' ? fail('ssh_unavailable', r.message, true) : credentialFailure(auth, r.code, r.message);
       return sshRunOf(r.code, r.stdout, r.stderr, r.timedOut);
     }
@@ -378,7 +381,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       const keyInfo = await store.describe(a.key);
       if (keyInfo?.kind !== 'ssh_key' || !keyInfo.publicPart) return fail('credential_not_found', `No SSH key named "${a.key}".`);
       // Only a password, and only for this server (bound at creation or here, at its first use).
-      const run = await sshWith(ctx, store, t, { password: a.password })(installKeyScript(keyInfo.publicPart), 60_000);
+      const run = await sshWith(ctx, store, t, { password: a.password, installKey: a.key })(installKeyScript(keyInfo.publicPart), 60_000);
       if (isFailure(run)) return run;
       if (!run.steps.has('install_key')) return sshFailure('Installing the key', run);
       return { ok: true, output: `Key "${a.key}" installed for ${t.user}@${t.host}. Use key "${a.key}" from now on.` };
@@ -596,8 +599,10 @@ async function forgetHostKey(a: Extract<ServerSetupAction, { action: 'forget_hos
     payload: { action: 'forget_host_key', host: t.host, port: t.port },
   });
   if (!approved.ok) return fail('approval_required', approved.message);
-  // Hosted: the trusted host keys are the server's (it runs the SSH).
-  if (store.forgetHostKey) await store.forgetHostKey(t.host, t.port);
+  // Hosted: the trusted host keys are the server's (it runs the SSH), and it offers no way to change them from here.
+  if (store.ssh) {
+    return fail('not_supported', `The server that runs the SSH keeps the host keys. Tell the owner: the operator removes ${t.host} from that server's known hosts, then try again.`);
+  }
   const file = knownHostsFile();
   const text = await readFile(file, 'utf8').catch(() => '');
   const marker = t.port === 22 ? t.host : `[${t.host}]:${t.port}`;

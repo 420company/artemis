@@ -94,6 +94,12 @@ export interface SshRequest {
   /** The credential's name and how it logs in. */
   name: string;
   as: 'key' | 'password';
+  /**
+   * With a password: the SSH key it installs. A server password only runs
+   * that key's installation (the server checks the exact script); every
+   * later session logs in with the key.
+   */
+  installKey?: string;
   host: string;
   user: string;
   port: number;
@@ -110,8 +116,6 @@ export interface CredentialStore {
    * process. Absent: the caller fetches the secret and runs ssh itself.
    */
   ssh?(request: SshRequest, signal?: AbortSignal): Promise<SshResponse>;
-  /** Forgets a server's recorded host key where `ssh` keeps them (only after the owner approved it). */
-  forgetHostKey?(host: string, port: number): Promise<boolean>;
   /** Keeps a WireGuard device profile where the owner's app reads it; absent: the caller writes the file. */
   storeVpnProfile?(server: string, device: string, conf: string): Promise<void>;
   /** Makes (or stores) a credential; returns what may be shown. Existing names fail with `exists` unless `replace`. */
@@ -510,10 +514,6 @@ export class BrokerCredentialStore implements CredentialStore {
       if (err instanceof CredentialError) return { ok: false, code: err.code, message: err.message };
       throw err;
     }
-  }
-
-  async forgetHostKey(host: string, port: number): Promise<boolean> {
-    return (await this.call<{ forgotten: boolean }>('ssh_forget_host', { host, port })).forgotten;
   }
 
   async storeVpnProfile(server: string, device: string, conf: string): Promise<void> {

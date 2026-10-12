@@ -100,7 +100,8 @@ locally; the server's own known hosts when hosted). A changed key fails at
 once with `host_key_changed` — no waiting loop — and the agent stops and
 tells the owner. `forget_host_key` asks for approval as a `confirmation`,
 the always-ask kind (never "always allow"); without an approval channel it is
-refused.
+refused. Hosted, it cannot change the server's known hosts at all: the
+operator removes the old line there.
 
 The QR encoder (`qr.ts`) matches a reference encoder bit for bit.
 `ARTEMIS_SSH_BIN` replaces `ssh` (tests use `scripts/fixtures/fakeSsh.mjs`,

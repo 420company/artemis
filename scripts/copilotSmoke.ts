@@ -694,6 +694,9 @@ await test('server_setup, hosted: the server runs the SSH; keys, passwords and p
   // What went to the server: names and scripts, never a key or a password; no SSH secret was fetched.
   const sshCalls = calls.filter((c) => c.op === 'ssh');
   assert.deepEqual(sshCalls.map((c) => `${c.as}:${c.name}`), ['key:hosted-key', 'password:root-hosted', 'key:hosted-key']);
+  // The password only installs the key: it names that key, and the script is exactly the installation.
+  assert.equal(sshCalls[1].installKey, 'hosted-key');
+  assert.match(sshCalls[1].script, /authorized_keys/);
   assert.ok(!calls.some((c) => c.op === 'use' && c.purpose?.type === 'ssh'), 'the engine never asks for an SSH secret');
   assert.ok(sshCalls.every((c) => typeof c.timeoutMs === 'number' && c.user === 'root' && c.port === 22));
   // The profile went to the server; no file in the agent's home.
@@ -709,12 +712,14 @@ await test('server_setup, hosted: the server runs the SSH; keys, passwords and p
   const held = await run({ action: 'install_key', host: '203.0.113.20', password: 'held-root', key: 'hosted-key' });
   assert.equal(held.error?.code, 'credential_locked');
   assert.match(held.output, /```unlock/);
-  // forget_host_key: the server's known hosts, and only after the owner approved (a hard approval: kind "confirmation").
+  // forget_host_key: never on the agent's word (a hard approval: kind "confirmation"); hosted, the server's
+  // known hosts cannot be changed from the engine at all (the operator does it).
   const refused = await run({ action: 'forget_host_key', host: '203.0.113.20' });
   assert.equal(refused.error?.code, 'approval_required');
-  assert.ok(!calls.some((c) => c.op === 'ssh_forget_host'), 'never on the agent\'s word');
-  assert.equal((await run({ action: 'forget_host_key', host: '203.0.113.20' }, { requestUserConfirmation: async () => true })).ok, true);
-  assert.deepEqual(calls.filter((c) => c.op === 'ssh_forget_host').map((c) => `${c.host}:${c.port}`), ['203.0.113.20:22']);
+  const approved = await run({ action: 'forget_host_key', host: '203.0.113.20' }, { requestUserConfirmation: async () => true });
+  assert.equal(approved.error?.code, 'not_supported');
+  assert.match(approved.output, /operator/);
+  assert.ok(!calls.some((c) => c.op === 'ssh_forget_host'), 'no such call to the server');
 });
 
 await test('graders: how-to steps for the user are caught in more phrasings; "I did it" replies are not', async () => {
