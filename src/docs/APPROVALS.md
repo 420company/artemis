@@ -12,28 +12,47 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 | Kind | When | Default |
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
-| `shell_high_risk` | `run_command` matching the high-risk classifier (`curl … \| sh`, reverse shells, decoded payloads) | ask |
-| `delete_outside_workspace` | `rm`/`rmdir`/`unlink`/`shred`/`find … -delete` (and `delete_file`/`delete_directory`) on paths outside the workspace; the temp dir is exempt | ask |
-| `outbound_send` | `bridge_send_*`, MCP tools that send (email, message, post, …) | ask |
-| `payment` | MCP tools that pay, buy, order, transfer, trade; tools that call `requireApproval('payment', …)` | ask |
-| `publish` | MCP tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
+| `shell_high_risk` | `run_command` matching the high-risk classifier: a fetch piped or substituted into an interpreter (also via `sudo`/`env`, `bash <(curl …)`, `sh -c "$(curl …)"`), a downloaded or decoded file that is then run, uploads (`curl -d/--data*/-F @file`, `-T`, `wget --post-file/--post-data`), reverse shells | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, …, and `delete_file`/`delete_directory`/`move_file`), and any delete whose target cannot be worked out | ask |
+| `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
+| `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
+| `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
+| `external_action` | Other external tools that change something (delete, drop, execute, generic HTTP requests) and tools whose server does not declare them read-only | ask |
 
-Modes per kind: `ask` (每次询问), `allow` (总是允许), `deny` (禁止). The engine
-reads `~/.artemis/approvals.json` and `<engine data root>/approvals.json`
-(`{"version":1,"modes":{…},"ttlMinutes":1440}`; the workspace file wins), then
-`ARTEMIS_APPROVAL_POLICY` (same JSON), which wins over both. The web server
-keeps the owner's choices from 权限与安全 in its own data dir
-(`<DATA_DIR>/approval-policy.json`, where the agent cannot write once agents
-are isolated) and passes them to every run in that variable.
-Requests expire after 24 hours unless `ttlMinutes` says otherwise.
+Modes per kind: `ask` (每次询问), `allow` (总是允许), `deny` (禁止). External
+tools can also have a mode of their own, keyed `server/tool` or `server/*`.
+
+**Where the policy comes from.** The host's copy, `ARTEMIS_APPROVAL_POLICY`
+(`{"modes":{…},"tools":{…},"ttlMinutes":1440}`), is the base. The web server
+keeps the owner's choices from 权限与安全 in its own data dir, where the agent
+cannot write, and passes them to every run. The files the agent can reach,
+`~/.artemis/approvals.json` and `<engine data root>/approvals.json`, can only
+**tighten** it: a stricter mode for a kind (deny > ask > allow), a per-tool
+`ask`/`deny`, or a shorter expiry. `allow` in a file is ignored. Requests
+expire after 24 hours unless the policy says otherwise.
+
+**What counts as read-only.** For an external tool, only the server's own
+description (its `readOnlyHint`, kept in the tool list) says it is read-only.
+The model's arguments never do, and an unknown server or tool is not
+read-only. Tool names are split into words (`chat_postMessage` → chat, post,
+message; `eth.sendTransaction` → eth, send, transaction); a word that sends,
+pays, signs, submits, deletes or executes always asks, even if the tool is
+also called "get" or "list" or is marked read-only.
+
+**Shell classification is best effort.** A shell command can hide what it
+does in countless ways. The classifier fails closed where it can (variables,
+substitutions, brace expansion, `eval`, `xargs`, inline interpreter code,
+unknown wrappers, `cd` to a place it cannot follow: any delete it cannot place
+asks), and resolves symlinks (a link in the workspace or the temp dir that
+leads elsewhere is elsewhere). It is still a classifier, not a sandbox; the
+real boundary is the agent's own Unix user (see Limits).
 
 ## Protocol (engine ⇄ host)
 
 1. **Stop.** In `artemis execute`, an ask-mode action is not run. The engine
    stores a pending record in the session (`session.approvals`: the exact
-   action, its sha256, an HMAC over id, session, kind, times, digests and host
-   binding, keyed by `~/.artemis/approvals.key`), tells the model it waits,
-   skips the rest of that turn's actions, and prints on stderr:
+   action, its sha256, the owner message it came from, and a MAC), tells the
+   model it waits, skips the rest of that turn's actions, and prints on stderr:
 
    ```
    [approval-request] {"id":"apr_<20 hex>","kind":"shell_high_risk","title":"…","summary":"…",
@@ -41,36 +60,57 @@ Requests expire after 24 hours unless `ttlMinutes` says otherwise.
      "sessionId":"<uuid>","locale":"zh-CN","actionDigest":"<sha256 of the stored action>"}
    ```
 
-   The summary panel is printed as usual (one plain line says what waits) and
-   the process exits **10** (`APPROVAL_REQUIRED`). Title and summary are plain
-   words in the owner's language, without tool or system names; the raw action
-   never leaves the engine.
+   The process exits **10** (`APPROVAL_REQUIRED`). Title and summary are plain
+   words in the owner's language, without tool or system names. `details`
+   carries what will run with stable keys: `command`; `to`, `cc`, `bcc`,
+   `subject`, `attachments`, `content`; `amount`, `currency`, `quantity`,
+   `merchant`; `service`, `action`, and `args` (every argument of an external
+   tool, as canonical JSON with sorted keys). Nothing is cut silently: a value
+   over 20000 characters is cut and `"truncated": true` is set, and the host
+   then shows that and lets the owner approve only after seeing the full card.
 
 2. **Answer.** `artemis execute --session <id> --approve <request id>` or
    `--deny <request id> [--reason <text>]` (no message), with
-   `--expect-digest <actionDigest>`: the digest the host stored when the
-   request arrived. The engine refuses the answer unless the stored action
-   still has that digest, so an action rewritten in the session files (even
-   with a recomputed digest and MAC) is never run. Under the session
-   lock the engine checks the request exists, is pending, has not expired,
-   still matches its HMAC (any edit of the stored action, digest or expiry
-   makes it unusable), and — when the run was host-bound — that the caller
-   presents the same host secret. It marks the request used *before* acting.
-   Approve runs exactly the stored action once (the policy still applies: a
-   kind switched to `deny` meanwhile is refused); deny runs nothing. The result
-   (or the refusal, with the owner's reason) is recorded as the tool result and
-   the model continues on the original request. It prints
-   `[approval-result] {"id","decision"}`. A refused answer prints
-   `[approval-error] {"id","code"}` (`approval_not_found`, `approval_already_used`,
-   `approval_expired`, `approval_tampered`, `approval_unauthorized`) and exits
-   **11** (`APPROVAL_REJECTED`).
+   `--expect-digest <actionDigest>` (the digest the host stored when the
+   request arrived) and `--signature <base64>`. Under the session lock the
+   engine checks that the request exists, is pending, has not expired, still
+   matches its MAC and digest, and that the host's digest matches the stored
+   action; then it checks the signature (below). It marks the request used
+   *before* acting and prints `[approval-result] {"id","decision"}`: from that
+   line on, the answer has been taken. Approve runs exactly the stored action
+   once (the policy still applies: a kind switched to `deny` meanwhile is
+   refused); deny runs nothing. The result (or the refusal, with the owner's
+   reason) is recorded as the tool result and the model continues on the
+   owner's message the request came from. A refused answer prints
+   `[approval-error] {"id","code"}` (`approval_not_found`,
+   `approval_already_used`, `approval_expired`, `approval_tampered`,
+   `approval_unauthorized`) and exits **11** (`APPROVAL_REJECTED`); nothing ran.
 
-3. **Host binding.** A host passes a per-run secret in `ARTEMIS_APPROVAL_SECRET`.
-   The engine removes it from its environment before any tool, shell or MCP
-   server starts and stores only its hash with the request; an answer must
-   carry the same secret. The agent's shells are marked (`ARTEMIS_AGENT_TOOL=1`)
-   and refused as answerers, and `run_command` refuses commands that try to
-   answer an approval.
+3. **Signed answers.** The host owns an Ed25519 key pair. Its private key never
+   leaves the host's data dir; the engine gets only the public key, in
+   `ARTEMIS_APPROVAL_PUBKEY` (base64 SPKI DER). Each request records which key
+   it is bound to (sha256 of that public key), and an answer to it is accepted
+   only with the host's signature over the canonical JSON
+
+   ```
+   {"actionDigest":"…","approvalId":"apr_…","decision":"approve|deny","expiresAt":"…","sessionId":"…","v":1}
+   ```
+
+   A signature cannot be made from anything the agent can read, so the agent
+   cannot answer its own request, even by running the engine itself with a
+   key pair of its own (the request stays bound to the host's key). The
+   agent's shells are also marked (`ARTEMIS_AGENT_TOOL=1`) and refused as
+   answerers, and `run_command` refuses commands that try to answer an
+   approval or read the approval key.
+
+   *Development only:* a run started without `ARTEMIS_APPROVAL_PUBKEY` (the
+   engine run by hand) records unbound requests, which `--approve` answers
+   without a signature. Hosts that serve an owner always pass the key.
+
+4. **Stale requests.** When the owner writes again in the conversation,
+   requests still waiting from earlier turns expire and the engine prints
+   `[approval-result] {"id","decision":"expired","reason":"superseded"}`
+   for each, so a late answer can never run an old action.
 
 `ARTEMIS_APPROVALS=off` turns suspension off (ask-mode actions are refused, as
 before). Interactive hosts (the CLI, chat bridges) ask through their own
@@ -90,29 +130,28 @@ if (!gate.ok) return { action, ok: false, output: gate.output, error: gate.error
 // …the irreversible step
 ```
 
-Call it right before the irreversible step. In a headless run the first call
-stops the run; after `--approve` the same tool call runs again and passes here
-once, for the same payload only (its digest is part of the HMAC). A tool can
-also register how its actions are classified with `registerApprovalRule`.
+Call it right before the irreversible step. The payload is shown in full on
+the card (`details.args`). In a headless run the first call stops the run;
+after `--approve` the same tool call runs again and passes here once, for the
+same payload only (its digest is part of the record). A tool can also
+register how its actions are classified with `registerApprovalRule`.
 
 ## Tests
 
-`npm run test:approvals` (part of `test:runtime`): policy, classifier, suspend,
-approve, deny, expiry, replay, tamper, host binding, `requireApproval`, CLI flags,
-and a headless end-to-end run.
+`npm run test:approvals` (part of `test:runtime`): policy (host base, files
+only tighten), classifier (read-only from the server only, tool names,
+fail-closed deletes through symlinks, download-and-run, uploads), suspend,
+approve, deny, expiry, replay, tamper, signatures (unsigned, wrong key,
+replayed), stale requests, `requireApproval`, CLI flags, and a headless
+end-to-end run.
 
 ## Limits
 
-**Full integrity depends on agent isolation** (`docs/AGENT_ISOLATION.md` in
-artemis-online, status "proposed"). Today the agent and the server run as the
-same Unix user, so a determined agent could reach the server's data dir. The
-approvals store lives in the server's configured data dir (`DATA_DIR`, never a
-hard-coded path) and the engine checks the host's stored digest and host
-secret, so once the server runs as its own user with a 0700 data dir the agent
-can neither forge nor answer a request.
-
-
-The agent runs as the same Unix user as the server on a VPS; the key file,
-policy file and host's store are protected from the agent's file and shell
-tools (protected paths), not by the operating system. The host secret means a
-request cannot be answered by re-running the engine without it.
+The engine's checks are only as strong as the boundary around the agent.
+With agent isolation (artemis-online `docs/AGENT_ISOLATION.md`) the agent runs
+as its own Unix user: it cannot read the host's private key or data dir, so
+it cannot produce an answer the engine accepts. The MAC key
+(`~/.artemis/approvals.key`) and the policy files are protected from the
+agent's file and shell tools, but they are not a security boundary; the
+host's signature and stored digest are. Without isolation (agent and host as
+the same user) a determined agent could reach the host's key.
