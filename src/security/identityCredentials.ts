@@ -39,7 +39,7 @@
  * belong to this module, and are resolved first.
  */
 
-import { fingerprintSet, type FingerprintSet } from './secretFingerprints.js';
+import { fingerprintSet, newFingerprintSalt, type FingerprintSet } from './secretFingerprints.js';
 
 const PLACEHOLDER = /\{\{credential:signup-(su_[0-9a-f]{20})\}\}/g;
 
@@ -256,8 +256,12 @@ export async function resolveIdentityPlaceholders(
  */
 export function identityFingerprints(): FingerprintSet | undefined {
   if (!resolved.size) return undefined;
-  return fingerprintSet([...resolved.values()].flatMap((entry) => entry.variants));
+  fingerprintSalt ??= newFingerprintSalt();
+  return fingerprintSet([...resolved.values()].flatMap((entry) => entry.variants), fingerprintSalt);
 }
+
+/** One salt per process: the host replaces this run's set instead of adding sets. */
+let fingerprintSalt: string | undefined;
 
 /** Puts placeholders back wherever a resolved password appears, in any of its echoed forms. */
 export function redactIdentitySecrets(text: string): string {

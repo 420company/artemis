@@ -539,7 +539,7 @@ async function main(): Promise<void> {
 
   console.log('sign-up password fingerprints');
   await check('the host recognises a password in a URL or title from fingerprints, without the password', async () => {
-    const { fingerprintSet, parseFingerprintSet, FingerprintMatcher } = await import('../src/security/secretFingerprints.js');
+    const { fingerprintSet, parseFingerprintSet, FingerprintMatcher, urlValuePart } = await import('../src/security/secretFingerprints.js');
     const { secretVariants } = await import('../src/security/identityCredentials.js');
     const password = 'Pw!Leak 99&x';
     const set = fingerprintSet(secretVariants(password));
@@ -547,15 +547,66 @@ async function main(): Promise<void> {
     const parsed = parseFingerprintSet(JSON.parse(JSON.stringify(set)));
     assert.ok(parsed);
     const m = new FingerprintMatcher();
-    m.add(parsed);
+    m.set(1, parsed);
     const form = new URLSearchParams({ user: 'me', password }).toString();
-    assert.equal(m.matches(`https://site.example/login?${form}`), true, 'form-encoded in a GET URL');
-    assert.equal(m.matches(`https://site.example/#${encodeURIComponent(password)}`), true);
-    assert.equal(m.matches(`Welcome ${password}`), true);
-    assert.equal(m.matches('https://site.example/login?user=me'), false);
-    assert.equal(m.matches(''), false);
+    assert.equal(m.check(urlValuePart(`https://site.example/login?${form}`)), 'yes', 'form-encoded in a GET URL');
+    assert.equal(m.check(urlValuePart(`https://site.example/#${encodeURIComponent(password)}`)), 'yes');
+    assert.equal(m.check(`Welcome ${password}`), 'yes');
+    assert.equal(m.check(urlValuePart('https://site.example/login?user=me')), 'no');
+    assert.equal(urlValuePart('https://site.example/a/b'), '', 'only the query and fragment of a URL are checked');
+    assert.equal(m.check(''), 'no');
     assert.equal(parseFingerprintSet({ salt: 'x', hashes: [] }), undefined);
-    assert.equal(parseFingerprintSet({ salt: 'a'.repeat(22), hashes: [{ n: 2, h: '0'.repeat(32) }] }), undefined, 'short variants are not accepted');
+    assert.equal(parseFingerprintSet({ salt: 'a'.repeat(22), hashes: [{ n: 2, r: 1, h: '0'.repeat(32) }] }), undefined, 'short variants are not accepted');
+    assert.equal(parseFingerprintSet({ salt: 'a'.repeat(22), hashes: [{ n: 8, r: -1, h: '0'.repeat(32) }] }), undefined, 'a bad rolling hash is not accepted');
+  });
+  await check('one set per run, replaced; the engine uses one salt per process', async () => {
+    const { FingerprintMatcher, MAX_SETS } = await import('../src/security/secretFingerprints.js');
+    const identity = await import('../src/security/identityCredentials.js');
+    identity.forgetIdentityCredentials();
+    identity.setIdentityCredentialSource({ site: async () => 'site.example', password: async () => ({ password: 'Salt!Once#77', site: 'site.example' }) });
+    const typed = await identity.resolveIdentityPlaceholders(`{{credential:signup-su_${'ab'.repeat(10)}}}`, { inputType: 'password', frameUrl: 'https://site.example/' });
+    assert.equal(typed.ok, true);
+    const a = identity.identityFingerprints()!;
+    const b = identity.identityFingerprints()!;
+    assert.equal(a.salt, b.salt, 'the same salt every time');
+    const m = new FingerprintMatcher();
+    for (let i = 0; i < 20; i++) m.set(7, identity.identityFingerprints()!);
+    assert.equal(m.size, 1, 'a run\'s newer set replaces its older one');
+    for (let i = 0; i < 20; i++) m.set(100 + i, a);
+    assert.equal(m.size, MAX_SETS, 'and only a few runs are kept');
+    identity.forgetIdentityCredentials();
+    identity.setIdentityCredentialSource(undefined);
+  });
+  await check('matching stays cheap: 8 KB texts against the most sets; past the budget it answers unknown', async () => {
+    const { fingerprintSet, FingerprintMatcher, MAX_SETS } = await import('../src/security/secretFingerprints.js');
+    const { secretVariants } = await import('../src/security/identityCredentials.js');
+    // (A frozen clock: this measures the scan itself, without the per-second budget.)
+    const m = new FingerprintMatcher(() => 0);
+    for (let i = 0; i < MAX_SETS; i++) m.set(i, fingerprintSet(secretVariants(`Bench!Pass#${i}x`)));
+    const t0 = performance.now();
+    for (let k = 0; k < 10; k++) assert.equal(m.check(`?q=${'h'.repeat(8_180)}${k}${Math.random()}`), 'no');
+    const each = (performance.now() - t0) / 10;
+    assert.ok(each < 60, `an 8 KB text against ${MAX_SETS} sets took ${each.toFixed(1)} ms`);
+    // A clock that says each check took 20 ms: after the 50 ms budget, 'unknown' until the next second.
+    let clock = 0;
+    const slow = new FingerprintMatcher(() => (clock += 10));
+    slow.set(1, fingerprintSet(secretVariants('Budget!Pass#1')));
+    const answers = Array.from({ length: 6 }, (_, i) => slow.check(`text number ${i}`));
+    assert.deepEqual(answers.slice(0, 3), ['no', 'no', 'no']);
+    assert.equal(answers.at(-1), 'unknown', 'over budget: the caller blanks the text');
+    assert.equal(slow.matches('another text'), true, 'matches() fails closed');
+    clock += 2_000;
+    assert.equal(slow.check('next second'), 'no');
+  });
+  await check('the router knows which viewer streams a page (never evicted for a new one)', async () => {
+    const { router, viewer } = await secretRouter();
+    const id = (viewer.client as { id: number }).id;
+    assert.equal(router.hasScreencast(id), false);
+    viewer.client.receive(JSON.stringify({ id: 90, method: 'Page.startScreencast', params: { format: 'jpeg' }, sessionId: 'CHILD-1' }));
+    await settle();
+    assert.equal(router.hasScreencast(id), true);
+    router.fromBrowser({ method: 'Target.detachedFromTarget', params: { sessionId: 'CHILD-1' }, sessionId: 'ROOT-V' });
+    assert.equal(router.hasScreencast(id), false, 'a detached session streams nothing');
   });
 
   console.log('handoff');

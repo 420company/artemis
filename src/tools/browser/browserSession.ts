@@ -273,6 +273,7 @@ async function initContext(): Promise<BrowserContext> {
         timezoneId: process.env.ARTEMIS_BROWSER_TIMEZONE?.trim() || contextOptions.timezoneId,
         locale: contextOptions.locale,
         ...(secretPauseMs() ? { secretPauseMs: secretPauseMs() } : {}),
+        ...(secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') ? { secretPauseMaxMs: secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') } : {}),
       };
       let host = await ensureHost(hostConfig);
       let browser: Browser;

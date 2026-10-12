@@ -353,11 +353,16 @@ export interface HostConfig {
   locale?: string;
   /** How long a tab stays paused after the last password typing at most (tests; default 3 minutes). */
   secretPauseMs?: number;
+  /** How long a tab may be paused in all, across pauses (tests; default 4 x secretPauseMs). */
+  secretPauseMaxMs?: number;
 }
 
+/** The host's answer when a tab may not be paused again (it was paused long enough in all). */
+export const PAUSE_USED_UP = 'pause_used_up: this tab has been paused for a password long enough';
+
 /** ARTEMIS_BROWSER_SECRET_PAUSE_MS, for tests: how long a password pause lasts at most. */
-export function secretPauseMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
-  const raw = Number(env.ARTEMIS_BROWSER_SECRET_PAUSE_MS);
+export function secretPauseMs(env: NodeJS.ProcessEnv = process.env, name = 'ARTEMIS_BROWSER_SECRET_PAUSE_MS'): number | undefined {
+  const raw = Number(env[name]);
   return Number.isFinite(raw) && raw >= 1_000 ? Math.min(raw, 3_600_000) : undefined;
 }
 

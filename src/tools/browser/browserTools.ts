@@ -65,6 +65,7 @@ import {
   handbackNote,
   liveDir,
   newHandoffId,
+  PAUSE_USED_UP,
   readControl,
   userInControlMessage,
   waitForHandback,
@@ -422,8 +423,11 @@ export interface BrowserFormInputAction {
  */
 type BeforeSecret = (page: Page) => Promise<void>;
 
-function secretGuardFailure(): ToolResult {
-  const message = 'The live browser view could not be paused, so the sign-up password was not typed. Try again.';
+function secretGuardFailure(err?: unknown): ToolResult {
+  const usedUp = err instanceof Error && err.message.includes(PAUSE_USED_UP);
+  const message = usedUp
+    ? 'The user\'s view of this tab has been paused for passwords long enough, so it is not paused again and the sign-up password was not typed. Open the sign-up page in a new tab (browser_tabs) and type it there.'
+    : 'The live browser view could not be paused, so the sign-up password was not typed. Try again.';
   return { ok: false, output: message, error: { code: 'secret_guard', message } };
 }
 
@@ -477,8 +481,8 @@ async function runBrowserFormInput(action: BrowserFormInputAction, beforeSecret?
       if (typed.secret && beforeSecret) {
         try {
           await beforeSecret(page);
-        } catch {
-          return secretGuardFailure();
+        } catch (err) {
+          return secretGuardFailure(err);
         }
       }
       await el.fill(typed.text, { timeout: 10_000 });
@@ -675,8 +679,8 @@ async function runBrowserType(action: BrowserTypeAction, beforeSecret?: BeforeSe
       if (typed.secret && beforeSecret) {
         try {
           await beforeSecret(page);
-        } catch {
-          return secretGuardFailure();
+        } catch (err) {
+          return secretGuardFailure(err);
         }
       }
       await el.click({ timeout: 10_000 });
@@ -774,7 +778,10 @@ async function gated(run: (beforeSecret?: BeforeSecret) => Promise<ToolResult>, 
   // tab it goes into is paused in the owner's view and masks its secret
   // fields, and the host gets the password's fingerprints; the pause lasts
   // until that tab loads a new document (browserHost.ts).
-  const beforeSecret: BeforeSecret = (page) => reportSecretState({ live: true, pause: [page], ...(identityFingerprints() ? { fingerprints: identityFingerprints()! } : {}) });
+  const beforeSecret: BeforeSecret = (page) => {
+    const fingerprints = identityFingerprints();
+    return reportSecretState({ live: true, pause: [page], ...(fingerprints ? { fingerprints } : {}) });
+  };
   const result = await run(beforeSecret);
   await reportActiveTab().catch(() => undefined);
   if (options.typesSecret) {
@@ -871,9 +878,16 @@ export async function executeBrowserRequestHandoff(
     // Open the browser if needed, so the user has a page to work in.
     const page = await getActivePage();
     // A tab paused for a typed password shows the owner nothing: they could not do the step.
-    const state = await hostSecretState().catch(() => undefined);
+    // Fail closed: without the host's answer, no handoff.
+    let state: Awaited<ReturnType<typeof hostSecretState>>;
+    try {
+      state = await hostSecretState();
+    } catch {
+      const message = 'Cannot check with the live browser whether this tab can be shown to the user right now, so no handoff was asked for. Try again shortly.';
+      return { ok: false, output: message, error: { code: 'secret_guard', message } };
+    }
     const targetId = await targetIdOf(page);
-    if (state && targetId && state.paused.includes(targetId)) {
+    if (state && (!targetId || state.paused.includes(targetId))) {
       const message = 'This tab still shows a sign-up password that was typed, so the user\'s view of it is paused until it loads a new page '
         + '(submit or leave the form first), or for a few minutes. Ask for the handoff after that, or open the page they need in a new tab (browser_tabs) and ask there.';
       return { ok: false, output: message, error: { code: 'secret_paused', message } };

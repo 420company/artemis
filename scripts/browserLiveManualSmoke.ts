@@ -42,6 +42,7 @@ process.env.ARTEMIS_BROWSER_HEADLESS = '1';
 process.env.ARTEMIS_BROWSER_TAKEOVER_WAIT_MS = '300';
 process.env.ARTEMIS_BROWSER_IDLE_MS = '60000';
 process.env.ARTEMIS_BROWSER_SECRET_PAUSE_MS = '20000';
+process.env.ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS = '60000';
 
 async function resolveExecutable(): Promise<void> {
   if (process.env.ARTEMIS_BROWSER_EXECUTABLE) return;
@@ -63,9 +64,13 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Live smoke</title>
 /** A sign-up form: GET (the password ends up in the URL), an echo of what is typed, a "show" toggle that swaps the field. */
 const SIGNUP_PAGE = `<!doctype html><meta charset="utf-8"><title>Sign up</title>
 <form action="/done" method="get"><input name="user" value="me"><input id="pw" name="password" type="password"><button id="go">go</button></form>
+<button id="pop" onclick="window.open('/popup')">pop</button>
 <button id="show" onclick="const o=document.getElementById('pw');const n=document.createElement('input');n.id='pw';n.name='password';n.type='text';n.value=o.value;o.replaceWith(n)">show</button>
 <div id="echo"></div>
 <script>document.addEventListener('input', (e) => { if (e.target.id === 'pw') { document.getElementById('echo').textContent = 'strength of ' + e.target.value; console.log('typed ' + e.target.value) } })</script>`;
+
+/** A page that changes its URL (8 KB query) and title (8 KB) every 20 ms. */
+const CHURN_PAGE = `<!doctype html><title>churn</title><script>let i = 0; setInterval(() => { i++; history.replaceState(null, '', '/churn?' + i + 'x'.repeat(8180) + Math.random()); document.title = i + 'y'.repeat(8170) + Math.random() }, 20)</script>churn`;
 
 /** A page whose renderer hangs shortly after loading. */
 const HANG_PAGE = `<!doctype html><title>hang</title><script>setTimeout(() => { for (;;) {} }, 300)</script>hang`;
@@ -121,7 +126,7 @@ async function main(): Promise<void> {
   await resolveExecutable();
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://x').pathname;
-    const body = pathname === '/signup' ? SIGNUP_PAGE : pathname === '/done' ? '<title>Done</title>done' : pathname === '/hang' ? HANG_PAGE : PAGE;
+    const body = pathname === '/signup' ? SIGNUP_PAGE : pathname === '/done' ? '<title>Done</title>done' : pathname === '/hang' ? HANG_PAGE : pathname === '/popup' ? '<title>Popup</title>popup' : pathname === '/churn' ? CHURN_PAGE : PAGE;
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -270,6 +275,16 @@ async function main(): Promise<void> {
   assert.match(shot.error?.message ?? '', /paused/, 'no screenshot of the paused tab');
   console.log('  ✓ typing a password pauses only that tab for the viewer; other tabs keep streaming');
 
+  // A popup the paused tab opens can read what was typed there (its opener): paused too.
+  const signupPage = await session.getActivePage();
+  const popupOpened = signupPage.waitForEvent('popup');
+  await signupPage.evaluate(() => (document.getElementById('pop') as HTMLButtonElement).click());
+  const popup = await popupOpened;
+  await waitFor('the popup to be paused', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.targets?.length === 2));
+  await popup.close();
+  await waitFor('the popup gone from the paused tabs', () => viewer.events.findLast((e) => e.method === 'Artemis.streamPaused')?.params.targets?.length === 1);
+  console.log('  ✓ a popup the paused tab opens is paused too');
+
   // The owner cannot be asked to work in a tab they cannot see.
   const handoff = await tools.executeBrowserRequestHandoff({ type: 'browser_request_handoff', reason: 'solve the captcha', timeoutSeconds: 30 });
   assert.equal(handoff.error?.code, 'secret_paused', handoff.output);
@@ -330,18 +345,34 @@ async function main(): Promise<void> {
   await waitFor('frames of the tab again', () => viewer.events.some((e) => e.method === 'Page.screencastFrame' && e.sessionId === sid), 5_000);
   console.log('  ✓ the tab resumes once it loads a page without the password');
 
-  // A pause always ends: typed again and left on screen, it ends after ARTEMIS_BROWSER_SECRET_PAUSE_MS.
-  const SIGNUP2 = `su_${'ef'.repeat(10)}`;
-  await tools.executeBrowserNavigate({ type: 'browser_navigate', url: `${url}signup` });
-  const again2 = await tools.executeBrowserType({ type: 'browser_type', selector: '#pw', text: `{{credential:signup-${SIGNUP2}}}` });
-  assert.equal(again2.ok, true, again2.output);
-  viewer.events.length = 0;
-  const pausedFor = Date.now();
-  await waitFor('the pause to time out', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false), 30_000);
-  assert.ok(Date.now() - pausedFor > 15_000, 'not before its time');
-  identity.endIdentitySignup(SIGNUP2);
+  // A pause always ends. A single-page app that never loads a new document: once the
+  // fields typed into are gone, it ends ARTEMIS_BROWSER_SECRET_PAUSE_MS after the typing.
+  const typeOnce = async (signup: string) => {
+    await tools.executeBrowserNavigate({ type: 'browser_navigate', url: `${url}signup` });
+    viewer.events.length = 0;
+    return tools.executeBrowserType({ type: 'browser_type', selector: '#pw', text: `{{credential:signup-${signup}}}` });
+  };
+  const spa = await typeOnce(`su_${'e1'.repeat(10)}`);
+  assert.equal(spa.ok, true, spa.output);
+  await (await session.getActivePage()).evaluate(() => document.querySelector('form')?.remove());
+  const spaAt = Date.now();
+  await waitFor('the pause to time out', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false), 35_000);
+  assert.ok(Date.now() - spaAt > 15_000, 'not before its time');
+  console.log(`  ✓ a pause ends on its own once the typed fields are gone (${Math.round((Date.now() - spaAt) / 1000)} s)`);
+
+  // The fields stay on screen: only the cap ends it, counted over every pause of the tab
+  // (ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS), so typing again cannot renew it for ever.
+  const capped = await typeOnce(`su_${'e2'.repeat(10)}`);
+  if (capped.ok) {
+    const cappedAt = Date.now();
+    await waitFor('the cap to end the pause', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false), 40_000);
+    console.log(`  ✓ with the fields still there the pause ends at the tab's cap (${Math.round((Date.now() - cappedAt) / 1000)} s)`);
+  }
+  const refusedType = await typeOnce(`su_${'e3'.repeat(10)}`);
+  assert.equal(refusedType.error?.code, 'secret_guard', refusedType.output);
+  assert.match(refusedType.output, /new tab/);
   identity.forgetIdentityCredentials();
-  console.log(`  ✓ a pause ends on its own (${Math.round((Date.now() - pausedFor) / 1000)} s)`);
+  console.log('  ✓ a tab paused long enough in all is not paused again: the password is not typed there');
 
   // A renderer crash: the host closes the page; the next step works and says so.
   const crashing = await session.getActivePage();
@@ -399,13 +430,43 @@ async function main(): Promise<void> {
   for (const c of [...extra, ...fillers]) c.close();
   console.log(`  ✓ agent connections stop at ${refusedAt} open; with every slot taken a new viewer still connects`);
 
+  // The matcher under load: the most fingerprint sets, a page changing an 8 KB URL and an
+  // 8 KB title every 20 ms for 5 s; the host keeps answering viewers within ~200 ms.
+  const { fingerprintSet, MAX_SETS } = await import('../src/security/secretFingerprints.js');
+  for (let i = 0; i < MAX_SETS; i++) {
+    await live.hostCall(live.readJsonFile<any>(path.join(liveDir, 'host.json'))!, 'Artemis.setSecretState', { live: false, fingerprints: fingerprintSet(identity.secretVariants(`Churn!Pass#${i}`)) });
+  }
+  await tools.executeBrowserTabs({ type: 'browser_tabs', action: 'new', url: `${url}churn` });
+  // Round-trips the host answers itself (a refused method) measure the host; target lists
+  // also go through Chromium, which such a page slows down by itself (seconds, host or not).
+  const hostLatencies: number[] = [];
+  const browserLatencies: number[] = [];
+  const churnUntil = Date.now() + 5_000;
+  while (Date.now() < churnUntil) {
+    let t0 = Date.now();
+    const refusedCall = await viewer.send('Runtime.evaluate', { expression: '1' });
+    assert.ok(refusedCall.error);
+    hostLatencies.push(Date.now() - t0);
+    t0 = Date.now();
+    await viewer.send('Target.getTargets');
+    browserLatencies.push(Date.now() - t0);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const worst = Math.max(...hostLatencies);
+  assert.ok(worst < 200, `host round-trips while a page churns: worst ${worst} ms (${hostLatencies.length} calls)`);
+  console.log(`  ✓ a page churning 8 KB URLs and titles every 20 ms against ${MAX_SETS} sets: worst host round-trip ${worst} ms (through Chromium: worst ${Math.max(...browserLatencies)} ms)`);
+
   viewer.close();
   await session.releaseBrowser();
+  // While that page still churns: the host exits promptly on SIGTERM.
+  const termAt = Date.now();
   process.kill(host.pid, 'SIGTERM');
   await waitFor('the host to exit', () => !live.isPidAlive(host.pid), 10_000);
+  const exitMs = Date.now() - termAt;
+  assert.ok(exitMs < 8_000, `the host took ${exitMs} ms to exit on SIGTERM`);
   assert.equal(fs.existsSync(path.join(liveDir, 'host.json')), false);
   assert.equal(fs.existsSync(path.join(liveDir, 'viewer.json')), false);
-  console.log('  ✓ the host exits on SIGTERM and removes its files');
+  console.log(`  ✓ the host exits on SIGTERM (${exitMs} ms, while a page churns) and removes its files`);
   server.close();
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   console.log('\nbrowser live manual smoke: passed');

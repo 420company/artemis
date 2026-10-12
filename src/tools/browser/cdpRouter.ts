@@ -191,6 +191,8 @@ interface Client {
   internal: boolean;
   /** Viewer calls run one after another (some are checked first), so their order holds. */
   chain: Promise<void>;
+  /** Sessions it runs a screencast on (a viewer showing a page to someone). */
+  screencasts: Set<string>;
   attachTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -209,6 +211,8 @@ interface Pending {
 }
 
 export interface RouterClient {
+  /** The router's id for this client. */
+  readonly id: number;
   /** A text message from this client. */
   receive: (text: string) => void;
   /** The client went away: its sessions are detached. */
@@ -224,12 +228,13 @@ export type HostMethod = (method: string, params: Record<string, unknown>, clien
 export interface SecretView {
   /** Whether viewers must not see this tab now. */
   isPaused(targetId: string): boolean;
-  /** Whether a URL or title carries a typed password. */
-  sensitive(text: string): boolean;
+  /** Whether a URL (`url`) or a title or fragment (`text`) carries a typed password; true when unsure (fail closed). */
+  sensitive(text: string, kind: 'url' | 'text'): boolean;
 }
 
-/** Keys whose string values may name or show a page. */
-const PAGE_TEXT_KEYS = new Set(['url', 'title', 'userTypedURL', 'urlFragment', 'unreachableUrl', 'documentURL', 'baseURL']);
+/** Keys whose string values may name or show a page: URLs, and texts. */
+const PAGE_URL_KEYS = new Set(['url', 'userTypedURL', 'unreachableUrl', 'documentURL', 'baseURL']);
+const PAGE_TEXT_KEYS = new Set(['title', 'urlFragment']);
 
 /** A client whose browser session does not exist after this long is dropped. */
 const ATTACH_TIMEOUT_MS = 10_000;
@@ -279,6 +284,12 @@ export class CdpRouter {
     client.send(JSON.stringify({ method: 'Artemis.streamPaused', params: this.pauseNotice }));
   }
 
+  /** Whether this client runs a screencast now (it shows a page to someone). */
+  hasScreencast(clientId: number): boolean {
+    for (const client of this.clients) if (client.id === clientId) return client.screencasts.size > 0;
+    return false;
+  }
+
   /** The target a session is attached to, if known. */
   targetOfSession(sessionId: string | undefined): string | undefined {
     return sessionId ? this.sessionTargets.get(sessionId) : undefined;
@@ -303,7 +314,8 @@ export class CdpRouter {
     for (const [key, item] of Object.entries(record)) {
       if (key === 'data') continue;
       if (typeof item === 'string') {
-        if (PAGE_TEXT_KEYS.has(key) && (pausedTarget || this.secrets?.sensitive(item))) record[key] = '';
+        const kind = PAGE_URL_KEYS.has(key) ? 'url' : PAGE_TEXT_KEYS.has(key) ? 'text' : undefined;
+        if (kind && item && (pausedTarget || this.secrets?.sensitive(item, kind))) record[key] = '';
       } else if (item && typeof item === 'object') {
         this.sanitizeForViewer(item, depth + 1);
       }
@@ -327,7 +339,7 @@ export class CdpRouter {
   }
 
   addClient(role: ClientRole, send: (text: string) => void, options: { internal?: boolean } = {}): RouterClient {
-    const client: Client = { id: this.nextClient++, role, send, queued: [], closed: false, internal: options.internal === true, chain: Promise.resolve() };
+    const client: Client = { id: this.nextClient++, role, send, queued: [], closed: false, internal: options.internal === true, chain: Promise.resolve(), screencasts: new Set() };
     this.clients.add(client);
     this.lastChange = this.now();
     client.attachTimer = setTimeout(() => {
@@ -352,6 +364,7 @@ export class CdpRouter {
       })
       .catch(() => this.drop(client));
     return {
+      id: client.id,
       receive: (text) => this.fromClient(client, text),
       close: () => this.drop(client),
       get attached() {
@@ -423,6 +436,10 @@ export class CdpRouter {
         reply(err instanceof Error ? err.message : String(err));
       }
       return;
+    }
+    if (sessionId !== client.root) {
+      if (message.method === 'Page.startScreencast') client.screencasts.add(sessionId);
+      else if (message.method === 'Page.stopScreencast') client.screencasts.delete(sessionId);
     }
     const id = this.nextId++;
     this.pending.set(id, {
@@ -536,6 +553,7 @@ export class CdpRouter {
       if (typeof child === 'string' && child !== owner.root) {
         this.owners.delete(child);
         this.sessionTargets.delete(child);
+        owner.screencasts.delete(child);
       }
     }
   }

@@ -50,14 +50,16 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { FingerprintMatcher, parseFingerprintSet } from '../../security/secretFingerprints.js';
+import { FingerprintMatcher, parseFingerprintSet, urlValuePart } from '../../security/secretFingerprints.js';
 import { CdpRouter, type ClientRole, type RouterClient } from './cdpRouter.js';
-import { LIVE_FILES, isPidAlive, probeHost, readJsonFile, writeJsonFileAtomic, type HostConfig, type HostInfo, type ViewerInfo } from './liveBrowser.js';
+import { LIVE_FILES, PAUSE_USED_UP, isPidAlive, probeHost, readJsonFile, writeJsonFileAtomic, type HostConfig, type HostInfo, type ViewerInfo } from './liveBrowser.js';
 import { attachWebSocket, handshakeResponse } from './wsFrames.js';
 
 const MAX_CLIENTS = 8;
 /** Connection slots agent-token clients may not take (kept for the owner's view). */
 const VIEWER_RESERVED = 2;
+/** An agent-token connection silent this long may give its slot to a new viewer. */
+const AGENT_IDLE_EVICT_MS = 60_000;
 /** A paused tab resumes this long after the last typing at the latest (ARTEMIS_BROWSER_SECRET_PAUSE_MS). */
 const SECRET_PAUSE_MS = 3 * 60_000;
 /** And never stays paused longer than this in all. */
@@ -65,6 +67,8 @@ const SECRET_PAUSE_MAX_FACTOR = 4;
 /** Host calls of its own give up after this long (a hung page must not stall the monitor). */
 const MONITOR_CALL_MS = 10_000;
 const VALID_TARGET = /^[A-Za-z0-9_-]{1,64}$/;
+/** The attribute the engine puts on fields a password was typed into (identityCredentials.ts). */
+const SECRET_FIELD_ATTRIBUTE = 'data-artemis-secret';
 const IDLE_CHECK_MS = 5_000;
 const PING_EVERY_MS = 20_000;
 /** A client silent for this long (no message, no pong) is dropped. */
@@ -270,12 +274,13 @@ async function main(): Promise<void> {
       else chrome.once('exit', () => resolve());
     });
     const within = (ms: number) => Promise.race([exited, sleep(ms)]);
-    await Promise.race([router.call('Browser.close').catch(() => undefined), sleep(3_000)]);
-    await within(3_000);
-    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM');
-    await within(3_000);
-    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGKILL');
+    // Bounded (about 7 s): a busy Chromium is asked, then told, then killed.
+    await Promise.race([router.call('Browser.close').catch(() => undefined), sleep(2_000)]);
     await within(2_000);
+    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM');
+    await within(2_000);
+    if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGKILL');
+    await within(1_000);
     process.exit(code);
   };
   chrome.once('exit', () => {
@@ -315,7 +320,7 @@ async function main(): Promise<void> {
   };
   const fingerprints = new FingerprintMatcher();
   const pauseMs = config.secretPauseMs && config.secretPauseMs >= 1_000 ? config.secretPauseMs : SECRET_PAUSE_MS;
-  const pauseMaxMs = pauseMs * SECRET_PAUSE_MAX_FACTOR;
+  const pauseMaxMs = config.secretPauseMaxMs && config.secretPauseMaxMs >= pauseMs ? config.secretPauseMaxMs : pauseMs * SECRET_PAUSE_MAX_FACTOR;
   let monitorNext = 1;
   const monitorPending = new Map<number, (m: { result?: Record<string, unknown>; error?: unknown }) => void>();
   let monitorClient: RouterClient | undefined;
@@ -354,6 +359,8 @@ async function main(): Promise<void> {
     monitor.loaders.delete(targetId);
     monitor.info.delete(targetId);
     monitor.ownerTyped.delete(targetId);
+    shown.delete(targetId);
+    pausedBefore.delete(targetId);
     if (monitor.paused.delete(targetId)) pausedChanged(false);
   };
   const watching = new Map<string, Promise<void>>();
@@ -385,21 +392,71 @@ async function main(): Promise<void> {
   const pausedChanged = (newlyPaused: boolean) => {
     router.pausedTargetsChanged([...monitor.paused].map(([targetId, p]) => ({ targetId, since: p.since })), newlyPaused);
   };
-  const showsSecret = (targetId: string) => {
+  /** Per tab: how long it was paused in earlier pauses (the cap counts them all, so it cannot be renewed forever). */
+  const pausedBefore = new Map<string, number>();
+  const pauseUsed = (targetId: string, now: number) => {
+    const current = monitor.paused.get(targetId);
+    return (pausedBefore.get(targetId) ?? 0) + (current ? now - current.since : 0);
+  };
+  const endPause = (targetId: string, now = Date.now()) => {
+    const current = monitor.paused.get(targetId);
+    if (!current) return false;
+    pausedBefore.set(targetId, (pausedBefore.get(targetId) ?? 0) + (now - current.since));
+    monitor.paused.delete(targetId);
+    return true;
+  };
+  /**
+   * Pauses a tab, or renews its pause (`renew`: a run is about to type);
+   * 'refused' once the tab has been paused SECRET_PAUSE_MAX_MS in all.
+   */
+  const startPause = (targetId: string, renew: boolean): 'started' | 'renewed' | 'refused' => {
+    const now = Date.now();
+    if (pauseUsed(targetId, now) >= pauseMaxMs) return 'refused';
+    const loaderId = monitor.loaders.get(targetId);
+    const current = monitor.paused.get(targetId);
+    if (current) {
+      if (renew) current.renewedAt = now;
+      if (loaderId) current.loaderId = loaderId;
+      return 'renewed';
+    }
+    monitor.paused.set(targetId, { since: now, renewedAt: now, ...(loaderId ? { loaderId } : {}) });
+    return 'started';
+  };
+  /**
+   * Whether a tab's URL (query and fragment) or title carries a password.
+   * Cached per tab for its current URL and title, so a page that keeps
+   * changing them costs one check per change, within the matcher's budget.
+   */
+  let fingerprintVersion = 0;
+  const shown = new Map<string, { url: string; title: string; version: number; result: 'yes' | 'no' }>();
+  const showsSecret = (targetId: string): 'yes' | 'no' | 'unknown' => {
     const info = monitor.info.get(targetId);
-    return !!info && (fingerprints.matches(info.url) || fingerprints.matches(info.title));
+    if (!info || fingerprints.size === 0) return 'no';
+    const last = shown.get(targetId);
+    if (last && last.url === info.url && last.title === info.title && last.version === fingerprintVersion) return last.result;
+    const url = fingerprints.check(urlValuePart(info.url));
+    const title = url === 'yes' ? 'yes' : fingerprints.check(info.title);
+    const result = url === 'yes' || title === 'yes' ? 'yes' : url === 'unknown' || title === 'unknown' ? 'unknown' : 'no';
+    // 'unknown' (over budget) is not kept: viewers get the text blanked meanwhile.
+    if (result !== 'unknown') shown.set(targetId, { url: info.url, title: info.title, version: fingerprintVersion, result });
+    return result;
   };
   /** A tab whose URL or title carries a password is paused (once per document). */
   const pauseIfShowingSecret = (targetId: string) => {
-    if (monitor.paused.has(targetId) || !showsSecret(targetId)) return;
-    const loaderId = monitor.loaders.get(targetId);
-    const key = `${targetId}:${loaderId ?? ''}`;
+    if (monitor.paused.has(targetId) || showsSecret(targetId) !== 'yes') return;
+    const key = `${targetId}:${monitor.loaders.get(targetId) ?? ''}`;
     if (monitor.autoPaused.has(key)) return;
     monitor.autoPaused.add(key);
     if (monitor.autoPaused.size > 1_000) monitor.autoPaused.clear();
-    const now = Date.now();
-    monitor.paused.set(targetId, { since: now, renewedAt: now, ...(loaderId ? { loaderId } : {}) });
-    pausedChanged(true);
+    if (startPause(targetId, false) === 'started') pausedChanged(true);
+  };
+  /** A popup a paused tab opened may show what was typed there (it can read its opener): paused too. */
+  const pauseIfOpenedByPaused = (targetId: string, openerId: string | undefined) => {
+    if (!openerId || !monitor.paused.has(openerId) || monitor.paused.has(targetId)) return;
+    const key = `popup:${targetId}`;
+    if (monitor.autoPaused.has(key)) return;
+    monitor.autoPaused.add(key);
+    if (startPause(targetId, false) === 'started') pausedChanged(true);
   };
   /** A tab loaded a new document: a pause for the old one ends, unless the new one shows the password too. */
   const newDocument = (targetId: string, loaderId: string, url: string | undefined) => {
@@ -409,24 +466,43 @@ async function main(): Promise<void> {
     if (monitor.ownerTyped.has(targetId) && typed !== loaderId) monitor.ownerTyped.delete(targetId);
     const paused = monitor.paused.get(targetId);
     if (!paused || paused.loaderId === loaderId) return;
-    if (url !== undefined && fingerprints.matches(url)) {
+    if (url !== undefined && fingerprints.check(urlValuePart(url)) !== 'no') {
       paused.loaderId = loaderId;
       return;
     }
-    monitor.paused.delete(targetId);
+    endPause(targetId);
     pausedChanged(false);
   };
-  // A pause always ends: SECRET_PAUSE_MS after the last typing, SECRET_PAUSE_MAX_MS in all.
-  setInterval(() => {
-    const now = Date.now();
-    let changed = false;
-    for (const [targetId, p] of monitor.paused) {
-      if (now - p.renewedAt > pauseMs || now - p.since > pauseMaxMs) {
-        monitor.paused.delete(targetId);
-        changed = true;
-      }
+  /** Whether a tab still has a field a password was typed into (unknown counts as yes). */
+  const hasSecretFields = async (targetId: string): Promise<boolean> => {
+    const session = monitor.pages.get(targetId);
+    if (!session) return false;
+    try {
+      const { result } = await monitorCall('Runtime.evaluate', { expression: `!!document.querySelector('[${SECRET_FIELD_ATTRIBUTE}]')`, returnByValue: true }, session, 3_000);
+      return (result as { value?: unknown } | undefined)?.value !== false;
+    } catch {
+      return true;
     }
-    if (changed) pausedChanged(false);
+  };
+  // A pause always ends: SECRET_PAUSE_MAX_MS of pausing a tab in all; and,
+  // SECRET_PAUSE_MS after the last typing, once the fields typed into are
+  // gone (a single-page app that never loads a new document).
+  let expiring = false;
+  setInterval(() => {
+    if (expiring || monitor.paused.size === 0) return;
+    expiring = true;
+    void (async () => {
+      let changed = false;
+      for (const [targetId, p] of [...monitor.paused]) {
+        const now = Date.now();
+        const over = pauseUsed(targetId, now) >= pauseMaxMs;
+        const idle = now - p.renewedAt > pauseMs && !(await hasSecretFields(targetId));
+        if ((over || idle) && monitor.paused.get(targetId) === p) changed = endPause(targetId) || changed;
+      }
+      if (changed) pausedChanged(false);
+    })().finally(() => {
+      expiring = false;
+    });
   }, Math.min(2_000, pauseMs)).unref();
 
   const recoverCrash = async (targetId: string) => {
@@ -446,10 +522,11 @@ async function main(): Promise<void> {
         return;
       }
       const params = message.params ?? {};
-      const info = params.targetInfo as { targetId?: string; type?: string; url?: string; title?: string } | undefined;
+      const info = params.targetInfo as { targetId?: string; type?: string; url?: string; title?: string; openerId?: string } | undefined;
       if ((message.method === 'Target.targetCreated' || message.method === 'Target.targetInfoChanged') && info?.type === 'page' && info.targetId) {
         monitor.info.set(info.targetId, { url: String(info.url ?? ''), title: String(info.title ?? '') });
         if (message.method === 'Target.targetCreated') void watchPage(info.targetId);
+        pauseIfOpenedByPaused(info.targetId, info.openerId);
         pauseIfShowingSecret(info.targetId);
       } else if (message.method === 'Target.targetCrashed' && typeof params.targetId === 'string') void recoverCrash(params.targetId);
       else if (message.method === 'Target.targetDestroyed' && typeof params.targetId === 'string') forget(params.targetId);
@@ -504,7 +581,8 @@ async function main(): Promise<void> {
   };
   router.secrets = {
     isPaused: (targetId) => monitor.paused.has(targetId),
-    sensitive: (text) => fingerprints.matches(text),
+    // 'unknown' (over the time budget) counts as carrying it: the text is blanked.
+    sensitive: (text, kind) => fingerprints.check(kind === 'url' ? urlValuePart(text) : text) !== 'no',
   };
   // The owner typing in a tab during a takeover: the engine keeps scripts off it until it loads a new document.
   router.onViewerInput = (targetId) => {
@@ -524,22 +602,20 @@ async function main(): Promise<void> {
         monitor.seq.set(client.id, params.seq);
       }
       const set = parseFingerprintSet(params.fingerprints);
-      if (set) fingerprints.add(set);
+      // One set per run, replaced by its newer one (the matcher keeps a few runs').
+      if (set) {
+        fingerprints.set(client.id, set);
+        fingerprintVersion++;
+      }
       const pause = Array.isArray(params.pause) ? params.pause.filter((t): t is string => typeof t === 'string' && VALID_TARGET.test(t)).slice(0, 16) : [];
       let newlyPaused = false;
       for (const targetId of pause) {
         // The mask first: the password is typed only once it is in place.
         await maskSecrets(targetId);
-        const now = Date.now();
-        const loaderId = monitor.loaders.get(targetId);
-        const current = monitor.paused.get(targetId);
-        if (current) {
-          if (now - current.since < pauseMaxMs) current.renewedAt = now;
-          if (loaderId) current.loaderId = loaderId;
-        } else {
-          monitor.paused.set(targetId, { since: now, renewedAt: now, ...(loaderId ? { loaderId } : {}) });
-          newlyPaused = true;
-        }
+        const outcome = startPause(targetId, true);
+        // A tab paused for SECRET_PAUSE_MAX_MS in all is not paused again: the run does not type there.
+        if (outcome === 'refused') throw new Error(PAUSE_USED_UP);
+        if (outcome === 'started') newlyPaused = true;
       }
       if (params.live) monitor.secretsLive.add(client.id);
       else monitor.secretsLive.delete(client.id);
@@ -583,8 +659,13 @@ async function main(): Promise<void> {
   const agentToken = randomBytes(32).toString('base64url');
   const viewerToken = randomBytes(32).toString('base64url');
   type Socket = ReturnType<typeof attachWebSocket>;
-  /** Open connections, with their role and when they last sent a message (not a pong). */
-  const sockets = new Map<Socket, { role: ClientRole; lastMessage: number }>();
+  /** Open connections, with their role, router client and when they last sent a message (not a pong). */
+  interface SocketInfo {
+    role: ClientRole;
+    clientId: number;
+    lastMessage: number;
+  }
+  const sockets = new Map<Socket, SocketInfo>();
   let agentSockets = 0;
   server = http.createServer((_req, res) => {
     // No HTTP discovery endpoints: only the WebSocket upgrade with a token.
@@ -603,15 +684,23 @@ async function main(): Promise<void> {
       return;
     }
     if (sockets.size >= MAX_CLIENTS && role === 'viewer') {
-      // Full: a new viewer takes the place of the viewer connection quiet
-      // for longest (connections opened just to fill the slots go first).
-      let quietest: Socket | undefined;
-      for (const [ws, info] of sockets) {
-        if (info.role === 'viewer' && (!quietest || info.lastMessage < sockets.get(quietest)!.lastMessage)) quietest = ws;
-      }
-      if (quietest) {
-        sockets.delete(quietest);
-        quietest.close();
+      // Full: a new viewer (the platform server reconnecting) takes the place
+      // of an agent-token connection idle for a while, else of a viewer that
+      // shows nothing; never of a viewer streaming a page to someone.
+      const now = Date.now();
+      const pick = (ok: (info: SocketInfo) => boolean) => {
+        let found: Socket | undefined;
+        for (const [ws, info] of sockets) {
+          if (ok(info) && (!found || info.lastMessage < sockets.get(found)!.lastMessage)) found = ws;
+        }
+        return found;
+      };
+      const evict =
+        pick((info) => info.role === 'agent' && now - info.lastMessage > AGENT_IDLE_EVICT_MS) ??
+        pick((info) => info.role === 'viewer' && !router.hasScreencast(info.clientId));
+      if (evict) {
+        sockets.delete(evict);
+        evict.close();
       }
     }
     // Agent-token clients never take the last slots: the owner's view can always connect.
@@ -620,7 +709,7 @@ async function main(): Promise<void> {
       return;
     }
     socket.write(accept);
-    const info = { role, lastMessage: Date.now() };
+    const info: SocketInfo = { role, clientId: 0, lastMessage: Date.now() };
     // The callbacks only fire on later socket events, after `client` exists.
     const ws = attachWebSocket(
       socket,
@@ -637,6 +726,7 @@ async function main(): Promise<void> {
     sockets.set(ws, info);
     if (role === 'agent') agentSockets++;
     const client = router.addClient(role, ws.send);
+    info.clientId = client.id;
   });
   server.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => server!.once('listening', () => resolve()));
