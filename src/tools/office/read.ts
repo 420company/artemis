@@ -255,11 +255,14 @@ export function countZipEntries(bytes: Buffer, cap: number): number | undefined 
   // ZIP64: the real count, offset and size are in the ZIP64 end record.
   const locator = end - 20;
   if (locator >= 0 && bytes.readUInt32LE(locator) === 0x07064b50) {
-    const record = Number(bytes.readBigUInt64LE(locator + 8));
-    if (Number.isSafeInteger(record) && record + 56 <= bytes.length && bytes.readUInt32LE(record) === 0x06064b50) {
+    // Where the locator says the record is, and right before the locator
+    // (where it sits when bytes were added in front of the ZIP).
+    const stated = Number(bytes.readBigUInt64LE(locator + 8));
+    for (const record of new Set([stated, locator - 56])) {
+      if (!Number.isSafeInteger(record) || record < 0 || record + 56 > bytes.length || bytes.readUInt32LE(record) !== 0x06064b50) continue;
       const count64 = Number(bytes.readBigUInt64LE(record + 32));
       if (count64 > cap) return count64;
-      starts.push(Number(bytes.readBigUInt64LE(record + 48)), locator - 56 - Number(bytes.readBigUInt64LE(record + 40)));
+      starts.push(Number(bytes.readBigUInt64LE(record + 48)), record - Number(bytes.readBigUInt64LE(record + 40)));
     }
   }
   // The headers themselves are counted (the record may claim fewer).

@@ -13,6 +13,15 @@
  */
 
 /**
+ * "Opus" is also an audio codec: next to another codec or the word "codec"
+ * (within 40 characters on the same line) it is left as it is; elsewhere it
+ * is the model tier.
+ */
+const AUDIO_CODEC = String.raw`\b(?:codecs?|pcm|g\.?7(?:11|22|29)|aac|mp3|vorbis|flac|speex|amr(?:-wb)?|ogg|webm|wav|silk|lc3)\b`
+const OPUS_MODEL = String.raw`(?<!${AUDIO_CODEC}[^\n]{0,40})\bopus\b(?![^\n]{0,40}${AUDIO_CODEC})`
+const MODEL_TIER = String.raw`(?:sonnet|haiku|${OPUS_MODEL})`
+
+/**
  * Replaced in this order: model ids and names first (with a version or
  * tier, spaced or not), then the vendors' and their products' names, so
  * "Claude 3 Opus" becomes "a model", not "the agent 3 Opus".
@@ -24,8 +33,8 @@ export const VENDOR_SCRUBS: ReadonlyArray<readonly [RegExp, string | ((match: st
   // Model ids and names.
   [/\bclaude(?:[- ]\d+(?:[.-]\d+)*)?[- ](?:opus|sonnet|haiku|instant)(?:[- ]\d+(?:[.-]\d+)*)?(?:-\d{8})?/gi, 'a model'],
   [/\bclaude-\d(?:[\w.-]*\w)?/gi, 'a model'],
-  [/\ban?\s+(?:sonnet|opus|haiku)\b/gi, (match) => (match[0] === 'A' ? 'A model' : 'a model')],
-  [/\b(?:sonnet|opus|haiku)(?:[- ]\d+(?:[.-]\d+)*)?\b/gi, 'a model'],
+  [new RegExp(String.raw`\ban?\s+${MODEL_TIER}\b`, 'gi'), (match) => (match[0] === 'A' ? 'A model' : 'a model')],
+  [new RegExp(String.raw`\b${MODEL_TIER}(?:[- ]\d+(?:[.-]\d+)*)?\b`, 'gi'), 'a model'],
   [/\bgpt[- ]?\d(?:[\w.]*\w)?(?:-[\w.]*\w)*/gi, 'a model'],
   [/\bgemini[- ](?:\d(?:[\w.]*\w)?|pro|flash|ultra|nano)(?:[- ](?:pro|flash|ultra|nano|lite|exp|preview|image|\d(?:[\w.]*\w)?))*/gi, 'a model'],
   [/\bdeepseek-[\w.-]*\w/gi, 'a model'],
@@ -53,7 +62,7 @@ export const VENDOR_SCRUBS: ReadonlyArray<readonly [RegExp, string | ((match: st
 ]
 
 /** Any of those names left in text: what the guards check the whole catalog against. */
-export const VENDOR_NAMES = /\b(?:claude|anthropic|chatgpt|openai|gemini|deepseek|sonnet|opus|haiku|whisper|gpts?)\b|claude\.md|\bgpt[- ]?\d|\bdall-?e\b|text-embedding|\bo[1-9](?:-mini)?\b/i
+export const VENDOR_NAMES = new RegExp(String.raw`\b(?:claude|anthropic|chatgpt|openai|gemini|deepseek|sonnet|haiku|whisper|gpts?)\b|${OPUS_MODEL}|claude\.md|\bgpt[- ]?\d|\bdall-?e\b|text-embedding|\bo[1-9](?:-mini)?\b`, 'i')
 
 /**
  * Skills whose very subject is wiring an app to third-party model APIs, for

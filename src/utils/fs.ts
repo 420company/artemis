@@ -266,7 +266,8 @@ function insideFolder(realFile: string, realFolder: string): boolean {
 
 /**
  * The text of a file a skill (or other installable content) is made of:
- * refused when the file is a symlink, is not a regular file, is larger than
+ * refused when the file is a symlink, is not a regular file, has another
+ * name elsewhere (a hard link: it may be a credential file), is larger than
  * `maxBytes`, or (given `folder`) resolves outside that folder. A link in a
  * skill folder never pulls another file (credentials, settings) into a run.
  */
@@ -286,6 +287,7 @@ export async function readOwnFileText(file: string, options: OwnFileOptions = {}
   try {
     const info = await handle.stat()
     if (!info.isFile()) throw ownFileError(file, 'is not a regular file')
+    if (info.nlink > 1) throw ownFileError(file, 'has other names (a hard link), which is not read')
     if (options.maxBytes !== undefined && info.size > options.maxBytes) throw ownFileError(file, 'is too large')
     return await handle.readFile('utf8')
   } finally {
@@ -309,6 +311,7 @@ export function readOwnFileTextSync(file: string, options: OwnFileOptions = {}):
   try {
     const info = fstatSync(fd)
     if (!info.isFile()) throw ownFileError(file, 'is not a regular file')
+    if (info.nlink > 1) throw ownFileError(file, 'has other names (a hard link), which is not read')
     if (options.maxBytes !== undefined && info.size > options.maxBytes) throw ownFileError(file, 'is too large')
     return readFileSync(fd, 'utf8')
   } finally {
@@ -316,10 +319,11 @@ export function readOwnFileTextSync(file: string, options: OwnFileOptions = {}):
   }
 }
 
-/** A regular file at this path, not a symlink. */
+/** A regular file at this path with no other name: not a symlink, not a hard link. */
 export function isOwnFile(file: string): boolean {
   try {
-    return lstatSync(file).isFile()
+    const info = lstatSync(file)
+    return info.isFile() && info.nlink === 1
   } catch {
     return false
   }

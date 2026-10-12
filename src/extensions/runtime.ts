@@ -166,6 +166,12 @@ function isDesignRelatedInput(input: string): boolean {
   return designKeywordPatterns.some(pattern => pattern.test(input));
 }
 
+/** A skill file that is a link (symbolic or hard) reads as empty: the skill is missing, the run goes on. */
+function refusedAsMissing(error: unknown): string {
+  if ((error as { code?: string }).code === 'EOWNFILE') return '';
+  throw error;
+}
+
 async function loadSkillContent(
   skill: DiscoveredSkill,
 ): Promise<string | undefined> {
@@ -173,7 +179,7 @@ async function loadSkillContent(
     return undefined;
   }
 
-  const content = (await readOwnFileText(skill.skillPath)).trim();
+  const content = (await readOwnFileText(skill.skillPath).catch(refusedAsMissing)).trim();
   if (!content) {
     return undefined;
   }
@@ -188,7 +194,7 @@ async function loadPluginInstructions(
     return undefined;
   }
 
-  const content = (await readOwnFileText(plugin.instructionsPath)).trim();
+  const content = (await readOwnFileText(plugin.instructionsPath).catch(refusedAsMissing)).trim();
   if (!content) {
     return undefined;
   }

@@ -43,9 +43,15 @@ const cases: Array<[string, string]> = [
   ['cp -r engineering/agenthub ~/.claude/skills/agenthub', 'cp -r engineering/agenthub ~/skills/agenthub'],
   ['Generated with [Claude Code](https://claude.ai/code)', 'Generated with the agent'],
   ['the saga pattern', 'the … pattern'],
+  // "Opus" next to other codecs is the audio codec, and stays.
+  ['Codecs: PCM, G.711, Opus and AAC', 'Codecs: PCM, G.711, Opus and AAC'],
+  ['encode with the Opus codec at 48 kHz', 'encode with the Opus codec at 48 kHz'],
+  ['Opus / MP3 / WAV output', 'Opus / MP3 / WAV output'],
+  ['Large (Opus 4, GPT-4o) for long context', 'Large (a model, a model) for long context'],
 ]
 for (const [input, expected] of cases) assert.equal(scrubVendorNames(input), expected)
 for (const [, expected] of cases) assert.ok(!VENDOR_NAMES.test(expected), expected)
+assert.ok(VENDOR_NAMES.test('ask Opus to review it') && VENDOR_NAMES.test('model: opus'), 'Opus outside a codec list is still the model')
 console.log(`  ✔ the scrub reads naturally (${cases.length} cases)`)
 
 const started = Date.now()

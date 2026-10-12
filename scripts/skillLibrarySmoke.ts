@@ -203,7 +203,7 @@ async function main(): Promise<void> {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
-  await test('a skill file that is a link is never read (SKILL.md, SKILL.json, reference files, learned skills)', async () => {
+  await test('a skill file that is a symlink or a hard link is never read (SKILL.md, SKILL.json, reference files, learned skills)', async () => {
     const secret = 'sk-LEAKED-providers-0123456789'
     const providers = path.join(home, 'providers.json')
     fs.writeFileSync(providers, JSON.stringify({ id: 'leak', name: 'leak', description: `key ${secret}`, apiKey: secret }))
@@ -221,6 +221,13 @@ async function main(): Promise<void> {
     fs.writeFileSync(path.join(ref, 'SKILL.md'), '---\nname: leak-ref\ndescription: A skill with a linked reference file.\n---\nRead references/keys.md.\n')
     fs.symlinkSync(providers, path.join(ref, 'keys.md'))
     fs.symlinkSync(home, path.join(ref, 'nested'))
+    // Hard links to the same file: a SKILL.md, and a reference file of a real skill.
+    const hard = path.join(roots[0]!, 'leak-hard')
+    fs.mkdirSync(hard, { recursive: true })
+    fs.linkSync(providers, path.join(hard, 'SKILL.md'))
+    fs.linkSync(providers, path.join(ref, 'hard.md'))
+    // A learned skill record hard-linked from outside the skills folder.
+    const outsideHard = path.join(sandbox, 'outside-hard.json')
     // A learned skill whose file is a link to a record outside the skills folder.
     const scope = skillScopesForCwd(workspace)[0]!
     const learnedDir = skillsDirForScope(workspace, scope)
@@ -228,27 +235,33 @@ async function main(): Promise<void> {
     const outsideRecord = path.join(sandbox, 'outside-record.json')
     fs.writeFileSync(outsideRecord, JSON.stringify({ id: 'leaked-learned', name: 'leaked-learned', description: `uses ${secret}`, steps: [secret] }))
     fs.symlinkSync(outsideRecord, path.join(learnedDir, 'leaked-learned.json'))
+    fs.writeFileSync(outsideHard, JSON.stringify({ id: 'hard-learned', name: 'hard-learned', description: `uses ${secret}`, steps: [secret] }))
+    fs.linkSync(outsideHard, path.join(learnedDir, 'hard-learned.json'))
     try {
       const seen: string[] = []
       const library = await loadSkillLibrary(workspace)
       seen.push(JSON.stringify(library.skills.filter((skill) => skill.id.startsWith('leak'))))
-      for (const id of ['leak-md', 'leak-json', 'leak-file', 'leak-ref']) seen.push((await load({ id })).output)
-      for (const file of ['keys.md', 'nested/providers.json']) {
+      for (const id of ['leak-md', 'leak-json', 'leak-file', 'leak-ref', 'leak-hard']) seen.push((await load({ id })).output)
+      for (const file of ['keys.md', 'nested/providers.json', 'hard.md']) {
         const result = await load({ id: 'leak-ref', file })
         assert.equal(result.ok, false, `${file}: ${result.output}`)
         seen.push(result.output)
       }
       seen.push((await load({ query: 'leak key' })).output)
-      const runtime = await resolveExtensionRuntime(workspace, 'use $leak-md $leak-json $leak-file $leak-ref', { ownerInput: true })
+      const runtime = await resolveExtensionRuntime(workspace, 'use $leak-md $leak-json $leak-file $leak-ref $leak-hard', { ownerInput: true })
       seen.push(runtime.sections.join('\n'))
       assert.ok(runtime.activeSkills.some((entry) => entry.skill.id === 'leak-ref'), 'the real skill still loads')
       seen.push(JSON.stringify((await discoverSkills(workspace)).skills))
       seen.push(JSON.stringify(await listAllSkills(workspace)), JSON.stringify(await readSkill(workspace, 'leaked-learned')))
       assert.equal(await readSkill(workspace, 'leaked-learned'), null)
+      assert.equal(await readSkill(workspace, 'hard-learned'), null)
+      seen.push(JSON.stringify(await readSkill(workspace, 'hard-learned')))
       for (const text of seen) assert.ok(!text.includes(secret) && !text.includes('LEAKED'), text.slice(0, 400))
     } finally {
       for (const root of roots) fs.rmSync(root, { recursive: true, force: true })
       fs.rmSync(path.join(learnedDir, 'leaked-learned.json'), { force: true })
+      fs.rmSync(path.join(learnedDir, 'hard-learned.json'), { force: true })
+      fs.rmSync(outsideHard, { force: true })
       fs.rmSync(providers, { force: true })
     }
   })

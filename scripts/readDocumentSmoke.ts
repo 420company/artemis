@@ -195,6 +195,28 @@ function manyEntriesZip(n: number, prefix: string): Buffer {
   return Buffer.concat([...locals, cd, end]);
 }
 
+/**
+ * The same as a ZIP64 archive with `prefix` junk bytes in front (offsets as
+ * if there were none, as a self-extracting stub leaves them); `claimed` is
+ * the count the end records state.
+ */
+function manyEntriesZip64(n: number, prefix: number, claimed = n): Buffer {
+  const plain = manyEntriesZip(n, 'z/');
+  const cdOffset = plain.readUInt32LE(plain.length - 6);
+  const cdSize = plain.readUInt32LE(plain.length - 10);
+  const body = plain.subarray(0, plain.length - 22);
+  const record = Buffer.alloc(56);
+  record.writeUInt32LE(0x06064b50, 0); record.writeBigUInt64LE(44n, 4); record.writeUInt16LE(45, 12); record.writeUInt16LE(45, 14);
+  record.writeBigUInt64LE(BigInt(claimed), 24); record.writeBigUInt64LE(BigInt(claimed), 32);
+  record.writeBigUInt64LE(BigInt(cdSize), 40); record.writeBigUInt64LE(BigInt(cdOffset), 48);
+  const locator = Buffer.alloc(20);
+  locator.writeUInt32LE(0x07064b50, 0); locator.writeBigUInt64LE(BigInt(body.length), 8); locator.writeUInt32LE(1, 16);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0xffff, 8); end.writeUInt16LE(0xffff, 10);
+  end.writeUInt32LE(0xffffffff, 12); end.writeUInt32LE(0xffffffff, 16);
+  return Buffer.concat([Buffer.alloc(prefix, 0x41), body, record, locator, end]);
+}
+
 async function main(): Promise<void> {
   console.log('read_document');
 
@@ -339,9 +361,12 @@ async function main(): Promise<void> {
     console.log(`    a 600 MB part (declared 2 KB) in a ${Math.round(xlsx.length / 1024)} KB file: stopped, memory +${Math.round(grew)} MB`);
   });
 
-  await test('a ZIP with 200,000 tiny entries is refused before it is parsed (fast, little memory)', async () => {
+  await test('a ZIP with 200,000 tiny entries is refused before it is parsed (fast, little memory; ZIP64 with bytes in front too)', async () => {
     const xlsx = manyEntriesZip(200_000, 'xl/');
     writeFileSync(path.join(workspace, 'entries.xlsx'), xlsx);
+    // ZIP64 with bytes in front: its end record is found where it sits, not where the locator says.
+    writeFileSync(path.join(workspace, 'entries64.xlsx'), manyEntriesZip64(200_000, 4_096));
+    writeFileSync(path.join(workspace, 'entries64.docx'), manyEntriesZip64(200_000, 4_096, 1));
     writeFileSync(path.join(workspace, 'entries.docx'), manyEntriesZip(200_000, 'w/'));
     writeFileSync(path.join(workspace, 'entries.pptx'), manyEntriesZip(12_000, 'p/'));
     const base = process.memoryUsage().rss;
@@ -349,7 +374,7 @@ async function main(): Promise<void> {
     const sampler = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 5);
     const started = Date.now();
     try {
-      for (const file of ['entries.xlsx', 'entries.docx', 'entries.pptx']) {
+      for (const file of ['entries.xlsx', 'entries.docx', 'entries.pptx', 'entries64.xlsx', 'entries64.docx']) {
         const result = await read({ path: file });
         assert.equal(result.ok, false, file);
         assert.equal(result.error?.code, 'too_large', `${file}: ${result.output}`);
