@@ -917,6 +917,102 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
         },
       };
+    case 'agent_mail_address':
+      return { type: 'object', additionalProperties: false, properties: {} };
+    case 'list_emails':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          from_contains: optionalStringSchema('Optional: only mail whose sender (address, name or domain) contains this, e.g. "example.com".'),
+          subject_contains: optionalStringSchema('Optional: only mail whose subject contains this.'),
+          limit: integerSchema('Optional: how many (default 20, at most 50).'),
+        },
+      };
+    case 'wait_for_email':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          from_contains: optionalStringSchema('The sender to wait for: part of its address or domain, e.g. "example.com". Recommended.'),
+          subject_contains: optionalStringSchema('Optional: part of the subject.'),
+          timeout_seconds: integerSchema('How long to wait (default 180, at most 600). Mail that arrived in the last 10 minutes counts.'),
+        },
+      };
+    case 'read_email':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: { id: nonEmptyStringSchema('The message id from wait_for_email or list_emails.') },
+      };
+    case 'extract_verification':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id'],
+        properties: {
+          id: nonEmptyStringSchema('The message id.'),
+          site: optionalStringSchema('Optional: the site being registered (domain or URL); defaults to the approved sign-up the message belongs to.'),
+        },
+      };
+    case 'begin_signup':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['site', 'purpose'],
+        properties: {
+          site: nonEmptyStringSchema('The site to create an account on: its domain or sign-up URL, e.g. "https://www.example.com/signup".'),
+          purpose: nonEmptyStringSchema('Why the owner needs this account, in one short sentence in the owner\'s language (shown on the approval card).'),
+          free: { type: 'boolean', description: 'true only if the account and what you will do with it cost nothing. Paid plans, trials that need a card, deposits: false.' },
+          wait_seconds: integerSchema('How long to wait for the owner\'s approval (default 300, at most 600).'),
+        },
+      };
+    case 'finish_signup':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['signup_id', 'outcome'],
+        properties: {
+          signup_id: nonEmptyStringSchema('The signup_id from begin_signup.'),
+          outcome: { type: 'string', enum: ['created', 'failed', 'abandoned'], description: 'created: the account exists; failed: the site refused; abandoned: you stopped before creating it.' },
+          username: optionalStringSchema('The username the site shows, if any (not the password).'),
+          login_url: optionalStringSchema('The site\'s https login page, if known.'),
+          note: optionalStringSchema('One short note for the owner (e.g. "verified by email").'),
+        },
+      };
+    case 'get_sms_number':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['country'],
+        properties: {
+          country: nonEmptyStringSchema('Two-letter country code of the number the site needs, e.g. "US".'),
+          signup_id: optionalStringSchema('The sign-up this number is for (recommended).'),
+          wait_seconds: integerSchema('How long to wait for the owner\'s approval (default 300, at most 600).'),
+        },
+      };
+    case 'wait_for_sms':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sender_contains: optionalStringSchema('Part of the sender or the brand in the text, e.g. "Example".'),
+          timeout_seconds: integerSchema('How long to wait (default 180, at most 600).'),
+        },
+      };
+    case 'ask_owner_for_code':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['site'],
+        properties: {
+          site: nonEmptyStringSchema('The domain of the site you are signing up on (an approved sign-up in progress), e.g. "example.com". Only for that site\'s own code; never for a bank, a wallet or the owner\'s own accounts.'),
+          channel: { type: 'string', enum: ['sms', 'email', 'authenticator', 'other'], description: 'Where the owner received it (default sms).' },
+          hint: optionalStringSchema('One short line to help the owner find it, e.g. "sent to your phone ending 1234".'),
+          timeout_seconds: integerSchema('How long to wait for the owner (default 600, at most 600).'),
+        },
+      };
     case 'view_image':
       return {
         type: 'object',
@@ -1290,6 +1386,24 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             maximum: 2,
             description: 'Speech pitch multiplier. 1 is normal.',
           },
+        },
+      };
+    case 'place_call':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['to', 'goal'],
+        properties: {
+          to: nonEmptyStringSchema('Phone number with its country code, e.g. +86 21 6123 4567 or +1 415 555 0100.'),
+          goal: nonEmptyStringSchema('What the call must achieve, in one or two sentences, e.g. "Book a table for 4 this Friday at 19:00".'),
+          brief: optionalStringSchema('Background the assistant on the call may use (who is calling, preferences, context).'),
+          language: { type: 'string', enum: ['zh', 'en'], description: 'Language of the call: zh (Mandarin) or en. Default: the owner\'s language.' },
+          allowedFacts: { type: 'array', items: { type: 'string' }, description: 'Facts it may tell the other side (name for the booking, a callback number). Nothing else is shared.' },
+          forbidden: { type: 'array', items: { type: 'string' }, description: 'Facts it must not share, as "category: value" (e.g. "身份证号: 1101…", "home address: 5 Elm St"). The call model is told only the category; the value is checked in code on every line and key press.' },
+          mayAgreeTo: { type: 'array', items: { type: 'string' }, description: 'Alternatives it may accept (e.g. "19:00-20:30", "outdoor seats are fine").' },
+          calleeName: optionalStringSchema('Who is being called (the restaurant or shop name).'),
+          onBehalfOf: optionalStringSchema('How to name the owner on the call (e.g. "Mr. Li"); omit to say "my client".'),
+          maxMinutes: { type: 'integer', minimum: 1, maximum: 60, description: 'Longest the call may last, in minutes (the platform may cap it lower).' },
         },
       };
     case 'create_presentation':
