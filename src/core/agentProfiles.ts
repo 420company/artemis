@@ -200,6 +200,8 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  // Asks the owner to take over the live browser (sign in, a check).
+  'browser_request_handoff',
   // Short progress messages the user sees while the run goes on
   // (core/agentUpdates.ts); hosts without a live channel refuse them.
   'post_update',

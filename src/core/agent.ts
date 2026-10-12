@@ -2091,6 +2091,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `browser_wait_for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':
       return 'browser_close';
+    case 'browser_request_handoff':
+      return `browser_request_handoff ${truncate(action.reason, 80)}`;
     // ── Computer / desktop automation ───────────────────────────────────
     case 'computer_screenshot':
       return `computer_screenshot${action.outputPath ? ` output=${truncate(action.outputPath, 80)}` : ''}`;
@@ -5149,6 +5151,8 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   begin_signup: 12 * 60_000,
   get_sms_number: 12 * 60_000,
   ask_owner_for_code: 12 * 60_000,
+  // Waits for the owner to take over the browser and hand it back (at most 30 minutes).
+  browser_request_handoff: 31 * 60_000,
 };
 
 /**
