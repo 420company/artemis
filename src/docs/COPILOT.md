@@ -113,9 +113,11 @@ console line or an extract never brings it into the history; scripts
 
 Backends:
 
-- hosted: the web server sets `ARTEMIS_CREDENTIAL_BROKER` (a loopback URL)
-  for each run; the engine reads and removes it at start and asks the server,
-  authenticated with the run's token. Secrets live in the server's data
+- hosted: the web server hands each run the service's loopback address and a
+  one-time claim code with the per-run headers on the inherited descriptor
+  (entry `artemis_credentials`; an older host: `ARTEMIS_CREDENTIAL_BROKER`,
+  removed from the environment at start); the engine trades the claim for a
+  ticket before any tool runs and asks the server with it. Secrets live in the server's data
   directory, out of the agent user's reach; the server generates keys and
   passwords and checks every use against the binding;
 - local CLI: `<ARTEMIS_HOME>/agent-credentials` (0700 dir, 0600 files;

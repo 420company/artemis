@@ -21,8 +21,8 @@
  * message or a script reading the field never brings it into the history.
  *
  * Backends:
- *   - hosted (`ARTEMIS_CREDENTIAL_BROKER`, set by the web server for each
- *     run): the secrets live in the server's own data directory, which the
+ *   - hosted (the web server hands each run the service's address and a
+ *     claim code with the per-run headers on fd 3): the secrets live in the server's own data directory, which the
  *     agent's OS user cannot read; each use is checked there against the
  *     binding, for this run only (`BrokerCredentialStore`). The run's ticket
  *     comes from a one-time claim code (captureCredentialBroker), so it lives
@@ -389,7 +389,7 @@ export class FileCredentialStore implements CredentialStore {
 
 // ── hosted backend: the web server keeps the secrets ──────────────────────
 
-/** The web server's credential broker for this run (`ARTEMIS_CREDENTIAL_BROKER` + the run's header). */
+/** The web server's credential service for this run (its address and this run's ticket). */
 export class BrokerCredentialStore implements CredentialStore {
   constructor(
     private readonly url: string,
