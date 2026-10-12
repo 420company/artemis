@@ -115,14 +115,46 @@ export interface WireGuardServerSpec {
   peers: Array<{ publicKey: string; address: string }>;
 }
 
-/** Installs WireGuard, writes wg0.conf, enables forwarding and NAT, opens the port, starts it. */
+const WIREGUARD_KEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$/;
+
+/** An IPv4 address with a prefix, every octet 0-255 (`10.66.66.1/24`). */
+export function isIpv4Cidr(value: unknown, prefix?: number): value is string {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value);
+  if (!match) return false;
+  if (match.slice(1, 5).some((octet) => Number(octet) > 255 || (octet.length > 1 && octet.startsWith('0')))) return false;
+  return prefix === undefined ? Number(match[5]) <= 32 : Number(match[5]) === prefix;
+}
+
+/** Throws unless every value going into wg0.conf is what it must be (keys, addresses, port). */
+function checkWireGuardSpec(spec: WireGuardServerSpec): void {
+  const bad = (what: string) => new Error(`Refusing to write wg0.conf: invalid ${what}`);
+  if (!WIREGUARD_KEY.test(spec.privateKey)) throw bad('server key');
+  if (!Number.isInteger(spec.listenPort) || spec.listenPort < 1024 || spec.listenPort > 65535) throw bad('port');
+  if (!isIpv4Cidr(spec.address, 24)) throw bad('address');
+  for (const peer of spec.peers) {
+    if (!WIREGUARD_KEY.test(peer.publicKey)) throw bad('peer key');
+    if (!isIpv4Cidr(peer.address, 32)) throw bad('peer address');
+  }
+}
+
+/**
+ * Installs WireGuard, writes wg0.conf, enables forwarding and NAT, opens the
+ * port, starts it. Every value is checked here and passed as a quoted
+ * argument (never expanded inside a here-document), and the key travels in
+ * a quoted here-document into a variable that only printf reads.
+ */
 export function wireguardScript(spec: WireGuardServerSpec): string {
-  const peers = spec.peers.map((p) => `\n[Peer]\nPublicKey = ${p.publicKey}\nAllowedIPs = ${p.address}`).join('\n');
+  checkWireGuardSpec(spec);
+  const peers = spec.peers
+    .map((p) => `  printf '\\n[Peer]\\nPublicKey = %s\\nAllowedIPs = %s\\n' ${shq(p.publicKey)} ${shq(p.address)}`)
+    .join('\n');
   return `${PRELUDE}
 command -v wg >/dev/null 2>&1 || install_pkgs wireguard-tools iptables || install_pkgs wireguard iptables
 command -v wg-quick >/dev/null 2>&1 || install_pkgs wireguard
 WAN=$(ip -4 route show default | awk '{print $5; exit}')
 [ -n "$WAN" ] || { echo "no default route" >&2; exit 1; }
+case "$WAN" in *[!A-Za-z0-9_.@-]*) echo "unexpected interface name" >&2; exit 1 ;; esac
 # IPv4 only: turning on IPv6 forwarding would drop the server's own IPv6 route (SLAAC).
 printf 'net.ipv4.ip_forward=1\\n' > /etc/sysctl.d/99-agent-wireguard.conf
 sysctl -q -p /etc/sysctl.d/99-agent-wireguard.conf >/dev/null || true
@@ -133,15 +165,12 @@ KEY=$(cat <<'KEY_EOF'
 ${spec.privateKey}
 KEY_EOF
 )
-cat > /etc/wireguard/wg0.conf <<CONF_EOF
-[Interface]
-Address = ${spec.address}
-ListenPort = ${spec.listenPort}
-PrivateKey = $KEY
-PostUp = iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -o $WAN -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT
+{
+  printf '[Interface]\\nAddress = %s\\nListenPort = %s\\nPrivateKey = %s\\n' ${shq(spec.address)} ${shq(String(spec.listenPort))} "$KEY"
+  printf 'PostUp = iptables -t nat -A POSTROUTING -o %s -j MASQUERADE; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT\\n' "$WAN"
+  printf 'PostDown = iptables -t nat -D POSTROUTING -o %s -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT\\n' "$WAN"
 ${peers}
-CONF_EOF
+} > /etc/wireguard/wg0.conf
 unset KEY
 chmod 600 /etc/wireguard/wg0.conf
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q active; then
@@ -162,6 +191,7 @@ echo "ARTEMIS_STEP wireguard ok"
 
 /** Checks the VPN on the server; adds a temporary peer for a tunnel test when one is given. */
 export function wireguardCheckScript(options: { listenPort: number; testPeer?: { publicKey: string; address: string } }): string {
+  if (!Number.isInteger(options.listenPort) || options.listenPort < 1 || options.listenPort > 65535) throw new Error('Refusing the VPN check: invalid port');
   const add = options.testPeer ? `wg set wg0 peer ${shq(options.testPeer.publicKey)} allowed-ips ${shq(options.testPeer.address)}\necho "test_peer=added"` : '';
   return `set -euo pipefail
 systemctl is-active --quiet wg-quick@wg0 && echo "service=active" || { echo "service=inactive"; exit 1; }

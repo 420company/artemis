@@ -60,9 +60,9 @@ name. With parallel tools the latest still running wins.
 Adapters for branches not merged yet:
 - live browser: `browser_request_handoff` already maps to
   `waiting_user/waiting_handoff`;
-- hard approvals: where the headless run stops at an approval request,
-  call `agentStatus.finish(statusForApprovalKind(result.approval.kind))`
-  instead of `finish()` (comment in `services/headlessAgent.ts`).
+- hard approvals: a headless run that stops at an approval request (first
+  run or a resumed one) ends with `statusForApprovalKind(approval.kind)`
+  (`finishStatus` in `services/headlessAgent.ts`).
 
 ## Server setup (`tools/serverSetup/`)
 

@@ -14,6 +14,7 @@
 import type { PermissionModeInput } from '../security/permissionModes.js'
 import type { SessionRecord } from '../core/types.js'
 import type { SessionStore } from '../storage/sessions.js'
+import type { ApprovalRequest } from '../security/approvals.js'
 
 export interface HeadlessAgentOptions {
   /** PRODUCER = full autonomous tools; read-only for analysis. Default PRODUCER. */
@@ -45,6 +46,19 @@ export interface HeadlessAgentOptions {
    */
   intent?: string
   /**
+   * Approvals (security/approvals.ts). `suspend`: stop at an ask-mode action
+   * and leave a pending request in the session (`artemis execute`); without
+   * it such actions are refused. Requests are bound to the host's public
+   * key (ARTEMIS_APPROVAL_PUBKEY) and answered only with its signature.
+   */
+  approvals?: { suspend?: boolean }
+  /**
+   * Answer a pending approval request of `sessionId` instead of sending a
+   * message: approve runs exactly the stored action once, deny runs nothing;
+   * then the model continues. `prompt` is ignored.
+   */
+  answer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
+  /**
    * Retry: take the conversation's last exchange (the owner's last message
    * and everything after it) out first, then run. An empty prompt runs the
    * same message again, with the intent and images it had; a prompt replaces
@@ -57,6 +71,12 @@ export interface HeadlessAgentOptions {
    * the retry (SessionRewindError 'changed') instead of replacing it.
    */
   retryOf?: string
+  /**
+   * The message is not from the owner (a scheduled task, a trigger, a call's
+   * follow-up, a connector that became ready): requests still waiting in the
+   * conversation stay as they are. Only the owner's own message ends them.
+   */
+  keepApprovals?: boolean
 }
 
 export interface HeadlessAgentResult {
@@ -66,6 +86,8 @@ export interface HeadlessAgentResult {
   durationMs: number
   /** One short line per context compaction that happened during the run. */
   contextNotices: string[]
+  /** The run stopped at this approval request (nothing sensitive ran). */
+  approval?: ApprovalRequest
 }
 
 async function loadExistingSession(sessionStore: SessionStore, sessionId: string): Promise<SessionRecord> {
@@ -150,10 +172,120 @@ export async function runHeadlessAgent(
   // working on the same session).
   const { withSessionLock } = await import('../storage/sessionLock.js')
   const compaction = await loadCompactionSettings(cwd, 'hosted')
+  const {
+    hostApprovalKey,
+    validateApprovalAnswer,
+    grantOf,
+    publicApproval,
+    requestMessageOf,
+    supersedePendingApprovals,
+    ApprovalResumeError,
+    APPROVAL_RESULT_PREFIX,
+  } = await import('../security/approvals.js')
+  // Requests are bound to the host's public key when the run has one: only the host's signature answers them.
+  const hostKey = hostApprovalKey()
+  const approvalSettings = {
+    suspend: opts.approvals?.suspend === true,
+    ...(hostKey ? { hostBinding: hostKey.id } : {}),
+  }
+  // The run is over: waiting for the owner when it stopped at a hard
+  // approval request (by the request's kind) or ended with a card that asks
+  // them something, else done.
+  const finishStatus = async (ended: { reply?: string; approval?: ApprovalRequest }): Promise<void> => {
+    const { statusAtEnd, statusForApprovalKind } = await import('../core/agentStatus.js')
+    agentStatus.finish(ended.approval ? statusForApprovalKind(ended.approval.kind) : statusAtEnd(ended.reply ?? ''))
+  }
   const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => {
     // Re-read under the lock: another process (a chat bridge) may have saved
     // a turn between the existence check above and getting the lock.
     const current = opts.sessionId ? await sessionStore.load(session.id, { fresh: true }) : session
+    const agentOptions = {
+      cwd,
+      provider,
+      sessionStore,
+      permissionManager,
+      maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
+      profile: 'main' as const,
+      // The main model's window; specialists with a smaller window are capped
+      // further by their own provider metadata inside runAgent.
+      contextLength: resolveProfileContextLength(providerConfig),
+      // Hosted runs default to a 200K-token context cap (cost); see
+      // services/compactionSettings.ts for the overrides.
+      compaction,
+      // Nobody reviews a headless turn as it runs: memories the model saves
+      // without naming a scope stay in this workspace.
+      memoryDefaultScope: 'project' as const,
+      // The process exits when the run returns: slow tools (image/video
+      // generation, delegated tasks) run in the foreground so their result is
+      // part of this run's reply instead of a background task that dies with it.
+      allowBackgroundTools: false,
+      // ...and while one runs, a progress line every minute tells the host the
+      // run is alive (a Saga long video can take an hour in one tool call).
+      toolHeartbeatMs: toolHeartbeatIntervalMs(),
+      ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
+      resolveProvider: providerRouter.resolveProvider,
+      resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
+      onContextCompaction: (notice: string) => contextNotices.push(notice),
+      ...(agentUpdates ? { agentUpdates } : {}),
+      onToolActivity: (event: Parameters<typeof agentStatus.onToolActivity>[0]) => agentStatus.onToolActivity(event),
+      onInfo: opts.onInfo,
+      approvals: approvalSettings,
+    }
+
+    if (opts.answer) {
+      // The owner answered a request this session stopped at. Checked and
+      // marked used under the lock, before anything runs: an answer works once.
+      let record
+      try {
+        record = validateApprovalAnswer(current, opts.answer.id, {
+          decision: opts.answer.decision,
+          ...(opts.answer.signature ? { signature: opts.answer.signature } : {}),
+          ...(opts.answer.expectDigest ? { expectedDigest: opts.answer.expectDigest } : {}),
+          ...(hostKey ? { hostKey } : {}),
+        })
+      } catch (error) {
+        // An expired or altered request is marked so; it can never be used.
+        if (error instanceof ApprovalResumeError && (error.code === 'approval_expired' || error.code === 'approval_tampered')) await sessionStore.save(current)
+        throw error
+      }
+      record.status = opts.answer.decision === 'approve' ? 'approved' : 'denied'
+      record.decidedAt = new Date().toISOString()
+      if (opts.answer.reason) record.reason = opts.answer.reason
+      await sessionStore.save(current)
+      onInfo(`${APPROVAL_RESULT_PREFIX} ${JSON.stringify({ id: record.id, decision: opts.answer.decision })}`)
+      const { recordApprovalAnswer } = await import('../core/agent.js')
+      const answered = await recordApprovalAnswer(current, {
+        request: publicApproval(record),
+        action: record.action,
+        grant: grantOf(record),
+        decision: opts.answer.decision,
+        ...(opts.answer.reason ? { reason: opts.answer.reason } : {}),
+      }, { ...agentOptions, delegationBudget: createDelegationBudget('direct') })
+      // The model goes on from the recorded result, on the owner's original request.
+      const { isSyntheticUserMessage } = await import('../core/compaction/language.js')
+      const originalRequest = requestMessageOf(current, record)
+        ?? [...current.messages].reverse().find((m) => m.role === 'user' && !isSyntheticUserMessage(m))?.content
+        ?? ''
+      const resumed = await runAgent(current, originalRequest, {
+        ...agentOptions,
+        approvals: { ...approvalSettings, resumed: { action: record.action, ok: opts.answer.decision === 'approve' && answered.ok } },
+        appendUserMessage: false,
+        delegationBudget: createDelegationBudget('direct'),
+      })
+      await finishStatus(resumed)
+      return resumed
+    }
+
+    // A new message from the owner in this conversation: requests still
+    // waiting from an earlier turn are stale (the owner moved on). They
+    // expire here, and the host is told, so a late answer can never run an
+    // old action. A message the host sends on its own keeps them.
+    const superseded = opts.keepApprovals ? [] : supersedePendingApprovals(current)
+    if (superseded.length) {
+      await sessionStore.save(current)
+      for (const record of superseded) onInfo(`${APPROVAL_RESULT_PREFIX} ${JSON.stringify({ id: record.id, decision: 'expired', reason: 'superseded' })}`)
+    }
+
     let runPrompt = prompt
     let runIntent = opts.intent
     let runImagePaths = opts.imagePaths ?? []
@@ -244,41 +376,13 @@ export async function runHeadlessAgent(
     // A retired workflow slash word ("/niko …") is already removed.
     plan.prompt,
     {
-    cwd,
-    provider,
-    sessionStore,
-    permissionManager,
-    maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
-    profile: 'main',
+    ...agentOptions,
     ...(workflowHint ? { workflowHint } : {}),
     // Every run is bounded, routed or not (Goal Mode and analysis: direct cap).
     delegationBudget: createDelegationBudget(plan.workflow),
     appendUserMessage: true,
-    // The main model's window; specialists with a smaller window are capped
-    // further by their own provider metadata inside runAgent.
-    contextLength: resolveProfileContextLength(providerConfig),
-    // Hosted runs default to a 200K-token context cap (cost); see
-    // services/compactionSettings.ts for the overrides.
-    compaction,
     // Verify before done: the main path checks its own work once (bounded).
     selfCheck: opts.selfCheck !== false && !readOnly && plan.workflow !== 'saga',
-    // Nobody reviews a headless turn as it runs: memories the model saves
-    // without naming a scope stay in this workspace.
-    memoryDefaultScope: 'project',
-    // The process exits when the run returns: slow tools (image/video
-    // generation, delegated tasks) run in the foreground so their result is
-    // part of this run's reply instead of a background task that dies with it.
-    allowBackgroundTools: false,
-    // ...and while one runs, a progress line every minute tells the host the
-    // run is alive (a Saga long video can take an hour in one tool call).
-    toolHeartbeatMs: toolHeartbeatIntervalMs(),
-    ensureSpecialistProvider: providerRouter.ensureSpecialistProvider,
-    resolveProvider: providerRouter.resolveProvider,
-    resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
-    onContextCompaction: (notice) => contextNotices.push(notice),
-    ...(agentUpdates ? { agentUpdates } : {}),
-    onToolActivity: (event) => agentStatus.onToolActivity(event),
-    onInfo: opts.onInfo,
     ...(runImages.length ? { imageAttachments: runImages } : {}),
   })
     // A generated long video ends the Saga conversation of this session.
@@ -289,11 +393,7 @@ export async function runHeadlessAgent(
       // Closed whether the run answered or failed (a killed process leaves it open).
       await recordTurn().catch(() => undefined)
     }
-    // The run is over: done, or waiting for the owner's OK when the answer
-    // ends with a confirmation card. (A run that stops at a hard approval
-    // request reports statusForApprovalKind(kind) here instead.)
-    const { statusAtEnd } = await import('../core/agentStatus.js')
-    agentStatus.finish(statusAtEnd(runResult.reply ?? ''))
+    await finishStatus(runResult)
     return runResult
   }, { label: `Session ${session.id}` })
 
@@ -303,5 +403,6 @@ export async function runHeadlessAgent(
     sessionId: session.id,
     durationMs: Date.now() - started,
     contextNotices,
+    ...('approval' in result && result.approval ? { approval: result.approval } : {}),
   }
 }

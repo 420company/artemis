@@ -277,10 +277,14 @@ await test('credentials: bound to an origin or a host, by kind and field (H2)', 
   assert.equal((await useCredential('root-pw', { type: 'ssh', host: '198.51.100.7', as: 'password' }, credStore)).ok, true);
   const otherHost = await useCredential('root-pw', { type: 'ssh', host: '203.0.113.99', as: 'password' }, credStore);
   assert.equal(!otherHost.ok && otherHost.code, 'wrong_host');
-  await credStore.create('wg-x', 'token', { secret: 'WGPRIVATEKEYvalue0123456789abcdef', publicPart: 'pub' });
-  const tokenAsPassword = await useCredential('wg-x', { type: 'ssh', host: '198.51.100.7', as: 'password' }, credStore);
+  await credStore.create('tokyo-wg-x', 'token', { secret: 'WGPRIVATEKEYvalue0123456789abcdef', publicPart: 'pub', meta: { server: 'tokyo', device: 'x' } });
+  const tokenAsPassword = await useCredential('tokyo-wg-x', { type: 'ssh', host: '198.51.100.7', as: 'password' }, credStore);
   assert.equal(!tokenAsPassword.ok && tokenAsPassword.code, 'wrong_kind', 'a VPN key is never an SSH password');
-  assert.equal((await useCredential('wg-x', { type: 'internal', use: 'vpn' }, credStore)).ok, true);
+  assert.equal((await useCredential('tokyo-wg-x', { type: 'internal', use: 'vpn', server: 'tokyo' }, credStore)).ok, true);
+  // Only that server's VPN keys: never another token, never for another server.
+  await credStore.create('api-token', 'token', { secret: 'sk-not-a-vpn-key-0123456789' });
+  assert.equal((await useCredential('api-token', { type: 'internal', use: 'vpn', server: 'tokyo' }, credStore)).ok, false);
+  assert.equal((await useCredential('tokyo-wg-x', { type: 'internal', use: 'vpn', server: 'osaka' }, credStore)).ok, false);
   const free = await credStore.create('free-pw', 'password');
   assert.deepEqual(free.bindings, {});
   assert.equal((await useCredential('free-pw', web('https://a.example.test'), credStore)).ok, true);
@@ -335,16 +339,16 @@ await test('credentials: a secret is scrubbed in every encoding a page or a log 
   const { secretEncodings } = await import('../src/security/credentialStore.js');
   const secret = 'Owner pass&word/+9=';
   const store = new FileCredentialStore(path.join(tmp, 'creds-enc'));
-  await store.create('owner-like', 'token', { secret });
-  assert.equal((await useCredential('owner-like', { type: 'internal', use: 'vpn' }, store)).ok, true);
+  await store.create('s-wg-owner-like', 'token', { secret, meta: { server: 's' } });
+  assert.equal((await useCredential('s-wg-owner-like', { type: 'internal', use: 'vpn', server: 's' }, store)).ok, true);
   for (const form of secretEncodings(secret)) assert.equal(scrubSecrets(`x ${form} y`), 'x •••• y', form);
   // Form posts (URLSearchParams), upper-case hex, and base64 broken into lines.
   const tricky = "It's (very) ~secret*! ok";
   const long = 'L0ng-Secret-'.repeat(8);
-  await store.create('tricky', 'token', { secret: tricky });
-  await store.create('long', 'token', { secret: long });
-  await useCredential('tricky', { type: 'internal', use: 'vpn' }, store);
-  await useCredential('long', { type: 'internal', use: 'vpn' }, store);
+  await store.create('s-wg-tricky', 'token', { secret: tricky, meta: { server: 's' } });
+  await store.create('s-wg-long', 'token', { secret: long, meta: { server: 's' } });
+  await useCredential('s-wg-tricky', { type: 'internal', use: 'vpn', server: 's' }, store);
+  await useCredential('s-wg-long', { type: 'internal', use: 'vpn', server: 's' }, store);
   const posted = new URLSearchParams({ password: tricky }).toString();
   assert.equal(scrubSecrets(posted), 'password=••••');
   assert.equal(scrubSecrets(`hex ${Buffer.from(tricky).toString('hex').toUpperCase()}`), 'hex ••••');
@@ -565,6 +569,36 @@ await test('server_setup: key → wait → harden → VPN → verify → invento
   assert.equal(elsewhere.error?.code, 'credential_refused');
 });
 
+await test('server_setup: a changed inventory names no credential and puts nothing into a script (M2)', async () => {
+  const inventory = path.join(tmp, 'servers.json');
+  const data = JSON.parse(fs.readFileSync(inventory, 'utf8'));
+  const wg = data.servers['vpn-tokyo-1'].wireguard;
+  // What the agent could write into servers.json: shell code, another credential's name.
+  wg.subnet = '10.66.66$(echo INJECTED >&2)';
+  wg.listenPort = '51820; reboot';
+  wg.serverKey = 'api-token';
+  wg.serverPublicKey = '$(id)';
+  wg.clients[0].keyName = 'api-token';
+  wg.clients[0].publicKey = '$(id)';
+  wg.clients[0].address = '10.66.66.2/32$(id)';
+  fs.writeFileSync(inventory, JSON.stringify(data));
+  const last = path.join(tmp, 'last-wg-script.sh');
+  process.env.ARTEMIS_SSH_FAKE_LAST_SCRIPT = last;
+  try {
+    const ctx = { cwd: tmp, store: credStore, inventoryFile: inventory, sleep: async () => undefined, sshBin: path.join(here, 'fixtures', 'fakeSsh.mjs') };
+    const again = await executeServerSetup({ type: 'server_setup', action: 'install_wireguard', host: '203.0.113.10', key: 'vpn-tokyo-1', server: 'vpn-tokyo-1', clients: ['phone'] }, ctx);
+    assert.equal(again.ok, true, again.output);
+    const script = fs.readFileSync(last, 'utf8');
+    assert.ok(!/INJECTED|\$\(id\)|reboot/.test(script), 'nothing from the inventory reaches the script unchecked');
+    assert.ok(!script.includes('sk-not-a-vpn-key'), 'another token is never used as a VPN key');
+    assert.match(script, /'10\.66\.66\.1\/24'/);
+    const check = await executeServerSetup({ type: 'server_setup', action: 'verify', check: 'wireguard', server: 'vpn-tokyo-1' }, ctx);
+    assert.equal(check.ok, true, check.output);
+  } finally {
+    delete process.env.ARTEMIS_SSH_FAKE_LAST_SCRIPT;
+  }
+});
+
 await test('server_setup: key-only SSH must really be in effect (M1)', async () => {
   const ctx = { cwd: tmp, store: credStore, inventoryFile: path.join(tmp, 'servers.json'), sleep: async () => undefined, sshBin: path.join(here, 'fixtures', 'fakeSsh.mjs') };
   process.env.ARTEMIS_SSH_FAKE_SSHD_OVERRIDE = '1';
@@ -630,7 +664,7 @@ await test('server_setup: password-only server gets the key installed through as
   const ok = await executeServerSetup({ type: 'server_setup', action: 'install_key', host: '198.51.100.7', password: 'root-pw', key: 'key-b' }, ctx);
   assert.equal(ok.ok, true, ok.output);
   // H2: only a password bound to that host; never a VPN key, an SSH key or a web password elsewhere.
-  for (const [password, host] of [['wg-x', '198.51.100.7'], ['vpn-tokyo-1', '198.51.100.7'], ['root-pw', '203.0.113.99'], ['shop-login', '198.51.100.7']]) {
+  for (const [password, host] of [['tokyo-wg-x', '198.51.100.7'], ['vpn-tokyo-1', '198.51.100.7'], ['root-pw', '203.0.113.99'], ['shop-login', '198.51.100.7']]) {
     const refused = await executeServerSetup({ type: 'server_setup', action: 'install_key', host: host!, password: password!, key: 'key-b' }, ctx);
     assert.equal(refused.error?.code, 'credential_refused', `${password} on ${host}`);
   }

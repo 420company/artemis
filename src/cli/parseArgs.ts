@@ -59,10 +59,13 @@ export interface ParsedArgs {
   imagePaths?: string[]
   /** execute/analyze: what the user picked in the app (--intent video|long_video|image|research|reminder|slides|document|spreadsheet). */
   intent?: string
+  /** execute: answer a pending approval request of --session (--approve <id> | --deny <id> [--reason <text>]). */
+  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
   /** execute: take the session's last exchange out and run again (--retry; a prompt replaces the last message). */
   retry?: boolean
   /** execute --retry: the owner message id of the exchange to replace (--retry-of <id>); another one refuses. */
   retryOf?: string
+  keepApprovals?: boolean
   resumeLast: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
@@ -124,7 +127,9 @@ ${t('命令', 'Commands')}:
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
   execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder|slides|document|spreadsheet 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder|slides|document|spreadsheet states what the user picked)')}
+                    ${t('需要你同意的操作会暂停（退出码 10）；用 --session <id> --approve <请求id> 同意，或 --deny <请求id> [--reason <理由>] 拒绝；--signature <签名> 由宿主签发，--expect-digest <actionDigest> 核对请求未被改动', 'Actions that need approval pause the run (exit code 10); answer with --session <id> --approve <request id>, or --deny <request id> [--reason <text>]; --signature <sig> is the host\'s signature, --expect-digest <actionDigest> checks the request was not changed')}
                     ${t('--retry 配合 --session：撤下上一轮再执行（不带 query 即原样重发，带 query 即编辑后重发）；--retry-of <消息 id> 只在它仍是最后一轮时执行', '--retry with --session: takes the last exchange out and runs again (no query: the same message; a query: the edited message); --retry-of <message id> only if that is still the last exchange')}
+                    ${t('--keep-approvals：消息不是你本人发的（定时任务、触发器等），会话里等你同意的请求保持不变', '--keep-approvals: the message is not the owner\'s (a scheduled task, a trigger, …): requests waiting in the conversation stay as they are')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
   session           ${t('管理会话记录（list/show/search/last-turn/undo/delete）', 'Manage session records (list/show/search/last-turn/undo/delete)')}
@@ -152,8 +157,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let sessionId: string | undefined
   const imagePaths: string[] = []
   let intent: string | undefined
+  let approvalAnswer: ParsedArgs['approvalAnswer']
+  let approvalReason: string | undefined
+  let expectDigest: string | undefined
+  let signature: string | undefined
   let retry = false
   let retryOf: string | undefined
+  let keepApprovals = false
   let resumeLast = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
@@ -238,7 +248,33 @@ export function parseArgs(argv: string[]): ParsedArgs {
       intent = v.trim()
       continue
     }
+    if (command === 'execute' && (cur === '--approve' || cur === '--deny')) {
+      const v = args.shift()?.trim()
+      if (!v || !/^apr_[0-9a-f]{20}$/.test(v)) throw new Error(`execute ${cur} requires an approval request id (apr_…).`)
+      if (approvalAnswer) throw new Error('execute takes one --approve or --deny at a time.')
+      approvalAnswer = { id: v, decision: cur === '--approve' ? 'approve' : 'deny' }
+      continue
+    }
+    if (command === 'execute' && cur === '--expect-digest') {
+      const v = args.shift()?.trim().toLowerCase()
+      if (!v || !/^[0-9a-f]{64}$/.test(v)) throw new Error('execute --expect-digest requires the request\'s actionDigest (64 hex characters).')
+      expectDigest = v
+      continue
+    }
+    if (command === 'execute' && cur === '--signature') {
+      const v = args.shift()?.trim()
+      if (!v || !/^[A-Za-z0-9+/_=-]{40,200}$/.test(v)) throw new Error('execute --signature requires the host\'s signature of the answer.')
+      signature = v
+      continue
+    }
+    if (command === 'execute' && cur === '--reason') {
+      const v = args.shift()
+      if (v === undefined) throw new Error('execute --reason requires a text.')
+      approvalReason = v.slice(0, 2_000)
+      continue
+    }
     if (command === 'execute' && cur === '--retry') { retry = true; continue }
+    if (command === 'execute' && cur === '--keep-approvals') { keepApprovals = true; continue }
     if (command === 'execute' && cur === '--retry-of') {
       const v = args.shift()
       if (!v || !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(v)) throw new Error('execute --retry-of requires a message id.')
@@ -272,6 +308,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
     promptParts.push(cur)
   }
 
+  if (approvalAnswer && !sessionId) throw new Error(`execute --${approvalAnswer.decision} requires --session <id>.`)
+  if (approvalAnswer && retry) throw new Error(`execute --${approvalAnswer.decision} cannot be combined with --retry.`)
+  if (approvalReason !== undefined && approvalAnswer?.decision !== 'deny') throw new Error('execute --reason goes with --deny.')
+  if (approvalAnswer && approvalReason?.trim()) approvalAnswer.reason = approvalReason.trim()
+  if (expectDigest !== undefined && !approvalAnswer) throw new Error('execute --expect-digest goes with --approve or --deny.')
+  if (approvalAnswer && expectDigest) approvalAnswer.expectDigest = expectDigest
+  if (signature !== undefined && !approvalAnswer) throw new Error('execute --signature goes with --approve or --deny.')
+  if (approvalAnswer && signature) approvalAnswer.signature = signature
   return {
     command, cwd, model, baseUrl, apiKey,
     prompt: promptParts.length > 0 ? promptParts.join(' ') : undefined,
@@ -280,8 +324,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     autoDrive, testProviders, background, setup,
     ...(imagePaths.length ? { imagePaths } : {}),
     ...(intent !== undefined ? { intent } : {}),
+    ...(approvalAnswer ? { approvalAnswer } : {}),
     ...(retry ? { retry } : {}),
     ...(retryOf ? { retryOf } : {}),
+    ...(keepApprovals ? { keepApprovals } : {}),
   }
 }
 

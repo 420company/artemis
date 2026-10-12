@@ -1781,6 +1781,14 @@ class StdioRpcTransport implements RpcTransport {
         new Error(`Failed to start stdio server: ${error.message}`),
       );
     });
+    // A server that exits at once leaves a closed pipe: the write fails (EPIPE)
+    // and the close handler below ends the requests; it never crashes the process.
+    child.stdin.on('error', (error) => {
+      if (this.child !== child) {
+        return;
+      }
+      this.appendDiagnostic(`stdin: ${error.message}\n`);
+    });
     child.on('close', (code) => {
       if (this.child !== child) {
         return;
@@ -2281,6 +2289,41 @@ async function discoverManagedSurface(options: {
   return result;
 }
 
+/** Tool lists asked of each server by this process, by where it lives (URL or command). */
+const LIVE_TOOL_LISTS = new Map<string, Promise<McpToolDescriptor[] | undefined>>();
+const LIVE_TOOL_LIST_TIMEOUT_MS = 20_000;
+
+/**
+ * A tool as the server itself lists it now (tools/list from this process,
+ * cached per URL), never as the MCP config file describes it: that file is
+ * the agent's to write. Undefined when the server cannot be asked.
+ */
+export async function liveToolDescriptor(
+  server: McpServerConfig,
+  cwd: string,
+  toolName: string,
+): Promise<McpToolDescriptor | undefined> {
+  const key = JSON.stringify([server.transport, server.url ?? null, server.command ?? null, server.commandArgs ?? [], server.workingDirectory ?? null]);
+  let list = LIVE_TOOL_LISTS.get(key);
+  if (!list) {
+    list = discoverManagedSurface({ server, cwd, timeoutMs: LIVE_TOOL_LIST_TIMEOUT_MS }).then(
+      (result) => result.surface?.tools ?? [],
+      () => undefined,
+    );
+    LIVE_TOOL_LISTS.set(key, list);
+    // A failed listing is asked again next time.
+    void list.then((tools) => {
+      if (!tools) LIVE_TOOL_LISTS.delete(key);
+    });
+  }
+  return (await list)?.find((tool) => tool.name === toolName);
+}
+
+/** For tests: forget the tool lists asked so far. */
+export function resetLiveToolListsForTest(): void {
+  LIVE_TOOL_LISTS.clear();
+}
+
 export async function discoverMcpServerSurface(options: {
   server: McpServerConfig;
   cwd: string;
@@ -2363,6 +2406,10 @@ async function reloadRotatedCredential(
       (entry) => entry.id === server.id,
     );
     if (!fresh || !fresh.enabled) {
+      return undefined;
+    }
+    // Only the credential may have changed: an entry now pointing elsewhere is not this server.
+    if (fresh.transport !== server.transport || fresh.url !== server.url) {
       return undefined;
     }
     const credential = (entry: McpServerConfig) =>

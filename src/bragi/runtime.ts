@@ -1004,6 +1004,8 @@ async function runRemoteCommandInner(
             contextMode: 'hosted',
             // Learned skills stay inside this chat: one chat never sees another's.
             skillPartition: `${opts.bridgePlatform ?? 'bridge'}:${opts.targetId ?? binding.storedSession.id}`,
+            // Media sent back to this very chat is the reply, not an outbound send needing approval.
+            ...(opts.bridgePlatform ? { approvalOwnChat: { platform: opts.bridgePlatform, ...(opts.targetId ? { targetId: opts.targetId } : {}) } } : {}),
             onCompressionSummary: (summary: string) => { latestCompressionSummary = summary },
             disableNativeTools: binding.permissionMode === 'read-only',
             // Verify before done (core/selfCheck.ts): one short progress line.

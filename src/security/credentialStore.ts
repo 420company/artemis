@@ -69,7 +69,8 @@ export interface CredentialInfo {
 export type CredentialPurpose =
   | { type: 'web'; origin: string; field: 'password' | 'username' }
   | { type: 'ssh'; host: string; as: 'key' | 'password' }
-  | { type: 'internal'; use: 'vpn' };
+  /** A VPN key of one server (`<server>-wg-…`, made by server_setup for it): never any other token. */
+  | { type: 'internal'; use: 'vpn'; server: string };
 
 export type CredentialErrorCode = 'invalid_name' | 'not_found' | 'exists' | 'wrong_kind' | 'wrong_origin' | 'wrong_host' | 'unavailable' | 'locked';
 
@@ -166,7 +167,14 @@ export function normalizeHost(value: string | undefined): string | undefined {
  */
 export function checkUse(info: CredentialInfo, purpose: CredentialPurpose): { ok: true; bind?: CredentialBindings } | { ok: false; code: CredentialErrorCode; message: string } {
   if (purpose.type === 'internal') {
-    return info.kind === 'token' ? { ok: true } : { ok: false, code: 'wrong_kind', message: `"${info.name}" is not a VPN key.` };
+    const server = typeof purpose.server === 'string' ? purpose.server : '';
+    const vpnKey =
+      info.kind === 'token' &&
+      server !== '' &&
+      info.meta?.server === server &&
+      info.meta?.owner !== '1' &&
+      info.name.startsWith(`${server}-wg-`);
+    return vpnKey ? { ok: true } : { ok: false, code: 'wrong_kind', message: `"${info.name}" is not a VPN key of ${server || 'this server'}.` };
   }
   if (purpose.type === 'web') {
     const wanted: CredentialKind = purpose.field === 'username' ? 'username' : 'password';

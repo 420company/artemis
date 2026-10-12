@@ -836,11 +836,6 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             description: 'Optional MCP tool arguments object.',
             additionalProperties: true,
           },
-          readOnly: {
-            type: 'boolean',
-            description:
-              'Set to true when the MCP tool is explicitly marked readOnly in the discovered surface.',
-          },
           timeoutMs: integerSchema('Optional timeout in milliseconds.'),
         },
       };

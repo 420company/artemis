@@ -29,7 +29,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getCredentialStore, normalizeOrigin, useCredential, CREDENTIAL_NAME, type CredentialStore } from '../../security/credentialStore.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
-import { generateWireGuardKeyPair } from './keys.js';
+import { generateWireGuardKeyPair, WIREGUARD_KEY, wireGuardPublicKeyOf } from './keys.js';
 import { encodeQr, qrToPng } from './qr.js';
 import { hardenScript, installKeyScript, probeScript, removePeerScript, wireguardCheckScript, wireguardScript } from './scripts.js';
 
@@ -466,6 +466,50 @@ function clientNames(clients: string[] | number | undefined): string[] | string 
   return [...new Set(names)];
 }
 
+const SUBNET = /^(?:10\.(?:25[0-5]|2[0-4]\d|1?\d?\d)|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+
+function listenPortOf(value: unknown): number | undefined {
+  const port = typeof value === 'string' ? Number(value) : value;
+  return typeof port === 'number' && Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : undefined;
+}
+
+function deviceAddressOf(value: unknown, subnet: string): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/32$/.exec(value);
+  if (!match || `${match[1]}.${match[2]}.${match[3]}` !== subnet) return undefined;
+  const host = Number(match[4]);
+  return host >= 2 && host <= 254 && String(host) === match[4] ? value : undefined;
+}
+
+/**
+ * A server's VPN as the credential store has it: its key and the device
+ * keys are the store's (names `<server>-wg-…`, made for this server), and
+ * the subnet, port and addresses come from the store's notes where they
+ * are, else from the inventory, checked. The inventory (servers.json) is
+ * the agent's to write, so nothing in it names a credential or reaches a
+ * script unchecked.
+ */
+async function trustedWireguard(server: string, record: ServerRecord | undefined, store: CredentialStore): Promise<NonNullable<ServerRecord['wireguard']> | undefined> {
+  const serverKey = `${server}-wg-server`;
+  const info = await store.describe(serverKey).catch(() => undefined);
+  if (!info || info.kind !== 'token' || info.meta?.server !== server || !WIREGUARD_KEY.test(info.publicPart ?? '')) return undefined;
+  const listed = record?.wireguard;
+  const subnet = [info.meta?.subnet, listed?.subnet].find((s): s is string => typeof s === 'string' && SUBNET.test(s)) ?? '10.66.66';
+  const listenPort = listenPortOf(info.meta?.listenPort) ?? listenPortOf(listed?.listenPort) ?? 51820;
+  const clients: NonNullable<ServerRecord['wireguard']>['clients'] = [];
+  for (const entry of Array.isArray(listed?.clients) ? listed.clients : []) {
+    const name = typeof entry?.name === 'string' ? entry.name : '';
+    if (!CLIENT_NAME.test(name) || name === 'server' || clients.some((c) => c.name === name)) continue;
+    const keyName = `${server}-wg-${name}`;
+    const device = await store.describe(keyName).catch(() => undefined);
+    if (!device || device.kind !== 'token' || device.meta?.server !== server || device.meta?.device !== name || !WIREGUARD_KEY.test(device.publicPart ?? '')) continue;
+    const address = deviceAddressOf(device.meta?.address, subnet) ?? deviceAddressOf(entry.address, subnet);
+    if (!address || clients.some((c) => c.address === address)) continue;
+    clients.push({ name, address, publicKey: device.publicPart!, keyName, files: [] });
+  }
+  return { listenPort, subnet, serverKey, serverPublicKey: info.publicPart!, clients };
+}
+
 async function installWireGuard(
   a: Extract<ServerSetupAction, { action: 'install_wireguard' }>,
   ctx: ServerSetupContext,
@@ -481,16 +525,17 @@ async function installWireGuard(
   const dns = (a.dns ?? '1.1.1.1, 8.8.8.8').replace(/[^0-9a-fA-F.:, ]/g, '');
 
   const servers = await readInventory(ctx);
-  const existing = servers[a.server]?.wireguard;
+  // What the server already has, from the credential store (out of the agent's reach), never trusted from the inventory file.
+  const existing = await trustedWireguard(a.server, servers[a.server], store);
   const subnet = existing?.subnet ?? '10.66.66';
-  // The server key is kept so more devices can be added later.
-  const serverKeyName = existing?.serverKey ?? `${a.server}-wg-server`;
+  // The server key is kept so more devices can be added later; its name always follows the server's.
+  const serverKeyName = `${a.server}-wg-server`;
   let serverPublicKey = existing?.serverPublicKey;
-  const kept = serverPublicKey ? await useCredential(serverKeyName, { type: 'internal', use: 'vpn' }, store) : undefined;
-  let serverPrivate = kept?.ok ? kept.secret : undefined;
+  const kept = serverPublicKey ? await useCredential(serverKeyName, { type: 'internal', use: 'vpn', server: a.server }, store) : undefined;
+  let serverPrivate = kept?.ok && wireGuardPublicKeyOf(kept.secret) === serverPublicKey ? kept.secret : undefined;
   if (!serverPrivate || !serverPublicKey) {
     const pair = generateWireGuardKeyPair();
-    await store.create(serverKeyName, 'token', { secret: pair.privateKey, publicPart: pair.publicKey, meta: { server: a.server }, replace: true });
+    await store.create(serverKeyName, 'token', { secret: pair.privateKey, publicPart: pair.publicKey, meta: { server: a.server, use: 'vpn', subnet, listenPort: String(listenPort) }, replace: true });
     serverPrivate = pair.privateKey;
     serverPublicKey = pair.publicKey;
   }
@@ -508,13 +553,14 @@ async function installWireGuard(
   const created: string[] = [];
   for (const name of wanted) {
     if (clients.some((c) => c.name === name)) continue;
+    if (name === 'server') return fail('invalid_input', 'clients: "server" is not a device name');
     let host = 2;
     while (used.has(host)) host++;
     if (host > 250) return fail('invalid_input', 'This server has no free VPN addresses left.');
     used.add(host);
     const pair = generateWireGuardKeyPair();
     const keyName = `${a.server}-wg-${name}`;
-    await store.create(keyName, 'token', { secret: pair.privateKey, publicPart: pair.publicKey, meta: { server: a.server, device: name }, replace: true });
+    await store.create(keyName, 'token', { secret: pair.privateKey, publicPart: pair.publicKey, meta: { server: a.server, device: name, use: 'vpn', address: `${subnet}.${host}/32` }, replace: true });
     clients.push({ name, address: `${subnet}.${host}/32`, publicKey: pair.publicKey, keyName, files: [] });
     created.push(name);
   }
@@ -531,7 +577,7 @@ async function installWireGuard(
   // Device profiles and their QR codes, readable by the agent only (0600 in 0700 folders).
   const endpointHost = t.host.includes(':') ? `[${t.host}]` : t.host;
   for (const client of clients) {
-    const key = await useCredential(client.keyName, { type: 'internal', use: 'vpn' }, store);
+    const key = await useCredential(client.keyName, { type: 'internal', use: 'vpn', server: a.server }, store);
     if (!key.ok) continue;
     const conf = [
       '[Interface]',
@@ -706,7 +752,7 @@ async function verify(a: Extract<ServerSetupAction, { action: 'verify' }>, ctx: 
     if (isFailure(run)) return run;
     return run.steps.has('probe') ? { ok: true, output: `SSH works for ${t.user}@${t.host}.\n${tail(run.stdout)}` } : sshFailure('SSH check', run);
   }
-  const wg = record?.wireguard;
+  const wg = record && SERVER_NAME.test(record.name) ? await trustedWireguard(record.name, record, store) : undefined;
   if (!wg) return fail('invalid_input', 'No VPN recorded for this server; run install_wireguard first.');
   const run = await ssh(wireguardCheckScript({ listenPort: wg.listenPort }), 60_000);
   if (isFailure(run)) return run;

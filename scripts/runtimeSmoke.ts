@@ -3271,6 +3271,8 @@ const WEB_MAIN_ADDED_TOOLS = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  // Answered through hard approvals (a pending request the host shows as a card).
+  'request_user_confirmation',
   'browser_request_handoff',
 ] as const
 const WEB_MAIN_EXCLUDED_TOOLS = [
@@ -3282,7 +3284,6 @@ const WEB_MAIN_EXCLUDED_TOOLS = [
   'mcp_enable',
   'mcp_disable',
   'bridge_send_image',
-  'request_user_confirmation',
   'spawn_background_workflow',
 ] as const
 
@@ -3307,6 +3308,7 @@ function sampleWebToolAction(type: string): AgentAction {
     currency_rates: { base: 'EUR' },
     flight_lookup: { callsign: 'AFR123' },
     browser_navigate: { url: 'https://example.com' },
+    request_user_confirmation: { question: 'Book the 9:30 train?' },
     browser_type: { selector: '#q', text: 'x' },
     browser_form_input: { selector: '#q', value: 'x' },
     browser_evaluate: { script: '1 + 1' },

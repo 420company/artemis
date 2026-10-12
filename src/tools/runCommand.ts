@@ -7,6 +7,8 @@ import type { Readable, Writable } from 'node:stream';
 import type { AgentAction } from '../core/types.js';
 import { invalidateWalkFilesCache, resolveArtemisHomeDir, truncate } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
+import { AGENT_TOOL_ENV, commandAnswersApproval } from '../security/approvals.js';
+import { describeHighRiskCommand } from '../security/shellRisk.js';
 import {
   appendCaptureChunk,
   closeCaptureLog,
@@ -56,11 +58,13 @@ function readSavedVercelToken(): string | null {
  * spawn so `/vercel logout` takes effect immediately without restart.
  */
 function buildSpawnEnv(command: string): NodeJS.ProcessEnv {
-  if (process.env.VERCEL_TOKEN) return process.env;
-  if (!isVercelInvocation(command)) return process.env;
+  // Marks the agent's own shell: approval answers are refused from inside it.
+  const base: NodeJS.ProcessEnv = { ...process.env, [AGENT_TOOL_ENV]: '1' };
+  if (process.env.VERCEL_TOKEN) return base;
+  if (!isVercelInvocation(command)) return base;
   const token = readSavedVercelToken();
-  if (!token) return process.env;
-  return { ...process.env, VERCEL_TOKEN: token };
+  if (!token) return base;
+  return { ...base, VERCEL_TOKEN: token };
 }
 
 // ── sensitive command guard ───────────────────────────────────────────────────
@@ -80,6 +84,7 @@ const SENSITIVE_PATH_PATTERNS = [
   /\.claude[/\\]/,
   /providers\.json/,
   /bragi\.json/,
+  /approvals\.key/,
   /\.env($|[\s"'.])/,
   /\.netrc/,
   /\.ssh[/\\]/,
@@ -99,37 +104,25 @@ const SENSITIVE_PATH_PATTERNS = [
   /\bid_(rsa|ed25519|ecdsa|dsa)\b/,
 ]
 
-function commandAccessesAllowedArtemisDiagnosticPath(cmd: string): boolean {
-  const expanded = expandForInspection(cmd).replace(/\\/g, '/')
-  const home = homedir().replace(/\\/g, '/')
-  const allowed = [
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/dreams`,
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.log`,
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.launchd.log`,
-    `${resolveArtemisHomeDir().replace(/\\/g, '/')}/gateway.launchd.err.log`,
-  ]
-  return allowed.some(path => expanded.includes(path))
+/**
+ * The Artemis paths the agent may read in a command (its dreams and gateway
+ * logs) are cut out of the command text before the sensitive-path check, so
+ * naming one never exempts the rest of the command (or a "../" after it).
+ */
+function withoutAllowedArtemisDiagnosticPaths(expanded: string): string {
+  const root = resolveArtemisHomeDir().replace(/\\/g, '/')
+  const allowed = [`${root}/dreams`, `${root}/gateway.log`, `${root}/gateway.launchd.log`, `${root}/gateway.launchd.err.log`]
+  let rest = expanded
+  for (const entry of allowed) {
+    rest = rest.split(entry).map((part, index) => {
+      if (index === 0) return part
+      const tail = /^[^\s;&|]*/.exec(part)?.[0] ?? ''
+      // A tail that climbs out (or is not this entry's own path) stays and is checked.
+      return /\.\./.test(tail) || !(tail === '' || tail.startsWith('/')) ? `${entry}${part}` : part.slice(tail.length)
+    }).join('')
+  }
+  return rest
 }
-
-// High-signal "remote payload → shell" pipelines and reverse-shell patterns.
-// Each matcher is deliberately conservative (must contain a distinguishing
-// construct) so benign commands don't trip it.
-const DANGEROUS_SHELL_PATTERNS: { re: RegExp; reason: string }[] = [
-  { re: /\bcurl\b[^|;&`]{0,200}\|\s*(bash|sh|zsh|ksh|dash)\b/i,
-    reason: 'pipes curl output directly into a shell' },
-  { re: /\bwget\b[^|;&`]{0,200}\|\s*(bash|sh|zsh|ksh|dash)\b/i,
-    reason: 'pipes wget output directly into a shell' },
-  { re: /\b(base64|xxd|openssl\s+base64)\b[^|;`]{0,200}-d[^|;`]{0,200}\|\s*(bash|sh|zsh|ksh)\b/i,
-    reason: 'decodes a base64 payload and pipes it into a shell' },
-  { re: /\beval\s+["'$(`][^"']*\b(curl|wget|fetch)\b/i,
-    reason: 'evals the output of a remote fetch' },
-  { re: /\bbash\s+-i\b[^|]{0,200}>&?\s*\/dev\/tcp\//,
-    reason: 'opens an interactive reverse shell over /dev/tcp' },
-  { re: /\bmkfifo\b[\s\S]{0,200}\bnc\b/,
-    reason: 'sets up a named-pipe reverse shell via nc' },
-  { re: /\bnc\b[^|]{0,200}-e\s+\/?(?:bin\/)?(bash|sh|zsh)\b/i,
-    reason: 'uses nc -e to expose a shell' },
-]
 
 function expandForInspection(cmd: string): string {
   const home = homedir().replace(/\\/g, '/')
@@ -145,16 +138,26 @@ function expandForInspection(cmd: string): string {
 }
 
 function commandAccessesSensitivePath(cmd: string): boolean {
-  if (commandAccessesAllowedArtemisDiagnosticPath(cmd)) return false
-  const expanded = expandForInspection(cmd)
+  const expanded = withoutAllowedArtemisDiagnosticPaths(expandForInspection(cmd).replace(/\\/g, '/'))
   return SENSITIVE_PATH_PATTERNS.some(re => re.test(expanded))
 }
 
+/** The approval key: never named in a command, whatever the permission mode. */
+function commandTouchesApprovalSecrets(cmd: string): boolean {
+  return /approvals\.key\b/i.test(expandForInspection(cmd))
+}
+
 function commandMatchesDangerousPattern(cmd: string): string | null {
-  for (const { re, reason } of DANGEROUS_SHELL_PATTERNS) {
-    if (re.test(cmd)) return reason
-  }
-  return null
+  return describeDangerousCommand(cmd)?.reason ?? null
+}
+
+/**
+ * The high-risk shell classifier (security/shellRisk.ts: remote code,
+ * hidden code, uploads, reverse shells), with a plain-language reason in
+ * both languages. Best effort; approvals use it.
+ */
+export function describeDangerousCommand(cmd: string): { reason: string; reasonZh: string } | null {
+  return describeHighRiskCommand(cmd)
 }
 
 const TIMEOUT_PREVIEW_CHARS = 4_000;
@@ -500,7 +503,7 @@ export async function executeRunCommand(
     })
   }
 
-  if (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command)) {
+  if (commandTouchesApprovalSecrets(action.command) || (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command))) {
     return Promise.resolve({
       action,
       ok: false,
@@ -508,7 +511,19 @@ export async function executeRunCommand(
     })
   }
 
-  const dangerousReason = commandMatchesDangerousPattern(action.command)
+  // Only the owner answers approval requests, never the agent's own shell.
+  if (commandAnswersApproval(action.command)) {
+    return Promise.resolve({
+      action,
+      ok: false,
+      output: 'Access denied: approval requests are answered by the owner only, never from a command.',
+      error: { code: 'approval_self_answer', message: 'Approval requests are answered by the owner only.', retryable: false },
+    })
+  }
+
+  // Already approved for this exact command (policy "allow", an approved
+  // request, or an interactive yes from the run's approval gate).
+  const dangerousReason = context.approvedKinds?.includes('shell_high_risk') ? null : commandMatchesDangerousPattern(action.command)
   if (dangerousReason) {
     if (!context.requestUserConfirmation) {
       return Promise.resolve({

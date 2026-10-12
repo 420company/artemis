@@ -3,7 +3,7 @@
  * (no ssh-keygen or wg binary needed on the agent's machine).
  */
 
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from 'node:crypto';
 
 function sshString(data: Buffer | string): Buffer {
   const body = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
@@ -80,4 +80,19 @@ export function generateWireGuardKeyPair(): WireGuardKeyPair {
   d[31]! |= 64;
   const x = Buffer.from((publicKey.export({ format: 'jwk' }) as { x: string }).x, 'base64url');
   return { privateKey: d.toString('base64'), publicKey: x.toString('base64') };
+}
+
+/** A WireGuard key as wg prints it: 32 bytes, base64. */
+export const WIREGUARD_KEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$/;
+
+/** The public key of a WireGuard private key (base64), or undefined when it is not one. */
+export function wireGuardPublicKeyOf(privateKey: string): string | undefined {
+  if (!WIREGUARD_KEY.test(privateKey)) return undefined;
+  try {
+    const der = Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), Buffer.from(privateKey, 'base64')]);
+    const key = createPublicKey(createPrivateKey({ key: der, format: 'der', type: 'pkcs8' }));
+    return Buffer.from((key.export({ format: 'jwk' }) as { x: string }).x, 'base64url').toString('base64');
+  } catch {
+    return undefined;
+  }
 }

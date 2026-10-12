@@ -333,8 +333,10 @@ export async function runCli(argv: string[]): Promise<void> {
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,
       intent: options.intent,
+      approvalAnswer: options.approvalAnswer,
       retry: options.retry,
       retryOf: options.retryOf,
+      keepApprovals: options.keepApprovals,
     })
     return
   }
@@ -683,18 +685,28 @@ async function runQueryCommand(options: {
   sessionId?: string
   imagePaths?: string[]
   intent?: string
+  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
   retry?: boolean
   retryOf?: string
+  keepApprovals?: boolean
 }): Promise<void> {
   const { cwd, locale, mode, model } = options
   const prompt = options.prompt ?? ''
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
+  const approvals = await import('../security/approvals.js')
+  const answer = mode === 'execute' ? options.approvalAnswer : undefined
+  if (answer && approvals.answeringFromAgentTool()) {
+    // The agent's own shell never answers an approval request.
+    console.error(`CLI Error: ${t('确认请求只能由你本人处理。', 'Approval requests are answered by the owner only.')}`)
+    console.error(`[approval-error] ${JSON.stringify({ id: answer.id, code: 'approval_unauthorized' })}`)
+    process.exit(approvals.APPROVAL_REJECTED_EXIT_CODE)
+  }
   const retry = mode === 'execute' && options.retry === true
   if (retry && !options.sessionId) {
     console.error(`CLI Error: ${t('--retry 需要 --session <id>。', '--retry needs --session <id>.')}`)
     process.exit(2)
   }
-  if (!prompt.trim() && !retry) {
+  if (!prompt.trim() && !retry && !answer) {
     console.log()
     console.log(buildPanel(t(`${mode} 用法`, `${mode} usage`), [
       `artemis ${mode} <query>`,
@@ -711,7 +723,7 @@ async function runQueryCommand(options: {
   const { SessionRewindError } = await import('../storage/sessionTurns.js')
   let result: Awaited<ReturnType<typeof runHeadlessAgent>>
   try {
-    result = await runHeadlessAgent(cwd, finalPrompt, {
+    result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
       permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
       model,
       maxTurns: options.maxTurns,
@@ -723,10 +735,23 @@ async function runQueryCommand(options: {
       // ([agent-update], [approval-request], …) for the host.
       onInfo: (message) => console.error(oneLine(message)),
       ...(options.intent !== undefined ? { intent: options.intent } : {}),
+      // Headless: an action that needs the owner's approval stops the run
+      // (ARTEMIS_APPROVALS=off refuses it instead, as before).
+      ...(mode === 'execute'
+        ? { approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' } }
+        : {}),
+      ...(answer ? { answer } : {}),
       ...(retry ? { retry: true } : {}),
       ...(retry && options.retryOf ? { retryOf: options.retryOf } : {}),
+      ...(options.keepApprovals ? { keepApprovals: true } : {}),
     })
   } catch (error) {
+    if (error instanceof approvals.ApprovalResumeError) {
+      // Unknown, already answered, expired, changed or from the wrong host: nothing ran.
+      console.error(`CLI Error: ${error.message}`)
+      console.error(`[approval-error] ${JSON.stringify({ id: answer?.id, code: error.code })}`)
+      process.exit(approvals.APPROVAL_REJECTED_EXIT_CODE)
+    }
     if (error instanceof SessionRewindError) {
       // Exit 65: nothing to retry; 66: the last exchange is another one (nothing was run or changed).
       console.error(`CLI Error: ${error.message}`)
@@ -741,9 +766,18 @@ async function runQueryCommand(options: {
     }
     throw error
   }
+  // Stopped at an approval request: a distinct exit code, and one plain line.
+  if (result.approval) {
+    process.exitCode = approvals.APPROVAL_REQUIRED_EXIT_CODE
+  }
+  const approvalLine = result.approval
+    ? (result.approval.locale === 'zh-CN'
+      ? `⏸ 需要你同意后才能继续：${result.approval.title}（请求 ${result.approval.id}，${new Date(result.approval.expiresAt).toLocaleString('zh-CN')} 前有效）`
+      : `⏸ Waiting for your approval: ${result.approval.title} (request ${result.approval.id}, valid until ${result.approval.expiresAt})`)
+    : undefined
   console.log()
   console.log(buildPanel(mode === 'analyze' ? t('分析结果', 'Analysis result') : t('执行结果', 'Execution result'), [
-    result.reply,
+    ...(approvalLine ? [result.reply, '', approvalLine] : [result.reply]),
     '',
     `Session: ${result.sessionId}`,
     `Turns: ${result.turns}`,
