@@ -50,10 +50,20 @@ setIdentityCredentialSource({
 const page = `<!doctype html><form id=f method=GET action="/next">
 <input id=t name=t type=text><input id=p name=p type=password><button id=go>go</button></form>
 <div id=echo></div><button id=reveal type=button onclick="document.getElementById('p').type='text'">show</button>
-<script>document.getElementById('p').addEventListener('input', e => { document.getElementById('echo').textContent = [...e.target.value].reverse().join('') + ' / ' + [...e.target.value].join(' ') })</script>`;
+<button id=slow type=button onclick="fetch('/slow?p=' + encodeURIComponent(document.getElementById('p').value))">slow</button>
+<script>console.log('before the password');
+document.getElementById('p').addEventListener('input', e => { console.log('typed: ' + e.target.value); document.getElementById('echo').textContent = [...e.target.value].reverse().join('') + ' / ' + [...e.target.value].join(' ') })</script>`;
+/** Every URL the site was asked for (to prove the password really went over the wire). */
+const served: string[] = [];
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'content-type': 'text/html' });
-  res.end(req.url === '/' ? page : '<p>thanks</p>');
+  served.push(req.url ?? '');
+  const reply = () => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(req.url === '/' || req.url?.startsWith('/next') ? page : '<p>thanks</p>');
+  };
+  // A request made while the password is live that only finishes after.
+  if (req.url?.startsWith('/slow')) setTimeout(reply, 1_500);
+  else reply();
 });
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
 const port = (server.address() as { port: number }).port;
@@ -65,6 +75,8 @@ const leaks = (text: string) =>
 
 try {
   await executeBrowserNavigate({ type: 'browser_navigate', url: `http://127.0.0.1:${port}/` } as never);
+  const beforeLog = await executeBrowserConsole({ type: 'browser_console' } as never);
+  assert.match(beforeLog.output, /before the password/, 'the logs record before the password goes live');
 
   // Only into a password field.
   const intoText = await executeBrowserType({ type: 'browser_type', selector: '#t', text: PLACEHOLDER } as never);
@@ -113,18 +125,37 @@ try {
   // Submitting a GET form puts it in the URL (form-encoded): redacted in what the tools report.
   const click = await executeBrowserClick({ type: 'browser_click', selector: '#go' } as never);
   assert.ok(!leaks(seen(click)), seen(click));
+  assert.ok(served.some((u) => u.startsWith('/next?') && leaks(u)), 'the form really sent it in the URL');
+  // Still live: a request whose answer only comes after the sign-up is finished.
+  await executeBrowserClick({ type: 'browser_click', selector: '#slow' } as never);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(served.some((u) => u.startsWith('/slow')), 'the slow request is on its way');
 
-  // finish_signup ends it: scripts and logs work again (redaction stays on behind them).
+  // finish_signup ends it (endIdentitySignup is what it calls): scripts and logs work again, and
+  // nothing from the live window is in them, not even a request that only finishes afterwards.
   endIdentitySignup(ID);
-  const title = await executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title + "|" + (1 + 1)' } as never);
+  const consoleAfter = await executeBrowserConsole({ type: 'browser_console' } as never);
+  assert.equal(consoleAfter.ok, true);
+  assert.doesNotMatch(consoleAfter.output, /typed:|before the password/, consoleAfter.output);
+  const requestsAfter = await executeBrowserRequests({ type: 'browser_requests' } as never);
+  assert.equal(requestsAfter.ok, true);
+  assert.doesNotMatch(requestsAfter.output, /\/next|\/slow/, requestsAfter.output);
+  await new Promise((r) => setTimeout(r, 2_000));
+  const lateRequests = await executeBrowserRequests({ type: 'browser_requests' } as never);
+  assert.doesNotMatch(lateRequests.output, /\/slow/, 'a request started while live is never recorded');
+  assert.ok(!leaks(JSON.stringify(lateRequests)) && !leaks(JSON.stringify(consoleAfter)) && !leaks(JSON.stringify(requestsAfter)), 'not even before redaction');
+  // The logs record again from now on.
+  const title = await executeBrowserEvaluate({ type: 'browser_evaluate', script: 'console.log("after the sign-up"); document.title + "|" + (1 + 1)' } as never);
   assert.equal(title.ok, true, title.output);
   assert.match(title.output, /\|2/);
-  assert.equal((await executeBrowserConsole({ type: 'browser_console' } as never)).ok, true);
-  const requests = await executeBrowserRequests({ type: 'browser_requests', pattern: 'next' } as never);
-  assert.ok(leaks(JSON.stringify(click)) || leaks(JSON.stringify(requests)), 'the URL really carried it');
-  assert.ok(!leaks(seen(requests)), seen(requests));
-  const href = await executeBrowserEvaluate({ type: 'browser_evaluate', script: 'location.href' } as never);
-  assert.ok(!leaks(seen(href)), seen(href));
+  await executeBrowserNavigate({ type: 'browser_navigate', url: `http://127.0.0.1:${port}/thanks` } as never);
+  assert.match((await executeBrowserConsole({ type: 'browser_console' } as never)).output, /after the sign-up/);
+  assert.match((await executeBrowserRequests({ type: 'browser_requests' } as never)).output, /\/thanks/);
+  // The field still holds the password after the sign-up: redaction, kept for the rest of the process, covers a read of it.
+  await executeBrowserNavigate({ type: 'browser_navigate', url: `http://127.0.0.1:${port}/` } as never);
+  await executeBrowserFormInput({ type: 'browser_form_input', selector: '#t', value: PW } as never);
+  const field = await executeBrowserEvaluate({ type: 'browser_evaluate', script: "document.querySelector('#t').value" } as never);
+  assert.ok(leaks(JSON.stringify(field)) && !leaks(seen(field)), 'redacted after the live window too');
 } finally {
   await executeBrowserClose({ type: 'browser_close' } as never).catch(() => undefined);
   server.close();

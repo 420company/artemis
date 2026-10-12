@@ -19,8 +19,13 @@
  * comes first. While any password is live, page scripts and the console /
  * request logs are refused outright (browser_evaluate, browser_console,
  * browser_requests; navigating to a script URL): a hard rule, not a filter
- * of what a script looks like. After that the password itself is dropped;
- * only the forms it can be echoed in are kept, for redaction.
+ * of what a script looks like. The console / request logs record nothing
+ * while a password is live (not even a request started then that finishes
+ * later) and are cleared as it goes live and as it stops being live.
+ * After that the password no longer resolves, but redaction still needs
+ * it: the forms it can be echoed in (the plain value among them) stay in
+ * this process's memory until it exits, because the page's field still
+ * holds the value and a script may read it once scripts are allowed again.
  *
  * Nothing the model receives may carry it: every tool outcome is redacted
  * at the one place results are recorded (core/agent.ts), in the forms a page
@@ -85,9 +90,32 @@ function isLive(entry: Resolved, now = Date.now()): boolean {
   return !entry.ended && now < entry.liveUntil;
 }
 
+type LiveWindowListener = (edge: 'start' | 'end') => void;
+const liveWindowListeners: LiveWindowListener[] = [];
+
+/**
+ * Called when a password goes live and when one stops being live (finish,
+ * run end). The browser tools clear their console / request logs on both,
+ * so nothing recorded around the live window can be read later.
+ */
+export function onIdentityLiveWindow(listener: LiveWindowListener): void {
+  liveWindowListeners.push(listener);
+}
+
+function notifyLiveWindow(edge: 'start' | 'end'): void {
+  for (const listener of liveWindowListeners) {
+    try {
+      listener(edge);
+    } catch {
+      /* a listener must not break typing or finishing */
+    }
+  }
+}
+
 function end(entry: Resolved): void {
   entry.ended = true;
   entry.password = '';
+  notifyLiveWindow('end');
 }
 
 /** Whether a sign-up password is live in this process (page scripts and log reads are then refused). */
@@ -104,7 +132,7 @@ export function hasTypedIdentitySecrets(): boolean {
 /** finish_signup recorded an outcome: that sign-up's password is no longer live. */
 export function endIdentitySignup(signupId: string): void {
   const entry = resolved.get(signupId);
-  if (entry) end(entry);
+  if (entry && !entry.ended) end(entry);
 }
 
 let runDepth = 0;
@@ -121,7 +149,7 @@ export function enterIdentityRun(): () => void {
     if (left) return;
     left = true;
     runDepth = Math.max(0, runDepth - 1);
-    if (runDepth === 0) for (const entry of resolved.values()) end(entry);
+    if (runDepth === 0) for (const entry of resolved.values()) if (!entry.ended) end(entry);
   };
 }
 
@@ -205,6 +233,7 @@ export async function resolveIdentityPlaceholders(
         const got = await fetchFromHost.password(id);
         if (got.site !== site) return { ok: false, message: 'The sign-up changed; start it again.' };
         resolved.set(id, { password: got.password, site: got.site, variants: secretVariants(got.password), liveUntil: liveUntilFrom(got.expiresAt), ended: false });
+        notifyLiveWindow('start');
       } catch (err) {
         return { ok: false, message: `The password for this sign-up is not available: ${err instanceof Error ? err.message : String(err)}` };
       }

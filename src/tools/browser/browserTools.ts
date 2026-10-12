@@ -15,7 +15,7 @@
  * input not piped through tool results yet).
  */
 
-import { hasIdentityPlaceholder, hasLiveIdentitySecrets, hasTypedIdentitySecrets, LIVE_SECRET_REFUSAL, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
+import { hasIdentityPlaceholder, hasLiveIdentitySecrets, hasTypedIdentitySecrets, LIVE_SECRET_REFUSAL, onIdentityLiveWindow, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -26,6 +26,7 @@ import {
   readConsoleBuffer,
   readNetworkBuffer,
   clearEventBuffers,
+  setEventCaptureGate,
   listTabs,
   openTab,
   switchTab,
@@ -33,6 +34,12 @@ import {
 } from './browserSession.js';
 import type { Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
+
+// Sign-up passwords (security/identityCredentials.ts): nothing is recorded in the
+// console / request logs while one is live, and both logs are cleared when one goes
+// live and when it stops being live, so nothing from around that window is read later.
+setEventCaptureGate(() => !hasLiveIdentitySecrets());
+onIdentityLiveWindow(() => clearEventBuffers('all'));
 
 export interface ToolResult {
   ok: boolean;
