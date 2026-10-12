@@ -88,8 +88,9 @@ fs.mkdirSync(process.env.ARTEMIS_HOME, { recursive: true })
     req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')))
     req.on('end', () => {
       try {
-        const parsed = JSON.parse(body) as { messages?: Array<{ role: string; content: unknown }> }
-        const users = (parsed.messages ?? []).filter((m) => m.role === 'user')
+        const parsed = JSON.parse(body) as { messages?: Array<{ role: string; name?: string; content: unknown }> }
+        // The run's own context message (skill index, memories) is not the prompt.
+        const users = (parsed.messages ?? []).filter((m) => m.role === 'user' && m.name !== 'runtime_context' && !(typeof m.content === 'string' && m.content.startsWith('[Runtime context for this request')))
         const last = users.at(-1)
         prompts.push(typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? ''))
       } catch {
