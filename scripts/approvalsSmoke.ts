@@ -661,7 +661,7 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
 {
   // As artemis-online passes its policy: `artemis_online/*` allow by default.
   const hosted = loadApprovalPolicy(workspace('platform-tools'), { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ version: 1, modes: {}, tools: { 'artemis_online/*': 'allow' } }) })
-  for (const toolName of ['trade_paper_order', 'publish_request', 'schedule_create', 'trigger_delete', 'model3d_generate']) {
+  for (const toolName of ['trade_paper_order', 'publish_request', 'schedule_create', 'trigger_delete', 'model3d_generate', 'pay_x402', 'transfer_to_allowlisted', 'request_swap']) {
     const found = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'artemis_online', toolName })
     assert(`platform tools: ${toolName} is keyed to the platform`, !found || found.toolKey === `artemis_online/${toolName}`, found?.toolKey)
     assert(`platform tools: ${toolName} runs without asking under the platform default`, !found || modeFor(hosted, found.kind, found.toolKey) === 'allow', found ? `${found.kind} → ${modeFor(hosted, found.kind, found.toolKey)}` : 'no need')

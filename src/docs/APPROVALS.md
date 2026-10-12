@@ -31,6 +31,12 @@ cannot write, and passes them to every run. The files the agent can reach,
 `ask`/`deny`, or a shorter expiry. `allow` in a file is ignored. Requests
 expire after 24 hours unless the policy says otherwise.
 
+**The host's own tools.** A host can let its own MCP tools through
+(`artemis-online` passes `artemis_online/*: allow`): its payment tools
+(`pay_x402`, `transfer_to_allowlisted`, `request_swap`) are approved and
+limited by its payments service, its publish requests wait for the owner in
+its app, so the owner is not asked twice.
+
 **Connected services.** A host whose connectors broker asks the owner
 before every write of a connected service (MCP servers named
 `conn_<connection>`) says so in its copy of the policy
