@@ -170,6 +170,7 @@ import {
   buildProviderNativeFunctionTools,
   buildProviderNativeToolRuntime,
   mapProviderNativeToolCallToAction,
+  resolveProjectedMcpToolName,
 } from './providerNativeTools.js';
 import {
   detectVisualGenerationNeed,
@@ -401,6 +402,19 @@ function buildActionFromLooseArgs(
   toolName: string,
   args: Record<string, unknown>,
 ): AgentAction | null {
+  // A projected MCP tool written as text: the server's own tool, with the
+  // arguments as given.
+  if (toolName.startsWith('mcp__')) {
+    const projected = resolveProjectedMcpToolName(toolName);
+    if (!projected) return null;
+    return {
+      type: 'mcp_call_tool',
+      serverId: projected.serverId,
+      toolName: projected.toolName,
+      args,
+      ...(projected.readOnly !== undefined ? { readOnly: projected.readOnly } : {}),
+    };
+  }
   const lower = toolName.toLowerCase();
 
   switch (lower) {
@@ -897,7 +911,7 @@ function extractXmlToolCalls(text: string): AgentAction[] {
   for (const match of text.matchAll(callPattern)) {
     const attributes = match[1] ?? '';
     const tool =
-      attributes.match(/\b(?:call|name|tool|tool_name)=["']([a-zA-Z_][a-zA-Z0-9_]*)["']/i)?.[1] ?? '';
+      attributes.match(/\b(?:call|name|tool|tool_name)=["']([a-zA-Z_][a-zA-Z0-9_-]*)["']/i)?.[1] ?? '';
     if (!tool) continue;
     const body = match[2] ?? '';
     const args = parseXmlArgsBlock(body);
@@ -968,7 +982,8 @@ function extractXmlToolCalls(text: string): AgentAction[] {
   // <toolcall name="run_command">{...}</toolcall> — emitted by DeepSeek/BytePlus coding models
   // and wrapped in optional <toolcalls>...</toolcalls>. JSON body may be the args directly
   // or contain a nested "parameters" / "args" key.
-  const namedToolcallPattern = /<toolcall\b[^>]*\bname=["']([a-zA-Z_][a-zA-Z0-9_]*)["'][^>]*>([\s\S]*?)<\/toolcall>/gi;
+  // Hyphens too: projected MCP tools keep them (mcp__notion__API-post-search).
+  const namedToolcallPattern = /<toolcall\b[^>]*\bname=["']([a-zA-Z_][a-zA-Z0-9_-]*)["'][^>]*>([\s\S]*?)<\/toolcall>/gi;
   for (const match of text.matchAll(namedToolcallPattern)) {
     const tool = match[1] ?? '';
     const body = match[2]?.trim() ?? '';
