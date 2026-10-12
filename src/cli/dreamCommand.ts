@@ -15,6 +15,8 @@
  *   --video              also render a short video from the dream (off by default)
  *   --date YYYY-MM-DD    the material is that local day's sessions (default: the last 24 hours)
  *   --since-hours <n>    the material is the last n hours (1-168)
+ *   --until <ISO time>   the window ends there instead of now (a host catching up a missed slot)
+ *   --day YYYY-MM-DD     the day the dream is named after (default: the window's local day)
  *   --require-activity   skip (status "skipped", reason "no_activity") when no session was active in the window
  *   --locale zh-CN|en    language of the diary
  *   --push               also push to configured chat bridges (off by default; the host delivers)
@@ -41,6 +43,8 @@ export interface DreamCommandOptions {
   video: boolean
   date?: string
   sinceHours?: number
+  until?: Date
+  day?: string
   requireActivity: boolean
   locale?: UiLocale
   push: boolean
@@ -121,6 +125,19 @@ export function parseDreamArgs(args: readonly string[]): DreamCommandOptions {
         options.date = v
         break
       }
+      case '--until': {
+        const v = value()
+        const t = Date.parse(v)
+        if (!/^\d{4}-\d{2}-\d{2}T/.test(v) || !Number.isFinite(t)) throw new DreamArgsError('--until must be an ISO date-time')
+        options.until = new Date(t)
+        break
+      }
+      case '--day': {
+        const v = value()
+        if (!DATE_RE.test(v)) throw new DreamArgsError('--day must be YYYY-MM-DD')
+        options.day = v
+        break
+      }
       case '--since-hours': {
         const n = Number(value())
         if (!Number.isFinite(n) || n < 1 || n > 168) throw new DreamArgsError('--since-hours must be between 1 and 168')
@@ -131,7 +148,7 @@ export function parseDreamArgs(args: readonly string[]): DreamCommandOptions {
         throw new DreamArgsError(`Unknown option for dream: ${cur}`)
     }
   }
-  if (options.date && options.sinceHours !== undefined) throw new DreamArgsError('Give either --date or --since-hours, not both')
+  if (options.date && (options.sinceHours !== undefined || options.until)) throw new DreamArgsError('Give either --date or --since-hours/--until, not both')
   return options
 }
 
@@ -142,7 +159,7 @@ export function localDay(at: Date): string {
 }
 
 /** The window whose sessions are the dream's material, and the day it is named after. */
-export function dreamWindow(options: Pick<DreamCommandOptions, 'date' | 'sinceHours'>, now: Date = new Date()): { sinceMs: number; untilMs: number; day: string } {
+export function dreamWindow(options: Pick<DreamCommandOptions, 'date' | 'sinceHours' | 'until' | 'day'>, now: Date = new Date()): { sinceMs: number; untilMs: number; day: string } {
   if (options.date) {
     const m = DATE_RE.exec(options.date)!
     const start = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
@@ -150,7 +167,8 @@ export function dreamWindow(options: Pick<DreamCommandOptions, 'date' | 'sinceHo
     return { sinceMs: start.getTime(), untilMs: Math.min(end.getTime() - 1, now.getTime()), day: options.date }
   }
   const hours = options.sinceHours ?? 24
-  return { sinceMs: now.getTime() - hours * 3_600_000, untilMs: now.getTime(), day: localDay(now) }
+  const until = Math.min(options.until?.getTime() ?? now.getTime(), now.getTime())
+  return { sinceMs: until - hours * 3_600_000, untilMs: until, day: options.day ?? localDay(new Date(until)) }
 }
 
 /** Title, diary body and distilled notes of a composed dream's markdown. */

@@ -60,6 +60,16 @@ await test('dream window: a local day, or the last n hours', () => {
   assert.equal(last.day, '2026-10-10');
   assert.equal(last.untilMs - last.sinceMs, 24 * 3_600_000);
   assert.equal(dreamWindow({ sinceHours: 6 }, now).untilMs - dreamWindow({ sinceHours: 6 }, now).sinceMs, 6 * 3_600_000);
+  const slot = new Date(2026, 9, 10, 0, 30);
+  const caught = dreamWindow({ until: slot, day: '2026-10-09' }, now);
+  assert.deepEqual([caught.untilMs, caught.untilMs - caught.sinceMs, caught.day], [slot.getTime(), 24 * 3_600_000, '2026-10-09'], 'a host catching up names the window and the day');
+  assert.equal(dreamWindow({ until: new Date(2030, 0, 1) }, now).untilMs, now.getTime(), 'never past now');
+  const parsed = parseDreamArgs(['--until', '2026-10-10T16:30:00.000Z', '--day', '2026-10-10', '--since-hours', '24']);
+  assert.equal(parsed.until?.toISOString(), '2026-10-10T16:30:00.000Z');
+  assert.equal(parsed.day, '2026-10-10');
+  for (const bad of [['--until', 'tonight'], ['--day', '10/10'], ['--date', '2026-10-09', '--until', '2026-10-10T00:00:00Z']]) {
+    assert.throws(() => parseDreamArgs(bad), DreamArgsError, bad.join(' '));
+  }
 });
 
 await test('dream markdown: title and diary, without the header comment or the distilled notes', () => {
