@@ -2060,6 +2060,23 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `view_image ${truncate(action.path, 120)}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
+    case 'agent_mail_address':
+    case 'list_emails':
+    case 'wait_for_sms':
+      return action.type;
+    case 'wait_for_email':
+      return `wait_for_email${action.from_contains ? ` from=${truncate(action.from_contains, 60)}` : ''}`;
+    case 'read_email':
+    case 'extract_verification':
+      return `${action.type} ${truncate(action.id, 40)}`;
+    case 'begin_signup':
+      return `begin_signup ${truncate(action.site, 80)}`;
+    case 'finish_signup':
+      return `finish_signup ${truncate(action.signup_id, 40)} ${action.outcome}`;
+    case 'get_sms_number':
+      return `get_sms_number ${action.country}`;
+    case 'ask_owner_for_code':
+      return `ask_owner_for_code ${truncate(action.site, 80)}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
@@ -5021,6 +5038,12 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   mcp_call_tool: 30 * 60_000,
   synthesize_speech: 30 * 60_000,
   transcribe_audio: 30 * 60_000,
+  // Agent identity: waits for mail, SMS or the owner's answer (at most 10 minutes each).
+  wait_for_email: 12 * 60_000,
+  wait_for_sms: 12 * 60_000,
+  begin_signup: 12 * 60_000,
+  get_sms_number: 12 * 60_000,
+  ask_owner_for_code: 12 * 60_000,
 };
 
 /**
