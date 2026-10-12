@@ -16,7 +16,7 @@ import JSZip from 'jszip';
 import { executeReadDocument } from '../src/tools/readDocument.js';
 import { executeReadFile } from '../src/tools/readFile.js';
 import { executeOfficeDocument } from '../src/tools/officeDocuments.js';
-import { READ_DOCUMENT_LIMITS, docxXmlToText, drawingXmlToText, parsePageRange, describePages, documentFormatOf, convertLocally, pdfFromConverter, listSheetNames, MAX_LISTED_SHEETS } from '../src/tools/office/read.js';
+import { READ_DOCUMENT_LIMITS, docxXmlToText, drawingXmlToText, parsePageRange, describePages, documentFormatOf, convertLocally, pdfFromConverter, listSheetNames, MAX_LISTED_SHEETS, CappedZip, isSheetTextPart, readXlsxSheets } from '../src/tools/office/read.js';
 import { findSoffice, resetSofficeCache } from '../src/tools/office/pdf.js';
 import { ViewedImageQueue } from '../src/core/imageInput.js';
 import { getToolDefinition, validateToolAction } from '../src/tools/registry.js';
@@ -172,6 +172,29 @@ async function lyingZip(name: string, actual: number, declared: number, extra: R
   return Buffer.concat([...locals, cd, end]);
 }
 
+/** A ZIP of `n` empty stored entries (central directory and all), built without holding much more than the file. */
+function manyEntriesZip(n: number, prefix: string): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (let i = 0; i < n; i += 1) {
+    const name = Buffer.from(`${prefix}${i.toString(36)}`);
+    const local = Buffer.alloc(30 + name.length);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(name.length, 26); name.copy(local, 30);
+    const central = Buffer.alloc(46 + name.length);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42); name.copy(central, 46);
+    locals.push(local);
+    centrals.push(central);
+    offset += local.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Math.min(n, 0xffff), 8); end.writeUInt16LE(Math.min(n, 0xffff), 10);
+  end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+
 async function main(): Promise<void> {
   console.log('read_document');
 
@@ -252,7 +275,7 @@ async function main(): Promise<void> {
       path: 'book.xlsx',
       spec: {
         sheets: [
-          { name: '汇总', columns: [{ header: '项目' }, { header: '金额' }], rows: [['A', 10], ['B', 32], ['合计', '=SUM(B2:B3)']] },
+          { name: '汇总', columns: [{ header: '项目' }, { header: '金额' }], rows: [['A', 10], ['B', 32], ['合计', '=SUM(B2:B3)']], charts: [{ type: 'column', title: '金额', categories: 'A2:A3', series: [{ values: 'B2:B3' }] }] },
           { name: 'Long', columns: [{ header: 'name' }, { header: 'n' }], rows },
         ],
       },
@@ -314,6 +337,53 @@ async function main(): Promise<void> {
     const grew = (peak - base) / 1024 / 1024;
     assert.ok(grew < 200, `memory grew ${Math.round(grew)} MB`);
     console.log(`    a 600 MB part (declared 2 KB) in a ${Math.round(xlsx.length / 1024)} KB file: stopped, memory +${Math.round(grew)} MB`);
+  });
+
+  await test('a ZIP with 200,000 tiny entries is refused before it is parsed (fast, little memory)', async () => {
+    const xlsx = manyEntriesZip(200_000, 'xl/');
+    writeFileSync(path.join(workspace, 'entries.xlsx'), xlsx);
+    writeFileSync(path.join(workspace, 'entries.docx'), manyEntriesZip(200_000, 'w/'));
+    writeFileSync(path.join(workspace, 'entries.pptx'), manyEntriesZip(12_000, 'p/'));
+    const base = process.memoryUsage().rss;
+    let peak = base;
+    const sampler = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 5);
+    const started = Date.now();
+    try {
+      for (const file of ['entries.xlsx', 'entries.docx', 'entries.pptx']) {
+        const result = await read({ path: file });
+        assert.equal(result.ok, false, file);
+        assert.equal(result.error?.code, 'too_large', `${file}: ${result.output}`);
+        assert.match(result.output, /holds more than [\d,]+ parts/);
+      }
+    } finally {
+      clearInterval(sampler);
+    }
+    const took = Date.now() - started;
+    const grew = (peak - base) / 1024 / 1024;
+    assert.ok(took < 3_000, `${took} ms`);
+    assert.ok(grew < 150, `memory grew ${Math.round(grew)} MB`);
+    console.log(`    ${Math.round(xlsx.length / 1024 / 1024)} MB with 200,000 entries: refused in ${took} ms, memory +${Math.round(grew)} MB`);
+  });
+
+  await test('.xlsx: ExcelJS gets the sheet parts only (no pictures, drawings or comments), links and tables still read', async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('数据');
+    sheet.addRow(['名称', '链接']);
+    sheet.addRow(['甲', { text: '主页', hyperlink: 'https://example.com/' }]);
+    sheet.getCell('A2').note = '备注';
+    sheet.addTable({ name: 'T1', ref: 'D1', columns: [{ name: '列' }], rows: [[1], [2]] });
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    sheet.addImage(workbook.addImage({ buffer: png as unknown as ExcelJS.Buffer, extension: 'png' }), 'F1:G3');
+    sheet.addBackgroundImage(workbook.addImage({ buffer: png as unknown as ExcelJS.Buffer, extension: 'png' }));
+    const bytes = Buffer.from(await workbook.xlsx.writeBuffer());
+    const all = (await CappedZip.open(bytes)).names();
+    assert.ok(all.some((name) => name.startsWith('xl/media/')) && all.some((name) => name.startsWith('xl/drawings/')), all.join(' '));
+    assert.deepEqual(all.filter((name) => isSheetTextPart(name) && /media|drawing|comment/i.test(name)), []);
+    const read = await readXlsxSheets(bytes);
+    const rows = read.sheets[0]!.rows.map((row) => row.cells.join('|')).join('\n');
+    assert.match(rows, /甲/);
+    assert.match(rows, /主页/);
+    assert.match(rows, /列/);
   });
 
   await test('sheet names and titles outside the fence are one clamped line, at most a dozen names', async () => {
@@ -390,6 +460,8 @@ async function main(): Promise<void> {
     }
   });
 
+  // CI installs poppler-utils and sets this, so the PDF tests never skip there unnoticed.
+  if (!poppler && process.env.READ_DOCUMENT_REQUIRE_POPPLER === '1') throw new Error('poppler-utils is required (READ_DOCUMENT_REQUIRE_POPPLER=1) but not installed');
   if (!poppler) {
     skip('PDF text, scans and page images', 'poppler-utils (pdftotext, pdftoppm, pdfinfo) is not installed');
   } else {

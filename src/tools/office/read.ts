@@ -219,9 +219,64 @@ export interface ZipCaps {
   total: number;
   /** One part. */
   part: number;
+  /** Entries in the ZIP (counted in its central directory before anything is parsed). */
+  entries: number;
 }
 
-const DEFAULT_ZIP_CAPS: ZipCaps = { total: READ_DOCUMENT_LIMITS.maxInflatedBytes, part: READ_DOCUMENT_LIMITS.maxPartBytes };
+/** Entries a .docx or .pptx may hold (real ones have tens to a few hundred). */
+export const MAX_ZIP_ENTRIES = 10_000;
+/** Entries a spreadsheet may hold. */
+export const MAX_XLSX_ENTRIES = 4_000;
+
+const DEFAULT_ZIP_CAPS: ZipCaps = { total: READ_DOCUMENT_LIMITS.maxInflatedBytes, part: READ_DOCUMENT_LIMITS.maxPartBytes, entries: MAX_ZIP_ENTRIES };
+
+/**
+ * How many entries a ZIP's central directory holds, counted by walking the
+ * directory itself (the end record's count can lie), stopping past `cap`.
+ * Undefined when the directory cannot be found or walked (the ZIP reader
+ * then refuses the file).
+ */
+export function countZipEntries(bytes: Buffer, cap: number): number | undefined {
+  // The end of central directory record: within the last 64 KiB + 22 bytes.
+  const from = Math.max(0, bytes.length - 0xffff - 22);
+  let end = -1;
+  for (let i = bytes.length - 22; i >= from; i -= 1) {
+    if (bytes.readUInt32LE(i) === 0x06054b50) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) return undefined;
+  const declared = bytes.readUInt16LE(end + 10);
+  if (declared !== 0xffff && declared > cap) return declared;
+  // Where the central directory starts: where the record says, and where it
+  // ends up when bytes were added in front of the ZIP (as JSZip reads it).
+  const starts = [bytes.readUInt32LE(end + 16), end - bytes.readUInt32LE(end + 12)];
+  // ZIP64: the real count, offset and size are in the ZIP64 end record.
+  const locator = end - 20;
+  if (locator >= 0 && bytes.readUInt32LE(locator) === 0x07064b50) {
+    const record = Number(bytes.readBigUInt64LE(locator + 8));
+    if (Number.isSafeInteger(record) && record + 56 <= bytes.length && bytes.readUInt32LE(record) === 0x06064b50) {
+      const count64 = Number(bytes.readBigUInt64LE(record + 32));
+      if (count64 > cap) return count64;
+      starts.push(Number(bytes.readBigUInt64LE(record + 48)), locator - 56 - Number(bytes.readBigUInt64LE(record + 40)));
+    }
+  }
+  // The headers themselves are counted (the record may claim fewer).
+  let most = 0;
+  for (const start of new Set(starts)) {
+    if (!Number.isSafeInteger(start) || start < 0) continue;
+    let count = 0;
+    let at = start;
+    while (at + 46 <= bytes.length && bytes.readUInt32LE(at) === 0x02014b50) {
+      count += 1;
+      if (count > cap) return count;
+      at += 46 + bytes.readUInt16LE(at + 28) + bytes.readUInt16LE(at + 30) + bytes.readUInt16LE(at + 32);
+    }
+    most = Math.max(most, count);
+  }
+  return most;
+}
 
 /** A parser's or the platform's error, as one clamped line (it may quote the file). */
 export function errorLine(error: unknown, max = 160): string {
@@ -237,11 +292,19 @@ export class CappedZip {
   private constructor(private readonly zip: JSZip, private readonly caps: ZipCaps) {}
 
   static async open(bytes: Buffer, caps: ZipCaps = DEFAULT_ZIP_CAPS): Promise<CappedZip> {
+    // Too many entries is refused before the ZIP is parsed (each entry costs memory and time there).
+    const entries = countZipEntries(bytes, caps.entries);
+    if (entries !== undefined && entries > caps.entries) {
+      throw new DocumentReadError(`the document holds more than ${caps.entries.toLocaleString('en-US')} parts, which is more than can be read`, 'too_large');
+    }
     let zip: JSZip;
     try {
       zip = await JSZip.loadAsync(bytes, { checkCRC32: false });
     } catch (error) {
       throw new DocumentReadError(`the file is not a readable Office document (${errorLine(error)})`, 'unreadable');
+    }
+    if (Object.keys(zip.files).length > caps.entries) {
+      throw new DocumentReadError(`the document holds more than ${caps.entries.toLocaleString('en-US')} parts, which is more than can be read`, 'too_large');
     }
     // What the parts say they inflate to: refused up front when it is too much
     // (a part that lies is stopped while it inflates, see bytes()).
@@ -303,15 +366,16 @@ export class CappedZip {
   }
 
   /**
-   * The same document as a new ZIP made only of parts that inflated within
+   * A new ZIP made only of the parts `keep` accepts, each inflated within
    * the caps (stored, not compressed): what a parser that inflates on its
    * own (ExcelJS) gets, so it never inflates anything unchecked.
    */
-  async rebuild(): Promise<Buffer> {
+  async rebuild(keep: (name: string) => boolean, transform?: (name: string, data: Buffer) => Buffer): Promise<Buffer> {
     const out = new JSZip();
     for (const name of this.names()) {
+      if (!keep(name)) continue;
       const data = await this.bytes(name);
-      if (data) out.file(name, data);
+      if (data) out.file(name, transform ? transform(name, data) : data);
     }
     return out.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
   }
@@ -566,6 +630,66 @@ export interface SheetRead {
   nextRow?: number;
 }
 
+/** The parts of a spreadsheet ExcelJS reads cell values from. */
+export function isSheetTextPart(name: string): boolean {
+  return name === '[Content_Types].xml'
+    || name === '_rels/.rels'
+    || name === 'xl/workbook.xml'
+    || name === 'xl/_rels/workbook.xml.rels'
+    || name === 'xl/sharedStrings.xml'
+    || name === 'xl/styles.xml'
+    || /^xl\/theme\/theme\d+\.xml$/.test(name)
+    || /^xl\/worksheets\/sheet\d+\.xml$/.test(name)
+    || /^xl\/worksheets\/_rels\/sheet\d+\.xml\.rels$/.test(name)
+    || /^xl\/tables\/table\d+\.xml$/.test(name);
+}
+
+const SHEET_RELS_PART = /^xl\/worksheets\/_rels\/sheet\d+\.xml\.rels$/;
+const SHEET_PART = /^xl\/worksheets\/sheet\d+\.xml$/;
+
+/** A sheet relationship kept in the rebuilt workbook: links out of the file, and tables (whose parts are kept). */
+function keptSheetRelationship(tag: string): boolean {
+  return /\sTargetMode="External"/.test(tag) || /\sType="[^"]*\/table"/.test(tag);
+}
+
+/**
+ * Drops what points at parts left out of the rebuilt workbook (drawings,
+ * charts, pictures, comments, embedded objects): the relationships go, and so
+ * does every sheet element that names one of them, so ExcelJS never looks
+ * for a part that is not there.
+ */
+export function sheetPartsWithoutMedia(keptIds: Map<string, Set<string>>) {
+  return (name: string, data: Buffer): Buffer => {
+    if (SHEET_RELS_PART.test(name)) {
+      const xml = data.toString('utf8');
+      return Buffer.from(xml.replace(/<Relationship\b[^>]*?(?:\/>|>\s*<\/Relationship>)/g, (tag) => (keptSheetRelationship(tag) ? tag : '')), 'utf8');
+    }
+    if (SHEET_PART.test(name)) {
+      const kept = keptIds.get(name) ?? new Set<string>();
+      const xml = data.toString('utf8');
+      return Buffer.from(xml.replace(/<([A-Za-z][\w.-]*:)?([A-Za-z][\w.-]*)\b[^<>]*?\sr:id="([^"]*)"[^<>]*?\/>/g, (tag, _prefix, _local, id: string) => (kept.has(id) ? tag : '')), 'utf8');
+    }
+    return data;
+  };
+}
+
+/** The relationship ids each sheet keeps, read from its relationships part. */
+async function keptSheetRelationshipIds(zip: CappedZip): Promise<Map<string, Set<string>>> {
+  const kept = new Map<string, Set<string>>();
+  for (const name of zip.names()) {
+    const match = /^xl\/worksheets\/_rels\/(sheet\d+\.xml)\.rels$/.exec(name);
+    if (!match) continue;
+    const xml = (await zip.text(name)) ?? '';
+    const ids = new Set<string>();
+    for (const tag of xml.match(/<Relationship\b[^>]*>/g) ?? []) {
+      const id = /\sId="([^"]*)"/.exec(tag)?.[1];
+      if (id && keptSheetRelationship(tag)) ids.add(id);
+    }
+    kept.set(`xl/worksheets/${match[1]}`, ids);
+  }
+  return kept;
+}
+
 /**
  * Rows of the sheets (or of one sheet: its name or 1-based number), from
  * `fromRow`, until READ_DOCUMENT_LIMITS.maxSheetRows rows were read.
@@ -574,8 +698,9 @@ export async function readXlsxSheets(bytes: Buffer, options: { sheet?: string; r
   // Every part is inflated here under the spreadsheet caps (counted as it
   // inflates, whatever the file declares); ExcelJS gets a ZIP rebuilt from
   // those parts only, so it never inflates anything itself.
-  const zip = await CappedZip.open(bytes, { total: READ_DOCUMENT_LIMITS.maxXlsxInflatedBytes, part: READ_DOCUMENT_LIMITS.maxXlsxPartBytes });
-  const checked = await zip.rebuild();
+  const zip = await CappedZip.open(bytes, { total: READ_DOCUMENT_LIMITS.maxXlsxInflatedBytes, part: READ_DOCUMENT_LIMITS.maxXlsxPartBytes, entries: MAX_XLSX_ENTRIES });
+  // Only the parts the cell values come from (no media, drawings, charts or embedded files).
+  const checked = await zip.rebuild(isSheetTextPart, sheetPartsWithoutMedia(await keptSheetRelationshipIds(zip)));
   const workbook = new ExcelJS.Workbook();
   try {
     await workbook.xlsx.load(checked as unknown as ArrayBuffer);
