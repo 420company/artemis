@@ -3078,6 +3078,7 @@ async function configureMockImageProfile(cwd: string): Promise<void> {
 // blocks below.
 const WEB_MAIN_ADDED_TOOLS = [
   'search_web',
+  'place_call',
   'generate_image',
   'generate_video',
   'generate_long_video',
@@ -3123,6 +3124,7 @@ const WEB_MAIN_EXCLUDED_TOOLS = [
 function sampleWebToolAction(type: string): AgentAction {
   const args: Record<string, Record<string, unknown>> = {
     search_web: { query: 'artemis' },
+    place_call: { to: '+86 138 0013 8000', goal: 'Ask the opening hours' },
     generate_image: { prompt: 'a red fox' },
     generate_video: { prompt: 'a red fox running' },
     generate_long_video: { prompt: 'a red fox journey' },
