@@ -100,7 +100,7 @@ category 可选值：preference | feedback | project | reference | skill | archi
 ${transcript.slice(-24000)}
 \`\`\``
 
-    const rawExtraction = await summarizeOnce(prompt)
+    const rawExtraction = await summarizeOnce(prompt, 'flush_memories')
     const match = rawExtraction.match(/\[\s*(?:\{[\s\S]*\}\s*)?\]/m)
     if (!match) return
 

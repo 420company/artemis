@@ -114,6 +114,16 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
+  // A headless dream (a host's nightly job) never reaches the first-run,
+  // trust or setup dialogs below: it runs once and exits.
+  if (options.command === 'dream') {
+    const { runDreamCommand } = await import('./dreamCommand.js')
+    const { exitCode } = await runDreamCommand({ cwd: options.cwd, locale, args: options.promptArgs ?? [] })
+    // Exit once the result line is flushed: provider clients may keep timers alive.
+    await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
+    process.exit(exitCode)
+  }
+
   // The interactive CLI must NEVER try to kill the background gateway daemon
   // to take over bridges. Doing so triggers a mutual-kill loop:
   //   CLI kills daemon → launchd restarts daemon → daemon kills CLI → "zsh: terminated"

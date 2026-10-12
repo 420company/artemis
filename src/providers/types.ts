@@ -200,6 +200,13 @@ export type CustomProviderConfig = {
   contextLengthCheckedAt?: string;
 };
 
+/**
+ * Helper tasks a store can route to their own model (see
+ * providers/auxiliaryModels.ts). Read today: `vision` (vision helper),
+ * `compression` (context compaction and one-shot summaries), `web_extract`
+ * (local deep research) and `flush_memories` (memory extraction). The other
+ * names are accepted and kept but have no model call of their own yet.
+ */
 export type AuxiliaryModelTask =
   | 'vision'
   | 'compression'
