@@ -1,4 +1,4 @@
-import { readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js';
@@ -707,7 +707,10 @@ export class McpServerStore {
     // never leaves a partial / corrupt JSON file.
     const tmp = `${this.filePath}.tmp`;
     try {
-      await writeFile(tmp, JSON.stringify(normalized, null, 2), 'utf8');
+      // 0600: entries may carry bearer tokens (audit §5.1); only the owner reads them.
+      await writeFile(tmp, JSON.stringify(normalized, null, 2), { encoding: 'utf8', mode: 0o600 });
+      // writeFile's mode applies only to a new file: a stale tmp (older engine, crash) keeps its own.
+      await chmod(tmp, 0o600);
       await rename(tmp, this.filePath);
       const info = await stat(this.filePath);
       McpServerStore.cache.set(this.filePath, {
