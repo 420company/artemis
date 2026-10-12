@@ -129,16 +129,47 @@ export interface ApprovalPolicy {
    */
   floors?: Record<string, ApprovalMode>
   /**
-   * The host's word that its connectors broker approves every write of a
-   * connected service itself (servers named `conn_<connection>`): those
-   * tools then run without a second request here, unless the owner set a
-   * mode for that service or tool. Only the host's copy can say so.
+   * The connected services the host's connectors broker serves, by MCP
+   * server id (`conn_<connection>`) → the broker's exact URL. The broker
+   * asks the owner before every write on its own card, so a tool of such a
+   * server runs without a second request here, but only when the live MCP
+   * config still points that server at that URL (the config is the agent's
+   * to write: a name alone proves nothing). Only the host's copy sets it.
    */
-  connectorsGated?: boolean
+  connectorServers?: Record<string, string>
 }
 
-/** MCP servers the host's connectors broker serves (`conn_<connection>`). */
-export const CONNECTOR_SERVER = /^conn_[A-Za-z0-9_.-]+$/
+/** MCP server ids the host's connectors broker uses (`conn_<connection>`). */
+export const CONNECTOR_SERVER = /^conn_[A-Za-z0-9_.-]{1,120}$/
+const MAX_CONNECTOR_SERVERS = 200
+
+/** The same URL, written either way (case of scheme and host, default port, trailing slash). */
+export function sameUrl(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false
+  try {
+    const left = new URL(a)
+    const right = new URL(b)
+    if (!/^https?:$/.test(left.protocol) || left.username || left.password || right.username || right.password) return false
+    const norm = (u: URL) => `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, '')}${u.search}`
+    return norm(left) === norm(right)
+  } catch {
+    return false
+  }
+}
+
+function connectorServersOf(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [id, url] of Object.entries(raw as Record<string, unknown>).slice(0, MAX_CONNECTOR_SERVERS)) {
+    if (!CONNECTOR_SERVER.test(id) || typeof url !== 'string') continue
+    try {
+      if (/^https?:$/.test(new URL(url).protocol)) out[id] = url
+    } catch {
+      // Not a URL: ignored.
+    }
+  }
+  return Object.keys(out).length ? out : undefined
+}
 
 function isMode(value: unknown): value is ApprovalMode {
   return value === 'ask' || value === 'allow' || value === 'deny'
@@ -148,7 +179,7 @@ export function isApprovalKind(value: unknown): value is ApprovalKind {
   return typeof value === 'string' && (APPROVAL_KINDS as readonly string[]).includes(value)
 }
 
-type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown; connectorsGated: unknown }>
+type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown; connectorServers: unknown }>
 
 function readPolicyFile(file: string): PolicyData | undefined {
   try {
@@ -204,8 +235,8 @@ export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process
     }
     ttlMs = ttlOf(host) ?? ttlMs
   }
-  // Only from the host's copy: a policy file the agent can write never turns a gate off.
-  const connectorsGated = host?.connectorsGated === true
+  // Only from the host's copy: a policy file the agent can write never names a broker.
+  const connectorServers = connectorServersOf(host?.connectorServers)
   const files = [...new Set([path.join(resolveArtemisHomeDir(), APPROVAL_POLICY_FILE), path.join(resolveDataRootDir(cwd), APPROVAL_POLICY_FILE)])]
   for (const data of files.map((file) => readPolicyFile(file))) {
     if (!data) continue
@@ -218,17 +249,34 @@ export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process
     const fileTtl = ttlOf(data)
     if (fileTtl !== undefined) ttlMs = Math.min(ttlMs, fileTtl)
   }
-  return { modes, ttlMs, tools, floors, ...(connectorsGated ? { connectorsGated } : {}) }
+  return { modes, ttlMs, tools, floors, ...(connectorServers ? { connectorServers } : {}) }
 }
 
-/** The mode for an external tool: its own entry, then its service's, then the kind's. */
-export function modeFor(policy: ApprovalPolicy, kind: ApprovalKind, toolKey?: string): ApprovalMode {
+/** The URL the live MCP config gives a server (undefined for none, stdio, or an unreadable config). */
+export async function liveMcpServerUrl(cwd: string, serverId: string): Promise<string | undefined> {
+  try {
+    const { McpServerStore } = await import('../mcp/store.js')
+    const data = await new McpServerStore(cwd).load()
+    const server = data.servers.find((entry) => entry.id === serverId)
+    return server && server.transport !== 'stdio' ? server.url : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The mode for an external tool: its own entry, then its service's, then
+ * (for a connected service the host's broker serves, at the URL the live
+ * config gives it: `live.serverUrl`) allow, then the kind's.
+ */
+export function modeFor(policy: ApprovalPolicy, kind: ApprovalKind, toolKey?: string, live: { serverUrl?: string | undefined } = {}): ApprovalMode {
   if (kind === 'confirmation') return 'ask'
   if (!toolKey) return policy.modes[kind]
   const service = `${toolKey.split('/')[0]}/*`
   const serverId = toolKey.split('/')[0]!
   // A connected service's writes are approved by the host's connectors broker on its own card.
-  const gated = policy.connectorsGated === true && CONNECTOR_SERVER.test(serverId) ? 'allow' : undefined
+  const broker = Object.prototype.hasOwnProperty.call(policy.connectorServers ?? {}, serverId) ? policy.connectorServers![serverId] : undefined
+  const gated = broker !== undefined && sameUrl(broker, live.serverUrl) ? 'allow' : undefined
   const base = policy.tools[toolKey] ?? policy.tools[service] ?? gated ?? policy.modes[kind]
   const floor = tighter(policy.floors?.[toolKey] ?? 'allow', policy.floors?.[service] ?? 'allow')
   return tighter(base, floor)
@@ -798,7 +846,12 @@ export class ApprovalRuntime {
   /** Applies the policy to one need of one action. */
   async check(found: ApprovalNeed, action: AgentAction, payloadDigest?: string): Promise<GateResult> {
     const { locale } = this.options
-    const mode = modeFor(this.options.policy, found.kind, found.toolKey)
+    // A broker-served connected service: its URL as the live MCP config has it now.
+    const serverUrl =
+      action.type === 'mcp_call_tool' && this.options.policy.connectorServers?.[action.serverId] !== undefined
+        ? await liveMcpServerUrl(this.options.cwd, action.serverId)
+        : undefined
+    const mode = modeFor(this.options.policy, found.kind, found.toolKey, { serverUrl })
     const { title } = describeApprovalNeed(found, locale)
     if (mode === 'deny') {
       const message = t(

@@ -38,13 +38,17 @@ limited by its payments service, its publish requests wait for the owner in
 its app, so the owner is not asked twice.
 
 **Connected services.** A host whose connectors broker asks the owner
-before every write of a connected service (MCP servers named
-`conn_<connection>`) says so in its copy of the policy
-(`"connectorsGated": true`); those tools then run without a second request
-here, unless the owner set a mode for that service or tool, or a policy file
-forbids it. Only the host's copy can say this. *Follow-up:* the broker's
-cards and these cards are still two systems; they should become one (the
-broker raising its writes through `requireApproval`, one card per action).
+before every write of a connected service names the broker's servers in its
+copy of the policy: `"connectorServers": {"conn_<connection>": "<broker URL>"}`.
+A tool of such a server runs without a second request here only when the
+live MCP config (`mcp-servers.json`, which the agent can write) still points
+that server id at exactly that URL; a `conn_…` server the host did not name,
+or a named one whose URL was changed, asks like any other external tool. The
+owner can still set a mode for the service or tool, and a policy file can
+still forbid it; only the host's copy can name brokers. *Follow-up:* the
+broker's cards and these cards are still two systems; they should become one
+(the broker raising its writes through `requireApproval`, one card per
+action).
 
 **What counts as read-only.** For an external tool, only the server's own
 description (its `readOnlyHint`, kept in the tool list) says it is read-only.

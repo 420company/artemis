@@ -42,6 +42,7 @@ import {
   hostApprovalKey,
   loadApprovalPolicy,
   modeFor,
+  sameUrl,
   publicApproval,
   registerApprovalRule,
   requestMessageOf,
@@ -674,21 +675,45 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
 // ── Connected services: the host's connectors broker asks on its own card ───
 {
   const dir = workspace('connectors')
-  const send = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'conn_gmail', toolName: 'send_email', args: { to: 'a@x.example' } })!
-  const write = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'conn_github', toolName: 'create_issue' })!
-  const gated = loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorsGated: true }) })
-  assert('connectors: the host can say its broker gates connected services', gated.connectorsGated === true)
-  assert('connectors: a connected service\'s send is not asked twice', modeFor(gated, send.kind, send.toolKey) === 'allow')
-  assert('connectors: nor any other write of a connected service', modeFor(gated, write.kind, write.toolKey) === 'allow')
-  assert('connectors: other servers still ask', modeFor(gated, send.kind, 'mail/send_email') === 'ask')
-  assert('connectors: without the host\'s word, connected services ask', modeFor(loadApprovalPolicy(dir, {}), send.kind, send.toolKey) === 'ask')
-  writePolicy(dir, { connectorsGated: true })
-  assert('connectors: a policy file the agent can write cannot turn the gate off', loadApprovalPolicy(dir, {}).connectorsGated === undefined)
+  const BROKER = 'http://127.0.0.1:8787/connectors/mcp/gmail-1'
+  const GITHUB = 'http://127.0.0.1:8787/connectors/mcp/github-1'
+  // The live MCP config, as the host registered it (the agent can write this file).
+  const writeServers = (servers: { id: string; url: string }[]) => {
+    const file = path.join(resolveDataRootDir(dir), 'mcp-servers.json')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ servers: servers.map((s) => ({ ...s, enabled: true, transport: 'streamable-http', authType: 'bearer', bearerToken: 'tok' })) }))
+  }
+  writeServers([{ id: 'conn_gmail', url: BROKER }, { id: 'conn_github', url: GITHUB }, { id: 'conn_evil', url: 'https://evil.example/mcp' }])
+  const hostPolicy = (extra: Record<string, unknown> = {}) =>
+    loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorServers: { conn_gmail: BROKER, conn_github: GITHUB }, ...extra }) })
+  const gated = hostPolicy()
+  assert('connectors: the host names its broker\'s servers and their URLs', gated.connectorServers?.conn_gmail === BROKER && gated.connectorServers?.conn_github === GITHUB)
+  const call = (serverId: string, toolName: string) => ({ type: 'mcp_call_tool' as const, serverId, toolName, args: { to: 'a@x.example' } })
+  const gate = async (policy: ReturnType<typeof loadApprovalPolicy>, serverId: string, toolName = 'send_email') => {
+    const runtime = new ApprovalRuntime({ cwd: dir, locale: 'en', policy })
+    return runtime.checkAction(call(serverId, toolName))
+  }
+  assert('connectors: a real connected service\'s send is not asked twice', (await gate(gated, 'conn_gmail')).ok)
+  assert('connectors: nor another write of a real connected service', (await gate(gated, 'conn_github', 'create_issue')).ok)
+  assert('connectors: a conn_ server the host did not name (one the agent added) still asks', !(await gate(gated, 'conn_evil')).ok)
+  assert('connectors: other servers still ask', !(await gate(gated, 'mail')).ok)
+  writeServers([{ id: 'conn_gmail', url: 'https://evil.example/mcp' }, { id: 'conn_github', url: GITHUB }])
+  assert('connectors: a real connector whose URL was changed in the MCP config still asks', !(await gate(gated, 'conn_gmail')).ok)
+  writeServers([{ id: 'conn_github', url: GITHUB }])
+  assert('connectors: a named connector missing from the MCP config asks', !(await gate(gated, 'conn_gmail')).ok)
+  writeServers([{ id: 'conn_gmail', url: `${BROKER}/` }, { id: 'conn_github', url: GITHUB }])
+  assert('connectors: the same URL written with a trailing slash is the same broker', (await gate(gated, 'conn_gmail')).ok)
+  const send = classifyMcpCall(call('conn_gmail', 'send_email'))!
+  assert('connectors: modeFor needs the live URL to match', modeFor(gated, send.kind, send.toolKey, { serverUrl: BROKER }) === 'allow' && modeFor(gated, send.kind, send.toolKey) === 'ask' && modeFor(gated, send.kind, send.toolKey, { serverUrl: 'http://127.0.0.1:8788/connectors/mcp/gmail-1' }) === 'ask')
+  assert('connectors: sameUrl refuses credentials and other schemes', !sameUrl('http://u:p@127.0.0.1/x', 'http://127.0.0.1/x') && !sameUrl('file:///x', 'file:///x'))
+  assert('connectors: without the host\'s list, connected services ask', !(await gate(loadApprovalPolicy(dir, {}), 'conn_gmail')).ok)
+  writePolicy(dir, { connectorServers: { conn_evil: 'https://evil.example/mcp' } })
+  assert('connectors: a policy file the agent can write cannot name a broker', loadApprovalPolicy(dir, {}).connectorServers === undefined && hostPolicy().connectorServers?.conn_evil === undefined)
   writePolicy(dir, { tools: { 'conn_gmail/*': 'deny' } })
-  assert('connectors: a file can still forbid a connected service', modeFor(loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorsGated: true }) }), send.kind, send.toolKey) === 'deny')
+  assert('connectors: a file can still forbid a connected service', modeFor(hostPolicy(), send.kind, send.toolKey, { serverUrl: BROKER }) === 'deny')
   fs.rmSync(path.join(resolveDataRootDir(dir), 'approvals.json'), { force: true })
-  const owner = loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorsGated: true, tools: { 'conn_gmail/*': 'ask' } }) })
-  assert('connectors: the owner can still make a connected service ask here', modeFor(owner, send.kind, send.toolKey) === 'ask')
+  assert('connectors: the owner can still make a connected service ask here', modeFor(hostPolicy({ tools: { 'conn_gmail/*': 'ask' } }), send.kind, send.toolKey, { serverUrl: BROKER }) === 'ask')
+  assert('connectors: a malformed list is ignored', loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorServers: { 'not-conn': BROKER, conn_x: 'javascript:alert(1)', conn_y: 5 } }) }).connectorServers === undefined)
 }
 
 // ── Office files and speech: inside the workspace nothing asks ─────────────
