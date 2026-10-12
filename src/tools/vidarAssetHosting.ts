@@ -241,12 +241,14 @@ export function platformAssetHostingFromStore(data: Partial<ProviderStoreData> |
     }
   };
   const isKey = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
-  // The platform is the gateway the platform-managed main profile talks to (https only):
-  // its key goes nowhere else.
+  // The platform is the gateway the platform-managed profile talks to (https only): its key
+  // goes nowhere else. The main profile when the platform manages it, else any profile it
+  // manages (an owner's own main model, through a local proxy say, keeps hosting).
   const profiles = Array.isArray(data.profiles) ? data.profiles : [];
-  const main = profiles.find((p) => p?.id === (data.defaultMainProfileId ?? 'executor'));
-  const managed = !!main && (main.capabilitiesSource === 'platform' || main.managedBy === 'platform');
-  const platformOrigin = managed ? httpsOrigin(main?.baseUrl) : undefined;
+  const managedBy = (p: (typeof profiles)[number] | undefined) => !!p && (p.capabilitiesSource === 'platform' || p.managedBy === 'platform');
+  const mainProfile = profiles.find((p) => p?.id === (data.defaultMainProfileId ?? 'executor'));
+  const main = managedBy(mainProfile) ? mainProfile : profiles.find((p) => managedBy(p) && httpsOrigin(p.baseUrl));
+  const platformOrigin = main ? httpsOrigin(main.baseUrl) : undefined;
   if (!platformOrigin) return undefined;
   if (hosting?.provider === 'platform' && hosting.baseUrl !== undefined) {
     if (httpsOrigin(hosting.baseUrl) !== platformOrigin || !isKey(hosting.apiKey)) return undefined;
@@ -255,6 +257,23 @@ export function platformAssetHostingFromStore(data: Partial<ProviderStoreData> |
   if (!isKey(main?.apiKey)) return undefined;
   return { baseUrl: main!.baseUrl.trim(), apiKey: main!.apiKey.trim() };
 }
+
+/** The platform said it does not host references now (`assetHosting: {provider: "platform", enabled: false}`). */
+export function platformAssetHostingOff(data: Partial<ProviderStoreData> | undefined): boolean {
+  const hosting = data?.visualProfile?.assetHosting;
+  return !!hosting && hosting.provider === 'platform' && !hosting.enabled;
+}
+
+async function platformHostingSaysOff(): Promise<boolean> {
+  try {
+    const { createGlobalProviderStore } = await import('../providers/store.js');
+    return platformAssetHostingOff(await createGlobalProviderStore().load());
+  } catch {
+    return false;
+  }
+}
+
+const PLATFORM_HOSTING_OFF = 'Video generation: this platform does not host reference videos or audio right now. Use a public https URL for the reference instead.';
 
 export async function resolvePlatformAssetHosting(): Promise<PlatformAssetHosting | undefined> {
   try {
@@ -289,7 +308,7 @@ export async function uploadViaPlatform(
   if (!presign.ok) {
     const code = typeof answer.error?.code === 'string' ? answer.error.code : `HTTP ${presign.status}`;
     if (presign.status === 404 || code === 'asset_hosting_unavailable') {
-      throw new Error('Video generation: this platform does not host reference videos or audio yet. Use a public https URL for the reference instead.');
+      throw new Error(PLATFORM_HOSTING_OFF);
     }
     if (code === 'asset_too_large') throw new Error(`Video generation: the reference file is too large to upload (${Math.round(file.body.length / 1024 / 1024)} MB).`);
     if (code === 'asset_budget_exhausted') throw new Error('Video generation: today\'s reference uploads are used up. Use a public https URL for the reference, or try again tomorrow.');
@@ -315,8 +334,9 @@ export async function uploadViaPlatform(
     throw new Error(`Video generation: reference upload failed (${error instanceof Error ? error.message : String(error)}).`);
   }
   if (!res.ok) {
-    const raw = await res.text().catch(() => '');
-    throw new Error(`Video generation: reference upload failed (HTTP ${res.status}): ${raw.slice(0, 300)}`);
+    // The store's own error body says nothing the model should relay.
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`Video generation: the reference upload did not go through (HTTP ${res.status}). Try again, or use a public https URL for the reference.`);
   }
   return answer.publicUrl;
 }
@@ -332,7 +352,7 @@ export async function uploadLocalReferenceAssets(
   // An own bucket (env or store) first; else the hosted platform's signed uploads.
   const config = await resolveVidarAssetHostingConfig(context.cwd);
   const platform = config ? undefined : await resolvePlatformAssetHosting();
-  if (!config && !platform) throw requiredConfigError();
+  if (!config && !platform) throw (await platformHostingSaysOff()) ? new Error(PLATFORM_HOSTING_OFF) : requiredConfigError();
   const maxUploadBytes = config?.maxUploadBytes ?? DEFAULT_MAX_REFERENCE_UPLOAD_BYTES;
 
   const urls: string[] = [];

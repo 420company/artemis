@@ -186,7 +186,7 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   ]
   // The researcher: a read (allowed) and a write (blocked by its profile).
   // Internal names and a model id in the helper's own words: none may reach the stream.
-  const LEAKY = 'Saga 和 Nidhogg、Mnemosyne、Bragi、Freya、Heimdall、Bifrost、Director、Critic、Constitution、gateway、niko、athena、contest、Seedance、ModelArk、Hyperframes 都提到了 doubao-seedance-1-0-pro 和 generate_long_video。'
+  const LEAKY = 'Saga 和 Nidhogg、Mnemosyne、Bragi、Heimdall、Bifrost、Director agent、[niko:reviewer]、Seedance、ModelArk、Hyperframes 都提到了 doubao-seedance-1-0-pro、claude-x、OpenAI 和 generate_long_video。'
   const childScript: Array<{ reply: string; actions?: AgentAction[] }> = [
     { reply: LEAKY, actions: [{ type: 'list_files', pattern: '*.md' } as AgentAction, { type: 'write_file', path: 'x.md', content: 'no' } as AgentAction] },
     { reply: LEAKY },
@@ -235,12 +235,18 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   assert('todo: kept on the conversation\'s task board', session.tasks?.length === 2 && session.tasks.every((t) => t.status === 'completed'))
   assert('stream: the sub-agent starts and ends', c.events.some((e) => e.type === 'subagent_start' && (e.agent as { role: string }).role === 'researcher' && typeof e.task === 'string') && c.events.some((e) => e.type === 'subagent_end' && e.ok === true))
   assert('stream: usage per model call', c.events.filter((e) => e.type === 'usage').length >= 4 && c.events.every((e) => e.type !== 'usage' || e.inputTokens === 100))
+  const { hasInternalProgressName, scrubInternalNamesStrict } = await import('../src/utils/internalNames.js')
+  const { detailText } = await import('../src/core/progressEvents.js')
   const shown = c.events.map((e) => [e.label, e.detail, e.task, e.summary, e.text, ...(Array.isArray(e.items) ? (e.items as Array<{ content: string }>).map((i) => i.content) : [])].filter((v) => typeof v === 'string').join(' ')).join(' ')
-  assert('stream: nothing shown names an internal system or a model (the helper wrote them all)', findInternalNames(shown).length === 0 && !/doubao|seedance/i.test(shown), JSON.stringify(findInternalNames(shown)))
+  assert('stream: nothing shown names an internal system or a model (the helper wrote them all)', !hasInternalProgressName(shown) && !/doubao|seedance|nidhogg|heimdall|openai|claude/i.test(shown), shown.slice(0, 400))
   assert('stream: the helper\'s summary comes with its end', c.events.some((e) => e.type === 'subagent_end' && typeof e.summary === 'string' && (e.summary as string).length > 0))
-  const { INTERNAL_NAME_PATTERNS, scrubInternalNamesStrict } = await import('../src/utils/internalNames.js')
-  assert('names: every internal name has a rewrite in the strict scrubber', INTERNAL_NAME_PATTERNS.every((p) => !!(p.scrub || p.strict)))
-  assert('names: the strict scrubber leaves none, paths included', findInternalNames(scrubInternalNamesStrict(`${LEAKY} src/tools/visual/sagaWorkflow.ts [Workflow: x]`)).length === 0)
+  const MUST = ['Saga 长视频', 'sagaWorkflow 模块', 'saga-render step', 'Nidhogg round', 'Mnemosyne', 'Bragi bridge', 'Heimdall log', 'Bifrost', 'Director agent', 'critic pass', '[niko:reviewer] ok', '[Workflow: saga]', 'Seedance', 'byteplus/seedream-5-0', 'doubao-seedance-1-0-pro', 'claude-x', 'gpt-4o', 'deepseek-v3', 'qwen-max', 'wan2.1', 'gemini-pro', 'OpenAI', 'Anthropic', 'volcengine', 'generate_long_video']
+  for (const text of MUST) assert(`names: "${text}" is rewritten`, !hasInternalProgressName(scrubInternalNamesStrict(text)) && scrubInternalNamesStrict(text) !== text, scrubInternalNamesStrict(text))
+  const KEEP = ['cd gateway', 'email the director about the contest results', 'US Constitution', 'Stripe payment gateway', 'AWS Athena', 'Carl Sagan', 'sagacious', 'src/sagaWorkflow.ts', 'Freya Allan', 'Niko Rosberg']
+  for (const text of KEEP) assert(`names: "${text}" stays as it is`, scrubInternalNamesStrict(text) === text, scrubInternalNamesStrict(text))
+  assert('names: Chinese text gets Chinese words', scrubInternalNamesStrict('用 Saga 和 doubao-seedance 做') === '用 长视频 和 视频模型 做', scrubInternalNamesStrict('用 Saga 和 doubao-seedance 做'))
+  assert('detail: a path or command naming an internal system is left out, never rewritten', detailText('src/sagaWorkflow.ts') === undefined && detailText('cat heimdall.log') === undefined && detailText('cd gateway') === 'cd gateway')
+
 }
 
 // ── A long video reports its segments, n of N ─────────────────────────────
@@ -282,6 +288,17 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   assert('hosting: the public URL comes back', url === 'https://assets.example/acct/audio/x.mp3')
   const presign = calls[0]!
   assert('hosting: asks the gateway with the platform key, stating size and type', presign.url === 'https://gw.example/v1/assets/presign' && presign.headers.authorization === 'Bearer ak-owner' && JSON.parse(String(presign.body)).bytes === 4)
+  let putFailed = ''
+  try {
+    await uploadViaPlatform({ baseUrl: 'https://gw.example/v1', apiKey: 'k' }, { body: Buffer.from('a'), contentType: 'audio/mpeg', kind: 'audio', name: 'a.mp3' }, (async (u: string) => (u.endsWith('/assets/presign') ? new Response(JSON.stringify({ uploadUrl: 'https://store.example/x', publicUrl: 'https://assets.example/x' }), { status: 200 }) : new Response('<Error><Code>SignatureDoesNotMatch</Code><BucketName>secret-bucket</BucketName></Error>', { status: 403 }))) as unknown as typeof fetch)
+  } catch (error) {
+    putFailed = (error as Error).message
+  }
+  assert('hosting: a failed upload says so plainly, without the store\'s own error', /HTTP 403/.test(putFailed) && !/secret-bucket|SignatureDoesNotMatch/.test(putFailed), putFailed)
+  const { platformAssetHostingOff } = await import('../src/tools/vidarAssetHosting.js')
+  assert('hosting: the platform turning it off is known as such', platformAssetHostingOff({ visualProfile: { assetHosting: { enabled: false, provider: 'platform' } } } as never) && !platformAssetHostingOff({} as never))
+  const byoMain = { defaultMainProfileId: 'mine', profiles: [{ id: 'mine', baseUrl: 'http://127.0.0.1:8080/v1', apiKey: 'own' }, { id: 'executor', managedBy: 'platform', baseUrl: 'https://gw.example/v1', apiKey: 'ak-owner' }] } as never
+  assert('hosting: an owner\'s own main model (a local proxy) keeps platform hosting, with the platform\'s key', JSON.stringify(platformAssetHostingFromStore(byoMain)) === JSON.stringify({ baseUrl: 'https://gw.example/v1', apiKey: 'ak-owner' }))
   const put = calls[1]!
   assert('hosting: the upload carries no key of ours, only the signed headers', put.method === 'PUT' && !Object.keys(put.headers).some((k) => /authorization/i.test(k)) && put.headers['content-type'] === 'audio/mpeg')
   let refused = ''

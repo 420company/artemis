@@ -35,7 +35,7 @@
  * fields may be added within version 1; a breaking change bumps `v`.
  */
 
-import { describeToolForUser, scrubInternalNamesStrict } from '../utils/internalNames.js';
+import { describeToolForUser, hasInternalProgressName, scrubInternalNamesStrict } from '../utils/internalNames.js';
 import type { AgentRef, ProgressEvent } from '../core/progressEvents.js';
 
 export const STREAM_JSON_VERSION = 1;
@@ -57,6 +57,8 @@ export function redirectedStdout(chunk: unknown): string {
 
 /** Progress text, scrubbed once more on its way out (it is already, at its source). */
 const clean = (text: unknown): string | undefined => (typeof text === 'string' && text ? scrubInternalNamesStrict(text) : undefined);
+/** A step's detail (a path, a command): never rewritten, left out when it names an internal system. */
+const detail = (text: unknown): string | undefined => (typeof text === 'string' && text && !hasInternalProgressName(text) ? text : undefined);
 
 type Json = Record<string, unknown>;
 
@@ -161,7 +163,7 @@ export class StreamJsonWriter {
           callId: event.callId,
           tool: event.tool,
           label: describeToolForUser(event.tool, this.locale),
-          ...(clean(event.detail) ? { detail: clean(event.detail) } : {}),
+          ...(detail(event.detail) ? { detail: detail(event.detail) } : {}),
           ...by,
         });
         return;

@@ -26,18 +26,11 @@ export type InternalNamePattern = {
   name: string;
   re: RegExp;
   scrub?: { re: RegExp; to: string };
-  /**
-   * For names without `scrub` (also ordinary words or titles): how the
-   * strict scrubber (scrubInternalNamesStrict) rewrites them. Only for text
-   * Artemis shows as progress (step details, plans, helper summaries), where
-   * a false hit costs a word and a leak costs more.
-   */
-  strict?: { re: RegExp; to: string };
 };
 
 /** Internal names, case-insensitive; word-bounded where the name is also an English word. */
 export const INTERNAL_NAME_PATTERNS: ReadonlyArray<InternalNamePattern> = [
-  { name: 'Saga', re: /saga/i, strict: { re: /[\w-]*saga[\w-]*/gi, to: 'long video' } },
+  { name: 'Saga', re: /saga/i },
   {
     name: 'Super Visual',
     re: /super[\s_-]?visual|超级视觉/i,
@@ -48,20 +41,20 @@ export const INTERNAL_NAME_PATTERNS: ReadonlyArray<InternalNamePattern> = [
   { name: 'Dreamina', re: /dreamina/i, scrub: { re: /[\w.-]*dreamina[\w.-]*/gi, to: 'video model' } },
   { name: 'BytePlus', re: /byte[\s-]?plus|bytepluses/i, scrub: { re: /\bbyte[\s-]?plus(?:es)?\b/gi, to: 'provider' } },
   { name: 'ModelArk', re: /model[\s-]?ark/i, scrub: { re: /\bmodel[\s-]?ark\b/gi, to: 'provider' } },
-  { name: 'Nidhogg', re: /nidhogg/i, strict: { re: /[\w-]*nidhogg[\w-]*/gi, to: 'review' } },
-  { name: 'Mnemosyne', re: /mnemosyne/i, strict: { re: /[\w-]*mnemosyne[\w-]*/gi, to: 'memory' } },
-  { name: 'Bragi', re: /bragi/i, strict: { re: /[\w-]*bragi[\w-]*/gi, to: 'chat bridge' } },
-  { name: 'Freya', re: /\bfreya\b/i, strict: { re: /\bfreya\b/gi, to: 'assistant' } },
-  { name: 'Heimdall', re: /heimdall/i, strict: { re: /[\w-]*heimdall[\w-]*/gi, to: 'run log' } },
-  { name: 'Bifrost', re: /bifrost/i, strict: { re: /[\w-]*bifrost[\w-]*/gi, to: 'worker' } },
+  { name: 'Nidhogg', re: /nidhogg/i },
+  { name: 'Mnemosyne', re: /mnemosyne/i },
+  { name: 'Bragi', re: /bragi/i },
+  { name: 'Freya', re: /\bfreya\b/i },
+  { name: 'Heimdall', re: /heimdall/i },
+  { name: 'Bifrost', re: /bifrost/i },
   { name: 'Hyperframes', re: /hyperframes/i, scrub: { re: /\bhyperframes\b/gi, to: 'renderer' } },
   { name: 'Vidar', re: /\bvidar\b/i, scrub: { re: /\bvidar\b/gi, to: 'media' } },
-  { name: 'Director', re: /\bdirector\b/i, strict: { re: /\bdirector\b/gi, to: 'planner' } },
-  { name: 'Critic', re: /\bcritic\b/i, strict: { re: /\bcritic\b/gi, to: 'reviewer' } },
-  { name: 'Constitution', re: /\bconstitution\b/i, strict: { re: /\bconstitution\b/gi, to: 'guidelines' } },
-  { name: 'gateway', re: /\bgateway\b/i, strict: { re: /\bgateway\b/gi, to: 'platform' } },
-  { name: 'workflow playbook name', re: /\b(?:niko|athena|contest)\b/i, strict: { re: /\b(?:niko|athena|contest)\b/gi, to: 'workflow' } },
-  { name: 'workflow marker', re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/i, strict: { re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/gi, to: '[' } },
+  { name: 'Director', re: /\bdirector\b/i },
+  { name: 'Critic', re: /\bcritic\b/i },
+  { name: 'Constitution', re: /\bconstitution\b/i },
+  { name: 'gateway', re: /\bgateway\b/i },
+  { name: 'workflow playbook name', re: /\b(?:niko|athena|contest)\b/i },
+  { name: 'workflow marker', re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/i },
   {
     name: 'tool code name',
     re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|create_(?:presentation|document|spreadsheet)|use_workflow|delegate_task|spawn_background_workflow)\b/i,
@@ -96,21 +89,96 @@ const TOOL_WORDS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Every internal name rewritten, paths and URLs included: the scrubber for
- * progress text a host shows (step details, plans, helper summaries,
- * core/progressEvents.ts userText). It applies the ordinary rules, then the
- * `strict` ones; nothing in INTERNAL_NAME_PATTERNS survives it.
+ * Progress text a host shows (step summaries, plans, helper tasks and
+ * summaries, segment labels: core/progressEvents.ts): besides the vendor,
+ * model and tool names `scrub` rewrites, the internal system names, but
+ * only where they cannot be an ordinary word: "Saga" as a word or an
+ * identifier (never "Sagan" or "sagacious"), the Norse system names, a
+ * "Director agent", a "[niko:…]" label, a "[Workflow:" marker, model ids
+ * and vendor names. Ordinary words ("the director", "payment gateway",
+ * "US Constitution", "AWS Athena", "Freya") are left alone.
+ */
+const PROGRESS_RULES: ReadonlyArray<{ re: RegExp; to: string }> = [
+  { re: /\b[Ss][Aa][Gg][Aa](?:[-_][A-Za-z0-9][\w-]*|[A-Z]\w*)?\b/g, to: 'long video' },
+  { re: /[\w-]*nidhogg[\w-]*/gi, to: 'review' },
+  { re: /[\w-]*mnemosyne[\w-]*/gi, to: 'memory' },
+  { re: /\bbragi(?:[-_:]\w[\w:-]*)?\b/gi, to: 'chat bridge' },
+  { re: /[\w-]*heimdall[\w-]*/gi, to: 'run log' },
+  { re: /[\w-]*bifrost[\w-]*/gi, to: 'worker' },
+  { re: /\bdirector[\s_-]+(?:agent|pass|stage|role|round)\b/gi, to: 'planner' },
+  { re: /\b(?:critic|judge)[\s_-]+(?:agent|pass|stage|role|round)\b/gi, to: 'reviewer' },
+  { re: /\[(?:niko|athena|contest|nidhogg|agent)(?::[^\]\n]{0,80})?\]\s*/gi, to: '' },
+  { re: /\b(?:niko|athena|contest)[\s_-]+(?:workflow|playbook|mode)\b/gi, to: 'workflow' },
+  { re: /\[Workflow:[^\]\n]{0,120}\]?|\[Artemis chose this workflow[^\]\n]{0,200}\]?|\[Workflow budget[^\]\n]{0,120}\]?/gi, to: '' },
+  { re: /\b(?:claude|gpt|qwen|deepseek|gemini|wan2\.\d|doubao|kling|veo-?\d|sora-?\d|seedance|seedream|dreamina)[\w.-]*/gi, to: 'model' },
+  { re: /\b(?:anthropic|openai|volcengine|byteplus|bytepluses|modelark)\b/gi, to: 'provider' },
+]
+
+/** Chinese words for the replacements, for Chinese text (no English word lands in it). */
+const ZH_WORDS: Readonly<Record<string, string>> = {
+  'long video': '长视频',
+  review: '审查',
+  memory: '记忆',
+  'chat bridge': '聊天桥接',
+  'run log': '运行记录',
+  worker: '协作助手',
+  planner: '规划',
+  reviewer: '审查',
+  workflow: '工作方式',
+  model: '模型',
+  'video model': '视频模型',
+  'image model': '图片模型',
+  provider: '服务商',
+  consistency: '画面一致性',
+  renderer: '渲染器',
+  media: '媒体',
+  video: '视频',
+  image: '图片',
+  music: '音乐',
+  speech: '语音',
+  'send video': '发送视频',
+  'send image': '发送图片',
+  'send file': '发送文件',
+  'send message': '发送消息',
+  slides: '幻灯片',
+  document: '文档',
+  spreadsheet: '表格',
+  'workflow switch': '切换工作方式',
+  'sub-task': '子任务',
+  'background task': '后台任务',
+}
+
+const HAS_CJK = /[\u3400-\u9fff]/
+/** Paths and URLs in progress text, kept as they are: PATH_TOKEN_RE plus relative paths with a file extension ("src/a.ts"). */
+const PROGRESS_PATH_RE = /(?<![^\s"'`(（[【:：=,，])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+|(?:~|\.{1,2})?[/\\]\S*|[A-Za-z]:[/\\]\S*|[\w.@-]+(?:[/\\][\w.@-]+)*\.[A-Za-z][A-Za-z0-9]{0,4}(?=$|[\s"'`)\]）】,，。;；:：]))/g
+
+/**
+ * Rewrites internal names in progress text (PROGRESS_RULES plus the `scrub`
+ * rules), in Chinese words for Chinese text. File paths and URLs are never
+ * touched (a rewritten path points nowhere); a step's own detail (its file,
+ * its command) is not rewritten at all but left out when it names one
+ * (hasInternalProgressName).
  */
 export function scrubInternalNamesStrict(text: string): string {
   if (!text) return text;
-  let out = text;
-  for (const { scrub, strict } of INTERNAL_NAME_PATTERNS) {
-    for (const rule of [scrub, strict]) {
-      if (!rule) continue;
-      out = out.replace(rule.re, (match) => rule.to || TOOL_WORDS[match.toLowerCase()] || '');
-    }
+  const zh = HAS_CJK.test(text);
+  const word = (to: string) => (zh ? ZH_WORDS[to] ?? to : to);
+  const kept: string[] = [];
+  let out = text.replace(PROGRESS_PATH_RE, (token) => `\uE010${kept.push(token) - 1}\uE011`);
+  for (const { scrub } of INTERNAL_NAME_PATTERNS) {
+    if (!scrub) continue;
+    out = out.replace(scrub.re, (match) => word(scrub.to || TOOL_WORDS[match.toLowerCase()] || ''));
   }
-  return out.replace(/\b(video model|image model|provider|model)(?:[\s/]+\1\b)+/g, '$1');
+  for (const rule of PROGRESS_RULES) out = out.replace(rule.re, () => word(rule.to));
+  out = out.replace(/\b(video model|image model|provider|model)(?:[\s/]+\1\b)+/g, '$1').replace(/(视频模型|图片模型|服务商|模型)(?:[\s/]*\1)+/g, '$1');
+  return out.replace(/\uE010(\d+)\uE011/g, (_, index: string) => kept[Number(index)] ?? '');
+}
+
+/** Whether progress text (a path, a command) names anything scrubInternalNamesStrict would rewrite, paths included. */
+export function hasInternalProgressName(text: string): boolean {
+  if (!text) return false;
+  const test = (re: RegExp) => new RegExp(re.source, re.flags.replace('g', '')).test(text);
+  return INTERNAL_NAME_PATTERNS.some(({ scrub }) => !!scrub && test(scrub.re)) || PROGRESS_RULES.some(({ re }) => test(re));
 }
 
 export type InternalNameHit = { name: string; match: string; index: number };

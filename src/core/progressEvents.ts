@@ -19,7 +19,7 @@
  */
 
 import { scrubSecrets } from '../security/credentialStore.js';
-import { scrubInternalNamesStrict } from '../utils/internalNames.js';
+import { hasInternalProgressName, scrubInternalNamesStrict } from '../utils/internalNames.js';
 import type { AgentAction, TaskItem } from './types.js';
 
 /** One sub-agent in an event's path (outermost first). */
@@ -116,6 +116,18 @@ export function userText(text: unknown, max = MAX_DETAIL): string | undefined {
   return cleaned || undefined;
 }
 
+/**
+ * A step's own detail (its file, its command, its query): never rewritten
+ * (a rewritten path or command would be wrong), left out instead when it
+ * names an internal system, a model or a vendor.
+ */
+export function detailText(text: unknown, max = MAX_DETAIL): string | undefined {
+  if (typeof text !== 'string') return undefined;
+  const cleaned = clip(maskTokens(scrubSecrets(text)), max);
+  if (!cleaned || hasInternalProgressName(cleaned)) return undefined;
+  return cleaned;
+}
+
 function hostOf(url: unknown): string | undefined {
   if (typeof url !== 'string') return undefined;
   try {
@@ -137,25 +149,25 @@ export function toolDetail(action: AgentAction): string | undefined {
     case 'insert_in_file':
     case 'replace_in_file':
     case 'view_image':
-      return userText(a.path);
+      return detailText(a.path);
     case 'list_files':
     case 'search_files':
-      return userText([a.pattern, a.query].filter((v) => typeof v === 'string' && v).join(' '));
+      return detailText([a.pattern, a.query].filter((v) => typeof v === 'string' && v).join(' '));
     case 'run_command':
-      return userText(a.command, 120);
+      return detailText(a.command, 120);
     case 'search_web':
     case 'lookup_docs':
     case 'deep_research':
-      return userText(a.query);
+      return detailText(a.query);
     case 'browser_navigate':
     case 'browser_tabs':
-      return hostOf(a.url);
+      return detailText(hostOf(a.url));
     case 'delegate_task':
-      return userText(a.task);
+      return detailText(a.task);
     case 'transcribe_audio':
-      return userText(a.inputPath);
+      return detailText(a.inputPath);
     case 'mcp_call_tool':
-      return userText(typeof a.toolName === 'string' ? a.toolName : undefined, 80);
+      return detailText(typeof a.toolName === 'string' ? a.toolName : undefined, 80);
     case 'todo':
       return undefined;
     default:
