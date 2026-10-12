@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-copilot-'));
 process.env.ARTEMIS_HOME = path.join(tmp, 'home');
+delete process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
 fs.mkdirSync(process.env.ARTEMIS_HOME, { recursive: true });
 
 const { AgentUpdateChannel, AGENT_UPDATE_PREFIX, MAX_UPDATE_CHARS } = await import('../src/core/agentUpdates.js');
@@ -331,14 +332,14 @@ await test('server_setup: key → wait → harden → VPN → verify → invento
   assert.equal(hardened.ok, true, hardened.output);
   const vpn = await run({ action: 'install_wireguard', host: '203.0.113.10', key: 'vpn-tokyo-1', server: 'vpn-tokyo-1', clients: ['phone', 'laptop'] });
   assert.equal(vpn.ok, true, vpn.output);
-  for (const f of ['phone.conf', 'phone-qr.png', 'laptop.conf', 'laptop-qr.png']) assert.ok(fs.existsSync(path.join(ws, 'vpn', 'vpn-tokyo-1', f)), f);
-  const conf = fs.readFileSync(path.join(ws, 'vpn', 'vpn-tokyo-1', 'phone.conf'), 'utf8');
+  for (const f of ['phone.conf', 'phone-qr.png', 'laptop.conf', 'laptop-qr.png']) assert.ok(fs.existsSync(path.join(ws, 'media', 'vpn', 'vpn-tokyo-1', f)), f);
+  const conf = fs.readFileSync(path.join(ws, 'media', 'vpn', 'vpn-tokyo-1', 'phone.conf'), 'utf8');
   assert.match(conf, /Endpoint = 203\.0\.113\.10:51820/);
-  assert.equal(fs.statSync(path.join(ws, 'vpn', 'vpn-tokyo-1', 'phone.conf')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(ws, 'media', 'vpn', 'vpn-tokyo-1', 'phone.conf')).mode & 0o777, 0o600);
   // One more device later reuses the server key and keeps the old profiles.
   const more = await run({ action: 'install_wireguard', host: '203.0.113.10', key: 'vpn-tokyo-1', server: 'vpn-tokyo-1', clients: ['tablet'] });
   assert.match(more.output, /New device profiles: tablet/);
-  const confAfter = fs.readFileSync(path.join(ws, 'vpn', 'vpn-tokyo-1', 'phone.conf'), 'utf8');
+  const confAfter = fs.readFileSync(path.join(ws, 'media', 'vpn', 'vpn-tokyo-1', 'phone.conf'), 'utf8');
   assert.equal(confAfter, conf, 'existing devices keep their keys');
   const check = await run({ action: 'verify', check: 'wireguard', server: 'vpn-tokyo-1' });
   assert.equal(check.ok, true, check.output);

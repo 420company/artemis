@@ -204,12 +204,12 @@
     {
       "id": "t3-qr-1",
       "type": "file_exists",
-      "path": "vpn/vpn-tokyo-1/phone-qr.png"
+      "path": "media/vpn/vpn-tokyo-1/phone-qr.png"
     },
     {
       "id": "t3-conf-2",
       "type": "file_exists",
-      "path": "vpn/vpn-tokyo-2/phone.conf"
+      "path": "media/vpn/vpn-tokyo-2/phone.conf"
     },
     {
       "id": "t3-verified",
@@ -607,7 +607,7 @@
             ]
           },
           {
-            "say": "两台 VPN 服务器都好了，我已经检查过服务都在正常运行：\n\n- 东京 1（203.0.113.10）：vpn/vpn-tokyo-1/phone-qr.png\n- 东京 2（203.0.113.11）：vpn/vpn-tokyo-2/phone-qr.png\n\n手机扫码导入：手机上打开 WireGuard App，扫上面的二维码就能连上；电脑用同目录的 phone.conf。\n\n两台都做了安全加固（系统更新、防火墙、只允许密钥登录），登录密钥在凭据库里，这两台机器我也记下了，以后说「再加一台」或「关掉东京 2」就行。\n\n要我再给你的电脑各生成一份配置吗？"
+            "say": "两台 VPN 服务器都好了，我已经检查过服务都在正常运行：\n\n- 东京 1（203.0.113.10）：media/vpn/vpn-tokyo-1/phone-qr.png\n- 东京 2（203.0.113.11）：media/vpn/vpn-tokyo-2/phone-qr.png\n\n手机扫码导入：手机上打开 WireGuard App，扫上面的二维码就能连上；电脑用同目录的 phone.conf。\n\n两台都做了安全加固（系统更新、防火墙、只允许密钥登录），登录密钥在凭据库里，这两台机器我也记下了，以后说「再加一台」或「关掉东京 2」就行。\n\n要我再给你的电脑各生成一份配置吗？"
           }
         ]
       ]

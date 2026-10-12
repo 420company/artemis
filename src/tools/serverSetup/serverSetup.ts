@@ -8,7 +8,7 @@
  *   install_key        puts a stored key on a server that only has a root password
  *   wait_ready         polls until SSH answers (a new server takes minutes)
  *   harden             updates, firewall, automatic security updates, key-only SSH
- *   install_wireguard  WireGuard server + client profiles (.conf) and QR codes (.png) in the workspace
+ *   install_wireguard  WireGuard server + client profiles (.conf) and QR codes (.png) under media/vpn/<server>/
  *   verify             proves it works: SSH, the VPN service (and a real tunnel when this machine can), or a URL
  *   run                one command on the server
  *   list_servers / record_server   the inventory, so "再加一台" / "把东京那台关了" can follow
@@ -410,7 +410,9 @@ async function installWireGuard(
   }
   const clients = [...(existing?.clients ?? [])];
   const used = new Set(clients.map((c) => Number(c.address.split('.')[3]?.split('/')[0])));
-  const outDir = path.join(ctx.cwd, 'vpn', a.server);
+  // With the other things the agent makes for the user (the chat shows media/… files as cards).
+  const mediaRoot = process.env.ARTEMIS_MEDIA_OUTPUT_ROOT?.trim() || path.join(ctx.cwd, 'media');
+  const outDir = path.join(path.resolve(ctx.cwd, mediaRoot), 'vpn', a.server);
   await mkdir(outDir, { recursive: true });
   const created: string[] = [];
   for (const name of wanted) {
@@ -460,7 +462,8 @@ async function installWireGuard(
     await writeFile(confFile, conf, { mode: 0o600 });
     await chmod(confFile, 0o600);
     await writeFile(pngFile, qrToPng(encodeQr(conf, 'M'), 8));
-    client.files = [path.relative(ctx.cwd, confFile), path.relative(ctx.cwd, pngFile)];
+    const shown = (file: string) => (file.startsWith(path.resolve(ctx.cwd) + path.sep) ? path.relative(ctx.cwd, file) : file);
+    client.files = [shown(confFile), shown(pngFile)];
   }
   await updateServer(ctx, a.server, {
     host: t.host,
