@@ -394,6 +394,109 @@ test('auxiliary models: the compression route becomes the router summarizer; has
   }
 });
 
+test('auxiliary models: a platform-owned global store ignores workspace routes in every tier; a workspace visionProfileId beats a plain global vision route', async () => {
+  const { resolveAuxiliaryProfile } = await import('../src/providers/auxiliaryModels.js');
+  const { resolveVisionProfile } = await import('../src/core/visionHelper.js');
+  const { resolveDataRootDir } = await import('../src/utils/fs.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-aux-owned-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  const writeStore = (dir: string, data: unknown) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'providers.json'), JSON.stringify(data));
+  };
+  const profile = (id: string, model: string, extra: Record<string, unknown> = {}) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9', apiKey: 'k', model, ...extra });
+  try {
+    const home = path.join(root, 'home');
+    process.env.ARTEMIS_HOME = home;
+    const project = path.join(root, 'project');
+    fs.mkdirSync(project, { recursive: true });
+    // The platform wrote only the main profile; a workspace route for compression must not redirect it.
+    writeStore(home, { defaultMainProfileId: 'pm', profiles: [profile('pm', 'platform-main', { managedBy: 'platform' })] });
+    writeStore(resolveDataRootDir(project), { profiles: [profile('evil', 'elsewhere')], auxiliaryModels: { compression: { mode: 'custom', baseUrl: 'https://elsewhere.example', model: 'x' } } });
+    let got = await resolveAuxiliaryProfile('compression', project);
+    assert.deepEqual([got?.source, got?.profile.id], ['main', 'pm'], 'the platform main, not the workspace route');
+    assert.equal(await resolveAuxiliaryProfile('compression', project, { explicitOnly: true }), undefined);
+    // Without a platform-managed profile the workspace route is used, as before.
+    writeStore(home, { defaultMainProfileId: 'm', profiles: [profile('m', 'main')] });
+    got = await resolveAuxiliaryProfile('compression', project);
+    assert.equal(got?.source, 'auxiliary');
+
+    // Vision: workspace visionProfileId > plain global auxiliaryModels.vision route.
+    writeStore(home, { defaultMainProfileId: 'm', profiles: [profile('m', 'main', { supportsImages: false }), profile('geye', 'g-eye', { supportsImages: true })], auxiliaryModels: { vision: { mode: 'provider', providerProfileId: 'geye' } } });
+    writeStore(resolveDataRootDir(project), { visionProfileId: 'leye', profiles: [profile('leye', 'l-eye', { supportsImages: true })] });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'leye');
+    // A platform-managed global route still wins.
+    writeStore(home, { defaultMainProfileId: 'm', profiles: [profile('m', 'main', { supportsImages: false }), profile('geye', 'g-eye', { supportsImages: true, managedBy: 'platform' })], auxiliaryModels: { vision: { mode: 'provider', providerProfileId: 'geye' } } });
+    assert.equal((await resolveVisionProfile(project))?.profile.id, 'geye');
+  } finally {
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('summarizeOnce: one request when the main model fails, a main retry only after a helper model failed, none after 402; a rewritten providers.json drops the cached worker', async () => {
+  const http = await import('node:http');
+  const { summarizeOnce } = await import('../src/brain.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-sum-retry-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  const originalCwd = process.cwd();
+  const seen: string[] = [];
+  const status: Record<string, number> = {};
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const model = String(JSON.parse(raw).model);
+      seen.push(model);
+      const code = status[model] ?? 200;
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(code === 200
+        ? JSON.stringify({ choices: [{ message: { content: `from ${model}` }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
+        : JSON.stringify({ error: { message: 'no', type: 'invalid_request_error' } }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  const profile = (id: string, model: string) => ({ id, protocol: 'openai', baseUrl, apiKey: 'k', model });
+  try {
+    const home = path.join(root, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    process.env.ARTEMIS_HOME = home;
+    const ws = path.join(root, 'ws');
+    fs.mkdirSync(ws);
+    process.chdir(ws);
+    const write = (data: unknown) => fs.writeFileSync(path.join(home, 'providers.json'), JSON.stringify(data));
+    write({ defaultMainProfileId: 'main', profiles: [profile('main', 'main-model')] });
+    status['main-model'] = 400;
+    await assert.rejects(summarizeOnce('hello'));
+    assert.deepEqual(seen, ['main-model'], 'a single model is asked once');
+
+    seen.length = 0;
+    write({ defaultMainProfileId: 'main', specialistProfileId: 'w', profiles: [profile('main', 'main-model'), profile('w', 'worker-model')] });
+    status['main-model'] = 200;
+    status['worker-model'] = 400;
+    assert.equal(await summarizeOnce('hello'), 'from main-model');
+    assert.deepEqual(seen, ['worker-model', 'main-model'], 'a failed worker is retried on main');
+
+    seen.length = 0;
+    status['worker-model'] = 402;
+    await assert.rejects(summarizeOnce('hello'));
+    assert.deepEqual(seen, ['worker-model'], 'out of credit: no retry');
+
+    seen.length = 0;
+    write({ defaultMainProfileId: 'main', profiles: [profile('main', 'main-model')] });
+    assert.equal(await summarizeOnce('hello'), 'from main-model');
+    assert.deepEqual(seen, ['main-model'], 'the worker is gone once providers.json no longer names it');
+  } finally {
+    process.chdir(originalCwd);
+    server.close();
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('truncateInline keeps a long reason on one line (the bridge read-failure message stays matchable)', async () => {
   const { truncate, truncateInline } = await import('../src/utils/fs.js');
   const reason = `ENOENT: no such file or directory, open '${'/very/long/tmpdir'.repeat(20)}/sessions/x.json'`;

@@ -14,11 +14,15 @@
  *
  * `mode: "auto"` (or no entry) means "no task-specific route". Resolution for
  * a task is: its explicit route, then the worker (specialist) profile, then
- * the main profile. Each tier looks in the cwd-local store first and the
- * global store second, except that a platform-managed candidate in the
- * global store (managedBy "platform" or capabilitiesSource "platform") wins
- * over a workspace one, so a workspace cannot redirect the platform's helper
- * traffic to another endpoint (the same rule as the vision profile).
+ * the main profile.
+ *
+ * Which store: when the global store holds a platform-managed candidate for
+ * any of those tiers (a profile with managedBy "platform" or
+ * capabilitiesSource "platform"), the agent server owns helper routing and
+ * only the global store counts, so a workspace store cannot redirect the
+ * platform's helper traffic to another endpoint, not even through a tier the
+ * platform did not set. Otherwise each tier looks in the cwd-local store
+ * first and the global store second, as the main and worker profiles do.
  */
 import path from 'node:path';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
@@ -130,14 +134,11 @@ function pickTier(
   pick: (entry: LoadedStore) => ProviderProfile | undefined,
   accept: ((profile: ProviderProfile) => boolean) | undefined,
 ): { profile: ProviderProfile; storeCwd: string } | undefined {
-  const candidates = stores
-    .map((entry) => ({ entry, profile: pick(entry) }))
-    .filter((c): c is { entry: LoadedStore; profile: ProviderProfile } =>
-      Boolean(c.profile) && (!accept || accept(c.profile!)));
-  if (candidates.length === 0) return undefined;
-  const platformGlobal = candidates.find((c) => c.entry.global && isPlatformManagedProfile(c.profile));
-  const chosen = platformGlobal ?? candidates[0]!;
-  return { profile: chosen.profile, storeCwd: chosen.entry.cwd };
+  for (const entry of stores) {
+    const profile = pick(entry);
+    if (profile && (!accept || accept(profile))) return { profile, storeCwd: entry.cwd };
+  }
+  return undefined;
 }
 
 /**
@@ -149,20 +150,28 @@ export async function resolveAuxiliaryProfile(
   cwd: string,
   options: ResolveAuxiliaryOptions = {},
 ): Promise<AuxiliaryResolution | undefined> {
-  const stores = await loadStores(cwd);
-  const explicit = pickTier(
-    stores,
+  const loaded = await loadStores(cwd);
+  const pickers: Array<(entry: LoadedStore) => ProviderProfile | undefined> = [
     ({ store, data }) => profileForAuxiliaryRoute(task, data.auxiliaryModels?.[task], store, data),
-    options.accept,
-  );
+    ({ store, data }) => store.getProfile(data, data.specialistProfileId),
+    ({ store, data }) => store.getDefaultMainProfile(data),
+  ];
+  // The platform owns helper routing when its global store has a say in any tier.
+  const global = loaded.find((entry) => entry.global);
+  const platformOwned = global && pickers.some((pick) => {
+    const profile = pick(global);
+    return profile && isPlatformManagedProfile(profile) && (!options.accept || options.accept(profile));
+  });
+  const stores = platformOwned ? [global] : loaded;
+  const explicit = pickTier(stores, pickers[0]!, options.accept);
   if (explicit) return { ...explicit, source: 'auxiliary' };
   if (options.explicitOnly) return undefined;
 
-  const worker = pickTier(stores, ({ store, data }) => store.getProfile(data, data.specialistProfileId), options.accept);
+  const worker = pickTier(stores, pickers[1]!, options.accept);
   if (worker) return { ...worker, source: 'worker' };
   if (options.skipMain) return undefined;
 
-  const main = pickTier(stores, ({ store, data }) => store.getDefaultMainProfile(data), options.accept);
+  const main = pickTier(stores, pickers[2]!, options.accept);
   return main ? { ...main, source: 'main' } : undefined;
 }
 

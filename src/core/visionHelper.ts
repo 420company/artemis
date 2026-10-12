@@ -35,8 +35,8 @@ import type { SessionMessage } from './types.js';
 import type { ChatProvider, ImageAttachment, ProviderProfile } from '../providers/types.js';
 import { fitImagesToRequest, imageByteSize, MAX_IMAGE_BYTES } from './imageInput.js';
 import { modelSupportsImages } from '../providers/imageSupport.js';
-import { ProviderStore } from '../providers/store.js';
-import { isPlatformManagedProfile, resolveAuxiliaryProfile } from '../providers/auxiliaryModels.js';
+import { ProviderStore, createGlobalProviderStore } from '../providers/store.js';
+import { isPlatformManagedProfile, profileForAuxiliaryRoute, resolveAuxiliaryProfile } from '../providers/auxiliaryModels.js';
 import { createTrackedProviderFromConfig } from '../providers/telemetry.js';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
 import {
@@ -369,17 +369,26 @@ async function readVisionProfile(storeCwd: string): Promise<VisionProfileCandida
 export async function resolveVisionProfile(cwd: string): Promise<VisionProfileCandidate | undefined> {
   const localCwd = path.resolve(cwd);
   const globalCwd = resolveArtemisHomeDir();
+  const route = async (storeCwd: string): Promise<VisionProfileCandidate | null> => {
+    try {
+      const store = storeCwd === globalCwd ? createGlobalProviderStore() : new ProviderStore(storeCwd);
+      const data = await store.load();
+      const profile = profileForAuxiliaryRoute('vision', data.auxiliaryModels?.vision, store, data);
+      return profile ? { profile, storeCwd } : null;
+    } catch {
+      return null;
+    }
+  };
+  const sameDir = localCwd === globalCwd;
+  const globalRoute = await route(globalCwd);
   const global = await readVisionProfile(globalCwd);
-  const platformVision = global && isPlatformManagedProfile(global.profile) ? global : null;
-  // An explicit auxiliaryModels.vision route comes first, except that a
-  // workspace route never overrides the platform's own vision profile.
-  const route = await resolveAuxiliaryProfile('vision', cwd, { explicitOnly: true, accept: modelSupportsImages })
-    .catch(() => undefined);
-  if (route && (!platformVision || route.storeCwd === globalCwd)) {
-    return { profile: route.profile, storeCwd: route.storeCwd };
-  }
-  const local = localCwd === globalCwd ? null : await readVisionProfile(localCwd);
-  const chosen = platformVision ?? local ?? global;
+  const localRoute = sameDir ? null : await route(localCwd);
+  const local = sameDir ? null : await readVisionProfile(localCwd);
+  // The platform's own choice wins over any workspace setting; otherwise the
+  // workspace wins, and an explicit auxiliaryModels.vision route comes before
+  // visionProfileId within the same store.
+  const platform = [globalRoute, global].find((c) => c && isPlatformManagedProfile(c.profile));
+  const chosen = platform ?? localRoute ?? local ?? globalRoute ?? global;
   if (chosen) return modelSupportsImages(chosen.profile) ? chosen : undefined;
   // No vision setting at all: the worker describes images when it can see
   // them (a main model that sees them never asks for a helper).

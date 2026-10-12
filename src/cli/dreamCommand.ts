@@ -18,12 +18,18 @@
  *   --require-activity   skip (status "skipped", reason "no_activity") when no session was active in the window
  *   --locale zh-CN|en    language of the diary
  *   --push               also push to configured chat bridges (off by default; the host delivers)
+ *   --taste-file <path>  the owner's taste (≤1 KB JSON, see services/dreamTaste.ts): steers this
+ *                        dream's look and voice, in the diary and picture prompts only
+ *   --explore            deliberately try a look/voice the taste does not favour yet
+ *   --evolve             also add the dream's distilled style notes to the learned prompt (off by
+ *                        default: headless dreams read session text, so their notes never reach
+ *                        future system prompts unless the owner asks for it here)
  *   --json               print only the result line
  *
  * Exit code: 0 when the dream was written or skipped, 1 when it failed, 2 on bad arguments.
  */
-import { copyFile, mkdir, readFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { copyFile, mkdir, readFile, stat } from 'node:fs/promises'
+import { constants as fsConstants, existsSync } from 'node:fs'
 import path from 'node:path'
 import type { UiLocale } from './locale.js'
 
@@ -39,6 +45,9 @@ export interface DreamCommandOptions {
   locale?: UiLocale
   push: boolean
   json: boolean
+  evolve: boolean
+  tasteFile?: string
+  explore: boolean
 }
 
 export interface DreamCommandResult {
@@ -64,6 +73,10 @@ export interface DreamCommandResult {
   locale: UiLocale
   /** Engine sessions active in the window. */
   sessions: number
+  /** The style choices the dream was made with (`dimension:value`). */
+  style?: string[]
+  /** It deliberately tried something the taste does not favour yet. */
+  explore?: boolean
 }
 
 export class DreamArgsError extends Error {}
@@ -71,7 +84,7 @@ export class DreamArgsError extends Error {}
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
 
 export function parseDreamArgs(args: readonly string[]): DreamCommandOptions {
-  const options: DreamCommandOptions = { image: true, video: false, requireActivity: false, push: false, json: false }
+  const options: DreamCommandOptions = { image: true, video: false, requireActivity: false, push: false, json: false, evolve: false, explore: false }
   const rest = [...args]
   while (rest.length > 0) {
     const cur = rest.shift()!
@@ -90,6 +103,9 @@ export function parseDreamArgs(args: readonly string[]): DreamCommandOptions {
       case '--require-activity': options.requireActivity = true; break
       case '--push': options.push = true; break
       case '--json': options.json = true; break
+      case '--evolve': options.evolve = true; break
+      case '--explore': options.explore = true; break
+      case '--taste-file': options.tasteFile = path.resolve(value()); break
       case '--locale': {
         const v = value().toLowerCase()
         if (v.startsWith('zh')) options.locale = 'zh-CN'
@@ -153,14 +169,25 @@ export function formatDreamResultLine(result: DreamCommandResult): string {
   return `${DREAM_RESULT_MARKER} ${JSON.stringify(result)}`
 }
 
+/** Copies a dream file into `outDir`, never over an existing file (a numbered name instead). */
 async function copyInto(outDir: string | undefined, file: string | undefined, day: string): Promise<string | undefined> {
   if (!file || !existsSync(file)) return undefined
   if (!outDir) return file
   await mkdir(outDir, { recursive: true })
   const base = path.basename(file)
-  const target = path.join(outDir, base.startsWith(day) ? base : `${day}_${base}`)
-  await copyFile(file, target)
-  return target
+  const name = base.startsWith(day) ? base : `${day}_${base}`
+  const ext = path.extname(name)
+  const stem = name.slice(0, name.length - ext.length)
+  for (let n = 0; n < 100; n += 1) {
+    const target = path.join(outDir, n === 0 ? name : `${stem}-${n + 1}${ext}`)
+    try {
+      await copyFile(file, target, fsConstants.COPYFILE_EXCL)
+      return target
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    }
+  }
+  throw new Error(`no free file name for ${name} in ${outDir}`)
 }
 
 export async function runDreamCommand(input: {
@@ -195,6 +222,21 @@ export async function runDreamCommand(input: {
     return finish({ v: 1, status: 'skipped', reason: 'no_activity', day: window.day, locale, sessions }, 0)
   }
 
+  // The owner's taste: bounded, vocabulary-only weights and their own notes.
+  const { chooseDreamStyle, parseDreamTaste, DREAM_TASTE_MAX_BYTES } = await import('../services/dreamTaste.js')
+  let taste
+  if (options.tasteFile) {
+    try {
+      const info = await stat(options.tasteFile)
+      if (info.size > DREAM_TASTE_MAX_BYTES) throw new Error(`the taste file is larger than ${DREAM_TASTE_MAX_BYTES} bytes`)
+      taste = parseDreamTaste(await readFile(options.tasteFile, 'utf8'))
+    } catch (err) {
+      process.stderr.write(`dream: --taste-file: ${err instanceof Error ? err.message : String(err)}\n`)
+      return { exitCode: 2 }
+    }
+  }
+  const style = chooseDreamStyle({ ...(taste ? { taste } : {}), explore: options.explore })
+
   const { composeDream } = await import('../services/dreamComposer.js')
   let composed
   try {
@@ -204,8 +246,10 @@ export async function runDreamCommand(input: {
       locale,
       window: { sinceMs: window.sinceMs, untilMs: window.untilMs },
       onStatus: status,
+      style,
+      ...(taste ? { taste } : {}),
       // The host decides when to dream and where it goes: never the idle cap or bridges here.
-      configOverride: { enabled: true, mode: options.image ? 'vision' : 'text', pushToBridges: options.push },
+      configOverride: { enabled: true, mode: options.image ? 'vision' : 'text', pushToBridges: options.push, evolveSystemPrompt: options.evolve },
     })
   } catch (err) {
     composed = { ok: false, reason: err instanceof Error ? err.message : String(err) }
@@ -250,5 +294,7 @@ export async function runDreamCommand(input: {
     ...(videoNote ? { videoNote } : {}),
     locale,
     sessions,
+    style: entry.style ?? [],
+    explore: options.explore,
   }, 0)
 }
