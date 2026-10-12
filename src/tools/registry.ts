@@ -453,7 +453,7 @@ function validateUseWorkflowAction(action: any): string[] {
   validateEnumString(
     action?.workflow,
     'workflow',
-    ['plan', 'team', 'compare', 'design'] as const,
+    ['plan', 'team', 'compare', 'design', 'review'] as const,
     errors,
   );
   validateOptionalNonEmptyString(action?.reason, 'reason', errors);
