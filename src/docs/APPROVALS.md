@@ -31,6 +31,15 @@ cannot write, and passes them to every run. The files the agent can reach,
 `ask`/`deny`, or a shorter expiry. `allow` in a file is ignored. Requests
 expire after 24 hours unless the policy says otherwise.
 
+**Connected services.** A host whose connectors broker asks the owner
+before every write of a connected service (MCP servers named
+`conn_<connection>`) says so in its copy of the policy
+(`"connectorsGated": true`); those tools then run without a second request
+here, unless the owner set a mode for that service or tool, or a policy file
+forbids it. Only the host's copy can say this. *Follow-up:* the broker's
+cards and these cards are still two systems; they should become one (the
+broker raising its writes through `requireApproval`, one card per action).
+
 **What counts as read-only.** For an external tool, only the server's own
 description (its `readOnlyHint`, kept in the tool list) says it is read-only.
 The model's arguments never do, and an unknown server or tool is not

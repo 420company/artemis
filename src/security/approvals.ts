@@ -128,7 +128,17 @@ export interface ApprovalPolicy {
    * stricter than what the host decided, never looser.
    */
   floors?: Record<string, ApprovalMode>
+  /**
+   * The host's word that its connectors broker approves every write of a
+   * connected service itself (servers named `conn_<connection>`): those
+   * tools then run without a second request here, unless the owner set a
+   * mode for that service or tool. Only the host's copy can say so.
+   */
+  connectorsGated?: boolean
 }
+
+/** MCP servers the host's connectors broker serves (`conn_<connection>`). */
+export const CONNECTOR_SERVER = /^conn_[A-Za-z0-9_.-]+$/
 
 function isMode(value: unknown): value is ApprovalMode {
   return value === 'ask' || value === 'allow' || value === 'deny'
@@ -138,7 +148,7 @@ export function isApprovalKind(value: unknown): value is ApprovalKind {
   return typeof value === 'string' && (APPROVAL_KINDS as readonly string[]).includes(value)
 }
 
-type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown }>
+type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown; connectorsGated: unknown }>
 
 function readPolicyFile(file: string): PolicyData | undefined {
   try {
@@ -194,6 +204,8 @@ export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process
     }
     ttlMs = ttlOf(host) ?? ttlMs
   }
+  // Only from the host's copy: a policy file the agent can write never turns a gate off.
+  const connectorsGated = host?.connectorsGated === true
   const files = [...new Set([path.join(resolveArtemisHomeDir(), APPROVAL_POLICY_FILE), path.join(resolveDataRootDir(cwd), APPROVAL_POLICY_FILE)])]
   for (const data of files.map((file) => readPolicyFile(file))) {
     if (!data) continue
@@ -206,7 +218,7 @@ export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process
     const fileTtl = ttlOf(data)
     if (fileTtl !== undefined) ttlMs = Math.min(ttlMs, fileTtl)
   }
-  return { modes, ttlMs, tools, floors }
+  return { modes, ttlMs, tools, floors, ...(connectorsGated ? { connectorsGated } : {}) }
 }
 
 /** The mode for an external tool: its own entry, then its service's, then the kind's. */
@@ -214,7 +226,10 @@ export function modeFor(policy: ApprovalPolicy, kind: ApprovalKind, toolKey?: st
   if (kind === 'confirmation') return 'ask'
   if (!toolKey) return policy.modes[kind]
   const service = `${toolKey.split('/')[0]}/*`
-  const base = policy.tools[toolKey] ?? policy.tools[service] ?? policy.modes[kind]
+  const serverId = toolKey.split('/')[0]!
+  // A connected service's writes are approved by the host's connectors broker on its own card.
+  const gated = policy.connectorsGated === true && CONNECTOR_SERVER.test(serverId) ? 'allow' : undefined
+  const base = policy.tools[toolKey] ?? policy.tools[service] ?? gated ?? policy.modes[kind]
   const floor = tighter(policy.floors?.[toolKey] ?? 'allow', policy.floors?.[service] ?? 'allow')
   return tighter(base, floor)
 }

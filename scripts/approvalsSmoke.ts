@@ -671,6 +671,26 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('platform tools: the owner can make the platform ask again', modeFor(loadApprovalPolicy(workspace('platform-tools-ask'), { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ tools: { 'artemis_online/*': 'allow', 'artemis_online/trade_paper_order': 'ask' } }) }), trade.kind, trade.toolKey) === 'ask')
 }
 
+// ── Connected services: the host's connectors broker asks on its own card ───
+{
+  const dir = workspace('connectors')
+  const send = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'conn_gmail', toolName: 'send_email', args: { to: 'a@x.example' } })!
+  const write = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'conn_github', toolName: 'create_issue' })!
+  const gated = loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorsGated: true }) })
+  assert('connectors: the host can say its broker gates connected services', gated.connectorsGated === true)
+  assert('connectors: a connected service\'s send is not asked twice', modeFor(gated, send.kind, send.toolKey) === 'allow')
+  assert('connectors: nor any other write of a connected service', modeFor(gated, write.kind, write.toolKey) === 'allow')
+  assert('connectors: other servers still ask', modeFor(gated, send.kind, 'mail/send_email') === 'ask')
+  assert('connectors: without the host\'s word, connected services ask', modeFor(loadApprovalPolicy(dir, {}), send.kind, send.toolKey) === 'ask')
+  writePolicy(dir, { connectorsGated: true })
+  assert('connectors: a policy file the agent can write cannot turn the gate off', loadApprovalPolicy(dir, {}).connectorsGated === undefined)
+  writePolicy(dir, { tools: { 'conn_gmail/*': 'deny' } })
+  assert('connectors: a file can still forbid a connected service', modeFor(loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorsGated: true }) }), send.kind, send.toolKey) === 'deny')
+  fs.rmSync(path.join(resolveDataRootDir(dir), 'approvals.json'), { force: true })
+  const owner = loadApprovalPolicy(dir, { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ connectorsGated: true, tools: { 'conn_gmail/*': 'ask' } }) })
+  assert('connectors: the owner can still make a connected service ask here', modeFor(owner, send.kind, send.toolKey) === 'ask')
+}
+
 // ── Office files and speech: inside the workspace nothing asks ─────────────
 {
   const cwd = workspace('office')
