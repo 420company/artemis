@@ -678,6 +678,20 @@ export type AgentAction =
   | { type: 'create_document'; path?: string; spec?: Record<string, unknown>; markdown?: string; edits?: Array<Record<string, unknown>>; pdf?: boolean; theme?: string }
   | { type: 'create_spreadsheet'; path?: string; spec?: Record<string, unknown>; edits?: Array<Record<string, unknown>>; pdf?: boolean; theme?: string }
   | {
+      /** Phone someone for the owner; the owner approves each call first (tools/phoneCall). */
+      type: 'place_call';
+      to: string;
+      goal: string;
+      brief?: string;
+      language?: 'zh' | 'en';
+      allowedFacts?: string[];
+      forbidden?: string[];
+      mayAgreeTo?: string[];
+      calleeName?: string;
+      onBehalfOf?: string;
+      maxMinutes?: number;
+    }
+  | {
       type: 'transcribe_audio';
       inputPath: string;
       language?: string;
@@ -805,6 +819,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
+  'place_call',
   'create_presentation',
   'create_document',
   'create_spreadsheet',
