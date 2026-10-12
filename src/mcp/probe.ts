@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { APP_NAME, APP_VERSION } from '../appMeta.js';
 import { discoverMcpServerSurface, getSuggestedMcpAuthState } from './client.js';
 import { buildRuntimeSnapshotFromSurface } from './runtime.js';
+import { inheritedMcpHeaders } from './inheritedHeaders.js';
 import type {
   McpAuthState,
   McpRuntimeSnapshot,
@@ -74,6 +75,8 @@ async function resolveProbeHeaders(
       // Ignore malformed env header overrides and continue with the stored config.
     }
   }
+  // Per-run headers the host handed over on a descriptor (never the environment).
+  Object.assign(headers, inheritedMcpHeaders(server.id));
 
   if (server.authType !== 'oauth') {
     return { server, headers };

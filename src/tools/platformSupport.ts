@@ -16,11 +16,15 @@ export type ToolHostRequirement =
   /** macOS only (osascript / Apple apps). */
   | 'macos'
   /** Native desktop automation backends: macOS or Windows. */
-  | 'desktop-automation';
+  | 'desktop-automation'
+  /** A hosting platform that gives the agent an identity (mailbox, numbers); it sets ARTEMIS_IDENTITY_TOOLS=1. */
+  | 'agent-identity';
 
 export interface ToolHostEnvironment {
   platform: NodeJS.Platform;
   hasDisplay: boolean;
+  /** The host offers the agent identity tools (tools/agentIdentity.ts). */
+  agentIdentity?: boolean;
 }
 
 const TOOL_HOST_REQUIREMENTS: ReadonlyArray<{
@@ -30,6 +34,19 @@ const TOOL_HOST_REQUIREMENTS: ReadonlyArray<{
   { prefix: 'calendar_', requirement: 'macos' },
   { prefix: 'reminders_', requirement: 'macos' },
   { prefix: 'computer_', requirement: 'desktop-automation' },
+  // Exact names (each is its own "prefix"): the agent identity tools.
+  ...[
+    'agent_mail_address',
+    'list_emails',
+    'wait_for_email',
+    'read_email',
+    'extract_verification',
+    'begin_signup',
+    'finish_signup',
+    'get_sms_number',
+    'wait_for_sms',
+    'ask_owner_for_code',
+  ].map((prefix) => ({ prefix, requirement: 'agent-identity' as const })),
   // spotify_* tools are deliberately not listed: they drive the Spotify Web
   // API (Spotify Connect), so a headless server can still control the user's
   // phone or speakers once logged in.
@@ -45,7 +62,7 @@ export function detectToolHostEnvironment(
     platform === 'darwin' ||
     platform === 'win32' ||
     Boolean(env.DISPLAY?.trim() || env.WAYLAND_DISPLAY?.trim());
-  return { platform, hasDisplay };
+  return { platform, hasDisplay, agentIdentity: parseBooleanEnv(env.ARTEMIS_IDENTITY_TOOLS) === true };
 }
 
 export function getToolHostEnvironment(): ToolHostEnvironment {
@@ -54,7 +71,7 @@ export function getToolHostEnvironment(): ToolHostEnvironment {
 
 /** Stable key for caches that depend on the host environment. */
 export function getToolHostKey(host: ToolHostEnvironment = getToolHostEnvironment()): string {
-  return `${host.platform}:${host.hasDisplay ? 'display' : 'headless'}`;
+  return `${host.platform}:${host.hasDisplay ? 'display' : 'headless'}${host.agentIdentity ? ':identity' : ''}`;
 }
 
 /**
@@ -87,6 +104,8 @@ export function isHostRequirementMet(
       return host.platform === 'darwin';
     case 'desktop-automation':
       return host.platform === 'darwin' || host.platform === 'win32';
+    case 'agent-identity':
+      return host.agentIdentity === true;
     default: {
       const exhaustive: never = requirement;
       return Boolean(exhaustive);
