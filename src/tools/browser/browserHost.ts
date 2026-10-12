@@ -219,7 +219,7 @@ async function main(): Promise<void> {
     await monitorCall(
       'Emulation.setDeviceMetricsOverride',
       phone
-        ? { width: phone.width, height: phone.height, screenWidth: phone.width, screenHeight: phone.height, deviceScaleFactor: 2, mobile: true }
+        ? { width: phone.width, height: phone.height, screenWidth: phone.width, screenHeight: phone.height, deviceScaleFactor: 3, mobile: true }
         : { width: viewport.width, height: viewport.height, screenWidth: viewport.width, screenHeight: viewport.height, deviceScaleFactor: 1, mobile: false },
       session,
     ).catch(() => undefined);
