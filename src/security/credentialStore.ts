@@ -40,6 +40,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
+import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
 
 export type CredentialKind = 'password' | 'username' | 'ssh_key' | 'token';
 export const CREDENTIAL_KINDS: readonly CredentialKind[] = ['password', 'username', 'ssh_key', 'token'];
@@ -466,25 +467,31 @@ export function registerCredentialStore(store: CredentialStore | undefined): voi
 }
 
 /**
- * Takes the hosted broker out of the environment (so no tool or shell this
- * run starts inherits it): `ARTEMIS_CREDENTIAL_BROKER` is
- * `{"url": "http://127.0.0.1:…/agent/credentials", "claim": "…"}`. The
- * claim code works once (claimCredentialBroker trades it for the run's
- * ticket, kept in this process only), so a copy read later from the
- * process's environment is worth nothing.
+ * Takes the hosted broker's address and one-time claim code: from the
+ * per-run headers the host handed over on an inherited descriptor (entry
+ * `artemis_credentials`, see mcp/inheritedHeaders.ts), or, from an older
+ * host, `ARTEMIS_CREDENTIAL_BROKER` = `{"url", "claim"}`, which is removed
+ * from the environment so no tool or shell inherits it. The claim works
+ * once (claimCredentialBroker trades it for the run's ticket, kept in this
+ * process only).
  */
-export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env): void {
+export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env, inherited: Record<string, string> = inheritedMcpHeaders(CREDENTIAL_ENTRY)): void {
   const raw = env.ARTEMIS_CREDENTIAL_BROKER?.trim();
   delete env.ARTEMIS_CREDENTIAL_BROKER;
-  if (!raw) return;
-  let parsed: { url?: unknown; claim?: unknown } = {};
-  try {
-    parsed = JSON.parse(raw) as typeof parsed;
-  } catch {
-    parsed = {};
+  let url = inherited['x-credential-broker'] ?? '';
+  let claim = inherited['x-credential-claim'] ?? '';
+  if (!claim && raw) {
+    try {
+      const parsed = JSON.parse(raw) as { url?: unknown; claim?: unknown };
+      url = typeof parsed.url === 'string' ? parsed.url : '';
+      claim = typeof parsed.claim === 'string' ? parsed.claim : '';
+    } catch {
+      url = '';
+      claim = '';
+    }
+  } else if (!claim) {
+    return;
   }
-  const url = typeof parsed.url === 'string' ? parsed.url : '';
-  const claim = typeof parsed.claim === 'string' ? parsed.claim : '';
   // Loopback only; anything else is refused rather than falling back to local files.
   if (!/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?\//.test(url) || !claim) {
     broker = { url: '', failed: 'The credential service address is invalid.' };
@@ -492,6 +499,9 @@ export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env): v
   }
   broker = { url, claim };
 }
+
+/** The entry of the per-run headers that carries the credential service (not an MCP server). */
+export const CREDENTIAL_ENTRY = 'artemis_credentials';
 
 /** Trades the claim code for this run's ticket; before any tool runs. */
 export async function claimCredentialBroker(fetchImpl: typeof fetch = (...args) => fetch(...args)): Promise<void> {

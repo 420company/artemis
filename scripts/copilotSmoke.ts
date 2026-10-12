@@ -353,6 +353,14 @@ await test('credentials: the hosted broker is taken out of the environment and a
   });
   assert.deepEqual(claims, [{ op: 'claim', claim: 'claim-once' }]);
   assert.equal(credentialBackend(), 'hosted');
+  // The way a current host hands it over: with the per-run headers on a descriptor, never in the environment.
+  captureCredentialBroker({}, { 'x-credential-broker': 'http://127.0.0.1:18897/agent/credentials', 'x-credential-claim': 'claim-fd' });
+  const viaFd: any[] = [];
+  await claimCredentialBroker(async (_url, init) => {
+    viaFd.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ ticket: 'run-ticket-2' }), { status: 200 });
+  });
+  assert.deepEqual(viaFd, [{ op: 'claim', claim: 'claim-fd' }]);
   // A refused claim (someone else used the code first) leaves the store unusable, loudly.
   captureCredentialBroker({ ARTEMIS_CREDENTIAL_BROKER: JSON.stringify({ url: 'http://127.0.0.1:18897/agent/credentials', claim: 'spent' }) });
   await claimCredentialBroker(async () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }));
