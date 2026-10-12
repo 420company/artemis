@@ -192,8 +192,8 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
   sectionTitle(tr(locale, '语音输入 / 输出', 'Voice Input / Output'), [
     tr(
       locale,
-      '配置真实语音输出。当前内置 Microsoft Edge TTS 免费线路，不需要 API key。',
-      'Configure real speech output. The built-in Microsoft Edge TTS path is free and requires no API key.',
+      '配置真实语音输出。可选的 Microsoft Edge TTS 是面向浏览器的免费服务，不需要 API key，但其条款不授权其他软件调用，开启即表示你接受这一风险。',
+      'Configure real speech output. The optional Microsoft Edge TTS path is a free browser service needing no API key, but its terms do not license use by other software; enabling it means you accept that risk.',
     ),
     tr(
       locale,
@@ -204,8 +204,8 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
 
   const ttsEnabled = await askYesNo(
     locale,
-    tr(locale, '启用 Microsoft Edge TTS（免费）？', 'Enable Microsoft Edge TTS (free)?'),
-    true,
+    tr(locale, '启用 Microsoft Edge TTS（免费，非授权服务）？', 'Enable Microsoft Edge TTS (free, not a licensed service)?'),
+    false,
     tr(locale, '用于通讯桥接、通知播报、把文本合成为 MP3。', 'Useful for messaging bridges, notification readout, and text-to-MP3 synthesis.'),
   )
 
@@ -264,6 +264,8 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
         ...setup.voice.tts,
         provider: 'edge',
         voice,
+        // Answering yes here is the operator's explicit opt-in (core/edgeTts.ts).
+        edgeOptIn: ttsEnabled,
       },
       stt: {
         ...setup.voice.stt,

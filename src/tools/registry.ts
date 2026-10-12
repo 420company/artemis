@@ -990,7 +990,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'synthesize_speech',
-    description: '使用已配置的 TTS provider 将文本合成为音频文件。内置免费 Microsoft Edge TTS，无需 API key。',
+    description: '把文本合成为音频文件（MP3）。托管主机使用平台的授权语音；免费的 Edge 语音默认关闭，需运营方显式开启。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1000,7 +1000,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'transcribe_audio',
-    description: '使用免费的本地 Whisper 引擎转写音频文件。优先 whisper.cpp，其次 Python whisper；不需要 API key。',
+    description: '把音频或视频文件转写成文字。主机配置了平台语音识别时用它（长录音按停顿分段、带时间戳），否则用本地 Whisper（优先 whisper.cpp，其次 Python whisper）。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
