@@ -57,9 +57,9 @@ export const INTERNAL_NAME_PATTERNS: ReadonlyArray<InternalNamePattern> = [
   { name: 'workflow marker', re: /\[Workflow:|\[Artemis chose this workflow|\[Workflow budget/i },
   {
     name: 'tool code name',
-    re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|use_workflow|delegate_task|spawn_background_workflow)\b/i,
+    re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|create_(?:presentation|document|spreadsheet)|use_workflow|delegate_task|spawn_background_workflow)\b/i,
     scrub: {
-      re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|use_workflow|delegate_task|spawn_background_workflow)\b/gi,
+      re: /\b(?:generate_(?:long_video|video|image|music|speech)|bridge_send_(?:video|image|file|message)|create_(?:presentation|document|spreadsheet)|use_workflow|delegate_task|spawn_background_workflow)\b/gi,
       to: '',
     },
   },
@@ -80,6 +80,9 @@ const TOOL_WORDS: Readonly<Record<string, string>> = {
   bridge_send_image: 'send image',
   bridge_send_file: 'send file',
   bridge_send_message: 'send message',
+  create_presentation: 'slides',
+  create_document: 'document',
+  create_spreadsheet: 'spreadsheet',
   use_workflow: 'workflow switch',
   delegate_task: 'sub-task',
   spawn_background_workflow: 'background task',
@@ -149,6 +152,9 @@ const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: 
   search_web: { zh: '联网搜索', en: 'Searching the web' },
   fetch_url: { zh: '读取网页', en: 'Reading a web page' },
   deep_research: { zh: '深入调研', en: 'Researching' },
+  create_presentation: { zh: '制作幻灯片', en: 'Making slides', outputZh: '幻灯片已生成', outputEn: 'Your slides are ready' },
+  create_document: { zh: '生成文档', en: 'Writing a document', outputZh: '文档已生成', outputEn: 'Your document is ready' },
+  create_spreadsheet: { zh: '生成表格', en: 'Building a spreadsheet', outputZh: '表格已生成', outputEn: 'Your spreadsheet is ready' },
   delegate_task: { zh: '分派子任务', en: 'Delegating a sub-task' },
   use_workflow: { zh: '调整工作方式', en: 'Adjusting the approach' },
 };

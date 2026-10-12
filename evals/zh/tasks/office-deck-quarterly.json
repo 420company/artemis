@@ -1,0 +1,188 @@
+{
+  "id": "office-deck-quarterly",
+  "category": "office",
+  "description": "做一份第三季度销售汇报 PPT：真正的 .pptx、页数合适、数据和柱状图都在",
+  "turns": [
+    {
+      "prompt": "帮我做一份第三季度销售汇报的PPT，给老板看的，6页左右。数据：7月营收 120 万，8月 135 万，9月 160 万；新客户 86 家；主要问题是华南区回款慢。要有一页柱状图。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 16,
+    "timeoutSec": 420,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "deck",
+      "type": "office_file",
+      "pattern": "\\.pptx$",
+      "kind": "pptx",
+      "minParts": 5,
+      "maxParts": 12,
+      "contains": [
+        "第三季度",
+        [
+          "160",
+          "160万"
+        ],
+        "华南"
+      ],
+      "minCharts": 1
+    },
+    {
+      "id": "made-with-tool",
+      "type": "tool_called",
+      "tool": "create_presentation",
+      "ok": true
+    },
+    {
+      "id": "office-playbook",
+      "type": "context_contains",
+      "pattern": "one idea per slide",
+      "request": "first",
+      "note": "the deck request got the office playbook"
+    },
+    {
+      "id": "path-in-reply",
+      "type": "reply_matches",
+      "pattern": "\\.pptx"
+    },
+    {
+      "id": "no-tool-names",
+      "type": "reply_not_matches",
+      "pattern": "create_presentation|pptxgenjs"
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    },
+    {
+      "id": "judge",
+      "type": "llm_judge",
+      "rubric": "用户要一份给老板看的第三季度销售汇报 PPT。回复应说明已生成文件并给出路径，简要概括每页内容；不应只给出文字大纲或 Markdown。",
+      "minScore": 4
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "create_presentation",
+                "args": {
+                  "path": "outputs/第三季度销售汇报.pptx",
+                  "spec": {
+                    "title": "2026 年第三季度销售汇报",
+                    "subtitle": "营收、客户与下一步",
+                    "theme": "business",
+                    "slides": [
+                      {
+                        "layout": "title",
+                        "title": "2026 年第三季度销售汇报",
+                        "subtitle": "营收、客户与下一步"
+                      },
+                      {
+                        "layout": "stats",
+                        "title": "本季度概览",
+                        "stats": [
+                          {
+                            "value": "415 万",
+                            "label": "季度营收"
+                          },
+                          {
+                            "value": "86 家",
+                            "label": "新客户"
+                          },
+                          {
+                            "value": "+33%",
+                            "label": "9 月环比 7 月"
+                          }
+                        ]
+                      },
+                      {
+                        "layout": "chart",
+                        "title": "月度营收（万元）",
+                        "chart": {
+                          "type": "column",
+                          "categories": [
+                            "7月",
+                            "8月",
+                            "9月"
+                          ],
+                          "series": [
+                            {
+                              "name": "营收",
+                              "values": [
+                                120,
+                                135,
+                                160
+                              ]
+                            }
+                          ],
+                          "showValues": true
+                        },
+                        "caption": "数据：销售部提供"
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "主要问题",
+                        "bullets": [
+                          "华南区回款周期偏长",
+                          "大客户续约进度落后"
+                        ]
+                      },
+                      {
+                        "layout": "bullets",
+                        "title": "下一步计划",
+                        "bullets": [
+                          "成立回款专项小组",
+                          "第四季度新客户目标 100 家"
+                        ]
+                      },
+                      {
+                        "layout": "title",
+                        "title": "谢谢",
+                        "subtitle": "Q&A"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "已完成：outputs/第三季度销售汇报.pptx，共 6 页——封面、概览（415 万营收、86 家新客户）、月度营收柱状图（7–9 月 120/135/160 万）、主要问题（华南区回款慢）、下一步计划和结尾页。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "deck",
+        "made-with-tool",
+        "path-in-reply"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "汇报.md",
+                  "content": "# 第三季度销售汇报\n\n- 7月 120 万\n- 8月 135 万\n- 9月 160 万\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "PPT 的内容已经写好了，你复制到 PowerPoint 里就行。"
+          }
+        ]
+      ]
+    }
+  }
+}

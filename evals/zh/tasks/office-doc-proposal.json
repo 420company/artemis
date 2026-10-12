@@ -1,0 +1,102 @@
+{
+  "id": "office-doc-proposal",
+  "category": "office",
+  "description": "写一份社区垃圾分类倡议书（Word）：真正的 .docx，结构和四类垃圾、落款都在",
+  "turns": [
+    {
+      "prompt": "帮我写一份社区垃圾分类倡议书，要 Word 文件。内容包括：为什么要分类、怎么分（列出四类垃圾和例子）、倡议内容，落款是 阳光社区居委会。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 16,
+    "timeoutSec": 420,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "document",
+      "type": "office_file",
+      "pattern": "\\.docx$",
+      "kind": "docx",
+      "contains": [
+        "倡议",
+        "可回收物",
+        "有害垃圾",
+        [
+          "厨余垃圾",
+          "湿垃圾"
+        ],
+        [
+          "其他垃圾",
+          "干垃圾"
+        ],
+        "阳光社区居委会"
+      ]
+    },
+    {
+      "id": "made-with-tool",
+      "type": "tool_called",
+      "tool": "create_document",
+      "ok": true
+    },
+    {
+      "id": "path-in-reply",
+      "type": "reply_matches",
+      "pattern": "\\.docx"
+    },
+    {
+      "id": "chinese",
+      "type": "reply_zh"
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "create_document",
+                "args": {
+                  "path": "outputs/垃圾分类倡议书.docx",
+                  "markdown": "# 垃圾分类倡议书\n\n## 为什么要分类\n\n垃圾分类能减少污染、节约资源。\n\n## 怎么分\n\n- 可回收物：纸张、塑料瓶、金属\n- 有害垃圾：电池、过期药品\n- 厨余垃圾：剩菜剩饭、果皮\n- 其他垃圾：纸巾、烟头\n\n## 我们倡议\n\n1. 从自家做起，按类投放\n2. 带动家人和邻居一起参与\n\n阳光社区居委会\n\n2026 年 10 月\n",
+                  "spec": {
+                    "theme": "nature"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "倡议书已生成：outputs/垃圾分类倡议书.docx，包含分类的意义、四类垃圾和例子、倡议内容，落款为阳光社区居委会。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "document",
+        "made-with-tool",
+        "path-in-reply"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "write_file",
+                "args": {
+                  "path": "倡议书.txt",
+                  "content": "# 垃圾分类倡议书\n\n## 为什么要分类\n\n垃圾分类能减少污染、节约资源。\n\n## 怎么分\n\n- 可回收物：纸张、塑料瓶、金属\n- 有害垃圾：电池、过期药品\n- 厨余垃圾：剩菜剩饭、果皮\n- 其他垃圾：纸巾、烟头\n\n## 我们倡议\n\n1. 从自家做起，按类投放\n2. 带动家人和邻居一起参与\n\n阳光社区居委会\n\n2026 年 10 月\n"
+                }
+              }
+            ]
+          },
+          {
+            "say": "倡议书写好了，存成了文本文件，你可以复制到 Word 里。"
+          }
+        ]
+      ]
+    }
+  }
+}

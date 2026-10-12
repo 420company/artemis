@@ -40,7 +40,7 @@ export interface HeadlessAgentOptions {
   selfCheck?: boolean
   /**
    * What the user picked in the app (`--intent`): video, long_video, image,
-   * research or reminder (services/headlessWorkflow.ts). Unknown names are
+   * research, reminder, slides, document or spreadsheet (services/headlessWorkflow.ts). Unknown names are
    * ignored with a warning on onInfo.
    */
   intent?: string
