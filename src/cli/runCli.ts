@@ -1395,9 +1395,10 @@ export async function runSessionCommand(options: { cwd: string; locale: UiLocale
       return
     }
     await fs.promises.unlink(path.join(resolveDataRootDir(cwd), 'sessions', `${session.id}.json`))
-    // Context files (transcript archive, spilled tool outputs) go with it,
+    // Context files (transcript archive, spilled tool outputs) and a host's goal state go with it,
     // and so do its delegated child sessions and theirs.
     await store.removeContextDir(session.id)
+    await fs.promises.rm(path.join(resolveDataRootDir(cwd), 'sessions', session.id, 'goals'), { recursive: true, force: true })
     const removed = new Set([session.id])
     let grew = true
     while (grew) {

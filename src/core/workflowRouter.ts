@@ -222,9 +222,15 @@ const DESIGN_SURFACE_RE = /(?:页面|网页|网站|官网|落地页|着陆页|�
 const DESIGN_VERB_RE = /(?:做|设计|搭建|创建|生成|制作|编写|开发|写|改版|重新设计|重做|美化|打造|\bbuild|\bdesign|\bcreate|\bmake|\bredesign|\bcraft|\brestyle|\bmock up)/i;
 const CONTINUATION_START_RE = /^(?:继续|接着|然后|另外|补充|continue|go on)/i;
 
-// An explicit ask for a rigorous, adversarial review ("帮我严审", "往死里挑刺",
-// "red-team this", "review it ruthlessly"). Plain "review" / "看看" is not enough.
-const REVIEW_CUE_RE = /(?:严审|严格(?:地)?(?:审查|审核|审一下|审一审|评审|把关|检查|review)|严苛(?:地)?(?:审查|评审|审)|对抗(?:式|性)?(?:审查|评审|审计|审核|测试|review)|红队(?:测试|审查|演练)?|挑刺|找茬|挑毛病|往死里(?:审|挑|查)|狠狠(?:地)?(?:审|挑|查)|吹毛求疵(?:地)?(?:审|看|查)|\badversarial(?:ly)?\s+(?:review|audit|test|testing)\b|\bred[- ]?team(?:ing)?\b|\b(?:rigorous|ruthless|brutal|harsh|strict|hostile)(?:ly)?\s+(?:code\s+)?(?:review|audit|critique)\b|\breview\b.{0,40}\b(?:rigorously|ruthlessly|harshly|brutally|strictly|adversarially)\b|\btear\s+(?:it|this|them)\s+apart\b|\bpoke\s+holes\b)/i;
+// An explicit ask for a rigorous, adversarial review, as the request itself:
+// "帮我严审…", "严格审查一下…", "请对…做一次对抗式评审", "red-team this…",
+// "please review … rigorously". A word dropped in passing ("他总爱挑刺",
+// "our red team found…") is not an ask; plain "review" / "看看" is not either.
+const REVIEW_TERM_ZH = String.raw`(?:严审|严格(?:地)?(?:审查|评审|审核|审一下|审一审)|对抗(?:式|性)(?:审查|评审|审核))`;
+const REVIEW_ASK_ZH = new RegExp(
+  String.raw`(?:^\s*(?:请|麻烦)?\s*(?:你\s*)?|(?:帮我|帮忙|请你?|给我|麻烦你?|替我|能不能|能否|可以|可不可以)\s*(?:帮我)?\s*(?:对.{1,40}?)?\s*(?:做|来|进行)?\s*(?:一次|一下|一轮|个)?\s*|^\s*对.{1,40}?(?:做|进行)\s*(?:一次|一下|一轮)?\s*)` + REVIEW_TERM_ZH,
+);
+const REVIEW_ASK_EN = /^\s*(?:(?:please|can you|could you|would you|i want you to|i need you to)\s+)?(?:red[- ]?team\s+(?:this|these|that|my|our|the)\b|(?:do|run|give (?:me|it|this))\s+an?\s+(?:adversarial|rigorous|ruthless|strict)\s+(?:review|audit|critique)\b|(?:adversarially|rigorously|ruthlessly|strictly)\s+review\b|review\b.{0,60}\b(?:rigorously|adversarially|ruthlessly|strictly)\b)/i;
 // What a question about the term looks like ("什么是红队", "what is red teaming").
 const REVIEW_DEFINITION_RE = /(?:什么是|是什么|啥是|什么叫|怎么理解|含义|定义|\bwhat(?:'s| is| does)\b|\bmeaning of\b|\bdefine\b)/i;
 
@@ -285,7 +291,7 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, fullText = inp
     design: designSurface && DESIGN_VERB_RE.test(text) && !bug && !writing,
     designSurface,
     bug,
-    review: REVIEW_CUE_RE.test(text) && !REVIEW_DEFINITION_RE.test(text) && !PAST_MENTION_RE.test(text),
+    review: (REVIEW_ASK_ZH.test(text) || REVIEW_ASK_EN.test(text)) && !REVIEW_DEFINITION_RE.test(text) && !PAST_MENTION_RE.test(text),
     // Saga comes after every code / design / question check: only plain
     // creation requests for a new long video qualify.
     saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(fullText, { maxClipSeconds: input.maxClipSeconds }),
