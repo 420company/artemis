@@ -114,6 +114,12 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
+  // The live browser host, kept by a platform apart from every run (browserSession.ts).
+  if (options.command === 'browser-host') {
+    const { runBrowserHostCommand } = await import('../tools/browser/browserSession.js')
+    process.exit(await runBrowserHostCommand())
+  }
+
   // A headless dream (a host's nightly job) never reaches the first-run,
   // trust or setup dialogs below: it runs once and exits.
   if (options.command === 'dream') {

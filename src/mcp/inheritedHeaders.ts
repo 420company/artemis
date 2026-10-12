@@ -266,6 +266,43 @@ export function ownedEntryProblem(server: { id: string; url?: string; surface?: 
 }
 
 /**
+ * The ids the host owns: v2 entries that name a surface. The MCP store
+ * checks the raw entries of these before it de-duplicates them
+ * (ownedRawEntriesProblem).
+ */
+export function ownedServerIds(): string[] {
+  return [...headersByServer.entries()].filter(([, entry]) => entry.surface !== undefined).map(([id]) => id);
+}
+
+const HOST_UNSET_FIELDS = ['command', 'commandArgs', 'args', 'environment', 'env', 'headers', 'workingDirectory', 'cwd'] as const;
+
+/**
+ * Why the raw entries (as they are in mcp-servers.json, before the store
+ * normalises ids and keeps the first of each) that normalise to an id the
+ * host owns must not be used. The store keeps the first entry per
+ * normalised id, so a look-alike (`ARTEMIS_ONLINE`, ` artemis_online`)
+ * placed first would stand in for the host's entry: every such entry is
+ * disabled unless it is the single, exact entry the host writes, with that
+ * very id, transport streamable-http and no command, environment, working
+ * directory or headers of its own. Undefined when it is fine.
+ */
+export function ownedRawEntriesProblem(ownedId: string, raws: unknown[]): string | undefined {
+  if (raws.length !== 1) return `${raws.length} entries share its id (look-alike ids)`;
+  const raw = raws[0] && typeof raws[0] === 'object' ? (raws[0] as Record<string, unknown>) : {};
+  if (raw.id !== ownedId) return 'a look-alike id';
+  if (raw.transport !== 'streamable-http') return 'another transport than the host\'s';
+  for (const field of HOST_UNSET_FIELDS) {
+    const value = raw[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value as object).length === 0) continue;
+    return `a ${field} the host does not set`;
+  }
+  return undefined;
+}
+
+/**
  * An entry for the engine itself (not an MCP server, not a target): a v2
  * entry with neither, or a v1 entry (v1 does not tell them apart).
  */

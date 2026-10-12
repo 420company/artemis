@@ -6032,7 +6032,9 @@ async function executeAuthorizedAction(
       if (gate.approvedKind) approvedKinds.push(gate.approvedKind);
     }
 
-    options.onInfo?.(`[tool:${hydratedAction.type}] running`);
+    // MCP actions name their server (and tool), so the host can tell its own
+    // server's tools from another server's content (artemis-online run trust).
+    options.onInfo?.(`[tool:${hydratedAction.type}] running${mcpTarget(hydratedAction)}`);
     if (options.onToolActivity) {
       activityCallId = `call_${++toolActivitySeq}`;
       notifyToolActivity(options, { phase: 'start', callId: activityCallId, action: hydratedAction as unknown as ToolActivityAction });
@@ -6631,6 +6633,13 @@ function suspendedRunResult(runtime: ApprovalRuntime | undefined, finalReply: st
   const pending = runtime?.pending;
   if (!pending) return undefined;
   return { reply: finalReply, turns: turn, approval: publicApproval(pending) };
+}
+
+/** ` {"server":…,"tool":…}` for MCP actions, '' otherwise (see the `[tool:…] running` line). */
+export function mcpTarget(action: AgentAction): string {
+  if (action.type === 'mcp_call_tool') return ` ${JSON.stringify({ server: action.serverId, tool: action.toolName })}`;
+  if (action.type === 'mcp_read_resource' || action.type === 'mcp_get_prompt') return ` ${JSON.stringify({ server: action.serverId })}`;
+  return '';
 }
 
 export async function runAgent(

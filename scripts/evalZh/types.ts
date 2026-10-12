@@ -20,10 +20,11 @@ export type TaskCategory =
   | 'long-context'
   | 'errand'
   | 'office'
+  | 'trading'
 
 export const TASK_CATEGORIES: readonly TaskCategory[] = [
   'writing', 'qa', 'file', 'coding', 'multistep', 'vision', 'search',
-  'routing', 'safety', 'honesty', 'memory', 'long-context', 'errand', 'office',
+  'routing', 'safety', 'honesty', 'memory', 'long-context', 'errand', 'office', 'trading',
 ]
 
 /** One user message of a task. Turns of a task share the workspace; `newSession` starts a fresh conversation. */
@@ -58,6 +59,8 @@ export interface TaskSetup {
   videoProvider?: boolean
   /** setup.agent.compression.maxContextTokens for this task (forces compaction on a long history). */
   maxContextTokens?: number
+  /** Register the paper trading desk stub (tradingDeskStub.mjs) as the platform's `artemis_online` MCP server. */
+  tradingDesk?: boolean
   /**
    * A fixture directory served as the only web the browser tools see
    * (scripts/evalZh/mockWeb.ts): pages of made-up shops and providers.

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js';
 import { normalizeStdioCommandParts } from './stdioConfig.js';
-import { ownedEntryProblem } from './inheritedHeaders.js';
+import { ownedEntryProblem, ownedRawEntriesProblem, ownedServerIds } from './inheritedHeaders.js';
 
 // Bundled default config: seeds new installs with all 90 pre-configured MCP servers
 const BUNDLED_DEFAULT_MCP_CONFIG = path.resolve(
@@ -613,13 +613,16 @@ function cloneStoreData(data: McpServerStoreData): McpServerStoreData {
   return JSON.parse(JSON.stringify(data)) as McpServerStoreData;
 }
 
-function normalizeData(input: unknown): McpServerStoreData {
-  const rawServers =
-    input &&
+function rawServerList(input: unknown): unknown[] {
+  return input &&
     typeof input === 'object' &&
     Array.isArray((input as { servers?: unknown[] }).servers)
-      ? (input as { servers: unknown[] }).servers
-      : [];
+    ? (input as { servers: unknown[] }).servers
+    : [];
+}
+
+function normalizeData(input: unknown): McpServerStoreData {
+  const rawServers = rawServerList(input);
   const seenIds = new Set<string>();
   const servers = rawServers
     .map((entry) => normalizeServer(entry))
@@ -644,7 +647,7 @@ export class McpServerStore {
   private readonly filePath: string;
   private static readonly cache = new Map<
     string,
-    { data: McpServerStoreData; mtimeMs?: number; size?: number }
+    { data: McpServerStoreData; mtimeMs?: number; size?: number; raw?: unknown[] }
   >();
 
   constructor(cwd: string) {
@@ -688,17 +691,20 @@ export class McpServerStore {
       cached.mtimeMs === info.mtimeMs &&
       cached.size === info.size
     ) {
-      return withOwnedEntriesChecked(cloneStoreData(cached.data));
+      return withOwnedEntriesChecked(cloneStoreData(cached.data), cached.raw ?? cached.data.servers);
     }
 
     const raw = await readFile(this.filePath, 'utf8');
-    const normalized = normalizeData(JSON.parse(raw) as unknown);
+    const parsed = JSON.parse(raw) as unknown;
+    const normalized = normalizeData(parsed);
+    const rawServers = rawServerList(parsed);
     McpServerStore.cache.set(this.filePath, {
       data: normalized,
       mtimeMs: info.mtimeMs,
       size: info.size,
+      raw: rawServers,
     });
-    return withOwnedEntriesChecked(cloneStoreData(normalized));
+    return withOwnedEntriesChecked(cloneStoreData(normalized), rawServers);
   }
 
   async save(data: McpServerStoreData): Promise<void> {
@@ -782,9 +788,26 @@ export class McpServerStore {
  * disabled for this process, with its surface dropped: nothing written into
  * it reaches the prompt, the tool definitions or a call.
  */
-function withOwnedEntriesChecked(data: McpServerStoreData): McpServerStoreData {
+/**
+ * Disables, for this run, every entry the host owns (named with a surface in
+ * its v2 payload) that is not what the host wrote: look-alike or repeated
+ * ids among the raw entries, another transport, a command, environment or
+ * headers of its own (ownedRawEntriesProblem, checked on the file as it is,
+ * before ids are normalised and de-duplicated), another URL or a surface
+ * with anything the host does not serve (ownedEntryProblem).
+ */
+function withOwnedEntriesChecked(data: McpServerStoreData, rawServers: unknown[]): McpServerStoreData {
+  const rawProblems = new Map<string, string>();
+  for (const ownedId of ownedServerIds()) {
+    const id = normalizeMcpServerId(ownedId);
+    if (!id) continue;
+    const raws = rawServers.filter((entry) => entry && typeof entry === 'object' && normalizeMcpServerId((entry as { id?: unknown }).id) === id);
+    if (raws.length === 0) continue;
+    const problem = ownedRawEntriesProblem(ownedId, raws);
+    if (problem) rawProblems.set(id, problem);
+  }
   for (const server of data.servers) {
-    const problem = ownedEntryProblem(server);
+    const problem = rawProblems.get(server.id) ?? ownedEntryProblem(server);
     if (!problem) continue;
     server.enabled = false;
     server.surface = undefined;

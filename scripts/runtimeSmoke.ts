@@ -763,7 +763,7 @@ assert(
       assert(`run profile: ${why} gets no run headers`, Object.keys(runHeadersFor(managed, url)).length === 0, url)
     }
     // A target-bound entry never goes to an MCP server, whatever its id.
-    assert('run profile: an MCP server named like the own-key entry gets no headers', Object.keys(inheritedMcpHeaders('byo_api_x')).length === 0)
+    assert('run profile: an MCP server named like the own-key entry gets no headers', Object.keys(inheritedMcpHeaders('byo_api_x', `${proxy}/api_x`)).length === 0 && Object.keys(inheritedMcpHeaders('byo_api_x', undefined)).length === 0)
     resetInheritedMcpHeadersForTest()
   } finally {
     if (saved.b === undefined) delete process.env.ARTEMIS_BUILDER_PROFILE
