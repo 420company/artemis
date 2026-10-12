@@ -291,6 +291,15 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
     refused = (error as Error).message
   }
   assert('hosting: a platform without hosting says so plainly', /does not host reference/.test(refused), refused)
+  for (const [code, words] of [['asset_budget_exhausted', /used up/], ['insufficient_balance', /no quota left/], ['membership_inactive', /no quota left/], ['rate_limited', /too many/]] as const) {
+    let said = ''
+    try {
+      await uploadViaPlatform({ baseUrl: 'https://gw.example/v1', apiKey: 'k' }, { body: Buffer.from('a'), contentType: 'video/mp4', kind: 'video', name: 'a.mp4' }, (async () => new Response(JSON.stringify({ error: { code } }), { status: 429 })) as unknown as typeof fetch)
+    } catch (error) {
+      said = (error as Error).message
+    }
+    assert(`hosting: ${code} is told plainly`, words.test(said) && !/费用|计费|余额|充值|balance/i.test(said), said)
+  }
 }
 
 // ── Background music as an uploaded file ───────────────────────────────────

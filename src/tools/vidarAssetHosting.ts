@@ -292,6 +292,9 @@ export async function uploadViaPlatform(
       throw new Error('Video generation: this platform does not host reference videos or audio yet. Use a public https URL for the reference instead.');
     }
     if (code === 'asset_too_large') throw new Error(`Video generation: the reference file is too large to upload (${Math.round(file.body.length / 1024 / 1024)} MB).`);
+    if (code === 'asset_budget_exhausted') throw new Error('Video generation: today\'s reference uploads are used up. Use a public https URL for the reference, or try again tomorrow.');
+    if (code === 'rate_limited') throw new Error('Video generation: too many reference uploads in the last hour; try again later.');
+    if (code === 'insufficient_balance' || code === 'membership_inactive') throw new Error('Video generation: there is no quota left for reference uploads right now.');
     throw new Error(`Video generation: reference upload was refused (${code}).`);
   }
   if (typeof answer.uploadUrl !== 'string' || !/^https:\/\//i.test(answer.uploadUrl) || typeof answer.publicUrl !== 'string' || !/^https:\/\//i.test(answer.publicUrl)) {
