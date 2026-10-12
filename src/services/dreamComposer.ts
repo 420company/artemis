@@ -24,6 +24,7 @@ import {
   countDreamsInLast24h,
   gatherRecentSessionDigest,
   loadDreamConfig,
+  sanitizeLearnedLines,
   type DreamConfig,
   type DreamEntry,
 } from './dreamStore.js'
@@ -36,6 +37,7 @@ import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { broadcastToBridges, listRegisteredBridges } from './bridgeNotifier.js'
 import { sendBragiImageBroadcast } from '../bragi/imageBroadcast.js'
 import { notifyDreamFinished } from './dreamNotifications.js'
+import { diaryStyleBrief, imageStyleAnchors, ownerNotesBlock, styleTags, type DreamStyle, type DreamTaste } from './dreamTaste.js'
 import type { UiLocale } from '../cli/locale.js'
 import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 
@@ -50,6 +52,15 @@ export interface ComposeDreamOptions {
   onStatus?: (text: string) => void
   /** UI language used to compose and distill the dream. */
   locale?: UiLocale
+  /** Which sessions count as the day's material (default: the last 24h, workspace and global). */
+  window?: { sinceMs?: number; untilMs?: number }
+  /**
+   * The look and voice of this dream (see dreamTaste.ts). When given it is
+   * used in the diary and picture prompts only, and recorded with the dream.
+   */
+  style?: DreamStyle
+  /** The owner's notes about dream style; used in the same two prompts only. */
+  taste?: DreamTaste
 }
 
 export interface ComposeDreamResult {
@@ -160,9 +171,9 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   options.onStatus?.(t('🌙 收集白天素材…', '🌙 Gathering daytime traces…'))
 
   // ── gather context ──────────────────────────────────────────────────────
-  const sessionDigest = await gatherRecentSessionDigest(8)
+  const sessionDigest = await gatherRecentSessionDigest(8, { cwd: options.cwd, ...(options.window ?? {}) })
   const memoryDigest = await gatherMemoryDigest()
-  const gitDigest = await gatherGitDigest(options.cwd)
+  const gitDigest = await gatherGitDigest(options.cwd, options.window)
 
   const contextLines: string[] = []
   if (options.firstDreamSeed?.trim()) {
@@ -190,14 +201,16 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
       profileLabel: typeof profileLabel === 'string' ? profileLabel : undefined,
     })
   } catch (err) {
-    const result = { ok: false, reason: `${t('未配置 provider', 'no provider configured')}: ${err instanceof Error ? err.message : String(err)}` }
+    // The resolver's own message is not localized: say it in the dream's language.
+    void err
+    const result = { ok: false, reason: t('还没有配置执行模型', 'no main model is configured') }
     await notifyDreamFinished(result, locale).catch(() => undefined)
     return result
   }
 
   const now = new Date()
   const composeMessages = [
-    { id: 'dream-sys', role: 'system' as const, content: DREAM_SYSTEM_PROMPTS[locale], createdAt: now.toISOString() },
+    { id: 'dream-sys', role: 'system' as const, content: diarySystemPrompt(locale, options.style, options.taste), createdAt: now.toISOString() },
     { id: 'dream-usr', role: 'user' as const, content: contextLines.join('\n'), createdAt: now.toISOString() },
   ]
 
@@ -236,7 +249,8 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   if (config.mode === 'vision') {
     options.onStatus?.(t('🌙 渲染梦境图…', '🌙 Rendering dream image…'))
     try {
-      const imgPrompt = await deriveImagePrompt(provider, dreamMd, now)
+      const derived = await deriveImagePrompt(provider, dreamMd, now, options.style, options.taste)
+      const imgPrompt = derived && options.style ? `${derived}, ${imageStyleAnchors(options.style)}` : derived
       if (!imgPrompt) {
         imageNote = t('图像 prompt 推导为空', 'image prompt derivation returned empty')
       } else {
@@ -266,7 +280,8 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   }
 
   // ── distill learned lines + persist index ───────────────────────────────
-  const learned = extractLearnedSection(dreamMd, locale)
+  // Model output that read session text: only clean style notes survive (see sanitizeLearnedLines).
+  const learned = sanitizeLearnedLines(extractLearnedSection(dreamMd, locale))
   if (config.evolveSystemPrompt && learned.length > 0) {
     await appendLearnedPrompt(learned)
     try {
@@ -288,6 +303,7 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
     preview,
     learned: learned.length > 0 ? learned : undefined,
     tokenCost,
+    ...(options.style ? { style: styleTags(options.style) } : {}),
   }
   await appendDreamIndex(entry)
 
@@ -328,10 +344,24 @@ export async function composeDream(options: ComposeDreamOptions): Promise<Compos
   return result
 }
 
-async function deriveImagePrompt(provider: Awaited<ReturnType<typeof createTrackedProviderFromConfig>>, dreamMd: string, now: Date): Promise<string | null> {
+/** The diary writer's system prompt: the base prompt, then this dream's style and the owner's notes. */
+export function diarySystemPrompt(locale: UiLocale, style?: DreamStyle, taste?: DreamTaste): string {
+  return [DREAM_SYSTEM_PROMPTS[locale], style ? diaryStyleBrief(style, locale) : '', ownerNotesBlock(taste, locale)]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+/** The picture-prompt writer's instructions: the base, then this dream's look and the owner's notes. */
+export function imagePromptSystem(dreamMd: string, style?: DreamStyle, taste?: DreamTaste): string {
+  const look = style ? `\nVisual direction for this dream: ${imageStyleAnchors(style)}.` : ''
+  const notes = ownerNotesBlock(taste, 'en')
+  return `${DREAM_IMAGE_PROMPT_SYSTEM.replace(/\n\nDream:$/, '')}${look}${notes ? `\n${notes}` : ''}\n\nDream:${dreamMd}`
+}
+
+async function deriveImagePrompt(provider: Awaited<ReturnType<typeof createTrackedProviderFromConfig>>, dreamMd: string, now: Date, style?: DreamStyle, taste?: DreamTaste): Promise<string | null> {
   try {
     const messages = [
-      { id: 'imgp-sys', role: 'system' as const, content: DREAM_IMAGE_PROMPT_SYSTEM + dreamMd, createdAt: now.toISOString() },
+      { id: 'imgp-sys', role: 'system' as const, content: imagePromptSystem(dreamMd, style, taste), createdAt: now.toISOString() },
       { id: 'imgp-usr', role: 'user' as const, content: '请直接输出 image prompt。', createdAt: now.toISOString() },
     ]
     const response = await withTimeout(provider.complete(messages), DREAM_IMAGE_PROMPT_TIMEOUT_MS, 'dream image prompt derivation')
@@ -421,13 +451,21 @@ async function gatherMemoryDigest(): Promise<string[]> {
   }
 }
 
-async function gatherGitDigest(cwd: string): Promise<string[]> {
+/** Commit subjects in the dream's window (default: the last 24 hours). */
+async function gatherGitDigest(cwd: string, window?: { sinceMs?: number; untilMs?: number }): Promise<string[]> {
   // Run git log only if cwd looks like a repo. Best-effort, silent failure.
   try {
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const exec = promisify(execFile)
-    const { stdout } = await exec('git', ['-C', cwd, 'log', '--since=24.hours.ago', '--pretty=format:- %s'], {
+    const untilMs = window?.untilMs ?? Date.now()
+    const sinceMs = window?.sinceMs ?? untilMs - 24 * 60 * 60 * 1000
+    const { stdout } = await exec('git', [
+      '-C', cwd, 'log',
+      `--since=${new Date(sinceMs).toISOString()}`,
+      `--until=${new Date(untilMs).toISOString()}`,
+      '--pretty=format:- %s',
+    ], {
       timeout: 4000,
       maxBuffer: 256 * 1024,
     })

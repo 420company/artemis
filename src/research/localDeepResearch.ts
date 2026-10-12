@@ -2,9 +2,9 @@
  * Local deep-research engine — the "builtin" fallback when Gemini Deep
  * Research is not configured.
  *
- * Runs a bounded plan → search → read → digest loop on the cheap
- * specialist/worker provider (falling back to the main profile) at low
- * effort, using the existing searchWeb backends (DuckDuckGo works with zero
+ * Runs a bounded plan → search → read → digest loop on the
+ * auxiliaryModels.web_extract route, else the cheap specialist/worker
+ * provider (falling back to the main profile), at low effort, using the existing searchWeb backends (DuckDuckGo works with zero
  * keys) and an axios+cheerio page extractor. Depth is intentionally modest —
  * the goal is "always-available research", not parity with Gemini's
  * server-side agent.
@@ -12,10 +12,8 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { searchWeb } from '../core/searchTools.js';
-import { createProviderFromConfig } from '../providers/factory.js';
-import { ProviderStore } from '../providers/store.js';
-import { resolveArtemisHomeDir } from '../utils/fs.js';
-import type { ChatProvider, ProviderConfig } from '../providers/types.js';
+import { createAuxiliaryProvider } from '../providers/auxiliaryModels.js';
+import type { ChatProvider } from '../providers/types.js';
 import type { SessionMessage } from '../core/types.js';
 import type { UiLocale } from '../cli/locale.js';
 import { pickLocale } from '../cli/locale.js';
@@ -44,27 +42,13 @@ export type LocalDeepResearchResult = {
   error?: string;
 };
 
-// ── provider resolution (specialist → main, cwd → global) ────────────────────
+// ── provider resolution (web_extract route → specialist → main) ─────────────
 
 async function resolveResearchProvider(cwd: string): Promise<ChatProvider | null> {
-  for (const preferSpecialist of [true, false]) {
-    for (const root of [cwd, resolveArtemisHomeDir()]) {
-      try {
-        const store = new ProviderStore(root);
-        const data = await store.load();
-        const profile = preferSpecialist
-          ? store.getProfile(data, data.specialistProfileId)
-          : store.getDefaultMainProfile(data);
-        if (profile) {
-          const config: ProviderConfig = { ...(profile as ProviderConfig), effort: 'low' };
-          return createProviderFromConfig(config);
-        }
-      } catch {
-        // try next root
-      }
-    }
-  }
-  return null;
+  // auxiliaryModels.web_extract when set, else the worker, else the main
+  // profile; cwd-local store first, then the global one.
+  const resolved = await createAuxiliaryProvider('web_extract', cwd, { effort: 'low' }).catch(() => undefined);
+  return resolved?.provider ?? null;
 }
 
 // ── page extraction ───────────────────────────────────────────────────────────

@@ -220,3 +220,13 @@ export function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`
 }
+
+/**
+ * Like truncate, for text that sits inside a sentence or a one-line field:
+ * no line break is added (a reason in "Could not … (<reason>), …" stays on
+ * one line however long it was).
+ */
+export function truncateInline(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, maxChars)}… [+${text.length - maxChars} chars]`
+}

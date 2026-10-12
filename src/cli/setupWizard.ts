@@ -1200,17 +1200,19 @@ async function configureDreamSettings(options: { cwd: string; locale: UiLocale }
   })
 
   let evolveSystemPrompt = current.evolveSystemPrompt
+  let evolveChosen = current.evolveChosen === true
   let pushToBridges = current.pushToBridges
   if (mode !== 'off') {
     const evolve = await chooseInteractiveOption<'on' | 'off'>({
       title: tr(locale, '梦后扩展系统提示词（让 AI 进化风格）', 'Append distilled style to long-term system prompt'),
       initialIndex: current.evolveSystemPrompt ? 0 : 1,
       choices: [
-        { label: tr(locale, '启用（推荐）', 'Enable (recommended)'), value: 'on' },
-        { label: tr(locale, '关闭', 'Off'), value: 'off' },
+        { label: tr(locale, '启用（梦里的风格笔记会加入以后的系统提示词）', 'Enable (style notes from dreams join future system prompts)'), value: 'on' },
+        { label: tr(locale, '关闭（推荐）', 'Off (recommended)'), value: 'off' },
       ],
     })
     evolveSystemPrompt = evolve === 'on'
+    evolveChosen = true
 
     const push = await chooseInteractiveOption<'on' | 'off'>({
       title: tr(locale, '主动推送到聊天桥接', 'Push dreams to active bridges'),
@@ -1228,6 +1230,7 @@ async function configureDreamSettings(options: { cwd: string; locale: UiLocale }
     enabled: mode !== 'off',
     mode,
     evolveSystemPrompt,
+    evolveChosen,
     pushToBridges,
   })
 

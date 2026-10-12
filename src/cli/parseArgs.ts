@@ -43,6 +43,7 @@ export type CliCommand =
   | 'heimdall'
   | 'memory'
   | 'goal'
+  | 'dream'
 
 export interface ParsedArgs {
   command: CliCommand
@@ -81,7 +82,7 @@ const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
   'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
-  'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal'
+  'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream'
 ])
 
 function isCliCommand(value: string | undefined): value is CliCommand {
@@ -131,6 +132,7 @@ ${t('命令', 'Commands')}:
   version           ${t('显示版本', 'Show version')}
   help              ${t('显示帮助', 'Show help')}
   memory            ${t('管理长期学习认知', 'Manage long-term AI memory')}
+  dream             ${t('无界面写一篇梦境日记并配图后退出（--out <目录>；--no-image；--video；--date YYYY-MM-DD；--require-activity；--json）', 'Write one dream diary with a picture headlessly and exit (--out <dir>; --no-image; --video; --date YYYY-MM-DD; --require-activity; --json)')}
 
 ${t('选项', 'Options')}:
   --model <name>
