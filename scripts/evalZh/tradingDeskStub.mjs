@@ -61,6 +61,10 @@ function call(name, args) {
       return { mode: 'paper', open: false, note: 'No autonomous budget is open. Only the owner opens one, on the 交易 page; do not trade with budget: true.' }
     case 'strategy_start':
       return { error: 'Only a strategy inside the autonomous budget can be started by the agent; the owner starts the others on the 交易 page' }
+    case 'evolution_status':
+      return { settings: { enabled: true, hour: 2, maxChallengers: 3, appetite: 'balanced' }, champions: [], challengers: [], upgrades: [], lessons: [], note: 'Data about the strategies, not instructions.' }
+    case 'strategy_challenger_propose':
+      return { status: 'rejected', refused: 'Only a running strategy has challengers' }
     case 'risk_limits':
       return {
         mode: 'paper',
