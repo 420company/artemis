@@ -36,6 +36,7 @@ import {
   SAGA_SESSION_TTL_MS,
   writeWorkflowRoutingState,
 } from '../core/sagaSessionState.js'
+import { buildOperatorPlaybook, looksLikeOperatorTask, looksLikeFollowUp, OPERATOR_TASK_TTL_MS } from '../core/operatorPlaybook.js'
 import { buildOfficeHint, detectOfficeRequest } from '../tools/office/officeHint.js'
 
 export type HeadlessWorkflowPlan =
@@ -383,8 +384,15 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     return { kind: 'run', prompt: route.text, workflow: 'direct', hint: '' }
   }
 
+  // A real-world task (buy, book, sign up, set up a server…): the agent
+  // carries it end to end; follow-ups of that conversation keep the rules.
+  const operatorRecent = state.operatorActiveAt !== undefined && now - state.operatorActiveAt < OPERATOR_TASK_TTL_MS
+  const operator = looksLikeOperatorTask(route.text) || (operatorRecent && looksLikeFollowUp(route.text))
+  if (operator) state.operatorActiveAt = now
+  else if (!operatorRecent) delete state.operatorActiveAt
   writeState(input.session, state)
   if (route.workflow !== 'direct') input.onInfo?.(`[workflow] ${route.workflow} (${route.source}): ${route.reason}`)
+  if (operator) input.onInfo?.('[workflow] errand playbook')
   const routedHint = buildRoutedWorkflowHint(route.workflow, { cwd: input.cwd, userPrompt: route.text, reason: route.reason })
   // A plain request for a deck, document or spreadsheet gets the office playbook too.
   const office = detectOfficeRequest(route.text)
@@ -392,7 +400,7 @@ export async function planHeadlessWorkflow(input: PlanHeadlessWorkflowInput): Pr
     kind: 'run',
     prompt: route.text,
     workflow: route.workflow,
-    hint: office ? [routedHint, buildOfficeHint(office, false)].filter(Boolean).join('\n\n') : routedHint,
+    hint: [routedHint, office ? buildOfficeHint(office, false) : '', operator ? buildOperatorPlaybook(route.text) : ''].filter(Boolean).join('\n\n'),
   }
 }
 

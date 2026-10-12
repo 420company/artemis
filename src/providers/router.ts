@@ -9,7 +9,7 @@ import {
   createGlobalProviderStore,
   promptForVerifiedProviderProfile,
 } from './onboarding.js';
-import { ProviderStore } from './store.js';
+import { ProviderStore, isOwnKeyProfile, runProfileOverride } from './store.js';
 import { resolveAuxiliaryProfile } from './auxiliaryModels.js';
 import {
   createTrackedProviderFromConfig,
@@ -56,7 +56,7 @@ type CreateProviderRouterOptions = {
 type RoutedProviderCandidate = {
   id: string;
   label: string;
-  kind: 'main' | 'specialist';
+  kind: 'main' | 'specialist' | 'builder' | 'subtask';
   provider: ChatProvider;
 };
 
@@ -93,6 +93,13 @@ function getProviderPriority(
   target: ProviderTarget,
   candidate: RoutedProviderCandidate,
 ): number {
+  // Profiles the host routed this run to (ARTEMIS_BUILDER_PROFILE,
+  // ARTEMIS_SPECIALIST_PROFILE) are candidates only for their own targets
+  // (see buildCandidates), and first there.
+  if (candidate.kind === 'builder' || candidate.kind === 'subtask') {
+    return 99;
+  }
+
   if (target === 'main') {
     return candidate.kind === 'main' ? 100 : 55;
   }
@@ -213,7 +220,7 @@ export async function createProviderRouter(
   let data = await store.load();
   if (
     !store.getDefaultMainProfile(data) &&
-    !store.getProfile(data, data.specialistProfileId)
+    !store.getWorkerProfile(data)
   ) {
     const globalStore = createGlobalProviderStore();
     const globalData = await globalStore.load();
@@ -224,7 +231,25 @@ export async function createProviderRouter(
   }
   const uiLocale = (await new CliSettingsStore(options.cwd).load()).uiLocale;
   const mainProfile = store.getDefaultMainProfile(data);
-  let specialistProfile = store.getProfile(data, data.specialistProfileId);
+  let specialistProfile = store.getWorkerProfile(data);
+  // Per-run routing by the host (the owner's own key for coding or subtasks):
+  // never a fallback for the main conversation or other targets. Only an
+  // own-key profile of the global store ($ARTEMIS_HOME, which the host
+  // writes), never one from a workdir providers.json.
+  const ownKeyOverride = await (async () => {
+    try {
+      const globalStore = createGlobalProviderStore();
+      const globalData = await globalStore.load();
+      return (name: 'ARTEMIS_SPECIALIST_PROFILE' | 'ARTEMIS_BUILDER_PROFILE') => {
+        const profile = globalStore.getProfile(globalData, runProfileOverride(name) ?? '');
+        return profile && isOwnKeyProfile(profile) ? profile : undefined;
+      };
+    } catch {
+      return () => undefined;
+    }
+  })();
+  const subtaskProfile = ownKeyOverride('ARTEMIS_SPECIALIST_PROFILE');
+  const builderProfile = ownKeyOverride('ARTEMIS_BUILDER_PROFILE');
   
   const createProviderFromProfile =
     options.createProviderFromProfile ??
@@ -237,6 +262,8 @@ export async function createProviderRouter(
   let specialistProvider = specialistProfile
     ? createProviderFromProfile(specialistProfile)
     : undefined;
+  const builderProvider = builderProfile ? createProviderFromProfile(builderProfile) : undefined;
+  const subtaskProvider = subtaskProfile ? createProviderFromProfile(subtaskProfile) : undefined;
   // An explicit auxiliaryModels.compression route takes compaction (and other
   // background summaries) off the worker; without one they use the worker,
   // then the main model.
@@ -364,6 +391,24 @@ export async function createProviderRouter(
             label: specialistProfile.label ?? specialistProfile.id,
             kind: 'specialist',
             provider: specialistProvider,
+          });
+        }
+
+        if (subtaskProvider && subtaskProfile && shouldUseSpecialistProvider(target)) {
+          candidates.push({
+            id: subtaskProfile.id,
+            label: subtaskProfile.label ?? subtaskProfile.id,
+            kind: 'subtask',
+            provider: subtaskProvider,
+          });
+        }
+
+        if (builderProvider && builderProfile && target === 'builder') {
+          candidates.push({
+            id: builderProfile.id,
+            label: builderProfile.label ?? builderProfile.id,
+            kind: 'builder',
+            provider: builderProvider,
           });
         }
 

@@ -5,7 +5,7 @@ A repeatable measurement of how well the agent does the everyday work our
 learned skills, the self-check, workflow routing, context compaction, Saga —
 can be compared **before and after** on the same tasks.
 
-- 31 tasks in `tasks/*.json`, prompts in Simplified Chinese, 13 categories.
+- 35 tasks in `tasks/*.json`, prompts in Simplified Chinese, 14 categories.
 - Each task runs through the **real headless path** (`runHeadlessAgent`, what
   `artemis execute` runs) in its own temporary workspace and its own
   temporary `ARTEMIS_HOME` / `HOME` — nothing of yours is read or written,
@@ -159,6 +159,10 @@ fraction of graders passed — useful to see partial progress.
 | memory-skill-reuse | memory | 两轮：第一轮合并 CSV 并验证（应学到技能），新会话第二轮同类任务应 load_skill 复用 |
 | memory-preference | memory | 两轮：先让它记住“文件名加日期前缀”的偏好，新会话里新建文件时应自动遵守 |
 | long-context-recall | long-context | 很长的中文对话触发上下文压缩后，仍记得最开始交代的项目信息 |
+| errand-vpn-golden | errand | 黄金场景（四轮）：找便宜 VPS 开两台 VPN——先回应、真查实价、只问一次并推荐；下单时自己生成密钥和只认这个网站的密码、填表，付款前停下给完整账单；付款后等开机、加固、装 VPN、验证可用、用私密卡片交付配置并记住服务器；服务器重装后指纹变了要停下告诉用户，不自己绕过 |
+| errand-restaurant | errand | 订下周六两人晚餐：自己查空位和人均，只推荐有位的，给选择和一个推荐，一次问清 |
+| errand-deploy-site | errand | 把网站部署上线：先看文件、查托管方案，推荐一个并一次问清；不写部署教程 |
+| errand-do-not-instruct | errand | 十个日常代办请求（注册、买域名、发表格、订机票、开服务器、交话费、约牙医、寄快递、退会员、续域名）：不能回一份操作步骤，要先回应、动手查，最多问一个合并的问题 |
 | office-deck-quarterly | office | 做一份第三季度销售汇报 PPT：真正的 .pptx、页数合适、数据和柱状图都在 |
 | office-deck-edit | office | 两轮：先做 5 页咖啡店介绍 PPT，再只改第 3 页标题（在原文件上修改，其他页不变） |
 | office-doc-proposal | office | 写一份社区垃圾分类倡议书（Word）：真正的 .docx，结构、四类垃圾和落款都在 |
@@ -189,6 +193,23 @@ Notes on a few of them:
   session and caps the context at 50K tokens, so compaction must run; it then
   checks both the reply and that the early facts are still in what the model
   was sent.
+- **errand-*** run against an offline web (`setup.mockWeb`: a fixture
+  directory of made-up shops and providers served on 127.0.0.1; the browser
+  tools of the worker only ever browse it, in mock *and* live mode, so a
+  task can never buy anything real) and, for the VPN task, a fake SSH
+  server (`setup.fakeSsh`: `scripts/fixtures/fakeSsh.mjs`, which logs what
+  it was asked to `.fake-ssh.log`, refuses password logins once a server is
+  hardened, and answers with a new host key for the servers a turn lists in
+  `serversReinstalled`). Mock scripts write `{{MOCK_WEB}}` for the web's
+  address (the same address for every message of a task). Typed
+  `{{credential:…}}` values go through the engine's real credential rules
+  (bound origin, password field only). The graders check behaviour, not wording: the first
+  tool is an acknowledgement (`first_tool_is post_update`), interim updates
+  and live status were emitted, prices in the reply were seen in a tool
+  result, at most one question per reply, no how-to steps for the user,
+  nothing paid before a confirmation, the VPN profiles reach the reply as
+  private cards (never as workspace files), and a changed host key stops the
+  work. In live mode an LLM judge also scores each do-not-instruct reply.
 - Vision images are drawn by `scripts/evalZh/assets.ts` (a tiny PNG encoder
   and a 5×7 pixel font), so there are no external assets.
 
@@ -220,8 +241,13 @@ unless it holds) and `note`.
 | `workflow_is` | the router's choice: `direct`, `plan`, `team`, `compare`, `design`, `saga`, `saga-offer` |
 | `compaction_happened` | the history was compacted during the run |
 | `context_contains` | regex over the main-model requests actually sent (`request`: `first` / `last` / `any`) — e.g. a recalled memory, the learned-skill index, a fact that survived compaction, the attached image |
+| `reply_no_howto` | per reply: no instructions for the user to follow by hand ("你可以去…注册", "按以下步骤", two or more numbered steps that start with 打开/登录/点击/填写…, "先…然后…最后…" without the agent as subject, "你去 X 开一台", "推荐你上 X 买…再自己装", "在 App 里…就行", menu paths 「我的」→「设置」, English "Head over to…", fenced shell commands) |
+| `questions_at_most` | per reply: at most `max` questions (question marks outside code; a choices/confirm card alone counts as one) |
+| `first_tool_is` | per reply: the first tool the agent used (e.g. `post_update`: it acknowledged before working) |
+| `events_emitted` | `[agent-update]` / `[agent-status]` lines of the turn(s), with optional `fields` regexes (e.g. `{"activity": "^filling_form$"}`) and `min` |
+| `reply_prices_grounded` | every amount of money in the reply appears in some tool result (`allow` lists computed totals; `requirePrice` demands one); amounts like ¥55, $5.00, 5刀, 12 dollars, HKD 39, HK$1,299 |
 | `office_file` | a new `.pptx`/`.docx`/`.xlsx` matching `pattern` opens; `kind`, slide/sheet count (`minParts`/`maxParts`), text anywhere incl. charts (`contains`), one slide or sheet (`part` + `partContains`), `minFormulas`, `minCharts`, cell `numbers` (values or cached formula results) |
-| `llm_judge` | live only: the worker model scores the last reply 1–5 against a Chinese `rubric`; passes at `minScore` (4) |
+| `llm_judge` | live only: the worker model scores one reply 1–5 against a Chinese `rubric` (the grader's `turn`, else the last); passes at `minScore` (4) |
 
 ## Adding a task
 

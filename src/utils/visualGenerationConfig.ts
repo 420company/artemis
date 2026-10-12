@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { ProviderStore } from '../providers/store.js';
+import { ProviderStore, isOwnKeyProfile } from '../providers/store.js';
 import type { ProviderProfile, VisualModelConfig } from '../providers/types.js';
 
 export type VisualAssetKind = 'image' | 'video';
@@ -165,6 +165,8 @@ function inferVisualProvider(profile: ProviderProfile): string | null {
 }
 
 function visualConfigFromProviderProfile(profile: ProviderProfile, assetKind: VisualAssetKind): VisualModelConfig | null {
+  // The owner's own model key covers chat calls only: images and videos stay on the platform's routes.
+  if (isOwnKeyProfile(profile)) return null;
   if (!hasApiKey(profile.apiKey) || !profile.baseUrl?.trim() || !profile.model?.trim()) return null;
   const provider = inferVisualProvider(profile);
   if (!provider) return null;

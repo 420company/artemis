@@ -202,6 +202,14 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'browser_close',
   // Asks the owner to take over the live browser (sign in, a check).
   'browser_request_handoff',
+  // Short progress messages the user sees while the run goes on
+  // (core/agentUpdates.ts); hosts without a live channel refuse them.
+  'post_update',
+  // Set up a server the agent rented for the user: keys and passwords in the
+  // credential store, SSH bootstrap, hardening, VPN, checks.
+  'server_setup',
+  // One-time codes sent to the agent's own mailbox/phone, when the host has one.
+  'get_verification_code',
   // The agent's identity on a hosted platform (tools/agentIdentity.ts):
   // offered only where the host provides it (platformSupport.ts); the host
   // enforces the owner's approvals and what mail the agent may read.
