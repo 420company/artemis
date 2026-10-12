@@ -34,6 +34,8 @@ export type LocalDeepResearchSource = {
 export type LocalDeepResearchResult = {
   status: 'completed' | 'failed';
   reportMarkdown?: string;
+  /** The writer's report without the appended sources list (what a report file is built from). */
+  reportBody?: string;
   sources: LocalDeepResearchSource[];
   roundsRun: number;
   pagesRead: number;
@@ -292,6 +294,7 @@ export async function runLocalDeepResearch(options: {
         'You are a research writer. Write in the same language as the research question.',
         'Only state what the notes support; keep every [n] citation attached to its claim.',
         'End with a short "未核实/Limitations" section listing what remains unverified.',
+        'When the sources compare several options or give figures, add one Markdown table; when they give comparable numbers, you may add one chart as a fenced block of language "chart" holding JSON {"type":"bar","title":"...","unit":"...","data":[{"label":"...","value":0}]} with numbers taken from the notes only.',
         options.systemInstruction ? `Task context from the caller: ${options.systemInstruction}` : '',
       ].filter(Boolean).join('\n'),
       [
@@ -299,7 +302,7 @@ export async function runLocalDeepResearch(options: {
         '',
         `Research notes (with [n] citations):\n${notes}`,
         '',
-        'Write the final research report in markdown: a 2-3 sentence summary, then the findings with citations, then limitations. Do not invent a sources list — it is appended automatically.',
+        'Write the final research report in markdown: a first line "# <short title>", a 2-3 sentence summary, then the findings under ## headings with citations, then limitations. Do not invent a sources list — it is appended automatically.',
       ].join('\n'),
     )).trim();
   } catch {
@@ -316,5 +319,5 @@ export async function runLocalDeepResearch(options: {
       : pickLocale(locale, { zh: '（无可用来源）', en: '(no usable sources)' }),
   ].join('\n');
 
-  return { status: 'completed', reportMarkdown, sources, roundsRun, pagesRead };
+  return { status: 'completed', reportMarkdown, reportBody: report, sources, roundsRun, pagesRead };
 }

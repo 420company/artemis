@@ -1052,5 +1052,87 @@ test('learned skills: `artemis memory skills` reaches the memory command and lis
   assert.match(text, /No learned skill "missing"/);
 });
 
+test('per-run MCP headers: read once from the inherited socket, then gone for the process and its tools', async () => {
+  const { spawn } = await import('node:child_process');
+  const { createServer } = await import('node:http');
+  // The MCP endpoint: records the run header of every request.
+  const runHeaders: (string | null)[] = [];
+  const mcp = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const header = req.headers['x-run-context'];
+      runHeaders.push(typeof header === 'string' ? header : null);
+      const message = body ? (JSON.parse(body) as { id?: number; method?: string }) : {};
+      if (message.id === undefined) { res.writeHead(202); res.end(); return; }
+      const result = message.method === 'initialize'
+        ? { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'test', version: '1' } }
+        : { tools: [], resources: [], prompts: [], commands: [] };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+    });
+  });
+  await new Promise<void>((done) => mcp.listen(0, '127.0.0.1', () => done()));
+  const port = (mcp.address() as import('node:net').AddressInfo).port;
+  const harness = resolve('scripts/fixtures/inheritedHeadersHarness.ts');
+  const child = spawn(process.execPath, ['--no-warnings', '--import', 'tsx', harness, `http://127.0.0.1:${port}/mcp`], {
+    env: { ...process.env, ARTEMIS_MCP_HEADERS_FD: '3' },
+    stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+  });
+  const fd3 = child.stdio[3] as import('node:net').Socket;
+  fd3.on('error', () => undefined);
+  fd3.end(JSON.stringify({ artemis_online: { 'X-Run-Context': 'run-token-for-test' }, broken: 'x' }));
+  let out = '';
+  let err = '';
+  child.stdout!.on('data', (chunk) => { out += chunk; });
+  child.stderr!.on('data', (chunk) => { err += chunk; });
+  const code = await new Promise<number | null>((done) => child.on('close', done));
+  mcp.close();
+  assert.equal(code, 0, err);
+  assert.ok(runHeaders.length > 0 && runHeaders.every((value) => value === 'run-token-for-test'), `run headers sent: ${JSON.stringify(runHeaders)}`);
+  const seen = JSON.parse(out) as { problem: string | null; headers: Record<string, string>; other: Record<string, string>; envLeft: string | null; fd3Open: boolean; socket: string; childFds: string };
+  assert.equal(seen.problem, null);
+  assert.deepEqual(seen.headers, { 'x-run-context': 'run-token-for-test' });
+  assert.deepEqual(seen.other, {});
+  assert.equal(seen.envLeft, null, 'the variable is dropped from the environment');
+  assert.equal(seen.fd3Open, false, 'the descriptor is closed after reading');
+  assert.ok(!seen.childFds.includes(seen.socket), `a tool subprocess inherited the socket: ${seen.childFds}`);
+  assert.match(seen.childFds, /env=unset/);
+});
+
+test('per-run MCP headers: another process cannot open the socket through /proc/<pid>/fd', async () => {
+  if (process.platform !== 'linux') return;
+  const { spawn } = await import('node:child_process');
+  // Holds fd 3 without reading it, like an engine that has not started yet.
+  const holder = spawn('/bin/sh', ['-c', 'sleep 5'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe'] });
+  const fd3 = holder.stdio[3] as import('node:net').Socket;
+  fd3.on('error', () => undefined);
+  fd3.write('{"artemis_online":{"x-run-context":"not-for-you"}}');
+  try {
+    await new Promise((done) => setTimeout(done, 100));
+    assert.throws(() => readFileSync(`/proc/${holder.pid}/fd/3`), (error: NodeJS.ErrnoException) => error.code === 'ENXIO');
+  } finally {
+    holder.kill('SIGKILL');
+    fd3.destroy();
+  }
+});
+
+test('per-run MCP headers: a bad descriptor variable is refused and removed, stdio is never touched', async () => {
+  const { loadInheritedMcpHeaders, inheritedMcpHeaders, resetInheritedMcpHeadersForTest } = await import('../src/mcp/inheritedHeaders.js');
+  try {
+    for (const value of ['1', '0', 'x', '-3', '3 4']) {
+      resetInheritedMcpHeadersForTest();
+      const env: NodeJS.ProcessEnv = { ARTEMIS_MCP_HEADERS_FD: value };
+      assert.match(loadInheritedMcpHeaders(env) ?? '', /ARTEMIS_MCP_HEADERS_FD/, value);
+      assert.equal(env.ARTEMIS_MCP_HEADERS_FD, undefined);
+    }
+    resetInheritedMcpHeadersForTest();
+    assert.equal(loadInheritedMcpHeaders({}), undefined);
+    assert.deepEqual(inheritedMcpHeaders('artemis_online'), {});
+  } finally {
+    resetInheritedMcpHeadersForTest();
+  }
+});
+
 await pending;
 console.log('\n  ✔ All system smoke tests passed');
