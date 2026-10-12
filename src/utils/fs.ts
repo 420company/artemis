@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import { realpathSync } from 'node:fs'
-import { access, mkdir, readdir, readFile } from 'node:fs/promises'
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
+import { access, mkdir, open, readdir, readFile, realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, basename, dirname, resolve, relative, sep, extname, isAbsolute } from 'node:path'
@@ -238,4 +238,93 @@ export function truncate(text: string, maxChars: number): string {
 export function truncateInline(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   return `${text.slice(0, maxChars)}… [+${text.length - maxChars} chars]`
+}
+
+// Opened without following a symlink as the file itself, and without
+// blocking on a FIFO (refused below as not a regular file).
+const NO_FOLLOW_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)
+
+export interface OwnFileOptions {
+  /** The real path of the file must stay inside this folder (symlinked parents included). */
+  folder?: string
+  /** Larger files are refused. */
+  maxBytes?: number
+}
+
+function ownFileError(file: string, why: string): Error {
+  return Object.assign(new Error(`${basename(file)} ${why}`), { code: 'EOWNFILE' })
+}
+
+/** Where open() cannot refuse a link itself (no O_NOFOLLOW), it is checked first. */
+function refuseLinkWithoutNoFollow(file: string): void {
+  if (fsConstants.O_NOFOLLOW === undefined && lstatSync(file).isSymbolicLink()) throw ownFileError(file, 'is a link, which is not read')
+}
+
+function insideFolder(realFile: string, realFolder: string): boolean {
+  return realFile !== realFolder && isWithinPath(realFolder, realFile)
+}
+
+/**
+ * The text of a file a skill (or other installable content) is made of:
+ * refused when the file is a symlink, is not a regular file, has another
+ * name elsewhere (a hard link: it may be a credential file), is larger than
+ * `maxBytes`, or (given `folder`) resolves outside that folder. A link in a
+ * skill folder never pulls another file (credentials, settings) into a run.
+ */
+export async function readOwnFileText(file: string, options: OwnFileOptions = {}): Promise<string> {
+  if (options.folder !== undefined) {
+    const [realFile, realFolder] = await Promise.all([realpath(file), realpath(options.folder)])
+    if (!insideFolder(realFile, realFolder)) throw ownFileError(file, 'is outside its folder')
+  }
+  refuseLinkWithoutNoFollow(file)
+  let handle: import('node:fs/promises').FileHandle
+  try {
+    handle = await open(file, NO_FOLLOW_FLAGS)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw ownFileError(file, 'is a link, which is not read')
+    throw error
+  }
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) throw ownFileError(file, 'is not a regular file')
+    if (info.nlink > 1) throw ownFileError(file, 'has other names (a hard link), which is not read')
+    if (options.maxBytes !== undefined && info.size > options.maxBytes) throw ownFileError(file, 'is too large')
+    return await handle.readFile('utf8')
+  } finally {
+    await handle.close()
+  }
+}
+
+/** readOwnFileText, synchronously. */
+export function readOwnFileTextSync(file: string, options: OwnFileOptions = {}): string {
+  if (options.folder !== undefined && !insideFolder(realpathSync(file), realpathSync(options.folder))) {
+    throw ownFileError(file, 'is outside its folder')
+  }
+  refuseLinkWithoutNoFollow(file)
+  let fd: number
+  try {
+    fd = openSync(file, NO_FOLLOW_FLAGS)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw ownFileError(file, 'is a link, which is not read')
+    throw error
+  }
+  try {
+    const info = fstatSync(fd)
+    if (!info.isFile()) throw ownFileError(file, 'is not a regular file')
+    if (info.nlink > 1) throw ownFileError(file, 'has other names (a hard link), which is not read')
+    if (options.maxBytes !== undefined && info.size > options.maxBytes) throw ownFileError(file, 'is too large')
+    return readFileSync(fd, 'utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** A regular file at this path with no other name: not a symlink, not a hard link. */
+export function isOwnFile(file: string): boolean {
+  try {
+    const info = lstatSync(file)
+    return info.isFile() && info.nlink === 1
+  } catch {
+    return false
+  }
 }

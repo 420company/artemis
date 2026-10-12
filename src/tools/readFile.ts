@@ -6,6 +6,7 @@ import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { resolveToolPathWithWorkspaceAccess } from './workspaceAccess.js';
 import { noteFileRead } from './editGuards.js';
 import { pathNotFoundHint } from './pathSuggestions.js';
+import { isReadableDocument } from './office/documentFormat.js';
 
 const LARGE_FILE_WARNING_LINES = 500;
 const MAX_READ_LINES = 2_000;
@@ -104,6 +105,15 @@ export async function executeReadFile(
   });
   if (context.permissionMode !== 'full-access') {
     ensureNotSensitivePath(absolute, action.path);
+  }
+  // PDF and Office files are binary: their text comes from read_document.
+  if (isReadableDocument(absolute)) {
+    return {
+      action,
+      ok: false,
+      output: `${action.path} is a PDF or Office document, which read_file cannot read as text. Use read_document with path "${action.path}" instead.`,
+      error: { code: 'use_read_document', message: 'use read_document for PDF and Office files', retryable: false },
+    };
   }
   const requestedStart = toInteger(action.startLine);
   const requestedEnd = toInteger(action.endLine);

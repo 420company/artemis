@@ -17,7 +17,8 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-const CANDIDATES = [
+// ARTEMIS_SOFFICE_BIN is read when the binary is looked for (after resetSofficeCache too).
+const candidates = () => [
   process.env.ARTEMIS_SOFFICE_BIN,
   'soffice',
   'libreoffice',
@@ -33,7 +34,7 @@ let cached: { bin: string | undefined } | undefined;
 /** The LibreOffice binary, or undefined when it is not installed. */
 export async function findSoffice(): Promise<string | undefined> {
   if (cached) return cached.bin;
-  for (const candidate of CANDIDATES) {
+  for (const candidate of candidates()) {
     if (path.isAbsolute(candidate) && !existsSync(candidate)) continue;
     try {
       await execFileAsync(candidate, ['--version'], { timeout: 20_000 });

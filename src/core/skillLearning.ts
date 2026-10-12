@@ -134,7 +134,7 @@ const GENERATION_TOOLS = new Set([
 ])
 /** File paths of generated media in a generation tool's output. */
 export const ARTIFACT_PATH_RE = /(?:[A-Za-z]:\\|\/|\.{1,2}\/)[^\s"'`<>|]+\.(?:png|jpe?g|webp|gif|mp4|mov|webm|mkv|mp3|wav|m4a|ogg|flac)\b/gi
-const LOADED_SKILL_HEADER_RE = /Learned skill id=(\S+) scope=(\S+?)[\s,;]/
+const LOADED_SKILL_HEADER_RE = /^\[Learned skill id=(\S+) scope=(\S+?)[\s,;]/
 
 /** Collects one run's tool calls. Both engine paths feed it. */
 export class SkillRunRecorder {
@@ -161,16 +161,13 @@ export class SkillRunRecorder {
     skillId?: string
   }): void {
     const tool = String(input.tool || 'unknown')
-    if (tool === LOAD_SKILL_TOOL) {
+    const learnedHeader = tool === LOAD_SKILL_TOOL && input.ok ? input.output?.match(LOADED_SKILL_HEADER_RE) : null
+    if (learnedHeader) {
       // A stored skill (sanitized when learned), not outside content.
-      if (input.ok) {
-        const header = input.output?.match(LOADED_SKILL_HEADER_RE)
-        const ref: SkillRef | undefined = header
-          ? { id: header[1]!, scope: header[2]! as SkillScope }
-          : undefined
-        if (ref && !this.loadedSkills.some((entry) => entry.id === ref.id && entry.scope === ref.scope)) this.loadedSkills.push(ref)
-      }
+      const ref: SkillRef = { id: learnedHeader[1]!, scope: learnedHeader[2]! as SkillScope }
+      if (!this.loadedSkills.some((entry) => entry.id === ref.id && entry.scope === ref.scope)) this.loadedSkills.push(ref)
     } else if (input.output) {
+      // Everything else, a library skill or a skill search included, was not written by this run's learning.
       this.addUntrusted(input.output)
     }
     if (this.steps.length >= MAX_RECORDED_STEPS) return

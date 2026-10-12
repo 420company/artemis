@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SkillAdapterManager } from './externalSkillAdapter.js';
+import { readOwnFileText, readOwnFileTextSync } from '../utils/fs.js';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
 
 /**
@@ -232,7 +233,7 @@ export class SkillManager {
       if (cached && cached.source === 'json' && cached.mtimeMs === mtimeMs && cached.def) {
         return { skillDir, mtimeMs, source: 'json', def: cached.def };
       }
-      const content = await fsp.readFile(jsonFile, 'utf8');
+      const content = await readOwnFileText(jsonFile);
       try {
         const def = JSON.parse(content);
         return { skillDir, mtimeMs, source: 'json', def };
@@ -253,7 +254,7 @@ export class SkillManager {
       if (cached && cached.source === 'md' && cached.mtimeMs === mtimeMs && cached.def) {
         return { skillDir, mtimeMs, source: 'md', def: cached.def };
       }
-      const mdContent = await fsp.readFile(mdFile, 'utf8');
+      const mdContent = await readOwnFileText(mdFile);
       const def = this.parseSkillFromMarkdown(mdContent, path.basename(skillDir));
       if (def) return { skillDir, mtimeMs, source: 'md', def };
     } catch {
@@ -785,7 +786,7 @@ export class SkillManager {
       for (const file of skillFiles) {
         if (file.endsWith('.json')) {
           const skillPath = path.join(skillsDir, file);
-          const skillConfig = JSON.parse(fs.readFileSync(skillPath, 'utf8'));
+          const skillConfig = JSON.parse(readOwnFileTextSync(skillPath));
           
           this.skillDefinitions.set(skillConfig.id, skillConfig);
           this.addSkillDefinition(skillConfig);

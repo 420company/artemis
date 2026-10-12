@@ -1078,7 +1078,7 @@ export function checkMediaMetadata(
 export const SELF_CHECK_FIX_MAX_TOOL_CALLS = 4
 export const SELF_CHECK_FIX_MAX_ROUNDS = 3
 const FIX_READ_TOOLS = new Set([
-  'read_file', 'list_files', 'search_files', 'list_directory', 'file_info', 'git_diff', 'git_status', 'view_image', 'load_skill',
+  'read_file', 'list_files', 'search_files', 'list_directory', 'file_info', 'git_diff', 'git_status', 'view_image', 'read_document', 'load_skill',
 ])
 const FIX_WRITE_TOOLS = new Set(['write_file', 'insert_in_file', 'replace_in_file', 'apply_patch', 'format_code'])
 

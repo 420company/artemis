@@ -1059,6 +1059,19 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           path: nonEmptyStringSchema('Image file (PNG, JPEG, GIF or WebP, up to 8 MB), relative to the workspace. It is attached to your next step so you can see it.'),
         },
       };
+    case 'read_document':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path'],
+        properties: {
+          path: nonEmptyStringSchema('PDF, Word, PowerPoint, Excel, OpenDocument or RTF file, relative to the workspace (an attached file\'s path as given).'),
+          pages: optionalStringSchema('PDF pages or slides to read, e.g. "1-10" or "3,7-9". Default: from the start, up to 50 pages (4 when as_images).'),
+          sheet: optionalStringSchema('Spreadsheets: the sheet to read, by name or 1-based number. Default: all sheets.'),
+          rows: optionalStringSchema('Spreadsheets: rows to read, e.g. "1-500". Default: from row 1, up to 1000 rows.'),
+          as_images: { type: 'boolean', description: 'PDF only: show the pages as images (charts, layout, scans) instead of extracting text. Up to 4 pages per call.' },
+        },
+      };
     case 'task_output':
       return {
         type: 'object',
@@ -1936,9 +1949,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
       return {
         type: 'object',
         additionalProperties: false,
-        required: ['id'],
         properties: {
-          id: nonEmptyStringSchema('Id of a learned skill from the "Learned skills" index in the runtime context.'),
+          id: optionalStringSchema('Id of a skill from the "Learned skills" or "Skill library" lists in the runtime context (or from a search).'),
+          query: optionalStringSchema('Search learned and library skills by topic instead, e.g. "SEO audit" or "board deck". Give id or query.'),
+          file: optionalStringSchema('With id: one of that library skill\'s reference files, as its full text listed them (e.g. "references/checklist.md").'),
         },
       };
     case 'memory':

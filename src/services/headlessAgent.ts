@@ -100,6 +100,20 @@ async function loadExistingSession(sessionStore: SessionStore, sessionId: string
   }
 }
 
+/** Set by the host for the owner's own words; see ownerInput below. */
+export const OWNER_INPUT_ENV = 'ARTEMIS_OWNER_INPUT'
+
+/**
+ * The host's owner-input mark, read once and taken out of this process's
+ * environment: nothing the run starts (a shell command, an MCP server, a
+ * hook, a sub-agent) inherits it or can pass it on.
+ */
+function takeOwnerInputMark(): boolean {
+  const marked = process.env[OWNER_INPUT_ENV]?.trim() === '1'
+  delete process.env[OWNER_INPUT_ENV]
+  return marked
+}
+
 /**
  * The main provider of a headless run. `--model`, `--base-url` and
  * `--api-key` together name a complete endpoint; otherwise they override the
@@ -130,6 +144,7 @@ export async function runHeadlessAgent(
   prompt: string,
   opts: HeadlessAgentOptions = {},
 ): Promise<HeadlessAgentResult> {
+  const ownerInput = takeOwnerInputMark()
   const { createTrackedProviderFromConfig } = await import('../providers/telemetry.js')
   const { createProviderRouter } = await import('../providers/router.js')
   const { PermissionManager } = await import('../security/permissions.js')
@@ -226,6 +241,9 @@ export async function runHeadlessAgent(
       permissionManager,
       maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
       profile: 'main' as const,
+      // The host says the message is the owner's own words (artemis-online's composer):
+      // only then may `$id` reach an optional pack's skill. Anything else fails closed.
+      ownerInput,
       // The main model's window; specialists with a smaller window are capped
       // further by their own provider metadata inside runAgent.
       contextLength: resolveProfileContextLength(providerConfig),

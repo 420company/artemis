@@ -44,3 +44,24 @@ jobs:
       - run: npm run build
       - name: Verify dist output
         run: ls dist/cli.js
+
+  skills-and-documents:
+    name: Skill library and document reading
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install poppler-utils (PDF text and page images)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+      - run: npm ci
+      - name: Skill library
+        run: npm run test:skillLibrary
+      - name: Skill text hosts show (no vendor, model or internal names)
+        run: npm run test:skillText
+      - name: read_document
+        env:
+          READ_DOCUMENT_REQUIRE_POPPLER: '1'
+        run: npm run test:readDocument

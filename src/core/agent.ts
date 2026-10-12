@@ -118,6 +118,7 @@ import {
   type VisionHelper,
 } from './visionHelper.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
+import { loadSkillLibrary, renderSkillLibraryIndex } from '../extensions/skillLibrary.js';
 import {
   beginSkillRun,
   finishSkillRun,
@@ -890,10 +891,18 @@ function buildActionFromLooseArgs(
     }
     case 'load_skill':
     case 'load_learned_skill':
-    case 'read_skill': {
+    case 'read_skill':
+    case 'search_skills': {
       const id = getLooseStringArg(args, 'id', 'name', 'skill', 'skillId', 'skill_id');
-      if (!id?.trim()) return null;
-      return { type: 'load_skill', id };
+      const query = getLooseStringArg(args, 'query', 'search', 'q', 'keywords');
+      const file = getLooseStringArg(args, 'file', 'reference', 'path');
+      if (!id?.trim() && !query?.trim()) return null;
+      return {
+        type: 'load_skill',
+        ...(id?.trim() ? { id: id.trim() } : {}),
+        ...(query?.trim() ? { query: query.trim() } : {}),
+        ...(file?.trim() && id?.trim() ? { file: file.trim() } : {}),
+      };
     }
     case 'view_image':
     case 'look_at_image':
@@ -901,6 +910,24 @@ function buildActionFromLooseArgs(
       const imagePath = getLooseStringArg(args, 'path', 'file', 'image', 'imagePath', 'image_path');
       if (!imagePath?.trim()) return null;
       return { type: 'view_image', path: imagePath };
+    }
+    case 'read_document':
+    case 'read_pdf':
+    case 'read_media': {
+      const docPath = getLooseStringArg(args, 'path', 'file', 'document', 'filename', 'file_path');
+      if (!docPath?.trim()) return null;
+      const pages = getLooseStringArg(args, 'pages', 'page', 'slides', 'range');
+      const sheet = getLooseStringArg(args, 'sheet', 'worksheet', 'tab');
+      const rows = getLooseStringArg(args, 'rows', 'row_range');
+      const asImages = getLooseBooleanArg(args, 'as_images', 'asImages', 'images');
+      return {
+        type: 'read_document',
+        path: docPath,
+        ...(pages?.trim() ? { pages: pages.trim() } : {}),
+        ...(sheet?.trim() ? { sheet: sheet.trim() } : {}),
+        ...(rows?.trim() ? { rows: rows.trim() } : {}),
+        ...(asImages !== undefined ? { as_images: asImages } : {}),
+      };
     }
     default:
       // Any other tool the model may call (search_web, browser_*, task_output,
@@ -2148,11 +2175,13 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'memory':
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
     case 'load_skill':
-      return `load_skill ${truncateInline(action.id, 80)}`;
+      return `load_skill ${action.id ? truncateInline(action.id, 80) : `query=${truncateInline(action.query ?? '', 80)}`}${action.file ? ` file=${truncateInline(action.file, 80)}` : ''}`;
     case 'task_output':
       return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
     case 'view_image':
       return `view_image ${truncateInline(action.path, 120)}`;
+    case 'read_document':
+      return `read_document ${truncateInline(action.path, 120)}${action.pages ? ` pages=${truncateInline(String(action.pages), 30)}` : ''}${action.sheet ? ` sheet=${truncateInline(String(action.sheet), 40)}` : ''}${action.rows ? ` rows=${truncateInline(String(action.rows), 30)}` : ''}${action.as_images ? ' as_images' : ''}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
     case 'post_update':
@@ -3224,6 +3253,8 @@ async function buildRunContextContent(input: {
   evidenceDigest?: string;
   /** Learned skills relevant to this request (ids + one line each). */
   skillIndexSection?: string;
+  /** The skill library's index: its size and the playbooks that fit (ids + one line each). */
+  skillLibrarySection?: string;
 }): Promise<string | undefined> {
   const sections: string[] = [];
   const latestUserMessage = input.latestUserMessage?.trim();
@@ -3271,6 +3302,7 @@ async function buildRunContextContent(input: {
   }
 
   if (input.skillIndexSection?.trim()) sections.push(input.skillIndexSection.trim());
+  if (input.skillLibrarySection?.trim()) sections.push(input.skillLibrarySection.trim());
   sections.push(...input.extensionSections.filter((section) => section.trim()));
   if (input.evidenceDigest?.trim()) {
     sections.push(`Repository evidence:\n${input.evidenceDigest.trim()}`);
@@ -3616,6 +3648,8 @@ function isTerminalVisualGenerationFailureBlocker(
 // its service is not configured, out of balance or unavailable. The
 // unresolved-failure guard still asks the model to acknowledge them, but only
 // a bounded number of times before ending the run with the real error.
+/** What a load_skill `ok` line may name as the skill's source. */
+const LOAD_SKILL_SOURCES = new Set(['bundled', 'pack', 'workspace', 'data-root', 'learned']);
 const TERMINAL_TOOL_FAILURE_CODES = new Set([
   'tool_profile_blocked',
   'tool_permission_denied',
@@ -3968,6 +4002,12 @@ export type RunAgentOptions = {
   profile?: 'main' | AgentRole;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  /**
+   * The request is the owner's own words (an `artemis execute` the host
+   * marks with ARTEMIS_OWNER_INPUT=1): only then may `$id` activate a skill
+   * of an optional pack. Unset: it may not (triggers, events, bridges).
+   */
+  ownerInput?: boolean;
   /**
    * Sub-agent budget for this run, shared with its sub-agents (see
    * core/workflowRouter.ts). Unset: no limit beyond maxTurns.
@@ -5269,7 +5309,7 @@ async function executeAgentAction(
   options: RunAgentOptions,
   abortSignal?: AbortSignal,
   approvedKinds?: ApprovalKind[],
-): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError; data?: { skillSource?: string } }> {
   return scrubToolResult(await executeAgentActionUnscrubbed(session, action, options, abortSignal, approvedKinds));
 }
 
@@ -5280,7 +5320,7 @@ async function executeAgentActionUnscrubbed(
   abortSignal?: AbortSignal,
   /** Kinds the owner approved for this action (hard approvals): the tool's own refusal for them is lifted. */
   approvedKinds?: ApprovalKind[],
-): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError; data?: { skillSource?: string } }> {
   // Saga long-video safety reroute. Runs before validation so the rerouted
   // action is the one validated and dispatched.
   const rerouted = maybeRerouteToSagaLongVideo(session, action);
@@ -5350,11 +5390,14 @@ async function executeAgentActionUnscrubbed(
         },
       }),
     );
+    const skillSource = action.type === 'load_skill' ? (result.data as { skillSource?: unknown } | undefined)?.skillSource : undefined;
     return {
       action: result.action,
       ok: result.ok,
       output: result.output,
       error: result.error,
+      // load_skill: the source of the skill it read, as the tool resolved it (see the tool's ok line).
+      ...(typeof skillSource === 'string' ? { data: { skillSource } } : {}),
     };
   }
 
@@ -6127,6 +6170,11 @@ async function executeAuthorizedAction(
         result.ok,
         result.output ?? '',
       );
+      // load_skill: where the skill it returned came from, as the tool itself
+      // resolved it (one of a fixed set; the model's arguments never set it).
+      // Hosts' run trust reads it (a bundled skill's text is not outside content).
+      const skillSource = completedAction.type === 'load_skill' && result.ok ? result.data?.skillSource : undefined;
+      if (typeof skillSource === 'string' && LOAD_SKILL_SOURCES.has(skillSource)) uiPayload.skill_source = skillSource;
       options.onInfo?.(
         `[tool:${hydratedAction.type}] ${result.ok ? 'ok' : 'failed'} ${JSON.stringify(uiPayload)}`,
       );
@@ -6878,7 +6926,8 @@ async function runAgentInner(
     }
     return accepted;
   };
-  const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
+  // `$id` of an optional pack's skill only from the owner's own words (options.ownerInput).
+  const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput, { ownerInput: options.ownerInput === true });
 
   // ── Learned skills (see core/skillLearning.ts) ────────────────────────────
   // The main agent applies the user's feedback on the previous run, gets the
@@ -6905,6 +6954,14 @@ async function runAgentInner(
     : undefined;
   if (skillRun?.indexSection) {
     options.onInfo?.(`[skills] learned skill index: ${skillRun.indexSection.split('\n').length - 1} entr(ies)`);
+  }
+  // The skill library's index (extensions/skillLibrary.ts): the top-level
+  // main run only, within SKILL_LIBRARY_INDEX_MAX_CHARS.
+  const skillLibrarySection = profile === 'main' && (options.delegationDepth ?? 0) === 0 && process.env.ARTEMIS_SKILL_LIBRARY_INDEX !== '0'
+    ? await loadSkillLibrary(options.cwd).then((library) => renderSkillLibraryIndex(library, userInput)).catch(() => '')
+    : '';
+  if (skillLibrarySection) {
+    options.onInfo?.(`[skills] library index: ${skillLibrarySection.split('\n').filter((line) => line.startsWith('- ')).length} match(es), ${skillLibrarySection.length} chars`);
   }
   let skillRunCompleted = false;
   let skillRunUnresolvedFailure = false;
@@ -7035,6 +7092,7 @@ async function runAgentInner(
       extensionSections: extensionRuntime.sections,
       evidenceDigest,
       skillIndexSection: skillRun?.indexSection,
+      skillLibrarySection,
     });
     runContextMessage = content
       ? {

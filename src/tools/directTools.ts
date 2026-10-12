@@ -9,6 +9,7 @@ import { getToolHostKey, isToolSupportedOnHost } from './platformSupport.js';
 const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'list_files',
   'read_file',
+  'read_document',
   'search_files',
   'lookup_docs',
   'search_web',

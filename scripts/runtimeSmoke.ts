@@ -5040,8 +5040,9 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
   const provider: ChatProvider = {
     supportsNativeToolCalls: true,
     async complete(messages, options): Promise<ProviderResponse> {
+      // The owner's latest message (the per-run context, when there is one, comes after it).
       const latestUser =
-        [...messages].reverse().find((message) => message.role === 'user')?.content ?? ''
+        [...messages].reverse().find((message) => message.role === 'user' && message.name !== 'runtime_context')?.content ?? ''
       const toolNames = options?.nativeFunctionTools?.map((tool) => tool.name) ?? []
 
       implementationCalls += 1

@@ -6,7 +6,7 @@ version: 2.3.0
 author: claude-code-skills
 license: MIT
 tags: [code-quality, discipline, karpathy, simplicity, surgical-changes, anti-patterns, review]
-compatible_tools: [claude-code, codex-cli, cursor, antigravity, opencode, gemini-cli]
+compatible_tools: [codex-cli, cursor, opencode]
 ---
 
 # Karpathy Coder — Active Coding Discipline
@@ -96,7 +96,7 @@ All tools are stdlib-only. Run with `--help`.
 
 ## Pre-commit hook
 
-`hooks/karpathy-gate.sh` — runs `complexity_checker.py` and `diff_surgeon.py` on staged files. Warns (non-blocking) when violations are found. Wire it via `.claude/settings.json` or Husky.
+`hooks/karpathy-gate.sh` — runs `complexity_checker.py` and `diff_surgeon.py` on staged files. Warns (non-blocking) when violations are found. Wire it in as a pre-commit hook (for example with Husky).
 
 ## References
 
@@ -112,17 +112,6 @@ These principles bias toward **caution over speed**. For trivial tasks (typo fix
 - Code you don't fully understand
 - Multi-step tasks with unclear requirements
 - Anything that will be reviewed by humans
-
-## Cross-tool compatibility
-
-Installs via plugin for Claude Code. For other tools, copy the principles into your schema file:
-
-| Tool | Schema file |
-|---|---|
-| Claude Code | `CLAUDE.md` (auto-loaded by plugin) |
-| Codex CLI | `AGENTS.md` |
-| Cursor | `AGENTS.md` or `.cursorrules` |
-| Antigravity / OpenCode / Gemini CLI | `AGENTS.md` |
 
 ## Related skills (chains via `context: fork`)
 
