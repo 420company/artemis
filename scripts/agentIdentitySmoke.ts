@@ -10,7 +10,18 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { loadInheritedMcpHeaders, MCP_HEADERS_FD_ENV, resetInheritedMcpHeadersForTest } from '../src/mcp/inheritedHeaders.js';
-import { evaluateTouchesSecrets, forgetIdentityCredentials, redactIdentitySecrets, redactIdentitySecretsDeep, resolveIdentityPlaceholders } from '../src/security/identityCredentials.js';
+import {
+  enterIdentityRun,
+  forgetIdentityCredentials,
+  hasLiveIdentitySecrets,
+  LIVE_SECRET_REFUSAL,
+  redactIdentitySecrets,
+  redactIdentitySecretsDeep,
+  resolveIdentityPlaceholders,
+  setIdentityCredentialSource,
+  type HostFetch,
+} from '../src/security/identityCredentials.js';
+import { executeBrowserConsole, executeBrowserEvaluate, executeBrowserNavigate, executeBrowserRequests } from '../src/tools/browser/browserTools.js';
 import {
   executeAgentIdentity,
   fenceUntrusted,
@@ -35,6 +46,7 @@ const seen: Seen[] = [];
 let signupPolls = 0;
 let requestPolls = 0;
 let credentialFetches = 0;
+let finishes = 0;
 let nonces = 0;
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
@@ -59,6 +71,10 @@ const server = createServer(async (req, res) => {
     signupPolls += 1;
     if (signupPolls < 2) return send(200, { status: 'pending', signupId: 'su_00000000000000000001' });
     return send(200, { status: 'approved', signupId: 'su_00000000000000000001', site: 'example.com', email: 'mk7q2wd9@agentmail.test', credential: '{{credential:signup-su_00000000000000000001}}', expiresAt: '2026-10-11T10:00:00Z' });
+  }
+  if (p === '/agent-identity/signups/su_00000000000000000001/finish') {
+    finishes += 1;
+    return send(200, { status: 'created', message: 'Recorded: account created.' });
   }
   if (p === '/agent-identity/signups/su_00000000000000000001/credential-nonce') {
     nonces += 1;
@@ -203,12 +219,75 @@ const context = { cwd: process.cwd(), sessionId: SESSION };
     assert.equal(redactIdentitySecrets(`value: ${echo}`), `value: ${P}`, echo);
   }
   assert.deepEqual(redactIdentitySecretsDeep({ ok: false, output: 'x', error: { code: 'e', message: 'Error: Gq7!pX2#mT9vK4wZ8eLr', details: { url: `https://x/?p=${encodeURIComponent('Gq7!pX2#mT9vK4wZ8eLr')}` } } }), { ok: false, output: 'x', error: { code: 'e', message: `Error: ${P}`, details: { url: `https://x/?p=${P}` } } });
-  assert.equal(evaluateTouchesSecrets("document.querySelector('#p').value"), true);
-  assert.equal(evaluateTouchesSecrets('document.title'), false);
+  // While the password is live: no page script, whatever it says, and no console / request log (a hard rule, not a filter).
+  assert.equal(hasLiveIdentitySecrets(), true);
+  for (const script of ['document.title', '1 + 1', '(() => 42)()', "document.querySelector('#p').value", 'fetch("/x")']) {
+    const refused = await executeBrowserEvaluate({ type: 'browser_evaluate', script });
+    assert.equal(refused.ok, false, script);
+    assert.equal(refused.error?.code, 'secret_guard', script);
+    assert.match(refused.output, /密码填写期间不能运行网页脚本或读取控制台\/请求记录/, script);
+  }
+  for (const read of [executeBrowserConsole({ type: 'browser_console' }), executeBrowserRequests({ type: 'browser_requests' }), executeBrowserConsole({ type: 'browser_console', pattern: 'x', clear: true })]) {
+    const refused = await read;
+    assert.equal(refused.ok, false);
+    assert.equal(refused.output, LIVE_SECRET_REFUSAL);
+  }
+  const scriptUrl = await executeBrowserNavigate({ type: 'browser_navigate', url: ' JavaScript:document.forms[0].p.value' });
+  assert.equal(scriptUrl.error?.code, 'secret_guard', 'a script URL is a page script');
+  // finish_signup ends it: the logs can be read again (and browser_evaluate runs again: identityPasswordBrowserSmoke.ts).
+  const finished = await executeAgentIdentity({ type: 'finish_signup', signup_id: 'su_00000000000000000001', outcome: 'created' }, context);
+  assert.equal(finished.ok, true);
+  assert.equal(finishes, 1);
+  assert.equal(hasLiveIdentitySecrets(), false);
+  assert.equal((await executeBrowserConsole({ type: 'browser_console' })).ok, true, 'the console can be read again');
+  assert.equal((await executeBrowserRequests({ type: 'browser_requests' })).ok, true, 'the request log can be read again');
+  // The password itself is gone: the placeholder no longer resolves, and nothing is fetched again.
+  const afterFinish = await resolveIdentityPlaceholders(P, onSite);
+  assert.equal(afterFinish.ok, false);
+  assert.match(afterFinish.ok ? '' : afterFinish.message, /no longer available/);
+  assert.equal(credentialFetches, 1);
+  // Redaction stays on (defence in depth).
+  assert.equal(redactIdentitySecrets('echo Gq7!pX2#mT9vK4wZ8eLr'), `echo ${P}`);
   forgetIdentityCredentials();
   const again = await resolveIdentityPlaceholders(P, onSite);
   assert.equal(again.ok, false, 'the host hands it out once');
   assert.equal(redactIdentitySecrets('nothing to hide'), 'nothing to hide');
+}
+// "Live" also ends with the run (the outermost one; sub-agents nest) and when the sign-up expires.
+{
+  let n = 0;
+  const fake = (expiresAt: string | null): HostFetch => ({
+    site: async () => 'example.org',
+    password: async () => ({ password: `Zz9!fake-password-${++n}`, site: 'example.org', expiresAt }),
+  });
+  const field = { inputType: 'password', frameUrl: 'https://example.org/join' };
+  forgetIdentityCredentials();
+  setIdentityCredentialSource(fake(null));
+  const leaveOuter = enterIdentityRun();
+  const leaveInner = enterIdentityRun();
+  assert.equal((await resolveIdentityPlaceholders('{{credential:signup-su_0000000000000000000a}}', field)).ok, true);
+  assert.equal(hasLiveIdentitySecrets(), true);
+  leaveInner();
+  assert.equal(hasLiveIdentitySecrets(), true, 'a sub-agent ending does not end the run');
+  assert.equal((await executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title' })).error?.code, 'secret_guard');
+  leaveOuter();
+  leaveOuter();
+  assert.equal(hasLiveIdentitySecrets(), false, 'the run ended');
+  assert.equal((await executeBrowserConsole({ type: 'browser_console' })).ok, true);
+  assert.equal(redactIdentitySecrets('Zz9!fake-password-1'), '{{credential:signup-su_0000000000000000000a}}');
+  // Without an expiry from the host: two hours.
+  const leave = enterIdentityRun();
+  assert.equal((await resolveIdentityPlaceholders('{{credential:signup-su_0000000000000000000b}}', field)).ok, true);
+  assert.equal(hasLiveIdentitySecrets(Date.now() + 60 * 60 * 1000), true);
+  assert.equal(hasLiveIdentitySecrets(Date.now() + 2 * 60 * 60 * 1000 + 1000), false, 'expired');
+  // With one: until then.
+  setIdentityCredentialSource(fake(new Date(Date.now() + 10 * 60 * 1000).toISOString()));
+  forgetIdentityCredentials();
+  assert.equal((await resolveIdentityPlaceholders('{{credential:signup-su_0000000000000000000c}}', field)).ok, true);
+  assert.equal(hasLiveIdentitySecrets(Date.now() + 9 * 60 * 1000), true);
+  assert.equal(hasLiveIdentitySecrets(Date.now() + 11 * 60 * 1000), false, 'the sign-up expired');
+  leave();
+  forgetIdentityCredentials();
 }
 {
   const r = await executeAgentIdentity({ type: 'wait_for_email', from_contains: 'example.com', timeout_seconds: 5 }, context);

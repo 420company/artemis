@@ -1,19 +1,23 @@
 // Sign-up passwords in a real browser (the review's pw.mts probe, turned into
 // checks): typed only into a password field of the sign-up's site, never in
 // anything the model receives (outputs, error messages, URLs, requests,
-// reversed or spaced echoes), reads of the field refused, screenshots masked
-// and refused when the field shows its text.
+// reversed or spaced echoes), page scripts and console / request logs refused
+// outright while the password is live and allowed again once the sign-up is
+// finished, screenshots masked and refused when the field shows its text.
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import http from 'node:http';
 import {
+  endIdentitySignup,
   forgetIdentityCredentials,
+  LIVE_SECRET_REFUSAL,
   redactIdentitySecretsDeep,
   setIdentityCredentialSource,
 } from '../src/security/identityCredentials.js';
 import {
   executeBrowserClick,
   executeBrowserClose,
+  executeBrowserConsole,
   executeBrowserEvaluate,
   executeBrowserExtract,
   executeBrowserFormInput,
@@ -88,12 +92,15 @@ try {
   assert.ok(leaks(JSON.stringify(echo)), 'the page really echoed it (the check is not vacuous)');
   assert.ok(!leaks(seen(echo)), seen(echo));
 
-  // Scripts that could read the field are refused, including one that throws the value.
-  for (const script of ["[...document.querySelector('#p').value].join(' ')", "(() => { throw new Error(document.querySelector('#p').value) })()", "new FormData(document.forms[0]).get('p')"]) {
+  // While the password is live, no script runs at all, harmless or not, and the console / request logs stay shut.
+  for (const script of ["[...document.querySelector('#p').value].join(' ')", "(() => { throw new Error(document.querySelector('#p').value) })()", "new FormData(document.forms[0]).get('p')", 'document.title', '1 + 1']) {
     const r = await executeBrowserEvaluate({ type: 'browser_evaluate', script } as never);
     assert.equal(r.ok, false, script);
+    assert.equal(r.output, LIVE_SECRET_REFUSAL, script);
     assert.ok(!leaks(seen(r)));
   }
+  assert.equal((await executeBrowserConsole({ type: 'browser_console' } as never)).output, LIVE_SECRET_REFUSAL);
+  assert.equal((await executeBrowserRequests({ type: 'browser_requests' } as never)).output, LIVE_SECRET_REFUSAL);
 
   // A screenshot masks the field; once the page shows its text, no screenshot.
   const shot = await executeBrowserScreenshot({ type: 'browser_screenshot' } as never);
@@ -106,6 +113,13 @@ try {
   // Submitting a GET form puts it in the URL (form-encoded): redacted in what the tools report.
   const click = await executeBrowserClick({ type: 'browser_click', selector: '#go' } as never);
   assert.ok(!leaks(seen(click)), seen(click));
+
+  // finish_signup ends it: scripts and logs work again (redaction stays on behind them).
+  endIdentitySignup(ID);
+  const title = await executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title + "|" + (1 + 1)' } as never);
+  assert.equal(title.ok, true, title.output);
+  assert.match(title.output, /\|2/);
+  assert.equal((await executeBrowserConsole({ type: 'browser_console' } as never)).ok, true);
   const requests = await executeBrowserRequests({ type: 'browser_requests', pattern: 'next' } as never);
   assert.ok(leaks(JSON.stringify(click)) || leaks(JSON.stringify(requests)), 'the URL really carried it');
   assert.ok(!leaks(seen(requests)), seen(requests));

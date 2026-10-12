@@ -15,7 +15,7 @@
  * input not piped through tool results yet).
  */
 
-import { evaluateTouchesSecrets, hasIdentityPlaceholder, hasLiveIdentitySecrets, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
+import { hasIdentityPlaceholder, hasLiveIdentitySecrets, hasTypedIdentitySecrets, LIVE_SECRET_REFUSAL, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -114,6 +114,8 @@ export async function executeBrowserNavigate(action: BrowserNavigateAction): Pro
       error: { code: 'invalid_input', message: 'url required' },
     };
   }
+  // A script URL is a page script too.
+  if (hasLiveIdentitySecrets() && /^\s*(javascript|vbscript):/i.test(action.url)) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
       const waitUntil = action.waitFor ?? 'domcontentloaded';
@@ -234,12 +236,12 @@ async function markSecretField(el: import('playwright').Locator): Promise<void> 
 }
 
 /**
- * While a sign-up password is live: refuse when a marked field is no longer
+ * Once a sign-up password was typed: refuse when a marked field is no longer
  * a password field (switched to text, it would show in the picture); else
  * the fields to mask, in every frame.
  */
 async function secretScreenshotGuard(page: import('playwright').Page): Promise<{ ok: true; mask: import('playwright').Locator[] } | { ok: false; message: string }> {
-  if (!hasLiveIdentitySecrets()) return { ok: true, mask: [] };
+  if (!hasTypedIdentitySecrets()) return { ok: true, mask: [] };
   const mask: import('playwright').Locator[] = [];
   for (const frame of page.frames()) {
     const exposed = await frame
@@ -419,6 +421,14 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
   }
 }
 
+/**
+ * While a sign-up password is live (security/identityCredentials.ts): page
+ * scripts and the console / request logs are refused outright, not filtered.
+ */
+function liveSecretRefusal(): ToolResult {
+  return { ok: false, output: LIVE_SECRET_REFUSAL, error: { code: 'secret_guard', message: LIVE_SECRET_REFUSAL } };
+}
+
 // ── browser_evaluate ────────────────────────────────────────────────────
 
 export interface BrowserEvaluateAction {
@@ -435,11 +445,8 @@ export async function executeBrowserEvaluate(action: BrowserEvaluateAction): Pro
       error: { code: 'invalid_input', message: 'script required' },
     };
   }
-  // While a sign-up password is live, a script must not be able to read it back (a value, form data, a type switch).
-  if (evaluateTouchesSecrets(action.script)) {
-    const message = 'This script could read a password typed on this page; not run while a sign-up password is in use. Read the page with browser_extract_text instead.';
-    return { ok: false, output: message, error: { code: 'secret_guard', message } };
-  }
+  // While a sign-up password is live, no page script runs at all, whatever it says.
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
       const result = await page.evaluate(action.script);
@@ -466,6 +473,7 @@ export interface BrowserConsoleAction {
 }
 
 export async function executeBrowserConsole(action: BrowserConsoleAction): Promise<ToolResult> {
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     const entries = readConsoleBuffer(action.pattern, action.limit ?? 50);
     if (action.clear) clearEventBuffers('console');
@@ -487,6 +495,7 @@ export interface BrowserRequestsAction {
 }
 
 export async function executeBrowserRequests(action: BrowserRequestsAction): Promise<ToolResult> {
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     const entries = readNetworkBuffer(action.pattern, action.limit ?? 50);
     if (action.clear) clearEventBuffers('network');

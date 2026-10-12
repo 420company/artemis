@@ -1,5 +1,5 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
-import { redactIdentitySecretsDeep } from '../security/identityCredentials.js';
+import { enterIdentityRun, redactIdentitySecretsDeep } from '../security/identityCredentials.js';
 import path from 'node:path';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
 import {
@@ -6325,6 +6325,20 @@ export type AgentRunResult = RunResult & {
 };
 
 export async function runAgent(
+  session: SessionRecord,
+  userInput: string,
+  options: RunAgentOptions,
+): Promise<AgentRunResult> {
+  // A sign-up password typed during this run stops being live when the outermost run ends.
+  const leaveIdentityRun = enterIdentityRun();
+  try {
+    return await runAgentInner(session, userInput, options);
+  } finally {
+    leaveIdentityRun();
+  }
+}
+
+async function runAgentInner(
   session: SessionRecord,
   userInput: string,
   options: RunAgentOptions,

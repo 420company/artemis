@@ -20,7 +20,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
-import { setIdentityCredentialSource } from '../security/identityCredentials.js';
+import { endIdentitySignup, setIdentityCredentialSource } from '../security/identityCredentials.js';
 import { resolveDataRootDir } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 
@@ -97,9 +97,9 @@ setIdentityCredentialSource({
   password: async (signupId) => {
     const nonce = await hostCall<{ nonce?: string }>(undefined, 'POST', `/agent-identity/signups/${encodeURIComponent(signupId)}/credential-nonce`, {});
     if (typeof nonce.nonce !== 'string') throw new IdentityHostError('nonce_required', 403, 'No nonce');
-    const r = await hostCall<{ password?: string; site?: string }>(undefined, 'POST', `/agent-identity/signups/${encodeURIComponent(signupId)}/credential`, {}, 0, { 'x-identity-nonce': nonce.nonce });
+    const r = await hostCall<{ password?: string; site?: string; expiresAt?: string | null }>(undefined, 'POST', `/agent-identity/signups/${encodeURIComponent(signupId)}/credential`, {}, 0, { 'x-identity-nonce': nonce.nonce });
     if (typeof r.password !== 'string' || !r.password || typeof r.site !== 'string') throw new IdentityHostError('not_found', 404, 'No password');
-    return { password: r.password, site: r.site };
+    return { password: r.password, site: r.site, expiresAt: typeof r.expiresAt === 'string' ? r.expiresAt : null };
   },
 });
 
@@ -333,6 +333,7 @@ export async function executeAgentIdentity(action: any, context: ToolExecutionCo
               `Password: type ${r.credential} into the password field(s) with browser_type or browser_form_input. The browser fills in the saved password; you never see it, and it is kept for the owner.`,
               `Finish before ${r.expiresAt ?? 'two hours from now'}: an unfinished sign-up is abandoned and its password deleted.`,
               'After submitting the form: wait_for_email (or wait_for_sms / ask_owner_for_code), then finish_signup with the outcome.',
+              'Once the password is typed, browser_evaluate, browser_console and browser_requests are off until finish_signup: read pages with browser_extract_text or screenshots.',
             ].join('\n'),
             { status: r.status, signupId: r.signupId, site: r.site, email: r.email },
           );
@@ -347,6 +348,8 @@ export async function executeAgentIdentity(action: any, context: ToolExecutionCo
           ...(action.login_url ? { login_url: String(action.login_url) } : {}),
           ...(action.note ? { note: String(action.note) } : {}),
         });
+        // The sign-up is over: its password is no longer live, so page scripts and log reads are allowed again.
+        endIdentitySignup(String(action.signup_id));
         return ok(action, flat(r.message, 400) || 'Recorded.', r);
       }
       case 'get_sms_number': {
