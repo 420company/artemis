@@ -1949,9 +1949,10 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
       return {
         type: 'object',
         additionalProperties: false,
-        required: ['id'],
         properties: {
-          id: nonEmptyStringSchema('Id of a learned skill from the "Learned skills" index in the runtime context.'),
+          id: optionalStringSchema('Id of a skill from the "Learned skills" or "Skill library" lists in the runtime context (or from a search).'),
+          query: optionalStringSchema('Search learned and library skills by topic instead, e.g. "SEO audit" or "board deck". Give id or query.'),
+          file: optionalStringSchema('With id: one of that library skill\'s reference files, as its full text listed them (e.g. "references/checklist.md").'),
         },
       };
     case 'memory':

@@ -970,6 +970,13 @@ async function runSkillCommand(options: { cwd: string; locale: UiLocale; args: s
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
   const sub = args[0]?.toLowerCase()
 
+  // The skill library for hosts and scripts (artemis-online's skill browser): JSON on stdout.
+  if (sub === 'catalog' || sub === 'packs' || ((sub === 'show' || sub === 'read') && args.includes('--json'))) {
+    const { runSkillLibraryCommand } = await import('./skillLibraryCommand.js')
+    process.exitCode = await runSkillLibraryCommand({ cwd, locale, args })
+    return
+  }
+
   if (!sub || sub === 'list' || sub === 'ls' || sub === '--list' || sub === 'browse' || sub === 'categories') {
     const { groupSkillsByCategory, loadSkillDiscovery } = await import('../core/skillDiscovery.js')
     const { skills } = await loadSkillDiscovery(cwd)

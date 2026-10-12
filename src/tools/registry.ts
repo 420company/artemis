@@ -2114,14 +2114,15 @@ const capabilityToolDefs: ToolDefinition[] = [
   // ── Learned skills (procedural memory) ──────────────────────────────────
   {
     type: 'load_skill',
-    description: 'Load a learned skill by id: a procedure Artemis distilled from an earlier verified run (when to use it, steps, pitfalls, verification). The runtime context lists the relevant ones under "Learned skills"; load one before starting a task it fits. Read-only.',
+    description: 'Read a skill in full by id, or search skills by query. Skills are learned procedures (from earlier verified runs: steps, pitfalls, verification) and the skill library\'s playbooks (SEO, finance, product, security, writing…). The runtime context lists the ones that fit under "Learned skills" and "Skill library"; load one before starting a task it fits. With id and file, reads one of a library skill\'s reference files. Read-only.',
     kind: 'code',
     permissionCategory: 'read',
     executionMode: 'blocking',
     parallelSafe: true,
     validate: (a: any) => {
       const errs: string[] = [];
-      validateRequiredNonEmptyString(a?.id, 'id', errs);
+      if (!isNonEmptyString(a?.id) && !isNonEmptyString(a?.query)) errs.push('id or query is required.');
+      if (a?.file !== undefined && !isNonEmptyString(a?.id)) errs.push('file needs the id of a library skill.');
       return errs;
     },
     execute: (async (action: any, context: any) => {

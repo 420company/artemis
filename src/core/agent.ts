@@ -118,6 +118,7 @@ import {
   type VisionHelper,
 } from './visionHelper.js';
 import { resolveExtensionRuntime } from '../extensions/runtime.js';
+import { loadSkillLibrary, renderSkillLibraryIndex } from '../extensions/skillLibrary.js';
 import {
   beginSkillRun,
   finishSkillRun,
@@ -3250,6 +3251,8 @@ async function buildRunContextContent(input: {
   evidenceDigest?: string;
   /** Learned skills relevant to this request (ids + one line each). */
   skillIndexSection?: string;
+  /** The skill library's index: its size and the playbooks that fit (ids + one line each). */
+  skillLibrarySection?: string;
 }): Promise<string | undefined> {
   const sections: string[] = [];
   const latestUserMessage = input.latestUserMessage?.trim();
@@ -3297,6 +3300,7 @@ async function buildRunContextContent(input: {
   }
 
   if (input.skillIndexSection?.trim()) sections.push(input.skillIndexSection.trim());
+  if (input.skillLibrarySection?.trim()) sections.push(input.skillLibrarySection.trim());
   sections.push(...input.extensionSections.filter((section) => section.trim()));
   if (input.evidenceDigest?.trim()) {
     sections.push(`Repository evidence:\n${input.evidenceDigest.trim()}`);
@@ -6914,6 +6918,14 @@ async function runAgentInner(
   if (skillRun?.indexSection) {
     options.onInfo?.(`[skills] learned skill index: ${skillRun.indexSection.split('\n').length - 1} entr(ies)`);
   }
+  // The skill library's index (extensions/skillLibrary.ts): the top-level
+  // main run only, within SKILL_LIBRARY_INDEX_MAX_CHARS.
+  const skillLibrarySection = profile === 'main' && (options.delegationDepth ?? 0) === 0 && process.env.ARTEMIS_SKILL_LIBRARY_INDEX !== '0'
+    ? await loadSkillLibrary(options.cwd).then((library) => renderSkillLibraryIndex(library, userInput)).catch(() => '')
+    : '';
+  if (skillLibrarySection) {
+    options.onInfo?.(`[skills] library index: ${skillLibrarySection.split('\n').filter((line) => line.startsWith('- ')).length} match(es), ${skillLibrarySection.length} chars`);
+  }
   let skillRunCompleted = false;
   let skillRunUnresolvedFailure = false;
 
@@ -7043,6 +7055,7 @@ async function runAgentInner(
       extensionSections: extensionRuntime.sections,
       evidenceDigest,
       skillIndexSection: skillRun?.indexSection,
+      skillLibrarySection,
     });
     runContextMessage = content
       ? {

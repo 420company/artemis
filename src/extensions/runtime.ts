@@ -9,6 +9,7 @@ import {
   type DiscoveredSkill,
 } from './skills.js';
 import { buildPluginPolicySummary } from './pluginPolicy.js';
+import { findLibrarySkill, loadSkillLibrary, type SkillLibrary } from './skillLibrary.js';
 
 
 const MAX_SKILL_CONTENT_CHARS = 2_500;
@@ -47,7 +48,8 @@ function collectStructuredSelectors(input: string): string[] {
 
   for (const match of input.matchAll(/\$([A-Za-z0-9._-]+)/g)) {
     const selector = normalizeId(match[1] ?? '');
-    if (selector) {
+    // "$100" or "$4.99" is a price, not a skill.
+    if (selector && !/^\d[\d.,]*$/.test(selector)) {
       selectors.add(selector);
     }
   }
@@ -211,6 +213,7 @@ function buildActiveSkillSection(activeSkills: ActiveSkill[]): string | undefine
       `- ${entry.skill.id} [${entry.skill.source}] selector=${entry.selector}`,
     );
     lines.push(`Path: ${entry.skill.skillPath ?? entry.skill.dirPath}`);
+    if (entry.content.length >= MAX_SKILL_CONTENT_CHARS) lines.push(`(Cut to ${MAX_SKILL_CONTENT_CHARS} characters: load_skill {"id": "${entry.skill.id}"} reads it in full.)`);
     lines.push('Instructions:');
     lines.push(entry.content);
   }
@@ -415,8 +418,28 @@ export async function resolveExtensionRuntime(
   }
 
   // 处理显式选择的技能
+  // $skill-id also reaches the skill library (bundled skills and every pack,
+  // enabled or not: naming one is the owner's choice), read only when needed.
+  let library: SkillLibrary | undefined;
   for (const selector of selectors) {
-    const skill = findRequestedSkill(selector, skillDiscovery.skills);
+    let skill = findRequestedSkill(selector, skillDiscovery.skills);
+    if (!skill) {
+      library ??= await loadSkillLibrary(cwd, { allPacks: true }).catch(() => ({ skills: [], packs: [] }));
+      const entry = findLibrarySkill(library, selector);
+      if (entry) {
+        skill = {
+          id: entry.id,
+          name: entry.name,
+          title: entry.name,
+          description: entry.description,
+          source: entry.source,
+          dirPath: entry.dirPath,
+          skillPath: entry.skillPath,
+          status: 'ready',
+          issues: [],
+        };
+      }
+    }
     if (!skill || skill.status !== 'ready') {
       missingSkillSelectors.push(selector);
       continue;

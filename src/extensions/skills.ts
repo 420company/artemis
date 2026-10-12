@@ -4,7 +4,8 @@ import { pathExists, resolveDataRootDir, truncate } from '../utils/fs.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { SkillAdapterManager } from '../core/externalSkillAdapter.js';
 
-export type SkillSource = 'workspace' | 'data-root';
+/** bundled and pack: the skill library's own (extensions/skillLibrary.ts), activated with $skill-id. */
+export type SkillSource = 'workspace' | 'data-root' | 'bundled' | 'pack';
 export type SkillStatus = 'ready' | 'invalid';
 
 export type DiscoveredSkill = {
