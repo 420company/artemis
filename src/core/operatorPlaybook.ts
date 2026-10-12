@@ -27,8 +27,8 @@ export const OPERATOR_TASK_TTL_MS = 6 * 60 * 60 * 1000;
 
 // "帮我/替我/给我/麻烦" + a doing verb, or a doing verb + a real-world object.
 const ZH_ASK = /(?:帮我|帮忙|替我|给我|麻烦你?|请你?|能不能|可以帮|你去|你来|直接)/;
-const ZH_DO = /(?:开(?:一|两|几|个|台|通|户)|买|购买|采购|订|预订|预定|预约|挂号|注册|申请|办理?|下单|续费|退订|取消|退款|改签|部署|上线|发布|搭(?:建|一个)?|装(?:一个|个)?|安装|配置|配好|设置|加(?:一|两|几)?台|租|迁移|绑定|开户|充值|缴费|交费|报名|寄|发给|发送|转发|整理.{0,12}发|找(?:个|一个|一家|家|几)|比价|对比.{0,6}(?:价|家)|抢)/;
-const ZH_OBJECT = /(?:VPS|vps|服务器|云主机|主机|VPN|vpn|梯子|节点|域名|DNS|证书|SSL|网站|博客|小程序|机票|航班|火车票|高铁|车票|酒店|民宿|餐厅|饭店|位子|座位|门票|演出|电影票|账号|帐号|会员|订阅|套餐|快递|外卖|保险|发票|报销|邮件|邮箱|表格|简历|合同|号码|手机号|宽带|签证|护照|医院|体检|课程|房子|车位|礼物|蛋糕|鲜花)/;
+const ZH_DO = /(?:开(?:一|两|几|个|台|通|户)|买|购买|采购|订|预订|预定|预约|挂号|注册|申请|办理?|下单|续费|退订|取消|退款|改签|部署|上线|发布|搭(?:建|一个)?|装(?:一个|个)?|安装|配置|配好|设置|加(?:一|两|几)?台|租|迁移|绑定|开户|充值|缴费|交费|报名|寄|发给|发送|转发|整理.{0,12}发|找(?:个|一个|一家|家|几)|比价|对比.{0,6}(?:价|家)|抢|交了|交一下|交上|缴纳?|续上)/;
+const ZH_OBJECT = /(?:VPS|vps|服务器|云主机|主机|VPN|vpn|梯子|节点|域名|DNS|证书|SSL|网站|博客|小程序|机票|航班|火车票|高铁|车票|酒店|民宿|餐厅|饭店|位子|座位|门票|演出|电影票|账号|帐号|会员|订阅|套餐|快递|外卖|保险|发票|报销|邮件|邮箱|表格|简历|合同|号码|手机号|宽带|签证|护照|医院|体检|课程|房子|车位|礼物|蛋糕|鲜花|话费|电费|水费|燃气费|物业费|房租|学费|牙医|快递)/;
 const EN_DO = /\b(?:buy|order|purchase|book|reserve|sign(?:\s|-)?up|register|subscribe|cancel|renew|deploy|launch|host|set\s?up|install|configure|rent|transfer|apply\s+for|send|ship|find\s+(?:me\s+)?(?:a|an|some)\s+cheap)\b/i;
 const EN_OBJECT = /\b(?:vps|server|vpn|domain|dns|website|site|blog|flight|ticket|hotel|restaurant|table|account|subscription|membership|package|parcel|email|spreadsheet|appointment)s?\b/i;
 // Writing, drawing and code work are not errands, unless something is sent or submitted.

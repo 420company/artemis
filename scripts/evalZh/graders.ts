@@ -238,6 +238,46 @@ function conditionHolds(condition: GraderCondition, turns: TurnTrace[]): boolean
   return true
 }
 
+// ── errand helpers ─────────────────────────────────────────────────────────
+
+/** Prose outside fenced blocks. */
+function proseOf(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, ' ')
+}
+
+/** Questions put to the user: question marks in prose; a choices/confirm card alone counts as one. */
+export function countQuestions(text: string): number {
+  const prose = proseOf(text)
+  const marks = (prose.match(/[？?](?![\w/=&])/g) ?? []).length
+  const cards = (text.match(/```(?:choices|confirm)\b/g) ?? []).length
+  return Math.max(marks, marks === 0 && cards > 0 ? 1 : 0)
+}
+
+const HOWTO_PHRASES = /(?:你|您)(?:可以|需要|得|要|只需|先)(?:先|自己|直接)?(?:去|到|在|打开|登录|登陆|访问|前往|进入|注册|下载|安装|搜索)|按(?:照)?(?:以下|下面|如下)(?:的)?步骤|步骤如下|操作步骤|具体步骤|教程如下|(?:you can|you should|you'll need to|first,? go to)\s+(?:go to|visit|open|log ?in|sign ?up|download|install|click)/i
+const HOWTO_LINE = /^\s*(?:[-*•]|\d+[.)、．]|第[一二三四五六七八九十\d]+步[:：]?)\s*(?:\*\*)?(?:你|您)?(?:可以|需要)?(?:先|然后|再|接着|最后)?(?:打开|登录|登陆|进入|前往|访问|点击|注册|选择|填写|输入|下载|安装|复制|粘贴|搜索|找到|提交|付款|支付|设置|扫码|绑定)/
+
+/** Instructions the user would have to follow by hand (lines or phrases). */
+export function howToSteps(text: string): string[] {
+  const prose = proseOf(text)
+  const found: string[] = []
+  const phrase = HOWTO_PHRASES.exec(prose)
+  if (phrase) found.push(phrase[0])
+  const lines = prose.split(/\n/).filter((line) => HOWTO_LINE.test(line))
+  if (lines.length >= 2) found.push(...lines.map((line) => line.trim().slice(0, 40)))
+  return found
+}
+
+const PRICE = /(?:US\$|USD\s?|[¥￥$€£])\s?(\d+(?:[.,]\d+)?)|(\d+(?:\.\d+)?)\s?(?:元|美元|块钱|欧元|USD|\/月|\/mo)/g
+
+/** The amounts of money a text names, as numbers ("$5.00" → 5). */
+export function extractPrices(text: string): number[] {
+  return [...text.matchAll(PRICE)].map((m) => Number((m[1] ?? m[2] ?? '').replace(',', '.'))).filter((n) => Number.isFinite(n))
+}
+
+function numbersIn(text: string): Set<number> {
+  return new Set([...text.matchAll(/\d+(?:\.\d+)?/g)].map((m) => Number(m[0])))
+}
+
 // ── the graders ────────────────────────────────────────────────────────────
 
 type Verdict = { pass: boolean; detail: string } | { skip: string }
@@ -415,6 +455,40 @@ function gradeOne(grader: Grader, id: string, ctx: GradeContext): Verdict {
       const hits = replies().map((turn) => (probeId ? turn.probes[probeId]?.[where] : undefined))
       if (replies().every((turn) => turn.mainRequests === 0)) return { pass: false, detail: 'no main-model request was made' }
       return { pass: hits.length > 0 && hits.every(Boolean), detail: `/${grader.pattern}/ ${hits.every(Boolean) ? 'found' : 'not found'} in the ${where} main-model request` }
+    }
+    case 'reply_no_howto': {
+      const bad = replies().map((turn, i) => ({ i, steps: howToSteps(turn.reply) })).filter((r) => r.steps.length)
+      return { pass: bad.length === 0, detail: bad.length ? `instructions to the user: ${bad.map((r) => r.steps.slice(0, 3).join(' / ')).join(' | ')}` : 'no how-to steps for the user' }
+    }
+    case 'questions_at_most': {
+      const counts = replies().map((turn) => countQuestions(turn.reply))
+      return { pass: counts.length > 0 && counts.every((n) => n <= grader.max), detail: `questions per reply: ${counts.join(', ')} (max ${grader.max})` }
+    }
+    case 'first_tool_is': {
+      const wanted = toolNames(grader.tool)
+      const firsts = replies().map((turn) => turn.tools.find((event) => !event.agent)?.name ?? 'none')
+      return { pass: firsts.length > 0 && firsts.every((name) => wanted.includes(name)), detail: `first tool: ${firsts.join(', ')} (wanted ${wanted.join('|')})` }
+    }
+    case 'events_emitted': {
+      const prefix = `[${grader.event}] `
+      const events = toolTurns().flatMap((turn) => turn.events ?? []).filter((line) => line.startsWith(prefix)).map((line) => {
+        try {
+          return JSON.parse(line.slice(prefix.length)) as Record<string, unknown>
+        } catch {
+          return {}
+        }
+      })
+      const matching = events.filter((event) => Object.entries(grader.fields ?? {}).every(([key, pattern]) => new RegExp(pattern).test(String(event[key] ?? ''))))
+      const min = grader.min ?? 1
+      return { pass: matching.length >= min, detail: `${matching.length} matching ${grader.event} event(s) of ${events.length} (min ${min})` }
+    }
+    case 'reply_prices_grounded': {
+      const prices = extractPrices(replyText())
+      const seen = numbersIn(toolTurns().flatMap((turn) => turn.tools.map((event) => event.output ?? '')).join('\n'))
+      for (const allowed of grader.allow ?? []) seen.add(Number(allowed))
+      const invented = prices.filter((n) => !seen.has(n))
+      if (grader.requirePrice && prices.length === 0) return { pass: false, detail: 'no price in the reply' }
+      return { pass: invented.length === 0, detail: invented.length ? `prices not seen in any tool result: ${invented.join(', ')}` : `${prices.length} price(s), all seen in tool results` }
     }
     case 'llm_judge': {
       if (!ctx.judge) return { skip: 'judge did not run' }

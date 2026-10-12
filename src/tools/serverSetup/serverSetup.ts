@@ -40,7 +40,7 @@ export type ServerSetupAction =
   | { type: 'server_setup'; action: 'verify'; check: 'ssh' | 'wireguard' | 'url'; host?: string; user?: string; port?: number; key?: string; server?: string; url?: string; expect?: string }
   | { type: 'server_setup'; action: 'run'; host: string; user?: string; port?: number; key: string; command: string; timeoutSeconds?: number }
   | { type: 'server_setup'; action: 'list_servers' }
-  | { type: 'server_setup'; action: 'record_server'; server: string; host?: string; provider?: string; region?: string; plan?: string; purpose?: string; status?: 'active' | 'cancelled' | 'deleted'; notes?: string; key?: string; user?: string };
+  | { type: 'server_setup'; action: 'record_server'; server: string; host?: string; provider?: string; region?: string; offering?: string; purpose?: string; status?: 'active' | 'cancelled' | 'deleted'; notes?: string; key?: string; user?: string };
 
 export interface ServerSetupResult {
   ok: boolean;
@@ -78,7 +78,7 @@ export interface ServerRecord {
   key?: string;
   provider?: string;
   region?: string;
-  plan?: string;
+  offering?: string;
   purpose?: string;
   status: 'active' | 'cancelled' | 'deleted';
   notes?: string;
@@ -131,7 +131,7 @@ function describeServer(s: ServerRecord): string {
     s.host ? `host ${s.host}` : undefined,
     s.provider ? `provider ${s.provider}` : undefined,
     s.region ? `region ${s.region}` : undefined,
-    s.plan ? `plan ${s.plan}` : undefined,
+    s.offering ? `offering ${s.offering}` : undefined,
     s.purpose ? `purpose ${s.purpose}` : undefined,
     s.key ? `ssh key ${s.key} (user ${s.user ?? 'root'})` : undefined,
     s.hardened ? 'hardened' : undefined,
@@ -357,7 +357,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
     case 'record_server': {
       if (!SERVER_NAME.test(a.server ?? '')) return fail('invalid_input', 'server: a short name such as "vpn-tokyo-1"');
       const patch: Partial<ServerRecord> = {};
-      for (const field of ['host', 'provider', 'region', 'plan', 'purpose', 'status', 'notes', 'key', 'user'] as const) {
+      for (const field of ['host', 'provider', 'region', 'offering', 'purpose', 'status', 'notes', 'key', 'user'] as const) {
         const value = a[field];
         if (typeof value === 'string' && value.trim()) (patch as Record<string, string>)[field] = value.trim().slice(0, 200);
       }

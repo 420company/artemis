@@ -969,7 +969,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           command: { type: 'string', description: 'run: the shell command.' },
           provider: { type: 'string' },
           region: { type: 'string' },
-          plan: { type: 'string' },
+          offering: { type: 'string', description: 'record_server: the plan bought, e.g. "1 vCPU 1 GB, $5/month".' },
           purpose: { type: 'string' },
           status: { type: 'string', enum: ['active', 'cancelled', 'deleted'] },
           notes: { type: 'string' },

@@ -18,10 +18,11 @@ export type TaskCategory =
   | 'honesty'
   | 'memory'
   | 'long-context'
+  | 'errand'
 
 export const TASK_CATEGORIES: readonly TaskCategory[] = [
   'writing', 'qa', 'file', 'coding', 'multistep', 'vision', 'search',
-  'routing', 'safety', 'honesty', 'memory', 'long-context',
+  'routing', 'safety', 'honesty', 'memory', 'long-context', 'errand',
 ]
 
 /** One user message of a task. Turns of a task share the workspace; `newSession` starts a fresh conversation. */
@@ -54,6 +55,14 @@ export interface TaskSetup {
   videoProvider?: boolean
   /** setup.agent.compression.maxContextTokens for this task (forces compaction on a long history). */
   maxContextTokens?: number
+  /**
+   * A fixture directory served as the only web the browser tools see
+   * (scripts/evalZh/mockWeb.ts): pages of made-up shops and providers.
+   * Mock scripts write `{{MOCK_WEB}}` for its address.
+   */
+  mockWeb?: string
+  /** SSH goes to a fake server (scripts/fixtures/fakeSsh.mjs) that logs to `.fake-ssh.log` in the workspace. */
+  fakeSsh?: boolean
 }
 
 export interface TaskLimits {
@@ -115,6 +124,16 @@ export type Grader = GraderBase & (
   | { type: 'compaction_happened' }
   | { type: 'context_contains'; pattern: string; flags?: string; request?: 'first' | 'last' | 'any' }
   | { type: 'llm_judge'; rubric: string; minScore?: number }
+  /** Per selected turn: the reply does not tell the user how to do what the agent could do itself. */
+  | { type: 'reply_no_howto' }
+  /** Per selected turn: at most `max` questions to the user (a choices/confirm card counts as one). */
+  | { type: 'questions_at_most'; max: number }
+  /** Per selected turn: the first tool the agent used is one of these (e.g. an acknowledgement first). */
+  | { type: 'first_tool_is'; tool: string | string[] }
+  /** Engine events of the turn(s): `[agent-update]` / `[agent-status]` lines, optionally with field regexes. */
+  | { type: 'events_emitted'; event: 'agent-update' | 'agent-status'; fields?: Record<string, string>; min?: number }
+  /** Every amount of money in the reply was seen in a tool result (no invented prices); `allow` lists computed ones. */
+  | { type: 'reply_prices_grounded'; allow?: string[]; requirePrice?: boolean }
 )
 
 export type GraderType = Grader['type']
@@ -258,6 +277,8 @@ export interface TurnTrace {
   /** Main-model requests seen (tools attached). */
   mainRequests: number
   transcript: TranscriptEntry[]
+  /** The engine's `[agent-update]` and `[agent-status]` lines, in order. */
+  events?: string[]
   /** Hosts the mock-mode network guard refused. */
   blockedHosts: string[]
   error?: string

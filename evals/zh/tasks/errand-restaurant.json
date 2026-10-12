@@ -1,0 +1,133 @@
+{
+  "id": "errand-restaurant",
+  "category": "errand",
+  "description": "订下周六两人晚餐：自己查空位和人均，只推荐有位的，给 2-3 个选择加一个推荐，一次问清（不教用户去哪个 App 订）",
+  "setup": {
+    "mockWeb": "web-dining"
+  },
+  "turns": [
+    {
+      "prompt": "帮我订下周六晚上两个人的餐厅"
+    }
+  ],
+  "limits": {
+    "maxTurns": 12,
+    "timeoutSec": 300,
+    "budgetTokens": 600000
+  },
+  "graders": [
+    {
+      "id": "playbook",
+      "type": "context_contains",
+      "pattern": "代办任务模式",
+      "request": "first"
+    },
+    {
+      "id": "ack-first",
+      "type": "first_tool_is",
+      "tool": "post_update"
+    },
+    {
+      "id": "looked",
+      "type": "tool_called",
+      "tool": [
+        "browser_extract_text",
+        "search_web"
+      ]
+    },
+    {
+      "id": "options",
+      "type": "reply_matches",
+      "pattern": "(炉边[\\s\\S]*橄榄|橄榄[\\s\\S]*炉边)"
+    },
+    {
+      "id": "no-full-one",
+      "type": "reply_not_matches",
+      "pattern": "竹里日料[^。\\n]{0,20}(19|七)[:：点]"
+    },
+    {
+      "id": "recommend",
+      "type": "reply_matches",
+      "pattern": "推荐|建议"
+    },
+    {
+      "id": "prices-grounded",
+      "type": "reply_prices_grounded",
+      "requirePrice": true
+    },
+    {
+      "id": "one-question",
+      "type": "questions_at_most",
+      "max": 1
+    },
+    {
+      "id": "no-howto",
+      "type": "reply_no_howto"
+    },
+    {
+      "id": "not-booked-yet",
+      "type": "tool_not_called",
+      "tool": "browser_click",
+      "args": {
+        "*": "提交预订"
+      }
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "post_update",
+                "args": {
+                  "text": "收到，我去看看下周六晚上 7 点还有哪些两人位。"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_navigate",
+                "args": {
+                  "url": "{{MOCK_WEB}}/index.html"
+                }
+              }
+            ]
+          },
+          {
+            "tools": [
+              {
+                "name": "browser_extract_text",
+                "args": {}
+              }
+            ]
+          },
+          {
+            "say": "下周六（10月17日）晚上 7 点、两位，我查到这几家有位：\n\n1. **炉边小馆**（粤菜）人均 ¥180，评分 4.7，有靠窗位，免订金。\n2. **橄榄树西餐厅**（意大利菜）人均 ¥260，评分 4.6，需要预付订金。\n\n竹里日料 7 点已经满了，只有 9 点的位子。\n\n我推荐 **炉边小馆**：靠窗、免订金、评分最高。我就按「炉边小馆、周六 19:00、2 位」帮你订，留你的名字和手机号，可以吗？"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "ack-first",
+        "looked",
+        "options",
+        "recommend",
+        "prices-grounded",
+        "one-question",
+        "no-howto"
+      ],
+      "turns": [
+        [
+          {
+            "say": "你可以打开订餐 App 自己订：\n1. 搜索附近的餐厅\n2. 选择周六晚上 19:00、2 人\n3. 填写手机号提交\n你喜欢什么菜系？预算多少？"
+          }
+        ]
+      ]
+    }
+  }
+}
