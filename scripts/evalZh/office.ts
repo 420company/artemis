@@ -38,7 +38,10 @@ export function readZip(file: string): Map<string, Buffer> {
   return entries
 }
 
-const decode = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#x([0-9a-f]+);/gi, (_, h: string) => String.fromCodePoint(parseInt(h, 16))).replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d))).replace(/&amp;/g, '&')
+/** A character reference as text; out-of-range or surrogate values become U+FFFD. */
+const codePoint = (n: number) => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : '\uFFFD')
+
+const decode = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#x([0-9a-f]+);/gi, (_, h: string) => codePoint(parseInt(h, 16))).replace(/&#(\d+);/g, (_, d: string) => codePoint(Number(d))).replace(/&amp;/g, '&')
 
 function texts(xml: string, tag: string): string[] {
   const re = new RegExp(`<${tag}(?:\\s[^>]*)?>([^<]*)</${tag}>`, 'g')

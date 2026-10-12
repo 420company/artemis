@@ -37,7 +37,12 @@ Layouts: `title`, `section`, `bullets`, `two-column`, `image-text`, `chart`,
 `table`, `quote`, `stats`. Every slide may carry `notes` (speaker notes).
 Charts are native PowerPoint charts (column, bar, line, pie, doughnut,
 area); tables are real tables; pictures (`image-text`) are cropped to fill
-their half of the slide. Text sizes are fitted to their boxes; inline
+their half of the slide. Picture paths pass the same gates as the other file
+tools (`images.ts`, `createImageLoader`): inside the workspace or the media
+output folder, anywhere else only after the workspace trust prompt, never a
+protected directory, symlinks judged by their real target; URLs are not
+fetched. WebP, BMP and TIFF (identified by magic bytes) are converted with
+ImageMagick using an explicit input coder; anything else is refused. Text sizes are fitted to their boxes; inline
 `**bold**`, `*italic*`, `` `code` `` are honoured. A missing picture becomes a
 placeholder and a warning, never a failed deck.
 
@@ -122,5 +127,5 @@ exceljs, so the new packages add no `npm audit` findings.
 
 Optional system tools: LibreOffice (MPL-2.0) for PDF export, poppler's
 `pdftotext` (GPL, run as a separate program) for contents page numbers,
-ImageMagick for WebP/BMP pictures. Fonts: Noto Sans/Serif CJK (SIL OFL 1.1),
+ImageMagick for WebP/BMP/TIFF pictures (the hosted toolbox installs a restrictive `policy.xml`). Fonts: Noto Sans/Serif CJK (SIL OFL 1.1),
 Liberation (SIL OFL 1.1).

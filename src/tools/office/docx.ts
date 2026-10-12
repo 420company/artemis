@@ -31,7 +31,7 @@ import {
   WidthType,
 } from 'docx';
 import type { Bullet, DocBlock, DocSpec, TableSpec } from './spec.js';
-import { loadImage } from './images.js';
+import type { ImageLoader } from './images.js';
 import { formatCellNumber, hasCjk, parseInline, plainText, textWidthEm } from './text.js';
 import { resolveTheme, type OfficeTheme } from './themes.js';
 
@@ -53,7 +53,7 @@ const PX_PER_IN = 96;
 
 interface Ctx {
   theme: OfficeTheme;
-  cwd: string;
+  images: ImageLoader;
   warnings: string[];
   textWidthTwips: number;
   listInstance: number;
@@ -162,7 +162,7 @@ function table(ctx: Ctx, spec: TableSpec, captionText?: string): Array<Paragraph
 }
 
 async function image(ctx: Ctx, block: DocBlock, index: number): Promise<Paragraph[]> {
-  const loaded = await loadImage(block.path ?? '', ctx.cwd);
+  const loaded = await ctx.images(block.path ?? '');
   if ('error' in loaded) {
     ctx.warnings.push(`block ${index + 1}: ${loaded.error}; it was left out`);
     return [];
@@ -247,14 +247,14 @@ function tocBlock(ctx: Ctx, spec: DocSpec): Array<Paragraph | TableOfContents> {
   ];
 }
 
-export async function buildDocument(spec: DocSpec, cwd: string, options: { tocPages?: Array<number | undefined> } = {}): Promise<BuiltDocument> {
+export async function buildDocument(spec: DocSpec, images: ImageLoader, options: { tocPages?: Array<number | undefined> } = {}): Promise<BuiltDocument> {
   const theme = resolveTheme(spec.theme);
   const c = theme.colors;
   const page = PAGE[spec.pageSize ?? 'A4'];
   const allText = [spec.title ?? '', ...spec.blocks.slice(0, 40).map((b) => b.text ?? '')].join('');
   const ctx: Ctx = {
     theme,
-    cwd,
+    images,
     warnings: [],
     textWidthTwips: page.width - 2 * MARGIN_X,
     listInstance: 0,

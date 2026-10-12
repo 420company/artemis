@@ -2,17 +2,29 @@
  * tools/office/images.ts — pictures for slides and documents.
  *
  * Reads the size and type of a PNG, JPEG or GIF from its header (no image
- * library), and turns other formats (WebP, BMP, TIFF) into PNG with
- * ImageMagick when it is installed, since Office files cannot carry them
- * reliably. A picture that cannot be used becomes a warning, never a failed
- * file: the slide gets a placeholder instead.
+ * library), and turns WebP, BMP and TIFF into PNG with ImageMagick when it is
+ * installed, since Office files cannot carry them reliably. Anything else is
+ * refused before ImageMagick ever sees it (the decoder is named explicitly,
+ * so a file cannot pick a different coder by its content). A picture that
+ * cannot be used becomes a warning, never a failed file: the slide gets a
+ * placeholder instead.
+ *
+ * Paths go through the same gates as the other file tools
+ * (createImageLoader): inside the workspace or the agent's own media folder,
+ * anything else only after the workspace trust prompt, never a protected
+ * directory, symlinks checked at their real target. URLs are not fetched.
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { ensureNotSensitivePath } from '../../utils/fs.js';
+import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
+import { isPathInsideWorkspace } from '../../utils/workspaceRoots.js';
+import type { ToolExecutionContext } from '../types.js';
+import { ensureWorkspaceForToolCandidate, resolveAbsoluteToolCandidate } from '../workspaceAccess.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -22,6 +34,9 @@ export interface LoadedImage {
   width: number;
   height: number;
 }
+
+/** Reads one picture named in a spec, or says why it cannot be used. */
+export type ImageLoader = (requested: string) => Promise<LoadedImage | { error: string }>;
 
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 
@@ -54,13 +69,23 @@ export function imageInfo(data: Buffer): { type: LoadedImage['type']; width: num
   return undefined;
 }
 
-async function convertToPng(file: string): Promise<Buffer | undefined> {
+/** Formats converted to PNG, identified by their magic bytes; the value is ImageMagick's coder name. */
+export function convertibleType(data: Buffer): 'webp' | 'bmp' | 'tiff' | undefined {
+  if (data.length >= 12 && data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP') return 'webp';
+  if (data.length >= 26 && data.toString('ascii', 0, 2) === 'BM') return 'bmp';
+  if (data.length >= 8 && (data.toString('latin1', 0, 4) === 'II*\u0000' || data.toString('latin1', 0, 4) === 'MM\u0000*')) return 'tiff';
+  return undefined;
+}
+
+async function convertToPng(file: string, coder: 'webp' | 'bmp' | 'tiff'): Promise<Buffer | undefined> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'artemis-office-img-'));
   const out = path.join(dir, 'image.png');
+  // The input coder is forced ("webp:file"), the first frame only, bounded.
+  const args = ['-limit', 'memory', '256MiB', '-limit', 'disk', '512MiB', '-limit', 'time', '30', `${coder}:${file}[0]`, `png:${out}`];
   try {
-    for (const [bin, args] of [['magick', [file + '[0]', out]], ['convert', [file + '[0]', out]]] as const) {
+    for (const bin of ['magick', 'convert']) {
       try {
-        await execFileAsync(bin, [...args], { timeout: 30_000 });
+        await execFileAsync(bin, args, { timeout: 30_000 });
         return await readFile(out);
       } catch {
         // Try the next binary name.
@@ -72,28 +97,56 @@ async function convertToPng(file: string): Promise<Buffer | undefined> {
   }
 }
 
-/** The picture at `requested` (relative to cwd), or a reason it cannot be used. */
-export async function loadImage(requested: string, cwd: string): Promise<LoadedImage | { error: string }> {
-  if (/^https?:\/\//i.test(requested)) return { error: `image ${requested}: download it into the workspace first and pass the file path` };
-  const file = path.resolve(cwd, requested.replace(/^file:\/\//, ''));
+/** The picture at an absolute, already-permitted path. */
+export async function readImageFile(file: string, label: string): Promise<LoadedImage | { error: string }> {
   let size: number;
   try {
     const info = await stat(file);
-    if (!info.isFile()) return { error: `image ${requested}: not a file` };
+    if (!info.isFile()) return { error: `image ${label}: not a file` };
     size = info.size;
   } catch {
-    return { error: `image ${requested}: file not found` };
+    return { error: `image ${label}: file not found` };
   }
-  if (size > MAX_IMAGE_BYTES) return { error: `image ${requested}: larger than 30 MB` };
+  if (size > MAX_IMAGE_BYTES) return { error: `image ${label}: larger than 30 MB` };
   let data: Buffer = await readFile(file);
   let info = imageInfo(data);
   if (!info) {
-    const converted = await convertToPng(file);
-    if (converted) {
-      data = converted;
-      info = imageInfo(data);
-    }
+    const coder = convertibleType(data);
+    if (!coder) return { error: `image ${label}: use a PNG, JPEG or GIF` };
+    const converted = await convertToPng(file, coder);
+    if (!converted) return { error: `image ${label}: could not convert it; use a PNG, JPEG or GIF` };
+    data = converted;
+    info = imageInfo(data);
   }
-  if (!info || info.width <= 0 || info.height <= 0) return { error: `image ${requested}: use a PNG, JPEG or GIF` };
+  if (!info || info.width <= 0 || info.height <= 0) return { error: `image ${label}: use a PNG, JPEG or GIF` };
   return { data, ...info };
+}
+
+/**
+ * The image loader for one tool call: a path is allowed inside the
+ * workspace or the media output folder (where generated pictures go), or
+ * elsewhere after the workspace trust prompt (without switching the
+ * workspace); never in a protected directory; a symlink is judged by its
+ * real target. URLs are refused (download first, through the web tools).
+ */
+export function createImageLoader(context: ToolExecutionContext, toolName: string): ImageLoader {
+  const permitted = async (candidate: string, requested: string): Promise<void> => {
+    ensureNotSensitivePath(candidate, requested);
+    if (isPathInsideWorkspace(context.cwd, candidate) || isPathInsideWorkspace(getMediaOutputRoot(), candidate)) return;
+    await ensureWorkspaceForToolCandidate({ candidatePath: candidate, inputPath: requested, toolName, context, switchNow: false });
+  };
+  return async (requested) => {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(requested) && !/^file:\/\//i.test(requested)) {
+      return { error: `image ${requested}: links are not fetched; download the picture into the workspace first and pass its path` };
+    }
+    try {
+      const candidate = resolveAbsoluteToolCandidate(requested.replace(/^file:\/\//i, ''), context.cwd, context);
+      await permitted(candidate, requested);
+      const real = await realpath(candidate).catch(() => candidate);
+      if (real !== candidate) await permitted(real, requested);
+      return await readImageFile(real, requested);
+    } catch (error) {
+      return { error: `image ${requested}: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  };
 }

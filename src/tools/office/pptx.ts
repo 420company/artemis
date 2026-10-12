@@ -15,8 +15,8 @@
 import JSZip from 'jszip';
 import PptxGenJSModule from 'pptxgenjs';
 import type { Bullet, ChartSpec, DeckSpec, SlideColumn, SlideSpec, TableSpec } from './spec.js';
-import { loadImage, type LoadedImage } from './images.js';
-import { fitFontSize, formatCellNumber, hasCjk, parseInline, plainText, textWidthEm } from './text.js';
+import type { ImageLoader, LoadedImage } from './images.js';
+import { ellipsize, emFor, fitFontSize, formatCellNumber, hasCjk, parseInline, plainText, textWidthEm } from './text.js';
 import { resolveTheme, tint, type OfficeTheme } from './themes.js';
 
 // The package is CommonJS with an ESM build; depending on the loader the
@@ -45,7 +45,7 @@ interface Ctx {
   pptx: PptxGenJS;
   theme: OfficeTheme;
   deck: DeckSpec;
-  cwd: string;
+  images: ImageLoader;
   warnings: string[];
   sectionCount: number;
 }
@@ -91,7 +91,9 @@ function background(slide: Slide, color: string): void {
 function footer(ctx: Ctx, slide: Slide, dark = ctx.theme.dark): void {
   const { theme } = ctx;
   const color = dark ? theme.colors.muted : theme.colors.muted;
-  const label = ctx.deck.footer ?? ctx.deck.title;
+  const full = ctx.deck.footer ?? ctx.deck.title;
+  // One line: a long title is cut with an ellipsis instead of running off the slide.
+  const label = full ? ellipsize(plainText(full), emFor(8, 10)) : undefined;
   if (label) {
     slide.addText(label, { x: M, y: 6.98, w: 8, h: 0.3, fontSize: 10, color, fontFace: theme.fonts.bodyLatin, lang: lang(label), margin: 0 });
   }
@@ -274,7 +276,7 @@ async function imageTextSlide(ctx: Ctx, spec: SlideSpec, number: number): Promis
   const imageW = 5.9;
   const right = spec.imageSide === 'right';
   const imageBox = { x: right ? W - imageW : 0, y: 0, w: imageW, h: H };
-  const loaded = spec.image ? await loadImage(spec.image, ctx.cwd) : { error: 'no image' };
+  const loaded = spec.image ? await ctx.images(spec.image) : { error: 'no image' };
   if ('error' in loaded) {
     ctx.warnings.push(`slide ${number}: ${loaded.error}; a placeholder was used`);
     placeholder(ctx, slide, imageBox, hasCjk(spec.title ?? '') ? '图片' : 'Image');
@@ -287,7 +289,8 @@ async function imageTextSlide(ctx: Ctx, spec: SlideSpec, number: number): Promis
   const captionH = spec.caption ? 0.5 : 0;
   bulletBox(ctx, slide, { x: textX, y: top, w: textW, h: BODY_BOTTOM - top - captionH }, spec.bullets, spec.text, 22);
   if (spec.caption) slide.addText(spec.caption, { x: textX, y: BODY_BOTTOM - 0.4, w: textW, h: 0.4, fontSize: 11, color: theme.colors.muted, fontFace: theme.fonts.bodyLatin, margin: 0, italic: true, lang: lang(spec.caption) });
-  const label = ctx.deck.footer ?? ctx.deck.title;
+  const fullLabel = ctx.deck.footer ?? ctx.deck.title;
+  const label = fullLabel ? ellipsize(plainText(fullLabel), emFor(textW - 1, 10)) : undefined;
   if (label) slide.addText(label, { x: textX, y: 6.98, w: textW - 1, h: 0.3, fontSize: 10, color: theme.colors.muted, fontFace: theme.fonts.bodyLatin, margin: 0, lang: lang(label) });
   slide.slideNumber = { x: right ? textX + textW - 0.8 : W - M - 0.8, y: 6.98, w: 0.8, h: 0.3, fontSize: 10, color: theme.colors.muted, fontFace: theme.fonts.bodyLatin, align: 'right' } as PptxGenJSModule.SlideNumberProps;
 }
@@ -512,14 +515,14 @@ async function finishXml(buffer: Buffer, theme: OfficeTheme): Promise<Buffer> {
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
 }
 
-export async function buildPresentation(deck: DeckSpec, cwd: string): Promise<BuiltDeck> {
+export async function buildPresentation(deck: DeckSpec, images: ImageLoader): Promise<BuiltDeck> {
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_WIDE';
   const theme = resolveTheme(deck.theme);
   if (deck.title) pptx.title = deck.title;
   if (deck.author) pptx.author = deck.author;
   pptx.theme = { headFontFace: theme.fonts.headLatin, bodyFontFace: theme.fonts.bodyLatin };
-  const ctx: Ctx = { pptx, theme, deck, cwd, warnings: [], sectionCount: 0 };
+  const ctx: Ctx = { pptx, theme, deck, images, warnings: [], sectionCount: 0 };
   for (const [index, spec] of deck.slides.entries()) {
     const number = index + 1;
     switch (spec.layout) {

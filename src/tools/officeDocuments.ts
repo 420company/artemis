@@ -18,6 +18,7 @@ import { buildDocument, documentOutline, tocHeadings } from './office/docx.js';
 import { markdownToDocSpec } from './office/markdown.js';
 import { exportPdf, findSoffice, locateHeadings, pdfPageTexts } from './office/pdf.js';
 import { buildPresentation, deckOutline } from './office/pptx.js';
+import { createImageLoader } from './office/images.js';
 import {
   applySpecEdits,
   normalizeDeckSpec,
@@ -225,21 +226,23 @@ export async function executeOfficeDocument(action: OfficeAction, context: ToolE
   if (normalized.theme && !isKnownTheme(normalized.theme)) notes.push(`Unknown theme "${normalized.theme}"; used minimal. Themes: ${THEME_IDS.join(', ')}.`);
   const theme = resolveTheme(normalized.theme);
 
+  // Pictures named in the spec pass the same path gates as the file tools.
+  const images = createImageLoader({ ...context, cwd }, action.type);
   let buffer: Buffer;
   let summary: string[];
   let warnings: string[];
   if (kind === 'presentation') {
     const deck = normalized as DeckSpec;
-    const built = await buildPresentation(deck, cwd);
+    const built = await buildPresentation(deck, images);
     buffer = built.buffer;
     warnings = built.warnings;
     summary = [`Slides: ${built.slideCount}`, 'Outline (slide n is /slides/n-1 in edits):', ...deckOutline(deck).map((line) => `  ${line}`)];
   } else if (kind === 'document') {
     const doc = normalized as DocSpec;
-    let built = await buildDocument(doc, cwd);
+    let built = await buildDocument(doc, images);
     if (built.hasToc) {
       const pages = await tocPageNumbers(built.buffer, doc).catch(() => undefined);
-      if (pages?.some((p) => p !== undefined)) built = await buildDocument(doc, cwd, { tocPages: pages });
+      if (pages?.some((p) => p !== undefined)) built = await buildDocument(doc, images, { tocPages: pages });
     }
     buffer = built.buffer;
     warnings = built.warnings;

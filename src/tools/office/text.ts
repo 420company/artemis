@@ -95,3 +95,19 @@ export function formatCellNumber(value: string | number): string {
   if (Number.isInteger(value) && Math.abs(value) < 10_000) return String(value);
   return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
 }
+
+/** `text` cut to at most `maxEm` wide (textWidthEm), ending in "…" when cut. */
+export function ellipsize(text: string, maxEm: number): string {
+  if (textWidthEm(text) <= maxEm) return text;
+  let out = '';
+  for (const ch of text) {
+    if (textWidthEm(out + ch) > maxEm - 1) break;
+    out += ch;
+  }
+  return `${out.trimEnd()}…`;
+}
+
+/** How many em fit in `widthIn` inches at `pt` points. */
+export function emFor(widthIn: number, pt: number): number {
+  return (widthIn * 72) / pt;
+}

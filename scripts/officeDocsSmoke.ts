@@ -5,7 +5,7 @@
 // back as fixable messages, and the intents / routing hint / user-facing
 // labels are in place. PDF export runs when LibreOffice is installed.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -16,8 +16,8 @@ import { FormulaError, FormulaEvaluator, type Scalar } from '../src/tools/office
 import { markdownToDocSpec } from '../src/tools/office/markdown.js';
 import { buildOfficeHint, detectOfficeRequest } from '../src/tools/office/officeHint.js';
 import { findSoffice, locateHeadings } from '../src/tools/office/pdf.js';
-import { imageInfo } from '../src/tools/office/images.js';
-import { fitFontSize, parseInline, slugify } from '../src/tools/office/text.js';
+import { convertibleType, createImageLoader, imageInfo } from '../src/tools/office/images.js';
+import { ellipsize, fitFontSize, parseInline, slugify, textWidthEm } from '../src/tools/office/text.js';
 import { OFFICE_THEMES, THEME_IDS, resolveTheme } from '../src/tools/office/themes.js';
 import { validateOfficeAction } from '../src/tools/office/descriptions.js';
 import { normalizeHeadlessIntent, planHeadlessWorkflow } from '../src/services/headlessWorkflow.js';
@@ -159,6 +159,50 @@ await test('presentation: missing picture becomes a placeholder and a warning, n
   const result = await run({ type: 'create_presentation', path: 'decks/missing.pptx', spec: { slides: [{ layout: 'image-text', title: 'x', image: 'nope.png', bullets: ['a'] }] } });
   assert.equal(result.ok, true);
   assert.match(result.output, /Warning: slide 1: image nope\.png: file not found/);
+});
+
+await test('pictures pass the file-tool gates: no paths outside the workspace, no protected dirs, no symlink escape, no URLs', async () => {
+  const outside = mkdtempSync(path.join(os.tmpdir(), 'artemis-office-outside-'));
+  writeFileSync(path.join(outside, 'secret.png'), png(8, 8));
+  symlinkSync(path.join(outside, 'secret.png'), path.join(workspace, 'link.png'));
+  const relativeEscape = path.relative(workspace, path.join(outside, 'secret.png'));
+  const loader = createImageLoader({ ...context, permissionMode: 'default' } as ToolExecutionContext, 'create_presentation');
+  assert.ok(!('error' in (await loader('photo.png'))), 'a workspace picture loads');
+  for (const requested of [path.join(outside, 'secret.png'), relativeEscape, 'link.png', path.join(os.homedir(), '.ssh', 'id.png'), 'https://example.com/a.png', 'http://169.254.169.254/x.png']) {
+    const result = await loader(requested);
+    assert.ok('error' in result, `${requested} must be refused`);
+  }
+  assert.match(JSON.stringify(await loader('https://example.com/a.png')), /not fetched/);
+  // The deck still builds; the refused pictures become placeholders with a warning.
+  const result = await run({ type: 'create_presentation', path: 'decks/gated.pptx', spec: { slides: [{ layout: 'image-text', title: 'x', image: path.join(outside, 'secret.png') }] } });
+  assert.equal(result.ok, true);
+  assert.match(result.output, /Warning: slide 1: image .*secret\.png/);
+  const zip = await zipOf(path.join(workspace, 'decks', 'gated.pptx'));
+  assert.ok(!Object.values(zip.files).some((entry) => entry.name.startsWith('ppt/media/') && !entry.dir), 'nothing from outside was embedded');
+});
+
+await test('pictures: only positively identified formats reach the converter', async () => {
+  assert.equal(convertibleType(Buffer.from('RIFF\u0000\u0000\u0000\u0000WEBPVP8 ', 'latin1')), 'webp');
+  assert.equal(convertibleType(Buffer.concat([Buffer.from('BM'), Buffer.alloc(30)])), 'bmp');
+  assert.equal(convertibleType(Buffer.from('II*\u0000\u0008\u0000\u0000\u0000', 'latin1')), 'tiff');
+  for (const payload of ['<svg xmlns="http://www.w3.org/2000/svg"/>', 'push graphic-context\nviewbox 0 0 1 1', '%!PS-Adobe-3.0', '%PDF-1.7', 'text:/etc/passwd']) {
+    assert.equal(convertibleType(Buffer.from(payload)), undefined, payload);
+  }
+  writeFileSync(path.join(workspace, 'fake.png'), '<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///etc/passwd"/></svg>');
+  const loader = createImageLoader(context, 'create_presentation');
+  assert.match(JSON.stringify(await loader('fake.png')), /use a PNG, JPEG or GIF/);
+});
+
+await test('presentation: a very long footer title is cut with an ellipsis', async () => {
+  const title = '这是一个非常非常长的演示文稿标题，用来检查页脚会不会超出幻灯片的宽度'.repeat(4);
+  const result = await run({ type: 'create_presentation', path: 'decks/long.pptx', spec: { title, slides: [{ layout: 'bullets', title: 'x', bullets: ['a'] }] } });
+  assert.equal(result.ok, true, result.output);
+  const xml = await partText(await zipOf(path.join(workspace, 'decks', 'long.pptx')), 'ppt/slides/slide1.xml');
+  const footer = [...xml.matchAll(/<a:t>([^<]*…)<\/a:t>/g)].map((m) => m[1]!);
+  assert.equal(footer.length, 1, 'the footer is cut');
+  assert.ok(textWidthEm(footer[0]!) <= (8 * 72) / 10, 'and fits one line');
+  assert.equal(ellipsize('short', 10), 'short');
+  assert.equal(ellipsize('abcdefghijklmnopqrstuvwxyz', 6).endsWith('…'), true);
 });
 
 await test('presentation: bad specs come back as fixable messages', async () => {
