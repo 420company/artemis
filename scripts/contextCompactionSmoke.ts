@@ -1997,6 +1997,8 @@ function webHistory(messages: unknown): Array<{ id: string; role: string; conten
     (async () => {
       while (writing) {
         try {
+          // The file itself, read raw: a torn (non-atomic) write would fail to parse here.
+          JSON.parse(fs.readFileSync(path.join(path.dirname(writer.getLockPath(session.id)), `${session.id}.json`), 'utf8'))
           const loaded = await new SessionStore(cwd).load(session.id, { fresh: true })
           if (loaded.metadata?.recoveredFrom) recovered += 1
         } catch { readErrors += 1 }

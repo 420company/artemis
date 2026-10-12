@@ -242,6 +242,8 @@ export async function runDreamCommand(input: {
 
   // The owner's taste: bounded, vocabulary-only weights and their own notes.
   const { chooseDreamStyle, parseDreamTaste, DREAM_TASTE_MAX_BYTES } = await import('../services/dreamTaste.js')
+  // A taste file that is missing, too big or malformed is ignored (and said
+  // so): the dream is made without a taste rather than not at all.
   let taste
   if (options.tasteFile) {
     try {
@@ -249,8 +251,8 @@ export async function runDreamCommand(input: {
       if (info.size > DREAM_TASTE_MAX_BYTES) throw new Error(`the taste file is larger than ${DREAM_TASTE_MAX_BYTES} bytes`)
       taste = parseDreamTaste(await readFile(options.tasteFile, 'utf8'))
     } catch (err) {
-      process.stderr.write(`dream: --taste-file: ${err instanceof Error ? err.message : String(err)}\n`)
-      return { exitCode: 2 }
+      process.stderr.write(`dream: --taste-file ignored: ${err instanceof Error ? err.message : String(err)}\n`)
+      taste = undefined
     }
   }
   const style = chooseDreamStyle({ ...(taste ? { taste } : {}), explore: options.explore })

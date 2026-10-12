@@ -252,18 +252,39 @@ try {
     const { isStyleTag } = await import('../src/services/dreamTaste.js');
     assert.ok(r.parsed.style.every(isStyleTag), r.parsed.style.join(','));
     assert.equal(fs.existsSync(path.join(home, 'dreams', 'learned-prompt.md')), false);
-    // Too big: refused, nothing composed.
-    fs.writeFileSync(tasteFile, JSON.stringify({ v: 1, like: ['x'.repeat(2000)] }));
-    const lines: string[] = [];
+    // Too big, or not JSON: ignored (and said so); the dream comes without a taste.
+    const errors: string[] = [];
     const write = process.stderr.write.bind(process.stderr);
-    process.stderr.write = (() => true) as typeof process.stderr.write;
+    process.stderr.write = ((chunk: string) => (errors.push(String(chunk)), true)) as typeof process.stderr.write;
     try {
-      const big = await runDreamCommand({ cwd: workspace, locale: 'en', args: ['--json', '--taste-file', tasteFile], write: (l) => lines.push(l) });
-      assert.equal(big.exitCode, 2);
+      for (const bad of [JSON.stringify({ v: 1, like: ['x'.repeat(2000)] }), '{not json']) {
+        fs.writeFileSync(tasteFile, bad);
+        const at = asked.length;
+        const ignored = await run(['--json', '--no-image', '--taste-file', tasteFile]);
+        assert.equal(ignored.exitCode, 0);
+        assert.equal(ignored.parsed.status, 'ok');
+        assert.doesNotMatch(asked.slice(at).join('\n'), /owner_dream_preferences/);
+      }
     } finally {
       process.stderr.write = write;
     }
-    assert.deepEqual(lines, []);
+    assert.equal(errors.filter((e) => /--taste-file ignored/.test(e)).length, 2);
+  });
+
+  await test('taste notes lose control, bidi and zero-width characters; the interactive dream does not evolve the prompt unless the owner chose it', async () => {
+    const { parseDreamTaste } = await import('../src/services/dreamTaste.js');
+    const taste = parseDreamTaste(JSON.stringify({ v: 1, like: ['喜欢\u202e海边\u200b的\u2066色调\u0007'] }));
+    assert.deepEqual(taste.like, ['喜欢 海边 的 色调']);
+    const { loadDreamConfig, sanitizeLearnedLines } = await import('../src/services/dreamStore.js');
+    assert.deepEqual(sanitizeLearnedLines(['Prefer\u202e short\u200b replies']), ['Prefer short replies']);
+    const configFile = path.join(home, 'dreams', 'config.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ enabled: true, mode: 'text', evolveSystemPrompt: true }));
+    assert.equal((await loadDreamConfig()).evolveSystemPrompt, false, 'an old default true is not a choice');
+    fs.writeFileSync(configFile, JSON.stringify({ enabled: true, mode: 'text', evolveSystemPrompt: true, evolveChosen: true }));
+    assert.equal((await loadDreamConfig()).evolveSystemPrompt, true, 'the owner turned it on');
+    fs.rmSync(configFile);
+    assert.equal((await loadDreamConfig()).evolveSystemPrompt, false, 'off by default');
   });
 
   await test('taste: likes make a style likelier; explore never picks a favourite; without a taste every dimension still gets a tag', async () => {

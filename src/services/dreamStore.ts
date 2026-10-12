@@ -28,8 +28,15 @@ export interface DreamConfig {
   enabled: boolean
   /** Output mode for new dreams. */
   mode: DreamMode
-  /** Append distilled style/preferences to system prompt over time. */
+  /**
+   * Append distilled style/preferences to system prompt over time. Off unless
+   * the owner turned it on in the setup wizard (`evolveChosen`): the notes come
+   * from a model that read session text, and the filter on them is a guard,
+   * not a guarantee.
+   */
   evolveSystemPrompt: boolean
+  /** The owner chose evolveSystemPrompt themselves (older files' `true` is not a choice). */
+  evolveChosen?: boolean
   /** Push composed dreams to all active bridge chats. */
   pushToBridges: boolean
   /** Idle threshold in seconds before a dream may trigger. */
@@ -74,7 +81,7 @@ const DEFAULT_CONFIG: DreamConfig = {
   // visual provider is required; if missing, the composer silently degrades to
   // text-only so the dream still completes.
   mode: 'vision',
-  evolveSystemPrompt: true,
+  evolveSystemPrompt: false,
   pushToBridges: true,
   idleThresholdSec: 3600,
   maxDreamsPerDay: 3,
@@ -100,6 +107,8 @@ export async function loadDreamConfig(): Promise<DreamConfig> {
     return {
       ...DEFAULT_CONFIG,
       ...raw,
+      // Earlier versions wrote `true` as the default: only an explicit choice counts.
+      evolveSystemPrompt: raw.evolveChosen === true && raw.evolveSystemPrompt === true,
       nightWindow: { ...DEFAULT_CONFIG.nightWindow, ...(raw.nightWindow ?? {}) },
     }
   } catch {
@@ -210,7 +219,7 @@ export function sanitizeLearnedLines(lines: readonly string[]): string[] {
   const kept: string[] = []
   for (const raw of lines) {
     // eslint-disable-next-line no-control-regex
-    const line = raw.replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\ufeff]/g, ' ').replace(/^[-•*]\s*/, '').replace(/\s+/g, ' ').trim()
+    const line = raw.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g, ' ').replace(/^[-•*]\s*/, '').replace(/\s+/g, ' ').trim()
     if (!line || [...line].length > LEARNED_LINE_MAX_CHARS) continue
     if (/^#|<\/?[a-z_]+>/i.test(line)) continue
     if (LEARNED_LINE_DENY.some((re) => re.test(line))) continue

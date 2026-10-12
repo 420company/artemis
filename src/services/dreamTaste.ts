@@ -56,7 +56,7 @@ function cleanNotes(raw: unknown): string[] {
   if (!Array.isArray(raw)) return []
   return raw
     // eslint-disable-next-line no-control-regex
-    .map((n) => (typeof n === 'string' ? n.replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim() : ''))
+    .map((n) => (typeof n === 'string' ? n.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb<>]/g, ' ').replace(/\s+/g, ' ').trim() : ''))
     .filter(Boolean)
     .map((n) => [...n].slice(0, NOTE_MAX_CHARS).join(''))
     .slice(0, NOTES_MAX)
