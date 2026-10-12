@@ -76,6 +76,8 @@ function describeAction(action: AgentAction): string {
       return `synthesize speech with configured TTS${action.outputPath ? ` to ${action.outputPath}` : ''}`;
     case 'transcribe_audio':
       return `transcribe audio locally from ${action.inputPath}`;
+    case 'place_call':
+      return `phone ${action.to} for the owner (after the owner approves)`;
     case 'create_presentation':
       return `write a presentation${action.path ? ` to ${action.path}` : ''}`;
     case 'create_document':
