@@ -230,7 +230,13 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
       await fsp.mkdir(SCREENSHOT_DIR, { recursive: true });
       const filename = `screenshot-${Date.now()}.png`;
       const filepath = path.join(SCREENSHOT_DIR, filename);
-      await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
+      // On a site where a stored credential was typed, a page echoing it is masked in the picture too.
+      const unmask = await maskSecretsForScreenshot(page);
+      try {
+        await page.screenshot({ path: filepath, fullPage: action.fullPage === true });
+      } finally {
+        await unmask();
+      }
       const audit = await collectLayoutAudit(page);
       return {
         ok: true,
@@ -240,6 +246,58 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
   } catch (err) {
     return pwError(err);
   }
+}
+
+/**
+ * Replaces the stored secrets this run typed (in text and in the values of
+ * fields other than password fields, which the browser masks itself) with
+ * •••• for the moment of a screenshot, then puts the page back. Only on a
+ * site where they were typed: another site never gets them, even to mask.
+ */
+export async function maskSecretsForScreenshot(page: Awaited<ReturnType<typeof getActivePage>>): Promise<() => Promise<void>> {
+  let origin = '';
+  try {
+    origin = new URL(page.url()).origin.toLowerCase();
+  } catch {
+    origin = '';
+  }
+  if (!credentialOrigins.has(origin)) return async () => undefined;
+  const secrets = [...(typedSecrets.get(origin) ?? [])].sort((a, b) => b.length - a.length);
+  if (!secrets.length) return async () => undefined;
+  // A plain script (no compiled helpers in it): every text node and non-password field value.
+  const token = await page
+    .evaluate(`(() => {
+      const list = ${JSON.stringify(secrets)};
+      const masked = [], inputs = [];
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.nodeValue || '';
+        let out = text;
+        for (const s of list) out = out.split(s).join('••••');
+        if (out !== text) { masked.push([node, text]); node.nodeValue = out; }
+      }
+      for (const el of Array.from(document.querySelectorAll('input, textarea'))) {
+        if ((el.getAttribute('type') || '').toLowerCase() === 'password') continue;
+        let out = el.value;
+        for (const s of list) out = out.split(s).join('••••');
+        if (out !== el.value) { inputs.push([el, el.value]); el.value = out; }
+      }
+      window.__artemisMasked = { masked, inputs };
+      return true;
+    })()`)
+    .catch(() => false);
+  if (!token) return async () => undefined;
+  return async () => {
+    await page
+      .evaluate(`(() => {
+        const m = window.__artemisMasked;
+        if (!m) return;
+        for (const [node, text] of m.masked) node.nodeValue = text;
+        for (const [el, value] of m.inputs) el.value = value;
+        delete window.__artemisMasked;
+      })()`)
+      .catch(() => undefined);
+  };
 }
 
 // ── browser_extract_text ────────────────────────────────────────────────
@@ -255,6 +313,12 @@ export async function executeBrowserExtract(action: BrowserExtractAction): Promi
       let text: string;
       if (action.selector && action.selector.trim().length > 0) {
         const el = page.locator(action.selector).first();
+        // A password field is never read back (its value is what was typed into it).
+        const isPassword = await el.evaluate((node) => node.tagName.toLowerCase() === 'input' && ((node as HTMLInputElement).getAttribute('type') ?? '').toLowerCase() === 'password', undefined, { timeout: 10_000 }).catch(() => false);
+        if (isPassword) {
+          const message = 'Password fields are not read back.';
+          return { ok: false, output: message, error: { code: 'credential_field_locked', message } };
+        }
         text = await el.innerText({ timeout: 10_000 });
       } else {
         text = await page.evaluate(() => document.body?.innerText ?? '');
@@ -518,6 +582,8 @@ export interface BrowserTypeAction {
 
 /** Origins where a stored credential was typed this session: no scripts run there (they could read the field). */
 const credentialOrigins = new Set<string>();
+/** What was typed on each of those origins (and how it may be encoded): masked there in screenshots, never shown to another site. */
+const typedSecrets = new Map<string, Set<string>>();
 
 type FieldLocator = { evaluate: <R>(fn: (node: Element) => R, arg?: undefined, options?: { timeout?: number }) => Promise<R> };
 
@@ -571,6 +637,10 @@ export async function resolveCredentialValue(
       : `${used.message} Nothing was typed.`);
   }
   credentialOrigins.add(origin);
+  const { secretEncodings } = await import('../../security/credentialStore.js');
+  const typed = typedSecrets.get(origin) ?? new Set<string>();
+  for (const form of secretEncodings(used.secret)) if (form.length >= 6) typed.add(form);
+  typedSecrets.set(origin, typed);
   return { ok: true, text: used.secret, credential: match[1]! };
 }
 

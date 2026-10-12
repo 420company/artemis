@@ -131,6 +131,22 @@ resolver returns is checked the same way, and the secret is scrubbed the
 same way. Every typed value goes through `resolveCredentialValue` in
 `tools/browser/browserTools.ts` (also used by the offline eval browser).
 
+### The owner's own secrets
+
+When a step needs a secret only the owner has (their account password on a
+site, a server's root password, a PIN, an API key), the hosted platform
+offers the MCP tool `request_owner_secret {purpose, kind, bind: {origin} |
+{host}, label}`. The agent gets a placeholder `{{credential:owner-…}}` and a
+```secret {"id"} card to put in its reply; the run ends waiting
+(`statusAtEnd` → `waiting_user / waiting_secret`). The owner types the
+secret into the card in the web app; it goes straight into the server's
+encrypted store, bound to that site or server, and the chat only says
+已保存（仅用于 …）. The placeholder then types like any stored password, under
+the same rules. Typed secrets are masked in screenshots of the site they were
+typed on (and only there), a password field is never read back by
+`browser_extract_text`, and every result is scrubbed of the secret in its
+plain, URL, JSON, HTML, base64 and hex forms.
+
 ## Verification codes (`tools/verificationCodes.ts`)
 
 `get_verification_code {channel: email|sms|which, sender, timeoutSeconds?}`

@@ -172,10 +172,32 @@ export function checkUse(info: CredentialInfo, purpose: CredentialPurpose): { ok
 
 const revealed = new Set<string>();
 
+/** The ways a secret can come back out of a page or a request log, besides itself. */
+export function secretEncodings(secret: string): string[] {
+  const b64 = Buffer.from(secret, 'utf8').toString('base64');
+  const html = secret.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  return [
+    secret,
+    encodeURIComponent(secret),
+    encodeURIComponent(secret).replace(/%20/g, '+'),
+    JSON.stringify(secret).slice(1, -1),
+    html,
+    b64,
+    b64.replace(/=+$/, ''),
+    Buffer.from(secret, 'utf8').toString('base64url'),
+    Buffer.from(secret, 'utf8').toString('hex'),
+  ];
+}
+
 function remember(secret: string): void {
-  if (secret.length >= 6) revealed.add(secret);
+  for (const form of secretEncodings(secret)) if (form.length >= 6) revealed.add(form);
   // A multi-line secret (an SSH key) is also scrubbed line by line.
   for (const line of secret.split(/\r?\n/)) if (line.trim().length >= 16) revealed.add(line.trim());
+}
+
+/** The secrets handed out in this process (to mask them on a page before a screenshot of it). */
+export function revealedSecrets(): string[] {
+  return [...revealed];
 }
 
 /** Replaces every secret handed out in this process with •••• . */

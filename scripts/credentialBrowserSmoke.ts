@@ -115,6 +115,20 @@ try {
     ];
     for (const r of results) assert.ok(!r.output.includes(secret), r.output);
     assert.ok(results.some((r) => r.output.includes('••••')), 'the echo is there, masked');
+    // A password field is never read back; a screenshot masks the echo, and the page is put back after.
+    const field = await run(tools.executeBrowserExtract({ type: 'browser_extract_text', selector: '#pw' }));
+    assert.equal(field.error?.code, 'credential_field_locked');
+    const { getActivePage } = await import('../src/tools/browser/browserSession.js');
+    const page = await getActivePage();
+    await page.fill('#note', 'typed: ' + secret);
+    await page.evaluate(() => document.querySelector('#note')!.dispatchEvent(new Event('input')));
+    const unmask = await tools.maskSecretsForScreenshot(page);
+    assert.ok(!(await page.textContent('#echo'))?.includes(secret), 'masked while the picture is taken')
+    assert.ok(!(await page.inputValue('#note')).includes(secret))
+    await unmask();
+    const shot = await run(tools.executeBrowserScreenshot({ type: 'browser_screenshot' }));
+    assert.equal(shot.ok, true, shot.output);
+    assert.ok((await page.textContent('#echo'))?.includes(secret), 'the page is put back after the picture');
     // Scripts do not run on a site where a credential was typed.
     const evaluated = await run(tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: "document.querySelector('#pw').value" }));
     assert.equal(evaluated.error?.code, 'credential_page_locked');

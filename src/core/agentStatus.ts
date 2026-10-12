@@ -40,6 +40,7 @@ export const AGENT_ACTIVITIES = [
   'checking',
   'getting_code',
   'waiting_handoff',
+  'waiting_secret',
   'waiting_confirmation',
   'waiting_payment_approval',
   'waiting_send_approval',
@@ -173,6 +174,8 @@ export function statusForApprovalKind(kind: string | undefined): AgentStatus {
  * payment approval.
  */
 export function statusAtEnd(reply: string): AgentStatus {
+  // Asked the owner for their own secret (a request_owner_secret card): waiting for them to type it.
+  if (/```secret[ \t]*\n/.test(reply)) return { phase: 'waiting_user', activity: 'waiting_secret' };
   const cards = [...reply.matchAll(/```confirm[ \t]*\n([\s\S]*?)\n?```/g)];
   const last = cards.at(-1);
   if (!last) return { phase: 'done', activity: 'done' };

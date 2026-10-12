@@ -331,6 +331,15 @@ await test('credentials: another module\'s secrets (sign-ups) get the same bindi
   }
 });
 
+await test('credentials: a secret is scrubbed in every encoding a page or a log could carry it (H2)', async () => {
+  const { secretEncodings } = await import('../src/security/credentialStore.js');
+  const secret = 'Owner pass&word/+9=';
+  const store = new FileCredentialStore(path.join(tmp, 'creds-enc'));
+  await store.create('owner-like', 'token', { secret });
+  assert.equal((await useCredential('owner-like', { type: 'internal', use: 'vpn' }, store)).ok, true);
+  for (const form of secretEncodings(secret)) assert.equal(scrubSecrets(`x ${form} y`), 'x •••• y', form);
+});
+
 await test('credentials: the hosted broker is taken out of the environment and asked per use (H2)', async () => {
   const env: NodeJS.ProcessEnv = { ARTEMIS_CREDENTIAL_BROKER: JSON.stringify({ url: 'http://127.0.0.1:18897/agent/credentials', claim: 'claim-once' }) };
   captureCredentialBroker(env);
@@ -387,6 +396,8 @@ await test('status at the end: a confirmation card waits for the owner (L2)', ()
   const card = (o: object) => '订单填好了：\n\n```confirm\n' + JSON.stringify(o) + '\n```';
   assert.deepEqual(statusAtEnd(card({ title: '帆云东京 × 2', detail: '合计 $10.00/月，信用卡支付', confirm: '确认付款', cancel: '先不买' })), { phase: 'waiting_approval', activity: 'waiting_payment_approval' });
   assert.equal(statusAtEnd(card({ title: '把周报发给张三', confirm: '发送' })).activity, 'waiting_send_approval');
+  // Asked the owner for their own password: waiting for them to type it into the card.
+  assert.deepEqual(statusAtEnd('需要你的帆云主机密码：\n\n```secret\n{"id":"sr_0123456789abcdef0123"}\n```'), { phase: 'waiting_user', activity: 'waiting_secret' });
   assert.equal(statusAtEnd(card({ title: '删除旧文件夹' })).activity, 'waiting_confirmation');
   assert.equal(statusAtEnd('都好了。').phase, 'done');
   assert.equal(statusAtEnd('```confirm\nnot json\n```').phase, 'done');
