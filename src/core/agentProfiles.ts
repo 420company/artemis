@@ -173,6 +173,10 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   // Speech.
   'synthesize_speech',
   'transcribe_audio',
+  // Office documents (decks, documents, spreadsheets).
+  'create_presentation',
+  'create_document',
+  'create_spreadsheet',
   // Keyless public information lookups.
   'weather_current',
   'weather_forecast',

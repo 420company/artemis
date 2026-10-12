@@ -63,7 +63,7 @@ const GRADER_TYPES: readonly GraderType[] = [
   'reply_contains', 'reply_not_contains', 'reply_matches', 'reply_not_matches', 'reply_zh', 'reply_length',
   'reply_list_items', 'reply_urls_grounded', 'file_exists', 'file_absent', 'file_glob', 'file_contains',
   'files_unchanged', 'json_file', 'csv_file', 'command_succeeds', 'tool_called', 'tool_not_called',
-  'turns_at_most', 'workflow_is', 'compaction_happened', 'context_contains', 'llm_judge',
+  'turns_at_most', 'workflow_is', 'compaction_happened', 'context_contains', 'llm_judge', 'office_file',
 ]
 
 // ── options ─────────────────────────────────────────────────────────────────
