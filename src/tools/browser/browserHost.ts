@@ -281,6 +281,11 @@ async function main(): Promise<void> {
     await emulate(targetId);
     return {};
   };
+  // A client that attaches to a page may reset its emulation (Playwright does
+  // on connect): the host's viewport is applied again once it has settled.
+  router.onAttach = (targetId) => {
+    for (const delay of [300, 1_500]) setTimeout(() => void emulate(targetId), delay);
+  };
   // A viewer that goes away gives its pages their normal size back.
   router.onDrop = (client) => {
     for (const [targetId, phone] of monitor.mobile) {

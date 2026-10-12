@@ -417,6 +417,16 @@ export async function getActivePage(): Promise<Page> {
       _activePage = left;
       return left;
     }
+    // A blank tab nobody works in (the one the browser starts with) is used before opening another.
+    for (const blank of ctx.pages()) {
+      if (blank.isClosed() || blank.url() !== 'about:blank') continue;
+      const targetId = await targetIdOf(blank);
+      if (targetId && claimTab(dir, targetId)) {
+        ownPage(blank, targetId);
+        _activePage = blank;
+        return blank;
+      }
+    }
     const page = await ctx.newPage();
     await adoptNewPage(page);
     _activePage = page;

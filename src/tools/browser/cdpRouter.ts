@@ -190,6 +190,8 @@ interface Pending {
   clientId?: number;
   /** The sessionId the client wrote, if any (absent = its root session). */
   clientSession?: string;
+  /** For Target.attachToTarget: the target. */
+  targetId?: string;
   resolve?: (result: Record<string, unknown>) => void;
   reject?: (error: Error) => void;
 }
@@ -221,6 +223,8 @@ export class CdpRouter {
   hostMethod: HostMethod | undefined;
   /** Told when a client goes away (the host resets what it set up for it). */
   onDrop: ((client: { id: number; role: ClientRole }) => void) | undefined;
+  /** Told when an external client attaches to a target (the host re-applies its emulation). */
+  onAttach: ((targetId: string) => void) | undefined;
 
   constructor(
     private readonly toBrowser: (message: CdpMessage) => void,
@@ -332,7 +336,13 @@ export class CdpRouter {
       return;
     }
     const id = this.nextId++;
-    this.pending.set(id, { method: message.method!, client, clientId: message.id!, ...(message.sessionId ? { clientSession: message.sessionId } : {}) });
+    this.pending.set(id, {
+      method: message.method!,
+      client,
+      clientId: message.id!,
+      ...(message.sessionId ? { clientSession: message.sessionId } : {}),
+      ...(typeof params.targetId === 'string' ? { targetId: params.targetId } : {}),
+    });
     this.toBrowser({ id, method: message.method!, params, sessionId });
   }
 
@@ -379,6 +389,7 @@ export class CdpRouter {
       const attached = message.result?.sessionId;
       if (!message.error && typeof attached === 'string' && /^Target\.attachTo(Target|BrowserTarget)$/.test(pending.method)) {
         this.owners.set(attached, client);
+        if (pending.targetId && !client.internal) this.notifyAttach(pending.targetId);
       }
       client.send(JSON.stringify({
         id: pending.clientId,
@@ -395,6 +406,8 @@ export class CdpRouter {
     if (message.method === 'Target.attachedToTarget') {
       const child = message.params?.sessionId;
       if (typeof child === 'string') this.owners.set(child, owner);
+      const target = (message.params?.targetInfo as { targetId?: unknown } | undefined)?.targetId;
+      if (typeof target === 'string' && !owner.internal) this.notifyAttach(target);
     }
     const out: CdpMessage = { method: message.method!, params: message.params ?? {} };
     if (message.sessionId !== owner.root) out.sessionId = message.sessionId;
@@ -403,6 +416,12 @@ export class CdpRouter {
       const child = message.params?.sessionId;
       if (typeof child === 'string' && child !== owner.root) this.owners.delete(child);
     }
+  }
+
+  private notifyAttach(targetId: string): void {
+    try {
+      this.onAttach?.(targetId);
+    } catch { /* the host's hook must not break routing */ }
   }
 
   private drop(client: Client): void {
