@@ -168,7 +168,7 @@ import {
   recordHeimdallStage,
   type HeimdallThreadState,
 } from './heimdall.js';
-import { pathExists, truncate } from '../utils/fs.js';
+import { pathExists, truncate, truncateInline } from '../utils/fs.js';
 import { withRuntimeLogSink } from '../utils/log.js';
 import { SessionStore } from '../storage/sessions.js';
 import {
@@ -190,6 +190,8 @@ import {
   hasExplicitRemoteVisualFallback,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js';
+import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
+import { isOwnerProviderStoreFile, overrideProviderConfig } from '../providers/overrides.js';
 
 /**
  * Some model families (notably ark/doubao, qwen-coder, glm) emit tool calls
@@ -1609,7 +1611,7 @@ function summarizeVisualPlaceholderSubstitute(action: AgentAction): string | und
     /\b(node|python3?|bash|sh)\b/i.test(text) &&
     /generate-assets\.(?:js|mjs|cjs|ts|py|sh)/i.test(text)
   ) {
-    return `ran procedural visual asset generator instead of calling generate_image: ${truncate(text, 160)}`;
+    return `ran procedural visual asset generator instead of calling generate_image: ${truncateInline(text, 160)}`;
   }
 
   return undefined;
@@ -1890,9 +1892,9 @@ function buildToolUiPayload(
       if (typeof action.atLine === 'number') {
         payload.at_line = action.atLine;
       } else if (typeof action.after === 'string' && action.after.length > 0) {
-        payload.position = `after: ${truncate(action.after, 80)}`;
+        payload.position = `after: ${truncateInline(action.after, 80)}`;
       } else if (typeof action.before === 'string' && action.before.length > 0) {
-        payload.position = `before: ${truncate(action.before, 80)}`;
+        payload.position = `before: ${truncateInline(action.before, 80)}`;
       }
       break;
     }
@@ -1996,7 +1998,7 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'lookup_docs':
       return `lookup_docs query=${action.query}${action.library ? ` library=${action.library}` : ''}${action.version ? ` version=${action.version}` : ''}`;
     case 'deep_research':
-      return `deep_research query=${truncate(action.query, 120)}`;
+      return `deep_research query=${truncateInline(action.query, 120)}`;
     case 'mcp_call_tool':
       return `mcp_call_tool ${action.serverId}/${action.toolName}`;
     case 'mcp_read_resource':
@@ -2012,31 +2014,31 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'apply_patch':
       return `apply_patch files=${getChangedFilesForAction(action).join(',') || 'unknown'}`;
     case 'run_command':
-      return `run_command ${truncate(action.command, 140)}`;
+      return `run_command ${truncateInline(action.command, 140)}`;
     case 'delegate_task':
-      return `delegate_task role=${action.role} task=${truncate(action.task, 120)}`;
+      return `delegate_task role=${action.role} task=${truncateInline(action.task, 120)}`;
     case 'approve_builder_execution':
       return `approve_builder_execution session=${action.sessionId}`;
     case 'generate_image':
-      return `generate_image model=${action.model ?? 'seedream-5-0-260128'} prompt=${truncate(action.prompt, 120)}`;
+      return `generate_image model=${action.model ?? DEFAULT_MODEL_IDS.byteplusImage} prompt=${truncateInline(action.prompt, 120)}`;
     case 'generate_video':
-      return `generate_video model=${action.model ?? 'seedance-1-5-pro-251215'} duration=${action.duration ?? 5}s prompt=${truncate(action.prompt, 120)}`;
+      return `generate_video model=${action.model ?? DEFAULT_MODEL_IDS.byteplusVideo} duration=${action.duration ?? 5}s prompt=${truncateInline(action.prompt, 120)}`;
     case 'generate_long_video':
-      return `generate_long_video model=${action.model ?? 'configured'} total=${action.totalDuration ?? action.duration ?? 60}s prompt=${truncate(action.prompt, 120)}`;
+      return `generate_long_video model=${action.model ?? 'configured'} total=${action.totalDuration ?? action.duration ?? 60}s prompt=${truncateInline(action.prompt, 120)}`;
     case 'synthesize_speech':
-      return `synthesize_speech voice=${action.voice ?? 'configured'} text=${truncate(action.text, 120)}`;
+      return `synthesize_speech voice=${action.voice ?? 'configured'} text=${truncateInline(action.text, 120)}`;
     case 'transcribe_audio':
-      return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
+      return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncateInline(action.inputPath, 120)}`;
     case 'place_call':
-      return `place_call goal=${truncate(action.goal, 120)}`;
+      return `place_call goal=${truncateInline(action.goal, 120)}`;
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
       return `${action.type} path=${action.path ?? 'default'}${action.edits ? ` edits=${action.edits.length}` : ''}`;
     case 'spawn_background_workflow':
-      return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
+      return `spawn_background_workflow command=${action.command} prompt=${truncateInline(action.prompt, 120)}`;
     case 'use_workflow':
-      return `use_workflow ${action.workflow}${action.reason ? ` reason=${truncate(action.reason, 100)}` : ''}`;
+      return `use_workflow ${action.workflow}${action.reason ? ` reason=${truncateInline(action.reason, 100)}` : ''}`;
     case 'agent':
       const agentSummary = `agent action=${action.action}`;
       if (action.id) {
@@ -2047,7 +2049,7 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       }
       return agentSummary;
     case 'search_web':
-      const searchSummary = `search_web query=${truncate(action.query, 120)}`;
+      const searchSummary = `search_web query=${truncateInline(action.query, 120)}`;
       if (action.backend && action.backend !== 'auto') {
         return `${searchSummary} backend=${action.backend}`;
       }
@@ -2059,9 +2061,9 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'spotify_play_liked':
       return `spotify_play_liked${action.shuffle === false ? '' : ' shuffle=true'}${action.deviceHint ? ` device=${action.deviceHint}` : ''}`;
     case 'spotify_search_and_play':
-      return `spotify_search_and_play query=${truncate(action.query, 80)}${action.kind ? ` kind=${action.kind}` : ''}`;
+      return `spotify_search_and_play query=${truncateInline(action.query, 80)}${action.kind ? ` kind=${action.kind}` : ''}`;
     case 'spotify_play_playlist':
-      return `spotify_play_playlist name=${truncate(action.name, 80)}`;
+      return `spotify_play_playlist name=${truncateInline(action.name, 80)}`;
     case 'spotify_resume':
       return `spotify_resume${action.deviceHint ? ` device=${action.deviceHint}` : ''}`;
     case 'spotify_pause':
@@ -2075,12 +2077,12 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'spotify_now_playing':
       return 'spotify_now_playing';
     case 'spotify_set_device':
-      return `spotify_set_device device=${truncate(action.deviceHint, 80)}${action.startPlaying ? ' start=true' : ''}`;
+      return `spotify_set_device device=${truncateInline(action.deviceHint, 80)}${action.startPlaying ? ' start=true' : ''}`;
     // ── Ambient agent integrations ──────────────────────────────────────
     case 'weather_current':
-      return `weather_current location=${truncate(action.location, 60)}`;
+      return `weather_current location=${truncateInline(action.location, 60)}`;
     case 'weather_forecast':
-      return `weather_forecast location=${truncate(action.location, 60)} days=${action.days ?? 3}`;
+      return `weather_forecast location=${truncateInline(action.location, 60)} days=${action.days ?? 3}`;
     case 'world_clock':
       return `world_clock cities=[${action.cities.slice(0, 5).join(',')}]`;
     case 'time_diff':
@@ -2096,51 +2098,51 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'calendar_list_upcoming':
       return `calendar_list_upcoming days=${action.daysAhead ?? 7}`;
     case 'calendar_add_event':
-      return `calendar_add_event "${truncate(action.title, 60)}" at ${action.startISO}`;
+      return `calendar_add_event "${truncateInline(action.title, 60)}" at ${action.startISO}`;
     case 'reminders_list':
       return `reminders_list${action.list ? ` list=${action.list}` : ''}`;
     case 'reminders_add':
-      return `reminders_add "${truncate(action.title, 60)}"`;
+      return `reminders_add "${truncateInline(action.title, 60)}"`;
     case 'reminders_complete':
-      return `reminders_complete "${truncate(action.title, 60)}"`;
+      return `reminders_complete "${truncateInline(action.title, 60)}"`;
     // ── Browser automation ──────────────────────────────────────────────
     case 'browser_navigate':
-      return `browser_navigate ${truncate(action.url, 100)}`;
+      return `browser_navigate ${truncateInline(action.url, 100)}`;
     case 'browser_screenshot':
       return `browser_screenshot${action.fullPage ? ' fullPage=true' : ''}`;
     case 'browser_extract_text':
-      return `browser_extract_text${action.selector ? ` selector=${truncate(action.selector, 60)}` : ''}`;
+      return `browser_extract_text${action.selector ? ` selector=${truncateInline(action.selector, 60)}` : ''}`;
     case 'browser_click':
-      return `browser_click ${action.selector ? `selector=${truncate(action.selector, 60)}` : action.text ? `text=${truncate(action.text, 60)}` : `xy=(${action.x},${action.y})`}`;
+      return `browser_click ${action.selector ? `selector=${truncateInline(action.selector, 60)}` : action.text ? `text=${truncateInline(action.text, 60)}` : `xy=(${action.x},${action.y})`}`;
     case 'browser_type':
-      return `browser_type into=${truncate(action.selector, 50)} text=${truncate(action.text, 50)}`;
+      return `browser_type into=${truncateInline(action.selector, 50)} text=${truncateInline(action.text, 50)}`;
     case 'browser_form_input':
-      return `browser_form_input ${truncate(action.selector, 60)}${action.value !== undefined ? ` value=${truncate(action.value, 40)}` : ''}${action.checked !== undefined ? ` checked=${action.checked}` : ''}`;
+      return `browser_form_input ${truncateInline(action.selector, 60)}${action.value !== undefined ? ` value=${truncateInline(action.value, 40)}` : ''}${action.checked !== undefined ? ` checked=${action.checked}` : ''}`;
     case 'browser_evaluate':
-      return `browser_evaluate ${truncate(action.script, 80)}`;
+      return `browser_evaluate ${truncateInline(action.script, 80)}`;
     case 'browser_console':
-      return `browser_console${action.pattern ? ` pattern=${truncate(action.pattern, 40)}` : ''}`;
+      return `browser_console${action.pattern ? ` pattern=${truncateInline(action.pattern, 40)}` : ''}`;
     case 'browser_requests':
-      return `browser_requests${action.pattern ? ` pattern=${truncate(action.pattern, 40)}` : ''}`;
+      return `browser_requests${action.pattern ? ` pattern=${truncateInline(action.pattern, 40)}` : ''}`;
     case 'browser_tabs':
-      return `browser_tabs ${action.action}${action.index !== undefined ? ` index=${action.index}` : ''}${action.url ? ` url=${truncate(action.url, 60)}` : ''}`;
+      return `browser_tabs ${action.action}${action.index !== undefined ? ` index=${action.index}` : ''}${action.url ? ` url=${truncateInline(action.url, 60)}` : ''}`;
     case 'browser_wait_for':
       return `browser_wait_for ${action.selector ?? action.text ?? '?'}`;
     case 'browser_close':
       return 'browser_close';
     case 'browser_request_handoff':
-      return `browser_request_handoff ${truncate(action.reason, 80)}`;
+      return `browser_request_handoff ${truncateInline(action.reason, 80)}`;
     // ── Computer / desktop automation ───────────────────────────────────
     case 'computer_screenshot':
-      return `computer_screenshot${action.outputPath ? ` output=${truncate(action.outputPath, 80)}` : ''}`;
+      return `computer_screenshot${action.outputPath ? ` output=${truncateInline(action.outputPath, 80)}` : ''}`;
     case 'computer_click':
       return `computer_click ${action.x},${action.y}`;
     case 'computer_move':
       return `computer_move ${action.x},${action.y}`;
     case 'computer_type':
-      return `computer_type text=${truncate(action.text, 50)}`;
+      return `computer_type text=${truncateInline(action.text, 50)}`;
     case 'computer_key':
-      return `computer_key ${truncate(action.key, 30)}`;
+      return `computer_key ${truncateInline(action.key, 30)}`;
     case 'computer_drag':
       return `computer_drag ${action.fromX},${action.fromY} → ${action.toX},${action.toY}`;
     case 'computer_hotkey':
@@ -2148,9 +2150,9 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'computer_clipboard_get':
       return 'computer_clipboard_get';
     case 'computer_clipboard_set':
-      return `computer_clipboard_set text=${truncate(action.text, 50)}`;
+      return `computer_clipboard_set text=${truncateInline(action.text, 50)}`;
     case 'computer_open_app':
-      return `computer_open_app ${truncate(action.name, 80)}`;
+      return `computer_open_app ${truncateInline(action.name, 80)}`;
     case 'computer_active_window':
       return 'computer_active_window';
     case 'computer_doctor':
@@ -2163,48 +2165,48 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'mcp_disable':
       return `mcp_disable ${action.id}`;
     case 'mcp_suggest':
-      return `mcp_suggest "${truncate(action.intent, 80)}"`;
+      return `mcp_suggest "${truncateInline(action.intent, 80)}"`;
     case 'bridge_send_image':
-      return `bridge_send_image ${truncate(action.imagePath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
+      return `bridge_send_image ${truncateInline(action.imagePath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
     case 'bridge_send_video':
-      return `bridge_send_video ${truncate(action.videoPath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
+      return `bridge_send_video ${truncateInline(action.videoPath, 100)}${action.platform ? ` platform=${action.platform}` : ''}`;
     case 'request_user_confirmation':
-      return `request_user_confirmation "${truncate(action.question, 100)}"${action.screenshotPath ? ` screenshot=${truncate(action.screenshotPath, 80)}` : ''}`;
+      return `request_user_confirmation "${truncateInline(action.question, 100)}"${action.screenshotPath ? ` screenshot=${truncateInline(action.screenshotPath, 80)}` : ''}`;
     case 'memory':
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
     case 'load_skill':
-      return `load_skill ${action.id ? truncate(action.id, 80) : `query=${truncate(action.query ?? '', 80)}`}${action.file ? ` file=${truncate(action.file, 80)}` : ''}`;
+      return `load_skill ${action.id ? truncateInline(action.id, 80) : `query=${truncateInline(action.query ?? '', 80)}`}${action.file ? ` file=${truncateInline(action.file, 80)}` : ''}`;
     case 'task_output':
       return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
     case 'view_image':
-      return `view_image ${truncate(action.path, 120)}`;
+      return `view_image ${truncateInline(action.path, 120)}`;
     case 'read_document':
-      return `read_document ${truncate(action.path, 120)}${action.pages ? ` pages=${truncate(String(action.pages), 30)}` : ''}${action.sheet ? ` sheet=${truncate(String(action.sheet), 40)}` : ''}${action.rows ? ` rows=${truncate(String(action.rows), 30)}` : ''}${action.as_images ? ' as_images' : ''}`;
+      return `read_document ${truncateInline(action.path, 120)}${action.pages ? ` pages=${truncateInline(String(action.pages), 30)}` : ''}${action.sheet ? ` sheet=${truncateInline(String(action.sheet), 40)}` : ''}${action.rows ? ` rows=${truncateInline(String(action.rows), 30)}` : ''}${action.as_images ? ' as_images' : ''}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
     case 'post_update':
-      return `post_update "${truncate(action.text, 80)}"`;
+      return `post_update "${truncateInline(action.text, 80)}"`;
     case 'server_setup':
       return `server_setup ${action.action}${'host' in action && action.host ? ` ${action.host}` : ''}${'server' in action && action.server ? ` ${action.server}` : ''}`;
     case 'get_verification_code':
-      return `get_verification_code ${action.channel ?? 'which'}${action.sender ? ` from ${truncate(action.sender, 40)}` : ''}`;
+      return `get_verification_code ${action.channel ?? 'which'}${action.sender ? ` from ${truncateInline(action.sender, 40)}` : ''}`;
     case 'agent_mail_address':
     case 'list_emails':
     case 'wait_for_sms':
       return action.type;
     case 'wait_for_email':
-      return `wait_for_email${action.from_contains ? ` from=${truncate(action.from_contains, 60)}` : ''}`;
+      return `wait_for_email${action.from_contains ? ` from=${truncateInline(action.from_contains, 60)}` : ''}`;
     case 'read_email':
     case 'extract_verification':
-      return `${action.type} ${truncate(action.id, 40)}`;
+      return `${action.type} ${truncateInline(action.id, 40)}`;
     case 'begin_signup':
-      return `begin_signup ${truncate(action.site, 80)}`;
+      return `begin_signup ${truncateInline(action.site, 80)}`;
     case 'finish_signup':
-      return `finish_signup ${truncate(action.signup_id, 40)} ${action.outcome}`;
+      return `finish_signup ${truncateInline(action.signup_id, 40)} ${action.outcome}`;
     case 'get_sms_number':
       return `get_sms_number ${action.country}`;
     case 'ask_owner_for_code':
-      return `ask_owner_for_code ${truncate(action.site, 80)}`;
+      return `ask_owner_for_code ${truncateInline(action.site, 80)}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
@@ -2230,7 +2232,7 @@ async function recordEnvelopeWorkflowEntry(
 ): Promise<void> {
   const lines = [
     `done=${envelope.done !== false}`,
-    `reply=${truncate(envelope.reply || '(empty)', 280)}`,
+    `reply=${truncateInline(envelope.reply || '(empty)', 280)}`,
     `actions=${actions.length}/${originalActionCount}`,
     `autonomy=${session.autonomyMode ?? 'standard'}`,
   ];
@@ -2277,7 +2279,7 @@ async function recordOutcomeWorkflowEntry(
     options,
     `${profileLabel(options.profile ?? 'main')} Turn ${turn} Outcomes`,
     outcomes.map((outcome) =>
-      `${outcome.ok ? 'ok' : 'failed'} ${summarizeActionForWorkflow(outcome.action)} :: ${truncate(outcome.output, 220)}`,
+      `${outcome.ok ? 'ok' : 'failed'} ${summarizeActionForWorkflow(outcome.action)} :: ${truncateInline(outcome.output, 220)}`,
     ),
   );
 }
@@ -3290,7 +3292,7 @@ async function buildRunContextContent(input: {
         if (memories.length > 0) {
           sections.push([
             '🧠 [Enhanced Memory: Relevant Retrieved Context]',
-            ...memories.map((entry) => `- ${truncate(entry.text, 360)}`),
+            ...memories.map((entry) => `- ${truncateInline(entry.text, 360)}`),
           ].join('\n'));
         }
       }
@@ -3933,7 +3935,7 @@ async function recordVerificationOutcome(
   await recordWorkflowEntry(session, options, title, [
     `command=${action.command}`,
     `ok=${outcome.ok}`,
-    `output=${truncate(outcome.output, 300)}`,
+    `output=${truncateInline(outcome.output, 300)}`,
   ]);
   await options.sessionStore.upsertEvidenceClaim(session, {
     statement: deriveClaimStatement(
@@ -4635,7 +4637,7 @@ export async function approveBuilderExecution(
   await recordWorkflowEntry(parentSession, options, 'Builder Execution Completed', [
     `builder_session=${childSession.id}`,
     `turns=${result.turns}`,
-    `result=${truncate(result.reply, 400)}`,
+    `result=${truncateInline(result.reply, 400)}`,
   ]);
   await recordHeimdallEvent(options.sessionStore, parentSession, {
     kind: 'delegate_completed',
@@ -5412,15 +5414,17 @@ async function executeAgentActionUnscrubbed(
       try {
         const { spawnDetachedWorkflow } = await import('../services/detachedWorkflow.js');
         // Prefer the user's configured main profile (their actual relay +
-        // model) over a hardcoded 'gpt-4o' that may not exist on their relay.
+        // model) over a hard-coded model that may not exist on their relay.
         // Env vars still win when explicitly set — useful for ops overrides.
         let fallbackProtocol = 'openai';
         let fallbackModel = '';
         let fallbackBaseUrl = '';
         let fallbackApiKey = '';
+        let fallbackOwnerStore = true;
         try {
           const { ProviderStore } = await import('../providers/store.js');
-          const store = await new ProviderStore(options.cwd).load();
+          const storeFile = new ProviderStore(options.cwd);
+          const store = await storeFile.load();
           const mainId = store?.defaultMainProfileId ?? 'main';
           const main = store?.profiles?.find((p) => p.id === mainId) ?? store?.profiles?.[0];
           if (main) {
@@ -5428,8 +5432,24 @@ async function executeAgentActionUnscrubbed(
             if (main.model) fallbackModel = main.model;
             if (main.baseUrl) fallbackBaseUrl = main.baseUrl;
             if (main.apiKey) fallbackApiKey = main.apiKey;
+            fallbackOwnerStore = isOwnerProviderStoreFile(storeFile.getFilePath());
           }
         } catch { /* providers store unavailable — fall through to env-only */ }
+        // ARTEMIS_* overrides follow providers/overrides.ts: the stored key
+        // goes only to the profile's own endpoint, and a key alone applies only
+        // to a profile from the owner's own store.
+        const envOverrides = {
+          model: process.env.ARTEMIS_MODEL,
+          baseUrl: process.env.ARTEMIS_BASE_URL,
+          apiKey: process.env.ARTEMIS_API_KEY,
+        };
+        const spawnProvider = fallbackApiKey || fallbackBaseUrl || fallbackModel
+          ? overrideProviderConfig(
+            { protocol: fallbackProtocol as any, model: fallbackModel, baseUrl: fallbackBaseUrl, apiKey: fallbackApiKey },
+            envOverrides,
+            { ownerStore: fallbackOwnerStore },
+          )
+          : { protocol: fallbackProtocol as any, model: envOverrides.model ?? '', baseUrl: envOverrides.baseUrl ?? '', apiKey: envOverrides.apiKey ?? '' };
         const result = await spawnDetachedWorkflow({
           cwd: options.cwd,
           sessionStore: options.sessionStore,
@@ -5439,10 +5459,10 @@ async function executeAgentActionUnscrubbed(
           permissionMode: options.permissionManager.getMode() as any,
           permissionModeExplicit: false,
           providerConfig: {
-            protocol: (process.env.ARTEMIS_PROVIDER_PROTOCOL || fallbackProtocol) as any,
-            model: process.env.ARTEMIS_MODEL || fallbackModel,
-            baseUrl: process.env.ARTEMIS_BASE_URL || fallbackBaseUrl,
-            apiKey: process.env.ARTEMIS_API_KEY || fallbackApiKey,
+            protocol: (process.env.ARTEMIS_PROVIDER_PROTOCOL || spawnProvider.protocol) as any,
+            model: spawnProvider.model,
+            baseUrl: spawnProvider.baseUrl,
+            apiKey: spawnProvider.apiKey,
           },
         });
         return {
@@ -5491,7 +5511,7 @@ You can continue executing your current tasks. The background workflow will run 
           const interrupted = isAgentRuntimeInterruptedError(error);
           await recordWorkflowEntry(session, options, 'Builder Proposal Failed', [
             `task=${action.task}`,
-            `error=${truncate(message, 400)}`,
+            `error=${truncateInline(message, 400)}`,
           ]);
           return {
             ok: false,
@@ -5510,7 +5530,7 @@ You can continue executing your current tasks. The background workflow will run 
         await recordWorkflowEntry(session, options, 'Builder Proposal Returned', [
           `builder_session=${builderProposal.session.id}`,
           `task=${action.task}`,
-          `proposal=${truncate(builderProposal.result.reply, 600)}`,
+          `proposal=${truncateInline(builderProposal.result.reply, 600)}`,
         ]);
         await options.sessionStore.upsertEvidenceClaim(session, {
           statement: deriveClaimStatement(builderProposal.result.reply),
@@ -5561,7 +5581,7 @@ You can continue executing your current tasks. The background workflow will run 
         await recordWorkflowEntry(session, options, 'Specialist Task Failed', [
           `role=${action.role}`,
           `task=${action.task}`,
-          `error=${truncate(message, 400)}`,
+          `error=${truncateInline(message, 400)}`,
         ]);
         return {
           ok: false,
@@ -5581,7 +5601,7 @@ You can continue executing your current tasks. The background workflow will run 
         `role=${specialist.role}`,
         `session=${specialist.session.id}`,
         `turns=${specialist.result.turns}`,
-        `reply=${truncate(specialist.result.reply, 400)}`,
+        `reply=${truncateInline(specialist.result.reply, 400)}`,
       ]);
 
       return {
@@ -5724,13 +5744,13 @@ function buildHeimdallActionSummary(
         : action.type === 'mcp_get_prompt'
           ? `${action.serverId}/${action.promptName}`
           : action.type === 'delegate_task'
-            ? `${action.role}:${truncate(action.task, 80)}`
+            ? `${action.role}:${truncateInline(action.task, 80)}`
             : action.type === 'approve_builder_execution'
               ? action.sessionId
               : 'path' in action && typeof action.path === 'string'
                 ? action.path
                 : 'command' in action && typeof action.command === 'string'
-                  ? truncate(action.command, 80)
+                  ? truncateInline(action.command, 80)
                   : action.type;
 
   switch (kind) {
@@ -5824,7 +5844,7 @@ function describeBackgroundTaskLabel(action: AgentAction): string {
   if (action.type === 'generate_image' || action.type === 'generate_video' || action.type === 'generate_long_video') {
     const promptText =
       typeof (action as { prompt?: unknown }).prompt === 'string'
-        ? truncate((action as { prompt: string }).prompt, 60)
+        ? truncateInline((action as { prompt: string }).prompt, 60)
         : '(no prompt)';
     const noun = action.type === 'generate_image' ? 'image' : action.type === 'generate_long_video' ? 'long video' : 'video';
     return `${noun}: ${promptText}`;
@@ -5832,7 +5852,7 @@ function describeBackgroundTaskLabel(action: AgentAction): string {
   if (action.type === 'delegate_task') {
     const role = typeof action.role === 'string' ? action.role : 'agent';
     const taskText =
-      typeof action.task === 'string' ? truncate(action.task, 60) : 'task';
+      typeof action.task === 'string' ? truncateInline(action.task, 60) : 'task';
     return `delegate(${role}): ${taskText}`;
   }
   return action.type;
@@ -6609,7 +6629,7 @@ export async function recordApprovalAnswer(
   if (decision === 'deny') {
     const lines = [
       `The owner DENIED approval ${request.id} (${request.title}). The action did not run.`,
-      ...(answer.reason?.trim() ? [`Owner's reason: ${truncate(answer.reason.trim(), 500)}`] : []),
+      ...(answer.reason?.trim() ? [`Owner's reason: ${truncateInline(answer.reason.trim(), 500)}`] : []),
       'Do not retry it or try another way to do the same thing. Tell the owner briefly what you will do instead, or stop.',
     ];
     const output = lines.join('\n');
@@ -8158,7 +8178,7 @@ async function runAgentInner(
             '',
             `Violation: ${completionChecklist.visualPlaceholderViolation}`,
             '',
-            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+            `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
           ].join('\n'),
           turns: turn,
         };
@@ -8192,7 +8212,7 @@ async function runAgentInner(
             '',
             `Missing tool call(s): ${missingLocalVisualTools.join(', ')}`,
             '',
-            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+            `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
           ].join('\n'),
           turns: turn,
         };
@@ -8203,7 +8223,7 @@ async function runAgentInner(
           reply: [
             `The requested visual asset was not generated: ${missingLocalVisualTools.join(', ')} did not complete successfully in this run.`,
             lastFailure
-              ? `Last tool error (${lastFailure.actionType}): ${truncate(lastFailure.output, 300)}`
+              ? `Last tool error (${lastFailure.actionType}): ${truncateInline(lastFailure.output, 300)}`
               : 'The visual generation tool was not called.',
           ].join('\n'),
           turns: turn,
@@ -8239,9 +8259,9 @@ async function runAgentInner(
             unresolvedToolFailure.code
               ? `Error code: ${unresolvedToolFailure.code}`
               : '',
-            `Failure: ${truncate(unresolvedToolFailure.output, 240)}`,
+            `Failure: ${truncateInline(unresolvedToolFailure.output, 240)}`,
             '',
-            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+            `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
           ].filter(Boolean).join('\n'),
           turns: turn,
         };
@@ -8251,7 +8271,7 @@ async function runAgentInner(
           return {
             reply: [
               `This could not be completed: ${unresolvedToolFailure.actionType} failed, and retrying will not fix it in this run.`,
-              `Error: ${truncate(unresolvedToolFailure.output, 400)}`,
+              `Error: ${truncateInline(unresolvedToolFailure.output, 400)}`,
             ].join('\n'),
             turns: turn,
           };
@@ -8268,7 +8288,7 @@ async function runAgentInner(
           unresolvedToolFailure.code
             ? `Error code: ${unresolvedToolFailure.code}`
             : '',
-          `Failure: ${truncate(unresolvedToolFailure.output, 500)}`,
+          `Failure: ${truncateInline(unresolvedToolFailure.output, 500)}`,
           'Do not claim completion while this failure is unresolved.',
           'Continue with concrete recovery actions, or return a clear blocker that explicitly acknowledges the failed tool result.',
         ].filter(Boolean).join('\n'),
@@ -8290,7 +8310,7 @@ async function runAgentInner(
             `Missing target files: ${missingExpectedMutationPaths.join(', ')}`,
             `Observed changed files: ${freshChangedFiles.join(', ') || 'none'}`,
             '',
-            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+            `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
           ].join('\n'),
           turns: turn,
         };
@@ -8330,7 +8350,7 @@ async function runAgentInner(
               ? `Observed paths: ${freshChangedFiles.join(', ')}`
               : 'Observed paths: none',
             '',
-            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+            `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
           ].join('\n'),
           turns: turn,
         };
@@ -8379,7 +8399,7 @@ async function runAgentInner(
             reply: [
               'Execution blocked by deterministic completion checklist: the request explicitly asked for verification, but no verification command was recorded.',
               '',
-              `Last model reply: "${truncate(envelope.reply, 240)}"`,
+              `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
             ].join('\n'),
             turns: turn,
           };
@@ -8410,7 +8430,7 @@ async function runAgentInner(
           reply: [
             'Execution blocked by deterministic completion checklist: the request appears to require workspace changes, but no changed files or concrete mutation actions were recorded.',
             '',
-            `Last model reply: "${truncate(envelope.reply, 240)}"`,
+            `Last model reply: "${truncateInline(envelope.reply, 240)}"`,
           ].join('\n'),
           turns: turn,
         };

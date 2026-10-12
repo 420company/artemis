@@ -300,7 +300,7 @@ export type AgentAction =
       type: 'search_web';
       query: string;
       limit?: number;
-      backend?: 'auto' | 'platform' | 'bing' | 'google' | 'duckduckgo' | 'wikipedia';
+      backend?: 'auto' | 'platform' | 'google' | 'duckduckgo' | 'wikipedia';
       /** Only results from the last day / week / month / year (platform backend). */
       freshness?: 'day' | 'week' | 'month' | 'year';
     }
@@ -1030,26 +1030,3 @@ export type RunResult = {
   reply: string;
   turns: number;
 };
-
-// 查询引擎类型
-export interface QueryEngineConfig {
-  /** 最大上下文窗口大小（字符数） */
-  maxContextSize: number;
-  /** 会话超时时间（毫秒） */
-  sessionTimeout: number;
-  /** 是否启用记忆压缩 */
-  enableCompression: boolean;
-  /** 是否启用会话管理 */
-  enableSessionManagement: boolean;
-}
-
-export interface QueryResult {
-  /** 查询结果内容 */
-  content: string;
-  /** 会话信息 */
-  session: SessionRecord;
-  /** 执行时间（毫秒） */
-  executionTime: number;
-  /** 是否需要更多信息 */
-  needsMoreInfo: boolean;
-}

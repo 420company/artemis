@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { pathExists, readOwnFileText, resolveDataRootDir, truncate } from '../utils/fs.js';
+import { pathExists, readOwnFileText, resolveDataRootDir, truncateInline } from '../utils/fs.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { SkillAdapterManager } from '../core/externalSkillAdapter.js';
 
@@ -45,7 +45,7 @@ function deriveDescriptionFromMarkdown(content: string): string | undefined {
     .filter(Boolean)
     .filter((line) => !line.startsWith('#'));
   const firstBodyLine = lines[0];
-  return firstBodyLine ? truncate(firstBodyLine, 160) : undefined;
+  return firstBodyLine ? truncateInline(firstBodyLine, 160) : undefined;
 }
 
 async function loadSkillFromDirectory(options: {
@@ -255,11 +255,11 @@ function buildSkillLine(skill: DiscoveredSkill): string {
   return [
     `- ${skill.id}`,
     `[${skill.source} ${skill.status}]`,
-    `title=${truncate(skill.title, 80)}`,
-    skill.description ? `desc=${truncate(skill.description, 100)}` : '',
+    `title=${truncateInline(skill.title, 80)}`,
+    skill.description ? `desc=${truncateInline(skill.description, 100)}` : '',
     `path=${skill.dirPath}`,
     skill.issues.length > 0
-      ? `issues=${truncate(skill.issues.join(' '), 120)}`
+      ? `issues=${truncateInline(skill.issues.join(' '), 120)}`
       : '',
   ]
     .filter(Boolean)

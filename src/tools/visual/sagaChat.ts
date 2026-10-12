@@ -14,6 +14,7 @@ import { modelSupportsImages } from '../../providers/imageSupport.js';
 import type { ProviderProfile } from '../../providers/types.js';
 import { anyAbortSignal, resolveVisionProfile } from '../../core/visionHelper.js';
 import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationConfig.js';
+import { DEFAULT_MODEL_IDS } from '../../providers/presets.js';
 
 /** Time limit for one Saga chat request. */
 export const SAGA_CHAT_TIMEOUT_MS = 90_000;
@@ -31,7 +32,7 @@ export type SagaChatResponse =
   | { ok: false; status?: number; text: string; timedOut: boolean };
 
 /** Model used when the endpoint names none (a main profile without a model, or the image provider without a vision model). */
-const DEFAULT_CHAT_MODEL = 'gpt-5.5';
+const DEFAULT_CHAT_MODEL = DEFAULT_MODEL_IDS.visualChat;
 
 /**
  * Models known to accept only the default temperature. The request still

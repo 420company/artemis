@@ -5,7 +5,7 @@ import { deriveClaimStatement } from './evidence.js';
 import { buildWorkflowStrengthContract } from './workflowStrength.js';
 import type { AgentRole, PlanItem, RunResult, SessionRecord } from './types.js';
 import type { ImageAttachment, ImageMediaType } from '../providers/types.js';
-import { truncate } from '../utils/fs.js';
+import { truncate, truncateInline } from '../utils/fs.js';
 
 type CriticKind =
   | 'spec'
@@ -707,7 +707,7 @@ export async function runNidhoggWorkflow(
     onRunningUserMessageAccepted: (text) => {
       externallyAcceptedCorrections.push(text);
       options.onRunningUserMessageAccepted?.(text);
-      options.onInfo?.(`[nidhogg] running correction accepted inside ${phase}: ${truncate(text, 160)}`);
+      options.onInfo?.(`[nidhogg] running correction accepted inside ${phase}: ${truncateInline(text, 160)}`);
     },
   });
 
@@ -748,7 +748,7 @@ export async function runNidhoggWorkflow(
   session.plan = buildInitialPlan();
   await options.sessionStore.save(session);
   await options.sessionStore.appendWorkflowEntry(session, 'Nidhogg Started', [
-    `task=${truncate(activeUserPrompt, 300)}`,
+    `task=${truncateInline(activeUserPrompt, 300)}`,
     `max_rounds=${resolvedConfig.maxRounds}`,
     `pass_threshold=${resolvedConfig.passThreshold}`,
     `critics=${criticKinds.join(',')}`,
@@ -786,7 +786,7 @@ export async function runNidhoggWorkflow(
           imageAttachments: round === 1 ? imageAttachments : undefined,
           onInfo: (message) => options.onInfo?.(`[nidhogg:builder:r${round}] ${message}`),
         },
-        { title: `[nidhogg:builder:r${round}] ${truncate(activeUserPrompt, 60)}` },
+        { title: `[nidhogg:builder:r${round}] ${truncateInline(activeUserPrompt, 60)}` },
       ),
       GENERATOR_SOFT_TIMEOUT_MS,
     );
@@ -824,7 +824,7 @@ export async function runNidhoggWorkflow(
       `soft_failed=${generatorOutcome.timedOut}`,
       `harness_executed=${harnessResult.executed}`,
       `harness_pass_rate=${harnessResult.passRate.toFixed(2)}`,
-      `reply=${truncate(lastGeneratorReply, 300)}`,
+      `reply=${truncateInline(lastGeneratorReply, 300)}`,
     ]);
     if (!generatorOutcome.timedOut) {
       options.onInfo?.(`[nidhogg] round ${round}/${resolvedConfig.maxRounds} - generator done`);
@@ -851,7 +851,7 @@ export async function runNidhoggWorkflow(
               imageAttachments: kind === 'visual' ? imageAttachments : undefined,
               onInfo: (message) => options.onInfo?.(`[nidhogg:${kind}:r${round}] ${message}`),
             },
-            { title: `[nidhogg:${kind}:r${round}] ${truncate(activeUserPrompt, 50)}` },
+            { title: `[nidhogg:${kind}:r${round}] ${truncateInline(activeUserPrompt, 50)}` },
           ),
           CRITIC_SOFT_TIMEOUT_MS,
         );
@@ -925,7 +925,7 @@ export async function runNidhoggWorkflow(
           appendUserMessage: true,
           onInfo: (message) => options.onInfo?.(`[nidhogg:judge:r${round}] ${message}`),
         },
-        { title: `[nidhogg:judge:r${round}] ${truncate(activeUserPrompt, 50)}` },
+        { title: `[nidhogg:judge:r${round}] ${truncateInline(activeUserPrompt, 50)}` },
       ),
       JUDGE_SOFT_TIMEOUT_MS,
     );
@@ -1060,7 +1060,7 @@ export async function runNidhoggWorkflow(
     `final_score=${finalScore.toFixed(2)}`,
     `approved=${approved}`,
     `total_turns=${totalTurns}`,
-    `reply=${truncate(finalResult.reply, 300)}`,
+    `reply=${truncateInline(finalResult.reply, 300)}`,
   ]);
 
   return {

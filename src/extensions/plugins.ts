@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentRole } from '../core/types.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
-import { pathExists, resolveDataRootDir, truncate } from '../utils/fs.js';
+import { pathExists, resolveDataRootDir, truncateInline } from '../utils/fs.js';
 import {
   buildPluginPolicySummary,
   getPluginPolicyGateIssues,
@@ -197,7 +197,7 @@ function normalizePluginCommands(input: unknown): {
 
     const description =
       typeof record.description === 'string' && record.description.trim()
-        ? truncate(record.description.trim(), 160)
+        ? truncateInline(record.description.trim(), 160)
         : undefined;
     const type =
       typeof record.type === 'string' && record.type.trim()
@@ -493,7 +493,7 @@ async function loadPluginFromDirectory(options: {
       : undefined;
   const description =
     typeof parsed.description === 'string' && parsed.description.trim()
-      ? truncate(parsed.description.trim(), 160)
+      ? truncateInline(parsed.description.trim(), 160)
       : undefined;
   const enabled = parsed.enabled !== false;
   const capabilities = Array.isArray(parsed.capabilities)
@@ -662,7 +662,7 @@ function buildPluginLine(plugin: DiscoveredPlugin): string {
     `- ${plugin.id}`,
     `[${plugin.source} ${plugin.status} ${plugin.enabled ? 'enabled' : 'disabled'}]`,
     plugin.version ? `version=${plugin.version}` : '',
-    plugin.description ? `desc=${truncate(plugin.description, 100)}` : '',
+    plugin.description ? `desc=${truncateInline(plugin.description, 100)}` : '',
     plugin.capabilities.length > 0
       ? `caps=${plugin.capabilities.join(',')}`
       : '',
@@ -676,7 +676,7 @@ function buildPluginLine(plugin: DiscoveredPlugin): string {
     plugin.instructionsFile ? `instructions=${plugin.instructionsFile}` : '',
     `path=${plugin.dirPath}`,
     plugin.issues.length > 0
-      ? `issues=${truncate(plugin.issues.join(' '), 120)}`
+      ? `issues=${truncateInline(plugin.issues.join(' '), 120)}`
       : '',
   ]
     .filter(Boolean)

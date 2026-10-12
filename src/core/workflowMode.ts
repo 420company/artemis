@@ -6,7 +6,7 @@ import { autoWorkflowForMode, createDelegationBudget } from './workflowRouter.js
 import { appendTaskRuntime, createTaskRuntimeRecord, updateTaskRuntime } from './taskRuntime.js';
 import { runPluginHooks } from '../extensions/hooks.js';
 import type { RunResult, SessionRecord } from './types.js';
-import { truncate } from '../utils/fs.js';
+import { truncate, truncateInline } from '../utils/fs.js';
 import {
   prepareHeimdallThreadState,
   finalizeHeimdallThreadState,
@@ -94,7 +94,7 @@ export async function runWorkflowMode(
   if (rootRuntime) {
     rootRuntime =
       updateTaskRuntime(session, rootRuntime.id, {
-        label: `${displayName} :: ${truncate(userPrompt.trim(), 140)}`,
+        label: `${displayName} :: ${truncateInline(userPrompt.trim(), 140)}`,
         workflowMode: mode,
         status: 'running',
         lastOutput: `Workflow started: ${displayName}`,
@@ -102,7 +102,7 @@ export async function runWorkflowMode(
   } else {
     rootRuntime = createTaskRuntimeRecord({
       id: options.rootRuntimeId,
-      label: `${displayName} :: ${truncate(userPrompt.trim(), 140)}`,
+      label: `${displayName} :: ${truncateInline(userPrompt.trim(), 140)}`,
       workflowMode: mode,
       status: 'running',
     });
@@ -169,7 +169,7 @@ export async function runWorkflowMode(
         session,
         'Plugin Hooks Before Workflow',
         beforeHooks.results.map((result) =>
-          `${result.plugin.id} outcome=${result.outcome} command=${result.command} summary=${truncate(result.summary, 160)}`,
+          `${result.plugin.id} outcome=${result.outcome} command=${result.command} summary=${truncateInline(result.summary, 160)}`,
         ),
       );
     }
@@ -232,7 +232,7 @@ export async function runWorkflowMode(
         session,
         'Plugin Hooks After Workflow',
         afterHooks.results.map((hookResult) =>
-          `${hookResult.plugin.id} outcome=${hookResult.outcome} command=${hookResult.command} summary=${truncate(hookResult.summary, 160)}`,
+          `${hookResult.plugin.id} outcome=${hookResult.outcome} command=${hookResult.command} summary=${truncateInline(hookResult.summary, 160)}`,
         ),
       );
     }

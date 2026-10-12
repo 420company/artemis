@@ -4,23 +4,23 @@
  * Goal Mode ticks, and any future headless caller: resolve the user's
  * configured provider, wire the router/permissions/session store, and run
  * the REAL agent loop (core/agent.ts runAgent) with full tool access.
- *
- * (Historical note: `artemis execute` previously routed through
- * core/queryEngine.ts, which only SIMULATES responses — it never called a
- * model or ran a tool. QueryEngine stays exported for API compatibility, but
- * nothing in the CLI executes through it anymore.)
  */
 
 import type { PermissionModeInput } from '../security/permissionModes.js'
 import type { SessionRecord } from '../core/types.js'
 import type { SessionStore } from '../storage/sessions.js'
 import type { ApprovalRequest } from '../security/approvals.js'
+import type { ProviderConfig } from '../providers/types.js'
 
 export interface HeadlessAgentOptions {
   /** PRODUCER = full autonomous tools; read-only for analysis. Default PRODUCER. */
   permissionMode?: PermissionModeInput
   /** Override the configured model for this run. */
   model?: string
+  /** Override the configured endpoint for this run (`--base-url`); needs `apiKey` when it is another endpoint. */
+  baseUrl?: string
+  /** Override the configured API key for this run (`--api-key`). */
+  apiKey?: string
   maxTurns?: number
   /** Continue this existing session (its history becomes context) instead of creating a new one. */
   sessionId?: string
@@ -114,13 +114,37 @@ function takeOwnerInputMark(): boolean {
   return marked
 }
 
+/**
+ * The main provider of a headless run. `--model`, `--base-url` and
+ * `--api-key` together name a complete endpoint; otherwise they override the
+ * configured main profile under the rules in providers/overrides.ts (another
+ * endpoint needs its own key; a key alone only for a profile from the
+ * owner's own store).
+ */
+export async function resolveHeadlessProviderConfig(
+  cwd: string,
+  overrides: { model?: string; baseUrl?: string; apiKey?: string },
+  onInfo?: (message: string) => void,
+): Promise<ProviderConfig> {
+  const { resolveMainProviderConfig } = await import('../providers/onboarding.js')
+  const { mainProfileIsFromOwnerStore, overrideProviderConfig } = await import('../providers/overrides.js')
+  const model = overrides.model?.trim() || undefined
+  const baseUrl = overrides.baseUrl?.trim() || undefined
+  const apiKey = overrides.apiKey?.trim() || undefined
+  if (model && baseUrl && apiKey) {
+    return resolveMainProviderConfig({ cwd, config: { model, baseUrl, apiKey }, ...(onInfo ? { onInfo } : {}) })
+  }
+  const configured = await resolveMainProviderConfig({ cwd, config: {}, ...(onInfo ? { onInfo } : {}) })
+  if (!model && !baseUrl && !apiKey) return configured
+  return overrideProviderConfig(configured, { model, baseUrl, apiKey }, { ownerStore: await mainProfileIsFromOwnerStore(cwd) })
+}
+
 export async function runHeadlessAgent(
   cwd: string,
   prompt: string,
   opts: HeadlessAgentOptions = {},
 ): Promise<HeadlessAgentResult> {
   const ownerInput = takeOwnerInputMark()
-  const { resolveMainProviderConfig } = await import('../providers/onboarding.js')
   const { createTrackedProviderFromConfig } = await import('../providers/telemetry.js')
   const { createProviderRouter } = await import('../providers/router.js')
   const { PermissionManager } = await import('../security/permissions.js')
@@ -135,11 +159,7 @@ export async function runHeadlessAgent(
   const { captureCredentialBroker, claimCredentialBroker } = await import('../security/credentialStore.js')
   captureCredentialBroker()
   await claimCredentialBroker()
-  const providerConfig = await resolveMainProviderConfig({
-    cwd,
-    config: opts.model ? { model: opts.model } : {},
-    onInfo,
-  })
+  const providerConfig = await resolveHeadlessProviderConfig(cwd, opts, onInfo)
   const provider = createTrackedProviderFromConfig(providerConfig, { cwd })
   const permissionManager = new PermissionManager(opts.permissionMode ?? 'PRODUCER', false)
   const providerRouter = await createProviderRouter({

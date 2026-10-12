@@ -864,7 +864,7 @@ async function runRemoteCommandInner(
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               return {
-                replies: [t(`工作流执行失败：${truncate(msg, 800)}`, `Workflow execution failed: ${truncate(msg, 800)}`)],
+                replies: [t(`工作流执行失败：${truncateInline(msg, 800)}`, `Workflow execution failed: ${truncateInline(msg, 800)}`)],
                 storedSession: binding.storedSession,
                 permissionMode: binding.permissionMode,
               }
@@ -981,7 +981,7 @@ async function runRemoteCommandInner(
         // heartbeat reflects what's actually happening right now.
         const recordActivity = (snapshot: string): void => {
           const trimmed = snapshot.trim()
-          if (trimmed) lastActivitySnapshot = truncate(trimmed, 200)
+          if (trimmed) lastActivitySnapshot = truncateInline(trimmed, 200)
         }
 
         let lastReasoningNoticeAt = 0
@@ -1240,7 +1240,7 @@ async function runRemoteCommandInner(
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         return {
-          replies: [t(`错误：${truncate(msg, 400)}`, `Error: ${truncate(msg, 400)}`)],
+          replies: [t(`错误：${truncateInline(msg, 400)}`, `Error: ${truncateInline(msg, 400)}`)],
           storedSession: savedOnErrorRef.current ?? binding.storedSession,
           permissionMode: binding.permissionMode,
         }
@@ -1790,7 +1790,7 @@ export async function runBragiMessagePump<TCheckpoint>(
 
           options.onInfo?.(buildPanel(
             `${options.channelLabel} inbound`,
-            [`[${options.channelLabel.toLowerCase()}] ${message.targetLabel} → ${truncate(message.text, 200)}`]
+            [`[${options.channelLabel.toLowerCase()}] ${message.targetLabel} → ${truncateInline(message.text, 200)}`]
           ))
           options.onNotify?.({
             kind: 'bridge-message',
@@ -1842,7 +1842,7 @@ export async function runBragiMessagePump<TCheckpoint>(
             },
             pollRunningUserMessages: () => activeTask.pendingUserMessages.splice(0),
             onRunningUserMessageAccepted: (text) => {
-              options.onInfo?.(`[${options.channelLabel.toLowerCase()}] running interjection accepted from ${message.targetLabel}: ${truncate(text, 200)}`)
+              options.onInfo?.(`[${options.channelLabel.toLowerCase()}] running interjection accepted from ${message.targetLabel}: ${truncateInline(text, 200)}`)
             },
             bridgePlatform: bridgePlatform === 'cli' ? undefined : bridgePlatform,
             targetId: message.targetId,
@@ -1860,7 +1860,7 @@ export async function runBragiMessagePump<TCheckpoint>(
               await options.sendMessage(message.targetId, mobileReply)
             } catch (sendErr: unknown) {
               const sendFailure = sendErr instanceof Error ? sendErr.message : String(sendErr)
-              const detail = `[${options.channelLabel.toLowerCase()}] failed to send final reply to ${compactTargetLabel} (${mobileReply.length} chars): ${truncate(sendFailure, 500)}`
+              const detail = `[${options.channelLabel.toLowerCase()}] failed to send final reply to ${compactTargetLabel} (${mobileReply.length} chars): ${truncateInline(sendFailure, 500)}`
               options.onInfo?.(detail)
               options.onNotify?.({
                 kind: 'bridge-status',
@@ -1901,7 +1901,7 @@ export async function runBragiMessagePump<TCheckpoint>(
           const sendFailure = /sendMessage failed|failed to send/i.test(failure)
           if (!sendFailure) {
             try {
-              await options.sendMessage(message.targetId, `${options.channelLabel} error: ${truncate(failure, 500)}`)
+              await options.sendMessage(message.targetId, `${options.channelLabel} error: ${truncateInline(failure, 500)}`)
             } catch (sendErr: unknown) {
               options.onInfo?.(`[${options.channelLabel.toLowerCase()}] failed to send error reply: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`)
             }
@@ -1912,7 +1912,7 @@ export async function runBragiMessagePump<TCheckpoint>(
               kind: 'bridge-status',
               platform: options.channelLabel.toLowerCase() as 'telegram' | 'discord' | 'wechat',
               targetLabel: compactLabel(message.targetLabel),
-              text: `${options.channelLabel} error: ${truncate(failure, 1200)}`,
+              text: `${options.channelLabel} error: ${truncateInline(failure, 1200)}`,
               level: 'error',
             })
           } else {
@@ -1921,7 +1921,7 @@ export async function runBragiMessagePump<TCheckpoint>(
               platform: options.channelLabel.toLowerCase() as 'telegram' | 'discord' | 'wechat',
               direction: 'outbound',
               targetLabel: compactLabel(message.targetLabel),
-              text: `${options.channelLabel} error: ${truncate(failure, 1200)}`,
+              text: `${options.channelLabel} error: ${truncateInline(failure, 1200)}`,
             })
           }
         } finally {

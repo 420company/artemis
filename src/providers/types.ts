@@ -209,21 +209,16 @@ export type CustomProviderConfig = {
 
 /**
  * Helper tasks a store can route to their own model (see
- * providers/auxiliaryModels.ts). Read today: `vision` (vision helper),
- * `compression` (context compaction and one-shot summaries), `web_extract`
- * (local deep research) and `flush_memories` (memory extraction). The other
- * names are accepted and kept but have no model call of their own yet.
+ * providers/auxiliaryModels.ts): `vision` (vision helper), `compression`
+ * (context compaction and one-shot summaries), `web_extract` (local deep
+ * research) and `flush_memories` (memory extraction). Other keys in a
+ * stored `auxiliaryModels` are kept on save and otherwise ignored.
  */
 export type AuxiliaryModelTask =
   | 'vision'
   | 'compression'
   | 'web_extract'
-  | 'session_search'
-  | 'approval'
-  | 'mcp'
-  | 'flush_memories'
-  | 'title_generation'
-  | 'skills_hub';
+  | 'flush_memories';
 
 export type AuxiliaryModelRoute = {
   mode: 'auto' | 'provider' | 'custom';

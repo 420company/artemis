@@ -173,7 +173,6 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
   {
     id: 'tasks',
     group: 'workflow',
-    cli: 'tasks [sessionId] [add <task>|start <id>|done <id>|block <id>|pending <id>|remove <id>|clear]',
     slash: '/tasks [add <text>|start <id>|done <id>|block <id>|pending <id>|remove <id>|clear]',
     remote: '/tasks [add <text>|start <id>|done <id>|block <id>|pending <id>|remove <id>|clear]',
     autocomplete: true,
@@ -182,7 +181,6 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
   {
     id: 'runtimes',
     group: 'workflow',
-    cli: 'runtimes [sessionId]',
     slash: '/runtimes [interrupt <id>|interrupt-all|clear-finished|clear-all]',
     remote: '/runtimes [interrupt <id>|interrupt-all|clear-finished|clear-all]',
     autocomplete: true,
@@ -277,15 +275,6 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     remote: '/docs <query>',
     autocomplete: true,
     desc: { zh: 'Look up documentation', en: 'Look up documentation' },
-  },
-  {
-    id: 'search-engine',
-    group: 'knowledge',
-    cli: 'search-engine [bing|google]',
-    slash: '/search-engine [bing|google]',
-    remote: '/search-engine [bing|google]',
-    autocomplete: true,
-    desc: { zh: 'Switch the docs search backend', en: 'Switch the docs search backend' },
   },
   {
     id: 'research-engine',
@@ -447,9 +436,8 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
   {
     id: 'mcp',
     group: 'project',
-    cli: 'mcp [doctor|probe [id]|get <id>|import-json <path>|import-project [path]|add-http <id> <url>|add-sse <id> <url>|add-stdio <id> <command...>|enable <id>|disable <id>|remove <id>|auth <id> <state>|clear-error <id>|reset-state <id>]',
-    slash: '/mcp [doctor|probe [id]|get <id>|import-json <path>|import-project [path]|add-http <id> <url>|add-sse <id> <url>|add-stdio <id> <command...>|enable <id>|disable <id>|remove <id>|auth <id> <state>|clear-error <id>|reset-state <id>]',
-    remote: '/mcp [doctor|probe [id]|get <id>|import-json <path>|import-project [path]|add-http <id> <url>|add-sse <id> <url>|add-stdio <id> <command...>|enable <id>|disable <id>|remove <id>|auth <id> <state>|clear-error <id>|reset-state <id>]',
+    cli: 'mcp [list|install|add [--stdio] <command...>|add --http <url>|add --sse <url>|remove <id>|probe <id>]',
+    slash: '/mcp [list <keyword>|suggest <intent>|enable <id>|disable <id>]',
     autocomplete: true,
     quickValue: '/mcp',
     desc: { zh: 'Show or manage MCP servers', en: 'Show or manage MCP servers' },
@@ -463,16 +451,6 @@ export const COMMAND_DESCRIPTORS: CommandDescriptor[] = [
     autocomplete: true,
     quickValue: '/skills',
     desc: { zh: '浏览、推荐和查看内置技能', en: 'Browse, recommend, and inspect built-in skills' },
-  },
-  {
-    id: 'plugins',
-    group: 'project',
-    cli: 'plugins [run <plugin-id> <command...>]',
-    slash: '/plugins',
-    remote: '/plugins',
-    autocomplete: true,
-    quickValue: '/plugins',
-    desc: { zh: 'Inspect or run local plugins', en: 'Inspect or run local plugins' },
   },
   {
     id: 'tools',

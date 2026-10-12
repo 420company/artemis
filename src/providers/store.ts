@@ -17,6 +17,7 @@ import type {
 import { ensureDir, pathExists } from '../utils/fs.js';
 import { capKnownModelContextLength, detectModelContextLength } from './modelContext.js';
 import { hasPlatformCapabilities } from './capabilities.js';
+import { DEFAULT_MODEL_IDS } from './presets.js';
 
 function getDefaultSetupConfig(): ArtemisSetupConfig {
   return {
@@ -176,7 +177,7 @@ function getEmptyStore(): ProviderStoreData {
         provider: 'byteplus',
         apiKey: '',
         baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
-        model: 'seedream-5-0-260128',
+        model: DEFAULT_MODEL_IDS.byteplusImage,
         nsfw: false,
         defaultParams: {
           size: '2K',
@@ -190,7 +191,7 @@ function getEmptyStore(): ProviderStoreData {
         provider: 'byteplus',
         apiKey: '',
         baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
-        model: 'seedance-1-5-pro-251215',
+        model: DEFAULT_MODEL_IDS.byteplusVideo,
         nsfw: false,
         defaultParams: {
           duration: '10s',
@@ -622,19 +623,6 @@ export class ProviderStore {
   ): Promise<ProviderStoreData> {
     const data = await this.load();
     data.setup = updater(data.setup ?? getDefaultSetupConfig(), data);
-    await this.save(data);
-    return data;
-  }
-
-  async setAuxiliaryModelRoute(
-    task: AuxiliaryModelTask,
-    route: AuxiliaryModelRoute,
-  ): Promise<ProviderStoreData> {
-    const data = await this.load();
-    data.auxiliaryModels = {
-      ...(data.auxiliaryModels ?? {}),
-      [task]: route,
-    };
     await this.save(data);
     return data;
   }

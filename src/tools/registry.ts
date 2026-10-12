@@ -294,7 +294,7 @@ function validateSearchWebAction(action: any): string[] {
   validateEnumString(
     action?.backend,
     'backend',
-    ['auto', 'platform', 'bing', 'google', 'duckduckgo', 'wikipedia'] as const,
+    ['auto', 'platform', 'google', 'duckduckgo', 'wikipedia'] as const,
     errors,
   );
   validateEnumString(action?.freshness, 'freshness', ['day', 'week', 'month', 'year'] as const, errors);
@@ -1199,71 +1199,6 @@ const actionToolDefs: ToolDefinition[] = [
 ];
 
 const capabilityToolDefs: ToolDefinition[] = [
-  {
-    type: 'http_request',
-    description: '发送HTTP请求',
-    kind: 'shell',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.url, 'url', errors);
-      return errors;
-    },
-  },
-  {
-    type: 'search',
-    description: '执行网络搜索并返回结果摘要',
-    kind: 'shell',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.query, 'query', errors);
-      return errors;
-    },
-  },
-  {
-    type: 'web_scraper',
-    description: '从指定 URL 提取网页内容',
-    kind: 'shell',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.url, 'url', errors);
-      return errors;
-    },
-  },
-  {
-    type: 'user_interaction',
-    description: '允许 AI 主动向用户提问，获取反馈或确认',
-    kind: 'function',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.question, 'question', errors);
-      return errors;
-    },
-  },
-  {
-    type: 'confirm',
-    description: '获取用户对某个问题的简单确认（是/否）',
-    kind: 'function',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.question, 'question', errors);
-      return errors;
-    },
-  },
   // NOTE: removed 3 stub tools (`todo`, `mcp`, `notebook_worktree`) that were
   // declared with executionMode='blocking' but had no `execute` function.
   // They were never callable from the brain (would throw at runtime). The
@@ -1652,7 +1587,7 @@ const capabilityToolDefs: ToolDefinition[] = [
   // ── Browser automation (Playwright headed Chromium) ────────────────────
   {
     type: 'browser_navigate',
-    description: '在本机 Chromium 浏览器中打开 URL。url 必填。当 http_request 被反爬阻挡时，切换到这条工具。',
+    description: '在本机 Chromium 浏览器中打开 URL。url 必填。网页被反爬拦截、需要登录、点击交互或 JS 渲染时，用这条工具。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -2271,9 +2206,8 @@ export function validateToolAction(action: any): string[] {
 
 // The prompt manifest lists only tools the model can actually use on this
 // host: tools with a direct executor or a registered agent action type that
-// is not excluded from the model. Executor-less capability placeholders
-// (file, system, http_request, search, web_scraper, user_interaction,
-// confirm) stay in the registry for metadata lookups but are not advertised,
+// is not excluded from the model. Executor-less capability entries (file,
+// system) stay in the registry for metadata lookups but are not advertised,
 // since calling them can only fail.
 function isListedInModelManifest(def: ToolDefinition): boolean {
   if (!isToolSupportedOnHost(def.type)) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { compileShotPromptWithContinuity } from '../src/tools/visual/sagaRenderer/continuity.js';
-import type { SagaContinuityBible } from '../src/tools/visual/sagaRenderer/continuity.js';
+import type { SagaContinuityBible } from '../src/tools/visual/sagaRenderer/types.js';
 
 const bible: SagaContinuityBible = {
   identityCard: 'identity: NeonCat launch host, short silver hair, black jacket.',

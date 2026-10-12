@@ -3,6 +3,34 @@ import type { ProviderApiKeyHeader, ProviderProtocol } from './types.js'
 
 export type ProviderPresetId = string
 
+/**
+ * Model ids the engine names on its own, when nothing configured names one.
+ * They all live here so that a retired id is replaced in one place. A
+ * profile, a visual profile or the request itself always wins over these.
+ */
+export const DEFAULT_MODEL_IDS = {
+  /** Lead model when no provider profile exists and only ANTHROPIC_API_KEY is set. */
+  anthropicEnvFallback: 'claude-opus-5-5',
+  /** Chat model for the visual workflows when their OpenAI-compatible endpoint names none. */
+  visualChat: 'gpt-5.5',
+  /** Vision models tried in order on an OpenAI-compatible image endpoint without a configured visionModel. */
+  visionFallbacks: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'],
+  /** First model the character description tries on such an endpoint (one short paragraph). */
+  visionDescribe: 'gpt-5.4-mini',
+  /** Vision model on a Google (Gemini API) image provider without a configured visionModel. */
+  geminiVision: 'gemini-2.5-flash',
+  /** BytePlus image model when neither the request nor the visual profile names one. */
+  byteplusImage: 'seedream-5-0-260128',
+  /** BytePlus video model when neither the request nor the visual profile names one. */
+  byteplusVideo: 'seedance-1-5-pro-251215',
+} as const
+
+/** Examples in the interactive `/model` help. */
+export const MODEL_SWITCH_EXAMPLES: readonly string[] = [
+  DEFAULT_MODEL_IDS.anthropicEnvFallback,
+  DEFAULT_MODEL_IDS.visualChat,
+]
+
 export type ProviderPreset = {
   id: ProviderPresetId
   /** Provider display name — keep English-only, no mixed Chinese/English. */
