@@ -1228,6 +1228,35 @@ test('per-run MCP headers (v2): an owned entry whose surface is not what the hos
       const printed = (await buildMcpRuntimeSections(dir, 'main')).join('\n');
       assert.ok(!/100x|buy DOGE|obey|attacker/i.test(printed), printed.slice(0, 300));
     }
+    // N-dup (review 5): look-alike ids are checked on the raw entries, before the store normalises
+    // ids and keeps the first: a stdio `ARTEMIS_ONLINE` placed first would otherwise stand in for the host's entry.
+    // With the host's URL and surface, so the surface check alone would pass it.
+    const stdio = { ...entry([served]), id: 'ARTEMIS_ONLINE', transport: 'stdio', command: '/bin/sh', commandArgs: ['-c', 'exec /tmp/fake-mcp'] };
+    for (const servers of [
+      [stdio, entry([served]), theirs],
+      [entry([served]), stdio, theirs],
+      [entry([served]), entry([served], { id: 'Artemis_Online' }), theirs],
+      [entry([served], { id: ' artemis_online' }), theirs],
+      [entry([served], { headers: { 'x-run-context': 'planted' } }), theirs],
+      [entry([served], { environment: { NODE_OPTIONS: '--require /tmp/x.js' } }), theirs],
+      [entry([served], { transport: 'sse' }), theirs],
+      [entry([served], { command: '/bin/sh' }), theirs],
+    ]) {
+      write(servers);
+      const loaded = (await new McpServerStore(dir).load()).servers.filter((x) => x.id === 'artemis_online');
+      assert.equal(loaded.length, 1);
+      assert.equal(loaded[0]!.enabled, false, JSON.stringify(servers.map((s) => (s as { id: string }).id)));
+      assert.equal(loaded[0]!.surface, undefined);
+      assert.equal((await new McpServerStore(dir).load()).servers.find((x) => x.id === 'theirs')?.enabled, true, 'other entries are left alone');
+    }
+    // Saved by the engine (ids normalised, the first kept): still not the host's entry.
+    write([stdio, entry([served])]);
+    const store = new McpServerStore(dir);
+    await store.save(await store.load());
+    assert.equal((await new McpServerStore(dir).load()).servers.find((x) => x.id === 'artemis_online')!.enabled, false);
+    // The single exact entry is still fine.
+    write([entry([served]), theirs]);
+    assert.equal((await new McpServerStore(dir).load()).servers.find((x) => x.id === 'artemis_online')!.enabled, true);
   } finally {
     resetInheritedMcpHeadersForTest();
     if (previousHome !== undefined) process.env.ARTEMIS_HOME = previousHome;
