@@ -5020,7 +5020,8 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   spawn_background_workflow: 2 * 3_600_000,
   mcp_call_tool: 30 * 60_000,
   synthesize_speech: 30 * 60_000,
-  transcribe_audio: 30 * 60_000,
+  // Up to two hours of audio, a few five-minute pieces at a time.
+  transcribe_audio: 60 * 60_000,
 };
 
 /**

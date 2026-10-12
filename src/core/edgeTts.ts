@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import type { Duplex } from 'node:stream';
 import tls from 'node:tls';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 
@@ -37,7 +38,19 @@ export const EDGE_TTS_VOICES: ReadonlyArray<{ id: string; language: string; gend
   { id: 'en-US-GuyNeural', language: 'en-US', gender: 'male', style: 'clear' },
   { id: 'en-GB-SoniaNeural', language: 'en-GB', gender: 'female', style: 'British' },
   { id: 'ja-JP-NanamiNeural', language: 'ja-JP', gender: 'female', style: 'Japanese' },
+  { id: 'ko-KR-SunHiNeural', language: 'ko-KR', gender: 'female', style: 'Korean' },
 ];
+
+/**
+ * Microsoft's online read-aloud voices are a consumer service: this client
+ * presents itself as the Edge browser to reach it, which its terms do not
+ * grant to other software. It is therefore off unless the operator opts in
+ * (ARTEMIS_EDGE_TTS=1, or setup.voice.tts.edgeOptIn), accepting that risk;
+ * hosted installs speak through the platform's licensed voices instead.
+ */
+export function edgeTtsOptedIn(setupOptIn: unknown, env: NodeJS.ProcessEnv = process.env): boolean {
+  return setupOptIn === true || /^(?:1|true|yes|on)$/i.test(env.ARTEMIS_EDGE_TTS?.trim() ?? '');
+}
 
 /** Most of the letters are Han (Chinese) characters. */
 export function isMostlyChinese(text: string): boolean {
@@ -51,16 +64,49 @@ export function isMostlyChinese(text: string): boolean {
  * cannot speak the text (an English voice for Chinese text, or the other
  * way round), else a default for the text's language.
  */
+/** The language a text is in, as far as its script and letters tell (undefined: no strong sign). */
+export function scriptLanguage(text: string): 'zh' | 'ja' | 'ko' | 'latin-other' | 'en' | undefined {
+  const count = (re: RegExp) => text.match(re)?.length ?? 0;
+  const kana = count(/[\p{Script=Hiragana}\p{Script=Katakana}]/gu);
+  const hangul = count(/\p{Script=Hangul}/gu);
+  const han = count(/\p{Script=Han}/gu);
+  const latin = count(/[A-Za-z\u00C0-\u024F]/g);
+  if (kana > 0 && kana * 4 >= han) return 'ja';
+  if (hangul > 0 && hangul * 2 >= latin) return 'ko';
+  if (han > 0 && han * 2 >= latin) return 'zh';
+  if (latin === 0) return undefined;
+  // Accented letters, or words common in other Latin-script languages: a multilingual voice reads them.
+  if (/[\u00C0-\u024F]/.test(text) || /\b(?:le|la|les|des|est|und|der|die|das|el|los|que|una|por|il|che|não|uma|het|een)\b/i.test(text)) return 'latin-other';
+  return 'en';
+}
+
+const SCRIPT_VOICES: Record<'zh' | 'ja' | 'ko' | 'latin-other' | 'en', string> = {
+  zh: 'zh-CN-XiaoxiaoNeural',
+  ja: 'ja-JP-NanamiNeural',
+  ko: 'ko-KR-SunHiNeural',
+  'latin-other': 'en-US-AvaMultilingualNeural',
+  en: 'en-US-AriaNeural',
+};
+
+/**
+ * The voice for a text: the one asked for, else the configured one when it
+ * can speak the text's language (a multilingual voice speaks any), else one
+ * for the text's script: Chinese, Japanese (kana), Korean (hangul), English,
+ * or a multilingual voice for other Latin-script languages (French, ...).
+ */
 export function pickEdgeVoice(text: string, options: { voice?: string; configured?: string; language?: string } = {}): string {
   const asked = options.voice?.trim();
   if (asked && asked !== 'default') return asked;
-  const chinese = options.language ? options.language.toLowerCase().startsWith('zh') : isMostlyChinese(text);
+  const fromTag = options.language?.toLowerCase();
+  const language =
+    fromTag?.startsWith('zh') ? 'zh' : fromTag?.startsWith('ja') ? 'ja' : fromTag?.startsWith('ko') ? 'ko' : fromTag?.startsWith('en') ? 'en' : fromTag ? 'latin-other' : (scriptLanguage(text) ?? 'en');
   const configured = options.configured?.trim();
   if (configured && configured !== 'default') {
-    const configuredChinese = configured.toLowerCase().startsWith('zh-');
-    if (configuredChinese === chinese || /Multilingual/i.test(configured)) return configured;
+    if (/Multilingual/i.test(configured) && language !== 'ja' && language !== 'ko') return configured;
+    const prefix = configured.slice(0, 2).toLowerCase();
+    if ((language === 'zh' || language === 'ja' || language === 'ko' || language === 'en') && prefix === language) return configured;
   }
-  return chinese ? 'zh-CN-XiaoxiaoNeural' : 'en-US-AriaNeural';
+  return SCRIPT_VOICES[language];
 }
 
 /**
@@ -111,6 +157,8 @@ export function splitSpeechText(text: string, maxBytes = EDGE_TTS_MAX_PIECE_BYTE
 }
 
 export type EdgeTtsOptions = {
+  /** Tests: a stand-in for the TLS connection to the service. */
+  connect?: () => Duplex;
   text: string;
   voice?: string;
   language?: string;
@@ -227,7 +275,7 @@ function extractAudioPayload(frame: Buffer): Buffer | null {
   return payload.length > 0 ? payload : null;
 }
 
-function resolveOutputPath(options: EdgeTtsOptions): string {
+export function resolveOutputPath(options: Pick<EdgeTtsOptions, 'outputPath' | 'cwd'>): string {
   if (options.outputPath) {
     return path.isAbsolute(options.outputPath)
       ? options.outputPath
@@ -352,13 +400,13 @@ class EdgeHandshakeError extends Error {
 }
 
 /** One request: one piece of text to MP3 bytes. */
-function synthesizePiece(text: string, voice: string, language: string, options: Pick<EdgeTtsOptions, 'rate' | 'pitch'>): Promise<Buffer> {
+function synthesizePiece(text: string, voice: string, language: string, options: Pick<EdgeTtsOptions, 'rate' | 'pitch' | 'connect'>): Promise<Buffer> {
   const id = requestId();
   const connectionId = requestId();
   const chunks: Buffer[] = [];
 
   return new Promise<Buffer>((resolve, reject) => {
-    const socket = tls.connect({
+    const socket: Duplex = options.connect?.() ?? tls.connect({
       host: EDGE_TTS_HOST,
       port: 443,
       servername: EDGE_TTS_HOST,
@@ -385,6 +433,7 @@ function synthesizePiece(text: string, voice: string, language: string, options:
       socket.write(buildHandshakeRequest(connectionId, randomBytes(16).toString('base64')));
     });
     socket.on('error', (error) => finish(error));
+    socket.on('close', () => finish(new Error('Edge TTS connection closed before the speech was complete.')));
     socket.on('data', (data) => {
       try {
         buffered = Buffer.concat([buffered, data]);
@@ -412,7 +461,8 @@ function synthesizePiece(text: string, voice: string, language: string, options:
           buffered = buffered.subarray(frame.frameLength);
 
           if (frame.opcode === 8) {
-            finish(chunks.length > 0 ? undefined : new Error('Edge TTS closed before returning audio.'));
+            // Only turn.end means the speech is complete: a close before it is half a reply, never kept.
+            finish(new Error('Edge TTS closed before the speech was complete.'));
             return;
           }
           if (frame.opcode === 9) {
@@ -444,7 +494,7 @@ function synthesizePiece(text: string, voice: string, language: string, options:
 }
 
 /** One piece, once more after a refusal that a clock correction fixes. */
-async function synthesizePieceWithClockFix(text: string, voice: string, language: string, options: Pick<EdgeTtsOptions, 'rate' | 'pitch'>): Promise<Buffer> {
+async function synthesizePieceWithClockFix(text: string, voice: string, language: string, options: Pick<EdgeTtsOptions, 'rate' | 'pitch' | 'connect'>): Promise<Buffer> {
   try {
     return await synthesizePiece(text, voice, language, options);
   } catch (error) {

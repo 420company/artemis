@@ -9,11 +9,14 @@
  *
  *   "speech": { "provider": "platform", "enabled": true,
  *               "baseUrl": "https://<gateway>/v1", "apiKey": "ak-…",
- *               "sttModel": "<the tier's speech model>",
+ *               "sttModel": "<the tier's speech-to-text model>",
+ *               "ttsModel": "<the tier's text-to-speech model>",
  *               "managedBy": "platform" }
  *
- * `enabled: false` (or no `sttModel`) turns the backend off: the account's
- * tier has no speech model. Only the global store (~/.artemis or
+ * `enabled: false` turns both off; without `sttModel` there is no platform
+ * speech to text, without `ttsModel` no platform text to speech (the tier has
+ * no such model). Text to speech goes to `/v1/audio/speech` (licensed
+ * voices, billed to the owner) and is synthesize_speech's first choice. Only the global store (~/.artemis or
  * $ARTEMIS_HOME) is read, so a workspace's own providers.json cannot point
  * the platform key at another endpoint.
  *
@@ -28,9 +31,14 @@ export interface PlatformSpeechConfig {
   baseUrl: string;
   /** The owner's platform key. */
   apiKey: string;
-  /** The tier's speech-to-text model. */
-  sttModel: string;
+  /** The tier's speech-to-text model, if it has one. */
+  sttModel?: string;
+  /** The tier's text-to-speech model, if it has one. */
+  ttsModel?: string;
 }
+
+/** Platform speech with a speech-to-text model. */
+export type PlatformSttConfig = PlatformSpeechConfig & { sttModel: string };
 
 /** The largest recording the gateway takes in one request. */
 export const PLATFORM_SPEECH_MAX_BYTES = 12 * 1024 * 1024;
@@ -44,6 +52,7 @@ type SpeechEntry = {
   baseUrl?: unknown;
   apiKey?: unknown;
   sttModel?: unknown;
+  ttsModel?: unknown;
 };
 
 const isHttpUrl = (value: unknown): value is string => typeof value === 'string' && /^https?:\/\/\S+$/i.test(value.trim());
@@ -58,8 +67,11 @@ export function platformSpeechFromStore(data: { speech?: unknown }): PlatformSpe
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
   const speech = entry as SpeechEntry;
   if (speech.provider !== 'platform' || speech.enabled === false) return undefined;
-  if (!isHttpUrl(speech.baseUrl) || !isText(speech.apiKey) || !isText(speech.sttModel)) return undefined;
-  return { baseUrl: speech.baseUrl.trim(), apiKey: speech.apiKey.trim(), sttModel: speech.sttModel.trim() };
+  if (!isHttpUrl(speech.baseUrl) || !isText(speech.apiKey)) return undefined;
+  const sttModel = isText(speech.sttModel) ? speech.sttModel.trim() : undefined;
+  const ttsModel = isText(speech.ttsModel) ? speech.ttsModel.trim() : undefined;
+  if (!sttModel && !ttsModel) return undefined;
+  return { baseUrl: speech.baseUrl.trim(), apiKey: speech.apiKey.trim(), ...(sttModel ? { sttModel } : {}), ...(ttsModel ? { ttsModel } : {}) };
 }
 
 /** The platform speech settings of this host, from the global providers.json. */
@@ -113,7 +125,7 @@ export interface PlatformTranscription {
 export async function transcribeWithPlatform(
   audio: Uint8Array,
   contentType: string,
-  config: PlatformSpeechConfig,
+  config: PlatformSttConfig,
   options: { language?: string; prompt?: string; signal?: AbortSignal; fetchImpl?: typeof fetch; timeoutMs?: number } = {},
 ): Promise<PlatformTranscription> {
   if (audio.byteLength === 0) throw new PlatformSpeechError('invalid_audio', 'the recording is empty');
@@ -128,7 +140,8 @@ export async function transcribeWithPlatform(
     'content-type': contentType,
     'x-model': config.sttModel,
   };
-  const language = options.language?.trim();
+  // A header carries only ASCII: anything but a language tag (zh, en-US) is dropped, never sent.
+  const language = languageTag(options.language);
   if (language) headers['x-language'] = language;
   const prompt = options.prompt?.trim();
   if (prompt) headers['x-prompt'] = encodeURIComponent(prompt.slice(0, 1_000));
@@ -194,4 +207,68 @@ export function audioContentType(filePath: string): string | undefined {
     default:
       return undefined;
   }
+}
+
+/** A BCP-47 language tag (zh, en-US, zh-Hans-CN), or undefined for anything else ("中文", "Chinese"). */
+export function languageTag(value: string | undefined): string | undefined {
+  const tag = value?.trim();
+  return tag && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(tag) ? tag : undefined;
+}
+
+/** Voices a platform text-to-speech model takes (the OpenAI names; multilingual). */
+export const PLATFORM_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const;
+export const DEFAULT_PLATFORM_VOICE = 'nova';
+
+/** Text one platform speech request carries. */
+export const PLATFORM_TTS_MAX_CHARS = 4_000;
+
+/**
+ * Text to MP3 through the platform's licensed voices (`/v1/audio/speech`).
+ * `voice` is a PLATFORM_VOICES name (anything else: the default); `speed`
+ * 0.25-4. Rejects with a PlatformSpeechError worded for the model.
+ */
+export async function synthesizeWithPlatform(
+  text: string,
+  config: PlatformSpeechConfig & { ttsModel: string },
+  options: { voice?: string; speed?: number; signal?: AbortSignal; fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<Buffer> {
+  const input = text.trim();
+  if (!input) throw new PlatformSpeechError('invalid_audio', 'there is no text to speak');
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 60_000);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const voice = (PLATFORM_VOICES as readonly string[]).includes(options.voice ?? '') ? options.voice! : DEFAULT_PLATFORM_VOICE;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${config.baseUrl.replace(/\/+$/, '')}/audio/speech`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: config.ttsModel,
+        input,
+        voice,
+        response_format: 'mp3',
+        ...(options.speed !== undefined && Number.isFinite(options.speed) && options.speed !== 1 ? { speed: Math.min(4, Math.max(0.25, options.speed)) } : {}),
+      }),
+      signal,
+    });
+  } catch (error) {
+    throw new PlatformSpeechError(
+      'unreachable',
+      timeout.aborted ? 'platform speech synthesis did not answer in time' : `platform speech synthesis is unreachable (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (!response.ok) {
+    const data = (await response.json().catch(() => undefined)) as { error?: { code?: unknown } } | undefined;
+    const code = typeof data?.error?.code === 'string' ? data.error.code : `HTTP ${response.status}`;
+    if (response.status === 402) throw new PlatformSpeechError('insufficient_balance', 'platform speech synthesis refused: the account balance is too low (the owner needs to top up)');
+    if (response.status === 429) throw new PlatformSpeechError('rate_limited', 'platform speech synthesis is busy; try again shortly');
+    if (response.status === 401 || response.status === 403) throw new PlatformSpeechError('unauthorized', 'platform speech synthesis refused the platform key');
+    if (response.status === 404 || response.status === 503) throw new PlatformSpeechError('unavailable', `platform speech synthesis is not available right now (${code})`);
+    if (response.status === 400) throw new PlatformSpeechError('invalid_audio', `platform speech synthesis refused the text (${code})`);
+    throw new PlatformSpeechError('failed', `platform speech synthesis failed (${code})`);
+  }
+  const audio = Buffer.from(await response.arrayBuffer());
+  if (audio.length === 0) throw new PlatformSpeechError('failed', 'platform speech synthesis answered without audio');
+  return audio;
 }

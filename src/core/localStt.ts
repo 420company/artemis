@@ -1,11 +1,11 @@
-import { access, mkdir, readFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
-import { convertToSpeechWav, FfmpegMissingError } from './audioChunks.js';
+import { convertToSpeechWav, FfmpegMissingError, NoAudioError, probeMedia } from './audioChunks.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -143,27 +143,16 @@ export async function localSttAvailable(options: Pick<LocalSttOptions, 'engine' 
   }
 }
 
-async function transcribeWithWhisperCpp(command: string, inputPath: string, options: LocalSttOptions): Promise<LocalSttResult> {
+async function transcribeWithWhisperCpp(command: string, inputPath: string, options: LocalSttOptions, work: string): Promise<LocalSttResult> {
   const modelPath = await resolveWhisperCppModel(options);
-  const outBase = path.join(os.tmpdir(), `artemis-stt-${Date.now()}`);
-  // whisper.cpp reads WAV best (older builds nothing else): convert video
-  // and other audio first when ffmpeg is there, else try the file as it is.
-  if (path.extname(inputPath).toLowerCase() !== '.wav') {
-    try {
-      await convertToSpeechWav(inputPath, `${outBase}.wav`);
-      inputPath = `${outBase}.wav`;
-    } catch (error) {
-      if (!(error instanceof FfmpegMissingError)) throw error;
-    }
-  }
+  const outBase = path.join(work, 'transcript');
   const args = ['-m', modelPath, '-f', inputPath, '-otxt', '-of', outBase];
   if (options.language?.trim()) {
     args.push('-l', options.language.trim());
   }
 
   const { stdout, stderr } = await execFileAsync(command, args, { maxBuffer: 1024 * 1024 * 20 });
-  const textPath = `${outBase}.txt`;
-  const fileText = await readFile(textPath, 'utf8').catch(() => '');
+  const fileText = await readFile(`${outBase}.txt`, 'utf8').catch(() => '');
   const text = normalizeText(fileText || stdout || stderr);
   if (!text) {
     throw new Error('Local STT completed but returned no transcript.');
@@ -176,12 +165,11 @@ async function transcribeWithWhisperCpp(command: string, inputPath: string, opti
     language: options.language,
     model: options.model ?? 'base',
     modelPath,
-    textPath,
   };
 }
 
-async function transcribeWithOpenAiWhisper(command: string, inputPath: string, options: LocalSttOptions): Promise<LocalSttResult> {
-  const outputDir = path.join(os.tmpdir(), `artemis-stt-${Date.now()}`);
+async function transcribeWithOpenAiWhisper(command: string, inputPath: string, options: LocalSttOptions, work: string): Promise<LocalSttResult> {
+  const outputDir = path.join(work, 'out');
   await mkdir(outputDir, { recursive: true });
   const model = options.model ?? 'base';
   const args = [inputPath, '--model', model, '--output_dir', outputDir, '--output_format', 'txt'];
@@ -203,7 +191,6 @@ async function transcribeWithOpenAiWhisper(command: string, inputPath: string, o
     command,
     language: options.language,
     model,
-    textPath,
   };
 }
 
@@ -214,8 +201,28 @@ export async function transcribeLocalAudio(options: LocalSttOptions): Promise<Lo
   }
 
   const executable = await resolveExecutable(options);
-  if (executable.engine === 'openai-whisper') {
-    return transcribeWithOpenAiWhisper(executable.command, inputPath, options);
+  // One temp folder per run, always removed: the converted WAV and the transcript files.
+  const work = await mkdtemp(path.join(os.tmpdir(), 'artemis-stt-'));
+  try {
+    // Whisper reads WAV best (older whisper.cpp builds nothing else): with
+    // ffmpeg, the file is probed (playlists and file lists refused) and
+    // converted under the same local-files-only flags as the platform path;
+    // without it, the file is tried as it is.
+    let input = inputPath;
+    try {
+      const probe = await probeMedia(inputPath);
+      if (!probe.hasAudio) throw new NoAudioError('');
+      input = path.join(work, 'audio.wav');
+      await convertToSpeechWav(inputPath, input);
+    } catch (error) {
+      if (!(error instanceof FfmpegMissingError)) throw error;
+      input = inputPath;
+    }
+    if (executable.engine === 'openai-whisper') {
+      return await transcribeWithOpenAiWhisper(executable.command, input, options, work);
+    }
+    return await transcribeWithWhisperCpp(executable.command, input, options, work);
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }
-  return transcribeWithWhisperCpp(executable.command, inputPath, options);
 }

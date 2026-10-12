@@ -988,7 +988,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'synthesize_speech',
-    description: '使用已配置的 TTS provider 将文本合成为音频文件。内置免费 Microsoft Edge TTS，无需 API key。',
+    description: '把文本合成为音频文件（MP3）。托管主机使用平台的授权语音；免费的 Edge 语音默认关闭，需运营方显式开启。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',

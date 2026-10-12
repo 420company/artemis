@@ -1275,7 +1275,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         required: ['text'],
         properties: {
           text: nonEmptyStringSchema('Text to synthesize into speech.'),
-          voice: optionalStringSchema('Optional Microsoft Edge voice name. Chinese: zh-CN-XiaoxiaoNeural (female, warm; default for Chinese text), zh-CN-XiaoyiNeural (female, lively), zh-CN-YunxiNeural (male, conversational), zh-CN-YunjianNeural (male, deep), zh-CN-YunyangNeural (male, news), zh-TW-HsiaoChenNeural, zh-HK-HiuMaanNeural (Cantonese). English: en-US-AvaMultilingualNeural, en-US-AndrewMultilingualNeural, en-US-AriaNeural (default), en-US-GuyNeural, en-GB-SoniaNeural. Omit it to pick one that fits the text.'),
+          voice: optionalStringSchema('Optional voice. Platform voices (hosted installs; all multilingual, Chinese included): nova (default), shimmer, alloy, echo, onyx, fable. When the operator enabled the Edge voices instead: zh-CN-XiaoxiaoNeural, zh-CN-YunxiNeural, ja-JP-NanamiNeural, ko-KR-SunHiNeural, en-US-AvaMultilingualNeural, ... Omit it to pick one that fits the text.'),
           language: optionalStringSchema('Optional BCP-47 language code, e.g. en-US or zh-CN.'),
           outputPath: optionalStringSchema('Optional local MP3 output path. Defaults to an audio folder next to the other generated media, where the user can play and download it. Long text is spoken in full (in pieces joined into one MP3).'),
           playAudio: {

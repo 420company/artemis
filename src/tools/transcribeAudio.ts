@@ -8,7 +8,10 @@ import {
   FfmpegMissingError,
   formatTimestamp,
   NoAudioError,
-  splitSpeechWav,
+  planSpeechWav,
+  probeMedia,
+  readSpeechPiece,
+  UnsafeMediaError,
   type AudioPiece,
 } from '../core/audioChunks.js';
 import {
@@ -18,18 +21,25 @@ import {
   platformSpeechFallsBack,
   resolvePlatformSpeech,
   transcribeWithPlatform,
-  type PlatformSpeechConfig,
+  type PlatformSttConfig,
 } from '../core/platformSpeech.js';
 import { ProviderStore } from '../providers/store.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
+import { resolveDataRootDir } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 
 type TranscribeAudioAction = Extract<AgentAction, { type: 'transcribe_audio' }>;
 
 /** Longer transcripts are saved to a file and shown in part. */
 const INLINE_TRANSCRIPT_CHARS = 20_000;
-/** Four hours: beyond that, ask for a part of the file. */
-const MAX_PLATFORM_SECONDS = 4 * 3600;
+/**
+ * Two hours of audio at a time: transcribed three pieces at once, that fits
+ * well inside the hour the runtime allows this tool (TOOL_EXPECTED_MAX_MS),
+ * and its WAV (about 230 MB) is the most it ever writes to disk.
+ */
+export const MAX_PLATFORM_SECONDS = 2 * 3600;
+/** Pieces in flight at once. */
+const PIECE_CONCURRENCY = 3;
 
 export type PlatformFileTranscription = {
   text: string;
@@ -37,31 +47,60 @@ export type PlatformFileTranscription = {
   durationSeconds: number;
 };
 
+/** The run was stopped (the owner pressed stop, the run timed out). */
+export class TranscriptionStopped extends Error {
+  constructor() {
+    super('transcription stopped');
+    this.name = 'AbortError';
+  }
+}
+
 /**
  * Transcribes a local audio or video file through platform speech
- * recognition: converted to 16 kHz mono WAV, split into pieces of at most
- * five minutes at pauses, each piece sent in turn (one retry each for a
- * passing failure). Without ffmpeg, a small file in a format the platform
- * reads is sent as it is.
+ * recognition. The file is probed first (playlists and lists of other files
+ * are refused, and a recording over MAX_PLATFORM_SECONDS is refused before
+ * anything is decoded), converted to one 16 kHz mono WAV in the workspace's
+ * own temp folder (`tmpRoot`), and planned into pieces of at most five
+ * minutes cut at pauses; each piece is read from that WAV when it is sent,
+ * a few at a time, with one retry for a passing failure. `signal` stops
+ * ffmpeg and the pieces. Without ffmpeg, a small file in a format the
+ * platform reads is sent as it is.
  */
 export async function transcribeFileWithPlatform(
   inputPath: string,
-  config: PlatformSpeechConfig,
-  options: { language?: string; signal?: AbortSignal; fetchImpl?: typeof fetch; ffmpeg?: string; retryDelayMs?: number } = {},
+  config: PlatformSttConfig,
+  options: { language?: string; signal?: AbortSignal; fetchImpl?: typeof fetch; ffmpeg?: string; ffprobe?: string; retryDelayMs?: number; tmpRoot?: string; concurrency?: number; maxSeconds?: number } = {},
 ): Promise<PlatformFileTranscription> {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), 'artemis-stt-'));
+  const { signal } = options;
+  const cap = options.maxSeconds ?? MAX_PLATFORM_SECONDS;
+  const tooLong = (seconds: number) =>
+    new PlatformSpeechError(
+      'too_large',
+      `the recording is ${formatTimestamp(seconds)} long; transcribe at most ${formatTimestamp(cap)} at a time (cut it into parts with ffmpeg first)`,
+    );
+  const tmpRoot = options.tmpRoot ?? os.tmpdir();
+  await mkdir(tmpRoot, { recursive: true });
+  const tmp = await mkdtemp(path.join(tmpRoot, 'stt-'));
   try {
-    let pieces: AudioPiece[];
+    let pieces: AudioPiece[] = [];
     let durationSeconds = 0;
+    let wav: string | undefined;
     let direct: { audio: Buffer; type: string } | undefined;
     try {
-      const wav = path.join(tmp, 'audio.wav');
-      await convertToSpeechWav(inputPath, wav, { ffmpeg: options.ffmpeg, signal: options.signal });
-      const split = await splitSpeechWav(wav, tmp);
-      pieces = split.pieces;
-      durationSeconds = split.durationSeconds;
+      const probe = await probeMedia(inputPath, { ffprobe: options.ffprobe, signal });
+      if (!probe.hasAudio) throw new NoAudioError('');
+      if (probe.durationSeconds !== undefined && probe.durationSeconds > cap + 1) throw tooLong(probe.durationSeconds);
+      wav = path.join(tmp, 'audio.wav');
+      // -t as well: a container that does not say its length is still cut at the cap.
+      await convertToSpeechWav(inputPath, wav, { ffmpeg: options.ffmpeg, signal, maxSeconds: cap + 1 });
+      const plan = await planSpeechWav(wav);
+      pieces = plan.pieces;
+      durationSeconds = plan.durationSeconds;
+      if (durationSeconds > cap) throw tooLong(durationSeconds);
     } catch (error) {
+      if (signal?.aborted || (error as Error).name === 'AbortError') throw new TranscriptionStopped();
       if (error instanceof NoAudioError) throw new PlatformSpeechError('invalid_audio', error.message);
+      if (error instanceof UnsafeMediaError) throw new PlatformSpeechError('unsupported_format', error.message);
       if (!(error instanceof FfmpegMissingError)) throw error;
       const type = audioContentType(inputPath);
       const size = (await stat(inputPath)).size;
@@ -72,36 +111,48 @@ export async function transcribeFileWithPlatform(
         );
       }
       direct = { audio: await readFile(inputPath), type };
-      pieces = [{ path: inputPath, startSeconds: 0, durationSeconds: 0 }];
-    }
-    if (durationSeconds > MAX_PLATFORM_SECONDS) {
-      throw new PlatformSpeechError(
-        'too_large',
-        `the recording is ${formatTimestamp(durationSeconds)} long; transcribe at most ${MAX_PLATFORM_SECONDS / 3600} hours at a time (cut it with ffmpeg first)`,
-      );
+      pieces = [{ startSeconds: 0, durationSeconds: 0, byteOffset: 0, byteLength: size, sampleRate: 0 }];
     }
 
-    const results: PlatformFileTranscription['pieces'] = [];
-    for (const [index, piece] of pieces.entries()) {
-      const audio = direct?.audio ?? (await readFile(piece.path));
-      const type = direct?.type ?? 'audio/wav';
-      let result;
-      try {
-        result = await transcribeOnce(audio, type, config, options);
-      } catch (error) {
-        if (results.length > 0 && error instanceof PlatformSpeechError) {
-          const partial = joinPieces(results);
-          throw new PlatformSpeechError(
-            error.code,
-            `${error.message}. Part ${index + 1} of ${pieces.length} failed; the parts before it (up to ${formatTimestamp(piece.startSeconds)}) were transcribed:\n${partial}`,
-          );
+    // A few pieces at a time; the first failure stops the rest.
+    const results: (PlatformFileTranscription['pieces'][number] | undefined)[] = new Array(pieces.length);
+    const stop = new AbortController();
+    const pieceSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+    let next = 0;
+    const outcome: { failure?: { index: number; error: unknown } } = {};
+    const worker = async () => {
+      while (!outcome.failure && !pieceSignal.aborted) {
+        const index = next++;
+        if (index >= pieces.length) return;
+        const piece = pieces[index]!;
+        try {
+          const audio = direct?.audio ?? (await readSpeechPiece(wav!, piece));
+          const result = await transcribeOnce(audio, direct?.type ?? 'audio/wav', config, { ...options, signal: pieceSignal });
+          results[index] = { startSeconds: piece.startSeconds, durationSeconds: piece.durationSeconds || result.durationSeconds, text: result.text };
+          if (!durationSeconds && result.durationSeconds) durationSeconds = result.durationSeconds;
+        } catch (error) {
+          const earlier = outcome.failure as { index: number } | undefined;
+          if (!earlier || index < earlier.index) outcome.failure = { index, error };
+          stop.abort();
         }
-        throw error;
       }
-      if (!durationSeconds && result.durationSeconds) durationSeconds = result.durationSeconds;
-      results.push({ startSeconds: piece.startSeconds, durationSeconds: piece.durationSeconds || result.durationSeconds, text: result.text });
+    };
+    await Promise.all(Array.from({ length: Math.min(options.concurrency ?? PIECE_CONCURRENCY, pieces.length) }, worker));
+    if (signal?.aborted) throw new TranscriptionStopped();
+    const failed = outcome.failure;
+    if (failed) {
+      const { index, error } = failed;
+      const done = results.slice(0, index).filter((r): r is NonNullable<typeof r> => !!r);
+      if (done.length === index && index > 0 && error instanceof PlatformSpeechError) {
+        throw new PlatformSpeechError(
+          error.code,
+          `${error.message}. Part ${index + 1} of ${pieces.length} failed; the parts before it (up to ${formatTimestamp(pieces[index]!.startSeconds)}) were transcribed:\n${joinPieces(done)}`,
+        );
+      }
+      throw error;
     }
-    return { text: joinPieces(results), pieces: results, durationSeconds };
+    const all = results.filter((r): r is NonNullable<typeof r> => !!r);
+    return { text: joinPieces(all), pieces: all, durationSeconds };
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -111,7 +162,7 @@ export async function transcribeFileWithPlatform(
 async function transcribeOnce(
   audio: Buffer,
   type: string,
-  config: PlatformSpeechConfig,
+  config: PlatformSttConfig,
   options: { language?: string; signal?: AbortSignal; fetchImpl?: typeof fetch; retryDelayMs?: number },
 ) {
   const call = () => transcribeWithPlatform(audio, type, config, { language: options.language, signal: options.signal, fetchImpl: options.fetchImpl });
@@ -120,6 +171,7 @@ async function transcribeOnce(
   } catch (error) {
     if (!(error instanceof PlatformSpeechError) || !['rate_limited', 'unreachable', 'failed'].includes(error.code) || options.signal?.aborted) throw error;
     await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? 2_000));
+    if (options.signal?.aborted) throw error;
     return call();
   }
 }
@@ -165,11 +217,17 @@ export async function executeTranscribeAudio(
 
   // Asking for a local Whisper model or binary means local Whisper.
   const wantsLocal = Boolean(action.command || action.modelPath || action.model || (action.engine && action.engine !== 'auto'));
-  const platform = wantsLocal ? undefined : await resolvePlatformSpeech();
+  const resolved = wantsLocal ? undefined : await resolvePlatformSpeech();
+  const platform = resolved?.sttModel ? { ...resolved, sttModel: resolved.sttModel } : undefined;
   let platformFailure: PlatformSpeechError | undefined;
   if (platform) {
     try {
-      const result = await transcribeFileWithPlatform(inputPath, platform, { language: action.language ?? (stt?.language || undefined) });
+      const result = await transcribeFileWithPlatform(inputPath, platform, {
+        language: action.language ?? (stt?.language || undefined),
+        ...(context.abortSignal ? { signal: context.abortSignal } : {}),
+        // The workspace's own temp folder: hours of audio must not fill a small /tmp.
+        tmpRoot: path.join(resolveDataRootDir(context.cwd), 'tmp'),
+      });
       if (!result.text.trim()) {
         return { action, ok: true, output: 'Transcript: (no speech was recognised in this recording)', data: { engine: 'platform', ...result } };
       }
@@ -187,6 +245,7 @@ export async function executeTranscribeAudio(
         data: { engine: 'platform', text: result.text, durationSeconds: result.durationSeconds, pieces: result.pieces.length, ...(saved ? { textPath: saved } : {}) },
       };
     } catch (error) {
+      if (error instanceof TranscriptionStopped || context.abortSignal?.aborted) return { action, ok: false, output: 'Transcription stopped.' };
       const failure = error instanceof PlatformSpeechError ? error : new PlatformSpeechError('failed', error instanceof Error ? error.message : String(error));
       if (!platformSpeechFallsBack(failure) || !(await localSttAvailable({ engine: stt?.engine ?? 'auto', command: stt?.command }))) {
         return { action, ok: false, output: `Transcription failed: ${failure.message}` };

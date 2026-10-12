@@ -8,7 +8,7 @@
  * is read in blocks, never whole, so hours of audio need little memory.
  */
 import { execFile } from 'node:child_process';
-import { open, writeFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import * as path from 'node:path';
 
 export const SPEECH_SAMPLE_RATE = 16_000;
@@ -37,41 +37,115 @@ export class NoAudioError extends Error {
   }
 }
 
+/** A demuxer that can read other files or URLs named inside the input: never used on a file the agent was handed. */
+export class UnsafeMediaError extends Error {
+  constructor(format: string) {
+    super(`this file is a ${format} playlist or list of other files, not audio or video; it is not opened`);
+    this.name = 'UnsafeMediaError';
+  }
+}
+
+/** Formats that pull in other files or URLs (playlists, lists, image sequences). */
+const UNSAFE_FORMATS = new Set(['hls', 'applehttp', 'concat', 'image2', 'image2pipe', 'ffconcat', 'tee', 'dash', 'webm_dash_manifest']);
+
 /**
- * Converts an audio or video file to 16 kHz mono 16-bit PCM WAV. Rejects with
- * FfmpegMissingError when ffmpeg is not installed and NoAudioError when the
- * file has no readable audio.
+ * Hardening for every ffmpeg and ffprobe run on a file the agent was handed:
+ * only local files may be opened (no network, no pipes, no subprocesses
+ * that a crafted playlist could name).
  */
-export function convertToSpeechWav(
+export const FFMPEG_SAFE_INPUT = ['-protocol_whitelist', 'file'];
+
+/** An input path as ffmpeg must see it: absolute, so it can never read as an option or a protocol. */
+function safeInput(inputPath: string): string {
+  return path.resolve(inputPath);
+}
+
+function run(command: string, args: string[], options: { signal?: AbortSignal; timeoutMs: number }): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { maxBuffer: 4 * 1024 * 1024, timeout: options.timeoutMs, ...(options.signal ? { signal: options.signal } : {}) }, (error, stdout, stderr) => {
+      if (!error) return resolve({ stdout: String(stdout), stderr: String(stderr) });
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return reject(new FfmpegMissingError());
+      if (options.signal?.aborted) return reject(Object.assign(new Error('stopped'), { name: 'AbortError' }));
+      reject(Object.assign(error, { stderr: String(stderr ?? '') }));
+    });
+  });
+}
+
+export interface MediaProbe {
+  /** The demuxer ffprobe picked, e.g. "mov,mp4,m4a,3gp,3g2,mj2" or "wav". */
+  format: string;
+  /** Seconds, when the container says. */
+  durationSeconds?: number;
+  hasAudio: boolean;
+}
+
+/**
+ * What a file is, before anything is decoded: its container, length and
+ * whether it has sound. Playlists and file lists (hls, concat, image2...) are
+ * refused with UnsafeMediaError: they name other files or URLs to open.
+ */
+export async function probeMedia(inputPath: string, options: { ffprobe?: string; signal?: AbortSignal } = {}): Promise<MediaProbe> {
+  let stdout: string;
+  try {
+    ({ stdout } = await run(
+      options.ffprobe ?? 'ffprobe',
+      ['-v', 'error', ...FFMPEG_SAFE_INPUT, '-show_entries', 'format=format_name,duration:stream=codec_type', '-of', 'json', '-i', safeInput(inputPath)],
+      { timeoutMs: 60_000, ...(options.signal ? { signal: options.signal } : {}) },
+    ));
+  } catch (error) {
+    if (error instanceof FfmpegMissingError || (error as Error).name === 'AbortError') throw error;
+    throw new NoAudioError('not a readable audio or video file');
+  }
+  let data: { format?: { format_name?: unknown; duration?: unknown }; streams?: { codec_type?: unknown }[] } = {};
+  try {
+    data = JSON.parse(stdout) as typeof data;
+  } catch {
+    throw new NoAudioError('not a readable audio or video file');
+  }
+  const format = typeof data.format?.format_name === 'string' ? data.format.format_name : '';
+  const unsafe = format.split(',').find((name) => UNSAFE_FORMATS.has(name.trim()));
+  if (unsafe) throw new UnsafeMediaError(unsafe);
+  const duration = Number(data.format?.duration);
+  return {
+    format,
+    ...(Number.isFinite(duration) && duration > 0 ? { durationSeconds: duration } : {}),
+    hasAudio: Array.isArray(data.streams) && data.streams.some((s) => s?.codec_type === 'audio'),
+  };
+}
+
+/**
+ * Converts an audio or video file to 16 kHz mono 16-bit PCM WAV, at most
+ * `maxSeconds` of it. Only local files are opened (see FFMPEG_SAFE_INPUT;
+ * callers probe first to refuse playlists). Rejects with FfmpegMissingError
+ * when ffmpeg is not installed and NoAudioError when the file has no
+ * readable audio.
+ */
+export async function convertToSpeechWav(
   inputPath: string,
   outputPath: string,
-  options: { ffmpeg?: string; signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { ffmpeg?: string; signal?: AbortSignal; timeoutMs?: number; maxSeconds?: number } = {},
 ): Promise<void> {
   const args = [
     '-hide_banner', '-nostdin', '-loglevel', 'error', '-y',
-    '-i', inputPath,
+    ...FFMPEG_SAFE_INPUT,
+    '-i', safeInput(inputPath),
     '-map', '0:a:0',
     '-vn', '-sn', '-dn',
+    ...(options.maxSeconds ? ['-t', String(Math.ceil(options.maxSeconds))] : []),
     '-ac', '1', '-ar', String(SPEECH_SAMPLE_RATE),
     '-c:a', 'pcm_s16le', '-f', 'wav',
     outputPath,
   ];
-  return new Promise((resolve, reject) => {
-    execFile(
-      options.ffmpeg ?? 'ffmpeg',
-      args,
-      { maxBuffer: 4 * 1024 * 1024, timeout: options.timeoutMs ?? 20 * 60_000, ...(options.signal ? { signal: options.signal } : {}) },
-      (error, _stdout, stderr) => {
-        if (!error) return resolve();
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return reject(new FfmpegMissingError());
-        const text = String(stderr ?? '');
-        const tail = text.trim().split(/\r?\n/).filter(Boolean).slice(-2).join(' ').slice(0, 300);
-        if (/matches no streams|does not contain any stream/i.test(text)) return reject(new NoAudioError(''));
-        if (/Invalid data found|could not find codec parameters/i.test(text)) return reject(new NoAudioError('not a readable audio or video file'));
-        reject(new Error(`ffmpeg could not convert the audio${tail ? `: ${tail}` : ''}`));
-      },
-    );
-  });
+  try {
+    await run(options.ffmpeg ?? 'ffmpeg', args, { timeoutMs: options.timeoutMs ?? 20 * 60_000, ...(options.signal ? { signal: options.signal } : {}) });
+  } catch (error) {
+    if (error instanceof FfmpegMissingError || (error as Error).name === 'AbortError') throw error;
+    const text = String((error as { stderr?: unknown }).stderr ?? '');
+    const tail = text.trim().split(/\r?\n/).filter(Boolean).slice(-2).join(' ').slice(0, 300);
+    if (/matches no streams|does not contain any stream/i.test(text)) throw new NoAudioError('');
+    if (/Invalid data found|could not find codec parameters|not on whitelist/i.test(text)) throw new NoAudioError('not a readable audio or video file');
+    throw new Error(`ffmpeg could not convert the audio${tail ? `: ${tail}` : ''}`);
+  }
 }
 
 export interface WavInfo {
@@ -163,18 +237,22 @@ export function planCuts(levels: ArrayLike<number>, maxFrames: number, searchFra
 }
 
 export interface AudioPiece {
-  path: string;
   startSeconds: number;
   durationSeconds: number;
+  /** The piece's PCM within the WAV file. */
+  byteOffset: number;
+  byteLength: number;
+  sampleRate: number;
 }
 
 /**
- * Splits a 16 kHz mono 16-bit WAV into pieces of at most `maxSeconds`, cut
- * in pauses. A recording that fits in one piece is returned as it is.
+ * Plans the pieces of a 16 kHz mono 16-bit WAV: at most `maxSeconds` each,
+ * cut in pauses. Nothing is written: each piece is read from the one WAV
+ * when it is sent (readSpeechPiece), so a long recording takes its own size
+ * on disk once, never twice.
  */
-export async function splitSpeechWav(
+export async function planSpeechWav(
   wavPath: string,
-  outDir: string,
   options: { maxSeconds?: number; searchSeconds?: number } = {},
 ): Promise<{ pieces: AudioPiece[]; durationSeconds: number }> {
   const maxSeconds = options.maxSeconds ?? MAX_PIECE_SECONDS;
@@ -188,9 +266,14 @@ export async function splitSpeechWav(
     if (info.channels !== 1 || info.bitsPerSample !== 16) throw new Error('expected mono 16-bit WAV');
     const bytesPerSecond = info.sampleRate * 2;
     const durationSeconds = info.dataBytes / bytesPerSecond;
-    if (durationSeconds <= maxSeconds) {
-      return { pieces: [{ path: wavPath, startSeconds: 0, durationSeconds }], durationSeconds };
-    }
+    const piece = (from: number, to: number): AudioPiece => ({
+      startSeconds: from / bytesPerSecond,
+      durationSeconds: (to - from) / bytesPerSecond,
+      byteOffset: info.dataOffset + from,
+      byteLength: to - from,
+      sampleRate: info.sampleRate,
+    });
+    if (durationSeconds <= maxSeconds) return { pieces: info.dataBytes > 0 ? [piece(0, info.dataBytes)] : [], durationSeconds };
 
     // Loudness per frame (mean absolute sample), read in blocks.
     const frameBytes = Math.max(2, Math.round(info.sampleRate * FRAME_SECONDS) * 2);
@@ -217,18 +300,24 @@ export async function splitSpeechWav(
     const cuts = planCuts(levels, Math.floor(maxSeconds / frameSeconds), Math.round(searchSeconds / frameSeconds));
     const bounds = [0, ...cuts.map((frame) => frame * frameBytes), info.dataBytes];
     const pieces: AudioPiece[] = [];
-    const base = path.basename(wavPath, path.extname(wavPath));
     for (let i = 0; i + 1 < bounds.length; i++) {
       const from = bounds[i]!;
       const to = Math.min(bounds[i + 1]!, info.dataBytes);
-      if (to <= from) continue;
-      const pcm = Buffer.alloc(to - from);
-      await file.read(pcm, 0, pcm.length, info.dataOffset + from);
-      const piecePath = path.join(outDir, `${base}-${String(i + 1).padStart(3, '0')}.wav`);
-      await writeFile(piecePath, Buffer.concat([wavHeader(pcm.length, info.sampleRate), pcm]));
-      pieces.push({ path: piecePath, startSeconds: from / bytesPerSecond, durationSeconds: pcm.length / bytesPerSecond });
+      if (to > from) pieces.push(piece(from, to));
     }
     return { pieces, durationSeconds };
+  } finally {
+    await file.close();
+  }
+}
+
+/** One planned piece as a WAV file in memory. */
+export async function readSpeechPiece(wavPath: string, piece: AudioPiece): Promise<Buffer> {
+  const file = await open(wavPath, 'r');
+  try {
+    const pcm = Buffer.alloc(piece.byteLength);
+    const { bytesRead } = await file.read(pcm, 0, pcm.length, piece.byteOffset);
+    return Buffer.concat([wavHeader(bytesRead, piece.sampleRate), pcm.subarray(0, bytesRead)]);
   } finally {
     await file.close();
   }
