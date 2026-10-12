@@ -57,6 +57,26 @@ function call(name, args) {
       return { id: args.id, status: 'paused' }
     case 'strategy_delete':
       return { deleted: args.id }
+    case 'autopilot_status':
+      return { mode: 'paper', open: false, note: 'No autonomous budget is open. Only the owner opens one, on the 交易 page; do not trade with budget: true.' }
+    case 'strategy_start':
+      return { error: 'Only a strategy inside the autonomous budget can be started by the agent; the owner starts the others on the 交易 page' }
+    case 'risk_limits':
+      return {
+        mode: 'paper',
+        account: { maxOrderUsd: 2000, maxExposureUsd: 6000, maxMarketExposureUsd: 4000, maxLeverage: 3, defaultLeverage: 1, dailyLossLimitPct: 3, dailyLossLimitUsd: 0, maxOpenPositions: 5, maxOrdersPerHour: 20, maxSlippageBps: 50 },
+        leverageCeiling: 10,
+        strategies: [],
+        pendingProposals: [],
+        note: 'Only the owner changes these: propose with risk_limits_propose; it applies after they confirm on the 交易 page.',
+      }
+    case 'risk_limits_propose':
+      return {
+        proposalId: 'rp_eval_1',
+        status: 'waiting_for_owner',
+        text: '助手建议调整风控限额（模拟盘）/ Proposed risk limits (paper)\n只有你在这张卡片上确认后才会生效。',
+        message: 'Nothing has changed yet: the owner confirms or declines this on the 交易 page (风控). Tell them; do not say it is done.',
+      }
     default:
       return undefined
   }

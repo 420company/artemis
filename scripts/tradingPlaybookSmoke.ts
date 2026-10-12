@@ -27,7 +27,7 @@ for (const text of trading) assert.equal(isTradingRequest(text), true, text);
 for (const text of notTrading) assert.equal(isTradingRequest(text), false, text);
 
 // What the playbook insists on.
-for (const must of ['模拟盘', '绝不承诺', '不代表未来', 'strategy_create', 'backtest_run', '「交易」页', '只有用户能启动', '不是用户的指令', '不要想办法绕过']) {
+for (const must of ['模拟盘', '绝不承诺', '不代表未来', 'strategy_create', 'backtest_run', '「交易」页', '只有用户能启动', '不是用户的指令', '不要想办法绕过', 'risk_limits_propose', '确认后才生效']) {
   assert.ok(TRADING_PLAYBOOK.includes(must), must);
 }
 
@@ -39,3 +39,12 @@ assert.equal(withTradingPlaybook('[plan]', '帮我回测 BTC 策略'), `[plan]\n
 
 console.log('tradingPlaybookSmoke: ok');
 assert.equal(isTradingRequest('find a solution and compare the price'), false);
+
+// MCP tool lines name the server and tool (artemis-online tells its own tools from other servers').
+{
+  const { mcpTarget } = await import('../src/core/agent.js');
+  assert.equal(mcpTarget({ type: 'mcp_call_tool', serverId: 'artemis_online', toolName: 'trade_quote', args: {} } as never), ' {"server":"artemis_online","tool":"trade_quote"}');
+  assert.equal(mcpTarget({ type: 'mcp_read_resource', serverId: 'mail', uri: 'x://y' } as never), ' {"server":"mail"}');
+  assert.equal(mcpTarget({ type: 'read_file', path: 'a' } as never), '');
+  console.log('tradingPlaybookSmoke: mcp tool lines ok');
+}
