@@ -180,8 +180,8 @@ export function toolArtifacts(action: AgentAction, ok: boolean, payload: Record<
   const type = (action as { type: string }).type;
   if (type === 'write_file' || type === 'insert_in_file' || type === 'replace_in_file') add(payload.path);
   if (Array.isArray(payload.files)) payload.files.forEach(add);
-  // Generators and document tools name what they saved in their output.
-  if (type !== 'read_file' && type !== 'list_files' && type !== 'search_files' && type !== 'view_image') {
+  // Generators and document tools name what they saved in their output (other tools' output only mentions files).
+  if (/^(?:generate_|create_)/.test(type) || type === 'synthesize_speech' || type === 'deep_research') {
     for (const match of output.slice(0, 20_000).matchAll(PATH_IN_TEXT)) {
       if (ARTIFACT_EXT.test(match[1]!)) add(match[1]);
     }
