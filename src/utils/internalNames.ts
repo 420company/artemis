@@ -157,6 +157,16 @@ const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: 
   create_spreadsheet: { zh: '生成表格', en: 'Building a spreadsheet', outputZh: '表格已生成', outputEn: 'Your spreadsheet is ready' },
   delegate_task: { zh: '分派子任务', en: 'Delegating a sub-task' },
   use_workflow: { zh: '调整工作方式', en: 'Adjusting the approach' },
+  agent_mail_address: { zh: '查看专用邮箱', en: 'Checking the agent mailbox' },
+  list_emails: { zh: '查看邮件', en: 'Checking email' },
+  read_email: { zh: '查看邮件', en: 'Reading an email' },
+  wait_for_email: { zh: '等待验证邮件', en: 'Waiting for the verification email' },
+  extract_verification: { zh: '读取验证码', en: 'Reading the verification code' },
+  begin_signup: { zh: '注册账号（等待你批准）', en: 'Signing up (waiting for your approval)' },
+  finish_signup: { zh: '记录注册结果', en: 'Recording the sign-up' },
+  get_sms_number: { zh: '申请临时号码（等待你批准）', en: 'Getting a temporary number (waiting for your approval)' },
+  wait_for_sms: { zh: '等待验证短信', en: 'Waiting for the SMS code' },
+  ask_owner_for_code: { zh: '等待你输入验证码', en: 'Waiting for your code' },
 };
 
 /** What a tool call does, in plain words, for progress lines users see. */

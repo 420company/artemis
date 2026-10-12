@@ -56,6 +56,19 @@ const EVENT_BUFFER_MAX = 300;
 const _consoleBuffer: ConsoleEntry[] = [];
 const _networkBuffer: NetworkEntry[] = [];
 
+/**
+ * Whether console / network events are recorded now. While a sign-up
+ * password is live nothing is (security/identityCredentials.ts, via
+ * browserTools.ts), and a request that started then is never recorded,
+ * even if it finishes later.
+ */
+let captureAllowed: () => boolean = () => true;
+const unrecordedRequests = new WeakSet<object>();
+
+export function setEventCaptureGate(gate: () => boolean): void {
+  captureAllowed = gate;
+}
+
 function pushRing<T>(buffer: T[], entry: T): void {
   buffer.push(entry);
   if (buffer.length > EVENT_BUFFER_MAX) buffer.splice(0, buffer.length - EVENT_BUFFER_MAX);
@@ -63,6 +76,7 @@ function pushRing<T>(buffer: T[], entry: T): void {
 
 function attachPageListeners(page: Page): void {
   page.on('console', (msg) => {
+    if (!captureAllowed()) return;
     pushRing(_consoleBuffer, {
       time: new Date().toISOString().slice(11, 19),
       level: msg.type(),
@@ -71,6 +85,7 @@ function attachPageListeners(page: Page): void {
     });
   });
   page.on('pageerror', (err) => {
+    if (!captureAllowed()) return;
     pushRing(_consoleBuffer, {
       time: new Date().toISOString().slice(11, 19),
       level: 'pageerror',
@@ -83,8 +98,12 @@ function attachPageListeners(page: Page): void {
 function attachContextListeners(ctx: BrowserContext): void {
   for (const page of ctx.pages()) attachPageListeners(page);
   ctx.on('page', (page) => attachPageListeners(page));
+  ctx.on('request', (req) => {
+    if (!captureAllowed()) unrecordedRequests.add(req);
+  });
   ctx.on('response', (response) => {
     const req = response.request();
+    if (!captureAllowed() || unrecordedRequests.has(req)) return;
     pushRing(_networkBuffer, {
       time: new Date().toISOString().slice(11, 19),
       method: req.method(),
@@ -94,6 +113,7 @@ function attachContextListeners(ctx: BrowserContext): void {
     });
   });
   ctx.on('requestfailed', (req) => {
+    if (!captureAllowed() || unrecordedRequests.has(req)) return;
     pushRing(_networkBuffer, {
       time: new Date().toISOString().slice(11, 19),
       method: req.method(),
