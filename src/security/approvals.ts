@@ -38,7 +38,7 @@ import type { AgentAction, SessionRecord } from '../core/types.js'
 import type { ToolError } from '../tools/types.js'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { isSyntheticUserMessage } from '../core/compaction/language.js'
-import { analyzeDeletes, isInsideWorkspace, isTemporaryPath } from './shellRisk.js'
+import { analyzeDeletes, DESTRUCTIVE_TOKEN, isInsideWorkspace, isTemporaryPath } from './shellRisk.js'
 
 // ── Kinds, modes, policy ────────────────────────────────────────────────────
 
@@ -751,6 +751,25 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
     case 'synthesize_speech': {
       const target = outsideTarget(ctx, action.type === 'synthesize_speech' ? action.outputPath : action.path)
       return target ? need('delete_outside_workspace', 'high', { paths: target }) : null
+    }
+    // server_setup on a server the owner had the agent rent: setting it up
+    // (keys, hardening, VPN, checks) is the task the owner asked for, and the
+    // root password behind install_key is one the owner saved for exactly
+    // that server, so those steps ask nothing more. forget_host_key asks the
+    // owner itself (requireApproval, kind confirmation: always asks). `run`
+    // is one shell command on that server: classified like a local command
+    // for remote code and uploads, and anything destructive there asks.
+    case 'server_setup': {
+      const a = action as { action?: string; command?: unknown; host?: unknown }
+      if (a.action !== 'run' || typeof a.command !== 'string') return null
+      const host = typeof a.host === 'string' ? a.host : undefined
+      const risky = ctx.dangerousCommand?.(a.command) ?? null
+      if (risky) return need('shell_high_risk', 'high', { command: a.command, target: host, reason: risky.reason, reasonZh: risky.reasonZh })
+      const shown = a.command.replace(/\d*>>?\s*\/dev\/null|\d*>&\d/g, '')
+      if (DESTRUCTIVE_TOKEN.test(shown) || /\b(?:mkfs|wipefs|fdisk|parted|userdel|deluser|shutdown|reboot|poweroff|halt|iptables\s+-F|ufw\s+(?:reset|disable))\b/.test(a.command)) {
+        return need('external_action', 'high', { command: a.command, target: host, action: 'run on server' })
+      }
+      return null
     }
     // A recognition program the agent names itself is a command like any other.
     case 'transcribe_audio':

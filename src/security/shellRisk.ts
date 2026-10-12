@@ -245,7 +245,7 @@ const AWKS = new Set(['awk', 'gawk', 'mawk', 'nawk'])
 const AWK_RUNS_SHELL = /\bsystem\s*\(|\|\s*"|"\s*\|\s*getline|\|&/
 const INTERPRETER_RE = new RegExp(`^${INTERPRETERS}$`, 'i')
 /** Destructive operations anywhere in a command, including inline code. */
-const DESTRUCTIVE_TOKEN =
+export const DESTRUCTIVE_TOKEN =
   /\b(?:rm|rmdir|unlink|shred|srm|wipe|trash(?:-put)?|mv|truncate|dd)\b|\b(?:remove|removedirs|delete|unlink|rmtree|rmSync|rmdirSync|unlinkSync|truncate|truncateSync|writeFileSync|rename|renameSync|move)\s*\(|FileUtils\.rm|:\s*>|(?:^|[^<>0-9&=-])>(?!>|&)|\bgit\s+clean\b|--delete\b|\bof=/
 
 export interface DeleteAnalysis {

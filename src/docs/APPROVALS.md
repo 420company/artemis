@@ -37,6 +37,16 @@ expire after 24 hours unless the policy says otherwise.
 limited by its payments service, its publish requests wait for the owner in
 its app, so the owner is not asked twice.
 
+**Servers the agent sets up (`server_setup`).** Setting up a server the
+owner had the agent rent (keys, `install_key` with the root password the
+owner saved for exactly that server, `harden`, `install_wireguard`, checks)
+is the task the owner asked for: no second request. `forget_host_key` asks
+the owner itself through `requireApproval('confirmation', …)`, which no
+policy can allow. `run` is one shell command on that server: remote code and
+uploads are `shell_high_risk`, and destructive commands there (deletes,
+overwrites, `dd`, `mkfs`, user removal, shutdown, disabling the firewall) are
+`external_action`.
+
 **Connected services.** A host whose connectors broker asks the owner
 before every write of a connected service names the broker's servers in its
 copy of the policy: `"connectorServers": {"conn_<connection>": "<broker URL>"}`.
