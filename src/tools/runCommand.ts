@@ -60,6 +60,9 @@ function readSavedVercelToken(): string | null {
 function buildSpawnEnv(command: string): NodeJS.ProcessEnv {
   // Marks the agent's own shell: approval answers are refused from inside it.
   const base: NodeJS.ProcessEnv = { ...process.env, [AGENT_TOOL_ENV]: '1' };
+  // The host's mark for the owner's own words is the engine's, never a command's
+  // (it is also taken out of the environment when a headless run starts).
+  delete base.ARTEMIS_OWNER_INPUT;
   if (process.env.VERCEL_TOKEN) return base;
   if (!isVercelInvocation(command)) return base;
   const token = readSavedVercelToken();

@@ -21,6 +21,9 @@ import {
 import { resolveExtensionRuntime } from '../src/extensions/runtime.js'
 import { readLibrarySkillFile, readLibrarySkillText } from '../src/extensions/skillLibrary.js'
 import { executeLoadSkill } from '../src/tools/learnedSkillTool.js'
+import { discoverSkills } from '../src/extensions/skills.js'
+import { listAllSkills, readSkill, skillScopesForCwd, skillsDirForScope } from '../src/storage/skillStore.js'
+import { resolveDataRootDir } from '../src/utils/fs.js'
 import { runSkillLibraryCommand } from '../src/cli/skillLibraryCommand.js'
 import { runAgent } from '../src/core/agent.js'
 import { settleMemoryCuration } from '../src/core/memory.js'
@@ -92,6 +95,13 @@ async function main(): Promise<void> {
     assert.equal(names.filter((name) => name.startsWith('cco-')).length, 0, 'no cco-* left among the bundled skills')
     // Curated out: skills whose point is another vendor's agent product or brand.
     for (const gone of ['brand-guidelines', 'self-improving-agent']) assert.ok(!names.includes(gone), gone)
+    // ...and no bundled skill still points at them.
+    for (const name of names) {
+      const md = path.join(bundled!, name, 'SKILL.md')
+      if (!fs.existsSync(md)) continue
+      const text = fs.readFileSync(md, 'utf8')
+      for (const gone of ['brand-guidelines', 'self-improving-agent']) assert.ok(!text.includes(gone), `${name} mentions ${gone}`)
+    }
     assert.doesNotMatch(fs.readFileSync(path.join(bundled!, 'karpathy-coder', 'SKILL.md'), 'utf8'), /Claude Code|CLAUDE\.md|\.claude\//)
     const manifest = JSON.parse(fs.readFileSync(path.join(packs!, 'cco', 'pack.json'), 'utf8'))
     assert.equal(manifest.defaultEnabled, false)
@@ -193,6 +203,56 @@ async function main(): Promise<void> {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
+  await test('a skill file that is a link is never read (SKILL.md, SKILL.json, reference files, learned skills)', async () => {
+    const secret = 'sk-LEAKED-providers-0123456789'
+    const providers = path.join(home, 'providers.json')
+    fs.writeFileSync(providers, JSON.stringify({ id: 'leak', name: 'leak', description: `key ${secret}`, apiKey: secret }))
+    const roots = [path.join(workspace, 'skills'), path.join(resolveDataRootDir(workspace), 'skills')]
+    for (const root of roots) {
+      fs.mkdirSync(path.join(root, 'leak-md'), { recursive: true })
+      fs.symlinkSync(providers, path.join(root, 'leak-md', 'SKILL.md'))
+      fs.mkdirSync(path.join(root, 'leak-json'), { recursive: true })
+      fs.symlinkSync(providers, path.join(root, 'leak-json', 'SKILL.json'))
+      fs.symlinkSync(providers, path.join(root, 'leak-file.json'))
+    }
+    // A real skill whose reference file (and a nested folder) point at the credentials.
+    const ref = path.join(roots[0]!, 'leak-ref')
+    fs.mkdirSync(ref, { recursive: true })
+    fs.writeFileSync(path.join(ref, 'SKILL.md'), '---\nname: leak-ref\ndescription: A skill with a linked reference file.\n---\nRead references/keys.md.\n')
+    fs.symlinkSync(providers, path.join(ref, 'keys.md'))
+    fs.symlinkSync(home, path.join(ref, 'nested'))
+    // A learned skill whose file is a link to a record outside the skills folder.
+    const scope = skillScopesForCwd(workspace)[0]!
+    const learnedDir = skillsDirForScope(workspace, scope)
+    fs.mkdirSync(learnedDir, { recursive: true })
+    const outsideRecord = path.join(sandbox, 'outside-record.json')
+    fs.writeFileSync(outsideRecord, JSON.stringify({ id: 'leaked-learned', name: 'leaked-learned', description: `uses ${secret}`, steps: [secret] }))
+    fs.symlinkSync(outsideRecord, path.join(learnedDir, 'leaked-learned.json'))
+    try {
+      const seen: string[] = []
+      const library = await loadSkillLibrary(workspace)
+      seen.push(JSON.stringify(library.skills.filter((skill) => skill.id.startsWith('leak'))))
+      for (const id of ['leak-md', 'leak-json', 'leak-file', 'leak-ref']) seen.push((await load({ id })).output)
+      for (const file of ['keys.md', 'nested/providers.json']) {
+        const result = await load({ id: 'leak-ref', file })
+        assert.equal(result.ok, false, `${file}: ${result.output}`)
+        seen.push(result.output)
+      }
+      seen.push((await load({ query: 'leak key' })).output)
+      const runtime = await resolveExtensionRuntime(workspace, 'use $leak-md $leak-json $leak-file $leak-ref', { ownerInput: true })
+      seen.push(runtime.sections.join('\n'))
+      assert.ok(runtime.activeSkills.some((entry) => entry.skill.id === 'leak-ref'), 'the real skill still loads')
+      seen.push(JSON.stringify((await discoverSkills(workspace)).skills))
+      seen.push(JSON.stringify(await listAllSkills(workspace)), JSON.stringify(await readSkill(workspace, 'leaked-learned')))
+      assert.equal(await readSkill(workspace, 'leaked-learned'), null)
+      for (const text of seen) assert.ok(!text.includes(secret) && !text.includes('LEAKED'), text.slice(0, 400))
+    } finally {
+      for (const root of roots) fs.rmSync(root, { recursive: true, force: true })
+      fs.rmSync(path.join(learnedDir, 'leaked-learned.json'), { force: true })
+      fs.rmSync(providers, { force: true })
+    }
+  })
+
   await test('load_skill reads a library skill, its reference files, and searches', async () => {
     const def = getToolDefinition('load_skill')!
     assert.equal(def.permissionCategory, 'read')
@@ -251,6 +311,18 @@ async function main(): Promise<void> {
     }
     const section = runtime.sections.join('\n')
     assert.ok(section.includes('Local skills activated for this turn'))
+  })
+
+  await test('the owner-input mark never reaches a shell command', async () => {
+    const { executeRunCommand } = await import('../src/tools/runCommand.js')
+    process.env.ARTEMIS_OWNER_INPUT = '1'
+    try {
+      const result = await executeRunCommand({ type: 'run_command', command: 'echo "mark=${ARTEMIS_OWNER_INPUT:-none}"' }, { cwd: workspace, permissionMode: 'full-access' } as ToolExecutionContext)
+      assert.equal(result.ok, true, result.output)
+      assert.match(result.output, /mark=none/)
+    } finally {
+      delete process.env.ARTEMIS_OWNER_INPUT
+    }
   })
 
   await test('catalog and show for hosts: JSON, packs listed as off, no local paths', async () => {

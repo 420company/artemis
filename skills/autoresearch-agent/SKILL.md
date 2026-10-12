@@ -302,7 +302,6 @@ clawhub install cs-autoresearch-agent
 
 ## Related Skills
 
-- **self-improving-agent** — improves an agent's own memory/rules over time. NOT for structured experiment loops.
 - **senior-ml-engineer** — ML architecture decisions. Complementary — use for initial design, then autoresearch for optimization.
 - **tdd-guide** — test-driven development. Complementary — tests can be the evaluation function.
 - **skill-security-auditor** — audit skills before publishing. NOT for optimization loops.
