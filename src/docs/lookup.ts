@@ -1,10 +1,18 @@
-import {
-  formatDocsSearchEngineLabel,
-  type DocsSearchEngine,
-} from './searchEngine.js';
 import { APP_USER_AGENT } from '../appMeta.js';
+import { searchWeb, UNTRUSTED_SEARCH_RESULTS_HEADER, type SearchResponse } from '../core/searchTools.js';
 
 type FetchLike = typeof fetch;
+
+/** Web search used when the library's own index has no match (search_web, backend auto). */
+export type DocsWebSearch = (query: string, limit: number, signal?: AbortSignal) => Promise<SearchResponse>;
+
+const defaultDocsWebSearch: DocsWebSearch = (query, limit, signal) => searchWeb(query, limit, 'auto', signal ? { signal } : {});
+
+/** One line of untrusted web text: tags, line breaks and control characters removed. */
+function flattenWebText(text: string, max: number): string {
+  // eslint-disable-next-line no-control-regex
+  return truncate(stripHtml(text).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim(), max);
+}
 
 export type DocsLibraryProfile = {
   id: string;
@@ -29,7 +37,8 @@ export type DocsLookupResult = {
   library?: DocsLibraryProfile;
   version?: string;
   strategy: 'llms-index' | 'sitemap' | 'crawl' | 'search-fallback';
-  searchEngine: DocsSearchEngine;
+  /** The web search backend that answered (search-fallback only). */
+  searchBackend?: string;
   items: DocsLookupItem[];
 };
 
@@ -48,8 +57,8 @@ const DEFAULT_MAX_RESULTS = 5;
 const MAX_SITEMAP_URLS = 2_000;
 const MAX_SITEMAP_FILES = 12;
 const MAX_CRAWL_URLS = 1_200;
-const SEARCH_ENDPOINT = 'https://www.bing.com/search?format=rss&q=';
-const GOOGLE_SEARCH_ENDPOINT = 'https://www.google.com/search?hl=en&num=10&q=';
+// Web results asked for before the library-domain filter narrows them.
+const SEARCH_FALLBACK_RESULTS = 5;
 const DOCS_QUERY_STOP_WORDS = new Set([
   'api',
   'apis',
@@ -742,7 +751,7 @@ async function getCachedCrawlUrls(
   return promise;
 }
 
-function buildBingSearchQuery(options: {
+function buildDocsSearchQuery(options: {
   query: string;
   library?: DocsLibraryProfile;
   version?: string;
@@ -758,74 +767,6 @@ function buildBingSearchQuery(options: {
   }
   parts.push(options.query);
   return parts.join(' ');
-}
-
-function parseBingRssItems(xml: string): DocsLookupItem[] {
-  const items: DocsLookupItem[] = [];
-  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
-
-  for (const itemMatch of xml.matchAll(itemRegex)) {
-    const block = itemMatch[1] ?? '';
-    const title = decodeHtmlEntities(
-      block.match(/<title>([\s\S]*?)<\/title>/i)?.[1] ?? '',
-    ).trim();
-    const url = decodeHtmlEntities(
-      block.match(/<link>([\s\S]*?)<\/link>/i)?.[1] ?? '',
-    ).trim();
-    const snippet = stripHtml(
-      block.match(/<description>([\s\S]*?)<\/description>/i)?.[1] ?? '',
-    );
-
-    if (!title || !url) {
-      continue;
-    }
-
-    items.push({
-      title,
-      url,
-      snippet: truncate(snippet, 260),
-    });
-  }
-
-  return items;
-}
-
-function parseGoogleHtmlItems(html: string): DocsLookupItem[] {
-  const items: DocsLookupItem[] = [];
-  const seen = new Set<string>();
-  const anchorRegex = /<a[^>]+href="\/url\?q=([^"&]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-
-  for (const match of html.matchAll(anchorRegex)) {
-    const rawUrl = decodeHtmlEntities(match[1] ?? '').trim();
-    if (!rawUrl) {
-      continue;
-    }
-
-    let url = '';
-    try {
-      url = normalizeUrl(rawUrl);
-    } catch {
-      continue;
-    }
-
-    if (seen.has(url)) {
-      continue;
-    }
-
-    const title = stripHtml(match[2] ?? '');
-    if (!title || title.toLowerCase() === 'google search') {
-      continue;
-    }
-
-    seen.add(url);
-    items.push({
-      title: truncate(title, 180),
-      url,
-      snippet: '',
-    });
-  }
-
-  return items;
 }
 
 function extractPageTitle(html: string, url: string): string {
@@ -935,13 +876,14 @@ export async function lookupDocs(options: {
   library?: string;
   version?: string;
   maxResults?: number;
-  searchEngine?: DocsSearchEngine;
   fetchImpl?: FetchLike;
+  search?: DocsWebSearch;
+  signal?: AbortSignal;
 }): Promise<DocsLookupResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const search = options.search ?? defaultDocsWebSearch;
   const library = resolveDocsLibrary(options.library, options.query);
   const version = options.version?.trim() || inferDocsVersion(options.query);
-  const preferredSearchEngine = options.searchEngine ?? 'bing';
   const maxResults = Math.min(
     Math.max(options.maxResults ?? DEFAULT_MAX_RESULTS, 1),
     8,
@@ -964,7 +906,6 @@ export async function lookupDocs(options: {
         library,
         version,
         strategy: 'llms-index',
-        searchEngine: preferredSearchEngine,
         items: await hydrateDocsItems(
           llmsMatches.map((entry) => entry.candidate),
           fetchImpl,
@@ -987,7 +928,6 @@ export async function lookupDocs(options: {
         library,
         version,
         strategy: 'sitemap',
-        searchEngine: preferredSearchEngine,
         items: await hydrateDocsItems(
           sitemapMatches.map((entry) => entry.candidate),
           fetchImpl,
@@ -1010,7 +950,6 @@ export async function lookupDocs(options: {
         library,
         version,
         strategy: 'crawl',
-        searchEngine: preferredSearchEngine,
         items: await hydrateDocsItems(
           crawlMatches.map((entry) => entry.candidate),
           fetchImpl,
@@ -1019,46 +958,20 @@ export async function lookupDocs(options: {
     }
   }
 
-  const searchQuery = buildBingSearchQuery({
+  const searchQuery = buildDocsSearchQuery({
     query: options.query,
     library,
     version,
   });
-  let effectiveSearchEngine = preferredSearchEngine;
-  let searchItems: DocsLookupItem[];
-  try {
-    searchItems = preferredSearchEngine === 'google'
-      ? parseGoogleHtmlItems(
-          await fetchText(
-            `${GOOGLE_SEARCH_ENDPOINT}${encodeURIComponent(searchQuery)}`,
-            fetchImpl,
-          ),
-        )
-      : parseBingRssItems(
-          await fetchText(
-            `${SEARCH_ENDPOINT}${encodeURIComponent(searchQuery)}`,
-            fetchImpl,
-          ),
-      );
-  } catch {
-    effectiveSearchEngine = 'bing';
-    searchItems = parseBingRssItems(
-      await fetchText(
-        `${SEARCH_ENDPOINT}${encodeURIComponent(searchQuery)}`,
-        fetchImpl,
-      ),
-    );
+  const searchResult = await search(searchQuery, SEARCH_FALLBACK_RESULTS, options.signal);
+  if (!searchResult.success) {
+    throw new Error(`web search failed: ${searchResult.error ?? 'unknown error'}`);
   }
-
-  if (preferredSearchEngine === 'google' && searchItems.length === 0) {
-    effectiveSearchEngine = 'bing';
-    searchItems = parseBingRssItems(
-      await fetchText(
-        `${SEARCH_ENDPOINT}${encodeURIComponent(searchQuery)}`,
-        fetchImpl,
-      ),
-    );
-  }
+  const searchItems: DocsLookupItem[] = searchResult.data.web.map((result) => ({
+    title: flattenWebText(result.title, 180),
+    url: flattenWebText(result.url, 2_000),
+    snippet: flattenWebText(result.description ?? '', 260),
+  }));
   const items = searchItems
     .filter((item) => {
       if (!library) {
@@ -1084,7 +997,7 @@ export async function lookupDocs(options: {
     library,
     version,
     strategy: 'search-fallback',
-    searchEngine: effectiveSearchEngine,
+    ...(searchResult.backend ? { searchBackend: searchResult.backend } : {}),
     items: items.map((entry) => entry.item),
   };
 }
@@ -1096,7 +1009,7 @@ export function formatDocsLookupReport(result: DocsLookupResult): string {
     `- library: ${result.library?.label ?? 'auto'}`,
     `- version hint: ${result.version ?? 'none'}`,
     `- strategy: ${result.strategy}`,
-    `- search backend: ${formatDocsSearchEngineLabel(result.searchEngine)}`,
+    ...(result.searchBackend ? [`- search backend: ${result.searchBackend}`] : []),
     '',
   ];
 
@@ -1105,6 +1018,10 @@ export function formatDocsLookupReport(result: DocsLookupResult): string {
     return lines.join('\n');
   }
 
+  // Results found by web search are web content: data, never instructions.
+  if (result.strategy === 'search-fallback') {
+    lines.push(UNTRUSTED_SEARCH_RESULTS_HEADER, '');
+  }
   for (const [index, item] of result.items.entries()) {
     lines.push(`${index + 1}. ${item.title}`);
     lines.push(`   url: ${item.url}`);

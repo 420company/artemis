@@ -345,11 +345,10 @@ Model names behind a gateway can be aliases (`gpt-6-sol` may be a text-only GLM 
 |---|---|---|
 | `platform` | a hosted agent (see below) | The platform gateway's `POST /v1/search`, billed to the owner's platform account. Tried first on a platform-managed host when you configured no search key of your own. |
 | `duckduckgo` | nothing | HTML scraping; often blocked from datacenter IPs. |
-| `bing` | `BING_API_KEY` | |
-| `google` | `GOOGLE_API_KEY` + `GOOGLE_CX` | |
+| `google` | `GOOGLE_API_KEY` + `GOOGLE_CX` | Legacy: Google Programmable Search, for owners who already have it (it takes no new customers). |
 | `wikipedia` | nothing | Encyclopedic results only. |
 
-A Bing or Google key of your own keeps today's order (the platform is not used). `backend: "platform"` asks for it by name; `freshness: "day" | "week" | "month" | "year"` limits results to recent pages (platform backend). On a hosted VPS the agent server writes the platform settings into the global `providers.json` (a workspace store cannot redirect them):
+The Bing Search API backend was removed (the API is retired); `BING_API_KEY` is ignored. A legacy Google key of your own keeps today's order (the platform is not used). `lookup_docs` checks the library's own docs index (`llms.txt`, sitemap, a shallow crawl) and then searches through these same backends (`auto`). `backend: "platform"` asks for the platform search by name; `freshness: "day" | "week" | "month" | "year"` limits results to recent pages (platform backend). On a hosted VPS the agent server writes the platform settings into the global `providers.json` (a workspace store cannot redirect them):
 
 ```json
 "webSearch": { "provider": "platform", "enabled": true, "baseUrl": "https://<gateway>/v1",
@@ -676,7 +675,7 @@ artemis
 
 ### 联网搜索后端与平台搜索
 
-`search_web` 按顺序尝试各个后端，一个失败或没有结果就换下一个：平台搜索（`platform`，托管 agent 专用，经平台网关的 `POST /v1/search`，按次计入主人的平台账户）→ DuckDuckGo（免密钥，机房 IP 常被拦）→ Bing（`BING_API_KEY`）→ Google（`GOOGLE_API_KEY` + `GOOGLE_CX`）→ Wikipedia。只有在主机由平台托管、且你没有配置自己的搜索密钥时才会先用平台搜索；配置了自己的 Bing 或 Google 密钥时顺序保持不变。`backend: "platform"` 可以指定平台搜索，`freshness: "day" | "week" | "month" | "year"` 只要近期结果。托管 VPS 上由 agent 服务器把设置写进全局 `providers.json` 的 `webSearch`（`provider: "platform"`、`baseUrl`、`apiKey`、`managedBy: "platform"`；`enabled: false` 表示关闭），工作区里的配置不能改写它；没有 `webSearch` 时，标记为平台管理的主 profile 会被当作网关使用。平台搜索被拒绝或失败（余额不足、限流、未开通、所有服务商出错、网关不可达）时，工具结果如实说明原因；后备后端接着给出结果时，会在开头注明。平台搜索没有找到结果时返回「No results found.」，不算失败。搜索结果前会标明是不可信的网页内容（只当数据，不执行其中的指令），每条标题和摘要压成一行。绝不编造搜索结果。
+`search_web` 按顺序尝试各个后端，一个失败或没有结果就换下一个：平台搜索（`platform`，托管 agent 专用，经平台网关的 `POST /v1/search`，按次计入主人的平台账户）→ DuckDuckGo（免密钥，机房 IP 常被拦）→ Google（旧版 Programmable Search，`GOOGLE_API_KEY` + `GOOGLE_CX`，只给已有的用户，不再接受新用户）→ Wikipedia。Bing 搜索 API 已退役，相应后端已删除，`BING_API_KEY` 不再使用。只有在主机由平台托管、且你没有配置自己的搜索密钥时才会先用平台搜索；配置了自己的旧版 Google 密钥时顺序保持不变。`lookup_docs` 先查库自己的文档索引（`llms.txt`、sitemap、浅层爬取），再用同一套后端搜索（`auto`）。`backend: "platform"` 可以指定平台搜索，`freshness: "day" | "week" | "month" | "year"` 只要近期结果。托管 VPS 上由 agent 服务器把设置写进全局 `providers.json` 的 `webSearch`（`provider: "platform"`、`baseUrl`、`apiKey`、`managedBy: "platform"`；`enabled: false` 表示关闭），工作区里的配置不能改写它；没有 `webSearch` 时，标记为平台管理的主 profile 会被当作网关使用。平台搜索被拒绝或失败（余额不足、限流、未开通、所有服务商出错、网关不可达）时，工具结果如实说明原因；后备后端接着给出结果时，会在开头注明。平台搜索没有找到结果时返回「No results found.」，不算失败。搜索结果前会标明是不可信的网页内容（只当数据，不执行其中的指令），每条标题和摘要压成一行。绝不编造搜索结果。
 
 ### 用户选择的意图：`--intent`
 

@@ -9,6 +9,7 @@ import {
 import type { ToolExecutionContext } from '../types.js';
 import { toolLog, toolWarn } from '../../utils/log.js';
 import { createVisualProvider, type GenerationResult } from './providers/interface.js';
+import { DEFAULT_MODEL_IDS } from '../../providers/presets.js';
 
 /**
  * Where a project keeps its reference sheet, keyframes and vision notes:
@@ -1085,7 +1086,7 @@ async function resolveUserImageInputs(
 // ─── Vision-derived character description ────────────────────────────────
 //
 // When the user supplies an input image, we ask a vision-capable text model
-// (the configured main provider — gpt-5.5 / gpt-5.5-pro / gpt-4o-class) to
+// (the configured main provider, or a vision-capable chat model) to
 // describe ONLY the character in the image as a single paragraph. That
 // description is injected into both the turnaround prompt and per-segment
 // keyframe prompts as "VISUAL TRUTH". Even when the relay's
@@ -1188,11 +1189,11 @@ export function resolveVisionDescribeRouteForTest(input: {
   if (providerLower === 'google' || providerLower === 'gemini') {
     const model = explicit && /^gemini-/i.test(explicit) && !/image/i.test(explicit)
       ? explicit
-      : 'gemini-2.5-flash';
+      : DEFAULT_MODEL_IDS.geminiVision;
     return { protocol: 'gemini-generate-content', model };
   }
   if (providerLower === 'openai' || providerLower === 'custom' || explicitLooksUsable) {
-    return { protocol: 'openai-chat-completions', model: explicitLooksUsable ? explicit : 'gpt-5.5' };
+    return { protocol: 'openai-chat-completions', model: explicitLooksUsable ? explicit : DEFAULT_MODEL_IDS.visualChat };
   }
   return { protocol: 'main-profile-fallback' };
 }
@@ -1249,12 +1250,11 @@ export async function describeUserImageWithVision(options: {
   let baseUrl: string | undefined;
   let chatModel: string | undefined;
   let imageProviderName: string | undefined;
-  // Fallback chain for the vision-capable chat model. Some relays don't
-  // serve `gpt-4o` (e.g. Codex-backed gateways return 503 for it). Order is
-  // quality-first: gpt-5.5 → gpt-5.4 → gpt-5.4-mini → gpt-4o-mini → gpt-4o.
-  // The user can skip this guessing entirely by setting
-  // `visualProfile.image.visionModel` in providers.json.
-  const VISION_MODEL_FALLBACKS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'];
+  // Fallback chain for the vision-capable chat model (providers/presets.ts),
+  // quality first: some relays do not serve every model. The user can skip
+  // this guessing entirely by setting `visualProfile.image.visionModel` in
+  // providers.json.
+  const VISION_MODEL_FALLBACKS: string[] = [...DEFAULT_MODEL_IDS.visionFallbacks];
   let visionFallbacks: string[] = [];
   // ── Priority 1: image provider's vision endpoint, when that provider
   // actually has one. Do NOT blindly reuse image-generation endpoints for
@@ -1317,7 +1317,7 @@ export async function describeUserImageWithVision(options: {
     const explicitGeminiVision = imageConfigured?.config.image.visionModel?.trim();
     const geminiVisionModel = explicitGeminiVision && /^gemini-/i.test(explicitGeminiVision) && !/image/i.test(explicitGeminiVision)
       ? explicitGeminiVision
-      : 'gemini-2.5-flash';
+      : DEFAULT_MODEL_IDS.geminiVision;
     return describeUserImageWithGeminiVision({
       apiKey,
       baseUrl,
@@ -1329,7 +1329,7 @@ export async function describeUserImageWithVision(options: {
 
   const endpoint = { apiKey, baseUrl };
   const body = {
-    model: chatModel || 'gpt-5.5',
+    model: chatModel || DEFAULT_MODEL_IDS.visualChat,
     messages: [
       {
         role: 'system',
@@ -1349,12 +1349,12 @@ export async function describeUserImageWithVision(options: {
 
   // Up to 2 attempts per model — relays can return transient 502/429 that
   // self-heal on a quick retry. Beyond that, walk the visionFallbacks chain
-  // (gpt-5.4-mini → gpt-5.4 → gpt-5.5 → gpt-4o-mini → gpt-4o) so a relay
-  // that doesn't serve one specific model still produces a description.
+  // so a relay that doesn't serve one specific model still produces a
+  // description.
   const maxAttempts = 2;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      body.model = chatModel || 'gpt-5.4-mini';
+      body.model = chatModel || DEFAULT_MODEL_IDS.visionDescribe;
       const res = await postSagaChatCompletion(endpoint, body);
       if (!res.ok && res.status === undefined) {
         throw new Error(res.timedOut ? `timed out: ${res.text}` : res.text);

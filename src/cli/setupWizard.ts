@@ -12,7 +12,6 @@ import {
   DEFAULT_GEMINI_DEEP_RESEARCH_AGENT,
   DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS,
   DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
-  type DocsSearchEngine,
   type ResearchEngine,
 } from './settings.js'
 import { ProviderStore } from '../providers/store.js'
@@ -802,27 +801,10 @@ async function configureDocsAndResearchSettings(options: { cwd: string; locale: 
     ),
     tr(
       locale,
-      'Google docs search 需要 GOOGLE_CSE_ID + GOOGLE_API_KEY；缺失时会自动 fallback 到 Bing。',
-      'Google docs search needs GOOGLE_CSE_ID + GOOGLE_API_KEY; Artemis falls back to Bing when they are missing.',
+      '查文档时先查该库自己的文档索引，再用网页搜索，无需选择搜索引擎。',
+      'Docs lookups check the library\'s own docs index first, then search the web; there is no search engine to choose.',
     ),
   ])
-
-  const docsEngine = await chooseInteractiveOption<DocsSearchEngine>({
-    title: tr(locale, 'lookup_docs 使用哪个文档搜索引擎？', 'Which docs search engine should lookup_docs use?'),
-    initialIndex: settings.docsSearchEngine === 'google' ? 1 : 0,
-    choices: [
-      { label: 'Bing', value: 'bing', description: tr(locale, 'default · 免 API key', 'default · no API key') },
-      { label: 'Google', value: 'google', description: tr(locale, 'higher precision · 需要 GOOGLE_CSE_ID + GOOGLE_API_KEY', 'higher precision · needs GOOGLE_CSE_ID + GOOGLE_API_KEY') },
-    ],
-  })
-  await settingsStore.setDocsSearchEngine(docsEngine)
-  if (docsEngine === 'google' && (!process.env.GOOGLE_CSE_ID || !process.env.GOOGLE_API_KEY)) {
-    console.log(tr(
-      locale,
-        '  ⚠ 未检测到 GOOGLE_CSE_ID + GOOGLE_API_KEY；lookup_docs fallback: Bing。',
-        '  ⚠ GOOGLE_CSE_ID + GOOGLE_API_KEY were not detected; lookup_docs fallback: Bing.',
-    ))
-  }
 
   const researchEngine = await chooseInteractiveOption<ResearchEngine>({
     title: tr(locale, 'deep_research 使用哪个研究后端？', 'Which research backend should deep_research use?'),

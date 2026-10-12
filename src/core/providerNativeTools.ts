@@ -802,7 +802,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           limit: integerSchema('Optional limit for returned search results.'),
           backend: {
             type: 'string',
-            description: 'Optional backend: auto (default; uses the platform search on hosted agents), platform, bing, google, duckduckgo, or wikipedia.',
+            description: 'Optional backend: auto (default; uses the platform search on hosted agents), platform, google (legacy, needs its own key), duckduckgo, or wikipedia.',
           },
           freshness: {
             type: 'string',

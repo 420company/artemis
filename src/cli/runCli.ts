@@ -329,6 +329,8 @@ export async function runCli(argv: string[]): Promise<void> {
       prompt: options.prompt,
       mode: options.command,
       model: options.model,
+      baseUrl: options.baseUrl,
+      apiKey: options.apiKey,
       maxTurns: options.maxTurnsExplicit ? options.maxTurns : undefined,
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,
@@ -360,14 +362,17 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
-  // ── stubs for advanced subcommands ──────────────────────────────────────────
-  const stubCommands: Record<string, string> = {
-    tasks:    'Task manager (coming soon)',
-    runtimes: 'Runtime profiles (coming soon)',
-  }
-  if (options.command in stubCommands) {
+  // ── removed subcommands: say where the feature lives, start nothing ─────────
+  if (options.command === 'tasks' || options.command === 'runtimes') {
+    const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
+    const slash = `/${options.command}`
     console.log()
-    console.log(buildPanel(options.command, [stubCommands[options.command as keyof typeof stubCommands]]))
+    console.log(buildPanel(t('命令已移除', 'Command removed'), [
+      t(`artemis ${options.command} 已移除。`, `artemis ${options.command} was removed.`),
+      options.command === 'tasks'
+        ? t(`在对话里用 ${slash} 查看或管理任务板。`, `In a chat, use ${slash} to show or manage the task board.`)
+        : t(`在对话里用 ${slash} 查看或中断运行中的任务。`, `In a chat, use ${slash} to inspect or interrupt runtimes.`),
+    ]))
     console.log()
     return
   }
@@ -682,6 +687,8 @@ async function runQueryCommand(options: {
   prompt?: string
   mode: 'analyze' | 'execute'
   model?: string
+  baseUrl?: string
+  apiKey?: string
   maxTurns?: number
   sessionId?: string
   imagePaths?: string[]
@@ -743,6 +750,8 @@ async function runQueryCommand(options: {
     } else result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
       permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
       model,
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      ...(options.apiKey ? { apiKey: options.apiKey } : {}),
       maxTurns: options.maxTurns,
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,

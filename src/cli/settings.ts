@@ -10,12 +10,16 @@ import {
 } from '../utils/workspaceRoots.js'
 
 export const DEFAULT_WORDUP_INTERVAL_MINUTES = 30
+// Legacy: lookup_docs no longer picks a search engine (it uses search_web,
+// backend auto). The setting is still read and written so existing settings
+// files stay as they are; nothing acts on it.
 export const DEFAULT_DOCS_SEARCH_ENGINE = 'bing'
 export const DEFAULT_RESEARCH_ENGINE = 'builtin'
 export const DEFAULT_GEMINI_DEEP_RESEARCH_AGENT = 'deep-research-preview-04-2026'
 export const DEFAULT_GEMINI_DEEP_RESEARCH_MAX_POLLS = 360
 export const DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS = 5_000
 
+/** Legacy, unused: see DEFAULT_DOCS_SEARCH_ENGINE. */
 export type DocsSearchEngine = 'bing' | 'google'
 export type ResearchEngine = 'builtin' | 'gemini-deep-research'
 
@@ -30,6 +34,7 @@ export interface CliSettings {
   workspaceTrustConfirmed: boolean
   wordUpEnabled: boolean
   wordUpIntervalMinutes: number
+  /** Legacy, unused: see DEFAULT_DOCS_SEARCH_ENGINE. */
   docsSearchEngine: DocsSearchEngine
   docsSearchEngineConfigured: boolean
   researchEngine: ResearchEngine
@@ -285,10 +290,6 @@ export class CliSettingsStore {
       trustedWorkspaceRoots,
       lastTrustedWorkspaceRoot: path.resolve(workspacePath),
     })
-  }
-
-  async setDocsSearchEngine(engine: DocsSearchEngine): Promise<CliSettings> {
-    return this.update({ docsSearchEngine: engine, docsSearchEngineConfigured: true })
   }
 
   async clearVisualAssetPreference(): Promise<CliSettings> {

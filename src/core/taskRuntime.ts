@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { truncate } from '../utils/fs.js';
+import { truncate, truncateInline } from '../utils/fs.js';
 import type {
   AgentPhase,
   AgentRole,
@@ -591,7 +591,7 @@ export function formatTaskRuntimeCommandLine(
     `- ${command.id} [${command.state}] ${command.type}`,
     command.handledBySessionId ? `handled_by=${command.handledBySessionId}` : '',
     command.handledAt ? `handled_at=${command.handledAt}` : '',
-    command.summary ? `summary=${truncate(command.summary, 120)}` : '',
+    command.summary ? `summary=${truncateInline(command.summary, 120)}` : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -614,12 +614,12 @@ export function formatTaskRuntimeLines(
       runtime.workerSessionId ? `worker=${runtime.workerSessionId}` : '',
       runtime.processId ? `pid=${runtime.processId}` : '',
       runtime.processStartedAt ? `pid_started=${runtime.processStartedAt}` : '',
-      runtime.processToken ? `pid_token=${truncate(runtime.processToken, 24)}` : '',
+      runtime.processToken ? `pid_token=${truncateInline(runtime.processToken, 24)}` : '',
       runtime.commandQueue?.length
         ? `commands=${getQueuedTaskRuntimeCommands(runtime).length}/${runtime.commandQueue.length}`
         : '',
       `updated=${runtime.updatedAt}`,
-      runtime.lastOutput ? `output=${truncate(runtime.lastOutput, 120)}` : '',
+      runtime.lastOutput ? `output=${truncateInline(runtime.lastOutput, 120)}` : '',
     ]
       .filter(Boolean)
       .join(' '),

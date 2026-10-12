@@ -1,4 +1,4 @@
-import { truncate } from '../utils/fs.js';
+import { truncate, truncateInline } from '../utils/fs.js';
 import type {
   EvidenceClaim,
   EvidenceConflict,
@@ -13,7 +13,7 @@ function normalizeWhitespace(text: string): string {
 }
 
 function clip(text: string, maxChars: number): string {
-  return truncate(normalizeWhitespace(text), maxChars);
+  return truncateInline(normalizeWhitespace(text), maxChars);
 }
 
 const NEGATION_TOKENS = new Set([
@@ -238,7 +238,7 @@ export function deriveClaimStatement(
   }
 
   const firstSentence = normalized.match(/.+?[.!?](\s|$)/)?.[0]?.trim();
-  return truncate(firstSentence || normalized, maxChars);
+  return truncateInline(firstSentence || normalized, maxChars);
 }
 
 export function detectEvidenceConflicts(

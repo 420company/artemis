@@ -4,6 +4,7 @@ import { resolveConfiguredVisualProvider } from '../../utils/visualGenerationCon
 import { toolWarn } from '../../utils/log.js';
 import { postSagaChatCompletion, resolveSagaChatEndpoint } from './sagaChat.js';
 import type { ToolExecutionContext } from '../types.js';
+import { DEFAULT_MODEL_IDS } from '../../providers/presets.js';
 
 type StoryboardShot = {
   panelNumber?: string;
@@ -116,7 +117,7 @@ export async function parseStoryboardImageWithVision(options: {
     const explicitVision = imageConfigured?.config.image.visionModel?.trim();
     const visionCandidates = explicitVision && !/image|dall[-_]?e/i.test(explicitVision)
       ? [explicitVision]
-      : ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4o-mini', 'gpt-4o'];
+      : [...DEFAULT_MODEL_IDS.visionFallbacks];
     for (const m of visionCandidates) {
       candidates.push({ apiKey: imageApiKey, baseUrl: imageBaseUrl, chatModel: m, label: `image-provider-vision[${m}]` });
     }

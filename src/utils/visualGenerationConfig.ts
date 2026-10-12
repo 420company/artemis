@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { ProviderStore, isOwnKeyProfile } from '../providers/store.js';
 import type { ProviderProfile, VisualModelConfig } from '../providers/types.js';
+import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
 
 export type VisualAssetKind = 'image' | 'video';
 
@@ -211,25 +212,17 @@ export function defaultVisualModelForProvider(
   switch (provider.toLowerCase()) {
     case 'luna':
     case 'router':
-      return assetKind === 'image' ? 'gpt-image-2' : 'seedance-1-5-pro-251215';
+      return assetKind === 'image' ? 'gpt-image-2' : DEFAULT_MODEL_IDS.byteplusVideo;
     case 'openai':
       return assetKind === 'image' ? 'gpt-image-2' : 'sora-2';
     case 'byteplus':
       return assetKind === 'image'
-        ? 'seedream-5-0-260128'
-        : 'seedance-1-5-pro-251215';
-    case 'stable-diffusion':
-      return assetKind === 'image'
-        ? 'stable-diffusion-xl'
-        : 'stable-video-diffusion';
-    case 'gemini':
-      return assetKind === 'image' ? 'gemini-3-pro-image-preview' : 'none';
+        ? DEFAULT_MODEL_IDS.byteplusImage
+        : DEFAULT_MODEL_IDS.byteplusVideo;
     case 'google':
       return assetKind === 'image'
         ? 'gemini-3-pro-image-preview'
         : 'veo-3.1-generate-preview';
-    case 'grok':
-      return assetKind === 'image' ? 'grok-v1' : 'grok-video';
     case 'mock':
       return assetKind === 'image' ? 'mock-image' : 'mock-video';
     default:
@@ -247,7 +240,6 @@ export function defaultVisualBaseUrlForProvider(provider: string): string {
     case 'router':
       return 'https://api.router.ai/v1';
     case 'google':
-    case 'gemini':
       return 'https://generativelanguage.googleapis.com/v1beta';
     default:
       return '';
