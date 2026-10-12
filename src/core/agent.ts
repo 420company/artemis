@@ -1,5 +1,6 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import path from 'node:path';
+import { scrubSecrets } from '../security/credentialStore.js';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
 import {
   getAllowedActionTypesForProfile,
@@ -1136,21 +1137,9 @@ function tryParseEnvelope(raw: string): AssistantEnvelope {
     // Fall through to embedded JSON / XML recovery below.
   }
 
-  for (const candidate of extractEmbeddedEnvelopeCandidates(raw)) {
-    try {
-      const parsed = JSON.parse(candidate.jsonText) as unknown;
-      if (isAssistantEnvelopeLike(parsed)) {
-        return buildEnvelopeFromParsedObject(
-          parsed,
-          candidate.prefix || raw.trim(),
-        );
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  // JSON failed entirely. Try XML tool-call dialects before giving up.
+  // Tool-call blocks come first: they are actions, and nothing inside them
+  // (a tool's own `plan`, `reply` or nested `actions` argument) is ever read
+  // as the reply envelope.
   const xmlActions = extractXmlToolCalls(raw);
   if (xmlActions.length > 0) {
     const cleaned = stripXmlToolCalls(raw);
@@ -1163,6 +1152,27 @@ function tryParseEnvelope(raw: string): AssistantEnvelope {
       claims: undefined,
     };
   }
+
+  // An envelope after some prose: only a candidate that carries `reply` or
+  // `actions` and ends the text counts. JSON shown inside the prose (an
+  // example in a fenced block, a config) is the reply's content, not an
+  // envelope.
+  const withoutToolBlocks = stripXmlToolCalls(raw);
+  for (const candidate of extractEmbeddedEnvelopeCandidates(withoutToolBlocks)) {
+    try {
+      const parsed = JSON.parse(candidate.jsonText) as unknown;
+      if (!isAssistantEnvelopeLike(parsed)) continue;
+      const record = parsed as Record<string, unknown>;
+      if (!('reply' in record) && !('actions' in record)) continue;
+      const at = withoutToolBlocks.lastIndexOf(candidate.jsonText);
+      const after = at >= 0 ? withoutToolBlocks.slice(at + candidate.jsonText.length).replace(/^\s*```/, '').trim() : '';
+      if (after) continue;
+      return buildEnvelopeFromParsedObject(parsed, candidate.prefix || raw.trim());
+    } catch {
+      continue;
+    }
+  }
+
   return {
     reply: raw.trim(),
     done: true,
@@ -5089,7 +5099,20 @@ export function startToolHeartbeat(
   return () => clearInterval(timer);
 }
 
+/**
+ * Every tool result, foreground or background, with the stored secrets handed
+ * out this run replaced by •••• (a page echoing a password, a console line).
+ */
 async function executeAgentAction(
+  session: SessionRecord,
+  action: AgentAction,
+  options: RunAgentOptions,
+  abortSignal?: AbortSignal,
+): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+  return scrubToolResult(await executeAgentActionUnscrubbed(session, action, options, abortSignal));
+}
+
+async function executeAgentActionUnscrubbed(
   session: SessionRecord,
   action: AgentAction,
   options: RunAgentOptions,
@@ -5729,6 +5752,12 @@ function startBackgroundAction(
 }
 
 type ToolActivityAction = import('./agentStatus.js').ToolActivityEvent['action'];
+
+export function scrubToolResult<R extends { output?: string; error?: { message?: string } }>(result: R): R {
+  const output = typeof result.output === 'string' ? scrubSecrets(result.output) : result.output;
+  const error = result.error && typeof result.error.message === 'string' ? { ...result.error, message: scrubSecrets(result.error.message) } : result.error;
+  return output === result.output && error === result.error ? result : { ...result, output, ...(error ? { error } : {}) };
+}
 let toolActivitySeq = 0;
 
 /** A status listener never breaks a run. */
@@ -5861,6 +5890,9 @@ async function executeAuthorizedAction(
     } finally {
       stopHeartbeat();
     }
+    // A stored secret handed to a tool never comes back in what the model,
+    // the history or the host sees (a page echoing it, a console line).
+    result = scrubToolResult(result);
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;
     if (options.heimdallThreadState) {
@@ -5923,7 +5955,7 @@ async function executeAuthorizedAction(
           error instanceof Error ? truncate(error.message, 160) : truncate(String(error), 160),
       },
     );
-    return buildGuardrailFailureOutcome(action, error);
+    return buildGuardrailFailureOutcome(action, error instanceof Error ? new Error(scrubSecrets(error.message)) : scrubSecrets(String(error)));
   } finally {
     if (activityCallId) {
       notifyToolActivity(options, { phase: 'end', callId: activityCallId, action: action as unknown as ToolActivityAction, ...(activityOk !== undefined ? { ok: activityOk } : {}) });

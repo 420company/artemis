@@ -374,7 +374,7 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
       if (action.value === undefined) {
         return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
       }
-      const typed = await withCredentials(action.value);
+      const typed = await withCredentials(action.value, page.url(), el);
       if (!typed.ok) return typed.result;
       await el.fill(typed.text, { timeout: 10_000 });
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
@@ -402,6 +402,17 @@ export async function executeBrowserEvaluate(action: BrowserEvaluateAction): Pro
   }
   try {
     return await withPageRetry(async (page) => {
+      // A script could read a credential typed on this site and send it anywhere.
+      let origin = '';
+      try {
+        origin = new URL(page.url()).origin.toLowerCase();
+      } catch {
+        origin = '';
+      }
+      if (credentialOrigins.has(origin)) {
+        const message = 'Scripts are not run on a site where a stored credential was typed. Read the page with browser_extract_text instead.';
+        return { ok: false, output: message, error: { code: 'credential_page_locked', message } };
+      }
       const result = await page.evaluate(action.script);
       let rendered: string;
       try {
@@ -505,14 +516,44 @@ export interface BrowserTypeAction {
   pressEnter?: boolean;
 }
 
-/** Resolves `{{credential:<name>}}` placeholders (security/credentialStore.ts) just before typing. */
-async function withCredentials(text: string): Promise<{ ok: true; text: string } | { ok: false; result: ToolResult }> {
+/** Origins where a stored credential was typed this session: no scripts run there (they could read the field). */
+const credentialOrigins = new Set<string>();
+
+type FieldLocator = { evaluate: <R>(fn: (node: Element) => R, arg?: undefined, options?: { timeout?: number }) => Promise<R> };
+
+/**
+ * `{{credential:<name>}}` (the whole value, nothing else) types a stored
+ * secret: only on the origin it is bound to, a password only into a password
+ * field, a username only into a username/email field. Everything else in
+ * the value is typed as is. The history keeps the placeholder; the secret is
+ * scrubbed from every tool result (security/credentialStore.ts).
+ */
+async function withCredentials(text: string, pageUrl: string, el: FieldLocator): Promise<{ ok: true; text: string } | { ok: false; result: ToolResult }> {
   if (!text.includes('{{credential:')) return { ok: true, text };
-  const { resolveCredentialPlaceholders } = await import('../../security/credentialStore.js');
-  const resolved = await resolveCredentialPlaceholders(text);
-  if (resolved.ok) return { ok: true, text: resolved.text };
-  const message = `No stored password or token named ${resolved.missing.join(', ')}. Create one with server_setup create_password, or ask the user to type it in the browser themselves.`;
-  return { ok: false, result: { ok: false, output: message, error: { code: 'credential_not_found', message } } };
+  const refuse = (code: string, message: string) => ({ ok: false as const, result: { ok: false, output: message, error: { code, message } } });
+  const { CREDENTIAL_PLACEHOLDER_ONLY, normalizeOrigin, useCredential } = await import('../../security/credentialStore.js');
+  const match = CREDENTIAL_PLACEHOLDER_ONLY.exec(text.trim());
+  if (!match) return refuse('invalid_input', 'A credential placeholder must be the whole value: exactly {{credential:<name>}}, nothing before or after it.');
+  const origin = normalizeOrigin(pageUrl);
+  if (!origin) return refuse('credential_refused', 'Credentials are only typed on http(s) pages.');
+  const field = await el.evaluate((node) => {
+    const input = node as HTMLInputElement;
+    const type = (input.getAttribute('type') ?? 'text').toLowerCase();
+    const hints = `${input.getAttribute('autocomplete') ?? ''} ${input.getAttribute('name') ?? ''} ${input.id ?? ''}`.toLowerCase();
+    if (node.tagName.toLowerCase() !== 'input') return 'other';
+    if (type === 'password') return 'password';
+    if (type === 'email' || ((type === 'text' || type === '') && /username|email|user|login|account|mail/.test(hints))) return 'username';
+    return 'other';
+  }, undefined, { timeout: 10_000 });
+  if (field === 'other') return refuse('credential_refused', 'Stored credentials only go into a password field (or a username/email field for a username). Nothing was typed.');
+  const used = await useCredential(match[1]!, { type: 'web', origin, field });
+  if (!used.ok) {
+    return refuse(used.code === 'not_found' ? 'credential_not_found' : 'credential_refused', used.code === 'not_found'
+      ? `No stored credential named ${match[1]}. Make a password with server_setup create_password (with the site's origin), or hand this step to the user.`
+      : `${used.message} Nothing was typed.`);
+  }
+  credentialOrigins.add(origin);
+  return { ok: true, text: used.secret };
 }
 
 export async function executeBrowserType(action: BrowserTypeAction): Promise<ToolResult> {
@@ -527,7 +568,7 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
     return await withPageRetry(async (page) => {
       const el = page.locator(action.selector).first();
       // `{{credential:<name>}}` types a stored password; the history keeps the placeholder.
-      const typed = await withCredentials(action.text);
+      const typed = await withCredentials(action.text, page.url(), el);
       if (!typed.ok) return typed.result;
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first

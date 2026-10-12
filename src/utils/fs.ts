@@ -18,6 +18,9 @@ const SENSITIVE_PATH_SEGMENTS = [
   '.gnupg',
   '.aws',
   '.config/gh',
+  // The agent's own credentials and VPN profiles (security/credentialStore.ts, tools/serverSetup).
+  'agent-credentials',
+  'vpn-profiles',
 ]
 
 type WalkFilesCacheEntry = {
@@ -53,6 +56,12 @@ export function isSensitivePath(absolute: string): boolean {
   if (base === '.env' || base.startsWith('.env.') || base === '.netrc') return true
   if (base === 'providers.json' || base === 'bragi.json' || base === 'vercel.json') return true
   return false
+}
+
+/** The agent's own credential store and VPN profiles: closed to file tools in every permission mode. */
+export function isAlwaysPrivatePath(absolute: string): boolean {
+  const normalized = absolute.replace(/\\/g, '/')
+  return /(^|\/)(agent-credentials|vpn-profiles)(\/|$)/.test(normalized)
 }
 
 /** Throws if `absolute` is a sensitive path. Use to guard write tools. */

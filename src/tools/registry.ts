@@ -1878,7 +1878,7 @@ const capabilityToolDefs: ToolDefinition[] = [
 
   {
     type: 'server_setup',
-    description: '为用户新开的服务器做全套设置，密钥和密码只存在凭据库、不进对话：create_key（生成 SSH 密钥，返回公钥填到服务商表单）、create_password（生成强密码，表单里输入 {{credential:名字}}）、install_key（只有 root 密码的机器装上密钥）、wait_ready（等机器开好）、harden（更新、防火墙、仅密钥登录）、install_wireguard（装 VPN，生成手机/电脑配置和二维码）、verify（ssh / wireguard / url 检查是否真的可用）、run（在服务器上执行一条命令）、list_servers / record_server（服务器清单，方便以后"再加一台""关掉某台"）。',
+    description: '为用户新开的服务器做全套设置，密钥和密码只存在凭据库、不进对话：create_key（生成 SSH 密钥，返回公钥填到服务商表单）、create_password（生成强密码，绑定到要填它的网站 origin；在那个网站的密码框里输入 {{credential:名字}}）、install_key（只有 root 密码的机器装上密钥）、wait_ready（等机器开好）、harden（更新、防火墙、仅密钥登录）、install_wireguard（装 VPN，给出 ```vpn 卡片：二维码和下载，配置不进工作区）、verify（ssh / wireguard / url 检查是否真的可用）、run（在服务器上执行一条命令）、list_servers / record_server（服务器清单，方便以后"再加一台""关掉某台"）、forget_host_key（服务器指纹变了且用户确认重装过时才用，会请用户批准）。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1890,7 +1890,11 @@ const capabilityToolDefs: ToolDefinition[] = [
     },
     execute: (async (a: any, context: any) => {
       const { executeServerSetup } = await import('./serverSetup/serverSetup.js');
-      const result = await executeServerSetup(a, { cwd: context.cwd, ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}) });
+      const result = await executeServerSetup(a, {
+        cwd: context.cwd,
+        ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
+        ...(context.requestUserConfirmation ? { requestUserConfirmation: context.requestUserConfirmation } : {}),
+      });
       return { action: a, ...result };
     }) as any,
   },

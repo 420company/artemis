@@ -72,13 +72,35 @@ ${allow.map((p) => `  firewall-cmd --permanent --add-port=${shq(p)} >/dev/null`)
   echo "firewall=firewalld"
 fi
 systemctl enable --now fail2ban >/dev/null 2>&1 || true
+# A VPN set up before keeps working: its port stays open and its traffic is routed.
+if command -v wg >/dev/null 2>&1 && ip link show wg0 >/dev/null 2>&1; then
+  WGPORT=$(wg show wg0 listening-port 2>/dev/null || true)
+  WAN=$(ip -4 route show default | awk '{print $5; exit}')
+  if [ -n "$WGPORT" ] && command -v ufw >/dev/null 2>&1; then
+    ufw allow "$WGPORT/udp" >/dev/null
+    [ -n "$WAN" ] && ufw route allow in on wg0 out on "$WAN" >/dev/null 2>&1 || true
+    sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+    ufw reload >/dev/null || true
+  elif [ -n "$WGPORT" ] && command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$WGPORT/udp" >/dev/null && firewall-cmd --permanent --add-masquerade >/dev/null && firewall-cmd --reload >/dev/null
+  fi
+  echo "vpn=kept (port \${WGPORT:-?}/udp)"
+fi
 # Key-only SSH, but only when a key is installed (never lock the owner out).
+# sshd takes the first value it reads, and cloud images ship
+# 50-cloud-init.conf with PasswordAuthentication yes: ours sorts first.
 if [ -s "$HOME/.ssh/authorized_keys" ] || [ -s /root/.ssh/authorized_keys ]; then
   mkdir -p /etc/ssh/sshd_config.d
-  printf 'PasswordAuthentication no\\nKbdInteractiveAuthentication no\\nPermitRootLogin prohibit-password\\n' > /etc/ssh/sshd_config.d/60-agent-hardening.conf
+  rm -f /etc/ssh/sshd_config.d/60-agent-hardening.conf
+  printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' > /etc/ssh/sshd_config.d/00-agent-hardening.conf
   if ! grep -qi '^Include /etc/ssh/sshd_config.d' /etc/ssh/sshd_config; then sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config; fi
   sshd -t && (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true)
-  echo "ssh=key-only"
+  if sshd -T 2>/dev/null | grep -qix 'passwordauthentication no'; then
+    echo "ssh=key-only"
+  else
+    echo "key-only SSH is not in effect: another sshd setting turns password login back on" >&2
+    exit 3
+  fi
 fi
 echo "ARTEMIS_STEP harden ok"
 `;
@@ -101,8 +123,10 @@ command -v wg >/dev/null 2>&1 || install_pkgs wireguard-tools iptables || instal
 command -v wg-quick >/dev/null 2>&1 || install_pkgs wireguard
 WAN=$(ip -4 route show default | awk '{print $5; exit}')
 [ -n "$WAN" ] || { echo "no default route" >&2; exit 1; }
-printf 'net.ipv4.ip_forward=1\\nnet.ipv6.conf.all.forwarding=1\\n' > /etc/sysctl.d/99-agent-wireguard.conf
+# IPv4 only: turning on IPv6 forwarding would drop the server's own IPv6 route (SLAAC).
+printf 'net.ipv4.ip_forward=1\\n' > /etc/sysctl.d/99-agent-wireguard.conf
 sysctl -q -p /etc/sysctl.d/99-agent-wireguard.conf >/dev/null || true
+sysctl -q -w net.ipv6.conf.all.forwarding=0 >/dev/null 2>&1 || true
 umask 077
 mkdir -p /etc/wireguard
 KEY=$(cat <<'KEY_EOF'

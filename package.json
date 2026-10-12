@@ -48,6 +48,7 @@
     "test:prompt": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/promptSmoke.ts",
     "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/windowsInputSmoke.ts && npm run test:contextReplay && npm run test:compaction && npm run test:skills && npm run test:selfCheck && npm run test:copilot",
     "test:copilot": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/copilotSmoke.ts",
+    "test:credentials-browser": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/credentialBrowserSmoke.ts",
     "test:skills": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/skillLearningSmoke.ts",
     "test:selfCheck": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/selfCheckSmoke.ts",
     "test:compaction": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextCompactionSmoke.ts",

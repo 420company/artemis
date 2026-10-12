@@ -6,7 +6,7 @@
  * Adapter: the host registers a VerificationCodeSource
  * (registerVerificationCodeSource), or names a program in
  * ARTEMIS_VERIFICATION_CODE_CMD that prints `{"code":"123456","from":"…"}`
- * for `--channel email|sms --sender <text> --timeout <seconds> --since <ISO>`
+ * for `--channel=email|sms --sender=<text> --timeout=<seconds> --since=<ISO>`
  * (exit 0; exit 2 or `{}` when nothing arrived). Without either, the tool
  * says so and the agent falls back to a browser takeover or asks the user.
  */
@@ -76,7 +76,8 @@ export function commandCodeSource(command: string): VerificationCodeSource {
     },
     async get(request) {
       const r = await run(
-        ['--channel', request.channel, ...(request.sender ? ['--sender', request.sender] : []), '--timeout', String(Math.ceil(request.timeoutMs / 1000)), '--since', request.since.toISOString()],
+        // `--name=value`: a sender starting with "-" can never be read as an option.
+        [`--channel=${request.channel}`, ...(request.sender ? [`--sender=${request.sender}`] : []), `--timeout=${Math.ceil(request.timeoutMs / 1000)}`, `--since=${request.since.toISOString()}`],
         request.timeoutMs,
         request.signal,
       );
@@ -110,12 +111,13 @@ export interface GetCodeAction {
 export async function getVerificationCode(channel: CodeChannel, sender: string | undefined, timeoutMs: number, signal?: AbortSignal): Promise<ReceivedCode | undefined> {
   const source = currentCodeSource();
   if (!source) return undefined;
-  return source.get({ channel, ...(sender ? { sender } : {}), timeoutMs, since: new Date(Date.now() - 10 * 60_000), ...(signal ? { signal } : {}) });
+  // Only codes from the last few minutes: an older one is for something else.
+  return source.get({ channel, ...(sender ? { sender } : {}), timeoutMs, since: new Date(Date.now() - 3 * 60_000), ...(signal ? { signal } : {}) });
 }
 
 export async function executeGetVerificationCode(action: GetCodeAction, context: { abortSignal?: AbortSignal }): Promise<{ action: GetCodeAction; ok: boolean; output: string; error?: { code: string; message: string; retryable?: boolean } }> {
   const source = currentCodeSource();
-  const fallback = 'No mailbox or phone number of your own is connected. Ask the user to take over the browser and type the code (browser_request_handoff), or to send you the one-time code in chat — never their password.';
+  const fallback = 'No mailbox or phone number of your own is connected. Hand this step to the user in the browser (they type the code themselves), or ask them to send you the one-time code in chat — never their password.';
   if (!source) return { action, ok: false, output: fallback, error: { code: 'codes_unavailable', message: fallback, retryable: false } };
   if (!action.channel || action.channel === 'which') {
     const channels = await source.channels();
@@ -124,8 +126,14 @@ export async function executeGetVerificationCode(action: GetCodeAction, context:
       ? { action, ok: true, output: `You can receive codes at:\n${lines.join('\n')}\nUse these for sign-ups when the user agreed to it, then call get_verification_code with that channel.` }
       : { action, ok: false, output: fallback, error: { code: 'codes_unavailable', message: fallback, retryable: false } };
   }
+  const sender = action.sender?.trim().slice(0, 120);
+  // Without the site or address it comes from, any recent code could be taken for this one.
+  if (!sender) {
+    const message = 'Say who sends the code (the site or the address), so the right message is picked.';
+    return { action, ok: false, output: message, error: { code: 'invalid_input', message, retryable: true } };
+  }
   const timeoutMs = Math.max(15, Math.min(600, action.timeoutSeconds ?? 120)) * 1000;
-  const received = await getVerificationCode(action.channel, action.sender?.slice(0, 120), timeoutMs, context.abortSignal);
+  const received = await getVerificationCode(action.channel, sender, timeoutMs, context.abortSignal);
   if (!received) {
     const message = `No ${action.channel === 'sms' ? 'SMS' : 'email'} code arrived within ${Math.round(timeoutMs / 1000)} s. Ask the site to resend once; if it still does not come, hand the step to the user.`;
     return { action, ok: false, output: message, error: { code: 'code_not_received', message, retryable: true } };

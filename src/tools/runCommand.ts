@@ -485,6 +485,15 @@ export async function executeRunCommand(
     action.timeoutMs,
   );
 
+  // The agent's own credentials and VPN profiles stay out of shells in every mode.
+  if (/agent-credentials|vpn-profiles/.test(expandForInspection(action.command))) {
+    return Promise.resolve({
+      action,
+      ok: false,
+      output: 'Access denied: command references a protected path.',
+    })
+  }
+
   if (context.permissionMode !== 'full-access' && commandAccessesSensitivePath(action.command)) {
     return Promise.resolve({
       action,

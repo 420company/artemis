@@ -79,6 +79,10 @@ export async function runHeadlessAgent(
   const { loadCompactionSettings } = await import('./compactionSettings.js')
 
   const onInfo = opts.onInfo ?? (() => undefined)
+  // The web server's credential broker for this run: kept by this process,
+  // removed from the environment before any tool or shell starts.
+  const { captureCredentialBroker } = await import('../security/credentialStore.js')
+  captureCredentialBroker()
   const providerConfig = await resolveMainProviderConfig({
     cwd,
     config: opts.model ? { model: opts.model } : {},
@@ -204,9 +208,11 @@ export async function runHeadlessAgent(
     if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
       await sessionStore.save(current)
     }
-    // The run is over. (A run that stops at an approval request reports
-    // statusForApprovalKind(kind) here instead, so the owner sees what waits.)
-    agentStatus.finish()
+    // The run is over: done, or waiting for the owner's OK when the answer
+    // ends with a confirmation card. (A run that stops at a hard approval
+    // request reports statusForApprovalKind(kind) here instead.)
+    const { statusAtEnd } = await import('../core/agentStatus.js')
+    agentStatus.finish(statusAtEnd(runResult.reply ?? ''))
     return runResult
   }, { label: `Session ${session.id}` })
 

@@ -8,6 +8,9 @@
 //   ARTEMIS_SSH_FAKE_DOWN_FOR=N      refuse the first N connections ("still booting"); state in ARTEMIS_SSH_FAKE_STATE
 //   ARTEMIS_SSH_FAKE_PASSWORD=…      the root password install_key must present (through SSH_ASKPASS)
 //   ARTEMIS_SSH_FAKE_HOSTS=a,b       only these hosts exist (others: "No route to host")
+//   ARTEMIS_SSH_FAKE_NEW_HOSTKEY=a,b these hosts answer with a changed host key (reinstalled, or someone in between)
+//   ARTEMIS_SSH_FAKE_SSHD_OVERRIDE=1 a cloud image whose sshd config turns password login back on (hardening must fail)
+//   ARTEMIS_SSH_FAKE_LOCKED=1        password logins are refused (key-only SSH already on)
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 
@@ -31,6 +34,11 @@ process.stdin.on('end', () => {
     process.stderr.write(`ssh: connect to host ${host} port 22: No route to host\n`)
     process.exit(255)
   }
+  if ((process.env.ARTEMIS_SSH_FAKE_NEW_HOSTKEY ?? '').split(',').includes(host)) {
+    log({ result: 'hostkey_changed' })
+    process.stderr.write('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nHost key verification failed.\n')
+    process.exit(255)
+  }
   const downFor = Number(process.env.ARTEMIS_SSH_FAKE_DOWN_FOR ?? 0)
   if (downFor > 0) {
     const state = process.env.ARTEMIS_SSH_FAKE_STATE ?? '/tmp/fake-ssh-state.json'
@@ -42,6 +50,11 @@ process.stdin.on('end', () => {
       process.stderr.write(`ssh: connect to host ${host} port 22: Connection refused\n`)
       process.exit(255)
     }
+  }
+  if (auth === 'password' && process.env.ARTEMIS_SSH_FAKE_LOCKED === '1') {
+    log({ result: 'locked' })
+    process.stderr.write(`${user}@${host}: Permission denied (publickey).\n`)
+    process.exit(255)
   }
   if (auth === 'password') {
     let given = ''
@@ -66,7 +79,13 @@ process.stdin.on('end', () => {
     steps.push('probe')
   }
   if (script.includes('ARTEMIS_STEP harden')) {
-    out.push('updates=done', 'firewall=ufw', 'ssh=key-only', 'ARTEMIS_STEP harden ok')
+    if (process.env.ARTEMIS_SSH_FAKE_SSHD_OVERRIDE === '1' || !script.includes('00-agent-hardening.conf') || !script.includes('sshd -T')) {
+      log({ steps: ['harden-failed'] })
+      process.stdout.write('updates=done\nfirewall=ufw\n')
+      process.stderr.write('key-only SSH is not in effect: another sshd setting turns password login back on\n')
+      process.exit(3)
+    }
+    out.push('updates=done', 'firewall=ufw', ...(script.includes('wg show wg0 listening-port') ? ['vpn=kept (port 51820/udp)'] : []), 'ssh=key-only', 'ARTEMIS_STEP harden ok')
     steps.push('harden')
   }
   if (script.includes('ARTEMIS_STEP wireguard')) {
@@ -89,7 +108,7 @@ process.stdin.on('end', () => {
     steps.push('cleanup')
   }
   if (steps.length === 0) out.push(`ran: ${script.trim().slice(0, 200)}`)
-  log({ steps, scriptHasPrivateKey: /PrivateKey = \S/.test(script) || /BEGIN OPENSSH/.test(script) })
+  log({ steps, scriptHasPrivateKey: /PrivateKey = \S/.test(script) || /BEGIN OPENSSH/.test(script), ipv6Forwarding: /ipv6\.conf\.all\.forwarding=1/.test(script), keepsVpn: /wg show wg0 listening-port/.test(script) && script.includes('ARTEMIS_STEP harden') })
   process.stdout.write(out.join('\n') + '\n')
   process.exit(0)
 })

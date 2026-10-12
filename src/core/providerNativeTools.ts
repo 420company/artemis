@@ -948,8 +948,9 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['action'],
         properties: {
-          action: { type: 'string', enum: ['create_key', 'create_password', 'install_key', 'wait_ready', 'harden', 'install_wireguard', 'verify', 'run', 'list_servers', 'record_server'], description: 'create_key: SSH key pair (returns the public key for the provider form). create_password: strong password stored as {{credential:name}}. install_key: put a key on a server that only has a root password. wait_ready: wait until SSH answers. harden: updates, firewall, key-only SSH. install_wireguard: VPN + device profiles and QR codes. verify: check ssh | wireguard | url. run: one command. list_servers / record_server: the server inventory.' },
+          action: { type: 'string', enum: ['create_key', 'create_password', 'install_key', 'wait_ready', 'harden', 'install_wireguard', 'verify', 'run', 'list_servers', 'record_server', 'forget_host_key'], description: 'create_key: SSH key pair (returns the public key for the provider form). create_password: strong password, bound to `origin` (the site whose password field takes {{credential:name}}) and/or `host`. forget_host_key: only after the owner confirmed a reinstall (asks them to approve). install_key: put a key on a server that only has a root password. wait_ready: wait until SSH answers. harden: updates, firewall, key-only SSH. install_wireguard: VPN + device profiles and QR codes. verify: check ssh | wireguard | url. run: one command. list_servers / record_server: the server inventory.' },
           name: { type: 'string', description: 'create_key / create_password: credential name, e.g. "vpn-tokyo-1".' },
+          origin: { type: 'string', description: 'create_password: the web site the password is for, e.g. "https://www.example.com".' },
           comment: { type: 'string' },
           length: { type: 'integer', minimum: 16, maximum: 64 },
           host: { type: 'string', description: 'Server IP or host name.' },
@@ -981,7 +982,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         properties: {
           channel: { type: 'string', enum: ['email', 'sms', 'which'], description: '"which" lists the mailbox/phone number you can use for sign-ups.' },
-          sender: { type: 'string', description: 'Who sends the code (site or address), to pick the right message.' },
+          sender: { type: 'string', description: 'Required for email/sms: who sends the code (the site or address), to pick the right message.' },
           timeoutSeconds: { type: 'integer', minimum: 15, maximum: 600 },
         },
       };

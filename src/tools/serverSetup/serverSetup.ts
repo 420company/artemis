@@ -24,15 +24,16 @@ import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { generatePassword, getCredentialStore, CREDENTIAL_NAME, type CredentialStore } from '../../security/credentialStore.js';
+import { getCredentialStore, normalizeOrigin, useCredential, CREDENTIAL_NAME, type CredentialStore } from '../../security/credentialStore.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
-import { generateSshKeyPair, generateWireGuardKeyPair } from './keys.js';
+import { generateWireGuardKeyPair } from './keys.js';
 import { encodeQr, qrToPng } from './qr.js';
 import { hardenScript, installKeyScript, probeScript, removePeerScript, wireguardCheckScript, wireguardScript } from './scripts.js';
 
 export type ServerSetupAction =
-  | { type: 'server_setup'; action: 'create_key'; name: string; comment?: string }
-  | { type: 'server_setup'; action: 'create_password'; name: string; length?: number }
+  | { type: 'server_setup'; action: 'create_key'; name: string; comment?: string; host?: string }
+  | { type: 'server_setup'; action: 'forget_host_key'; host: string; port?: number }
+  | { type: 'server_setup'; action: 'create_password'; name: string; length?: number; origin?: string; host?: string }
   | { type: 'server_setup'; action: 'install_key'; host: string; user?: string; port?: number; password: string; key: string }
   | { type: 'server_setup'; action: 'wait_ready'; host: string; user?: string; port?: number; key: string; timeoutSeconds?: number; server?: string }
   | { type: 'server_setup'; action: 'harden'; host: string; user?: string; port?: number; key: string; extraPorts?: string[] }
@@ -56,6 +57,8 @@ export interface ServerSetupContext {
   inventoryFile?: string;
   sleep?: (ms: number) => Promise<void>;
   sshBin?: string;
+  /** The host's confirmation (the interactive CLI); see tools/ownerApproval.ts. */
+  requestUserConfirmation?: (request: { question: string }) => Promise<boolean>;
 }
 
 const HOST = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$|^\d{1,3}(?:\.\d{1,3}){3}$|^\[?[0-9A-Fa-f:]+\]?$/;
@@ -165,10 +168,17 @@ interface SshRun {
   stderr: string;
   steps: Set<string>;
   timedOut: boolean;
+  /** The server answered with another host key than the one recorded: maybe a reinstall, maybe someone in between. */
+  hostKeyChanged?: boolean;
 }
 
 function knownHostsFile(): string {
-  return path.join(resolveArtemisHomeDir(), 'credentials', 'known_hosts');
+  return path.join(resolveArtemisHomeDir(), 'agent-ssh', 'known_hosts');
+}
+
+/** Where device profiles go: the agent's own home, never the workspace (they hold private keys). */
+export function vpnProfilesDir(): string {
+  return path.join(resolveArtemisHomeDir(), 'vpn-profiles');
 }
 
 async function runSsh(
@@ -226,7 +236,8 @@ async function runSsh(
       ctx.abortSignal?.removeEventListener('abort', onAbort);
       if (askpassDir) void rm(askpassDir, { recursive: true, force: true });
       const steps = new Set([...stdout.matchAll(/^ARTEMIS_STEP (\w+) ok$/gm)].map((m) => m[1]!));
-      resolve({ code, stdout, stderr, steps, timedOut });
+      const hostKeyChanged = /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for .* has changed/i.test(stderr);
+      resolve({ code, stdout, stderr, steps, timedOut, hostKeyChanged });
     };
     child.on('error', (err) => {
       stderr += String((err as NodeJS.ErrnoException).code === 'ENOENT' ? `ssh client not found (${bin}); install openssh-client` : err.message);
@@ -243,20 +254,33 @@ function tail(text: string): string {
   return clean.length > OUTPUT_TAIL ? `…${clean.slice(-OUTPUT_TAIL)}` : clean;
 }
 
-async function withKey<T>(store: CredentialStore, key: string, fn: (keyPath: string) => Promise<T>): Promise<T | ServerSetupResult> {
+/**
+ * Runs `fn` with the stored key of `key` in a private temporary file (0600 in
+ * a 0700 directory, removed right after). The key must be bound to this host
+ * (it is bound at its first use).
+ */
+async function withKey<T>(store: CredentialStore, key: string, host: string, fn: (keyPath: string) => Promise<T>): Promise<T | ServerSetupResult> {
   if (!CREDENTIAL_NAME.test(key)) return fail('invalid_input', 'key must be the name of a key made with create_key');
-  const info = await store.describe(key);
-  if (!info || info.kind !== 'ssh_key') return fail('credential_not_found', `No SSH key named "${key}". Make one with create_key first.`);
-  const file = await store.materialize(key);
-  if (!file) return fail('credential_not_found', `No SSH key named "${key}".`);
+  const used = await useCredential(key, { type: 'ssh', host, as: 'key' }, store);
+  if (!used.ok) return fail(used.code === 'not_found' ? 'credential_not_found' : 'credential_refused', used.code === 'not_found' ? `No SSH key named "${key}". Make one with create_key first.` : used.message);
+  const dir = await mkdtemp(path.join(tmpdir(), 'artemis-ssh-'));
+  const file = path.join(dir, 'key');
   try {
-    return await fn(file.path);
+    await chmod(dir, 0o700);
+    await writeFile(file, used.secret.endsWith('\n') ? used.secret : `${used.secret}\n`, { mode: 0o600 });
+    return await fn(file);
   } finally {
-    await file.cleanup();
+    await rm(dir, { recursive: true, force: true });
   }
 }
 
 function sshFailure(step: string, run: SshRun): ServerSetupResult {
+  if (run.hostKeyChanged) {
+    return fail(
+      'host_key_changed',
+      `${step}: the server answered with a different host key than before. That happens after a reinstall, but it can also mean someone is in between. Nothing was sent. Tell the owner; only after they confirm the server was reinstalled, run forget_host_key for this host (it asks the owner to approve) and try again.`,
+    );
+  }
   if (run.timedOut) return fail('ssh_timeout', `${step}: the server did not finish in time.\n${tail(run.stderr || run.stdout)}`, true);
   const why = tail(run.stderr) || tail(run.stdout) || `exit code ${run.code}`;
   const auth = /Permission denied|Authentication failed/i.test(run.stderr);
@@ -275,28 +299,49 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       if (!CREDENTIAL_NAME.test(a.name ?? '')) return fail('invalid_input', 'name: letters, digits, ".", "_" or "-" (e.g. "vpn-tokyo-1")');
       const existing = await store.describe(a.name);
       if (existing?.kind === 'ssh_key' && existing.publicPart) {
-        return { ok: true, output: `SSH key "${a.name}" already exists.\nPublic key (paste this into the provider's SSH key field):\n${existing.publicPart}` };
+        return { ok: true, output: `SSH key "${a.name}" already exists${existing.bindings.host ? ` (for ${existing.bindings.host})` : ''}.\nPublic key (paste this into the provider's SSH key field):\n${existing.publicPart}` };
       }
       if (existing) return fail('credential_exists', `A credential named "${a.name}" exists and is not an SSH key; pick another name.`);
-      const pair = generateSshKeyPair((a.comment ?? `agent-${a.name}`).replace(/[^\w.@-]/g, '').slice(0, 64) || 'agent');
-      await store.put(a.name, 'ssh_key', pair.privateKey, { publicPart: pair.publicKey });
-      return { ok: true, output: `SSH key "${a.name}" created; the private key stays in the credential store.\nPublic key (paste this into the provider's SSH key field):\n${pair.publicKey}` };
+      const host = a.host ? target({ host: a.host }) : undefined;
+      if (typeof host === 'string') return fail('invalid_input', host);
+      const info = await store.create(a.name, 'ssh_key', { comment: a.comment ?? `agent-${a.name}`, ...(host ? { bindings: { host: host.host } } : {}) });
+      return {
+        ok: true,
+        output: `SSH key "${a.name}" created; the private key stays in the credential store. It is bound to ${host ? host.host : 'the first server it logs in to'}.\nPublic key (paste this into the provider's SSH key field):\n${info.publicPart ?? ''}`,
+      };
     }
     case 'create_password': {
       if (!CREDENTIAL_NAME.test(a.name ?? '')) return fail('invalid_input', 'name: letters, digits, ".", "_" or "-"');
-      if (await store.describe(a.name)) return { ok: true, output: `A credential named "${a.name}" already exists. Type {{credential:${a.name}}} where the password goes.` };
+      const origin = a.origin ? normalizeOrigin(a.origin) : undefined;
+      if (a.origin && !origin) return fail('invalid_input', 'origin: the web site the password is for, e.g. "https://www.example.com"');
+      const host = a.host ? target({ host: a.host }) : undefined;
+      if (typeof host === 'string') return fail('invalid_input', host);
+      if (!origin && !host) return fail('invalid_input', 'Say where the password is for: origin (the site whose form takes it) and/or host (a server it logs in to).');
+      const existing = await store.describe(a.name);
+      if (existing) {
+        return existing.kind === 'password'
+          ? { ok: true, output: `A password named "${a.name}" already exists (for ${existing.bindings.origin ?? existing.bindings.host ?? 'its first use'}). Type {{credential:${a.name}}} into the password field there.` }
+          : fail('credential_exists', `A credential named "${a.name}" exists and is not a password; pick another name.`);
+      }
       const length = Math.max(16, Math.min(64, a.length ?? 20));
-      await store.put(a.name, 'password', generatePassword(length));
-      return { ok: true, output: `A strong ${length}-character password was stored as "${a.name}". Type {{credential:${a.name}}} into the password field (browser_type / browser_form_input); the real password never appears here. Never write it out for the user in chat.` };
+      await store.create(a.name, 'password', { length, bindings: { ...(origin ? { origin } : {}), ...(host ? { host: host.host } : {}) } });
+      return {
+        ok: true,
+        output: `A strong ${length}-character password was stored as "${a.name}", bound to ${[origin, host?.host].filter(Boolean).join(' and ')}. Type exactly {{credential:${a.name}}} into the password field on that site (browser_type / browser_form_input): it is filled only into a password field there, and the real password never appears here. Never write it out for the user in chat.`,
+      };
     }
+    case 'forget_host_key':
+      return forgetHostKey(a, ctx);
     case 'install_key': {
       const t = target(a);
       if (typeof t === 'string') return fail('invalid_input', t);
-      const password = await store.reveal(a.password);
+      if (!CREDENTIAL_NAME.test(a.password ?? '') || !CREDENTIAL_NAME.test(a.key ?? '')) return fail('invalid_input', 'password and key are credential names');
       const keyInfo = await store.describe(a.key);
-      if (password === undefined) return fail('credential_not_found', `No stored password named "${a.password}".`);
-      if (!keyInfo?.publicPart) return fail('credential_not_found', `No SSH key named "${a.key}".`);
-      const run = await runSsh(ctx, t, { password }, installKeyScript(keyInfo.publicPart), 60_000);
+      if (keyInfo?.kind !== 'ssh_key' || !keyInfo.publicPart) return fail('credential_not_found', `No SSH key named "${a.key}".`);
+      // Only a password, and only for this server (bound at creation or here, at its first use).
+      const password = await useCredential(a.password, { type: 'ssh', host: t.host, as: 'password' }, store);
+      if (!password.ok) return fail(password.code === 'not_found' ? 'credential_not_found' : 'credential_refused', password.message);
+      const run = await runSsh(ctx, t, { password: password.secret }, installKeyScript(keyInfo.publicPart), 60_000);
       if (!run.steps.has('install_key')) return sshFailure('Installing the key', run);
       return { ok: true, output: `Key "${a.key}" installed for ${t.user}@${t.host}. Use key "${a.key}" from now on.` };
     }
@@ -305,7 +350,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       if (typeof t === 'string') return fail('invalid_input', t);
       const timeoutMs = Math.max(30, Math.min(1800, a.timeoutSeconds ?? 600)) * 1000;
       const deadline = Date.now() + timeoutMs;
-      return withKey(store, a.key, async (keyPath) => {
+      return withKey(store, a.key, t.host, async (keyPath) => {
         let last: SshRun | undefined;
         let attempts = 0;
         while (Date.now() < deadline && !ctx.abortSignal?.aborted) {
@@ -316,7 +361,8 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
             if (a.server) await updateServer(ctx, a.server, { host: t.host, user: t.user, port: t.port, key: a.key, status: 'active' });
             return { ok: true, output: `${t.host} is ready (SSH answered after ${attempts} attempt(s)).\n${facts}` };
           }
-          if (last.code === 127) break;
+          // Not reachable yet is worth waiting for; a missing client or a changed host key is not.
+          if (last.code === 127 || last.hostKeyChanged) break;
           await sleep(10_000);
         }
         return last ? sshFailure(`Waiting for ${t.host}`, last) : fail('ssh_timeout', `${t.host} did not answer in time.`, true);
@@ -326,7 +372,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       const t = target(a);
       if (typeof t === 'string') return fail('invalid_input', t);
       const extra = (a.extraPorts ?? []).filter((p) => /^\d{1,5}\/(tcp|udp)$/.test(p));
-      return withKey(store, a.key, async (keyPath) => {
+      return withKey(store, a.key, t.host, async (keyPath) => {
         const run = await runSsh(ctx, t, { keyPath }, hardenScript({ sshPort: t.port, extraPorts: extra }), 15 * 60_000);
         if (!run.steps.has('harden')) return sshFailure('Hardening', run);
         const servers = await readInventory(ctx);
@@ -344,7 +390,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       if (typeof t === 'string') return fail('invalid_input', t);
       if (!a.command?.trim()) return fail('invalid_input', 'command required');
       const timeoutMs = Math.max(5, Math.min(1800, a.timeoutSeconds ?? 300)) * 1000;
-      return withKey(store, a.key, async (keyPath) => {
+      return withKey(store, a.key, t.host, async (keyPath) => {
         const run = await runSsh(ctx, t, { keyPath }, `${a.command}\n`, timeoutMs);
         const out = [tail(run.stdout), run.stderr.trim() ? `stderr: ${tail(run.stderr)}` : ''].filter(Boolean).join('\n');
         return run.code === 0 ? { ok: true, output: out || '(no output)' } : { ...sshFailure('The command', run), output: `exit ${run.code}\n${out}` };
@@ -400,20 +446,22 @@ async function installWireGuard(
   // The server key is kept so more devices can be added later.
   const serverKeyName = existing?.serverKey ?? `${a.server}-wg-server`;
   let serverPublicKey = existing?.serverPublicKey;
-  let serverPrivate = await store.reveal(serverKeyName);
+  const kept = serverPublicKey ? await useCredential(serverKeyName, { type: 'internal', use: 'vpn' }, store) : undefined;
+  let serverPrivate = kept?.ok ? kept.secret : undefined;
   if (!serverPrivate || !serverPublicKey) {
     const pair = generateWireGuardKeyPair();
-    await store.remove(serverKeyName).catch(() => false);
-    await store.put(serverKeyName, 'token', pair.privateKey, { publicPart: pair.publicKey, meta: { server: a.server } });
+    await store.create(serverKeyName, 'token', { secret: pair.privateKey, publicPart: pair.publicKey, meta: { server: a.server }, replace: true });
     serverPrivate = pair.privateKey;
     serverPublicKey = pair.publicKey;
   }
   const clients = [...(existing?.clients ?? [])];
   const used = new Set(clients.map((c) => Number(c.address.split('.')[3]?.split('/')[0])));
-  // With the other things the agent makes for the user (the chat shows media/… files as cards).
-  const mediaRoot = process.env.ARTEMIS_MEDIA_OUTPUT_ROOT?.trim() || path.join(ctx.cwd, 'media');
-  const outDir = path.join(path.resolve(ctx.cwd, mediaRoot), 'vpn', a.server);
-  await mkdir(outDir, { recursive: true });
+  // The agent's own home, never the workspace: a profile holds the device's
+  // private key, so it must not end up in 作品, a shared page or a site.
+  const outDir = path.join(vpnProfilesDir(), a.server);
+  await mkdir(outDir, { recursive: true, mode: 0o700 });
+  await chmod(path.dirname(outDir), 0o700).catch(() => undefined);
+  await chmod(outDir, 0o700).catch(() => undefined);
   const created: string[] = [];
   for (const name of wanted) {
     if (clients.some((c) => c.name === name)) continue;
@@ -423,13 +471,12 @@ async function installWireGuard(
     used.add(host);
     const pair = generateWireGuardKeyPair();
     const keyName = `${a.server}-wg-${name}`;
-    await store.remove(keyName).catch(() => false);
-    await store.put(keyName, 'token', pair.privateKey, { publicPart: pair.publicKey, meta: { server: a.server, device: name } });
+    await store.create(keyName, 'token', { secret: pair.privateKey, publicPart: pair.publicKey, meta: { server: a.server, device: name }, replace: true });
     clients.push({ name, address: `${subnet}.${host}/32`, publicKey: pair.publicKey, keyName, files: [] });
     created.push(name);
   }
 
-  const run = await withKey(store, a.key, (keyPath) =>
+  const run = await withKey(store, a.key, t.host, (keyPath) =>
     runSsh(ctx, t, { keyPath }, wireguardScript({
       privateKey: serverPrivate!,
       listenPort,
@@ -439,14 +486,14 @@ async function installWireGuard(
   if ('ok' in run) return run;
   if (!run.steps.has('wireguard')) return sshFailure('Setting up the VPN', run);
 
-  // Client profiles and their QR codes (only new devices get files written; existing ones keep theirs).
+  // Device profiles and their QR codes, readable by the agent only (0600 in 0700 folders).
   const endpointHost = t.host.includes(':') ? `[${t.host}]` : t.host;
   for (const client of clients) {
-    const privateKey = await store.reveal(client.keyName);
-    if (!privateKey) continue;
+    const key = await useCredential(client.keyName, { type: 'internal', use: 'vpn' }, store);
+    if (!key.ok) continue;
     const conf = [
       '[Interface]',
-      `PrivateKey = ${privateKey}`,
+      `PrivateKey = ${key.secret}`,
       `Address = ${client.address}`,
       `DNS = ${dns}`,
       '',
@@ -461,9 +508,9 @@ async function installWireGuard(
     const pngFile = path.join(outDir, `${client.name}-qr.png`);
     await writeFile(confFile, conf, { mode: 0o600 });
     await chmod(confFile, 0o600);
-    await writeFile(pngFile, qrToPng(encodeQr(conf, 'M'), 8));
-    const shown = (file: string) => (file.startsWith(path.resolve(ctx.cwd) + path.sep) ? path.relative(ctx.cwd, file) : file);
-    client.files = [shown(confFile), shown(pngFile)];
+    await writeFile(pngFile, qrToPng(encodeQr(conf, 'M'), 8), { mode: 0o600 });
+    await chmod(pngFile, 0o600);
+    client.files = [vpnCard(a.server, client.name)];
   }
   await updateServer(ctx, a.server, {
     host: t.host,
@@ -474,16 +521,43 @@ async function installWireGuard(
     purpose: servers[a.server]?.purpose ?? 'vpn',
     wireguard: { listenPort, subnet, serverKey: serverKeyName, serverPublicKey: serverPublicKey!, clients },
   });
-  const listing = clients.map((c) => `- ${c.name}: ${c.files.join(' , ')}`).join('\n');
+  const cards = clients.map((c) => `${c.name}:\n${vpnCard(a.server, c.name)}`).join('\n');
   return {
     ok: true,
     output: [
       `VPN is running on ${t.host} (WireGuard, port ${listenPort}/udp). ${created.length ? `New device profiles: ${created.join(', ')}.` : 'No new devices; profiles refreshed.'}`,
-      'Profiles (give the user the QR code to scan in the WireGuard app; the .conf is for computers):',
-      listing,
+      'The profiles hold private keys: they are kept privately and are never files in the workspace. To hand one to the user, put its card in your reply exactly as below (the app shows the QR code to scan and a download button; it is never shared or published):',
+      cards,
       'Next: verify with check "wireguard" before telling the user it works.',
     ].join('\n'),
   };
+}
+
+/** The reply card the app turns into a QR code to scan and a download (never a file path). */
+export function vpnCard(server: string, device: string): string {
+  return '```vpn\n' + JSON.stringify({ server, device }) + '\n```';
+}
+
+/**
+ * Forgets the recorded host key of a server, after the owner approved it: a
+ * changed key may mean a reinstall, or someone in between.
+ */
+async function forgetHostKey(a: Extract<ServerSetupAction, { action: 'forget_host_key' }>, ctx: ServerSetupContext): Promise<ServerSetupResult> {
+  const t = target(a);
+  if (typeof t === 'string') return fail('invalid_input', t);
+  const { requireOwnerApproval } = await import('../ownerApproval.js');
+  const approved = await requireOwnerApproval(ctx, {
+    kind: 'confirmation',
+    question: `服务器 ${t.host} 的身份指纹变了。只有在你确认这台服务器刚重装过的情况下，才忘掉旧指纹并重新信任它。要继续吗？`,
+    payload: { action: 'forget_host_key', host: t.host, port: t.port },
+  });
+  if (!approved.ok) return fail('approval_required', approved.message);
+  const file = knownHostsFile();
+  const text = await readFile(file, 'utf8').catch(() => '');
+  const marker = t.port === 22 ? t.host : `[${t.host}]:${t.port}`;
+  const kept = text.split('\n').filter((line) => line && !line.split(' ')[0]!.split(',').includes(marker));
+  await writeFile(file, kept.length ? `${kept.join('\n')}\n` : '', { mode: 0o600 });
+  return { ok: true, output: `Forgot the old host key of ${t.host}. The next connection records the new one.` };
 }
 
 async function commandExists(name: string): Promise<boolean> {
@@ -575,7 +649,7 @@ async function verify(a: Extract<ServerSetupAction, { action: 'verify' }>, ctx: 
   if (typeof t === 'string') return fail('invalid_input', t);
   const key = a.key ?? record?.key;
   if (!key) return fail('invalid_input', 'key: the SSH key name for this server');
-  return withKey(store, key, async (keyPath) => {
+  return withKey(store, key, t.host, async (keyPath) => {
     if (a.check === 'ssh') {
       const run = await runSsh(ctx, t, { keyPath }, probeScript(), 30_000);
       return run.steps.has('probe') ? { ok: true, output: `SSH works for ${t.user}@${t.host}.\n${tail(run.stdout)}` } : sshFailure('SSH check', run);

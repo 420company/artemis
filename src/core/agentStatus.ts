@@ -35,6 +35,10 @@ export const AGENT_ACTIVITIES = [
   'generating_video',
   'using_service',
   'sending',
+  'setting_up_server',
+  'waiting_for_server',
+  'checking',
+  'getting_code',
   'waiting_handoff',
   'waiting_confirmation',
   'waiting_payment_approval',
@@ -127,6 +131,16 @@ export function statusForAction(action: Pick<AgentAction, 'type'> & Record<strin
     case 'bridge_send_image':
     case 'bridge_send_video':
       return { phase: 'working', activity: 'sending' };
+    case 'server_setup': {
+      const act = String(action.action ?? '');
+      if (act === 'wait_ready') return { phase: 'working', activity: 'waiting_for_server' };
+      if (act === 'verify') return { phase: 'working', activity: 'checking' };
+      if (act === 'forget_host_key') return { phase: 'waiting_approval', activity: 'waiting_confirmation' };
+      if (act === 'list_servers' || act === 'record_server') return undefined;
+      return { phase: 'working', activity: 'setting_up_server' };
+    }
+    case 'get_verification_code':
+      return { phase: 'working', activity: 'getting_code' };
     case 'mcp_call_tool': {
       const tool = String(action.toolName ?? action.tool_name ?? action.tool ?? action.name ?? '');
       return { phase: 'working', activity: SEND_WORDS.test(tool) ? 'sending' : 'using_service' };
@@ -150,6 +164,30 @@ export function statusForApprovalKind(kind: string | undefined): AgentStatus {
     default:
       return { phase: 'waiting_approval', activity: 'waiting_confirmation' };
   }
+}
+
+/**
+ * How a run that ends now leaves the owner: waiting for their OK when the
+ * answer ends with a confirmation card (a structured card the app shows with
+ * buttons, not prose), else done. A card about paying shows as waiting for a
+ * payment approval.
+ */
+export function statusAtEnd(reply: string): AgentStatus {
+  const cards = [...reply.matchAll(/```confirm[ \t]*\n([\s\S]*?)\n?```/g)];
+  const last = cards.at(-1);
+  if (!last) return { phase: 'done', activity: 'done' };
+  let text = '';
+  try {
+    const card = JSON.parse(last[1] ?? '{}') as Record<string, unknown>;
+    text = [card.title, card.detail, card.confirm].filter((v) => typeof v === 'string').join(' ');
+  } catch {
+    return { phase: 'done', activity: 'done' };
+  }
+  return /付款|支付|扣款|付费|下单|购买|充值|\bpay|purchase|checkout|charge/i.test(text)
+    ? { phase: 'waiting_approval', activity: 'waiting_payment_approval' }
+    : /发送|发给|发出|寄出|\bsend\b/i.test(text)
+      ? { phase: 'waiting_approval', activity: 'waiting_send_approval' }
+      : { phase: 'waiting_approval', activity: 'waiting_confirmation' };
 }
 
 export function formatAgentStatusLine(event: AgentStatusEvent): string {

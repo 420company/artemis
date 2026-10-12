@@ -1,20 +1,33 @@
 /**
  * security/credentialStore.ts — secrets the agent creates while working for
- * the user (an SSH key for a new server, a generated root password), kept
- * out of the conversation.
+ * the user (a password for a sign-up form, an SSH key for a new server, a
+ * VPN key), kept out of the conversation and bound to where they may be used.
  *
- * The model only ever sees a credential's name and its public part (an SSH
- * public key). Tools resolve the secret themselves:
- *   - server_setup uses stored SSH keys and passwords (tools/serverSetup.ts);
- *   - browser_type / browser_form_input replace `{{credential:<name>}}` with
- *     the stored password while typing, so the clear text never appears in
- *     a tool call, a tool result or the history.
+ * What the model sees: a credential's name, its kind, where it is bound and
+ * its public part (an SSH public key). Never the secret.
  *
- * Backend: a directory under the engine's home (`<ARTEMIS_HOME>/credentials`,
- * 0700, one 0600 file per credential). A host that keeps secrets in its own
- * vault (the platform's connector vault, run by a separate user) registers
- * another backend with registerCredentialStore(); the interface is all the
- * tools use, so nothing else changes.
+ * Use is narrow and bound:
+ *   - `password` / `username`: typed into a web form only on the origin the
+ *     credential is bound to (set when it is made, or at its first use), and
+ *     only into a password field (a username field for `username`); for SSH,
+ *     a `password` is used only as the login password of its bound host;
+ *   - `ssh_key`: only to log in to its bound host;
+ *   - `token` (VPN keys): only by the engine's own server setup.
+ * Every secret handed out is remembered for the run and scrubbed from every
+ * tool result (`scrubSecrets`), so a page that echoes it back, a console
+ * message or a script reading the field never brings it into the history.
+ *
+ * Backends:
+ *   - hosted (`ARTEMIS_CREDENTIAL_BROKER`, set by the web server for each
+ *     run): the secrets live in the server's own data directory, which the
+ *     agent's OS user cannot read; each use is checked there against the
+ *     binding, for this run only (`BrokerCredentialStore`);
+ *   - local (the CLI): files under `<ARTEMIS_HOME>/agent-credentials` (0700
+ *     directory, 0600 files), a protected path for the agent's file and
+ *     shell tools.
+ * A host can register its own backend (registerCredentialStore), e.g. a
+ * vault that fills forms itself (origin-bound fill without handing the
+ * secret to the engine at all).
  */
 
 import { randomBytes, randomInt } from 'node:crypto';
@@ -23,38 +36,67 @@ import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
 
-export type CredentialKind = 'ssh_key' | 'password' | 'token';
+export type CredentialKind = 'password' | 'username' | 'ssh_key' | 'token';
+export const CREDENTIAL_KINDS: readonly CredentialKind[] = ['password', 'username', 'ssh_key', 'token'];
+
+/** Where a credential may be used: a web origin (https://shop.example) and/or an SSH host. */
+export interface CredentialBindings {
+  origin?: string;
+  host?: string;
+}
 
 /** What may be shown: never the secret. */
 export interface CredentialInfo {
   name: string;
   kind: CredentialKind;
   createdAt: string;
-  /** An SSH public key, for example. */
+  bindings: CredentialBindings;
+  /** An SSH public key, a VPN public key. */
   publicPart?: string;
-  /** Short non-secret notes (provider, host, user). */
+  /** Short non-secret notes. */
   meta?: Record<string, string>;
 }
 
+export type CredentialPurpose =
+  | { type: 'web'; origin: string; field: 'password' | 'username' }
+  | { type: 'ssh'; host: string; as: 'key' | 'password' }
+  | { type: 'internal'; use: 'vpn' };
+
+export type CredentialErrorCode = 'invalid_name' | 'not_found' | 'exists' | 'wrong_kind' | 'wrong_origin' | 'wrong_host' | 'unavailable';
+
+export type UseResult = { ok: true; secret: string; info: CredentialInfo } | { ok: false; code: CredentialErrorCode; message: string };
+
+export interface CreateOptions {
+  /** The secret itself (VPN keys made by the caller); omitted: the store makes one (passwords, SSH keys). */
+  secret?: string;
+  publicPart?: string;
+  /** Password length (16–64, default 20). */
+  length?: number;
+  /** SSH key comment. */
+  comment?: string;
+  bindings?: CredentialBindings;
+  meta?: Record<string, string>;
+  /** Replace an existing credential of the same name (VPN keys refreshed by a re-run). */
+  replace?: boolean;
+}
+
 export interface CredentialStore {
-  put(name: string, kind: CredentialKind, secret: string, info?: { publicPart?: string; meta?: Record<string, string> }): Promise<CredentialInfo>;
+  /** Makes (or stores) a credential; returns what may be shown. Existing names fail with `exists` unless `replace`. */
+  create(name: string, kind: CredentialKind, options?: CreateOptions): Promise<CredentialInfo>;
   describe(name: string): Promise<CredentialInfo | undefined>;
   list(): Promise<CredentialInfo[]>;
-  /** The secret itself, for tools only. */
-  reveal(name: string): Promise<string | undefined>;
-  /**
-   * A file holding the secret with mode 0600 (ssh -i needs one), and a
-   * cleanup to call when done (a no-op for the file backend).
-   */
-  materialize(name: string): Promise<{ path: string; cleanup: () => Promise<void> } | undefined>;
+  /** The secret for this purpose, if the credential's kind and binding allow it (binding it on first use). */
+  use(name: string, purpose: CredentialPurpose): Promise<UseResult>;
   remove(name: string): Promise<boolean>;
 }
 
 export const CREDENTIAL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-export const CREDENTIAL_PLACEHOLDER = /\{\{credential:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}\}/g;
+/** A form value that is exactly one placeholder (nothing else may be typed with it). */
+export const CREDENTIAL_PLACEHOLDER_ONLY = /^\{\{credential:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}\}$/;
+export const CREDENTIAL_PLACEHOLDER = /\{\{credential:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}\}/;
 
 export class CredentialError extends Error {
-  constructor(readonly code: 'invalid_name' | 'not_found' | 'exists', message: string) {
+  constructor(readonly code: CredentialErrorCode, message: string) {
     super(message);
   }
 }
@@ -63,29 +105,160 @@ function checkName(name: string): void {
   if (!CREDENTIAL_NAME.test(name)) throw new CredentialError('invalid_name', `Credential names use letters, digits, ".", "_" and "-" (at most 64): ${JSON.stringify(name)}`);
 }
 
+/** "https://Shop.Example:443/x" → "https://shop.example"; undefined unless http(s). */
+export function normalizeOrigin(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value.includes('://') ? value : `https://${value}`);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+    return url.origin.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+export function normalizeHost(value: string | undefined): string | undefined {
+  const host = value?.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return host && /^[a-z0-9.:-]{1,253}$/.test(host) ? host : undefined;
+}
+
+/**
+ * Whether `info` may serve `purpose`; `bind` is the binding to record on a
+ * first use. Shared by every backend (the web server keeps its own copy of
+ * these rules for the hosted store).
+ */
+export function checkUse(info: CredentialInfo, purpose: CredentialPurpose): { ok: true; bind?: CredentialBindings } | { ok: false; code: CredentialErrorCode; message: string } {
+  if (purpose.type === 'internal') {
+    return info.kind === 'token' ? { ok: true } : { ok: false, code: 'wrong_kind', message: `"${info.name}" is not a VPN key.` };
+  }
+  if (purpose.type === 'web') {
+    const wanted: CredentialKind = purpose.field === 'username' ? 'username' : 'password';
+    if (info.kind !== wanted) {
+      return { ok: false, code: 'wrong_kind', message: `"${info.name}" is a ${info.kind}; only a ${wanted} can go into a ${purpose.field} field.` };
+    }
+    const origin = normalizeOrigin(purpose.origin);
+    if (!origin) return { ok: false, code: 'wrong_origin', message: 'Credentials are only typed on http(s) pages.' };
+    // A server password never goes into a web page, and the other way round.
+    if (info.bindings.host && !info.bindings.origin) {
+      return { ok: false, code: 'wrong_origin', message: `"${info.name}" is the password of server ${info.bindings.host}, not of a website. Nothing was typed.` };
+    }
+    if (info.bindings.origin && info.bindings.origin !== origin) {
+      return { ok: false, code: 'wrong_origin', message: `"${info.name}" belongs to ${info.bindings.origin}, not ${origin}. Nothing was typed.` };
+    }
+    return info.bindings.origin ? { ok: true } : { ok: true, bind: { origin } };
+  }
+  const wanted: CredentialKind = purpose.as === 'key' ? 'ssh_key' : 'password';
+  if (info.kind !== wanted) {
+    return { ok: false, code: 'wrong_kind', message: `"${info.name}" is a ${info.kind}; SSH ${purpose.as === 'key' ? 'keys' : 'passwords'} only.` };
+  }
+  const host = normalizeHost(purpose.host);
+  if (!host) return { ok: false, code: 'wrong_host', message: 'Invalid host.' };
+  if (info.bindings.origin && !info.bindings.host) {
+    return { ok: false, code: 'wrong_host', message: `"${info.name}" is the password of ${info.bindings.origin}, not of a server.` };
+  }
+  if (info.bindings.host && info.bindings.host !== host) {
+    return { ok: false, code: 'wrong_host', message: `"${info.name}" belongs to ${info.bindings.host}, not ${host}.` };
+  }
+  return info.bindings.host ? { ok: true } : { ok: true, bind: { host } };
+}
+
+// ── secrets handed out this run, scrubbed from every tool result ──────────
+
+const revealed = new Set<string>();
+
+function remember(secret: string): void {
+  if (secret.length >= 6) revealed.add(secret);
+  // A multi-line secret (an SSH key) is also scrubbed line by line.
+  for (const line of secret.split(/\r?\n/)) if (line.trim().length >= 16) revealed.add(line.trim());
+}
+
+/** Replaces every secret handed out in this process with •••• . */
+export function scrubSecrets(text: string): string {
+  if (!text || revealed.size === 0) return text;
+  let out = text;
+  for (const secret of [...revealed].sort((a, b) => b.length - a.length)) {
+    if (out.includes(secret)) out = out.split(secret).join('••••');
+  }
+  return out;
+}
+
+/** For tests. */
+export function forgetRevealedSecrets(): void {
+  revealed.clear();
+}
+
+/** The one way tools get a secret: checked, and remembered for scrubbing. */
+export async function useCredential(name: string, purpose: CredentialPurpose, store: CredentialStore = getCredentialStore()): Promise<UseResult> {
+  if (!CREDENTIAL_NAME.test(name)) return { ok: false, code: 'invalid_name', message: `Invalid credential name: ${JSON.stringify(name)}` };
+  const result = await store.use(name, purpose);
+  if (result.ok) remember(result.secret);
+  return result;
+}
+
+// ── generation ────────────────────────────────────────────────────────────
+
+const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+const PASSWORD_SYMBOLS = '-_.@#%+=';
+
+/**
+ * A strong password most sign-up forms accept: upper and lower case, digits
+ * and a common symbol, no look-alike letters.
+ */
+export function generatePassword(length = 20): string {
+  const chars: string[] = [];
+  const pick = (set: string) => set[randomInt(set.length)]!;
+  chars.push(pick('ABCDEFGHJKLMNPQRSTUVWXYZ'), pick('abcdefghijkmnopqrstuvwxyz'), pick('23456789'), pick(PASSWORD_SYMBOLS));
+  while (chars.length < Math.max(12, length)) chars.push(pick(PASSWORD_ALPHABET));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.join('');
+}
+
+async function generated(kind: CredentialKind, options: CreateOptions): Promise<{ secret: string; publicPart?: string }> {
+  if (options.secret !== undefined) return { secret: options.secret, ...(options.publicPart ? { publicPart: options.publicPart } : {}) };
+  if (kind === 'password') return { secret: generatePassword(Math.max(16, Math.min(64, options.length ?? 20))) };
+  if (kind === 'ssh_key') {
+    const { generateSshKeyPair } = await import('../tools/serverSetup/keys.js');
+    const pair = generateSshKeyPair((options.comment ?? 'agent').replace(/[^\w.@-]/g, '').slice(0, 64) || 'agent');
+    return { secret: pair.privateKey, publicPart: pair.publicKey };
+  }
+  throw new CredentialError('unavailable', `A ${kind} must be given, not generated.`);
+}
+
+function cleanBindings(b: CredentialBindings | undefined): CredentialBindings {
+  const origin = normalizeOrigin(b?.origin);
+  const host = normalizeHost(b?.host);
+  return { ...(origin ? { origin } : {}), ...(host ? { host } : {}) };
+}
+
+// ── local backend (the CLI) ───────────────────────────────────────────────
+
 interface StoredFile {
   info: CredentialInfo;
   secret: string;
 }
 
+/** Where the local store keeps its files; a protected path for the agent's tools (utils/fs.ts). */
+export function localCredentialsDir(): string {
+  return process.env.ARTEMIS_CREDENTIALS_DIR?.trim() || path.join(resolveArtemisHomeDir(), 'agent-credentials');
+}
+
 export class FileCredentialStore implements CredentialStore {
-  constructor(readonly dir: string = path.join(resolveArtemisHomeDir(), 'credentials')) {}
+  constructor(readonly dir: string = localCredentialsDir()) {}
 
   private ensure(): void {
     if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     try {
       chmodSync(this.dir, 0o700);
     } catch {
-      // best effort (another owner)
+      // another owner
     }
   }
 
   private file(name: string): string {
     return path.join(this.dir, `${name}.json`);
-  }
-
-  private keyFile(name: string): string {
-    return path.join(this.dir, `${name}.key`);
   }
 
   private async read(name: string): Promise<StoredFile | undefined> {
@@ -97,21 +270,27 @@ export class FileCredentialStore implements CredentialStore {
     }
   }
 
-  async put(name: string, kind: CredentialKind, secret: string, extra: { publicPart?: string; meta?: Record<string, string> } = {}): Promise<CredentialInfo> {
-    checkName(name);
+  private async write(stored: StoredFile): Promise<void> {
     this.ensure();
-    if (existsSync(this.file(name))) throw new CredentialError('exists', `A credential named "${name}" already exists; pick another name.`);
+    const temp = `${this.file(stored.info.name)}.${randomBytes(4).toString('hex')}.tmp`;
+    await writeFile(temp, JSON.stringify(stored), { mode: 0o600 });
+    await rename(temp, this.file(stored.info.name));
+  }
+
+  async create(name: string, kind: CredentialKind, options: CreateOptions = {}): Promise<CredentialInfo> {
+    checkName(name);
+    if (!CREDENTIAL_KINDS.includes(kind)) throw new CredentialError('wrong_kind', `Unknown kind ${kind}`);
+    if (!options.replace && (await this.read(name))) throw new CredentialError('exists', `A credential named "${name}" already exists; pick another name.`);
+    const made = await generated(kind, options);
     const info: CredentialInfo = {
       name,
       kind,
       createdAt: new Date().toISOString(),
-      ...(extra.publicPart ? { publicPart: extra.publicPart } : {}),
-      ...(extra.meta && Object.keys(extra.meta).length ? { meta: extra.meta } : {}),
+      bindings: cleanBindings(options.bindings),
+      ...(made.publicPart ? { publicPart: made.publicPart } : {}),
+      ...(options.meta && Object.keys(options.meta).length ? { meta: options.meta } : {}),
     };
-    const temp = `${this.file(name)}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(temp, JSON.stringify({ info, secret } satisfies StoredFile), { mode: 0o600 });
-    await rename(temp, this.file(name));
-    if (kind === 'ssh_key') await writeFile(this.keyFile(name), secret.endsWith('\n') ? secret : `${secret}\n`, { mode: 0o600 });
+    await this.write({ info, secret: made.secret });
     return info;
   }
 
@@ -132,76 +311,127 @@ export class FileCredentialStore implements CredentialStore {
     return out;
   }
 
-  async reveal(name: string): Promise<string | undefined> {
-    return (await this.read(name))?.secret;
-  }
-
-  async materialize(name: string): Promise<{ path: string; cleanup: () => Promise<void> } | undefined> {
+  async use(name: string, purpose: CredentialPurpose): Promise<UseResult> {
     const stored = await this.read(name);
-    if (!stored) return undefined;
-    if (!existsSync(this.keyFile(name))) {
-      this.ensure();
-      await writeFile(this.keyFile(name), stored.secret.endsWith('\n') ? stored.secret : `${stored.secret}\n`, { mode: 0o600 });
+    if (!stored) return { ok: false, code: 'not_found', message: `No credential named "${name}".` };
+    stored.info.bindings ??= {};
+    const verdict = checkUse(stored.info, purpose);
+    if (!verdict.ok) return verdict;
+    if (verdict.bind) {
+      stored.info.bindings = { ...stored.info.bindings, ...verdict.bind };
+      await this.write(stored);
     }
-    return { path: this.keyFile(name), cleanup: async () => undefined };
+    return { ok: true, secret: stored.secret, info: stored.info };
   }
 
   async remove(name: string): Promise<boolean> {
     checkName(name);
     const had = existsSync(this.file(name));
     await rm(this.file(name), { force: true });
-    await rm(this.keyFile(name), { force: true });
     return had;
   }
 }
 
-let registered: CredentialStore | undefined;
+// ── hosted backend: the web server keeps the secrets ──────────────────────
 
-/** A host's own backend (e.g. its vault); undefined goes back to the file store. */
+/** The web server's credential broker for this run (`ARTEMIS_CREDENTIAL_BROKER` + the run's header). */
+export class BrokerCredentialStore implements CredentialStore {
+  constructor(
+    private readonly url: string,
+    private readonly headers: Record<string, string>,
+    private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
+  ) {}
+
+  private async call<T>(op: string, body: Record<string, unknown>): Promise<T> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...this.headers },
+        body: JSON.stringify({ op, ...body }),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (err) {
+      throw new CredentialError('unavailable', `The credential service did not answer: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      const code = typeof data.error === 'string' && (['invalid_name', 'not_found', 'exists', 'wrong_kind', 'wrong_origin', 'wrong_host'] as string[]).includes(data.error) ? (data.error as CredentialErrorCode) : 'unavailable';
+      throw new CredentialError(code, typeof data.message === 'string' ? data.message : `Credential service error ${res.status}`);
+    }
+    return data as T;
+  }
+
+  async create(name: string, kind: CredentialKind, options: CreateOptions = {}): Promise<CredentialInfo> {
+    checkName(name);
+    // SSH keys and passwords are made by the server; only VPN keys travel in.
+    const body: Record<string, unknown> = { name, kind, bindings: cleanBindings(options.bindings) };
+    if (options.secret !== undefined) body.secret = options.secret;
+    if (options.publicPart) body.publicPart = options.publicPart;
+    if (options.length) body.length = options.length;
+    if (options.comment) body.comment = options.comment;
+    if (options.meta) body.meta = options.meta;
+    if (options.replace) body.replace = true;
+    return (await this.call<{ info: CredentialInfo }>('create', body)).info;
+  }
+
+  async describe(name: string): Promise<CredentialInfo | undefined> {
+    checkName(name);
+    return (await this.call<{ info?: CredentialInfo }>('describe', { name })).info;
+  }
+
+  async list(): Promise<CredentialInfo[]> {
+    return (await this.call<{ credentials: CredentialInfo[] }>('list', {})).credentials;
+  }
+
+  async use(name: string, purpose: CredentialPurpose): Promise<UseResult> {
+    try {
+      const data = await this.call<{ secret: string; info: CredentialInfo }>('use', { name, purpose });
+      return { ok: true, secret: data.secret, info: data.info };
+    } catch (err) {
+      if (err instanceof CredentialError) return { ok: false, code: err.code, message: err.message };
+      throw err;
+    }
+  }
+
+  async remove(name: string): Promise<boolean> {
+    return (await this.call<{ removed: boolean }>('remove', { name })).removed;
+  }
+}
+
+let registered: CredentialStore | undefined;
+let broker: { url: string; headers: Record<string, string> } | undefined;
+
+/** A host's own backend; undefined goes back to the default. */
 export function registerCredentialStore(store: CredentialStore | undefined): void {
   registered = store;
 }
 
+/**
+ * Takes the hosted broker's address out of the environment (so no tool or
+ * shell this run starts inherits it) and keeps it for this process.
+ */
+export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env): void {
+  const url = env.ARTEMIS_CREDENTIAL_BROKER?.trim();
+  delete env.ARTEMIS_CREDENTIAL_BROKER;
+  if (!url || !/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?\//.test(url)) return;
+  let headers: Record<string, string> = {};
+  try {
+    const raw = env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON;
+    if (raw) headers = Object.fromEntries(Object.entries(JSON.parse(raw) as Record<string, unknown>).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  } catch {
+    headers = {};
+  }
+  broker = { url, headers };
+}
+
 export function getCredentialStore(): CredentialStore {
-  return registered ?? new FileCredentialStore(process.env.ARTEMIS_CREDENTIALS_DIR?.trim() || undefined);
+  if (registered) return registered;
+  if (broker) return new BrokerCredentialStore(broker.url, broker.headers);
+  return new FileCredentialStore();
 }
 
-const PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-const PASSWORD_SYMBOLS = '-_.@#%+=';
-
-/**
- * A strong password most sign-up forms accept: 20 characters, upper and
- * lower case, digits and one or two common symbols, no look-alike letters.
- */
-export function generatePassword(length = 20): string {
-  const chars: string[] = [];
-  const pick = (set: string) => set[randomInt(set.length)]!;
-  chars.push(pick('ABCDEFGHJKLMNPQRSTUVWXYZ'), pick('abcdefghijkmnopqrstuvwxyz'), pick('23456789'), pick(PASSWORD_SYMBOLS));
-  while (chars.length < Math.max(12, length)) chars.push(pick(PASSWORD_ALPHABET));
-  // Fisher-Yates with a CSPRNG.
-  for (let i = chars.length - 1; i > 0; i--) {
-    const j = randomInt(i + 1);
-    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
-  }
-  return chars.join('');
-}
-
-/**
- * Replaces `{{credential:<name>}}` placeholders with stored passwords or
- * tokens. Unknown names are an error (nothing is typed), so a typo never
- * types the placeholder itself into a form.
- */
-export async function resolveCredentialPlaceholders(text: string, store: CredentialStore = getCredentialStore()): Promise<{ ok: true; text: string; used: string[] } | { ok: false; missing: string[] }> {
-  const names = [...new Set([...text.matchAll(CREDENTIAL_PLACEHOLDER)].map((m) => m[1]!))];
-  if (names.length === 0) return { ok: true, text, used: [] };
-  const values = new Map<string, string>();
-  const missing: string[] = [];
-  for (const name of names) {
-    const info = await store.describe(name);
-    const secret = info && info.kind !== 'ssh_key' ? await store.reveal(name) : undefined;
-    if (secret === undefined) missing.push(name);
-    else values.set(name, secret);
-  }
-  if (missing.length) return { ok: false, missing };
-  return { ok: true, text: text.replace(CREDENTIAL_PLACEHOLDER, (_m, name: string) => values.get(name) ?? ''), used: names };
+/** Which backend serves this process (for messages). */
+export function credentialBackend(): 'registered' | 'hosted' | 'local' {
+  return registered ? 'registered' : broker ? 'hosted' : 'local';
 }
