@@ -1977,17 +1977,25 @@ function webHistory(messages: unknown): Array<{ id: string; role: string; conten
   let saves = 0
   let readErrors = 0
   let recovered = 0
-  const stop = Date.now() + 2_000
+  // At least 2 s and at least 4 saves (a loaded machine saves this session
+  // only every second or so); the reader races the writer until it is done.
+  const minUntil = Date.now() + 2_000
+  const hardStop = Date.now() + 120_000
+  let writing = true
   await Promise.all([
     (async () => {
-      while (Date.now() < stop) {
-        session.messages.push(msg('user', `w${saves}`))
-        await writer.save(session)
-        saves += 1
+      try {
+        while ((Date.now() < minUntil || saves < 4) && Date.now() < hardStop) {
+          session.messages.push(msg('user', `w${saves}`))
+          await writer.save(session)
+          saves += 1
+        }
+      } finally {
+        writing = false
       }
     })(),
     (async () => {
-      while (Date.now() < stop) {
+      while (writing) {
         try {
           const loaded = await new SessionStore(cwd).load(session.id, { fresh: true })
           if (loaded.metadata?.recoveredFrom) recovered += 1
