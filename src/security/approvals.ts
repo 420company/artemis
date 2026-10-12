@@ -648,18 +648,40 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
     }
     case 'mcp_call_tool':
       return classifyMcpCall(action)
+    // Office files and synthesized speech are written where the agent says:
+    // inside the workspace (or the temp dir) that needs nothing; anywhere
+    // else it would replace a file the owner may not have meant to touch.
+    case 'create_presentation':
+    case 'create_document':
+    case 'create_spreadsheet':
+    case 'synthesize_speech': {
+      const target = outsideTarget(ctx, action.type === 'synthesize_speech' ? action.outputPath : action.path)
+      return target ? need('delete_outside_workspace', 'high', { paths: target }) : null
+    }
+    // A recognition program the agent names itself is a command like any other.
+    case 'transcribe_audio':
+      return action.command?.trim()
+        ? need('shell_high_risk', 'high', {
+          command: action.command,
+          reason: 'runs a speech-recognition program the agent named',
+          reasonZh: '会运行 agent 自己指定的语音识别程序',
+        })
+        : null
     default:
       return null
   }
 }
 
+/** A path outside the workspace and the temp dir (after following links), or undefined. */
+function outsideTarget(ctx: ClassifyContext, raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined
+  const target = path.resolve(ctx.cwd, raw.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'))
+  return isInsideWorkspace(ctx.cwd, target) || isTemporaryPath(target) ? undefined : target
+}
+
 /** Direct-tool names (interactive brain path) that are not AgentActions: delete_file / delete_directory / move_file. */
 export function classifyDirectToolNeed(name: string, input: Record<string, unknown>, ctx: ClassifyContext): ApprovalNeed | null {
-  const outside = (raw: unknown): string | undefined => {
-    if (typeof raw !== 'string' || !raw.trim()) return undefined
-    const target = path.resolve(ctx.cwd, raw.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'))
-    return isInsideWorkspace(ctx.cwd, target) || isTemporaryPath(target) ? undefined : target
-  }
+  const outside = (raw: unknown) => outsideTarget(ctx, raw)
   if (name === 'delete_file' || name === 'delete_directory') {
     const target = outside(input.path)
     return target ? need('delete_outside_workspace', 'high', { paths: target }) : null

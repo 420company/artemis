@@ -597,6 +597,25 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('details: a high-risk command is shown in full', cmd.details.command!.length > 3_000)
 }
 
+// ── Office files and speech: inside the workspace nothing asks ─────────────
+{
+  const cwd = workspace('office')
+  fs.symlinkSync('/usr/share', path.join(cwd, 'out-link'))
+  const kindOf = (action: Record<string, unknown>) => classifyApprovalNeed(action as never, { cwd })?.kind ?? null
+  for (const type of ['create_presentation', 'create_document', 'create_spreadsheet']) {
+    assert(`office: ${type} with no path (the workspace default) needs nothing`, kindOf({ type, spec: {} }) === null)
+    assert(`office: ${type} inside the workspace needs nothing`, kindOf({ type, path: 'reports/q3', spec: {} }) === null && kindOf({ type, path: path.join(cwd, 'deck'), spec: {} }) === null)
+    assert(`office: ${type} in the temp dir needs nothing`, kindOf({ type, path: path.join(os.tmpdir(), `apr-office-${process.pid}`), spec: {} }) === null)
+    assert(`office: ${type} outside the workspace asks`, kindOf({ type, path: '/etc/report', spec: {} }) === 'delete_outside_workspace')
+    assert(`office: ${type} through a link that leads out asks`, kindOf({ type, path: 'out-link/report', spec: {} }) === 'delete_outside_workspace')
+  }
+  assert('speech: synthesized speech in the media folder (default) needs nothing', kindOf({ type: 'synthesize_speech', text: 'hi' }) === null)
+  assert('speech: synthesized speech inside the workspace needs nothing', kindOf({ type: 'synthesize_speech', text: 'hi', outputPath: 'audio/hi.mp3' }) === null)
+  assert('speech: synthesized speech written outside the workspace asks', kindOf({ type: 'synthesize_speech', text: 'hi', outputPath: '/etc/hi.mp3' }) === 'delete_outside_workspace')
+  assert('speech: transcribing a file needs nothing', kindOf({ type: 'transcribe_audio', inputPath: 'uploads/a.m4a' }) === null)
+  assert('speech: a recognition program the agent names itself asks', kindOf({ type: 'transcribe_audio', inputPath: 'a.m4a', command: '/tmp/x/whisper' }) === 'shell_high_risk')
+}
+
 // ── Finding 9: stale requests, and the request's own message ───────────────
 {
   const { session, record } = await suspendOnce('stale')
