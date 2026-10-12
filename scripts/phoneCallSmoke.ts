@@ -4,13 +4,14 @@
 // hand over the brief, wait for the owner's approval and the call, return the
 // outcome, and never go ahead without an approval channel.
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, openSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentAction } from '../src/core/types.js';
 import { buildActionParametersSchema } from '../src/core/providerNativeTools.js';
+import { loadInheritedMcpHeaders, resetInheritedMcpHeadersForTest } from '../src/mcp/inheritedHeaders.js';
 import { requestPhoneCallApproval } from '../src/tools/phoneCall/approvalGate.js';
 import { callHostFromConfig, callHostRpc, CallHostError, hostHeaders } from '../src/tools/phoneCall/host.js';
 import { quickNumberCheck } from '../src/tools/phoneCall/phone.js';
@@ -186,6 +187,19 @@ await test('sends the run\'s context headers along, as the MCP client resolves t
   } finally {
     if (previous === undefined) delete process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON;
     else process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = previous;
+  }
+});
+
+await test('sends the run context the host handed over on a descriptor', () => {
+  const file = path.join(mkdtempSync(path.join(os.tmpdir(), 'artemis-call-hdr-')), 'headers.json');
+  writeFileSync(file, JSON.stringify({ artemis_online: { 'x-run-context': 'rc_fd' } }));
+  resetInheritedMcpHeadersForTest();
+  try {
+    assert.equal(loadInheritedMcpHeaders({ ARTEMIS_MCP_HEADERS_FD: String(openSync(file, 'r')) }), undefined);
+    const entry = { id: 'artemis_online', url: 'http://127.0.0.1:8787/mcp', bearerToken: 'tok', enabled: true };
+    assert.deepEqual(callHostFromConfig({ servers: [entry] })?.headers, { 'x-run-context': 'rc_fd' });
+  } finally {
+    resetInheritedMcpHeadersForTest();
   }
 });
 
