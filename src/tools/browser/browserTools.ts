@@ -15,6 +15,7 @@
  * input not piped through tool results yet).
  */
 
+import { resolveIdentityPlaceholders } from '../../security/identityCredentials.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -374,7 +375,9 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
       if (action.value === undefined) {
         return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
       }
-      await el.fill(action.value, { timeout: 10_000 });
+      const typed = await resolveIdentityPlaceholders(action.value);
+      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_not_found', message: typed.message } };
+      await el.fill(typed.text, { timeout: 10_000 });
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
     }, { restoreUrlOnRetry: true });
   } catch (err) {
@@ -514,9 +517,12 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
   try {
     return await withPageRetry(async (page) => {
       const el = page.locator(action.selector).first();
+      // `{{credential:signup-…}}` types a sign-up's saved password; the history keeps the placeholder.
+      const typed = await resolveIdentityPlaceholders(action.text);
+      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_not_found', message: typed.message } };
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first
-      await el.fill(action.text);
+      await el.fill(typed.text);
       if (action.pressEnter) {
         await el.press('Enter');
         await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);

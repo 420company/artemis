@@ -1011,7 +1011,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         additionalProperties: false,
         required: ['site'],
         properties: {
-          site: nonEmptyStringSchema('The site that sent the code (domain), e.g. "example.com".'),
+          site: nonEmptyStringSchema('The domain of the site you are signing up on (an approved sign-up in progress), e.g. "example.com". Only for that site\'s own code; never for a bank, a wallet or the owner\'s own accounts.'),
           channel: { type: 'string', enum: ['sms', 'email', 'authenticator', 'other'], description: 'Where the owner received it (default sms).' },
           hint: optionalStringSchema('One short line to help the owner find it, e.g. "sent to your phone ending 1234".'),
           timeout_seconds: integerSchema('How long to wait for the owner (default 600, at most 600).'),
