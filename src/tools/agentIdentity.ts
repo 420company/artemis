@@ -19,6 +19,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
 import { setIdentityCredentialSource } from '../security/identityCredentials.js';
 import { resolveDataRootDir } from '../utils/fs.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
@@ -113,23 +114,18 @@ export class IdentityHostError extends Error {
 }
 
 /**
- * The run's own headers for the host (the host's MCP entry headers, e.g.
- * its run-context token): the host treats a run an automation started as
- * restricted, and refuses sign-ups, leases and code requests from it.
+ * The run's own headers for the host (its run-context token): handed to the
+ * engine on an inherited descriptor, never in the environment
+ * (mcp/inheritedHeaders.ts). The host treats a run an automation started,
+ * and any call without a running run's token, as restricted: no sign-ups,
+ * leases, code requests or passwords then.
  */
-function runHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const raw = env[`ARTEMIS_MCP_${HOST_MCP_ID.toUpperCase()}_HEADERS_JSON`];
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const out: Record<string, string> = {};
-    for (const [name, value] of Object.entries(parsed)) {
-      if (/^x-[a-z0-9-]{1,40}$/i.test(name) && typeof value === 'string' && value.length < 200) out[name] = value;
-    }
-    return out;
-  } catch {
-    return {};
+function runHeaders(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(inheritedMcpHeaders(HOST_MCP_ID))) {
+    if (/^x-[a-z0-9-]{1,40}$/i.test(name) && typeof value === 'string' && value.length < 200) out[name] = value;
   }
+  return out;
 }
 
 async function hostCall<T = Record<string, unknown>>(

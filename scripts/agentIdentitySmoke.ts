@@ -4,11 +4,12 @@
 // without reaching the model), the waits, and the
 // getVerificationCode adapter other features call.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, openSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { loadInheritedMcpHeaders, MCP_HEADERS_FD_ENV, resetInheritedMcpHeadersForTest } from '../src/mcp/inheritedHeaders.js';
 import { evaluateTouchesSecrets, forgetIdentityCredentials, redactIdentitySecrets, redactIdentitySecretsDeep, resolveIdentityPlaceholders } from '../src/security/identityCredentials.js';
 import {
   executeAgentIdentity,
@@ -157,7 +158,16 @@ assert.deepEqual(validateAgentIdentityAction({ type: 'wait_for_email' }), []);
 process.env.ARTEMIS_IDENTITY_URL = base;
 process.env.ARTEMIS_IDENTITY_TOKEN = TOKEN;
 const context = { cwd: process.cwd(), sessionId: SESSION };
-process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = JSON.stringify({ 'x-run-context': 'run-token-1', authorization: 'must not override' });
+// The host hands the run's headers on an inherited descriptor (here a file's), never in the environment.
+{
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'identity-fd-'));
+  const file = path.join(dir, 'headers.json');
+  writeFileSync(file, JSON.stringify({ artemis_online: { 'x-run-context': 'run-token-1', authorization: 'must not override' } }));
+  resetInheritedMcpHeadersForTest();
+  process.env[MCP_HEADERS_FD_ENV] = String(openSync(file, 'r'));
+  assert.equal(loadInheritedMcpHeaders(), undefined);
+  assert.equal(process.env[MCP_HEADERS_FD_ENV], undefined, 'the variable is gone once read');
+}
 
 {
   const r = await executeAgentIdentity({ type: 'agent_mail_address' }, context);
