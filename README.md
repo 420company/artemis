@@ -239,7 +239,7 @@ Capabilities include:
 - Spotify playback control when explicitly requested
 - Browser automation for pages that require interaction
 - MCP server discovery, enabling, and runtime use
-- Local speech, media, and bridge utilities
+- Local speech, media, and bridge utilities: `transcribe_audio` (audio and video files; long recordings in parts, through the hosting platform's speech recognition when there is one, else local Whisper) and `synthesize_speech` (the platform's licensed voices on a hosted install). The free Microsoft Edge voices are **off unless you opt in** (`ARTEMIS_EDGE_TTS=1`, or yes in `artemis setup tts`): that service is reached by posing as the Edge browser, which its terms do not license to other software, so turning it on means accepting that risk.
 
 The intention is to make Artemis useful as a practical daily operator, not only a coding assistant.
 
