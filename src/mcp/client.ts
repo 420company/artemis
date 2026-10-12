@@ -267,7 +267,7 @@ export function resolveStaticServerHeaders(server: McpServerConfig): Record<stri
     }
   }
   // Per-run headers the host handed over on a descriptor (never the environment).
-  Object.assign(headers, inheritedMcpHeaders(server.id));
+  Object.assign(headers, inheritedMcpHeaders(server.id, server.url));
 
   return headers;
 }
@@ -2281,6 +2281,41 @@ async function discoverManagedSurface(options: {
   return result;
 }
 
+/** Tool lists asked of each server by this process, by where it lives (URL or command). */
+const LIVE_TOOL_LISTS = new Map<string, Promise<McpToolDescriptor[] | undefined>>();
+const LIVE_TOOL_LIST_TIMEOUT_MS = 20_000;
+
+/**
+ * A tool as the server itself lists it now (tools/list from this process,
+ * cached per URL), never as the MCP config file describes it: that file is
+ * the agent's to write. Undefined when the server cannot be asked.
+ */
+export async function liveToolDescriptor(
+  server: McpServerConfig,
+  cwd: string,
+  toolName: string,
+): Promise<McpToolDescriptor | undefined> {
+  const key = JSON.stringify([server.transport, server.url ?? null, server.command ?? null, server.commandArgs ?? [], server.workingDirectory ?? null]);
+  let list = LIVE_TOOL_LISTS.get(key);
+  if (!list) {
+    list = discoverManagedSurface({ server, cwd, timeoutMs: LIVE_TOOL_LIST_TIMEOUT_MS }).then(
+      (result) => result.surface?.tools ?? [],
+      () => undefined,
+    );
+    LIVE_TOOL_LISTS.set(key, list);
+    // A failed listing is asked again next time.
+    void list.then((tools) => {
+      if (!tools) LIVE_TOOL_LISTS.delete(key);
+    });
+  }
+  return (await list)?.find((tool) => tool.name === toolName);
+}
+
+/** For tests: forget the tool lists asked so far. */
+export function resetLiveToolListsForTest(): void {
+  LIVE_TOOL_LISTS.clear();
+}
+
 export async function discoverMcpServerSurface(options: {
   server: McpServerConfig;
   cwd: string;
@@ -2363,6 +2398,10 @@ async function reloadRotatedCredential(
       (entry) => entry.id === server.id,
     );
     if (!fresh || !fresh.enabled) {
+      return undefined;
+    }
+    // Only the credential may have changed: an entry now pointing elsewhere is not this server.
+    if (fresh.transport !== server.transport || fresh.url !== server.url) {
       return undefined;
     }
     const credential = (entry: McpServerConfig) =>

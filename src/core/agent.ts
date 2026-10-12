@@ -141,6 +141,7 @@ import {
   callMcpServerTool,
   getMcpServerPrompt,
   getSuggestedMcpAuthState,
+  liveToolDescriptor,
   readMcpServerResource,
 } from '../mcp/client.js';
 import { formatDependencyPrompt, installNpmMcpPackage } from '../mcp/installer.js';
@@ -148,7 +149,6 @@ import { McpServerStore, type McpServerConfig } from '../mcp/store.js';
 import {
   applyMcpRuntimeFailure,
   applyMcpRuntimeSuccess,
-  findMcpToolDescriptor,
 } from '../mcp/runtime.js';
 import {
   buildEvidenceDigest,
@@ -2787,11 +2787,26 @@ async function saveUpdatedMcpServer(
 }
 
 /**
- * An MCP call's `readOnly` comes from the server's own tool descriptor
- * (readOnly / annotations.readOnlyHint) and nothing else: whatever the model
- * put there is overwritten, and an unknown tool or server is not read-only.
- * Read-only calls skip approvals and are open to sub-agents, so the model
- * must never be able to claim it.
+ * The MCP config an action was checked against (its server entry, read
+ * once): the approval gate takes the server's URL from it and the call is
+ * made with exactly this entry, so changing the file (or the directory) in
+ * between changes neither.
+ */
+const resolvedMcpServers = new WeakMap<AgentAction, Awaited<ReturnType<typeof loadMcpServerState>>>();
+
+/** The server entry a hydrated MCP call was resolved to (for the gate), if any. */
+export function resolvedMcpServerOf(action: AgentAction): { url?: string } | undefined {
+  const resolved = resolvedMcpServers.get(action);
+  return resolved ? { ...(resolved.server?.url ? { url: resolved.server.url } : {}) } : undefined;
+}
+
+/**
+ * An MCP call's `readOnly` comes from the server's own tool list, asked by
+ * this process (tools/list, cached per URL: liveToolDescriptor) and nothing
+ * else: not the model, and not the tool list cached in the MCP config,
+ * which the agent can write. An unknown tool or a server that cannot be
+ * asked is not read-only. Read-only calls skip approvals and are open to
+ * sub-agents, so neither the model nor the agent's files may claim it.
  */
 export async function hydrateRuntimeManagedAction(
   action: AgentAction,
@@ -2801,14 +2816,17 @@ export async function hydrateRuntimeManagedAction(
     return action;
   }
 
-  const { server } = await loadMcpServerState(cwd, action.serverId).catch(() => ({ server: undefined }));
-  const descriptor = server
-    ? findMcpToolDescriptor(server, action.toolName)
+  const resolved = await loadMcpServerState(cwd, action.serverId).catch(() => undefined);
+  const server = resolved?.server;
+  const descriptor = server?.enabled
+    ? await liveToolDescriptor(server, cwd, action.toolName).catch(() => undefined)
     : undefined;
-  return {
+  const hydrated: AgentAction = {
     ...action,
     readOnly: descriptor?.readOnly === true,
   };
+  if (resolved) resolvedMcpServers.set(hydrated, resolved);
+  return hydrated;
 }
 
 function normalizeActions(input: unknown): AgentAction[] {
@@ -4806,7 +4824,8 @@ async function executeMcpToolAction(
   options: RunAgentOptions,
   abortSignal?: AbortSignal,
 ): Promise<{ ok: boolean; output: string; error?: ToolError }> {
-  const { store, data, server } = await loadMcpServerState(
+  // The entry the approval gate saw, when this call went through it (never read again).
+  const { store, data, server } = resolvedMcpServers.get(action) ?? await loadMcpServerState(
     options.cwd,
     action.serverId,
   );
@@ -6001,7 +6020,7 @@ async function executeAuthorizedAction(
     // a pending request that stops the run before anything sensitive runs.
     const approvedKinds: ApprovalKind[] = [];
     if (options.approvalRuntime) {
-      const gate = await options.approvalRuntime.checkAction(hydratedAction, options.cwd);
+      const gate = await options.approvalRuntime.checkAction(hydratedAction, options.cwd, resolvedMcpServerOf(hydratedAction));
       if (!gate.ok) {
         if (!gate.pending) options.onInfo?.(`[tool:${hydratedAction.type}] denied`);
         await recordHeimdallActionEvent(session, options, 'action_denied', hydratedAction, {

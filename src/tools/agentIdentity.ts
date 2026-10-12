@@ -120,9 +120,10 @@ export class IdentityHostError extends Error {
  * and any call without a running run's token, as restricted: no sign-ups,
  * leases, code requests or passwords then.
  */
-function runHeaders(): Record<string, string> {
+function runHeaders(endpoint: IdentityEndpoint): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [name, value] of Object.entries(inheritedMcpHeaders(HOST_MCP_ID))) {
+  // Bound to the host's MCP URL: the identity routes live on the same host.
+  for (const [name, value] of Object.entries(inheritedMcpHeaders(HOST_MCP_ID, `${endpoint.baseUrl}/mcp`))) {
     if (/^x-[a-z0-9-]{1,40}$/i.test(name) && typeof value === 'string' && value.length < 200) out[name] = value;
   }
   return out;
@@ -144,7 +145,7 @@ async function hostCall<T = Record<string, unknown>>(
     res = await fetch(`${endpoint.baseUrl}${route}`, {
       method,
       headers: {
-        ...runHeaders(),
+        ...runHeaders(endpoint),
         ...extraHeaders,
         authorization: `Bearer ${endpoint.token}`,
         ...(context?.sessionId && /^[0-9a-f-]{8,64}$/i.test(context.sessionId) ? { 'x-artemis-session': context.sessionId } : {}),

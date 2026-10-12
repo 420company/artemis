@@ -43,7 +43,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
-import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
+import { inheritedInternalHeaders } from '../mcp/inheritedHeaders.js';
 
 export type CredentialKind = 'password' | 'username' | 'ssh_key' | 'token';
 export const CREDENTIAL_KINDS: readonly CredentialKind[] = ['password', 'username', 'ssh_key', 'token'];
@@ -69,7 +69,8 @@ export interface CredentialInfo {
 export type CredentialPurpose =
   | { type: 'web'; origin: string; field: 'password' | 'username' }
   | { type: 'ssh'; host: string; as: 'key' | 'password' }
-  | { type: 'internal'; use: 'vpn' };
+  /** A VPN key of one server (`<server>-wg-…`, made by server_setup for it): never any other token. */
+  | { type: 'internal'; use: 'vpn'; server: string };
 
 export type CredentialErrorCode = 'invalid_name' | 'not_found' | 'exists' | 'wrong_kind' | 'wrong_origin' | 'wrong_host' | 'unavailable' | 'locked';
 
@@ -166,7 +167,14 @@ export function normalizeHost(value: string | undefined): string | undefined {
  */
 export function checkUse(info: CredentialInfo, purpose: CredentialPurpose): { ok: true; bind?: CredentialBindings } | { ok: false; code: CredentialErrorCode; message: string } {
   if (purpose.type === 'internal') {
-    return info.kind === 'token' ? { ok: true } : { ok: false, code: 'wrong_kind', message: `"${info.name}" is not a VPN key.` };
+    const server = typeof purpose.server === 'string' ? purpose.server : '';
+    const vpnKey =
+      info.kind === 'token' &&
+      server !== '' &&
+      info.meta?.server === server &&
+      info.meta?.owner !== '1' &&
+      info.name.startsWith(`${server}-wg-`);
+    return vpnKey ? { ok: true } : { ok: false, code: 'wrong_kind', message: `"${info.name}" is not a VPN key of ${server || 'this server'}.` };
   }
   if (purpose.type === 'web') {
     const wanted: CredentialKind = purpose.field === 'username' ? 'username' : 'password';
@@ -542,7 +550,7 @@ export function registerCredentialStore(store: CredentialStore | undefined): voi
  * once (claimCredentialBroker trades it for the run's ticket, kept in this
  * process only).
  */
-export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env, inherited: Record<string, string> = inheritedMcpHeaders(CREDENTIAL_ENTRY)): void {
+export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env, inherited: Record<string, string> = inheritedInternalHeaders(CREDENTIAL_ENTRY)): void {
   const raw = env.ARTEMIS_CREDENTIAL_BROKER?.trim();
   delete env.ARTEMIS_CREDENTIAL_BROKER;
   let url = inherited['x-credential-broker'] ?? '';

@@ -76,7 +76,7 @@ async function resolveProbeHeaders(
     }
   }
   // Per-run headers the host handed over on a descriptor (never the environment).
-  Object.assign(headers, inheritedMcpHeaders(server.id));
+  Object.assign(headers, inheritedMcpHeaders(server.id, server.url));
 
   if (server.authType !== 'oauth') {
     return { server, headers };

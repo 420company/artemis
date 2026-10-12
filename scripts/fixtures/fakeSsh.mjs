@@ -110,11 +110,12 @@ process.stdin.on('end', () => {
     saveState()
   }
   if (script.includes('ARTEMIS_STEP wireguard')) {
-    const peers = (script.match(/^\[Peer\]$/gm) ?? []).length
+    const peers = (script.match(/\[Peer\]/g) ?? []).length
     const port = /ListenPort = (\d+)/.exec(script)?.[1] ?? '51820'
     out.push(`listening=${port}`, 'ARTEMIS_STEP wireguard ok')
     steps.push('wireguard')
     log({ peers, port })
+    if (process.env.ARTEMIS_SSH_FAKE_LAST_SCRIPT) writeFileSync(process.env.ARTEMIS_SSH_FAKE_LAST_SCRIPT, script)
   }
   if (script.includes('ARTEMIS_STEP check')) {
     out.push('service=active', `listening=${/expected (\d+)/.exec(script)?.[1] ?? '51820'}`, 'peers=2', 'forwarding=1', 'ARTEMIS_STEP check ok')

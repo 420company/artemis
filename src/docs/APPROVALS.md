@@ -12,8 +12,8 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 | Kind | When | Default |
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
-| `shell_high_risk` | `run_command` matching the high-risk classifier: a fetch piped or substituted into an interpreter (also via `sudo`/`env`, `bash <(curl …)`, `sh -c "$(curl …)"`), a downloaded or decoded file that is then run, uploads (`curl -d/--data*/-F @file`, `-T`, `wget --post-file/--post-data`), reverse shells | ask |
-| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, …, and `delete_file`/`delete_directory`/`move_file`), and any delete whose target cannot be worked out | ask |
+| `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; and every `server_setup run` off the read-only allowlist | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file, inline code that opens a file for writing, …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
 | `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
 | `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
@@ -21,6 +21,53 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 
 Modes per kind: `ask` (每次询问), `allow` (总是允许), `deny` (禁止). External
 tools can also have a mode of their own, keyed `server/tool` or `server/*`.
+
+**The shell classifier** (`security/shellRisk.ts`) fails closed: a shell
+is a language, so whatever hides what will run asks, whatever the inner
+content is.
+- Built at run time: a substitution, a variable (other than `$HOME/…`), an
+  ANSI-C string (`$'\x72m'`) or a glob as the command word; `eval`; a shell
+  given `-c` code with a substitution or variable in it; `source`/`.` of a
+  process substitution or of stdin; a pipe, here-string, or here-document
+  into a shell or into an interpreter (sh, bash, zsh, python, perl, node,
+  ruby, …) that reads its program from stdin (`| sh`, `| python3 -`,
+  `bash <<< …`; data piped into `python3 -c '…'` or a script is fine; a
+  quoted here-document program for python/node is fine, an expanding one
+  with a substitution is not); `xargs`/`parallel`/`find -exec` into a
+  shell; `env -S`; inline code that decodes and runs (`exec(b64decode(…))`).
+  printf/echo escapes, base64/xxd/openssl/tr/rev and friends feeding any of
+  these are reported as decoding.
+- Sending data out: `curl` with a body or upload in any spelling (`-d`,
+  `--data*`, `--json`, `-F`, `-T`, combined short flags), `wget
+  --post-*/--body-*`, `nc`/`ncat`/`netcat` (except `-z` port checks),
+  `socat`, `telnet`, `/dev/tcp`, `scp`/`rsync` to a remote host, `sftp`,
+  data piped into `ssh`, inline code with a network send (`urlopen(url,
+  data)`, `requests.post`, sockets, `fetch` with a body, …).
+- Lock-outs: firewall changes (`iptables`/`nft`/`ufw`/`firewall-cmd`
+  other than listing), stopping, disabling or masking SSH, locking or
+  removing users, `kill -1`/`kill 1`, removing packages, `crontab -r`,
+  formatting or partitioning disks, shutdown and reboot.
+Here-document bodies are text, not commands: a body written to a file is
+not classified, a body that is a program is checked as inline code.
+
+**Commands on a server (`server_setup run`).** The agent is root on the
+owner's server, so a command there asks unless it is on a short allowlist
+of read-only commands with plain arguments (`readOnlyServerCommand`):
+`uptime`, `df`, `free`, `uname`, `whoami`, `nproc`; `cat`, `ls`, `head`,
+`tail`, `stat` of paths that hold no secrets (not `shadow`, `sudoers`,
+`.ssh`, key files, `.env`, histories, `wireguard`, `private`, `secrets`,
+`/proc/<pid>/environ`, devices, …); `systemctl
+status|is-active|is-enabled|is-failed|list-units|list-unit-files|list-timers`;
+`journalctl` (reading options only, no `--vacuum-*`/`--rotate`); `ss`
+and `netstat` (no `-K`); `ip addr|route|link|neigh|rule` show/list; `ufw
+status`; `wg show` (not `private-key`, `preshared-keys` or `dump`);
+`docker ps`, `docker logs`; and `grep` (no recursion, no pattern file),
+`wc`, `sort` (no `-o`), `uniq` (one operand), `head`, `tail` to filter
+them. They may be joined by `;`, `&&`, `||` and `|`; any substitution,
+variable, redirection, glob, escape, comment, background job or line break
+asks. Off the list everything asks as `shell_high_risk`: high risk for
+remote code, data sent out, lock-outs and deletes or overwrites, medium
+for the rest ("runs a command as root on the server").
 
 **Where the policy comes from.** The host's copy, `ARTEMIS_APPROVAL_POLICY`
 (`{"modes":{…},"tools":{…},"ttlMinutes":1440}`), is the base. The web server
@@ -31,22 +78,60 @@ cannot write, and passes them to every run. The files the agent can reach,
 `ask`/`deny`, or a shorter expiry. `allow` in a file is ignored. Requests
 expire after 24 hours unless the policy says otherwise.
 
-**The host's own tools.** A host can let its own MCP tools through
-(`artemis-online` passes `artemis_online/*: allow`): its payment tools
+**The host's own tools.** A host can let its own MCP tools through, as
+defaults apart from the owner's entries (`"defaults":
+{"artemis_online/*": "allow"}`), and names its own MCP servers with their
+exact URL (`"hostServers": {"artemis_online": "<url>"}`): its payment tools
 (`pay_x402`, `transfer_to_allowlisted`, `request_swap`) are approved and
 limited by its payments service, its publish requests wait for the owner in
-its app, so the owner is not asked twice.
+its app, so the owner is not asked twice. An `allow` for a tool of a named
+server (a default or an owner's entry) holds only while the MCP config the
+call uses still points that id at that URL; elsewhere the kind's mode
+applies. A kind the owner turned off (`deny`) wins over every default and
+over the connectors broker's gate; only the owner's own entry for that exact
+tool (`server/tool`) overrides it. Only the host's copy sets `defaults`,
+`hostServers` and `connectorServers`.
+
+**Which config a call uses.** An MCP call's server entry is read once,
+from the directory the call runs in (a `cd` changes it): the gate takes the
+server's URL from that entry and the call is made with exactly that entry
+(a credential rotated by the host is picked up on a refused call only when
+the URL is unchanged). Whether a tool only reads comes from the server's
+own `tools/list`, asked by the engine (cached per URL), never from the
+model and never from the tool list cached in `mcp-servers.json`, which the
+agent can write; a server that cannot be asked is not read-only.
+
+**Per-run headers** (`mcp/inheritedHeaders.ts`) follow the v2 payload the
+host writes on the inherited descriptor: `{"v": 2, "servers": {"<id>":
+{"url", "headers"}}}`. Server ids match exactly, and a server's headers go
+only to an entry whose URL is the one the host named, so the run's token
+never follows the name to another URL. An entry with a `target` is for the
+model proxy only; one with neither is the engine's own (the credential
+broker's claim).
+
+**Messages that are not the owner's.** A new message ends the requests
+still waiting in its conversation, but only the owner's: the host passes
+`--keep-approvals` for a message it sends on its own (a scheduled task, a
+trigger, a call's follow-up, a connector that became ready), and those
+requests stay as they are.
 
 **Servers the agent sets up (`server_setup`).** Setting up a server the
 owner had the agent rent (keys, `install_key` with the root password the
 owner saved for exactly that server, `harden`, `install_wireguard`, checks)
 is the task the owner asked for: no second request. `forget_host_key` asks
 the owner itself through `requireApproval('confirmation', …)`, which no
-policy can allow. `run` is one shell command on that server: remote code and
-uploads are `shell_high_risk`, and destructive commands there (deletes,
-overwrites, `dd`, `mkfs`, user removal, shutdown, disabling the firewall) are
-`external_action`. The SSH itself runs on the host when it offers a
-credential broker, so a key or password never reaches the agent.
+policy can allow; on an interactive host it is asked like any other
+request (only the model's own `request_user_confirmation` asks itself).
+`run` is a command as root on that server: see the allowlist above. The
+SSH itself runs on the host when it offers a credential broker, so a key or
+password never reaches the agent. The VPN setup takes nothing from the
+inventory (`servers.json`, which the agent can write) unchecked: the server
+and device keys are the credential store's, named `<server>-wg-…` and made
+for that server (a VPN key purpose names the server, so no other token can
+be used as one), the subnet, port and addresses come from the store's notes
+or are checked, and every value goes into the script as a checked, quoted
+argument (`wg0.conf` is written with `printf`, never an expanding
+here-document).
 
 **The host's own tools for the owner's secrets.** A host's tool that asks
 the owner for a secret of theirs (`request_owner_secret` on the platform)

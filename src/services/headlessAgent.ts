@@ -71,6 +71,12 @@ export interface HeadlessAgentOptions {
    * the retry (SessionRewindError 'changed') instead of replacing it.
    */
   retryOf?: string
+  /**
+   * The message is not from the owner (a scheduled task, a trigger, a call's
+   * follow-up, a connector that became ready): requests still waiting in the
+   * conversation stay as they are. Only the owner's own message ends them.
+   */
+  keepApprovals?: boolean
 }
 
 export interface HeadlessAgentResult {
@@ -270,10 +276,11 @@ export async function runHeadlessAgent(
       return resumed
     }
 
-    // A new message in this conversation: requests still waiting from an
-    // earlier turn are stale (the owner moved on). They expire here, and the
-    // host is told, so a late answer can never run an old action.
-    const superseded = supersedePendingApprovals(current)
+    // A new message from the owner in this conversation: requests still
+    // waiting from an earlier turn are stale (the owner moved on). They
+    // expire here, and the host is told, so a late answer can never run an
+    // old action. A message the host sends on its own keeps them.
+    const superseded = opts.keepApprovals ? [] : supersedePendingApprovals(current)
     if (superseded.length) {
       await sessionStore.save(current)
       for (const record of superseded) onInfo(`${APPROVAL_RESULT_PREFIX} ${JSON.stringify({ id: record.id, decision: 'expired', reason: 'superseded' })}`)

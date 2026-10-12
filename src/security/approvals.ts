@@ -38,7 +38,7 @@ import type { AgentAction, SessionRecord } from '../core/types.js'
 import type { ToolError } from '../tools/types.js'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { isSyntheticUserMessage } from '../core/compaction/language.js'
-import { analyzeDeletes, DESTRUCTIVE_TOKEN, isInsideWorkspace, isTemporaryPath } from './shellRisk.js'
+import { analyzeDeletes, describeHighRiskCommand, DESTRUCTIVE_TOKEN, isInsideWorkspace, isTemporaryPath, readOnlyServerCommand } from './shellRisk.js'
 
 // ── Kinds, modes, policy ────────────────────────────────────────────────────
 
@@ -137,6 +137,20 @@ export interface ApprovalPolicy {
    * to write: a name alone proves nothing). Only the host's copy sets it.
    */
   connectorServers?: Record<string, string>
+  /**
+   * The host's own defaults for its tools (`artemis_online/*: allow`), apart
+   * from the owner's entries in `tools`: a kind the owner turned off
+   * (`deny`) wins over a default, never over the owner's own entry for
+   * that exact tool. Only the host's copy sets it.
+   */
+  defaults?: Record<string, ApprovalMode>
+  /**
+   * The host's own MCP servers by id → their exact URL (`artemis_online`).
+   * An `allow` for a tool of such a server (a default or an owner's entry)
+   * holds only while the live MCP config still points that id at that URL;
+   * otherwise the kind's mode applies. Only the host's copy sets it.
+   */
+  hostServers?: Record<string, string>
 }
 
 /** MCP server ids the host's connectors broker uses (`conn_<connection>`). */
@@ -157,11 +171,11 @@ export function sameUrl(a: string | undefined, b: string | undefined): boolean {
   }
 }
 
-function connectorServersOf(raw: unknown): Record<string, string> | undefined {
+function connectorServersOf(raw: unknown, ids: RegExp = CONNECTOR_SERVER): Record<string, string> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const out: Record<string, string> = {}
   for (const [id, url] of Object.entries(raw as Record<string, unknown>).slice(0, MAX_CONNECTOR_SERVERS)) {
-    if (!CONNECTOR_SERVER.test(id) || typeof url !== 'string') continue
+    if (!ids.test(id) || typeof url !== 'string') continue
     try {
       if (/^https?:$/.test(new URL(url).protocol)) out[id] = url
     } catch {
@@ -179,7 +193,7 @@ export function isApprovalKind(value: unknown): value is ApprovalKind {
   return typeof value === 'string' && (APPROVAL_KINDS as readonly string[]).includes(value)
 }
 
-type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown; connectorServers: unknown }>
+type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown; connectorServers: unknown; defaults: unknown; hostServers: unknown }>
 
 function readPolicyFile(file: string): PolicyData | undefined {
   try {
@@ -235,8 +249,13 @@ export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process
     }
     ttlMs = ttlOf(host) ?? ttlMs
   }
-  // Only from the host's copy: a policy file the agent can write never names a broker.
+  // Only from the host's copy: a policy file the agent can write never names a broker, a default or a host server.
   const connectorServers = connectorServersOf(host?.connectorServers)
+  const hostServers = connectorServersOf(host?.hostServers, /^[A-Za-z0-9_.-]{1,64}$/)
+  const defaults: Record<string, ApprovalMode> = {}
+  for (const [key, mode] of Object.entries(host?.defaults && typeof host.defaults === 'object' ? host.defaults : {})) {
+    if (TOOL_KEY.test(key) && isMode(mode)) defaults[key] = mode
+  }
   const files = [...new Set([path.join(resolveArtemisHomeDir(), APPROVAL_POLICY_FILE), path.join(resolveDataRootDir(cwd), APPROVAL_POLICY_FILE)])]
   for (const data of files.map((file) => readPolicyFile(file))) {
     if (!data) continue
@@ -249,7 +268,15 @@ export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process
     const fileTtl = ttlOf(data)
     if (fileTtl !== undefined) ttlMs = Math.min(ttlMs, fileTtl)
   }
-  return { modes, ttlMs, tools, floors, ...(connectorServers ? { connectorServers } : {}) }
+  return {
+    modes,
+    ttlMs,
+    tools,
+    floors,
+    ...(connectorServers ? { connectorServers } : {}),
+    ...(Object.keys(defaults).length ? { defaults } : {}),
+    ...(hostServers ? { hostServers } : {}),
+  }
 }
 
 /** The URL the live MCP config gives a server (undefined for none, stdio, or an unreadable config). */
@@ -264,20 +291,45 @@ export async function liveMcpServerUrl(cwd: string, serverId: string): Promise<s
   }
 }
 
+/** The id of a server the host names (a broker's or its own), and the URL it must be at. */
+function namedServerUrl(policy: ApprovalPolicy, serverId: string): string | undefined {
+  const own = (map: Record<string, string> | undefined) => (map && Object.prototype.hasOwnProperty.call(map, serverId) ? map[serverId] : undefined)
+  return own(policy.hostServers) ?? own(policy.connectorServers)
+}
+
+/** Whether the gate needs the live URL of this tool's server (it is one the host names). */
+export function needsServerUrl(policy: ApprovalPolicy, serverId: string): boolean {
+  return namedServerUrl(policy, serverId) !== undefined
+}
+
 /**
- * The mode for an external tool: its own entry, then its service's, then
- * (for a connected service the host's broker serves, at the URL the live
- * config gives it: `live.serverUrl`) allow, then the kind's.
+ * The mode for an external tool:
+ *  1. the owner's own entry for that exact tool;
+ *  2. a kind the owner turned off (`deny`) — over every default and the
+ *     broker's gate;
+ *  3. the owner's entry for the service, the host's defaults for the tool
+ *     and the service, a connected service the host's broker serves
+ *     (allow), then the kind's mode.
+ * A server the host names (its own, or a broker's) counts only at its URL
+ * (`live.serverUrl`, from the config the call will use): elsewhere no
+ * `allow` applies to it, whatever said so. Policy files only tighten.
  */
 export function modeFor(policy: ApprovalPolicy, kind: ApprovalKind, toolKey?: string, live: { serverUrl?: string | undefined } = {}): ApprovalMode {
   if (kind === 'confirmation') return 'ask'
   if (!toolKey) return policy.modes[kind]
   const service = `${toolKey.split('/')[0]}/*`
   const serverId = toolKey.split('/')[0]!
+  const named = namedServerUrl(policy, serverId)
+  const atItsUrl = named !== undefined && sameUrl(named, live.serverUrl)
+  // An `allow` for a named server that is not where the host said: not applied.
+  const usable = (mode: ApprovalMode | undefined) => (mode === 'allow' && named !== undefined && !atItsUrl ? undefined : mode)
   // A connected service's writes are approved by the host's connectors broker on its own card.
-  const broker = Object.prototype.hasOwnProperty.call(policy.connectorServers ?? {}, serverId) ? policy.connectorServers![serverId] : undefined
-  const gated = broker !== undefined && sameUrl(broker, live.serverUrl) ? 'allow' : undefined
-  const base = policy.tools[toolKey] ?? policy.tools[service] ?? gated ?? policy.modes[kind]
+  const brokerGate = Object.prototype.hasOwnProperty.call(policy.connectorServers ?? {}, serverId) && atItsUrl ? 'allow' : undefined
+  const base =
+    usable(policy.tools[toolKey]) ??
+    (policy.modes[kind] === 'deny'
+      ? 'deny'
+      : (usable(policy.tools[service]) ?? usable(policy.defaults?.[toolKey]) ?? usable(policy.defaults?.[service]) ?? brokerGate ?? policy.modes[kind]))
   const floor = tighter(policy.floors?.[toolKey] ?? 'allow', policy.floors?.[service] ?? 'allow')
   return tighter(base, floor)
 }
@@ -757,19 +809,22 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
     // root password behind install_key is one the owner saved for exactly
     // that server, so those steps ask nothing more. forget_host_key asks the
     // owner itself (requireApproval, kind confirmation: always asks). `run`
-    // is one shell command on that server: classified like a local command
-    // for remote code and uploads, and anything destructive there asks.
+    // is a command as root on the owner's server: only a short allowlist of
+    // read-only commands with plain arguments runs freely
+    // (readOnlyServerCommand); everything else asks, as a high-risk command.
     case 'server_setup': {
       const a = action as { action?: string; command?: unknown; host?: unknown }
-      if (a.action !== 'run' || typeof a.command !== 'string') return null
+      if (a.action !== 'run') return null
+      const command = typeof a.command === 'string' ? a.command : ''
+      if (readOnlyServerCommand(command)) return null
       const host = typeof a.host === 'string' ? a.host : undefined
-      const risky = ctx.dangerousCommand?.(a.command) ?? null
-      if (risky) return need('shell_high_risk', 'high', { command: a.command, target: host, reason: risky.reason, reasonZh: risky.reasonZh })
-      const shown = a.command.replace(/\d*>>?\s*\/dev\/null|\d*>&\d/g, '')
-      if (DESTRUCTIVE_TOKEN.test(shown) || /\b(?:mkfs|wipefs|fdisk|parted|userdel|deluser|shutdown|reboot|poweroff|halt|iptables\s+-F|ufw\s+(?:reset|disable))\b/.test(a.command)) {
-        return need('external_action', 'high', { command: a.command, target: host, action: 'run on server' })
+      const risky = describeHighRiskCommand(command)
+      if (risky) return need('shell_high_risk', 'high', { command, target: host, reason: risky.reason, reasonZh: risky.reasonZh })
+      const shown = command.replace(/\d*>>?\s*\/dev\/null|\d*>&\d/g, '')
+      if (DESTRUCTIVE_TOKEN.test(shown)) {
+        return need('shell_high_risk', 'high', { command, target: host, reason: 'deletes or overwrites files on the server', reasonZh: '会删除或改写服务器上的文件' })
       }
-      return null
+      return need('shell_high_risk', 'medium', { command, target: host, reason: 'runs a command as root on the server', reasonZh: '会以管理员身份在服务器上运行一条命令' })
     }
     // A recognition program the agent names itself is a command like any other.
     case 'transcribe_audio':
@@ -856,21 +911,28 @@ export class ApprovalRuntime {
     return Boolean(this.options.ask)
   }
 
-  /** Classifies and checks an action before it runs. */
-  async checkAction(action: AgentAction, cwd = this.options.cwd): Promise<GateResult> {
+  /**
+   * Classifies and checks an action before it runs, in the directory it
+   * runs in. `resolved`: the MCP server entry the call will be made with
+   * (read once by the caller); without it, the config in `cwd` is read.
+   */
+  async checkAction(action: AgentAction, cwd = this.options.cwd, resolved?: { url?: string }): Promise<GateResult> {
     const found = classifyApprovalNeed(action, { ...this.classifyContext, cwd })
-    return found ? this.check(found, action) : { ok: true }
+    if (!found) return { ok: true }
+    // A server the host names: its URL in the config the call uses.
+    const serverUrl =
+      action.type === 'mcp_call_tool' && needsServerUrl(this.options.policy, action.serverId)
+        ? resolved
+          ? resolved.url
+          : await liveMcpServerUrl(cwd, action.serverId)
+        : undefined
+    return this.check(found, action, undefined, { serverUrl })
   }
 
   /** Applies the policy to one need of one action. */
-  async check(found: ApprovalNeed, action: AgentAction, payloadDigest?: string): Promise<GateResult> {
+  async check(found: ApprovalNeed, action: AgentAction, payloadDigest?: string, live: { serverUrl?: string | undefined } = {}): Promise<GateResult> {
     const { locale } = this.options
-    // A broker-served connected service: its URL as the live MCP config has it now.
-    const serverUrl =
-      action.type === 'mcp_call_tool' && this.options.policy.connectorServers?.[action.serverId] !== undefined
-        ? await liveMcpServerUrl(this.options.cwd, action.serverId)
-        : undefined
-    const mode = modeFor(this.options.policy, found.kind, found.toolKey, { serverUrl })
+    const mode = modeFor(this.options.policy, found.kind, found.toolKey, live)
     const { title } = describeApprovalNeed(found, locale)
     if (mode === 'deny') {
       const message = t(
@@ -883,7 +945,8 @@ export class ApprovalRuntime {
     if (mode === 'allow') return { ok: true, approvedKind: found.kind }
     if (this.consumeGrant(found.kind, action, payloadDigest)) return { ok: true, approvedKind: found.kind }
     // The model's own question on an interactive host: the tool asks it itself (with its screenshot).
-    if (found.kind === 'confirmation' && this.options.ask) return { ok: true }
+    // Only that tool: a tool's own confirmation (requireApproval, a payload) is asked here like any other.
+    if (found.kind === 'confirmation' && this.options.ask && action.type === 'request_user_confirmation' && payloadDigest === undefined) return { ok: true }
     if (this.options.ask) {
       const { summary } = describeApprovalNeed(found, locale)
       const lines = [title, summary, ...Object.entries(found.details).filter(([k]) => k !== 'reasonZh' && k !== 'question').map(([k, v]) => `${k}: ${v}`)]
@@ -962,12 +1025,12 @@ interface ApprovalScope {
 }
 const scope = new AsyncLocalStorage<ApprovalScope>()
 
-/** Runs a tool with the approval gate of its run in reach (requireApproval). */
 /** Whether this call is inside an agent run's approval gate (a run always has one). */
 export function inApprovalRun(): boolean {
   return scope.getStore() !== undefined
 }
 
+/** Runs a tool with the approval gate of its run in reach (requireApproval). */
 export function runInApprovalScope<T>(runtime: ApprovalRuntime | undefined, action: AgentAction, fn: () => Promise<T>): Promise<T> {
   return runtime ? scope.run({ runtime, action }, fn) : fn()
 }

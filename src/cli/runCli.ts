@@ -330,6 +330,7 @@ export async function runCli(argv: string[]): Promise<void> {
       approvalAnswer: options.approvalAnswer,
       retry: options.retry,
       retryOf: options.retryOf,
+      keepApprovals: options.keepApprovals,
     })
     return
   }
@@ -681,6 +682,7 @@ async function runQueryCommand(options: {
   approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
   retry?: boolean
   retryOf?: string
+  keepApprovals?: boolean
 }): Promise<void> {
   const { cwd, locale, mode, model } = options
   const prompt = options.prompt ?? ''
@@ -735,6 +737,7 @@ async function runQueryCommand(options: {
       ...(answer ? { answer } : {}),
       ...(retry ? { retry: true } : {}),
       ...(retry && options.retryOf ? { retryOf: options.retryOf } : {}),
+      ...(options.keepApprovals ? { keepApprovals: true } : {}),
     })
   } catch (error) {
     if (error instanceof approvals.ApprovalResumeError) {
