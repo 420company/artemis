@@ -14,14 +14,39 @@
  * mental model: "I'm in Bangkok, I can see my home Mac mirror in my mind."
  * Without a display (headless Linux) it runs headless instead.
  * ARTEMIS_BROWSER_HEADLESS=1/true/yes or 0/false/no overrides either way.
+ *
+ * Live mode (ARTEMIS_BROWSER_LIVE_DIR set, as on the online platform): the
+ * process connects to one shared, long-lived browser that the owner can
+ * watch and take over from the web app instead of launching its own; see
+ * liveBrowser.ts.
  */
 
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext, Page, Request } from 'playwright';
+import { redactIdentitySecrets } from '../../security/identityCredentials.js';
+import type { FingerprintSet } from '../../security/secretFingerprints.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveBrowserLaunchMode } from '../platformSupport.js';
+import {
+  LIVE_FILES,
+  agentEndpoint,
+  browserIdleMs,
+  claimTab,
+  ensureHost,
+  hostCall,
+  liveDir,
+  readJsonFile,
+  releaseTab,
+  secretPauseMs,
+  stopHost,
+  writeTabReport,
+  type HostConfig,
+  type HostInfo,
+  type TabReport,
+} from './liveBrowser.js';
 
 const PROFILE_DIR = path.join(resolveArtemisHomeDir(), 'browser-data');
 const TEMP_PROFILE_PREFIX = path.join(os.tmpdir(), 'artemis-browser-');
@@ -31,6 +56,14 @@ let _context: BrowserContext | null = null;
 let _activePage: Page | null = null;
 let _initPromise: Promise<BrowserContext> | null = null;
 let _ephemeralBrowser: Browser | null = null;
+/** Live mode (liveBrowser.ts): the shared browser this process is connected to. */
+let _liveBrowser: Browser | null = null;
+/** Live mode: the tabs this run works in (others belong to other runs, or to nobody). */
+const _ownPages = new Set<Page>();
+/** Live mode: how long connecting to the host may take before it is restarted. */
+const LIVE_CONNECT_TIMEOUT_MS = 20_000;
+/** Live mode: a connection still pending after this long is usually waiting on a hung page. */
+const LIVE_PROBE_AFTER_MS = 6_000;
 
 // ── console / network event buffers ────────────────────────────────────────
 // Ring buffers so the brain can debug pages ("what did the console say?",
@@ -95,15 +128,32 @@ function attachPageListeners(page: Page): void {
   });
 }
 
-function attachContextListeners(ctx: BrowserContext): void {
-  for (const page of ctx.pages()) attachPageListeners(page);
-  ctx.on('page', (page) => attachPageListeners(page));
+/**
+ * In live mode the browser is shared: a run records only what happens in
+ * its own tabs (another run's sign-up page is never in its logs).
+ */
+function isRecordedRequest(req: Request): boolean {
+  if (!_liveBrowser) return true;
+  try {
+    return _ownPages.has(req.frame().page());
+  } catch {
+    // A service worker's request: no page of this run's.
+    return false;
+  }
+}
+
+function attachContextListeners(ctx: BrowserContext, options: { live?: boolean } = {}): void {
+  // Live mode: page listeners are attached as the run takes a tab (ownPage).
+  if (!options.live) {
+    for (const page of ctx.pages()) attachPageListeners(page);
+    ctx.on('page', (page) => attachPageListeners(page));
+  }
   ctx.on('request', (req) => {
-    if (!captureAllowed()) unrecordedRequests.add(req);
+    if (!captureAllowed() || !isRecordedRequest(req)) unrecordedRequests.add(req);
   });
   ctx.on('response', (response) => {
     const req = response.request();
-    if (!captureAllowed() || unrecordedRequests.has(req)) return;
+    if (!captureAllowed() || unrecordedRequests.has(req) || !isRecordedRequest(req)) return;
     pushRing(_networkBuffer, {
       time: new Date().toISOString().slice(11, 19),
       method: req.method(),
@@ -113,7 +163,7 @@ function attachContextListeners(ctx: BrowserContext): void {
     });
   });
   ctx.on('requestfailed', (req) => {
-    if (!captureAllowed() || unrecordedRequests.has(req)) return;
+    if (!captureAllowed() || unrecordedRequests.has(req) || !isRecordedRequest(req)) return;
     pushRing(_networkBuffer, {
       time: new Date().toISOString().slice(11, 19),
       method: req.method(),
@@ -184,6 +234,8 @@ async function initContext(): Promise<BrowserContext> {
     _context = null;
     _activePage = null;
     _initPromise = null;
+    _liveBrowser = null;
+    _secretSession = null;
   }
   if (_initPromise) return _initPromise;
 
@@ -193,20 +245,62 @@ async function initContext(): Promise<BrowserContext> {
     // ARTEMIS_BROWSER_HEADLESS override and the Wayland flag are resolved in
     // platformSupport.ts so the prompt hint describes the same mode.
     const { headless, extraArgs } = resolveBrowserLaunchMode();
-    // Platform-consistent UA — a Mac UA on a Windows host is itself a bot signal.
-    const uaPlatform = process.platform === 'win32'
-      ? 'Windows NT 10.0; Win64; x64'
-      : process.platform === 'darwin'
-        ? 'Macintosh; Intel Mac OS X 14_5_0'
-        : 'X11; Linux x86_64';
     const contextOptions = {
       viewport: { width: 1280, height: 800 },
       locale: 'zh-CN',
       timezoneId: 'Asia/Bangkok',
-      userAgent:
-        `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36`,
+      userAgent: browserUserAgent(),
     } as const;
     const launchArgs = ['--disable-blink-features=AutomationControlled', ...extraArgs];
+
+    // Live mode: the shared, long-lived browser the owner can watch and take
+    // over from the web app (liveBrowser.ts). Its profile is its own, so a
+    // non-live browser elsewhere never holds its lock.
+    const live = liveDir();
+    if (live) {
+      const executable = process.env.ARTEMIS_BROWSER_EXECUTABLE?.trim() || chromium.executablePath();
+      if (!fs.existsSync(executable)) throw new Error(`Executable doesn't exist at ${executable}`);
+      const hostConfig: HostConfig = {
+        liveDir: live,
+        executable,
+        profileDir: `${PROFILE_DIR}-live`,
+        headless,
+        args: extraArgs,
+        userAgent: browserUserAgent(),
+        idleMs: browserIdleMs(),
+        // The host applies these to every page (a shared browser has no Playwright context options).
+        viewport: contextOptions.viewport,
+        timezoneId: process.env.ARTEMIS_BROWSER_TIMEZONE?.trim() || contextOptions.timezoneId,
+        locale: contextOptions.locale,
+        ...(secretPauseMs() ? { secretPauseMs: secretPauseMs() } : {}),
+        ...(secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') ? { secretPauseMaxMs: secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') } : {}),
+      };
+      let host = await ensureHost(hostConfig);
+      let browser: Browser;
+      const connect = (to: HostInfo) => connectLive(chromium, to);
+      try {
+        browser = await connect(host);
+      } catch {
+        // Usually a hung page (connecting waits for every page): the host
+        // closes pages that do not answer, and the connection is tried
+        // again. Only a host that does not answer at all is replaced.
+        const answered = await hostCall(host, 'Artemis.probePages', { timeoutMs: 5_000 }, 15_000).then(() => true, () => false);
+        try {
+          if (!answered) throw new Error('the browser host does not answer');
+          browser = await connect(host);
+        } catch {
+          await stopHost(live, host);
+          host = await ensureHost(hostConfig);
+          browser = await connect(host);
+        }
+      }
+      _liveBrowser = browser;
+      const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
+      ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      attachContextListeners(ctx, { live: true });
+      _context = ctx;
+      return ctx;
+    }
 
     // ARTEMIS_BROWSER_CDP_URL: attach to a real, already-running Chrome/Edge/Brave
     // started with --remote-debugging-port. Drives the user's actual browser —
@@ -330,6 +424,32 @@ async function initContext(): Promise<BrowserContext> {
   return _initPromise;
 }
 
+/**
+ * Connects Playwright to the live host. A connection still pending after a
+ * few seconds is usually waiting on a page whose renderer hangs: the host is
+ * asked meanwhile to close pages that do not answer, which lets it finish.
+ */
+async function connectLive(chromium: typeof import('playwright').chromium, host: HostInfo): Promise<Browser> {
+  const timer = setTimeout(() => {
+    void hostCall(host, 'Artemis.probePages', { timeoutMs: 5_000 }, 15_000).catch(() => undefined);
+  }, LIVE_PROBE_AFTER_MS);
+  try {
+    return await chromium.connectOverCDP(agentEndpoint(host), { timeout: LIVE_CONNECT_TIMEOUT_MS });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Platform-consistent UA: a Mac UA on a Windows host is itself a bot signal. */
+function browserUserAgent(): string {
+  const uaPlatform = process.platform === 'win32'
+    ? 'Windows NT 10.0; Win64; x64'
+    : process.platform === 'darwin'
+      ? 'Macintosh; Intel Mac OS X 14_5_0'
+      : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${uaPlatform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36`;
+}
+
 export async function getBrowserContext(): Promise<BrowserContext> {
   return initContext();
 }
@@ -353,6 +473,38 @@ export async function getActivePage(): Promise<Page> {
     ctx = await initContext();
   }
 
+  // Live mode: each run works in its own tabs. The first one is the tab the
+  // last run left (when no other run works in it), else a new one.
+  const dir = liveDir();
+  if (dir && _liveBrowser) {
+    const own = ownPages();
+    if (own.length > 0) {
+      _activePage = own[own.length - 1]!;
+      return _activePage;
+    }
+    const last = readLiveTab()?.targetId;
+    const left = last ? await pageForTarget(last) : undefined;
+    if (left && last && claimTab(dir, last)) {
+      ownPage(left, last);
+      _activePage = left;
+      return left;
+    }
+    // A blank tab nobody works in (the one the browser starts with) is used before opening another.
+    for (const blank of ctx.pages()) {
+      if (blank.isClosed() || blank.url() !== 'about:blank') continue;
+      const targetId = await targetIdOf(blank);
+      if (targetId && claimTab(dir, targetId)) {
+        ownPage(blank, targetId);
+        _activePage = blank;
+        return blank;
+      }
+    }
+    const page = await ctx.newPage();
+    await adoptNewPage(page);
+    _activePage = page;
+    return page;
+  }
+
   const pages = ctx.pages().filter(p => !p.isClosed());
   if (pages.length > 0) {
     _activePage = pages[pages.length - 1]!;
@@ -360,6 +512,214 @@ export async function getActivePage(): Promise<Page> {
   }
   _activePage = await ctx.newPage();
   return _activePage;
+}
+
+/** Live mode: this run's open tabs, oldest first. */
+function ownPages(): Page[] {
+  for (const page of _ownPages) if (page.isClosed()) _ownPages.delete(page);
+  return [..._ownPages];
+}
+
+/** Live mode: a tab this run works in (and the popups it opens). */
+function ownPage(page: Page, targetId: string): void {
+  if (_ownPages.has(page)) return;
+  _ownPages.add(page);
+  attachPageListeners(page);
+  const dir = liveDir();
+  page.once('close', () => {
+    _ownPages.delete(page);
+    if (dir) releaseTab(dir, targetId);
+  });
+  page.on('popup', (popup) => void adoptNewPage(popup));
+  // The host closes a crashed page; the model hears about it on its next step.
+  page.once('crash', () => {
+    _crashedUrl = page.url();
+  });
+}
+
+let _crashedUrl: string | undefined;
+
+/** Live mode: a browser-level session for the host's own methods (secrets). */
+let _secretSession: import('playwright').CDPSession | null = null;
+
+async function hostMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!_liveBrowser) await initContext();
+  const browser = _liveBrowser;
+  if (!browser) throw new Error('not connected to the live browser');
+  _secretSession ??= await browser.newBrowserCDPSession();
+  // A host method (browserHost.ts), not a DevTools one: hence the cast.
+  return (await (_secretSession as unknown as { send: (m: string, p: unknown) => Promise<unknown> }).send(method, params)) as Record<string, unknown>;
+}
+
+/** What the live host knows about sign-up passwords, across every run. */
+export interface HostSecretState {
+  /** Some run has a sign-up password live. */
+  live: boolean;
+  /** Tabs paused in the owner's view. */
+  paused: string[];
+  /** Tabs the owner typed into during a takeover (until they load a new document). */
+  ownerTyped: string[];
+}
+
+/**
+ * Live mode: the host's view of sign-up passwords (undefined when not in
+ * live mode). Throws when the host cannot be asked; callers then refuse.
+ */
+export async function hostSecretState(): Promise<HostSecretState | undefined> {
+  if (!liveDir()) return undefined;
+  const raw = await hostMethod('Artemis.getSecretState', {});
+  const ids = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  return { live: raw.live === true, paused: ids(raw.paused), ownerTyped: ids(raw.ownerTyped) };
+}
+
+let _secretSeq = 0;
+let _secretChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Live mode: tells the host whether a sign-up password is live in this run,
+ * and, just before one is typed, which tab it goes into (`pause`: that tab
+ * is paused in the owner's view and masks its secret fields) with the
+ * password's fingerprints (a URL or title carrying it is then blanked).
+ * Reports go out in order, numbered, so a late one never undoes a newer one.
+ * Throws when the host could not be told (the caller then does not type).
+ */
+export function reportSecretState(state: { live: boolean; pause?: Page[]; fingerprints?: FingerprintSet }): Promise<void> {
+  if (!liveDir()) return Promise.resolve();
+  const seq = ++_secretSeq;
+  const send = async () => {
+    const pause = state.pause ? (await Promise.all(state.pause.map((page) => targetIdOf(page)))).filter((id): id is string => !!id) : [];
+    if (state.pause?.length && pause.length === 0) throw new Error('the tab to type into is unknown');
+    await hostMethod('Artemis.setSecretState', {
+      seq,
+      live: state.live,
+      ...(pause.length ? { pause } : {}),
+      ...(state.fingerprints ? { fingerprints: state.fingerprints } : {}),
+    });
+  };
+  const next = _secretChain.then(send, send);
+  _secretChain = next.catch(() => undefined);
+  return next;
+}
+
+/** Live mode: the address of a page of this run that crashed since the last call, once. */
+export function takeCrashNote(): string | undefined {
+  const url = _crashedUrl;
+  _crashedUrl = undefined;
+  return url;
+}
+
+async function adoptNewPage(page: Page): Promise<void> {
+  const dir = liveDir();
+  const targetId = await targetIdOf(page);
+  if (dir && targetId) claimTab(dir, targetId);
+  ownPage(page, targetId ?? '');
+}
+
+/** The tabs browser_tabs works with: in live mode only this run's own. */
+function visiblePages(ctx: BrowserContext): Page[] {
+  return _liveBrowser ? ownPages() : ctx.pages().filter((p) => !p.isClosed());
+}
+
+/** True when this process drives the shared live browser. */
+export function isLiveBrowser(): boolean {
+  return liveDir() !== undefined;
+}
+
+function readLiveTab(): TabReport | undefined {
+  const dir = liveDir();
+  return dir ? readJsonFile<TabReport>(path.join(dir, LIVE_FILES.tab)) : undefined;
+}
+
+const _targetIds = new WeakMap<Page, string>();
+
+/** The DevTools target id of a page (cached). */
+export async function targetIdOf(page: Page): Promise<string | undefined> {
+  const known = _targetIds.get(page);
+  if (known) return known;
+  try {
+    const session = await page.context().newCDPSession(page);
+    const { targetInfo } = await session.send('Target.getTargetInfo') as { targetInfo: { targetId: string } };
+    await session.detach().catch(() => undefined);
+    _targetIds.set(page, targetInfo.targetId);
+    return targetInfo.targetId;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The open page with this target id, if any. */
+export async function pageForTarget(targetId: string | undefined): Promise<Page | undefined> {
+  if (!targetId || !_context) return undefined;
+  for (const page of _context.pages()) {
+    if (!page.isClosed() && (await targetIdOf(page)) === targetId) return page;
+  }
+  return undefined;
+}
+
+/**
+ * Make the tab with this target id the active one (after the user handed
+ * back), if it is this run's, or nobody's. Another run's tab stays its own.
+ */
+export async function focusTarget(targetId: string | undefined): Promise<Page | undefined> {
+  const page = await pageForTarget(targetId);
+  if (!page) return undefined;
+  const dir = liveDir();
+  if (_liveBrowser && dir && targetId && !_ownPages.has(page)) {
+    if (!claimTab(dir, targetId)) return undefined;
+    ownPage(page, targetId);
+  }
+  _activePage = page;
+  return page;
+}
+
+/** Live mode: tell the viewer which tab the agent works in. */
+export async function reportActiveTab(): Promise<void> {
+  const dir = liveDir();
+  const page = _activePage;
+  if (!dir || !page || page.isClosed()) return;
+  const targetId = await targetIdOf(page);
+  // The server shows this to the owner: never a typed password (a GET form puts it in the URL).
+  writeTabReport(dir, {
+    ...(targetId ? { targetId } : {}),
+    url: await redactShown(page.url()),
+    title: await redactShown(await page.title().catch(() => '')),
+  });
+}
+
+/**
+ * A page's URL or title as the owner may be shown it: sign-up passwords and
+ * stored credentials this run typed are replaced by their placeholders.
+ */
+export async function redactShown(text: string): Promise<string> {
+  const { scrubSecrets } = await import('../../security/credentialStore.js');
+  return scrubSecrets(redactIdentitySecrets(text));
+}
+
+/**
+ * Before this process exits: in live mode, disconnect from the shared
+ * browser (it stays open for the owner and the next run). Otherwise nothing.
+ */
+export async function releaseBrowser(): Promise<void> {
+  if (!_liveBrowser) return;
+  const browser = _liveBrowser;
+  const dir = liveDir();
+  // This run's other tabs close; its last one stays for the owner and the next run.
+  const keep = _activePage && !_activePage.isClosed() ? _activePage : ownPages().at(-1);
+  for (const page of ownPages()) {
+    if (page !== keep) await page.close().catch(() => undefined);
+  }
+  if (keep && dir) {
+    const targetId = await targetIdOf(keep);
+    if (targetId) releaseTab(dir, targetId);
+  }
+  _ownPages.clear();
+  _secretSession = null;
+  _liveBrowser = null;
+  _context = null;
+  _activePage = null;
+  _initPromise = null;
+  // A browser reached over CDP is only disconnected by close().
+  await Promise.race([browser.close().catch(() => undefined), new Promise((r) => setTimeout(r, 3_000))]);
 }
 
 /** Replace the active page reference (e.g. after explicit new tab open). */
@@ -378,7 +738,7 @@ export interface TabInfo {
 
 export async function listTabs(): Promise<TabInfo[]> {
   const ctx = await initContext();
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   const out: TabInfo[] = [];
   for (let i = 0; i < pages.length; i++) {
     let title = '';
@@ -393,17 +753,18 @@ export async function listTabs(): Promise<TabInfo[]> {
 export async function openTab(url?: string): Promise<TabInfo> {
   const ctx = await initContext();
   const page = await ctx.newPage();
+  if (_liveBrowser) await adoptNewPage(page);
   _activePage = page;
   if (url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   return { index: pages.indexOf(page), url: page.url(), title: await page.title().catch(() => ''), active: true };
 }
 
 export async function switchTab(index: number): Promise<TabInfo> {
   const ctx = await initContext();
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   if (index < 0 || index >= pages.length) {
     throw new Error(`tab index ${index} out of range (0-${pages.length - 1})`);
   }
@@ -413,32 +774,34 @@ export async function switchTab(index: number): Promise<TabInfo> {
   return { index, url: page.url(), title: await page.title().catch(() => ''), active: true };
 }
 
+/** Closes one of this run's tabs (in live mode never another run's). Returns how many it has left. */
 export async function closeTab(index?: number): Promise<number> {
   const ctx = await initContext();
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   const target = index === undefined
-    ? (_activePage && !_activePage.isClosed() ? _activePage : pages[pages.length - 1])
+    ? (_activePage && !_activePage.isClosed() && pages.includes(_activePage) ? _activePage : pages[pages.length - 1])
     : pages[index];
   if (!target) throw new Error(`tab index ${index ?? '(active)'} not found`);
   const wasActive = target === _activePage;
   await target.close().catch(() => undefined);
   if (wasActive) _activePage = null;
-  return ctx.pages().filter((p) => !p.isClosed()).length;
+  return visiblePages(ctx).length;
 }
 
 /**
- * Close the active page. Browser context stays alive for next call.
- * Use closeBrowser() to fully shut down.
+ * Close the active page (in live mode, only if it is this run's). Browser
+ * context stays alive for next call. Use closeBrowser() to fully shut down.
  */
 export async function closeActivePage(): Promise<void> {
-  if (_activePage && !_activePage.isClosed()) {
+  if (_activePage && !_activePage.isClosed() && (!_liveBrowser || _ownPages.has(_activePage))) {
     await _activePage.close().catch(() => undefined);
   }
   _activePage = null;
 }
 
-/** Hard shutdown — only call on Artemis exit. */
+/** Hard shutdown — only call on Artemis exit. In live mode it only disconnects. */
 export async function closeBrowser(): Promise<void> {
+  if (_liveBrowser) return releaseBrowser();
   if (_context) {
     await _context.close().catch(() => undefined);
     _context = null;
