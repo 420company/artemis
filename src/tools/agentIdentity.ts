@@ -96,6 +96,26 @@ export class IdentityHostError extends Error {
   }
 }
 
+/**
+ * The run's own headers for the host (the host's MCP entry headers, e.g.
+ * its run-context token): the host treats a run an automation started as
+ * restricted, and refuses sign-ups, leases and code requests from it.
+ */
+function runHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const raw = env[`ARTEMIS_MCP_${HOST_MCP_ID.toUpperCase()}_HEADERS_JSON`];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(parsed)) {
+      if (/^x-[a-z0-9-]{1,40}$/i.test(name) && typeof value === 'string' && value.length < 200) out[name] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 async function hostCall<T = Record<string, unknown>>(
   context: Pick<ToolExecutionContext, 'cwd' | 'sessionId' | 'abortSignal'> | undefined,
   method: 'GET' | 'POST',
@@ -111,6 +131,7 @@ async function hostCall<T = Record<string, unknown>>(
     res = await fetch(`${endpoint.baseUrl}${route}`, {
       method,
       headers: {
+        ...runHeaders(),
         authorization: `Bearer ${endpoint.token}`,
         ...(context?.sessionId && /^[0-9a-f-]{8,64}$/i.test(context.sessionId) ? { 'x-artemis-session': context.sessionId } : {}),
         ...(body ? { 'content-type': 'application/json' } : {}),

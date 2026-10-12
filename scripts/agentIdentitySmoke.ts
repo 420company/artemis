@@ -24,6 +24,7 @@ interface Seen {
   method: string;
   url: string;
   session?: string;
+  runContext?: string;
   body?: Record<string, unknown>;
 }
 const seen: Seen[] = [];
@@ -39,7 +40,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown> |
 const server = createServer(async (req, res) => {
   const body = await readBody(req);
   const url = req.url ?? '/';
-  seen.push({ method: req.method ?? '', url, ...(typeof req.headers['x-artemis-session'] === 'string' ? { session: req.headers['x-artemis-session'] } : {}), ...(body ? { body } : {}) });
+  seen.push({ method: req.method ?? '', url, ...(typeof req.headers['x-artemis-session'] === 'string' ? { session: req.headers['x-artemis-session'] } : {}), ...(typeof req.headers['x-run-context'] === 'string' ? { runContext: req.headers['x-run-context'] } : {}), ...(body ? { body } : {}) });
   const send = (status: number, value: unknown) => {
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(value));
@@ -129,12 +130,14 @@ assert.deepEqual(validateAgentIdentityAction({ type: 'wait_for_email' }), []);
 process.env.ARTEMIS_IDENTITY_URL = base;
 process.env.ARTEMIS_IDENTITY_TOKEN = TOKEN;
 const context = { cwd: process.cwd(), sessionId: SESSION };
+process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = JSON.stringify({ 'x-run-context': 'run-token-1', authorization: 'must not override' });
 
 {
   const r = await executeAgentIdentity({ type: 'agent_mail_address' }, context);
   assert.equal(r.ok, true);
   assert.match(r.output, /mk7q2wd9@agentmail\.test/);
   assert.equal(seen.at(-1)?.session, SESSION, 'the conversation goes along as a display hint');
+  assert.equal(seen.at(-1)?.runContext, 'run-token-1', 'the run context goes along, so the host can restrict automation runs');
 }
 {
   const r = await executeAgentIdentity({ type: 'begin_signup', site: 'https://www.example.com/signup', purpose: '帮主人订外卖', free: true, wait_seconds: 5 }, context);
