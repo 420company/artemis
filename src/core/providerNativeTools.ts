@@ -41,6 +41,38 @@ export type ProviderNativeToolRuntime = {
   selectedProjectedToolNames: string[];
 };
 
+/**
+ * The projected MCP names of the most recent tool runtime. A model that
+ * writes a projected tool as text (`<toolcall name="mcp__gmail__search_email">`)
+ * instead of a native call is resolved through it, so the call reaches the
+ * right server and tool (with the tool's exact name, which projection may
+ * have normalized).
+ */
+const lastProjectedMcpTools = new Map<string, ProviderNativeMcpProjection>();
+
+const PROJECTED_MCP_TOOL_NAME = /^mcp__([A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)__(.+)$/;
+
+/**
+ * The MCP tool a projected name (`mcp__<server>__<tool>`) stands for: from
+ * the latest projection when it is there, else parsed from the name (server
+ * ids never contain "__", so the first "__" after the server ends it).
+ */
+export function resolveProjectedMcpToolName(
+  name: string,
+): { serverId: string; toolName: string; readOnly?: boolean } | undefined {
+  const known = lastProjectedMcpTools.get(name);
+  if (known) {
+    return known.kind === 'tool'
+      ? { serverId: known.serverId, toolName: known.toolName, readOnly: known.readOnly }
+      : undefined;
+  }
+  const match = PROJECTED_MCP_TOOL_NAME.exec(name);
+  if (!match?.[1] || !match[2]) {
+    return undefined;
+  }
+  return { serverId: match[1], toolName: match[2] };
+}
+
 const MAX_PROJECTED_MCP_DESCRIPTION_LENGTH = 2_048;
 const DEFAULT_MAX_PROJECTED_MCP_TOOLS = 96;
 // Keyed by host so a forced host environment (tests) never reuses a manifest
@@ -668,6 +700,11 @@ function buildProjectedMcpFunctionTools(
       readOnly: candidate.readOnly,
       uri: candidate.uri,
     });
+  }
+
+  lastProjectedMcpTools.clear();
+  for (const [name, projection] of projectedMcpTools) {
+    lastProjectedMcpTools.set(name, projection);
   }
 
   return {
