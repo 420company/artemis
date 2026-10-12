@@ -19,10 +19,11 @@ export type TaskCategory =
   | 'memory'
   | 'long-context'
   | 'errand'
+  | 'office'
 
 export const TASK_CATEGORIES: readonly TaskCategory[] = [
   'writing', 'qa', 'file', 'coding', 'multistep', 'vision', 'search',
-  'routing', 'safety', 'honesty', 'memory', 'long-context', 'errand',
+  'routing', 'safety', 'honesty', 'memory', 'long-context', 'errand', 'office',
 ]
 
 /** One user message of a task. Turns of a task share the workspace; `newSession` starts a fresh conversation. */
@@ -136,6 +137,12 @@ export type Grader = GraderBase & (
   | { type: 'events_emitted'; event: 'agent-update' | 'agent-status'; fields?: Record<string, string>; min?: number }
   /** Every amount of money in the reply was seen in a tool result (no invented prices); `allow` lists computed ones. */
   | { type: 'reply_prices_grounded'; allow?: string[]; requirePrice?: boolean }
+  /**
+   * A new .pptx / .docx / .xlsx matching `pattern` that opens and has: `kind`, slide/sheet count
+   * (`minParts`/`maxParts`), text (`contains`; `part` + `partContains` for one slide or sheet, 1-based),
+   * formulas, charts, and cell `numbers` (xlsx: values or cached formula results).
+   */
+  | { type: 'office_file'; pattern: string; flags?: string; kind?: 'pptx' | 'docx' | 'xlsx'; minParts?: number; maxParts?: number; contains?: Needle[]; part?: number; partContains?: Needle[]; minFormulas?: number; minCharts?: number; numbers?: number[] }
 )
 
 export type GraderType = Grader['type']

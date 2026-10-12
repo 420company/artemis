@@ -286,6 +286,12 @@ export type VoiceSetupConfig = {
   };
   tts: {
     provider: 'edge' | 'elevenlabs' | 'openai' | 'xai' | 'minimax' | 'mistral' | 'gemini' | 'neutts' | 'kittentts';
+    /**
+     * The free Edge voices are a consumer service reached by posing as the
+     * browser (see core/edgeTts.ts): used only when the operator sets this
+     * (or ARTEMIS_EDGE_TTS=1), accepting its terms-of-service risk.
+     */
+    edgeOptIn?: boolean;
     apiKey?: string;
     voice?: string;
     model?: string;

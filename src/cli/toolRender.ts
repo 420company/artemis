@@ -76,6 +76,9 @@ const TOOL_META: Record<string, ToolMeta> = {
   generate_image:  { labelZh: '图片', labelEn: 'Image',     rgb: [245, 160, 120], icon: '✦' },
   generate_video:  { labelZh: '视频', labelEn: 'Video',     rgb: [245, 160, 120], icon: '✦' },
   generate_long_video: { labelZh: '长视频', labelEn: 'Video', rgb: [245, 160, 120], icon: '✦' },
+  create_presentation: { labelZh: '幻灯片', labelEn: 'Slides', rgb: [130, 220, 140], icon: '◆' },
+  create_document: { labelZh: '文档', labelEn: 'Document', rgb: [130, 220, 140], icon: '◆' },
+  create_spreadsheet: { labelZh: '表格', labelEn: 'Spreadsheet', rgb: [130, 220, 140], icon: '◆' },
 }
 
 const FALLBACK_META: ToolMeta = { labelZh: '工具', labelEn: 'Tool', rgb: [160, 160, 160], icon: '⚙' }
