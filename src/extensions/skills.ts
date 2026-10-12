@@ -1,6 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { pathExists, resolveDataRootDir, truncate } from '../utils/fs.js';
+import { pathExists, readOwnFileText, resolveDataRootDir, truncate } from '../utils/fs.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import { SkillAdapterManager } from '../core/externalSkillAdapter.js';
 
@@ -84,7 +84,7 @@ async function loadSkillFromDirectory(options: {
   }
 
   if (await pathExists(skillMdPath)) {
-    const content = (await readFile(skillMdPath, 'utf8')).trim();
+    const content = (await readOwnFileText(skillMdPath)).trim();
     if (!content) {
       issues.push('SKILL.md is empty.');
     }
@@ -102,7 +102,7 @@ async function loadSkillFromDirectory(options: {
     };
   } else if (await pathExists(skillJsonPath)) {
     try {
-      const content = JSON.parse(await readFile(skillJsonPath, 'utf8'));
+      const content = JSON.parse(await readOwnFileText(skillJsonPath));
       
       return {
         id: normalizeId(content.id || options.name),
@@ -151,7 +151,7 @@ async function loadSkillFromJsonFile(options: {
   const issues: string[] = [];
 
   try {
-    const content = JSON.parse(await readFile(skillPath, 'utf8'));
+    const content = JSON.parse(await readOwnFileText(skillPath));
     const skillName = path.basename(options.fileName, '.json');
     
     return {

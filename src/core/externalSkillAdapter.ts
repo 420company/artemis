@@ -2,7 +2,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { pathExists } from '../utils/fs.js';
+import { pathExists, readOwnFileTextSync } from '../utils/fs.js';
 
 // 外部技能定义接口
 export interface ExternalSkill {
@@ -104,7 +104,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const mdPath = path.join(directory, 'SKILL.md');
     if (fs.existsSync(mdPath)) {
       try {
-        const content = fs.readFileSync(mdPath, 'utf8');
+        const content = readOwnFileTextSync(mdPath);
         // 尝试从 YAML 前导内容中提取描述
         const yamlMatch = content.match(/---\s*([\s\S]*?)\s*---/);
         if (yamlMatch) {
@@ -142,7 +142,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const packageJsonPath = path.join(directory, 'package.json');
     if (fs.existsSync(packageJsonPath)) {
       try {
-        const packageContent = fs.readFileSync(packageJsonPath, 'utf8');
+        const packageContent = readOwnFileTextSync(packageJsonPath);
         const packageData = JSON.parse(packageContent);
         if (packageData.name && !skillData.name) {
           skillData.name = packageData.name;
@@ -177,7 +177,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const mdPath = path.join(skill.dirPath, 'SKILL.md');
     if (fs.existsSync(mdPath)) {
       try {
-        const content = fs.readFileSync(mdPath, 'utf8');
+        const content = readOwnFileTextSync(mdPath);
         if (content.length === 0) warnings.push('SKILL.md 文件为空');
       } catch (error) {
         warnings.push(`SKILL.md 无法读取: ${error}`);
@@ -210,7 +210,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const mdPath = path.join(skill.dirPath, 'SKILL.md');
     if (fs.existsSync(mdPath)) {
       try {
-        const content = fs.readFileSync(mdPath, 'utf8');
+        const content = readOwnFileTextSync(mdPath);
         // 尝试从 YAML 前导内容中提取描述
         const yamlMatch = content.match(/---\s*([\s\S]*?)\s*---/);
         if (yamlMatch) {
@@ -271,7 +271,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const mdPath = path.join(directory, 'SKILL.md');
     if (fs.existsSync(mdPath)) {
       try {
-        const content = fs.readFileSync(mdPath, 'utf8');
+        const content = readOwnFileTextSync(mdPath);
         // 查找关键词部分（通常在 SKILL.md 中有 Keywords 部分）
         const keywordsMatch = content.match(/\*\*Keywords\*\*:\s*(.*?)(\n\n|$)/);
         if (keywordsMatch) {
@@ -339,7 +339,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const requirementsPath = path.join(directory, 'requirements.txt');
     if (fs.existsSync(requirementsPath)) {
       try {
-        const content = fs.readFileSync(requirementsPath, 'utf8');
+        const content = readOwnFileTextSync(requirementsPath);
         const lines = content.split('\n');
         lines.forEach(line => {
           const trimmed = line.trim();
@@ -356,7 +356,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const packageJsonPath = path.join(directory, 'package.json');
     if (fs.existsSync(packageJsonPath)) {
       try {
-        const packageContent = fs.readFileSync(packageJsonPath, 'utf8');
+        const packageContent = readOwnFileTextSync(packageJsonPath);
         const packageData = JSON.parse(packageContent);
         if (packageData.dependencies) {
           dependencies.push(...Object.keys(packageData.dependencies));
@@ -373,7 +373,7 @@ export class ClaudeCodeSkillAdapter extends BaseSkillAdapter {
     const gemfilePath = path.join(directory, 'Gemfile');
     if (fs.existsSync(gemfilePath)) {
       try {
-        const content = fs.readFileSync(gemfilePath, 'utf8');
+        const content = readOwnFileTextSync(gemfilePath);
         const lines = content.split('\n');
         lines.forEach(line => {
           const match = line.match(/gem\s+['"]([^'"]+)['"]/);
@@ -584,7 +584,7 @@ export class OpenClawSkillAdapter extends BaseSkillAdapter {
     const configPath = path.join(directory, 'config.json');
     if (fs.existsSync(configPath)) {
       try {
-        const configContent = fs.readFileSync(configPath, 'utf8');
+        const configContent = readOwnFileTextSync(configPath);
         const configData = JSON.parse(configContent);
         if (configData.name) {
           skillData.id = configData.name.toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
@@ -603,7 +603,7 @@ export class OpenClawSkillAdapter extends BaseSkillAdapter {
     const metaPath = path.join(directory, '_meta.json');
     if (fs.existsSync(metaPath)) {
       try {
-        const metaContent = fs.readFileSync(metaPath, 'utf8');
+        const metaContent = readOwnFileTextSync(metaPath);
         const metaData = JSON.parse(metaContent);
         if (metaData.version) {
           skillData.version = metaData.version;
@@ -634,7 +634,7 @@ export class OpenClawSkillAdapter extends BaseSkillAdapter {
     const configPath = path.join(skill.dirPath, 'config.json');
     if (fs.existsSync(configPath)) {
       try {
-        const configContent = fs.readFileSync(configPath, 'utf8');
+        const configContent = readOwnFileTextSync(configPath);
         JSON.parse(configContent);
       } catch (error) {
         errors.push(`config.json 格式错误: ${error}`);
@@ -647,7 +647,7 @@ export class OpenClawSkillAdapter extends BaseSkillAdapter {
     const mdPath = path.join(skill.dirPath, 'SKILL.md');
     if (fs.existsSync(mdPath)) {
       try {
-        const content = fs.readFileSync(mdPath, 'utf8');
+        const content = readOwnFileTextSync(mdPath);
         if (content.length === 0) warnings.push('SKILL.md 文件为空');
       } catch (error) {
         warnings.push(`SKILL.md 无法读取: ${error}`);
@@ -667,7 +667,7 @@ export class OpenClawSkillAdapter extends BaseSkillAdapter {
     const configPath = path.join(skill.dirPath, 'config.json');
     if (fs.existsSync(configPath)) {
       try {
-        const configContent = fs.readFileSync(configPath, 'utf8');
+        const configContent = readOwnFileTextSync(configPath);
         configData = JSON.parse(configContent);
       } catch (error) {
         console.warn(`Failed to parse config.json: ${error}`);
@@ -679,7 +679,7 @@ export class OpenClawSkillAdapter extends BaseSkillAdapter {
     const mdPath = path.join(skill.dirPath, 'SKILL.md');
     if (fs.existsSync(mdPath)) {
       try {
-        const content = fs.readFileSync(mdPath, 'utf8');
+        const content = readOwnFileTextSync(mdPath);
         // 尝试从 YAML 前导内容中提取描述
         const yamlMatch = content.match(/---\s*([\s\S]*?)\s*---/);
         if (yamlMatch) {

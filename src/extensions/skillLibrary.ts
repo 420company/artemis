@@ -19,6 +19,7 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs';
+import { isOwnFile, readOwnFileText } from '../utils/fs.js';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -196,7 +197,8 @@ export function summarize(description: string, max = SUMMARY_MAX_CHARS): string 
 async function readSkillDir(root: string, dirPath: string, source: LibrarySource, pack?: string): Promise<LibrarySkill | undefined> {
   const mdPath = path.join(dirPath, 'SKILL.md');
   const jsonPath = path.join(dirPath, 'SKILL.json');
-  const json = await readFile(jsonPath, 'utf8').catch(() => undefined);
+  // Links are not read: a skill file that points elsewhere (settings, credentials) is skipped.
+  const json = await readOwnFileText(jsonPath, { maxBytes: LIBRARY_FILE_MAX_BYTES }).catch(() => undefined);
   let meta: Record<string, unknown> = {};
   if (json !== undefined) {
     try {
@@ -208,8 +210,8 @@ async function readSkillDir(root: string, dirPath: string, source: LibrarySource
   }
   const usable = (value: unknown): value is string => typeof value === 'string' && Boolean(value.trim()) && !BLOCK_INDICATOR.test(value.trim());
   // SKILL.md is read only when SKILL.json does not describe the skill (one file per skill, not two).
-  const md = usable(meta.description) && usable(meta.name) ? undefined : await readFile(mdPath, 'utf8').catch(() => undefined);
-  const hasMd = md !== undefined || existsSync(mdPath);
+  const md = usable(meta.description) && usable(meta.name) ? undefined : await readOwnFileText(mdPath, { maxBytes: LIBRARY_FILE_MAX_BYTES }).catch(() => undefined);
+  const hasMd = md !== undefined || isOwnFile(mdPath);
   if (!hasMd && json === undefined) return undefined;
   const base = path.basename(dirPath);
   const id = normalizeId(typeof meta.id === 'string' && meta.id ? meta.id : base);
@@ -541,8 +543,8 @@ export function skillFolder(skill: LibrarySkill): string {
 export async function readLibrarySkillText(skill: LibrarySkill, maxChars = LIBRARY_SKILL_MAX_CHARS): Promise<{ text: string; truncated: boolean }> {
   let text = '';
   if (skill.skillPath?.endsWith('.md')) {
-    skillFolder(skill);
-    text = stripFrontMatter(await readFile(skill.skillPath, 'utf8').catch(() => '')).trim();
+    const folder = skillFolder(skill);
+    text = stripFrontMatter(await readOwnFileText(skill.skillPath, { folder, maxBytes: LIBRARY_FILE_MAX_BYTES }).catch(() => '')).trim();
   }
   if (!text) text = skill.description;
   return text.length > maxChars ? { text: `${text.slice(0, maxChars)}\n[… cut at ${maxChars} characters]`, truncated: true } : { text, truncated: false };
@@ -565,7 +567,10 @@ export async function readLibrarySkillFile(skill: LibrarySkill, relative: string
   const info = await stat(file);
   if (!info.isFile()) throw new Error(`"${relative}" is not a file`);
   if (info.size > LIBRARY_FILE_MAX_BYTES) throw new Error(`"${relative}" is larger than load_skill reads (${Math.round(LIBRARY_FILE_MAX_BYTES / 1024)} KB)`);
-  const text = await readFile(file, 'utf8');
+  // The path as written must not be a link either (its target is checked above, the link itself here).
+  const text = await readOwnFileText(path.join(skill.dirPath, clean), { folder: root, maxBytes: LIBRARY_FILE_MAX_BYTES }).catch(() => {
+    throw new Error(`"${relative}" is not a file of skill ${skill.id}`);
+  });
   return text.length > LIBRARY_FILE_MAX_CHARS ? `${text.slice(0, LIBRARY_FILE_MAX_CHARS)}\n[… cut at ${LIBRARY_FILE_MAX_CHARS} characters]` : text;
 }
 

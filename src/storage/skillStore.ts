@@ -32,7 +32,7 @@
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { readFile, writeFile, readdir, rename, unlink, stat } from 'node:fs/promises'
-import { ensureDir, resolveDataRootDir } from '../utils/fs.js'
+import { ensureDir, readOwnFileText, resolveDataRootDir } from '../utils/fs.js'
 import { memoryDirForScope, scopesCollide, tokenizeForRecall, type MemoryScope } from './memoryFiles.js'
 import { withSessionLock } from './sessionLock.js'
 
@@ -305,7 +305,7 @@ export async function listSkills(cwd: string, scope: SkillScope): Promise<SkillR
   const out: SkillRecord[] = []
   for (const file of files) {
     try {
-      const parsed = parseSkillRecord(JSON.parse(await readFile(join(dir, file), 'utf8')), file.slice(0, -5), scope)
+      const parsed = parseSkillRecord(JSON.parse(await readOwnFileText(join(dir, file))), file.slice(0, -5), scope)
       if (parsed) out.push(parsed)
     } catch { /* unreadable or corrupt skill — skip it */ }
   }
@@ -330,7 +330,7 @@ export async function listAllSkills(cwd: string, scopes: SkillScope[] = skillSco
 
 async function readSkillIn(cwd: string, scope: SkillScope, id: string): Promise<SkillRecord | null> {
   try {
-    return parseSkillRecord(JSON.parse(await readFile(skillFile(cwd, scope, id), 'utf8')), id, scope)
+    return parseSkillRecord(JSON.parse(await readOwnFileText(skillFile(cwd, scope, id))), id, scope)
   } catch {
     return null
   }
@@ -459,7 +459,7 @@ export async function restorePreviousSkillVersion(
     if (!latest) return null
     let previous: SkillRecord | null = null
     try {
-      previous = parseSkillRecord(JSON.parse(await readFile(join(dir, latest.file), 'utf8')), id, scope)
+      previous = parseSkillRecord(JSON.parse(await readOwnFileText(join(dir, latest.file))), id, scope)
     } catch { /* unreadable backup */ }
     if (!previous) return null
     const now = options.now ?? new Date()

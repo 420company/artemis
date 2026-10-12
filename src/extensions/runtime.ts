@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import { truncate } from '../utils/fs.js';
+import { readOwnFileText, truncate } from '../utils/fs.js';
 import {
   discoverPlugins,
   type DiscoveredPlugin,
@@ -174,7 +173,7 @@ async function loadSkillContent(
     return undefined;
   }
 
-  const content = (await readFile(skill.skillPath, 'utf8')).trim();
+  const content = (await readOwnFileText(skill.skillPath)).trim();
   if (!content) {
     return undefined;
   }
@@ -189,7 +188,7 @@ async function loadPluginInstructions(
     return undefined;
   }
 
-  const content = (await readFile(plugin.instructionsPath, 'utf8')).trim();
+  const content = (await readOwnFileText(plugin.instructionsPath)).trim();
   if (!content) {
     return undefined;
   }
