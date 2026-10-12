@@ -309,7 +309,8 @@ export function analyzeDeletes(command: string, cwd: string): DeleteAnalysis {
     const i = commandIndex(segment)
     const head = path.basename(segment[i] ?? '')
     const args = segment.slice(i + 1)
-    const segmentText = segment.join(' ')
+    // The segment's own words, without its redirections (those are checked on their own below).
+    const segmentText = segment.filter((w, k) => !/^\d*>>?$|^\d*>>?[^>&]/.test(w) && !/^\d*>>?$/.test(segment[k - 1] ?? '')).join(' ')
     if (head === 'cd' || head === 'pushd') {
       const target = args.find((a) => !a.startsWith('-'))
       const known = target === undefined ? homedir() : staticPath(target)
