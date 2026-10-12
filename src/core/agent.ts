@@ -589,13 +589,13 @@ function buildActionFromLooseArgs(
       const serverId = getLooseStringArg(args, 'serverId', 'server_id', 'server');
       const toolName = getLooseStringArg(args, 'toolName', 'tool_name', 'tool', 'name');
       if (!serverId?.trim() || !toolName?.trim()) return null;
-      const readOnly = getLooseBooleanArg(args, 'readOnly', 'read_only');
+      // `readOnly` is never taken from the model: the runtime sets it from the
+      // server's tool descriptor (hydrateRuntimeManagedAction).
       return {
         type: 'mcp_call_tool',
         serverId,
         toolName,
         args: getLooseObjectArg(args, 'args', 'arguments', 'input', 'params') ?? {},
-        ...(readOnly !== undefined ? { readOnly } : {}),
         timeoutMs: getLooseIntegerArg(args, 'timeoutMs', 'timeout_ms', 'timeout'),
       };
     }
@@ -2680,25 +2680,28 @@ async function saveUpdatedMcpServer(
   });
 }
 
-async function hydrateRuntimeManagedAction(
+/**
+ * An MCP call's `readOnly` comes from the server's own tool descriptor
+ * (readOnly / annotations.readOnlyHint) and nothing else: whatever the model
+ * put there is overwritten, and an unknown tool or server is not read-only.
+ * Read-only calls skip approvals and are open to sub-agents, so the model
+ * must never be able to claim it.
+ */
+export async function hydrateRuntimeManagedAction(
   action: AgentAction,
   cwd: string,
 ): Promise<AgentAction> {
-  if (action.type !== 'mcp_call_tool' || action.readOnly !== undefined) {
+  if (action.type !== 'mcp_call_tool') {
     return action;
   }
 
-  const { server } = await loadMcpServerState(cwd, action.serverId);
+  const { server } = await loadMcpServerState(cwd, action.serverId).catch(() => ({ server: undefined }));
   const descriptor = server
     ? findMcpToolDescriptor(server, action.toolName)
     : undefined;
-  if (descriptor?.readOnly === undefined) {
-    return action;
-  }
-
   return {
     ...action,
-    readOnly: descriptor.readOnly,
+    readOnly: descriptor?.readOnly === true,
   };
 }
 
@@ -2825,8 +2828,7 @@ function normalizeActions(input: unknown): AgentAction[] {
             serverId: entry.serverId,
             toolName: entry.toolName,
             args: asUnknownRecord(entry.args),
-            readOnly:
-              typeof entry.readOnly === 'boolean' ? entry.readOnly : undefined,
+            // Never from the model; see hydrateRuntimeManagedAction.
             timeoutMs: asPositiveInteger(entry.timeoutMs),
           });
         }

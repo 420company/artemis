@@ -329,7 +329,7 @@ export async function buildMcpRuntimeSections(
   const lines = [
     'MCP runtime surfaces:',
     profile === 'main'
-      ? 'Use mcp_call_tool for MCP tools, mcp_read_resource for MCP resources, and mcp_get_prompt for MCP prompts/templates. If a tool is marked readOnly=true, preserve that hint in the action.'
+      ? 'Use mcp_call_tool for MCP tools, mcp_read_resource for MCP resources, and mcp_get_prompt for MCP prompts/templates. Whether a tool is read-only comes from the server\'s own description, never from the action.'
       : 'This profile may use discovered MCP resources and prompts, but runtime policy still limits mutating or delegated actions.',
     ...activeServers.map((server) => buildServerSection(server)),
   ];

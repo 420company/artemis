@@ -251,6 +251,8 @@ export function validateProfileAction(
   profile: ExecutionProfile,
   action: AgentAction,
 ): { allowed: boolean; reason?: string } {
+  // `readOnly` is set by the runtime from the server's tool descriptor
+  // (hydrateRuntimeManagedAction), never by the model.
   if (
     profile !== 'main' &&
     action.type === 'mcp_call_tool' &&
