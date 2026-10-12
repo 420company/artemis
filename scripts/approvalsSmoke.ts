@@ -645,6 +645,10 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('cli: --reason goes with --deny only', reasonAlone)
   const sigArgs = parseArgs(['execute', '--session', sid, '--approve', id, '--signature', 'A'.repeat(86)])
   assert('cli: --signature parses with an answer', sigArgs.approvalAnswer?.signature === 'A'.repeat(86))
+  let mixed = false
+  try { parseArgs(['execute', '--session', sid, '--approve', id, '--retry']) } catch { mixed = true }
+  assert('cli: an answer cannot be combined with --retry', mixed)
+  assert('cli: --retry still parses on its own', parseArgs(['execute', '--session', sid, '--retry']).retry === true)
   const digest = 'a'.repeat(64)
   assert('cli: --expect-digest parses with an answer', parseArgs(['execute', '--session', sid, '--approve', id, '--expect-digest', digest]).approvalAnswer?.expectDigest === digest)
   let digestAlone = false
