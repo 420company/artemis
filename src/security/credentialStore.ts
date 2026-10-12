@@ -24,7 +24,9 @@
  *   - hosted (`ARTEMIS_CREDENTIAL_BROKER`, set by the web server for each
  *     run): the secrets live in the server's own data directory, which the
  *     agent's OS user cannot read; each use is checked there against the
- *     binding, for this run only (`BrokerCredentialStore`);
+ *     binding, for this run only (`BrokerCredentialStore`). The run's ticket
+ *     comes from a one-time claim code (captureCredentialBroker), so it lives
+ *     in this process's memory only, not in any environment;
  *   - local (the CLI): files under `<ARTEMIS_HOME>/agent-credentials` (0700
  *     directory, 0600 files), a protected path for the agent's file and
  *     shell tools.
@@ -404,7 +406,11 @@ export class BrokerCredentialStore implements CredentialStore {
 }
 
 let registered: CredentialStore | undefined;
-let broker: { url: string; headers: Record<string, string> } | undefined;
+/** The hosted broker: its address and the one-time claim code from the environment, then this run's ticket. */
+let broker: { url: string; claim?: string; headers?: Record<string, string>; failed?: string } | undefined;
+
+/** The header the broker reads this run's ticket from. */
+export const CREDENTIAL_TICKET_HEADER = 'x-credential-ticket';
 
 /** A host's own backend; undefined goes back to the default. */
 export function registerCredentialStore(store: CredentialStore | undefined): void {
@@ -412,27 +418,86 @@ export function registerCredentialStore(store: CredentialStore | undefined): voi
 }
 
 /**
- * Takes the hosted broker's address out of the environment (so no tool or
- * shell this run starts inherits it) and keeps it for this process.
+ * Takes the hosted broker out of the environment (so no tool or shell this
+ * run starts inherits it): `ARTEMIS_CREDENTIAL_BROKER` is
+ * `{"url": "http://127.0.0.1:…/agent/credentials", "claim": "…"}`. The
+ * claim code works once (claimCredentialBroker trades it for the run's
+ * ticket, kept in this process only), so a copy read later from the
+ * process's environment is worth nothing.
  */
 export function captureCredentialBroker(env: NodeJS.ProcessEnv = process.env): void {
-  const url = env.ARTEMIS_CREDENTIAL_BROKER?.trim();
+  const raw = env.ARTEMIS_CREDENTIAL_BROKER?.trim();
   delete env.ARTEMIS_CREDENTIAL_BROKER;
-  if (!url || !/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?\//.test(url)) return;
-  let headers: Record<string, string> = {};
+  if (!raw) return;
+  let parsed: { url?: unknown; claim?: unknown } = {};
   try {
-    const raw = env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON;
-    if (raw) headers = Object.fromEntries(Object.entries(JSON.parse(raw) as Record<string, unknown>).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+    parsed = JSON.parse(raw) as typeof parsed;
   } catch {
-    headers = {};
+    parsed = {};
   }
-  broker = { url, headers };
+  const url = typeof parsed.url === 'string' ? parsed.url : '';
+  const claim = typeof parsed.claim === 'string' ? parsed.claim : '';
+  // Loopback only; anything else is refused rather than falling back to local files.
+  if (!/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?\//.test(url) || !claim) {
+    broker = { url: '', failed: 'The credential service address is invalid.' };
+    return;
+  }
+  broker = { url, claim };
+}
+
+/** Trades the claim code for this run's ticket; before any tool runs. */
+export async function claimCredentialBroker(fetchImpl: typeof fetch = (...args) => fetch(...args)): Promise<void> {
+  if (!broker?.claim) return;
+  const { url, claim } = broker;
+  broker = { url };
+  try {
+    const res = await fetchImpl(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ op: 'claim', claim }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = (await res.json().catch(() => ({}))) as { ticket?: unknown };
+    if (!res.ok || typeof data.ticket !== 'string') throw new Error(`status ${res.status}`);
+    broker = { url, headers: { [CREDENTIAL_TICKET_HEADER]: data.ticket } };
+  } catch (err) {
+    broker = { url, failed: `The credential service refused this run (${err instanceof Error ? err.message : String(err)}).` };
+  }
+}
+
+/** Every call fails: the hosted service is configured but not usable (never a silent local fallback). */
+class UnavailableCredentialStore implements CredentialStore {
+  constructor(private readonly reason: string) {}
+  private fail(): never {
+    throw new CredentialError('unavailable', this.reason);
+  }
+  async create(): Promise<CredentialInfo> {
+    return this.fail();
+  }
+  async describe(): Promise<CredentialInfo | undefined> {
+    return this.fail();
+  }
+  async list(): Promise<CredentialInfo[]> {
+    return this.fail();
+  }
+  async use(): Promise<UseResult> {
+    return { ok: false, code: 'unavailable', message: this.reason };
+  }
+  async remove(): Promise<boolean> {
+    return this.fail();
+  }
 }
 
 export function getCredentialStore(): CredentialStore {
   if (registered) return registered;
-  if (broker) return new BrokerCredentialStore(broker.url, broker.headers);
+  if (broker?.headers) return new BrokerCredentialStore(broker.url, broker.headers);
+  if (broker) return new UnavailableCredentialStore(broker.failed ?? 'The credential service is not ready.');
   return new FileCredentialStore();
+}
+
+/** For tests: back to no broker. */
+export function resetCredentialBroker(): void {
+  broker = undefined;
 }
 
 /** Which backend serves this process (for messages). */

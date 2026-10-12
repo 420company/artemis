@@ -81,8 +81,9 @@ export async function runHeadlessAgent(
   const onInfo = opts.onInfo ?? (() => undefined)
   // The web server's credential broker for this run: kept by this process,
   // removed from the environment before any tool or shell starts.
-  const { captureCredentialBroker } = await import('../security/credentialStore.js')
+  const { captureCredentialBroker, claimCredentialBroker } = await import('../security/credentialStore.js')
   captureCredentialBroker()
+  await claimCredentialBroker()
   const providerConfig = await resolveMainProviderConfig({
     cwd,
     config: opts.model ? { model: opts.model } : {},

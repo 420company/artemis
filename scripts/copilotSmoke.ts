@@ -24,7 +24,7 @@ const { looksLikeOperatorTask, buildOperatorPlaybook } = await import('../src/co
 const { planHeadlessWorkflow } = await import('../src/services/headlessWorkflow.js');
 const { buildWorkflowHint } = await import('../src/core/workflowHints.js');
 const { SessionStore } = await import('../src/storage/sessions.js');
-const { FileCredentialStore, BrokerCredentialStore, generatePassword, useCredential, scrubSecrets, captureCredentialBroker, checkUse } = await import('../src/security/credentialStore.js');
+const { FileCredentialStore, BrokerCredentialStore, generatePassword, useCredential, scrubSecrets, captureCredentialBroker, claimCredentialBroker, resetCredentialBroker, getCredentialStore, credentialBackend, checkUse } = await import('../src/security/credentialStore.js');
 const { isAlwaysPrivatePath } = await import('../src/utils/fs.js');
 const { executeRunCommand } = await import('../src/tools/runCommand.js');
 const { parseAssistantEnvelopeForSmoke, scrubToolResult } = await import('../src/core/agent.js');
@@ -311,22 +311,38 @@ await test('credentials: the store is closed to the agent\'s file and shell tool
 });
 
 await test('credentials: the hosted broker is taken out of the environment and asked per use (H2)', async () => {
-  const env: NodeJS.ProcessEnv = { ARTEMIS_CREDENTIAL_BROKER: 'http://127.0.0.1:18897/agent/credentials', ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON: '{"x-run-context":"run-token"}' };
+  const env: NodeJS.ProcessEnv = { ARTEMIS_CREDENTIAL_BROKER: JSON.stringify({ url: 'http://127.0.0.1:18897/agent/credentials', claim: 'claim-once' }) };
   captureCredentialBroker(env);
   assert.equal(env.ARTEMIS_CREDENTIAL_BROKER, undefined, 'no tool or shell inherits it');
+  // Configured but not claimed yet: never a silent fallback to local files.
+  await assert.rejects(() => getCredentialStore().list(), /not ready/);
+  const claims: any[] = [];
+  await claimCredentialBroker(async (_url, init) => {
+    claims.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ ticket: 'run-ticket' }), { status: 200 });
+  });
+  assert.deepEqual(claims, [{ op: 'claim', claim: 'claim-once' }]);
+  assert.equal(credentialBackend(), 'hosted');
+  // A refused claim (someone else used the code first) leaves the store unusable, loudly.
+  captureCredentialBroker({ ARTEMIS_CREDENTIAL_BROKER: JSON.stringify({ url: 'http://127.0.0.1:18897/agent/credentials', claim: 'spent' }) });
+  await claimCredentialBroker(async () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }));
+  assert.equal((await getCredentialStore().use('x', { type: 'internal' })).ok, false);
+  captureCredentialBroker({ ARTEMIS_CREDENTIAL_BROKER: JSON.stringify({ url: 'https://evil.example/agent/credentials', claim: 'c' }) });
+  await assert.rejects(() => getCredentialStore().list(), /invalid/);
+  resetCredentialBroker();
   const calls: any[] = [];
-  const broker = new BrokerCredentialStore('http://127.0.0.1:1/agent/credentials', { 'x-run-context': 'run-token' }, async (_url, init) => {
+  const broker = new BrokerCredentialStore('http://127.0.0.1:1/agent/credentials', { 'x-credential-ticket': 'run-ticket' }, async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     calls.push({ headers: init?.headers, body });
-    if (body.op === 'use') return new Response(JSON.stringify({ error: 'wrong_origin', message: 'belongs elsewhere' }), { status: 403 });
+    if (body.op === 'use') return new Response(JSON.stringify({ error: 'wrong_host', message: 'belongs elsewhere' }), { status: 403 });
     return new Response(JSON.stringify({ info: { name: body.name, kind: body.kind, createdAt: 'x', bindings: body.bindings, publicPart: 'ssh-ed25519 AAAA test' } }), { status: 200 });
   });
   const made = await broker.create('vpn-k', 'ssh_key', { bindings: { host: '203.0.113.10' } });
   assert.equal(made.publicPart, 'ssh-ed25519 AAAA test');
   assert.equal(calls[0].body.secret, undefined, 'keys and passwords are made by the server, not sent');
-  assert.equal(calls[0].headers['x-run-context'], 'run-token');
+  assert.equal(calls[0].headers['x-credential-ticket'], 'run-ticket');
   const refused = await broker.use('vpn-k', { type: 'ssh', host: '203.0.113.11', as: 'key' });
-  assert.equal(!refused.ok && refused.code, 'wrong_origin');
+  assert.equal(!refused.ok && refused.code, 'wrong_host');
 });
 
 // ── reply envelope ──────────────────────────────────────────────────────
