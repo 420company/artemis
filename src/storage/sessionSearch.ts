@@ -534,3 +534,30 @@ export async function searchSessions(
 
   return searchSessionsInMemory(cwd, query, maxResults)
 }
+
+/**
+ * Session ids worth scanning for `query`, best first: the full-text index's
+ * ranking, then sessions whose live messages contain the text as typed.
+ * The second pass matters for Chinese and Japanese, which the index
+ * tokenizer keeps as whole runs (a word inside a sentence is not a token).
+ */
+export async function searchSessionCandidates(
+  cwd: string,
+  query: string,
+  opts: { maxResults?: number } = {},
+): Promise<string[]> {
+  if (!query.trim()) return []
+  const maxResults = opts.maxResults ?? 24
+  const ids: string[] = []
+  const seen = new Set<string>()
+  const add = (results: SessionSearchResult[] | null) => {
+    for (const result of results ?? []) {
+      if (seen.has(result.sessionId)) continue
+      seen.add(result.sessionId)
+      ids.push(result.sessionId)
+    }
+  }
+  add(await searchSessionsWithSqlite(cwd, query, maxResults))
+  if (ids.length < maxResults) add(await searchSessionsInMemory(cwd, query, maxResults))
+  return ids.slice(0, maxResults)
+}

@@ -18,11 +18,12 @@ export type TaskCategory =
   | 'honesty'
   | 'memory'
   | 'long-context'
+  | 'office'
   | 'trading'
 
 export const TASK_CATEGORIES: readonly TaskCategory[] = [
   'writing', 'qa', 'file', 'coding', 'multistep', 'vision', 'search',
-  'routing', 'safety', 'honesty', 'memory', 'long-context', 'trading',
+  'routing', 'safety', 'honesty', 'memory', 'long-context', 'office', 'trading',
 ]
 
 /** One user message of a task. Turns of a task share the workspace; `newSession` starts a fresh conversation. */
@@ -118,6 +119,12 @@ export type Grader = GraderBase & (
   | { type: 'compaction_happened' }
   | { type: 'context_contains'; pattern: string; flags?: string; request?: 'first' | 'last' | 'any' }
   | { type: 'llm_judge'; rubric: string; minScore?: number }
+  /**
+   * A new .pptx / .docx / .xlsx matching `pattern` that opens and has: `kind`, slide/sheet count
+   * (`minParts`/`maxParts`), text (`contains`; `part` + `partContains` for one slide or sheet, 1-based),
+   * formulas, charts, and cell `numbers` (xlsx: values or cached formula results).
+   */
+  | { type: 'office_file'; pattern: string; flags?: string; kind?: 'pptx' | 'docx' | 'xlsx'; minParts?: number; maxParts?: number; contains?: Needle[]; part?: number; partContains?: Needle[]; minFormulas?: number; minCharts?: number; numbers?: number[] }
 )
 
 export type GraderType = Grader['type']
