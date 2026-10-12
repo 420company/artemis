@@ -768,6 +768,25 @@ function buildActionFromLooseArgs(
         runInBackground: getLooseBooleanArg(args, 'runInBackground', 'run_in_background'),
       };
     }
+    case 'create_presentation':
+    case 'create_document':
+    case 'create_spreadsheet': {
+      // The spec is passed through as given; the tool checks it.
+      const spec = args.spec ?? args.deck ?? args.document ?? args.workbook;
+      const markdown = getLooseStringArg(args, 'markdown', 'md', 'content');
+      const edits = args.edits ?? args.changes;
+      const officeType = lower as 'create_presentation' | 'create_document' | 'create_spreadsheet';
+      if (spec === undefined && edits === undefined && !(officeType === 'create_document' && markdown?.trim())) return null;
+      return {
+        type: officeType,
+        ...(spec !== undefined ? { spec: spec as Record<string, unknown> } : {}),
+        ...(officeType === 'create_document' && markdown ? { markdown } : {}),
+        ...(edits !== undefined ? { edits: edits as Array<Record<string, unknown>> } : {}),
+        path: getLooseStringArg(args, 'path', 'outputPath', 'output_path', 'file'),
+        pdf: getLooseBooleanArg(args, 'pdf', 'exportPdf', 'export_pdf'),
+        theme: getLooseStringArg(args, 'theme'),
+      } as AgentAction;
+    }
     case 'synthesize_speech':
     case 'tts':
     case 'text_to_speech': {
@@ -1458,6 +1477,9 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'synthesize_speech':
     case 'transcribe_audio':
     case 'place_call':
+    case 'create_presentation':
+    case 'create_document':
+    case 'create_spreadsheet':
       return true;
     case 'run_command':
       return !runCommandLooksReadOnlyForExecutionEvidence(action.command);
@@ -1943,6 +1965,10 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
     case 'place_call':
       return `place_call goal=${truncate(action.goal, 120)}`;
+    case 'create_presentation':
+    case 'create_document':
+    case 'create_spreadsheet':
+      return `${action.type} path=${action.path ?? 'default'}${action.edits ? ` edits=${action.edits.length}` : ''}`;
     case 'spawn_background_workflow':
       return `spawn_background_workflow command=${action.command} prompt=${truncate(action.prompt, 120)}`;
     case 'use_workflow':
@@ -5048,7 +5074,12 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   spawn_background_workflow: 2 * 3_600_000,
   mcp_call_tool: 30 * 60_000,
   synthesize_speech: 30 * 60_000,
-  transcribe_audio: 30 * 60_000,
+  // Up to two hours of audio, a few five-minute pieces at a time.
+  transcribe_audio: 60 * 60_000,
+  // A long document with contents is rendered twice (page numbers), plus a PDF.
+  create_presentation: 15 * 60_000,
+  create_document: 15 * 60_000,
+  create_spreadsheet: 15 * 60_000,
   // Waiting for the owner's approval (15 min) and a call of up to an hour.
   place_call: 80 * 60_000,
 };

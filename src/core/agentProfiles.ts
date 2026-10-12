@@ -175,6 +175,10 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'transcribe_audio',
   // Phone calls for the owner (each one approved by the owner first).
   'place_call',
+  // Office documents (decks, documents, spreadsheets).
+  'create_presentation',
+  'create_document',
+  'create_spreadsheet',
   // Keyless public information lookups.
   'weather_current',
   'weather_forecast',

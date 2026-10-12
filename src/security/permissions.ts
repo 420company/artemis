@@ -78,6 +78,12 @@ function describeAction(action: AgentAction): string {
       return `transcribe audio locally from ${action.inputPath}`;
     case 'place_call':
       return `phone ${action.to} for the owner (after the owner approves)`;
+    case 'create_presentation':
+      return `write a presentation${action.path ? ` to ${action.path}` : ''}`;
+    case 'create_document':
+      return `write a document${action.path ? ` to ${action.path}` : ''}`;
+    case 'create_spreadsheet':
+      return `write a spreadsheet${action.path ? ` to ${action.path}` : ''}`;
     case 'spawn_background_workflow':
       return `spawn a detached background workflow for ${action.command}`;
     case 'use_workflow':
