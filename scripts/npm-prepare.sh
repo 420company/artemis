@@ -40,8 +40,8 @@ echo "package.json 配置完整"
 
 # 检查项目结构
 echo -e "\n4. 检查项目结构"
-required_files=("bin/artemis-cli.js" "src/index.ts" "README.md" "LICENSE" "tsconfig.json")
-required_dirs=("src" "dist" "bin")
+required_files=("src/cli.ts" "src/index.ts" "README.md" "LICENSE" "tsconfig.json")
+required_dirs=("src" "dist")
 
 for file in "${required_files[@]}"; do
     if [ ! -f "$file" ]; then
@@ -113,6 +113,6 @@ echo "   3. 发布包：npm publish"
 
 echo -e "\n💡 注意："
 echo "   - 项目依赖 tsx 运行 TypeScript 源码"
-echo "   - bin/artemis-cli.js 是 CLI 入口文件"
+echo "   - dist/cli.js 是 CLI 入口文件（npm run build 生成）"
 echo "   - 可以正常使用 npm link 进行本地开发"
 echo "   - 编译类型错误不影响基本功能"

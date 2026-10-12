@@ -1,4 +1,5 @@
 import type { VisualModelConfig } from '../../../providers/types.js'
+import { DEFAULT_MODEL_IDS } from '../../../providers/presets.js'
 
 // ─── ASSET GENERATION INTERFACE ───────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ export interface VisualProvider {
   generateVideo?(params: VideoGenerationParams): Promise<GenerationResult>
 }
 
-export type VisualProviderStatus = 'stable' | 'placeholder' | 'test'
+export type VisualProviderStatus = 'stable' | 'test'
 
 // ─── PROVIDER FACTORY ───────────────────────────────────────────────────────
 
@@ -92,24 +93,9 @@ export async function createVisualProvider(config: VisualModelConfig, assetType:
       return new openaiModule.OpenAIProvider(config)
     }
     
-    case 'stable-diffusion': {
-      const stableDiffusionModule = await import('./stableDiffusionProvider.js')
-      return new stableDiffusionModule.StableDiffusionProvider(config, assetType)
-    }
-    
-    case 'gemini': {
-      const geminiModule = await import('./geminiProvider.js')
-      return new geminiModule.GeminiProvider(config, assetType)
-    }
-
     case 'google': {
       const googleModule = await import('./googleProvider.js')
       return new googleModule.GoogleProvider(config, assetType)
-    }
-    
-    case 'grok': {
-      const grokModule = await import('./grokProvider.js')
-      return new grokModule.GrokProvider(config, assetType)
     }
     
     case 'custom': {
@@ -138,8 +124,8 @@ export const VISUAL_PROVIDERS = [
     supportsImages: true,
     supportsVideos: true,
     defaultModel: {
-      image: 'seedream-5-0-260128',
-      video: 'seedance-1-5-pro-251215'
+      image: DEFAULT_MODEL_IDS.byteplusImage,
+      video: DEFAULT_MODEL_IDS.byteplusVideo
     }
   },
   {
@@ -155,30 +141,6 @@ export const VISUAL_PROVIDERS = [
     }
   },
   {
-    name: 'stable-diffusion',
-    label: 'Stable Diffusion',
-    description: '占位适配器：当前未接入真实 Stable Diffusion 图片/视频 API',
-    status: 'placeholder' as const,
-    supportsImages: true,
-    supportsVideos: true,
-    defaultModel: {
-      image: 'stable-diffusion-xl',
-      video: 'stable-video-diffusion'
-    }
-  },
-  {
-    name: 'gemini',
-    label: 'Google Gemini',
-    description: '占位适配器：当前未接入真实 Gemini 视觉 API',
-    status: 'placeholder' as const,
-    supportsImages: true,
-    supportsVideos: false,
-    defaultModel: {
-      image: 'gemini-3-pro-image-preview',
-      video: 'none'
-    }
-  },
-  {
     name: 'google',
     label: 'Google Veo + Gemini Image',
     description: 'Google Generative AI: Veo 3.1 视频生成 + Gemini 3 / Nano Banana 图片生成',
@@ -188,18 +150,6 @@ export const VISUAL_PROVIDERS = [
     defaultModel: {
       image: 'gemini-3-pro-image-preview',
       video: 'veo-3.1-generate-preview'
-    }
-  },
-  {
-    name: 'grok',
-    label: 'xAI Grok',
-    description: '占位适配器：当前未接入真实 Grok 图像/视频 API',
-    status: 'placeholder' as const,
-    supportsImages: true,
-    supportsVideos: true,
-    defaultModel: {
-      image: 'grok-v1',
-      video: 'grok-video'
     }
   },
   {
@@ -242,21 +192,11 @@ export function getAvailableProviders() {
   return VISUAL_PROVIDERS.filter(p => p.status === 'stable')
 }
 
-export function isPlaceholderVisualProvider(name: string): boolean {
-  return getProviderByName(name)?.status === 'placeholder'
-}
-
 export function getVisualProviderSupportNote(
   name: string,
   locale: 'zh' | 'en' = 'en',
 ): string | null {
   switch (name.toLowerCase()) {
-    case 'stable-diffusion':
-    case 'gemini':
-    case 'grok':
-      return locale === 'zh'
-        ? '当前仓库里该视觉 provider 仍是占位实现，尚未接入真实 API。若目标服务是完全私有协议，需要单独编写 provider 适配器。'
-        : 'This visual provider is still a placeholder in this build and does not call a real API yet. Fully private protocols still need a dedicated provider adapter.'
     case 'google':
       return locale === 'zh'
         ? 'Google Veo 视频生成是 Long-running operation：调用后会轮询状态（通常需要 1-3 分钟），完成后视频会保存到桌面。需要 Google AI Studio API key。'
@@ -272,12 +212,4 @@ export function getVisualProviderSupportNote(
     default:
       return null
   }
-}
-
-export function buildPlaceholderVisualProviderError(
-  name: string,
-  assetType: 'image' | 'video',
-): string {
-  const providerLabel = getProviderByName(name)?.label ?? name
-  return `${providerLabel} ${assetType} provider is still a placeholder in this build and does not call a real API. Use BytePlus, OpenAI, custom (OpenAI-compatible), or implement a dedicated provider adapter for this service.`
 }

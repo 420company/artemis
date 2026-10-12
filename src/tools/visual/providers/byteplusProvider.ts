@@ -21,6 +21,7 @@ import {
 } from '../videoCapabilities.js'
 import { checkBytePlusReferenceSupport } from '../referenceImages.js'
 import { seedreamSizeFromKeyword } from '../seedreamSizes.js'
+import { DEFAULT_MODEL_IDS } from '../../../providers/presets.js'
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
@@ -80,7 +81,7 @@ export class BytePlusProvider implements VisualProvider {
     const startTime = Date.now()
     try {
       const { apiKey, baseUrl } = await this.resolveCredentials()
-      const model = params.model || this.config.image.model || 'seedream-5-0-260128'
+      const model = params.model || this.config.image.model || DEFAULT_MODEL_IDS.byteplusImage
       // OpenAI-style size words are not ModelArk sizes; give Seedream explicit pixels.
       const size = seedreamSizeFromKeyword(model, params.size || this.config.image.defaultParams.size || '2K')
       const count = params.count || 1
@@ -193,7 +194,7 @@ export class BytePlusProvider implements VisualProvider {
     const startTime = Date.now()
     try {
       const { apiKey, baseUrl } = await this.resolveCredentials()
-      const model = params.model || this.config.video.model || 'seedance-1-5-pro-251215'
+      const model = params.model || this.config.video.model || DEFAULT_MODEL_IDS.byteplusVideo
       const ratio = params.ratio || '16:9'
       const capabilityOverrides = model === this.config.video.model ? videoCapabilityOverridesFromConfig(this.config) : undefined
       const duration = normalizeVideoDurationForProvider(params.duration, this.name, model, capabilityOverrides)

@@ -5,7 +5,7 @@ import {
   isOpenTaskRuntimeStatus,
   isTaskRuntimeActiveStatus,
 } from './taskRuntime.js';
-import { truncate } from '../utils/fs.js';
+import { truncateInline } from '../utils/fs.js';
 
 export type RuntimeOwnership = {
   runtime: TaskRuntimeRecord;
@@ -16,7 +16,7 @@ export type RuntimeOwnership = {
 
 function formatMessageLine(message: SessionMessage): string {
   const role = message.name ? `${message.role}:${message.name}` : message.role;
-  return `${message.createdAt} [${role}] ${truncate(message.content, 220)}`;
+  return `${message.createdAt} [${role}] ${truncateInline(message.content, 220)}`;
 }
 
 export function listRuntimeOwnerships(

@@ -71,7 +71,7 @@ export async function checkDreamVideoCapability(cwd: string): Promise<DreamVideo
         provider: configured.provider,
         model: configured.model,
         source: configured.source,
-        reason: `configured visual provider does not support video generation: ${configured.provider}`,
+        reason: 'the configured visual service does not support video generation',
       }
     }
     return {
@@ -80,13 +80,14 @@ export async function checkDreamVideoCapability(cwd: string): Promise<DreamVideo
       model: configured.model,
       source: configured.source,
     }
-  } catch (err) {
+  } catch {
+    // A provider this version does not have: a neutral reason, no vendor name.
     return {
       ok: false,
       provider: configured.provider,
       model: configured.model,
       source: configured.source,
-      reason: err instanceof Error ? err.message : String(err),
+      reason: 'the configured visual service is not available in this version',
     }
   }
 }
@@ -105,14 +106,26 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
     return { ok: false, entry: selected.entry, reason: buildVisualSetupRequiredMessage('video') }
   }
 
-  const provider = await createVisualProvider(configured.config, 'video')
+  let provider: Awaited<ReturnType<typeof createVisualProvider>>
+  try {
+    provider = await createVisualProvider(configured.config, 'video')
+  } catch {
+    // A provider this version does not have (for example a removed placeholder).
+    return {
+      ok: false,
+      entry: selected.entry,
+      provider: configured.provider,
+      model: configured.model,
+      reason: t('已配置的视觉服务在此版本中不可用，请在视觉设置中换一个。', 'The configured visual service is not available in this version; choose another one in the visual settings.'),
+    }
+  }
   if (!provider.supportsVideos || !provider.generateVideo) {
     return {
       ok: false,
       entry: selected.entry,
       provider: configured.provider,
       model: configured.model,
-      reason: `${t('已配置的视觉 provider 不支持视频生成', 'configured visual provider does not support video generation')}: ${configured.provider}`,
+      reason: t('已配置的视觉服务不支持视频生成。', 'The configured visual service does not support video generation.'),
     }
   }
 

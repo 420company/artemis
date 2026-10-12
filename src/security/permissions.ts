@@ -67,11 +67,11 @@ function describeAction(action: AgentAction): string {
     case 'approve_builder_execution':
       return `approve builder execution for session ${action.sessionId}`;
     case 'generate_image':
-      return `generate image via BytePlus Seedream (${action.model ?? 'seedream-5-0-260128'})`;
+      return 'generate an image';
     case 'generate_video':
-      return `generate video via Seedance (${action.model ?? 'seedance-1-5-pro-251215'})`;
+      return 'generate a video';
     case 'generate_long_video':
-      return `generate long video via Saga (${action.model ?? 'configured video model'})`;
+      return 'generate a long video';
     case 'synthesize_speech':
       return `synthesize speech with configured TTS${action.outputPath ? ` to ${action.outputPath}` : ''}`;
     case 'transcribe_audio':

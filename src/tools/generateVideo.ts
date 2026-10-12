@@ -41,8 +41,9 @@ import {
   VIDEO_POLL_TIMEOUT_MS,
 } from './visual/providers/timeouts.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
+import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
 
-const DEFAULT_MODEL = 'seedance-1-5-pro-251215';
+const DEFAULT_MODEL = DEFAULT_MODEL_IDS.byteplusVideo;
 const DEFAULT_RATIO = '16:9';
 const DEFAULT_SUBDIR = 'videos';
 // 120 polls × 5s = 10 minutes. BytePlus 6-15s segments occasionally take
@@ -486,7 +487,18 @@ async function tryGenerateWithConfiguredVisualProvider(
     return null;
   }
 
-  const provider = await createVisualProvider(configured.config, 'video');
+  let provider: Awaited<ReturnType<typeof createVisualProvider>>;
+  try {
+    provider = await createVisualProvider(configured.config, 'video');
+  } catch {
+    // A provider name this build does not have (for example a removed
+    // placeholder): fail closed, no silent fallback to another service.
+    return {
+      action,
+      ok: false,
+      output: 'Video generation failed: the configured visual service is not available in this version. Choose another one in the visual settings; this does not get better by retrying.',
+    };
+  }
   if (!provider.supportsVideos || !provider.generateVideo) {
     return {
       action,

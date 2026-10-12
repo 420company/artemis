@@ -224,7 +224,6 @@ import type { UiLocale } from './locale.js'
 import { pickLocale } from './locale.js'
 import type { PermissionMode } from './parseArgs.js'
 import { CliSettingsStore } from './settings.js'
-import type { DocsSearchEngine } from './settings.js'
 import { ProviderStore } from '../providers/store.js'
 import { SessionStore } from '../storage/sessions.js'
 import type { SessionMessage, SessionRecord } from '../core/types.js'
@@ -300,6 +299,7 @@ import {
 } from '../utils/visualGenerationConfig.js'
 import { handleSeedanceMultimodalWorkflow, hasActiveSeedanceMultimodalWorkflow } from '../tools/visual/seedanceWorkflow.js'
 import { handleSagaLongVideoWorkflow, hasActiveSagaLongVideoWorkflow, LONG_VIDEO_COMMAND, offerSagaLongVideoWorkflow, parseLongVideoCommand } from '../tools/visual/sagaWorkflow.js'
+import { MODEL_SWITCH_EXAMPLES } from '../providers/presets.js'
 
 const HOME_DIR = os.homedir()
 const DIRECT_TOOL_COUNT = getDirectToolCount()
@@ -1826,7 +1826,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
     { value: '/permission', hint: t('设置权限模式',               'Set permission mode') },
     { value: '/cd',         hint: t('切换工作区根目录',           'Switch workspace root') },
     { value: '/bundle',     hint: t('Bundle 润色增强设置',        'Bundle polisher settings') },
-    { value: '/docs',       hint: t('选择文档搜索引擎',           'Choose docs search engine') },
+    { value: '/docs',       hint: t('文档查询说明',               'How docs lookups work') },
     { value: '/locale',     hint: t('切换界面语言',               'Switch UI language') },
     { value: '/config',     hint: t('重新配置 AI 提供商',         'Reconfigure AI provider') },
     { value: '/config visual', hint: t('单独配置视觉模型',        'Configure visual model only') },
@@ -3006,9 +3006,7 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
           modelLabel,
           '',
           t('用法: /model <模型名>  例如:', 'Usage: /model <name>  e.g.:'),
-          '  /model claude-opus-4-6',
-          '  /model claude-sonnet-4-20250514',
-          '  /model gpt-4o',
+          ...MODEL_SWITCH_EXAMPLES.map((example) => `  /model ${example}`),
         ])
       } else {
         await askAndSaveSession('/model')
@@ -3464,43 +3462,14 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
       continue
     }
 
-    // ── /docs — pick docs search engine (bing/google) ─────────────────────────
+    // ── /docs — docs lookups have no engine to pick any more ─────────────────
     if (isSlashCommand(trimmed, '/docs')) {
-      const arg = trimmed.slice('/docs'.length).trim().toLowerCase()
-      const engines: DocsSearchEngine[] = ['bing', 'google']
-      const descriptions: Record<DocsSearchEngine, [string, string]> = {
-        'bing':   ['免 API key，默认可用', 'No API key required, works by default'],
-        'google': ['需配置 GOOGLE_CSE_ID + GOOGLE_API_KEY 环境变量', 'Needs GOOGLE_CSE_ID + GOOGLE_API_KEY env vars'],
-      }
-      const cur = await opts.settingsStore.load()
-      if (arg && (engines as readonly string[]).includes(arg)) {
-        await opts.settingsStore.setDocsSearchEngine(arg as DocsSearchEngine)
-        appendSystemPanel(t('文档搜索引擎已更新', 'Docs search engine updated'), [`→ ${arg}`])
-      } else if (arg) {
-        appendSystemPanel(t('无效引擎', 'Invalid engine'), [`"${arg}" — ${t('可用', 'available')}: ${engines.join(', ')}`])
-      } else {
-        const initialIndex = Math.max(0, engines.indexOf(cur.docsSearchEngine))
-        try {
-          const picked = await prompt.pickOption<DocsSearchEngine>({
-              title: t('选择文档搜索引擎  (当前: ' + cur.docsSearchEngine + ')',
-                       'Select docs search engine  (current: ' + cur.docsSearchEngine + ')'),
-              initialIndex,
-              hint: t('↑ ↓ 选择   Enter 确认   Esc 取消',
-                      '↑ ↓ select   Enter confirm   Esc cancel'),
-              choices: engines.map(e => ({
-                label:       e === cur.docsSearchEngine ? `${e}  ✓` : e,
-                value:       e,
-                description: t(descriptions[e][0], descriptions[e][1]),
-              })),
-            })
-          if (picked) {
-            await opts.settingsStore.setDocsSearchEngine(picked)
-            appendSystemPanel(t('文档搜索引擎已更新', 'Docs search engine updated'), [`→ ${picked}`])
-          }
-        } finally {
-          prompt.forceRedraw()
-        }
-      }
+      appendSystemPanel(t('文档查询', 'Docs lookup'), [
+        t('查文档时先查该库自己的文档索引，再用网页搜索，无需选择搜索引擎。',
+          'Docs lookups check the library\'s own docs index first, then search the web; there is no search engine to choose.'),
+        t('直接让 Artemis 查文档即可，例如：“查一下 React 19 的 use() 文档”。',
+          'Just ask Artemis to look something up, e.g. "look up the React 19 use() docs".'),
+      ])
       continue
     }
 

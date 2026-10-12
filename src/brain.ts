@@ -96,6 +96,8 @@ import type {
     ProviderNativeToolOutput,
     ProviderResponse,
 } from './providers/types.js';
+import { DEFAULT_MODEL_IDS } from './providers/presets.js';
+import { isOwnerProviderStoreFile, overrideProviderConfig } from './providers/overrides.js';
 
 const BASE_SYSTEM_PROMPT = `\
 你是 Artemis，一个面向真实本地工作区的工程代理，工作方式遵循 Artemis 执行协议。
@@ -167,9 +169,7 @@ let session: any = null;
 let systemPromptSuffix: string = '';
 // Model used when no provider profile exists and only ANTHROPIC_API_KEY is
 // set (no profile to take a model from). Shared with the CLI model label.
-// TODO: this id is outdated; move to a current model once the env-only
-// fallback is re-validated (hosted deployments always configure a profile).
-export const ENV_FALLBACK_ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+export const ENV_FALLBACK_ANTHROPIC_MODEL = DEFAULT_MODEL_IDS.anthropicEnvFallback;
 // Runtime overrides from CLI flags (--model, --api-key, --base-url)
 let _modelOverride: any;
 let _apiKeyOverride: any;
@@ -567,6 +567,8 @@ async function loadProvider(cwd: string = process.cwd()) {
     const store = new ProviderStore(currentCwd);
     const data = await store.load();
     let config = store.getDefaultMainProfile(data);
+    // A workspace store (<cwd>/.artemis) chooses its own endpoint: see providers/overrides.ts.
+    const ownerStore = config ? isOwnerProviderStoreFile(store.getFilePath()) : true;
     let telemetryCwd = currentCwd;
     // setup.agent.compression per field: workspace > global > defaults (only
     // values a providers.json actually sets count).
@@ -602,22 +604,17 @@ async function loadProvider(cwd: string = process.cwd()) {
     if (!config) {
         throw new Error('No AI provider configured. Please set ANTHROPIC_API_KEY environment variable or run artemis config to configure.');
     }
-    // Apply CLI overrides
-    let finalConfig = { ...config };
-    if (_modelOverride) {
-        // Platform capabilities describe the profile's own model, not an
-        // override: drop all four so the override model gets the name rules.
-        const dropPlatformCapabilities = _modelOverride !== config.model && hasPlatformCapabilities(config);
-        finalConfig = {
-            ...finalConfig,
+    // Apply CLI overrides (--model, --base-url, --api-key or their ARTEMIS_*
+    // variables) under the shared rules: another endpoint needs its own key,
+    // and a key alone applies only to a profile from the owner's own store.
+    let finalConfig: any = { ...config };
+    if (_modelOverride || _apiKeyOverride || _baseUrlOverride) {
+        finalConfig = overrideProviderConfig(config as any, {
             model: _modelOverride,
-            ...(dropPlatformCapabilities
-                ? { supportsImages: undefined, contextLength: undefined, maxOutputTokens: undefined, capabilitiesSource: undefined }
-                : {}),
-        };
+            baseUrl: _baseUrlOverride,
+            apiKey: _apiKeyOverride,
+        }, { ownerStore });
     }
-    if (_apiKeyOverride) finalConfig = { ...finalConfig, apiKey: _apiKeyOverride };
-    if (_baseUrlOverride) finalConfig = { ...finalConfig, baseUrl: _baseUrlOverride ?? undefined };
     if (_effortOverride !== undefined) finalConfig = { ...finalConfig, effort: _effortOverride ?? undefined };
     providerConfig = finalConfig;
     providerTelemetryContext =
@@ -708,30 +705,6 @@ export function resetWorkerProvider() {
     workerProvider = null;
     workerProviderConfig = null;
     workerProviderCwd = null;
-}
-
-/**
- * True if a distinct specialist profile is configured (a different model from
- * main). Reads providers.json the way the providers resolve (cwd-local store
- * first, then the global one) without loading or caching any provider, so it
- * is right before anything asked for the worker and changes no state.
- */
-export async function hasDualModel(cwd: string = providerCwd ?? process.cwd()): Promise<boolean> {
-    try {
-        const stores = [new ProviderStore(path.resolve(cwd)), createGlobalProviderStore()];
-        let main: { model?: unknown } | undefined;
-        let worker: { model?: unknown } | undefined;
-        for (const store of stores) {
-            const data = await store.load();
-            main ??= store.getDefaultMainProfile(data);
-            worker ??= store.getWorkerProfile(data);
-        }
-        if (!worker) return false;
-        const mainModel = _modelOverride ?? main?.model;
-        return Boolean(worker.model) && worker.model !== mainModel;
-    } catch {
-        return false;
-    }
 }
 
 /** Public accessor for the worker provider — used by external callers. */

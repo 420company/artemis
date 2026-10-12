@@ -30,7 +30,6 @@ import type { ProviderProfile, VisualModelConfig } from '../providers/types.js'
 import type { BragiPlatformId } from '../bragi/types.js'
 import {
   getVisualProviderSupportNote,
-  isPlaceholderVisualProvider,
 } from '../tools/visual/providers/interface.js'
 import {
   BYTEPLUS_VIDEO_PRESETS,
@@ -340,9 +339,6 @@ function buildVisualProviderChoiceLabel(
 ): string {
   if (provider === 'custom') {
     return zh ? '自定义接口（OpenAI-compatible）' : 'Custom API (OpenAI-compatible)'
-  }
-  if (isPlaceholderVisualProvider(provider)) {
-    return zh ? `${label}（占位，需适配）` : `${label} (placeholder)`
   }
   return label
 }
@@ -1559,34 +1555,6 @@ export async function runOnboarding(localeHint: UiLocale, cwd?: string): Promise
       },
     }).catch(() => { /* non-fatal */ })
   }
-
-  // ─────────────────────────────────────────────────────────────────
-  //  Phase 3.6: Docs search engine picker (quick, one-question)
-  // ─────────────────────────────────────────────────────────────────
-  try {
-    sectionHeader(
-      t('▸ 文档搜索引擎', '▸ Docs search engine'),
-      t('选择 lookup_docs 工具用的引擎', 'Choose the engine for lookup_docs'),
-      t('bing 免 key 可用；google 需要 GOOGLE_CSE_ID + GOOGLE_API_KEY',
-        'bing works out of the box; google needs GOOGLE_CSE_ID + GOOGLE_API_KEY'),
-    )
-    const picked = await chooseInteractiveOption<'bing' | 'google' | '__skip__'>({
-      title: t('用哪个搜索引擎？', 'Which search engine?'),
-      hint:  t('↑ ↓ 选择   Enter 确认   Esc 默认 bing',
-               '↑ ↓ select   Enter confirm   Esc default bing'),
-      escapeValue: '__skip__',
-      initialIndex: 0,
-      choices: [
-        { label: 'Bing',   value: 'bing',   description: t('默认，免 API key', 'Default, no API key') },
-        { label: 'Google', value: 'google', description: t('质量更高但需环境变量', 'Higher quality, needs env vars') },
-      ],
-    })
-    const engine: 'bing' | 'google' = picked === '__skip__' ? 'bing' : picked
-    const settingsStoreForDocs = new CliSettingsStore(cwd ?? HOME_DIR)
-    await settingsStoreForDocs.setDocsSearchEngine(engine).catch(() => {})
-    console.log(c(`  ✓ ${t('搜索引擎', 'Search engine')}: ${engine}`, A.green))
-    console.log()
-  } catch { /* non-fatal */ }
 
   // ─────────────────────────────────────────────────────────────────
   //  Phase 4: Summary HUD

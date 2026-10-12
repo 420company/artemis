@@ -82,11 +82,13 @@ export interface ParsedArgs {
 // natural language with a hint (see core/workflowRouter.ts).
 const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
-  'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
+  'resume', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
   'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream',
   // For a platform host only (not in the help): the live browser host in the foreground.
   'browser-host',
+  // Removed CLI commands (not in the help): they print where the feature lives now.
+  'tasks', 'runtimes',
 ])
 
 function isCliCommand(value: string | undefined): value is CliCommand {
@@ -296,12 +298,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       resumeLast = false
       continue
     }
-    // first positional after resume/tasks may be a session id
-    if ((command === 'resume' || command === 'tasks') && !sessionId && !(command === 'resume' && resumeLast)) {
-      if (command === 'tasks' && !looksLikeSessionId(cur)) {
-        promptParts.push(cur)
-        continue
-      }
+    // first positional after resume may be a session id
+    if (command === 'resume' && !sessionId && !resumeLast) {
       sessionId = cur
       continue
     }

@@ -1705,9 +1705,9 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
   )
 
   assert(
-    'generate_image: configured placeholder provider fails closed without silent web fallback',
+    'generate_image: a configured provider this build does not support (a removed placeholder) fails closed without silent web fallback',
     result.ok === false &&
-      String(result.output).includes('configured visual API failed') &&
+      String(result.output).includes('configured visual service is not available in this version') &&
       !String(result.output).includes('Deep search fallback'),
     String(result.output),
   )
@@ -3863,8 +3863,8 @@ const ONE_PIXEL_PNG_BASE64 =
       platformSearchFromStore({ profiles: [main as never], defaultMainProfileId: 'executor' }) === undefined,
   )
   assert(
-    'platform search: a user search key (Bing, or Google with its CX) keeps priority over the platform',
-    hasUserSearchKey({ BING_API_KEY: 'b' }) && hasUserSearchKey({ GOOGLE_API_KEY: 'g', GOOGLE_CX: 'c' }) && !hasUserSearchKey({ GOOGLE_API_KEY: 'g' }) && !hasUserSearchKey({}),
+    'platform search: a legacy Google key with its CX keeps priority over the platform; a Bing key no longer counts (backend removed)',
+    !hasUserSearchKey({ BING_API_KEY: 'b' }) && hasUserSearchKey({ GOOGLE_API_KEY: 'g', GOOGLE_CX: 'c' }) && !hasUserSearchKey({ GOOGLE_API_KEY: 'g' }) && !hasUserSearchKey({}),
   )
 
   // Error wording: each failure says what happened, nothing is made up.
@@ -5641,7 +5641,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
 {
   const availableProviderNames = getAvailableProviders().map((provider) => provider.name)
   assert(
-    'visual provider registry: public provider list excludes placeholders',
+    'visual provider registry: the placeholder providers are gone; the real ones are listed',
     !availableProviderNames.includes('stable-diffusion') &&
       !availableProviderNames.includes('gemini') &&
       !availableProviderNames.includes('grok') &&

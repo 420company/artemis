@@ -20,17 +20,9 @@ export type {
   ToolExecutionMode
 } from './core/toolDef.js';
 
-export type {
-  QueryEngineConfig
-} from './core/queryEngine.js';
-
 export {
   buildTool
 } from './core/toolDef.js';
-
-export {
-  QueryEngine
-} from './core/queryEngine.js';
 
 export {
   SkillManager

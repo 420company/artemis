@@ -29,8 +29,9 @@ import {
     checkBytePlusReferenceSupport,
     resolveReferenceImages,
 } from './visual/referenceImages.js';
+import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
 
-const DEFAULT_MODEL = 'seedream-5-0-260128';
+const DEFAULT_MODEL = DEFAULT_MODEL_IDS.byteplusImage;
 const DEFAULT_SIZE = '2K';
 const DEFAULT_SUBDIR = 'images';
 
@@ -247,7 +248,19 @@ async function tryGenerateWithConfiguredVisualProvider(action: any, context: any
         return null;
     }
 
-    const provider = await createVisualProvider(configured.config, 'image');
+    let provider: Awaited<ReturnType<typeof createVisualProvider>>;
+    try {
+        provider = await createVisualProvider(configured.config, 'image');
+    } catch {
+        // A provider name this build does not have (for example a removed
+        // placeholder): fail closed, no silent fallback to another service.
+        toolWarn('⚠️ 已配置的视觉服务在此版本中不可用。');
+        return {
+            action,
+            ok: false,
+            output: 'Image generation failed: the configured visual service is not available in this version. Choose another one in the visual settings; this does not get better by retrying.',
+        };
+    }
     if (!provider.supportsImages) {
         toolWarn('⚠️ 已配置的视觉服务不支持图片生成。');
         return {
