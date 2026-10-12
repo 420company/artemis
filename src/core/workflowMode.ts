@@ -79,6 +79,11 @@ export async function runWorkflowMode(
   userPrompt: string,
   options: RunAgentOptions,
 ): Promise<RunResult> {
+  // A routed workflow carries its playbook (options.workflowHint): the
+  // adversarial mode then runs as the bounded rigorous review, never the
+  // multi-round hardening pipeline, which stays the explicit command's.
+  const routedReview = mode === 'nidhogg' && Boolean(options.workflowHint);
+  const displayName = routedReview ? 'review' : getWorkflowDisplayName(mode);
   let rootRuntime =
     options.rootRuntimeId
       ? (session.taskRuntimes ?? []).find(
@@ -89,15 +94,15 @@ export async function runWorkflowMode(
   if (rootRuntime) {
     rootRuntime =
       updateTaskRuntime(session, rootRuntime.id, {
-        label: `${getWorkflowDisplayName(mode)} :: ${truncateInline(userPrompt.trim(), 140)}`,
+        label: `${displayName} :: ${truncateInline(userPrompt.trim(), 140)}`,
         workflowMode: mode,
         status: 'running',
-        lastOutput: `Workflow started: ${getWorkflowDisplayName(mode)}`,
+        lastOutput: `Workflow started: ${displayName}`,
       }) ?? rootRuntime;
   } else {
     rootRuntime = createTaskRuntimeRecord({
       id: options.rootRuntimeId,
-      label: `${getWorkflowDisplayName(mode)} :: ${truncateInline(userPrompt.trim(), 140)}`,
+      label: `${displayName} :: ${truncateInline(userPrompt.trim(), 140)}`,
       workflowMode: mode,
       status: 'running',
     });
@@ -138,7 +143,7 @@ export async function runWorkflowMode(
     },
   });
   options.onInfo?.(
-    `[${getWorkflowDisplayName(mode)}] workflow strength contract active: specialist phases, dynamic task-specific assets, portable verification, failure recovery`,
+    `[${displayName}] workflow strength contract active: specialist phases, dynamic task-specific assets, portable verification, failure recovery`,
   );
 
   try {
@@ -170,7 +175,7 @@ export async function runWorkflowMode(
     }
 
     const result: RunResult =
-      mode === 'nidhogg'
+      mode === 'nidhogg' && !routedReview
         ? await runNidhoggWorkflow(
             session,
             userPrompt,

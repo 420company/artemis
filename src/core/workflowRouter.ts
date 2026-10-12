@@ -19,8 +19,14 @@
  * playbook and raises the budget up to the workflow's cap, never above
  * MAX_SUB_AGENTS_PER_RUN.
  *
- * The internal workflow names (niko, athena, contest, design) are kept for
- * persisted sessions and runtime records; the router speaks in plain names.
+ * A request for a rigorous, adversarial review ("帮我严审", "red-team this")
+ * gets the review workflow: independent critics from several angles, then an
+ * evidence-backed verdict. It runs as the adversarial hardening mode
+ * internally; users only ever see 严格审查 / "rigorous review".
+ *
+ * The internal workflow names (niko, athena, contest, design and the
+ * adversarial mode) are kept for persisted sessions and runtime records; the
+ * router speaks in plain names.
  */
 
 import type { ChatProvider } from '../providers/types.js';
@@ -29,10 +35,10 @@ import type { WorkflowMode } from './workflowMode.js';
 import { buildWorkflowHint } from './workflowHints.js';
 import { isClearSagaLongVideoRequest, splitSagaBrief } from '../tools/visual/sagaWorkflow.js';
 
-export type AutoWorkflow = 'direct' | 'plan' | 'team' | 'compare' | 'design' | 'saga';
+export type AutoWorkflow = 'direct' | 'plan' | 'team' | 'compare' | 'design' | 'review' | 'saga';
 /** Workflows the model can switch into with the use_workflow tool. */
-export type EscalationWorkflow = 'plan' | 'team' | 'compare' | 'design';
-export const ESCALATION_WORKFLOWS: readonly EscalationWorkflow[] = ['plan', 'team', 'compare', 'design'];
+export type EscalationWorkflow = 'plan' | 'team' | 'compare' | 'design' | 'review';
+export const ESCALATION_WORKFLOWS: readonly EscalationWorkflow[] = ['plan', 'team', 'compare', 'design', 'review'];
 
 export type RouteSource = 'heuristic' | 'classifier' | 'fallback' | 'slash-hint';
 
@@ -54,6 +60,7 @@ export const WORKFLOW_BUDGETS: Readonly<Record<AutoWorkflow, WorkflowBudget>> = 
   design: { maxSubAgents: 2, maxRounds: 1 },
   compare: { maxSubAgents: 4, maxRounds: 1, maxCandidates: 3 },
   team: { maxSubAgents: 4, maxRounds: 2 },
+  review: { maxSubAgents: 4, maxRounds: 2 },
   saga: { maxSubAgents: 0, maxRounds: 0 },
 };
 
@@ -64,6 +71,7 @@ export const AUTO_WORKFLOW_MODE: Readonly<Record<Exclude<AutoWorkflow, 'saga'>, 
   team: 'athena',
   compare: 'contest',
   design: 'design',
+  review: 'nidhogg',
 };
 
 export function autoWorkflowForMode(mode: WorkflowMode): AutoWorkflow | undefined {
@@ -73,6 +81,7 @@ export function autoWorkflowForMode(mode: WorkflowMode): AutoWorkflow | undefine
     case 'athena': return 'team';
     case 'contest': return 'compare';
     case 'design': return 'design';
+    case 'nidhogg': return 'review';
     default: return undefined;
   }
 }
@@ -213,6 +222,27 @@ const DESIGN_SURFACE_RE = /(?:页面|网页|网站|官网|落地页|着陆页|�
 const DESIGN_VERB_RE = /(?:做|设计|搭建|创建|生成|制作|编写|开发|写|改版|重新设计|重做|美化|打造|\bbuild|\bdesign|\bcreate|\bmake|\bredesign|\bcraft|\brestyle|\bmock up)/i;
 const CONTINUATION_START_RE = /^(?:继续|接着|然后|另外|补充|continue|go on)/i;
 
+// An explicit ask for a rigorous, adversarial review, as the request itself:
+// "帮我严审…", "严格审查一下…", "请对…做一次对抗式评审", "帮我挑挑刺",
+// "red-team this…", "please review … rigorously". Every Chinese form starts
+// a clause (the message or a part after punctuation), so a word dropped in
+// passing ("他总爱挑刺", "领导说可以严格审查", "不可以严格审查", "our red
+// team found…") is not an ask; plain "review" / "看看" is not either.
+const REVIEW_CLAUSE = String.raw`(?:^|[，,。；;！!？?\n])\s*`;
+const REVIEW_TERM_ZH = String.raw`(?:严审|严格(?:地)?(?:审查|评审|审核|审一下|审一审)|对抗(?:式|性)(?:审查|评审|审核))`;
+const REVIEW_ASK_ZH = new RegExp(
+  REVIEW_CLAUSE +
+    String.raw`(?:(?:请|麻烦)\s*)?(?:你\s*)?(?:(?:帮我|帮忙|请你?|给我|麻烦你?|替我)\s*|(?:能不能|能否|能|可以|可不可以)\s*(?:帮我)?\s*)?(?:对[^，,。；;！!？?\n]{1,40}?)?\s*(?:做|来|进行)?\s*(?:一次|一下|一轮|个)?\s*` +
+    REVIEW_TERM_ZH,
+);
+// 挑刺 / 找茬 only as the owner's imperative: "帮我挑刺", "请对这段代码找找茬", "帮我给这个方案挑挑刺".
+const REVIEW_PICK_ZH = new RegExp(
+  REVIEW_CLAUSE + String.raw`(?:帮我|帮忙|请你?|麻烦你?)\s*(?:(?:给|对|帮)\s*[^，,。；;！!？?\n]{1,30}?\s*)?(?:挑挑?刺|找找?茬|挑挑?毛病)`,
+);
+const REVIEW_ASK_EN = /^\s*(?:(?:please|can you|could you|would you|i want you to|i need you to)\s+)?(?:red[- ]?team\s+(?:this|these|that|my|our|the)\b|(?:do|run|give (?:me|it|this))\s+an?\s+(?:adversarial|rigorous|ruthless|strict)\s+(?:review|audit|critique)\b|(?:adversarially|rigorously|ruthlessly|strictly)\s+review\b|review\b.{0,60}\b(?:rigorously|adversarially|ruthlessly|strictly)\b)/i;
+// What a question about the term looks like ("什么是红队", "what is red teaming").
+const REVIEW_DEFINITION_RE = /(?:什么是|是什么|啥是|什么叫|怎么理解|含义|定义|\bwhat(?:'s| is| does)\b|\bmeaning of\b|\bdefine\b)/i;
+
 export interface WorkflowSignals {
   length: number;
   casual: boolean;
@@ -229,6 +259,8 @@ export interface WorkflowSignals {
   design: boolean;
   designSurface: boolean;
   bug: boolean;
+  /** An explicit ask for a rigorous, adversarial review of something. */
+  review: boolean;
   saga: boolean;
 }
 
@@ -268,6 +300,7 @@ export function collectWorkflowSignals(input: WorkflowRouteInput, fullText = inp
     design: designSurface && DESIGN_VERB_RE.test(text) && !bug && !writing,
     designSurface,
     bug,
+    review: (REVIEW_ASK_ZH.test(text) || REVIEW_PICK_ZH.test(text) || REVIEW_ASK_EN.test(text)) && !REVIEW_DEFINITION_RE.test(text) && !PAST_MENTION_RE.test(text),
     // Saga comes after every code / design / question check: only plain
     // creation requests for a new long video qualify.
     saga: !codeTask && !designSurface && codeContext === 0 && isClearSagaLongVideoRequest(fullText, { maxClipSeconds: input.maxClipSeconds }),
@@ -295,6 +328,9 @@ export type HeuristicVerdict =
  */
 export function classifyWorkflowHeuristically(signals: WorkflowSignals): HeuristicVerdict {
   if (signals.casual) return { kind: 'clear', workflow: 'direct', reason: 'casual chat' };
+  // An explicit ask for a rigorous review wins over the question and follow-up
+  // checks ("能帮我严审一下这个方案吗？" is a request, not a question).
+  if (signals.review) return { kind: 'clear', workflow: 'review', reason: 'asked for a rigorous, adversarial review' };
   if (signals.followUp) return { kind: 'clear', workflow: 'direct', reason: 'follow-up' };
   if (signals.question) return { kind: 'clear', workflow: 'direct', reason: 'question' };
   if (signals.compareExplicit) return { kind: 'clear', workflow: 'compare', reason: 'asked for several candidate solutions and the best one' };
@@ -501,6 +537,22 @@ const SAGA_PLAYBOOK = [
   '- Report the output file path and any segment that failed; never claim a video exists without the tool result.',
 ].join('\n');
 
+/**
+ * The review workflow's own steps, on top of the adversarial hardening hint:
+ * independent critics, evidence, one verdict. Plain words only.
+ */
+const REVIEW_PLAYBOOK = [
+  '[Workflow: rigorous review]',
+  'The user asked for a rigorous, adversarial review. Your job is to find what is wrong, not to reassure.',
+  '- First pin down what is under review (files, a diff, a plan, a document, a claim) and what "correct" means for it; read it in full before judging.',
+  '- Attack it from separate angles: does it do what was asked (spec), how it breaks (edge cases, failure paths, tests that would fail), security and data safety, design and maintainability. For a plan or document: hidden assumptions, missing risks, numbers that do not add up.',
+  '- For a large or high-stakes target you may give each angle to one read-only reviewer sub-agent (within the budget); tell each to return a list of issues with evidence, never to rewrite anything. Otherwise do the passes yourself, one angle at a time.',
+  '- Check each finding against the material (run the tests, read the code path, recompute the numbers). Drop what you cannot back up; never report a check that did not run.',
+  '- Reply with: a one-line verdict (可以用 / 修改后可用 / 不建议使用), then the issues ordered by severity, each with where it is, why it matters and a concrete fix. Say what you did not check.',
+  '- Do not change files unless the user asked you to fix things as well; then fix the confirmed issues and verify again.',
+  '- When you talk to the user, call this a rigorous review (「严格审查」). Never mention workflow, mode, playbook, tool, model or provider names.',
+].join('\n');
+
 function describeBudget(workflow: AutoWorkflow, budget: WorkflowBudget): string {
   const lines = [
     `[Workflow budget — ${workflow}]`,
@@ -521,7 +573,8 @@ export function buildRoutedWorkflowHint(
   const header = `[Artemis chose this workflow automatically${context.reason ? `: ${context.reason}` : ''}. The user did not name it. Never mention workflow, playbook, tool, model or provider names to the user; describe what you do in plain words.]`;
   if (workflow === 'saga') return `${header}\n\n${SAGA_PLAYBOOK}`;
   const hint = buildWorkflowHint(AUTO_WORKFLOW_MODE[workflow], { cwd: context.cwd, userPrompt: context.userPrompt });
-  return `${header}\n\n${hint}\n\n${describeBudget(workflow, WORKFLOW_BUDGETS[workflow])}`;
+  const review = workflow === 'review' ? `\n\n${REVIEW_PLAYBOOK}` : '';
+  return `${header}\n\n${hint}${review}\n\n${describeBudget(workflow, WORKFLOW_BUDGETS[workflow])}`;
 }
 
 /** Output of the use_workflow tool: the playbook the model switches to mid-task. */
@@ -531,6 +584,7 @@ export function buildEscalationPlaybook(workflow: EscalationWorkflow, cwd: strin
     `Switched to the ${workflow} workflow${reason ? ` (${reason})` : ''}. Follow this playbook for the rest of the task.`,
     '',
     hint,
+    ...(workflow === 'review' ? ['', REVIEW_PLAYBOOK] : []),
     '',
     describeBudget(workflow, WORKFLOW_BUDGETS[workflow]),
   ].join('\n');
@@ -587,6 +641,7 @@ export function checkDelegationBudget(action: AgentAction, budget: DelegationBud
 const HEURISTIC_REASONS_ZH: Readonly<Record<string, string>> = {
   'clear request for a long multi-segment video': '明确要求多段长视频',
   'asked for several candidate solutions and the best one': '明确要求产出多个方案并选出最优',
+  'asked for a rigorous, adversarial review': '明确要求严格审查',
   'question': '提问',
   'follow-up': '追问',
   'builds or restyles a website / UI': '要做或改网站 / 界面',
@@ -611,6 +666,7 @@ export function describeAutoWorkflow(workflow: AutoWorkflow, locale: 'zh-CN' | '
     case 'team': return zh ? '并行分工：拆成独立部分并行处理（有上限）' : 'Parallel team: independent parts in parallel (bounded)';
     case 'compare': return zh ? '多方案对比：最多 3 个候选，评审后实施最优' : 'Compare: up to 3 candidates, critique, build the best';
     case 'design': return zh ? '设计：视觉系统、素材、实现与截图验收' : 'Design: visual system, assets, build, screenshot check';
+    case 'review': return zh ? '严格审查：多角度挑错，逐条给出证据和改法' : 'Rigorous review: critique from several angles, each issue with evidence and a fix';
     case 'saga': return zh ? '长视频' : 'Long video';
     default: return zh ? '直接处理' : 'Direct';
   }

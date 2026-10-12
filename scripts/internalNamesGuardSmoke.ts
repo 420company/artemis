@@ -146,8 +146,8 @@ await test('string tables: /longvideo and /saga both start a long video (input o
 });
 
 await test('string tables: workflow labels and route reasons', () => {
-  const workflows: AutoWorkflow[] = ['direct', 'plan', 'team', 'compare', 'design', 'saga'];
-  const reasons = ['clear request for a long multi-segment video', 'asked for several candidate solutions and the best one', 'question', 'follow-up', 'builds or restyles a website / UI', 'large multi-part build or change', 'engineering task that needs investigation first', 'non-trivial engineering task'];
+  const workflows: AutoWorkflow[] = ['direct', 'plan', 'team', 'compare', 'design', 'review', 'saga'];
+  const reasons = ['clear request for a long multi-segment video', 'asked for several candidate solutions and the best one', 'asked for a rigorous, adversarial review', 'question', 'follow-up', 'builds or restyles a website / UI', 'large multi-part build or change', 'engineering task that needs investigation first', 'non-trivial engineering task'];
   for (const locale of LOCALES) {
     for (const workflow of workflows) expectClean(`describeAutoWorkflow(${workflow}, ${locale})`, describeAutoWorkflow(workflow, locale));
     for (const reason of reasons) expectClean(`describeRouteReason(${reason}, ${locale})`, describeRouteReason({ reason }, locale));
