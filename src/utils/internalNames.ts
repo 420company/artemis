@@ -148,30 +148,73 @@ const ZH_WORDS: Readonly<Record<string, string>> = {
   'background task': '后台任务',
 }
 
-const HAS_CJK = /[\u3400-\u9fff]/
-/** Paths and URLs in progress text, kept as they are: PATH_TOKEN_RE plus relative paths with a file extension ("src/a.ts"). */
-const PROGRESS_PATH_RE = /(?<![^\s"'`(（[【:：=,，])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+|(?:~|\.{1,2})?[/\\]\S*|[A-Za-z]:[/\\]\S*|[\w.@-]+(?:[/\\][\w.@-]+)*\.[A-Za-z][A-Za-z0-9]{0,4}(?=$|[\s"'`)\]）】,，。;；:：]))/g
+const HAS_CJK = /[㐀-鿿]/
+/** File types a bare name counts as a file with ("report.md", "clip.mp4"); "Saga.ai" or "x.com" is not one. */
+const FILE_EXTENSIONS = 'ts|tsx|js|jsx|mjs|cjs|json|jsonl|md|markdown|txt|log|py|ipynb|sh|bash|go|rs|java|kt|swift|rb|php|c|h|cc|cpp|hpp|cs|css|scss|html|htm|vue|svelte|yaml|yml|toml|ini|env|xml|csv|tsv|sql|db|sqlite|xlsx|xls|docx|doc|pptx|ppt|pdf|rtf|odt|png|jpe?g|webp|gif|svg|bmp|tiff?|heic|ico|mp4|mov|webm|m4v|mkv|avi|mp3|wav|m4a|aac|flac|ogg|opus|srt|vtt|zip|tar|gz|tgz|7z|ttf|otf|woff2?';
+/**
+ * Paths and URLs in progress text, kept as they are: a URL, a token with a
+ * slash or backslash, or a bare name with a known file type.
+ */
+const PROGRESS_PATH_RE = new RegExp(
+  String.raw`(?<![^\s"'` + '`' + String.raw`(（[【:：=,，])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+|(?:~|\.{1,2})?[/\\]\S*|[A-Za-z]:[/\\]\S*|[\w.@-]+(?:[/\\][\w.@-]*)+|[\w.@-]+\.(?:${FILE_EXTENSIONS})(?=$|[\s"'` + '`' + String.raw`)\]）】,，。;；:：]))`,
+  'gi',
+);
+
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * A replacement word next to the same word ("审查 审查" from "Nidhogg 审查",
+ * "run log log" from "Heimdall log") becomes one. Only words a replacement
+ * put in are collapsed; the rest of the text is left as it was written.
+ */
+export function collapseRepeatedWords(text: string, words: Iterable<string>): string {
+  let out = text;
+  for (const w of new Set(words)) {
+    if (!w.trim()) continue;
+    const cjk = HAS_CJK.test(w);
+    const parts = w.split(/\s+/);
+    const tail = cjk ? ([...w].length >= 3 ? [...w].slice(-2).join('') : undefined) : parts.length > 1 ? parts[parts.length - 1] : undefined;
+    const alt = tail ? `(?:${escapeRe(w)}|${escapeRe(tail)})` : escapeRe(w);
+    const re = cjk ? new RegExp(`${escapeRe(w)}(?:\\s*${alt})+`, 'g') : new RegExp(`\\b${escapeRe(w)}(?:\\s+${alt}\\b)+`, 'gi');
+    out = out.replace(re, w);
+  }
+  return out;
+}
 
 /**
  * Rewrites internal names in progress text (PROGRESS_RULES plus the `scrub`
  * rules), in Chinese words for Chinese text. File paths and URLs are never
- * touched (a rewritten path points nowhere); a step's own detail (its file,
- * its command) is not rewritten at all but left out when it names one
- * (hasInternalProgressName).
+ * rewritten (a rewritten path points nowhere): one that names an internal
+ * system, a model or a vendor is left out of the text, a neutral word in
+ * its place ("a file" / "a link"). A step's own detail (its file, its
+ * command) is not rewritten at all but left out when it names one
+ * (hasInternalProgressName); artifact links are never scrubbed.
  */
 export function scrubInternalNamesStrict(text: string): string {
   if (!text) return text;
   const zh = HAS_CJK.test(text);
-  const word = (to: string) => (zh ? ZH_WORDS[to] ?? to : to);
+  const used: string[] = [];
+  const word = (to: string) => {
+    const w = zh ? ZH_WORDS[to] ?? to : to;
+    used.push(w);
+    return w;
+  };
   const kept: string[] = [];
-  let out = text.replace(PROGRESS_PATH_RE, (token) => `\uE010${kept.push(token) - 1}\uE011`);
+  let out = text.replace(PROGRESS_PATH_RE, (token) => `${kept.push(token) - 1}`);
   for (const { scrub } of INTERNAL_NAME_PATTERNS) {
     if (!scrub) continue;
     out = out.replace(scrub.re, (match) => word(scrub.to || TOOL_WORDS[match.toLowerCase()] || ''));
   }
   for (const rule of PROGRESS_RULES) out = out.replace(rule.re, () => word(rule.to));
-  out = out.replace(/\b(video model|image model|provider|model)(?:[\s/]+\1\b)+/g, '$1').replace(/(视频模型|图片模型|服务商|模型)(?:[\s/]*\1)+/g, '$1');
-  return out.replace(/\uE010(\d+)\uE011/g, (_, index: string) => kept[Number(index)] ?? '');
+  out = out.replace(/(\d+)/g, (_, index: string) => {
+    const token = kept[Number(index)] ?? '';
+    if (!hasInternalProgressName(token)) return token;
+    const url = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(token);
+    const neutral = zh ? (url ? '链接' : '文件') : url ? 'a link' : 'a file';
+    used.push(neutral);
+    return neutral;
+  });
+  return collapseRepeatedWords(out, used);
 }
 
 /** Whether progress text (a path, a command) names anything scrubInternalNamesStrict would rewrite, paths included. */

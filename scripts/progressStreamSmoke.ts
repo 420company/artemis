@@ -242,8 +242,16 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   assert('stream: the helper\'s summary comes with its end', c.events.some((e) => e.type === 'subagent_end' && typeof e.summary === 'string' && (e.summary as string).length > 0))
   const MUST = ['Saga 长视频', 'sagaWorkflow 模块', 'saga-render step', 'Nidhogg round', 'Mnemosyne', 'Bragi bridge', 'Heimdall log', 'Bifrost', 'Director agent', 'critic pass', '[niko:reviewer] ok', '[Workflow: saga]', 'Seedance', 'byteplus/seedream-5-0', 'doubao-seedance-1-0-pro', 'claude-x', 'gpt-4o', 'deepseek-v3', 'qwen-max', 'wan2.1', 'gemini-pro', 'OpenAI', 'Anthropic', 'volcengine', 'generate_long_video']
   for (const text of MUST) assert(`names: "${text}" is rewritten`, !hasInternalProgressName(scrubInternalNamesStrict(text)) && scrubInternalNamesStrict(text) !== text, scrubInternalNamesStrict(text))
-  const KEEP = ['cd gateway', 'email the director about the contest results', 'US Constitution', 'Stripe payment gateway', 'AWS Athena', 'Carl Sagan', 'sagacious', 'src/sagaWorkflow.ts', 'Freya Allan', 'Niko Rosberg']
+  const KEEP = ['cd gateway', 'email the director about the contest results', 'US Constitution', 'Stripe payment gateway', 'AWS Athena', 'Carl Sagan', 'sagacious', 'Freya Allan', 'Niko Rosberg', 'report.md is done', 'see https://example.com/a', 'src/app.ts']
   for (const text of KEEP) assert(`names: "${text}" stays as it is`, scrubInternalNamesStrict(text) === text, scrubInternalNamesStrict(text))
+  for (const [text, want] of [
+    ['Saga.ts', 'a file'], ['src/sagaWorkflow.ts', 'a file'], ['文件 Saga.mp4', '文件'], ['see https://gemini.google.com now', 'see a link now'],
+    ['打开 https://seedance.ai/x 看看', '打开 链接 看看'], ['byteplus/seedream-5-0 said no', 'a file said no'],
+  ] as const) assert(`names: a path or link naming one is left out ("${text}")`, scrubInternalNamesStrict(text) === want, scrubInternalNamesStrict(text))
+  for (const text of ['Nidhogg.ai', 'Seedance.pro', 'BytePlus.com', 'seedance.ai']) assert(`names: a name dressed as a file or domain is not protected ("${text}")`, !hasInternalProgressName(scrubInternalNamesStrict(text)), scrubInternalNamesStrict(text))
+  assert('names: a replacement next to the same word is one word', scrubInternalNamesStrict('启动 Nidhogg 审查') === '启动 审查' && scrubInternalNamesStrict('Heimdall log') === 'run log' && scrubInternalNamesStrict('Saga Saga') === 'long video', `${scrubInternalNamesStrict('启动 Nidhogg 审查')} | ${scrubInternalNamesStrict('Heimdall log')}`)
+  assert('names: the owner\'s own repeated words stay', scrubInternalNamesStrict('log log 审查 审查') === 'log log 审查 审查')
+  assert('artifacts: a real path stays intact in the file links', JSON.stringify(toolArtifacts({ type: 'write_file' } as AgentAction, true, { path: 'src/sagaWorkflow.ts' }, '')) === '["src/sagaWorkflow.ts"]')
   assert('names: Chinese text gets Chinese words', scrubInternalNamesStrict('用 Saga 和 doubao-seedance 做') === '用 长视频 和 视频模型 做', scrubInternalNamesStrict('用 Saga 和 doubao-seedance 做'))
   assert('detail: a path or command naming an internal system is left out, never rewritten', detailText('src/sagaWorkflow.ts') === undefined && detailText('cat heimdall.log') === undefined && detailText('cd gateway') === 'cd gateway')
 
