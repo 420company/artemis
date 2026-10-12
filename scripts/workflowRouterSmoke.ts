@@ -13,7 +13,10 @@ import {
   CLASSIFIER_TIMEOUT_MS,
   MAX_SUB_AGENTS_PER_RUN,
   WORKFLOW_BUDGETS,
+  AUTO_WORKFLOW_MODE,
   buildRoutedWorkflowHint,
+  describeAutoWorkflow,
+  describeRouteReason,
   checkDelegationBudget,
   createDelegationBudget,
   gateClassifierVerdict,
@@ -774,7 +777,7 @@ async function main(): Promise<void> {
   });
 
   await test('playbooks: routed hints carry the budget and no slash command names', () => {
-    for (const workflow of ['plan', 'team', 'compare', 'design', 'saga'] as const) {
+    for (const workflow of ['plan', 'team', 'compare', 'design', 'review', 'saga'] as const) {
       const hint = buildRoutedWorkflowHint(workflow, { cwd: '/tmp', userPrompt: '做一个网站', reason: 'test' });
       assert.match(hint, /chose this workflow automatically/);
       assert.doesNotMatch(hint, /\/(?:niko|athena|contest|team|design)\b/, workflow);
@@ -797,6 +800,61 @@ async function main(): Promise<void> {
     assert.match(brain, /const runtimeNote = \[turnContextText, skillIndexSection, requestNote\]/, 'think() sends turnContext as unsaved runtime context');
     const headless = fs.readFileSync(path.join(process.cwd(), 'src/services/headlessAgent.ts'), 'utf8');
     assert.match(headless, /delegationBudget: createDelegationBudget\(plan\.workflow\)/, 'every headless run (Goal Mode, analysis too) is bounded');
+  });
+
+  // ── rigorous review ───────────────────────────────────────────────────────
+  await test('review: explicit asks for a rigorous, adversarial review route to review', async () => {
+    const cases: Array<[string, AutoWorkflow]> = [
+      ['帮我严审一下这个 PR', 'review'],
+      ['帮我严审', 'review'],
+      ['能帮我严审一下这个方案吗？', 'review'],
+      ['请严格审查 src/auth/session.ts 的改动', 'review'],
+      ['对这份商业计划书做一次对抗式评审', 'review'],
+      ['往死里挑刺，看看这个接口设计有什么问题', 'review'],
+      ['给我的合同条款找茬', 'review'],
+      ['Red-team this deployment plan', 'review'],
+      ['Please review my migration script rigorously', 'review'],
+      ['Do an adversarial review of the payment flow', 'review'],
+      // Not a review request: a question about the term, past work, a plain look.
+      ['什么是红队测试？', 'direct'],
+      ['what is red teaming?', 'direct'],
+      ['我们之前已经做过严审了', 'direct'],
+      ['帮我看看这段代码', 'direct'],
+      ['review this', 'direct'],
+    ];
+    const wrong: string[] = [];
+    for (const [text, expected] of cases) {
+      const route = await routeWorkflow({ text });
+      if (route.workflow !== expected) wrong.push(`${JSON.stringify(text)} → ${route.workflow} (${route.reason}), expected ${expected}`);
+    }
+    assert.deepEqual(wrong, []);
+    assert.equal(WORKFLOW_BUDGETS.review.maxSubAgents, 4);
+    assert.equal(AUTO_WORKFLOW_MODE.review, 'nidhogg');
+  });
+
+  await test('review: the playbook and labels are plain; the internal mode name never shows', async () => {
+    const hint = buildRoutedWorkflowHint('review', { cwd: '/tmp', userPrompt: '帮我严审这个方案', reason: 'asked for a rigorous, adversarial review' });
+    assert.match(hint, /rigorous review/);
+    assert.match(hint, /严格审查/);
+    assert.match(hint, /At most 4 sub-agent/);
+    assert.doesNotMatch(hint, /nidhogg/i);
+    for (const locale of ['zh-CN', 'en']) {
+      assert.doesNotMatch(describeAutoWorkflow('review', locale), /nidhogg/i);
+      assert.doesNotMatch(describeRouteReason({ reason: 'asked for a rigorous, adversarial review' }, locale), /nidhogg/i);
+    }
+    assert.match(describeAutoWorkflow('review', 'zh-CN'), /严格审查/);
+    assert.equal(describeRouteReason({ reason: 'asked for a rigorous, adversarial review' }, 'zh-CN'), '明确要求严格审查');
+    const result = await executeAction({ type: 'use_workflow', workflow: 'review', reason: 'the user wants a strict check' }, { cwd: process.cwd() });
+    assert.equal(result.ok, true);
+    assert.match(result.output, /Switched to the review workflow/);
+    assert.match(result.output, /一行|verdict/);
+    assert.doesNotMatch(result.output, /nidhogg/i);
+  });
+
+  await test('review: a routed review runs the bounded playbook, the explicit command keeps the full pipeline', () => {
+    const mode = fs.readFileSync(path.join(process.cwd(), 'src/core/workflowMode.ts'), 'utf8');
+    assert.match(mode, /const routedReview = mode === 'nidhogg' && Boolean\(options\.workflowHint\)/);
+    assert.match(mode, /mode === 'nidhogg' && !routedReview/);
   });
 
   // ── use_workflow tool ─────────────────────────────────────────────────────

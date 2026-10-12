@@ -337,6 +337,7 @@ export async function runCli(argv: string[]): Promise<void> {
       retry: options.retry,
       retryOf: options.retryOf,
       keepApprovals: options.keepApprovals,
+      goal: options.goal,
     })
     return
   }
@@ -689,6 +690,7 @@ async function runQueryCommand(options: {
   retry?: boolean
   retryOf?: string
   keepApprovals?: boolean
+  goal?: { id: string; maxSteps?: number }
 }): Promise<void> {
   const { cwd, locale, mode, model } = options
   const prompt = options.prompt ?? ''
@@ -722,8 +724,23 @@ async function runQueryCommand(options: {
   const { SessionBusyError, SESSION_BUSY_MESSAGE, SESSION_BUSY_MESSAGE_ZH } = await import('../storage/sessionLock.js')
   const { SessionRewindError } = await import('../storage/sessionTurns.js')
   let result: Awaited<ReturnType<typeof runHeadlessAgent>>
+  const goal = mode === 'execute' ? options.goal : undefined
   try {
-    result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
+    if (goal) {
+      // One step of a long-term goal the host schedules (services/goalRunner.ts):
+      // the same run as a message, with the goal's prompt, and one status line for the host.
+      const { formatGoalStatusLine, runHostGoalTick } = await import('../services/goalRunner.js')
+      const tick = await runHostGoalTick(cwd, { id: goal.id, objective: prompt, ...(goal.maxSteps ? { maxSteps: goal.maxSteps } : {}) }, {
+        model,
+        ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+        onInfo: (message) => console.error(oneLine(message)),
+        approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' },
+        ...(options.keepApprovals ? { keepApprovals: true } : {}),
+      })
+      console.error(formatGoalStatusLine(tick))
+      result = tick.run
+    } else result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
       permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
       model,
       maxTurns: options.maxTurns,
@@ -2203,8 +2220,10 @@ async function runGoalCliCommand(options: { cwd: string; locale: UiLocale; args:
     const final = await runGoalLoop(cwd, goal.id, {
       maxTicks,
       onTick: (g, tick) => {
-        console.log(`  ${statusIcon(g.status)} #${g.iterations.length} (${tick.iteration.turns} turns) ${tick.iteration.progress}`)
-        if (tick.iteration.next && g.status === 'active') console.log(t(`     ↳ 下一步: ${tick.iteration.next}`, `     ↳ next: ${tick.iteration.next}`))
+        const step = tick.iteration
+        if (!step) return
+        console.log(`  ${statusIcon(g.status)} #${g.iterations.length} (${step.turns} turns) ${step.progress}`)
+        if (step.next && g.status === 'active') console.log(t(`     ↳ 下一步: ${step.next}`, `     ↳ next: ${step.next}`))
       },
       onInfo: () => undefined,
     })

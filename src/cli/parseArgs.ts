@@ -66,6 +66,8 @@ export interface ParsedArgs {
   /** execute --retry: the owner message id of the exchange to replace (--retry-of <id>); another one refuses. */
   retryOf?: string
   keepApprovals?: boolean
+  /** execute: advance this long-term goal by one step instead of sending a message (--goal <id> [--goal-max-steps <n>]); the prompt is the goal. */
+  goal?: { id: string; maxSteps?: number }
   resumeLast: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
@@ -127,6 +129,7 @@ ${t('命令', 'Commands')}:
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
   execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder|slides|document|spreadsheet 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder|slides|document|spreadsheet states what the user picked)')}
+                    ${t('--goal <id> <目标> 把一个长期目标推进一步（--goal-max-steps <n> 步数上限），stderr 末尾输出一行 [goal-status] {json}', '--goal <id> <goal> advances a long-term goal by one step (--goal-max-steps <n> caps its steps); one [goal-status] {json} line on stderr reports it')}
                     ${t('需要你同意的操作会暂停（退出码 10）；用 --session <id> --approve <请求id> 同意，或 --deny <请求id> [--reason <理由>] 拒绝；--signature <签名> 由宿主签发，--expect-digest <actionDigest> 核对请求未被改动', 'Actions that need approval pause the run (exit code 10); answer with --session <id> --approve <request id>, or --deny <request id> [--reason <text>]; --signature <sig> is the host\'s signature, --expect-digest <actionDigest> checks the request was not changed')}
                     ${t('--retry 配合 --session：撤下上一轮再执行（不带 query 即原样重发，带 query 即编辑后重发）；--retry-of <消息 id> 只在它仍是最后一轮时执行', '--retry with --session: takes the last exchange out and runs again (no query: the same message; a query: the edited message); --retry-of <message id> only if that is still the last exchange')}
                     ${t('--keep-approvals：消息不是你本人发的（定时任务、触发器等），会话里等你同意的请求保持不变', '--keep-approvals: the message is not the owner\'s (a scheduled task, a trigger, …): requests waiting in the conversation stay as they are')}
@@ -164,6 +167,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let retry = false
   let retryOf: string | undefined
   let keepApprovals = false
+  let goalId: string | undefined
+  let goalMaxSteps: number | undefined
   let resumeLast = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
@@ -275,6 +280,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
     if (command === 'execute' && cur === '--retry') { retry = true; continue }
     if (command === 'execute' && cur === '--keep-approvals') { keepApprovals = true; continue }
+    if (command === 'execute' && cur === '--goal') {
+      const v = args.shift()?.trim()
+      if (!v || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v)) throw new Error('execute --goal requires a goal id (letters, digits, _ and -).')
+      goalId = v
+      continue
+    }
+    if (command === 'execute' && cur === '--goal-max-steps') {
+      const v = Number(args.shift())
+      if (!Number.isInteger(v) || v < 1 || v > 200) throw new Error('execute --goal-max-steps must be an integer between 1 and 200.')
+      goalMaxSteps = v
+      continue
+    }
     if (command === 'execute' && cur === '--retry-of') {
       const v = args.shift()
       if (!v || !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(v)) throw new Error('execute --retry-of requires a message id.')
@@ -316,6 +333,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (approvalAnswer && expectDigest) approvalAnswer.expectDigest = expectDigest
   if (signature !== undefined && !approvalAnswer) throw new Error('execute --signature goes with --approve or --deny.')
   if (approvalAnswer && signature) approvalAnswer.signature = signature
+  if (goalMaxSteps !== undefined && !goalId) throw new Error('execute --goal-max-steps goes with --goal.')
+  if (goalId && (approvalAnswer || retry)) throw new Error('execute --goal cannot be combined with --approve, --deny or --retry.')
+  if (goalId && (imagePaths.length || intent !== undefined)) throw new Error('execute --goal takes no --image or --intent.')
+  if (goalId && promptParts.length === 0) throw new Error('execute --goal requires the goal itself.')
   return {
     command, cwd, model, baseUrl, apiKey,
     prompt: promptParts.length > 0 ? promptParts.join(' ') : undefined,
@@ -328,6 +349,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(retry ? { retry } : {}),
     ...(retryOf ? { retryOf } : {}),
     ...(keepApprovals ? { keepApprovals } : {}),
+    ...(goalId ? { goal: { id: goalId, ...(goalMaxSteps !== undefined ? { maxSteps: goalMaxSteps } : {}) } } : {}),
   }
 }
 
