@@ -41,15 +41,15 @@ export interface HeadlessAgentOptions {
   selfCheck?: boolean
   /**
    * What the user picked in the app (`--intent`): video, long_video, image,
-   * research or reminder (services/headlessWorkflow.ts). Unknown names are
+   * research, reminder, slides, document or spreadsheet (services/headlessWorkflow.ts). Unknown names are
    * ignored with a warning on onInfo.
    */
   intent?: string
   /**
    * Approvals (security/approvals.ts). `suspend`: stop at an ask-mode action
    * and leave a pending request in the session (`artemis execute`); without
-   * it such actions are refused. `hostSecret`: the host's per-run secret;
-   * requests are bound to it and can only be answered with it.
+   * it such actions are refused. Requests are bound to the host's public
+   * key (ARTEMIS_APPROVAL_PUBKEY) and answered only with its signature.
    */
   approvals?: { suspend?: boolean }
   /**
@@ -58,6 +58,19 @@ export interface HeadlessAgentOptions {
    * then the model continues. `prompt` is ignored.
    */
   answer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
+  /**
+   * Retry: take the conversation's last exchange (the owner's last message
+   * and everything after it) out first, then run. An empty prompt runs the
+   * same message again, with the intent and images it had; a prompt replaces
+   * it (edit and resend). Needs `sessionId`.
+   */
+  retry?: boolean
+  /**
+   * With `retry`: the owner message id of the exchange the host asked to
+   * replace. Checked under the session lock; another last exchange fails
+   * the retry (SessionRewindError 'changed') instead of replacing it.
+   */
+  retryOf?: string
 }
 
 export interface HeadlessAgentResult {
@@ -94,6 +107,7 @@ export async function runHeadlessAgent(
   const { runAgent, toolHeartbeatIntervalMs } = await import('../core/agent.js')
   const { loadCompactionSettings } = await import('./compactionSettings.js')
 
+  if (opts.retry && !opts.sessionId) throw new Error('A retry needs the session it continues (--session <id>).')
   const onInfo = opts.onInfo ?? (() => undefined)
   const providerConfig = await resolveMainProviderConfig({
     cwd,
@@ -118,7 +132,9 @@ export async function runHeadlessAgent(
   // cannot see images does not: runAgent hands the images to the vision
   // helper, or tells the model they could not be read right now.
   const { loadPromptImages } = await import('../core/imageInput.js')
-  const imageAttachments = await loadPromptImages(opts.imagePaths ?? [], cwd)
+  // A retry reads its message, intent and images from the session, under the lock.
+  const imageAttachments = opts.retry ? [] : await loadPromptImages(opts.imagePaths ?? [], cwd)
+  const sessionTurns = await import('../storage/sessionTurns.js')
 
   // Workflow routing (services/headlessWorkflow.ts): the user never names a
   // workflow; a Saga long video is only offered, never started unasked.
@@ -129,7 +145,7 @@ export async function runHeadlessAgent(
   const { resolveActiveVideoClipSeconds } = await import('../tools/visual/activeVideoModel.js')
   const { resolveArtemisHomeDir } = await import('../utils/fs.js')
   const { existsSync } = await import('node:fs')
-  const { join } = await import('node:path')
+  const { isAbsolute, join } = await import('node:path')
   const readOnly = (opts.permissionMode ?? 'PRODUCER') === 'read-only'
 
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
@@ -241,11 +257,65 @@ export async function runHeadlessAgent(
       for (const record of superseded) onInfo(`${APPROVAL_RESULT_PREFIX} ${JSON.stringify({ id: record.id, decision: 'expired', reason: 'superseded' })}`)
     }
 
+    let runPrompt = prompt
+    let runIntent = opts.intent
+    let runImagePaths = opts.imagePaths ?? []
+    let runImages = imageAttachments
+    if (opts.retry) {
+      const { createSideEffectClassifier } = await import('./toolSideEffects.js')
+      const exchange = sessionTurns.lastExchangeFor(current, await createSideEffectClassifier(cwd), opts.retryOf)
+      if (!prompt.trim()) {
+        runPrompt = exchange.recorded?.prompt ?? current.messages[exchange.startIndex]!.content
+        if (!runImagePaths.length) runImagePaths = (exchange.recorded?.imagePaths ?? []).filter((file) => existsSync(file))
+        // Files deleted since the first time are left out, and the agent is told so.
+        const resent = sessionTurns.dropMissingAttachments(runPrompt, (file) => existsSync(isAbsolute(file) ? file : join(cwd, file)))
+        if (resent.missing.length) {
+          runPrompt = resent.prompt
+          onInfo(`[session] retry: ${resent.missing.length} attachment(s) no longer exist and were left out`)
+        }
+      }
+      runIntent = opts.intent ?? exchange.recorded?.intent
+      // Images first: one that cannot be read fails the retry before anything is removed.
+      runImages = await loadPromptImages(runImagePaths, cwd)
+      sessionTurns.removeExchange(current, exchange)
+      await sessionStore.save(current)
+      onInfo(`[session] retry: removed the last exchange (${exchange.messageCount} messages)`)
+    }
+    const knownIds = new Set(current.messages.map((message) => message.id))
+    // What a later retry needs: where this turn starts and what it was asked
+    // with. Recorded as soon as the owner's message is stored (marked open),
+    // so a run that fails, is stopped or killed can still be retried as asked;
+    // closed with the message the turn ended at once the run is over.
+    const turnFields = () => ({
+      prompt: runPrompt,
+      ...(runIntent !== undefined ? { intent: runIntent } : {}),
+      ...(runImagePaths.length ? { imagePaths: runImagePaths } : {}),
+    })
+    let turnMessageId: string | undefined
+    const appendMessage = sessionStore.appendMessage.bind(sessionStore)
+    sessionStore.appendMessage = (target, role, content, name) => {
+      const updated = appendMessage(target, role, content, name)
+      if (turnMessageId === undefined && target === current && role === 'user') {
+        const asked = sessionTurns.firstNewOwnerMessage(current.messages, knownIds)
+        if (asked) {
+          turnMessageId = asked.id
+          // Saved with the message by the caller's next save.
+          sessionTurns.recordLastTurn(current, { userMessageId: asked.id, ...turnFields() }, { open: true })
+        }
+      }
+      return updated
+    }
+    const recordTurn = async () => {
+      sessionStore.appendMessage = appendMessage
+      if (turnMessageId === undefined) return
+      sessionTurns.recordLastTurn(current, { userMessageId: turnMessageId, ...turnFields() })
+      await sessionStore.save(current)
+    }
     const plan = await planHeadlessWorkflow({
       session: current,
-      prompt,
+      prompt: runPrompt,
       cwd,
-      attachmentCount: imageAttachments.length,
+      attachmentCount: runImages.length,
       inCodeRepo: existsSync(join(cwd, '.git')),
       // Goal Mode ticks are written by Artemis; read-only analysis only reads.
       autoRoute: opts.autoRoute !== false && !readOnly,
@@ -254,17 +324,20 @@ export async function runHeadlessAgent(
       hasVideoProvider: async () => Boolean(await resolveConfiguredVisualProvider(cwd, 'video')),
       videoClipSeconds: () => resolveActiveVideoClipSeconds(cwd),
       onInfo,
-      ...(opts.intent !== undefined ? { intent: opts.intent } : {}),
+      ...(runIntent !== undefined ? { intent: runIntent } : {}),
     })
     if (plan.kind === 'reply') {
       // The Saga question: answered without running the model.
-      sessionStore.appendMessage(current, 'user', prompt)
+      sessionStore.appendMessage(current, 'user', runPrompt)
       sessionStore.appendMessage(current, 'assistant', plan.reply)
       await sessionStore.save(current)
+      await recordTurn()
       return { reply: plan.reply, turns: 0 }
     }
     const messagesBefore = current.messages.length
-    const runResult = await runAgent(
+    let runResult
+    try {
+    runResult = await runAgent(
     current,
     // A retired workflow slash word ("/niko …") is already removed.
     plan.prompt,
@@ -276,11 +349,15 @@ export async function runHeadlessAgent(
     appendUserMessage: true,
     // Verify before done: the main path checks its own work once (bounded).
     selfCheck: opts.selfCheck !== false && !readOnly && plan.workflow !== 'saga',
-    ...(imageAttachments.length ? { imageAttachments } : {}),
+    ...(runImages.length ? { imageAttachments: runImages } : {}),
   })
     // A generated long video ends the Saga conversation of this session.
     if (plan.workflow === 'saga' && finishSagaIfGenerated(current, current.messages.slice(messagesBefore))) {
       await sessionStore.save(current)
+    }
+    } finally {
+      // Closed whether the run answered or failed (a killed process leaves it open).
+      await recordTurn().catch(() => undefined)
     }
     return runResult
   }, { label: `Session ${session.id}` })

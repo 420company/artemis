@@ -141,7 +141,7 @@ await test('string tables: workflow labels and route reasons', () => {
 });
 
 await test('string tables: tool labels for progress lines and chat captions', () => {
-  const tools = ['generate_long_video', 'generate_video', 'generate_image', 'bridge_send_video', 'bridge_send_image', 'run_command', 'read_file', 'search_web', 'delegate_task', 'use_workflow', 'some_future_tool'];
+  const tools = ['generate_long_video', 'generate_video', 'generate_image', 'bridge_send_video', 'bridge_send_image', 'run_command', 'read_file', 'search_web', 'delegate_task', 'use_workflow', 'create_presentation', 'create_document', 'create_spreadsheet', 'some_future_tool'];
   for (const locale of LOCALES) {
     for (const tool of tools) {
       expectClean(`describeToolForUser(${tool}, ${locale})`, describeToolForUser(tool, locale));

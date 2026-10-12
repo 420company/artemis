@@ -28,6 +28,10 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'generate_long_video',
   'synthesize_speech',
   'transcribe_audio',
+  // Office documents: .pptx / .docx / .xlsx from a spec.
+  'create_presentation',
+  'create_document',
+  'create_spreadsheet',
   // ── Spotify integration ──────────────────────────────────────────────
   'spotify_play_liked',
   'spotify_search_and_play',

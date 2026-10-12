@@ -318,6 +318,8 @@ export async function runCli(argv: string[]): Promise<void> {
       imagePaths: options.imagePaths,
       intent: options.intent,
       approvalAnswer: options.approvalAnswer,
+      retry: options.retry,
+      retryOf: options.retryOf,
     })
     return
   }
@@ -662,8 +664,11 @@ async function runQueryCommand(options: {
   imagePaths?: string[]
   intent?: string
   approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
+  retry?: boolean
+  retryOf?: string
 }): Promise<void> {
-  const { cwd, locale, prompt, mode, model } = options
+  const { cwd, locale, mode, model } = options
+  const prompt = options.prompt ?? ''
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
   const approvals = await import('../security/approvals.js')
   const answer = mode === 'execute' ? options.approvalAnswer : undefined
@@ -673,7 +678,12 @@ async function runQueryCommand(options: {
     console.error(`[approval-error] ${JSON.stringify({ id: answer.id, code: 'approval_unauthorized' })}`)
     process.exit(approvals.APPROVAL_REJECTED_EXIT_CODE)
   }
-  if (!prompt?.trim() && !answer) {
+  const retry = mode === 'execute' && options.retry === true
+  if (retry && !options.sessionId) {
+    console.error(`CLI Error: ${t('--retry 需要 --session <id>。', '--retry needs --session <id>.')}`)
+    process.exit(2)
+  }
+  if (!prompt.trim() && !retry && !answer) {
     console.log()
     console.log(buildPanel(t(`${mode} 用法`, `${mode} usage`), [
       `artemis ${mode} <query>`,
@@ -687,6 +697,7 @@ async function runQueryCommand(options: {
     ? `${t('只分析不修改：调研以下问题并给出结论，不要改动任何文件或执行有副作用的命令。', 'Analysis only: investigate the question and report conclusions without modifying files or running side-effectful commands.')}\n\n${prompt}`
     : prompt
   const { SessionBusyError, SESSION_BUSY_MESSAGE, SESSION_BUSY_MESSAGE_ZH } = await import('../storage/sessionLock.js')
+  const { SessionRewindError } = await import('../storage/sessionTurns.js')
   let result: Awaited<ReturnType<typeof runHeadlessAgent>>
   try {
     result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
@@ -704,6 +715,8 @@ async function runQueryCommand(options: {
         ? { approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' } }
         : {}),
       ...(answer ? { answer } : {}),
+      ...(retry ? { retry: true } : {}),
+      ...(retry && options.retryOf ? { retryOf: options.retryOf } : {}),
     })
   } catch (error) {
     if (error instanceof approvals.ApprovalResumeError) {
@@ -711,6 +724,11 @@ async function runQueryCommand(options: {
       console.error(`CLI Error: ${error.message}`)
       console.error(`[approval-error] ${JSON.stringify({ id: answer?.id, code: error.code })}`)
       process.exit(approvals.APPROVAL_REJECTED_EXIT_CODE)
+    }
+    if (error instanceof SessionRewindError) {
+      // Exit 65: nothing to retry; 66: the last exchange is another one (nothing was run or changed).
+      console.error(`CLI Error: ${error.message}`)
+      process.exit(error.exitCode)
     }
     if (error instanceof SessionBusyError) {
       // A distinct exit code (75, EX_TEMPFAIL) so a host can tell "retry
@@ -1132,7 +1150,8 @@ async function runAuditCommand(options: { cwd: string; locale: UiLocale; args: s
   console.log()
 }
 
-async function runSessionCommand(options: { cwd: string; locale: UiLocale; args: string[] }): Promise<void> {
+/** `artemis session …` (exported for the smoke tests, which run it in process). */
+export async function runSessionCommand(options: { cwd: string; locale: UiLocale; args: string[] }): Promise<void> {
   const { cwd, locale, args } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
   const sub = args[0]?.toLowerCase()
@@ -1215,6 +1234,104 @@ async function runSessionCommand(options: { cwd: string; locale: UiLocale; args:
     return
   }
 
+  const flagValue = (name: string): string | undefined => {
+    const at = args.indexOf(name)
+    return at >= 0 ? args[at + 1] : undefined
+  }
+
+  // `session search <query> [--session <id>] [--limit N] [--hits N]`: JSON for hosts.
+  if (sub === 'search') {
+    const valued = new Set(['--session', '--limit', '--hits'])
+    const words: string[] = []
+    for (let i = 1; i < args.length; i += 1) {
+      const arg = args[i]!
+      if (valued.has(arg)) { i += 1; continue }
+      if (arg === '--json') continue
+      words.push(arg)
+    }
+    const query = words.join(' ').trim()
+    if (!query) {
+      console.log(t('\n  用法: artemis session search <关键词> [--session <id>] [--limit N] [--hits N]', '\n  Usage: artemis session search <query> [--session <id>] [--limit N] [--hits N]'))
+      console.log()
+      return
+    }
+    const { searchConversations } = await import('../storage/conversationSearch.js')
+    const limit = Number(flagValue('--limit'))
+    const hits = Number(flagValue('--hits'))
+    const results = await searchConversations(cwd, query, {
+      ...(flagValue('--session') ? { sessionId: flagValue('--session') } : {}),
+      ...(Number.isFinite(limit) && limit > 0 ? { limit: Math.floor(limit) } : {}),
+      ...(Number.isFinite(hits) && hits > 0 ? { hitsPerConversation: Math.floor(hits) } : {}),
+    })
+    console.log(JSON.stringify({ query, results }, null, 2))
+    return
+  }
+
+  // `session last-turn <id>`: what the last exchange holds (read-only; hosts ask before a retry).
+  if (sub === 'last-turn') {
+    const id = args[1]
+    if (!id) {
+      console.log(t('\n  用法: artemis session last-turn <id>', '\n  Usage: artemis session last-turn <id>'))
+      console.log()
+      return
+    }
+    const session = await store.load(id, { readOnly: true })
+    const { findLastExchange } = await import('../storage/sessionTurns.js')
+    const { createSideEffectClassifier } = await import('../services/toolSideEffects.js')
+    const lookup = findLastExchange(session, await createSideEffectClassifier(cwd))
+    console.log(JSON.stringify(lookup.ok
+      ? { sessionId: session.id, turn: describeExchange(lookup.exchange) }
+      : { sessionId: session.id, turn: null, reason: lookup.reason }, null, 2))
+    return
+  }
+
+  // `session undo <id>`: takes the last exchange out of the conversation (under the session lock).
+  if (sub === 'undo') {
+    const id = args[1]
+    if (!id) {
+      console.log(t('\n  用法: artemis session undo <id> [--turn <消息 id>]', '\n  Usage: artemis session undo <id> [--turn <message id>]'))
+      console.log()
+      return
+    }
+    // Fails with ENOENT (like `show`) for an unknown session, before taking the lock.
+    await store.load(id, { readOnly: true })
+    const { withSessionLock, SessionBusyError, SESSION_BUSY_MESSAGE, SESSION_BUSY_MESSAGE_ZH } = await import('../storage/sessionLock.js')
+    const { lastExchangeFor, removeExchange, SessionRewindError } = await import('../storage/sessionTurns.js')
+    const { createSideEffectClassifier } = await import('../services/toolSideEffects.js')
+    const classify = await createSideEffectClassifier(cwd)
+    // `--turn <message id>`: only that exchange (the one the owner confirmed) is taken back.
+    const turn = flagValue('--turn')
+    try {
+      const outcome = await withSessionLock(store.getLockPath(id), async () => {
+        const session = await store.load(id, { fresh: true })
+        const exchange = lastExchangeFor(session, classify, turn)
+        const lookup = { exchange }
+        removeExchange(session, lookup.exchange)
+        await store.save(session)
+        const history = await store.loadFullHistory(session)
+        const { isChatVisibleMessage } = await import('../storage/sessions.js')
+        return {
+          sessionId: session.id,
+          removed: describeExchange(lookup.exchange),
+          remainingMessages: history.messages.filter(isChatVisibleMessage).length,
+        }
+      }, { label: `Session ${id}` })
+      console.log(JSON.stringify({ ok: true, ...outcome }, null, 2))
+    } catch (error) {
+      if (error instanceof SessionRewindError) {
+        console.log(JSON.stringify({ ok: false, sessionId: id, reason: error.reason }))
+        console.error(`CLI Error: ${error.message}`)
+        process.exit(error.exitCode)
+      }
+      if (error instanceof SessionBusyError) {
+        console.error(`CLI Error: ${t(SESSION_BUSY_MESSAGE_ZH, SESSION_BUSY_MESSAGE)}`)
+        process.exit(error.exitCode)
+      }
+      throw error
+    }
+    return
+  }
+
   if (sub === 'delete' || sub === 'rm' || sub === '--delete') {
     const idPrefix = args[1]
     if (!idPrefix) {
@@ -1260,9 +1377,26 @@ async function runSessionCommand(options: { cwd: string; locale: UiLocale; args:
     'artemis session --list',
     'artemis session create [title]',
     'artemis session show <id>',
+    'artemis session search <query> [--session <id>]',
+    'artemis session last-turn <id>',
+    'artemis session undo <id> [--turn <message id>]',
     'artemis session delete <id>',
   ]))
   console.log()
+}
+
+/** The last exchange as hosts read it: the owner's message, the reply, and the tools it used. */
+function describeExchange(exchange: import('../storage/sessionTurns.js').LastExchange) {
+  return {
+    /** What hosts send back (`--retry-of`, `undo --turn`) so only this exchange is replaced. */
+    turnId: exchange.userMessage.id,
+    userMessage: exchange.userMessage,
+    ...(exchange.reply ? { reply: { ...exchange.reply, content: exchange.reply.content.slice(0, 2_000) } } : {}),
+    messageCount: exchange.messageCount,
+    tools: exchange.tools,
+    sideEffects: exchange.sideEffects,
+    ...(exchange.recorded?.intent ? { intent: exchange.recorded.intent } : {}),
+  }
 }
 
 // ─── resume subcommand ───────────────────────────────────────────────────────
