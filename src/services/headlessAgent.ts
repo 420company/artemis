@@ -182,6 +182,13 @@ export async function runHeadlessAgent(
     suspend: opts.approvals?.suspend === true,
     ...(hostKey ? { hostBinding: hostKey.id } : {}),
   }
+  // The run is over: waiting for the owner when it stopped at a hard
+  // approval request (by the request's kind) or ended with a card that asks
+  // them something, else done.
+  const finishStatus = async (ended: { reply?: string; approval?: ApprovalRequest }): Promise<void> => {
+    const { statusAtEnd, statusForApprovalKind } = await import('../core/agentStatus.js')
+    agentStatus.finish(ended.approval ? statusForApprovalKind(ended.approval.kind) : statusAtEnd(ended.reply ?? ''))
+  }
   const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => {
     // Re-read under the lock: another process (a chat bridge) may have saved
     // a turn between the existence check above and getting the lock.
@@ -253,12 +260,14 @@ export async function runHeadlessAgent(
       const originalRequest = requestMessageOf(current, record)
         ?? [...current.messages].reverse().find((m) => m.role === 'user' && !isSyntheticUserMessage(m))?.content
         ?? ''
-      return runAgent(current, originalRequest, {
+      const resumed = await runAgent(current, originalRequest, {
         ...agentOptions,
         approvals: { ...approvalSettings, resumed: { action: record.action, ok: opts.answer.decision === 'approve' && answered.ok } },
         appendUserMessage: false,
         delegationBudget: createDelegationBudget('direct'),
       })
+      await finishStatus(resumed)
+      return resumed
     }
 
     // A new message in this conversation: requests still waiting from an
@@ -374,11 +383,7 @@ export async function runHeadlessAgent(
       // Closed whether the run answered or failed (a killed process leaves it open).
       await recordTurn().catch(() => undefined)
     }
-    // The run is over: done, or waiting for the owner's OK when the answer
-    // ends with a confirmation card. (A run that stops at a hard approval
-    // request reports statusForApprovalKind(kind) here instead.)
-    const { statusAtEnd } = await import('../core/agentStatus.js')
-    agentStatus.finish(statusAtEnd(runResult.reply ?? ''))
+    await finishStatus(runResult)
     return runResult
   }, { label: `Session ${session.id}` })
 

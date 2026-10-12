@@ -963,6 +963,11 @@ interface ApprovalScope {
 const scope = new AsyncLocalStorage<ApprovalScope>()
 
 /** Runs a tool with the approval gate of its run in reach (requireApproval). */
+/** Whether this call is inside an agent run's approval gate (a run always has one). */
+export function inApprovalRun(): boolean {
+  return scope.getStore() !== undefined
+}
+
 export function runInApprovalScope<T>(runtime: ApprovalRuntime | undefined, action: AgentAction, fn: () => Promise<T>): Promise<T> {
   return runtime ? scope.run({ runtime, action }, fn) : fn()
 }

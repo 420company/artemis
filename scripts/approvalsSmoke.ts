@@ -741,6 +741,17 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     requireApproval('confirmation', { payload: { action: 'forget_host_key', host: '203.0.113.7', port: 22 }, details: { question: 'forget the old host key?' } }),
   )
   assert('server setup: forget_host_key always asks the owner, whatever the policy allows', !forget.ok)
+  // The tool's own helper: in a run, the run's gate decides even when the host could ask directly;
+  // outside any run (no gate can ask), only a host that asks the owner itself can allow it.
+  const { requireOwnerApproval } = await import('../src/tools/ownerApproval.js')
+  const ownerRequest = { kind: 'confirmation' as const, question: 'forget the old host key?', payload: { action: 'forget_host_key', host: '203.0.113.7', port: 22 } }
+  const inRun = await runInApprovalScope(runtime, { type: 'server_setup', action: 'forget_host_key', host: '203.0.113.7' } as never, () =>
+    requireOwnerApproval({ requestUserConfirmation: async () => true }, ownerRequest),
+  )
+  assert('server setup: in a run, forget_host_key waits for the run\'s approval, not a direct yes', !inRun.ok)
+  assert('server setup: outside a run, nobody to ask means no', !(await requireOwnerApproval({}, ownerRequest)).ok)
+  assert('server setup: outside a run, the owner\'s own no is final', !(await requireOwnerApproval({ requestUserConfirmation: async () => false }, ownerRequest)).ok)
+  assert('server setup: outside a run, the owner\'s own yes (interactive host) allows it', (await requireOwnerApproval({ requestUserConfirmation: async () => true }, ownerRequest)).ok)
 }
 
 // ── Office files and speech: inside the workspace nothing asks ─────────────
@@ -836,12 +847,19 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     }
     assert('headless: the run stops at the request', Boolean(first.approval) && !fs.existsSync(path.join(project, 'marker.txt')), JSON.stringify(first.approval))
     assert('headless: [approval-request] is printed for the host', info.some((l) => l.startsWith(`${APPROVAL_REQUEST_PREFIX} {`)))
+    const lastStatus = (lines: string[]): Record<string, unknown> => {
+      const line = lines.filter((l) => l.startsWith('[agent-status] ')).at(-1)
+      return line ? JSON.parse(line.slice('[agent-status] '.length)) as Record<string, unknown> : {}
+    }
+    const stopped = lastStatus(info)
+    assert('headless: a run stopped at a request ends waiting for the owner\'s approval', stopped.phase === 'waiting_approval' && stopped.activity === 'waiting_confirmation', JSON.stringify(stopped))
     const request = first.approval!
     const id = request.id
+    const resumedInfo: string[] = []
     const answer = async (signature: string | undefined, pubkey: string | undefined): Promise<string> => {
       if (pubkey) process.env.ARTEMIS_APPROVAL_PUBKEY = pubkey
       try {
-        const result = await runHeadlessAgent(project, '', { sessionId: first.sessionId, maxTurns: 4, selfCheck: false, answer: { id, decision: 'approve', expectDigest: request.actionDigest, ...(signature ? { signature } : {}) }, approvals: { suspend: true } })
+        const result = await runHeadlessAgent(project, '', { sessionId: first.sessionId, maxTurns: 4, selfCheck: false, answer: { id, decision: 'approve', expectDigest: request.actionDigest, ...(signature ? { signature } : {}) }, approvals: { suspend: true }, onInfo: (l) => resumedInfo.push(l) })
         return `ok:${result.reply}`
       } catch (error) {
         return error instanceof ApprovalResumeError ? error.code : String(error)
@@ -855,6 +873,7 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     assert('headless: an answer signed with the agent\'s own key is refused (even with its key in the environment)', (await answer(signAnswer(forger.privateKey, request, 'approve'), forger.publicB64)) === 'approval_unauthorized' && !fs.existsSync(path.join(project, 'marker.txt')))
     const second = await answer(signAnswer(host.privateKey, request, 'approve'), host.publicB64)
     assert('headless: the host\'s signed approve runs the stored command and the model continues', fs.existsSync(path.join(project, 'marker.txt')) && second === 'ok:安装脚本已经运行完毕。', second)
+    assert('headless: the resumed run that finished ends done', lastStatus(resumedInfo).phase === 'done', JSON.stringify(lastStatus(resumedInfo)))
     assert('headless: replaying the answer is refused', (await answer(signAnswer(host.privateKey, request, 'approve'), host.publicB64)) === 'approval_already_used')
     const saved = await new SessionStore(project).load(first.sessionId, { fresh: true })
     assert('headless: the record says approved', saved.approvals?.find((r) => r.id === id)?.status === 'approved')

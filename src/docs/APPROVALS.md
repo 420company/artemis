@@ -45,7 +45,15 @@ the owner itself through `requireApproval('confirmation', …)`, which no
 policy can allow. `run` is one shell command on that server: remote code and
 uploads are `shell_high_risk`, and destructive commands there (deletes,
 overwrites, `dd`, `mkfs`, user removal, shutdown, disabling the firewall) are
-`external_action`.
+`external_action`. The SSH itself runs on the host when it offers a
+credential broker, so a key or password never reaches the agent.
+
+**The host's own tools for the owner's secrets.** A host's tool that asks
+the owner for a secret of theirs (`request_owner_secret` on the platform)
+only shows the owner a box to type it into, outside the chat; the owner's
+own step is the gate, and the host's policy names its tools as allowed
+(`artemis_online/*`), so nothing asks twice. Unlocking a secret the owner
+holds the key to is the owner's own wallet step on the host.
 
 **Connected services.** A host whose connectors broker asks the owner
 before every write of a connected service names the broker's servers in its
@@ -168,6 +176,17 @@ the card (`details.args`). In a headless run the first call stops the run;
 after `--approve` the same tool call runs again and passes here once, for the
 same payload only (its digest is part of the record). A tool can also
 register how its actions are classified with `registerApprovalRule`.
+
+Outside an agent run (a tool called directly) nobody can be asked, so only
+the policy decides and `confirmation` is refused. `tools/ownerApproval.ts`
+(`requireOwnerApproval`, used by `forget_host_key`) then lets a host that
+asks the owner itself (`requestUserConfirmation`, the interactive CLI)
+decide; inside a run, the run's gate always decides (`inApprovalRun()`).
+
+**Live status.** A headless run that stops at a request, first run or
+resumed, ends its `[agent-status]` with `waiting_approval` and the kind's
+activity (`waiting_payment_approval`, `waiting_send_approval`,
+`waiting_publish_approval`, else `waiting_confirmation`).
 
 ## Tests
 
