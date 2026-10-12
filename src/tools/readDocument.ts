@@ -32,6 +32,9 @@ import {
   columnName,
   convertLegacy,
   describePages,
+  errorLine,
+  listSheetNames,
+  oneLineName,
   documentFormatOf,
   meaningfulChars,
   parsePageRange,
@@ -127,7 +130,7 @@ export async function executeReadDocument(action: ReadDocumentAction, context: T
       }
       return fail(`${displayPath}: ${error.message}`, error.code);
     }
-    return fail(`${displayPath}: ${error instanceof Error ? error.message : String(error)}`);
+    return fail(`${displayPath}: ${errorLine(error, 200)}`);
   } finally {
     clearTimeout(timer);
     context.abortSignal?.removeEventListener('abort', onStop);
@@ -259,7 +262,8 @@ async function readPdf(
   const parts = pages.map((page) => `--- page ${page} ---\n${texts.get(page) ?? ''}`);
   const { text, cut } = fit(parts);
   if (cut !== undefined) notes.unshift(`the text was too long for one result; stopped after page ${pages[cut - 1] ?? pages[0]}. Continue with pages="${describePages(pages.slice(Math.max(1, cut)))}".`);
-  return { kind: info.title ? `${kind} "${oneLine(info.title, 80)}"` : kind, extent, text, notes };
+  // The title is the file's text: one clamped line, no quotes (outside the fence).
+  return { kind: info.title ? `${kind} "${oneLineName(info.title, 60)}"` : kind, extent, text, notes };
 }
 
 /** Renders pages and shows each to the model; returns the pages shown. */
@@ -354,11 +358,12 @@ async function readXlsx(bytes: Buffer, action: ReadDocumentAction): Promise<Docu
     const header = `## Sheet "${sheet.name}"${sheet.hidden ? ' (hidden)' : ''} · ${sheet.rowCount} rows × ${sheet.columnCount} columns`;
     const columns = width ? `| row | ${range(1, width).map(columnName).join(' | ')} |` : '';
     parts.push([header, ...(columns ? [columns] : []), ...sheet.rows.map((row) => `| ${row.number} | ${row.cells.join(' | ')} |`)].join('\n'));
-    if (sheet.nextRow !== undefined) notes.push(`sheet "${sheet.name}" was cut at ${READ_DOCUMENT_LIMITS.maxSheetRows} rows per call; continue with sheet="${sheet.name}", rows="${sheet.nextRow}-${sheet.nextRow + READ_DOCUMENT_LIMITS.maxSheetRows - 1}".`);
+    if (sheet.nextRow !== undefined) notes.push(`sheet "${oneLineName(sheet.name)}" was cut at ${READ_DOCUMENT_LIMITS.maxSheetRows} rows per call; continue with sheet="${oneLineName(sheet.name)}", rows="${sheet.nextRow}-${sheet.nextRow + READ_DOCUMENT_LIMITS.maxSheetRows - 1}".`);
   }
   const { text, cut } = fit(parts);
   if (cut !== undefined) notes.unshift(`the sheets were too long for one result; read one sheet at a time with sheet= and rows=.`);
-  return { kind: 'Excel workbook', extent: `${sheetNames.length} sheet${sheetNames.length === 1 ? '' : 's'} (${sheetNames.map((name) => `"${oneLine(name, 40)}"`).join(', ')})`, text, notes };
+  // Sheet names are the file's text: clamped one-line names, at most a dozen (outside the fence).
+  return { kind: 'Excel workbook', extent: `${sheetNames.length} sheet${sheetNames.length === 1 ? '' : 's'} (${listSheetNames(sheetNames)})`, text, notes };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -396,10 +401,4 @@ function spans(pages: number[]): number[][] {
 
 function megabytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
-}
-
-function oneLine(text: string, max: number): string {
-  // eslint-disable-next-line no-control-regex
-  const flat = text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }

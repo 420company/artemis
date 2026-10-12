@@ -3,21 +3,28 @@
  * (read_document): PDF through poppler (pdftotext, pdfinfo, pdftoppm for
  * pages without a text layer), .docx / .pptx through the JSZip the office
  * builders already use, .xlsx through ExcelJS, older formats (.doc, .xls,
- * .ppt, OpenDocument, RTF) through LibreOffice when it is installed.
+ * .ppt, OpenDocument, RTF) converted to PDF by the platform's sandboxed
+ * converter (the artemis-office socket: its own throwaway user, no network)
+ * or, where there is none (a local install), by LibreOffice run here with a
+ * bare environment in its own process group.
  *
  * Every step has a cap: the file's size, what its ZIP parts inflate to
  * (counted while inflating, so a part that lies about its size is stopped
- * too), pages and rows per read, characters returned, and time. Nothing in
- * a document runs: XML is read with a scanner, never evaluated.
+ * too: ExcelJS only ever sees parts that passed), pages and rows per read,
+ * characters returned, and time. Nothing in a document runs: XML is read
+ * with a scanner, never evaluated.
  */
 
-import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { connect } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
-import { convertWithSoffice, findSoffice } from './pdf.js';
+import { findSoffice } from './pdf.js';
 import { LEGACY_SHEET_EXTENSIONS } from './documentFormat.js';
 
 export const READ_DOCUMENT_LIMITS = {
@@ -29,6 +36,10 @@ export const READ_DOCUMENT_LIMITS = {
   maxInflatedBytes: 160 * 1024 * 1024,
   /** What one ZIP part may inflate to. */
   maxPartBytes: 48 * 1024 * 1024,
+  /** A spreadsheet's parts together (ExcelJS builds objects from all of them). */
+  maxXlsxInflatedBytes: 48 * 1024 * 1024,
+  /** One spreadsheet part. */
+  maxXlsxPartBytes: 24 * 1024 * 1024,
   /** Characters of document text in one result (about 15k tokens). */
   maxOutputChars: 60_000,
   /** PDF pages (or slides) read as text in one call. */
@@ -115,7 +126,7 @@ function run(bin: string, args: string[], options: { timeoutMs: number; signal?:
         else if (options.signal?.aborted || e.name === 'AbortError') reject(new DocumentReadError('stopped', 'aborted'));
         else if (e.killed || e.signal === 'SIGKILL') reject(new DocumentReadError(`${bin} took too long and was stopped`, 'timeout'));
         else if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') reject(new DocumentReadError(`${bin} produced too much output`, 'too_large'));
-        else reject(new DocumentReadError(`${bin} failed: ${String(stderr || e.message).split('\n').find((l) => l.trim()) ?? 'unknown error'}`, 'tool_failed'));
+        else reject(new DocumentReadError(`${bin} failed: ${errorLine(String(stderr || e.message).split('\n').find((l) => l.trim()) ?? 'unknown error')}`, 'tool_failed'));
         return;
       }
       resolve({ stdout: String(stdout), stderr: String(stderr) });
@@ -203,28 +214,46 @@ export async function renderPdfPages(file: string, pages: number[], signal?: Abo
 // ── ZIP parts, inflated under a cap ─────────────────────────────────────────
 
 /** A loaded Office ZIP whose parts are inflated under one shared budget. */
+export interface ZipCaps {
+  /** All parts together. */
+  total: number;
+  /** One part. */
+  part: number;
+}
+
+const DEFAULT_ZIP_CAPS: ZipCaps = { total: READ_DOCUMENT_LIMITS.maxInflatedBytes, part: READ_DOCUMENT_LIMITS.maxPartBytes };
+
+/** A parser's or the platform's error, as one clamped line (it may quote the file). */
+export function errorLine(error: unknown, max = 160): string {
+  const text = error instanceof Error ? error.message : String(error);
+  // eslint-disable-next-line no-control-regex
+  const flat = text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
 export class CappedZip {
   private inflated = 0;
 
-  private constructor(private readonly zip: JSZip) {}
+  private constructor(private readonly zip: JSZip, private readonly caps: ZipCaps) {}
 
-  static async open(bytes: Buffer): Promise<CappedZip> {
+  static async open(bytes: Buffer, caps: ZipCaps = DEFAULT_ZIP_CAPS): Promise<CappedZip> {
     let zip: JSZip;
     try {
       zip = await JSZip.loadAsync(bytes, { checkCRC32: false });
     } catch (error) {
-      throw new DocumentReadError(`the file is not a readable Office document (${error instanceof Error ? error.message : String(error)})`, 'unreadable');
+      throw new DocumentReadError(`the file is not a readable Office document (${errorLine(error)})`, 'unreadable');
     }
-    // What the parts say they inflate to: refused up front when it is too much.
+    // What the parts say they inflate to: refused up front when it is too much
+    // (a part that lies is stopped while it inflates, see bytes()).
     let declared = 0;
     for (const entry of Object.values(zip.files)) {
       const size = Number((entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0);
       declared += Number.isFinite(size) ? size : 0;
     }
-    if (declared > READ_DOCUMENT_LIMITS.maxInflatedBytes) {
-      throw new DocumentReadError(`the document unpacks to more than ${Math.round(READ_DOCUMENT_LIMITS.maxInflatedBytes / 1024 / 1024)} MB, which is more than can be read`, 'too_large');
+    if (declared > caps.total) {
+      throw new DocumentReadError(`the document unpacks to more than ${Math.round(caps.total / 1024 / 1024)} MB, which is more than can be read`, 'too_large');
     }
-    return new CappedZip(zip);
+    return new CappedZip(zip, caps);
   }
 
   names(): string[] {
@@ -237,6 +266,11 @@ export class CappedZip {
 
   /** A part's text, inflated chunk by chunk and stopped the moment it passes the caps. */
   async text(name: string): Promise<string | undefined> {
+    return (await this.bytes(name))?.toString('utf8');
+  }
+
+  /** A part's bytes, inflated chunk by chunk and stopped the moment it passes the caps. */
+  async bytes(name: string): Promise<Buffer | undefined> {
     const file = this.zip.file(name);
     if (!file) return undefined;
     const chunks: Uint8Array[] = [];
@@ -249,7 +283,7 @@ export class CappedZip {
           if (failed) return;
           size += chunk.length;
           this.inflated += chunk.length;
-          if (size > READ_DOCUMENT_LIMITS.maxPartBytes || this.inflated > READ_DOCUMENT_LIMITS.maxInflatedBytes) {
+          if (size > this.caps.part || this.inflated > this.caps.total) {
             failed = true;
             stream.pause();
             reject(new DocumentReadError('a part of the document unpacks to more than can be read', 'too_large'));
@@ -258,14 +292,28 @@ export class CappedZip {
           chunks.push(chunk);
         })
         .on('error', (error: unknown) => {
-          if (!failed) reject(new DocumentReadError(`a part of the document is damaged (${error instanceof Error ? error.message : String(error)})`, 'unreadable'));
+          if (!failed) reject(new DocumentReadError(`a part of the document is damaged (${errorLine(error)})`, 'unreadable'));
         })
         .on('end', () => {
           if (!failed) resolve();
         })
         .resume();
     });
-    return Buffer.concat(chunks).toString('utf8');
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * The same document as a new ZIP made only of parts that inflated within
+   * the caps (stored, not compressed): what a parser that inflates on its
+   * own (ExcelJS) gets, so it never inflates anything unchecked.
+   */
+  async rebuild(): Promise<Buffer> {
+    const out = new JSZip();
+    for (const name of this.names()) {
+      const data = await this.bytes(name);
+      if (data) out.file(name, data);
+    }
+    return out.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
   }
 }
 
@@ -523,13 +571,16 @@ export interface SheetRead {
  * `fromRow`, until READ_DOCUMENT_LIMITS.maxSheetRows rows were read.
  */
 export async function readXlsxSheets(bytes: Buffer, options: { sheet?: string; rows?: number[] } = {}): Promise<{ sheets: SheetRead[]; sheetNames: string[] }> {
-  // The parts' declared sizes are checked before ExcelJS inflates them.
-  await CappedZip.open(bytes);
+  // Every part is inflated here under the spreadsheet caps (counted as it
+  // inflates, whatever the file declares); ExcelJS gets a ZIP rebuilt from
+  // those parts only, so it never inflates anything itself.
+  const zip = await CappedZip.open(bytes, { total: READ_DOCUMENT_LIMITS.maxXlsxInflatedBytes, part: READ_DOCUMENT_LIMITS.maxXlsxPartBytes });
+  const checked = await zip.rebuild();
   const workbook = new ExcelJS.Workbook();
   try {
-    await workbook.xlsx.load(bytes as unknown as ArrayBuffer);
+    await workbook.xlsx.load(checked as unknown as ArrayBuffer);
   } catch (error) {
-    throw new DocumentReadError(`the spreadsheet cannot be read (${error instanceof Error ? error.message : String(error)})`, 'unreadable');
+    throw new DocumentReadError(`the spreadsheet cannot be read (${errorLine(error)})`, 'unreadable');
   }
   const all = workbook.worksheets;
   const sheetNames = all.map((ws) => ws.name);
@@ -539,7 +590,7 @@ export async function readXlsxSheets(bytes: Buffer, options: { sheet?: string; r
     const byName = all.find((ws) => ws.name === key) ?? all.find((ws) => ws.name.toLowerCase() === key.toLowerCase());
     const byNumber = /^\d+$/.test(key) ? all[Number(key) - 1] : undefined;
     const ws = byName ?? byNumber;
-    if (!ws) throw new DocumentReadError(`no sheet "${key}"; the sheets are: ${sheetNames.join(', ')}`, 'bad_sheet');
+    if (!ws) throw new DocumentReadError(`no sheet "${oneLineName(key)}"; the sheets are: ${listSheetNames(sheetNames)}`, 'bad_sheet');
     chosen = [ws];
   }
   const wanted = options.rows ? new Set(options.rows) : undefined;
@@ -582,21 +633,186 @@ export function columnName(n: number): string {
 
 // ── older formats ───────────────────────────────────────────────────────────
 
+/** One line of a name the file chose (a sheet name, a title), clamped. */
+export function oneLineName(text: string, max = 40): string {
+  // eslint-disable-next-line no-control-regex
+  const flat = text.replace(/[\u0000-\u001f\u007f\u2028\u2029"]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** At most this many sheet names are named in one line. */
+export const MAX_LISTED_SHEETS = 12;
+
+/** The sheet names as one clamped line: quoted, at most MAX_LISTED_SHEETS, then how many more. */
+export function listSheetNames(names: string[]): string {
+  const shown = names.slice(0, MAX_LISTED_SHEETS).map((name) => `"${oneLineName(name)}"`);
+  return names.length > MAX_LISTED_SHEETS ? `${shown.join(', ')} and ${names.length - MAX_LISTED_SHEETS} more` : shown.join(', ');
+}
+
+/** The platform's sandboxed office converter (artemis-office-agent.socket on a provisioned server). */
+export function officeConvertSocket(env: NodeJS.ProcessEnv = process.env): string {
+  return env.ARTEMIS_OFFICE_CONVERT_SOCKET?.trim() || '/run/artemis-office/agent.sock';
+}
+
+const SOCKET_TYPES = new Set(['doc', 'xls', 'ppt', 'odt', 'ods', 'odp', 'rtf']);
+/** What the converter may send back (a PDF plus a page image and a thumbnail). */
+const MAX_CONVERTER_OUTPUT = 96 * 1024 * 1024;
+
 /**
- * Converts an older or OpenDocument file with LibreOffice: spreadsheets to
- * .xlsx (structure kept), everything else to PDF. The caller removes `dir`.
+ * Converts through the sandboxed converter: the file's bytes go in, a PDF
+ * comes back (protocol: ARTEMIS-PREVIEW 1 <ext> <bytes> <max pages>, then
+ * INFO, FILE <name> <bytes> frames and END, or ERR <reason>).
  */
-export async function convertLegacy(file: string, signal?: AbortSignal): Promise<{ dir: string; file: string; format: 'pdf' | 'xlsx' }> {
-  if (!(await findSoffice())) {
+export function convertViaSocket(socketPath: string, data: Buffer, ext: string, timeoutMs: number, signal?: AbortSignal): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const socket = connect(socketPath);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+    const finish = (error?: unknown, pdf?: Buffer) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(pdf!);
+    };
+    const timer = setTimeout(() => finish(new DocumentReadError('the converter took too long and was stopped', 'timeout')), timeoutMs);
+    const onAbort = () => finish(new DocumentReadError('stopped', 'aborted'));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    socket.once('error', (error) => finish(new DocumentReadError(`the converter cannot be reached (${errorLine(error)})`, 'tool_failed')));
+    socket.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_CONVERTER_OUTPUT) return finish(new DocumentReadError('the converter answered with too much data', 'too_large'));
+      chunks.push(chunk);
+    });
+    socket.once('end', () => {
+      try {
+        finish(undefined, pdfFromConverter(Buffer.concat(chunks)));
+      } catch (error) {
+        finish(error);
+      }
+    });
+    socket.once('connect', () => {
+      socket.write(`ARTEMIS-PREVIEW 1 ${ext} ${data.length} 1\n`);
+      socket.write(data);
+    });
+  });
+}
+
+/** The PDF in the converter's answer. */
+export function pdfFromConverter(out: Buffer): Buffer {
+  let at = 0;
+  const line = (): string => {
+    const end = out.indexOf(0x0a, at);
+    if (end < 0 || end - at > 512) throw new DocumentReadError('the converter gave an unreadable answer', 'tool_failed');
+    const text = out.subarray(at, end).toString('utf8');
+    at = end + 1;
+    return text;
+  };
+  const first = line();
+  if (first.startsWith('ERR ')) throw new DocumentReadError(`the converter could not read the file (${errorLine(first.slice(4), 80)})`, 'tool_failed');
+  if (!first.startsWith('INFO ')) throw new DocumentReadError('the converter gave an unreadable answer', 'tool_failed');
+  for (;;) {
+    const next = line();
+    if (next === 'END') break;
+    const frame = /^FILE ([\w.-]{1,64}) (\d{1,10})$/.exec(next);
+    if (!frame) throw new DocumentReadError('the converter gave an unreadable answer', 'tool_failed');
+    const size = Number(frame[2]);
+    if (at + size > out.length) throw new DocumentReadError('the converter answer was cut short', 'tool_failed');
+    const body = out.subarray(at, at + size);
+    at += size;
+    if (frame[1] === 'document.pdf') return Buffer.from(body);
+  }
+  throw new DocumentReadError('the converter sent no PDF', 'tool_failed');
+}
+
+/**
+ * LibreOffice on this machine (no sandboxed converter here: a local
+ * install): a bare environment (PATH, a throwaway HOME, LANG), its own
+ * process group, killed as a group on timeout or when the read stops.
+ */
+export async function convertLocally(file: string, format: 'pdf' | 'xlsx', target: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  const bin = await findSoffice();
+  if (!bin) {
     throw new DocumentReadError(`${path.extname(file)} files need LibreOffice to be read, and it is not installed here; ask for a PDF, .docx, .xlsx or .pptx copy`, 'tool_missing');
   }
-  const format = LEGACY_SHEET_EXTENSIONS.has(path.extname(file).toLowerCase()) ? 'xlsx' : 'pdf';
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'artemis-read-legacy-'));
-  const target = path.join(dir, `converted.${format}`);
-  const result = await convertWithSoffice(file, format, target, { timeoutMs: READ_DOCUMENT_LIMITS.commandTimeoutMs * 2, signal });
-  if ('error' in result) {
-    await rm(dir, { recursive: true, force: true });
-    throw new DocumentReadError(result.error, 'tool_failed');
+  const work = await mkdtemp(path.join(os.tmpdir(), 'artemis-read-convert-'));
+  try {
+    const input = path.join(work, `input${path.extname(file).toLowerCase()}`);
+    await copyFile(file, input);
+    const out = path.join(work, 'out');
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(bin, [
+        `-env:UserInstallation=${pathToFileURL(path.join(work, 'profile')).href}`,
+        '--headless', '--norestore', '--nolockcheck', '--convert-to', format, '--outdir', out, input,
+      ], {
+        cwd: work,
+        detached: true,
+        stdio: 'ignore',
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: work, LANG: process.env.LANG?.trim() || 'C.UTF-8' },
+      });
+      let done = false;
+      const killGroup = () => {
+        try {
+          if (child.pid) process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          child.kill('SIGKILL');
+        }
+      };
+      const end = (error?: DocumentReadError) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (error) {
+          killGroup();
+          reject(error);
+        } else resolve();
+      };
+      const timer = setTimeout(() => end(new DocumentReadError('LibreOffice took too long and was stopped', 'timeout')), timeoutMs);
+      const onAbort = () => end(new DocumentReadError('stopped', 'aborted'));
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      child.once('error', (error) => end(new DocumentReadError(`LibreOffice could not start (${errorLine(error)})`, 'tool_failed')));
+      child.once('exit', (code) => {
+        // Anything it left behind in its group goes with it.
+        killGroup();
+        end(code === 0 ? undefined : new DocumentReadError(`LibreOffice could not convert the file (exit ${code})`, 'tool_failed'));
+      });
+    });
+    const produced = (await readdir(out).catch(() => [] as string[])).find((name) => name.endsWith(`.${format}`));
+    if (!produced) throw new DocumentReadError(`LibreOffice did not produce a .${format} file`, 'tool_failed');
+    await copyFile(path.join(out, produced), target);
+  } finally {
+    await rm(work, { recursive: true, force: true });
   }
-  return { dir, file: result.file, format };
+}
+
+/**
+ * Converts an older or OpenDocument file for reading. With the platform's
+ * sandboxed converter (its socket exists): to PDF there. Otherwise (a local
+ * install) with LibreOffice here: spreadsheets to .xlsx (structure kept),
+ * the rest to PDF. The caller removes `dir`.
+ */
+export async function convertLegacy(file: string, signal?: AbortSignal, env: NodeJS.ProcessEnv = process.env): Promise<{ dir: string; file: string; format: 'pdf' | 'xlsx' }> {
+  const ext = path.extname(file).toLowerCase().slice(1);
+  const socket = officeConvertSocket(env);
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'artemis-read-legacy-'));
+  try {
+    if (existsSync(socket) && SOCKET_TYPES.has(ext)) {
+      const pdf = await convertViaSocket(socket, await readFile(file), ext, READ_DOCUMENT_LIMITS.commandTimeoutMs * 2, signal);
+      const target = path.join(dir, 'converted.pdf');
+      await writeFile(target, pdf, { mode: 0o600 });
+      return { dir, file: target, format: 'pdf' };
+    }
+    const format = LEGACY_SHEET_EXTENSIONS.has(`.${ext}`) ? 'xlsx' : 'pdf';
+    const target = path.join(dir, `converted.${format}`);
+    await convertLocally(file, format, target, READ_DOCUMENT_LIMITS.commandTimeoutMs * 2, signal);
+    return { dir, file: target, format };
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
 }
