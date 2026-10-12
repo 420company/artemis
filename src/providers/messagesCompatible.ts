@@ -533,7 +533,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
             'content-type': 'application/json',
             'x-api-key': this.config.apiKey,
             'anthropic-version': '2023-06-01',
-            ...runHeadersFor(this.config),
+            ...runHeadersFor(this.config, `${this.config.baseUrl.replace(/\/$/, '')}/v1/messages`),
           },
           body: JSON.stringify(body),
           signal: effectiveSignal,

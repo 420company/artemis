@@ -683,13 +683,30 @@ assert(
 
 {
   // Profiles a host routes one run to (the owner's own key for coding or subtasks) serve only
-  // their own targets: never the main conversation, never as its fallback.
+  // their own targets: never the main conversation, never as its fallback, and only from the
+  // global store the host writes ($ARTEMIS_HOME), never from a workdir providers.json.
   const tmpDir = path.join(os.tmpdir(), `artemis-run-profile-router-${Date.now()}`)
-  fs.mkdirSync(path.join(tmpDir, '.artemis'), { recursive: true })
-  const testProfile = (id: string) => ({ id, protocol: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: `token-${id}`, model: `${id}-model` })
+  const artemisHome = path.join(tmpDir, 'artemis-home')
+  fs.mkdirSync(path.join(tmpDir, 'work', '.artemis'), { recursive: true })
+  fs.mkdirSync(artemisHome, { recursive: true })
+  const workdir = path.join(tmpDir, 'work')
+  const proxy = 'http://127.0.0.1:8789/llm'
+  const testProfile = (id: string, baseUrl = 'http://127.0.0.1:9/v1') => ({ id, protocol: 'openai', baseUrl, apiKey: `token-${id}`, model: `${id}-model` })
+  const saved = { b: process.env.ARTEMIS_BUILDER_PROFILE, s: process.env.ARTEMIS_SPECIALIST_PROFILE, home: process.env.ARTEMIS_HOME }
+  process.env.ARTEMIS_BUILDER_PROFILE = 'byo_coding'
+  process.env.ARTEMIS_SPECIALIST_PROFILE = 'byo_subtasks'
+  process.env.ARTEMIS_HOME = artemisHome
+  const workdirStoreFile = new ProviderStore(workdir).getFilePath()
+  fs.mkdirSync(path.dirname(workdirStoreFile), { recursive: true })
+  // The host's global store: the platform profile and the own-key profiles at the proxy.
   fs.writeFileSync(
-    path.join(tmpDir, '.artemis', 'providers.json'),
-    JSON.stringify({ profiles: [testProfile('executor'), testProfile('byo_coding'), testProfile('byo_subtasks')], defaultMainProfileId: 'executor' }),
+    path.join(artemisHome, 'providers.json'),
+    JSON.stringify({ profiles: [testProfile('executor'), testProfile('byo_coding', `${proxy}/api_coding`), testProfile('byo_subtasks', `${proxy}/api_subtasks`)], defaultMainProfileId: 'executor' }),
+  )
+  // The agent's workdir store: a main profile, and own-key profiles of its own pointed at a listener of its own.
+  fs.writeFileSync(
+    workdirStoreFile,
+    JSON.stringify({ profiles: [testProfile('executor'), testProfile('byo_coding', 'http://127.0.0.1:7777/agent'), testProfile('byo_subtasks', 'http://127.0.0.1:7777/agent')], defaultMainProfileId: 'executor' }),
   )
   const used: string[] = []
   const stub = (id: string, fail = false): ChatProvider => ({
@@ -700,44 +717,61 @@ assert(
       return { text: 'ok', raw: null }
     },
   })
-  const saved = { b: process.env.ARTEMIS_BUILDER_PROFILE, s: process.env.ARTEMIS_SPECIALIST_PROFILE }
-  process.env.ARTEMIS_BUILDER_PROFILE = 'byo_coding'
-  process.env.ARTEMIS_SPECIALIST_PROFILE = 'byo_subtasks'
   try {
     const failingMain = stub('main', true)
-    const router = await createProviderRouter({ cwd: tmpDir, mainProvider: failingMain, createProviderFromProfile: (profile) => stub(profile.id) })
+    const router = await createProviderRouter({ cwd: workdir, mainProvider: failingMain, createProviderFromProfile: (profile) => stub(`${profile.id}@${profile.baseUrl}`) })
     const msg = [{ id: 'u', role: 'user' as const, content: 'implement the feature', createdAt: new Date().toISOString() }]
     used.length = 0
     await router.resolveProvider('main', 'implement and deploy the feature').complete(msg).catch(() => undefined)
-    assert('run profile router: the main conversation never falls back to an own-key builder or subtask profile', !used.includes('byo_coding') && !used.includes('byo_subtasks'), used.join(','))
+    assert('run profile router: the main conversation never falls back to an own-key builder or subtask profile', !used.some((u) => u.startsWith('byo_')), used.join(','))
     used.length = 0
     await router.resolveProvider('builder').complete(msg)
-    assert('run profile router: builder work goes to the builder profile first', used[0] === 'byo_coding', used.join(','))
+    assert('run profile router: builder work goes to the global builder profile first', used[0] === `byo_coding@${proxy}/api_coding`, used.join(','))
     used.length = 0
     await router.resolveProvider('planner').complete(msg)
-    assert('run profile router: specialist work goes to the subtask profile first', used[0] === 'byo_subtasks', used.join(','))
+    assert('run profile router: specialist work goes to the global subtask profile first', used[0] === `byo_subtasks@${proxy}/api_subtasks`, used.join(','))
+    assert('run profile router: a workdir own-key profile is never used', !used.some((u) => u.includes('7777')), used.join(','))
+
     const { runHeadersFor } = await import('../src/providers/openaiCompatible.js')
-    assert('run profile: a profile without runHeadersFrom sends no run headers', Object.keys(runHeadersFor({})).length === 0)
-    // The host's per-run headers for the own-key profile, as handed over on a descriptor.
-    const { loadInheritedMcpHeaders, resetInheritedMcpHeadersForTest, MCP_HEADERS_FD_ENV } = await import('../src/mcp/inheritedHeaders.js')
+    assert('run profile: a profile without runHeadersFrom sends no run headers', Object.keys(runHeadersFor({}, `${proxy}/api_x/chat/completions`)).length === 0)
+    // The host's per-run headers for the own-key profile, as handed over on a descriptor:
+    // bound to the proxy's URL for that connection.
+    const { loadInheritedMcpHeaders, resetInheritedMcpHeadersForTest, inheritedMcpHeaders, MCP_HEADERS_FD_ENV } = await import('../src/mcp/inheritedHeaders.js')
     const headersFile = path.join(tmpDir, 'run-headers.json')
-    fs.writeFileSync(headersFile, JSON.stringify({ byo_api_x: { 'x-run-context': 'run-token-placeholder', 'x-byo-grant': 'grant-placeholder' } }))
+    fs.writeFileSync(headersFile, JSON.stringify({ byo_api_x: { 'x-run-context': 'run-token-placeholder', 'x-byo-grant': 'grant-placeholder', 'x-artemis-target': `${proxy}/api_x` } }))
     resetInheritedMcpHeadersForTest()
     const headersFd = fs.openSync(headersFile, 'r')
     const headersEnv: NodeJS.ProcessEnv = { [MCP_HEADERS_FD_ENV]: String(headersFd) }
     assert('run profile: the per-run headers load', loadInheritedMcpHeaders(headersEnv) === undefined)
     const managed = { id: 'byo_api_x', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' }
-    assert('run profile: the own-key profile sends its run headers', runHeadersFor(managed)['x-byo-grant'] === 'grant-placeholder')
+    const legit = runHeadersFor(managed, `${proxy}/api_x/chat/completions`)
+    assert('run profile: the own-key profile at the proxy sends its run headers, never the target', legit['x-byo-grant'] === 'grant-placeholder' && legit['x-run-context'] === 'run-token-placeholder' && !('x-artemis-target' in legit), JSON.stringify(Object.keys(legit)))
+    assert('run profile: the messages endpoint at the proxy too', runHeadersFor(managed, `${proxy}/api_x/v1/messages`)['x-byo-grant'] === 'grant-placeholder')
     // providers.json is the agent's to edit: a profile it adds (a main profile pointed at the
     // model proxy, say) gets no run headers, so the proxy refuses it.
-    assert('run profile: a forged non-own-key profile borrowing runHeadersFrom sends nothing', Object.keys(runHeadersFor({ id: 'main-via-proxy', runHeadersFrom: 'byo_api_x' })).length === 0)
-    assert('run profile: an own-key profile borrowing another entry sends nothing', Object.keys(runHeadersFor({ id: 'byo_api_y', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' })).length === 0)
+    assert('run profile: a forged non-own-key profile borrowing runHeadersFrom sends nothing', Object.keys(runHeadersFor({ id: 'main-via-proxy', runHeadersFrom: 'byo_api_x' }, `${proxy}/api_x/chat/completions`)).length === 0)
+    assert('run profile: an own-key profile borrowing another entry sends nothing', Object.keys(runHeadersFor({ id: 'byo_api_y', managedBy: 'artemis-online-connectors', runHeadersFrom: 'byo_api_x' }, `${proxy}/api_x/chat/completions`)).length === 0)
+    // An own-key profile pointed elsewhere (a workdir one, or the global one with its baseUrl changed)
+    // gets nothing: the headers go only to the target the host named.
+    for (const [why, url] of [
+      ['a workdir own-key profile at a listener of the agent', 'http://127.0.0.1:7777/agent/chat/completions'],
+      ['the global profile with a tampered baseUrl', 'https://evil.example/llm/api_x/chat/completions'],
+      ['another connection under the proxy', `${proxy}/api_x_other/chat/completions`],
+      ['a path that climbs out', `${proxy}/api_x/../api_y/chat/completions`],
+      ['credentials in the URL', 'http://127.0.0.1:8789@evil.example/llm/api_x/chat/completions'],
+    ] as const) {
+      assert(`run profile: ${why} gets no run headers`, Object.keys(runHeadersFor(managed, url)).length === 0, url)
+    }
+    // A target-bound entry never goes to an MCP server, whatever its id.
+    assert('run profile: an MCP server named like the own-key entry gets no headers', Object.keys(inheritedMcpHeaders('byo_api_x')).length === 0)
     resetInheritedMcpHeadersForTest()
   } finally {
     if (saved.b === undefined) delete process.env.ARTEMIS_BUILDER_PROFILE
     else process.env.ARTEMIS_BUILDER_PROFILE = saved.b
     if (saved.s === undefined) delete process.env.ARTEMIS_SPECIALIST_PROFILE
     else process.env.ARTEMIS_SPECIALIST_PROFILE = saved.s
+    if (saved.home === undefined) delete process.env.ARTEMIS_HOME
+    else process.env.ARTEMIS_HOME = saved.home
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
 import { splitTrailingRuntimeContext } from './runtimeContext.js'
-import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
+import { inheritedTargetHeaders } from '../mcp/inheritedHeaders.js';
 import { isOwnKeyProfile } from './store.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
@@ -154,15 +154,33 @@ function buildProviderTransportErrorMessage(
 
 type OpenAIMessageContent = string | Array<{ type: string; [key: string]: unknown }>;
 
+/** origin + normalized path of a URL, or undefined when it is not one. */
+function targetOf(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) return undefined;
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The per-run headers a profile asks for (runHeadersFrom), from what the host
- * handed over at startup. Only a profile of the owner's own key, for its own
- * entry: providers.json is the agent's to edit, and a profile it adds (say, a
- * main profile pointed at the model proxy) must not borrow those headers.
+ * handed over at startup, for one request. Only a profile of the owner's own
+ * key, for its own entry, and only for a request to the target the host
+ * named in that entry (the local model proxy): providers.json is the agent's
+ * to edit, and neither a profile it adds (say, a main profile pointed at the
+ * proxy) nor an own-key profile pointed elsewhere (a listener of its own) may
+ * get them. The target itself is never sent.
  */
-export function runHeadersFor(config: { id?: string; managedBy?: string; runHeadersFrom?: string }): Record<string, string> {
+export function runHeadersFor(config: { id?: string; managedBy?: string; runHeadersFrom?: string }, requestUrl: string): Record<string, string> {
   if (!config.runHeadersFrom || config.runHeadersFrom !== config.id || !isOwnKeyProfile(config)) return {};
-  return inheritedMcpHeaders(config.runHeadersFrom);
+  const entry = inheritedTargetHeaders(config.runHeadersFrom);
+  const allowed = entry ? targetOf(entry.target) : undefined;
+  const request = targetOf(requestUrl);
+  if (!entry || !allowed || !request || !request.startsWith(`${allowed}/`)) return {};
+  return entry.headers;
 }
 
 export function buildApiKeyHeaders(
@@ -592,7 +610,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
-            ...runHeadersFor(this.config),
+            ...runHeadersFor(this.config, `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`),
             ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
@@ -923,7 +941,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
-            ...runHeadersFor(this.config),
+            ...runHeadersFor(this.config, `${this.config.baseUrl.replace(/\/$/, '')}/chat/completions`),
             ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),

@@ -9,7 +9,7 @@ import {
   createGlobalProviderStore,
   promptForVerifiedProviderProfile,
 } from './onboarding.js';
-import { ProviderStore, runProfileOverride } from './store.js';
+import { ProviderStore, isOwnKeyProfile, runProfileOverride } from './store.js';
 import { resolveAuxiliaryProfile } from './auxiliaryModels.js';
 import {
   createTrackedProviderFromConfig,
@@ -233,9 +233,23 @@ export async function createProviderRouter(
   const mainProfile = store.getDefaultMainProfile(data);
   let specialistProfile = store.getWorkerProfile(data);
   // Per-run routing by the host (the owner's own key for coding or subtasks):
-  // never a fallback for the main conversation or other targets.
-  const subtaskProfile = store.getProfile(data, runProfileOverride('ARTEMIS_SPECIALIST_PROFILE') ?? '');
-  const builderProfile = store.getProfile(data, runProfileOverride('ARTEMIS_BUILDER_PROFILE') ?? '');
+  // never a fallback for the main conversation or other targets. Only an
+  // own-key profile of the global store ($ARTEMIS_HOME, which the host
+  // writes), never one from a workdir providers.json.
+  const ownKeyOverride = await (async () => {
+    try {
+      const globalStore = createGlobalProviderStore();
+      const globalData = await globalStore.load();
+      return (name: 'ARTEMIS_SPECIALIST_PROFILE' | 'ARTEMIS_BUILDER_PROFILE') => {
+        const profile = globalStore.getProfile(globalData, runProfileOverride(name) ?? '');
+        return profile && isOwnKeyProfile(profile) ? profile : undefined;
+      };
+    } catch {
+      return () => undefined;
+    }
+  })();
+  const subtaskProfile = ownKeyOverride('ARTEMIS_SPECIALIST_PROFILE');
+  const builderProfile = ownKeyOverride('ARTEMIS_BUILDER_PROFILE');
   
   const createProviderFromProfile =
     options.createProviderFromProfile ??
