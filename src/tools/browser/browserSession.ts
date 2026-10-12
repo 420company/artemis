@@ -257,7 +257,8 @@ async function initContext(): Promise<BrowserContext> {
     // Live mode: the shared, long-lived browser the owner can watch and take
     // over from the web app (liveBrowser.ts). Its profile is its own, so a
     // non-live browser elsewhere never holds its lock.
-    const live = liveDir();
+    const plan = browserLaunchPlan();
+    const live = plan === 'live' ? liveDir() : undefined;
     if (live) {
       const hostConfig = liveHostConfig(live, chromium.executablePath());
       let host = await ensureHost(hostConfig);
@@ -293,7 +294,7 @@ async function initContext(): Promise<BrowserContext> {
     // DEFAULT profile; start Chrome with a dedicated --user-data-dir. Example:
     //   /Applications/Google\ Chrome.app/.../Google\ Chrome \
     //     --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-artemis"
-    const cdpUrl = process.env.ARTEMIS_BROWSER_CDP_URL?.trim();
+    const cdpUrl = plan === 'cdp' ? process.env.ARTEMIS_BROWSER_CDP_URL?.trim() : undefined;
     if (cdpUrl) {
       const browser = await chromium.connectOverCDP(cdpUrl);
       _ephemeralBrowser = browser;
@@ -373,6 +374,15 @@ async function initContext(): Promise<BrowserContext> {
     void activeChannel;
 
     let ctx: BrowserContext;
+    if (plan === 'ephemeral') {
+      // A throwaway browser of this run's own: a fresh temporary profile, a
+      // child of this process (it ends with the run), nothing kept or shared.
+      ctx = await launchEphemeral();
+      ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      attachContextListeners(ctx);
+      _context = ctx;
+      return ctx;
+    }
     try {
       // launchPersistentContext gives us cookies + localStorage + login state
       // surviving across Artemis restarts. Persistent profile = single browser
@@ -865,4 +875,18 @@ export async function runBrowserHostCommand(): Promise<number> {
     return 1;
   }
   return runHostForeground(config);
+}
+
+/**
+ * Which browser a run gets: `ephemeral` (ARTEMIS_BROWSER_EPHEMERAL=1, set by
+ * a platform for runs that act on outside data: a throwaway browser with a
+ * temporary profile, never the shared live browser or a kept profile), the
+ * shared live browser (ARTEMIS_BROWSER_LIVE_DIR), a running browser over CDP
+ * (ARTEMIS_BROWSER_CDP_URL), or the kept local profile.
+ */
+export function browserLaunchPlan(env: NodeJS.ProcessEnv = process.env): 'ephemeral' | 'live' | 'cdp' | 'persistent' {
+  if (env.ARTEMIS_BROWSER_EPHEMERAL?.trim() === '1') return 'ephemeral';
+  if (liveDir(env)) return 'live';
+  if (env.ARTEMIS_BROWSER_CDP_URL?.trim()) return 'cdp';
+  return 'persistent';
 }

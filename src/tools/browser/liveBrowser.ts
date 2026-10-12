@@ -100,6 +100,8 @@ export interface TabReport {
 
 /** The live directory, or undefined when live mode is off. */
 export function liveDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  // A run with a throwaway browser of its own never touches the shared one (browserSession.ts browserLaunchPlan).
+  if (env.ARTEMIS_BROWSER_EPHEMERAL?.trim() === '1') return undefined;
   const raw = env[LIVE_DIR_ENV]?.trim();
   return raw ? path.resolve(raw) : undefined;
 }

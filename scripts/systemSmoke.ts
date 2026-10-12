@@ -1326,3 +1326,15 @@ test('live browser: a platform-managed host (ARTEMIS_BROWSER_HOST=managed) is ne
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('live browser: a run with ARTEMIS_BROWSER_EPHEMERAL=1 gets a throwaway browser, never the shared live one', async () => {
+  const { browserLaunchPlan } = await import('../src/tools/browser/browserSession.js');
+  const { liveDir } = await import('../src/tools/browser/liveBrowser.js');
+  assert.equal(browserLaunchPlan({}), 'persistent');
+  assert.equal(browserLaunchPlan({ ARTEMIS_BROWSER_LIVE_DIR: '/tmp/live' }), 'live');
+  assert.equal(browserLaunchPlan({ ARTEMIS_BROWSER_CDP_URL: 'http://127.0.0.1:9222' }), 'cdp');
+  for (const env of [{ ARTEMIS_BROWSER_EPHEMERAL: '1' }, { ARTEMIS_BROWSER_EPHEMERAL: '1', ARTEMIS_BROWSER_LIVE_DIR: '/tmp/live', ARTEMIS_BROWSER_CDP_URL: 'http://127.0.0.1:9222' }]) {
+    assert.equal(browserLaunchPlan(env), 'ephemeral');
+    assert.equal(liveDir(env), undefined, 'no live-browser path (hand-off, takeover waits) either');
+  }
+});
