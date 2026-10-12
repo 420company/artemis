@@ -597,6 +597,20 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('details: a high-risk command is shown in full', cmd.details.command!.length > 3_000)
 }
 
+// ── The platform's own tools: the host's default lets them through ─────────
+{
+  // As artemis-online passes its policy: `artemis_online/*` allow by default.
+  const hosted = loadApprovalPolicy(workspace('platform-tools'), { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ version: 1, modes: {}, tools: { 'artemis_online/*': 'allow' } }) })
+  for (const toolName of ['trade_paper_order', 'publish_request', 'schedule_create', 'trigger_delete', 'model3d_generate']) {
+    const found = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'artemis_online', toolName })
+    assert(`platform tools: ${toolName} is keyed to the platform`, !found || found.toolKey === `artemis_online/${toolName}`, found?.toolKey)
+    assert(`platform tools: ${toolName} runs without asking under the platform default`, !found || modeFor(hosted, found.kind, found.toolKey) === 'allow', found ? `${found.kind} → ${modeFor(hosted, found.kind, found.toolKey)}` : 'no need')
+  }
+  const trade = classifyMcpCall({ type: 'mcp_call_tool', serverId: 'artemis_online', toolName: 'trade_paper_order' })!
+  assert('platform tools: the same tool on another server still asks', modeFor(hosted, trade.kind, 'broker/trade_paper_order') === 'ask')
+  assert('platform tools: the owner can make the platform ask again', modeFor(loadApprovalPolicy(workspace('platform-tools-ask'), { ARTEMIS_APPROVAL_POLICY: JSON.stringify({ tools: { 'artemis_online/*': 'allow', 'artemis_online/trade_paper_order': 'ask' } }) }), trade.kind, trade.toolKey) === 'ask')
+}
+
 // ── Office files and speech: inside the workspace nothing asks ─────────────
 {
   const cwd = workspace('office')
