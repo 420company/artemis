@@ -144,7 +144,10 @@ offers the MCP tool `request_owner_secret {purpose, kind, bind: {origin} |
 secret into the card in the web app; it goes straight into the server's
 encrypted store, bound to that site or server, and the chat only says
 已保存（仅用于 …）. The placeholder then types like any stored password, under
-the same rules. Typed secrets are masked in screenshots of the site they were
+the same rules. An item the owner locked with their own key (你持钥匙) answers
+`locked` with an unlock card: the agent shows it and stops
+(`waiting_unlock`); after the owner unlocks it, the placeholder types again.
+Typed secrets are masked in screenshots of the site they were
 typed on (and only there), a password field is never read back by
 `browser_extract_text`, and every result is scrubbed of the secret in its
 plain, URL, JSON, HTML, base64 and hex forms.
