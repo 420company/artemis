@@ -411,7 +411,7 @@ if (hasFfmpeg) {
         inFlight--;
         served++;
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text: `段${served}`, durationSeconds: 1 }));
-      }, 150);
+      }, 600); // long enough that pieces overlap even on a loaded machine
     });
   });
   await new Promise<void>((resolve) => slow.listen(0, '127.0.0.1', resolve));
