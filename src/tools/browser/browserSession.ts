@@ -36,6 +36,7 @@ import {
   browserIdleMs,
   claimTab,
   ensureHost,
+  runHostForeground,
   hostCall,
   liveDir,
   readJsonFile,
@@ -258,23 +259,7 @@ async function initContext(): Promise<BrowserContext> {
     // non-live browser elsewhere never holds its lock.
     const live = liveDir();
     if (live) {
-      const executable = process.env.ARTEMIS_BROWSER_EXECUTABLE?.trim() || chromium.executablePath();
-      if (!fs.existsSync(executable)) throw new Error(`Executable doesn't exist at ${executable}`);
-      const hostConfig: HostConfig = {
-        liveDir: live,
-        executable,
-        profileDir: `${PROFILE_DIR}-live`,
-        headless,
-        args: extraArgs,
-        userAgent: browserUserAgent(),
-        idleMs: browserIdleMs(),
-        // The host applies these to every page (a shared browser has no Playwright context options).
-        viewport: contextOptions.viewport,
-        timezoneId: process.env.ARTEMIS_BROWSER_TIMEZONE?.trim() || contextOptions.timezoneId,
-        locale: contextOptions.locale,
-        ...(secretPauseMs() ? { secretPauseMs: secretPauseMs() } : {}),
-        ...(secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') ? { secretPauseMaxMs: secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') } : {}),
-      };
+      const hostConfig = liveHostConfig(live, chromium.executablePath());
       let host = await ensureHost(hostConfig);
       let browser: Browser;
       const connect = (to: HostInfo) => connectLive(chromium, to);
@@ -835,4 +820,49 @@ export function describePlaywrightError(err: unknown): string {
     ].join('\n');
   }
   return msg;
+}
+
+/** The live host's settings, as a run would start it (also `artemis browser-host`). */
+export function liveHostConfig(live: string, bundledExecutable: string): HostConfig {
+  const { headless, extraArgs } = resolveBrowserLaunchMode();
+  const executable = process.env.ARTEMIS_BROWSER_EXECUTABLE?.trim() || bundledExecutable;
+  if (!fs.existsSync(executable)) throw new Error(`Executable doesn't exist at ${executable}`);
+  return {
+    liveDir: live,
+    executable,
+    profileDir: `${PROFILE_DIR}-live`,
+    headless,
+    args: extraArgs,
+    userAgent: browserUserAgent(),
+    idleMs: browserIdleMs(),
+    // The host applies these to every page (a shared browser has no Playwright context options).
+    viewport: { width: 1280, height: 800 },
+    timezoneId: process.env.ARTEMIS_BROWSER_TIMEZONE?.trim() || 'Asia/Bangkok',
+    locale: 'zh-CN',
+    ...(secretPauseMs() ? { secretPauseMs: secretPauseMs() } : {}),
+    ...(secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') ? { secretPauseMaxMs: secretPauseMs(process.env, 'ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS') } : {}),
+  };
+}
+
+/**
+ * `artemis browser-host`: runs the live browser host in the foreground for a
+ * platform that keeps it in a process group (and cgroup) of its own, apart
+ * from every run (runs then wait for it: ARTEMIS_BROWSER_HOST=managed).
+ * Exits with the host: after its idle time without clients, or on SIGTERM.
+ */
+export async function runBrowserHostCommand(): Promise<number> {
+  const live = liveDir();
+  if (!live) {
+    process.stderr.write('browser-host: ARTEMIS_BROWSER_LIVE_DIR is not set\n');
+    return 2;
+  }
+  let config: HostConfig;
+  try {
+    const { chromium } = await import('playwright');
+    config = liveHostConfig(live, chromium.executablePath());
+  } catch (err) {
+    process.stderr.write(`browser-host: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
+  return runHostForeground(config);
 }

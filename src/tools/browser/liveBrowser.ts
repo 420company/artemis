@@ -481,6 +481,19 @@ export async function ensureHost(config: HostConfig, options: { timeoutMs?: numb
   ensureLiveDir(dir);
   const existing = await runningHost(dir);
   if (existing) return existing;
+  // A host the platform runs (ARTEMIS_BROWSER_HOST=managed, `artemis
+  // browser-host`): it starts and restarts the host in a process group (and
+  // cgroup) of its own, so a run's end never takes it down; a run only waits
+  // for it and never starts one itself.
+  if (hostManaged()) {
+    const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+    while (Date.now() < deadline) {
+      await defaultSleep(200);
+      const host = await runningHost(dir);
+      if (host) return host;
+    }
+    throw new Error('the browser is not running (the platform starts it); try again in a moment');
+  }
   const lockFile = path.join(dir, LIVE_FILES.lock);
   const deadline = Date.now() + (options.timeoutMs ?? 30_000);
   let locked = false;
@@ -540,6 +553,40 @@ export async function ensureHost(config: HostConfig, options: { timeoutMs?: numb
   } finally {
     await fsp.rm(lockFile, { force: true });
   }
+}
+
+/** Whether the platform runs the host (runs never start one: ensureHost waits for it). */
+export function hostManaged(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[HOST_MODE_ENV]?.trim() === 'managed';
+}
+
+/** ARTEMIS_BROWSER_HOST=managed: the platform starts the host (`artemis browser-host`). */
+export const HOST_MODE_ENV = 'ARTEMIS_BROWSER_HOST';
+
+/**
+ * Runs a host in the foreground (`artemis browser-host`): the host is a
+ * child of this process, in its process group, and this process exits with
+ * it. SIGTERM and SIGINT are passed on. A host that finds another one
+ * running exits at once (0).
+ */
+export function runHostForeground(config: HostConfig): Promise<number> {
+  ensureLiveDir(config.liveDir);
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [...process.execArgv, hostScript(), JSON.stringify(config)], {
+      stdio: 'ignore',
+      env: hostEnv(),
+      cwd: config.liveDir,
+    });
+    const pass = (sig: NodeJS.Signals) => () => {
+      try {
+        child.kill(sig);
+      } catch { /* gone */ }
+    };
+    process.on('SIGTERM', pass('SIGTERM'));
+    process.on('SIGINT', pass('SIGINT'));
+    child.once('error', () => resolve(1));
+    child.once('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
 }
 
 /** Removes host.json and viewer.json (a host that is gone, or one being replaced). */

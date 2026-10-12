@@ -1299,3 +1299,30 @@ test('per-run MCP headers (v2): exact ids, and only to the URL the host named', 
 
 await pending;
 console.log('\n  ✔ All system smoke tests passed');
+
+test('live browser: a platform-managed host (ARTEMIS_BROWSER_HOST=managed) is never started by a run; `browser-host` runs it in the foreground', async () => {
+  const { ensureHost, hostManaged, LIVE_FILES } = await import('../src/tools/browser/liveBrowser.js');
+  const { runBrowserHostCommand } = await import('../src/tools/browser/browserSession.js');
+  assert.equal(parseArgs(['browser-host']).command, 'browser-host');
+  assert.ok(!getHelpText().includes('browser-host'), 'not in the help');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-live-'));
+  const saved = { mode: process.env.ARTEMIS_BROWSER_HOST, live: process.env.ARTEMIS_BROWSER_LIVE_DIR };
+  try {
+    process.env.ARTEMIS_BROWSER_HOST = 'managed';
+    assert.equal(hostManaged(), true);
+    const started = Date.now();
+    await assert.rejects(
+      ensureHost({ liveDir: dir, executable: '/bin/false', profileDir: path.join(dir, 'p'), headless: true, args: [], idleMs: 5_000 }, { timeoutMs: 600 }),
+      /not running \(the platform starts it\)/,
+    );
+    assert.ok(Date.now() - started < 5_000);
+    assert.ok(!fs.existsSync(path.join(dir, LIVE_FILES.lock)), 'no start was attempted');
+    assert.ok(!fs.existsSync(path.join(dir, LIVE_FILES.host)));
+    delete process.env.ARTEMIS_BROWSER_LIVE_DIR;
+    assert.equal(await runBrowserHostCommand(), 2);
+  } finally {
+    if (saved.mode === undefined) delete process.env.ARTEMIS_BROWSER_HOST; else process.env.ARTEMIS_BROWSER_HOST = saved.mode;
+    if (saved.live === undefined) delete process.env.ARTEMIS_BROWSER_LIVE_DIR; else process.env.ARTEMIS_BROWSER_LIVE_DIR = saved.live;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

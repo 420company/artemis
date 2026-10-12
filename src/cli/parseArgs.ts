@@ -44,6 +44,7 @@ export type CliCommand =
   | 'memory'
   | 'goal'
   | 'dream'
+  | 'browser-host'
 
 export interface ParsedArgs {
   command: CliCommand
@@ -80,7 +81,9 @@ const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
   'resume', 'tasks', 'runtimes', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
-  'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream'
+  'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream',
+  // For a platform host only (not in the help): the live browser host in the foreground.
+  'browser-host',
 ])
 
 function isCliCommand(value: string | undefined): value is CliCommand {
