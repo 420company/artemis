@@ -237,7 +237,8 @@ function getEnvPrefix(server: McpServerConfig): string {
   return `ARTEMIS_MCP_${normalizeIdForEnv(server.id)}`;
 }
 
-function resolveStaticServerHeaders(server: McpServerConfig): Record<string, string> {
+/** A server's headers that need no sign-in: its stored ones, the token, and the run's extra headers. Also used by place_call. */
+export function resolveStaticServerHeaders(server: McpServerConfig): Record<string, string> {
   const headers: Record<string, string> = {
     ...(server.headers ?? {}),
   };

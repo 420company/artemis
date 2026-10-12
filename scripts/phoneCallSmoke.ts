@@ -12,7 +12,7 @@ import path from 'node:path';
 import type { AgentAction } from '../src/core/types.js';
 import { buildActionParametersSchema } from '../src/core/providerNativeTools.js';
 import { requestPhoneCallApproval } from '../src/tools/phoneCall/approvalGate.js';
-import { callHostFromConfig, callHostRpc, CallHostError, hostHeadersFromEnv } from '../src/tools/phoneCall/host.js';
+import { callHostFromConfig, callHostRpc, CallHostError, hostHeaders } from '../src/tools/phoneCall/host.js';
 import { quickNumberCheck } from '../src/tools/phoneCall/phone.js';
 import { executePlaceCall } from '../src/tools/phoneCall/placeCall.js';
 import { validateToolAction } from '../src/tools/registry.js';
@@ -174,15 +174,15 @@ await test('only ever sends the token to a loopback server', () => {
   assert.equal(callHostFromConfig({}), undefined);
 });
 
-await test('sends the run\'s context headers along (a restricted run is refused by the server)', () => {
-  const env = { ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON: JSON.stringify({ 'X-Run-Context': 'rc_1', authorization: 'Bearer other' }) };
-  assert.deepEqual(hostHeadersFromEnv(env), { 'x-run-context': 'rc_1' }, 'never the bearer token');
-  assert.deepEqual(hostHeadersFromEnv({ ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON: 'not json' }), {});
+await test('sends the run\'s context headers along, as the MCP client resolves them (a restricted run is refused by the server)', () => {
+  const entry = { id: 'artemis_online', url: 'http://127.0.0.1:8787/mcp', bearerToken: 'tok', enabled: true };
   const previous = process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON;
-  process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON;
+  process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = JSON.stringify({ 'X-Run-Context': 'rc_1', authorization: 'Bearer other' });
   try {
-    const entry = { servers: [{ id: 'artemis_online', url: 'http://127.0.0.1:8787/mcp', bearerToken: 'tok', enabled: true }] };
-    assert.deepEqual(callHostFromConfig(entry)?.headers, { 'x-run-context': 'rc_1' });
+    assert.deepEqual(hostHeaders(entry), { 'x-run-context': 'rc_1' }, 'never the bearer token');
+    assert.deepEqual(callHostFromConfig({ servers: [entry] })?.headers, { 'x-run-context': 'rc_1' });
+    process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = 'not json';
+    assert.deepEqual(hostHeaders(entry), {});
   } finally {
     if (previous === undefined) delete process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON;
     else process.env.ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON = previous;

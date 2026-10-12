@@ -7,12 +7,14 @@
  * The call tools there (phone_call_request / phone_call_status /
  * phone_call_hangup) are not listed to the model; place_call is the one way
  * in. The token is only ever sent to a loopback address. The run's extra
- * MCP headers (ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON, e.g. the run context
- * that marks an automation's run as restricted) go along, as the engine's
- * MCP client sends them, so the server refuses a call from such a run.
+ * MCP headers (e.g. the run context that marks an automation's run as
+ * restricted) go along, resolved by the engine's MCP client, so the server
+ * refuses a call from such a run.
  */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { resolveStaticServerHeaders } from '../../mcp/client.js';
+import type { McpServerConfig } from '../../mcp/store.js';
 import { resolveDataRootDir } from '../../utils/fs.js';
 
 export const CALL_HOST_SERVER_ID = 'artemis_online';
@@ -24,24 +26,20 @@ export interface CallHost {
   headers?: Record<string, string>;
 }
 
-const HEADERS_ENV = 'ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON';
-
-/** The run's extra headers for the owner's server, from the environment (as src/mcp/client.ts reads them). */
-export function hostHeadersFromEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const raw = env[HEADERS_ENV];
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const out: Record<string, string> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      // Never let it replace the bearer token or the body's type.
-      if (typeof value === 'string' && key.trim() && !/^(authorization|content-type)$/i.test(key.trim())) out[key.trim().toLowerCase()] = value.trim();
-    }
-    return out;
-  } catch {
-    return {};
+/**
+ * The run's extra headers for the owner's server (the run context that marks
+ * an automation's run as restricted), exactly as the engine's MCP client
+ * resolves them for this server (resolveStaticServerHeaders), so a change
+ * in how the host hands them over applies here too. Never the token or the
+ * body's type: those are set per request.
+ */
+export function hostHeaders(entry: Record<string, unknown>): Record<string, string> {
+  const resolved = resolveStaticServerHeaders({ ...(entry as unknown as McpServerConfig), id: CALL_HOST_SERVER_ID });
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(resolved)) {
+    if (!/^(authorization|content-type|accept)$/i.test(key)) out[key.toLowerCase()] = value;
   }
+  return out;
 }
 
 export class CallHostError extends Error {
@@ -65,7 +63,7 @@ export function callHostFromConfig(raw: unknown): CallHost | undefined {
   const url = typeof entry.url === 'string' ? entry.url : '';
   const token = typeof entry.bearerToken === 'string' ? entry.bearerToken : '';
   if (!LOOPBACK.test(url) || !token) return undefined;
-  const headers = hostHeadersFromEnv();
+  const headers = hostHeaders(entry);
   return { url, token, ...(Object.keys(headers).length ? { headers } : {}) };
 }
 
