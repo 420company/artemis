@@ -24,7 +24,7 @@ import { buildPanel } from '../cli/ui.js'
 import type { UiLocale } from '../cli/locale.js'
 import { DEFAULT_UI_LOCALE, pickLocale } from '../cli/locale.js'
 import type { BridgePlatform, BridgeTerminalEvent } from '../cli/bridgeNotify.js'
-import { ensureDir, resolveArtemisHomeDir, resolveDataRootDir, truncate } from '../utils/fs.js'
+import { ensureDir, resolveArtemisHomeDir, resolveDataRootDir, truncate, truncateInline } from '../utils/fs.js'
 import stripAnsi from 'strip-ansi'
 import {
   detectExplicitWorkflowIntent,
@@ -88,7 +88,7 @@ function summarizeToolArgs(args: unknown): string {
   for (const key of candidates) {
     const value = record[key]
     if (typeof value === 'string' && value.trim()) {
-      return ` · ${truncate(value.replace(/\s+/g, ' '), 120)}`
+      return ` · ${truncateInline(value.replace(/\s+/g, ' '), 120)}`
     }
   }
   return ''
@@ -103,7 +103,7 @@ function isUnsafeBridgeWorkspace(cwd: string): boolean {
 function summarizeToolOutput(output: unknown): string {
   if (typeof output !== 'string') return ''
   const compact = output.replace(/\s+/g, ' ').trim()
-  return compact ? ` · ${truncate(compact, 160)}` : ''
+  return compact ? ` · ${truncateInline(compact, 160)}` : ''
 }
 
 function formatBytesCompact(bytes: number): string {
@@ -439,8 +439,8 @@ async function reloadStoredSession(store: SessionStore, sessionId: string, local
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     throw new BridgeSessionReadError(pickLocale(locale, {
-      zh: `无法从磁盘读取这个对话（${truncate(reason, 160)}），因此没有执行也没有保存任何内容。请稍后重试。`,
-      en: `Could not read this conversation from disk (${truncate(reason, 160)}), so nothing was run or saved. Please try again in a moment.`,
+      zh: `无法从磁盘读取这个对话（${truncateInline(reason, 160)}），因此没有执行也没有保存任何内容。请稍后重试。`,
+      en: `Could not read this conversation from disk (${truncateInline(reason, 160)}), so nothing was run or saved. Please try again in a moment.`,
     }))
   }
 }
@@ -1018,8 +1018,8 @@ async function runRemoteCommandInner(
             pollRunningUserMessages: opts.pollRunningUserMessages,
             onRunningUserMessageAccepted: (text) => {
               const msg = t(
-                `💬 已采纳运行中插话：${truncate(text, 160)}`,
-                `💬 Running interjection accepted: ${truncate(text, 160)}`,
+                `💬 已采纳运行中插话：${truncateInline(text, 160)}`,
+                `💬 Running interjection accepted: ${truncateInline(text, 160)}`,
               )
               emitProgress(msg, 'info')
               recordActivity(msg)

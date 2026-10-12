@@ -394,6 +394,18 @@ test('auxiliary models: the compression route becomes the router summarizer; has
   }
 });
 
+test('truncateInline keeps a long reason on one line (the bridge read-failure message stays matchable)', async () => {
+  const { truncate, truncateInline } = await import('../src/utils/fs.js');
+  const reason = `ENOENT: no such file or directory, open '${'/very/long/tmpdir'.repeat(20)}/sessions/x.json'`;
+  const inline = truncateInline(reason, 160);
+  assert.ok(!inline.includes('\n'));
+  assert.ok(inline.startsWith(reason.slice(0, 160)));
+  assert.match(inline, /… \[\+\d+ chars\]$/);
+  assert.equal(truncateInline('short', 160), 'short');
+  assert.match(`Could not read this conversation from disk (${inline}), so nothing was run or saved. Please try again in a moment.`, /Could not read this conversation from disk.*try again/);
+  assert.ok(truncate(reason, 160).includes('\n'), 'block truncation is unchanged');
+});
+
 test('vision helper: image text cannot escape its <image_description> block (prompt injection)', async () => {
   const { createVisionHelper, prepareUserImagesForModel } = await import('../src/core/visionHelper.js');
   const { IMAGE_DESCRIPTION_DATA_NOTE } = await import('../src/core/imageDescription.js');
