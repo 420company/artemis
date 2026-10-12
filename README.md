@@ -147,7 +147,7 @@ Besides learned skills, Artemis ships a library of about 200 playbooks (SEO, cop
 - **On demand.** `load_skill` reads a playbook in full (`{"id"}`), one of its reference files (`{"id", "file"}`), or searches learned and library skills (`{"query"}`). Workspace and pack skills come back fenced as untrusted text, and library text counts as outside content for skill learning.
 - **Still explicit.** `$skill-id` in a message activates a library skill directly; a pack skill only when the message is the owner's own words (the local CLI, or a host that marks the run with `ARTEMIS_OWNER_INPUT=1`), never from triggers, events or chat bridges. The design keyword rules stay as a fallback. The workspace's own skills are not in the index (load_skill still finds them); ids are at most 64 characters.
 - **Packs are off by default.** `ARTEMIS_SKILL_PACKS=cco` (or `cco/traders,cco/creators`) or `artemis skills packs enable cco/traders` turns groups on; only enabled groups join the index and search.
-- **For hosts.** `artemis skills catalog --json` lists every skill (packs included, marked on or off), `artemis skills show <id> --json` returns one with its reference files, `artemis skills packs --json` the packs.
+- **For hosts.** `artemis skills catalog --json` lists every skill (packs included, marked on or off), `artemis skills show <id> --json` returns one with its reference files, `artemis skills packs --json` the packs. This JSON is meant to be shown to people, so AI vendor, product and model names in it are replaced with plain words (`src/utils/vendorNames.ts`; `npm run test:skillText` walks the whole catalog).
 
 #### 4. Visual generation system
 
@@ -532,7 +532,7 @@ Artemis 在告诉你一项非简单任务"完成了"之前，会像细心的工�
 - **按需读取**：`load_skill` 用 `{"id"}` 读取完整手册，用 `{"id", "file"}` 读取它的参考文件，用 `{"query"}` 搜索已学技能和技能库。工作区和技能包里的技能会作为不可信文本隔开返回；技能库内容在技能学习里也算外部内容。
 - **仍可显式指定**：消息里写 `$技能id` 会直接启用技能库里的技能；技能包里的技能只在消息是主人亲手写的时候才会启用（本地命令行，或宿主程序用 `ARTEMIS_OWNER_INPUT=1` 标明的运行），触发器、事件和聊天桥接的消息不行。设计类关键词规则作为补充保留。工作区自己的技能不进目录（`load_skill` 仍能找到）；技能 id 最长 64 个字符。
 - **技能包默认不加载**：设置 `ARTEMIS_SKILL_PACKS=cco`（或 `cco/traders,cco/creators`），或运行 `artemis skills packs enable cco/traders` 启用分组；只有启用的分组会进入目录和搜索。
-- **给宿主程序用**：`artemis skills catalog --json` 列出全部技能（含技能包，标明是否启用），`artemis skills show <id> --json` 返回单个技能及其参考文件，`artemis skills packs --json` 返回技能包。
+- **给宿主程序用**：`artemis skills catalog --json` 列出全部技能（含技能包，标明是否启用），`artemis skills show <id> --json` 返回单个技能及其参考文件，`artemis skills packs --json` 返回技能包。这些 JSON 是给人看的，其中的 AI 厂商、产品和模型名称会替换成通用说法（`src/utils/vendorNames.ts`；`npm run test:skillText` 会检查整个目录）。
 
 #### 4. 视觉生成系统
 

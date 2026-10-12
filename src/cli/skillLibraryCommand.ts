@@ -11,6 +11,11 @@
  * JSON goes to stdout (one document, `version: 1`); errors are
  * `{"error": {...}}` with exit code 1 (an unknown skill: 2). No file paths
  * of this machine are printed.
+ *
+ * The JSON is what a host shows its users, so the text in it names no AI
+ * vendor, product or model and no internal system (utils/vendorNames.ts):
+ * those names are replaced, skills and files named after one are left out,
+ * and the skill-text guard walks the whole catalog for any left.
  */
 
 import type { UiLocale } from './locale.js'
@@ -24,6 +29,7 @@ import {
   type LibrarySkill,
   type PackInfo,
 } from '../extensions/skillLibrary.js'
+import { VENDOR_BODY_ALLOWLIST, namesVendor, scrubVendorNames } from '../utils/vendorNames.js'
 
 /** What `show` returns of SKILL.md. */
 const SHOW_MAX_CHARS = 40_000
@@ -34,14 +40,23 @@ function clamp(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
 }
 
+/** A skill a host may list: its id and name name no vendor or internal system. */
+function hostShows(skill: LibrarySkill): boolean {
+  return !namesVendor(`${skill.id} ${skill.name}`)
+}
+
+const scrub = (text: string) => scrubVendorNames(text)
+const scrubPair = (pair: { zh: string; en: string }) => ({ zh: scrub(pair.zh), en: scrub(pair.en) })
+
 function entry(skill: LibrarySkill) {
+  const tags = skill.tags.filter((tag) => !namesVendor(tag)).map(scrub)
   return {
     id: skill.id,
-    name: skill.name,
-    summary: skill.summary,
-    description: clamp(skill.description, CATALOG_DESCRIPTION_MAX_CHARS),
-    ...(skill.category ? { category: skill.category } : {}),
-    ...(skill.tags.length ? { tags: skill.tags } : {}),
+    name: scrub(skill.name),
+    summary: scrub(skill.summary),
+    description: clamp(scrub(skill.description), CATALOG_DESCRIPTION_MAX_CHARS),
+    ...(skill.category ? { category: scrub(skill.category) } : {}),
+    ...(tags.length ? { tags } : {}),
     source: skill.source,
     ...(skill.pack ? { pack: skill.pack.split('/')[0], audience: skill.pack.split('/')[1] } : {}),
     enabled: skill.enabled,
@@ -51,9 +66,9 @@ function entry(skill: LibrarySkill) {
 function packEntry(pack: PackInfo) {
   return {
     id: pack.id,
-    title: pack.title,
-    description: pack.description,
-    audiences: pack.audiences.map((audience) => ({ id: audience.id, title: audience.title, count: audience.count, enabled: audience.enabled })),
+    title: scrubPair(pack.title),
+    description: scrubPair(pack.description),
+    audiences: pack.audiences.map((audience) => ({ id: audience.id, title: scrubPair(audience.title), count: audience.count, enabled: audience.enabled })),
   }
 }
 
@@ -73,7 +88,7 @@ export async function runSkillLibraryCommand(options: { cwd: string; locale: UiL
   if (sub === 'catalog') {
     const library = await loadSkillLibrary(cwd, { allPacks: true })
     if (json) {
-      out({ version: 1, skills: library.skills.map(entry), packs: library.packs.map(packEntry) })
+      out({ version: 1, skills: library.skills.filter(hostShows).map(entry), packs: library.packs.map(packEntry) })
       return 0
     }
     const enabled = library.skills.filter((skill) => skill.enabled)
@@ -88,8 +103,21 @@ export async function runSkillLibraryCommand(options: { cwd: string; locale: UiL
     const library = await loadSkillLibrary(cwd, { allPacks: true })
     const skill = findLibrarySkill(library, id)
     if (!skill) return error('not_found', `No skill "${id}"`, 2)
+    if (json && !hostShows(skill)) return error('not_found', `No skill "${id}"`, 2)
     const [{ text, truncated }, files] = await Promise.all([readLibrarySkillText(skill, SHOW_MAX_CHARS), listSkillFiles(skill)])
-    out({ version: 1, skill: { ...entry(skill), description: skill.description, origin: describeSource(skill), content: text, truncated, files } })
+    // Developer skills about wiring an app to model APIs keep the vendors' names in their instructions (only there).
+    const keepVendors = VENDOR_BODY_ALLOWLIST.has(skill.id)
+    out({
+      version: 1,
+      skill: {
+        ...entry(skill),
+        description: scrub(skill.description),
+        origin: describeSource(skill),
+        content: scrubVendorNames(text, { keepVendors }),
+        truncated,
+        files: files.filter((file) => keepVendors || !namesVendor(file)),
+      },
+    })
     return 0
   }
 
