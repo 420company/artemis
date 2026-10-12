@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDir, pathExists, resolveDataRootDir } from '../utils/fs.js';
 import { normalizeStdioCommandParts } from './stdioConfig.js';
+import { ownedEntryProblem } from './inheritedHeaders.js';
 
 // Bundled default config: seeds new installs with all 90 pre-configured MCP servers
 const BUNDLED_DEFAULT_MCP_CONFIG = path.resolve(
@@ -687,7 +688,7 @@ export class McpServerStore {
       cached.mtimeMs === info.mtimeMs &&
       cached.size === info.size
     ) {
-      return cloneStoreData(cached.data);
+      return withOwnedEntriesChecked(cloneStoreData(cached.data));
     }
 
     const raw = await readFile(this.filePath, 'utf8');
@@ -697,7 +698,7 @@ export class McpServerStore {
       mtimeMs: info.mtimeMs,
       size: info.size,
     });
-    return cloneStoreData(normalized);
+    return withOwnedEntriesChecked(cloneStoreData(normalized));
   }
 
   async save(data: McpServerStoreData): Promise<void> {
@@ -774,3 +775,25 @@ export class McpServerStore {
     }
   }
 }
+
+/**
+ * An entry the host owns (named with a surface in its per-run payload,
+ * inheritedHeaders.ts) whose URL or surface is not what the host serves is
+ * disabled for this process, with its surface dropped: nothing written into
+ * it reaches the prompt, the tool definitions or a call.
+ */
+function withOwnedEntriesChecked(data: McpServerStoreData): McpServerStoreData {
+  for (const server of data.servers) {
+    const problem = ownedEntryProblem(server);
+    if (!problem) continue;
+    server.enabled = false;
+    server.surface = undefined;
+    if (!warnedOwned.has(`${server.id}:${problem}`)) {
+      warnedOwned.add(`${server.id}:${problem}`);
+      process.stderr.write(`[mcp] ${server.id} is disabled for this run: ${problem}\n`);
+    }
+  }
+  return data;
+}
+
+const warnedOwned = new Set<string>();
