@@ -220,7 +220,7 @@ function scoreProjectedMcpCandidate(options: {
   return score;
 }
 
-function buildProjectedMcpToolName(
+export function buildProjectedMcpToolName(
   serverId: string,
   toolName: string,
 ): string {
