@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Must stay the first import: it takes the per-run MCP headers off their
+// inherited descriptor and closes it before anything else runs.
+import './mcp/inheritedHeadersInit.js'
 import { installCrashHandler, checkPreviousCrash } from './core/crashHandler.js'
 import { runCli } from './cli/runCli.js'
 
