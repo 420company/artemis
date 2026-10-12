@@ -85,7 +85,8 @@ const IMAGE_INTENT_HINT = [
 
 const RESEARCH_INTENT_NOTE = [
   '[Run context — the user chose "research" in the app; this is not part of their message]',
-  'The user wants a researched answer: look things up, compare sources and cite them; do not answer from memory alone. ' + INTENT_PLAIN_WORDS,
+  'The user wants a researched answer: look things up, compare sources and cite them; do not answer from memory alone. ' +
+    'For a broad question, run deep_research once: it writes a cited report into reports/; reply with a short summary and put the report path on its own line. ' + INTENT_PLAIN_WORDS,
 ].join('\n')
 
 const REMINDER_INTENT_HINT = [
