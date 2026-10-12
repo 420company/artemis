@@ -51,13 +51,13 @@ export interface HeadlessAgentOptions {
    * it such actions are refused. `hostSecret`: the host's per-run secret;
    * requests are bound to it and can only be answered with it.
    */
-  approvals?: { suspend?: boolean; hostSecret?: string }
+  approvals?: { suspend?: boolean }
   /**
    * Answer a pending approval request of `sessionId` instead of sending a
    * message: approve runs exactly the stored action once, deny runs nothing;
    * then the model continues. `prompt` is ignored.
    */
-  answer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string }
+  answer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
 }
 
 export interface HeadlessAgentResult {
@@ -139,10 +139,21 @@ export async function runHeadlessAgent(
   // working on the same session).
   const { withSessionLock } = await import('../storage/sessionLock.js')
   const compaction = await loadCompactionSettings(cwd, 'hosted')
-  const { hostBindingOf, validateApprovalAnswer, grantOf, publicApproval, ApprovalResumeError, APPROVAL_RESULT_PREFIX } = await import('../security/approvals.js')
+  const {
+    hostApprovalKey,
+    validateApprovalAnswer,
+    grantOf,
+    publicApproval,
+    requestMessageOf,
+    supersedePendingApprovals,
+    ApprovalResumeError,
+    APPROVAL_RESULT_PREFIX,
+  } = await import('../security/approvals.js')
+  // Requests are bound to the host's public key when the run has one: only the host's signature answers them.
+  const hostKey = hostApprovalKey()
   const approvalSettings = {
     suspend: opts.approvals?.suspend === true,
-    ...(opts.approvals?.hostSecret ? { hostBinding: hostBindingOf(opts.approvals.hostSecret) } : {}),
+    ...(hostKey ? { hostBinding: hostKey.id } : {}),
   }
   const result = await withSessionLock(sessionStore.getLockPath(session.id), async () => {
     // Re-read under the lock: another process (a chat bridge) may have saved
@@ -185,8 +196,10 @@ export async function runHeadlessAgent(
       let record
       try {
         record = validateApprovalAnswer(current, opts.answer.id, {
-          hostSecret: opts.approvals?.hostSecret,
+          decision: opts.answer.decision,
+          ...(opts.answer.signature ? { signature: opts.answer.signature } : {}),
           ...(opts.answer.expectDigest ? { expectedDigest: opts.answer.expectDigest } : {}),
+          ...(hostKey ? { hostKey } : {}),
         })
       } catch (error) {
         // An expired or altered request is marked so; it can never be used.
@@ -208,13 +221,24 @@ export async function runHeadlessAgent(
       }, { ...agentOptions, delegationBudget: createDelegationBudget('direct') })
       // The model goes on from the recorded result, on the owner's original request.
       const { isSyntheticUserMessage } = await import('../core/compaction/language.js')
-      const originalRequest = [...current.messages].reverse().find((m) => m.role === 'user' && !isSyntheticUserMessage(m))?.content ?? ''
+      const originalRequest = requestMessageOf(current, record)
+        ?? [...current.messages].reverse().find((m) => m.role === 'user' && !isSyntheticUserMessage(m))?.content
+        ?? ''
       return runAgent(current, originalRequest, {
         ...agentOptions,
         approvals: { ...approvalSettings, resumed: { action: record.action, ok: opts.answer.decision === 'approve' && answered.ok } },
         appendUserMessage: false,
         delegationBudget: createDelegationBudget('direct'),
       })
+    }
+
+    // A new message in this conversation: requests still waiting from an
+    // earlier turn are stale (the owner moved on). They expire here, and the
+    // host is told, so a late answer can never run an old action.
+    const superseded = supersedePendingApprovals(current)
+    if (superseded.length) {
+      await sessionStore.save(current)
+      for (const record of superseded) onInfo(`${APPROVAL_RESULT_PREFIX} ${JSON.stringify({ id: record.id, decision: 'expired', reason: 'superseded' })}`)
     }
 
     const plan = await planHeadlessWorkflow({

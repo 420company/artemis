@@ -661,14 +661,11 @@ async function runQueryCommand(options: {
   sessionId?: string
   imagePaths?: string[]
   intent?: string
-  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string }
+  approvalAnswer?: { id: string; decision: 'approve' | 'deny'; reason?: string; expectDigest?: string; signature?: string }
 }): Promise<void> {
   const { cwd, locale, prompt, mode, model } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
-  // The host's per-run approval secret leaves the environment before any tool,
-  // shell or MCP server starts (security/approvals.ts).
   const approvals = await import('../security/approvals.js')
-  const hostSecret = approvals.takeHostApprovalSecret()
   const answer = mode === 'execute' ? options.approvalAnswer : undefined
   if (answer && approvals.answeringFromAgentTool()) {
     // The agent's own shell never answers an approval request.
@@ -704,7 +701,7 @@ async function runQueryCommand(options: {
       // Headless: an action that needs the owner's approval stops the run
       // (ARTEMIS_APPROVALS=off refuses it instead, as before).
       ...(mode === 'execute'
-        ? { approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off', ...(hostSecret ? { hostSecret } : {}) } }
+        ? { approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' } }
         : {}),
       ...(answer ? { answer } : {}),
     })

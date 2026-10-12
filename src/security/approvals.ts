@@ -12,11 +12,15 @@
  *  - interactive (CLI, chat bridges): the runtime's confirmation callback
  *    asks right away and the action runs only on a yes;
  *  - headless with suspension (`artemis execute`): the action is NOT run. A
- *    pending approval is stored in the session (the exact action, bound by
- *    an HMAC), `[approval-request] {...}` is printed for the host, and the
- *    run ends with APPROVAL_REQUIRED_EXIT_CODE. The host later runs
- *    `artemis execute --session <id> --approve <requestId>` (or `--deny`),
- *    which executes exactly the stored action once, then lets the model go on;
+ *    pending approval is stored in the session (the exact action and its
+ *    digest), `[approval-request] {...}` is printed for the host, and the
+ *    run ends with APPROVAL_REQUIRED_EXIT_CODE. The host keeps the digest and
+ *    later runs `artemis execute --session <id> --approve <requestId>
+ *    --signature <sig>` (or `--deny`): the answer is signed with the host's
+ *    Ed25519 key over the request id, session, digest, decision and expiry;
+ *    the engine only holds the public key (ARTEMIS_APPROVAL_PUBKEY), so the
+ *    agent, which runs as the engine's user, cannot produce an answer. The
+ *    stored action then runs exactly once and the model goes on;
  *  - anything else: the action is refused, as before this module existed.
  *
  * Tools that need an approval for something only they know about (a
@@ -26,14 +30,15 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature, type KeyObject } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import type { UiLocale } from '../cli/locale.js'
 import type { AgentAction, SessionRecord } from '../core/types.js'
 import type { ToolError } from '../tools/types.js'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
+import { isSyntheticUserMessage } from '../core/compaction/language.js'
+import { analyzeDeletes, isInsideWorkspace, isTemporaryPath } from './shellRisk.js'
 
 // ── Kinds, modes, policy ────────────────────────────────────────────────────
 
@@ -44,6 +49,7 @@ export const APPROVAL_KINDS = [
   'outbound_send',
   'payment',
   'publish',
+  'external_action',
 ] as const
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number]
 export type ApprovalMode = 'ask' | 'allow' | 'deny'
@@ -56,6 +62,7 @@ export const CONFIGURABLE_APPROVAL_KINDS: readonly ApprovalKind[] = [
   'outbound_send',
   'payment',
   'publish',
+  'external_action',
 ]
 
 export const DEFAULT_APPROVAL_MODES: Readonly<Record<ApprovalKind, ApprovalMode>> = {
@@ -65,6 +72,8 @@ export const DEFAULT_APPROVAL_MODES: Readonly<Record<ApprovalKind, ApprovalMode>
   outbound_send: 'ask',
   payment: 'ask',
   publish: 'ask',
+  // An external service's tool that does not say it only reads.
+  external_action: 'ask',
 }
 
 /** A pending approval expires after this long unless the policy says otherwise. */
@@ -83,15 +92,18 @@ export const APPROVAL_ID_PATTERN = /^apr_[0-9a-f]{20}$/
 
 /** Policy file name, looked up in the global data dir, then the workspace data dir (which wins). */
 export const APPROVAL_POLICY_FILE = 'approvals.json'
-/** HMAC key that binds stored actions to their approval records. */
+/**
+ * HMAC key that binds stored actions to their approval records. It lives
+ * with the engine, so it only catches accidental edits; the boundary is the
+ * host's signature (below) over the digest the host kept.
+ */
 export const APPROVAL_KEY_FILE = 'approvals.key'
 /**
- * Host binding: a host (the web server) may pass a per-run secret in this
- * variable. It is removed from the environment before any tool runs, and a
- * request created in that run can only be answered by a process that
- * presents the same secret.
+ * The host's Ed25519 public key (base64 SPKI DER). Requests created in a run
+ * that had it are bound to it: only an answer signed with the matching
+ * private key (which only the host holds) is accepted.
  */
-export const APPROVAL_HOST_SECRET_ENV = 'ARTEMIS_APPROVAL_SECRET'
+export const APPROVAL_PUBKEY_ENV = 'ARTEMIS_APPROVAL_PUBKEY'
 /** Set in the environment of every shell command the agent runs. */
 export const AGENT_TOOL_ENV = 'ARTEMIS_AGENT_TOOL'
 /** `off` turns headless suspension off (ask-mode actions are refused instead). */
@@ -106,6 +118,16 @@ export const APPROVAL_POLICY_ENV = 'ARTEMIS_APPROVAL_POLICY'
 export interface ApprovalPolicy {
   modes: Record<ApprovalKind, ApprovalMode>
   ttlMs: number
+  /**
+   * Per-service / per-tool modes for external (MCP) tools, keyed
+   * `server/tool` or `server/*`; they win over the kind's mode.
+   */
+  tools: Record<string, ApprovalMode>
+  /**
+   * Per-tool modes from the policy files. They can only make a tool
+   * stricter than what the host decided, never looser.
+   */
+  floors?: Record<string, ApprovalMode>
 }
 
 function isMode(value: unknown): value is ApprovalMode {
@@ -116,7 +138,9 @@ export function isApprovalKind(value: unknown): value is ApprovalKind {
   return typeof value === 'string' && (APPROVAL_KINDS as readonly string[]).includes(value)
 }
 
-function readPolicyFile(file: string): Partial<{ modes: Record<string, unknown>; ttlMinutes: unknown }> | undefined {
+type PolicyData = Partial<{ modes: Record<string, unknown>; tools: Record<string, unknown>; ttlMinutes: unknown }>
+
+function readPolicyFile(file: string): PolicyData | undefined {
   try {
     return parsePolicy(readFileSync(file, 'utf8'))
   } catch {
@@ -124,37 +148,75 @@ function readPolicyFile(file: string): Partial<{ modes: Record<string, unknown>;
   }
 }
 
-function parsePolicy(text: string): Partial<{ modes: Record<string, unknown>; ttlMinutes: unknown }> | undefined {
+function parsePolicy(text: string): PolicyData | undefined {
   try {
     const raw = JSON.parse(text) as unknown
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, never>) : undefined
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as PolicyData) : undefined
   } catch {
     return undefined
   }
 }
 
+const STRICTNESS: Record<ApprovalMode, number> = { allow: 0, ask: 1, deny: 2 }
+/** The stricter of two modes. */
+function tighter(a: ApprovalMode, b: ApprovalMode): ApprovalMode {
+  return STRICTNESS[b] > STRICTNESS[a] ? b : a
+}
+
+const TOOL_KEY = /^[A-Za-z0-9_.-]{1,64}\/(?:\*|[A-Za-z0-9_.:-]{1,128})$/
+
 /**
- * The policy for a workspace: defaults, then `<home>/approvals.json`, then
- * `<workspace data root>/approvals.json`, then the host's copy in
- * ARTEMIS_APPROVAL_POLICY (which wins). Unknown kinds and modes are
- * ignored; `confirmation` always asks.
+ * The policy for a workspace.
+ *
+ * The base is the host's copy (ARTEMIS_APPROVAL_POLICY: the owner's choices
+ * as the web server keeps them, where the agent cannot write), or the
+ * defaults (everything asks). The policy files (`<home>/approvals.json`,
+ * `<workspace data root>/approvals.json`) can only TIGHTEN it: ask → deny,
+ * allow → ask, a shorter expiry; never the other way, so a file the agent
+ * can reach cannot relax anything. `confirmation` always asks.
  */
 export function loadApprovalPolicy(cwd: string, env: NodeJS.ProcessEnv = process.env): ApprovalPolicy {
   const modes: Record<ApprovalKind, ApprovalMode> = { ...DEFAULT_APPROVAL_MODES }
+  const tools: Record<string, ApprovalMode> = {}
+  const floors: Record<string, ApprovalMode> = {}
   let ttlMs = DEFAULT_APPROVAL_TTL_MS
-  const files = [path.join(resolveArtemisHomeDir(), APPROVAL_POLICY_FILE), path.join(resolveDataRootDir(cwd), APPROVAL_POLICY_FILE)]
-  const sources = [...new Set(files)].map((file) => readPolicyFile(file))
-  if (env[APPROVAL_POLICY_ENV]?.trim()) sources.push(parsePolicy(env[APPROVAL_POLICY_ENV]))
-  for (const data of sources) {
-    if (!data) continue
-    const given = data.modes && typeof data.modes === 'object' ? data.modes : {}
-    for (const [kind, mode] of Object.entries(given)) {
+  const ttlOf = (data: PolicyData): number | undefined => {
+    const minutes = Number(data.ttlMinutes)
+    return Number.isFinite(minutes) && minutes > 0 ? Math.min(MAX_TTL_MS, Math.max(MIN_TTL_MS, minutes * 60_000)) : undefined
+  }
+  const host = env[APPROVAL_POLICY_ENV]?.trim() ? parsePolicy(env[APPROVAL_POLICY_ENV]) : undefined
+  if (host) {
+    for (const [kind, mode] of Object.entries(host.modes && typeof host.modes === 'object' ? host.modes : {})) {
       if (isApprovalKind(kind) && kind !== 'confirmation' && isMode(mode)) modes[kind] = mode
     }
-    const minutes = Number(data.ttlMinutes)
-    if (Number.isFinite(minutes) && minutes > 0) ttlMs = Math.min(MAX_TTL_MS, Math.max(MIN_TTL_MS, minutes * 60_000))
+    for (const [key, mode] of Object.entries(host.tools && typeof host.tools === 'object' ? host.tools : {})) {
+      if (TOOL_KEY.test(key) && isMode(mode)) tools[key] = mode
+    }
+    ttlMs = ttlOf(host) ?? ttlMs
   }
-  return { modes, ttlMs }
+  const files = [...new Set([path.join(resolveArtemisHomeDir(), APPROVAL_POLICY_FILE), path.join(resolveDataRootDir(cwd), APPROVAL_POLICY_FILE)])]
+  for (const data of files.map((file) => readPolicyFile(file))) {
+    if (!data) continue
+    for (const [kind, mode] of Object.entries(data.modes && typeof data.modes === 'object' ? data.modes : {})) {
+      if (isApprovalKind(kind) && kind !== 'confirmation' && isMode(mode)) modes[kind] = tighter(modes[kind], mode)
+    }
+    for (const [key, mode] of Object.entries(data.tools && typeof data.tools === 'object' ? data.tools : {})) {
+      if (TOOL_KEY.test(key) && isMode(mode) && mode !== 'allow') floors[key] = tighter(floors[key] ?? 'allow', mode)
+    }
+    const fileTtl = ttlOf(data)
+    if (fileTtl !== undefined) ttlMs = Math.min(ttlMs, fileTtl)
+  }
+  return { modes, ttlMs, tools, floors }
+}
+
+/** The mode for an external tool: its own entry, then its service's, then the kind's. */
+export function modeFor(policy: ApprovalPolicy, kind: ApprovalKind, toolKey?: string): ApprovalMode {
+  if (kind === 'confirmation') return 'ask'
+  if (!toolKey) return policy.modes[kind]
+  const service = `${toolKey.split('/')[0]}/*`
+  const base = policy.tools[toolKey] ?? policy.tools[service] ?? policy.modes[kind]
+  const floor = tighter(policy.floors?.[toolKey] ?? 'allow', policy.floors?.[service] ?? 'allow')
+  return tighter(base, floor)
 }
 
 // ── Records ─────────────────────────────────────────────────────────────────
@@ -165,21 +227,27 @@ export interface ApprovalRequest {
   kind: ApprovalKind
   title: string
   summary: string
-  /** Plain facts under 详情; stable keys (command, reason, paths, to, content, file, amount, ...). */
+  /**
+   * The facts the owner approves, with stable keys (command, to, cc, bcc,
+   * attachments, amount, currency, quantity, args, paths, ...). Never cut
+   * silently: a value over MAX_DETAIL_CHARS is cut and `truncated` is set.
+   */
   details: Record<string, string>
+  /** A detail was too long to send in full (the host shows that, and approves on the full card only). */
+  truncated?: boolean
   risk: ApprovalRisk
   createdAt: string
   expiresAt: string
   sessionId: string
   locale: UiLocale
   /**
-   * sha256 of the exact stored action (and of a tool's payload). The host
-   * keeps it in its own store and sends it back with the answer
-   * (`--expect-digest`), so an action changed in the session files is refused
-   * whatever the session says.
+   * sha256 of the exact stored action. The host keeps it and signs it into
+   * its answer, so an action changed in the session files is refused.
    */
   actionDigest: string
   payloadDigest?: string
+  /** `server/tool` of an external tool, for per-tool settings. */
+  toolKey?: string
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'invalid'
@@ -189,12 +257,16 @@ export interface PendingApproval extends ApprovalRequest {
   status: ApprovalStatus
   /** The exact action to run on approval. */
   action: AgentAction
-  /** sha256 of the host secret, when the run had one. */
+  /** sha256 of the host's public key, when the run had one: only its signature answers. */
   hostBinding?: string
-  /** HMAC over everything above that matters; any change makes the record unusable. */
+  /** The owner's message the request came from (the run continues on it). */
+  requestMessageId?: string
+  /** HMAC over what matters (see APPROVAL_KEY_FILE). */
   mac: string
   decidedAt?: string
   reason?: string
+  /** Why it expired without an answer (`superseded`: the owner wrote again). */
+  endedBy?: 'expired' | 'superseded'
 }
 
 /** What a resume hands to the run: the one action it may let through, once. */
@@ -221,7 +293,7 @@ export function digestOf(value: unknown): string {
 
 let cachedKey: { file: string; key: Buffer } | undefined
 
-/** The per-install HMAC key (created on first use, mode 0600, never shown to the model). */
+/** The per-install HMAC key (created on first use, mode 0600). */
 export function approvalKey(): Buffer {
   const file = path.join(resolveArtemisHomeDir(), APPROVAL_KEY_FILE)
   if (cachedKey?.file === file) return cachedKey.key
@@ -247,9 +319,9 @@ export function approvalKey(): Buffer {
   return key
 }
 
-function macOf(record: Omit<PendingApproval, 'mac' | 'status' | 'decidedAt' | 'reason'>): string {
+function macOf(record: Omit<PendingApproval, 'mac' | 'status' | 'decidedAt' | 'reason' | 'endedBy'>): string {
   const bound = {
-    v: 1,
+    v: 2,
     id: record.id,
     sessionId: record.sessionId,
     kind: record.kind,
@@ -276,6 +348,7 @@ export function publicApproval(record: PendingApproval): ApprovalRequest {
     title: record.title,
     summary: record.summary,
     details: { ...record.details },
+    ...(record.truncated ? { truncated: true } : {}),
     risk: record.risk,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
@@ -283,6 +356,7 @@ export function publicApproval(record: PendingApproval): ApprovalRequest {
     locale: record.locale,
     actionDigest: record.actionDigest,
     ...(record.payloadDigest ? { payloadDigest: record.payloadDigest } : {}),
+    ...(record.toolKey ? { toolKey: record.toolKey } : {}),
   }
 }
 
@@ -290,31 +364,32 @@ export function formatApprovalRequestLine(record: PendingApproval): string {
   return `${APPROVAL_REQUEST_PREFIX} ${JSON.stringify(publicApproval(record))}`
 }
 
-// ── Host secret ─────────────────────────────────────────────────────────────
+// ── The host's key and its signed answers ───────────────────────────────────
 
-let hostSecret: { value: string | undefined } | undefined
+/** The host's public key from the environment, or undefined. */
+export function hostApprovalKey(env: NodeJS.ProcessEnv = process.env): { key: KeyObject; id: string } | undefined {
+  const raw = env[APPROVAL_PUBKEY_ENV]?.trim()
+  if (!raw) return undefined
+  try {
+    const der = Buffer.from(raw, 'base64')
+    const key = createPublicKey({ key: der, format: 'der', type: 'spki' })
+    if (key.asymmetricKeyType !== 'ed25519') return undefined
+    return { key, id: createHash('sha256').update(der).digest('hex') }
+  } catch {
+    return undefined
+  }
+}
 
 /**
- * Reads the host's per-run secret once and removes it from this process's
- * environment, so no tool, shell or MCP server the agent starts inherits it.
+ * The bytes a host signs to answer a request (Ed25519, no prehash):
+ * canonical JSON with sorted keys, e.g.
+ * {"actionDigest":"…","approvalId":"apr_…","decision":"approve","expiresAt":"…","sessionId":"…","v":1}
  */
-export function takeHostApprovalSecret(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  if (!hostSecret) {
-    const value = env[APPROVAL_HOST_SECRET_ENV]?.trim()
-    hostSecret = { value: value && value.length >= 16 ? value : undefined }
-  }
-  delete env[APPROVAL_HOST_SECRET_ENV]
-  return hostSecret.value
-}
-
-/** Tests only. */
-export function resetHostApprovalSecretForTests(): void {
-  hostSecret = undefined
-  cachedKey = undefined
-}
-
-export function hostBindingOf(secret: string | undefined): string | undefined {
-  return secret ? createHash('sha256').update(`artemis-approval-host:${secret}`).digest('hex') : undefined
+export function approvalAnswerPayload(answer: { approvalId: string; sessionId: string; actionDigest: string; decision: 'approve' | 'deny'; expiresAt: string }): Buffer {
+  return Buffer.from(
+    canonicalJson({ v: 1, approvalId: answer.approvalId, sessionId: answer.sessionId, actionDigest: answer.actionDigest, decision: answer.decision, expiresAt: answer.expiresAt }),
+    'utf8',
+  )
 }
 
 // ── User-facing text ────────────────────────────────────────────────────────
@@ -328,9 +403,15 @@ function clip(text: string, max: number): string {
 
 const PLATFORM_NAMES: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', wechat: '微信', all: '' }
 
-/** "send_email" → "send email": tool code names never reach the owner as identifiers. */
-function plainWords(name: string): string {
-  return name.replace(/^mcp__[^_]+__/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
+/** Words of a tool name: `chat_postMessage` → chat post message; `eth_sendTransaction` → eth send transaction. */
+export function toolWords(name: string): string[] {
+  return name
+    .replace(/^mcp__[^_]+__/, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .map((w) => w.toLowerCase())
+    .filter(Boolean)
 }
 
 /** What the model or a tool needs approved, before it has an id. */
@@ -338,6 +419,9 @@ export interface ApprovalNeed {
   kind: ApprovalKind
   risk: ApprovalRisk
   details: Record<string, string>
+  truncated?: boolean
+  /** `server/tool` of an external tool (per-tool settings). */
+  toolKey?: string
   /** Overrides the generated title / summary (a tool's own wording, or the model's question). */
   title?: string
   summary?: string
@@ -345,7 +429,8 @@ export interface ApprovalNeed {
 
 export function describeApprovalNeed(need: ApprovalNeed, locale: UiLocale): { title: string; summary: string } {
   const d = need.details
-  const generated = (() => {
+  const money = d.amount ? `${d.amount}${d.currency ? ` ${d.currency}` : ''}${d.quantity ? ` × ${d.quantity}` : ''}` : ''
+  const generated = ((): { title: string; summary: string } => {
     switch (need.kind) {
       case 'confirmation':
         return { title: t(locale, '需要你确认', 'Your confirmation is needed'), summary: d.question ?? '' }
@@ -360,12 +445,14 @@ export function describeApprovalNeed(need: ApprovalNeed, locale: UiLocale): { ti
         }
       case 'delete_outside_workspace':
         return {
-          title: t(locale, '删除工作区以外的文件', 'Delete files outside the workspace'),
-          summary: t(locale, `将删除：${clip(d.paths ?? '', 160)}。删除后无法恢复。`, `Will delete: ${clip(d.paths ?? '', 160)}. This cannot be undone.`),
+          title: t(locale, '删除或改写工作区以外的文件', 'Delete or overwrite files outside the workspace'),
+          summary: d.paths
+            ? t(locale, `涉及：${clip(d.paths, 160)}。无法恢复。`, `Affects: ${clip(d.paths, 160)}. This cannot be undone.`)
+            : t(locale, '无法事先确定会删除哪些文件，只有你同意后才会运行。', 'Which files it removes cannot be known beforehand; it runs only if you approve.'),
         }
       case 'outbound_send':
         return {
-          title: d.to ? t(locale, `代你发送到 ${d.to}`, `Send to ${d.to} on your behalf`) : t(locale, '代你对外发送消息', 'Send a message on your behalf'),
+          title: d.to ? t(locale, `代你发送到 ${clip(d.to, 60)}`, `Send to ${clip(d.to, 60)} on your behalf`) : t(locale, '代你对外发送消息', 'Send a message on your behalf'),
           summary: d.content
             ? t(locale, `内容：${clip(d.content, 160)}`, `Content: ${clip(d.content, 160)}`)
             : d.file
@@ -375,8 +462,8 @@ export function describeApprovalNeed(need: ApprovalNeed, locale: UiLocale): { ti
       case 'payment':
         return {
           title: t(locale, '付款或购买', 'Make a payment or purchase'),
-          summary: d.amount
-            ? t(locale, `金额：${d.amount}${d.merchant ? `，收款方：${d.merchant}` : ''}`, `Amount: ${d.amount}${d.merchant ? `, to ${d.merchant}` : ''}`)
+          summary: money
+            ? t(locale, `金额：${money}${d.merchant ? `，收款方：${d.merchant}` : ''}`, `Amount: ${money}${d.merchant ? `, to ${d.merchant}` : ''}`)
             : t(locale, '这一步会付款，只有你同意后才会进行。', 'This step makes a payment and runs only if you approve.'),
         }
       case 'publish':
@@ -385,6 +472,15 @@ export function describeApprovalNeed(need: ApprovalNeed, locale: UiLocale): { ti
           summary: d.target
             ? t(locale, `发布到：${d.target}`, `Publish to: ${d.target}`)
             : t(locale, '发布后其他人可以看到。', 'Once published, others can see it.'),
+        }
+      case 'external_action':
+        return {
+          title: t(locale, `在外部服务执行操作：${clip(d.action ?? '', 40)}`, `Act in an outside service: ${clip(d.action ?? '', 40)}`),
+          summary: t(
+            locale,
+            `服务「${d.service ?? ''}」没有说明这一步只读取数据，只有你同意后才会进行。`,
+            `The service "${d.service ?? ''}" does not say this step only reads; it runs only if you approve.`,
+          ),
         }
     }
   })()
@@ -417,142 +513,102 @@ export function registerApprovalRule(rule: ApprovalRule): () => void {
   }
 }
 
-const OUTBOUND_TOOL = /(?:^|[_\-.])(?:send|post|reply|tweet|toot|email|mail|sms|dm|message|notify|invite|forward)(?:$|[_\-.])/i
-const PAYMENT_TOOL = /(?:^|[_\-.])(?:pay|payment|purchase|checkout|buy|order|charge|transfer|withdraw|swap|trade|tip|donate|subscribe)(?:$|[_\-.])/i
-const PUBLISH_TOOL = /(?:^|[_\-.])(?:publish|share|deploy|release|upload|unpublish)(?:$|[_\-.])/i
-const READ_ONLY_TOOL = /(?:^|[_\-.])(?:get|list|search|read|fetch|find|query|lookup|status|preview|draft|quote|estimate|history)(?:$|[_\-.])/i
+/**
+ * External tool name words. Read-only words (get, list, search, draft…)
+ * never cancel these: `gmail_send_draft`, `search_and_buy` still ask.
+ */
+const PAYMENT_WORDS = new Set(['pay', 'payment', 'payments', 'purchase', 'checkout', 'buy', 'order', 'charge', 'transfer', 'withdraw', 'swap', 'trade', 'tip', 'donate', 'subscribe', 'invoice', 'refund', 'transaction', 'transactions', 'tx', 'sign', 'broadcast', 'mint', 'stake', 'bid'])
+const OUTBOUND_WORDS = new Set(['send', 'post', 'reply', 'tweet', 'toot', 'email', 'mail', 'sms', 'dm', 'message', 'notify', 'invite', 'forward', 'submit', 'comment', 'respond'])
+const PUBLISH_WORDS = new Set(['publish', 'share', 'deploy', 'release', 'upload', 'unpublish'])
+const DESTRUCTIVE_WORDS = new Set(['delete', 'remove', 'drop', 'destroy', 'purge', 'truncate', 'wipe', 'erase', 'revoke', 'execute', 'exec', 'run', 'eval', 'write', 'update', 'overwrite', 'kill', 'terminate', 'reset', 'move', 'rename'])
 
-const DELETE_COMMANDS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'trash', 'trash-put', 'srm'])
-const WRAPPERS = new Set(['sudo', 'doas', 'command', 'builtin', 'nohup', 'nice', 'time', 'exec'])
+/** Longest a single detail travels in full (it is cut beyond, and the request says so). */
+export const MAX_DETAIL_CHARS = 20_000
 
-/** Splits a shell command into simple-command word lists (quotes respected; no expansion). */
-function shellSegments(command: string): string[][] {
-  const segments: string[][] = []
-  let words: string[] = []
-  let word = ''
-  let quote: '"' | "'" | undefined
-  let hasWord = false
-  const endWord = () => {
-    if (hasWord) words.push(word)
-    word = ''
-    hasWord = false
+function valueText(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value === 'string') return value.trim() || undefined
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    const parts = value.map((v) => (typeof v === 'string' ? v : typeof v === 'object' && v && 'name' in v ? String((v as { name: unknown }).name) : canonicalJson(v)))
+    return parts.length ? parts.join(', ') : undefined
   }
-  const endSegment = () => {
-    endWord()
-    if (words.length) segments.push(words)
-    words = []
-  }
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!
-    if (quote) {
-      if (ch === quote) quote = undefined
-      else if (ch === '\\' && quote === '"' && i + 1 < command.length) word += command[++i]
-      else word += ch
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      hasWord = true
-      continue
-    }
-    if (ch === '\\' && i + 1 < command.length) {
-      word += command[++i]
-      hasWord = true
-      continue
-    }
-    if (ch === ';' || ch === '\n' || ch === '|' || ch === '&' || ch === '(' || ch === ')' || ch === '`') {
-      endSegment()
-      continue
-    }
-    if (ch === ' ' || ch === '\t') {
-      endWord()
-      continue
-    }
-    word += ch
-    hasWord = true
-  }
-  endSegment()
-  return segments
+  return canonicalJson(value)
 }
 
-function expandHome(word: string): string | undefined {
-  const home = homedir()
-  const expanded = word.replace(/^~(?=\/|$)/, home).replace(/\$\{HOME\}|\$HOME\b/g, home)
-  // Any other variable or a command substitution: the real target is unknown here.
-  if (/\$/.test(expanded)) return undefined
-  return expanded
+function argText(args: Record<string, unknown> | undefined, ...names: string[]): string | undefined {
+  for (const name of names) {
+    const text = valueText(args?.[name])
+    if (text) return text
+  }
+  return undefined
 }
 
-function isTemporaryPath(target: string): boolean {
-  const roots = [...new Set([path.resolve(tmpdir()), '/tmp', '/var/tmp'])]
-  return roots.some((root) => target === root || target.startsWith(`${root}${path.sep}`)) && !roots.includes(target)
-}
-
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(target))
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
-}
-
-/** Targets of `rm`-like commands (and `find … -delete`) that resolve outside the workspace. */
-export function deletesOutsideWorkspace(command: string, cwd: string): string[] {
-  const outside: string[] = []
-  for (const segment of shellSegments(command)) {
-    let i = 0
-    while (i < segment.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[i]!) || WRAPPERS.has(segment[i]!))) i++
-    const name = path.basename(segment[i] ?? '')
-    const args = segment.slice(i + 1)
-    let targets: string[] = []
-    if (DELETE_COMMANDS.has(name)) {
-      let afterDashes = false
-      for (const arg of args) {
-        if (!afterDashes && arg === '--') {
-          afterDashes = true
-          continue
-        }
-        if (!afterDashes && arg.startsWith('-')) continue
-        targets.push(arg)
-      }
-    } else if (name === 'find' && args.some((a) => a === '-delete' || a === '-exec' || a === '-execdir')) {
-      const deletes = args.includes('-delete') || args.some((a, k) => (a === '-exec' || a === '-execdir') && DELETE_COMMANDS.has(path.basename(args[k + 1] ?? '')))
-      if (deletes) {
-        for (const arg of args) {
-          if (arg.startsWith('-') || arg === '!' || arg === '(') break
-          targets.push(arg)
-        }
-        if (targets.length === 0) targets = ['.']
-      }
-    }
-    for (const raw of targets) {
-      const expanded = expandHome(raw)
-      if (expanded === undefined) continue
-      const resolved = path.resolve(cwd, expanded.replace(/\*.*$/, '') || '.')
-      if (isInside(cwd, resolved) && !/(^|\/)\.\.(\/|$)/.test(path.relative(cwd, resolved))) continue
-      if (isTemporaryPath(resolved)) continue
-      outside.push(expanded)
+/** Details without blanks; a value over MAX_DETAIL_CHARS is cut and `truncated` set (never silently). */
+function limitDetails(details: Record<string, string | undefined>): { details: Record<string, string>; truncated: boolean } {
+  const out: Record<string, string> = {}
+  let truncated = false
+  for (const [key, value] of Object.entries(details)) {
+    if (value === undefined || value === '') continue
+    if (value.length > MAX_DETAIL_CHARS) {
+      truncated = true
+      out[key] = value.slice(0, MAX_DETAIL_CHARS)
+    } else {
+      out[key] = value
     }
   }
-  return [...new Set(outside)]
+  return { details: out, truncated }
+}
+
+function need(kind: ApprovalKind, risk: ApprovalRisk, details: Record<string, string | undefined>, extra: Partial<ApprovalNeed> = {}): ApprovalNeed {
+  const limited = limitDetails(details)
+  return { kind, risk, details: limited.details, ...(limited.truncated ? { truncated: true } : {}), ...extra }
+}
+
+/** An external (MCP) tool call: classified by what its name says it does, and asked unless it is known to only read. */
+export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_tool' }>): ApprovalNeed | null {
+  const words = toolWords(action.toolName)
+  const has = (set: Set<string>) => words.some((w) => set.has(w))
+  const args = action.args ?? {}
+  const toolKey = `${action.serverId}/${action.toolName}`
+  const base = {
+    service: action.serverId,
+    action: words.join(' '),
+    // Everything the call carries, exactly (sorted keys): what the owner approves.
+    args: canonicalJson(args),
+  }
+  if (has(PAYMENT_WORDS)) {
+    return need('payment', 'high', {
+      ...base,
+      amount: argText(args, 'amount', 'value', 'total', 'price', 'amountWei', 'wei'),
+      currency: argText(args, 'currency', 'token', 'asset', 'symbol', 'coin'),
+      quantity: argText(args, 'quantity', 'qty', 'count'),
+      merchant: argText(args, 'merchant', 'payee', 'recipient', 'to', 'seller'),
+    }, { toolKey })
+  }
+  if (has(OUTBOUND_WORDS)) {
+    return need('outbound_send', 'medium', {
+      ...base,
+      to: argText(args, 'to', 'recipient', 'recipients', 'chat', 'chatId', 'chat_id', 'channel', 'email', 'phone', 'user', 'url'),
+      cc: argText(args, 'cc'),
+      bcc: argText(args, 'bcc'),
+      attachments: argText(args, 'attachments', 'attachment', 'files', 'file'),
+      subject: argText(args, 'subject', 'title'),
+      content: argText(args, 'text', 'body', 'message', 'content', 'html'),
+    }, { toolKey })
+  }
+  if (has(PUBLISH_WORDS)) {
+    return need('publish', 'medium', { ...base, target: argText(args, 'url', 'target', 'site', 'channel', 'name', 'title') }, { toolKey })
+  }
+  if (has(DESTRUCTIVE_WORDS)) return need('external_action', 'high', base, { toolKey })
+  // Known to only read (the server's own annotation, never the model's word).
+  if (action.readOnly === true) return null
+  return need('external_action', 'medium', base, { toolKey })
 }
 
 /** True when a shell command tries to answer an approval itself (`artemis … --approve|--deny`). */
 export function commandAnswersApproval(command: string): boolean {
   return /\bartemis\b[\s\S]{0,400}--(?:approve|deny)\b|--(?:approve|deny)\b[\s\S]{0,200}\bapr_[0-9a-f]/i.test(command)
-}
-
-function argText(args: Record<string, unknown> | undefined, ...names: string[]): string | undefined {
-  for (const name of names) {
-    const value = args?.[name]
-    if (typeof value === 'string' && value.trim()) return value.trim()
-    if (Array.isArray(value) && value.length && value.every((v) => typeof v === 'string')) return value.join(', ')
-    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
-  }
-  return undefined
-}
-
-function compact(details: Record<string, string | undefined>): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [key, value] of Object.entries(details)) if (value !== undefined && value !== '') out[key] = clip(value, 1_000)
-  return out
 }
 
 /**
@@ -561,28 +617,24 @@ function compact(details: Record<string, string | undefined>): Record<string, st
  */
 export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext): ApprovalNeed | null {
   for (const rule of extraRules) {
-    const need = rule(action, ctx)
-    if (need) return need
+    const found = rule(action, ctx)
+    if (found) return found
   }
   switch (action.type) {
     case 'request_user_confirmation':
-      return {
-        kind: 'confirmation',
-        risk: 'medium',
-        details: compact({ question: action.question, screenshot: action.screenshotPath }),
-      }
+      return need('confirmation', 'medium', { question: action.question, screenshot: action.screenshotPath })
     case 'run_command': {
       const dangerous = ctx.dangerousCommand?.(action.command) ?? null
-      const deletes = deletesOutsideWorkspace(action.command, ctx.cwd)
+      const deletes = analyzeDeletes(action.command, ctx.cwd)
       if (dangerous) {
-        return {
-          kind: 'shell_high_risk',
-          risk: 'high',
-          details: compact({ command: action.command, reason: dangerous.reason, reasonZh: dangerous.reasonZh, paths: deletes.join(', ') || undefined }),
-        }
+        return need('shell_high_risk', 'high', { command: action.command, reason: dangerous.reason, reasonZh: dangerous.reasonZh, paths: deletes.outside.join(', ') || undefined })
       }
-      if (deletes.length) {
-        return { kind: 'delete_outside_workspace', risk: 'high', details: compact({ command: action.command, paths: deletes.join(', ') }) }
+      if (deletes.outside.length || deletes.unverifiable) {
+        return need('delete_outside_workspace', 'high', {
+          command: action.command,
+          paths: deletes.outside.join(', ') || undefined,
+          ...(deletes.unverifiable ? { unverifiable: deletes.unverifiable } : {}),
+        })
       }
       return null
     }
@@ -592,61 +644,29 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
       const own = ctx.ownChat
       if (own?.platform && own.platform === action.platform && (!action.targetId || action.targetId === own.targetId)) return null
       const file = action.type === 'bridge_send_image' ? action.imagePath : action.videoPath
-      return {
-        kind: 'outbound_send',
-        risk: 'medium',
-        details: compact({
-          to: PLATFORM_NAMES[platform] || undefined,
-          file,
-          content: action.caption,
-          target: action.targetId,
-        }),
-      }
+      return need('outbound_send', 'medium', { to: PLATFORM_NAMES[platform] || undefined, file, content: action.caption, target: action.targetId })
     }
-    case 'mcp_call_tool': {
-      if (action.readOnly === true) return null
-      const tool = action.toolName
-      const words = plainWords(tool)
-      const args = action.args
-      const base = { service: action.serverId, action: words }
-      if (PAYMENT_TOOL.test(tool) && !READ_ONLY_TOOL.test(tool)) {
-        return {
-          kind: 'payment',
-          risk: 'high',
-          details: compact({ ...base, amount: argText(args, 'amount', 'total', 'price', 'value'), merchant: argText(args, 'merchant', 'to', 'recipient', 'payee') }),
-        }
-      }
-      if (OUTBOUND_TOOL.test(tool) && !READ_ONLY_TOOL.test(tool)) {
-        return {
-          kind: 'outbound_send',
-          risk: 'medium',
-          details: compact({
-            ...base,
-            to: argText(args, 'to', 'recipient', 'recipients', 'chat', 'chatId', 'channel', 'email', 'phone', 'user'),
-            subject: argText(args, 'subject', 'title'),
-            content: argText(args, 'text', 'body', 'message', 'content', 'html'),
-          }),
-        }
-      }
-      if (PUBLISH_TOOL.test(tool) && !READ_ONLY_TOOL.test(tool)) {
-        return { kind: 'publish', risk: 'medium', details: compact({ ...base, target: argText(args, 'url', 'target', 'site', 'channel', 'name', 'title') }) }
-      }
-      return null
-    }
+    case 'mcp_call_tool':
+      return classifyMcpCall(action)
     default:
       return null
   }
 }
 
-/** Direct-tool names (interactive brain path) that are not AgentActions: delete_file / delete_directory. */
+/** Direct-tool names (interactive brain path) that are not AgentActions: delete_file / delete_directory / move_file. */
 export function classifyDirectToolNeed(name: string, input: Record<string, unknown>, ctx: ClassifyContext): ApprovalNeed | null {
+  const outside = (raw: unknown): string | undefined => {
+    if (typeof raw !== 'string' || !raw.trim()) return undefined
+    const target = path.resolve(ctx.cwd, raw.replace(/^~(?=\/|$)/, process.env.HOME ?? '~'))
+    return isInsideWorkspace(ctx.cwd, target) || isTemporaryPath(target) ? undefined : target
+  }
   if (name === 'delete_file' || name === 'delete_directory') {
-    const raw = typeof input.path === 'string' ? input.path : ''
-    const expanded = raw ? expandHome(raw) : undefined
-    if (!expanded) return null
-    const resolved = path.resolve(ctx.cwd, expanded)
-    if (isInside(ctx.cwd, resolved) || isTemporaryPath(resolved)) return null
-    return { kind: 'delete_outside_workspace', risk: 'high', details: compact({ paths: resolved }) }
+    const target = outside(input.path)
+    return target ? need('delete_outside_workspace', 'high', { paths: target }) : null
+  }
+  if (name === 'move_file') {
+    const targets = [outside(input.from), outside(input.to)].filter((p): p is string => !!p)
+    return targets.length ? need('delete_outside_workspace', 'high', { paths: targets.join(', ') }) : null
   }
   return classifyApprovalNeed({ type: name, ...input } as AgentAction, ctx)
 }
@@ -668,6 +688,7 @@ export interface ApprovalRuntimeOptions {
     session: SessionRecord
     persist: () => Promise<void>
     emit: (line: string) => void
+    /** sha256 of the host's public key: only its signature can answer. */
     hostBinding?: string
   }
   /** The single action a resume may let through. */
@@ -702,15 +723,15 @@ export class ApprovalRuntime {
 
   /** Classifies and checks an action before it runs. */
   async checkAction(action: AgentAction, cwd = this.options.cwd): Promise<GateResult> {
-    const need = classifyApprovalNeed(action, { ...this.classifyContext, cwd })
-    return need ? this.check(need, action) : { ok: true }
+    const found = classifyApprovalNeed(action, { ...this.classifyContext, cwd })
+    return found ? this.check(found, action) : { ok: true }
   }
 
   /** Applies the policy to one need of one action. */
-  async check(need: ApprovalNeed, action: AgentAction, payloadDigest?: string): Promise<GateResult> {
+  async check(found: ApprovalNeed, action: AgentAction, payloadDigest?: string): Promise<GateResult> {
     const { locale } = this.options
-    const mode = need.kind === 'confirmation' ? 'ask' : this.options.policy.modes[need.kind]
-    const { title } = describeApprovalNeed(need, locale)
+    const mode = modeFor(this.options.policy, found.kind, found.toolKey)
+    const { title } = describeApprovalNeed(found, locale)
     if (mode === 'deny') {
       const message = t(
         locale,
@@ -719,20 +740,20 @@ export class ApprovalRuntime {
       )
       return { ok: false, output: message, error: { code: 'approval_denied_by_policy', message, retryable: false } }
     }
-    if (mode === 'allow') return { ok: true, approvedKind: need.kind }
-    if (this.consumeGrant(need.kind, action, payloadDigest)) return { ok: true, approvedKind: need.kind }
+    if (mode === 'allow') return { ok: true, approvedKind: found.kind }
+    if (this.consumeGrant(found.kind, action, payloadDigest)) return { ok: true, approvedKind: found.kind }
     // The model's own question on an interactive host: the tool asks it itself (with its screenshot).
-    if (need.kind === 'confirmation' && this.options.ask) return { ok: true }
+    if (found.kind === 'confirmation' && this.options.ask) return { ok: true }
     if (this.options.ask) {
-      const { summary } = describeApprovalNeed(need, locale)
-      const lines = [title, summary, ...Object.entries(need.details).filter(([k]) => k !== 'reasonZh' && k !== 'question').map(([k, v]) => `${k}: ${v}`)]
+      const { summary } = describeApprovalNeed(found, locale)
+      const lines = [title, summary, ...Object.entries(found.details).filter(([k]) => k !== 'reasonZh' && k !== 'question').map(([k, v]) => `${k}: ${v}`)]
       const yes = await this.options.ask(lines.filter(Boolean).join('\n'))
-      if (yes) return { ok: true, approvedKind: need.kind }
+      if (yes) return { ok: true, approvedKind: found.kind }
       const message = t(locale, `用户没有同意：${title}。停在这一步，不要重试。`, `The user did not approve: ${title}. Stop before this step; do not retry it.`)
       return { ok: false, output: message, error: { code: 'approval_declined', message, retryable: false } }
     }
     if (this.options.suspend && this.suspendable && !this.pending) {
-      const record = this.createPending(need, action, payloadDigest)
+      const record = this.createPending(found, action, payloadDigest)
       const store = this.options.suspend
       // The latest 50 records are kept (answered ones too: a second answer must find them used).
       store.session.approvals = [...(store.session.approvals ?? []).slice(-49), record]
@@ -763,19 +784,21 @@ export class ApprovalRuntime {
     return true
   }
 
-  private createPending(need: ApprovalNeed, action: AgentAction, payloadDigest?: string): PendingApproval {
+  private createPending(found: ApprovalNeed, action: AgentAction, payloadDigest?: string): PendingApproval {
     const { session, hostBinding } = this.options.suspend!
     const now = (this.options.now ?? (() => new Date()))()
-    const { title, summary } = describeApprovalNeed(need, this.options.locale)
-    const details = { ...need.details }
+    const { title, summary } = describeApprovalNeed(found, this.options.locale)
+    const details = { ...found.details }
     delete details.reasonZh
+    const requestMessageId = [...session.messages].reverse().find((m) => m.role === 'user' && !isSyntheticUserMessage(m))?.id
     const base = {
       id: `apr_${randomBytes(10).toString('hex')}`,
-      kind: need.kind,
+      kind: found.kind,
       title,
       summary,
       details,
-      risk: need.risk,
+      ...(found.truncated ? { truncated: true } : {}),
+      risk: found.risk,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + this.options.policy.ttlMs).toISOString(),
       sessionId: session.rootSessionId ?? session.id,
@@ -783,7 +806,9 @@ export class ApprovalRuntime {
       action,
       actionDigest: digestOf(action),
       ...(payloadDigest ? { payloadDigest } : {}),
+      ...(found.toolKey ? { toolKey: found.toolKey } : {}),
       ...(hostBinding ? { hostBinding } : {}),
+      ...(requestMessageId ? { requestMessageId } : {}),
     }
     return { ...base, status: 'pending', mac: macOf(base) }
   }
@@ -821,25 +846,25 @@ export type RequireApprovalResult = { ok: true } | { ok: false; output: string; 
  *   if (!gate.ok) return { action, ok: false, output: gate.output, error: gate.error }
  *
  * In a headless run this suspends the run; after `--approve` the same tool
- * call runs again and passes here once, for the same payload only.
+ * call runs again and passes here once, for the same payload only. The
+ * payload itself is shown under 详情 (as canonical JSON).
  */
 export async function requireApproval(kind: ApprovalKind, request: RequireApprovalRequest): Promise<RequireApprovalResult> {
   const current = scope.getStore()
-  const need: ApprovalNeed = {
+  const found = need(
     kind,
-    risk: request.risk ?? (kind === 'payment' || kind === 'delete_outside_workspace' || kind === 'shell_high_risk' ? 'high' : 'medium'),
-    details: compact(request.details ?? {}),
-    ...(request.title ? { title: request.title } : {}),
-    ...(request.summary ? { summary: request.summary } : {}),
-  }
+    request.risk ?? (kind === 'payment' || kind === 'delete_outside_workspace' || kind === 'shell_high_risk' ? 'high' : 'medium'),
+    { ...(request.details ?? {}), args: canonicalJson(request.payload ?? null) },
+    { ...(request.title ? { title: request.title } : {}), ...(request.summary ? { summary: request.summary } : {}) },
+  )
   if (!current) {
     // Outside an agent run: only the policy can decide.
-    const mode = kind === 'confirmation' ? 'ask' : loadApprovalPolicy(process.cwd()).modes[kind]
+    const mode = modeFor(loadApprovalPolicy(process.cwd()), kind)
     if (mode === 'allow') return { ok: true }
     const message = `This step needs the owner's approval (${kind}) and none can be asked for here.`
     return { ok: false, output: message, error: { code: mode === 'deny' ? 'approval_denied_by_policy' : 'approval_unavailable', message, retryable: false } }
   }
-  const gate = await current.runtime.check(need, current.action, digestOf(request.payload ?? null))
+  const gate = await current.runtime.check(found, current.action, digestOf(request.payload ?? null))
   return gate.ok ? { ok: true } : { ok: false, output: gate.output, error: gate.error }
 }
 
@@ -856,52 +881,90 @@ export class ApprovalResumeError extends Error {
   }
 }
 
+export interface ApprovalAnswerProof {
+  decision: 'approve' | 'deny'
+  /** The host's Ed25519 signature over approvalAnswerPayload (base64 or base64url). */
+  signature?: string
+  /** The digest the host kept (optional without a signature; the signature covers it). */
+  expectedDigest?: string
+  /** The host's public key (default: ARTEMIS_APPROVAL_PUBKEY). */
+  hostKey?: { key: KeyObject; id: string }
+  now?: Date
+}
+
 /**
  * Checks an answer against the stored request: it exists in this session, is
- * still pending, has not expired, was not changed since it was stored, and
- * (when the run was host-bound) comes from the same host. Throws
+ * still pending, has not expired, was not changed since it was stored, and,
+ * when the run that asked had the host's public key, carries the host's
+ * signature over this request, its digest and this decision. Throws
  * ApprovalResumeError; marks an expired or changed record so it can never be
  * used. Does not mark it decided: the caller does, before it acts.
  */
-export function validateApprovalAnswer(
-  session: SessionRecord,
-  id: string,
-  options: { now?: Date; hostSecret?: string; expectedDigest?: string } = {},
-): PendingApproval {
+export function validateApprovalAnswer(session: SessionRecord, id: string, proof: ApprovalAnswerProof): PendingApproval {
   const record = (session.approvals ?? []).find((r) => r.id === id)
   if (!record || !APPROVAL_ID_PATTERN.test(id)) throw new ApprovalResumeError('approval_not_found', `No approval request ${id} in this conversation.`)
   if (record.status !== 'pending') {
     throw new ApprovalResumeError(record.status === 'expired' ? 'approval_expired' : record.status === 'invalid' ? 'approval_tampered' : 'approval_already_used', `Approval ${id} was already ${record.status}.`)
   }
-  const { mac, status: _status, decidedAt: _decided, reason: _reason, ...rest } = record
-  const expected = macOf(rest)
-  if (!safeEqualHex(mac, expected) || digestOf(record.action) !== record.actionDigest || !isApprovalKind(record.kind)) {
+  const { mac, status: _status, decidedAt: _decided, reason: _reason, endedBy: _ended, ...rest } = record
+  if (!safeEqualHex(mac, macOf(rest)) || digestOf(record.action) !== record.actionDigest || !isApprovalKind(record.kind)) {
     record.status = 'invalid'
     throw new ApprovalResumeError('approval_tampered', `Approval ${id} does not match what was requested; it cannot be used.`)
   }
-  // The host's own copy of the digest: an action edited in the session files
-  // (with a recomputed digest and MAC) still does not match it.
-  if (options.expectedDigest !== undefined && (!/^[0-9a-f]{64}$/.test(options.expectedDigest) || !safeEqualHex(options.expectedDigest, record.actionDigest))) {
+  if (proof.expectedDigest !== undefined && (!/^[0-9a-f]{64}$/.test(proof.expectedDigest) || !safeEqualHex(proof.expectedDigest, record.actionDigest))) {
     record.status = 'invalid'
     throw new ApprovalResumeError('approval_tampered', `Approval ${id} does not match what the host was shown; it cannot be used.`)
   }
-  if (record.hostBinding) {
-    // A host-bound request is answered with the host's own copy of the digest too.
-    if (options.expectedDigest === undefined) {
-      throw new ApprovalResumeError('approval_unauthorized', `Approval ${id} must be answered with the digest its host stored (--expect-digest).`)
-    }
-    const given = hostBindingOf(options.hostSecret)
-    if (!given || !safeEqualHex(given, record.hostBinding)) {
+  const hostKey = proof.hostKey ?? hostApprovalKey()
+  if (record.hostBinding || proof.signature) {
+    if (!hostKey || (record.hostBinding && !safeEqualHex(hostKey.id, record.hostBinding))) {
       throw new ApprovalResumeError('approval_unauthorized', `Approval ${id} can only be answered by the host that requested it.`)
     }
+    const signature = proof.signature ? Buffer.from(proof.signature.replace(/-/g, '+').replace(/_/g, '/'), 'base64') : Buffer.alloc(0)
+    let valid = false
+    try {
+      valid = signature.length === 64 && verifySignature(null, approvalAnswerPayload({
+        approvalId: record.id,
+        sessionId: record.sessionId,
+        actionDigest: record.actionDigest,
+        decision: proof.decision,
+        expiresAt: record.expiresAt,
+      }), hostKey.key, signature)
+    } catch {
+      valid = false
+    }
+    if (!valid) throw new ApprovalResumeError('approval_unauthorized', `Approval ${id} needs its host's signature for this answer.`)
   }
-  const now = options.now ?? new Date()
+  const now = proof.now ?? new Date()
   if (Date.parse(record.expiresAt) <= now.getTime()) {
     record.status = 'expired'
+    record.endedBy = 'expired'
     record.decidedAt = now.toISOString()
     throw new ApprovalResumeError('approval_expired', `Approval ${id} expired at ${record.expiresAt}.`)
   }
   return record
+}
+
+/**
+ * The owner wrote again in this conversation: requests still waiting are
+ * stale (the owner moved on). They expire, and the host says so.
+ */
+export function supersedePendingApprovals(session: SessionRecord, now = new Date()): PendingApproval[] {
+  const ended: PendingApproval[] = []
+  for (const record of session.approvals ?? []) {
+    if (record.status !== 'pending') continue
+    record.status = 'expired'
+    record.endedBy = 'superseded'
+    record.decidedAt = now.toISOString()
+    ended.push(record)
+  }
+  return ended
+}
+
+/** The owner's message a request came from, for the run that continues after the answer. */
+export function requestMessageOf(session: SessionRecord, record: PendingApproval): string | undefined {
+  if (!record.requestMessageId) return undefined
+  return session.messages.find((m) => m.id === record.requestMessageId)?.content
 }
 
 export function grantOf(record: PendingApproval): ApprovalGrant {
