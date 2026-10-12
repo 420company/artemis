@@ -252,12 +252,13 @@ export async function resolveIdentityPlaceholders(
  * Salted fingerprints of every form the passwords typed in this process may
  * be echoed in (secretFingerprints.ts): the live browser host uses them to
  * keep a URL or title carrying one out of the owner's view, without ever
- * holding a password. Undefined before any password was typed.
+ * holding a password. Undefined before any password was typed. `extra`:
+ * other secrets typed (stored credentials, in their encoded forms).
  */
-export function identityFingerprints(): FingerprintSet | undefined {
-  if (!resolved.size) return undefined;
+export function identityFingerprints(extra: string[] = []): FingerprintSet | undefined {
+  if (!resolved.size && !extra.length) return undefined;
   fingerprintSalt ??= newFingerprintSalt();
-  return fingerprintSet([...resolved.values()].flatMap((entry) => entry.variants), fingerprintSalt);
+  return fingerprintSet([...[...resolved.values()].flatMap((entry) => entry.variants), ...extra], fingerprintSalt);
 }
 
 /** One salt per process: the host replaces this run's set instead of adding sets. */

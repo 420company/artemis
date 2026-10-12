@@ -43,6 +43,8 @@ process.env.ARTEMIS_BROWSER_TAKEOVER_WAIT_MS = '300';
 process.env.ARTEMIS_BROWSER_IDLE_MS = '60000';
 process.env.ARTEMIS_BROWSER_SECRET_PAUSE_MS = '20000';
 process.env.ARTEMIS_BROWSER_SECRET_PAUSE_MAX_MS = '60000';
+delete process.env.ARTEMIS_CREDENTIALS_DIR;
+delete process.env.ARTEMIS_CREDENTIAL_BROKER;
 
 async function resolveExecutable(): Promise<void> {
   if (process.env.ARTEMIS_BROWSER_EXECUTABLE) return;
@@ -429,6 +431,29 @@ async function main(): Promise<void> {
   reserved.close();
   for (const c of [...extra, ...fillers]) c.close();
   console.log(`  ✓ agent connections stop at ${refusedAt} open; with every slot taken a new viewer still connects`);
+
+  // A stored credential (security/credentialStore.ts, origin-bound) is guarded like a sign-up
+  // password: its tab is paused before typing, and a GET form's URL with it never reaches the
+  // viewer or tab.json.
+  const { getCredentialStore } = await import('../src/security/credentialStore.js');
+  await getCredentialStore().create('smoke-pw', 'password', { bindings: { origin: new URL(url).origin } });
+  const stored = JSON.parse(fs.readFileSync(path.join(process.env.ARTEMIS_HOME!, 'agent-credentials', 'smoke-pw.json'), 'utf8')).secret as string;
+  const storedLeaks = (text: string) => [stored, encodeURIComponent(stored), new URLSearchParams({ p: stored }).toString().slice(2)].some((v) => text.includes(v));
+  await tools.executeBrowserTabs({ type: 'browser_tabs', action: 'new', url: `${url}signup` });
+  const storedTab = live.readJsonFile<{ targetId: string }>(path.join(liveDir, 'tab.json'))!.targetId;
+  viewer.events.length = 0;
+  await viewer.send('Target.setDiscoverTargets', { discover: true });
+  const storedTyped = await tools.executeBrowserType({ type: 'browser_type', selector: '#pw', text: '{{credential:smoke-pw}}' });
+  assert.equal(storedTyped.ok, true, storedTyped.output);
+  await waitFor('the stored credential\'s tab paused', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.targets?.some((t: any) => t.targetId === storedTab)));
+  await (await session.getActivePage()).evaluate(() => (document.querySelector('form') as HTMLFormElement).submit());
+  await waitFor('the GET submit', async () => ((await session.getActivePage()).url().includes('/done') ? true : undefined));
+  await tools.executeBrowserExtract({ type: 'browser_extract_text' });
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(!storedLeaks(JSON.stringify(viewer.events.filter((e) => e.method !== 'Page.screencastFrame'))), 'no viewer event carries the stored credential');
+  assert.ok(!storedLeaks(JSON.stringify(await viewer.send('Target.getTargets'))), 'nor a target list');
+  assert.ok(!storedLeaks(fs.readFileSync(path.join(liveDir, 'tab.json'), 'utf8')), 'nor tab.json');
+  console.log('  ✓ a stored credential: its tab paused before typing; a GET URL with it never reaches the viewer or tab.json');
 
   // The matcher under load: the most fingerprint sets, a page changing an 8 KB URL and an
   // 8 KB title every 20 ms for 5 s; the host keeps answering viewers within ~200 ms.

@@ -34,7 +34,7 @@ const MAX_CHECKED = 8_192;
 const MIN_LENGTH = 4;
 /** Sets kept by the host (one per run; the oldest goes). */
 export const MAX_SETS = 8;
-const MAX_HASHES = 64;
+const MAX_HASHES = 256;
 /** A prime below 2^26: products of two residues stay exact in a double. */
 const MOD = 67_108_859;
 /** Matching time allowed per second; past it, texts are 'unknown' until the next second. */

@@ -29,7 +29,6 @@ import {
   identityFingerprints,
   LIVE_SECRET_REFUSAL,
   onIdentityLiveWindow,
-  redactIdentitySecrets,
   resolveIdentityPlaceholders,
   SECRET_FIELD_ATTRIBUTE,
 } from '../../security/identityCredentials.js';
@@ -54,6 +53,7 @@ import {
   takeCrashNote,
   reportSecretState,
   hostSecretState,
+  redactShown,
   targetIdOf,
 } from './browserSession.js';
 import type { Page } from 'playwright';
@@ -926,7 +926,8 @@ async function gated(run: (beforeSecret?: BeforeSecret) => Promise<ToolResult>, 
   // fields, and the host gets the password's fingerprints; the pause lasts
   // until that tab loads a new document (browserHost.ts).
   const beforeSecret: BeforeSecret = (page) => {
-    const fingerprints = identityFingerprints();
+    // Sign-up passwords and the stored credentials typed so far (in the forms a page or URL can echo them).
+    const fingerprints = identityFingerprints([...typedSecrets.values()].flatMap((forms) => [...forms]));
     return reportSecretState({ live: true, pause: [page], ...(fingerprints ? { fingerprints } : {}) });
   };
   const result = await run(beforeSecret);
@@ -1040,8 +1041,8 @@ export async function executeBrowserRequestHandoff(
       return { ok: false, output: message, error: { code: 'secret_paused', message } };
     }
     // The card shows these to the owner: never a typed password.
-    url = redactIdentitySecrets(page.url());
-    title = redactIdentitySecrets(await page.title().catch(() => ''));
+    url = await redactShown(page.url());
+    title = await redactShown(await page.title().catch(() => ''));
     await reportActiveTab().catch(() => undefined);
   } catch (err) {
     return pwError(err);

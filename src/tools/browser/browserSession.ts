@@ -681,9 +681,18 @@ export async function reportActiveTab(): Promise<void> {
   // The server shows this to the owner: never a typed password (a GET form puts it in the URL).
   writeTabReport(dir, {
     ...(targetId ? { targetId } : {}),
-    url: redactIdentitySecrets(page.url()),
-    title: redactIdentitySecrets(await page.title().catch(() => '')),
+    url: await redactShown(page.url()),
+    title: await redactShown(await page.title().catch(() => '')),
   });
+}
+
+/**
+ * A page's URL or title as the owner may be shown it: sign-up passwords and
+ * stored credentials this run typed are replaced by their placeholders.
+ */
+export async function redactShown(text: string): Promise<string> {
+  const { scrubSecrets } = await import('../../security/credentialStore.js');
+  return scrubSecrets(redactIdentitySecrets(text));
 }
 
 /**
