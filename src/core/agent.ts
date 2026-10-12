@@ -1,6 +1,7 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import { enterIdentityRun, redactIdentitySecretsDeep } from '../security/identityCredentials.js';
 import path from 'node:path';
+import { scrubSecrets } from '../security/credentialStore.js';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
 import {
   getAllowedActionTypesForProfile,
@@ -1203,26 +1204,15 @@ function tryParseEnvelope(raw: string): AssistantEnvelope {
     // Fall through to embedded JSON / XML recovery below.
   }
 
-  for (const candidate of extractEmbeddedEnvelopeCandidates(raw)) {
-    try {
-      const parsed = JSON.parse(candidate.jsonText) as unknown;
-      if (isAssistantEnvelopeLike(parsed)) {
-        return buildEnvelopeFromParsedObject(
-          parsed,
-          candidate.prefix || raw.trim(),
-        );
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  // JSON failed entirely. Try XML tool-call dialects before giving up.
+  // Tool-call blocks come first: they are actions, and nothing inside them
+  // (a tool's own `plan`, `reply` or nested `actions` argument) is ever read
+  // as the reply envelope.
   const xmlActions = extractXmlToolCalls(raw);
   if (xmlActions.length > 0) {
     const cleaned = stripXmlToolCalls(raw);
     return {
-      reply: cleaned || raw.trim(),
+      // A turn of tool calls only has no reply text: never the raw call markup.
+      reply: cleaned,
       done: false,
       actions: xmlActions,
       plan: undefined,
@@ -1230,6 +1220,27 @@ function tryParseEnvelope(raw: string): AssistantEnvelope {
       claims: undefined,
     };
   }
+
+  // An envelope after some prose: only a candidate that carries `reply` or
+  // `actions` and ends the text counts. JSON shown inside the prose (an
+  // example in a fenced block, a config) is the reply's content, not an
+  // envelope.
+  const withoutToolBlocks = stripXmlToolCalls(raw);
+  for (const candidate of extractEmbeddedEnvelopeCandidates(withoutToolBlocks)) {
+    try {
+      const parsed = JSON.parse(candidate.jsonText) as unknown;
+      if (!isAssistantEnvelopeLike(parsed)) continue;
+      const record = parsed as Record<string, unknown>;
+      if (!('reply' in record) && !('actions' in record)) continue;
+      const at = withoutToolBlocks.lastIndexOf(candidate.jsonText);
+      const after = at >= 0 ? withoutToolBlocks.slice(at + candidate.jsonText.length).replace(/^\s*```/, '').trim() : '';
+      if (after) continue;
+      return buildEnvelopeFromParsedObject(parsed, candidate.prefix || raw.trim());
+    } catch {
+      continue;
+    }
+  }
+
   return {
     reply: raw.trim(),
     done: true,
@@ -2140,6 +2151,12 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `view_image ${truncate(action.path, 120)}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
+    case 'post_update':
+      return `post_update "${truncate(action.text, 80)}"`;
+    case 'server_setup':
+      return `server_setup ${action.action}${'host' in action && action.host ? ` ${action.host}` : ''}${'server' in action && action.server ? ` ${action.server}` : ''}`;
+    case 'get_verification_code':
+      return `get_verification_code ${action.channel ?? 'which'}${action.sender ? ` from ${truncate(action.sender, 40)}` : ''}`;
     case 'agent_mail_address':
     case 'list_emails':
     case 'wait_for_sms':
@@ -3968,6 +3985,14 @@ export type RunAgentOptions = {
    * hung engine; unset or 0: no heartbeat (interactive CLI, chat bridges).
    */
   toolHeartbeatMs?: number;
+  /**
+   * Delivers post_update messages to the user while the run goes on
+   * (core/agentUpdates.ts). Headless hosts pass one per run; without it the
+   * tool reports that live updates are unavailable.
+   */
+  agentUpdates?: import('./agentUpdates.js').AgentUpdateChannel;
+  /** Each tool call's start and end, for the live status line (core/agentStatus.ts). */
+  onToolActivity?: (event: import('./agentStatus.js').ToolActivityEvent) => void;
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
   onInfo?: (message: string) => void;
@@ -5147,6 +5172,9 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   create_presentation: 15 * 60_000,
   create_document: 15 * 60_000,
   create_spreadsheet: 15 * 60_000,
+  // wait_ready polls up to 30 minutes; harden / install_wireguard install packages.
+  server_setup: 31 * 60_000,
+  get_verification_code: 11 * 60_000,
   // Waiting for the owner's approval (15 min) and a call of up to an hour.
   place_call: 80 * 60_000,
   // Agent identity: waits for mail, SMS or the owner's answer (at most 10 minutes each).
@@ -5206,11 +5234,26 @@ export function startToolHeartbeat(
   return () => clearInterval(timer);
 }
 
+/**
+ * Every tool result, foreground or background, with the stored secrets handed
+ * out this run replaced by •••• (a page echoing a password, a console line).
+ */
 async function executeAgentAction(
   session: SessionRecord,
   action: AgentAction,
   options: RunAgentOptions,
   abortSignal?: AbortSignal,
+  approvedKinds?: ApprovalKind[],
+): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+  return scrubToolResult(await executeAgentActionUnscrubbed(session, action, options, abortSignal, approvedKinds));
+}
+
+async function executeAgentActionUnscrubbed(
+  session: SessionRecord,
+  action: AgentAction,
+  options: RunAgentOptions,
+  abortSignal?: AbortSignal,
+  /** Kinds the owner approved for this action (hard approvals): the tool's own refusal for them is lifted. */
   approvedKinds?: ApprovalKind[],
 ): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
   // Saga long-video safety reroute. Runs before validation so the rerouted
@@ -5274,6 +5317,7 @@ async function executeAgentAction(
         sessionId: session.id,
         memoryDefaultScope: options.memoryDefaultScope,
         viewedImages: options.viewedImages,
+        ...(options.agentUpdates ? { postUpdate: (text: string) => options.agentUpdates!.post(text) } : {}),
         context: {
           profile: options.profile ?? 'main',
           runtimeId: options.rootRuntimeId,
@@ -5847,6 +5891,24 @@ function startBackgroundAction(
   };
 }
 
+type ToolActivityAction = import('./agentStatus.js').ToolActivityEvent['action'];
+
+export function scrubToolResult<R extends { output?: string; error?: { message?: string } }>(result: R): R {
+  const output = typeof result.output === 'string' ? scrubSecrets(result.output) : result.output;
+  const error = result.error && typeof result.error.message === 'string' ? { ...result.error, message: scrubSecrets(result.error.message) } : result.error;
+  return output === result.output && error === result.error ? result : { ...result, output, ...(error ? { error } : {}) };
+}
+let toolActivitySeq = 0;
+
+/** A status listener never breaks a run. */
+function notifyToolActivity(options: RunAgentOptions, event: import('./agentStatus.js').ToolActivityEvent): void {
+  try {
+    options.onToolActivity?.(event);
+  } catch {
+    // ignored
+  }
+}
+
 async function executeAuthorizedAction(
   session: SessionRecord,
   action: AgentAction,
@@ -5854,6 +5916,8 @@ async function executeAuthorizedAction(
   preAuthorized = false,
   abortSignal?: AbortSignal,
 ): Promise<ActionOutcome> {
+  let activityCallId: string | undefined;
+  let activityOk: boolean | undefined;
   try {
     if (abortSignal?.aborted) {
       const message = 'Action skipped: the run was cancelled before this tool started.';
@@ -5946,6 +6010,10 @@ async function executeAuthorizedAction(
     }
 
     options.onInfo?.(`[tool:${hydratedAction.type}] running`);
+    if (options.onToolActivity) {
+      activityCallId = `call_${++toolActivitySeq}`;
+      notifyToolActivity(options, { phase: 'start', callId: activityCallId, action: hydratedAction as unknown as ToolActivityAction });
+    }
     await recordHeimdallActionEvent(
       session,
       options,
@@ -5979,6 +6047,9 @@ async function executeAuthorizedAction(
     } finally {
       stopHeartbeat();
     }
+    // A stored secret handed to a tool never comes back in what the model,
+    // the history or the host sees (a page echoing it, a console line).
+    result = scrubToolResult(result);
     // A sign-up password typed through its placeholder never comes back in a result: the whole outcome
     // (output, error message, details, anything nested) goes back to placeholders before it is recorded
     // or sent to the model, in every form a page or URL may echo it (security/identityCredentials.ts).
@@ -6026,6 +6097,7 @@ async function executeAuthorizedAction(
         output_excerpt: truncate(result.output, 160),
       },
     );
+    activityOk = result.ok;
     return classifyActionOutcomeFailure({
       action: completedAction,
       ok: result.ok,
@@ -6044,7 +6116,11 @@ async function executeAuthorizedAction(
           error instanceof Error ? truncate(error.message, 160) : truncate(String(error), 160),
       },
     );
-    return redactIdentitySecretsDeep(buildGuardrailFailureOutcome(action, error));
+    return redactIdentitySecretsDeep(buildGuardrailFailureOutcome(action, error instanceof Error ? new Error(scrubSecrets(error.message)) : scrubSecrets(String(error))));
+  } finally {
+    if (activityCallId) {
+      notifyToolActivity(options, { phase: 'end', callId: activityCallId, action: action as unknown as ToolActivityAction, ...(activityOk !== undefined ? { ok: activityOk } : {}) });
+    }
   }
 }
 
@@ -7068,6 +7144,13 @@ async function runAgentInner(
         ).content,
         outcome.action.type,
       );
+      if (outcome.ok && outcome.action.type === 'post_update' && options.agentUpdates) {
+        // The chat history shows a delivered update as a message of its own,
+        // under the id the live stream used.
+        const delivered = options.agentUpdates.claim(outcome.action.text);
+        const stored = session.messages.at(-1);
+        if (delivered && stored?.role === 'tool') stored.agentUpdate = { id: delivered.id, text: delivered.text };
+      }
 
       if (
         outcome.ok &&

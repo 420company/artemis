@@ -668,7 +668,7 @@ async function loadWorkerProvider(cwd: string = providerCwd ?? process.cwd()): P
     const currentCwd = requestedCwd;
     const localStore = new ProviderStore(currentCwd);
     const localData = await localStore.load();
-    let workerCfg = localStore.getProfile(localData, localData.specialistProfileId);
+    let workerCfg = localStore.getWorkerProfile(localData);
     let telemetryCwd = currentCwd;
 
     if (!workerCfg) {
@@ -676,7 +676,7 @@ async function loadWorkerProvider(cwd: string = providerCwd ?? process.cwd()): P
         const artemisHome = resolveArtemisHomeDir();
         const globalStore = createGlobalProviderStore();
         const globalData = await globalStore.load();
-        workerCfg = globalStore.getProfile(globalData, globalData.specialistProfileId);
+        workerCfg = globalStore.getWorkerProfile(globalData);
         telemetryCwd = artemisHome;
     }
 
@@ -724,7 +724,7 @@ export async function hasDualModel(cwd: string = providerCwd ?? process.cwd()): 
         for (const store of stores) {
             const data = await store.load();
             main ??= store.getDefaultMainProfile(data);
-            worker ??= store.getProfile(data, data.specialistProfileId);
+            worker ??= store.getWorkerProfile(data);
         }
         if (!worker) return false;
         const mainModel = _modelOverride ?? main?.model;

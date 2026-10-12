@@ -27,10 +27,22 @@ import {
   executeBrowserType,
 } from '../src/tools/browser/browserTools.js';
 
-// Needs Playwright's Chromium (npx playwright install chromium, or PLAYWRIGHT_BROWSERS_PATH).
-const browsers = process.env.PLAYWRIGHT_BROWSERS_PATH;
-if (browsers && !existsSync(browsers)) {
-  console.log('identity password browser smoke: skipped (PLAYWRIGHT_BROWSERS_PATH does not exist)');
+// Needs Playwright's Chromium (npx playwright install chromium, or PLAYWRIGHT_BROWSERS_PATH):
+// without the build this Playwright launches, skip cleanly instead of failing on a page that never loaded.
+async function missingBrowser(): Promise<string | undefined> {
+  const browsers = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (browsers && !existsSync(browsers)) return 'PLAYWRIGHT_BROWSERS_PATH does not exist';
+  try {
+    const { chromium } = await import('playwright');
+    const executable = chromium.executablePath();
+    return executable && existsSync(executable) ? undefined : `no Chromium for this Playwright at ${executable} (npx playwright install chromium)`;
+  } catch (err) {
+    return `Playwright is not available (${err instanceof Error ? err.message : String(err)})`;
+  }
+}
+const missing = await missingBrowser();
+if (missing) {
+  console.log(`identity password browser smoke: skipped (${missing})`);
   process.exit(0);
 }
 

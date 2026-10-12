@@ -663,6 +663,11 @@ async function runToolCommand(options: { cwd: string; locale: UiLocale; args: st
   console.log(result.output)
 }
 
+/** A progress message as exactly one stderr line. */
+export function oneLine(message: string): string {
+  return message.replace(/\r\n|\r|\n|\u2028|\u2029/g, '\\n')
+}
+
 async function runQueryCommand(options: {
   cwd: string
   locale: UiLocale
@@ -716,8 +721,11 @@ async function runQueryCommand(options: {
       maxTurns: options.maxTurns,
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,
-      sessionTitle: `${mode}: ${(prompt ?? '').slice(0, 48)}`,
-      onInfo: (message) => console.error(message),
+      sessionTitle: `${mode}: ${prompt.slice(0, 48)}`,
+      // One line per event: a newline inside a message (a tool's output) is
+      // escaped, so nothing a tool prints can start a protocol line of its own
+      // ([agent-update], [approval-request], …) for the host.
+      onInfo: (message) => console.error(oneLine(message)),
       ...(options.intent !== undefined ? { intent: options.intent } : {}),
       // Headless: an action that needs the owner's approval stops the run
       // (ARTEMIS_APPROVALS=off refuses it instead, as before).

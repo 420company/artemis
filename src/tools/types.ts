@@ -88,6 +88,11 @@ export type ToolExecutionContext = {
    */
   viewedImages?: import('../core/imageInput.js').ViewedImageQueue;
   /**
+   * Delivers a post_update to the user right away (core/agentUpdates.ts).
+   * Absent on hosts without a live channel (the interactive CLI).
+   */
+  postUpdate?: (text: string) => import('../core/agentUpdates.js').PostUpdateResult;
+  /**
    * Contextual information for the tool execution
    */
   context?: any;

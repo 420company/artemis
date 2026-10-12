@@ -1,3 +1,4 @@
+import { isAlwaysPrivatePath } from '../utils/fs.js'
 import path from 'node:path'
 import type { ToolExecutionContext, WorkspaceSwitchRequest } from './types.js'
 import { fromHeimdallVirtualPath } from '../core/heimdall.js'
@@ -117,6 +118,8 @@ export async function resolveToolPathWithWorkspaceAccess(options: {
     switchNow: true,
   })
   const absolute = resolveInsideRoot(effectiveCwd, candidatePath)
+  // The agent's credentials and VPN profiles are never a file tool's business, in any mode.
+  if (isAlwaysPrivatePath(absolute)) throw new Error(`Access denied: ${inputPath} is in a protected directory.`)
 
   return {
     absolute,

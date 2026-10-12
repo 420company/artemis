@@ -273,7 +273,13 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
       const filepath = path.join(SCREENSHOT_DIR, filename);
       const guard = await secretScreenshotGuard(page);
       if (!guard.ok) return { ok: false, output: guard.message, error: { code: 'secret_visible', message: guard.message } };
-      await page.screenshot({ path: filepath, fullPage: action.fullPage === true, ...(guard.mask.length ? { mask: guard.mask } : {}) });
+      // On a site where a stored credential was typed, a page echoing it is masked in the picture too.
+      const unmask = await maskSecretsForScreenshot(page);
+      try {
+        await page.screenshot({ path: filepath, fullPage: action.fullPage === true, ...(guard.mask.length ? { mask: guard.mask } : {}) });
+      } finally {
+        await unmask();
+      }
       const audit = await collectLayoutAudit(page);
       return {
         ok: true,
@@ -283,6 +289,58 @@ export async function executeBrowserScreenshot(action: BrowserScreenshotAction):
   } catch (err) {
     return pwError(err);
   }
+}
+
+/**
+ * Replaces the stored secrets this run typed (in text and in the values of
+ * fields other than password fields, which the browser masks itself) with
+ * •••• for the moment of a screenshot, then puts the page back. Only on a
+ * site where they were typed: another site never gets them, even to mask.
+ */
+export async function maskSecretsForScreenshot(page: Awaited<ReturnType<typeof getActivePage>>): Promise<() => Promise<void>> {
+  let origin = '';
+  try {
+    origin = new URL(page.url()).origin.toLowerCase();
+  } catch {
+    origin = '';
+  }
+  if (!credentialOrigins.has(origin)) return async () => undefined;
+  const secrets = [...(typedSecrets.get(origin) ?? [])].sort((a, b) => b.length - a.length);
+  if (!secrets.length) return async () => undefined;
+  // A plain script (no compiled helpers in it): every text node and non-password field value.
+  const token = await page
+    .evaluate(`(() => {
+      const list = ${JSON.stringify(secrets)};
+      const masked = [], inputs = [];
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.nodeValue || '';
+        let out = text;
+        for (const s of list) out = out.split(s).join('••••');
+        if (out !== text) { masked.push([node, text]); node.nodeValue = out; }
+      }
+      for (const el of Array.from(document.querySelectorAll('input, textarea'))) {
+        if ((el.getAttribute('type') || '').toLowerCase() === 'password') continue;
+        let out = el.value;
+        for (const s of list) out = out.split(s).join('••••');
+        if (out !== el.value) { inputs.push([el, el.value]); el.value = out; }
+      }
+      window.__artemisMasked = { masked, inputs };
+      return true;
+    })()`)
+    .catch(() => false);
+  if (!token) return async () => undefined;
+  return async () => {
+    await page
+      .evaluate(`(() => {
+        const m = window.__artemisMasked;
+        if (!m) return;
+        for (const [node, text] of m.masked) node.nodeValue = text;
+        for (const [el, value] of m.inputs) el.value = value;
+        delete window.__artemisMasked;
+      })()`)
+      .catch(() => undefined);
+  };
 }
 
 // ── browser_extract_text ────────────────────────────────────────────────
@@ -298,6 +356,12 @@ export async function executeBrowserExtract(action: BrowserExtractAction): Promi
       let text: string;
       if (action.selector && action.selector.trim().length > 0) {
         const el = page.locator(action.selector).first();
+        // A password field is never read back (its value is what was typed into it).
+        const isPassword = await el.evaluate((node) => node.tagName.toLowerCase() === 'input' && ((node as HTMLInputElement).getAttribute('type') ?? '').toLowerCase() === 'password', undefined, { timeout: 10_000 }).catch(() => false);
+        if (isPassword) {
+          const message = 'Password fields are not read back.';
+          return { ok: false, output: message, error: { code: 'credential_field_locked', message } };
+        }
         text = await el.innerText({ timeout: 10_000 });
       } else {
         text = await page.evaluate(() => document.body?.innerText ?? '');
@@ -417,10 +481,13 @@ export async function executeBrowserFormInput(action: BrowserFormInputAction): P
       if (action.value === undefined) {
         return { ok: false, output: `${kind} 元素需要 value`, error: { code: 'invalid_input', message: 'value required' } };
       }
-      const typed = await resolveIdentityPlaceholders(action.value, hasIdentityPlaceholder(action.value) ? await fieldInfo(el) : undefined);
-      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_refused', message: typed.message } };
+      // A sign-up's password (the identity module), else a stored credential: each under its own rules.
+      const identityTyped = await resolveIdentityPlaceholders(action.value, hasIdentityPlaceholder(action.value) ? await fieldInfo(el) : undefined);
+      if (!identityTyped.ok) return { ok: false, output: identityTyped.message, error: { code: 'credential_refused', message: identityTyped.message } };
+      const typed = identityTyped.secret ? { ok: true as const, text: identityTyped.text, credential: 'signup' } : await withCredentials(action.value, page.url(), el);
+      if (!typed.ok) return typed.result;
       await el.fill(typed.text, { timeout: 10_000 });
-      if (typed.secret) await markSecretField(el);
+      if (identityTyped.secret || typed.credential) await markSecretField(el);
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
     }, { restoreUrlOnRetry: true });
   } catch (err) {
@@ -456,6 +523,17 @@ export async function executeBrowserEvaluate(action: BrowserEvaluateAction): Pro
   if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
+      // A script could read a credential typed on this site and send it anywhere.
+      let origin = '';
+      try {
+        origin = new URL(page.url()).origin.toLowerCase();
+      } catch {
+        origin = '';
+      }
+      if (credentialOrigins.has(origin)) {
+        const message = 'Scripts are not run on a site where a stored credential was typed. Read the page with browser_extract_text instead.';
+        return { ok: false, output: message, error: { code: 'credential_page_locked', message } };
+      }
       const result = await page.evaluate(action.script);
       let rendered: string;
       try {
@@ -561,6 +639,71 @@ export interface BrowserTypeAction {
   pressEnter?: boolean;
 }
 
+/** Origins where a stored credential was typed this session: no scripts run there (they could read the field). */
+const credentialOrigins = new Set<string>();
+/** What was typed on each of those origins (and how it may be encoded): masked there in screenshots, never shown to another site. */
+const typedSecrets = new Map<string, Set<string>>();
+
+type FieldLocator = { evaluate: <R>(fn: (node: Element) => R, arg?: undefined, options?: { timeout?: number }) => Promise<R> };
+
+/**
+ * `{{credential:<name>}}` (the whole value, nothing else) types a stored
+ * secret: only on the origin it is bound to, a password only into a password
+ * field, a username only into a username/email field. Everything else in
+ * the value is typed as is. The history keeps the placeholder; the secret is
+ * scrubbed from every tool result (security/credentialStore.ts).
+ */
+async function withCredentials(text: string, pageUrl: string, el: FieldLocator): Promise<{ ok: true; text: string; credential?: string } | { ok: false; result: ToolResult }> {
+  return resolveCredentialValue(text, pageUrl, () =>
+    el.evaluate((node) => {
+      const input = node as HTMLInputElement;
+      return { tag: node.tagName, type: input.getAttribute('type'), hints: `${input.getAttribute('autocomplete') ?? ''} ${input.getAttribute('name') ?? ''} ${input.id ?? ''}` };
+    }, undefined, { timeout: 10_000 }).then(credentialFieldKind),
+  );
+}
+
+/** What a field may take: a password field a password, a username/email field a username, nothing else anything. */
+export function credentialFieldKind(field: { tag: string; type?: string | null; hints?: string }): 'password' | 'username' | 'other' {
+  if (field.tag.toLowerCase() !== 'input') return 'other';
+  const type = (field.type ?? 'text').toLowerCase();
+  if (type === 'password') return 'password';
+  if (type === 'email' || ((type === 'text' || type === '') && /username|email|user|login|account|mail/.test((field.hints ?? '').toLowerCase()))) return 'username';
+  return 'other';
+}
+
+/**
+ * The one path a typed value takes when it names a stored credential (also
+ * used by the offline eval browser, so the same rules are graded there).
+ */
+export async function resolveCredentialValue(
+  text: string,
+  pageUrl: string,
+  detectField: () => Promise<'password' | 'username' | 'other'>,
+): Promise<{ ok: true; text: string; credential?: string } | { ok: false; result: ToolResult }> {
+  if (!text.includes('{{credential:')) return { ok: true, text };
+  const refuse = (code: string, message: string) => ({ ok: false as const, result: { ok: false, output: message, error: { code, message } } });
+  const { CREDENTIAL_PLACEHOLDER_ONLY, normalizeOrigin, useCredential } = await import('../../security/credentialStore.js');
+  const match = CREDENTIAL_PLACEHOLDER_ONLY.exec(text.trim());
+  if (!match) return refuse('invalid_input', 'A credential placeholder must be the whole value: exactly {{credential:<name>}}, nothing before or after it.');
+  const origin = normalizeOrigin(pageUrl);
+  if (!origin) return refuse('credential_refused', 'Credentials are only typed on http(s) pages.');
+  const field = await detectField();
+  if (field === 'other') return refuse('credential_refused', 'Stored credentials only go into a password field (or a username/email field for a username). Nothing was typed.');
+  const used = await useCredential(match[1]!, { type: 'web', origin, field });
+  if (!used.ok) {
+    if (used.code === 'locked') return refuse('credential_locked', used.message);
+    return refuse(used.code === 'not_found' ? 'credential_not_found' : 'credential_refused', used.code === 'not_found'
+      ? `No stored credential named ${match[1]}. Make a password with server_setup create_password (with the site's origin), or hand this step to the user.`
+      : `${used.message} Nothing was typed.`);
+  }
+  credentialOrigins.add(origin);
+  const { secretEncodings } = await import('../../security/credentialStore.js');
+  const typed = typedSecrets.get(origin) ?? new Set<string>();
+  for (const form of secretEncodings(used.secret)) if (form.length >= 6) typed.add(form);
+  typedSecrets.set(origin, typed);
+  return { ok: true, text: used.secret, credential: match[1]! };
+}
+
 export async function executeBrowserType(action: BrowserTypeAction): Promise<ToolResult> {
   if (!action.selector) {
     return {
@@ -572,14 +715,16 @@ export async function executeBrowserType(action: BrowserTypeAction): Promise<Too
   try {
     return await withPageRetry(async (page) => {
       const el = page.locator(action.selector).first();
-      // `{{credential:signup-…}}` types a sign-up's saved password (into a password field of its site);
-      // the history keeps the placeholder.
-      const typed = await resolveIdentityPlaceholders(action.text, hasIdentityPlaceholder(action.text) ? await fieldInfo(el) : undefined);
-      if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_refused', message: typed.message } };
+      // `{{credential:signup-…}}` (a sign-up's password, the identity module) or `{{credential:<name>}}`
+      // (a stored credential): typed only where its rules allow; the history keeps the placeholder.
+      const identityTyped = await resolveIdentityPlaceholders(action.text, hasIdentityPlaceholder(action.text) ? await fieldInfo(el) : undefined);
+      if (!identityTyped.ok) return { ok: false, output: identityTyped.message, error: { code: 'credential_refused', message: identityTyped.message } };
+      const typed = identityTyped.secret ? { ok: true as const, text: identityTyped.text, credential: 'signup' } : await withCredentials(action.text, page.url(), el);
+      if (!typed.ok) return typed.result;
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first
       await el.fill(typed.text);
-      if (typed.secret) await markSecretField(el);
+      if (identityTyped.secret || typed.credential) await markSecretField(el);
       if (action.pressEnter) {
         await el.press('Enter');
         await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);

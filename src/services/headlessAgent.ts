@@ -109,6 +109,11 @@ export async function runHeadlessAgent(
 
   if (opts.retry && !opts.sessionId) throw new Error('A retry needs the session it continues (--session <id>).')
   const onInfo = opts.onInfo ?? (() => undefined)
+  // The web server's credential broker for this run: kept by this process,
+  // removed from the environment before any tool or shell starts.
+  const { captureCredentialBroker, claimCredentialBroker } = await import('../security/credentialStore.js')
+  captureCredentialBroker()
+  await claimCredentialBroker()
   const providerConfig = await resolveMainProviderConfig({
     cwd,
     config: opts.model ? { model: opts.model } : {},
@@ -148,6 +153,12 @@ export async function runHeadlessAgent(
   const { isAbsolute, join } = await import('node:path')
   const readOnly = (opts.permissionMode ?? 'PRODUCER') === 'read-only'
 
+  // Live updates and status for the host (core/agentUpdates.ts, core/agentStatus.ts):
+  // one stderr line each, through onInfo.
+  const { AgentUpdateChannel } = await import('../core/agentUpdates.js')
+  const { AgentStatusReporter } = await import('../core/agentStatus.js')
+  const agentUpdates = readOnly ? undefined : new AgentUpdateChannel({ emit: onInfo })
+  const agentStatus = new AgentStatusReporter(onInfo)
   const { resolveProfileContextLength } = await import('../providers/modelContext.js')
   const contextNotices: string[] = []
   const started = Date.now()
@@ -202,6 +213,8 @@ export async function runHeadlessAgent(
       resolveProvider: providerRouter.resolveProvider,
       resolveSummarizerProvider: providerRouter.resolveSummarizerProvider,
       onContextCompaction: (notice: string) => contextNotices.push(notice),
+      ...(agentUpdates ? { agentUpdates } : {}),
+      onToolActivity: (event: Parameters<typeof agentStatus.onToolActivity>[0]) => agentStatus.onToolActivity(event),
       onInfo: opts.onInfo,
       approvals: approvalSettings,
     }
@@ -327,6 +340,7 @@ export async function runHeadlessAgent(
       ...(runIntent !== undefined ? { intent: runIntent } : {}),
     })
     if (plan.kind === 'reply') {
+      agentStatus.finish()
       // The Saga question: answered without running the model.
       sessionStore.appendMessage(current, 'user', runPrompt)
       sessionStore.appendMessage(current, 'assistant', plan.reply)
@@ -335,6 +349,7 @@ export async function runHeadlessAgent(
       return { reply: plan.reply, turns: 0 }
     }
     const messagesBefore = current.messages.length
+    agentStatus.thinking()
     let runResult
     try {
     runResult = await runAgent(
@@ -359,6 +374,11 @@ export async function runHeadlessAgent(
       // Closed whether the run answered or failed (a killed process leaves it open).
       await recordTurn().catch(() => undefined)
     }
+    // The run is over: done, or waiting for the owner's OK when the answer
+    // ends with a confirmation card. (A run that stops at a hard approval
+    // request reports statusForApprovalKind(kind) here instead.)
+    const { statusAtEnd } = await import('../core/agentStatus.js')
+    agentStatus.finish(statusAtEnd(runResult.reply ?? ''))
     return runResult
   }, { label: `Session ${session.id}` })
 
