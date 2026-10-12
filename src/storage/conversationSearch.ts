@@ -10,7 +10,7 @@
  * a page at a time can page back far enough to show it.
  */
 
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { searchSessionCandidates } from './sessionSearch.js';
 import { isChatVisibleMessage, SessionStore } from './sessions.js';
@@ -138,28 +138,62 @@ export function buildSnippet(text: string, ranges: Array<[number, number]>): { s
   return { snippet: `${lead}${flat.slice(start, end)}${tail}`, highlights };
 }
 
-/** Sessions whose transcript archive mentions the query (the phrase, or each term somewhere). */
-async function sessionsWithArchivedMatch(cwd: string, query: string): Promise<string[]> {
+/** At most this many archives (newest first) and this many bytes are read per search. */
+const MAX_ARCHIVES_PER_SEARCH = 200;
+const MAX_ARCHIVE_BYTES_PER_SEARCH = 48 * 1024 * 1024;
+
+/**
+ * Sessions whose transcript archive (pages compaction moved out of the live
+ * history) has a visible message that matches: only the owner's and the
+ * agent's text counts, never the JSON around it. Bounded: the newest
+ * archives first, within a file and byte budget, stopping at `wanted`.
+ */
+async function sessionsWithArchivedMatch(cwd: string, query: string, wanted: number, skip: ReadonlySet<string>): Promise<string[]> {
   const sessionDir = path.join(resolveDataRootDir(cwd), 'sessions');
-  const phrase = query.trim().slice(0, MAX_QUERY_CHARS).toLowerCase();
-  const terms = queryTerms(query);
   let entries: string[];
   try {
     entries = await readdir(sessionDir);
   } catch {
     return [];
   }
-  const found: string[] = [];
+  const archives: Array<{ id: string; file: string; mtimeMs: number; size: number }> = [];
   for (const entry of entries) {
-    if (entry.endsWith('.json') || entry.endsWith('.lock')) continue;
-    let text: string;
+    if (entry.endsWith('.json') || entry.endsWith('.lock') || skip.has(entry)) continue;
+    const file = path.join(sessionDir, entry, 'transcript.jsonl');
     try {
-      text = (await readFile(path.join(sessionDir, entry, 'transcript.jsonl'), 'utf8')).toLowerCase();
+      const info = await stat(file);
+      if (info.isFile()) archives.push({ id: entry, file, mtimeMs: info.mtimeMs, size: info.size });
+    } catch {
+      // No archive: nothing was compacted in this session.
+    }
+  }
+  archives.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const found: string[] = [];
+  let budget = MAX_ARCHIVE_BYTES_PER_SEARCH;
+  for (const archive of archives.slice(0, MAX_ARCHIVES_PER_SEARCH)) {
+    if (found.length >= wanted || archive.size > budget) break;
+    budget -= archive.size;
+    let raw: string;
+    try {
+      raw = await readFile(archive.file, 'utf8');
     } catch {
       continue;
     }
-    // The archive is JSON as written by JSON.stringify: non-ASCII text stays as is, so a plain search works.
-    if (text.includes(phrase) || (terms.length > 0 && terms.every((term) => text.includes(term)))) found.push(entry);
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let message: { role?: unknown; content?: unknown } | undefined;
+      try {
+        message = (JSON.parse(line) as { message?: { role?: unknown; content?: unknown } }).message;
+      } catch {
+        continue;
+      }
+      if ((message?.role !== 'user' && message?.role !== 'assistant') || typeof message.content !== 'string') continue;
+      const text = message.role === 'user' ? userVisibleMessageText(message.content) : message.content;
+      if (matchText(text, query)) {
+        found.push(archive.id);
+        break;
+      }
+    }
   }
   return found;
 }
@@ -179,7 +213,7 @@ export async function searchConversations(
   if (!options.sessionId && candidates.length < limit * 2) {
     // The index holds the live history only: pages compaction moved to a
     // session's transcript archive are looked through as well.
-    for (const id of await sessionsWithArchivedMatch(cwd, query)) if (!candidates.includes(id)) candidates.push(id);
+    for (const id of await sessionsWithArchivedMatch(cwd, query, limit * 2 - candidates.length, new Set(candidates))) candidates.push(id);
   }
 
   const matches: ConversationMatch[] = [];

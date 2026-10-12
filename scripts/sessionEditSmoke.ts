@@ -438,6 +438,8 @@ console.log('\nconversation search')
     const onlyArchived = await searchConversations(cwd, 'zebracrossings')
     assert('search: a word found only in an archived page is found by the global search too',
       onlyArchived.length === 1 && onlyArchived[0]!.sessionId === c.id && onlyArchived[0]!.hits[0]!.newerCount === 3, JSON.stringify(onlyArchived))
+    const keys = await searchConversations(cwd, 'compaction')
+    assert('search: the archive\'s JSON keys never match, only message text', keys.length === 0, JSON.stringify(keys))
     const deep = await searchConversations(cwd, 'lighthouses', { sessionId: c.id })
     assert('search: archived pages are searched too, with how many messages are newer',
       deep[0]?.matchCount === 3 && deep[0]!.hits.at(-1)!.newerCount === 3,
