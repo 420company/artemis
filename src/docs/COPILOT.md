@@ -124,7 +124,12 @@ Backends:
 The agent's own file and shell tools refuse `agent-credentials` and
 `vpn-profiles` paths in every mode. A host can register another backend
 (`registerCredentialStore`), e.g. a vault that fills an origin-bound field
-itself without handing the secret to the engine.
+itself without handing the secret to the engine. Secrets another module
+keeps plug in by name prefix (`registerCredentialResolver('signup-', …)`
+for the agent identity's sign-up passwords): the binding in what the
+resolver returns is checked the same way, and the secret is scrubbed the
+same way. Every typed value goes through `resolveCredentialValue` in
+`tools/browser/browserTools.ts` (also used by the offline eval browser).
 
 ## Verification codes (`tools/verificationCodes.ts`)
 

@@ -310,6 +310,27 @@ await test('credentials: the store is closed to the agent\'s file and shell tool
   }
 });
 
+await test('credentials: another module\'s secrets (sign-ups) get the same binding and scrubbing (H2)', async () => {
+  const { registerCredentialResolver } = await import('../src/security/credentialStore.js');
+  let fetched = 0;
+  registerCredentialResolver('signup-', async (name) => {
+    fetched += 1;
+    return { ok: true, secret: 'Signup-Pass-7f3Kq9', info: { name, kind: 'password', createdAt: '', bindings: { origin: 'https://drive.example' } } };
+  });
+  try {
+    const ok = await useCredential('signup-su_0123', { type: 'web', origin: 'https://drive.example', field: 'password' }, credStore);
+    assert.equal(ok.ok, true);
+    assert.equal(scrubSecrets('page says Signup-Pass-7f3Kq9'), 'page says ••••');
+    const elsewhere = await useCredential('signup-su_0123', { type: 'web', origin: 'https://evil.example', field: 'password' }, credStore);
+    assert.equal(!elsewhere.ok && elsewhere.code, 'wrong_origin');
+    const asUser = await useCredential('signup-su_0123', { type: 'web', origin: 'https://drive.example', field: 'username' }, credStore);
+    assert.equal(asUser.ok, false);
+    assert.equal(fetched, 3);
+  } finally {
+    registerCredentialResolver('signup-', undefined);
+  }
+});
+
 await test('credentials: the hosted broker is taken out of the environment and asked per use (H2)', async () => {
   const env: NodeJS.ProcessEnv = { ARTEMIS_CREDENTIAL_BROKER: JSON.stringify({ url: 'http://127.0.0.1:18897/agent/credentials', claim: 'claim-once' }) };
   captureCredentialBroker(env);

@@ -196,9 +196,35 @@ export function forgetRevealedSecrets(): void {
 /** The one way tools get a secret: checked, and remembered for scrubbing. */
 export async function useCredential(name: string, purpose: CredentialPurpose, store: CredentialStore = getCredentialStore()): Promise<UseResult> {
   if (!CREDENTIAL_NAME.test(name)) return { ok: false, code: 'invalid_name', message: `Invalid credential name: ${JSON.stringify(name)}` };
+  const resolver = [...resolvers].find(([prefix]) => name.startsWith(prefix))?.[1];
+  if (resolver) {
+    // Another module's secret (a sign-up password the host keeps): the same rules apply to it.
+    const result = await resolver(name, purpose);
+    if (!result.ok) return result;
+    const verdict = checkUse(result.info, purpose);
+    if (!verdict.ok) return verdict;
+    remember(result.secret);
+    return result;
+  }
   const result = await store.use(name, purpose);
   if (result.ok) remember(result.secret);
   return result;
+}
+
+/**
+ * Secrets another module keeps, by name prefix: e.g. the agent identity's
+ * sign-up passwords (`{{credential:signup-…}}`), fetched from the host. They
+ * go through the same path as the store's own: the binding in the returned
+ * info is checked (origin, field kind), the secret is typed only where that
+ * allows, and it is scrubbed from every tool result afterwards.
+ */
+export type CredentialResolver = (name: string, purpose: CredentialPurpose) => Promise<UseResult>;
+
+const resolvers = new Map<string, CredentialResolver>();
+
+export function registerCredentialResolver(prefix: string, resolver: CredentialResolver | undefined): void {
+  if (resolver) resolvers.set(prefix, resolver);
+  else resolvers.delete(prefix);
 }
 
 // ── generation ────────────────────────────────────────────────────────────
