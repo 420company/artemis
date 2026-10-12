@@ -1,5 +1,6 @@
 import type { SessionMessage } from '../core/types.js';
 import { splitTrailingRuntimeContext } from './runtimeContext.js';
+import { runHeadersFor } from './openaiCompatible.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
   createStreamIdleGuard,
@@ -532,6 +533,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
             'content-type': 'application/json',
             'x-api-key': this.config.apiKey,
             'anthropic-version': '2023-06-01',
+            ...runHeadersFor(this.config),
           },
           body: JSON.stringify(body),
           signal: effectiveSignal,

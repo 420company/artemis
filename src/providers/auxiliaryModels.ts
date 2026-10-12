@@ -28,7 +28,7 @@ import path from 'node:path';
 import { resolveArtemisHomeDir } from '../utils/fs.js';
 import { hasPlatformCapabilities } from './capabilities.js';
 import { normalizeProviderProtocol } from './factory.js';
-import { ProviderStore, createGlobalProviderStore } from './store.js';
+import { ProviderStore, createGlobalProviderStore, isOwnKeyProfile } from './store.js';
 import { createTrackedProviderFromConfig } from './telemetry.js';
 import type {
   AuxiliaryModelRoute,
@@ -151,10 +151,13 @@ export async function resolveAuxiliaryProfile(
   options: ResolveAuxiliaryOptions = {},
 ): Promise<AuxiliaryResolution | undefined> {
   const loaded = await loadStores(cwd);
+  // Helper tasks never run on the owner's own key (isOwnKeyProfile), not even when this
+  // run's coding tasks or subtasks do: they never count as subtasks.
+  const notOwnKey = (profile: ProviderProfile | undefined) => (profile && !isOwnKeyProfile(profile) ? profile : undefined);
   const pickers: Array<(entry: LoadedStore) => ProviderProfile | undefined> = [
-    ({ store, data }) => profileForAuxiliaryRoute(task, data.auxiliaryModels?.[task], store, data),
-    ({ store, data }) => store.getProfile(data, data.specialistProfileId),
-    ({ store, data }) => store.getDefaultMainProfile(data),
+    ({ store, data }) => notOwnKey(profileForAuxiliaryRoute(task, data.auxiliaryModels?.[task], store, data)),
+    ({ store, data }) => notOwnKey(store.getProfile(data, data.specialistProfileId)),
+    ({ store, data }) => notOwnKey(store.getDefaultMainProfile(data)),
   ];
   // The platform owns helper routing when its global store has a say in any tier.
   const global = loaded.find((entry) => entry.global);

@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import type { SessionMessage } from '../core/types.js';
 import { splitTrailingRuntimeContext } from './runtimeContext.js'
+import { inheritedMcpHeaders } from '../mcp/inheritedHeaders.js';
 import { pickLocale, type UiLocale } from '../cli/locale.js';
 import {
   createStreamIdleGuard,
@@ -151,6 +152,11 @@ function buildProviderTransportErrorMessage(
 }
 
 type OpenAIMessageContent = string | Array<{ type: string; [key: string]: unknown }>;
+
+/** The per-run headers a profile asks for (runHeadersFrom), from what the host handed over at startup. */
+export function runHeadersFor(config: { runHeadersFrom?: string }): Record<string, string> {
+  return config.runHeadersFrom ? inheritedMcpHeaders(config.runHeadersFrom) : {};
+}
 
 export function buildApiKeyHeaders(
   apiKey: string,
@@ -579,6 +585,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...runHeadersFor(this.config),
             ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),
@@ -909,6 +916,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           headers: {
             'content-type': 'application/json',
             ...buildApiKeyHeaders(this.config.apiKey, this.config.apiKeyHeader),
+            ...runHeadersFor(this.config),
             ...visionSkipHeader(this.bridgesImages, options),
           },
           body: JSON.stringify(body),

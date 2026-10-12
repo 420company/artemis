@@ -668,36 +668,46 @@ export class ProviderStore {
     return data.profiles.find((entry) => entry.id === id);
   }
 
-  getDefaultMainProfile(
-    data: ProviderStoreData,
-  ): ProviderProfile | undefined {
-    // A host may route one run to another of the configured profiles (the
-    // owner's own key for a task); a name that is not a profile is ignored.
-    const override = runProfileOverride('ARTEMIS_MAIN_PROFILE');
-    const overridden = override ? this.getProfile(data, override) : undefined;
-    if (overridden) return overridden;
+  getDefaultMainProfile(data: ProviderStoreData): ProviderProfile | undefined {
+    // The main conversation never runs on a profile of the owner's own key
+    // (isOwnKeyProfile): that key serves coding tasks and subtasks only, and
+    // no run setting can make it the main model.
     if (data.defaultMainProfileId) {
-      return this.getProfile(data, data.defaultMainProfileId);
+      const chosen = this.getProfile(data, data.defaultMainProfileId);
+      if (!isOwnKeyProfile(chosen)) return chosen;
+    }
+    const profiles = data.profiles.filter((entry) => !isOwnKeyProfile(entry));
+
+    if (!data.specialistProfileId && profiles.length === 1) {
+      return profiles[0];
     }
 
-    if (!data.specialistProfileId && data.profiles.length === 1) {
-      return data.profiles[0];
-    }
-
-    return data.profiles.find(
+    return profiles.find(
       (entry) => entry.id !== data.specialistProfileId,
     );
   }
 }
 
 /**
- * Per-run profile routing set by the host (artemis-online sets it when the
- * owner chose their own key for some work): ARTEMIS_MAIN_PROFILE (the main
- * conversation), ARTEMIS_SPECIALIST_PROFILE (subagent specialists) and
- * ARTEMIS_BUILDER_PROFILE (execution/coding work). Each names a profile in
- * providers.json; unset or unknown names change nothing.
+ * A profile on the owner's own model key (artemis-online's `byo_<connection>`,
+ * served by its local model proxy). It covers chat-model calls in the scope
+ * the owner chose and nothing else: helper tasks (vision, compression, web
+ * extraction ...), image and video generation, search and speech keep the
+ * platform's own routes, which stay metered.
  */
-export function runProfileOverride(name: 'ARTEMIS_MAIN_PROFILE' | 'ARTEMIS_SPECIALIST_PROFILE' | 'ARTEMIS_BUILDER_PROFILE'): string | undefined {
+export function isOwnKeyProfile(profile: { id?: string; managedBy?: string } | undefined): boolean {
+  return !!profile && (profile.managedBy === 'artemis-online-connectors' || (typeof profile.id === 'string' && profile.id.startsWith('byo_')));
+}
+
+/**
+ * Per-run profile routing set by the host (artemis-online sets it, in the
+ * owner's chat runs only, when the owner chose their own key for coding
+ * tasks or subtasks): ARTEMIS_SPECIALIST_PROFILE (specialist subtasks) and
+ * ARTEMIS_BUILDER_PROFILE (coding tasks). Each names a profile in
+ * providers.json; unset or unknown names change nothing. There is no
+ * override of the main conversation's profile.
+ */
+export function runProfileOverride(name: 'ARTEMIS_SPECIALIST_PROFILE' | 'ARTEMIS_BUILDER_PROFILE'): string | undefined {
   const value = process.env[name]?.trim();
   return value && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : undefined;
 }

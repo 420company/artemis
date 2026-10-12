@@ -56,7 +56,7 @@ type CreateProviderRouterOptions = {
 type RoutedProviderCandidate = {
   id: string;
   label: string;
-  kind: 'main' | 'specialist' | 'builder';
+  kind: 'main' | 'specialist' | 'builder' | 'subtask';
   provider: ChatProvider;
 };
 
@@ -93,10 +93,11 @@ function getProviderPriority(
   target: ProviderTarget,
   candidate: RoutedProviderCandidate,
 ): number {
-  // A builder profile the host routed this run to (ARTEMIS_BUILDER_PROFILE)
-  // takes execution work first and is only a late fallback elsewhere.
-  if (candidate.kind === 'builder') {
-    return target === 'builder' ? 99 : 40;
+  // Profiles the host routed this run to (ARTEMIS_BUILDER_PROFILE,
+  // ARTEMIS_SPECIALIST_PROFILE) are candidates only for their own targets
+  // (see buildCandidates), and first there.
+  if (candidate.kind === 'builder' || candidate.kind === 'subtask') {
+    return 99;
   }
 
   if (target === 'main') {
@@ -230,9 +231,10 @@ export async function createProviderRouter(
   }
   const uiLocale = (await new CliSettingsStore(options.cwd).load()).uiLocale;
   const mainProfile = store.getDefaultMainProfile(data);
-  let specialistProfile =
-    store.getProfile(data, runProfileOverride('ARTEMIS_SPECIALIST_PROFILE') ?? '') ??
-    store.getProfile(data, data.specialistProfileId);
+  let specialistProfile = store.getProfile(data, data.specialistProfileId);
+  // Per-run routing by the host (the owner's own key for coding or subtasks):
+  // never a fallback for the main conversation or other targets.
+  const subtaskProfile = store.getProfile(data, runProfileOverride('ARTEMIS_SPECIALIST_PROFILE') ?? '');
   const builderProfile = store.getProfile(data, runProfileOverride('ARTEMIS_BUILDER_PROFILE') ?? '');
   
   const createProviderFromProfile =
@@ -247,6 +249,7 @@ export async function createProviderRouter(
     ? createProviderFromProfile(specialistProfile)
     : undefined;
   const builderProvider = builderProfile ? createProviderFromProfile(builderProfile) : undefined;
+  const subtaskProvider = subtaskProfile ? createProviderFromProfile(subtaskProfile) : undefined;
   // An explicit auxiliaryModels.compression route takes compaction (and other
   // background summaries) off the worker; without one they use the worker,
   // then the main model.
@@ -377,7 +380,16 @@ export async function createProviderRouter(
           });
         }
 
-        if (builderProvider && builderProfile) {
+        if (subtaskProvider && subtaskProfile && shouldUseSpecialistProvider(target)) {
+          candidates.push({
+            id: subtaskProfile.id,
+            label: subtaskProfile.label ?? subtaskProfile.id,
+            kind: 'subtask',
+            provider: subtaskProvider,
+          });
+        }
+
+        if (builderProvider && builderProfile && target === 'builder') {
           candidates.push({
             id: builderProfile.id,
             label: builderProfile.label ?? builderProfile.id,
