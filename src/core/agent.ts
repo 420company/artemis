@@ -1201,7 +1201,8 @@ function tryParseEnvelope(raw: string): AssistantEnvelope {
   if (xmlActions.length > 0) {
     const cleaned = stripXmlToolCalls(raw);
     return {
-      reply: cleaned || raw.trim(),
+      // A turn of tool calls only has no reply text: never the raw call markup.
+      reply: cleaned,
       done: false,
       actions: xmlActions,
       plan: undefined,

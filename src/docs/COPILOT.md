@@ -86,9 +86,21 @@ and network namespace when the machine allows it — or `url`), `run`,
 `forget_host_key` (only with the owner's approval: the hard-approval gate,
 else the host's confirmation, else refused).
 
-SSH trusts a server's key on first use (`<ARTEMIS_HOME>/agent-ssh/known_hosts`).
-A changed key fails at once with `host_key_changed` — no waiting loop — and
-the agent stops and tells the owner.
+Where SSH runs: with the hosted credential service, the server runs it (the
+store's `ssh`: the engine sends the script and the credential's name, the
+server checks the binding and runs `ssh` as its own OS user, with the key in
+a server-only temporary file and the password over an askpass socket), so a
+key or root password never reaches the engine or the agent's OS user; the
+device profiles go to the server too (`storeVpnProfile`), and no profile
+file is written. Locally (the CLI) the engine fetches the secret and runs
+`ssh` itself.
+
+SSH trusts a server's key on first use (`<ARTEMIS_HOME>/agent-ssh/known_hosts`
+locally; the server's own known hosts when hosted). A changed key fails at
+once with `host_key_changed` — no waiting loop — and the agent stops and
+tells the owner. `forget_host_key` asks for approval as a `confirmation`,
+the always-ask kind (never "always allow"); without an approval channel it is
+refused.
 
 The QR encoder (`qr.ts`) matches a reference encoder bit for bit.
 `ARTEMIS_SSH_BIN` replaces `ssh` (tests use `scripts/fixtures/fakeSsh.mjs`,
@@ -124,7 +136,9 @@ Backends:
   `ARTEMIS_CREDENTIALS_DIR` overrides).
 
 The agent's own file and shell tools refuse `agent-credentials` and
-`vpn-profiles` paths in every mode. A host can register another backend
+`vpn-profiles` paths in every mode. That refusal is a limit for mistakes,
+not a guard: a shell can build the name. What keeps the hosted secrets from
+the agent is that they are the server's. A host can register another backend
 (`registerCredentialStore`), e.g. a vault that fills an origin-bound field
 itself without handing the secret to the engine. Secrets another module
 keeps plug in by name prefix (`registerCredentialResolver('signup-', …)`

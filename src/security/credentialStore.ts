@@ -26,7 +26,10 @@
  *     agent's OS user cannot read; each use is checked there against the
  *     binding, for this run only (`BrokerCredentialStore`). The run's ticket
  *     comes from a one-time claim code (captureCredentialBroker), so it lives
- *     in this process's memory only, not in any environment;
+ *     in this process's memory only, not in any environment. SSH keys and
+ *     server passwords are not even handed out: the server runs the SSH
+ *     itself (`ssh`), so they never reach the agent's OS user, and it keeps
+ *     the VPN device profiles (`storeVpnProfile`);
  *   - local (the CLI): files under `<ARTEMIS_HOME>/agent-credentials` (0700
  *     directory, 0600 files), a protected path for the agent's file and
  *     shell tools.
@@ -86,7 +89,31 @@ export interface CreateOptions {
   replace?: boolean;
 }
 
+/** One SSH session run where the secret lives (the hosted server): the script goes in, the output comes back. */
+export interface SshRequest {
+  /** The credential's name and how it logs in. */
+  name: string;
+  as: 'key' | 'password';
+  host: string;
+  user: string;
+  port: number;
+  script: string;
+  timeoutMs: number;
+}
+
+export type SshResponse = { ok: true; code: number | null; stdout: string; stderr: string; timedOut: boolean } | { ok: false; code: CredentialErrorCode; message: string };
+
 export interface CredentialStore {
+  /**
+   * Runs SSH with a stored key or password where the store keeps them (the
+   * hosted server, as its own OS user): the secret never comes to this
+   * process. Absent: the caller fetches the secret and runs ssh itself.
+   */
+  ssh?(request: SshRequest, signal?: AbortSignal): Promise<SshResponse>;
+  /** Forgets a server's recorded host key where `ssh` keeps them (only after the owner approved it). */
+  forgetHostKey?(host: string, port: number): Promise<boolean>;
+  /** Keeps a WireGuard device profile where the owner's app reads it; absent: the caller writes the file. */
+  storeVpnProfile?(server: string, device: string, conf: string): Promise<void>;
   /** Makes (or stores) a credential; returns what may be shown. Existing names fail with `exists` unless `replace`. */
   create(name: string, kind: CredentialKind, options?: CreateOptions): Promise<CredentialInfo>;
   describe(name: string): Promise<CredentialInfo | undefined>;
@@ -173,21 +200,40 @@ export function checkUse(info: CredentialInfo, purpose: CredentialPurpose): { ok
 
 const revealed = new Set<string>();
 
+/** Base64 broken into lines (MIME wraps at 76, PEM at 64), with either line end. */
+function wrapped(b64: string): string[] {
+  const out: string[] = [];
+  for (const width of [64, 76]) {
+    if (b64.length <= width) continue;
+    const lines = b64.match(new RegExp(`.{1,${width}}`, 'g')) ?? [];
+    out.push(lines.join('\n'), lines.join('\r\n'));
+  }
+  return out;
+}
+
 /** The ways a secret can come back out of a page or a request log, besides itself. */
 export function secretEncodings(secret: string): string[] {
-  const b64 = Buffer.from(secret, 'utf8').toString('base64');
+  const bytes = Buffer.from(secret, 'utf8');
+  const b64 = bytes.toString('base64');
+  const hex = bytes.toString('hex');
   const html = secret.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  return [
+  // A form post (URLSearchParams, application/x-www-form-urlencoded) also escapes ( ) ! ' ~ * and writes a space as +.
+  const form = new URLSearchParams([['', secret]]).toString().slice(1);
+  return [...new Set([
     secret,
     encodeURIComponent(secret),
     encodeURIComponent(secret).replace(/%20/g, '+'),
+    form,
+    form.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
     JSON.stringify(secret).slice(1, -1),
     html,
     b64,
     b64.replace(/=+$/, ''),
-    Buffer.from(secret, 'utf8').toString('base64url'),
-    Buffer.from(secret, 'utf8').toString('hex'),
-  ];
+    ...wrapped(b64),
+    bytes.toString('base64url'),
+    hex,
+    hex.toUpperCase(),
+  ])];
 }
 
 function remember(secret: string): void {
@@ -397,14 +443,15 @@ export class BrokerCredentialStore implements CredentialStore {
     private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
   ) {}
 
-  private async call<T>(op: string, body: Record<string, unknown>): Promise<T> {
+  private async call<T>(op: string, body: Record<string, unknown>, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T> {
     let res: Response;
     try {
+      const timeout = AbortSignal.timeout(options.timeoutMs ?? 15_000);
       res = await this.fetchImpl(this.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...this.headers },
         body: JSON.stringify({ op, ...body }),
-        signal: AbortSignal.timeout(15_000),
+        signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
       });
     } catch (err) {
       throw new CredentialError('unavailable', `The credential service did not answer: ${err instanceof Error ? err.message : String(err)}`);
@@ -451,6 +498,26 @@ export class BrokerCredentialStore implements CredentialStore {
 
   async remove(name: string): Promise<boolean> {
     return (await this.call<{ removed: boolean }>('remove', { name })).removed;
+  }
+
+  /** The server runs the SSH as its own user; only the output comes back. */
+  async ssh(request: SshRequest, signal?: AbortSignal): Promise<SshResponse> {
+    checkName(request.name);
+    try {
+      const data = await this.call<{ code: number | null; stdout?: string; stderr?: string; timedOut?: boolean }>('ssh', { ...request }, { timeoutMs: request.timeoutMs + 30_000, ...(signal ? { signal } : {}) });
+      return { ok: true, code: data.code, stdout: data.stdout ?? '', stderr: data.stderr ?? '', timedOut: data.timedOut === true };
+    } catch (err) {
+      if (err instanceof CredentialError) return { ok: false, code: err.code, message: err.message };
+      throw err;
+    }
+  }
+
+  async forgetHostKey(host: string, port: number): Promise<boolean> {
+    return (await this.call<{ forgotten: boolean }>('ssh_forget_host', { host, port })).forgotten;
+  }
+
+  async storeVpnProfile(server: string, device: string, conf: string): Promise<void> {
+    await this.call('vpn_profile', { server, device, conf });
   }
 }
 

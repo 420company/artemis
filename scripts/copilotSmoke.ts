@@ -338,6 +338,20 @@ await test('credentials: a secret is scrubbed in every encoding a page or a log 
   await store.create('owner-like', 'token', { secret });
   assert.equal((await useCredential('owner-like', { type: 'internal', use: 'vpn' }, store)).ok, true);
   for (const form of secretEncodings(secret)) assert.equal(scrubSecrets(`x ${form} y`), 'x •••• y', form);
+  // Form posts (URLSearchParams), upper-case hex, and base64 broken into lines.
+  const tricky = "It's (very) ~secret*! ok";
+  const long = 'L0ng-Secret-'.repeat(8);
+  await store.create('tricky', 'token', { secret: tricky });
+  await store.create('long', 'token', { secret: long });
+  await useCredential('tricky', { type: 'internal', use: 'vpn' }, store);
+  await useCredential('long', { type: 'internal', use: 'vpn' }, store);
+  const posted = new URLSearchParams({ password: tricky }).toString();
+  assert.equal(scrubSecrets(posted), 'password=••••');
+  assert.equal(scrubSecrets(`hex ${Buffer.from(tricky).toString('hex').toUpperCase()}`), 'hex ••••');
+  const mime = Buffer.from(long).toString('base64').match(/.{1,76}/g)!.join('\r\n');
+  const pem = Buffer.from(long).toString('base64').match(/.{1,64}/g)!.join('\n');
+  assert.equal(scrubSecrets(`mime ${mime}`), 'mime ••••');
+  assert.equal(scrubSecrets(`pem ${pem}`), 'pem ••••');
 });
 
 await test('credentials: the hosted broker is taken out of the environment and asked per use (H2)', async () => {
@@ -403,6 +417,13 @@ await test('envelope: tool calls come first; their arguments are never the envel
   const envelope = parse('好的。\n```json\n{"reply":"done","done":true,"actions":[]}\n```');
   assert.equal(envelope.reply, 'done');
   assert.equal(parse('{"reply":"hi","done":false,"actions":[{"type":"list_files","path":"."}]}').actions.length, 1);
+  // A turn of tool calls only: no reply text, and never the raw call markup as the reply.
+  const toolOnly = parse('<toolcall name="browser_click">{"selector":"#buy"}</toolcall>');
+  assert.equal(toolOnly.actions.length, 1);
+  assert.equal(toolOnly.reply, '');
+  const twoCalls = parse('\n<toolcall name="post_update">{"text":"在看配置"}</toolcall>\n<toolcall name="browser_navigate">{"url":"https://example.com"}</toolcall>\n');
+  assert.equal(twoCalls.actions.length, 2);
+  assert.doesNotMatch(twoCalls.reply, /toolcall|<|selector/);
 });
 
 await test('status at the end: a confirmation card waits for the owner (L2)', () => {
@@ -627,6 +648,92 @@ await test('server_setup: password-only server gets the key installed through as
   assert.equal(missing.error?.code, 'credential_not_found');
   const noSsh = await executeServerSetup({ type: 'server_setup', action: 'run', host: '198.51.100.7', key: 'key-b', command: 'uptime' }, { ...ctx, sshBin: '/nonexistent/ssh' });
   assert.equal(noSsh.error?.code, 'ssh_missing');
+});
+
+await test('server_setup, hosted: the server runs the SSH; keys, passwords and profiles never come to the engine (finding 3)', async () => {
+  const calls: any[] = [];
+  const created = new Map<string, any>();
+  const tmpBefore = new Set(fs.readdirSync(os.tmpdir()));
+  const store = new BrokerCredentialStore('http://127.0.0.1:1/agent/credentials', { 'x-credential-ticket': 't' }, async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    calls.push(body);
+    const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status });
+    switch (body.op) {
+      case 'describe':
+        return json(created.has(body.name) ? { info: created.get(body.name) } : {});
+      case 'create': {
+        const info = { name: body.name, kind: body.kind, createdAt: 'x', bindings: body.bindings ?? {}, publicPart: body.publicPart ?? 'ssh-ed25519 AAAAhosted agent' };
+        created.set(body.name, info);
+        return json({ info });
+      }
+      case 'use':
+        if (body.purpose?.type === 'ssh') return json({ error: 'wrong_kind', message: 'the engine must not fetch SSH secrets here' }, 403);
+        return json({ secret: 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5IQ==', info: created.get(body.name) });
+      case 'ssh':
+        if (body.name === 'held-root') return json({ error: 'locked', message: 'Locked. Put this card in your reply:\n```unlock\n{"id":"ul_0123456789abcdef0123"}\n```' }, 423);
+        if (body.host === '203.0.113.99') return json({ error: 'wrong_host', message: 'belongs to 203.0.113.20' }, 403);
+        return json({ code: 0, stdout: ['probe', 'wireguard', 'check', 'install_key'].map((x) => `ARTEMIS_STEP ${x} ok`).join('\n') + '\n', stderr: '', timedOut: false });
+      case 'ssh_forget_host':
+        return json({ forgotten: true });
+      case 'vpn_profile':
+        return json({ stored: true });
+      default:
+        return json({ error: 'not_found' }, 404);
+    }
+  });
+  const ctx = { cwd: tmp, store, inventoryFile: path.join(tmp, 'servers-hosted.json'), sleep: async () => undefined, sshBin: '/nonexistent/ssh' };
+  const run = (a: any, extra: any = {}) => executeServerSetup({ type: 'server_setup', ...a }, { ...ctx, ...extra });
+  assert.equal((await run({ action: 'create_key', name: 'hosted-key', host: '203.0.113.20' })).ok, true);
+  const ready = await run({ action: 'wait_ready', host: '203.0.113.20', key: 'hosted-key', server: 'hosted-1' });
+  assert.equal(ready.ok, true, ready.output);
+  const installed = await run({ action: 'install_key', host: '203.0.113.20', password: 'root-hosted', key: 'hosted-key' });
+  assert.equal(installed.ok, true, installed.output);
+  const vpn = await run({ action: 'install_wireguard', host: '203.0.113.20', key: 'hosted-key', server: 'hosted-1', clients: ['phone'] });
+  assert.equal(vpn.ok, true, vpn.output);
+  assert.match(vpn.output, /```vpn\n\{"server":"hosted-1","device":"phone"\}\n```/);
+  // What went to the server: names and scripts, never a key or a password; no SSH secret was fetched.
+  const sshCalls = calls.filter((c) => c.op === 'ssh');
+  assert.deepEqual(sshCalls.map((c) => `${c.as}:${c.name}`), ['key:hosted-key', 'password:root-hosted', 'key:hosted-key']);
+  assert.ok(!calls.some((c) => c.op === 'use' && c.purpose?.type === 'ssh'), 'the engine never asks for an SSH secret');
+  assert.ok(sshCalls.every((c) => typeof c.timeoutMs === 'number' && c.user === 'root' && c.port === 22));
+  // The profile went to the server; no file in the agent's home.
+  const profiles = calls.filter((c) => c.op === 'vpn_profile');
+  assert.equal(profiles.length, 1);
+  assert.match(profiles[0].conf, /^\[Interface\]\nPrivateKey = /);
+  assert.ok(!fs.existsSync(path.join(vpnProfilesDir(), 'hosted-1')), 'no profile file for the agent to read');
+  assert.ok(!vpn.output.includes(profiles[0].conf.match(/PrivateKey = (\S+)/)[1]), 'no key in the tool result');
+  // No temporary key or askpass folder was made here.
+  assert.deepEqual([...fs.readdirSync(os.tmpdir())].filter((f) => !tmpBefore.has(f) && /^artemis-(ssh|askpass)-/.test(f)), []);
+  // A refused binding and a secret the owner holds the key to come back as such.
+  assert.equal((await run({ action: 'run', host: '203.0.113.99', key: 'hosted-key', command: 'id' })).error?.code, 'credential_refused');
+  const held = await run({ action: 'install_key', host: '203.0.113.20', password: 'held-root', key: 'hosted-key' });
+  assert.equal(held.error?.code, 'credential_locked');
+  assert.match(held.output, /```unlock/);
+  // forget_host_key: the server's known hosts, and only after the owner approved (a hard approval: kind "confirmation").
+  const refused = await run({ action: 'forget_host_key', host: '203.0.113.20' });
+  assert.equal(refused.error?.code, 'approval_required');
+  assert.ok(!calls.some((c) => c.op === 'ssh_forget_host'), 'never on the agent\'s word');
+  assert.equal((await run({ action: 'forget_host_key', host: '203.0.113.20' }, { requestUserConfirmation: async () => true })).ok, true);
+  assert.deepEqual(calls.filter((c) => c.op === 'ssh_forget_host').map((c) => `${c.host}:${c.port}`), ['203.0.113.20:22']);
+});
+
+await test('graders: how-to steps for the user are caught in more phrasings; "I did it" replies are not', async () => {
+  const { howToSteps } = await import('./evalZh/graders.js');
+  const handedOver = [
+    '建议到 Vultr 控制台新建实例，系统选 Debian 12，之后用一键脚本装上就行。',
+    '麻烦您自行登录 Vultr 后台创建一台东京的机器，创建完把 IP 告诉我。',
+    '去这里买就行：https://www.vultr.com/ ，选最便宜那档。',
+    '请您自己到官网注册一个账号。',
+  ];
+  for (const reply of handedOver) assert.ok(howToSteps(reply).length > 0, reply);
+  const didIt = [
+    '我先上 Vultr 官网注册了账号，然后选了东京机房的 5 美元套餐，已经装好 WireGuard，二维码在下面。',
+    '要我直接帮你在 Vultr 东京开一台吗？',
+    '收到，我已经在 Vultr 东京开好了一台 5 美元的机器，VPN 装好了，二维码在下面，扫一下就能用。',
+    '我去这里买好了：https://www.vultr.com/ ，订单号在下面。',
+    '我建议选东京机房，延迟最低；要我现在就去开吗？',
+  ];
+  for (const reply of didIt) assert.deepEqual(howToSteps(reply), [], reply);
 });
 
 // ── verification codes ──────────────────────────────────────────────────

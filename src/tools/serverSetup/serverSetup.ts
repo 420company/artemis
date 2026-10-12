@@ -13,8 +13,11 @@
  *   run                one command on the server
  *   list_servers / record_server   the inventory, so "再加一台" / "把东京那台关了" can follow
  *
- * SSH runs the system `ssh` (ARTEMIS_SSH_BIN overrides it, e.g. a test
- * double). Keys and passwords come from security/credentialStore.ts; tool
+ * SSH: on a hosted server the credential service runs it (the store's
+ * `ssh`), as the server's OS user, so a key or root password never reaches
+ * this process or the agent's user; only the output comes back. Without one
+ * (the CLI) this process fetches the secret from its local store and runs
+ * the system `ssh` (ARTEMIS_SSH_BIN overrides it, e.g. a test double). Tool
  * results carry only names, public keys, file paths and check results.
  */
 
@@ -181,6 +184,13 @@ export function vpnProfilesDir(): string {
   return path.join(resolveArtemisHomeDir(), 'vpn-profiles');
 }
 
+function sshRunOf(code: number | null, stdout: string, stderr: string, timedOut: boolean): SshRun {
+  const steps = new Set([...stdout.matchAll(/^ARTEMIS_STEP (\w+) ok$/gm)].map((m) => m[1]!));
+  const hostKeyChanged = /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for .* has changed/i.test(stderr);
+  return { code, stdout, stderr, steps, timedOut, hostKeyChanged };
+}
+
+/** The ssh client here, with a secret this process holds (the local store only). */
 async function runSsh(
   ctx: ServerSetupContext,
   t: Target,
@@ -235,9 +245,7 @@ async function runSsh(
       clearTimeout(timer);
       ctx.abortSignal?.removeEventListener('abort', onAbort);
       if (askpassDir) void rm(askpassDir, { recursive: true, force: true });
-      const steps = new Set([...stdout.matchAll(/^ARTEMIS_STEP (\w+) ok$/gm)].map((m) => m[1]!));
-      const hostKeyChanged = /REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|host key for .* has changed/i.test(stderr);
-      resolve({ code, stdout, stderr, steps, timedOut, hostKeyChanged });
+      resolve(sshRunOf(code, stdout, stderr, timedOut));
     };
     child.on('error', (err) => {
       stderr += String((err as NodeJS.ErrnoException).code === 'ENOENT' ? `ssh client not found (${bin}); install openssh-client` : err.message);
@@ -254,24 +262,55 @@ function tail(text: string): string {
   return clean.length > OUTPUT_TAIL ? `…${clean.slice(-OUTPUT_TAIL)}` : clean;
 }
 
-/**
- * Runs `fn` with the stored key of `key` in a private temporary file (0600 in
- * a 0700 directory, removed right after). The key must be bound to this host
- * (it is bound at its first use).
- */
-async function withKey<T>(store: CredentialStore, key: string, host: string, fn: (keyPath: string) => Promise<T>): Promise<T | ServerSetupResult> {
-  if (!CREDENTIAL_NAME.test(key)) return fail('invalid_input', 'key must be the name of a key made with create_key');
-  const used = await useCredential(key, { type: 'ssh', host, as: 'key' }, store);
-  if (!used.ok) return fail(used.code === 'not_found' ? 'credential_not_found' : 'credential_refused', used.code === 'not_found' ? `No SSH key named "${key}". Make one with create_key first.` : used.message);
-  const dir = await mkdtemp(path.join(tmpdir(), 'artemis-ssh-'));
-  const file = path.join(dir, 'key');
-  try {
-    await chmod(dir, 0o700);
-    await writeFile(file, used.secret.endsWith('\n') ? used.secret : `${used.secret}\n`, { mode: 0o600 });
-    return await fn(file);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
+/** How a session logs in: the name of a stored SSH key, or of a stored server password. */
+type SshAuth = { key: string } | { password: string };
+
+/** One session with a script; a credential problem comes back as the tool's failure. */
+type Ssh = (script: string, timeoutMs: number) => Promise<SshRun | ServerSetupResult>;
+
+function isFailure(run: SshRun | ServerSetupResult): run is ServerSetupResult {
+  return 'ok' in run;
+}
+
+function credentialFailure(auth: SshAuth, code: string, message: string): ServerSetupResult {
+  if (code === 'not_found') {
+    return fail('credential_not_found', 'key' in auth ? `No SSH key named "${auth.key}". Make one with create_key first.` : `No password named "${auth.password}".`);
   }
+  // A secret the owner holds the key to: the message carries the unlock card to show.
+  if (code === 'locked') return fail('credential_locked', message);
+  return fail('credential_refused', message);
+}
+
+/**
+ * Sessions to one server with one stored credential, which must be bound to
+ * this host (a password is bound at its first use, a key when made for it).
+ * Hosted: the credential service runs ssh (as the server's user) and only
+ * the output comes back. Local: the secret is fetched here, a key goes into a
+ * private temporary file (0600 in a 0700 directory, removed right after).
+ */
+function sshWith(ctx: ServerSetupContext, store: CredentialStore, t: Target, auth: SshAuth): Ssh {
+  const name = 'key' in auth ? auth.key : auth.password;
+  const as = 'key' in auth ? 'key' : 'password';
+  return async (script, timeoutMs) => {
+    if (!CREDENTIAL_NAME.test(name)) return fail('invalid_input', 'key' in auth ? 'key must be the name of a key made with create_key' : 'password must be the name of a stored password');
+    if (store.ssh) {
+      const r = await store.ssh({ name, as, host: t.host, user: t.user, port: t.port, script, timeoutMs }, ctx.abortSignal);
+      if (!r.ok) return r.code === 'unavailable' ? fail('ssh_unavailable', r.message, true) : credentialFailure(auth, r.code, r.message);
+      return sshRunOf(r.code, r.stdout, r.stderr, r.timedOut);
+    }
+    const used = await useCredential(name, { type: 'ssh', host: t.host, as }, store);
+    if (!used.ok) return credentialFailure(auth, used.code, used.message);
+    if (as === 'password') return runSsh(ctx, t, { password: used.secret }, script, timeoutMs);
+    const dir = await mkdtemp(path.join(tmpdir(), 'artemis-ssh-'));
+    const file = path.join(dir, 'key');
+    try {
+      await chmod(dir, 0o700);
+      await writeFile(file, used.secret.endsWith('\n') ? used.secret : `${used.secret}\n`, { mode: 0o600 });
+      return await runSsh(ctx, t, { keyPath: file }, script, timeoutMs);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
 }
 
 function sshFailure(step: string, run: SshRun): ServerSetupResult {
@@ -331,7 +370,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       };
     }
     case 'forget_host_key':
-      return forgetHostKey(a, ctx);
+      return forgetHostKey(a, ctx, store);
     case 'install_key': {
       const t = target(a);
       if (typeof t === 'string') return fail('invalid_input', t);
@@ -339,9 +378,8 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       const keyInfo = await store.describe(a.key);
       if (keyInfo?.kind !== 'ssh_key' || !keyInfo.publicPart) return fail('credential_not_found', `No SSH key named "${a.key}".`);
       // Only a password, and only for this server (bound at creation or here, at its first use).
-      const password = await useCredential(a.password, { type: 'ssh', host: t.host, as: 'password' }, store);
-      if (!password.ok) return fail(password.code === 'not_found' ? 'credential_not_found' : 'credential_refused', password.message);
-      const run = await runSsh(ctx, t, { password: password.secret }, installKeyScript(keyInfo.publicPart), 60_000);
+      const run = await sshWith(ctx, store, t, { password: a.password })(installKeyScript(keyInfo.publicPart), 60_000);
+      if (isFailure(run)) return run;
       if (!run.steps.has('install_key')) return sshFailure('Installing the key', run);
       return { ok: true, output: `Key "${a.key}" installed for ${t.user}@${t.host}. Use key "${a.key}" from now on.` };
     }
@@ -350,36 +388,36 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       if (typeof t === 'string') return fail('invalid_input', t);
       const timeoutMs = Math.max(30, Math.min(1800, a.timeoutSeconds ?? 600)) * 1000;
       const deadline = Date.now() + timeoutMs;
-      return withKey(store, a.key, t.host, async (keyPath) => {
-        let last: SshRun | undefined;
-        let attempts = 0;
-        while (Date.now() < deadline && !ctx.abortSignal?.aborted) {
-          attempts++;
-          last = await runSsh(ctx, t, { keyPath }, probeScript(), 30_000);
-          if (last.steps.has('probe')) {
-            const facts = tail(last.stdout);
-            if (a.server) await updateServer(ctx, a.server, { host: t.host, user: t.user, port: t.port, key: a.key, status: 'active' });
-            return { ok: true, output: `${t.host} is ready (SSH answered after ${attempts} attempt(s)).\n${facts}` };
-          }
-          // Not reachable yet is worth waiting for; a missing client or a changed host key is not.
-          if (last.code === 127 || last.hostKeyChanged) break;
-          await sleep(10_000);
+      const ssh = sshWith(ctx, store, t, { key: a.key });
+      let last: SshRun | undefined;
+      let attempts = 0;
+      while (Date.now() < deadline && !ctx.abortSignal?.aborted) {
+        attempts++;
+        const tried = await ssh(probeScript(), 30_000);
+        if (isFailure(tried)) return tried;
+        last = tried;
+        if (last.steps.has('probe')) {
+          const facts = tail(last.stdout);
+          if (a.server) await updateServer(ctx, a.server, { host: t.host, user: t.user, port: t.port, key: a.key, status: 'active' });
+          return { ok: true, output: `${t.host} is ready (SSH answered after ${attempts} attempt(s)).\n${facts}` };
         }
-        return last ? sshFailure(`Waiting for ${t.host}`, last) : fail('ssh_timeout', `${t.host} did not answer in time.`, true);
-      });
+        // Not reachable yet is worth waiting for; a missing client or a changed host key is not.
+        if (last.code === 127 || last.hostKeyChanged) break;
+        await sleep(10_000);
+      }
+      return last ? sshFailure(`Waiting for ${t.host}`, last) : fail('ssh_timeout', `${t.host} did not answer in time.`, true);
     }
     case 'harden': {
       const t = target(a);
       if (typeof t === 'string') return fail('invalid_input', t);
       const extra = (a.extraPorts ?? []).filter((p) => /^\d{1,5}\/(tcp|udp)$/.test(p));
-      return withKey(store, a.key, t.host, async (keyPath) => {
-        const run = await runSsh(ctx, t, { keyPath }, hardenScript({ sshPort: t.port, extraPorts: extra }), 15 * 60_000);
-        if (!run.steps.has('harden')) return sshFailure('Hardening', run);
-        const servers = await readInventory(ctx);
-        const known = Object.values(servers).find((s) => s.host === t.host);
-        if (known) await updateServer(ctx, known.name, { hardened: true });
-        return { ok: true, output: `Hardened ${t.host}: system updated, firewall on (open: ${[`${t.port}/tcp`, ...extra].join(', ')}), automatic security updates, password login off where a key is installed.\n${tail(run.stdout)}` };
-      });
+      const run = await sshWith(ctx, store, t, { key: a.key })(hardenScript({ sshPort: t.port, extraPorts: extra }), 15 * 60_000);
+      if (isFailure(run)) return run;
+      if (!run.steps.has('harden')) return sshFailure('Hardening', run);
+      const servers = await readInventory(ctx);
+      const known = Object.values(servers).find((s) => s.host === t.host);
+      if (known) await updateServer(ctx, known.name, { hardened: true });
+      return { ok: true, output: `Hardened ${t.host}: system updated, firewall on (open: ${[`${t.port}/tcp`, ...extra].join(', ')}), automatic security updates, password login off where a key is installed.\n${tail(run.stdout)}` };
     }
     case 'install_wireguard':
       return installWireGuard(a, ctx, store);
@@ -390,11 +428,10 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       if (typeof t === 'string') return fail('invalid_input', t);
       if (!a.command?.trim()) return fail('invalid_input', 'command required');
       const timeoutMs = Math.max(5, Math.min(1800, a.timeoutSeconds ?? 300)) * 1000;
-      return withKey(store, a.key, t.host, async (keyPath) => {
-        const run = await runSsh(ctx, t, { keyPath }, `${a.command}\n`, timeoutMs);
-        const out = [tail(run.stdout), run.stderr.trim() ? `stderr: ${tail(run.stderr)}` : ''].filter(Boolean).join('\n');
-        return run.code === 0 ? { ok: true, output: out || '(no output)' } : { ...sshFailure('The command', run), output: `exit ${run.code}\n${out}` };
-      });
+      const run = await sshWith(ctx, store, t, { key: a.key })(`${a.command}\n`, timeoutMs);
+      if (isFailure(run)) return run;
+      const out = [tail(run.stdout), run.stderr.trim() ? `stderr: ${tail(run.stderr)}` : ''].filter(Boolean).join('\n');
+      return run.code === 0 ? { ok: true, output: out || '(no output)' } : { ...sshFailure('The command', run), output: `exit ${run.code}\n${out}` };
     }
     case 'list_servers': {
       const servers = Object.values(await readInventory(ctx));
@@ -456,12 +493,15 @@ async function installWireGuard(
   }
   const clients = [...(existing?.clients ?? [])];
   const used = new Set(clients.map((c) => Number(c.address.split('.')[3]?.split('/')[0])));
-  // The agent's own home, never the workspace: a profile holds the device's
-  // private key, so it must not end up in 作品, a shared page or a site.
+  // Hosted: the server keeps the profiles. Local: the agent's own home, never the
+  // workspace: a profile holds the device's private key, so it must not end up
+  // in 作品, a shared page or a site.
   const outDir = path.join(vpnProfilesDir(), a.server);
-  await mkdir(outDir, { recursive: true, mode: 0o700 });
-  await chmod(path.dirname(outDir), 0o700).catch(() => undefined);
-  await chmod(outDir, 0o700).catch(() => undefined);
+  if (!store.storeVpnProfile) {
+    await mkdir(outDir, { recursive: true, mode: 0o700 });
+    await chmod(path.dirname(outDir), 0o700).catch(() => undefined);
+    await chmod(outDir, 0o700).catch(() => undefined);
+  }
   const created: string[] = [];
   for (const name of wanted) {
     if (clients.some((c) => c.name === name)) continue;
@@ -476,14 +516,13 @@ async function installWireGuard(
     created.push(name);
   }
 
-  const run = await withKey(store, a.key, t.host, (keyPath) =>
-    runSsh(ctx, t, { keyPath }, wireguardScript({
-      privateKey: serverPrivate!,
-      listenPort,
-      address: `${subnet}.1/24`,
-      peers: clients.map((c) => ({ publicKey: c.publicKey, address: c.address })),
-    }), 10 * 60_000));
-  if ('ok' in run) return run;
+  const run = await sshWith(ctx, store, t, { key: a.key })(wireguardScript({
+    privateKey: serverPrivate!,
+    listenPort,
+    address: `${subnet}.1/24`,
+    peers: clients.map((c) => ({ publicKey: c.publicKey, address: c.address })),
+  }), 10 * 60_000);
+  if (isFailure(run)) return run;
   if (!run.steps.has('wireguard')) return sshFailure('Setting up the VPN', run);
 
   // Device profiles and their QR codes, readable by the agent only (0600 in 0700 folders).
@@ -504,13 +543,18 @@ async function installWireGuard(
       'PersistentKeepalive = 25',
       '',
     ].join('\n');
+    client.files = [vpnCard(a.server, client.name)];
+    // Hosted: the server keeps the profile (out of the agent user's reach); no file here.
+    if (store.storeVpnProfile) {
+      await store.storeVpnProfile(a.server, client.name, conf);
+      continue;
+    }
     const confFile = path.join(outDir, `${client.name}.conf`);
     const pngFile = path.join(outDir, `${client.name}-qr.png`);
     await writeFile(confFile, conf, { mode: 0o600 });
     await chmod(confFile, 0o600);
     await writeFile(pngFile, qrToPng(encodeQr(conf, 'M'), 8), { mode: 0o600 });
     await chmod(pngFile, 0o600);
-    client.files = [vpnCard(a.server, client.name)];
   }
   await updateServer(ctx, a.server, {
     host: t.host,
@@ -542,7 +586,7 @@ export function vpnCard(server: string, device: string): string {
  * Forgets the recorded host key of a server, after the owner approved it: a
  * changed key may mean a reinstall, or someone in between.
  */
-async function forgetHostKey(a: Extract<ServerSetupAction, { action: 'forget_host_key' }>, ctx: ServerSetupContext): Promise<ServerSetupResult> {
+async function forgetHostKey(a: Extract<ServerSetupAction, { action: 'forget_host_key' }>, ctx: ServerSetupContext, store: CredentialStore): Promise<ServerSetupResult> {
   const t = target(a);
   if (typeof t === 'string') return fail('invalid_input', t);
   const { requireOwnerApproval } = await import('../ownerApproval.js');
@@ -552,6 +596,8 @@ async function forgetHostKey(a: Extract<ServerSetupAction, { action: 'forget_hos
     payload: { action: 'forget_host_key', host: t.host, port: t.port },
   });
   if (!approved.ok) return fail('approval_required', approved.message);
+  // Hosted: the trusted host keys are the server's (it runs the SSH).
+  if (store.forgetHostKey) await store.forgetHostKey(t.host, t.port);
   const file = knownHostsFile();
   const text = await readFile(file, 'utf8').catch(() => '');
   const marker = t.port === 22 ? t.host : `[${t.host}]:${t.port}`;
@@ -592,13 +638,13 @@ function runLocal(cmd: string, args: string[], input?: string, timeoutMs = 20_00
  * a WireGuard interface, and one HTTPS request through it. Needs root, `ip`
  * and `wg`; otherwise undefined (not possible here).
  */
-async function tunnelTest(ctx: ServerSetupContext, t: Target, keyPath: string, wg: NonNullable<ServerRecord['wireguard']>): Promise<string | undefined> {
+async function tunnelTest(ctx: ServerSetupContext, t: Target, ssh: Ssh, wg: NonNullable<ServerRecord['wireguard']>): Promise<string | undefined> {
   if (process.getuid?.() !== 0 || !(await commandExists('ip')) || !(await commandExists('wg')) || !(await commandExists('curl'))) return undefined;
   const pair = generateWireGuardKeyPair();
   const address = `${wg.subnet}.254/32`;
   const ns = `agentwg${randomBytes(3).toString('hex')}`;
-  const added = await runSsh(ctx, t, { keyPath }, wireguardCheckScript({ listenPort: wg.listenPort, testPeer: { publicKey: pair.publicKey, address } }), 60_000);
-  if (!added.steps.has('check')) return 'tunnel test skipped: could not add a test peer';
+  const added = await ssh(wireguardCheckScript({ listenPort: wg.listenPort, testPeer: { publicKey: pair.publicKey, address } }), 60_000);
+  if (isFailure(added) || !added.steps.has('check')) return 'tunnel test skipped: could not add a test peer';
   const dir = await mkdtemp(path.join(tmpdir(), 'artemis-wgtest-'));
   try {
     const keyFile = path.join(dir, 'key');
@@ -624,7 +670,7 @@ async function tunnelTest(ctx: ServerSetupContext, t: Target, keyPath: string, w
   } finally {
     await runLocal('ip', ['netns', 'del', ns]);
     await rm(dir, { recursive: true, force: true });
-    await runSsh(ctx, t, { keyPath }, removePeerScript(pair.publicKey), 30_000);
+    await ssh(removePeerScript(pair.publicKey), 30_000);
   }
 }
 
@@ -649,22 +695,23 @@ async function verify(a: Extract<ServerSetupAction, { action: 'verify' }>, ctx: 
   if (typeof t === 'string') return fail('invalid_input', t);
   const key = a.key ?? record?.key;
   if (!key) return fail('invalid_input', 'key: the SSH key name for this server');
-  return withKey(store, key, t.host, async (keyPath) => {
-    if (a.check === 'ssh') {
-      const run = await runSsh(ctx, t, { keyPath }, probeScript(), 30_000);
-      return run.steps.has('probe') ? { ok: true, output: `SSH works for ${t.user}@${t.host}.\n${tail(run.stdout)}` } : sshFailure('SSH check', run);
-    }
-    const wg = record?.wireguard;
-    if (!wg) return fail('invalid_input', 'No VPN recorded for this server; run install_wireguard first.');
-    const run = await runSsh(ctx, t, { keyPath }, wireguardCheckScript({ listenPort: wg.listenPort }), 60_000);
-    if (!run.steps.has('check')) return sshFailure('VPN check', run);
-    const tunnel = await tunnelTest(ctx, t, keyPath, wg);
-    const verdict = tunnel?.startsWith('tunnel test failed') ? 'fail' : 'ok';
-    const lines = [
-      `VPN on ${t.host}: service active, listening on ${wg.listenPort}/udp.`,
-      tail(run.stdout),
-      tunnel ?? 'A tunnel from this machine was not possible here (needs root and WireGuard tools); the first phone connection will confirm it — ask the user to tell you if it does not connect.',
-    ];
-    return verdict === 'ok' ? { ok: true, output: lines.join('\n') } : fail('verify_failed', lines.join('\n'), true);
-  });
+  const ssh = sshWith(ctx, store, t, { key });
+  if (a.check === 'ssh') {
+    const run = await ssh(probeScript(), 30_000);
+    if (isFailure(run)) return run;
+    return run.steps.has('probe') ? { ok: true, output: `SSH works for ${t.user}@${t.host}.\n${tail(run.stdout)}` } : sshFailure('SSH check', run);
+  }
+  const wg = record?.wireguard;
+  if (!wg) return fail('invalid_input', 'No VPN recorded for this server; run install_wireguard first.');
+  const run = await ssh(wireguardCheckScript({ listenPort: wg.listenPort }), 60_000);
+  if (isFailure(run)) return run;
+  if (!run.steps.has('check')) return sshFailure('VPN check', run);
+  const tunnel = await tunnelTest(ctx, t, ssh, wg);
+  const verdict = tunnel?.startsWith('tunnel test failed') ? 'fail' : 'ok';
+  const lines = [
+    `VPN on ${t.host}: service active, listening on ${wg.listenPort}/udp.`,
+    tail(run.stdout),
+    tunnel ?? 'A tunnel from this machine was not possible here (needs root and WireGuard tools); the first phone connection will confirm it — ask the user to tell you if it does not connect.',
+  ];
+  return verdict === 'ok' ? { ok: true, output: lines.join('\n') } : fail('verify_failed', lines.join('\n'), true);
 }
