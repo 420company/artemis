@@ -409,7 +409,7 @@ export type AgentAction =
   | {
       // Switch this task to a heavier workflow mid-run (see core/workflowRouter.ts).
       type: 'use_workflow';
-      workflow: 'plan' | 'team' | 'compare' | 'design';
+      workflow: 'plan' | 'team' | 'compare' | 'design' | 'review';
       reason?: string;
     }
   | {

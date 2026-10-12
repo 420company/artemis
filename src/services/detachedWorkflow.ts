@@ -717,8 +717,11 @@ export async function runDetachedWorkflowWorker(
           `source=${route.source}`,
           `reason=${route.reason}`,
         ]);
-        session.title =
-          getWorkflowSessionTitle(args.workflow, cwd) ?? session.title;
+        // The rigorous review keeps a plain title (its internal mode name is not for users).
+        if (route.workflow !== 'review') {
+          session.title =
+            getWorkflowSessionTitle(args.workflow, cwd) ?? session.title;
+        }
       }
     }
 
@@ -728,7 +731,7 @@ export async function runDetachedWorkflowWorker(
       processToken: args.launchToken,
       status: 'running',
       workflowMode: args.workflow,
-      lastOutput: `Detached workflow running (${getWorkflowDisplayName(args.workflow)}).`,
+      lastOutput: `Detached workflow running (${routedWorkflowHint && args.workflow === 'nidhogg' ? 'review' : getWorkflowDisplayName(args.workflow)}).`,
     });
     await sessionStore.save(session);
     await updateDetachedWorkflowManifest(cwd, args.runtimeId, {

@@ -3142,9 +3142,11 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
             const finalGoal = await runGoalLoop(workspaceRoot, goal.id, {
               maxTicks: ticks,
               onTick: (g, tick) => {
-                appendSystemPanel(t(`🎯 第 ${g.iterations.length} 步 (${tick.iteration.turns} turns)`, `🎯 Tick ${g.iterations.length} (${tick.iteration.turns} turns)`), [
-                  tick.iteration.progress,
-                  ...(tick.iteration.next && g.status === 'active' ? [t(`↳ 下一步: ${tick.iteration.next}`, `↳ next: ${tick.iteration.next}`)] : []),
+                const step = tick.iteration
+                if (!step) return
+                appendSystemPanel(t(`🎯 第 ${g.iterations.length} 步 (${step.turns} turns)`, `🎯 Tick ${g.iterations.length} (${step.turns} turns)`), [
+                  step.progress,
+                  ...(step.next && g.status === 'active' ? [t(`↳ 下一步: ${step.next}`, `↳ next: ${step.next}`)] : []),
                 ])
               },
             })

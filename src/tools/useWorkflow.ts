@@ -4,7 +4,8 @@ import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 export const USE_WORKFLOW_DESCRIPTION = [
   'Switch the current task to a heavier workflow when it turns out bigger than it looked.',
   'plan = investigate, plan, then implement and verify; team = split a large job into independent parts (bounded parallel sub-agents);',
-  'compare = weigh up to 3 alternative solutions, critique them, build the best; design = website/UI build with visual system, assets and screenshot check.',
+  'compare = weigh up to 3 alternative solutions, critique them, build the best; design = website/UI build with visual system, assets and screenshot check;',
+  'review = rigorous adversarial review of code, a plan or a document: critics from several angles, every issue backed by evidence, one verdict (use it when the user asks you to review something strictly, e.g. 帮我严审).',
   'Returns the playbook to follow. Use it only for real complexity, at most once per task; simple tasks need no workflow.',
 ].join(' ');
 

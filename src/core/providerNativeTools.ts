@@ -1188,8 +1188,8 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         properties: {
           workflow: {
             type: 'string',
-            description: 'plan, team, compare or design.',
-            enum: ['plan', 'team', 'compare', 'design'],
+            description: 'plan, team, compare, design or review.',
+            enum: ['plan', 'team', 'compare', 'design', 'review'],
           },
           reason: optionalStringSchema('One short sentence: why the task needs this workflow.'),
         },
