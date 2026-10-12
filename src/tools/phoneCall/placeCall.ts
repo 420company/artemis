@@ -116,8 +116,12 @@ const RESULT_WORDS: Record<string, [string, string]> = {
   unclear: ['结果不明确', 'unclear'],
 };
 const word = (table: Record<string, [string, string]>, key: string | undefined, zh: boolean) => (key && table[key] ? table[key][zh ? 0 : 1] : key ?? '');
-/** Quoted call text cannot close the fence around it. */
-const quoted = (text: string) => String(text).replace(/[<>]/g, (c) => (c === '<' ? '‹' : '›'));
+/** Quoted call text cannot close the fence around it: angle brackets and their lookalikes become parentheses; no invisible characters. */
+export const quoted = (text: string) =>
+  String(text)
+    .replace(/[\p{Cf}\p{Cc}]/gu, ' ')
+    .replace(/[<＜﹤〈⟨‹«《〈❮❰⧼]/g, '(')
+    .replace(/[>＞﹥〉⟩›»》〉❯❱⧽]/g, ')');
 
 function resultText(view: CallView, zh: boolean): string {
   const lines: string[] = [];
