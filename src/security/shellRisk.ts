@@ -551,6 +551,101 @@ export function describeExfiltration(command: string): ShellRisk | null {
   return null
 }
 
+// ── Programs that run another command given in their options ───────────
+
+const RUN_VIA_OPTION: ShellRisk = { reason: 'makes a program run another command through its options or settings', reasonZh: '会通过程序的选项或设置去运行另一条命令' }
+const GIT_COMMAND_KEYS =
+  /^(?:core\.(?:sshcommand|pager|editor|fsmonitor|hookspath|gitproxy|askpass)|sequence\.editor|diff\.external|diff\.[^.=]+\.(?:textconv|command)|difftool\.[^.=]+\.cmd|mergetool\.[^.=]+\.cmd|filter\.[^.=]+\.(?:clean|smudge|process)|merge\.[^.=]+\.driver|alias\.[^=]+=\s*!|credential\.helper|gpg\.(?:[^.=]+\.)?program|uploadpack\.packobjectshook|ssh\.variant|pager\.[^=]+|interactive\.difffilter|remote\.[^.=]+\.(?:uploadpack|receivepack)|protocol\.[^=]+\.allow|url\..+\.insteadof|include\.path|includeif\..+)/i
+const GIT_COMMAND_ENV = /(?:^|[\s;&|(])(?:export\s+)?(GIT_SSH_COMMAND|GIT_SSH|GIT_EXTERNAL_DIFF|GIT_PAGER|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_ASKPASS|SSH_ASKPASS|GIT_PROXY_COMMAND|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_\d+|GIT_EXEC_PATH|GIT_TEMPLATE_DIR|LESSOPEN|LESSCLOSE|PAGER|EDITOR|VISUAL)=("[^"]*"|'[^']*'|[^\s;&|]*)/g
+/** Pagers and editors that run nothing else: `GIT_PAGER=cat` stays fine. */
+const HARMLESS_PROGRAM = /^(?:cat|true|less|more|)$/
+
+function runsProgramFromEnv(command: string): boolean {
+  for (const match of command.matchAll(GIT_COMMAND_ENV)) {
+    const name = match[1]!
+    const value = match[2]!.replace(/^["']|["']$/g, '').trim()
+    if (/^(?:GIT_PAGER|PAGER|GIT_EDITOR|EDITOR|VISUAL|GIT_SEQUENCE_EDITOR)$/.test(name) && HARMLESS_PROGRAM.test(value)) continue
+    return true
+  }
+  return false
+}
+/** What find may run on what it finds without asking: commands that only read. */
+const FIND_READ_ONLY = new Set(['ls', 'stat', 'cat', 'head', 'tail', 'wc', 'file', 'grep', 'egrep', 'fgrep', 'du', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'basename', 'dirname', 'echo', 'printf', 'test', '[', 'readlink', 'realpath'])
+const EDITORS = new Set(['vim', 'vi', 'nvim', 'ex', 'view', 'vimdiff', 'gvim', 'rvim', 'nvi', 'elvis'])
+const EDITOR_RUNS = /!|\bsystem\s*\(|^\s*:?\s*(?:py3?|python3?|pyx|lua|perl|ruby|ter(?:minal)?|r(?:ead)?\s*!)\b|\blua\b|\bos\.execute\b/
+
+/**
+ * A command made to run another command through a program's options or
+ * settings: `git -c core.sshCommand=…` (and GIT_SSH_COMMAND and friends),
+ * `tar --to-command` / `--use-compress-program` / `--checkpoint-action=exec`,
+ * an editor's `-c`/`+`/`--cmd` with `!`, `less`/`more` with `!` or LESSOPEN,
+ * awk's `system(`, `find -exec` of anything but a read-only command,
+ * `rsync -e`, `ssh -o ProxyCommand=`.
+ */
+export function describeIndirectExecution(command: string): ShellRisk | null {
+  if (runsProgramFromEnv(command)) return RUN_VIA_OPTION
+  for (const segment of shellCommands(command)) {
+    const head = commandHead(segment.words)
+    if (!head) continue
+    const name = head.name
+    const args = segment.words.slice(head.index + 1)
+    const valueOf = (i: number, flag: string) => (args[i] === flag ? args[i + 1] ?? '' : args[i]!.slice(flag.length))
+    switch (name) {
+      case 'git':
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]!
+          if (a === '-c' && GIT_COMMAND_KEYS.test(args[i + 1] ?? '')) return RUN_VIA_OPTION
+          if (/^-c\S/.test(a) && GIT_COMMAND_KEYS.test(a.slice(2))) return RUN_VIA_OPTION
+          if (/^--config-env(?:=|$)/.test(a) || /^--exec-path=/.test(a)) return RUN_VIA_OPTION
+          // Options before the subcommand only.
+          if (!a.startsWith('-')) break
+        }
+        break
+      case 'tar':
+      case 'bsdtar':
+      case 'gtar':
+        if (args.some((a) => /^--(?:to-command|use-compress-program|info-script|new-volume-script|checkpoint-action=exec|rsh-command)(?:=|$)/.test(a) || /^-[A-Za-z]*[IF]$/.test(a) || a === '-I')) return RUN_VIA_OPTION
+        break
+      case 'rsync':
+        if (args.some((a) => /^-[A-Za-z]*e/.test(a) || /^--(?:rsh|rsync-path)(?:=|$)/.test(a))) return RUN_VIA_OPTION
+        break
+      case 'ssh':
+      case 'scp':
+      case 'sftp':
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]!
+          if (a === '-o' || /^-o\S/.test(a)) {
+            if (/^\s*(?:ProxyCommand|LocalCommand|PermitLocalCommand|ProxyUseFdpass|KnownHostsCommand|Match)\b/i.test(valueOf(i, '-o'))) return RUN_VIA_OPTION
+          }
+          if (name !== 'ssh' && (a === '-S' || a === '-D')) return RUN_VIA_OPTION
+        }
+        break
+      case 'less':
+      case 'more':
+      case 'most':
+        if (args.some((a) => a.includes('!'))) return RUN_VIA_OPTION
+        break
+      case 'find':
+        for (let i = 0; i < args.length; i++) {
+          if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i]!)) continue
+          const run = path.basename(args[i + 1] ?? '')
+          if (!FIND_READ_ONLY.has(run)) return RUN_VIA_OPTION
+        }
+        break
+      default:
+        if (AWKS.has(name) && AWK_RUNS_SHELL.test(args.join(' '))) return RUN_VIA_OPTION
+        if (EDITORS.has(name)) {
+          for (let i = 0; i < args.length; i++) {
+            const a = args[i]!
+            const value = a === '-c' || a === '--cmd' ? args[i + 1] : a.startsWith('+') ? a.slice(1) : /^-c\S/.test(a) ? a.slice(2) : undefined
+            if (value !== undefined && EDITOR_RUNS.test(value)) return RUN_VIA_OPTION
+          }
+        }
+    }
+  }
+  return null
+}
+
 // ── Lock-outs ──────────────────────────────────────────────────────────────
 
 const PACKAGE_REMOVAL: Record<string, RegExp> = {
@@ -642,7 +737,7 @@ export function describeHighRiskCommand(command: string): ShellRisk | null {
   for (const { file, decoded } of producedFiles(command)) {
     if (runsFile(command, file)) return decoded ? RUN_DECODED : RUN_REMOTE
   }
-  return describeRuntimeBuiltCommand(command) ?? describeExfiltration(command) ?? describeLockout(command)
+  return describeRuntimeBuiltCommand(command) ?? describeExfiltration(command) ?? describeIndirectExecution(command) ?? describeLockout(command)
 }
 
 // ── Deletes and overwrites ──────────────────────────────────────────────────
@@ -658,7 +753,10 @@ const AWK_RUNS_SHELL = /\bsystem\s*\(|\|\s*"|"\s*\|\s*getline|\|&/
 const INTERPRETER_RE = new RegExp(`^${INTERPRETERS}$`, 'i')
 /** Destructive operations anywhere in a command, including inline code. */
 export const DESTRUCTIVE_TOKEN =
-  /\b(?:rm|rmdir|unlink|shred|srm|wipe|trash(?:-put)?|mv|truncate|dd)\b|\b(?:remove|removedirs|delete|unlink|rmtree|rmSync|rmdirSync|unlinkSync|truncate|truncateSync|writeFileSync|rename|renameSync|move)\s*\(|FileUtils\.rm|:\s*>|(?:^|[^<>0-9&=-])>(?!>|&)|\bgit\s+clean\b|--delete\b|\bof=|\bopen\s*\([^)]*,\s*['"][^'"]*[wax+]|\.write_(?:text|bytes)\s*\(/
+  /\b(?:rm|rmdir|unlink|shred|srm|wipe|trash(?:-put)?|mv|truncate|dd)\b|\b(?:remove|removedirs|delete|unlink|rmtree|rmSync|rmdirSync|unlinkSync|truncate|truncateSync|writeFileSync|rename|renameSync|move)\s*\(|FileUtils\.rm|:\s*>|(?:^|[^<>0-9&=-])>>?(?!&)|\bgit\s+clean\b|--delete\b|\bof=|\bopen\s*\([^)]*,\s*['"][^'"]*[wax+]|\.write_(?:text|bytes)\s*\(/
+/** Places whose files run later on their own: login scripts, autostart entries, services, cron, SSH keys. */
+const STARTUP_PATH =
+  /(?:^|\/)(?:\.bashrc|\.bash_profile|\.bash_login|\.profile|\.zshrc|\.zprofile|\.zshenv|\.xprofile|\.xinitrc|\.config\/autostart\/|\.config\/systemd\/|\.config\/fish\/|\.local\/share\/applications\/|\.ssh\/)|^\/etc\/(?:profile|bash\.bashrc|cron|systemd\/|init\.d\/|rc\.local|xdg\/autostart\/|sudoers)|^\/var\/spool\/cron\//
 /** Inline code writing a file it names literally: `open('/etc/x', 'w')`, `Path('/etc/x').write_text(…)`. */
 const LITERAL_FILE_WRITES = [
   /\bopen\s*\(\s*(['"])([^'"]+)\1\s*,\s*(['"])[^'"]*[wax+][^'"]*\3[^)]*\)/g,
@@ -672,10 +770,10 @@ export interface DeleteAnalysis {
   unverifiable?: string
 }
 
-/** Truncating redirects: `> f`, `: > f` (not `>>`, not `2>&1`). */
+/** Files a redirect writes: `> f`, `: > f`, and appends `>> f` (a line added to ~/.bashrc runs later); not `2>&1`. */
 function redirectTargets(command: string): string[] {
   const targets: string[] = []
-  const re = /(?:^|[^<>0-9&=-])>(?!>|&)\s*("[^"]*"|'[^']*'|[^\s;&|()]+)/g
+  const re = /(?:^|[^<>0-9&=-])>>?(?!&)\s*("[^"]*"|'[^']*'|[^\s;&|()]+)/g
   for (const match of command.matchAll(re)) targets.push(match[1]!.replace(/^["']|["']$/g, ''))
   return targets
 }
@@ -753,6 +851,12 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     try {
       isDirectory = statSync(absolute).isDirectory()
     } catch {
+      // A new file where something runs later (a login script, an autostart entry, a unit) asks too.
+      if (STARTUP_PATH.test(absolute) || STARTUP_PATH.test(`${absolute}/`)) outside.add(known)
+      return
+    }
+    if (isDirectory && STARTUP_PATH.test(`${absolute}/`)) {
+      outside.add(known)
       return
     }
     if (!isDirectory) {
@@ -823,8 +927,8 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
         if (!afterDashes && arg.startsWith('-')) continue
         check(arg)
       }
-    } else if (head === 'find' && args.some((a) => a === '-delete' || a === '-exec' || a === '-execdir' || a === '-ok')) {
-      if (args.some((a) => a === '-exec' || a === '-execdir' || a === '-ok')) flag('find runs commands on what it finds')
+    } else if (head === 'find' && args.some((a, k) => a === '-delete' || (/^-(?:exec|execdir|ok|okdir)$/.test(a) && !FIND_READ_ONLY.has(path.basename(args[k + 1] ?? ''))))) {
+      if (args.some((a, k) => /^-(?:exec|execdir|ok|okdir)$/.test(a) && !FIND_READ_ONLY.has(path.basename(args[k + 1] ?? '')))) flag('find runs commands on what it finds')
       const roots: string[] = []
       for (const arg of args) {
         if (arg.startsWith('-') || arg === '!' || arg === '(') break

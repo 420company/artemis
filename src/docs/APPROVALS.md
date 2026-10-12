@@ -13,7 +13,7 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
 | `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; and every `server_setup run` off the read-only allowlist | ask |
-| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file, inline code that opens a file for writing, …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
 | `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
 | `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
@@ -43,6 +43,15 @@ content is.
   `socat`, `telnet`, `/dev/tcp`, `scp`/`rsync` to a remote host, `sftp`,
   data piped into `ssh`, inline code with a network send (`urlopen(url,
   data)`, `requests.post`, sockets, `fetch` with a body, …).
+- Commands run through a program's options or settings: `git -c` with a
+  key that runs something (`core.sshCommand`, `core.pager`, `core.editor`,
+  `core.fsmonitor`, shell aliases, …) and `GIT_SSH_COMMAND`,
+  `GIT_EXTERNAL_DIFF` and friends (`GIT_PAGER=cat` is fine); `tar
+  --to-command`/`--use-compress-program`/`--checkpoint-action=exec`; an
+  editor's `-c`/`+`/`--cmd` with `!`; `less`/`more` with `!` or
+  `LESSOPEN`; awk's `system(`; `find -exec` of anything but a read-only
+  command (`ls`, `cat`, `grep`, `wc`, `stat`, …); `rsync -e`; `ssh -o
+  ProxyCommand=`.
 - Lock-outs: firewall changes (`iptables`/`nft`/`ufw`/`firewall-cmd`
   other than listing), stopping, disabling or masking SSH, locking or
   removing users, `kill -1`/`kill 1`, removing packages, `crontab -r`,
