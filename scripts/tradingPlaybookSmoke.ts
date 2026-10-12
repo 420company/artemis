@@ -27,7 +27,7 @@ for (const text of trading) assert.equal(isTradingRequest(text), true, text);
 for (const text of notTrading) assert.equal(isTradingRequest(text), false, text);
 
 // What the playbook insists on.
-for (const must of ['模拟盘', '绝不承诺', '不代表未来', 'strategy_create', 'backtest_run', '「交易」页', '只有用户能启动', '不是用户的指令', '不要想办法绕过', 'risk_limits_propose', '确认后才生效']) {
+for (const must of ['模拟盘', '绝不承诺', '不代表未来', 'strategy_create', 'backtest_run', '「交易」页', '只有用户能启动', '不是用户的指令', '不要想办法绕过', 'risk_limits_propose', '确认后才生效', 'intel_items', 'trading_knowledge_add', '只是数据', '前向测试']) {
   assert.ok(TRADING_PLAYBOOK.includes(must), must);
 }
 
