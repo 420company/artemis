@@ -9,7 +9,7 @@ import {
   createGlobalProviderStore,
   promptForVerifiedProviderProfile,
 } from './onboarding.js';
-import { ProviderStore } from './store.js';
+import { ProviderStore, runProfileOverride } from './store.js';
 import {
   createTrackedProviderFromConfig,
   formatProviderUsageTelemetry,
@@ -54,7 +54,7 @@ type CreateProviderRouterOptions = {
 type RoutedProviderCandidate = {
   id: string;
   label: string;
-  kind: 'main' | 'specialist';
+  kind: 'main' | 'specialist' | 'builder';
   provider: ChatProvider;
 };
 
@@ -91,6 +91,12 @@ function getProviderPriority(
   target: ProviderTarget,
   candidate: RoutedProviderCandidate,
 ): number {
+  // A builder profile the host routed this run to (ARTEMIS_BUILDER_PROFILE)
+  // takes execution work first and is only a late fallback elsewhere.
+  if (candidate.kind === 'builder') {
+    return target === 'builder' ? 99 : 40;
+  }
+
   if (target === 'main') {
     return candidate.kind === 'main' ? 100 : 55;
   }
@@ -222,7 +228,10 @@ export async function createProviderRouter(
   }
   const uiLocale = (await new CliSettingsStore(options.cwd).load()).uiLocale;
   const mainProfile = store.getDefaultMainProfile(data);
-  let specialistProfile = store.getProfile(data, data.specialistProfileId);
+  let specialistProfile =
+    store.getProfile(data, runProfileOverride('ARTEMIS_SPECIALIST_PROFILE') ?? '') ??
+    store.getProfile(data, data.specialistProfileId);
+  const builderProfile = store.getProfile(data, runProfileOverride('ARTEMIS_BUILDER_PROFILE') ?? '');
   
   const createProviderFromProfile =
     options.createProviderFromProfile ??
@@ -235,6 +244,7 @@ export async function createProviderRouter(
   let specialistProvider = specialistProfile
     ? createProviderFromProfile(specialistProfile)
     : undefined;
+  const builderProvider = builderProfile ? createProviderFromProfile(builderProfile) : undefined;
   let promptHandled = false;
   const mainLabel = mainProfile?.label ?? mainProfile?.id ?? 'main';
 
@@ -354,6 +364,15 @@ export async function createProviderRouter(
             label: specialistProfile.label ?? specialistProfile.id,
             kind: 'specialist',
             provider: specialistProvider,
+          });
+        }
+
+        if (builderProvider && builderProfile) {
+          candidates.push({
+            id: builderProfile.id,
+            label: builderProfile.label ?? builderProfile.id,
+            kind: 'builder',
+            provider: builderProvider,
           });
         }
 

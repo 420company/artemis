@@ -671,6 +671,11 @@ export class ProviderStore {
   getDefaultMainProfile(
     data: ProviderStoreData,
   ): ProviderProfile | undefined {
+    // A host may route one run to another of the configured profiles (the
+    // owner's own key for a task); a name that is not a profile is ignored.
+    const override = runProfileOverride('ARTEMIS_MAIN_PROFILE');
+    const overridden = override ? this.getProfile(data, override) : undefined;
+    if (overridden) return overridden;
     if (data.defaultMainProfileId) {
       return this.getProfile(data, data.defaultMainProfileId);
     }
@@ -683,6 +688,18 @@ export class ProviderStore {
       (entry) => entry.id !== data.specialistProfileId,
     );
   }
+}
+
+/**
+ * Per-run profile routing set by the host (artemis-online sets it when the
+ * owner chose their own key for some work): ARTEMIS_MAIN_PROFILE (the main
+ * conversation), ARTEMIS_SPECIALIST_PROFILE (subagent specialists) and
+ * ARTEMIS_BUILDER_PROFILE (execution/coding work). Each names a profile in
+ * providers.json; unset or unknown names change nothing.
+ */
+export function runProfileOverride(name: 'ARTEMIS_MAIN_PROFILE' | 'ARTEMIS_SPECIALIST_PROFILE' | 'ARTEMIS_BUILDER_PROFILE'): string | undefined {
+  const value = process.env[name]?.trim();
+  return value && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : undefined;
 }
 
 /**

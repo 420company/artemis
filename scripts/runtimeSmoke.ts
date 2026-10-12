@@ -1496,6 +1496,32 @@ async function configureBytePlusVideoProfile(cwd: string, model: string): Promis
 }
 
 {
+  // A host can route one run to another configured profile (the owner's own key for some work).
+  const tmpDir = path.join(os.tmpdir(), `artemis-run-profile-${Date.now()}`)
+  fs.mkdirSync(tmpDir, { recursive: true })
+  const store = new ProviderStore(tmpDir)
+  const data = await store.load()
+  const profile = (id: string) => ({ id, protocol: 'openai' as const, baseUrl: 'http://127.0.0.1:8789/llm/x', apiKey: 'engine-token-placeholder', model: 'm' })
+  data.profiles = [profile('executor'), profile('byo_api_anthropic')]
+  data.defaultMainProfileId = 'executor'
+  const saved = { main: process.env.ARTEMIS_MAIN_PROFILE }
+  try {
+    delete process.env.ARTEMIS_MAIN_PROFILE
+    assert('run profile: without an override the main profile is the default', store.getDefaultMainProfile(data)?.id === 'executor')
+    process.env.ARTEMIS_MAIN_PROFILE = 'byo_api_anthropic'
+    assert('run profile: ARTEMIS_MAIN_PROFILE routes this run to that profile', store.getDefaultMainProfile(data)?.id === 'byo_api_anthropic')
+    process.env.ARTEMIS_MAIN_PROFILE = 'no_such_profile'
+    assert('run profile: an unknown name changes nothing', store.getDefaultMainProfile(data)?.id === 'executor')
+    process.env.ARTEMIS_MAIN_PROFILE = '../etc'
+    assert('run profile: a malformed name is ignored', store.getDefaultMainProfile(data)?.id === 'executor')
+  } finally {
+    if (saved.main === undefined) delete process.env.ARTEMIS_MAIN_PROFILE
+    else process.env.ARTEMIS_MAIN_PROFILE = saved.main
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+{
   const tmpDir = path.join(os.tmpdir(), `artemis-generate-image-fail-closed-${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   const store = new ProviderStore(tmpDir)
