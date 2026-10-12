@@ -3646,6 +3646,8 @@ function isTerminalVisualGenerationFailureBlocker(
 // its service is not configured, out of balance or unavailable. The
 // unresolved-failure guard still asks the model to acknowledge them, but only
 // a bounded number of times before ending the run with the real error.
+/** What a load_skill `ok` line may name as the skill's source. */
+const LOAD_SKILL_SOURCES = new Set(['bundled', 'pack', 'workspace', 'data-root', 'learned']);
 const TERMINAL_TOOL_FAILURE_CODES = new Set([
   'tool_profile_blocked',
   'tool_permission_denied',
@@ -3998,6 +4000,12 @@ export type RunAgentOptions = {
   profile?: 'main' | AgentRole;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  /**
+   * The request is the owner's own words (an `artemis execute` the host
+   * marks with ARTEMIS_OWNER_INPUT=1): only then may `$id` activate a skill
+   * of an optional pack. Unset: it may not (triggers, events, bridges).
+   */
+  ownerInput?: boolean;
   /**
    * Sub-agent budget for this run, shared with its sub-agents (see
    * core/workflowRouter.ts). Unset: no limit beyond maxTurns.
@@ -5299,7 +5307,7 @@ async function executeAgentAction(
   options: RunAgentOptions,
   abortSignal?: AbortSignal,
   approvedKinds?: ApprovalKind[],
-): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError; data?: { skillSource?: string } }> {
   return scrubToolResult(await executeAgentActionUnscrubbed(session, action, options, abortSignal, approvedKinds));
 }
 
@@ -5310,7 +5318,7 @@ async function executeAgentActionUnscrubbed(
   abortSignal?: AbortSignal,
   /** Kinds the owner approved for this action (hard approvals): the tool's own refusal for them is lifted. */
   approvedKinds?: ApprovalKind[],
-): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError }> {
+): Promise<{ action?: AgentAction; ok: boolean; output: string; error?: ToolError; data?: { skillSource?: string } }> {
   // Saga long-video safety reroute. Runs before validation so the rerouted
   // action is the one validated and dispatched.
   const rerouted = maybeRerouteToSagaLongVideo(session, action);
@@ -5380,11 +5388,14 @@ async function executeAgentActionUnscrubbed(
         },
       }),
     );
+    const skillSource = action.type === 'load_skill' ? (result.data as { skillSource?: unknown } | undefined)?.skillSource : undefined;
     return {
       action: result.action,
       ok: result.ok,
       output: result.output,
       error: result.error,
+      // load_skill: the source of the skill it read, as the tool resolved it (see the tool's ok line).
+      ...(typeof skillSource === 'string' ? { data: { skillSource } } : {}),
     };
   }
 
@@ -6139,6 +6150,11 @@ async function executeAuthorizedAction(
         result.ok,
         result.output ?? '',
       );
+      // load_skill: where the skill it returned came from, as the tool itself
+      // resolved it (one of a fixed set; the model's arguments never set it).
+      // Hosts' run trust reads it (a bundled skill's text is not outside content).
+      const skillSource = completedAction.type === 'load_skill' && result.ok ? result.data?.skillSource : undefined;
+      if (typeof skillSource === 'string' && LOAD_SKILL_SOURCES.has(skillSource)) uiPayload.skill_source = skillSource;
       options.onInfo?.(
         `[tool:${hydratedAction.type}] ${result.ok ? 'ok' : 'failed'} ${JSON.stringify(uiPayload)}`,
       );
@@ -6890,7 +6906,8 @@ async function runAgentInner(
     }
     return accepted;
   };
-  const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput);
+  // `$id` of an optional pack's skill only from the owner's own words (options.ownerInput).
+  const extensionRuntime = await resolveExtensionRuntime(options.cwd, userInput, { ownerInput: options.ownerInput === true });
 
   // ── Learned skills (see core/skillLearning.ts) ────────────────────────────
   // The main agent applies the user's feedback on the previous run, gets the

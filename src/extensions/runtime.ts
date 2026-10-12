@@ -324,6 +324,15 @@ function buildGatedPluginSection(
 export async function resolveExtensionRuntime(
   cwd: string,
   userInput: string,
+  options: {
+    /**
+     * The input is the owner's own words (the CLI user, the platform owner's
+     * composer): only then may `$id` reach an optional pack's skill, which
+     * is third-party text. Input from triggers, events, bridges or anything
+     * else gets bundled and workspace skills only.
+     */
+    ownerInput?: boolean;
+  } = {},
 ): Promise<ExtensionRuntimeContext> {
   const [skillDiscovery, pluginDiscovery] = await Promise.all([
     discoverSkills(cwd),
@@ -418,15 +427,16 @@ export async function resolveExtensionRuntime(
   }
 
   // 处理显式选择的技能
-  // $skill-id also reaches the skill library (bundled skills and every pack,
-  // enabled or not: naming one is the owner's choice), read only when needed.
+  // $skill-id also reaches the skill library (bundled skills, and every pack
+  // whether enabled or not when the owner wrote it: naming one is the
+  // owner's choice), read only when needed.
   let library: SkillLibrary | undefined;
   for (const selector of selectors) {
     let skill = findRequestedSkill(selector, skillDiscovery.skills);
     if (!skill) {
       library ??= await loadSkillLibrary(cwd, { allPacks: true }).catch(() => ({ skills: [], packs: [] }));
       const entry = findLibrarySkill(library, selector);
-      if (entry) {
+      if (entry && (entry.source !== 'pack' || options.ownerInput === true)) {
         skill = {
           id: entry.id,
           name: entry.name,

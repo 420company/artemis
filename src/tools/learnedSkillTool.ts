@@ -14,6 +14,11 @@
  * A library skill's text is reference material, framed as data; one the
  * workspace (or a pack) supplies is fenced as untrusted, since anyone who
  * could write the folder could have written it.
+ *
+ * The result's `data.skillSource` (bundled, pack, workspace, data-root or
+ * learned; none for a search or a failure) is what the engine resolved, never
+ * what the model asked for: the run loop puts it on the tool's `ok` line,
+ * where a host's run trust (artemis-online) reads it.
  */
 
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js'
@@ -52,7 +57,7 @@ export async function executeLoadSkill(
       if (learned) {
         // Counted in the scope the skill was read from, never a same-named one elsewhere.
         const used = (await recordSkillUse(context.cwd, learned.id, { scope: learned.scope })) ?? learned
-        return { action: action as any, ok: true, output: formatSkillForModel(used) }
+        return { action: action as any, ok: true, output: formatSkillForModel(used), data: { skillSource: 'learned' } }
       }
     }
 
@@ -75,14 +80,14 @@ export async function executeLoadSkill(
     }
     if (file) {
       const text = await readLibrarySkillFile(skill, file)
-      return { action: action as any, ok: true, output: frame(skill, `file ${file}`, text) }
+      return { action: action as any, ok: true, output: frame(skill, `file ${file}`, text), data: { skillSource: skill.source } }
     }
     const [{ text, truncated }, files] = await Promise.all([readLibrarySkillText(skill), listSkillFiles(skill)])
     const notes = [
       ...(files.length ? [`Its reference files (read one with load_skill {"id": "${skill.id}", "file": "<path>"}): ${files.join(', ')}`] : []),
       ...(truncated ? ['The instructions were cut; the rest is in its reference files or a later section of SKILL.md.'] : []),
     ]
-    return { action: action as any, ok: true, output: [frame(skill, 'instructions', text), ...notes].join('\n') }
+    return { action: action as any, ok: true, output: [frame(skill, 'instructions', text), ...notes].join('\n'), data: { skillSource: skill.source } }
   } catch (err: any) {
     return fail(action, err?.message ?? 'load_skill failed')
   }

@@ -1079,6 +1079,8 @@ async function buildRuntimeSystemMessages(
     systemPrompt: string,
     conversationMessages: SessionMessage[],
     model?: string,
+    /** The local CLI user typed it (not a chat bridge or a hosted turn): `$id` may reach a pack's skill. */
+    ownerInput = false,
 ): Promise<SessionMessage[]> {
     const runtimeMessages = [makeSessionMessage('system', systemPrompt)];
     if (!model) {
@@ -1087,7 +1089,7 @@ async function buildRuntimeSystemMessages(
 
     // 自动解析与设计相关的任务并添加对应的技能
     const latestUserText = getLatestUserText(conversationMessages);
-    const ctx = await resolveExtensionRuntime(process.cwd(), latestUserText);
+    const ctx = await resolveExtensionRuntime(process.cwd(), latestUserText, { ownerInput });
     
     // 添加技能内容到系统提示
     if (ctx.activeSkills.length > 0) {
@@ -2394,6 +2396,8 @@ async function thinkTurn(
         tSession.getSystemPrompt(),
         history,
         providerConfigVal?.model,
+        // Chat bridges and hosted turns may carry other people's words.
+        contextMode !== 'hosted' && !skillPartition,
     );
     const systemTokens = Math.round(estimateConversationTokens(systemMessages));
 

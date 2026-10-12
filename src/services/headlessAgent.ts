@@ -206,6 +206,9 @@ export async function runHeadlessAgent(
       permissionManager,
       maxTurns: Math.max(1, Math.min(200, opts.maxTurns ?? 60)),
       profile: 'main' as const,
+      // The host says the message is the owner's own words (artemis-online's composer):
+      // only then may `$id` reach an optional pack's skill. Anything else fails closed.
+      ownerInput: process.env.ARTEMIS_OWNER_INPUT?.trim() === '1',
       // The main model's window; specialists with a smaller window are capped
       // further by their own provider metadata inside runAgent.
       contextLength: resolveProfileContextLength(providerConfig),

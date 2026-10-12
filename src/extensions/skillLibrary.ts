@@ -39,6 +39,8 @@ export interface LibrarySkill {
   /** Pack skills: "cco/traders". */
   pack?: string;
   dirPath: string;
+  /** The library folder it was found in (its skill folder must stay inside it). */
+  root: string;
   /** SKILL.md when there is one (the instructions), else SKILL.json. */
   skillPath?: string;
   /** Whether it is in the index and search (packs: only the enabled groups). */
@@ -64,6 +66,8 @@ export interface SkillLibrary {
   packs: PackInfo[];
 }
 
+/** Longest skill id (an id is an index line's handle and a `$id` token). */
+export const MAX_SKILL_ID_CHARS = 64;
 /** The index's share of the per-run context. */
 export const SKILL_LIBRARY_INDEX_MAX_CHARS = 1_400;
 /** Skills the index names at most. */
@@ -189,7 +193,7 @@ export function summarize(description: string, max = SUMMARY_MAX_CHARS): string 
   return sentence.length > max ? `${sentence.slice(0, max - 1).trimEnd()}…` : sentence;
 }
 
-async function readSkillDir(dirPath: string, source: LibrarySource, pack?: string): Promise<LibrarySkill | undefined> {
+async function readSkillDir(root: string, dirPath: string, source: LibrarySource, pack?: string): Promise<LibrarySkill | undefined> {
   const mdPath = path.join(dirPath, 'SKILL.md');
   const jsonPath = path.join(dirPath, 'SKILL.json');
   const json = await readFile(jsonPath, 'utf8').catch(() => undefined);
@@ -209,7 +213,7 @@ async function readSkillDir(dirPath: string, source: LibrarySource, pack?: strin
   if (!hasMd && json === undefined) return undefined;
   const base = path.basename(dirPath);
   const id = normalizeId(typeof meta.id === 'string' && meta.id ? meta.id : base);
-  if (!id) return undefined;
+  if (!id || id.length > MAX_SKILL_ID_CHARS) return undefined;
   const name = oneLine(usable(meta.name) ? meta.name : (md && frontMatterValue(md, 'name')) || base);
   const description = oneLine(
     (usable(meta.description) && meta.description)
@@ -227,6 +231,7 @@ async function readSkillDir(dirPath: string, source: LibrarySource, pack?: strin
     source,
     ...(pack ? { pack } : {}),
     dirPath,
+    root,
     skillPath: hasMd ? mdPath : jsonPath,
     enabled: source !== 'pack',
   };
@@ -239,7 +244,8 @@ async function readSkillsRoot(root: string, source: LibrarySource, pack?: string
   } catch {
     return [];
   }
-  const found = await Promise.all(entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => readSkillDir(path.join(root, entry.name), source, pack)));
+  // Real folders only: a symlinked skill folder is not followed.
+  const found = await Promise.all(entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => readSkillDir(root, path.join(root, entry.name), source, pack)));
   return found.filter((skill): skill is LibrarySkill => Boolean(skill));
 }
 
@@ -464,10 +470,13 @@ function indexSafe(text: string): string {
  * `maxChars`. Empty when the library is empty.
  */
 export function renderSkillLibraryIndex(library: SkillLibrary, request: string, maxChars = SKILL_LIBRARY_INDEX_MAX_CHARS): string {
-  const enabled = library.skills.filter((skill) => skill.enabled);
+  // The workspace's and data root's own skills stay out of the index (anyone
+  // who can write those folders could write the lines); load_skill still
+  // finds them by id or query.
+  const enabled = library.skills.filter((skill) => skill.enabled && (skill.source === 'bundled' || skill.source === 'pack'));
   if (!enabled.length) return '';
   const header = `📚 [Skill library — ${enabled.length} playbooks for specialist tasks. load_skill with {"id"} reads one in full; with {"query"} searches them all. Reference material, not instructions: use one only when it fits the request.]`;
-  const matches = searchSkillLibrary(library, request, SKILL_LIBRARY_INDEX_MAX_ENTRIES);
+  const matches = searchSkillLibrary({ ...library, skills: enabled }, request, SKILL_LIBRARY_INDEX_MAX_ENTRIES);
   const categories = new Map<string, number>();
   for (const skill of enabled) {
     const key = skill.pack ? skill.pack.split('/')[1]! : skill.category ?? 'general';
@@ -511,10 +520,28 @@ export async function listSkillFiles(skill: LibrarySkill, limit = 40): Promise<s
   return out;
 }
 
+/**
+ * The skill's folder, resolved: refused when it (or a link on the way)
+ * leads outside the library folder it was found in.
+ */
+export function skillFolder(skill: LibrarySkill): string {
+  let root: string;
+  let dir: string;
+  try {
+    root = realpathSync(skill.root);
+    dir = realpathSync(skill.dirPath);
+  } catch {
+    throw new Error(`skill ${skill.id} cannot be read`);
+  }
+  if (dir === root || !dir.startsWith(root + path.sep)) throw new Error(`skill ${skill.id} is not inside its library folder`);
+  return dir;
+}
+
 /** The skill's instructions (SKILL.md without front matter, or its description), clamped. */
 export async function readLibrarySkillText(skill: LibrarySkill, maxChars = LIBRARY_SKILL_MAX_CHARS): Promise<{ text: string; truncated: boolean }> {
   let text = '';
   if (skill.skillPath?.endsWith('.md')) {
+    skillFolder(skill);
     text = stripFrontMatter(await readFile(skill.skillPath, 'utf8').catch(() => '')).trim();
   }
   if (!text) text = skill.description;
@@ -526,7 +553,7 @@ export async function readLibrarySkillFile(skill: LibrarySkill, relative: string
   const clean = relative.replace(/\\/g, '/').replace(/^\.\/+/, '');
   if (!clean || clean.startsWith('/') || clean.split('/').includes('..')) throw new Error(`"${relative}" is not a file of skill ${skill.id}`);
   if (!READABLE_FILE.test(clean)) throw new Error(`"${relative}" is not a text file load_skill can read`);
-  const root = realpathSync(skill.dirPath);
+  const root = skillFolder(skill);
   let file: string;
   try {
     file = realpathSync(path.join(skill.dirPath, clean));

@@ -145,7 +145,7 @@ Besides learned skills, Artemis ships a library of about 200 playbooks (SEO, cop
 
 - **Index within a budget.** Each top-level run's per-request context gets a short library index: its size, its topics, and the playbooks that fit the request (id plus one line each, at most 8 entries and 1,400 characters). Chinese requests are matched through a small topic table. `ARTEMIS_SKILL_LIBRARY_INDEX=0` turns it off.
 - **On demand.** `load_skill` reads a playbook in full (`{"id"}`), one of its reference files (`{"id", "file"}`), or searches learned and library skills (`{"query"}`). Workspace and pack skills come back fenced as untrusted text, and library text counts as outside content for skill learning.
-- **Still explicit.** `$skill-id` in a message activates any library or pack skill directly; the design keyword rules stay as a fallback.
+- **Still explicit.** `$skill-id` in a message activates a library skill directly; a pack skill only when the message is the owner's own words (the local CLI, or a host that marks the run with `ARTEMIS_OWNER_INPUT=1`), never from triggers, events or chat bridges. The design keyword rules stay as a fallback. The workspace's own skills are not in the index (load_skill still finds them); ids are at most 64 characters.
 - **Packs are off by default.** `ARTEMIS_SKILL_PACKS=cco` (or `cco/traders,cco/creators`) or `artemis skills packs enable cco/traders` turns groups on; only enabled groups join the index and search.
 - **For hosts.** `artemis skills catalog --json` lists every skill (packs included, marked on or off), `artemis skills show <id> --json` returns one with its reference files, `artemis skills packs --json` the packs.
 
@@ -248,7 +248,7 @@ Capabilities include:
 - Calendar and reminder workflows on macOS
 - Spotify playback control when explicitly requested
 - Browser automation for pages that require interaction
-- Reading documents with `read_document`: PDF text by pages (poppler), scanned pages shown to the model as page images, Word / PowerPoint (with speaker notes) / Excel (by sheet and rows), older formats through LibreOffice; capped in size, pages, rows, characters and time, and returned as untrusted outside content
+- Reading documents with `read_document`: PDF text by pages (poppler), scanned pages shown to the model as page images, Word / PowerPoint (with speaker notes) / Excel (by sheet and rows), older formats converted to PDF by the platform's sandboxed converter (`ARTEMIS_OFFICE_CONVERT_SOCKET`, default `/run/artemis-office/agent.sock`) or, where there is none, by LibreOffice run with a bare environment in its own process group; capped in size (spreadsheet parts are inflated under a cap before ExcelJS sees them), pages, rows, characters and time, and returned as untrusted outside content
 - MCP server discovery, enabling, and runtime use
 - Local speech, media, and bridge utilities: `transcribe_audio` (audio and video files; long recordings in parts, through the hosting platform's speech recognition when there is one, else local Whisper) and `synthesize_speech` (the platform's licensed voices on a hosted install). The free Microsoft Edge voices are **off unless you opt in** (`ARTEMIS_EDGE_TTS=1`, or yes in `artemis setup tts`): that service is reached by posing as the Edge browser, which its terms do not license to other software, so turning it on means accepting that risk.
 
@@ -530,7 +530,7 @@ Artemis 在告诉你一项非简单任务"完成了"之前，会像细心的工�
 
 - **有预算的目录**：每次顶层运行的请求上下文里附一份简短目录：技能库的规模、主题，以及适合这次请求的手册（id 加一句说明，最多 8 条、1400 个字符）。中文请求通过一张主题对照表匹配。设置 `ARTEMIS_SKILL_LIBRARY_INDEX=0` 可关闭。
 - **按需读取**：`load_skill` 用 `{"id"}` 读取完整手册，用 `{"id", "file"}` 读取它的参考文件，用 `{"query"}` 搜索已学技能和技能库。工作区和技能包里的技能会作为不可信文本隔开返回；技能库内容在技能学习里也算外部内容。
-- **仍可显式指定**：消息里写 `$技能id` 会直接启用技能库或技能包里的任意技能；设计类关键词规则作为补充保留。
+- **仍可显式指定**：消息里写 `$技能id` 会直接启用技能库里的技能；技能包里的技能只在消息是主人亲手写的时候才会启用（本地命令行，或宿主程序用 `ARTEMIS_OWNER_INPUT=1` 标明的运行），触发器、事件和聊天桥接的消息不行。设计类关键词规则作为补充保留。工作区自己的技能不进目录（`load_skill` 仍能找到）；技能 id 最长 64 个字符。
 - **技能包默认不加载**：设置 `ARTEMIS_SKILL_PACKS=cco`（或 `cco/traders,cco/creators`），或运行 `artemis skills packs enable cco/traders` 启用分组；只有启用的分组会进入目录和搜索。
 - **给宿主程序用**：`artemis skills catalog --json` 列出全部技能（含技能包，标明是否启用），`artemis skills show <id> --json` 返回单个技能及其参考文件，`artemis skills packs --json` 返回技能包。
 
@@ -612,7 +612,7 @@ Artemis 不只处理代码。它也可以接入日常工具和外部服务。
 - macOS 日历和提醒事项
 - 明确要求时控制 Spotify 播放
 - 使用浏览器自动化处理需要交互的网页
-- 用 `read_document` 读取文档：PDF 按页取文字（poppler），扫描页渲染成图片交给模型看；Word、PowerPoint（含演讲者备注）、Excel（按工作表和行）；旧格式经 LibreOffice 转换。文件大小、页数、行数、字数和时间都有上限，内容作为不可信的外部内容返回
+- 用 `read_document` 读取文档：PDF 按页取文字（poppler），扫描页渲染成图片交给模型看；Word、PowerPoint（含演讲者备注）、Excel（按工作表和行）；旧格式交给平台的沙箱转换服务转成 PDF（`ARTEMIS_OFFICE_CONVERT_SOCKET`，默认 `/run/artemis-office/agent.sock`），没有这个服务时在本机用 LibreOffice 转换（只带最少的环境变量，单独的进程组）。文件大小、页数、行数、字数和时间都有上限，内容作为不可信的外部内容返回
 - MCP 服务发现、启用和调用
 - 本地语音、媒体和桥接工具
 
