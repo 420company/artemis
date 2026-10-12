@@ -63,6 +63,36 @@ async function applySetup(job: WorkerTurnJob): Promise<void> {
     data.setup = { ...(data.setup ?? {}), agent: { ...(data.setup?.agent ?? {}), compression: { ...(data.setup?.agent?.compression ?? {}), maxContextTokens: job.setup.maxContextTokens } } }
     await store.save(data)
   }
+  if (job.setup.tradingDesk) {
+    // The platform's paper trading tools, as the server registers them
+    // (mcp.ts registerWithEngine): a local stdio stand-in with canned answers.
+    const { McpServerStore } = await import('../../src/mcp/store.js')
+    const { TOOLS } = await import('./tradingDeskTools.mjs' as string) as { TOOLS: { name: string; description: string; inputSchema: unknown; annotations?: { readOnlyHint?: boolean } }[] }
+    const store = new McpServerStore(job.cwd)
+    const at = new Date().toISOString()
+    await store.save({
+      servers: [{
+        id: 'artemis_online',
+        enabled: true,
+        transport: 'stdio',
+        authType: 'none',
+        authState: 'unknown',
+        command: process.execPath,
+        commandArgs: [path.join(path.dirname(new URL(import.meta.url).pathname), 'tradingDeskStub.mjs')],
+        createdAt: at,
+        updatedAt: at,
+        surface: {
+          discoveredAt: at,
+          source: 'probe',
+          serverName: 'artemis_online',
+          tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, ...(t.annotations?.readOnlyHint ? { readOnly: true } : {}) })),
+          resources: [],
+          prompts: [],
+          commands: [],
+        },
+      }],
+    } as any)
+  }
   if (job.setup.videoProvider) {
     // An unreachable endpoint with a dummy key: the router sees "a video
     // provider is configured" (so it offers Saga), and any generation call
