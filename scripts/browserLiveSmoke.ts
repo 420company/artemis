@@ -279,35 +279,111 @@ async function main(): Promise<void> {
     assert.ok(!sent.some((m) => String(m.method).startsWith('Artemis.')), 'never forwarded to Chromium');
   });
 
-  await check('while a password is typed viewers get no frames or screenshots, and are told; agents still get theirs', async () => {
-    const { router, sent } = fakeBrowser();
-    const agent = await connect(router, 'agent', 'ROOT-A', sent);
-    const viewer = await connect(router, 'viewer', 'ROOT-V', sent);
-    router.fromBrowser({ method: 'Target.attachedToTarget', params: { sessionId: 'CHILD-A', targetInfo: { type: 'page' } }, sessionId: 'ROOT-A' });
-    router.viewerFramesPaused = true;
-    assert.deepEqual(viewer.out.at(-1), { method: 'Artemis.streamPaused', params: { paused: true, reason: 'secret' } });
+  /** A router whose host pauses the tabs in `paused` and treats texts containing `secret` as carrying the password. */
+  const secretRouter = async () => {
+    const env = fakeBrowser();
+    const paused = new Set<string>();
+    env.router.secrets = { isPaused: (t) => paused.has(t), sensitive: (text) => text.includes('S3CRET') };
+    const agent = await connect(env.router, 'agent', 'ROOT-A', env.sent);
+    const viewer = await connect(env.router, 'viewer', 'ROOT-V', env.sent);
+    // The viewer watches two tabs: CHILD-1 shows P1, CHILD-2 shows P2.
+    for (const [n, target] of [[10, 'P1'], [11, 'P2']] as const) {
+      viewer.client.receive(JSON.stringify({ id: n, method: 'Target.attachToTarget', params: { targetId: target, flatten: true } }));
+      await settle();
+      const info = env.sent.findLast((m) => m.method === 'Target.getTargetInfo')!;
+      env.router.fromBrowser({ id: info.id, result: { targetInfo: { type: 'page' } } });
+      await settle();
+      const attach = env.sent.findLast((m) => m.method === 'Target.attachToTarget')!;
+      env.router.fromBrowser({ id: attach.id, result: { sessionId: target === 'P1' ? 'CHILD-1' : 'CHILD-2' } });
+      await settle();
+    }
+    return { ...env, paused, agent, viewer };
+  };
+
+  await check('a paused tab sends viewers no frames, screenshots or page events; other tabs and agents are not affected', async () => {
+    const { router, sent, paused, agent, viewer } = await secretRouter();
+    router.fromBrowser({ method: 'Target.attachedToTarget', params: { sessionId: 'CHILD-A', targetInfo: { targetId: 'P1', type: 'page' } }, sessionId: 'ROOT-A' });
+    paused.add('P1');
+    router.pausedTargetsChanged([{ targetId: 'P1', since: 1234 }], true);
+    assert.deepEqual(viewer.out.at(-1), { method: 'Artemis.streamPaused', params: { paused: true, reason: 'secret', targets: [{ targetId: 'P1', since: 1234 }] } });
     assert.equal(agent.out.some((m) => m.method === 'Artemis.streamPaused'), false, 'only viewers are told');
-    // A viewer frame is dropped and acknowledged by the router (so frames resume later).
-    (router as any).owners.set('CHILD-V', (router as any).owners.get('ROOT-V'));
     sent.length = 0;
     const before = viewer.out.length;
-    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'SECRET-PIXELS', sessionId: 7 }, sessionId: 'CHILD-V' });
-    assert.equal(viewer.out.length, before, 'not forwarded');
+    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'SECRET-PIXELS', sessionId: 7 }, sessionId: 'CHILD-1' });
+    router.fromBrowser({ method: 'Page.frameNavigated', params: { frame: { id: 'F', url: 'https://site.example/?q=1' } }, sessionId: 'CHILD-1' });
+    assert.equal(viewer.out.length, before, 'nothing of the paused tab is forwarded');
     await new Promise((r) => setTimeout(r, 300));
-    assert.deepEqual(sent.map((m) => [m.method, m.params, m.sessionId]), [['Page.screencastFrameAck', { sessionId: 7 }, 'CHILD-V']]);
-    // The agent's own frames (Playwright screenshots use the same events) are not affected.
+    assert.deepEqual(sent.map((m) => [m.method, m.params, m.sessionId]), [['Page.screencastFrameAck', { sessionId: 7 }, 'CHILD-1']], 'acknowledged by the router');
+    // The other tab streams on.
+    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'ok', sessionId: 8 }, sessionId: 'CHILD-2' });
+    assert.equal(viewer.out.at(-1).method, 'Page.screencastFrame');
+    // The agent's own frames are not affected.
     router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'x', sessionId: 1 }, sessionId: 'CHILD-A' });
     assert.equal(agent.out.at(-1).method, 'Page.screencastFrame');
-    viewer.client.receive(JSON.stringify({ id: 50, method: 'Page.captureScreenshot', params: {}, sessionId: 'CHILD-V' }));
+    viewer.client.receive(JSON.stringify({ id: 50, method: 'Page.captureScreenshot', params: {}, sessionId: 'CHILD-1' }));
     await settle();
     assert.match(viewer.out.at(-1).error.message, /paused/);
+    viewer.client.receive(JSON.stringify({ id: 51, method: 'Page.getNavigationHistory', params: {}, sessionId: 'CHILD-1' }));
+    await settle();
+    assert.match(viewer.out.at(-1).error.message, /paused/, 'history names URLs too');
     // A viewer that connects meanwhile is told at once.
     const late = await connect(router, 'viewer', 'ROOT-L', sent);
-    assert.deepEqual(late.out[0], { method: 'Artemis.streamPaused', params: { paused: true, reason: 'secret' } });
-    router.viewerFramesPaused = false;
-    assert.deepEqual(viewer.out.at(-1), { method: 'Artemis.streamPaused', params: { paused: false, reason: 'secret' } });
-    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'ok', sessionId: 8 }, sessionId: 'CHILD-V' });
+    assert.equal(late.out[0].params.paused, true);
+    paused.delete('P1');
+    router.pausedTargetsChanged([], false);
+    assert.deepEqual(viewer.out.at(-1), { method: 'Artemis.streamPaused', params: { paused: false, reason: 'secret', targets: [] } });
+    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'ok', sessionId: 9 }, sessionId: 'CHILD-1' });
     assert.equal(viewer.out.at(-1).method, 'Page.screencastFrame');
+  });
+
+  await check('viewers never read a paused tab\'s URL or title, nor any URL or title carrying the password', async () => {
+    const { router, sent, paused, viewer } = await secretRouter();
+    paused.add('P1');
+    router.pausedTargetsChanged([{ targetId: 'P1', since: 1 }], true);
+    router.fromBrowser({ method: 'Target.targetInfoChanged', params: { targetInfo: { targetId: 'P1', type: 'page', url: 'https://site.example/signup', title: 'Sign up' } }, sessionId: 'ROOT-V' });
+    assert.deepEqual(viewer.out.at(-1).params.targetInfo, { targetId: 'P1', type: 'page', url: '', title: '' });
+    router.fromBrowser({ method: 'Target.targetInfoChanged', params: { targetInfo: { targetId: 'P2', type: 'page', url: 'https://other.example/?password=S3CRET', title: 'Echo S3CRET' } }, sessionId: 'ROOT-V' });
+    assert.deepEqual(viewer.out.at(-1).params.targetInfo, { targetId: 'P2', type: 'page', url: '', title: '' }, 'a URL with the password is blanked anywhere');
+    router.fromBrowser({ method: 'Target.targetInfoChanged', params: { targetInfo: { targetId: 'P2', type: 'page', url: 'https://other.example/', title: 'Other' } }, sessionId: 'ROOT-V' });
+    assert.deepEqual(viewer.out.at(-1).params.targetInfo, { targetId: 'P2', type: 'page', url: 'https://other.example/', title: 'Other' });
+    router.fromBrowser({ method: 'Page.navigatedWithinDocument', params: { frameId: 'F', url: 'https://other.example/#S3CRET' }, sessionId: 'CHILD-2' });
+    assert.equal(viewer.out.at(-1).params.url, '');
+    viewer.client.receive(JSON.stringify({ id: 60, method: 'Target.getTargets', params: {} }));
+    await settle();
+    const list = sent.findLast((m) => m.method === 'Target.getTargets')!;
+    router.fromBrowser({ id: list.id, result: { targetInfos: [{ targetId: 'P1', type: 'page', url: 'https://site.example/signup', title: 'Sign up' }, { targetId: 'P2', type: 'page', url: 'https://other.example/', title: 'Other' }] } });
+    assert.deepEqual(viewer.out.at(-1).result.targetInfos.map((t: any) => [t.url, t.title]), [['', ''], ['https://other.example/', 'Other']]);
+  });
+
+  await check('a viewer screenshot asked for before a pause began is not delivered', async () => {
+    const { router, sent, paused, viewer } = await secretRouter();
+    viewer.client.receive(JSON.stringify({ id: 70, method: 'Page.captureScreenshot', params: { format: 'png' }, sessionId: 'CHILD-2' }));
+    await settle();
+    const shot = sent.findLast((m) => m.method === 'Page.captureScreenshot')!;
+    paused.add('P2');
+    router.pausedTargetsChanged([{ targetId: 'P2', since: 2 }], true);
+    router.fromBrowser({ id: shot.id, result: { data: 'PIXELS-AFTER-PAUSE' }, sessionId: 'CHILD-2' });
+    assert.equal(viewer.out.at(-1).id, 70);
+    assert.match(viewer.out.at(-1).error.message, /paused/);
+    assert.ok(!JSON.stringify(viewer.out).includes('PIXELS-AFTER-PAUSE'));
+    // Without a pause in between, screenshots arrive as usual.
+    paused.clear();
+    router.pausedTargetsChanged([], false);
+    viewer.client.receive(JSON.stringify({ id: 71, method: 'Page.captureScreenshot', params: {}, sessionId: 'CHILD-2' }));
+    await settle();
+    const next = sent.findLast((m) => m.method === 'Page.captureScreenshot')!;
+    router.fromBrowser({ id: next.id, result: { data: 'OK' }, sessionId: 'CHILD-2' });
+    assert.deepEqual(viewer.out.at(-1), { id: 71, result: { data: 'OK' }, sessionId: 'CHILD-2' });
+  });
+
+  await check('viewer input names the tab it went to (the host keeps scripts off it afterwards)', async () => {
+    const { router, viewer } = await secretRouter();
+    const typed: string[] = [];
+    router.onViewerInput = (t) => typed.push(t);
+    viewer.client.receive(JSON.stringify({ id: 80, method: 'Input.insertText', params: { text: 'hunter2' }, sessionId: 'CHILD-2' }));
+    viewer.client.receive(JSON.stringify({ id: 81, method: 'Page.enable', params: {}, sessionId: 'CHILD-1' }));
+    await settle();
+    assert.deepEqual(typed, ['P2']);
   });
 
   await check('a client that leaves before its session exists is cleaned up', () => {
@@ -390,6 +466,10 @@ async function main(): Promise<void> {
     const owner = handbackNote({ mode: 'agent', since: 0, handedBackAt: 1, endedBy: 'owner' });
     assert.match(owner, /handed it back/);
     assert.doesNotMatch(owner, /did not/);
+    const restart = handbackNote({ mode: 'agent', since: 0, handedBackAt: 1, endedBy: 'restart' });
+    assert.match(restart, /platform restarted/);
+    assert.doesNotMatch(restart, /view closed/, 'a restart is not the view closing');
+    assert.match(handbackNote({ mode: 'agent', since: 0, handedBackAt: 1, endedBy: 'closed' }), /view closed/);
     const dir = tempLiveDir();
     writeControl(dir, { mode: 'agent', since: 1, handedBackAt: 1, endedBy: 'idle' });
     assert.equal(readControl(dir).endedBy, 'idle');
@@ -412,6 +492,42 @@ async function main(): Promise<void> {
     releaseTab(dir, 'T1');
     assert.ok(!fs.existsSync(path.join(dir, LIVE_FILES.claims, 'T1.json')));
     assert.equal(claimTab(dir, '../escape'), false);
+    // A dead run's claim is never removed by releasing (only broken by a new claim).
+    writeJsonFileAtomic(path.join(dir, LIVE_FILES.claims, 'T4.json'), { pid: 2 ** 22 + 9 }, 0o600);
+    releaseTab(dir, 'T4');
+    assert.ok(fs.existsSync(path.join(dir, LIVE_FILES.claims, 'T4.json')));
+    // An unreadable claim is broken once it is old.
+    fs.writeFileSync(path.join(dir, LIVE_FILES.claims, 'T5.json'), '{half');
+    assert.equal(claimTab(dir, 'T5'), false, 'a fresh unreadable claim may be one being written');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(path.join(dir, LIVE_FILES.claims, 'T5.json'), old, old);
+    assert.equal(claimTab(dir, 'T5'), true);
+  });
+  await check('claiming is atomic: of runs racing for a free or stale tab, exactly one gets it', async () => {
+    const { spawn } = await import('node:child_process');
+    const tsx = path.resolve('node_modules/tsx/dist/cli.mjs');
+    const module = path.resolve('src/tools/browser/liveBrowser.ts');
+    for (const stale of [false, true]) {
+      const dir = tempLiveDir();
+      fs.mkdirSync(path.join(dir, LIVE_FILES.claims));
+      if (stale) writeJsonFileAtomic(path.join(dir, LIVE_FILES.claims, 'RACE.json'), { pid: 2 ** 22 + 11 }, 0o600);
+      // Each racer stays alive until all have answered (a winner that exited would leave a stale claim).
+      const script = `const m = await import(${JSON.stringify(module)}); const go = Number(process.argv[1]); while (Date.now() < go) {} console.log(m.claimTab(${JSON.stringify(dir)}, 'RACE') ? 'won' : 'lost'); setTimeout(() => process.exit(0), 60000);`;
+      const go = Date.now() + 4_000;
+      const racers: import('node:child_process').ChildProcess[] = [];
+      const results = await Promise.all(Array.from({ length: 6 }, () => new Promise<string>((resolve) => {
+        const p = spawn(process.execPath, ['--no-warnings', tsx, '--input-type=module', '-e', script, String(go)], { stdio: ['ignore', 'pipe', 'inherit'] });
+        racers.push(p);
+        let out = '';
+        p.stdout.on('data', (d) => {
+          out += d;
+          if (out.includes('\n')) resolve(out.trim());
+        });
+        p.on('exit', () => resolve(out.trim()));
+      })));
+      for (const p of racers) p.kill('SIGKILL');
+      assert.equal(results.filter((r) => r === 'won').length, 1, `${stale ? 'stale' : 'free'} tab: ${results.join(',')}`);
+    }
   });
   await check('a malformed control file counts as the agent holding the browser', async () => {
     const dir = tempLiveDir();
@@ -419,6 +535,27 @@ async function main(): Promise<void> {
     assert.equal(readControl(dir).mode, 'agent');
     writeControl(dir, { mode: 'owner?', since: 'x', url: 42 });
     assert.deepEqual(readControl(dir), { mode: 'agent', since: 0 });
+  });
+
+  console.log('sign-up password fingerprints');
+  await check('the host recognises a password in a URL or title from fingerprints, without the password', async () => {
+    const { fingerprintSet, parseFingerprintSet, FingerprintMatcher } = await import('../src/security/secretFingerprints.js');
+    const { secretVariants } = await import('../src/security/identityCredentials.js');
+    const password = 'Pw!Leak 99&x';
+    const set = fingerprintSet(secretVariants(password));
+    assert.ok(!JSON.stringify(set).includes('Leak'), 'the set does not carry the password');
+    const parsed = parseFingerprintSet(JSON.parse(JSON.stringify(set)));
+    assert.ok(parsed);
+    const m = new FingerprintMatcher();
+    m.add(parsed);
+    const form = new URLSearchParams({ user: 'me', password }).toString();
+    assert.equal(m.matches(`https://site.example/login?${form}`), true, 'form-encoded in a GET URL');
+    assert.equal(m.matches(`https://site.example/#${encodeURIComponent(password)}`), true);
+    assert.equal(m.matches(`Welcome ${password}`), true);
+    assert.equal(m.matches('https://site.example/login?user=me'), false);
+    assert.equal(m.matches(''), false);
+    assert.equal(parseFingerprintSet({ salt: 'x', hashes: [] }), undefined);
+    assert.equal(parseFingerprintSet({ salt: 'a'.repeat(22), hashes: [{ n: 2, h: '0'.repeat(32) }] }), undefined, 'short variants are not accepted');
   });
 
   console.log('handoff');
@@ -479,10 +616,12 @@ async function main(): Promise<void> {
         assert.equal(result.error?.code, 'browser_user_in_control');
         assert.match(result.output, /user is controlling the browser/);
       }
+      // The logs wait too: what the owner does while holding the browser is not read.
+      for (const result of [await tools.executeBrowserConsole({ type: 'browser_console' }), await tools.executeBrowserRequests({ type: 'browser_requests' })]) {
+        assert.equal(result.error?.code, 'browser_user_in_control');
+      }
       // No browser was started for them.
       assert.equal(fs.existsSync(path.join(dir, LIVE_FILES.host)), false);
-      // Local buffers stay readable.
-      assert.equal((await tools.executeBrowserConsole({ type: 'browser_console' })).ok, true);
     } finally {
       if (before.live === undefined) delete process.env[LIVE_DIR_ENV];
       else process.env[LIVE_DIR_ENV] = before.live;

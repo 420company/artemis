@@ -17,8 +17,18 @@
  * the handback is reported with the page; the browser survives the run
  * disconnecting and the next run continues in the same tab; the host exits
  * on SIGTERM and removes its files.
+ *
+ * Sign-up passwords: the tab typed into (only that one) is paused for the
+ * viewer until it loads a new document, also after the password stops being
+ * live; a URL carrying it (a GET form) never reaches the viewer or tab.json;
+ * a "show password" toggle that swaps the field stays masked; another run's
+ * logs and scripts are refused while it is live; a pause ends on its own
+ * after ARTEMIS_BROWSER_SECRET_PAUSE_MS. Also: scripts are refused on a tab
+ * the owner typed into until it navigates; a hung tab is closed instead of
+ * the browser being restarted; agent connections leave slots for viewers.
  */
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -31,6 +41,7 @@ process.env.ARTEMIS_BROWSER_LIVE_DIR = liveDir;
 process.env.ARTEMIS_BROWSER_HEADLESS = '1';
 process.env.ARTEMIS_BROWSER_TAKEOVER_WAIT_MS = '300';
 process.env.ARTEMIS_BROWSER_IDLE_MS = '60000';
+process.env.ARTEMIS_BROWSER_SECRET_PAUSE_MS = '20000';
 
 async function resolveExecutable(): Promise<void> {
   if (process.env.ARTEMIS_BROWSER_EXECUTABLE) return;
@@ -48,6 +59,16 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Live smoke</title>
 <input id="pw" type="password" style="position:absolute;left:100px;top:320px;width:300px">
 <div id="echo" style="position:absolute;left:100px;top:360px"></div>
 <script>document.getElementById('pw').addEventListener('input', (e) => { document.getElementById('echo').textContent = e.target.value })</script>`;
+
+/** A sign-up form: GET (the password ends up in the URL), an echo of what is typed, a "show" toggle that swaps the field. */
+const SIGNUP_PAGE = `<!doctype html><meta charset="utf-8"><title>Sign up</title>
+<form action="/done" method="get"><input name="user" value="me"><input id="pw" name="password" type="password"><button id="go">go</button></form>
+<button id="show" onclick="const o=document.getElementById('pw');const n=document.createElement('input');n.id='pw';n.name='password';n.type='text';n.value=o.value;o.replaceWith(n)">show</button>
+<div id="echo"></div>
+<script>document.addEventListener('input', (e) => { if (e.target.id === 'pw') { document.getElementById('echo').textContent = 'strength of ' + e.target.value; console.log('typed ' + e.target.value) } })</script>`;
+
+/** A page whose renderer hangs shortly after loading. */
+const HANG_PAGE = `<!doctype html><title>hang</title><script>setTimeout(() => { for (;;) {} }, 300)</script>hang`;
 
 class Viewer {
   private ws: WebSocket;
@@ -98,13 +119,19 @@ async function waitFor<T>(what: string, fn: () => T | undefined | Promise<T | un
 
 async function main(): Promise<void> {
   await resolveExecutable();
-  const server = http.createServer((_req, res) => res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(PAGE));
+  const server = http.createServer((req, res) => {
+    const pathname = new URL(req.url ?? '/', 'http://x').pathname;
+    const body = pathname === '/signup' ? SIGNUP_PAGE : pathname === '/done' ? '<title>Done</title>done' : pathname === '/hang' ? HANG_PAGE : PAGE;
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
+  });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
 
   const tools = await import('../src/tools/browser/browserTools.js');
   const session = await import('../src/tools/browser/browserSession.js');
   const live = await import('../src/tools/browser/liveBrowser.js');
+  /** Reads the page directly (the test's eyes; not the model's browser_evaluate). */
+  const pageEval = async (expression: string): Promise<string> => JSON.stringify(await (await session.getActivePage()).evaluate(expression));
 
   const nav = await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
   assert.equal(nav.ok, true, nav.output);
@@ -146,19 +173,24 @@ async function main(): Promise<void> {
     const r = await viewer.send('Input.dispatchMouseEvent', { type, x: 200, y: 160, button: type === 'mouseMoved' ? 'none' : 'left', clickCount: 1 }, sid);
     assert.ok(!r.error, JSON.stringify(r.error));
   }
-  const clicks = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'window.clicks || 0' });
-  assert.match(clicks.output, /\b1\b/, clicks.output);
+  const clicks = await pageEval('window.clicks || 0');
+  assert.match(clicks, /\b1\b/, clicks);
   console.log('  ✓ viewer click landed (window.clicks = 1)');
   // Focus the input and commit IME text.
   for (const type of ['mousePressed', 'mouseReleased']) await viewer.send('Input.dispatchMouseEvent', { type, x: 150, y: 270, button: 'left', clickCount: 1 }, sid);
   await viewer.send('Input.insertText', { text: '你好 live' }, sid);
   await viewer.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, sid);
   await viewer.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, sid);
-  const typed = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.querySelector("#q").value' });
-  assert.match(typed.output, /你好 liv"/, typed.output);
+  const typed = await pageEval('document.querySelector("#q").value');
+  assert.match(typed, /你好 liv"/, typed);
   const nav2 = await viewer.send('Page.navigate', { url: 'javascript:alert(1)' }, sid);
   assert.match(nav2.error?.message ?? '', /http/);
   console.log('  ✓ viewer IME text and keys landed; javascript: navigation refused');
+  // The owner typed into this tab: the model's scripts stay off it until it loads a new page.
+  const ownerTyped = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.querySelector("#q").value' });
+  assert.equal(ownerTyped.error?.code, 'owner_typed', ownerTyped.output);
+  assert.ok(!ownerTyped.output.includes('你好'));
+  console.log('  ✓ browser_evaluate is refused on a tab the owner typed into');
 
   // Takeover: tools refuse while the user holds the browser...
   live.writeJsonFileAtomic(path.join(liveDir, 'control.json'), { mode: 'user', since: Date.now() }, 0o640);
@@ -183,11 +215,14 @@ async function main(): Promise<void> {
 
   // Review regressions: the viewer cannot run script; the page has the engine's viewport;
   // a phone viewport set through the host is undone again.
-  const before = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title' });
+  const before = await pageEval('document.title');
   await viewer.send('Page.reload', { scriptToEvaluateOnLoad: "document.title='LEAK:'+document.cookie" }, sid);
   await new Promise((r) => setTimeout(r, 1500));
-  const afterReload = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title' });
-  assert.equal(afterReload.output, before.output, 'a reload from the viewer runs no script');
+  const afterReload = await pageEval('document.title');
+  assert.equal(afterReload, before, 'a reload from the viewer runs no script');
+  // The reload was a new document: scripts are allowed again.
+  const allowed = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title' });
+  assert.equal(allowed.ok, true, allowed.output);
   const size = async () => (await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'innerWidth + "x" + innerHeight + " " + screen.width' })).output;
   assert.match(await size(), /"1280x800 1280"/);
   const phone = await viewer.send('Artemis.setViewport', { targetId: tab.targetId, mode: 'mobile', width: 390, height: 844 });
@@ -197,32 +232,116 @@ async function main(): Promise<void> {
   assert.match(await size(), /"1280x800 1280"/);
   console.log('  ✓ the viewer cannot inject script on reload; viewport 1280x800; phone viewport on request, then back');
 
-  // A sign-up password (identity) is never in the owner's picture while it is live:
-  // the view pauses before it is typed, no frames or screenshots, and resumes after.
+  // ── sign-up passwords ───────────────────────────────────────────────
   const identity = await import('../src/security/identityCredentials.js');
   const SIGNUP = `su_${'cd'.repeat(10)}`;
-  identity.setIdentityCredentialSource({ site: async () => '127.0.0.1', password: async () => ({ password: 'Sm0ke!Pa55word#9', site: '127.0.0.1' }) });
-  await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
-  const currentTab = live.readJsonFile<{ targetId: string }>(path.join(liveDir, 'tab.json'))!.targetId;
-  if (currentTab !== tab.targetId) throw new Error('the run moved to another tab');
+  const PASSWORD = 'Sm0ke!Pa55 word#9';
+  const leaks = (text: string) => [PASSWORD, encodeURIComponent(PASSWORD), new URLSearchParams({ p: PASSWORD }).toString().slice(2)].some((v) => text.includes(v));
+  identity.setIdentityCredentialSource({ site: async () => '127.0.0.1', password: async () => ({ password: PASSWORD, site: '127.0.0.1' }) });
+  // A second tab of this run, which the viewer also watches: it must keep streaming.
+  const other = await tools.executeBrowserTabs({ type: 'browser_tabs', action: 'new', url });
+  assert.equal(other.ok, true, other.output);
+  const otherTab = live.readJsonFile<{ targetId: string }>(path.join(liveDir, 'tab.json'))!.targetId;
+  const sid2 = (await viewer.send('Target.attachToTarget', { targetId: otherTab, flatten: true })).result.sessionId as string;
+  await viewer.send('Page.enable', {}, sid2);
+  await viewer.send('Page.startScreencast', { format: 'jpeg', quality: 40, maxWidth: 640, maxHeight: 400 }, sid2);
+  await tools.executeBrowserTabs({ type: 'browser_tabs', action: 'switch', index: 0 });
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', url: `${url}signup` });
+  const signupTab = live.readJsonFile<{ targetId: string }>(path.join(liveDir, 'tab.json'))!.targetId;
+  assert.equal(signupTab, tab.targetId, 'the sign-up runs in the first tab');
+  await viewer.send('Target.setDiscoverTargets', { discover: true });
   viewer.events.length = 0;
   const typedSecret = await tools.executeBrowserType({ type: 'browser_type', selector: '#pw', text: `{{credential:signup-${SIGNUP}}}` });
   assert.equal(typedSecret.ok, true, typedSecret.output);
-  const pauseAt = viewer.events.findIndex((e) => e.method === 'Artemis.streamPaused' && e.params.paused === true);
-  assert.ok(pauseAt >= 0, 'the viewer was told the picture is paused');
+  const pausedEvent = viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === true);
+  assert.ok(pausedEvent, 'the viewer was told');
+  assert.deepEqual(pausedEvent.params.targets.map((t: any) => t.targetId), [signupTab], 'only the tab typed into is paused');
   await new Promise((r) => setTimeout(r, 1500));
-  assert.equal(viewer.events.slice(pauseAt).filter((e) => e.method === 'Page.screencastFrame').length, 0, 'no frame while the password is live');
+  // (Frames from before the pause, while the form loaded, are fine.)
+  const pausedIndex = viewer.events.indexOf(pausedEvent);
+  assert.equal(viewer.events.slice(pausedIndex).filter((e) => e.method === 'Page.screencastFrame' && e.sessionId === sid).length, 0, 'no frame of the paused tab');
+  // (A background tab paints nothing in headless Chromium: bring the other one forward to see it stream.)
+  await viewer.send('Target.activateTarget', { targetId: otherTab });
+  await viewer.send('Page.stopScreencast', {}, sid2);
+  await viewer.send('Page.startScreencast', { format: 'jpeg', quality: 40, maxWidth: 640, maxHeight: 400 }, sid2);
+  await waitFor('frames of the other tab', () => viewer.events.some((e) => e.method === 'Page.screencastFrame' && e.sessionId === sid2), 5_000);
+  await viewer.send('Target.activateTarget', { targetId: signupTab });
   const shot = await viewer.send('Page.captureScreenshot', { format: 'jpeg' }, sid);
-  assert.match(shot.error?.message ?? '', /paused/, 'no screenshot for the viewer while live');
+  assert.match(shot.error?.message ?? '', /paused/, 'no screenshot of the paused tab');
+  console.log('  ✓ typing a password pauses only that tab for the viewer; other tabs keep streaming');
+
+  // The owner cannot be asked to work in a tab they cannot see.
+  const handoff = await tools.executeBrowserRequestHandoff({ type: 'browser_request_handoff', reason: 'solve the captcha', timeoutSeconds: 30 });
+  assert.equal(handoff.error?.code, 'secret_paused', handoff.output);
+  console.log('  ✓ browser_request_handoff explains instead of handing over a paused tab');
+
+  // Another run on the same browser: its logs and scripts are refused while the password is live,
+  // and its logs never hold this run's tab.
+  const tsx = path.resolve('node_modules/tsx/dist/cli.mjs');
+  const runOther = (step: string) => new Promise<string>((resolve) => {
+    const script = `const t = await import(${JSON.stringify(path.resolve('src/tools/browser/browserTools.ts'))}); const s = await import(${JSON.stringify(path.resolve('src/tools/browser/browserSession.ts'))});
+      ${step === 'nav' ? `await t.executeBrowserNavigate({ type: 'browser_navigate', url: ${JSON.stringify(url)} });` : ''}
+      const c = await t.executeBrowserConsole({ type: 'browser_console' }); const q = await t.executeBrowserRequests({ type: 'browser_requests' }); const e = await t.executeBrowserEvaluate({ type: 'browser_evaluate', script: '1+1' });
+      console.log(JSON.stringify({ console: c, requests: q, evaluate: e })); await s.releaseBrowser(); process.exit(0);`;
+    const p = spawn(process.execPath, ['--no-warnings', tsx, '--input-type=module', '-e', script], { env: process.env, stdio: ['ignore', 'pipe', 'inherit'] });
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.on('exit', () => resolve(out.trim().split('\n').at(-1) ?? ''));
+  });
+  const whileLive = JSON.parse(await runOther('nav'));
+  for (const key of ['console', 'requests', 'evaluate']) assert.equal(whileLive[key].error?.code, 'secret_guard', `${key}: ${JSON.stringify(whileLive[key])}`);
+  console.log('  ✓ another run gets no console, requests or scripts while a password is live');
+
+  // The password stops being live; the tab stays paused while it still shows what was typed.
   identity.endIdentitySignup(SIGNUP);
-  await waitFor('the picture to resume', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false));
-  // The field the password went into stays masked, also when the page shows it as text.
-  await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.getElementById("pw").type = "text"' });
-  const masking = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'getComputedStyle(document.getElementById("pw")).webkitTextSecurity' });
-  assert.match(masking.output, /disc/, masking.output);
-  await waitFor('frames again after the password', () => viewer.events.slice(pauseAt).some((e) => e.method === 'Page.screencastFrame'), 5_000);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.ok(!viewer.events.some((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false), 'still paused');
+  assert.equal(viewer.events.slice(pausedIndex).filter((e) => e.method === 'Page.screencastFrame' && e.sessionId === sid).length, 0);
+  const afterLive = JSON.parse(await runOther('nav'));
+  assert.equal(afterLive.console.ok, true, JSON.stringify(afterLive.console));
+  assert.ok(!leaks(JSON.stringify(afterLive)), 'the other run never saw the password');
+  assert.doesNotMatch(afterLive.console.output, /typed /, 'the other run\'s console only holds its own tabs');
+  console.log('  ✓ the tab stays paused after the password stops being live; the other run never saw it');
+
+  // A "show password" toggle that swaps the field for a text field: still masked.
+  await (await session.getActivePage()).evaluate(() => (document.getElementById('show') as HTMLButtonElement).click());
+  const swapped = await waitFor('the swapped field to be masked', async () => {
+    const v = await pageEval(`(() => { const e = document.getElementById('pw'); return e.type + ' ' + e.hasAttribute('data-artemis-secret') + ' ' + getComputedStyle(e).webkitTextSecurity })()`);
+    return /text true disc/.test(v) ? v : undefined;
+  }, 3_000);
+  console.log(`  ✓ a reveal toggle that replaces the field stays masked (${swapped})`);
+
+  // The form goes out by GET: the URL carries the password. The viewer never gets it, the
+  // tab stays paused (a new document, but it shows the password), tab.json is redacted.
+  await (await session.getActivePage()).evaluate(() => (document.querySelector('form') as HTMLFormElement).submit());
+  await waitFor('the GET submit', async () => ((await session.getActivePage()).url().includes('/done') ? true : undefined));
+  await tools.executeBrowserExtract({ type: 'browser_extract_text' });
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(!leaks(JSON.stringify(viewer.events.filter((e) => e.method !== 'Page.screencastFrame'))), 'no viewer event carries the password');
+  const targetsNow = await viewer.send('Target.getTargets');
+  assert.ok(!leaks(JSON.stringify(targetsNow)), 'nor does a target list');
+  assert.ok(!leaks(fs.readFileSync(path.join(liveDir, 'tab.json'), 'utf8')), 'nor tab.json');
+  assert.ok(!viewer.events.some((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false), 'a page showing the password in its URL stays paused');
+  console.log('  ✓ a GET form with the password: URL and title never reach the viewer or tab.json; still paused');
+
+  // A new document without the password: the picture comes back.
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
+  await waitFor('the pause to end', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false));
+  await waitFor('frames of the tab again', () => viewer.events.some((e) => e.method === 'Page.screencastFrame' && e.sessionId === sid), 5_000);
+  console.log('  ✓ the tab resumes once it loads a page without the password');
+
+  // A pause always ends: typed again and left on screen, it ends after ARTEMIS_BROWSER_SECRET_PAUSE_MS.
+  const SIGNUP2 = `su_${'ef'.repeat(10)}`;
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', url: `${url}signup` });
+  const again2 = await tools.executeBrowserType({ type: 'browser_type', selector: '#pw', text: `{{credential:signup-${SIGNUP2}}}` });
+  assert.equal(again2.ok, true, again2.output);
+  viewer.events.length = 0;
+  const pausedFor = Date.now();
+  await waitFor('the pause to time out', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false), 30_000);
+  assert.ok(Date.now() - pausedFor > 15_000, 'not before its time');
+  identity.endIdentitySignup(SIGNUP2);
   identity.forgetIdentityCredentials();
-  console.log('  ✓ a live sign-up password is never in the picture: paused before typing, no frames or screenshots, masked after');
+  console.log(`  ✓ a pause ends on its own (${Math.round((Date.now() - pausedFor) / 1000)} s)`);
 
   // A renderer crash: the host closes the page; the next step works and says so.
   const crashing = await session.getActivePage();
@@ -235,6 +354,50 @@ async function main(): Promise<void> {
   const nextRun = await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
   assert.equal(nextRun.ok, true, 'the next run connects after a crash');
   console.log('  ✓ a renderer crash is recovered from, in the run and for the next one');
+
+  // A hung renderer in one tab: the next run closes it instead of restarting the browser.
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', url: `${url}hang` });
+  await new Promise((r) => setTimeout(r, 800));
+  const hostBeforeHang = live.readJsonFile<{ pid: number }>(path.join(liveDir, 'host.json'))!.pid;
+  await Promise.race([session.releaseBrowser(), new Promise((r) => setTimeout(r, 5_000))]);
+  const hangStart = Date.now();
+  const afterHang = await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
+  assert.equal(afterHang.ok, true, afterHang.output);
+  assert.equal(live.readJsonFile<{ pid: number }>(path.join(liveDir, 'host.json'))!.pid, hostBeforeHang, 'the same browser');
+  console.log(`  ✓ a hung tab is closed and the next run connects to the same browser (${Math.round((Date.now() - hangStart) / 1000)} s)`);
+
+  // Agent-token connections leave two slots for the owner's view.
+  const hostInfo = live.readJsonFile<{ port: number; agentToken: string }>(path.join(liveDir, 'host.json'))!;
+  const extra: Viewer[] = [];
+  let refusedAt = -1;
+  for (let i = 0; i < 8; i++) {
+    const c = new Viewer(`ws://127.0.0.1:${hostInfo.port}/cdp/${hostInfo.agentToken}`);
+    try {
+      await c.open();
+      extra.push(c);
+    } catch {
+      refusedAt = i;
+      break;
+    }
+  }
+  assert.ok(refusedAt >= 0, 'agent connections are limited');
+  // The viewer token can be read by the agent too: slots filled with quiet viewer
+  // connections give way to a new viewer (the platform server reconnecting).
+  const fillers: Viewer[] = [];
+  for (let i = 0; i < 4; i++) {
+    // The real viewer is active (the platform server acknowledges frames many times a second).
+    await viewer.send('Target.getTargets');
+    const c = new Viewer(`ws://127.0.0.1:${viewerInfo.port}/cdp/${viewerInfo.token}`);
+    await c.open().then(() => fillers.push(c), () => undefined);
+  }
+  await viewer.send('Target.getTargets');
+  const reserved = new Viewer(`ws://127.0.0.1:${viewerInfo.port}/cdp/${viewerInfo.token}`);
+  await reserved.open();
+  const stillWorks = await viewer.send('Target.getTargets');
+  assert.ok(stillWorks.result, 'the active viewer was not the one evicted');
+  reserved.close();
+  for (const c of [...extra, ...fillers]) c.close();
+  console.log(`  ✓ agent connections stop at ${refusedAt} open; with every slot taken a new viewer still connects`);
 
   viewer.close();
   await session.releaseBrowser();

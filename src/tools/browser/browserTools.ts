@@ -22,7 +22,17 @@
  * check) and waits until they hand back.
  */
 
-import { hasIdentityPlaceholder, hasLiveIdentitySecrets, hasTypedIdentitySecrets, LIVE_SECRET_REFUSAL, onIdentityLiveWindow, resolveIdentityPlaceholders, SECRET_FIELD_ATTRIBUTE } from '../../security/identityCredentials.js';
+import {
+  hasIdentityPlaceholder,
+  hasLiveIdentitySecrets,
+  hasTypedIdentitySecrets,
+  identityFingerprints,
+  LIVE_SECRET_REFUSAL,
+  onIdentityLiveWindow,
+  redactIdentitySecrets,
+  resolveIdentityPlaceholders,
+  SECRET_FIELD_ATTRIBUTE,
+} from '../../security/identityCredentials.js';
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
@@ -43,6 +53,8 @@ import {
   reportActiveTab,
   takeCrashNote,
   reportSecretState,
+  hostSecretState,
+  targetIdOf,
 } from './browserSession.js';
 import type { Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
@@ -61,6 +73,8 @@ import {
 // Sign-up passwords (security/identityCredentials.ts): nothing is recorded in the
 // console / request logs while one is live, and both logs are cleared when one goes
 // live and when it stops being live, so nothing from around that window is read later.
+// In live mode the logs only ever hold this run's own tabs, and while any run on the
+// shared browser has a password live, they are refused here too (refusalForScripts).
 setEventCaptureGate(() => !hasLiveIdentitySecrets());
 onIdentityLiveWindow(() => clearEventBuffers('all'));
 
@@ -144,10 +158,15 @@ async function runBrowserNavigate(action: BrowserNavigateAction): Promise<ToolRe
       error: { code: 'invalid_input', message: 'url required' },
     };
   }
+  const scriptUrl = /^\s*(javascript|vbscript):/i.test(action.url);
   // A script URL is a page script too.
-  if (hasLiveIdentitySecrets() && /^\s*(javascript|vbscript):/i.test(action.url)) return liveSecretRefusal();
+  if (scriptUrl && hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
+      if (scriptUrl) {
+        const refused = await refusalForScripts(page);
+        if (refused) return refused;
+      }
       const waitUntil = action.waitFor ?? 'domcontentloaded';
       await page.goto(action.url, { waitUntil, timeout: 30_000 });
       const title = await page.title();
@@ -396,7 +415,19 @@ export interface BrowserFormInputAction {
   checked?: boolean;
 }
 
-async function runBrowserFormInput(action: BrowserFormInputAction): Promise<ToolResult> {
+/**
+ * Called just before a resolved sign-up password is typed into the page
+ * (live mode: the tab is paused in the owner's view first). Throws when
+ * that could not be done; the password is then not typed.
+ */
+type BeforeSecret = (page: Page) => Promise<void>;
+
+function secretGuardFailure(): ToolResult {
+  const message = 'The live browser view could not be paused, so the sign-up password was not typed. Try again.';
+  return { ok: false, output: message, error: { code: 'secret_guard', message } };
+}
+
+async function runBrowserFormInput(action: BrowserFormInputAction, beforeSecret?: BeforeSecret): Promise<ToolResult> {
   if (!action.selector) {
     return {
       ok: false,
@@ -443,6 +474,13 @@ async function runBrowserFormInput(action: BrowserFormInputAction): Promise<Tool
       }
       const typed = await resolveIdentityPlaceholders(action.value, hasIdentityPlaceholder(action.value) ? await fieldInfo(el) : undefined);
       if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_refused', message: typed.message } };
+      if (typed.secret && beforeSecret) {
+        try {
+          await beforeSecret(page);
+        } catch {
+          return secretGuardFailure();
+        }
+      }
       await el.fill(typed.text, { timeout: 10_000 });
       if (typed.secret) await markSecretField(el);
       return { ok: true, output: `⌨  已填入 ${action.selector}: "${action.value.slice(0, 80)}"` };
@@ -458,6 +496,35 @@ async function runBrowserFormInput(action: BrowserFormInputAction): Promise<Tool
  */
 function liveSecretRefusal(): ToolResult {
   return { ok: false, output: LIVE_SECRET_REFUSAL, error: { code: 'secret_guard', message: LIVE_SECRET_REFUSAL } };
+}
+
+const OWNER_TYPED_REFUSAL = 'The user typed into this tab while they had the browser (maybe a password). Page scripts are off on it until it loads a new page; read it with browser_extract_text or a screenshot.';
+const SECRET_STATE_UNKNOWN = 'Cannot check with the live browser whether a password is in use, so page scripts and the console / request logs are off for now. Try again shortly.';
+
+/**
+ * Why page scripts or the console / request logs are refused now, if they
+ * are: a sign-up password is live in this run, or (live mode, the browser
+ * is shared) in any run; for a script on `page`, also when the owner typed
+ * into that tab during a takeover (until it loads a new document).
+ * Fails closed: a host that cannot be asked means no.
+ */
+async function refusalForScripts(page?: Page): Promise<ToolResult | undefined> {
+  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
+  if (!isLiveBrowser()) return undefined;
+  let state: Awaited<ReturnType<typeof hostSecretState>>;
+  try {
+    state = await hostSecretState();
+  } catch {
+    return { ok: false, output: SECRET_STATE_UNKNOWN, error: { code: 'secret_guard', message: SECRET_STATE_UNKNOWN } };
+  }
+  if (state?.live) return liveSecretRefusal();
+  if (page && state) {
+    const targetId = await targetIdOf(page);
+    if (!targetId || state.ownerTyped.includes(targetId)) {
+      return { ok: false, output: OWNER_TYPED_REFUSAL, error: { code: 'owner_typed', message: OWNER_TYPED_REFUSAL } };
+    }
+  }
+  return undefined;
 }
 
 // ── browser_evaluate ────────────────────────────────────────────────────
@@ -480,6 +547,8 @@ async function runBrowserEvaluate(action: BrowserEvaluateAction): Promise<ToolRe
   if (hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
     return await withPageRetry(async (page) => {
+      const refused = await refusalForScripts(page);
+      if (refused) return refused;
       const result = await page.evaluate(action.script);
       let rendered: string;
       try {
@@ -503,8 +572,9 @@ export interface BrowserConsoleAction {
   clear?: boolean;
 }
 
-export async function executeBrowserConsole(action: BrowserConsoleAction): Promise<ToolResult> {
-  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
+async function runBrowserConsole(action: BrowserConsoleAction): Promise<ToolResult> {
+  const refused = await refusalForScripts();
+  if (refused) return refused;
   try {
     const entries = readConsoleBuffer(action.pattern, action.limit ?? 50);
     if (action.clear) clearEventBuffers('console');
@@ -525,8 +595,9 @@ export interface BrowserRequestsAction {
   clear?: boolean;
 }
 
-export async function executeBrowserRequests(action: BrowserRequestsAction): Promise<ToolResult> {
-  if (hasLiveIdentitySecrets()) return liveSecretRefusal();
+async function runBrowserRequests(action: BrowserRequestsAction): Promise<ToolResult> {
+  const refused = await refusalForScripts();
+  if (refused) return refused;
   try {
     const entries = readNetworkBuffer(action.pattern, action.limit ?? 50);
     if (action.clear) clearEventBuffers('network');
@@ -585,7 +656,7 @@ export interface BrowserTypeAction {
   pressEnter?: boolean;
 }
 
-async function runBrowserType(action: BrowserTypeAction): Promise<ToolResult> {
+async function runBrowserType(action: BrowserTypeAction, beforeSecret?: BeforeSecret): Promise<ToolResult> {
   if (!action.selector) {
     return {
       ok: false,
@@ -600,6 +671,13 @@ async function runBrowserType(action: BrowserTypeAction): Promise<ToolResult> {
       // the history keeps the placeholder.
       const typed = await resolveIdentityPlaceholders(action.text, hasIdentityPlaceholder(action.text) ? await fieldInfo(el) : undefined);
       if (!typed.ok) return { ok: false, output: typed.message, error: { code: 'credential_refused', message: typed.message } };
+      if (typed.secret && beforeSecret) {
+        try {
+          await beforeSecret(page);
+        } catch {
+          return secretGuardFailure();
+        }
+      }
       await el.click({ timeout: 10_000 });
       await el.fill(''); // clear first
       await el.fill(typed.text);
@@ -674,7 +752,7 @@ async function runBrowserClose(_action: BrowserCloseAction): Promise<ToolResult>
  * Runs a page tool unless the user holds the browser (live mode only).
  * After a handback the result starts with a note on where the browser is.
  */
-async function gated(run: () => Promise<ToolResult>, signal?: AbortSignal, options: { typesSecret?: boolean } = {}): Promise<ToolResult> {
+async function gated(run: (beforeSecret?: BeforeSecret) => Promise<ToolResult>, signal?: AbortSignal, options: { typesSecret?: boolean } = {}): Promise<ToolResult> {
   const dir = liveDir();
   if (!dir) return run();
   const gate = await browserGate(dir, signal ? { signal } : {});
@@ -686,31 +764,29 @@ async function gated(run: () => Promise<ToolResult>, signal?: AbortSignal, optio
   const crashed = takeCrashNote();
   if (crashed) note = `[The tab you were working in (${crashed || 'a page'}) crashed and was closed; this step runs in a new tab. Open the page again if you still need it.]`;
   if (gate.handback) {
+    // What the owner did while holding the browser (typing, maybe a password) is not read back.
+    clearEventBuffers('all');
     const page = await focusTarget(gate.handback.targetId).catch(() => undefined);
     note = [note, handbackNote(gate.handback, page ? { url: page.url(), title: await page.title().catch(() => '') } : undefined)].filter(Boolean).join('\n');
   }
-  // A sign-up password is about to be typed: the owner's live view pauses
-  // first (the host stops its frames), so the typing is never on screen.
-  if (options.typesSecret) {
-    try {
-      await reportSecretState({ live: true, typed: hasTypedIdentitySecrets() });
-    } catch {
-      const message = 'The live browser view could not be paused, so the sign-up password was not typed. Try again.';
-      return { ok: false, output: message, error: { code: 'secret_guard', message } };
-    }
-  }
-  const result = await run();
+  // Just before a sign-up password is typed (it is resolved by then), the
+  // tab it goes into is paused in the owner's view and masks its secret
+  // fields, and the host gets the password's fingerprints; the pause lasts
+  // until that tab loads a new document (browserHost.ts).
+  const beforeSecret: BeforeSecret = (page) => reportSecretState({ live: true, pause: [page], ...(identityFingerprints() ? { fingerprints: identityFingerprints()! } : {}) });
+  const result = await run(beforeSecret);
   await reportActiveTab().catch(() => undefined);
-  if (options.typesSecret || hasTypedIdentitySecrets()) {
-    await reportSecretState({ live: hasLiveIdentitySecrets(), typed: hasTypedIdentitySecrets() }).catch(() => undefined);
+  if (options.typesSecret) {
+    await reportSecretState({ live: hasLiveIdentitySecrets() }).catch(() => undefined);
   }
   return note ? { ...result, output: `${note}\n\n${result.output}` } : result;
 }
 
-// The live window's edges (finish_signup, the run's end) un-pause the owner's view.
+// The live window's edges (finish_signup, the run's end) tell the host. Its
+// paused tabs stay paused: the page may still show what was typed.
 onIdentityLiveWindow(() => {
   if (!liveDir()) return;
-  void reportSecretState({ live: hasLiveIdentitySecrets(), typed: hasTypedIdentitySecrets() }).catch(() => undefined);
+  void reportSecretState({ live: hasLiveIdentitySecrets() }).catch(() => undefined);
 });
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
@@ -722,7 +798,7 @@ export const executeBrowserExtract = (action: BrowserExtractAction, context?: To
 export const executeBrowserClick = (action: BrowserClickAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserClick(action), context?.abortSignal);
 export const executeBrowserFormInput = (action: BrowserFormInputAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserFormInput(action), context?.abortSignal, {
+  gated((beforeSecret) => runBrowserFormInput(action, beforeSecret), context?.abortSignal, {
     typesSecret: hasIdentityPlaceholder(action.value) || (action.values ?? []).some((v) => hasIdentityPlaceholder(v)),
   });
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
@@ -730,11 +806,16 @@ export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: 
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserTabs(action), context?.abortSignal);
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserType(action), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
+  gated((beforeSecret) => runBrowserType(action, beforeSecret), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserWait(action), context?.abortSignal);
 export const executeBrowserClose = (action: BrowserCloseAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserClose(action), context?.abortSignal);
+// The logs too: while the owner holds the browser, what they do is not read.
+export const executeBrowserConsole = (action: BrowserConsoleAction, context?: ToolExecutionContext) =>
+  gated(() => runBrowserConsole(action), context?.abortSignal);
+export const executeBrowserRequests = (action: BrowserRequestsAction, context?: ToolExecutionContext) =>
+  gated(() => runBrowserRequests(action), context?.abortSignal);
 
 /** Inside an agent run, the screenshot itself goes to the model (as view_image does). */
 async function showScreenshotToModel(filepath: string, context?: ToolExecutionContext): Promise<string | undefined> {
@@ -788,8 +869,17 @@ export async function executeBrowserRequestHandoff(
   try {
     // Open the browser if needed, so the user has a page to work in.
     const page = await getActivePage();
-    url = page.url();
-    title = await page.title().catch(() => '');
+    // A tab paused for a typed password shows the owner nothing: they could not do the step.
+    const state = await hostSecretState().catch(() => undefined);
+    const targetId = await targetIdOf(page);
+    if (state && targetId && state.paused.includes(targetId)) {
+      const message = 'This tab still shows a sign-up password that was typed, so the user\'s view of it is paused until it loads a new page '
+        + '(submit or leave the form first), or for a few minutes. Ask for the handoff after that, or open the page they need in a new tab (browser_tabs) and ask there.';
+      return { ok: false, output: message, error: { code: 'secret_paused', message } };
+    }
+    // The card shows these to the owner: never a typed password.
+    url = redactIdentitySecrets(page.url());
+    title = redactIdentitySecrets(await page.title().catch(() => ''));
     await reportActiveTab().catch(() => undefined);
   } catch (err) {
     return pwError(err);

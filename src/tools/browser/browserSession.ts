@@ -25,7 +25,9 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext, Page, Request } from 'playwright';
+import { redactIdentitySecrets } from '../../security/identityCredentials.js';
+import type { FingerprintSet } from '../../security/secretFingerprints.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
 import { resolveBrowserLaunchMode } from '../platformSupport.js';
 import {
@@ -34,12 +36,15 @@ import {
   browserIdleMs,
   claimTab,
   ensureHost,
+  hostCall,
   liveDir,
   readJsonFile,
   releaseTab,
+  secretPauseMs,
   stopHost,
   writeTabReport,
   type HostConfig,
+  type HostInfo,
   type TabReport,
 } from './liveBrowser.js';
 
@@ -57,6 +62,8 @@ let _liveBrowser: Browser | null = null;
 const _ownPages = new Set<Page>();
 /** Live mode: how long connecting to the host may take before it is restarted. */
 const LIVE_CONNECT_TIMEOUT_MS = 20_000;
+/** Live mode: a connection still pending after this long is usually waiting on a hung page. */
+const LIVE_PROBE_AFTER_MS = 6_000;
 
 // ── console / network event buffers ────────────────────────────────────────
 // Ring buffers so the brain can debug pages ("what did the console say?",
@@ -121,15 +128,32 @@ function attachPageListeners(page: Page): void {
   });
 }
 
-function attachContextListeners(ctx: BrowserContext): void {
-  for (const page of ctx.pages()) attachPageListeners(page);
-  ctx.on('page', (page) => attachPageListeners(page));
+/**
+ * In live mode the browser is shared: a run records only what happens in
+ * its own tabs (another run's sign-up page is never in its logs).
+ */
+function isRecordedRequest(req: Request): boolean {
+  if (!_liveBrowser) return true;
+  try {
+    return _ownPages.has(req.frame().page());
+  } catch {
+    // A service worker's request: no page of this run's.
+    return false;
+  }
+}
+
+function attachContextListeners(ctx: BrowserContext, options: { live?: boolean } = {}): void {
+  // Live mode: page listeners are attached as the run takes a tab (ownPage).
+  if (!options.live) {
+    for (const page of ctx.pages()) attachPageListeners(page);
+    ctx.on('page', (page) => attachPageListeners(page));
+  }
   ctx.on('request', (req) => {
-    if (!captureAllowed()) unrecordedRequests.add(req);
+    if (!captureAllowed() || !isRecordedRequest(req)) unrecordedRequests.add(req);
   });
   ctx.on('response', (response) => {
     const req = response.request();
-    if (!captureAllowed() || unrecordedRequests.has(req)) return;
+    if (!captureAllowed() || unrecordedRequests.has(req) || !isRecordedRequest(req)) return;
     pushRing(_networkBuffer, {
       time: new Date().toISOString().slice(11, 19),
       method: req.method(),
@@ -139,7 +163,7 @@ function attachContextListeners(ctx: BrowserContext): void {
     });
   });
   ctx.on('requestfailed', (req) => {
-    if (!captureAllowed() || unrecordedRequests.has(req)) return;
+    if (!captureAllowed() || unrecordedRequests.has(req) || !isRecordedRequest(req)) return;
     pushRing(_networkBuffer, {
       time: new Date().toISOString().slice(11, 19),
       method: req.method(),
@@ -248,21 +272,31 @@ async function initContext(): Promise<BrowserContext> {
         viewport: contextOptions.viewport,
         timezoneId: process.env.ARTEMIS_BROWSER_TIMEZONE?.trim() || contextOptions.timezoneId,
         locale: contextOptions.locale,
+        ...(secretPauseMs() ? { secretPauseMs: secretPauseMs() } : {}),
       };
       let host = await ensureHost(hostConfig);
       let browser: Browser;
+      const connect = (to: HostInfo) => connectLive(chromium, to);
       try {
-        browser = await chromium.connectOverCDP(agentEndpoint(host), { timeout: LIVE_CONNECT_TIMEOUT_MS });
+        browser = await connect(host);
       } catch {
-        // A host that does not answer properly (a wedged browser) is replaced once.
-        await stopHost(live, host);
-        host = await ensureHost(hostConfig);
-        browser = await chromium.connectOverCDP(agentEndpoint(host), { timeout: LIVE_CONNECT_TIMEOUT_MS });
+        // Usually a hung page (connecting waits for every page): the host
+        // closes pages that do not answer, and the connection is tried
+        // again. Only a host that does not answer at all is replaced.
+        const answered = await hostCall(host, 'Artemis.probePages', { timeoutMs: 5_000 }, 15_000).then(() => true, () => false);
+        try {
+          if (!answered) throw new Error('the browser host does not answer');
+          browser = await connect(host);
+        } catch {
+          await stopHost(live, host);
+          host = await ensureHost(hostConfig);
+          browser = await connect(host);
+        }
       }
       _liveBrowser = browser;
       const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
-      attachContextListeners(ctx);
+      attachContextListeners(ctx, { live: true });
       _context = ctx;
       return ctx;
     }
@@ -389,6 +423,22 @@ async function initContext(): Promise<BrowserContext> {
   return _initPromise;
 }
 
+/**
+ * Connects Playwright to the live host. A connection still pending after a
+ * few seconds is usually waiting on a page whose renderer hangs: the host is
+ * asked meanwhile to close pages that do not answer, which lets it finish.
+ */
+async function connectLive(chromium: typeof import('playwright').chromium, host: HostInfo): Promise<Browser> {
+  const timer = setTimeout(() => {
+    void hostCall(host, 'Artemis.probePages', { timeoutMs: 5_000 }, 15_000).catch(() => undefined);
+  }, LIVE_PROBE_AFTER_MS);
+  try {
+    return await chromium.connectOverCDP(agentEndpoint(host), { timeout: LIVE_CONNECT_TIMEOUT_MS });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Platform-consistent UA: a Mac UA on a Windows host is itself a bot signal. */
 function browserUserAgent(): string {
   const uaPlatform = process.platform === 'win32'
@@ -473,6 +523,7 @@ function ownPages(): Page[] {
 function ownPage(page: Page, targetId: string): void {
   if (_ownPages.has(page)) return;
   _ownPages.add(page);
+  attachPageListeners(page);
   const dir = liveDir();
   page.once('close', () => {
     _ownPages.delete(page);
@@ -487,24 +538,66 @@ function ownPage(page: Page, targetId: string): void {
 
 let _crashedUrl: string | undefined;
 
-/** Live mode: a browser-level session for telling the host about secrets. */
+/** Live mode: a browser-level session for the host's own methods (secrets). */
 let _secretSession: import('playwright').CDPSession | null = null;
 
-/**
- * Live mode: tells the host whether a sign-up password is live in this run
- * (the owner's view then shows no frames) and, once one was typed, which of
- * this run's tabs must keep masking secret fields. Throws when the host could
- * not be told (the caller then does not type the password).
- */
-export async function reportSecretState(state: { live: boolean; typed: boolean }): Promise<void> {
-  if (!liveDir()) return;
+async function hostMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (!_liveBrowser) await initContext();
   const browser = _liveBrowser;
   if (!browser) throw new Error('not connected to the live browser');
-  const mask = state.typed ? (await Promise.all(ownPages().map((page) => targetIdOf(page)))).filter((id): id is string => !!id) : [];
   _secretSession ??= await browser.newBrowserCDPSession();
   // A host method (browserHost.ts), not a DevTools one: hence the cast.
-  await (_secretSession as unknown as { send: (method: string, params: unknown) => Promise<unknown> }).send('Artemis.setSecretState', { live: state.live, mask });
+  return (await (_secretSession as unknown as { send: (m: string, p: unknown) => Promise<unknown> }).send(method, params)) as Record<string, unknown>;
+}
+
+/** What the live host knows about sign-up passwords, across every run. */
+export interface HostSecretState {
+  /** Some run has a sign-up password live. */
+  live: boolean;
+  /** Tabs paused in the owner's view. */
+  paused: string[];
+  /** Tabs the owner typed into during a takeover (until they load a new document). */
+  ownerTyped: string[];
+}
+
+/**
+ * Live mode: the host's view of sign-up passwords (undefined when not in
+ * live mode). Throws when the host cannot be asked; callers then refuse.
+ */
+export async function hostSecretState(): Promise<HostSecretState | undefined> {
+  if (!liveDir()) return undefined;
+  const raw = await hostMethod('Artemis.getSecretState', {});
+  const ids = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  return { live: raw.live === true, paused: ids(raw.paused), ownerTyped: ids(raw.ownerTyped) };
+}
+
+let _secretSeq = 0;
+let _secretChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Live mode: tells the host whether a sign-up password is live in this run,
+ * and, just before one is typed, which tab it goes into (`pause`: that tab
+ * is paused in the owner's view and masks its secret fields) with the
+ * password's fingerprints (a URL or title carrying it is then blanked).
+ * Reports go out in order, numbered, so a late one never undoes a newer one.
+ * Throws when the host could not be told (the caller then does not type).
+ */
+export function reportSecretState(state: { live: boolean; pause?: Page[]; fingerprints?: FingerprintSet }): Promise<void> {
+  if (!liveDir()) return Promise.resolve();
+  const seq = ++_secretSeq;
+  const send = async () => {
+    const pause = state.pause ? (await Promise.all(state.pause.map((page) => targetIdOf(page)))).filter((id): id is string => !!id) : [];
+    if (state.pause?.length && pause.length === 0) throw new Error('the tab to type into is unknown');
+    await hostMethod('Artemis.setSecretState', {
+      seq,
+      live: state.live,
+      ...(pause.length ? { pause } : {}),
+      ...(state.fingerprints ? { fingerprints: state.fingerprints } : {}),
+    });
+  };
+  const next = _secretChain.then(send, send);
+  _secretChain = next.catch(() => undefined);
+  return next;
 }
 
 /** Live mode: the address of a page of this run that crashed since the last call, once. */
@@ -584,7 +677,12 @@ export async function reportActiveTab(): Promise<void> {
   const page = _activePage;
   if (!dir || !page || page.isClosed()) return;
   const targetId = await targetIdOf(page);
-  writeTabReport(dir, { ...(targetId ? { targetId } : {}), url: page.url(), title: await page.title().catch(() => '') });
+  // The server shows this to the owner: never a typed password (a GET form puts it in the URL).
+  writeTabReport(dir, {
+    ...(targetId ? { targetId } : {}),
+    url: redactIdentitySecrets(page.url()),
+    title: redactIdentitySecrets(await page.title().catch(() => '')),
+  });
 }
 
 /**

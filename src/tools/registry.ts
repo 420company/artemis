@@ -1729,9 +1729,9 @@ const capabilityToolDefs: ToolDefinition[] = [
     executionMode: 'blocking',
     parallelSafe: true,
     validate: () => [],
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserConsole } = await import('./browser/browserTools.js');
-      return executeBrowserConsole(a);
+      return executeBrowserConsole(a, context);
     }) as any,
   },
   {
@@ -1742,9 +1742,9 @@ const capabilityToolDefs: ToolDefinition[] = [
     executionMode: 'blocking',
     parallelSafe: true,
     validate: () => [],
-    execute: (async (a: any) => {
+    execute: (async (a: any, context: any) => {
       const { executeBrowserRequests } = await import('./browser/browserTools.js');
-      return executeBrowserRequests(a);
+      return executeBrowserRequests(a, context);
     }) as any,
   },
   {

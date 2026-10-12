@@ -262,9 +262,14 @@ export function userInControlMessage(since: number, now = Date.now()): string {
 export function handbackNote(control: ControlState, current?: { url: string; title: string }): string {
   const at = control.handedBackAt ? new Date(control.handedBackAt).toISOString().slice(11, 16) : '';
   const page = current ?? (control.url ? { url: control.url, title: control.title ?? '' } : undefined);
+  const ended = control.endedBy === 'idle'
+    ? 'timed out after a while without input'
+    : control.endedBy === 'restart'
+      ? 'ended because the platform restarted'
+      : 'ended when the browser view closed';
   const how = !control.endedBy || control.endedBy === 'owner'
     ? `[The user took over the browser and handed it back${at ? ` at ${at} UTC` : ''}.`
-    : `[The user took over the browser, but did not hand it back: the takeover ${control.endedBy === 'idle' ? 'timed out after a while without input' : 'ended when the browser view closed'}${at ? ` at ${at} UTC` : ''}. They may not have finished what they were doing.`;
+    : `[The user took over the browser, but did not hand it back: the takeover ${ended}${at ? ` at ${at} UTC` : ''}. They may not have finished what they were doing.`;
   return [
     how,
     page ? `It is now on: ${page.title ? `${page.title} — ` : ''}${page.url}.` : '',
@@ -346,6 +351,14 @@ export interface HostConfig {
   viewport?: { width: number; height: number };
   timezoneId?: string;
   locale?: string;
+  /** How long a tab stays paused after the last password typing at most (tests; default 3 minutes). */
+  secretPauseMs?: number;
+}
+
+/** ARTEMIS_BROWSER_SECRET_PAUSE_MS, for tests: how long a password pause lasts at most. */
+export function secretPauseMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = Number(env.ARTEMIS_BROWSER_SECRET_PAUSE_MS);
+  return Number.isFinite(raw) && raw >= 1_000 ? Math.min(raw, 3_600_000) : undefined;
 }
 
 /** Idle time before the host closes the browser (ARTEMIS_BROWSER_IDLE_MS, default 10 minutes). */
@@ -412,6 +425,46 @@ export async function runningHost(dir: string): Promise<HostInfo | undefined> {
 
 export function agentEndpoint(host: HostInfo): string {
   return `ws://127.0.0.1:${host.port}/cdp/${host.agentToken}`;
+}
+
+/**
+ * One call to the host on a connection of its own (no Playwright): used
+ * when Playwright cannot connect, to ask the host to close hung pages
+ * (`Artemis.probePages`). Rejects when the host does not answer in time.
+ */
+export function hostCall(host: HostInfo, method: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(agentEndpoint(host));
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+    const finish = (error?: Error, result?: Record<string, unknown>) => {
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch { /* already closed */ }
+      if (error) reject(error);
+      else resolve(result ?? {});
+    };
+    const timer = setTimeout(() => finish(new Error(`the browser host did not answer ${method}`)), timeoutMs);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method, params }));
+    ws.onerror = () => finish(new Error('cannot reach the browser host'));
+    ws.onclose = () => finish(new Error('the browser host closed the connection'));
+    ws.onmessage = (event) => {
+      let message: { id?: number; result?: Record<string, unknown>; error?: { message?: string } };
+      try {
+        message = JSON.parse(String(event.data)) as typeof message;
+      } catch {
+        return;
+      }
+      if (message.id !== 1) return;
+      if (message.error) finish(new Error(message.error.message ?? 'host error'));
+      else finish(undefined, message.result);
+    };
+  });
 }
 
 /**
@@ -522,24 +575,78 @@ export function tabOwner(dir: string, targetId: string): number | undefined {
   return claim?.pid && claim.pid !== process.pid && isPidAlive(claim.pid) ? claim.pid : undefined;
 }
 
-/** Claims a tab for this run; false when another live run has it. */
+/**
+ * Claims a tab for this run; false when another live run has it.
+ *
+ * Atomic: the claim is written to a file of its own and linked into place,
+ * which fails when a claim exists. A claim whose run is gone is broken
+ * explicitly, under a short lock, after checking again that it is still
+ * that dead run's: two runs never both own a tab.
+ */
 export function claimTab(dir: string, targetId: string): boolean {
   const file = claimFile(dir, targetId);
   if (!file) return false;
-  if (tabOwner(dir, targetId)) return false;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    writeJsonFileAtomic(file, { pid: process.pid, at: Date.now() }, 0o600);
-    return true;
   } catch {
     return false;
   }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const existing = readJsonFile<{ pid?: number }>(file);
+    if (existing?.pid === process.pid) return true;
+    if (existing && isPidAlive(existing.pid)) return false;
+    if (linkClaim(file)) return true;
+    // A claim is there: a live run's (it lost the race to us), or a dead one's to break.
+    if (!breakStaleClaim(file)) return readJsonFile<{ pid?: number }>(file)?.pid === process.pid;
+  }
+  return false;
 }
 
-/** Gives a tab up (the run ended, or the tab closed). */
+function linkClaim(file: string): boolean {
+  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, at: Date.now() }), { mode: 0o600 });
+    fs.linkSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** Removes a claim whose run is gone (or that cannot be read and is old); false when it is a live run's. */
+function breakStaleClaim(file: string): boolean {
+  const lock = `${file}.lock`;
+  try {
+    fs.writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 });
+  } catch {
+    // Someone else is breaking it; a lock left by a dead run is old and goes.
+    try {
+      if (Date.now() - fs.statSync(lock).mtimeMs > 10_000) fs.rmSync(lock, { force: true });
+    } catch { /* gone already */ }
+    return false;
+  }
+  try {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      return true;
+    }
+    const claim = readJsonFile<{ pid?: number }>(file);
+    const stale = claim ? !isPidAlive(claim.pid) : Date.now() - stat.mtimeMs > 10_000;
+    if (!stale) return false;
+    fs.rmSync(file, { force: true });
+    return true;
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+}
+
+/** Gives a tab up (the run ended, or the tab closed): only this run's own claim. */
 export function releaseTab(dir: string, targetId: string): void {
   const file = claimFile(dir, targetId);
   if (!file) return;
-  const claim = readJsonFile<{ pid?: number }>(file);
-  if (!claim || claim.pid === process.pid || !isPidAlive(claim.pid)) fs.rmSync(file, { force: true });
+  if (readJsonFile<{ pid?: number }>(file)?.pid === process.pid) fs.rmSync(file, { force: true });
 }

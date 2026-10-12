@@ -39,6 +39,8 @@
  * belong to this module, and are resolved first.
  */
 
+import { fingerprintSet, type FingerprintSet } from './secretFingerprints.js';
+
 const PLACEHOLDER = /\{\{credential:signup-(su_[0-9a-f]{20})\}\}/g;
 
 /** The data attribute put on fields a password was typed into. */
@@ -244,6 +246,17 @@ export async function resolveIdentityPlaceholders(
     }
   }
   return { ok: true, text: text.replace(PLACEHOLDER, (_m, id: string) => resolved.get(id)?.password ?? ''), secret: true };
+}
+
+/**
+ * Salted fingerprints of every form the passwords typed in this process may
+ * be echoed in (secretFingerprints.ts): the live browser host uses them to
+ * keep a URL or title carrying one out of the owner's view, without ever
+ * holding a password. Undefined before any password was typed.
+ */
+export function identityFingerprints(): FingerprintSet | undefined {
+  if (!resolved.size) return undefined;
+  return fingerprintSet([...resolved.values()].flatMap((entry) => entry.variants));
 }
 
 /** Puts placeholders back wherever a resolved password appears, in any of its echoed forms. */

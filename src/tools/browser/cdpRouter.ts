@@ -26,10 +26,15 @@
  * Methods in the `Artemis.` domain are answered by the host itself (see
  * `hostMethod`), never forwarded.
  *
- * While `viewerFramesPaused` is set (a sign-up password is being typed;
- * see browserHost.ts), viewers get no screencast frames and no screenshots:
- * the host acknowledges their frames itself, so the stream picks up again
- * afterwards, and tells them with an `Artemis.streamPaused` event.
+ * Sign-up passwords (browserHost.ts decides, through `secrets`):
+ *
+ * - a paused tab sends viewers no screencast frames, no screenshots and no
+ *   other page events (the host acknowledges their frames itself, so the
+ *   stream picks up again afterwards); viewers hear which tabs are paused
+ *   from an `Artemis.streamPaused` event;
+ * - a screenshot a viewer asked for before a pause began is not delivered;
+ * - a URL or title is blanked in everything a viewer receives while its
+ *   tab is paused, and wherever it carries a typed password.
  */
 
 export type ClientRole = 'agent' | 'viewer';
@@ -191,6 +196,8 @@ interface Client {
 
 interface Pending {
   method: string;
+  /** A viewer screenshot: the pause generation when it was asked for. */
+  generation?: number;
   client?: Client;
   clientId?: number;
   /** The sessionId the client wrote, if any (absent = its root session). */
@@ -213,6 +220,17 @@ export interface RouterClient {
 /** Host-handled `Artemis.*` methods: the client, its params, and the result. */
 export type HostMethod = (method: string, params: Record<string, unknown>, client: { id: number; role: ClientRole }) => Promise<Record<string, unknown>>;
 
+/** What the host knows about sign-up passwords (browserHost.ts). */
+export interface SecretView {
+  /** Whether viewers must not see this tab now. */
+  isPaused(targetId: string): boolean;
+  /** Whether a URL or title carries a typed password. */
+  sensitive(text: string): boolean;
+}
+
+/** Keys whose string values may name or show a page. */
+const PAGE_TEXT_KEYS = new Set(['url', 'title', 'userTypedURL', 'urlFragment', 'unreachableUrl', 'documentURL', 'baseURL']);
+
 /** A client whose browser session does not exist after this long is dropped. */
 const ATTACH_TIMEOUT_MS = 10_000;
 
@@ -230,28 +248,66 @@ export class CdpRouter {
   onDrop: ((client: { id: number; role: ClientRole }) => void) | undefined;
   /** Told when an external client attaches to a target (the host re-applies its emulation). */
   onAttach: ((targetId: string) => void) | undefined;
-  private paused = false;
+  /** Told when a viewer sends input to a tab (the owner typing during a takeover). */
+  onViewerInput: ((targetId: string) => void) | undefined;
+  /** Sign-up password state, from the host. */
+  secrets: SecretView | undefined;
+  /** Which target each attached session belongs to. */
+  private readonly sessionTargets = new Map<string, string>();
+  /** Bumped whenever a tab is newly paused (screenshots asked for before then are dropped). */
+  private pauseGeneration = 0;
+  private pauseNotice: { paused: boolean; reason: 'secret'; targets: { targetId: string; since: number }[] } = { paused: false, reason: 'secret', targets: [] };
 
   constructor(
     private readonly toBrowser: (message: CdpMessage) => void,
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** Viewers see no frames while this is set (a secret is being typed). */
-  get viewerFramesPaused(): boolean {
-    return this.paused;
-  }
-
-  set viewerFramesPaused(paused: boolean) {
-    if (paused === this.paused) return;
-    this.paused = paused;
+  /**
+   * The host's paused tabs changed: viewers are told, and when a tab was
+   * newly paused, screenshots asked for before now are not delivered.
+   */
+  pausedTargetsChanged(targets: { targetId: string; since: number }[], newlyPaused: boolean): void {
+    if (newlyPaused) this.pauseGeneration++;
+    this.pauseNotice = { paused: targets.length > 0, reason: 'secret', targets };
     for (const client of this.clients) {
       if (client.role === 'viewer' && client.root && !client.closed) this.tellPaused(client);
     }
   }
 
   private tellPaused(client: Client): void {
-    client.send(JSON.stringify({ method: 'Artemis.streamPaused', params: { paused: this.paused, reason: 'secret' } }));
+    client.send(JSON.stringify({ method: 'Artemis.streamPaused', params: this.pauseNotice }));
+  }
+
+  /** The target a session is attached to, if known. */
+  targetOfSession(sessionId: string | undefined): string | undefined {
+    return sessionId ? this.sessionTargets.get(sessionId) : undefined;
+  }
+
+  private isPaused(targetId: string | undefined): boolean {
+    return !!targetId && !!this.secrets?.isPaused(targetId);
+  }
+
+  /**
+   * Blanks, in place, what a viewer must not read: the URL and title of a
+   * paused tab, and any page text carrying a typed password.
+   */
+  private sanitizeForViewer(value: unknown, depth = 0): void {
+    if (!value || typeof value !== 'object' || depth > 8) return;
+    if (Array.isArray(value)) {
+      for (const item of value) this.sanitizeForViewer(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const pausedTarget = typeof record.targetId === 'string' && this.isPaused(record.targetId);
+    for (const [key, item] of Object.entries(record)) {
+      if (key === 'data') continue;
+      if (typeof item === 'string') {
+        if (PAGE_TEXT_KEYS.has(key) && (pausedTarget || this.secrets?.sensitive(item))) record[key] = '';
+      } else if (item && typeof item === 'object') {
+        this.sanitizeForViewer(item, depth + 1);
+      }
+    }
   }
 
   /** Clients actually using the browser: attached, and not the host's own. */
@@ -290,8 +346,8 @@ export class CdpRouter {
         client.root = sessionId;
         this.owners.set(sessionId, client);
         this.lastChange = this.now();
-        // A viewer that arrives while the picture is paused learns it at once.
-        if (client.role === 'viewer' && this.paused) this.tellPaused(client);
+        // A viewer that arrives while a tab is paused learns it at once.
+        if (client.role === 'viewer' && this.pauseNotice.paused) this.tellPaused(client);
         for (const message of client.queued.splice(0)) this.dispatch(client, message);
       })
       .catch(() => this.drop(client));
@@ -349,6 +405,14 @@ export class CdpRouter {
       const refusal = await this.checkViewerCall(client, message.method!, params, sessionId).catch((err: unknown) => (err instanceof Error ? err.message : String(err)));
       if (refusal) return reply(refusal);
       if (client.closed) return;
+      if (message.method!.startsWith('Input.') && sessionId !== client.root) {
+        const target = this.sessionTargets.get(sessionId);
+        if (target) {
+          try {
+            this.onViewerInput?.(target);
+          } catch { /* the host's hook must not break routing */ }
+        }
+      }
     }
     if (message.method!.startsWith('Artemis.')) {
       if (!this.hostMethod) return reply(`Unknown method: ${message.method}`);
@@ -363,6 +427,7 @@ export class CdpRouter {
     const id = this.nextId++;
     this.pending.set(id, {
       method: message.method!,
+      ...(client.role === 'viewer' && message.method === 'Page.captureScreenshot' ? { generation: this.pauseGeneration } : {}),
       client,
       clientId: message.id!,
       ...(message.sessionId ? { clientSession: message.sessionId } : {}),
@@ -376,7 +441,8 @@ export class CdpRouter {
    * detach must be the viewer's own, a history entry must be http(s).
    */
   private async checkViewerCall(client: Client, method: string, params: Record<string, unknown>, sessionId: string): Promise<string | undefined> {
-    if (this.paused && method === 'Page.captureScreenshot') return 'The picture is paused while a password is being typed';
+    if (method === 'Page.captureScreenshot' && this.isPaused(this.sessionTargets.get(sessionId))) return 'The picture is paused while a password is being typed';
+    if (method === 'Page.getNavigationHistory' && this.isPaused(this.sessionTargets.get(sessionId))) return 'The page is paused while a password is being typed';
     switch (method) {
       case 'Target.attachToTarget':
       case 'Target.activateTarget':
@@ -415,7 +481,16 @@ export class CdpRouter {
       const attached = message.result?.sessionId;
       if (!message.error && typeof attached === 'string' && /^Target\.attachTo(Target|BrowserTarget)$/.test(pending.method)) {
         this.owners.set(attached, client);
+        if (pending.targetId) this.sessionTargets.set(attached, pending.targetId);
         if (pending.targetId && !client.internal) this.notifyAttach(pending.targetId);
+      }
+      if (client.role === 'viewer') {
+        // A screenshot asked for before a pause began shows what the pause hides.
+        if (pending.generation !== undefined && pending.generation !== this.pauseGeneration && !message.error) {
+          client.send(JSON.stringify({ id: pending.clientId, error: { code: -32000, message: 'The picture is paused while a password is being typed' }, ...(pending.clientSession ? { sessionId: pending.clientSession } : {}) }));
+          return;
+        }
+        if (message.result) this.sanitizeForViewer(message.result);
       }
       client.send(JSON.stringify({
         id: pending.clientId,
@@ -433,25 +508,35 @@ export class CdpRouter {
       const child = message.params?.sessionId;
       if (typeof child === 'string') this.owners.set(child, owner);
       const target = (message.params?.targetInfo as { targetId?: unknown } | undefined)?.targetId;
+      if (typeof child === 'string' && typeof target === 'string') this.sessionTargets.set(child, target);
       if (typeof target === 'string' && !owner.internal) this.notifyAttach(target);
     }
-    if (this.paused && owner.role === 'viewer' && message.method === 'Page.screencastFrame') {
-      // Not shown; acknowledged for the viewer, gently, so frames resume afterwards.
-      const frameSession = message.sessionId;
-      const ackId = message.params?.sessionId;
-      setTimeout(() => {
-        if (!owner.closed && this.owners.get(frameSession) === owner) {
-          this.toBrowser({ id: this.nextId++, method: 'Page.screencastFrameAck', params: { sessionId: ackId }, sessionId: frameSession });
+    if (owner.role === 'viewer') {
+      if (message.sessionId !== owner.root && this.isPaused(this.sessionTargets.get(message.sessionId)) && message.method?.startsWith('Page.')) {
+        if (message.method === 'Page.screencastFrame') {
+          // Not shown; acknowledged for the viewer, gently, so frames resume afterwards.
+          const frameSession = message.sessionId;
+          const ackId = message.params?.sessionId;
+          setTimeout(() => {
+            if (!owner.closed && this.owners.get(frameSession) === owner) {
+              this.toBrowser({ id: this.nextId++, method: 'Page.screencastFrameAck', params: { sessionId: ackId }, sessionId: frameSession });
+            }
+          }, 250);
         }
-      }, 250);
-      return;
+        // Nothing else of a paused tab either (navigations name its URL).
+        return;
+      }
+      if (message.method !== 'Page.screencastFrame') this.sanitizeForViewer(message.params);
     }
     const out: CdpMessage = { method: message.method!, params: message.params ?? {} };
     if (message.sessionId !== owner.root) out.sessionId = message.sessionId;
     owner.send(JSON.stringify(out));
     if (message.method === 'Target.detachedFromTarget') {
       const child = message.params?.sessionId;
-      if (typeof child === 'string' && child !== owner.root) this.owners.delete(child);
+      if (typeof child === 'string' && child !== owner.root) {
+        this.owners.delete(child);
+        this.sessionTargets.delete(child);
+      }
     }
   }
 
@@ -468,7 +553,10 @@ export class CdpRouter {
     this.clients.delete(client);
     this.lastChange = this.now();
     const sessions = [...this.owners.entries()].filter(([, owner]) => owner === client).map(([id]) => id);
-    for (const id of sessions) this.owners.delete(id);
+    for (const id of sessions) {
+      this.owners.delete(id);
+      this.sessionTargets.delete(id);
+    }
     try {
       this.onDrop?.({ id: client.id, role: client.role });
     } catch { /* the host's cleanup must not stop this one */ }
