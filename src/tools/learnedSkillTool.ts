@@ -64,7 +64,7 @@ export async function executeLoadSkill(
       skill = findLibrarySkill(library, id)
     }
     if (!skill) {
-      const learnedIds = (await listAllSkills(context.cwd, scopes)).slice(0, 10).map((entry) => entry.id)
+      const learnedIds = (await listAllSkills(context.cwd, scopes)).slice(0, 20).map((entry) => entry.id)
       const near = searchSkillLibrary(library, id.replace(/[-_.]/g, ' '), 6, 0.2).map((entry) => entry.id)
       return fail(action, [
         `No skill "${id}".`,
