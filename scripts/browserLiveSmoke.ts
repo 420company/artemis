@@ -279,6 +279,37 @@ async function main(): Promise<void> {
     assert.ok(!sent.some((m) => String(m.method).startsWith('Artemis.')), 'never forwarded to Chromium');
   });
 
+  await check('while a password is typed viewers get no frames or screenshots, and are told; agents still get theirs', async () => {
+    const { router, sent } = fakeBrowser();
+    const agent = await connect(router, 'agent', 'ROOT-A', sent);
+    const viewer = await connect(router, 'viewer', 'ROOT-V', sent);
+    router.fromBrowser({ method: 'Target.attachedToTarget', params: { sessionId: 'CHILD-A', targetInfo: { type: 'page' } }, sessionId: 'ROOT-A' });
+    router.viewerFramesPaused = true;
+    assert.deepEqual(viewer.out.at(-1), { method: 'Artemis.streamPaused', params: { paused: true, reason: 'secret' } });
+    assert.equal(agent.out.some((m) => m.method === 'Artemis.streamPaused'), false, 'only viewers are told');
+    // A viewer frame is dropped and acknowledged by the router (so frames resume later).
+    (router as any).owners.set('CHILD-V', (router as any).owners.get('ROOT-V'));
+    sent.length = 0;
+    const before = viewer.out.length;
+    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'SECRET-PIXELS', sessionId: 7 }, sessionId: 'CHILD-V' });
+    assert.equal(viewer.out.length, before, 'not forwarded');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(sent.map((m) => [m.method, m.params, m.sessionId]), [['Page.screencastFrameAck', { sessionId: 7 }, 'CHILD-V']]);
+    // The agent's own frames (Playwright screenshots use the same events) are not affected.
+    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'x', sessionId: 1 }, sessionId: 'CHILD-A' });
+    assert.equal(agent.out.at(-1).method, 'Page.screencastFrame');
+    viewer.client.receive(JSON.stringify({ id: 50, method: 'Page.captureScreenshot', params: {}, sessionId: 'CHILD-V' }));
+    await settle();
+    assert.match(viewer.out.at(-1).error.message, /paused/);
+    // A viewer that connects meanwhile is told at once.
+    const late = await connect(router, 'viewer', 'ROOT-L', sent);
+    assert.deepEqual(late.out[0], { method: 'Artemis.streamPaused', params: { paused: true, reason: 'secret' } });
+    router.viewerFramesPaused = false;
+    assert.deepEqual(viewer.out.at(-1), { method: 'Artemis.streamPaused', params: { paused: false, reason: 'secret' } });
+    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'ok', sessionId: 8 }, sessionId: 'CHILD-V' });
+    assert.equal(viewer.out.at(-1).method, 'Page.screencastFrame');
+  });
+
   await check('a client that leaves before its session exists is cleaned up', () => {
     const toBrowser: Record<string, any>[] = [];
     const router = new CdpRouter((m) => toBrowser.push(m as Record<string, any>));

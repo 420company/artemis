@@ -44,7 +44,10 @@ async function resolveExecutable(): Promise<void> {
 const PAGE = `<!doctype html><meta charset="utf-8"><title>Live smoke</title>
 <style>body{margin:0;font:16px sans-serif}#b{position:absolute;left:100px;top:120px;width:200px;height:80px}#q{position:absolute;left:100px;top:260px;width:300px}</style>
 <button id="b" onclick="window.clicks=(window.clicks||0)+1;this.textContent='clicked '+window.clicks">Click me</button>
-<input id="q" placeholder="type here">`;
+<input id="q" placeholder="type here">
+<input id="pw" type="password" style="position:absolute;left:100px;top:320px;width:300px">
+<div id="echo" style="position:absolute;left:100px;top:360px"></div>
+<script>document.getElementById('pw').addEventListener('input', (e) => { document.getElementById('echo').textContent = e.target.value })</script>`;
 
 class Viewer {
   private ws: WebSocket;
@@ -58,7 +61,11 @@ class Viewer {
       if (m.id && this.pending.has(m.id)) {
         this.pending.get(m.id)!(m);
         this.pending.delete(m.id);
-      } else this.events.push(m);
+      } else {
+        this.events.push(m);
+        // Like the platform server: every frame is acknowledged, so the next one comes.
+        if (m.method === 'Page.screencastFrame') this.ws.send(JSON.stringify({ id: this.nextId++, method: 'Page.screencastFrameAck', params: { sessionId: m.params.sessionId }, sessionId: m.sessionId }));
+      }
     };
   }
   open(): Promise<void> {
@@ -129,7 +136,6 @@ async function main(): Promise<void> {
   const started = await viewer.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 }, sid);
   assert.ok(!started.error, JSON.stringify(started.error));
   const frame = await waitFor('a screencast frame', () => viewer.events.find((e) => e.method === 'Page.screencastFrame' && e.sessionId === sid));
-  await viewer.send('Page.screencastFrameAck', { sessionId: frame.params.sessionId }, sid);
   const jpeg = Buffer.from(frame.params.data, 'base64');
   assert.equal(jpeg[0], 0xff);
   assert.equal(jpeg[1], 0xd8);
@@ -190,6 +196,33 @@ async function main(): Promise<void> {
   await viewer.send('Artemis.setViewport', { targetId: tab.targetId, mode: 'desktop' });
   assert.match(await size(), /"1280x800 1280"/);
   console.log('  ✓ the viewer cannot inject script on reload; viewport 1280x800; phone viewport on request, then back');
+
+  // A sign-up password (identity) is never in the owner's picture while it is live:
+  // the view pauses before it is typed, no frames or screenshots, and resumes after.
+  const identity = await import('../src/security/identityCredentials.js');
+  const SIGNUP = `su_${'cd'.repeat(10)}`;
+  identity.setIdentityCredentialSource({ site: async () => '127.0.0.1', password: async () => ({ password: 'Sm0ke!Pa55word#9', site: '127.0.0.1' }) });
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
+  const currentTab = live.readJsonFile<{ targetId: string }>(path.join(liveDir, 'tab.json'))!.targetId;
+  if (currentTab !== tab.targetId) throw new Error('the run moved to another tab');
+  viewer.events.length = 0;
+  const typedSecret = await tools.executeBrowserType({ type: 'browser_type', selector: '#pw', text: `{{credential:signup-${SIGNUP}}}` });
+  assert.equal(typedSecret.ok, true, typedSecret.output);
+  const pauseAt = viewer.events.findIndex((e) => e.method === 'Artemis.streamPaused' && e.params.paused === true);
+  assert.ok(pauseAt >= 0, 'the viewer was told the picture is paused');
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(viewer.events.slice(pauseAt).filter((e) => e.method === 'Page.screencastFrame').length, 0, 'no frame while the password is live');
+  const shot = await viewer.send('Page.captureScreenshot', { format: 'jpeg' }, sid);
+  assert.match(shot.error?.message ?? '', /paused/, 'no screenshot for the viewer while live');
+  identity.endIdentitySignup(SIGNUP);
+  await waitFor('the picture to resume', () => viewer.events.find((e) => e.method === 'Artemis.streamPaused' && e.params.paused === false));
+  // The field the password went into stays masked, also when the page shows it as text.
+  await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.getElementById("pw").type = "text"' });
+  const masking = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'getComputedStyle(document.getElementById("pw")).webkitTextSecurity' });
+  assert.match(masking.output, /disc/, masking.output);
+  await waitFor('frames again after the password', () => viewer.events.slice(pauseAt).some((e) => e.method === 'Page.screencastFrame'), 5_000);
+  identity.forgetIdentityCredentials();
+  console.log('  ✓ a live sign-up password is never in the picture: paused before typing, no frames or screenshots, masked after');
 
   // A renderer crash: the host closes the page; the next step works and says so.
   const crashing = await session.getActivePage();

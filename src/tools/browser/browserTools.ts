@@ -42,6 +42,7 @@ import {
   isLiveBrowser,
   reportActiveTab,
   takeCrashNote,
+  reportSecretState,
 } from './browserSession.js';
 import type { Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
@@ -673,7 +674,7 @@ async function runBrowserClose(_action: BrowserCloseAction): Promise<ToolResult>
  * Runs a page tool unless the user holds the browser (live mode only).
  * After a handback the result starts with a note on where the browser is.
  */
-async function gated(run: () => Promise<ToolResult>, signal?: AbortSignal): Promise<ToolResult> {
+async function gated(run: () => Promise<ToolResult>, signal?: AbortSignal, options: { typesSecret?: boolean } = {}): Promise<ToolResult> {
   const dir = liveDir();
   if (!dir) return run();
   const gate = await browserGate(dir, signal ? { signal } : {});
@@ -688,10 +689,29 @@ async function gated(run: () => Promise<ToolResult>, signal?: AbortSignal): Prom
     const page = await focusTarget(gate.handback.targetId).catch(() => undefined);
     note = [note, handbackNote(gate.handback, page ? { url: page.url(), title: await page.title().catch(() => '') } : undefined)].filter(Boolean).join('\n');
   }
+  // A sign-up password is about to be typed: the owner's live view pauses
+  // first (the host stops its frames), so the typing is never on screen.
+  if (options.typesSecret) {
+    try {
+      await reportSecretState({ live: true, typed: hasTypedIdentitySecrets() });
+    } catch {
+      const message = 'The live browser view could not be paused, so the sign-up password was not typed. Try again.';
+      return { ok: false, output: message, error: { code: 'secret_guard', message } };
+    }
+  }
   const result = await run();
   await reportActiveTab().catch(() => undefined);
+  if (options.typesSecret || hasTypedIdentitySecrets()) {
+    await reportSecretState({ live: hasLiveIdentitySecrets(), typed: hasTypedIdentitySecrets() }).catch(() => undefined);
+  }
   return note ? { ...result, output: `${note}\n\n${result.output}` } : result;
 }
+
+// The live window's edges (finish_signup, the run's end) un-pause the owner's view.
+onIdentityLiveWindow(() => {
+  if (!liveDir()) return;
+  void reportSecretState({ live: hasLiveIdentitySecrets(), typed: hasTypedIdentitySecrets() }).catch(() => undefined);
+});
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserNavigate(action), context?.abortSignal);
@@ -702,13 +722,15 @@ export const executeBrowserExtract = (action: BrowserExtractAction, context?: To
 export const executeBrowserClick = (action: BrowserClickAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserClick(action), context?.abortSignal);
 export const executeBrowserFormInput = (action: BrowserFormInputAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserFormInput(action), context?.abortSignal);
+  gated(() => runBrowserFormInput(action), context?.abortSignal, {
+    typesSecret: hasIdentityPlaceholder(action.value) || (action.values ?? []).some((v) => hasIdentityPlaceholder(v)),
+  });
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserEvaluate(action), context?.abortSignal);
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserTabs(action), context?.abortSignal);
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserType(action), context?.abortSignal);
+  gated(() => runBrowserType(action), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserWait(action), context?.abortSignal);
 export const executeBrowserClose = (action: BrowserCloseAction, context?: ToolExecutionContext) =>

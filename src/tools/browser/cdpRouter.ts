@@ -25,6 +25,11 @@
  *
  * Methods in the `Artemis.` domain are answered by the host itself (see
  * `hostMethod`), never forwarded.
+ *
+ * While `viewerFramesPaused` is set (a sign-up password is being typed;
+ * see browserHost.ts), viewers get no screencast frames and no screenshots:
+ * the host acknowledges their frames itself, so the stream picks up again
+ * afterwards, and tells them with an `Artemis.streamPaused` event.
  */
 
 export type ClientRole = 'agent' | 'viewer';
@@ -225,11 +230,29 @@ export class CdpRouter {
   onDrop: ((client: { id: number; role: ClientRole }) => void) | undefined;
   /** Told when an external client attaches to a target (the host re-applies its emulation). */
   onAttach: ((targetId: string) => void) | undefined;
+  private paused = false;
 
   constructor(
     private readonly toBrowser: (message: CdpMessage) => void,
     private readonly now: () => number = Date.now,
   ) {}
+
+  /** Viewers see no frames while this is set (a secret is being typed). */
+  get viewerFramesPaused(): boolean {
+    return this.paused;
+  }
+
+  set viewerFramesPaused(paused: boolean) {
+    if (paused === this.paused) return;
+    this.paused = paused;
+    for (const client of this.clients) {
+      if (client.role === 'viewer' && client.root && !client.closed) this.tellPaused(client);
+    }
+  }
+
+  private tellPaused(client: Client): void {
+    client.send(JSON.stringify({ method: 'Artemis.streamPaused', params: { paused: this.paused, reason: 'secret' } }));
+  }
 
   /** Clients actually using the browser: attached, and not the host's own. */
   get clientCount(): number {
@@ -267,6 +290,8 @@ export class CdpRouter {
         client.root = sessionId;
         this.owners.set(sessionId, client);
         this.lastChange = this.now();
+        // A viewer that arrives while the picture is paused learns it at once.
+        if (client.role === 'viewer' && this.paused) this.tellPaused(client);
         for (const message of client.queued.splice(0)) this.dispatch(client, message);
       })
       .catch(() => this.drop(client));
@@ -351,6 +376,7 @@ export class CdpRouter {
    * detach must be the viewer's own, a history entry must be http(s).
    */
   private async checkViewerCall(client: Client, method: string, params: Record<string, unknown>, sessionId: string): Promise<string | undefined> {
+    if (this.paused && method === 'Page.captureScreenshot') return 'The picture is paused while a password is being typed';
     switch (method) {
       case 'Target.attachToTarget':
       case 'Target.activateTarget':
@@ -408,6 +434,17 @@ export class CdpRouter {
       if (typeof child === 'string') this.owners.set(child, owner);
       const target = (message.params?.targetInfo as { targetId?: unknown } | undefined)?.targetId;
       if (typeof target === 'string' && !owner.internal) this.notifyAttach(target);
+    }
+    if (this.paused && owner.role === 'viewer' && message.method === 'Page.screencastFrame') {
+      // Not shown; acknowledged for the viewer, gently, so frames resume afterwards.
+      const frameSession = message.sessionId;
+      const ackId = message.params?.sessionId;
+      setTimeout(() => {
+        if (!owner.closed && this.owners.get(frameSession) === owner) {
+          this.toBrowser({ id: this.nextId++, method: 'Page.screencastFrameAck', params: { sessionId: ackId }, sessionId: frameSession });
+        }
+      }, 250);
+      return;
     }
     const out: CdpMessage = { method: message.method!, params: message.params ?? {} };
     if (message.sessionId !== owner.root) out.sessionId = message.sessionId;

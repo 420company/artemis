@@ -13,7 +13,12 @@
  *   was the last), so a crash never breaks the next run's connection;
  * - `Artemis.setViewport` lets the platform server show a phone-sized page
  *   while the owner holds the browser from a phone, and is undone when the
- *   server asks, or disconnects.
+ *   server asks, or disconnects;
+ * - sign-up passwords (security/identityCredentials.ts) never show in the
+ *   owner's live view: while an engine run says one is live, viewers get no
+ *   frames (`Artemis.setSecretState`, agent only); and the tabs it typed one
+ *   into keep masking password fields and the fields it marked, also when a
+ *   page switches such a field to text.
  *
  * Clients that stop answering pings are dropped, so a half-open connection
  * never keeps the browser alive. Started by an engine run as
@@ -37,6 +42,25 @@ const PING_EVERY_MS = 20_000;
 /** A client silent for this long (no message, no pong) is dropped. */
 const SILENT_LIMIT_MS = 65_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
+
+/**
+ * Masks secret fields in every document of a tab: password inputs and the
+ * fields a sign-up password was typed into (identityCredentials.ts marks
+ * them), in an isolated world, and again whenever the page replaces it.
+ */
+const SECRET_MASK_SOURCE = `(() => {
+  const css = '[data-artemis-secret], [data-artemis-secret] *, input[type="password"] { -webkit-text-security: disc !important; }';
+  const add = () => {
+    const root = document.head || document.documentElement;
+    if (!root || document.getElementById('__artemis_secret_mask')) return;
+    const style = document.createElement('style');
+    style.id = '__artemis_secret_mask';
+    style.textContent = css;
+    root.appendChild(style);
+  };
+  add();
+  new MutationObserver(add).observe(document, { childList: true, subtree: true });
+})();`;
 
 function chromeArgs(config: HostConfig): string[] {
   const viewport = config.viewport ?? DEFAULT_VIEWPORT;
@@ -98,6 +122,10 @@ async function waitForProfile(profileDir: string, timeoutMs = 15_000): Promise<v
 interface Monitor {
   /** The monitor's own session on each page. */
   pages: Map<string, string>;
+  /** Engine runs (client ids) with a sign-up password live: viewers see no frames. */
+  secretsLive: Set<number>;
+  /** Tabs a sign-up password was typed into: their secret fields stay masked. */
+  masked: Set<string>;
   /** Pages a viewer switched to a phone viewport, by viewer client id. */
   mobile: Map<string, { client: number; width: number; height: number }>;
 }
@@ -202,7 +230,7 @@ async function main(): Promise<void> {
   }
 
   // ── the monitor: emulation for every page, crashed pages closed ─────────
-  const monitor: Monitor = { pages: new Map(), mobile: new Map() };
+  const monitor: Monitor = { pages: new Map(), mobile: new Map(), secretsLive: new Set(), masked: new Set() };
   let monitorNext = 1;
   const monitorPending = new Map<number, (m: { result?: Record<string, unknown>; error?: unknown }) => void>();
   let monitorClient: RouterClient | undefined;
@@ -259,6 +287,7 @@ async function main(): Promise<void> {
       else if (message.method === 'Target.targetDestroyed' && typeof params.targetId === 'string') {
         monitor.pages.delete(params.targetId);
         monitor.mobile.delete(params.targetId);
+        monitor.masked.delete(params.targetId);
       }
     },
     { internal: true },
@@ -267,7 +296,26 @@ async function main(): Promise<void> {
   const { targetInfos } = await monitorCall('Target.getTargets').catch(() => ({ targetInfos: [] }));
   for (const t of targetInfos as { targetId: string; type: string }[]) if (t.type === 'page') await watchPage(t.targetId);
 
+  const maskSecrets = async (targetId: string) => {
+    await watchPage(targetId);
+    const session = monitor.pages.get(targetId);
+    if (!session) return;
+    await monitorCall('Page.addScriptToEvaluateOnNewDocument', { source: SECRET_MASK_SOURCE, runImmediately: true, worldName: 'artemis-secret-mask' }, session).catch(() => undefined);
+  };
   router.hostMethod = async (method, params, client) => {
+    if (method === 'Artemis.setSecretState' && client.role === 'agent') {
+      if (typeof params.live !== 'boolean') throw new Error('"live" must be true or false');
+      const mask = Array.isArray(params.mask) ? params.mask.filter((t): t is string => typeof t === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(t)).slice(0, 64) : [];
+      if (params.live) monitor.secretsLive.add(client.id);
+      else monitor.secretsLive.delete(client.id);
+      router.viewerFramesPaused = monitor.secretsLive.size > 0;
+      for (const targetId of mask) {
+        if (monitor.masked.has(targetId)) continue;
+        monitor.masked.add(targetId);
+        await maskSecrets(targetId);
+      }
+      return { paused: router.viewerFramesPaused };
+    }
     if (method !== 'Artemis.setViewport' || client.role !== 'viewer') throw new Error(`Unknown method: ${method}`);
     const targetId = String(params.targetId);
     if (params.mode === 'mobile') {
@@ -288,6 +336,8 @@ async function main(): Promise<void> {
   };
   // A viewer that goes away gives its pages their normal size back.
   router.onDrop = (client) => {
+    // A run that ends ends its live password (its process is gone).
+    if (monitor.secretsLive.delete(client.id)) router.viewerFramesPaused = monitor.secretsLive.size > 0;
     for (const [targetId, phone] of monitor.mobile) {
       if (phone.client !== client.id) continue;
       monitor.mobile.delete(targetId);

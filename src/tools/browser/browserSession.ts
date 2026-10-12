@@ -211,6 +211,7 @@ async function initContext(): Promise<BrowserContext> {
     _activePage = null;
     _initPromise = null;
     _liveBrowser = null;
+    _secretSession = null;
   }
   if (_initPromise) return _initPromise;
 
@@ -486,6 +487,26 @@ function ownPage(page: Page, targetId: string): void {
 
 let _crashedUrl: string | undefined;
 
+/** Live mode: a browser-level session for telling the host about secrets. */
+let _secretSession: import('playwright').CDPSession | null = null;
+
+/**
+ * Live mode: tells the host whether a sign-up password is live in this run
+ * (the owner's view then shows no frames) and, once one was typed, which of
+ * this run's tabs must keep masking secret fields. Throws when the host could
+ * not be told (the caller then does not type the password).
+ */
+export async function reportSecretState(state: { live: boolean; typed: boolean }): Promise<void> {
+  if (!liveDir()) return;
+  if (!_liveBrowser) await initContext();
+  const browser = _liveBrowser;
+  if (!browser) throw new Error('not connected to the live browser');
+  const mask = state.typed ? (await Promise.all(ownPages().map((page) => targetIdOf(page)))).filter((id): id is string => !!id) : [];
+  _secretSession ??= await browser.newBrowserCDPSession();
+  // A host method (browserHost.ts), not a DevTools one: hence the cast.
+  await (_secretSession as unknown as { send: (method: string, params: unknown) => Promise<unknown> }).send('Artemis.setSecretState', { live: state.live, mask });
+}
+
 /** Live mode: the address of a page of this run that crashed since the last call, once. */
 export function takeCrashNote(): string | undefined {
   const url = _crashedUrl;
@@ -584,6 +605,7 @@ export async function releaseBrowser(): Promise<void> {
     if (targetId) releaseTab(dir, targetId);
   }
   _ownPages.clear();
+  _secretSession = null;
   _liveBrowser = null;
   _context = null;
   _activePage = null;
