@@ -173,6 +173,8 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   // Speech.
   'synthesize_speech',
   'transcribe_audio',
+  // Phone calls for the owner (each one approved by the owner first).
+  'place_call',
   // Office documents (decks, documents, spreadsheets).
   'create_presentation',
   'create_document',
@@ -198,6 +200,19 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'browser_tabs',
   'browser_wait_for',
   'browser_close',
+  // The agent's identity on a hosted platform (tools/agentIdentity.ts):
+  // offered only where the host provides it (platformSupport.ts); the host
+  // enforces the owner's approvals and what mail the agent may read.
+  'agent_mail_address',
+  'list_emails',
+  'wait_for_email',
+  'read_email',
+  'extract_verification',
+  'begin_signup',
+  'finish_signup',
+  'get_sms_number',
+  'wait_for_sms',
+  'ask_owner_for_code',
 ];
 
 export function getAllowedActionTypesForProfile(

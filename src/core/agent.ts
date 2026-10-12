@@ -1,4 +1,5 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
+import { enterIdentityRun, redactIdentitySecretsDeep } from '../security/identityCredentials.js';
 import path from 'node:path';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
 import {
@@ -803,6 +804,28 @@ function buildActionFromLooseArgs(
         pitch: getLooseNumberArg(args, 'pitch'),
       };
     }
+    case 'place_call':
+    case 'phone_call':
+    case 'make_call': {
+      const to = getLooseStringArg(args, 'to', 'number', 'phone', 'phoneNumber', 'phone_number');
+      const goal = getLooseStringArg(args, 'goal', 'purpose', 'task');
+      if (!to?.trim() || !goal?.trim()) return null;
+      const language = getLooseStringArg(args, 'language', 'lang');
+      const maxMinutes = getLooseNumberArg(args, 'maxMinutes', 'max_minutes');
+      return {
+        type: 'place_call',
+        to,
+        goal,
+        brief: getLooseStringArg(args, 'brief', 'context', 'background'),
+        ...(language === 'en' || language === 'zh' ? { language } : {}),
+        allowedFacts: getLooseStringArrayArg(args, 'allowedFacts', 'allowed_facts'),
+        forbidden: getLooseStringArrayArg(args, 'forbidden', 'forbiddenFacts', 'forbidden_facts', 'do_not_share'),
+        mayAgreeTo: getLooseStringArrayArg(args, 'mayAgreeTo', 'may_agree_to'),
+        calleeName: getLooseStringArg(args, 'calleeName', 'callee_name', 'callee'),
+        onBehalfOf: getLooseStringArg(args, 'onBehalfOf', 'on_behalf_of'),
+        ...(maxMinutes !== undefined ? { maxMinutes } : {}),
+      };
+    }
     case 'transcribe_audio':
     case 'stt':
     case 'speech_to_text': {
@@ -1454,6 +1477,7 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'generate_long_video':
     case 'synthesize_speech':
     case 'transcribe_audio':
+    case 'place_call':
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
@@ -1886,6 +1910,9 @@ function buildToolUiPayload(
     case 'transcribe_audio':
       payload.path = action.inputPath;
       break;
+    case 'place_call':
+      payload.goal = action.goal;
+      break;
     default:
       break;
   }
@@ -1937,6 +1964,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `synthesize_speech voice=${action.voice ?? 'configured'} text=${truncate(action.text, 120)}`;
     case 'transcribe_audio':
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncate(action.inputPath, 120)}`;
+    case 'place_call':
+      return `place_call goal=${truncate(action.goal, 120)}`;
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
@@ -2086,6 +2115,23 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `view_image ${truncate(action.path, 120)}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
+    case 'agent_mail_address':
+    case 'list_emails':
+    case 'wait_for_sms':
+      return action.type;
+    case 'wait_for_email':
+      return `wait_for_email${action.from_contains ? ` from=${truncate(action.from_contains, 60)}` : ''}`;
+    case 'read_email':
+    case 'extract_verification':
+      return `${action.type} ${truncate(action.id, 40)}`;
+    case 'begin_signup':
+      return `begin_signup ${truncate(action.site, 80)}`;
+    case 'finish_signup':
+      return `finish_signup ${truncate(action.signup_id, 40)} ${action.outcome}`;
+    case 'get_sms_number':
+      return `get_sms_number ${action.country}`;
+    case 'ask_owner_for_code':
+      return `ask_owner_for_code ${truncate(action.site, 80)}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
@@ -5052,6 +5098,14 @@ const TOOL_EXPECTED_MAX_MS: Partial<Record<string, number>> = {
   create_presentation: 15 * 60_000,
   create_document: 15 * 60_000,
   create_spreadsheet: 15 * 60_000,
+  // Waiting for the owner's approval (15 min) and a call of up to an hour.
+  place_call: 80 * 60_000,
+  // Agent identity: waits for mail, SMS or the owner's answer (at most 10 minutes each).
+  wait_for_email: 12 * 60_000,
+  wait_for_sms: 12 * 60_000,
+  begin_signup: 12 * 60_000,
+  get_sms_number: 12 * 60_000,
+  ask_owner_for_code: 12 * 60_000,
 };
 
 /**
@@ -5856,6 +5910,10 @@ async function executeAuthorizedAction(
     } finally {
       stopHeartbeat();
     }
+    // A sign-up password typed through its placeholder never comes back in a result: the whole outcome
+    // (output, error message, details, anything nested) goes back to placeholders before it is recorded
+    // or sent to the model, in every form a page or URL may echo it (security/identityCredentials.ts).
+    result = redactIdentitySecretsDeep(result);
     const completedAction = result.action ?? hydratedAction;
     let actionArtifactPath: string | undefined;
     if (options.heimdallThreadState) {
@@ -5917,7 +5975,7 @@ async function executeAuthorizedAction(
           error instanceof Error ? truncate(error.message, 160) : truncate(String(error), 160),
       },
     );
-    return buildGuardrailFailureOutcome(action, error);
+    return redactIdentitySecretsDeep(buildGuardrailFailureOutcome(action, error));
   }
 }
 
@@ -6297,6 +6355,20 @@ export type AgentRunResult = RunResult & {
 };
 
 export async function runAgent(
+  session: SessionRecord,
+  userInput: string,
+  options: RunAgentOptions,
+): Promise<AgentRunResult> {
+  // A sign-up password typed during this run stops being live when the outermost run ends.
+  const leaveIdentityRun = enterIdentityRun();
+  try {
+    return await runAgentInner(session, userInput, options);
+  } finally {
+    leaveIdentityRun();
+  }
+}
+
+async function runAgentInner(
   session: SessionRecord,
   userInput: string,
   options: RunAgentOptions,

@@ -76,6 +76,8 @@ function describeAction(action: AgentAction): string {
       return `synthesize speech with configured TTS${action.outputPath ? ` to ${action.outputPath}` : ''}`;
     case 'transcribe_audio':
       return `transcribe audio locally from ${action.inputPath}`;
+    case 'place_call':
+      return `phone ${action.to} for the owner (after the owner approves)`;
     case 'create_presentation':
       return `write a presentation${action.path ? ` to ${action.path}` : ''}`;
     case 'create_document':
@@ -227,6 +229,26 @@ function describeAction(action: AgentAction): string {
       return `view image ${action.path}`;
     case 'kill_task':
       return `kill background task ${action.taskId}`;
+    case 'agent_mail_address':
+      return 'look up the agent\'s email address';
+    case 'list_emails':
+      return 'list the agent\'s email';
+    case 'wait_for_email':
+      return `wait for an email${action.from_contains ? ` from ${action.from_contains}` : ''}`;
+    case 'read_email':
+      return `read email ${action.id}`;
+    case 'extract_verification':
+      return `find the verification code in email ${action.id}`;
+    case 'begin_signup':
+      return `sign up on ${action.site} (needs the owner's approval)`;
+    case 'finish_signup':
+      return `record the sign-up outcome (${action.outcome})`;
+    case 'get_sms_number':
+      return `get a temporary ${action.country} phone number (needs the owner's approval)`;
+    case 'wait_for_sms':
+      return 'wait for a verification SMS';
+    case 'ask_owner_for_code':
+      return `ask the owner for the code ${action.site} sent`;
     default: {
       const exhaustive: never = action;
       return exhaustive;
