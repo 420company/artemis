@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "cco",
+  "title": { "zh": "扩展技能包", "en": "Extended skill pack" },
+  "description": {
+    "zh": "第三方服务和专业领域的操作手册，按人群分组。默认不加载：启用后才进入技能目录和搜索；在消息里用 $技能id 可以随时单独调用其中一个。",
+    "en": "Playbooks for third-party services and specialist fields, grouped by audience. Not loaded by default: enabled groups join the skill index and search; $skill-id in a message uses one of them at any time."
+  },
+  "defaultEnabled": false,
+  "audiences": [
+    { "id": "creators", "title": { "zh": "创作者", "en": "Creators" } },
+    { "id": "marketers", "title": { "zh": "营销增长", "en": "Marketing & growth" } },
+    { "id": "traders", "title": { "zh": "交易与研究", "en": "Trading & research" } },
+    { "id": "analysts", "title": { "zh": "数据分析", "en": "Data & analytics" } },
+    { "id": "office", "title": { "zh": "办公协作", "en": "Office & teamwork" } },
+    { "id": "sellers", "title": { "zh": "商家与支付", "en": "Sellers & payments" } },
+    { "id": "security", "title": { "zh": "安全运维", "en": "Security & operations" } },
+    { "id": "developers", "title": { "zh": "开发者", "en": "Developers" } }
+  ]
+}
