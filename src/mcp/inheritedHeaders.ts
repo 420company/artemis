@@ -14,6 +14,15 @@
  *
  *   { "<server id>": { "<header name>": "<value>", ... }, ... }
  *
+ * or, binding each server's headers to the URL the host expects for it:
+ *
+ *   { "v": 2, "servers": { "<server id>": { "url": "<url>", "headers": { ... } } } }
+ *
+ * Server ids match exactly (an entry the agent added as `Artemis-Online`
+ * does not get `artemis_online`'s headers), and with v2 the headers go only
+ * to an entry whose URL is the one the host named: an entry pointed
+ * somewhere else, or a look-alike, never carries the run's token.
+ *
  * The engine reads it once at startup, before any tool can run, keeps it in
  * memory only, closes the descriptor (so no child process inherits it) and
  * drops the variable from its environment (so no child tries to read it).
@@ -30,15 +39,21 @@ const MAX_BYTES = 64 * 1024;
 const WAIT_LIMIT_MS = 5_000;
 
 let loaded = false;
-const headersByServer = new Map<string, Record<string, string>>();
+type ServerHeaders = { url?: string; headers: Record<string, string> };
+const headersByServer = new Map<string, ServerHeaders>();
 
-/** Same normalization as the per-server ARTEMIS_MCP_<ID>_* variables. */
-function normalizeServerId(id: string): string {
-  return id
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+/** URLs compare without a trailing slash. */
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
+function cleanHeaders(headers: unknown): Record<string, string> | undefined {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return undefined;
+  const clean: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+    if (typeof value === 'string' && name.trim()) clean[name.trim().toLowerCase()] = value.trim();
+  }
+  return clean;
 }
 
 function sleepSync(ms: number): void {
@@ -72,21 +87,32 @@ function readToEnd(fd: number): Buffer {
   return Buffer.concat(chunks);
 }
 
-function parse(text: string): Map<string, Record<string, string>> {
-  const result = new Map<string, Record<string, string>>();
+function parse(text: string): Map<string, ServerHeaders> {
+  const result = new Map<string, ServerHeaders>();
   if (!text.trim()) return result;
   const parsed = JSON.parse(text) as unknown;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('per-run MCP headers must be a JSON object');
   }
-  for (const [serverId, headers] of Object.entries(parsed as Record<string, unknown>)) {
-    const id = normalizeServerId(serverId);
-    if (!id || !headers || typeof headers !== 'object' || Array.isArray(headers)) continue;
-    const clean: Record<string, string> = {};
-    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
-      if (typeof value === 'string' && name.trim()) clean[name.trim().toLowerCase()] = value.trim();
+  const object = parsed as Record<string, unknown>;
+  if (object.v === 2) {
+    const servers = object.servers;
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) throw new Error('per-run MCP headers (v2) need a servers object');
+    for (const [serverId, entry] of Object.entries(servers as Record<string, unknown>)) {
+      const id = serverId.trim();
+      const { url, headers } = (entry && typeof entry === 'object' ? entry : {}) as { url?: unknown; headers?: unknown };
+      const clean = cleanHeaders(headers);
+      // v2 always names the URL: without one, the headers go nowhere.
+      if (!id || !clean || typeof url !== 'string' || !url.trim()) continue;
+      result.set(id, { url: normalizeUrl(url), headers: clean });
     }
-    result.set(id, { ...(result.get(id) ?? {}), ...clean });
+    return result;
+  }
+  for (const [serverId, headers] of Object.entries(object)) {
+    const id = serverId.trim();
+    const clean = cleanHeaders(headers);
+    if (!id || !clean) continue;
+    result.set(id, { headers: { ...(result.get(id)?.headers ?? {}), ...clean } });
   }
   return result;
 }
@@ -127,9 +153,16 @@ export function loadInheritedMcpHeaders(env: NodeJS.ProcessEnv = process.env): s
   }
 }
 
-/** The per-run headers for this MCP server (a copy; empty when none were given). */
-export function inheritedMcpHeaders(serverId: string): Record<string, string> {
-  return { ...(headersByServer.get(normalizeServerId(serverId)) ?? {}) };
+/**
+ * The per-run headers for this MCP server (a copy; empty when none were
+ * given): the server id must match exactly, and when the host bound them to
+ * a URL, `url` (the entry's own) must be that URL.
+ */
+export function inheritedMcpHeaders(serverId: string, url: string | undefined): Record<string, string> {
+  const entry = headersByServer.get(serverId.trim());
+  if (!entry) return {};
+  if (entry.url !== undefined && (url === undefined || normalizeUrl(url) !== entry.url)) return {};
+  return { ...entry.headers };
 }
 
 /** For tests: forget what was loaded, so the next load reads again. */

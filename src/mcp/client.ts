@@ -267,7 +267,7 @@ export function resolveStaticServerHeaders(server: McpServerConfig): Record<stri
     }
   }
   // Per-run headers the host handed over on a descriptor (never the environment).
-  Object.assign(headers, inheritedMcpHeaders(server.id));
+  Object.assign(headers, inheritedMcpHeaders(server.id, server.url));
 
   return headers;
 }

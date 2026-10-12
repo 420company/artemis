@@ -32,8 +32,9 @@ if (url) {
 process.stdout.write(
   JSON.stringify({
     problem: problem ?? null,
-    headers: inheritedMcpHeaders('artemis-online'),
-    other: inheritedMcpHeaders('another'),
+    headers: inheritedMcpHeaders('artemis_online', url),
+    lookalike: inheritedMcpHeaders('artemis-online', url),
+    other: inheritedMcpHeaders('another', url),
     envLeft: process.env.ARTEMIS_MCP_HEADERS_FD ?? null,
     fd3Open,
     socket: `socket:[${before}]`,

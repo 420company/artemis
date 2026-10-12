@@ -825,9 +825,10 @@ test('per-run MCP headers: read once from the inherited socket, then gone for th
   mcp.close();
   assert.equal(code, 0, err);
   assert.ok(runHeaders.length > 0 && runHeaders.every((value) => value === 'run-token-for-test'), `run headers sent: ${JSON.stringify(runHeaders)}`);
-  const seen = JSON.parse(out) as { problem: string | null; headers: Record<string, string>; other: Record<string, string>; envLeft: string | null; fd3Open: boolean; socket: string; childFds: string };
+  const seen = JSON.parse(out) as { problem: string | null; headers: Record<string, string>; lookalike: Record<string, string>; other: Record<string, string>; envLeft: string | null; fd3Open: boolean; socket: string; childFds: string };
   assert.equal(seen.problem, null);
   assert.deepEqual(seen.headers, { 'x-run-context': 'run-token-for-test' });
+  assert.deepEqual(seen.lookalike, {}, 'server ids match exactly');
   assert.deepEqual(seen.other, {});
   assert.equal(seen.envLeft, null, 'the variable is dropped from the environment');
   assert.equal(seen.fd3Open, false, 'the descriptor is closed after reading');
@@ -863,9 +864,42 @@ test('per-run MCP headers: a bad descriptor variable is refused and removed, std
     }
     resetInheritedMcpHeadersForTest();
     assert.equal(loadInheritedMcpHeaders({}), undefined);
-    assert.deepEqual(inheritedMcpHeaders('artemis_online'), {});
+    assert.deepEqual(inheritedMcpHeaders('artemis_online', undefined), {});
   } finally {
     resetInheritedMcpHeadersForTest();
+  }
+});
+
+test('per-run MCP headers (v2): exact ids, and only to the URL the host named', async () => {
+  const { loadInheritedMcpHeaders, inheritedMcpHeaders, resetInheritedMcpHeadersForTest } = await import('../src/mcp/inheritedHeaders.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-headers-'));
+  try {
+    resetInheritedMcpHeadersForTest();
+    const file = path.join(dir, 'payload.json');
+    fs.writeFileSync(file, JSON.stringify({
+      v: 2,
+      servers: {
+        artemis_online: { url: 'http://127.0.0.1:8787/mcp', headers: { 'X-Run-Context': 'tok' } },
+        conn_gmail: { url: 'http://127.0.0.1:8789/mcp/gmail/', headers: { 'x-run-context': 'tok' } },
+        no_url: { headers: { 'x-run-context': 'tok' } },
+      },
+    }));
+    assert.equal(loadInheritedMcpHeaders({ ARTEMIS_MCP_HEADERS_FD: String(fs.openSync(file, 'r')) }), undefined);
+    assert.deepEqual(inheritedMcpHeaders('artemis_online', 'http://127.0.0.1:8787/mcp'), { 'x-run-context': 'tok' });
+    assert.deepEqual(inheritedMcpHeaders('artemis_online', 'http://127.0.0.1:8787/mcp/'), { 'x-run-context': 'tok' }, 'a trailing slash is the same URL');
+    // An entry the agent pointed elsewhere, or added under a look-alike id, gets nothing.
+    assert.deepEqual(inheritedMcpHeaders('artemis_online', 'https://attacker.example/mcp'), {});
+    assert.deepEqual(inheritedMcpHeaders('artemis_online', undefined), {});
+    assert.deepEqual(inheritedMcpHeaders('artemis-online', 'http://127.0.0.1:8787/mcp'), {});
+    assert.deepEqual(inheritedMcpHeaders('ARTEMIS_ONLINE', 'http://127.0.0.1:8787/mcp'), {});
+    assert.deepEqual(inheritedMcpHeaders('conn_gmail', 'http://127.0.0.1:8789/mcp/gmail'), { 'x-run-context': 'tok' });
+    assert.deepEqual(inheritedMcpHeaders('conn-gmail', 'http://127.0.0.1:8789/mcp/gmail'), {});
+    assert.deepEqual(inheritedMcpHeaders('conn_gmail', 'http://127.0.0.1:8789/mcp/slack'), {});
+    // v2 without a URL: the headers go nowhere.
+    assert.deepEqual(inheritedMcpHeaders('no_url', 'http://127.0.0.1:1/mcp'), {});
+  } finally {
+    resetInheritedMcpHeadersForTest();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

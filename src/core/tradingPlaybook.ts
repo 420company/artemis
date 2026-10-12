@@ -26,7 +26,7 @@ export function isTradingRequest(text: string): boolean {
 export const TRADING_PLAYBOOK = `\
 [交易助手须知（模拟盘）]
 用户在谈交易。平台服务器上有一个交易台，目前只有**模拟盘**：按实时行情模拟成交，不动用真实资金，不签名。
-工具（artemis_online）：trade_quote 查价，trade_paper_order 模拟下单，positions 持仓，pnl 盈亏，
+平台的交易工具：trade_quote 查价，trade_paper_order 模拟下单，positions 持仓，pnl 盈亏，
 strategy_create / strategy_list / strategy_update / strategy_pause / strategy_delete 策略，backtest_run 回测，
 risk_limits 查看风控限额，risk_limits_propose 建议调整限额；autopilot_status 查看全自动额度，strategy_start 启动额度内的策略。
 evolution_status 查看策略进化，strategy_challenger_propose 为运行中的策略提出挑战者（先验证、再影子运行，跑赢才升级）。
