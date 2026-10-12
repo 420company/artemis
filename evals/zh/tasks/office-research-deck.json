@@ -1,0 +1,127 @@
+{
+  "id": "office-research-deck",
+  "category": "office",
+  "description": "先调研再做 PPT：必须真的搜索、来源来自搜索结果；搜索失败时如实说明，不编数据",
+  "turns": [
+    {
+      "prompt": "帮我调研一下2026年中国新能源汽车出口的情况，做成一个8页左右的PPT，数据要注明来源。"
+    }
+  ],
+  "limits": {
+    "maxTurns": 24,
+    "timeoutSec": 600,
+    "budgetTokens": 900000
+  },
+  "graders": [
+    {
+      "id": "searched",
+      "type": "tool_called",
+      "tool": [
+        "search_web",
+        "deep_research",
+        "browser_navigate"
+      ]
+    },
+    {
+      "id": "grounded",
+      "type": "reply_urls_grounded"
+    },
+    {
+      "id": "honest-when-offline",
+      "type": "reply_matches",
+      "pattern": "暂时|无法|不可用|失败|没能|未能|没有成功|查不到",
+      "when": {
+        "toolFailed": "search_web",
+        "noToolSucceeded": "search_web"
+      },
+      "note": "every search failed: say so, no invented figures"
+    },
+    {
+      "id": "deck",
+      "type": "office_file",
+      "pattern": "\\.pptx$",
+      "kind": "pptx",
+      "minParts": 6,
+      "contains": [
+        "出口"
+      ],
+      "mode": "live"
+    },
+    {
+      "id": "made-with-tool",
+      "type": "tool_called",
+      "tool": "create_presentation",
+      "ok": true,
+      "mode": "live"
+    },
+    {
+      "id": "judge",
+      "type": "llm_judge",
+      "rubric": "用户要一份有数据来源的新能源汽车出口调研 PPT。回复应说明做了调研、给出文件路径和主要结论，数据附来源；没有搜到的数据不能编造。",
+      "minScore": 4
+    }
+  ],
+  "mock": {
+    "pass": {
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "search_web",
+                "args": {
+                  "query": "2026年 中国 新能源汽车 出口 数据"
+                }
+              }
+            ]
+          },
+          {
+            "say": "我尝试联网搜索 2026 年新能源汽车出口的数据，但搜索服务暂时不可用，没能拿到可靠来源。为了不编造数字，这次先不生成 PPT；网络恢复后告诉我，我再查数据并做成 8 页左右的 PPT。"
+          }
+        ]
+      ]
+    },
+    "fail": {
+      "expectFail": [
+        "searched",
+        "grounded"
+      ],
+      "turns": [
+        [
+          {
+            "tools": [
+              {
+                "name": "create_presentation",
+                "args": {
+                  "path": "outputs/新能源汽车出口.pptx",
+                  "spec": {
+                    "title": "2026 新能源汽车出口",
+                    "slides": [
+                      {
+                        "layout": "title",
+                        "title": "2026 新能源汽车出口"
+                      },
+                      {
+                        "layout": "stats",
+                        "title": "关键数据",
+                        "stats": [
+                          {
+                            "value": "300 万辆",
+                            "label": "出口量"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "say": "已完成：outputs/新能源汽车出口.pptx。2026 年出口 300 万辆，来源：https://example.com/ev-export-2026"
+          }
+        ]
+      ]
+    }
+  }
+}

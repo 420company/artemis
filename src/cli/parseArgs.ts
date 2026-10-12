@@ -55,7 +55,7 @@ export interface ParsedArgs {
   sessionId?: string
   /** execute/analyze: images the user attached to the prompt (--image, repeatable). */
   imagePaths?: string[]
-  /** execute/analyze: what the user picked in the app (--intent video|long_video|image|research|reminder). */
+  /** execute/analyze: what the user picked in the app (--intent video|long_video|image|research|reminder|slides|document|spreadsheet). */
   intent?: string
   /** execute: take the session's last exchange out and run again (--retry; a prompt replaces the last message). */
   retry?: boolean
@@ -119,7 +119,7 @@ ${t('命令', 'Commands')}:
   nidhogg <prompt>  ${t('执行深度批判/审查工作流', 'Run the critique/review workflow')}
   tool              ${t('列出或执行注册工具', 'List or execute registered tools')}
   analyze <query>   ${t('无界面只读分析（--session <id> 继续已有会话；--image <路径> 附图，可多次）', 'Headless read-only analysis (--session <id> continues a session; --image <path> attaches an image, repeatable)')}
-  execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder states what the user picked)')}
+  execute <query>   ${t('无界面执行完整 agent（--session <id> 继续已有会话；--image <路径> 附图，可多次；--intent video|long_video|image|research|reminder|slides|document|spreadsheet 传入用户选择的意图）', 'Headless full agent run (--session <id> continues a session; --image <path> attaches an image, repeatable; --intent video|long_video|image|research|reminder|slides|document|spreadsheet states what the user picked)')}
                     ${t('--retry 配合 --session：撤下上一轮再执行（不带 query 即原样重发，带 query 即编辑后重发）；--retry-of <消息 id> 只在它仍是最后一轮时执行', '--retry with --session: takes the last exchange out and runs again (no query: the same message; a query: the edited message); --retry-of <message id> only if that is still the last exchange')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
@@ -229,7 +229,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
     if ((command === 'execute' || command === 'analyze') && (cur === '--intent' || cur.startsWith('--intent='))) {
       const v = cur === '--intent' ? args.shift() : cur.slice('--intent='.length)
-      if (!v?.trim()) throw new Error(`${command} --intent requires a name (video, long_video, image, research or reminder).`)
+      if (!v?.trim()) throw new Error(`${command} --intent requires a name (video, long_video, image, research, reminder, slides, document or spreadsheet).`)
       intent = v.trim()
       continue
     }
