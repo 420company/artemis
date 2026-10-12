@@ -224,11 +224,13 @@ function describeAction(action: AgentAction): string {
     case 'memory':
       return `memory: ${action.action}${action.name ? ` ${action.name}` : ''}`;
     case 'load_skill':
-      return `load learned skill ${action.id}`;
+      return action.id ? `load skill ${action.id}${action.file ? ` (${action.file})` : ''}` : `search skills for ${action.query ?? ''}`;
     case 'task_output':
       return `read background task output ${action.taskId}`;
     case 'view_image':
       return `view image ${action.path}`;
+    case 'read_document':
+      return `read document ${action.path}${action.pages ? ` pages ${action.pages}` : ''}`;
     case 'kill_task':
       return `kill background task ${action.taskId}`;
     case 'post_update':

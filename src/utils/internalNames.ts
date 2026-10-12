@@ -146,6 +146,8 @@ const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: 
   bridge_send_file: { zh: '发送文件', en: 'Sending the file' },
   run_command: { zh: '运行命令', en: 'Running a command' },
   read_file: { zh: '读取文件', en: 'Reading a file' },
+  read_document: { zh: '读取文档', en: 'Reading a document' },
+  load_skill: { zh: '查看技能', en: 'Looking up a skill' },
   write_file: { zh: '写入文件', en: 'Writing a file' },
   replace_in_file: { zh: '修改文件', en: 'Editing a file' },
   list_files: { zh: '查看目录', en: 'Listing files' },

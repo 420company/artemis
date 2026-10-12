@@ -374,6 +374,22 @@ export type AgentAction =
       path: string;
     }
   | {
+      /**
+       * Read a PDF / Word / PowerPoint / Excel file (older formats through
+       * LibreOffice). Scanned PDF pages are shown as images.
+       */
+      type: 'read_document';
+      path: string;
+      /** PDF pages or slides: "3", "2-5", "1,4-6". */
+      pages?: string;
+      /** A spreadsheet's sheet: its name or 1-based number. */
+      sheet?: string;
+      /** Spreadsheet rows: "1-500". */
+      rows?: string;
+      /** Show PDF pages as images (charts, scans, layout). */
+      as_images?: boolean;
+    }
+  | {
       type: 'kill_task';
       taskId: string;
     }
@@ -782,7 +798,16 @@ export type AgentAction =
   // ── Long-term memory (Mnemosyne v2) ─────────────────────────────────────
   | { type: 'memory'; action: 'save' | 'update' | 'delete' | 'list'; scope?: 'global' | 'project'; name?: string; description?: string; category?: 'preference' | 'feedback' | 'project' | 'reference' | 'skill' | 'architecture'; content?: string }
   // ── Learned skills (procedural memory) ──────────────────────────────────
-  | { type: 'load_skill'; id: string }
+  | {
+      /**
+       * A learned skill or a skill library entry by id (`file`: one of its
+       * reference files), or a search of both (`query`).
+       */
+      type: 'load_skill';
+      id?: string;
+      query?: string;
+      file?: string;
+    }
   | { type: 'request_user_confirmation'; question: string; screenshotPath?: string; timeoutMs?: number }
   /** A short progress message shown to the user at once, while the run goes on (core/agentUpdates.ts). */
   | { type: 'post_update'; text: string }
@@ -821,6 +846,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'run_command',
   'task_output',
   'view_image',
+  'read_document',
   'kill_task',
   'delegate_task',
   'spawn_background_workflow',

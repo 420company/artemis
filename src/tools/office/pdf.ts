@@ -59,8 +59,23 @@ const CONVERT_TIMEOUT_MS = 180_000;
  * Returns the PDF path, or an error message in plain words.
  */
 export async function exportPdf(file: string, target = file.replace(/\.[^.\\/]+$/, '') + '.pdf'): Promise<{ pdf: string } | { error: string }> {
+  const result = await convertWithSoffice(file, 'pdf', target);
+  return 'error' in result ? result : { pdf: result.file };
+}
+
+/**
+ * Converts `file` with LibreOffice to `format` (its filter name, e.g. pdf
+ * or xlsx) at `target`. Returns the new file, or an error in plain words.
+ */
+export async function convertWithSoffice(
+  file: string,
+  format: string,
+  target: string,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<{ file: string } | { error: string }> {
+  const what = format === 'pdf' ? 'PDF export' : `Conversion to .${format}`;
   const bin = await findSoffice();
-  if (!bin) return { error: 'PDF export needs LibreOffice, which is not installed on this machine' };
+  if (!bin) return { error: `${what} needs LibreOffice, which is not installed on this machine` };
   const work = await mkdtemp(path.join(os.tmpdir(), 'artemis-office-pdf-'));
   try {
     const profile = path.join(work, 'profile');
@@ -74,20 +89,24 @@ export async function exportPdf(file: string, target = file.replace(/\.[^.\\/]+$
       '--norestore',
       '--nolockcheck',
       '--convert-to',
-      'pdf',
+      format,
       '--outdir',
       out,
       input,
-    ], { timeout: CONVERT_TIMEOUT_MS, env: { ...process.env, HOME: work } });
-    const produced = (await readdir(out).catch(() => [] as string[])).find((name) => name.endsWith('.pdf'));
-    if (!produced) return { error: 'LibreOffice did not produce a PDF' };
+    ], {
+      timeout: options.timeoutMs ?? CONVERT_TIMEOUT_MS,
+      env: { ...process.env, HOME: work },
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    const produced = (await readdir(out).catch(() => [] as string[])).find((name) => name.endsWith(`.${format}`));
+    if (!produced) return { error: `LibreOffice did not produce a .${format} file` };
     await rename(path.join(out, produced), target).catch(async () => {
       await copyFile(path.join(out, produced), target);
     });
-    return { pdf: target };
+    return { file: target };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { error: /timed out|ETIMEDOUT|SIGTERM/i.test(message) ? 'PDF export took too long and was stopped' : `PDF export failed: ${message.split('\n')[0]}` };
+    return { error: /timed out|ETIMEDOUT|SIGTERM|abort/i.test(message) ? `${what} took too long and was stopped` : `${what} failed: ${message.split('\n')[0]}` };
   } finally {
     await rm(work, { recursive: true, force: true });
   }

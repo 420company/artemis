@@ -65,6 +65,7 @@ interface ToolMeta {
 const TOOL_META: Record<string, ToolMeta> = {
   run_command:     { labelZh: '执行', labelEn: 'Bash',      rgb: [255, 170,  80], icon: '▲' },
   read_file:       { labelZh: '读取', labelEn: 'Reading',   rgb: [100, 210, 240], icon: '◇' },
+  read_document:   { labelZh: '读文档', labelEn: 'Document', rgb: [100, 210, 240], icon: '◇' },
   write_file:      { labelZh: '写入', labelEn: 'Writing',   rgb: [130, 220, 140], icon: '◆' },
   replace_in_file: { labelZh: '编辑', labelEn: 'Editing',   rgb: [130, 220, 140], icon: '◆' },
   insert_in_file:  { labelZh: '编辑', labelEn: 'Editing',   rgb: [130, 220, 140], icon: '◆' },
@@ -95,6 +96,7 @@ export function formatToolTarget(name: string, args: Record<string, unknown>): s
     case 'run_command':
       return asStr(args.command).slice(0, 80)
     case 'read_file':
+    case 'read_document':
     case 'write_file':
     case 'list_files':
       return asStr(args.path).slice(0, 80)

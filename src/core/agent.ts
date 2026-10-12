@@ -888,10 +888,18 @@ function buildActionFromLooseArgs(
     }
     case 'load_skill':
     case 'load_learned_skill':
-    case 'read_skill': {
+    case 'read_skill':
+    case 'search_skills': {
       const id = getLooseStringArg(args, 'id', 'name', 'skill', 'skillId', 'skill_id');
-      if (!id?.trim()) return null;
-      return { type: 'load_skill', id };
+      const query = getLooseStringArg(args, 'query', 'search', 'q', 'keywords');
+      const file = getLooseStringArg(args, 'file', 'reference', 'path');
+      if (!id?.trim() && !query?.trim()) return null;
+      return {
+        type: 'load_skill',
+        ...(id?.trim() ? { id: id.trim() } : {}),
+        ...(query?.trim() ? { query: query.trim() } : {}),
+        ...(file?.trim() && id?.trim() ? { file: file.trim() } : {}),
+      };
     }
     case 'view_image':
     case 'look_at_image':
@@ -899,6 +907,24 @@ function buildActionFromLooseArgs(
       const imagePath = getLooseStringArg(args, 'path', 'file', 'image', 'imagePath', 'image_path');
       if (!imagePath?.trim()) return null;
       return { type: 'view_image', path: imagePath };
+    }
+    case 'read_document':
+    case 'read_pdf':
+    case 'read_media': {
+      const docPath = getLooseStringArg(args, 'path', 'file', 'document', 'filename', 'file_path');
+      if (!docPath?.trim()) return null;
+      const pages = getLooseStringArg(args, 'pages', 'page', 'slides', 'range');
+      const sheet = getLooseStringArg(args, 'sheet', 'worksheet', 'tab');
+      const rows = getLooseStringArg(args, 'rows', 'row_range');
+      const asImages = getLooseBooleanArg(args, 'as_images', 'asImages', 'images');
+      return {
+        type: 'read_document',
+        path: docPath,
+        ...(pages?.trim() ? { pages: pages.trim() } : {}),
+        ...(sheet?.trim() ? { sheet: sheet.trim() } : {}),
+        ...(rows?.trim() ? { rows: rows.trim() } : {}),
+        ...(asImages !== undefined ? { as_images: asImages } : {}),
+      };
     }
     default:
       // Any other tool the model may call (search_web, browser_*, task_output,
@@ -2146,11 +2172,13 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'memory':
       return `memory ${action.action}${action.name ? ` ${action.name}` : ''}${action.scope ? ` scope=${action.scope}` : ''}`;
     case 'load_skill':
-      return `load_skill ${truncate(action.id, 80)}`;
+      return `load_skill ${action.id ? truncate(action.id, 80) : `query=${truncate(action.query ?? '', 80)}`}${action.file ? ` file=${truncate(action.file, 80)}` : ''}`;
     case 'task_output':
       return `task_output ${action.taskId}${action.tail ? ` tail=${action.tail}` : ''}`;
     case 'view_image':
       return `view_image ${truncate(action.path, 120)}`;
+    case 'read_document':
+      return `read_document ${truncate(action.path, 120)}${action.pages ? ` pages=${truncate(String(action.pages), 30)}` : ''}${action.sheet ? ` sheet=${truncate(String(action.sheet), 40)}` : ''}${action.rows ? ` rows=${truncate(String(action.rows), 30)}` : ''}${action.as_images ? ' as_images' : ''}`;
     case 'kill_task':
       return `kill_task ${action.taskId}`;
     case 'post_update':

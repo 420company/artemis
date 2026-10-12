@@ -116,6 +116,7 @@ export function statusForAction(action: Pick<AgentAction, 'type'> & Record<strin
       return { phase: 'working', activity: 'searching' };
     case 'list_files':
     case 'read_file':
+    case 'read_document':
     case 'search_files':
       return { phase: 'working', activity: 'reading_files' };
     case 'write_file':
