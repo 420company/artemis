@@ -175,6 +175,34 @@ async function main(): Promise<void> {
   assert.equal(host2.pid, host.pid, 'the same host serves the next run');
   console.log('  ✓ the browser outlives the run; the next connection continues in the same tab');
 
+  // Review regressions: the viewer cannot run script; the page has the engine's viewport;
+  // a phone viewport set through the host is undone again.
+  const before = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title' });
+  await viewer.send('Page.reload', { scriptToEvaluateOnLoad: "document.title='LEAK:'+document.cookie" }, sid);
+  await new Promise((r) => setTimeout(r, 1500));
+  const afterReload = await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'document.title' });
+  assert.equal(afterReload.output, before.output, 'a reload from the viewer runs no script');
+  const size = async () => (await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: 'innerWidth + "x" + innerHeight + " " + screen.width' })).output;
+  assert.match(await size(), /"1280x800 1280"/);
+  const phone = await viewer.send('Artemis.setViewport', { targetId: tab.targetId, mode: 'mobile', width: 390, height: 844 });
+  assert.ok(!phone.error, JSON.stringify(phone));
+  assert.match(await size(), / 390"/);
+  await viewer.send('Artemis.setViewport', { targetId: tab.targetId, mode: 'desktop' });
+  assert.match(await size(), /"1280x800 1280"/);
+  console.log('  ✓ the viewer cannot inject script on reload; viewport 1280x800; phone viewport on request, then back');
+
+  // A renderer crash: the host closes the page; the next step works and says so.
+  const crashing = await session.getActivePage();
+  await crashing.goto('chrome://crash').catch(() => undefined);
+  await new Promise((r) => setTimeout(r, 1500));
+  const afterCrash = await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
+  assert.equal(afterCrash.ok, true, afterCrash.output);
+  assert.match(afterCrash.output, /crashed and was closed/);
+  await session.releaseBrowser();
+  const nextRun = await tools.executeBrowserNavigate({ type: 'browser_navigate', url });
+  assert.equal(nextRun.ok, true, 'the next run connects after a crash');
+  console.log('  ✓ a renderer crash is recovered from, in the run and for the next one');
+
   viewer.close();
   await session.releaseBrowser();
   process.kill(host.pid, 'SIGTERM');

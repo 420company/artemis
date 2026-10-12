@@ -22,12 +22,18 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { CdpRouter, VIEWER_METHODS, viewerRefusal } from '../src/tools/browser/cdpRouter.js';
+import { CdpRouter, VIEWER_METHODS, viewerParams, viewerRefusal } from '../src/tools/browser/cdpRouter.js';
 import {
   LIVE_DIR_ENV,
   LIVE_FILES,
+  claimTab,
+  probeHost,
+  releaseTab,
+  resetRunState,
+  tabOwner,
   browserGate,
   emitHandoff,
   handbackNote,
@@ -121,89 +127,158 @@ async function main(): Promise<void> {
   });
 
   console.log('cdpRouter');
+  /** A fake browser behind the router: answers what the tests script, records the rest. */
+  const fakeBrowser = () => {
+    const sent: Record<string, any>[] = [];
+    const answers: Record<string, (m: Record<string, any>) => Record<string, unknown> | undefined> = {};
+    const router = new CdpRouter((m) => {
+      const msg = m as Record<string, any>;
+      sent.push(msg);
+      const answer = answers[msg.method];
+      const result = answer?.(msg);
+      if (result) queueMicrotask(() => router.fromBrowser({ id: msg.id, result, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}) }));
+    });
+    return { router, sent, answers };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+  const connect = async (router: CdpRouter, role: 'agent' | 'viewer', root: string, sent: Record<string, any>[], options: { internal?: boolean } = {}) => {
+    const out: any[] = [];
+    const client = router.addClient(role, (t) => out.push(JSON.parse(t)), options);
+    const attach = sent.findLast((m) => m.method === 'Target.attachToBrowserTarget')!;
+    router.fromBrowser({ id: attach.id, result: { sessionId: root } });
+    await settle();
+    return { client, out };
+  };
+
   await check('per-client ids and browser sessions; responses and events routed back', async () => {
-    const toBrowser: Record<string, any>[] = [];
-    const router = new CdpRouter((m) => toBrowser.push(m as Record<string, any>));
-    const agentOut: any[] = [];
-    const viewerOut: any[] = [];
-    const agent = router.addClient('agent', (t) => agentOut.push(JSON.parse(t)));
-    const viewer = router.addClient('viewer', (t) => viewerOut.push(JSON.parse(t)));
+    const { router, sent } = fakeBrowser();
+    const agent = await connect(router, 'agent', 'ROOT-A', sent);
+    const viewer = await connect(router, 'viewer', 'ROOT-V', sent);
     assert.equal(router.clientCount, 2);
-    // Both ask for a browser session first.
-    const [attachA, attachV] = toBrowser.splice(0);
-    assert.equal(attachA?.method, 'Target.attachToBrowserTarget');
-    agent.receive(JSON.stringify({ id: 1, method: 'Browser.getVersion' })); // queued until the session exists
-    router.fromBrowser({ id: attachA!.id, result: { sessionId: 'ROOT-A' } });
-    router.fromBrowser({ id: attachV!.id, result: { sessionId: 'ROOT-V' } });
-    await new Promise((r) => setImmediate(r));
-    const sent = toBrowser.splice(0);
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0]!.sessionId, 'ROOT-A');
-    assert.equal(sent[0]!.method, 'Browser.getVersion');
-    viewer.receive(JSON.stringify({ id: 1, method: 'Target.getTargets' }));
-    const vSent = toBrowser.splice(0)[0]!;
-    assert.notEqual(vSent.id, sent[0]!.id, 'host ids never collide');
-    router.fromBrowser({ id: sent[0]!.id, result: { product: 'Chrome' }, sessionId: 'ROOT-A' });
-    router.fromBrowser({ id: vSent.id, result: { targetInfos: [] }, sessionId: 'ROOT-V' });
-    assert.deepEqual(agentOut, [{ id: 1, result: { product: 'Chrome' } }]);
-    assert.deepEqual(viewerOut, [{ id: 1, result: { targetInfos: [] } }]);
+    sent.length = 0;
+    agent.client.receive(JSON.stringify({ id: 1, method: 'Browser.getVersion' }));
+    viewer.client.receive(JSON.stringify({ id: 1, method: 'Target.getTargets', params: { filter: [{ type: 'browser' }] } }));
+    await settle();
+    const [a, v] = sent.splice(0);
+    assert.equal(a!.sessionId, 'ROOT-A');
+    assert.notEqual(a!.id, v!.id, 'host ids never collide');
+    assert.deepEqual(v!.params, {}, 'unlisted parameters are dropped');
+    router.fromBrowser({ id: a!.id, result: { product: 'Chrome' }, sessionId: 'ROOT-A' });
+    router.fromBrowser({ id: v!.id, result: { targetInfos: [] }, sessionId: 'ROOT-V' });
+    assert.deepEqual(agent.out, [{ id: 1, result: { product: 'Chrome' } }]);
+    assert.deepEqual(viewer.out, [{ id: 1, result: { targetInfos: [] } }]);
 
     // Auto-attached child of the agent: its events go to the agent only.
     router.fromBrowser({ method: 'Target.attachedToTarget', params: { sessionId: 'CHILD-A', targetInfo: { type: 'page' } }, sessionId: 'ROOT-A' });
     router.fromBrowser({ method: 'Page.loadEventFired', params: {}, sessionId: 'CHILD-A' });
-    assert.equal(agentOut.at(-2).method, 'Target.attachedToTarget');
-    assert.equal(agentOut.at(-2).sessionId, undefined, 'root-session events carry no sessionId');
-    assert.equal(agentOut.at(-1).sessionId, 'CHILD-A');
-    assert.equal(viewerOut.length, 1);
+    assert.equal(agent.out.at(-2).method, 'Target.attachedToTarget');
+    assert.equal(agent.out.at(-2).sessionId, undefined, 'root-session events carry no sessionId');
+    assert.equal(agent.out.at(-1).sessionId, 'CHILD-A');
+    assert.equal(viewer.out.length, 1);
 
-    // The viewer cannot use the agent's sessions, nor non-whitelisted methods.
-    viewer.receive(JSON.stringify({ id: 2, method: 'Page.navigate', params: { url: 'https://a.example' }, sessionId: 'CHILD-A' }));
-    assert.match(viewerOut.at(-1).error.message, /Session with given id not found/);
-    viewer.receive(JSON.stringify({ id: 3, method: 'Runtime.evaluate', params: { expression: 'document.cookie' } }));
-    assert.match(viewerOut.at(-1).error.message, /not allowed/);
-    viewer.receive(JSON.stringify({ id: 4, method: 'Network.getAllCookies' }));
-    assert.match(viewerOut.at(-1).error.message, /not allowed/);
-    assert.equal(toBrowser.length, 0, 'refused messages never reach the browser');
-
-    // The viewer attaches to a page itself: that session is its own.
-    viewer.receive(JSON.stringify({ id: 5, method: 'Target.attachToTarget', params: { targetId: 'T1', flatten: true } }));
-    const attach = toBrowser.splice(0)[0]!;
-    router.fromBrowser({ id: attach.id, result: { sessionId: 'CHILD-V' }, sessionId: 'ROOT-V' });
-    viewer.receive(JSON.stringify({ id: 6, method: 'Page.startScreencast', params: { format: 'jpeg' }, sessionId: 'CHILD-V' }));
-    const start = toBrowser.splice(0)[0]!;
-    assert.equal(start.sessionId, 'CHILD-V');
-    router.fromBrowser({ id: start.id, result: {}, sessionId: 'CHILD-V' });
-    assert.deepEqual(viewerOut.at(-1), { id: 6, result: {}, sessionId: 'CHILD-V' });
-    router.fromBrowser({ method: 'Page.screencastFrame', params: { data: 'abc', sessionId: 1 }, sessionId: 'CHILD-V' });
-    assert.equal(viewerOut.at(-1).method, 'Page.screencastFrame');
-    assert.equal(agentOut.some((m) => m.method === 'Page.screencastFrame'), false);
-
-    // The agent cannot hijack the viewer's session either.
-    agent.receive(JSON.stringify({ id: 9, method: 'Input.insertText', params: { text: 'x' }, sessionId: 'CHILD-V' }));
-    assert.match(agentOut.at(-1).error.message, /Session with given id not found/);
+    // Neither may use the other's sessions.
+    viewer.client.receive(JSON.stringify({ id: 2, method: 'Page.navigate', params: { url: 'https://a.example' }, sessionId: 'CHILD-A' }));
+    await settle();
+    assert.match(viewer.out.at(-1).error.message, /Session with given id not found/);
+    viewer.client.receive(JSON.stringify({ id: 3, method: 'Target.detachFromTarget', params: { sessionId: 'CHILD-A' } }));
+    await settle();
+    assert.match(viewer.out.at(-1).error.message, /Session with given id not found/, 'cannot detach the agent from its page');
+    agent.client.receive(JSON.stringify({ id: 9, method: 'Input.insertText', params: { text: 'x' }, sessionId: 'ROOT-V' }));
+    await settle();
+    assert.match(agent.out.at(-1).error.message, /Session with given id not found/);
+    assert.equal(sent.length, 0, 'refused messages never reach the browser');
 
     // Disconnect: the viewer's sessions are detached and forgotten.
-    viewer.close();
+    viewer.client.close();
     assert.equal(router.clientCount, 1);
-    const detaches = toBrowser.splice(0);
-    assert.deepEqual(detaches.map((m) => [m.method, m.params.sessionId, m.sessionId]), [
-      ['Target.detachFromTarget', 'CHILD-V', 'ROOT-V'],
-      ['Target.detachFromTarget', 'ROOT-V', undefined],
-    ]);
-    router.fromBrowser({ method: 'Page.screencastFrame', params: {}, sessionId: 'CHILD-V' });
-    assert.equal(viewerOut.at(-1).method, 'Page.screencastFrame');
-    assert.equal(viewerOut.filter((m) => m.method === 'Page.screencastFrame').length, 1, 'nothing after close');
+    assert.deepEqual(sent.splice(0).map((m) => [m.method, m.params.sessionId, m.sessionId]), [['Target.detachFromTarget', 'ROOT-V', undefined]]);
   });
-  await check('viewer whitelist: only screencast, input, tab and navigation calls; http(s) only', () => {
-    for (const m of ['Runtime.evaluate', 'Network.getCookies', 'Storage.getCookies', 'Browser.close', 'Target.createTarget', 'Target.setAutoAttach', 'Page.setDownloadBehavior', 'Browser.setDownloadBehavior', 'DOM.getDocument', 'Fetch.enable']) {
-      assert.ok(!VIEWER_METHODS.has(m), m);
+
+  await check('viewer parameters are rebuilt from the whitelist: no script on reload, no editing commands, no filters', async () => {
+    assert.deepEqual(viewerParams('Page.reload', { ignoreCache: true, scriptToEvaluateOnLoad: 'steal()' }), { params: { ignoreCache: true } });
+    assert.deepEqual(viewerParams('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'a', commands: ['selectAll', 'copy'] }), { params: { type: 'rawKeyDown', key: 'a' } });
+    assert.deepEqual(viewerParams('Page.navigate', { url: 'https://a.example/x', referrer: 'https://evil.example', frameId: 'F' }), { params: { url: 'https://a.example/x' } });
+    assert.deepEqual(viewerParams('Target.setDiscoverTargets', { discover: true, filter: [{}] }), { params: { discover: true } });
+    assert.deepEqual(viewerParams('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280 }), { params: { format: 'jpeg', quality: 60, maxWidth: 1280 } });
+    for (const [method, params] of [
+      ['Runtime.evaluate', { expression: 'document.cookie' }],
+      ['Network.getAllCookies', {}],
+      ['Storage.getCookies', {}],
+      ['Browser.close', {}],
+      ['Target.createTarget', { url: 'https://a.example' }],
+      ['Target.setAutoAttach', { autoAttach: true }],
+      ['Browser.setDownloadBehavior', { behavior: 'allow' }],
+      ['Emulation.setDeviceMetricsOverride', { width: 1 }],
+      ['Page.navigate', { url: 'javascript:alert(1)' }],
+      ['Page.navigate', { url: 'file:///etc/passwd' }],
+      ['Page.navigate', { url: 'http:file:///etc/passwd' }],
+      ['Target.attachToTarget', { targetId: 'x' }],
+      ['Input.dispatchMouseEvent', { type: 'mouseDragged', x: 1, y: 1 }],
+      ['Input.dispatchMouseEvent', { type: 'mousePressed', x: Number.NaN, y: 1 }],
+      ['Input.dispatchKeyEvent', { type: 'keyDown', text: 'too long text' }],
+      ['Input.insertText', {}],
+      ['Artemis.setViewport', { targetId: 'T', mode: 'tablet' }],
+    ] as const) {
+      assert.ok('error' in viewerParams(method, params as Record<string, unknown>), `${method} ${JSON.stringify(params)}`);
     }
-    assert.equal(viewerRefusal('Page.navigate', { url: 'javascript:alert(1)' }), 'Only http(s) addresses can be opened');
-    assert.equal(viewerRefusal('Page.navigate', { url: 'file:///etc/passwd' }), 'Only http(s) addresses can be opened');
-    assert.equal(viewerRefusal('Page.navigate', { url: 'https://example.com' }), undefined);
-    assert.match(viewerRefusal('Target.attachToTarget', { targetId: 'x' }) ?? '', /flattened/);
+    assert.ok(VIEWER_METHODS.has('Input.insertText'));
     assert.equal(viewerRefusal('Input.insertText', { text: '你好' }), undefined);
+
+    // End to end through the router: what reaches the browser is the rebuilt call.
+    const { router, sent } = fakeBrowser();
+    const viewer = await connect(router, 'viewer', 'ROOT-V', sent);
+    sent.length = 0;
+    viewer.client.receive(JSON.stringify({ id: 1, method: 'Page.reload', params: { scriptToEvaluateOnLoad: 'steal()' } }));
+    viewer.client.receive(JSON.stringify({ id: 2, method: 'Input.dispatchKeyEvent', params: { type: 'keyDown', key: 'a', text: 'a', commands: ['copy'] } }));
+    await settle();
+    assert.deepEqual(sent.map((m) => [m.method, m.params]), [['Page.reload', {}], ['Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', text: 'a' }]]);
   });
+
+  await check('checks against the browser: only page targets, only http(s) history entries; order is kept', async () => {
+    const { router, sent, answers } = fakeBrowser();
+    answers['Target.getTargetInfo'] = (m) => ({ targetInfo: { targetId: m.params.targetId, type: m.params.targetId.startsWith('P') ? 'page' : 'service_worker' } });
+    answers['Page.getNavigationHistory'] = () => ({ currentIndex: 1, entries: [{ id: 1, url: 'data:text/html,secret' }, { id: 2, url: 'https://a.example/' }] });
+    answers['Target.attachToTarget'] = () => ({ sessionId: 'CHILD-V' });
+    const viewer = await connect(router, 'viewer', 'ROOT-V', sent);
+    viewer.client.receive(JSON.stringify({ id: 1, method: 'Target.attachToTarget', params: { targetId: 'SW1', flatten: true } }));
+    viewer.client.receive(JSON.stringify({ id: 2, method: 'Target.attachToTarget', params: { targetId: 'P1', flatten: true } }));
+    await settle();
+    assert.match(viewer.out.find((m) => m.id === 1).error.message, /Only page targets/);
+    assert.deepEqual(viewer.out.find((m) => m.id === 2), { id: 2, result: { sessionId: 'CHILD-V' } });
+    viewer.client.receive(JSON.stringify({ id: 3, method: 'Page.navigateToHistoryEntry', params: { entryId: 1 }, sessionId: 'CHILD-V' }));
+    viewer.client.receive(JSON.stringify({ id: 4, method: 'Input.insertText', params: { text: 'after' }, sessionId: 'CHILD-V' }));
+    viewer.client.receive(JSON.stringify({ id: 5, method: 'Page.navigateToHistoryEntry', params: { entryId: 2 }, sessionId: 'CHILD-V' }));
+    await settle();
+    assert.match(viewer.out.find((m) => m.id === 3).error.message, /http\(s\) history/);
+    const forwarded = sent.filter((m) => m.method === 'Input.insertText' || m.method === 'Page.navigateToHistoryEntry');
+    assert.deepEqual(forwarded.map((m) => [m.method, m.params]), [['Input.insertText', { text: 'after' }], ['Page.navigateToHistoryEntry', { entryId: 2 }]]);
+  });
+
+  await check('only attached, external clients keep the browser open; Artemis.* goes to the host', async () => {
+    const { router, sent } = fakeBrowser();
+    router.addClient('agent', () => undefined); // never gets its session
+    assert.equal(router.clientCount, 0, 'a connection that never attached does not count');
+    await connect(router, 'agent', 'ROOT-M', sent, { internal: true });
+    assert.equal(router.clientCount, 0, 'the host monitor does not count');
+    const viewer = await connect(router, 'viewer', 'ROOT-V', sent);
+    assert.equal(router.clientCount, 1);
+    const calls: unknown[] = [];
+    router.hostMethod = async (method, params, client) => {
+      calls.push([method, params, client.role]);
+      return { ok: true };
+    };
+    sent.length = 0;
+    viewer.client.receive(JSON.stringify({ id: 1, method: 'Artemis.setViewport', params: { targetId: 'P1', mode: 'mobile', width: 390, height: 844, extra: 1 } }));
+    // The target check asks the browser first.
+    await settle();
+    const info = sent.find((m) => m.method === 'Target.getTargetInfo')!;
+    router.fromBrowser({ id: info.id, result: { targetInfo: { type: 'page' } } });
+    await settle();
+    assert.deepEqual(calls, [['Artemis.setViewport', { targetId: 'P1', mode: 'mobile', width: 390, height: 844 }, 'viewer']]);
+    assert.deepEqual(viewer.out.at(-1), { id: 1, result: { ok: true } });
+    assert.ok(!sent.some((m) => String(m.method).startsWith('Artemis.')), 'never forwarded to Chromium');
+  });
+
   await check('a client that leaves before its session exists is cleaned up', () => {
     const toBrowser: Record<string, any>[] = [];
     const router = new CdpRouter((m) => toBrowser.push(m as Record<string, any>));
@@ -257,6 +332,55 @@ async function main(): Promise<void> {
     assert.match(note, /handed it back at 08:30 UTC/);
     assert.match(note, /My account — https:\/\/shop\.example\/account/);
     assert.match(note, /check the page/);
+  });
+  await check('handback notes are per run: each run hears about a handback once, a new run not about old ones', async () => {
+    const dir = tempLiveDir();
+    resetRunState();
+    writeControl(dir, { mode: 'agent', since: 5, handedBackAt: 5, url: 'https://a.example/' });
+    const first = await browserGate(dir, { waitMs: 0 });
+    assert.equal(first.state === 'free' && first.handback?.handedBackAt, 5);
+    // Another run starting later: that handback was reported already.
+    resetRunState();
+    assert.deepEqual(await browserGate(dir, { waitMs: 0 }), { state: 'free' });
+    // Two runs alive at the time of a new handback: each hears about it.
+    writeControl(dir, { mode: 'agent', since: 9, handedBackAt: 9 });
+    const runA = await browserGate(dir, { waitMs: 0 });
+    resetRunState(); // run B, a separate process, started before the handback was reported to A
+    fs.writeFileSync(path.join(dir, LIVE_FILES.agent), JSON.stringify({ seenHandbackAt: 5 }));
+    const runB = await browserGate(dir, { waitMs: 0 });
+    assert.equal(runA.state === 'free' && !!runA.handback, true);
+    assert.equal(runB.state === 'free' && !!runB.handback, true);
+  });
+  await check('a takeover the server ended is not reported as a handback', () => {
+    const idle = handbackNote({ mode: 'agent', since: 0, handedBackAt: Date.UTC(2026, 9, 10, 8, 30), endedBy: 'idle', url: 'https://a.example/' });
+    assert.match(idle, /did not hand it back/);
+    assert.match(idle, /timed out/);
+    assert.match(idle, /may not have finished/);
+    const owner = handbackNote({ mode: 'agent', since: 0, handedBackAt: 1, endedBy: 'owner' });
+    assert.match(owner, /handed it back/);
+    assert.doesNotMatch(owner, /did not/);
+    const dir = tempLiveDir();
+    writeControl(dir, { mode: 'agent', since: 1, handedBackAt: 1, endedBy: 'idle' });
+    assert.equal(readControl(dir).endedBy, 'idle');
+    writeControl(dir, { mode: 'agent', since: 1, endedBy: 'hacked' });
+    assert.equal(readControl(dir).endedBy, undefined);
+  });
+  await check('tabs are claimed per run: another live run keeps its tab; a dead one does not', () => {
+    const dir = tempLiveDir();
+    assert.equal(claimTab(dir, 'T1'), true);
+    assert.equal(tabOwner(dir, 'T1'), undefined, 'our own claim');
+    // A tab claimed by another live process (our parent stands in for it).
+    writeJsonFileAtomic(path.join(dir, LIVE_FILES.claims, 'T2.json'), { pid: process.ppid }, 0o600);
+    assert.equal(tabOwner(dir, 'T2'), process.ppid);
+    assert.equal(claimTab(dir, 'T2'), false);
+    releaseTab(dir, 'T2');
+    assert.ok(fs.existsSync(path.join(dir, LIVE_FILES.claims, 'T2.json')), 'never releases another run\'s tab');
+    // A claim by a process that is gone is free.
+    writeJsonFileAtomic(path.join(dir, LIVE_FILES.claims, 'T3.json'), { pid: 2 ** 22 + 7 }, 0o600);
+    assert.equal(claimTab(dir, 'T3'), true);
+    releaseTab(dir, 'T1');
+    assert.ok(!fs.existsSync(path.join(dir, LIVE_FILES.claims, 'T1.json')));
+    assert.equal(claimTab(dir, '../escape'), false);
   });
   await check('a malformed control file counts as the agent holding the browser', async () => {
     const dir = tempLiveDir();
@@ -376,6 +500,31 @@ async function main(): Promise<void> {
       AWS_SECRET_ACCESS_KEY: 's',
     });
     assert.deepEqual(Object.keys(env).sort(), ['HOME', 'PATH', 'PLAYWRIGHT_BROWSERS_PATH', 'TZ']);
+  });
+  await check('a host is only trusted when it answers the token handshake (pids and ports get reused)', async () => {
+    const token = 'k'.repeat(43);
+    const server = http.createServer((_q, r) => r.writeHead(404).end());
+    server.on('upgrade', (req, socket) => {
+      const ok = req.url === `/cdp/${token}` && handshakeResponse(req.headers);
+      if (ok) socket.write(ok);
+      else socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as { port: number }).port;
+    assert.equal(await probeHost(port, token), true);
+    assert.equal(await probeHost(port, 'x'.repeat(43)), false);
+    server.close();
+    const plain = http.createServer((_q, r) => r.writeHead(200).end('something else'));
+    await new Promise<void>((r) => plain.listen(0, '127.0.0.1', () => r()));
+    assert.equal(await probeHost((plain.address() as { port: number }).port, token), false, 'an open port is not a host');
+    plain.close();
+    assert.equal(await probeHost(1, token, 500), false);
+  });
+  await check('pongs count as signs of life', () => {
+    let pongs = 0;
+    const decoder = new FrameDecoder({ onText: () => undefined, onClose: () => undefined, onPong: () => pongs++ }, () => undefined);
+    decoder.push(clientFrame(0xa, Buffer.alloc(0)));
+    assert.equal(pongs, 1);
   });
   await check('files are written atomically with exact modes', () => {
     const dir = tempLiveDir();

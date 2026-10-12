@@ -32,10 +32,14 @@ import {
   LIVE_FILES,
   agentEndpoint,
   browserIdleMs,
+  claimTab,
   ensureHost,
   liveDir,
   readJsonFile,
+  releaseTab,
+  stopHost,
   writeTabReport,
+  type HostConfig,
   type TabReport,
 } from './liveBrowser.js';
 
@@ -49,6 +53,10 @@ let _initPromise: Promise<BrowserContext> | null = null;
 let _ephemeralBrowser: Browser | null = null;
 /** Live mode (liveBrowser.ts): the shared browser this process is connected to. */
 let _liveBrowser: Browser | null = null;
+/** Live mode: the tabs this run works in (others belong to other runs, or to nobody). */
+const _ownPages = new Set<Page>();
+/** Live mode: how long connecting to the host may take before it is restarted. */
+const LIVE_CONNECT_TIMEOUT_MS = 20_000;
 
 // ── console / network event buffers ────────────────────────────────────────
 // Ring buffers so the brain can debug pages ("what did the console say?",
@@ -207,7 +215,7 @@ async function initContext(): Promise<BrowserContext> {
     if (live) {
       const executable = process.env.ARTEMIS_BROWSER_EXECUTABLE?.trim() || chromium.executablePath();
       if (!fs.existsSync(executable)) throw new Error(`Executable doesn't exist at ${executable}`);
-      const host = await ensureHost({
+      const hostConfig: HostConfig = {
         liveDir: live,
         executable,
         profileDir: `${PROFILE_DIR}-live`,
@@ -215,8 +223,21 @@ async function initContext(): Promise<BrowserContext> {
         args: extraArgs,
         userAgent: browserUserAgent(),
         idleMs: browserIdleMs(),
-      });
-      const browser = await chromium.connectOverCDP(agentEndpoint(host));
+        // The host applies these to every page (a shared browser has no Playwright context options).
+        viewport: contextOptions.viewport,
+        timezoneId: process.env.ARTEMIS_BROWSER_TIMEZONE?.trim() || contextOptions.timezoneId,
+        locale: contextOptions.locale,
+      };
+      let host = await ensureHost(hostConfig);
+      let browser: Browser;
+      try {
+        browser = await chromium.connectOverCDP(agentEndpoint(host), { timeout: LIVE_CONNECT_TIMEOUT_MS });
+      } catch {
+        // A host that does not answer properly (a wedged browser) is replaced once.
+        await stopHost(live, host);
+        host = await ensureHost(hostConfig);
+        browser = await chromium.connectOverCDP(agentEndpoint(host), { timeout: LIVE_CONNECT_TIMEOUT_MS });
+      }
       _liveBrowser = browser;
       const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
@@ -380,14 +401,78 @@ export async function getActivePage(): Promise<Page> {
     ctx = await initContext();
   }
 
+  // Live mode: each run works in its own tabs. The first one is the tab the
+  // last run left (when no other run works in it), else a new one.
+  const dir = liveDir();
+  if (dir && _liveBrowser) {
+    const own = ownPages();
+    if (own.length > 0) {
+      _activePage = own[own.length - 1]!;
+      return _activePage;
+    }
+    const last = readLiveTab()?.targetId;
+    const left = last ? await pageForTarget(last) : undefined;
+    if (left && last && claimTab(dir, last)) {
+      ownPage(left, last);
+      _activePage = left;
+      return left;
+    }
+    const page = await ctx.newPage();
+    await adoptNewPage(page);
+    _activePage = page;
+    return page;
+  }
+
   const pages = ctx.pages().filter(p => !p.isClosed());
   if (pages.length > 0) {
-    // Live mode: carry on in the tab the agent (or the user) used last.
-    _activePage = (await pageForTarget(readLiveTab()?.targetId)) ?? pages[pages.length - 1]!;
+    _activePage = pages[pages.length - 1]!;
     return _activePage;
   }
   _activePage = await ctx.newPage();
   return _activePage;
+}
+
+/** Live mode: this run's open tabs, oldest first. */
+function ownPages(): Page[] {
+  for (const page of _ownPages) if (page.isClosed()) _ownPages.delete(page);
+  return [..._ownPages];
+}
+
+/** Live mode: a tab this run works in (and the popups it opens). */
+function ownPage(page: Page, targetId: string): void {
+  if (_ownPages.has(page)) return;
+  _ownPages.add(page);
+  const dir = liveDir();
+  page.once('close', () => {
+    _ownPages.delete(page);
+    if (dir) releaseTab(dir, targetId);
+  });
+  page.on('popup', (popup) => void adoptNewPage(popup));
+  // The host closes a crashed page; the model hears about it on its next step.
+  page.once('crash', () => {
+    _crashedUrl = page.url();
+  });
+}
+
+let _crashedUrl: string | undefined;
+
+/** Live mode: the address of a page of this run that crashed since the last call, once. */
+export function takeCrashNote(): string | undefined {
+  const url = _crashedUrl;
+  _crashedUrl = undefined;
+  return url;
+}
+
+async function adoptNewPage(page: Page): Promise<void> {
+  const dir = liveDir();
+  const targetId = await targetIdOf(page);
+  if (dir && targetId) claimTab(dir, targetId);
+  ownPage(page, targetId ?? '');
+}
+
+/** The tabs browser_tabs works with: in live mode only this run's own. */
+function visiblePages(ctx: BrowserContext): Page[] {
+  return _liveBrowser ? ownPages() : ctx.pages().filter((p) => !p.isClosed());
 }
 
 /** True when this process drives the shared live browser. */
@@ -426,10 +511,19 @@ export async function pageForTarget(targetId: string | undefined): Promise<Page 
   return undefined;
 }
 
-/** Make the tab with this target id the active one (after the user handed back). */
+/**
+ * Make the tab with this target id the active one (after the user handed
+ * back), if it is this run's, or nobody's. Another run's tab stays its own.
+ */
 export async function focusTarget(targetId: string | undefined): Promise<Page | undefined> {
   const page = await pageForTarget(targetId);
-  if (page) _activePage = page;
+  if (!page) return undefined;
+  const dir = liveDir();
+  if (_liveBrowser && dir && targetId && !_ownPages.has(page)) {
+    if (!claimTab(dir, targetId)) return undefined;
+    ownPage(page, targetId);
+  }
+  _activePage = page;
   return page;
 }
 
@@ -449,6 +543,17 @@ export async function reportActiveTab(): Promise<void> {
 export async function releaseBrowser(): Promise<void> {
   if (!_liveBrowser) return;
   const browser = _liveBrowser;
+  const dir = liveDir();
+  // This run's other tabs close; its last one stays for the owner and the next run.
+  const keep = _activePage && !_activePage.isClosed() ? _activePage : ownPages().at(-1);
+  for (const page of ownPages()) {
+    if (page !== keep) await page.close().catch(() => undefined);
+  }
+  if (keep && dir) {
+    const targetId = await targetIdOf(keep);
+    if (targetId) releaseTab(dir, targetId);
+  }
+  _ownPages.clear();
   _liveBrowser = null;
   _context = null;
   _activePage = null;
@@ -473,7 +578,7 @@ export interface TabInfo {
 
 export async function listTabs(): Promise<TabInfo[]> {
   const ctx = await initContext();
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   const out: TabInfo[] = [];
   for (let i = 0; i < pages.length; i++) {
     let title = '';
@@ -488,17 +593,18 @@ export async function listTabs(): Promise<TabInfo[]> {
 export async function openTab(url?: string): Promise<TabInfo> {
   const ctx = await initContext();
   const page = await ctx.newPage();
+  if (_liveBrowser) await adoptNewPage(page);
   _activePage = page;
   if (url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   return { index: pages.indexOf(page), url: page.url(), title: await page.title().catch(() => ''), active: true };
 }
 
 export async function switchTab(index: number): Promise<TabInfo> {
   const ctx = await initContext();
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   if (index < 0 || index >= pages.length) {
     throw new Error(`tab index ${index} out of range (0-${pages.length - 1})`);
   }
@@ -508,25 +614,26 @@ export async function switchTab(index: number): Promise<TabInfo> {
   return { index, url: page.url(), title: await page.title().catch(() => ''), active: true };
 }
 
+/** Closes one of this run's tabs (in live mode never another run's). Returns how many it has left. */
 export async function closeTab(index?: number): Promise<number> {
   const ctx = await initContext();
-  const pages = ctx.pages().filter((p) => !p.isClosed());
+  const pages = visiblePages(ctx);
   const target = index === undefined
-    ? (_activePage && !_activePage.isClosed() ? _activePage : pages[pages.length - 1])
+    ? (_activePage && !_activePage.isClosed() && pages.includes(_activePage) ? _activePage : pages[pages.length - 1])
     : pages[index];
   if (!target) throw new Error(`tab index ${index ?? '(active)'} not found`);
   const wasActive = target === _activePage;
   await target.close().catch(() => undefined);
   if (wasActive) _activePage = null;
-  return ctx.pages().filter((p) => !p.isClosed()).length;
+  return visiblePages(ctx).length;
 }
 
 /**
- * Close the active page. Browser context stays alive for next call.
- * Use closeBrowser() to fully shut down.
+ * Close the active page (in live mode, only if it is this run's). Browser
+ * context stays alive for next call. Use closeBrowser() to fully shut down.
  */
 export async function closeActivePage(): Promise<void> {
-  if (_activePage && !_activePage.isClosed()) {
+  if (_activePage && !_activePage.isClosed() && (!_liveBrowser || _ownPages.has(_activePage))) {
     await _activePage.close().catch(() => undefined);
   }
   _activePage = null;

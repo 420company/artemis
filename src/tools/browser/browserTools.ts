@@ -39,6 +39,7 @@ import {
   focusTarget,
   isLiveBrowser,
   reportActiveTab,
+  takeCrashNote,
 } from './browserSession.js';
 import type { Page } from 'playwright';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
@@ -618,9 +619,11 @@ async function gated(run: () => Promise<ToolResult>, signal?: AbortSignal): Prom
     return { ok: false, output: message, error: { code: 'browser_user_in_control', message } };
   }
   let note = '';
+  const crashed = takeCrashNote();
+  if (crashed) note = `[The tab you were working in (${crashed || 'a page'}) crashed and was closed; this step runs in a new tab. Open the page again if you still need it.]`;
   if (gate.handback) {
     const page = await focusTarget(gate.handback.targetId).catch(() => undefined);
-    note = handbackNote(gate.handback, page ? { url: page.url(), title: await page.title().catch(() => '') } : undefined);
+    note = [note, handbackNote(gate.handback, page ? { url: page.url(), title: await page.title().catch(() => '') } : undefined)].filter(Boolean).join('\n');
   }
   const result = await run();
   await reportActiveTab().catch(() => undefined);
@@ -710,7 +713,9 @@ export async function executeBrowserRequestHandoff(
   const since = Date.now();
   emitHandoff({ id, status: 'waiting', reason, url, title });
   const { outcome, control } = await waitForHandback(dir, since, seconds * 1000, context?.abortSignal ? { signal: context.abortSignal } : {});
-  emitHandoff({ id, status: outcome === 'handed_back' ? 'done' : 'expired' });
+  // A takeover the server ended (no input for a while, the view closed) is not a handback.
+  const ownerHandedBack = outcome === 'handed_back' && (!control.endedBy || control.endedBy === 'owner');
+  emitHandoff({ id, status: outcome === 'handed_back' ? (ownerHandedBack ? 'done' : 'timeout') : 'expired' });
   const minutes = Math.max(1, Math.round(seconds / 60));
   if (outcome === 'handed_back') {
     const page = (await focusTarget(control.targetId).catch(() => undefined)) ?? (await getActivePage().catch(() => undefined));
@@ -718,7 +723,9 @@ export async function executeBrowserRequestHandoff(
     const where = page ? `${(await page.title().catch(() => '')) || '(untitled)'} — ${page.url()}` : control.url ?? '';
     return {
       ok: true,
-      output: `The user handed the browser back.${where ? ` It is now on: ${where}.` : ''} Check the page (browser_screenshot or browser_extract_text) before continuing.`,
+      output: ownerHandedBack
+        ? `The user handed the browser back.${where ? ` It is now on: ${where}.` : ''} Check the page (browser_screenshot or browser_extract_text) before continuing.`
+        : `The user's takeover ended without a handback (it timed out, or their browser view closed), so they may not have finished.${where ? ` The browser is on: ${where}.` : ''} Check the page; if the step is not done, ask the user in your reply.`,
     };
   }
   if (outcome === 'aborted') return { ok: false, output: 'Stopped while waiting for the user.', error: { code: 'aborted', message: 'aborted' } };

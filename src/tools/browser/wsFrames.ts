@@ -60,6 +60,7 @@ export function encodeFrame(opcode: number, payload: Buffer): Buffer {
 export interface FrameHandlers {
   onText: (text: string) => void;
   onClose: () => void;
+  onPong?: () => void;
 }
 
 /**
@@ -127,6 +128,8 @@ export class FrameDecoder {
         this.handlers.onClose();
       } else if (opcode === 0x9) {
         this.reply(encodeFrame(0xa, payload));
+      } else if (opcode === 0xa) {
+        this.handlers.onPong?.();
       }
       return;
     }
@@ -155,8 +158,10 @@ export function attachWebSocket(
   socket: Duplex,
   onText: (text: string) => void,
   onClose: () => void,
-): { send: (text: string) => void; close: () => void } {
+): { send: (text: string) => void; close: () => void; ping: () => void; readonly lastSeen: number } {
   let closed = false;
+  // Any frame from the client (a message or a pong) shows it is alive.
+  let lastSeen = Date.now();
   const finish = () => {
     if (closed) return;
     closed = true;
@@ -165,8 +170,9 @@ export function attachWebSocket(
   const write = (frame: Buffer) => {
     if (!closed && socket.writable) socket.write(frame);
   };
-  const decoder = new FrameDecoder({ onText, onClose: () => { finish(); socket.end(); } }, write);
+  const decoder = new FrameDecoder({ onText, onClose: () => { finish(); socket.end(); }, onPong: () => { lastSeen = Date.now(); } }, write);
   socket.on('data', (chunk: Buffer) => {
+    lastSeen = Date.now();
     try {
       decoder.push(chunk);
     } catch {
@@ -182,6 +188,12 @@ export function attachWebSocket(
       write(encodeFrame(0x8, Buffer.from([0x03, 0xe8])));
       finish();
       socket.end();
+      // A half-open peer never acknowledges the close.
+      setTimeout(() => socket.destroy(), 2_000).unref?.();
+    },
+    ping: () => write(encodeFrame(0x9, Buffer.alloc(0))),
+    get lastSeen() {
+      return lastSeen;
     },
   };
 }

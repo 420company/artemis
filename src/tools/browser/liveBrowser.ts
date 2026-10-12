@@ -25,8 +25,11 @@
  *   control.json   Written by the platform server: who controls the
  *                  browser ('agent' or 'user'), and when the user last
  *                  handed it back. The engine only reads it.
- *   agent.json     0600, written by the engine: the last handback it told
- *                  the model about.
+ *   agent.json     0600, written by the engine: the last handback a run
+ *                  told its model about (each run also remembers its own).
+ *   claims/        0600, one file per tab an engine run works in (its pid):
+ *                  each run has its own tabs; a finished run leaves its last
+ *                  tab unclaimed for the owner and the next run.
  *
  * Takeover is cooperative on the engine's side: while control.json says
  * 'user', browser tools wait a little and then report that the user is in
@@ -35,10 +38,10 @@
  * owner holds control).
  */
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import net from 'node:net';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,6 +54,7 @@ export const LIVE_FILES = {
   control: 'control.json',
   agent: 'agent.json',
   lock: 'spawn.lock',
+  claims: 'claims',
 } as const;
 
 export interface HostInfo {
@@ -76,6 +80,11 @@ export interface ControlState {
   since: number;
   /** When the user last handed the browser back (ms). */
   handedBackAt?: number;
+  /**
+   * How the last takeover ended: the owner handed back, or the server took
+   * it back (no input for a while, the server restarted, the browser closed).
+   */
+  endedBy?: 'owner' | 'idle' | 'restart' | 'closed';
   /** The tab the user left the browser on. */
   targetId?: string;
   url?: string;
@@ -134,6 +143,7 @@ export function readControl(dir: string): ControlState {
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
   const str = (v: unknown) => (typeof v === 'string' ? v.slice(0, 2000) : undefined);
   const handedBackAt = num(raw?.handedBackAt);
+  const endedBy = raw?.endedBy === 'idle' || raw?.endedBy === 'restart' || raw?.endedBy === 'closed' || raw?.endedBy === 'owner' ? raw.endedBy : undefined;
   const targetId = str(raw?.targetId);
   const url = str(raw?.url);
   const title = str(raw?.title);
@@ -141,6 +151,7 @@ export function readControl(dir: string): ControlState {
     mode,
     since: num(raw?.since) ?? 0,
     ...(handedBackAt !== undefined ? { handedBackAt } : {}),
+    ...(endedBy ? { endedBy } : {}),
     ...(targetId ? { targetId } : {}),
     ...(url ? { url } : {}),
     ...(title ? { title } : {}),
@@ -155,17 +166,36 @@ export function writeTabReport(dir: string, tab: Omit<TabReport, 'updatedAt'>, n
   }
 }
 
+/**
+ * The last handback this run told its model about. Per run: concurrent runs
+ * each hear about a handback once. A new run starts from the last one any
+ * run reported (agent.json), so an old handback is not repeated.
+ */
+const seenByRun = new Map<string, number>();
+
 function readSeenHandback(dir: string): number {
+  const known = seenByRun.get(dir);
+  if (known !== undefined) return known;
   const raw = readJsonFile<{ seenHandbackAt?: number }>(path.join(dir, LIVE_FILES.agent));
-  return typeof raw?.seenHandbackAt === 'number' ? raw.seenHandbackAt : 0;
+  const at = typeof raw?.seenHandbackAt === 'number' ? raw.seenHandbackAt : 0;
+  seenByRun.set(dir, at);
+  return at;
 }
 
 function writeSeenHandback(dir: string, at: number): void {
+  seenByRun.set(dir, at);
   try {
+    const raw = readJsonFile<{ seenHandbackAt?: number }>(path.join(dir, LIVE_FILES.agent));
+    if (typeof raw?.seenHandbackAt === 'number' && raw.seenHandbackAt >= at) return;
     writeJsonFileAtomic(path.join(dir, LIVE_FILES.agent), { seenHandbackAt: at }, 0o600);
   } catch {
-    // The note may then be repeated once; harmless.
+    // The next run may then hear about it once more; harmless.
   }
+}
+
+/** Forgets this process's per-run state (tests). */
+export function resetRunState(): void {
+  seenByRun.clear();
 }
 
 // ── takeover gate ───────────────────────────────────────────────────────────
@@ -232,8 +262,11 @@ export function userInControlMessage(since: number, now = Date.now()): string {
 export function handbackNote(control: ControlState, current?: { url: string; title: string }): string {
   const at = control.handedBackAt ? new Date(control.handedBackAt).toISOString().slice(11, 16) : '';
   const page = current ?? (control.url ? { url: control.url, title: control.title ?? '' } : undefined);
+  const how = !control.endedBy || control.endedBy === 'owner'
+    ? `[The user took over the browser and handed it back${at ? ` at ${at} UTC` : ''}.`
+    : `[The user took over the browser, but did not hand it back: the takeover ${control.endedBy === 'idle' ? 'timed out after a while without input' : 'ended when the browser view closed'}${at ? ` at ${at} UTC` : ''}. They may not have finished what they were doing.`;
   return [
-    `[The user took over the browser and handed it back${at ? ` at ${at} UTC` : ''}.`,
+    how,
     page ? `It is now on: ${page.title ? `${page.title} — ` : ''}${page.url}.` : '',
     'Pages may have changed (for example the user signed in); check the page before relying on earlier observations.]',
   ].filter(Boolean).join(' ');
@@ -243,7 +276,8 @@ export function handbackNote(control: ControlState, current?: { url: string; tit
 
 export interface HandoffEvent {
   id: string;
-  status: 'waiting' | 'done' | 'expired';
+  /** done: handed back; timeout: the takeover ended without a handback; expired: no longer waited for. */
+  status: 'waiting' | 'done' | 'timeout' | 'expired';
   reason?: string;
   url?: string;
   title?: string;
@@ -308,6 +342,10 @@ export interface HostConfig {
   args: string[];
   userAgent?: string;
   idleMs: number;
+  /** Applied to every page by the host (the engine's former context options). */
+  viewport?: { width: number; height: number };
+  timezoneId?: string;
+  locale?: string;
 }
 
 /** Idle time before the host closes the browser (ARTEMIS_BROWSER_IDLE_MS, default 10 minutes). */
@@ -332,24 +370,44 @@ function hostScript(): string {
   return fileURLToPath(new URL(`./browserHost${ext}`, import.meta.url));
 }
 
-function portOpen(port: number, timeoutMs = 1_000): Promise<boolean> {
+/**
+ * Whether a live host answers on this port with this token: a WebSocket
+ * handshake that must succeed (101). A port that is merely open, or a pid
+ * that is alive, proves nothing (both are reused).
+ */
+export function probeHost(port: number, token: string, timeoutMs = 2_000): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.connect({ host: '127.0.0.1', port });
-    const done = (ok: boolean) => {
-      socket.destroy();
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      req.destroy();
       resolve(ok);
     };
-    socket.setTimeout(timeoutMs, () => done(false));
-    socket.once('connect', () => done(true));
-    socket.once('error', () => done(false));
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: `/cdp/${token}`,
+      headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': randomBytes(16).toString('base64') },
+      timeout: timeoutMs,
+    });
+    req.on('upgrade', (_res, socket) => {
+      // Close politely so the host drops the probe at once.
+      socket.end(Buffer.from([0x88, 0x82, 0, 0, 0, 0, 0x03, 0xe8]));
+      finish(true);
+    });
+    req.on('response', () => finish(false));
+    req.on('timeout', () => finish(false));
+    req.on('error', () => finish(false));
+    req.end();
   });
 }
 
-/** The running host, if host.json names a live process that answers. */
+/** The running host, if host.json names a live process that answers with its token. */
 export async function runningHost(dir: string): Promise<HostInfo | undefined> {
   const host = readJsonFile<HostInfo>(path.join(dir, LIVE_FILES.host));
   if (!host || host.version !== 1 || !isPidAlive(host.pid) || typeof host.port !== 'number' || typeof host.agentToken !== 'string') return undefined;
-  return (await portOpen(host.port)) ? host : undefined;
+  return (await probeHost(host.port, host.agentToken)) ? host : undefined;
 }
 
 export function agentEndpoint(host: HostInfo): string {
@@ -384,31 +442,104 @@ export async function ensureHost(config: HostConfig, options: { timeoutMs?: numb
     }
   }
   try {
-    const again = await runningHost(dir);
-    if (again) return again;
-    const child = spawn(process.execPath, [...process.execArgv, hostScript(), JSON.stringify(config)], {
-      detached: true,
-      stdio: 'ignore',
-      env: hostEnv(),
-      cwd: dir,
-    });
-    child.unref();
-    let exited = false;
-    child.once('exit', () => { exited = true; });
-    while (Date.now() < deadline) {
-      const host = readJsonFile<HostInfo>(path.join(dir, LIVE_FILES.host));
-      if (host && host.pid === child.pid && (await portOpen(host.port))) return host;
-      if (exited) {
-        let reason = '';
-        try {
-          reason = fs.readFileSync(path.join(dir, 'host-error.txt'), 'utf8').trim();
-        } catch { /* no reason recorded */ }
-        throw new Error(`the browser host exited during startup: ${reason || 'unknown error (is Chromium installed?)'}`);
+    // Twice at most: a host that finds a (stale) other host exits 0 without
+    // writing its own files; the stale files are then removed and it starts again.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const again = await runningHost(dir);
+      if (again) return again;
+      const child = spawn(process.execPath, [...process.execArgv, hostScript(), JSON.stringify(config)], {
+        detached: true,
+        stdio: 'ignore',
+        env: hostEnv(),
+        cwd: dir,
+      });
+      child.unref();
+      let exitCode: number | null | undefined;
+      child.once('exit', (code) => { exitCode = code; });
+      let retry = false;
+      while (Date.now() < deadline && !retry) {
+        const host = readJsonFile<HostInfo>(path.join(dir, LIVE_FILES.host));
+        if (host && host.pid === child.pid && (await probeHost(host.port, host.agentToken))) return host;
+        if (exitCode !== undefined) {
+          if (exitCode === 0) {
+            const running = await runningHost(dir);
+            if (running) return running;
+            removeHostFiles(dir);
+            retry = true;
+            break;
+          }
+          let reason = '';
+          try {
+            reason = fs.readFileSync(path.join(dir, 'host-error.txt'), 'utf8').trim();
+          } catch { /* no reason recorded */ }
+          throw new Error(`the browser host exited during startup: ${reason || 'unknown error (is Chromium installed?)'}`);
+        }
+        await defaultSleep(100);
       }
-      await defaultSleep(100);
+      if (!retry) break;
     }
     throw new Error('timed out waiting for the browser to start');
   } finally {
     await fsp.rm(lockFile, { force: true });
   }
+}
+
+/** Removes host.json and viewer.json (a host that is gone, or one being replaced). */
+export function removeHostFiles(dir: string): void {
+  for (const name of [LIVE_FILES.host, LIVE_FILES.viewer]) fs.rmSync(path.join(dir, name), { force: true });
+}
+
+/**
+ * Stops a host that does not work (a connection to it timed out): SIGTERM,
+ * then SIGKILL to the host and its Chromium, then removes its files, so the
+ * next ensureHost starts a fresh one.
+ */
+export async function stopHost(dir: string, host: HostInfo, graceMs = 6_000): Promise<void> {
+  const signal = (pid: number, sig: NodeJS.Signals) => {
+    try {
+      process.kill(pid, sig);
+    } catch { /* gone */ }
+  };
+  signal(host.pid, 'SIGTERM');
+  const deadline = Date.now() + graceMs;
+  while (isPidAlive(host.pid) && Date.now() < deadline) await defaultSleep(100);
+  signal(host.pid, 'SIGKILL');
+  if (host.chromePid) signal(host.chromePid, 'SIGKILL');
+  const current = readJsonFile<HostInfo>(path.join(dir, LIVE_FILES.host));
+  if (!current || current.pid === host.pid) removeHostFiles(dir);
+}
+
+// ── tabs: each run works in its own ─────────────────────────────────────────
+
+function claimFile(dir: string, targetId: string): string | undefined {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(targetId) ? path.join(dir, LIVE_FILES.claims, `${targetId}.json`) : undefined;
+}
+
+/** The pid of the live run that works in this tab, if another one does. */
+export function tabOwner(dir: string, targetId: string): number | undefined {
+  const file = claimFile(dir, targetId);
+  const claim = file ? readJsonFile<{ pid?: number }>(file) : undefined;
+  return claim?.pid && claim.pid !== process.pid && isPidAlive(claim.pid) ? claim.pid : undefined;
+}
+
+/** Claims a tab for this run; false when another live run has it. */
+export function claimTab(dir: string, targetId: string): boolean {
+  const file = claimFile(dir, targetId);
+  if (!file) return false;
+  if (tabOwner(dir, targetId)) return false;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeJsonFileAtomic(file, { pid: process.pid, at: Date.now() }, 0o600);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Gives a tab up (the run ended, or the tab closed). */
+export function releaseTab(dir: string, targetId: string): void {
+  const file = claimFile(dir, targetId);
+  if (!file) return;
+  const claim = readJsonFile<{ pid?: number }>(file);
+  if (!claim || claim.pid === process.pid || !isPidAlive(claim.pid)) fs.rmSync(file, { force: true });
 }
