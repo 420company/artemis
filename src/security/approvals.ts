@@ -404,8 +404,37 @@ function clip(text: string, max: number): string {
 const PLATFORM_NAMES: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', wechat: '微信', all: '' }
 
 /** Words of a tool name: `chat_postMessage` → chat post message; `eth_sendTransaction` → eth send transaction. */
+/**
+ * Letters from other scripts that look like Latin ones (Cyrillic, Greek and
+ * a few others), so a tool named with them (`ѕend_mеssage`) is read as the
+ * word it imitates. Full-width and styled letters are handled by NFKC.
+ */
+const CONFUSABLES: Record<string, string> = Object.fromEntries(
+  [
+    ['а', 'a'], ['в', 'b'], ['е', 'e'], ['ё', 'e'], ['к', 'k'], ['м', 'm'], ['н', 'h'], ['о', 'o'], ['р', 'p'], ['с', 'c'], ['т', 't'], ['у', 'y'], ['х', 'x'],
+    ['ѕ', 's'], ['і', 'i'], ['ї', 'i'], ['ј', 'j'], ['ԁ', 'd'], ['ԛ', 'q'], ['ԝ', 'w'], ['ү', 'y'], ['һ', 'h'], ['ӏ', 'l'], ['ь', 'b'], ['п', 'n'], ['г', 'r'],
+    ['А', 'A'], ['В', 'B'], ['Е', 'E'], ['К', 'K'], ['М', 'M'], ['Н', 'H'], ['О', 'O'], ['Р', 'P'], ['С', 'C'], ['Т', 'T'], ['Х', 'X'], ['Ѕ', 'S'], ['І', 'I'], ['Ј', 'J'], ['Ү', 'Y'],
+    ['α', 'a'], ['β', 'b'], ['ε', 'e'], ['ι', 'i'], ['κ', 'k'], ['ν', 'v'], ['ο', 'o'], ['ρ', 'p'], ['τ', 't'], ['υ', 'u'], ['χ', 'x'], ['γ', 'y'],
+    ['Α', 'A'], ['Β', 'B'], ['Ε', 'E'], ['Ζ', 'Z'], ['Η', 'H'], ['Ι', 'I'], ['Κ', 'K'], ['Μ', 'M'], ['Ν', 'N'], ['Ο', 'O'], ['Ρ', 'P'], ['Τ', 'T'], ['Υ', 'Y'], ['Χ', 'X'],
+    ['ı', 'i'], ['ȷ', 'j'], ['ℓ', 'l'], ['ɡ', 'g'], ['ɑ', 'a'],
+  ],
+)
+
+/** A tool name as the letters it shows: NFKC, accents and invisible characters removed, look-alike letters folded to Latin. */
+export function foldToolName(name: string): string {
+  return [...name.normalize('NFKC').normalize('NFD').replace(/\p{Mn}/gu, '').replace(/[\u00AD\u180E\u200B-\u200F\u2060-\u2064\uFEFF]/g, '')]
+    .map((ch) => CONFUSABLES[ch] ?? ch)
+    .join('')
+    .normalize('NFC')
+}
+
+/** Every character outside printable ASCII as U+XXXX, so look-alikes and invisible ones show. */
+function visibleName(name: string): string {
+  return [...name].map((ch) => (/[\x20-\x7E]/.test(ch) ? ch : `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`)).join('')
+}
+
 export function toolWords(name: string): string[] {
-  return name
+  return foldToolName(name)
     .replace(/^mcp__[^_]+__/, '')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
@@ -574,6 +603,8 @@ export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_t
   const base = {
     service: action.serverId,
     action: words.join(' '),
+    // A name written with look-alike or invisible characters: the owner sees it as it really is.
+    ...(foldToolName(action.toolName) !== action.toolName || /[^\x20-\x7E]/.test(action.toolName) ? { tool: visibleName(action.toolName) } : {}),
     // Everything the call carries, exactly (sorted keys): what the owner approves.
     args: canonicalJson(args),
   }

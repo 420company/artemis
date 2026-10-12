@@ -35,15 +35,19 @@ expire after 24 hours unless the policy says otherwise.
 description (its `readOnlyHint`, kept in the tool list) says it is read-only.
 The model's arguments never do, and an unknown server or tool is not
 read-only. Tool names are split into words (`chat_postMessage` → chat, post,
-message; `eth.sendTransaction` → eth, send, transaction); a word that sends,
+message; `eth.sendTransaction` → eth, send, transaction), after folding
+look-alike letters (NFKC, accents and invisible characters removed, Cyrillic
+and Greek look-alikes read as Latin; the card then shows the real characters
+as code points); a word that sends,
 pays, signs, submits, deletes or executes always asks, even if the tool is
 also called "get" or "list" or is marked read-only.
 
 **Shell classification is best effort.** A shell command can hide what it
 does in countless ways. The classifier fails closed where it can (variables,
 substitutions, brace expansion, `eval`, `xargs`, inline interpreter code,
-unknown wrappers, `cd` to a place it cannot follow: any delete it cannot place
-asks), and resolves symlinks (a link in the workspace or the temp dir that
+unknown wrappers, `cd` to a place it cannot follow, function bodies, combined
+inline-code flags such as `bash -lc`, awk programs that run commands, a
+variable run as the command: any delete it cannot place asks), and resolves symlinks (a link in the workspace or the temp dir that
 leads elsewhere is elsewhere). It is still a classifier, not a sandbox; the
 real boundary is the agent's own Unix user (see Limits).
 

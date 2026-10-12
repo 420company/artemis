@@ -111,6 +111,10 @@ function staticPath(word: string): string | undefined {
 const SHELLS = '(?:ba|z|k|da)?sh'
 const INTERPRETERS = `(?:${SHELLS}|python[0-9.]*|node|perl|ruby|php|lua|deno|bun)`
 const FETCH = '(?:curl|wget|fetch)'
+/** Fetchers spelled in capitals (libwww's GET/HEAD/POST, matched case-sensitively), and other HTTP clients. */
+const FETCH_CS = '(?:GET|HEAD|POST|lwp-request|xh|http|https|aria2c)'
+/** An interpreter given inline code with combined flags: `bash -lc`, `sh -xc`, `perl -we`, `ruby -e`. */
+const INLINE_FLAG = '-[A-Za-z]*[ceE]'
 
 const PIPE_TO_INTERPRETER = new RegExp(
   `\\b${FETCH}\\b[^;&\`]{0,400}\\|\\s*(?:sudo(?:\\s+-\\S+)*\\s+)?(?:env(?:\\s+\\S+=\\S*)*\\s+)?${INTERPRETERS}\\b`,
@@ -120,9 +124,13 @@ const DECODE_TO_INTERPRETER = new RegExp(
   `\\b(?:base64|xxd|openssl)\\b[^;&\`]{0,300}(?:-d|--decode|-r)\\b[^;&\`]{0,300}\\|\\s*(?:sudo\\s+)?${INTERPRETERS}\\b`,
   'i',
 )
-const PROCESS_SUBSTITUTION = new RegExp(`\\b(?:${INTERPRETERS}|source|\\.)\\s+<\\(\\s*${FETCH}\\b`, 'i')
+// No \\b before the name: `. <(curl …)` starts with a dot, which \\b cannot precede.
+const PROCESS_SUBSTITUTION = new RegExp(`(?:^|[\\s;&|(])(?:${INTERPRETERS}|source|\\.)\\s+<\\(\\s*(?:${FETCH}|${FETCH_CS})\\b`, 'i')
+const PIPE_TO_INTERPRETER_CS = new RegExp(
+  `(?:^|[\\s;&|(])${FETCH_CS}\\s[^;&\`]{0,400}\\|\\s*(?:sudo(?:\\s+-\\S+)*\\s+)?(?:env(?:\\s+\\S+=\\S*)*\\s+)?${INTERPRETERS}\\b`,
+)
 const SUBSTITUTED_FETCH = new RegExp(`\\$\\(\\s*${FETCH}\\b|\`\\s*${FETCH}\\b`, 'i')
-const EXEC_OF_SUBSTITUTION = new RegExp(`(?:\\b${INTERPRETERS}\\s+-c\\s+["']?|\\beval\\s+["']?|^\\s*|[;&|]\\s*)(?:\\$\\(|\`)\\s*${FETCH}\\b`, 'i')
+const EXEC_OF_SUBSTITUTION = new RegExp(`(?:\\b${INTERPRETERS}\\s+${INLINE_FLAG}\\s+["']?|\\beval\\s+["']?|^\\s*|[;&|]\\s*)(?:\\$\\(|\`)\\s*${FETCH}\\b`, 'i')
 
 const UPLOAD_FILE = /\bcurl\b[^;&|]{0,400}(?:\s(?:-d|--data(?:-binary|-raw|-urlencode|-ascii)?|-F|--form)\s*=?\s*["']?[^\s"']*@|\s(?:-T|--upload-file)\s)/i
 const WGET_POST = /\bwget\b[^;&|]{0,400}--post-(?:file|data)\b/i
@@ -187,10 +195,34 @@ function runsFile(command: string, file: string): boolean {
   return false
 }
 
+/** Reserved words and grouping that come before a command without changing it. */
+const LEADING_WORDS = new Set(['{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until'])
+
+/** Index of the command word in a segment: after assignments, `{`, `!`, `then`, … and simple wrappers. */
+function commandIndex(segment: string[]): number {
+  let i = 0
+  while (i < segment.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[i]!) || LEADING_WORDS.has(segment[i]!) || SIMPLE_WRAPPERS.has(path.basename(segment[i]!)))) i++
+  return i
+}
+
+/** A segment whose command is itself a variable (`$B`, `"${X}"`): what runs is not known before it runs. */
+function runsAVariable(command: string): boolean {
+  return shellSegments(command).some((segment) => /^\$\{?[A-Za-z_]/.test(segment[commandIndex(segment)] ?? ''))
+}
+
+const DECODES = /\b(?:base64|xxd|openssl)\b[^;&|]{0,300}(?:-d|--decode|-r)\b/i
+const FETCHES = new RegExp(`\\b${FETCH}\\b`, 'i')
+const FETCHES_CS = new RegExp(`(?:^|[\\s;&|(])${FETCH_CS}\\s`)
+
 /** A command that runs remote or hidden code, sends data out, or opens a shell to the outside. */
 export function describeHighRiskCommand(command: string): ShellRisk | null {
   for (const { re, risk } of REVERSE_SHELLS) if (re.test(command)) return risk
-  if (PIPE_TO_INTERPRETER.test(command) || PROCESS_SUBSTITUTION.test(command)) return RUN_REMOTE
+  if (PIPE_TO_INTERPRETER.test(command) || PIPE_TO_INTERPRETER_CS.test(command) || PROCESS_SUBSTITUTION.test(command)) return RUN_REMOTE
+  // `B=$(… | base64 -d); $B`, `X=$(curl …); $X`: a variable run as the command.
+  if (runsAVariable(command)) {
+    if (DECODES.test(command)) return RUN_DECODED
+    if (FETCHES.test(command) || FETCHES_CS.test(command)) return RUN_REMOTE
+  }
   if (SUBSTITUTED_FETCH.test(command) && EXEC_OF_SUBSTITUTION.test(command)) return RUN_REMOTE
   if (/\beval\b/.test(command) && SUBSTITUTED_FETCH.test(command)) return RUN_REMOTE
   if (DECODE_TO_INTERPRETER.test(command)) return RUN_DECODED
@@ -207,7 +239,10 @@ const DELETE_COMMANDS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'trash', 'tra
 /** Wrappers whose arguments are only the command that follows. */
 const SIMPLE_WRAPPERS = new Set(['sudo', 'doas', 'command', 'builtin', 'nohup', 'exec', 'time'])
 /** Wrappers with their own options (the wrapped command's position is not certain). */
-const COMPLEX_WRAPPERS = new Set(['env', 'timeout', 'nice', 'ionice', 'stdbuf', 'busybox', 'chroot', 'flock', 'setsid', 'unbuffer', 'watch', 'parallel', 'su', 'runuser', 'xargs', 'strace', 'taskset', 'chrt', 'script'])
+const COMPLEX_WRAPPERS = new Set(['env', 'timeout', 'nice', 'ionice', 'stdbuf', 'busybox', 'chroot', 'flock', 'setsid', 'unbuffer', 'watch', 'parallel', 'su', 'runuser', 'xargs', 'strace', 'taskset', 'chrt', 'script', 'awk', 'gawk', 'mawk', 'nawk', 'make', 'gmake'])
+/** awk-like programs that can run shell commands themselves (system(), print | "cmd", "cmd" | getline). */
+const AWKS = new Set(['awk', 'gawk', 'mawk', 'nawk'])
+const AWK_RUNS_SHELL = /\bsystem\s*\(|\|\s*"|"\s*\|\s*getline|\|&/
 const INTERPRETER_RE = new RegExp(`^${INTERPRETERS}$`, 'i')
 /** Destructive operations anywhere in a command, including inline code. */
 const DESTRUCTIVE_TOKEN =
@@ -266,11 +301,12 @@ export function analyzeDeletes(command: string, cwd: string): DeleteAnalysis {
     if (/(?:^|\s)~[A-Za-z_]/.test(command)) flag('names another user\'s home')
     if (/\beval\b/.test(command)) flag('uses eval')
     if (/\bxargs\b/.test(command)) flag('passes names through xargs')
+    // A function body runs later, with arguments not known here.
+    if (/(?:^|[\s;&|(])(?:function\s+[A-Za-z_][\w-]*|[A-Za-z_][\w-]*\s*\(\s*\))\s*\{/.test(command)) flag('defines a function that deletes or overwrites files')
   }
 
   for (const segment of shellSegments(command)) {
-    let i = 0
-    while (i < segment.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[i]!) || SIMPLE_WRAPPERS.has(path.basename(segment[i]!)))) i++
+    const i = commandIndex(segment)
     const head = path.basename(segment[i] ?? '')
     const args = segment.slice(i + 1)
     const segmentText = segment.join(' ')
@@ -285,9 +321,13 @@ export function analyzeDeletes(command: string, cwd: string): DeleteAnalysis {
       continue
     }
     if (COMPLEX_WRAPPERS.has(head) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${head}`)
-    if (INTERPRETER_RE.test(head) && args.some((a) => /^-(?:c|e|E|r|-eval|-command)$/.test(a)) && DESTRUCTIVE_TOKEN.test(args.join(' '))) {
+    if (INTERPRETER_RE.test(head) && args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a)) && DESTRUCTIVE_TOKEN.test(args.join(' '))) {
       flag('inline code that deletes or overwrites files')
     }
+    // awk can run any shell command from its program; what it runs is not known here.
+    if (AWKS.has(head) && AWK_RUNS_SHELL.test(args.join(' '))) flag('an awk program that runs shell commands')
+    // A variable run as the command, with something destructive around it.
+    if (destructive && /^\$\{?[A-Za-z_]/.test(segment[i] ?? '')) flag('runs a command held in a variable')
     if (DELETE_COMMANDS.has(head)) {
       let afterDashes = false
       for (const arg of args) {
