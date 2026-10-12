@@ -1781,6 +1781,14 @@ class StdioRpcTransport implements RpcTransport {
         new Error(`Failed to start stdio server: ${error.message}`),
       );
     });
+    // A server that exits at once leaves a closed pipe: the write fails (EPIPE)
+    // and the close handler below ends the requests; it never crashes the process.
+    child.stdin.on('error', (error) => {
+      if (this.child !== child) {
+        return;
+      }
+      this.appendDiagnostic(`stdin: ${error.message}\n`);
+    });
     child.on('close', (code) => {
       if (this.child !== child) {
         return;
