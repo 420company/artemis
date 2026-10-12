@@ -12013,6 +12013,11 @@ process.stdin.on('data', (c) => {
     const store = new McpServerStore(dir)
     const stale = await store.add({ id: 'rotating', enabled: true, transport: 'streamable-http', url, authType: 'bearer', authState: 'configured', bearerToken: 'token-old-placeholder' })
     assert('mcp store: the server list is private to its user (0600)', (fs.statSync(store.getFilePath()).mode & 0o077) === 0, (fs.statSync(store.getFilePath()).mode & 0o777).toString(8))
+    // A leftover world-readable tmp from an older engine or a crash does not make the list readable.
+    fs.writeFileSync(`${store.getFilePath()}.tmp`, '{}', { mode: 0o644 })
+    fs.chmodSync(`${store.getFilePath()}.tmp`, 0o644)
+    await store.add({ ...stale, bearerToken: 'token-old-placeholder' })
+    assert('mcp store: saving over a stale 0644 tmp still writes 0600', (fs.statSync(store.getFilePath()).mode & 0o777) === 0o600, (fs.statSync(store.getFilePath()).mode & 0o777).toString(8))
     await store.add({ ...stale, bearerToken: accepted })
     const result = await callMcpServerTool({ server: stale, cwd: dir, toolName: 'ping', args: {} })
     assert('mcp call: a token the host rotated is picked up after a 401', result.output.includes('pong'), result.output)
