@@ -233,6 +233,8 @@ function describeAction(action: AgentAction): string {
       return `kill background task ${action.taskId}`;
     case 'post_update':
       return 'tell the user about progress';
+    case 'todo':
+      return 'update the plan';
     case 'server_setup':
       return `server setup: ${action.action}${'host' in action && action.host ? ` on ${action.host}` : ''}`;
     case 'get_verification_code':

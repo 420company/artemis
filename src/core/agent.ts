@@ -169,6 +169,8 @@ import {
 } from './heimdall.js';
 import { pathExists, truncate } from '../utils/fs.js';
 import { withRuntimeLogSink } from '../utils/log.js';
+import { applyTodos, renderTodos } from './todoList.js';
+import { childInfo, nextAgentRef, todoEventItems, toolArtifacts, toolDetail, toolEndSummary, userText, type InfoSink, type ProgressEvent, type ToolEndStatus } from './progressEvents.js';
 import { SessionStore } from '../storage/sessions.js';
 import {
   buildVerificationReminder,
@@ -2155,6 +2157,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `kill_task ${action.taskId}`;
     case 'post_update':
       return `post_update "${truncate(action.text, 80)}"`;
+    case 'todo':
+      return `todo ${action.todos?.length ?? 0} item(s)`;
     case 'server_setup':
       return `server_setup ${action.action}${'host' in action && action.host ? ` ${action.host}` : ''}${'server' in action && action.server ? ` ${action.server}` : ''}`;
     case 'get_verification_code':
@@ -4015,7 +4019,11 @@ export type RunAgentOptions = {
   onToolActivity?: (event: import('./agentStatus.js').ToolActivityEvent) => void;
   ensureSpecialistProvider?: (roles: AgentRole[]) => Promise<void>;
   resolveProvider?: (target: ProviderTarget) => ChatProvider;
-  onInfo?: (message: string) => void;
+  /**
+   * Progress lines (stderr for `artemis execute`). A line with a structured
+   * meaning passes it as the second argument (core/progressEvents.ts).
+   */
+  onInfo?: InfoSink;
   heimdallThreadState?: HeimdallThreadState;
   completionContract?: CompletionContract;
   /**
@@ -4346,7 +4354,8 @@ export async function runBuilderProposalAgent(
   );
   const childMaxTurns = clampTurns(Math.max(options.maxTurns, 15));
 
-  options.onInfo?.('[agent:builder] proposal running');
+  const proposalAgent = nextAgentRef('builder');
+  options.onInfo?.('[agent:builder] proposal running', { type: 'subagent_start', agent: proposalAgent, ...(userText(task) ? { task: userText(task) } : {}) });
 
   try {
     const result = await withSubagentCoordination(parentSession, options, (coordination) =>
@@ -4363,7 +4372,7 @@ export async function runBuilderProposalAgent(
           delegationDepth: delegationDepth + 1,
           maxDelegationDepth,
           appendUserMessage: true,
-          onInfo: (message) => options.onInfo?.(`[agent:builder] ${message}`),
+          onInfo: childInfo(options.onInfo, '[agent:builder]', proposalAgent),
         },
       ),
     );
@@ -4378,7 +4387,7 @@ export async function runBuilderProposalAgent(
       await options.sessionStore.save(parentSession);
     }
 
-    options.onInfo?.('[agent:builder] proposal done');
+    options.onInfo?.('[agent:builder] proposal done', { type: 'subagent_end', agent: proposalAgent, ok: true });
 
     return {
       role: 'builder',
@@ -4388,6 +4397,7 @@ export async function runBuilderProposalAgent(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const interrupted = isAgentRuntimeInterruptedError(error);
+    options.onInfo?.(`[agent:builder] proposal ${interrupted ? 'interrupted' : 'failed'}`, { type: 'subagent_end', agent: proposalAgent, ok: false });
     await syncSessionRecordInPlace(parentSession, options.sessionStore);
     if (!managedByParent) {
       updateTaskRuntime(parentSession, runtimeTaskId, {
@@ -4563,7 +4573,7 @@ export async function approveBuilderExecution(
           maxTurns: clampTurns(action.maxTurns ?? Math.max(options.maxTurns, 15)),
           profile: 'builder',
           appendUserMessage: true,
-          onInfo: (message) => options.onInfo?.(`[agent:builder] ${message}`),
+          onInfo: childInfo(options.onInfo, '[agent:builder]', nextAgentRef('builder')),
         },
       ),
     );
@@ -4720,7 +4730,8 @@ export async function runSpecialistAgent(
     Math.max(options.maxTurns, 15),
   );
 
-  options.onInfo?.(`[agent:${role}] running`);
+  const childAgent = nextAgentRef(role);
+  options.onInfo?.(`[agent:${role}] running`, { type: 'subagent_start', agent: childAgent, ...(userText(task) ? { task: userText(task) } : {}) });
 
   try {
     const result = await withSubagentCoordination(parentSession, options, (coordination) =>
@@ -4734,7 +4745,7 @@ export async function runSpecialistAgent(
         delegationDepth: delegationDepth + 1,
         maxDelegationDepth,
         appendUserMessage: options.appendUserMessage ?? true,
-        onInfo: (message) => options.onInfo?.(`[agent:${role}] ${message}`),
+        onInfo: childInfo(options.onInfo, `[agent:${role}]`, childAgent),
       }),
     );
 
@@ -4762,7 +4773,7 @@ export async function runSpecialistAgent(
       },
     });
 
-    options.onInfo?.(`[agent:${role}] done`);
+    options.onInfo?.(`[agent:${role}] done`, { type: 'subagent_end', agent: childAgent, ok: true, ...(userText(result.reply) ? { summary: userText(result.reply) } : {}) });
 
     return {
       role,
@@ -4772,6 +4783,7 @@ export async function runSpecialistAgent(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const interrupted = isAgentRuntimeInterruptedError(error);
+    options.onInfo?.(`[agent:${role}] ${interrupted ? 'interrupted' : 'failed'}`, { type: 'subagent_end', agent: childAgent, ok: false });
     await syncSessionRecordInPlace(parentSession, options.sessionStore);
     if (!managedByParent) {
       updateTaskRuntime(parentSession, runtimeTaskId, {
@@ -5236,9 +5248,10 @@ export function toolHeartbeatLimitMs(action: AgentAction): number {
  */
 export function startToolHeartbeat(
   toolName: string,
-  onInfo: ((message: string) => void) | undefined,
+  onInfo: InfoSink | undefined,
   intervalMs: number = toolHeartbeatIntervalMs(),
   limitMs: number = DEFAULT_TOOL_EXPECTED_MAX_MS,
+  callId?: string,
 ): () => void {
   if (!onInfo) return () => undefined;
   const started = Date.now();
@@ -5246,11 +5259,11 @@ export function startToolHeartbeat(
     const elapsedMs = Date.now() - started;
     const elapsedSeconds = Math.round(elapsedMs / 1000);
     if (elapsedMs > limitMs) {
-      onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds, overdue: true })}`);
+      onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds, overdue: true })}`, { type: 'heartbeat', tool: toolName, elapsedSeconds, overdue: true, ...(callId ? { callId } : {}) });
       clearInterval(timer);
       return;
     }
-    onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds })}`);
+    onInfo(`[tool:${toolName}] progress ${JSON.stringify({ elapsedSeconds })}`, { type: 'heartbeat', tool: toolName, elapsedSeconds, ...(callId ? { callId } : {}) });
   }, intervalMs);
   // Never the reason the process stays alive.
   timer.unref?.();
@@ -5341,6 +5354,8 @@ async function executeAgentActionUnscrubbed(
         memoryDefaultScope: options.memoryDefaultScope,
         viewedImages: options.viewedImages,
         ...(options.agentUpdates ? { postUpdate: (text: string) => options.agentUpdates!.post(text) } : {}),
+        // A long tool's parts (segment n/N) as `[segment] …` lines with their event.
+        progress: (event) => options.onInfo?.(`[segment] ${event.job} ${event.index}/${event.total} ${event.status}`, { ...event, ...(event.label ? { label: userText(event.label, 80) } : {}) }),
         context: {
           profile: options.profile ?? 'main',
           runtimeId: options.rootRuntimeId,
@@ -5365,6 +5380,12 @@ async function executeAgentActionUnscrubbed(
       return executeMcpGetPromptAction(action, options, abortSignal);
     case 'approve_builder_execution':
       return approveBuilderExecution(session, action, options);
+    case 'todo': {
+      const items = applyTodos(session, action);
+      await options.sessionStore.save(session);
+      options.onInfo?.('[tasks] updated', { type: 'todo', items: todoEventItems(items) });
+      return { ok: true, output: renderTodos(items) };
+    }
     case 'spawn_background_workflow': {
       try {
         const { spawnDetachedWorkflow } = await import('../services/detachedWorkflow.js');
@@ -5941,6 +5962,10 @@ async function executeAuthorizedAction(
 ): Promise<ActionOutcome> {
   let activityCallId: string | undefined;
   let activityOk: boolean | undefined;
+  // This call's id in the progress events (tool_start … tool_end).
+  const callId = `call_${++toolActivitySeq}`;
+    const toolEnd = (type: string, status: ToolEndStatus, extra: { summary?: string; artifacts?: string[] } = {}): ProgressEvent =>
+    ({ type: 'tool_end', callId, tool: type, status, ...extra });
   try {
     if (abortSignal?.aborted) {
       const message = 'Action skipped: the run was cancelled before this tool started.';
@@ -5957,7 +5982,7 @@ async function executeAuthorizedAction(
     const profile = options.profile ?? 'main';
     const profilePolicy = validateProfileAction(profile, hydratedAction);
     if (!profilePolicy.allowed) {
-      options.onInfo?.(`[tool:${hydratedAction.type}] blocked by profile policy`);
+      options.onInfo?.(`[tool:${hydratedAction.type}] blocked by profile policy`, toolEnd(hydratedAction.type, 'blocked'));
       await recordHeimdallActionEvent(
         session,
         options,
@@ -5983,7 +6008,7 @@ async function executeAuthorizedAction(
     if (!preAuthorized) {
       const decision = await options.permissionManager.authorize(hydratedAction);
       if (!decision.allowed) {
-        options.onInfo?.(`[tool:${hydratedAction.type}] denied`);
+        options.onInfo?.(`[tool:${hydratedAction.type}] denied`, toolEnd(hydratedAction.type, 'denied'));
         await recordHeimdallActionEvent(
           session,
           options,
@@ -6022,7 +6047,7 @@ async function executeAuthorizedAction(
     if (options.approvalRuntime) {
       const gate = await options.approvalRuntime.checkAction(hydratedAction, options.cwd, resolvedMcpServerOf(hydratedAction));
       if (!gate.ok) {
-        if (!gate.pending) options.onInfo?.(`[tool:${hydratedAction.type}] denied`);
+        if (!gate.pending) options.onInfo?.(`[tool:${hydratedAction.type}] denied`, toolEnd(hydratedAction.type, 'denied'));
         await recordHeimdallActionEvent(session, options, 'action_denied', hydratedAction, {
           reason: gate.error.code,
           denied_by: 'approval_gate',
@@ -6034,9 +6059,14 @@ async function executeAuthorizedAction(
 
     // MCP actions name their server (and tool), so the host can tell its own
     // server's tools from another server's content (artemis-online run trust).
-    options.onInfo?.(`[tool:${hydratedAction.type}] running${mcpTarget(hydratedAction)}`);
+    options.onInfo?.(`[tool:${hydratedAction.type}] running${mcpTarget(hydratedAction)}`, {
+      type: 'tool_start',
+      callId,
+      tool: hydratedAction.type,
+      ...(toolDetail(hydratedAction) ? { detail: toolDetail(hydratedAction) } : {}),
+    });
     if (options.onToolActivity) {
-      activityCallId = `call_${++toolActivitySeq}`;
+      activityCallId = callId;
       notifyToolActivity(options, { phase: 'start', callId: activityCallId, action: hydratedAction as unknown as ToolActivityAction });
     }
     await recordHeimdallActionEvent(
@@ -6063,7 +6093,7 @@ async function executeAuthorizedAction(
     // without printing anything; a host that stops runs with no progress
     // must still see that this one is alive.
     const stopHeartbeat = options.toolHeartbeatMs && options.toolHeartbeatMs > 0
-      ? startToolHeartbeat(hydratedAction.type, options.onInfo, options.toolHeartbeatMs, toolHeartbeatLimitMs(hydratedAction))
+      ? startToolHeartbeat(hydratedAction.type, options.onInfo, options.toolHeartbeatMs, toolHeartbeatLimitMs(hydratedAction), callId)
       : () => undefined;
     let result: Awaited<ReturnType<typeof executeAgentAction>>;
     try {
@@ -6107,8 +6137,11 @@ async function executeAuthorizedAction(
         result.ok,
         result.output ?? '',
       );
+      const summary = toolEndSummary(result.ok, uiPayload);
+      const artifacts = toolArtifacts(completedAction, result.ok, uiPayload, result.output ?? '');
       options.onInfo?.(
         `[tool:${hydratedAction.type}] ${result.ok ? 'ok' : 'failed'} ${JSON.stringify(uiPayload)}`,
+        toolEnd(hydratedAction.type, result.ok ? 'ok' : 'failed', { ...(summary ? { summary } : {}), ...(artifacts ? { artifacts } : {}) }),
       );
     }
     await recordHeimdallActionEvent(
@@ -6130,7 +6163,7 @@ async function executeAuthorizedAction(
       error: result.error,
     });
   } catch (error) {
-    options.onInfo?.(`[tool:${action.type}] error`);
+    options.onInfo?.(`[tool:${action.type}] error`, toolEnd(action.type, 'error'));
     await recordHeimdallActionEvent(
       session,
       options,
@@ -6187,7 +6220,7 @@ async function resolveActionPermissions<TAction extends AgentAction>(
     const hydratedAction = await hydrateRuntimeManagedAction(action, options.cwd);
     const profilePolicy = validateProfileAction(profile, hydratedAction);
     if (!profilePolicy.allowed) {
-      options.onInfo?.(`[tool:${hydratedAction.type}] blocked by profile policy`);
+      options.onInfo?.(`[tool:${hydratedAction.type}] blocked by profile policy`, { type: 'tool_end', callId: `call_${++toolActivitySeq}`, tool: hydratedAction.type, status: 'blocked' });
       await recordHeimdallActionEvent(
         session,
         options,
@@ -6214,7 +6247,7 @@ async function resolveActionPermissions<TAction extends AgentAction>(
     try {
       const decision = await options.permissionManager.authorize(hydratedAction);
       if (!decision.allowed) {
-        options.onInfo?.(`[tool:${hydratedAction.type}] denied`);
+        options.onInfo?.(`[tool:${hydratedAction.type}] denied`, { type: 'tool_end', callId: `call_${++toolActivitySeq}`, tool: hydratedAction.type, status: 'denied' });
         await recordHeimdallActionEvent(
           session,
           options,
@@ -6248,7 +6281,7 @@ async function resolveActionPermissions<TAction extends AgentAction>(
       );
       allowed.push(hydratedAction as TAction);
     } catch (error) {
-      options.onInfo?.(`[tool:${hydratedAction.type}] authorize_error`);
+      options.onInfo?.(`[tool:${hydratedAction.type}] authorize_error`, { type: 'tool_end', callId: `call_${++toolActivitySeq}`, tool: hydratedAction.type, status: 'error' });
       await recordHeimdallActionEvent(
         session,
         options,
@@ -7722,6 +7755,7 @@ async function runAgentInner(
               // Encode newlines so the receiver can rebuild the text.
               onInfoCallback(
                 `[stream-chunk] profile=${profile} turn=${turn} delta=${JSON.stringify(delta)}`,
+                { type: 'text_delta', text: delta, profile },
               );
             },
           );
@@ -7829,7 +7863,17 @@ async function runAgentInner(
         usageBits.push(`duration_ms=${completion.usage.durationMs}`);
       }
       if (usageBits.length > 0) {
-        options.onInfo?.(`[usage] profile=${profile} ${usageBits.join(' ')}`);
+        const u = completion.usage;
+        const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+        const usageEvent: ProgressEvent = {
+          type: 'usage',
+          ...(num(u.promptTokens) !== undefined ? { inputTokens: num(u.promptTokens) } : {}),
+          ...(num(u.completionTokens) !== undefined ? { outputTokens: num(u.completionTokens) } : {}),
+          ...(num(u.cacheReadTokens) !== undefined ? { cacheReadTokens: num(u.cacheReadTokens) } : {}),
+          ...(num(u.cacheCreationTokens) !== undefined ? { cacheWriteTokens: num(u.cacheCreationTokens) } : {}),
+          ...(num(u.totalTokens) !== undefined ? { totalTokens: num(u.totalTokens) } : {}),
+        };
+        options.onInfo?.(`[usage] profile=${profile} ${usageBits.join(' ')}`, usageEvent);
       }
     }
     const envelope = tryParseEnvelope(completion.text);
@@ -7850,7 +7894,7 @@ async function runAgentInner(
         (options.profile ?? 'main') === 'main' &&
         didTaskBoardJustCloseWithoutVerification(previousTasks, nextTasks);
       if (nextTasks.length > 0) {
-        options.onInfo?.('[tasks] updated');
+        options.onInfo?.('[tasks] updated', { type: 'todo', items: todoEventItems(nextTasks) });
       }
     }
     if (Array.isArray(envelope.plan)) {

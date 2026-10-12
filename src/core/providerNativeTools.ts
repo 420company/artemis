@@ -1115,6 +1115,29 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           timeoutSeconds: { type: 'integer', minimum: 15, maximum: 600 },
         },
       };
+    case 'todo':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['todos'],
+        properties: {
+          todos: {
+            type: 'array',
+            maxItems: 30,
+            description: 'The whole plan, in order, every time (it replaces the previous list). Steps in the user\'s language, a few words each.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['content'],
+              properties: {
+                id: { type: 'string', description: 'Keep the same id for the same step across updates (t1, t2, ...).' },
+                content: nonEmptyStringSchema('What this step does, in a few words.'),
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked'] },
+              },
+            },
+          },
+        },
+      };
     case 'post_update':
       return {
         type: 'object',

@@ -383,7 +383,16 @@ export type MemoryEnhancementConfig = {
 
 export type VidarAssetHostingConfig = {
   enabled: boolean;
-  provider: 's3' | 'r2';
+  /**
+   * s3 / r2: this host's own bucket and keys. platform: the hosted
+   * platform's gateway issues a one-time upload URL per file
+   * (`POST <gateway>/v1/assets/presign`), so no storage key is ever here;
+   * read from the global store only (tools/vidarAssetHosting.ts).
+   */
+  provider: 's3' | 'r2' | 'platform';
+  /** platform: the gateway's API root and the owner's platform key (default: the platform-managed main profile's). */
+  baseUrl?: string;
+  apiKey?: string;
   endpoint?: string;
   bucket?: string;
   region?: string;

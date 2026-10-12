@@ -6,6 +6,7 @@ import { buildWorkflowStrengthContract } from './workflowStrength.js';
 import type { AgentRole, PlanItem, RunResult, SessionRecord } from './types.js';
 import type { ImageAttachment, ImageMediaType } from '../providers/types.js';
 import { truncate } from '../utils/fs.js';
+import { childInfo, nextAgentRef } from './progressEvents.js';
 
 type CriticKind =
   | 'spec'
@@ -784,7 +785,7 @@ export async function runNidhoggWorkflow(
           ...buildNestedNidhoggOptions(`builder round ${round}`),
           appendUserMessage: true,
           imageAttachments: round === 1 ? imageAttachments : undefined,
-          onInfo: (message) => options.onInfo?.(`[nidhogg:builder:r${round}] ${message}`),
+          onInfo: childInfo(options.onInfo, `[nidhogg:builder:r${round}]`, nextAgentRef('builder')),
         },
         { title: `[nidhogg:builder:r${round}] ${truncate(activeUserPrompt, 60)}` },
       ),
@@ -849,7 +850,7 @@ export async function runNidhoggWorkflow(
               }),
               appendUserMessage: true,
               imageAttachments: kind === 'visual' ? imageAttachments : undefined,
-              onInfo: (message) => options.onInfo?.(`[nidhogg:${kind}:r${round}] ${message}`),
+              onInfo: childInfo(options.onInfo, `[nidhogg:${kind}:r${round}]`, nextAgentRef('reviewer')),
             },
             { title: `[nidhogg:${kind}:r${round}] ${truncate(activeUserPrompt, 50)}` },
           ),
@@ -923,7 +924,7 @@ export async function runNidhoggWorkflow(
             permissionManager: options.permissionManager.fork('read-only'),
           }),
           appendUserMessage: true,
-          onInfo: (message) => options.onInfo?.(`[nidhogg:judge:r${round}] ${message}`),
+          onInfo: childInfo(options.onInfo, `[nidhogg:judge:r${round}]`, nextAgentRef('reviewer')),
         },
         { title: `[nidhogg:judge:r${round}] ${truncate(activeUserPrompt, 50)}` },
       ),

@@ -2064,6 +2064,14 @@ export async function executeGenerateLongVideo(
     const heartbeatInterval = 60_000 * 2; // 2 minutes
 
     toolLog(`🎬 开始按段生成 ${segments.length} 段视频（${actualTotalSeconds}s 总时长）。`);
+    // Segment n of N for the host's progress view (core/progressEvents.ts).
+    const segmentProgress = (segment: { index: number; title?: string }, status: 'started' | 'done' | 'failed') => {
+      try {
+        context.progress?.({ type: 'segment', job: 'long_video', index: segment.index, total: segments.length, status, ...(segment.title ? { label: segment.title } : {}) });
+      } catch {
+        // A progress listener never breaks the generation.
+      }
+    };
     for (const segment of segments) {
       const cutsIn = segment.index > 1 && sanitizedShots?.[segment.index - 1]?.transitionKind === 'cut';
       // Manual heartbeat check to keep the bridge alive
@@ -2076,8 +2084,10 @@ export async function executeGenerateLongVideo(
       if (canReuse) {
         reusedSegmentPaths.push(segment.outputPath);
         toolLog(`♻️ 第 ${segment.index}/${segments.length} 段：已存在缓存，复用 ${segment.outputPath}`);
+        segmentProgress(segment, 'done');
       } else {
         toolLog(`🎬 正在生成第 ${segment.index}/${segments.length} 段（${segment.duration}s · ${segment.title ?? '无标题'}）...`);
+        segmentProgress(segment, 'started');
         // Generate this segment's Image-2 opening keyframe right before the
         // BytePlus call. RELAY CHAIN: for shots N>1, `previousLastFramePath`
         // holds segment N-1's actual closing frame (extracted at the end of
@@ -2296,6 +2306,7 @@ export async function executeGenerateLongVideo(
               usingUserImageReferences ? '用户图' : '无用户图',
             ].join(' / ');
             toolLog(`✅ 第 ${segment.index}/${segments.length} 段完成（${tags}）。`);
+            segmentProgress(segment, 'done');
             break;
           }
           lastError = result.output ?? '';
@@ -2366,6 +2377,7 @@ export async function executeGenerateLongVideo(
         }
 
         if (!succeeded) {
+          segmentProgress(segment, 'failed');
           return {
             action,
             ok: false,

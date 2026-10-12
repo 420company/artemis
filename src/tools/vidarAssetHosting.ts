@@ -133,7 +133,8 @@ async function loadHostingConfigFromStore(cwd: string): Promise<VidarAssetHostin
       continue;
     }
     const hosting = data.visualProfile?.assetHosting;
-    if (hosting?.enabled) return hosting;
+    // A platform entry holds no bucket: resolvePlatformAssetHosting reads it (global store only).
+    if (hosting?.enabled && hosting.provider !== 'platform') return hosting;
   }
   return undefined;
 }
@@ -215,6 +216,95 @@ async function putS3Object(config: ResolvedAssetHostingConfig, objectKey: string
   }
 }
 
+/**
+ * The hosted platform's reference hosting: the gateway signs one upload URL
+ * per file under this account's own prefix (`POST <baseUrl>/assets/presign`)
+ * and keeps the storage key itself. Only the global store is read (a
+ * workspace's providers.json cannot point the platform key elsewhere).
+ * `assetHosting: {provider: "platform", enabled: false}` turns it off.
+ */
+export type PlatformAssetHosting = { baseUrl: string; apiKey: string };
+
+export function platformAssetHostingFromStore(data: Partial<ProviderStoreData> | undefined): PlatformAssetHosting | undefined {
+  if (!data) return undefined;
+  const hosting = data.visualProfile?.assetHosting;
+  if (hosting && hosting.provider === 'platform' && !hosting.enabled) return undefined;
+  // An own bucket is configured: that one is used, not the platform's.
+  if (hosting && hosting.provider !== 'platform' && hosting.enabled) return undefined;
+  const isUrl = (v: unknown): v is string => typeof v === 'string' && /^https?:\/\/\S+$/i.test(v.trim());
+  const isKey = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+  if (hosting?.provider === 'platform' && isUrl(hosting.baseUrl) && isKey(hosting.apiKey)) {
+    return { baseUrl: hosting.baseUrl.trim(), apiKey: hosting.apiKey.trim() };
+  }
+  const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+  const main = profiles.find((p) => p?.id === (data.defaultMainProfileId ?? 'executor'));
+  const managed = !!main && (main.capabilitiesSource === 'platform' || main.managedBy === 'platform');
+  if (!managed || !isUrl(main?.baseUrl) || !isKey(main?.apiKey)) return undefined;
+  return { baseUrl: main!.baseUrl.trim(), apiKey: main!.apiKey.trim() };
+}
+
+export async function resolvePlatformAssetHosting(): Promise<PlatformAssetHosting | undefined> {
+  try {
+    const { createGlobalProviderStore } = await import('../providers/store.js');
+    return platformAssetHostingFromStore(await createGlobalProviderStore().load());
+  } catch {
+    return undefined;
+  }
+}
+
+const PRESIGN_TIMEOUT_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+
+/** One file through the platform: a signed upload URL for exactly this file, then the upload. */
+export async function uploadViaPlatform(
+  hosting: PlatformAssetHosting,
+  file: { body: Buffer; contentType: string; kind: HostedReferenceKind; name: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  let presign: Response;
+  try {
+    presign = await fetchImpl(`${hosting.baseUrl.replace(/\/+$/, '')}/assets/presign`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${hosting.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: file.kind, contentType: file.contentType, bytes: file.body.length, name: file.name.slice(0, 120) }),
+      signal: AbortSignal.timeout(PRESIGN_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new Error(`Video generation: reference hosting is unreachable (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  const answer = await presign.json().catch(() => ({})) as { uploadUrl?: unknown; headers?: unknown; publicUrl?: unknown; error?: { code?: unknown; message?: unknown } };
+  if (!presign.ok) {
+    const code = typeof answer.error?.code === 'string' ? answer.error.code : `HTTP ${presign.status}`;
+    if (presign.status === 404 || code === 'asset_hosting_unavailable') {
+      throw new Error('Video generation: this platform does not host reference videos or audio yet. Use a public https URL for the reference instead.');
+    }
+    if (code === 'asset_too_large') throw new Error(`Video generation: the reference file is too large to upload (${Math.round(file.body.length / 1024 / 1024)} MB).`);
+    throw new Error(`Video generation: reference upload was refused (${code}).`);
+  }
+  if (typeof answer.uploadUrl !== 'string' || !/^https:\/\//i.test(answer.uploadUrl) || typeof answer.publicUrl !== 'string' || !/^https:\/\//i.test(answer.publicUrl)) {
+    throw new Error('Video generation: reference hosting gave no usable upload address.');
+  }
+  // Only the headers the signature covers (content type, length); nothing of ours.
+  const headers: Record<string, string> = {};
+  if (answer.headers && typeof answer.headers === 'object' && !Array.isArray(answer.headers)) {
+    for (const [key, value] of Object.entries(answer.headers as Record<string, unknown>)) {
+      if (typeof value === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(key) && !/^(authorization|cookie)$/i.test(key)) headers[key] = value;
+    }
+  }
+  headers['content-type'] ??= file.contentType;
+  let res: Response;
+  try {
+    res = await fetchImpl(answer.uploadUrl, { method: 'PUT', headers, body: new Uint8Array(file.body), signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+  } catch (error) {
+    throw new Error(`Video generation: reference upload failed (${error instanceof Error ? error.message : String(error)}).`);
+  }
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    throw new Error(`Video generation: reference upload failed (HTTP ${res.status}): ${raw.slice(0, 300)}`);
+  }
+  return answer.publicUrl;
+}
+
 export async function uploadLocalReferenceAssets(
   paths: string[] | undefined,
   kind: HostedReferenceKind,
@@ -223,8 +313,11 @@ export async function uploadLocalReferenceAssets(
   const rawPaths = Array.isArray(paths) ? paths.map((value) => value.trim()).filter(Boolean) : [];
   if (rawPaths.length === 0) return [];
 
+  // An own bucket (env or store) first; else the hosted platform's signed uploads.
   const config = await resolveVidarAssetHostingConfig(context.cwd);
-  if (!config) throw requiredConfigError();
+  const platform = config ? undefined : await resolvePlatformAssetHosting();
+  if (!config && !platform) throw requiredConfigError();
+  const maxUploadBytes = config?.maxUploadBytes ?? DEFAULT_MAX_REFERENCE_UPLOAD_BYTES;
 
   const urls: string[] = [];
   for (const rawPath of rawPaths) {
@@ -234,8 +327,8 @@ export async function uploadLocalReferenceAssets(
       context,
     });
     const info = await stat(resolved.absolute);
-    if (info.size > config.maxUploadBytes) {
-      throw new Error(`Video generation: local ${kind} reference is too large to upload (${Math.round(info.size / 1024 / 1024)} MB > ${Math.round(config.maxUploadBytes / 1024 / 1024)} MB): ${rawPath}`);
+    if (info.size > maxUploadBytes) {
+      throw new Error(`Video generation: local ${kind} reference is too large to upload (${Math.round(info.size / 1024 / 1024)} MB > ${Math.round(maxUploadBytes / 1024 / 1024)} MB): ${rawPath}`);
     }
     let body: Buffer = Buffer.from(await readFile(resolved.absolute));
     let uploadPath = resolved.absolute;
@@ -257,6 +350,10 @@ export async function uploadLocalReferenceAssets(
       } catch (error) {
         toolWarn(`⚠️ HEIC 转换失败，将按原始 HEIC 上传: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+    if (!config) {
+      urls.push(await uploadViaPlatform(platform!, { body, contentType: inferContentType(uploadPath, kind), kind, name: path.basename(uploadPath) }));
+      continue;
     }
     const objectKey = buildObjectKey(config, uploadPath, kind);
     await putS3Object(config, objectKey, body, inferContentType(uploadPath, kind));

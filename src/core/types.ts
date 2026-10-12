@@ -786,6 +786,8 @@ export type AgentAction =
   | { type: 'request_user_confirmation'; question: string; screenshotPath?: string; timeoutMs?: number }
   /** A short progress message shown to the user at once, while the run goes on (core/agentUpdates.ts). */
   | { type: 'post_update'; text: string }
+  /** The run's plan as a checklist: the whole list each time (core/todoList.ts). */
+  | { type: 'todo'; todos: Array<{ id?: string; content: string; status?: TaskStatus }> }
   /** Keys, passwords, SSH bootstrap, VPN setup and checks for a server the agent set up (tools/serverSetup). */
   | ({ type: 'server_setup' } & Omit<import('../tools/serverSetup/serverSetup.js').ServerSetupAction, 'type'>)
   /** A one-time code sent to the agent's own mailbox or phone (tools/verificationCodes.ts). */
@@ -901,6 +903,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'load_skill',
   'request_user_confirmation',
   'post_update',
+  'todo',
   'server_setup',
   'get_verification_code',
   'agent_mail_address',
@@ -922,6 +925,8 @@ export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',
+  // Writes the conversation's task board (core/todoList.ts).
+  'todo',
 ] as const satisfies readonly AgentActionType[];
 
 export type AssistantEnvelope = {

@@ -208,6 +208,8 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   // Short progress messages the user sees while the run goes on
   // (core/agentUpdates.ts); hosts without a live channel refuse them.
   'post_update',
+  // The run's plan as a checklist the owner sees (core/todoList.ts).
+  'todo',
   // Set up a server the agent rented for the user: keys and passwords in the
   // credential store, SSH bootstrap, hardening, VPN, checks.
   'server_setup',

@@ -337,6 +337,7 @@ export async function runCli(argv: string[]): Promise<void> {
       retry: options.retry,
       retryOf: options.retryOf,
       keepApprovals: options.keepApprovals,
+      ...(options.outputFormat ? { outputFormat: options.outputFormat } : {}),
     })
     return
   }
@@ -689,6 +690,7 @@ async function runQueryCommand(options: {
   retry?: boolean
   retryOf?: string
   keepApprovals?: boolean
+  outputFormat?: 'text' | 'stream-json'
 }): Promise<void> {
   const { cwd, locale, mode, model } = options
   const prompt = options.prompt ?? ''
@@ -716,6 +718,11 @@ async function runQueryCommand(options: {
   }
   // Real agent loop (headless). analyze = read-only tools, execute = full access.
   const { runHeadlessAgent } = await import('../services/headlessAgent.js')
+  // --output-format stream-json: progress events on stdout (services/streamJson.ts); stderr unchanged.
+  const stream = options.outputFormat === 'stream-json'
+    ? new (await import('../services/streamJson.js')).StreamJsonWriter({ locale: locale === 'zh-CN' ? 'zh-CN' : 'en' })
+    : undefined
+  if (stream) stream.start({ mode, engine: (await import('../appMeta.js')).APP_VERSION })
   const finalPrompt = mode === 'analyze'
     ? `${t('只分析不修改：调研以下问题并给出结论，不要改动任何文件或执行有副作用的命令。', 'Analysis only: investigate the question and report conclusions without modifying files or running side-effectful commands.')}\n\n${prompt}`
     : prompt
@@ -733,7 +740,11 @@ async function runQueryCommand(options: {
       // One line per event: a newline inside a message (a tool's output) is
       // escaped, so nothing a tool prints can start a protocol line of its own
       // ([agent-update], [approval-request], …) for the host.
-      onInfo: (message) => console.error(oneLine(message)),
+      // The line first (hosts check every [tool:…] line on stderr), then its event.
+      onInfo: (message, event) => {
+        console.error(oneLine(message))
+        stream?.onInfo(message, event)
+      },
       ...(options.intent !== undefined ? { intent: options.intent } : {}),
       // Headless: an action that needs the owner's approval stops the run
       // (ARTEMIS_APPROVALS=off refuses it instead, as before).
@@ -770,22 +781,35 @@ async function runQueryCommand(options: {
   if (result.approval) {
     process.exitCode = approvals.APPROVAL_REQUIRED_EXIT_CODE
   }
-  const approvalLine = result.approval
+  if (stream) {
+    // The closing panel's content as the last event (stdout carries nothing else).
+    stream.result({
+      sessionId: result.sessionId,
+      turns: result.turns,
+      durationMs: result.durationMs,
+      reply: result.reply,
+      ...(result.approval ? { approval: result.approval } : {}),
+      contextNotices: result.contextNotices,
+    })
+  }
+  const approvalLine = !stream && result.approval
     ? (result.approval.locale === 'zh-CN'
       ? `⏸ 需要你同意后才能继续：${result.approval.title}（请求 ${result.approval.id}，${new Date(result.approval.expiresAt).toLocaleString('zh-CN')} 前有效）`
       : `⏸ Waiting for your approval: ${result.approval.title} (request ${result.approval.id}, valid until ${result.approval.expiresAt})`)
     : undefined
-  console.log()
-  console.log(buildPanel(mode === 'analyze' ? t('分析结果', 'Analysis result') : t('执行结果', 'Execution result'), [
-    ...(approvalLine ? [result.reply, '', approvalLine] : [result.reply]),
-    '',
-    `Session: ${result.sessionId}`,
-    `Turns: ${result.turns}`,
-    `Duration: ${result.durationMs}ms`,
-    // After the block the web server parses, so it stays intact.
-    ...result.contextNotices.map((notice) => `Context: ${notice.replace(/^\[(?:context|上下文)\]\s*/, '')}`),
-  ]))
-  console.log()
+  if (!stream) {
+    console.log()
+    console.log(buildPanel(mode === 'analyze' ? t('分析结果', 'Analysis result') : t('执行结果', 'Execution result'), [
+      ...(approvalLine ? [result.reply, '', approvalLine] : [result.reply]),
+      '',
+      `Session: ${result.sessionId}`,
+      `Turns: ${result.turns}`,
+      `Duration: ${result.durationMs}ms`,
+      // After the block the web server parses, so it stays intact.
+      ...result.contextNotices.map((notice) => `Context: ${notice.replace(/^\[(?:context|上下文)\]\s*/, '')}`),
+    ]))
+    console.log()
+  }
   // Live browser mode: let go of the shared browser, which stays open for the
   // owner and the next run (a CDP connection would keep this process alive).
   await import('../tools/browser/browserSession.js').then((m) => m.releaseBrowser()).catch(() => undefined)

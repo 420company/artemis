@@ -161,6 +161,7 @@ const TOOL_LABELS: Readonly<Record<string, { zh: string; en: string; outputZh?: 
   server_setup: { zh: '设置服务器', en: 'Setting up the server' },
   get_verification_code: { zh: '收取验证码', en: 'Getting the verification code' },
   post_update: { zh: '告诉你进展', en: 'Updating you' },
+  todo: { zh: '更新任务计划', en: 'Updating the plan' },
   agent_mail_address: { zh: '查看专用邮箱', en: 'Checking the agent mailbox' },
   list_emails: { zh: '查看邮件', en: 'Checking email' },
   read_email: { zh: '查看邮件', en: 'Reading an email' },

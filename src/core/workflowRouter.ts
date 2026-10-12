@@ -498,6 +498,9 @@ const SAGA_PLAYBOOK = [
   '- When you talk to the user, call it 「制作长视频」 / "making your long video". Never mention workflow, tool, engine, model or provider names.',
   "- Treat a script or timecoded brief the user wrote as authoritative (preserveUserScript: true); otherwise expand the idea into a brief yourself.",
   '- Take the total duration, aspect ratio and subtitle wishes from the request; ask one short question only when a required choice is missing and cannot be defaulted.',
+  '- An audio file the user attached ("Attached file: …" ending in .mp3/.wav/.m4a/.aac/.flac/.ogg) is the background music: pass that path as soundtrackPath (mixed in after the segments are made). If they want music but sent none, ask them to attach an audio file (or give a direct audio-file URL).',
+  '- A reference video or audio for the look or sound goes in referenceVideoPaths / referenceAudioPaths as the attached path; it is hosted for the video model automatically.',
+  '- For a plan of several steps (brief, segments, music, final cut), keep it as a short todo list and tick steps off as they finish.',
   '- Report the output file path and any segment that failed; never claim a video exists without the tool result.',
 ].join('\n');
 
