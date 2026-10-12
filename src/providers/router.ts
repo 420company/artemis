@@ -10,6 +10,7 @@ import {
   promptForVerifiedProviderProfile,
 } from './onboarding.js';
 import { ProviderStore, runProfileOverride } from './store.js';
+import { resolveAuxiliaryProfile } from './auxiliaryModels.js';
 import {
   createTrackedProviderFromConfig,
   formatProviderUsageTelemetry,
@@ -38,7 +39,8 @@ export type ProviderRouter = {
   resolveProvider(target: ProviderTarget): ChatProvider;
   /**
    * Provider for background summarization (context compaction): the
-   * configured worker/specialist model when there is one, else the main model.
+   * auxiliaryModels.compression route when one is set, else the configured
+   * worker/specialist model when there is one, else the main model.
    */
   resolveSummarizerProvider(): ChatProvider;
 };
@@ -245,6 +247,14 @@ export async function createProviderRouter(
     ? createProviderFromProfile(specialistProfile)
     : undefined;
   const builderProvider = builderProfile ? createProviderFromProfile(builderProfile) : undefined;
+  // An explicit auxiliaryModels.compression route takes compaction (and other
+  // background summaries) off the worker; without one they use the worker,
+  // then the main model.
+  const compressionRoute = await resolveAuxiliaryProfile('compression', options.cwd, { explicitOnly: true })
+    .catch(() => undefined);
+  const compressionProvider = compressionRoute
+    ? createProviderFromProfile(compressionRoute.profile)
+    : undefined;
   let promptHandled = false;
   const mainLabel = mainProfile?.label ?? mainProfile?.id ?? 'main';
 
@@ -344,7 +354,7 @@ export async function createProviderRouter(
     },
 
     resolveSummarizerProvider(): ChatProvider {
-      return specialistProvider ?? options.mainProvider;
+      return compressionProvider ?? specialistProvider ?? options.mainProvider;
     },
 
     resolveProvider(target: ProviderTarget, task?: string): ChatProvider {

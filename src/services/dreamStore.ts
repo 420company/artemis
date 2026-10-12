@@ -17,7 +17,7 @@
  */
 
 import path from 'node:path'
-import { resolveArtemisHomeDir } from '../utils/fs.js'
+import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { mkdir, readFile, writeFile, readdir, unlink, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
@@ -28,8 +28,15 @@ export interface DreamConfig {
   enabled: boolean
   /** Output mode for new dreams. */
   mode: DreamMode
-  /** Append distilled style/preferences to system prompt over time. */
+  /**
+   * Append distilled style/preferences to system prompt over time. Off unless
+   * the owner turned it on in the setup wizard (`evolveChosen`): the notes come
+   * from a model that read session text, and the filter on them is a guard,
+   * not a guarantee.
+   */
   evolveSystemPrompt: boolean
+  /** The owner chose evolveSystemPrompt themselves (older files' `true` is not a choice). */
+  evolveChosen?: boolean
   /** Push composed dreams to all active bridge chats. */
   pushToBridges: boolean
   /** Idle threshold in seconds before a dream may trigger. */
@@ -53,6 +60,8 @@ export interface DreamEntry {
   learned?: string[]
   /** Token cost of composing this dream (best-effort). */
   tokenCost?: { input: number; output: number }
+  /** The style choices it was made with (`dimension:value`, see dreamTaste.ts). */
+  style?: string[]
 }
 
 const DREAMS_ROOT = process.env.ARTEMIS_DREAMS_ROOT && process.env.ARTEMIS_DREAMS_ROOT.trim().length > 0
@@ -72,7 +81,7 @@ const DEFAULT_CONFIG: DreamConfig = {
   // visual provider is required; if missing, the composer silently degrades to
   // text-only so the dream still completes.
   mode: 'vision',
-  evolveSystemPrompt: true,
+  evolveSystemPrompt: false,
   pushToBridges: true,
   idleThresholdSec: 3600,
   maxDreamsPerDay: 3,
@@ -98,6 +107,8 @@ export async function loadDreamConfig(): Promise<DreamConfig> {
     return {
       ...DEFAULT_CONFIG,
       ...raw,
+      // Earlier versions wrote `true` as the default: only an explicit choice counts.
+      evolveSystemPrompt: raw.evolveChosen === true && raw.evolveSystemPrompt === true,
       nightWindow: { ...DEFAULT_CONFIG.nightWindow, ...(raw.nightWindow ?? {}) },
     }
   } catch {
@@ -164,15 +175,18 @@ export async function countDreamsInLast24h(): Promise<number> {
   }).length
 }
 
-export function buildDreamId(now: Date = new Date()): string {
-  const date = now.toISOString().slice(0, 10)
+/**
+ * A dream's id: the local date, the time-of-day slot, the local time to the
+ * second and a short random suffix, so two dreams never share files (two
+ * runs in the same second included).
+ */
+export function buildDreamId(now: Date = new Date(), random: () => number = Math.random): string {
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
   const hour = now.getHours()
   const slot = hour < 5 ? 'midnight' : hour < 12 ? 'dawn' : hour < 18 ? 'noon' : 'night'
-  // Append seconds to avoid collisions when two dreams fall in the same slot.
-  return `${date}_${slot}_${now.getHours().toString().padStart(2, '0')}${now
-    .getMinutes()
-    .toString()
-    .padStart(2, '0')}`
+  const suffix = Math.floor(random() * 36 ** 4).toString(36).padStart(4, '0')
+  return `${date}_${slot}_${pad(hour)}${pad(now.getMinutes())}${pad(now.getSeconds())}-${suffix}`
 }
 
 export function buildDreamPaths(id: string): { mdPath: string; imagePath: string; videoPath: string } {
@@ -183,21 +197,64 @@ export function buildDreamPaths(id: string): { mdPath: string; imagePath: string
   }
 }
 
+/** Longest distilled line kept, in characters. */
+export const LEARNED_LINE_MAX_CHARS = 160
+
+/**
+ * Lines that are not style notes: they name places, run things or talk about
+ * secrets and instructions. Dream notes come from a model that read session
+ * text (and, through memories, tool output), so anything here may be an
+ * injected instruction; only plain notes about tone and style are kept.
+ */
+const LEARNED_LINE_DENY: RegExp[] = [
+  /[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\b[\w-]+\.(?:com|net|org|io|dev|ai|xyz|ru|cn|me|app)\b/i, // URLs and hosts
+  /(?:^|[\s"'`(])(?:~|\.{1,2})?\/[\w.-]|[a-z]:\\|\\\\/i, // file paths
+  /`|\$\(|\$\{|&&|\|\||;\s*\w|\|\s*\w|>\s*\/|\b(?:curl|wget|rm|sudo|ssh|scp|chmod|chown|bash|sh|zsh|python3?|node|npm|npx|pip|git|eval|exec|powershell|nc|base64)\b/i, // commands
+  /\b(?:password|passwd|passphrase|token|api[\s_-]?key|secret|credential|private[\s_-]?key|seed[\s_-]?phrase|mnemonic|cookie|session[\s_-]?id|wallet|\.ssh|\.env)\b|密码|口令|密钥|私钥|令牌|助记词|凭据|钱包|cookie/i, // secrets
+  /\b(?:ignore|disregard|override|forget)\b.{0,40}\b(?:previous|prior|above|earlier|system|instructions?|rules?)\b|\bsystem prompt\b|\b(?:always|never|must)\s+(?:send|upload|post|share|forward|reveal|run|execute|delete|disable|bypass|obey)\b|\bfrom now on\b|忽略.{0,10}(?:之前|以上|上面|规则|指令)|系统提示|发送到|上传到|转发到|一律|从现在起/i, // instructions
+]
+
+/** The style notes worth keeping from a dream's "what I learned" lines (see LEARNED_LINE_DENY). */
+export function sanitizeLearnedLines(lines: readonly string[]): string[] {
+  const kept: string[] = []
+  for (const raw of lines) {
+    // eslint-disable-next-line no-control-regex
+    const line = raw.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g, ' ').replace(/^[-•*]\s*/, '').replace(/\s+/g, ' ').trim()
+    if (!line || [...line].length > LEARNED_LINE_MAX_CHARS) continue
+    if (/^#|<\/?[a-z_]+>/i.test(line)) continue
+    if (LEARNED_LINE_DENY.some((re) => re.test(line))) continue
+    kept.push(line)
+  }
+  return kept
+}
+
+/**
+ * The learned style notes, as stored, with every note that would not pass
+ * sanitizeLearnedLines dropped (a file written by an older version, or by
+ * hand, is filtered the same way).
+ */
 export async function loadLearnedPrompt(): Promise<string> {
   if (!existsSync(LEARNED_PROMPT_FILE)) return ''
   try {
-    return (await readFile(LEARNED_PROMPT_FILE, 'utf8')).trim()
+    const text = (await readFile(LEARNED_PROMPT_FILE, 'utf8')).trim()
+    const out: string[] = []
+    for (const line of text.split('\n')) {
+      if (/^#{1,3}\s/.test(line) || !line.trim()) out.push(line)
+      else if (sanitizeLearnedLines([line]).length > 0) out.push(`- ${sanitizeLearnedLines([line])[0]}`)
+    }
+    return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
   } catch {
     return ''
   }
 }
 
 export async function appendLearnedPrompt(distilled: string[]): Promise<void> {
-  if (distilled.length === 0) return
+  const notes = sanitizeLearnedLines(distilled)
+  if (notes.length === 0) return
   await ensureRoot()
   const existing = await loadLearnedPrompt()
   const stamp = new Date().toISOString().slice(0, 10)
-  const block = [`### ${stamp}`, ...distilled.map(line => `- ${line.trim()}`)].join('\n')
+  const block = [`### ${stamp}`, ...notes.map(line => `- ${line}`)].join('\n')
   let next = existing ? `${existing}\n\n${block}` : `# Artemis Learned Style\n\n${block}`
   // Cap size — when over budget, keep the most recent half. This is a coarse
   // truncation; a future iteration could ask the LLM to compress instead.
@@ -305,53 +362,127 @@ export async function findLatestDreamImage(): Promise<string | null> {
   }
 }
 
+/** Which sessions count as "today" for a dream: modified inside the window. */
+export interface DreamActivityWindow {
+  /** Workspace whose engine sessions count too (headless runs keep them there). */
+  cwd?: string
+  /** Start of the window, ms since epoch (default: 24 hours before `untilMs`). */
+  sinceMs?: number
+  /** End of the window, ms since epoch (default: now). */
+  untilMs?: number
+}
+
 /**
- * Best-effort: scan ~/.artemis/sessions/*.json for sessions touched in the
- * last 24h. Used by the composer to gather "what did the user work on today".
+ * Session directories a dream reads: the workspace's own data root (where
+ * headless runs such as `artemis execute` keep their sessions) and the
+ * global ~/.artemis/sessions, without duplicates.
+ */
+function dreamSessionDirs(cwd: string | undefined): string[] {
+  const dirs = [
+    ...(cwd ? [path.join(resolveDataRootDir(cwd), 'sessions')] : []),
+    path.join(resolveArtemisHomeDir(), 'sessions'),
+  ].map((dir) => path.resolve(dir))
+  return [...new Set(dirs)]
+}
+
+/** Session files read per dream at most, and the largest one read. */
+const MAX_SESSION_FILES = 200
+const MAX_SESSION_FILE_BYTES = 32 * 1024 * 1024
+
+interface WindowSession {
+  file: string
+  title: string
+  cwd: string
+  /** User messages written inside the window, oldest first. */
+  userMessages: string[]
+  /** When the session last had activity inside the window. */
+  lastAt: number
+}
+
+const timeOf = (value: unknown): number | undefined => {
+  const t = typeof value === 'string' ? Date.parse(value) : Number.NaN
+  return Number.isFinite(t) ? t : undefined
+}
+
+/**
+ * Sessions with activity inside the window, newest first. A session counts
+ * by when its messages were written (their `createdAt`), not by when its file
+ * was last touched: a session first used today but saved again tomorrow still
+ * belongs to today. A message without a time takes the session's
+ * `updatedAt`, then the file time. Files last modified before the window
+ * cannot hold anything inside it and are not read.
+ */
+async function listWindowSessions(window: DreamActivityWindow = {}): Promise<WindowSession[]> {
+  const untilMs = window.untilMs ?? Date.now()
+  const sinceMs = window.sinceMs ?? untilMs - 24 * 60 * 60 * 1000
+  const candidates: Array<{ file: string; mtime: number; size: number }> = []
+  for (const dir of dreamSessionDirs(window.cwd)) {
+    if (!existsSync(dir)) continue
+    const files = await readdir(dir).catch(() => [] as string[])
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue
+      const file = path.join(dir, f)
+      try {
+        const st = await stat(file)
+        if (st.mtimeMs >= sinceMs) candidates.push({ file, mtime: st.mtimeMs, size: st.size })
+      } catch { /* skip */ }
+    }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  const inWindow = (t: number) => t >= sinceMs && t <= untilMs
+  const sessions: WindowSession[] = []
+  for (const { file, mtime, size } of candidates.slice(0, MAX_SESSION_FILES)) {
+    if (size > MAX_SESSION_FILE_BYTES) continue
+    try {
+      const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+      const fallback = timeOf(raw?.updatedAt) ?? mtime
+      const messages = Array.isArray(raw?.messages) ? (raw.messages as Array<Record<string, unknown>>) : []
+      let lastAt: number | undefined
+      const userMessages: string[] = []
+      for (const m of messages) {
+        const at = timeOf(m?.createdAt) ?? fallback
+        if (!inWindow(at)) continue
+        lastAt = Math.max(lastAt ?? at, at)
+        if (m?.role === 'user' && typeof m?.content === 'string' && m.content.trim()) {
+          userMessages.push(m.content.replace(/\s+/g, ' ').slice(0, 220))
+        }
+      }
+      if (lastAt === undefined) continue
+      sessions.push({
+        file,
+        title: typeof raw?.title === 'string' ? raw.title : 'untitled session',
+        cwd: typeof raw?.cwd === 'string' ? raw.cwd : '?',
+        userMessages,
+        lastAt,
+      })
+    } catch { /* skip malformed */ }
+  }
+  return sessions.sort((a, b) => b.lastAt - a.lastAt)
+}
+
+/** How many engine sessions were active in the window (0 = nothing to dream about). */
+export async function countRecentSessions(window: DreamActivityWindow = {}): Promise<number> {
+  return (await listWindowSessions(window)).length
+}
+
+/**
+ * Best-effort: scan the workspace's and ~/.artemis's sessions/*.json for
+ * sessions with activity in the window (default: the last 24h). Used by the
+ * composer to gather "what did the user work on today".
  * Only returns light metadata + the first/last user message of each session
  * — never the full transcript — to keep prompts small and avoid leaking
  * arbitrary chat content into the dream LLM call.
  */
-export async function gatherRecentSessionDigest(maxSessions = 8): Promise<string[]> {
-  const sessionsDir = path.join(resolveArtemisHomeDir(), 'sessions')
-  if (!existsSync(sessionsDir)) return []
-  const files = await readdir(sessionsDir).catch(() => [])
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000
-  const recent: Array<{ file: string; mtime: number }> = []
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue
-    try {
-      const st = await stat(path.join(sessionsDir, f))
-      if (st.mtimeMs >= cutoff) recent.push({ file: f, mtime: st.mtimeMs })
-    } catch { /* skip */ }
-  }
-  recent.sort((a, b) => b.mtime - a.mtime)
-
-  const digests: string[] = []
-  for (const { file } of recent.slice(0, maxSessions)) {
-    try {
-      const raw = JSON.parse(await readFile(path.join(sessionsDir, file), 'utf8'))
-      const title: string = typeof raw?.title === 'string' ? raw.title : 'untitled session'
-      const cwd: string = typeof raw?.cwd === 'string' ? raw.cwd : '?'
-      const messages: unknown = raw?.messages ?? []
-      let firstUser: string | undefined
-      let lastUser: string | undefined
-      if (Array.isArray(messages)) {
-        for (const m of messages) {
-          if (m?.role === 'user' && typeof m?.content === 'string' && m.content.trim()) {
-            const compact = m.content.replace(/\s+/g, ' ').slice(0, 220)
-            firstUser ??= compact
-            lastUser = compact
-          }
-        }
-      }
-      digests.push([
-        `- ${title}`,
-        `  cwd: ${cwd}`,
-        firstUser ? `  first: ${firstUser}` : '',
-        lastUser && lastUser !== firstUser ? `  last:  ${lastUser}` : '',
-      ].filter(Boolean).join('\n'))
-    } catch { /* skip malformed */ }
-  }
-  return digests
+export async function gatherRecentSessionDigest(maxSessions = 8, window: DreamActivityWindow = {}): Promise<string[]> {
+  const sessions = await listWindowSessions(window)
+  return sessions.slice(0, maxSessions).map(({ title, cwd, userMessages }) => {
+    const firstUser = userMessages[0]
+    const lastUser = userMessages.at(-1)
+    return [
+      `- ${title}`,
+      `  cwd: ${cwd}`,
+      firstUser ? `  first: ${firstUser}` : '',
+      lastUser && lastUser !== firstUser ? `  last:  ${lastUser}` : '',
+    ].filter(Boolean).join('\n')
+  })
 }
