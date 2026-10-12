@@ -6,7 +6,10 @@
  *
  * The call tools there (phone_call_request / phone_call_status /
  * phone_call_hangup) are not listed to the model; place_call is the one way
- * in. The token is only ever sent to a loopback address.
+ * in. The token is only ever sent to a loopback address. The run's extra
+ * MCP headers (ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON, e.g. the run context
+ * that marks an automation's run as restricted) go along, as the engine's
+ * MCP client sends them, so the server refuses a call from such a run.
  */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -17,6 +20,28 @@ export const CALL_HOST_SERVER_ID = 'artemis_online';
 export interface CallHost {
   url: string;
   token: string;
+  /** Extra headers for every request (the run context). */
+  headers?: Record<string, string>;
+}
+
+const HEADERS_ENV = 'ARTEMIS_MCP_ARTEMIS_ONLINE_HEADERS_JSON';
+
+/** The run's extra headers for the owner's server, from the environment (as src/mcp/client.ts reads them). */
+export function hostHeadersFromEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const raw = env[HEADERS_ENV];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      // Never let it replace the bearer token or the body's type.
+      if (typeof value === 'string' && key.trim() && !/^(authorization|content-type)$/i.test(key.trim())) out[key.trim().toLowerCase()] = value.trim();
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 export class CallHostError extends Error {
@@ -40,7 +65,8 @@ export function callHostFromConfig(raw: unknown): CallHost | undefined {
   const url = typeof entry.url === 'string' ? entry.url : '';
   const token = typeof entry.bearerToken === 'string' ? entry.bearerToken : '';
   if (!LOOPBACK.test(url) || !token) return undefined;
-  return { url, token };
+  const headers = hostHeadersFromEnv();
+  return { url, token, ...(Object.keys(headers).length ? { headers } : {}) };
 }
 
 export async function resolveCallHost(cwd: string): Promise<CallHost | undefined> {
@@ -66,7 +92,7 @@ export async function callHostRpc(
   try {
     res = await fetchImpl(host.url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${host.token}` },
+      headers: { ...(host.headers ?? {}), 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${host.token}` },
       body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } }),
       signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
     });

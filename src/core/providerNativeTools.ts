@@ -1307,7 +1307,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           brief: optionalStringSchema('Background the assistant on the call may use (who is calling, preferences, context).'),
           language: { type: 'string', enum: ['zh', 'en'], description: 'Language of the call: zh (Mandarin) or en. Default: the owner\'s language.' },
           allowedFacts: { type: 'array', items: { type: 'string' }, description: 'Facts it may tell the other side (name for the booking, a callback number). Nothing else is shared.' },
-          forbidden: { type: 'array', items: { type: 'string' }, description: 'Facts it must not share and things it must not do.' },
+          forbidden: { type: 'array', items: { type: 'string' }, description: 'Facts it must not share, as "category: value" (e.g. "身份证号: 1101…", "home address: 5 Elm St"). The call model is told only the category; the value is checked in code on every line and key press.' },
           mayAgreeTo: { type: 'array', items: { type: 'string' }, description: 'Alternatives it may accept (e.g. "19:00-20:30", "outdoor seats are fine").' },
           calleeName: optionalStringSchema('Who is being called (the restaurant or shop name).'),
           onBehalfOf: optionalStringSchema('How to name the owner on the call (e.g. "Mr. Li"); omit to say "my client".'),

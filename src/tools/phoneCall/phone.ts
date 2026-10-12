@@ -15,13 +15,16 @@ const EMERGENCY = new Set([
 /** Country codes whose numbers are checked without their trunk zero ("+86 (0)110"). */
 const CODES = ['1', '7', '20', '27', '30', '31', '32', '33', '34', '36', '39', '40', '41', '43', '44', '45', '46', '47', '48', '49', '51', '52', '54', '55', '56', '57', '60', '61', '62', '63', '64', '65', '66', '81', '82', '84', '86', '90', '91', '92', '852', '853', '886'];
 
+/** China's anti-fraud and public-service short numbers: never dialed by the assistant (as on the platform). */
+const CN_SHORT_BLOCKED = new Set(['96110', '95110', '95119', '95120', '96119', '96120', '12321', '12389']);
+
 export type QuickCheck = { ok: true } | { ok: false; code: 'invalid_number' | 'emergency_number' };
 
 export function quickNumberCheck(raw: string | undefined): QuickCheck {
   const text = String(raw ?? '').trim();
   const digits = text.replace(/\D/g, '');
   if (!digits || text.length > 40) return { ok: false, code: 'invalid_number' };
-  if (EMERGENCY.has(digits)) return { ok: false, code: 'emergency_number' };
+  if (EMERGENCY.has(digits) || CN_SHORT_BLOCKED.has(digits)) return { ok: false, code: 'emergency_number' };
   const international = /^\+/.test(text) || digits.startsWith('00');
   if (international) {
     const rest = digits.startsWith('00') ? digits.slice(2) : digits;
@@ -29,6 +32,7 @@ export function quickNumberCheck(raw: string | undefined): QuickCheck {
       if (!rest.startsWith(cc)) continue;
       const national = rest.slice(cc.length);
       if (EMERGENCY.has(national) || EMERGENCY.has(national.replace(/^0/, ''))) return { ok: false, code: 'emergency_number' };
+      if (cc === '86' && CN_SHORT_BLOCKED.has(national)) return { ok: false, code: 'emergency_number' };
     }
   } else if (EMERGENCY.has(digits.replace(/^0/, ''))) {
     return { ok: false, code: 'emergency_number' };
