@@ -203,6 +203,8 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   // headless run stops at a pending approval the host shows as a card and
   // resumes with the answer (security/approvals.ts).
   'request_user_confirmation',
+  // Asks the owner to take over the live browser (sign in, a check).
+  'browser_request_handoff',
   // Short progress messages the user sees while the run goes on
   // (core/agentUpdates.ts); hosts without a live channel refuse them.
   'post_update',
