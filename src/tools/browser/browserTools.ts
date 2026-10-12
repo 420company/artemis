@@ -520,7 +520,8 @@ async function refusalForScripts(page?: Page): Promise<ToolResult | undefined> {
   if (state?.live) return liveSecretRefusal();
   if (page && state) {
     const targetId = await targetIdOf(page);
-    if (!targetId || state.ownerTyped.includes(targetId)) {
+    if (!targetId) return { ok: false, output: SECRET_STATE_UNKNOWN, error: { code: 'secret_guard', message: SECRET_STATE_UNKNOWN } };
+    if (state.ownerTyped.includes(targetId)) {
       return { ok: false, output: OWNER_TYPED_REFUSAL, error: { code: 'owner_typed', message: OWNER_TYPED_REFUSAL } };
     }
   }
