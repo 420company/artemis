@@ -124,7 +124,7 @@ async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
   let web: MockWebHandle | undefined
   let steps = job.mock?.steps ?? []
   if (job.setup.mockWeb) {
-    web = await startMockWeb(path.join(REPO, 'evals', 'zh', 'fixtures', job.setup.mockWeb))
+    web = await startMockWeb(path.join(REPO, 'evals', 'zh', 'fixtures', job.setup.mockWeb), path.join(job.cwd, '.mock-web-port'))
     await installMockBrowser(web.baseUrl, path.join(job.cwd, '.mock-web-page.json'))
     steps = withMockWeb(steps, web.baseUrl)
   }
@@ -132,6 +132,7 @@ async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
     process.env.ARTEMIS_SSH_BIN = path.join(REPO, 'scripts', 'fixtures', 'fakeSsh.mjs')
     process.env.ARTEMIS_SSH_FAKE_LOG = path.join(job.cwd, '.fake-ssh.log')
     process.env.ARTEMIS_SSH_FAKE_STATE = path.join(job.cwd, '.fake-ssh-state.json')
+    if (job.serversReinstalled?.length) process.env.ARTEMIS_SSH_FAKE_REINSTALLED = job.serversReinstalled.join(',')
   }
 
   let mock: MockServerHandle | undefined

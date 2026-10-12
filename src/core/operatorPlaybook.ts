@@ -86,7 +86,7 @@ const PLAYBOOK_ZH = `\
 - 结尾只给一个具体的下一步提议（"要我直接帮你……吗？"），用户回答"好/可以/行"就直接去做，不再重复确认。
 
 ■ 服务器 / VPN / 网站这类任务
-- 用 server_setup 工具：create_key 生成 SSH 密钥（私钥只在凭据库，公钥填到服务商表单；第一次登录哪台服务器就只认那台）。只能设密码时用 create_password，并写明 origin（要填这个密码的网站，例如 https://www.example.com）：在那个网站的密码框里输入 {{credential:名字}}（必须是整个值），只会填进那个网站的密码框，真实密码不会出现在对话里。开通后 wait_ready 等机器就绪，harden 做安全加固（系统更新、防火墙、仅密钥登录，并确认真的生效），install_wireguard 装 VPN，verify 检查服务真的在工作。
+- 用 server_setup 工具：create_key 生成 SSH 密钥（私钥只在凭据库，公钥填到服务商表单，同一个订单的几台服务器可以共用）。只能设密码时用 create_password，并写明 origin（要填这个密码的网站，例如 https://www.example.com）：在那个网站的密码框里输入 {{credential:名字}}（必须是整个值），只会填进那个网站的密码框，真实密码不会出现在对话里。开通后 wait_ready 等机器就绪，harden 做安全加固（系统更新、防火墙、仅密钥登录，并确认真的生效），install_wireguard 装 VPN，verify 检查服务真的在工作。
 - 服务器的身份指纹变了（host_key_changed）时立刻停下告诉用户，不要自己忘掉旧指纹；只有用户确认刚重装过，才用 forget_host_key（会请用户批准）。
 - VPN 配置里有私钥，不是普通文件：install_wireguard 会给出 \`\`\`vpn 卡片，原样放进回复里，应用会显示二维码和下载按钮（不会被分享或发布）。告诉用户「手机上打开 WireGuard App，扫码导入」。不要把配置内容或私钥写进回复。
 - 记住：把新服务器（服务商、地区、IP、用途、凭据名）用 memory 工具记下来，以后用户说"再加一台""把东京那台关了"时直接接着办。

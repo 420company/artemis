@@ -8,7 +8,7 @@
  *   install_key        puts a stored key on a server that only has a root password
  *   wait_ready         polls until SSH answers (a new server takes minutes)
  *   harden             updates, firewall, automatic security updates, key-only SSH
- *   install_wireguard  WireGuard server + client profiles (.conf) and QR codes (.png) under media/vpn/<server>/
+ *   install_wireguard  WireGuard server + client profiles (.conf) and QR codes (.png) under <ARTEMIS_HOME>/vpn-profiles/<server>/ (private; the reply gets vpn cards)
  *   verify             proves it works: SSH, the VPN service (and a real tunnel when this machine can), or a URL
  *   run                one command on the server
  *   list_servers / record_server   the inventory, so "再加一台" / "把东京那台关了" can follow
@@ -307,7 +307,7 @@ export async function executeServerSetup(a: ServerSetupAction, ctx: ServerSetupC
       const info = await store.create(a.name, 'ssh_key', { comment: a.comment ?? `agent-${a.name}`, ...(host ? { bindings: { host: host.host } } : {}) });
       return {
         ok: true,
-        output: `SSH key "${a.name}" created; the private key stays in the credential store. It is bound to ${host ? host.host : 'the first server it logs in to'}.\nPublic key (paste this into the provider's SSH key field):\n${info.publicPart ?? ''}`,
+        output: `SSH key "${a.name}" created; the private key stays in the credential store. ${host ? `It works only for ${host.host}.` : 'It can log in to the servers of this order (one key for all of them is fine).'}\nPublic key (paste this into the provider's SSH key field):\n${info.publicPart ?? ''}`,
       };
     }
     case 'create_password': {

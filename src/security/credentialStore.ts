@@ -11,7 +11,10 @@
  *     credential is bound to (set when it is made, or at its first use), and
  *     only into a password field (a username field for `username`); for SSH,
  *     a `password` is used only as the login password of its bound host;
- *   - `ssh_key`: only to log in to its bound host;
+ *   - `ssh_key`: only for SSH logins, never typed or shown; tied to one
+ *     host when made with one, otherwise usable for the several servers of
+ *     one order (a key login reveals nothing secret to the server, unlike a
+ *     password, which is why passwords are always bound);
  *   - `token` (VPN keys): only by the engine's own server setup.
  * Every secret handed out is remembered for the run and scrubbed from every
  * tool result (`scrubSecrets`), so a page that echoes it back, a console
@@ -159,6 +162,7 @@ export function checkUse(info: CredentialInfo, purpose: CredentialPurpose): { ok
   if (info.bindings.host && info.bindings.host !== host) {
     return { ok: false, code: 'wrong_host', message: `"${info.name}" belongs to ${info.bindings.host}, not ${host}.` };
   }
+  if (info.kind === 'ssh_key') return { ok: true };
   return info.bindings.host ? { ok: true } : { ok: true, bind: { host } };
 }
 

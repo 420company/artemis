@@ -17,7 +17,12 @@ export interface MockWebHandle {
   close: () => Promise<void>
 }
 
-export async function startMockWeb(dir: string): Promise<MockWebHandle> {
+/**
+ * `portFile` keeps the address the same across a task's messages (each runs
+ * in its own process), so a password bound to the mock shop's origin in one
+ * message is still that shop's in the next.
+ */
+export async function startMockWeb(dir: string, portFile?: string): Promise<MockWebHandle> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
@@ -30,8 +35,20 @@ export async function startMockWeb(dir: string): Promise<MockWebHandle> {
     res.writeHead(200, { 'content-type': file.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/octet-stream' })
     res.end(fs.readFileSync(file))
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const listen = (port: number) =>
+    new Promise<boolean>((resolve) => {
+      server.once('error', () => resolve(false))
+      server.listen(port, '127.0.0.1', () => resolve(true))
+    })
+  let wanted = 0
+  try {
+    wanted = portFile ? Number(fs.readFileSync(portFile, 'utf8').trim()) || 0 : 0
+  } catch {
+    wanted = 0
+  }
+  if (!(await listen(wanted)) && !(await listen(0))) throw new Error('mock web: cannot listen')
   const port = (server.address() as { port: number }).port
+  if (portFile) fs.writeFileSync(portFile, String(port))
   return { baseUrl: `http://127.0.0.1:${port}`, close: () => new Promise((resolve) => server.close(() => resolve())) }
 }
 
@@ -59,6 +76,20 @@ function textOf(html: string): string {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n+/g, '\n')
     .trim()
+}
+
+/** The form field a simple selector (#id, [name=x], tag[name="x"]) points at in a page. */
+function fieldOf(html: string, selector: string): { tag: string; type?: string; hints: string } | undefined {
+  const id = /^#([\w-]+)$/.exec(selector)?.[1]
+  const name = /^(?:\w+)?\[name=["']?([\w-]+)["']?\]$/.exec(selector)?.[1]
+  for (const m of html.matchAll(/<(input|textarea|select)\b([^>]*)>/gi)) {
+    const attrs = m[2]!
+    const attr = (key: string) => new RegExp(`\\b${key}="([^"]*)"`, 'i').exec(attrs)?.[1]
+    if ((id && attr('id') === id) || (name && attr('name') === name)) {
+      return { tag: m[1]!, type: attr('type'), hints: `${attr('autocomplete') ?? ''} ${attr('name') ?? ''} ${attr('id') ?? ''}` }
+    }
+  }
+  return undefined
 }
 
 /**
@@ -108,12 +139,20 @@ export async function installMockBrowser(baseUrl: string, stateFile?: string): P
     return ok(a, '已关闭标签页')
   })
   for (const type of ['browser_evaluate', 'browser_console', 'browser_requests', 'browser_tabs']) set(type, async (a) => ok(a, '（离线测试网络：此操作无结果）'))
+  const { resolveCredentialValue, credentialFieldKind } = await import('../../src/tools/browser/browserTools.js')
   const fill = async (a: any, value: string) => {
     if (!page) return bad(a, '还没有打开任何网页')
+    const current = page
     const selector = String(a?.selector ?? '')
     if (!selector) return bad(a, 'selector 必填', 'invalid_input')
-    page.typed[selector] = value
-    return ok(a, `⌨  已输入到 ${selector}: "${value.slice(0, 80)}"`)
+    // Stored credentials go through the real rules: bound origin, field kind, whole value.
+    const resolved = await resolveCredentialValue(value, current.url, async () => {
+      const field = fieldOf(current.html, selector)
+      return field ? credentialFieldKind(field) : 'other'
+    })
+    if (!resolved.ok) return { action: a, ...resolved.result }
+    current.typed[selector] = resolved.credential ? `{{credential:${resolved.credential}}}` : value
+    return ok(a, `⌨  已输入到 ${selector}: "${resolved.credential ? '••••' : value.slice(0, 80)}"`)
   }
   set('browser_type', async (a) => fill(a, String(a?.text ?? '')))
   set('browser_form_input', async (a) => fill(a, String(a?.value ?? (Array.isArray(a?.values) ? a.values.join(',') : a?.checked ?? ''))))

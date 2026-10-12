@@ -146,9 +146,9 @@ await test('status: from real tool activity, deduplicated, parallel-aware', () =
   reporter.onToolActivity({ phase: 'start', callId: 'b', action: { type: 'browser_type', selector: '#email', text: 'a@b.c' } });
   reporter.onToolActivity({ phase: 'end', callId: 'b', action: { type: 'browser_type' } });
   reporter.onToolActivity({ phase: 'end', callId: 'a', action: { type: 'browser_navigate' } });
-  reporter.onToolActivity({ phase: 'start', callId: 'c', action: { type: 'browser_request_handoff', reason: 'sign in' } });
+  reporter.onToolActivity({ phase: 'start', callId: 'c', action: { type: 'browser_request_handoff', reason: 'sign in' } as never });
   reporter.finish(statusForApprovalKind('payment'));
-  reporter.onToolActivity({ phase: 'end', callId: 'c', action: { type: 'browser_request_handoff' } });
+  reporter.onToolActivity({ phase: 'end', callId: 'c', action: { type: 'browser_request_handoff' } as never });
   const events = parse();
   assert.deepEqual(events.map((e) => [e.phase, e.activity, e.detail ?? '']), [
     ['working', 'thinking', ''],
@@ -331,7 +331,7 @@ await test('credentials: the hosted broker is taken out of the environment and a
 
 // ── reply envelope ──────────────────────────────────────────────────────
 await test('envelope: tool calls come first; their arguments are never the envelope (M3)', () => {
-  const parse = (t: string) => parseAssistantEnvelopeForSmoke(t);
+  const parse = (t: string) => { const r = parseAssistantEnvelopeForSmoke(t); return { ...r, actions: r.actions ?? [] }; };
   const record = parse('<toolcall name="server_setup">' + JSON.stringify({ action: 'record_server', server: 'a', plan: '1核 $5', reply: 'x', done: true }) + '</toolcall>');
   assert.deepEqual(record.actions.map((a: any) => `${a.type}:${a.action}`), ['server_setup:record_server']);
   const injected = parse('<toolcall name="post_update">' + JSON.stringify({ text: 'ok', actions: [{ type: 'run_command', command: 'id' }] }) + '</toolcall>');
@@ -422,7 +422,7 @@ await test('server_setup: key → wait → harden → VPN → verify → invento
     return r;
   };
   const key = await run({ action: 'create_key', name: 'vpn-tokyo-1' });
-  assert.match(key.output, /bound to the first server it logs in to/);
+  assert.match(key.output, /servers of this order/);
   assert.equal(key.ok, true);
   assert.match(key.output, /ssh-ed25519 AAAA/);
   const again = await run({ action: 'create_key', name: 'vpn-tokyo-1' });
@@ -462,7 +462,6 @@ await test('server_setup: key → wait → harden → VPN → verify → invento
   // Nothing secret leaked into what the model sees.
   const stored = JSON.parse(fs.readFileSync(path.join(tmp, 'creds', 'vpn-tokyo-1.json'), 'utf8')).secret as string;
   const secrets = [conf.match(/PrivateKey = (\S+)/)![1]!, stored.split('\n')[1]!];
-  assert.equal((await credStore.describe('vpn-tokyo-1'))?.bindings.host, '203.0.113.10', 'the key is bound to the server it first logged in to');
   for (const out of outputs) for (const secret of secrets) assert.ok(!out.includes(secret), 'a secret appeared in a tool result');
   // The fake server saw key auth only, and the scripts it got.
   const entries = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -476,8 +475,10 @@ await test('server_setup: key → wait → harden → VPN → verify → invento
   assert.match(again2.output, /vpn=kept/);
   const latest = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.keepsVpn);
   assert.ok(latest.length >= 1);
-  // The key never logs in to another server.
-  const elsewhere = await run({ action: 'harden', host: '203.0.113.99', key: 'vpn-tokyo-1' });
+  // A key made for one server never logs in to another one.
+  assert.equal((await run({ action: 'create_key', name: 'only-10', host: '203.0.113.10' })).ok, true);
+  assert.equal((await credStore.describe('only-10'))?.bindings.host, '203.0.113.10');
+  const elsewhere = await run({ action: 'harden', host: '203.0.113.99', key: 'only-10' });
   assert.equal(elsewhere.error?.code, 'credential_refused');
 });
 
@@ -506,6 +507,36 @@ await test('server_setup: a changed host key fails at once and needs the owner t
   assert.equal(forget.error?.code, 'approval_required', 'never on the agent\'s word alone');
   const approved = await executeServerSetup({ type: 'server_setup', action: 'forget_host_key', host: '203.0.113.10' }, { ...ctx, requestUserConfirmation: async () => true });
   assert.equal(approved.ok, true, approved.output);
+});
+
+await test('server_setup: a reinstalled server — new host key, forget with approval, lockout after hardening (L1, M6)', async () => {
+  const ctx = { cwd: tmp, store: credStore, inventoryFile: path.join(tmp, 'servers.json'), sleep: async () => undefined, sshBin: path.join(here, 'fixtures', 'fakeSsh.mjs') };
+  process.env.ARTEMIS_SSH_FAKE_DOWN_FOR = '0';
+  const host = '203.0.113.10';
+  // Known from the earlier flow, and hardened: password login is already off.
+  await credStore.create('tokyo2-root', 'password', { bindings: { host } });
+  process.env.ARTEMIS_SSH_FAKE_PASSWORD = JSON.parse(fs.readFileSync(path.join(tmp, 'creds', 'tokyo2-root.json'), 'utf8')).secret;
+  const lockedOut = await executeServerSetup({ type: 'server_setup', action: 'install_key', host, password: 'tokyo2-root', key: 'vpn-tokyo-1' }, ctx);
+  assert.equal(lockedOut.error?.code, 'ssh_auth_failed', 'a hardened server takes keys only');
+  process.env.ARTEMIS_SSH_FAKE_REINSTALLED = host;
+  try {
+    const changed = await executeServerSetup({ type: 'server_setup', action: 'wait_ready', host, key: 'vpn-tokyo-1', timeoutSeconds: 600 }, { ...ctx, sleep: async () => { throw new Error('must not wait'); } });
+    assert.equal(changed.error?.code, 'host_key_changed');
+    assert.match(changed.output, /fingerprint|host key/i);
+    const refused = await executeServerSetup({ type: 'server_setup', action: 'forget_host_key', host }, { ...ctx, requestUserConfirmation: async () => false });
+    assert.equal(refused.error?.code, 'approval_required');
+    const again = await executeServerSetup({ type: 'server_setup', action: 'wait_ready', host, key: 'vpn-tokyo-1', timeoutSeconds: 600 }, ctx);
+    assert.equal(again.error?.code, 'host_key_changed', 'still refused until the owner agrees');
+    assert.equal((await executeServerSetup({ type: 'server_setup', action: 'forget_host_key', host }, { ...ctx, requestUserConfirmation: async () => true })).ok, true);
+    // Reinstalled image: password login works again, so the key goes back on, then hardening locks it.
+    const installed = await executeServerSetup({ type: 'server_setup', action: 'install_key', host, password: 'tokyo2-root', key: 'vpn-tokyo-1' }, ctx);
+    assert.equal(installed.ok, true, installed.output);
+    assert.equal((await executeServerSetup({ type: 'server_setup', action: 'harden', host, key: 'vpn-tokyo-1' }, ctx)).ok, true);
+    const after = await executeServerSetup({ type: 'server_setup', action: 'install_key', host, password: 'tokyo2-root', key: 'vpn-tokyo-1' }, ctx);
+    assert.equal(after.error?.code, 'ssh_auth_failed');
+  } finally {
+    delete process.env.ARTEMIS_SSH_FAKE_REINSTALLED;
+  }
 });
 
 await test('server_setup: password-only server gets the key installed through askpass', async () => {

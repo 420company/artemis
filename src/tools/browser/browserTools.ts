@@ -529,6 +529,32 @@ type FieldLocator = { evaluate: <R>(fn: (node: Element) => R, arg?: undefined, o
  * scrubbed from every tool result (security/credentialStore.ts).
  */
 async function withCredentials(text: string, pageUrl: string, el: FieldLocator): Promise<{ ok: true; text: string } | { ok: false; result: ToolResult }> {
+  return resolveCredentialValue(text, pageUrl, () =>
+    el.evaluate((node) => {
+      const input = node as HTMLInputElement;
+      return { tag: node.tagName, type: input.getAttribute('type'), hints: `${input.getAttribute('autocomplete') ?? ''} ${input.getAttribute('name') ?? ''} ${input.id ?? ''}` };
+    }, undefined, { timeout: 10_000 }).then(credentialFieldKind),
+  );
+}
+
+/** What a field may take: a password field a password, a username/email field a username, nothing else anything. */
+export function credentialFieldKind(field: { tag: string; type?: string | null; hints?: string }): 'password' | 'username' | 'other' {
+  if (field.tag.toLowerCase() !== 'input') return 'other';
+  const type = (field.type ?? 'text').toLowerCase();
+  if (type === 'password') return 'password';
+  if (type === 'email' || ((type === 'text' || type === '') && /username|email|user|login|account|mail/.test((field.hints ?? '').toLowerCase()))) return 'username';
+  return 'other';
+}
+
+/**
+ * The one path a typed value takes when it names a stored credential (also
+ * used by the offline eval browser, so the same rules are graded there).
+ */
+export async function resolveCredentialValue(
+  text: string,
+  pageUrl: string,
+  detectField: () => Promise<'password' | 'username' | 'other'>,
+): Promise<{ ok: true; text: string; credential?: string } | { ok: false; result: ToolResult }> {
   if (!text.includes('{{credential:')) return { ok: true, text };
   const refuse = (code: string, message: string) => ({ ok: false as const, result: { ok: false, output: message, error: { code, message } } });
   const { CREDENTIAL_PLACEHOLDER_ONLY, normalizeOrigin, useCredential } = await import('../../security/credentialStore.js');
@@ -536,15 +562,7 @@ async function withCredentials(text: string, pageUrl: string, el: FieldLocator):
   if (!match) return refuse('invalid_input', 'A credential placeholder must be the whole value: exactly {{credential:<name>}}, nothing before or after it.');
   const origin = normalizeOrigin(pageUrl);
   if (!origin) return refuse('credential_refused', 'Credentials are only typed on http(s) pages.');
-  const field = await el.evaluate((node) => {
-    const input = node as HTMLInputElement;
-    const type = (input.getAttribute('type') ?? 'text').toLowerCase();
-    const hints = `${input.getAttribute('autocomplete') ?? ''} ${input.getAttribute('name') ?? ''} ${input.id ?? ''}`.toLowerCase();
-    if (node.tagName.toLowerCase() !== 'input') return 'other';
-    if (type === 'password') return 'password';
-    if (type === 'email' || ((type === 'text' || type === '') && /username|email|user|login|account|mail/.test(hints))) return 'username';
-    return 'other';
-  }, undefined, { timeout: 10_000 });
+  const field = await detectField();
   if (field === 'other') return refuse('credential_refused', 'Stored credentials only go into a password field (or a username/email field for a username). Nothing was typed.');
   const used = await useCredential(match[1]!, { type: 'web', origin, field });
   if (!used.ok) {
@@ -553,7 +571,7 @@ async function withCredentials(text: string, pageUrl: string, el: FieldLocator):
       : `${used.message} Nothing was typed.`);
   }
   credentialOrigins.add(origin);
-  return { ok: true, text: used.secret };
+  return { ok: true, text: used.secret, credential: match[1]! };
 }
 
 export async function executeBrowserType(action: BrowserTypeAction): Promise<ToolResult> {

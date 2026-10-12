@@ -11,6 +11,10 @@
 //   ARTEMIS_SSH_FAKE_NEW_HOSTKEY=a,b these hosts answer with a changed host key (reinstalled, or someone in between)
 //   ARTEMIS_SSH_FAKE_SSHD_OVERRIDE=1 a cloud image whose sshd config turns password login back on (hardening must fail)
 //   ARTEMIS_SSH_FAKE_LOCKED=1        password logins are refused (key-only SSH already on)
+//   ARTEMIS_SSH_FAKE_REINSTALLED=a,b these hosts were reinstalled: a new host key (checked against the
+//                                    UserKnownHostsFile the caller passes, so forgetting the old key works)
+//                                    and password login on again until the next harden
+// With ARTEMIS_SSH_FAKE_STATE set, a hardened host refuses password logins from then on (lockout).
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 
@@ -39,19 +43,34 @@ process.stdin.on('end', () => {
     process.stderr.write('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nHost key verification failed.\n')
     process.exit(255)
   }
+  // Host keys: generation 1, or 2 after a reinstall; trust on first use, like StrictHostKeyChecking=accept-new.
+  const generation = (process.env.ARTEMIS_SSH_FAKE_REINSTALLED ?? '').split(',').includes(host) ? 2 : 1
+  const knownFile = args.map((a, i) => (args[i - 1] === '-o' && a.startsWith('UserKnownHostsFile=') ? a.slice('UserKnownHostsFile='.length) : '')).find(Boolean)
+  if (knownFile) {
+    const lines = existsSync(knownFile) ? readFileSync(knownFile, 'utf8').split('\n').filter(Boolean) : []
+    const known = lines.find((line) => line.split(' ')[0] === host)
+    if (known && !known.endsWith(`fake-host-key-${generation}`)) {
+      log({ result: 'hostkey_changed' })
+      process.stderr.write('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nHost key verification failed.\n')
+      process.exit(255)
+    }
+    if (!known) appendFileSync(knownFile, `${host} ssh-ed25519 fake-host-key-${generation}\n`)
+  }
+  const stateFile = process.env.ARTEMIS_SSH_FAKE_STATE
+  const state = stateFile && existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {}
+  const saveState = () => stateFile && writeFileSync(stateFile, JSON.stringify(state))
   const downFor = Number(process.env.ARTEMIS_SSH_FAKE_DOWN_FOR ?? 0)
   if (downFor > 0) {
-    const state = process.env.ARTEMIS_SSH_FAKE_STATE ?? '/tmp/fake-ssh-state.json'
-    const seen = existsSync(state) ? JSON.parse(readFileSync(state, 'utf8')) : {}
-    seen[host] = (seen[host] ?? 0) + 1
-    writeFileSync(state, JSON.stringify(seen))
-    if (seen[host] <= downFor) {
+    state[host] = (state[host] ?? 0) + 1
+    saveState()
+    if (state[host] <= downFor) {
       log({ result: 'refused' })
       process.stderr.write(`ssh: connect to host ${host} port 22: Connection refused\n`)
       process.exit(255)
     }
   }
-  if (auth === 'password' && process.env.ARTEMIS_SSH_FAKE_LOCKED === '1') {
+  const hardened = (state.hardened ?? {})[host] === generation
+  if (auth === 'password' && (process.env.ARTEMIS_SSH_FAKE_LOCKED === '1' || hardened)) {
     log({ result: 'locked' })
     process.stderr.write(`${user}@${host}: Permission denied (publickey).\n`)
     process.exit(255)
@@ -87,6 +106,8 @@ process.stdin.on('end', () => {
     }
     out.push('updates=done', 'firewall=ufw', ...(script.includes('wg show wg0 listening-port') ? ['vpn=kept (port 51820/udp)'] : []), 'ssh=key-only', 'ARTEMIS_STEP harden ok')
     steps.push('harden')
+    state.hardened = { ...(state.hardened ?? {}), [host]: generation }
+    saveState()
   }
   if (script.includes('ARTEMIS_STEP wireguard')) {
     const peers = (script.match(/^\[Peer\]$/gm) ?? []).length

@@ -66,50 +66,87 @@ Adapters for branches not merged yet:
 
 ## Server setup (`tools/serverSetup/`)
 
-`server_setup` actions: `create_key` (Ed25519, made in-process, private key
-in the credential store, public key returned for the provider's form),
-`create_password` (type `{{credential:<name>}}` in the browser),
-`install_key` (password-only servers, through `SSH_ASKPASS`), `wait_ready`,
-`harden` (updates, firewall, automatic security updates, key-only SSH when a
-key is installed), `install_wireguard` (server config, device profiles and
-QR codes under `media/vpn/<server>/`; re-running adds devices and keeps the
-existing ones), `verify` (`ssh`, `wireguard` — with a real tunnel through a
-temporary peer and network namespace when the machine allows it — or `url`),
-`run`, `list_servers`, `record_server` (inventory in
-`<ARTEMIS_HOME>/servers.json`). The QR encoder (`qr.ts`) matches a reference
-encoder bit for bit; no external program is needed. `ARTEMIS_SSH_BIN`
-replaces `ssh` (tests use `scripts/fixtures/fakeSsh.mjs`).
+`server_setup` actions: `create_key` (Ed25519, private key in the credential
+store, public key returned for the provider's form; optional `host` ties it
+to one server, otherwise one key serves the servers of one order — a key
+login reveals nothing secret to the server), `create_password` (needs
+`origin` and/or `host`; typed with `{{credential:<name>}}` as the whole value
+of a password field on that origin only), `install_key` (password-only
+servers, through `SSH_ASKPASS`; only a `password` bound to that host),
+`wait_ready`, `harden` (updates, firewall, automatic security updates,
+key-only SSH through `sshd_config.d/00-agent-hardening.conf`, then checked
+with `sshd -T` — the step fails if password login is still on; an installed
+WireGuard keeps its port and forwarding), `install_wireguard` (IPv4
+forwarding only; device profiles and QR codes under
+`<ARTEMIS_HOME>/vpn-profiles/<server>/`, 0700/0600, never in the workspace;
+the result carries ```vpn {"server","device"}``` cards for the reply),
+`verify` (`ssh`, `wireguard` — with a real tunnel through a temporary peer
+and network namespace when the machine allows it — or `url`), `run`,
+`list_servers`, `record_server` (inventory in `<ARTEMIS_HOME>/servers.json`),
+`forget_host_key` (only with the owner's approval: the hard-approval gate,
+else the host's confirmation, else refused).
 
-Secrets never reach a tool result or the history: results carry names,
-public keys, file paths and check results.
+SSH trusts a server's key on first use (`<ARTEMIS_HOME>/agent-ssh/known_hosts`).
+A changed key fails at once with `host_key_changed` — no waiting loop — and
+the agent stops and tells the owner.
+
+The QR encoder (`qr.ts`) matches a reference encoder bit for bit.
+`ARTEMIS_SSH_BIN` replaces `ssh` (tests use `scripts/fixtures/fakeSsh.mjs`,
+which also models reinstalls, sshd overrides and lockout after hardening).
 
 ## Credentials (`security/credentialStore.ts`)
 
-`CredentialStore` with a file backend at `<ARTEMIS_HOME>/credentials`
-(0700 dir, 0600 files; `ARTEMIS_CREDENTIALS_DIR` overrides). These are the
-agent's own credentials for servers it manages, so they belong to the agent
-user. A host can register another backend (`registerCredentialStore`) — the
-place to plug the platform's vault in once the connector vault is merged.
-`browser_type` / `browser_form_input` resolve `{{credential:<name>}}` just
-before typing; an unknown name types nothing.
+Kinds `password`, `username`, `ssh_key`, `token` (VPN keys). Every use is
+checked against what the credential is for:
+
+- web: only on its bound origin (bound when made, or at first use), a
+  password only into an `<input type=password>`, a username only into a
+  username/email input; the placeholder must be the whole value;
+- SSH: a password only as the login of its bound host; a web password is
+  never an SSH password and the other way round;
+- `token`: only the engine's own server setup.
+
+Every secret handed out is remembered for the run and replaced by `••••` in
+every tool result (foreground and background), so a page echoing it, a
+console line or an extract never brings it into the history; scripts
+(`browser_evaluate`) do not run on an origin where a credential was typed.
+
+Backends:
+
+- hosted: the web server sets `ARTEMIS_CREDENTIAL_BROKER` (a loopback URL)
+  for each run; the engine reads and removes it at start and asks the server,
+  authenticated with the run's token. Secrets live in the server's data
+  directory, out of the agent user's reach; the server generates keys and
+  passwords and checks every use against the binding;
+- local CLI: `<ARTEMIS_HOME>/agent-credentials` (0700 dir, 0600 files;
+  `ARTEMIS_CREDENTIALS_DIR` overrides).
+
+The agent's own file and shell tools refuse `agent-credentials` and
+`vpn-profiles` paths in every mode. A host can register another backend
+(`registerCredentialStore`), e.g. a vault that fills an origin-bound field
+itself without handing the secret to the engine.
 
 ## Verification codes (`tools/verificationCodes.ts`)
 
-`get_verification_code {channel: email|sms|which, sender?, timeoutSeconds?}`
+`get_verification_code {channel: email|sms|which, sender, timeoutSeconds?}`
 uses `getVerificationCode(channel, sender, timeout)`: a registered
 `VerificationCodeSource` or a host program in
-`ARTEMIS_VERIFICATION_CODE_CMD` (prints `{"code": "…"}`). Without one it tells
-the model to hand the step to the owner (takeover) or ask for the one-time
-code — never a password. This is the adapter the agent mailbox/phone branch
-plugs into.
+`ARTEMIS_VERIFICATION_CODE_CMD` (called with `--channel= --sender=
+--timeout= --since=`, prints `{"code": "…"}`). `sender` is required and only
+codes from the last three minutes count, so another site's code is never
+taken. Without a source the model hands the step to the owner or asks for
+the one-time code — never a password.
 
 ## Tests
 
 - `npm run test:copilot` (part of `test:runtime`): update limits and ids,
-  history projection, status from tool activity, errand detection and
-  routing, credentials and placeholders, key formats (checked with an
-  independent OpenSSH parser when available), QR, `server_setup` against
-  the fake SSH server (no secret in any output), codes adapter.
+  history projection, status from tool activity and at the end of a run,
+  envelope parsing, errand detection and routing, credential bindings,
+  scrubbing and the broker, key formats, QR, `server_setup` against the fake
+  SSH server (no secret in any output, hardening checks, host key changes,
+  lockout), codes adapter.
+- `npm run test:credentials-browser`: credential typing and scrubbing in a
+  real headless Chromium (skipped without one).
 - `npm run eval:zh:mock`: the `errand` category (`evals/zh/README.md`) —
   golden VPN scenario, restaurant, deploy, and ten do-not-instruct requests,
   against an offline web and a fake SSH server.

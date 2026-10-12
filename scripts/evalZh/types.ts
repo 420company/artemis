@@ -31,6 +31,8 @@ export interface TaskTurn {
   newSession?: boolean
   /** Workspace-relative image paths sent with this message (`artemis execute --image`). */
   attachments?: string[]
+  /** setup.fakeSsh: servers reinstalled before this message (new host key; password login on until hardened again). */
+  serversReinstalled?: string[]
 }
 
 /** An image the runner draws into the workspace before the run (no external assets). */
@@ -219,6 +221,8 @@ export interface WorkerTurnJob {
   seedHistory?: SeedHistory
   probes: ContextProbe[]
   mock?: { steps: MockStep[]; aux: MockAuxReply[] }
+  /** Fake servers reinstalled so far in this task. */
+  serversReinstalled?: string[]
   outFile: string
 }
 
