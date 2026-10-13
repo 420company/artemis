@@ -261,6 +261,8 @@ function describeAction(action: AgentAction): string {
       return 'wait for a verification SMS';
     case 'ask_owner_for_code':
       return `ask the owner for the code ${action.site} sent`;
+    case 'load_tools':
+      return `load schemas for tools: ${action.tools.join(', ')}`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

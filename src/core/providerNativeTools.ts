@@ -1128,6 +1128,21 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           timeoutSeconds: { type: 'integer', minimum: 15, maximum: 600 },
         },
       };
+    case 'load_tools':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['tools'],
+        properties: {
+          tools: {
+            type: 'array',
+            items: { type: 'string', minLength: 1 },
+            minItems: 1,
+            maxItems: 10,
+            description: 'Names of tools whose full schema should be returned.',
+          },
+        },
+      };
     case 'todo':
       return {
         type: 'object',

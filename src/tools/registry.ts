@@ -51,6 +51,7 @@ import { executeViewImage } from './viewImage.js';
 import { executeAgentIdentity, validateAgentIdentityAction } from './agentIdentity.js';
 import { executeUseWorkflow, USE_WORKFLOW_DESCRIPTION } from './useWorkflow.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
+import { createLoadToolsToolDef, LOAD_TOOLS_TYPE } from './toolLoader.js';
 
 export type { ToolDefinition };
 
@@ -2132,17 +2133,134 @@ function withTaskCompletionReminders(def: ToolDefinition): ToolDefinition {
   };
 }
 
+// ---------------------------------------------------------------------------
+// WP-18: tool load tiers (view-only; does not change toolDefs membership)
+// ---------------------------------------------------------------------------
+
+export type ToolLoadTier = 'core' | 'ondemand';
+
+/**
+ * Tools always rendered in full in the manifest. Everything else is
+ * 'ondemand' and (once phase 2 switches the system prompt to core-only)
+ * is listed by name + one-line summary, fetched via `load_tools`.
+ */
+export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
+  // File basics
+  'read_file',
+  'write_file',
+  'list_files',
+  'search_files',
+  // Execution / editing
+  'run_command',
+  'apply_patch',
+  'insert_in_file',
+  'replace_in_file',
+  // Task tracking
+  'todo',
+  // Delegation
+  'delegate_task',
+  // User interaction
+  'request_user_confirmation',
+  'post_update',
+  // Loader itself — must never be lazy
+  LOAD_TOOLS_TYPE,
+  // Search / knowledge
+  'search_web',
+  'lookup_docs',
+  // Memory
+  'memory',
+  // Workflow
+  'use_workflow',
+  // Image viewing
+  'view_image',
+  // MCP basics
+  'mcp_call_tool',
+  'mcp_list',
+]);
+
+const ON_DEMAND_SUMMARY_MAX_CHARS = 120;
+
+/**
+ * Lookups are wrapped in lambdas so they are resolved at call time,
+ * not at module evaluation time (avoids TDZ issues regardless of
+ * declaration order in this file).
+ */
+const loadToolsToolDef: ToolDefinition = createLoadToolsToolDef({
+  getToolDefinition: (toolType) => getToolDefinition(toolType),
+  getToolLoadTier: (toolType) => getToolLoadTier(toolType),
+  isToolAvailableForProvider: (toolType) => isToolAvailableForProvider(toolType),
+});
+
 export const toolDefs: ToolDefinition[] = [
   fileToolDef,
   systemToolDef,
   skillToolDef,
   securityAuditToolDef,
+  loadToolsToolDef,
   ...actionToolDefs,
   ...capabilityToolDefs,
 ].map(withTaskCompletionReminders);
 
 export function getToolDefinition(toolType: string): ToolDefinition | undefined {
   return toolDefs.find((def) => def.type === toolType);
+}
+
+export function isCoreTool(toolType: string): boolean {
+  return CORE_TOOL_TYPES.has(toolType);
+}
+
+export function getToolLoadTier(toolType: string): ToolLoadTier {
+  return isCoreTool(toolType) ? 'core' : 'ondemand';
+}
+
+/** First sentence of a description, whitespace-collapsed, truncated to 120 chars. */
+function summarizeToolDescription(description: string): string {
+  const collapsed = description.replace(/\s+/g, ' ').trim();
+  const match = collapsed.match(/^.*?[.!?。！？](?=\s|$)/);
+  const firstSentence = (match ? match[0] : collapsed).trim();
+  if (firstSentence.length <= ON_DEMAND_SUMMARY_MAX_CHARS) return firstSentence;
+  return `${firstSentence.slice(0, ON_DEMAND_SUMMARY_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function toAllowedTypeSet(allowedToolTypes?: Iterable<string> | null): ReadonlySet<string> | null {
+  if (!allowedToolTypes) return null;
+  return new Set<string>(allowedToolTypes);
+}
+
+/**
+ * On-demand tools that would appear in the model manifest, as type + one-line summary.
+ * Optional `allowedToolTypes` restricts the result to a profile's allowed set.
+ */
+export function getOnDemandToolSummaries(
+  allowedToolTypes?: Iterable<string> | null,
+): Array<{ type: string; description: string }> {
+  const allowed = toAllowedTypeSet(allowedToolTypes);
+  const seen = new Set<string>();
+  const summaries: Array<{ type: string; description: string }> = [];
+  for (const def of toolDefs) {
+    if (seen.has(def.type)) continue;
+    seen.add(def.type);
+    if (isCoreTool(def.type)) continue;
+    if (!isListedInModelManifest(def)) continue;
+    if (allowed && !allowed.has(def.type)) continue;
+    summaries.push({ type: def.type, description: summarizeToolDescription(def.description) });
+  }
+  return summaries;
+}
+
+/** Integrity rules for load tiers; merged into validateToolRegistryIntegrity(). */
+export function validateToolLoadTierIntegrity(): string[] {
+  const errors: string[] = [];
+  const registered = new Set(toolDefs.map((def) => def.type));
+  for (const toolType of CORE_TOOL_TYPES) {
+    if (!registered.has(toolType)) {
+      errors.push(`CORE_TOOL_TYPES contains "${toolType}" which has no ToolDefinition in toolDefs.`);
+    }
+  }
+  if (!CORE_TOOL_TYPES.has(LOAD_TOOLS_TYPE)) {
+    errors.push(`"${LOAD_TOOLS_TYPE}" must be in CORE_TOOL_TYPES; the loader cannot itself be lazy.`);
+  }
+  return errors;
 }
 
 export function getToolPermissionCategory(toolType: string): ToolPermissionCategory {
@@ -2267,8 +2385,37 @@ export function renderDetailedToolManifest(
     .join('\n\n');
 }
 
-export function renderToolManifest(allowedToolTypes?: readonly string[]): string {
-  return renderDetailedToolManifest(allowedToolTypes);
+export interface RenderToolManifestOptions {
+  /** 'all' (default) keeps legacy behavior; 'core' renders core in full + on-demand summaries. */
+  loadTier?: 'core' | 'all';
+}
+
+export function renderToolManifest(
+  allowedToolTypes?: readonly string[],
+  options: RenderToolManifestOptions = {},
+): string {
+  const loadTier = options.loadTier ?? 'all';
+  if (loadTier === 'all') {
+    return renderDetailedToolManifest(allowedToolTypes);
+  }
+
+  const allowed = toAllowedTypeSet(allowedToolTypes);
+  const coreTypes = toolDefs
+    .filter((def) => isCoreTool(def.type) && isListedInModelManifest(def))
+    .filter((def) => !allowed || allowed.has(def.type))
+    .map((def) => def.type);
+
+  const coreManifest = renderDetailedToolManifest(coreTypes);
+
+  // Without load_tools available, an on-demand list would be unusable noise.
+  const loaderAvailable = !allowed || allowed.has(LOAD_TOOLS_TYPE);
+  if (!loaderAvailable) return coreManifest;
+
+  const onDemand = getOnDemandToolSummaries(allowed);
+  if (onDemand.length === 0) return coreManifest;
+
+  const onDemandLines = onDemand.map((tool) => `- ${tool.type}: ${tool.description}`);
+  return [coreManifest, '', 'On-demand tools (call load_tools to fetch full schema):', ...onDemandLines].join('\n');
 }
 
 export function validateToolRegistryIntegrity(): string[] {
@@ -2326,6 +2473,9 @@ export function validateToolRegistryIntegrity(): string[] {
       );
     }
   }
+
+  // WP-18: load-tier integrity
+  errors.push(...validateToolLoadTierIntegrity());
 
   return [...new Set(errors)];
 }

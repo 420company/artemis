@@ -46,6 +46,12 @@ export function buildSystemPrompt(
     '',
     'Tool policy:',
     getToolManifest(getAllowedActionTypesForProfile(profile)),
+    '',
+    // WP-18 phase 1: guidance only; manifest switch to core-only happens in phase 2
+    'Lazy tool loading:',
+    '- Only core tools are listed in full above. Additional tools are available on demand.',
+    '- If a task needs a tool that is not listed, call `load_tools` with the tool names first to fetch their full schemas, then call them.',
+    '- Do not guess parameters for a tool you have not loaded; always load first.',
     ...specialistRoleManifest,
     '',
     'Operating guidelines:',
