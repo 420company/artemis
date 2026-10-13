@@ -177,6 +177,22 @@ export type ProviderRequestOptions = {
 
 export type ProviderTarget = 'main' | AgentRole;
 
+/**
+ * Platform speech (STT/TTS) config. Written by platform login/sync or the
+ * setup wizard; read only from the global store (see core/platformSpeech.ts).
+ */
+export interface PlatformSpeechStoreEntry {
+  provider: 'platform'
+  enabled: boolean
+  baseUrl: string
+  apiKey: string
+  sttModel?: string
+  ttsModel?: string
+  language?: string
+  /** 'platform' = written by platform login/sync, 'user' = written by setup wizard. */
+  managedBy?: 'platform' | 'user'
+}
+
 export type ProviderStoreData = {
   profiles: ProviderProfile[];
   defaultMainProfileId?: string;
@@ -192,6 +208,8 @@ export type ProviderStoreData = {
   customProviders?: CustomProviderConfig[];
   auxiliaryModels?: Partial<Record<AuxiliaryModelTask, AuxiliaryModelRoute>>;
   setup?: ArtemisSetupConfig;
+  /** Platform speech config; only meaningful in the global store. */
+  speech?: PlatformSpeechStoreEntry;
 };
 
 export type CustomProviderConfig = {
@@ -283,7 +301,7 @@ export type TerminalSetupConfig = {
 export type VoiceSetupConfig = {
   stt: {
     enabled: boolean;
-    provider: 'local' | 'openai' | 'mistral';
+    provider: 'local' | 'openai' | 'mistral' | 'platform';
     engine?: 'auto' | 'whisper.cpp' | 'openai-whisper';
     command?: string;
     modelPath?: string;
