@@ -9,6 +9,33 @@
  *
  * Validators never throw. Each returns a list of human-readable (English) error
  * messages; an empty array means the action is valid.
+ *
+ * ── Input hardening for shell-bound parameters ──────────────────────────────
+ * Threat model: every parameter value is LLM-generated content (possibly steered
+ * by prompt injection), so it is untrusted input to the execution layer.
+ *
+ * Where this sits: these validators are the pre-execution gate. runAgent calls
+ * them before dispatching an extras tool; a non-empty error list means the tool
+ * is never executed.
+ *
+ * Four strategies, chosen by how the execution layer embeds the value:
+ *   1. Bare concatenation into a shell command
+ *      (git_diff.path, git_add.paths, git_branch.create, git_branch.checkout,
+ *      which_command.command):
+ *      rejectShellMetachars() blacklists  ; & | $ ` ( ) < > \n \r * ? ~ #
+ *   2. Concatenation inside double quotes (git_commit.message, format_code.path):
+ *      rejectDquoteBreakout() rejects only  " $ ` \ and newline. Inside "..."
+ *      only these keep a special meaning; ; & | < > etc. are literal there, so they
+ *      stay allowed and ordinary commit messages keep working.
+ *   3. npm_run.script: allowlist ^[A-Za-z0-9:_-]+$ (npm script names only).
+ *   4. calculate.expression: mirrors the execution layer's character allowlist
+ *      (strip Math.xxx / PI / E, the remainder must match ^[\d\s+\-*\/%().,^]+$).
+ *
+ * The blacklists (1, 2) are defense in depth, not the primary control. Character
+ * blacklists are inherently incomplete; the robust fix is argv-based execution
+ * (no shell) in the execution layer. These checks only narrow what can reach a
+ * shell if that layer is ever wrong or regresses. They only ADD rejections; every
+ * input previously rejected is still rejected.
  */
 import type { AgentAction, ExtraAgentAction, ExtraAgentActionType } from '../core/types.js';
 
@@ -364,10 +391,142 @@ function checkRegexCompiles(a: Bag, errs: string[]): void {
   }
 }
 
+// ── Shell-injection hardening helpers (never throw) ──────────────────────────
+// All regexes below are non-global (except the two used only with
+// String.prototype.replace, which resets lastIndex itself), so .test() is
+// stateless and safe to reuse across calls.
+
+/**
+ * Bare concatenation: characters that let a value terminate, chain, substitute,
+ * redirect, glob, expand or comment out parts of an unquoted shell command.
+ */
+const SHELL_METACHAR_RE = /[;&|$`()<>\n\r*?~#]/;
+
+/**
+ * Inside double quotes only  "  $  `  \  and newline keep a special meaning
+ * (quote breakout, parameter/command substitution, escapes, line breaks).
+ * ; & | < > * ? ~ # ( ) are literal inside "..." and intentionally allowed.
+ */
+const DQUOTE_BREAKOUT_RE = /["$`\\\n]/;
+
+/** npm script names: letters, digits, colon, underscore, hyphen. */
+const NPM_SCRIPT_RE = /^[A-Za-z0-9:_-]+$/;
+
+/** calculate: tokens stripped before the character allowlist is applied. */
+const CALC_STRIP_MATH_RE = /Math\.[A-Za-z_][A-Za-z0-9_]*/g;
+const CALC_STRIP_CONST_RE = /\b(?:PI|E)\b/g;
+/** calculate: mirrors the execution layer's character allowlist. */
+const CALC_ALLOWED_RE = /^[\d\s+\-*/%().,^]+$/;
+const CALC_DISALLOWED_CHAR_RE = /[^\d\s+\-*/%().,^]/;
+
+const MAX_REPORTED_CHARS = 10;
+
+/** Distinct characters of `s` matching the (non-global) single-char regex `re`. */
+function findChars(s: string, re: RegExp): string[] {
+  const found: string[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (re.test(ch) && !found.includes(ch)) found.push(ch);
+  }
+  return found;
+}
+
+/** Render characters as JSON string literals, e.g. ";" , "\n". */
+function describeChars(chars: readonly string[]): string {
+  const shown = chars.slice(0, MAX_REPORTED_CHARS).map((c) => JSON.stringify(c));
+  if (chars.length > MAX_REPORTED_CHARS) shown.push('...');
+  return shown.join(', ');
+}
+
+/**
+ * Invoke `fn` for the string value of `key`, or for every string element when the
+ * value is an array (labelled key[i]). Non-string values are skipped: their type
+ * errors are reported by checkString / checkStringOrStringArray.
+ */
+function forEachStringValue(a: Bag, key: string, fn: (label: string, s: string) => void): void {
+  const v = a[key];
+  if (typeof v === 'string') {
+    fn(key, v);
+    return;
+  }
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) {
+      const item = v[i];
+      if (typeof item === 'string') fn(`${key}[${i}]`, item);
+    }
+  }
+}
+
+/**
+ * For values concatenated UNQUOTED into a shell command.
+ * Rejects ; & | $ ` ( ) < > \n \r * ? ~ #  (defense in depth, see file header).
+ */
+function rejectShellMetachars(a: Bag, key: string, errs: string[]): void {
+  forEachStringValue(a, key, (label, s) => {
+    const bad = findChars(s, SHELL_METACHAR_RE);
+    if (bad.length > 0) {
+      errs.push(
+        `${label} contains shell metacharacters (${describeChars(bad)}) rejected to prevent command injection.`,
+      );
+    }
+  });
+}
+
+/**
+ * For values concatenated INSIDE DOUBLE QUOTES into a shell command.
+ * Narrower than rejectShellMetachars on purpose: within "..." only  " $ ` \  and
+ * newline are special. Characters such as ; & | < > ( ) # are plain text there, so
+ * they are allowed (e.g. a commit message "fix: a & b; see #12" stays valid).
+ */
+function rejectDquoteBreakout(a: Bag, key: string, errs: string[]): void {
+  forEachStringValue(a, key, (label, s) => {
+    const bad = findChars(s, DQUOTE_BREAKOUT_RE);
+    if (bad.length > 0) {
+      errs.push(
+        `${label} contains characters that are special inside double quotes (${describeChars(bad)}) rejected to prevent command injection.`,
+      );
+    }
+  });
+}
+
+/** npm_run.script: allowlist; only applied when script is a string. */
+function checkNpmScriptName(a: Bag, errs: string[]): void {
+  const v = a.script;
+  if (typeof v !== 'string') return;
+  if (!NPM_SCRIPT_RE.test(v)) {
+    const bad = findChars(v, /[^A-Za-z0-9:_-]/);
+    const detail = bad.length > 0 ? `disallowed characters: ${describeChars(bad)}` : 'empty name';
+    errs.push(
+      `script must be an npm script name matching ^[A-Za-z0-9:_-]+$ (got ${show(v)}; ${detail}); rejected to prevent command injection.`,
+    );
+  }
+}
+
+/**
+ * calculate.expression: mirrors the execution layer's allowlist (defense in depth).
+ * Math.xxx calls/constants and bare PI / E tokens are stripped first; whatever is
+ * left must consist only of digits, whitespace and  + - * / % ( ) . , ^
+ * An empty remainder (e.g. "Math.PI") contains no characters at all and passes.
+ */
+function checkCalcExpression(a: Bag, errs: string[]): void {
+  const v = a.expression;
+  if (typeof v !== 'string' || v.trim() === '') return; // REQ_NE already reported
+  const rest = v.replace(CALC_STRIP_MATH_RE, '').replace(CALC_STRIP_CONST_RE, '');
+  if (rest === '') return;
+  if (!CALC_ALLOWED_RE.test(rest)) {
+    const bad = findChars(rest, CALC_DISALLOWED_CHAR_RE);
+    errs.push(
+      `expression contains characters outside the math allowlist (${describeChars(bad)}); ` +
+        'only digits, whitespace, + - * / % ( ) . , ^, Math.* functions, PI and E are allowed.',
+    );
+  }
+}
+
 /**
  * Generic, table-driven validation against EXTRA_PARAM_SPECS + EXTRA_PARAM_ENUMS.
  * Used by the parity tests; the per-tool validators below additionally apply
- * tool-specific semantic checks (integer ranges, regex compilation, ...).
+ * tool-specific semantic checks (integer ranges, regex compilation, shell
+ * hardening, ...).
  */
 export function validateExtraParams(type: string, action: unknown): string[] {
   const errs: string[] = [];
@@ -465,6 +624,91 @@ export function validateExtraAction(action: AgentAction | null | undefined): str
   return EXTRA_VALIDATORS[type](action);
 }
 
+// ── Validator <-> buildExtraToolDefs() input_schema audit (48 tools) ─────────
+// Checked per field: required (listed in schema `required`), type, allowed set for
+// enum-like fields (taken from the schema description), nonEmpty (paths/ids/messages).
+// Result: required/type/allowed match input_schema for all 48 tools; no mismatch
+// required a fix. Places where the validator is intentionally stricter than the
+// schema are marked (+). NE is always a validator-side addition (the schema has no
+// minLength) and is applied to required path/id/message-like fields.
+// Legend: R=required O=optional NE=non-empty S=shell blacklist D=dquote check
+//
+//  #  tool                field              req type             extra
+//  1  delete_file         path               R   string           NE
+//  2  move_file           from, to           R   string           NE
+//  3  copy_file           from, to           R   string           NE
+//  4  create_directory    path               R   string           NE
+//  5  delete_directory    path               R   string           NE
+//                         force              O   boolean
+//  6  file_info           path               R   string           NE
+//  7  list_directory      path               O   string           (default: current dir)
+//  8  git_status          (no params)
+//  9  git_diff            staged             O   boolean
+//                         path               O   string           S
+// 10  git_log             limit              O   number           (+) integer >= 1
+// 11  git_add             paths              O   string|string[]  S (each element); schema has no
+//                                                                 `type`, description says "string or array"
+// 12  git_commit          message            R   string           NE, D
+// 13  git_branch          create             O   string           NE (+), S
+//                         checkout           O   string           NE (+), S
+// 14  regex_match         text               R   string
+//                         pattern            R   string           (+) must compile with flags
+//                         flags              O   string           (default "gm")
+// 15  json_query          json, query        R   string
+// 16  format_json         text               R   string
+//                         indent             O   number           (+) integer 0..10
+// 17  diff_text           original, modified R   string
+// 18  sort_lines          text               R   string
+//                         direction          O   string           asc | desc
+// 19  dedupe_lines        text               R   string
+// 20  count_lines         path               R   string           NE
+// 21  base64_encode       text               R   string
+// 22  base64_decode       text               R   string
+// 23  hash_text           text               R   string
+//                         algorithm          O   string           md5 | sha1 | sha256 | sha512
+// 24  generate_uuid       (no params)
+// 25  get_env             key                O   string
+//                         keys               O   string[]
+// 26  which_command       command            R   string           NE, S
+// 27  get_system_info     (no params)
+// 28  date_now            format             O   string           iso | local | unix | date | time (+)
+//                                                                 execDateNow falls back to toString()
+//                                                                 for unknown values; the validator keeps
+//                                                                 the allowlist (stricter is acceptable)
+// 29  calculate           expression         R   string           NE, (+) math character allowlist
+// 30  check_url           url                R   string           NE
+// 31  download_file       url                R   string           NE
+//                         destination        O   string
+// 32  dns_lookup          hostname           R   string           NE
+// 33  parse_url           url                R   string           NE
+// 34  npm_run             script             O   string           (+) ^[A-Za-z0-9:_-]+$ (default: test)
+// 35  format_code         path               R   string           NE, D
+// 36  get_imports         path               R   string           NE
+// 37  path_info           path               R   string           NE
+// 38  url_encode          text               R   string
+//                         mode               O   string           encode | decode
+// 39  hash_file           path               R   string           NE
+//                         algorithm          O   string           md5 | sha1 | sha256 | sha512
+// 40  notebook_create     title              R   string           NE
+//                         content            O   string
+//                         tags               O   string[]
+// 41  notebook_list       (no params)
+// 42  notebook_update     id                 R   string           NE
+//                         title, content     O   string
+//                         tags               O   string[]
+// 43  notebook_delete     id                 R   string           NE
+// 44  notebook_view       id                 R   string           NE
+// 45  notebook_search     search             R   string           NE
+// 46  notebook_addTag     id                 R   string           NE
+//                         tags               R   string[]
+// 47  notebook_removeTag  id                 R   string           NE
+//                         tags               R   string[]
+// 48  notebook_tree       (no params)
+//
+// Optional path-like fields (list_directory.path, git_diff.path,
+// download_file.destination) intentionally stay without NE: the schema documents
+// defaults for them and tightening would reject previously valid input.
+
 // ── File operations ──────────────────────────────────────────────────────────
 export function validateDeleteFileAction(action: any): string[] {
   const errs: string[] = [];
@@ -538,6 +782,7 @@ export function validateGitDiffAction(action: any): string[] {
   if (!a) return errs;
   checkBoolean(a, 'staged', errs, { required: false });
   checkString(a, 'path', errs, OPT);
+  rejectShellMetachars(a, 'path', errs); // bare concatenation
   return errs;
 }
 
@@ -554,6 +799,7 @@ export function validateGitAddAction(action: any): string[] {
   const a = begin(action, 'git_add', errs);
   if (!a) return errs;
   checkStringOrStringArray(a, 'paths', errs, { required: false });
+  rejectShellMetachars(a, 'paths', errs); // bare concatenation (string or each element)
   return errs;
 }
 
@@ -562,6 +808,7 @@ export function validateGitCommitAction(action: any): string[] {
   const a = begin(action, 'git_commit', errs);
   if (!a) return errs;
   checkString(a, 'message', errs, REQ_NE);
+  rejectDquoteBreakout(a, 'message', errs); // embedded inside "..."
   return errs;
 }
 
@@ -571,6 +818,8 @@ export function validateGitBranchAction(action: any): string[] {
   if (!a) return errs;
   checkString(a, 'create', errs, OPT_NE);
   checkString(a, 'checkout', errs, OPT_NE);
+  rejectShellMetachars(a, 'create', errs); // bare concatenation
+  rejectShellMetachars(a, 'checkout', errs); // bare concatenation
   return errs;
 }
 
@@ -685,6 +934,7 @@ export function validateWhichCommandAction(action: any): string[] {
   const a = begin(action, 'which_command', errs);
   if (!a) return errs;
   checkString(a, 'command', errs, REQ_NE);
+  rejectShellMetachars(a, 'command', errs); // bare concatenation
   return errs;
 }
 
@@ -698,6 +948,7 @@ export function validateDateNowAction(action: any): string[] {
   const errs: string[] = [];
   const a = begin(action, 'date_now', errs);
   if (!a) return errs;
+  // Stricter than execDateNow (which falls back to toString() for unknown formats).
   checkString(a, 'format', errs, { required: false, allowed: DATE_FORMATS });
   return errs;
 }
@@ -707,6 +958,7 @@ export function validateCalculateAction(action: any): string[] {
   const a = begin(action, 'calculate', errs);
   if (!a) return errs;
   checkString(a, 'expression', errs, REQ_NE);
+  checkCalcExpression(a, errs); // mirrors the execution-layer allowlist
   return errs;
 }
 
@@ -750,6 +1002,7 @@ export function validateNpmRunAction(action: any): string[] {
   const a = begin(action, 'npm_run', errs);
   if (!a) return errs;
   checkString(a, 'script', errs, OPT);
+  checkNpmScriptName(a, errs); // allowlist
   return errs;
 }
 
@@ -758,6 +1011,7 @@ export function validateFormatCodeAction(action: any): string[] {
   const a = begin(action, 'format_code', errs);
   if (!a) return errs;
   checkString(a, 'path', errs, REQ_NE);
+  rejectDquoteBreakout(a, 'path', errs); // embedded inside "..."
   return errs;
 }
 
