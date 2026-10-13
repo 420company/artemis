@@ -2211,6 +2211,8 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `get_sms_number ${action.country}`;
     case 'ask_owner_for_code':
       return `ask_owner_for_code ${truncateInline(action.site, 80)}`;
+    case 'load_tools':
+      return `load_tools ${action.tools.join(', ')}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
