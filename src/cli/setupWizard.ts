@@ -33,6 +33,7 @@ import { resolveDataRootDir } from '../utils/fs.js'
 import { runBundleOnboarding } from './bundleOnboarding.js'
 import { SkillManager } from '../core/skillManager.js'
 import { CronScheduler } from '../services/cron.js'
+import { offerServerPush } from './setupWizardServerPush.js'
 
 // 扩展配置 sections
 type SetupSection =
@@ -1096,6 +1097,10 @@ async function printSetupSummary(cwd: string, locale: UiLocale): Promise<void> {
   console.log()
   console.log(buildPanel('Setup Summary', lines))
   console.log()
+  // P3: offer to push the just-configured providers to the artemis-online
+  // server. No-op when declined; degrades honestly to local-only when the
+  // server is unreachable / unsupported / needs a login session.
+  await offerServerPush(cwd, locale)
   console.log(buildPanel(
     tr(locale, '下一步', 'Next steps'),
     [
