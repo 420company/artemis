@@ -1,4 +1,4 @@
- /**
+/**
  * tools/registry.ts — runtime tool registry
  *
  * The registry is the single source of truth for tool metadata exposed to the
