@@ -329,6 +329,8 @@ export async function runCli(argv: string[]): Promise<void> {
       prompt: options.prompt,
       mode: options.command,
       model: options.model,
+      baseUrl: options.baseUrl,
+      apiKey: options.apiKey,
       maxTurns: options.maxTurnsExplicit ? options.maxTurns : undefined,
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,
@@ -338,6 +340,7 @@ export async function runCli(argv: string[]): Promise<void> {
       retryOf: options.retryOf,
       keepApprovals: options.keepApprovals,
       ...(options.outputFormat ? { outputFormat: options.outputFormat } : {}),
+      goal: options.goal,
     })
     return
   }
@@ -360,14 +363,17 @@ export async function runCli(argv: string[]): Promise<void> {
     return
   }
 
-  // ── stubs for advanced subcommands ──────────────────────────────────────────
-  const stubCommands: Record<string, string> = {
-    tasks:    'Task manager (coming soon)',
-    runtimes: 'Runtime profiles (coming soon)',
-  }
-  if (options.command in stubCommands) {
+  // ── removed subcommands: say where the feature lives, start nothing ─────────
+  if (options.command === 'tasks' || options.command === 'runtimes') {
+    const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
+    const slash = `/${options.command}`
     console.log()
-    console.log(buildPanel(options.command, [stubCommands[options.command as keyof typeof stubCommands]]))
+    console.log(buildPanel(t('命令已移除', 'Command removed'), [
+      t(`artemis ${options.command} 已移除。`, `artemis ${options.command} was removed.`),
+      options.command === 'tasks'
+        ? t(`在对话里用 ${slash} 查看或管理任务板。`, `In a chat, use ${slash} to show or manage the task board.`)
+        : t(`在对话里用 ${slash} 查看或中断运行中的任务。`, `In a chat, use ${slash} to inspect or interrupt runtimes.`),
+    ]))
     console.log()
     return
   }
@@ -682,6 +688,8 @@ async function runQueryCommand(options: {
   prompt?: string
   mode: 'analyze' | 'execute'
   model?: string
+  baseUrl?: string
+  apiKey?: string
   maxTurns?: number
   sessionId?: string
   imagePaths?: string[]
@@ -691,6 +699,7 @@ async function runQueryCommand(options: {
   retryOf?: string
   keepApprovals?: boolean
   outputFormat?: 'text' | 'stream-json'
+  goal?: { id: string; maxSteps?: number }
 }): Promise<void> {
   const { cwd, locale, mode, model } = options
   const prompt = options.prompt ?? ''
@@ -729,10 +738,27 @@ async function runQueryCommand(options: {
   const { SessionBusyError, SESSION_BUSY_MESSAGE, SESSION_BUSY_MESSAGE_ZH } = await import('../storage/sessionLock.js')
   const { SessionRewindError } = await import('../storage/sessionTurns.js')
   let result: Awaited<ReturnType<typeof runHeadlessAgent>>
+  const goal = mode === 'execute' ? options.goal : undefined
   try {
-    result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
+    if (goal) {
+      // One step of a long-term goal the host schedules (services/goalRunner.ts):
+      // the same run as a message, with the goal's prompt, and one status line for the host.
+      const { formatGoalStatusLine, runHostGoalTick } = await import('../services/goalRunner.js')
+      const tick = await runHostGoalTick(cwd, { id: goal.id, objective: prompt, ...(goal.maxSteps ? { maxSteps: goal.maxSteps } : {}) }, {
+        model,
+        ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+        onInfo: (message) => console.error(oneLine(message)),
+        approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' },
+        ...(options.keepApprovals ? { keepApprovals: true } : {}),
+      })
+      console.error(formatGoalStatusLine(tick))
+      result = tick.run
+    } else result = await runHeadlessAgent(cwd, answer ? '' : finalPrompt ?? '', {
       permissionMode: mode === 'analyze' ? 'read-only' : 'PRODUCER',
       model,
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      ...(options.apiKey ? { apiKey: options.apiKey } : {}),
       maxTurns: options.maxTurns,
       sessionId: options.sessionId,
       imagePaths: options.imagePaths,
@@ -993,6 +1019,13 @@ async function runSkillCommand(options: { cwd: string; locale: UiLocale; args: s
   const { cwd, locale, args } = options
   const t = (zh: string, en: string) => locale === 'zh-CN' ? zh : en
   const sub = args[0]?.toLowerCase()
+
+  // The skill library for hosts and scripts (artemis-online's skill browser): JSON on stdout.
+  if (sub === 'catalog' || sub === 'packs' || ((sub === 'show' || sub === 'read') && args.includes('--json'))) {
+    const { runSkillLibraryCommand } = await import('./skillLibraryCommand.js')
+    process.exitCode = await runSkillLibraryCommand({ cwd, locale, args })
+    return
+  }
 
   if (!sub || sub === 'list' || sub === 'ls' || sub === '--list' || sub === 'browse' || sub === 'categories') {
     const { groupSkillsByCategory, loadSkillDiscovery } = await import('../core/skillDiscovery.js')
@@ -1402,9 +1435,10 @@ export async function runSessionCommand(options: { cwd: string; locale: UiLocale
       return
     }
     await fs.promises.unlink(path.join(resolveDataRootDir(cwd), 'sessions', `${session.id}.json`))
-    // Context files (transcript archive, spilled tool outputs) go with it,
+    // Context files (transcript archive, spilled tool outputs) and a host's goal state go with it,
     // and so do its delegated child sessions and theirs.
     await store.removeContextDir(session.id)
+    await fs.promises.rm(path.join(resolveDataRootDir(cwd), 'sessions', session.id, 'goals'), { recursive: true, force: true })
     const removed = new Set([session.id])
     let grew = true
     while (grew) {
@@ -2227,8 +2261,10 @@ async function runGoalCliCommand(options: { cwd: string; locale: UiLocale; args:
     const final = await runGoalLoop(cwd, goal.id, {
       maxTicks,
       onTick: (g, tick) => {
-        console.log(`  ${statusIcon(g.status)} #${g.iterations.length} (${tick.iteration.turns} turns) ${tick.iteration.progress}`)
-        if (tick.iteration.next && g.status === 'active') console.log(t(`     ↳ 下一步: ${tick.iteration.next}`, `     ↳ next: ${tick.iteration.next}`))
+        const step = tick.iteration
+        if (!step) return
+        console.log(`  ${statusIcon(g.status)} #${g.iterations.length} (${step.turns} turns) ${step.progress}`)
+        if (step.next && g.status === 'active') console.log(t(`     ↳ 下一步: ${step.next}`, `     ↳ next: ${step.next}`))
       },
       onInfo: () => undefined,
     })
