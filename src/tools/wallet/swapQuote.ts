@@ -1,22 +1,26 @@
 /**
  * swap_quote — Engine-side wallet tool (WP-16)
  *
- * QUOTE ONLY: this tool requests a swap price quote from the artemis-online
- * gateway (`GET /v1/wallet/swap-quote`). It never signs, submits, or broadcasts
- * a transaction, and it moves no funds.
+ * QUOTE ONLY: this tool requests a swap price quote from the wallet gateway
+ * (`/wallet/swap-quote`). It never signs, submits, or broadcasts a
+ * transaction, and it moves no funds.
  *
  * permissionCategory: 'read'
  *
  * Flow:
+ *   0. Strictly normalize inputs (chain / from / to / amount) via walletConfig
+ *      helpers; any invalid value → WALLET_INVALID_INPUT.
  *   1. resolvePlatformWallet() → if not configured, return an "unavailable" result.
  *   2. checkWalletKillSwitch() → if disabled, refuse.
- *   3. GET /v1/wallet/swap-quote?chain=&from=&to=&amount= with Bearer auth.
+ *   3. walletRequest(config, '/wallet/swap-quote', { query }) — URL building,
+ *      auth headers, timeout and error mapping are centralized there (no manual
+ *      URL concatenation, which previously produced a duplicated version prefix).
  *   4. Validate that the response contains `amountOut`.
  *   5. Return a bilingual (Chinese-primary) summary; `data` holds the full quote.
  *
  * Security notes:
- *   - The apiKey is only placed in the Authorization header. It is never logged,
- *     never included in output, and is redacted from any relayed gateway text.
+ *   - The apiKey is handled exclusively by walletRequest; this tool never reads,
+ *     logs, or outputs it.
  *   - Amounts are handled strictly as strings; no floating-point math is done.
  *   - Addresses are shown truncated (0x1234…abcd) in human-readable output.
  */
@@ -27,6 +31,11 @@ import {
   resolvePlatformWallet,
   checkWalletKillSwitch,
   WalletConfigError,
+  normalizeChain,
+  normalizeToken,
+  normalizeAmount,
+  walletRequest,
+  walletFailure,
 } from './walletConfig.js';
 
 export const SWAP_QUOTE_DESCRIPTION = [
@@ -55,8 +64,6 @@ interface SwapQuoteResponse {
 }
 
 const QUOTE_TIMEOUT_MS = 15_000;
-const DECIMAL_AMOUNT_RE = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
-const MAX_RELAYED_MESSAGE_LENGTH = 500;
 
 function t(zh: boolean, zhText: string, enText: string): string {
   return zh ? zhText : enText;
@@ -95,17 +102,6 @@ function truncateAddress(value: string): string {
   return v;
 }
 
-function redact(text: string, apiKey: string): string {
-  let out = text;
-  if (apiKey.length > 0) {
-    out = out.split(apiKey).join('[REDACTED]');
-  }
-  if (out.length > MAX_RELAYED_MESSAGE_LENGTH) {
-    out = `${out.slice(0, MAX_RELAYED_MESSAGE_LENGTH)}…`;
-  }
-  return out;
-}
-
 function fail(output: string, code: string, message: string, retryable: boolean): ToolExecutionResult {
   return {
     ok: false,
@@ -116,27 +112,6 @@ function fail(output: string, code: string, message: string, retryable: boolean)
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
-}
-
-function extractGatewayMessage(body: unknown): string | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  const b = body as Record<string, unknown>;
-  if (isNonEmptyString(b.message)) return b.message;
-  if (isNonEmptyString(b.error)) return b.error;
-  if (b.error && typeof b.error === 'object') {
-    const e = b.error as Record<string, unknown>;
-    if (isNonEmptyString(e.message)) return e.message;
-  }
-  return undefined;
-}
-
-function parseJsonSafe(text: string): unknown {
-  if (text.trim().length === 0) return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
 }
 
 function amountToString(v: unknown): string | undefined {
@@ -161,36 +136,32 @@ function displayToken(value: string): string {
   return truncateAddress(value);
 }
 
+function errorDetail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export async function executeSwapQuote(
   action: SwapQuoteAction,
   context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
   const zh = deriveZh(context);
 
-  const chain = typeof action.chain === 'string' ? action.chain.trim() : '';
-  const from = typeof action.from === 'string' ? action.from.trim() : '';
-  const to = typeof action.to === 'string' ? action.to.trim() : '';
-  const amount = typeof action.amount === 'string' ? action.amount.trim() : '';
+  // ---- 0. strict input validation ---------------------------------------
+  const chain = normalizeChain(action.chain);
+  const from = normalizeToken(action.from);
+  const to = normalizeToken(action.to);
+  const amount = normalizeAmount(action.amount);
 
-  // ---- input validation -------------------------------------------------
-  const missing: string[] = [];
-  if (!chain) missing.push('chain');
-  if (!from) missing.push('from');
-  if (!to) missing.push('to');
-  if (!amount) missing.push('amount');
-  if (missing.length > 0) {
+  const invalid: string[] = [];
+  if (chain === null) invalid.push('chain');
+  if (from === null) invalid.push('from');
+  if (to === null) invalid.push('to');
+  if (amount === null) invalid.push('amount');
+  if (chain === null || from === null || to === null || amount === null) {
     const msg = t(
       zh,
-      `缺少必要参数：${missing.join(', ')}`,
-      `Missing required parameter(s): ${missing.join(', ')}`,
-    );
-    return fail(msg, 'WALLET_INVALID_INPUT', msg, false);
-  }
-  if (!DECIMAL_AMOUNT_RE.test(amount) || /^0(?:\.0+)?$/.test(amount)) {
-    const msg = t(
-      zh,
-      `无效的数量 "${amount}"：必须是大于 0 的十进制数字字符串（例如 "1.5"）。`,
-      `Invalid amount "${amount}": must be a positive decimal string (e.g. "1.5").`,
+      `参数缺失或无效：${invalid.join(', ')}（amount 必须是大于 0 的十进制数字字符串，例如 "1.5"）。`,
+      `Missing or invalid parameter(s): ${invalid.join(', ')} (amount must be a positive decimal string, e.g. "1.5").`,
     );
     return fail(msg, 'WALLET_INVALID_INPUT', msg, false);
   }
@@ -204,13 +175,11 @@ export async function executeSwapQuote(
   try {
     config = await resolvePlatformWallet();
   } catch (err) {
-    const detail =
-      err instanceof WalletConfigError || err instanceof Error ? err.message : String(err);
-    const msg = t(
-      zh,
-      `钱包配置错误：${detail}`,
-      `Wallet configuration error: ${detail}`,
-    );
+    if (err instanceof WalletConfigError) {
+      return walletFailure(err, zh) as ToolExecutionResult;
+    }
+    const detail = errorDetail(err);
+    const msg = t(zh, `钱包配置错误：${detail}`, `Wallet configuration error: ${detail}`);
     return fail(msg, 'WALLET_CONFIG_ERROR', msg, false);
   }
   if (!config) {
@@ -221,13 +190,12 @@ export async function executeSwapQuote(
     );
     return fail(msg, 'WALLET_UNAVAILABLE', msg, false);
   }
-  const apiKey = config.apiKey;
 
   // ---- 2. kill switch ---------------------------------------------------
   try {
     const ks = await checkWalletKillSwitch(config);
     if (!ks.enabled) {
-      const reason = ks.message ? redact(ks.message, apiKey) : undefined;
+      const reason = isNonEmptyString(ks.message) ? ks.message : undefined;
       const msg = t(
         zh,
         `钱包功能已被停用，拒绝执行${reason ? `：${reason}` : '。'}`,
@@ -236,62 +204,36 @@ export async function executeSwapQuote(
       return fail(msg, 'WALLET_DISABLED', msg, false);
     }
   } catch (err) {
-    const detail = redact(err instanceof Error ? err.message : String(err), apiKey);
-    const retryable = !(err instanceof WalletConfigError);
+    if (err instanceof WalletConfigError) {
+      return walletFailure(err, zh) as ToolExecutionResult;
+    }
+    const detail = errorDetail(err);
     const msg = t(
       zh,
       `无法确认钱包开关状态，出于安全考虑拒绝执行：${detail}`,
       `Could not verify wallet kill-switch state; refusing for safety: ${detail}`,
     );
-    return fail(msg, 'WALLET_KILL_SWITCH_ERROR', msg, retryable);
+    return fail(msg, 'WALLET_KILL_SWITCH_ERROR', msg, true);
   }
 
-  // ---- 3. GET quote -----------------------------------------------------
-  const params = new URLSearchParams({ chain, from, to, amount });
-  const url = `${config.baseUrl.replace(/\/+$/, '')}/v1/wallet/swap-quote?${params.toString()}`;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), QUOTE_TIMEOUT_MS);
-  let status: number;
-  let bodyText: string;
+  // ---- 3. request quote -------------------------------------------------
+  let body: unknown;
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: 'application/json',
-      },
-      signal: controller.signal,
+    body = await walletRequest(config, '/wallet/swap-quote', {
+      query: { chain, from, to, amount },
+      timeoutMs: QUOTE_TIMEOUT_MS,
     });
-    status = res.status;
-    bodyText = await res.text();
   } catch (err) {
-    const aborted = err instanceof Error && err.name === 'AbortError';
-    const detail = aborted
-      ? t(zh, `请求超时（${QUOTE_TIMEOUT_MS / 1000} 秒）`, `request timed out after ${QUOTE_TIMEOUT_MS / 1000}s`)
-      : redact(err instanceof Error ? err.message : String(err), apiKey);
+    if (err instanceof WalletConfigError) {
+      return walletFailure(err, zh) as ToolExecutionResult;
+    }
+    const detail = errorDetail(err);
     const msg = t(
       zh,
-      `获取报价失败（网络错误）：${detail}`,
-      `Failed to fetch swap quote (network error): ${detail}`,
+      `获取报价失败：${detail}`,
+      `Failed to fetch swap quote: ${detail}`,
     );
     return fail(msg, 'WALLET_NETWORK_ERROR', msg, true);
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const body = parseJsonSafe(bodyText);
-
-  if (status < 200 || status >= 300) {
-    const gatewayMsg = extractGatewayMessage(body) ?? (bodyText.trim() || `HTTP ${status}`);
-    const relayed = redact(gatewayMsg, apiKey);
-    const retryable = status >= 500;
-    const msg = t(
-      zh,
-      `网关返回错误（HTTP ${status}）：${relayed}`,
-      `Gateway returned an error (HTTP ${status}): ${relayed}`,
-    );
-    return fail(msg, 'WALLET_GATEWAY_ERROR', msg, retryable);
   }
 
   // ---- 4. validate ------------------------------------------------------
