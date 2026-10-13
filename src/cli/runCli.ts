@@ -751,6 +751,8 @@ async function runQueryCommand(options: {
         onInfo: (message) => console.error(oneLine(message)),
         approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' },
         ...(options.keepApprovals ? { keepApprovals: true } : {}),
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+        ...(options.apiKey ? { apiKey: options.apiKey } : {}),
       })
       console.error(formatGoalStatusLine(tick))
       result = tick.run
