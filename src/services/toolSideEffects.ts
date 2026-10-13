@@ -36,6 +36,9 @@ export function toolUseName(name: string, action: Record<string, unknown> | unde
   if (name === 'mcp_call_tool' && typeof action?.serverId === 'string' && typeof action?.toolName === 'string') {
     return buildProjectedMcpToolName(action.serverId, action.toolName);
   }
+  if (name === 'mcp_run_command' && typeof action?.serverId === 'string' && typeof action?.commandName === 'string') {
+    return buildProjectedMcpToolName(action.serverId, action.commandName);
+  }
   return name;
 }
 

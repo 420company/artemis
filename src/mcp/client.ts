@@ -88,6 +88,14 @@ export type McpPromptGetResult = {
   server: McpServerConfig;
 };
 
+export type McpCommandRunResult = {
+  output: string;
+  raw: unknown;
+  surface?: McpServerSurface;
+  authState: McpAuthState;
+  server: McpServerConfig;
+};
+
 type RpcTransport = {
   initialize(): Promise<RpcClientInfo>;
   listTools(): Promise<McpToolDescriptor[]>;
@@ -104,6 +112,10 @@ type RpcTransport = {
   readResource(uri: string): Promise<unknown>;
   getPrompt(
     promptName: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown>;
+  runCommand(
+    commandName: string,
     args: Record<string, unknown>,
   ): Promise<unknown>;
   close(): Promise<void>;
@@ -1035,6 +1047,17 @@ class HttpRpcTransport implements RpcTransport {
     });
   }
 
+  async runCommand(
+    commandName: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    await this.initialize();
+    return await this.send('commands/call', {
+      name: commandName,
+      arguments: args,
+    });
+  }
+
   async close(): Promise<void> {
     this.initialized = false;
   }
@@ -1598,6 +1621,17 @@ class SseRpcTransport implements RpcTransport {
     });
   }
 
+  async runCommand(
+    commandName: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    await this.initialize();
+    return await this.send('commands/call', {
+      name: commandName,
+      arguments: args,
+    });
+  }
+
   async close(): Promise<void> {
     this.closing = true;
     if (this.reconnectTimer) {
@@ -2090,6 +2124,17 @@ class StdioRpcTransport implements RpcTransport {
     });
   }
 
+  async runCommand(
+    commandName: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    await this.initialize();
+    return await this.send('commands/call', {
+      name: commandName,
+      arguments: args,
+    });
+  }
+
   async close(): Promise<void> {
     this.rejectPending(new Error('stdio MCP client closed.'));
     if (this.child) {
@@ -2433,6 +2478,64 @@ export async function callMcpServerTool(options: ManagedRequestOptions & {
         request,
         `MCP tool ${request.toolName}`,
         (client) => client.callTool(request.toolName, request.args ?? {}),
+      );
+      return {
+        output: serializeResult(result),
+        raw: result,
+        surface: surface.surface,
+        authState: surface.authState,
+        server: surface.server,
+      };
+    } catch (error) {
+      await invalidateManagedClient(request.server, request.cwd);
+      if (error instanceof McpCallCancelledError) {
+        throw error;
+      }
+      if (!retriedSession && isMcpSessionExpiryError(error)) {
+        retriedSession = true;
+        continue;
+      }
+      if (!retriedCredential && isMcpAuthRejection(error)) {
+        retriedCredential = true;
+        const fresh = await reloadRotatedCredential(request.server, request.cwd);
+        if (fresh) {
+          request = { ...request, server: fresh };
+          continue;
+        }
+      }
+      // Detect missing runtime/executable — do not retry, surface to user
+      if (isMissingExecutableError(error)) {
+        const req = detectDependencyRequirement(request.server);
+        if (req) {
+          throw new McpDependencyError(
+            request.server,
+            buildDependencyInfo(request.server, req),
+          );
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        isMcpAuthRejection(error)
+          ? `${message}\nMCP server ${request.server.id} refused the credential. If the owner connected this service in an app, it may need to be reconnected there.`
+          : message,
+      );
+    }
+  }
+}
+
+export async function runMcpServerCommand(options: ManagedRequestOptions & {
+  commandName: string;
+  args?: Record<string, unknown>;
+}): Promise<McpCommandRunResult> {
+  let request = options;
+  let retriedSession = false;
+  let retriedCredential = false;
+  for (;;) {
+    try {
+      const { result, surface } = await requestWithManagedClient(
+        request,
+        `MCP command ${request.commandName}`,
+        (client) => client.runCommand(request.commandName, request.args ?? {}),
       );
       return {
         output: serializeResult(result),
