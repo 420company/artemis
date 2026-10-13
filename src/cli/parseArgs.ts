@@ -45,6 +45,7 @@ export type CliCommand =
   | 'goal'
   | 'dream'
   | 'browser-host'
+  | 'retry'
 
 export interface ParsedArgs {
   command: CliCommand
@@ -71,6 +72,8 @@ export interface ParsedArgs {
   /** execute: advance this long-term goal by one step instead of sending a message (--goal <id> [--goal-max-steps <n>]); the prompt is the goal. */
   goal?: { id: string; maxSteps?: number }
   resumeLast: boolean
+  /** retry: print the result as JSON instead of human text (--json). */
+  json?: boolean
   maxTurns: number
   maxTurnsExplicit: boolean
   permissionMode: PermissionMode
@@ -91,6 +94,7 @@ const CLI_COMMANDS = new Set<CliCommand>([
   'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream',
   // For a platform host only (not in the help): the live browser host in the foreground.
   'browser-host',
+  'retry',
   // Removed CLI commands (not in the help): they print where the feature lives now.
   'tasks', 'runtimes',
 ])
@@ -176,6 +180,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let goalId: string | undefined
   let goalMaxSteps: number | undefined
   let resumeLast = false
+  let json = false
   let model: string | undefined = process.env.ARTEMIS_MODEL
   let baseUrl: string | undefined = process.env.ARTEMIS_BASE_URL
   let apiKey: string | undefined = process.env.ARTEMIS_API_KEY
@@ -325,6 +330,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
       resumeLast = false
       continue
     }
+    if (command === 'retry' && cur === '--session') {
+      const v = args.shift()
+      const extracted = v ? extractSessionIdToken(v) : undefined
+      if (!extracted) throw new Error('retry --session requires a valid session id.')
+      sessionId = extracted
+      continue
+    }
+    if (command === 'retry' && cur === '--json') {
+      json = true
+      continue
+    }
     // first positional after resume may be a session id
     if (command === 'resume' && !sessionId && !resumeLast) {
       sessionId = cur
@@ -359,6 +375,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(keepApprovals ? { keepApprovals } : {}),
     ...(outputFormat ? { outputFormat } : {}),
     ...(goalId ? { goal: { id: goalId, ...(goalMaxSteps !== undefined ? { maxSteps: goalMaxSteps } : {}) } } : {}),
+    ...(json ? { json } : {}),
   }
 }
 
