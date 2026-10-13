@@ -835,6 +835,11 @@ export type AgentAction =
   | { type: 'get_sms_number'; country: string; signup_id?: string; wait_seconds?: number }
   | { type: 'wait_for_sms'; sender_contains?: string; timeout_seconds?: number }
   | { type: 'ask_owner_for_code'; site: string; channel?: 'sms' | 'email' | 'authenticator' | 'other'; hint?: string; timeout_seconds?: number };
+  | {
+      type: 'edit_timeline';
+      action: 'list_segments' | 'replace_segment' | 'trim_segment' | 'add_subtitle' | 'remove_subtitle' | 'set_bgm' | 'render' | 'import_saga';
+      projectId?: string;
+    }
 
 export type AgentActionType = AgentAction['type'];
 
@@ -952,7 +957,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'finish_signup',
   'get_sms_number',
   'wait_for_sms',
-  'ask_owner_for_code',
+  'ask_owner_for_code', 'edit_timeline',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
