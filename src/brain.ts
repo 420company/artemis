@@ -2281,12 +2281,14 @@ const NEW_PATH_UNSUPPORTED_OPTIONS = [
 
 /**
  * Returns whether the runAgent-backed think() path is enabled.
- * ARTEMIS_BRAIN_LEGACY=1 always wins. Otherwise the new path requires an explicit
- * ARTEMIS_BRAIN_NEW=1. The default is legacy.
+ * ARTEMIS_BRAIN_NEW=0 forces legacy (escape hatch). ARTEMIS_BRAIN_LEGACY=1
+ * also forces legacy (kept for backward compatibility). Otherwise the new
+ * path is the default — no env var needed.
  */
 function isBrainNewPathEnabled(): boolean {
+    if (process.env.ARTEMIS_BRAIN_NEW === '0') return false;
     if (process.env.ARTEMIS_BRAIN_LEGACY === '1') return false;
-    return process.env.ARTEMIS_BRAIN_NEW === '1';
+    return true;
 }
 
 /**
@@ -2527,8 +2529,9 @@ async function withCwdThinkLock<T>(cwd: string, fn: () => Promise<T>): Promise<T
 
 /**
  * Public think() entry point and thin adapter.
- * Routes to runAgent when ARTEMIS_BRAIN_NEW=1 and the options pass the capability
- * gate. Otherwise it delegates to thinkTurnLegacy with the original arguments.
+ * Routes to runAgent by default when the options pass the capability
+ * gate. ARTEMIS_BRAIN_NEW=0 (or ARTEMIS_BRAIN_LEGACY=1) forces the legacy
+ * path. Otherwise it delegates to thinkTurnLegacy with the original arguments.
  */
 export async function think(
     input: string,
