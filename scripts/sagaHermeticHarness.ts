@@ -174,9 +174,20 @@ export async function withHermeticWorkspace<T>(
       return json(200, { status: 'succeeded', content: { video_url: `https://cdn.example.test/clip-${taskSeconds.get(task[1]!) ?? 5}.mp4` } });
     }
     const clip = /^https:\/\/cdn\.example\.test\/clip-(\d+)\.mp4$/.exec(url);
-    if (clip) return new Response(clipOf(Number(clip[1])), { status: 200, headers: { 'Content-Type': 'video/mp4' } });
+    if (clip) {
+      // Buffer (generic in @types/node >= 22) is not assignable to DOM
+      // BodyInit; copy into a plain ArrayBuffer-backed view instead.
+      const clipBytes = clipOf(Number(clip[1]));
+      const body = new Uint8Array(clipBytes.byteLength);
+      body.set(clipBytes);
+      return new Response(body.buffer, { status: 200, headers: { 'Content-Type': 'video/mp4' } });
+    }
     if (url === 'https://cdn.example.test/expired.png') return new Response('gone', { status: 403 });
-    if (url === 'https://cdn.example.test/still.png') return new Response(pngBytes, { status: 200, headers: { 'Content-Type': 'image/png' } });
+    if (url === 'https://cdn.example.test/still.png') {
+      const pngBody = new Uint8Array(pngBytes.byteLength);
+      pngBody.set(pngBytes);
+      return new Response(pngBody.buffer, { status: 200, headers: { 'Content-Type': 'image/png' } });
+    }
     return new Response(`unexpected request ${method} ${url}`, { status: 500 });
   }) as typeof fetch;
   try {
