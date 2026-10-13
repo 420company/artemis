@@ -563,6 +563,13 @@ export type AgentAction =
       timeoutMs?: number;
     }
   | {
+      type: 'mcp_run_command';
+      serverId: string;
+      commandName: string;
+      args?: Record<string, unknown>;
+      timeoutMs?: number;
+    }
+  | {
       type: 'write_file';
       path: string;
       content: string;
@@ -1084,6 +1091,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'mcp_call_tool',
   'mcp_read_resource',
   'mcp_get_prompt',
+  'mcp_run_command',
   'write_file',
   'insert_in_file',
   'replace_in_file',
@@ -1243,6 +1251,7 @@ export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
   'mcp_call_tool',
   'mcp_read_resource',
   'mcp_get_prompt',
+  'mcp_run_command',
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',
