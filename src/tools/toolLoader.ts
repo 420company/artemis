@@ -70,6 +70,42 @@ function getActionTypeSet(): ReadonlySet<string> {
 
 let schemaBuilderPromise: Promise<SchemaBuilder | null> | undefined;
 
+// ---------------------------------------------------------------------------
+// WP-18 phase 2: session-level loaded-tool cache.
+// ---------------------------------------------------------------------------
+// Maps sessionId -> (toolName -> LoadedToolSchema). A tool loaded once in a
+// session is served from cache on subsequent load_tools calls, avoiding
+// redundant schema builds. Keyed by sessionId string (from
+// ToolExecutionContext.sessionId) rather than Session object to avoid a
+// circular import with core/session.ts. Entries live as long as the process;
+// call clearLoadedToolSchemas(sessionId) on session teardown, or
+// clearLoadedToolSchemas() to drop everything (e.g. in tests).
+const sessionLoadedSchemas = new Map<string, Map<string, LoadedToolSchema>>();
+
+export function getLoadedToolSchemasForSession(sessionId: string): ReadonlyMap<string, LoadedToolSchema> {
+  return sessionLoadedSchemas.get(sessionId) ?? new Map();
+}
+
+export function clearLoadedToolSchemas(sessionId?: string): void {
+  if (sessionId === undefined) {
+    sessionLoadedSchemas.clear();
+  } else {
+    sessionLoadedSchemas.delete(sessionId);
+  }
+}
+
+function cacheLoadedSchemas(sessionId: string | undefined, tools: LoadedToolSchema[]): void {
+  if (!sessionId) return;
+  let perSession = sessionLoadedSchemas.get(sessionId);
+  if (!perSession) {
+    perSession = new Map();
+    sessionLoadedSchemas.set(sessionId, perSession);
+  }
+  for (const tool of tools) {
+    perSession.set(tool.type, tool);
+  }
+}
+
 function loadSchemaBuilder(): Promise<SchemaBuilder | null> {
   if (!schemaBuilderPromise) {
     schemaBuilderPromise = import('../core/providerNativeTools.js')
@@ -230,25 +266,43 @@ export function createLoadToolsToolDef(deps: ToolLoaderDeps): ToolDefinition {
       return [];
     },
 
-    async execute(action: AgentAction): Promise<{ success: boolean; data?: LoadToolsResultData; error?: string }> {
+    async execute(
+      action: AgentAction,
+      context?: any,
+    ): Promise<{ success: boolean; data?: LoadToolsResultData; error?: string }> {
       const { errors, names } = parseRequestedTools(readRawToolsField(action));
       if (errors.length > 0) {
         // Defensive: validate normally runs first; never throw from execute.
         return { success: false, error: errors.join('\n') };
       }
 
+      const sessionId: string | undefined =
+        typeof context?.sessionId === 'string' ? context.sessionId : undefined;
+      const cached = sessionId ? sessionLoadedSchemas.get(sessionId) : undefined;
+
       const schemaBuilder = await loadSchemaBuilder();
       const tools: LoadedToolSchema[] = [];
       const unknown: string[] = [];
+      const freshlyBuilt: LoadedToolSchema[] = [];
 
       for (const name of names) {
+        const hit = cached?.get(name);
+        if (hit) {
+          tools.push(hit);
+          continue;
+        }
         const def = deps.getToolDefinition(name);
         if (!def) {
           unknown.push(name);
           continue;
         }
-        tools.push(buildLoadedToolSchema(name, def, deps, schemaBuilder));
+        const schema = buildLoadedToolSchema(name, def, deps, schemaBuilder);
+        tools.push(schema);
+        freshlyBuilt.push(schema);
       }
+
+      // Cache freshly built schemas for this session so repeat loads are free.
+      cacheLoadedSchemas(sessionId, freshlyBuilt);
 
       return { success: true, data: { tools, unknown } };
     },
