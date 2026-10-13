@@ -1547,6 +1547,41 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           maxMinutes: { type: 'integer', minimum: 1, maximum: 60, description: 'Longest the call may last, in minutes (the platform may cap it lower).' },
         },
       };
+    case 'get_balance':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['chain', 'address'],
+        properties: {
+          chain: nonEmptyStringSchema('Chain, e.g. "bsc", "ethereum" or "solana".'),
+          address: nonEmptyStringSchema('Wallet address to look up.'),
+        },
+      };
+    case 'swap_quote':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['chain', 'from', 'to', 'amount'],
+        properties: {
+          chain: nonEmptyStringSchema('Chain, e.g. "bsc", "ethereum" or "solana".'),
+          from: nonEmptyStringSchema('Token to swap from (symbol or contract address).'),
+          to: nonEmptyStringSchema('Token to swap to (symbol or contract address).'),
+          amount: nonEmptyStringSchema('Amount to swap, as a decimal string. Quote only; nothing is sent.'),
+        },
+      };
+    case 'send_transaction':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['chain', 'to', 'token', 'amount'],
+        properties: {
+          chain: nonEmptyStringSchema('Chain, e.g. "bsc", "ethereum" or "solana".'),
+          to: nonEmptyStringSchema('Recipient wallet address.'),
+          token: nonEmptyStringSchema('Token symbol or contract address to send.'),
+          amount: nonEmptyStringSchema('Amount to send, as a decimal string.'),
+          quoteId: optionalStringSchema('Quote id from swap_quote, when this send follows a quote.'),
+        },
+      };
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':

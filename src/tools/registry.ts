@@ -27,6 +27,9 @@ import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
 import { executePlaceCall, PLACE_CALL_DESCRIPTION } from './phoneCall/placeCall.js';
+import { GET_BALANCE_DESCRIPTION } from './wallet/getBalance.js';
+import { SWAP_QUOTE_DESCRIPTION } from './wallet/swapQuote.js';
+import { SEND_TRANSACTION_DESCRIPTION } from './wallet/sendTransaction.js';
 import { executeOfficeDocument } from './officeDocuments.js';
 import { CREATE_DOCUMENT_DESCRIPTION, CREATE_PRESENTATION_DESCRIPTION, CREATE_SPREADSHEET_DESCRIPTION, validateOfficeAction } from './office/descriptions.js';
 import { executeInsertInFile } from './insertInFile.js';
@@ -712,6 +715,32 @@ function validatePlaceCallAction(action: any): string[] {
   return errors;
 }
 
+function validateGetBalanceAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.chain, 'chain', errors);
+  validateRequiredNonEmptyString(action?.address, 'address', errors);
+  return errors;
+}
+
+function validateSwapQuoteAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.chain, 'chain', errors);
+  validateRequiredNonEmptyString(action?.from, 'from', errors);
+  validateRequiredNonEmptyString(action?.to, 'to', errors);
+  validateRequiredNonEmptyString(action?.amount, 'amount', errors);
+  return errors;
+}
+
+function validateSendTransactionAction(action: any): string[] {
+  const errors: string[] = [];
+  validateRequiredNonEmptyString(action?.chain, 'chain', errors);
+  validateRequiredNonEmptyString(action?.to, 'to', errors);
+  validateRequiredNonEmptyString(action?.token, 'token', errors);
+  validateRequiredNonEmptyString(action?.amount, 'amount', errors);
+  if (action?.quoteId !== undefined && typeof action.quoteId !== 'string') errors.push('quoteId must be a string');
+  return errors;
+}
+
 function validateTranscribeAudioAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.inputPath, 'inputPath', errors);
@@ -1158,6 +1187,45 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validatePlaceCallAction,
     execute: ((action: any, context: any) => executePlaceCall(action, context)) as any,
+  },
+  {
+    type: 'get_balance',
+    description: GET_BALANCE_DESCRIPTION,
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: validateGetBalanceAction,
+    execute: (async (action: any, context: any) => {
+      const { executeGetBalance } = await import('./wallet/getBalance.js');
+      return executeGetBalance(action, context);
+    }) as any,
+  },
+  {
+    type: 'swap_quote',
+    description: SWAP_QUOTE_DESCRIPTION,
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'blocking',
+    parallelSafe: true,
+    validate: validateSwapQuoteAction,
+    execute: (async (action: any, context: any) => {
+      const { executeSwapQuote } = await import('./wallet/swapQuote.js');
+      return executeSwapQuote(action, context);
+    }) as any,
+  },
+  {
+    type: 'send_transaction',
+    description: SEND_TRANSACTION_DESCRIPTION,
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateSendTransactionAction,
+    execute: (async (action: any, context: any) => {
+      const { executeSendTransaction } = await import('./wallet/sendTransaction.js');
+      return executeSendTransaction(action, context);
+    }) as any,
   },
   {
     type: 'create_presentation',
