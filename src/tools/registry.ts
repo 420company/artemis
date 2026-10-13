@@ -1,3 +1,5 @@
+ /**
+ * tools/registry.ts — runtime tool registry
  *
  * The registry is the single source of truth for tool metadata exposed to the
  * CLI runtime. Provider-native tool manifests, permission checks, validation,
@@ -92,11 +94,9 @@ import {
   executeTaskOutput,
 } from './taskManager.js';
 import { executeSearchFiles } from './searchFiles.js';
-
 import { executeSearchWeb } from './searchWeb.js';
 import { executeHttpRequest } from './httpRequest.js';
 import { executeWebScraper } from './webScraper.js';
-
 import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
