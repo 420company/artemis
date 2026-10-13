@@ -27,7 +27,8 @@ export interface HeadlessAgentOptions {
   /** Images attached to the prompt: sent with the first request, or described by the vision helper for a text-only model. */
   imagePaths?: string[]
   sessionTitle?: string
-  onInfo?: (message: string) => void
+  /** Progress lines; a line with a structured meaning passes it as the second argument (core/progressEvents.ts). */
+  onInfo?: import('../core/progressEvents.js').InfoSink
   /**
    * Pick the workflow from the request (core/workflowRouter.ts). Default
    * true; Goal Mode ticks pass false (their prompt is written by Artemis).
