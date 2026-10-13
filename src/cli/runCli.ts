@@ -130,6 +130,36 @@ export async function runCli(argv: string[]): Promise<void> {
     process.exit(exitCode)
   }
 
+  // ── retry ─────────────────────────────────────────────────────────────────
+  // Q5: standalone `artemis retry [--session <id>] [--json]`. Delegates to the
+  // same headless retry path as `execute --retry` (services/headlessAgent.ts).
+  if (options.command === 'retry') {
+    const { runRetryCommand } = await import('./retryCommand.js')
+    try {
+      const result = await runRetryCommand({
+        cwd: options.cwd,
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.maxTurnsExplicit ? { maxTurns: options.maxTurns } : {}),
+      })
+      if (options.json) {
+        console.log(JSON.stringify({ ...result }))
+      } else {
+        console.log(`\u2713 ${result.message}`)
+        if (result.retriedPrompt) console.log(`  Retried: ${result.retriedPrompt}`)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (options.json) {
+        console.log(JSON.stringify({ ok: false, error: message }))
+      } else {
+        console.error(`\u2717 ${message}`)
+      }
+      process.exit(1)
+    }
+    return
+  }
+
   // The interactive CLI must NEVER try to kill the background gateway daemon
   // to take over bridges. Doing so triggers a mutual-kill loop:
   //   CLI kills daemon → launchd restarts daemon → daemon kills CLI → "zsh: terminated"
