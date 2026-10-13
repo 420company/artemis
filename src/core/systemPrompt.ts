@@ -45,13 +45,21 @@ export function buildSystemPrompt(
     `Execution profile: ${profile}`,
     '',
     'Tool policy:',
-    getToolManifest(getAllowedActionTypesForProfile(profile)),
+    getToolManifest(getAllowedActionTypesForProfile(profile), {
+      profile: profile,
+    }),
     '',
-    // WP-18 phase 1: guidance only; manifest switch to core-only happens in phase 2
-    'Lazy tool loading:',
-    '- Only core tools are listed in full above. Additional tools are available on demand.',
-    '- If a task needs a tool that is not listed, call `load_tools` with the tool names first to fetch their full schemas, then call them.',
-    '- Do not guess parameters for a tool you have not loaded; always load first.',
+    // WP-18 phase 2: core-only manifest is the default. Set ARTEMIS_ALL_TOOLS=1
+    // to fall back to the legacy full manifest.
+    ...(process.env.ARTEMIS_ALL_TOOLS === '1'
+      ? []
+      : [
+          'Lazy tool loading (core-only mode):',
+          '- Only core tools are listed in full above. All other tools are available on demand and listed by name below.',
+          '- If a task needs a tool that is not listed in full, call `load_tools` with the tool names first (up to 10 per call) to fetch each tool\'s description and input schema, then call the tool.',
+          '- Do not guess parameters for a tool you have not loaded; always load first.',
+          '- Tools you already loaded earlier in this session do not need to be loaded again.',
+        ]),
     ...specialistRoleManifest,
     '',
     'Operating guidelines:',
