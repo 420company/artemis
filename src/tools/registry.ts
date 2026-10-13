@@ -2180,6 +2180,25 @@ const capabilityToolDefs: ToolDefinition[] = [
       return executeMemoryTool(action, context);
     }) as any,
   },
+  {
+    type: 'edit_timeline',
+    description: '视频时间线编辑器：管理 timeline-projects 下的时间线项目。list_segments 列出段落；replace_segment 替换段落视频；trim_segment 裁剪段落（ffmpeg）；add_subtitle/remove_subtitle 加/删字幕；set_bgm 设置背景音乐；render 渲染成片（拼接+字幕+混音）；import_saga 从 Saga 长视频输出导入为可编辑时间线。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: (a: any) => {
+      const errs: string[] = [];
+      const validActions = ['list_segments', 'replace_segment', 'trim_segment', 'add_subtitle', 'remove_subtitle', 'set_bgm', 'render', 'import_saga'];
+      if (!validActions.includes(a?.action)) errs.push(`action must be one of: ${validActions.join(', ')}. `);
+      if (a?.action !== 'import_saga' && !isNonEmptyString(a?.projectId)) errs.push('projectId is required.');
+      return errs;
+    },
+    execute: (async (a: any, context: any) => {
+      const { executeEditTimeline } = await import('./visual/timelineEditor.js');
+      return executeEditTimeline(a, context);
+    }) as any,
+  },
 ];
 
 // Every direct executor is wrapped so that pending background-task completion
