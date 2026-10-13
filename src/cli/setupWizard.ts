@@ -14,7 +14,8 @@ import {
   DEFAULT_GEMINI_DEEP_RESEARCH_POLL_INTERVAL_MS,
   type ResearchEngine,
 } from './settings.js'
-import { ProviderStore } from '../providers/store.js'
+import { createGlobalProviderStore, ProviderStore } from '../providers/store.js'
+import type { PlatformSpeechStoreEntry } from '../providers/types.js'
 import { promptForVerifiedProviderProfile } from '../providers/onboarding.js'
 import type {
   AgentSetupConfig,
@@ -93,6 +94,18 @@ function normalizeSection(value: string | undefined): SetupSection | undefined {
     return v as SetupSection
   }
   return undefined
+}
+
+/** Normalize a gateway base URL, or undefined when it is not http(s). */
+function normalizeGatewayUrl(raw: string): string | undefined {
+  const trimmed = raw.trim().replace(/\/+$/, '')
+  if (!/^https?:\/\/\S+$/i.test(trimmed)) return undefined
+  try {
+    new URL(trimmed)
+  } catch {
+    return undefined
+  }
+  return trimmed
 }
 
 async function askText(prompt: string, defaultValue = '', mask = false): Promise<string> {
@@ -255,6 +268,65 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
     })
   }
 
+  // --- STT backend: local Whisper vs platform speech recognition ---
+  let sttBackend: 'local' | 'platform' = 'local'
+  let platformSttSummary: { baseUrl: string; sttModel: string; language?: string } | undefined
+
+  if (sttEnabled) {
+    const backendChoice = await chooseInteractiveOption<'local' | 'platform'>({
+      title: tr(locale, '选择语音识别后端', 'Choose speech recognition backend'),
+      initialIndex: 0,
+      choices: [
+        { label: tr(locale, '本地 Whisper（免费，在本机运行）', 'Local Whisper (free, runs on this machine)'), value: 'local' },
+        {
+          label: tr(locale, '平台语音识别（需要网关地址和 API 密钥，费用计入你的账户）', 'Platform speech recognition (needs gateway URL and API key, billed to your account)'),
+          value: 'platform',
+        },
+      ],
+    })
+
+    if (backendChoice === 'platform') {
+      let baseUrl: string | undefined
+      for (let attempt = 0; attempt < 3 && !baseUrl; attempt++) {
+        const rawUrl = await askText(tr(locale, '网关地址（如 https://gw.example.com/v1，留空取消）', 'Gateway base URL (e.g. https://gw.example.com/v1, empty to cancel)'), '')
+        if (!rawUrl.trim()) break
+        baseUrl = normalizeGatewayUrl(rawUrl)
+        if (!baseUrl) {
+          console.log(tr(locale, '  地址无效，需以 http:// 或 https:// 开头。', '  Invalid URL; it must start with http:// or https://.'))
+        }
+      }
+
+      const apiKey = baseUrl ? (await askText(tr(locale, 'API 密钥', 'API key'), '', true)).trim() : ''
+      const platformModel = baseUrl && apiKey
+        ? (await askText(tr(locale, 'STT 模型名称（留空则跳过平台语音识别）', 'STT model name (empty to skip platform STT)'), '')).trim()
+        : ''
+      const language = platformModel
+        ? (await askText(tr(locale, '识别语言（可选，如 zh、en；留空自动检测）', 'Recognition language (optional, e.g. zh, en; empty = auto-detect)'), '')).trim()
+        : ''
+
+      if (baseUrl && apiKey && platformModel) {
+        const entry: PlatformSpeechStoreEntry = {
+          provider: 'platform',
+          enabled: true,
+          baseUrl,
+          apiKey,
+          sttModel: platformModel,
+          ...(language ? { language } : {}),
+          managedBy: 'user',
+        }
+        // Global store only: resolvePlatformSpeech() never reads workspace stores.
+        // Merge with any existing entry so platform-written TTS settings survive.
+        const globalStore = createGlobalProviderStore()
+        const current = await globalStore.load()
+        await globalStore.save({ ...current, speech: { ...current.speech, ...entry } })
+        sttBackend = 'platform'
+        platformSttSummary = { baseUrl, sttModel: platformModel, ...(language ? { language } : {}) }
+      } else {
+        console.log(tr(locale, '  未完成平台配置，继续使用本地 Whisper。', '  Platform setup incomplete; keeping local Whisper.'))
+      }
+    }
+  }
+
   await new ProviderStore(cwd).updateSetupConfig((setup) => ({
     ...setup,
     voice: {
@@ -269,7 +341,8 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
       stt: {
         ...setup.voice.stt,
         enabled: sttEnabled,
-        provider: 'local',
+        provider: sttBackend,
+        // Local Whisper settings are kept as fallback; platformSpeechFallsBack() uses them on platform errors.
         engine: sttEngine,
         localModel: sttModel,
       },
@@ -302,15 +375,23 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
       ? `  ✓ Microsoft Edge TTS enabled with default voice: ${voice}`
       : '  ✓ TTS disabled.',
   ))
-  console.log(tr(
-    locale,
-    sttEnabled
-      ? `  ✓ 已启用本地 Whisper STT：${sttEngine} / ${sttModel}。若未安装引擎，transcribe_audio 会给出安装提示。`
-      : '  ✓ 已关闭 STT。',
-    sttEnabled
-      ? `  ✓ Local Whisper STT enabled: ${sttEngine} / ${sttModel}. If no engine is installed, transcribe_audio will return install guidance.`
-      : '  ✓ STT disabled.',
-  ))
+  if (sttBackend === 'platform' && platformSttSummary) {
+    console.log(tr(
+      locale,
+      `  ✓ 已启用平台语音识别：${platformSttSummary.sttModel} @ ${platformSttSummary.baseUrl}${platformSttSummary.language ? `（${platformSttSummary.language}）` : ''}，本地 Whisper 作为备用。`,
+      `  ✓ Platform STT enabled: ${platformSttSummary.sttModel} @ ${platformSttSummary.baseUrl}${platformSttSummary.language ? ` (${platformSttSummary.language})` : ''}, local Whisper as fallback.`,
+    ))
+  } else {
+    console.log(tr(
+      locale,
+      sttEnabled
+        ? `  ✓ 已启用本地 Whisper STT：${sttEngine} / ${sttModel}。若未安装引擎，transcribe_audio 会给出安装提示。`
+        : '  ✓ 已关闭 STT。',
+      sttEnabled
+        ? `  ✓ Local Whisper STT enabled: ${sttEngine} / ${sttModel}. If no engine is installed, transcribe_audio will return install guidance.`
+        : '  ✓ STT disabled.',
+    ))
+  }
 }
 
 async function configureToolSettings(options: { cwd: string; locale: UiLocale }): Promise<void> {
