@@ -2946,8 +2946,9 @@ export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
   'search_files',
   // Execution / editing
   'run_command',
+  'task_output',
+  'kill_task',
   'apply_patch',
-  'insert_in_file',
   'replace_in_file',
   // Task tracking
   'todo',
@@ -2958,18 +2959,16 @@ export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
   'post_update',
   // Loader itself — must never be lazy
   LOAD_TOOLS_TYPE,
+  // Skills
+  'load_skill',
   // Search / knowledge
   'search_web',
-  'lookup_docs',
   // Memory
   'memory',
-  // Workflow
-  'use_workflow',
   // Image viewing
   'view_image',
   // MCP basics
   'mcp_call_tool',
-  'mcp_list',
 ]);
 
 const ON_DEMAND_SUMMARY_MAX_CHARS = 120;
@@ -3005,6 +3004,64 @@ export function isCoreTool(toolType: string): boolean {
 
 export function getToolLoadTier(toolType: string): ToolLoadTier {
   return isCoreTool(toolType) ? 'core' : 'ondemand';
+}
+
+/**
+ * WP-18 phase 2: profile-specific core tool sets.
+ *
+ * Different execution profiles need different core tools. The global
+ * CORE_TOOL_TYPES is the 'main' profile set. Builder/designer profiles only
+ * need file + execution tools; read-only specialist roles get a minimal set.
+ * `load_tools` is always included — without it, an on-demand list would be
+ * unusable noise.
+ *
+ * Uses string profile names to avoid a circular import with agentProfiles.ts.
+ */
+const BUILDER_CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
+  'read_file',
+  'write_file',
+  'list_files',
+  'search_files',
+  'run_command',
+  'task_output',
+  'kill_task',
+  'apply_patch',
+  'replace_in_file',
+  'todo',
+  LOAD_TOOLS_TYPE,
+]);
+
+const READONLY_CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
+  'read_file',
+  'list_files',
+  'search_files',
+  'view_image',
+  'search_web',
+  'memory',
+  LOAD_TOOLS_TYPE,
+  'mcp_call_tool',
+]);
+
+export function getCoreToolTypesForProfile(profile: string): ReadonlySet<string> {
+  if (profile === 'builder' || profile === 'designer') {
+    return BUILDER_CORE_TOOL_TYPES;
+  }
+  if (profile === 'main') {
+    return CORE_TOOL_TYPES;
+  }
+  // All specialist roles (planner, researcher, reviewer, brainstormer,
+  // arbiter, architect, qa) are read-only.
+  return READONLY_CORE_TOOL_TYPES;
+}
+
+/**
+ * WP-18 phase 2: resolve the manifest tier.
+ *
+ * Default is 'core' (core-only mode). Set ARTEMIS_ALL_TOOLS=1 to fall back
+ * to the legacy 'all' mode (every tool rendered in full) for debugging.
+ */
+export function resolveToolManifestTier(): 'core' | 'all' {
+  return process.env.ARTEMIS_ALL_TOOLS === '1' ? 'all' : 'core';
 }
 
 /** First sentence of a description, whitespace-collapsed, truncated to 120 chars. */
@@ -3180,22 +3237,29 @@ export function renderDetailedToolManifest(
 }
 
 export interface RenderToolManifestOptions {
-  /** 'all' (default) keeps legacy behavior; 'core' renders core in full + on-demand summaries. */
+  /**
+   * 'core' (default) renders core tools in full + on-demand summaries.
+   * 'all' keeps legacy behavior (every tool in full). When unset, resolved
+   * via resolveToolManifestTier() (ARTEMIS_ALL_TOOLS=1 forces 'all').
+   */
   loadTier?: 'core' | 'all';
+  /** Execution profile for profile-specific core filtering. Defaults to 'main'. */
+  profile?: string;
 }
 
 export function renderToolManifest(
   allowedToolTypes?: readonly string[],
   options: RenderToolManifestOptions = {},
 ): string {
-  const loadTier = options.loadTier ?? 'all';
+  const loadTier = options.loadTier ?? resolveToolManifestTier();
   if (loadTier === 'all') {
     return renderDetailedToolManifest(allowedToolTypes);
   }
 
   const allowed = toAllowedTypeSet(allowedToolTypes);
+  const profileCore = getCoreToolTypesForProfile(options.profile ?? 'main');
   const coreTypes = toolDefs
-    .filter((def) => isCoreTool(def.type) && isListedInModelManifest(def))
+    .filter((def) => profileCore.has(def.type) && isListedInModelManifest(def))
     .filter((def) => !allowed || allowed.has(def.type))
     .map((def) => def.type);
 

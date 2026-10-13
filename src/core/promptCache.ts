@@ -35,7 +35,7 @@ type PromptRuntimeCacheStats = {
   size: number;
 };
 
-const PROMPT_CACHE_SCHEMA_VERSION = 2;
+const PROMPT_CACHE_SCHEMA_VERSION = 3; // WP-18 phase 2: core-only manifest
 const stableProviderSystemCache = new Map<string, StableProviderSystemCacheEntry>();
 const promptRuntimeCacheStats: PromptRuntimeCacheStats = {
   hits: 0,
@@ -77,6 +77,9 @@ async function buildStablePromptCacheKey(
     getFileSignature(path.join(resolveDataRootDir(options.cwd), 'mcp-servers.json')),
   ]);
 
+  // WP-18 phase 2: the tool manifest now depends on the load tier
+  // (core-only by default; ARTEMIS_ALL_TOOLS=1 forces legacy full mode).
+  const manifestTier = process.env.ARTEMIS_ALL_TOOLS === '1' ? 'all' : 'core';
   return hashString(
     JSON.stringify({
       schema: PROMPT_CACHE_SCHEMA_VERSION,
@@ -89,6 +92,7 @@ async function buildStablePromptCacheKey(
       instructionMaxChars,
       projectInstructionSignatures,
       mcpConfigSignature,
+      manifestTier,
     }),
   );
 }
