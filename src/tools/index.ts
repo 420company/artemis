@@ -201,9 +201,11 @@ export async function executeAction(
 // WP-18 re-exports
 export {
   CORE_TOOL_TYPES,
+  getCoreToolTypesForProfile,
   getToolLoadTier,
   getOnDemandToolSummaries,
   isCoreTool,
+  resolveToolManifestTier,
   validateToolLoadTierIntegrity,
   type ToolLoadTier,
   type RenderToolManifestOptions,
@@ -211,6 +213,8 @@ export {
 export {
   LOAD_TOOLS_TYPE,
   LOAD_TOOLS_MAX_PER_CALL,
+  clearLoadedToolSchemas,
+  getLoadedToolSchemasForSession,
   type LoadedToolSchema,
   type LoadToolsResultData,
 } from './toolLoader.js';
