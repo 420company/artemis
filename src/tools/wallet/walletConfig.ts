@@ -11,11 +11,24 @@
  * The shape follows src/core/platformSpeech.ts:
  *
  *   { "wallet": { "provider": "platform", "enabled": true,
- *                 "baseUrl": "https://<gateway>/v1", "apiKey": "ak-…" } }
+ *                 "baseUrl": "https://<gateway>/v1", "apiKey": "ak-…",
+ *                 "approvalSecret": "<32+ random bytes hex>" } }
  *
  * A missing section, `enabled: false`, a non-platform provider or an invalid
  * baseUrl/apiKey all resolve to "wallet unavailable". Nothing throws past the
  * tool boundary.
+ *
+ * approvalSecret:
+ *  - It is an HMAC-SHA256 key shared between the engine and the gateway. It is
+ *    used ONLY to sign the approval token of POST /v1/wallet/send.
+ *  - It is never sent over the network and never written to logs or tool
+ *    output. When it is missing or invalid, send_transaction fails closed and
+ *    refuses to send. The read-only tools stay available; an invalid
+ *    approvalSecret does not invalidate the rest of the config.
+ *  - Residual risk: it is stored in the same file as the apiKey, so anyone who
+ *    can read that file gets both. The engine layer must forbid the agent from
+ *    reading or writing the global providers.json. It is planned to move to an
+ *    environment variable or the OS keychain later.
  *
  * Security:
  *  - The apiKey is only ever placed in the Authorization header. It is never
@@ -145,6 +158,12 @@ export interface PlatformWalletConfig {
   /** Normalised gateway base URL, always ending in `/v1` (no trailing slash). */
   readonly baseUrl: string;
   readonly apiKey: string;
+  /**
+   * HMAC-SHA256 key shared with the gateway. Used only to sign approval tokens
+   * for POST /v1/wallet/send. Never sent over the network, never logged or
+   * output. undefined → send_transaction must fail closed.
+   */
+  readonly approvalSecret?: string | undefined;
 }
 
 function isLoopbackHost(hostname: string): boolean {
@@ -174,6 +193,18 @@ function normalizeBaseUrl(raw: string): string | null {
 }
 
 /**
+ * Validate the optional approval secret. Returns undefined when it is missing
+ * or invalid (not a string, empty after trimming, or contains whitespace).
+ * An invalid secret never invalidates the rest of the config.
+ */
+function normalizeApprovalSecret(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const secret = raw.trim();
+  if (!secret || /\s/.test(secret)) return undefined;
+  return secret;
+}
+
+/**
  * Extract the platform wallet config from the loaded global provider store data.
  * Returns null when the wallet section is missing, disabled or invalid.
  */
@@ -195,7 +226,9 @@ export function walletConfigFromStore(data: unknown): PlatformWalletConfig | nul
   const baseUrl = normalizeBaseUrl(rawBaseUrl);
   if (!baseUrl) return null;
 
-  return { baseUrl, apiKey };
+  const approvalSecret = normalizeApprovalSecret(section.approvalSecret);
+
+  return { baseUrl, apiKey, approvalSecret };
 }
 
 /**
