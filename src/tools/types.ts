@@ -93,6 +93,12 @@ export type ToolExecutionContext = {
    */
   postUpdate?: (text: string) => import('../core/agentUpdates.js').PostUpdateResult;
   /**
+   * Reports a long tool's own progress (a long video's segments: n of N) to
+   * the host, as a line with its event (core/progressEvents.ts). Absent
+   * outside an agent run.
+   */
+  progress?: (event: Extract<import('../core/progressEvents.js').ProgressEvent, { type: 'segment' }>) => void;
+  /**
    * Contextual information for the tool execution
    */
   context?: any;
