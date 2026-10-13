@@ -22,6 +22,12 @@ async function configureVideoProfile(cwd: string): Promise<void> {
       apiKey: 'smoke-key',
       baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
       model: 'seedream-5-0-260128',
+      defaultParams: {
+        size: '2K',
+        quality: 'standard',
+        style: 'realistic',
+        watermark: false,
+      },
     },
     video: {
       enabled: true,
@@ -29,6 +35,15 @@ async function configureVideoProfile(cwd: string): Promise<void> {
       apiKey: 'smoke-key',
       baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
       model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+      defaultParams: {
+        duration: '10s',
+        resolution: '720p',
+        quality: 'standard',
+        style: 'realistic',
+        format: 'mp4',
+        framerate: '30fps',
+        watermark: false,
+      },
     },
   };
   await store.save(data);
@@ -43,7 +58,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '帮我生成一段30秒左右的视频，你的角色现在叫饼干姐姐，亚洲女性，内容是在不同的海滩享受阳光和海风。',
   });
   assert.equal(genericTimedVideo.handled, false, 'generic timed video must not auto-enter Saga without explicit long-video wording');
@@ -52,7 +67,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-keywords`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '图片 视频 长视频',
   });
   assert.equal(genericImageVideoKeywords.handled, false, 'plain chat keywords like 图片/视频/长视频 must not enter Saga');
@@ -61,7 +76,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '帮我生成一段长视频',
   });
   assert.equal(naturalLongVideo.handled, false, 'the handler never starts Saga without forceIntent (callers set it for /saga or a clear long-video request)');
@@ -70,7 +85,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     forceIntent: true,
     text: '帮我生成一段长视频',
   });
@@ -81,7 +96,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '1',
   });
   assert.equal(afterSubjectMode.handled, true, 'after subject-mode choice Saga should continue to identity source');
@@ -91,7 +106,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '4',
   });
   assert.equal(afterTextOnlyIdentity.handled, true, 'text-only identity should enter reference collection');
@@ -101,7 +116,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '剧情你来创造。',
   });
   assert.equal(shortDirectorNote.handled, true, 'short director/story directive should remain in Saga reference collection');
@@ -111,7 +126,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '开始生成',
   });
   assert.equal(afterStart.handled, true, 'after materials are done Saga should ask ratio mode or optional protagonist before final duration');
@@ -122,7 +137,7 @@ async function main(): Promise<void> {
         scope: 'bridge',
         key: `${key}-natural-long`,
         cwd,
-        locale: 'zh',
+        locale: 'zh-CN',
         text: 'B 梦幻海滩女主角',
       })
     : afterStart;
@@ -133,7 +148,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '9:16',
   });
   assert.equal(afterRatioMode.handled, true, 'after ratio mode Saga should ask subtitle mode');
@@ -143,7 +158,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '带字幕',
   });
   assert.equal(afterSubtitleMode.handled, true, 'after subtitle mode Saga should ask final duration');
@@ -153,7 +168,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '20秒',
   });
   assert.equal(afterFinalDuration.handled, true, 'after final duration Saga should ask BGM mode');
@@ -162,7 +177,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-natural-long`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '不加 BGM',
   });
   assert.equal(afterBgmSkip.handled, false, 'after BGM choice Saga should emit generate_long_video action');
@@ -173,42 +188,42 @@ async function main(): Promise<void> {
   assert.match(afterBgmSkip.action?.prompt ?? '', /subtitleMode: "always"/, 'workflow prompt should tell the model to pass subtitleMode');
 
   const scriptedKey = `${key}-scripted`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '1' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '4' });
   await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: scriptedKey,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '[0-5秒] 镜头1：女孩推开旧影院的门，尘埃在光束里漂浮。 [5-10秒] 镜头2：她走到银幕前，银幕上映出海浪。',
   });
-  const scriptedStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '开始生成' });
+  const scriptedStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '开始生成' });
   if (scriptedStart.handled && /确认.*主角|confirm the lead/i.test(scriptedStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: 'B 旧影院里的女孩' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: 'B 旧影院里的女孩' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '自动' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '自动' });
-  const scriptedBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '10秒' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '自动' });
+  const scriptedBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '10秒' });
   assert.equal(scriptedBgm.handled, true, 'scripted Saga should ask BGM after duration');
-  const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh', text: '不加' });
+  const scriptedFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: scriptedKey, cwd, locale: 'zh-CN', text: '不加' });
   assert.equal(scriptedFinal.handled, false, 'scripted Saga should emit generate_long_video action after BGM choice');
   assert.equal(scriptedFinal.action?.preserveUserScript, true, 'explicit user script must be preserved through generate_long_video action');
   assert.match(scriptedFinal.action?.prompt ?? '', /preserveUserScript: true/, 'workflow prompt should tell the model to pass preserveUserScript');
 
   const cleanKey = `${key}-clean-direct`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频，使用旧版质感，不要滤镜，raw seedance' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '纯风景：海边黄昏，风吹过草地。' });
-  const cleanStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成长视频，使用旧版质感，不要滤镜，raw seedance' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '纯风景：海边黄昏，风吹过草地。' });
+  const cleanStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '开始生成' });
   if (cleanStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(cleanStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: 'X' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: 'X' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '自动' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '无字幕' });
-  const cleanBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '10秒' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '无字幕' });
+  const cleanBgm = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '10秒' });
   assert.equal(cleanBgm.handled, true, 'clean-direct Saga should ask BGM after duration');
-  const cleanFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '不加' });
+  const cleanFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '不加' });
   assert.equal(cleanFinal.handled, false, 'clean-direct Saga should emit generate_long_video action after BGM choice');
   assert.equal(cleanFinal.action?.cleanDirect, true, 'clean/direct wording should enable cleanDirect mode');
   assert.match(cleanFinal.action?.prompt ?? '', /cleanDirect: true/, 'workflow prompt should tell the model to pass cleanDirect');
@@ -216,23 +231,23 @@ async function main(): Promise<void> {
   const bgmKey = `${key}-bgm-path`;
   const bgmPath = path.join(cwd, 'Camel Power Club - Oboe (SPOTISAVER).mp3');
   await writeFile(bgmPath, Buffer.alloc(128, 1));
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '纯视觉：暴雨中的东京街道，霓虹倒影。' });
-  const bgmStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '纯视觉：暴雨中的东京街道，霓虹倒影。' });
+  const bgmStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '开始生成' });
   if (bgmStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(bgmStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: 'X' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: 'X' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '16:9' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '无字幕' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '60秒' });
-  const bgmChoice = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '60秒' });
+  const bgmChoice = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: '2' });
   assert.equal(bgmChoice.handled, true, 'BGM option 2 should ask for an audio asset instead of repeating the full menu');
   assert.match(bgmChoice.reply, /发送本地音频路径|local audio path/i, 'BGM option 2 should enter asset-collection flow');
-  const bgmAfterPath = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: bgmPath });
+  const bgmAfterPath = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: bgmPath });
   assert.equal(bgmAfterPath.handled, true, 'path-only BGM reply should open the mix-settings follow-up, not start generation');
   assert.match(bgmAfterPath.reply ?? '', /已接收音乐|Music received|调整混音参数|Adjust the mix/, 'mix-settings follow-up should reference defaults and the captured music file');
-  const bgmFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh', text: 'default' });
+  const bgmFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmKey, cwd, locale: 'zh-CN', text: 'default' });
   assert.equal(bgmFinal.handled, false, 'default reply in mix-settings step should emit generate_long_video');
   assert.equal(bgmFinal.action?.soundtrackPath, bgmPath, 'local BGM path should be passed to generate_long_video');
   assert.equal(bgmFinal.action?.soundtrackStartSec, undefined, 'mix-settings defaults must keep startSec undefined (renderer applies 0s)');
@@ -241,18 +256,18 @@ async function main(): Promise<void> {
   const bgmInlineKey = `${key}-bgm-inline`;
   const bgmInlinePath = path.join(cwd, 'inline-bgm.mp3');
   await writeFile(bgmInlinePath, Buffer.alloc(128, 1));
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
-  const bgmInlineStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '纯视觉：雨夜东京。' });
+  const bgmInlineStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '开始生成' });
   if (bgmInlineStart.handled && /确认.*主角|confirm the lead/i.test(bgmInlineStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: 'X' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: 'X' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '16:9' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '无字幕' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '60秒' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: '2' });
-  const bgmInlineFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh', text: `${bgmInlinePath} 从1:19开始 音量-15dB 淡出2秒` });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '60秒' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: '2' });
+  const bgmInlineFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmInlineKey, cwd, locale: 'zh-CN', text: `${bgmInlinePath} 从1:19开始 音量-15dB 淡出2秒` });
   assert.equal(bgmInlineFinal.handled, false, 'inline mix params with the path should skip the follow-up and emit generate_long_video');
   assert.equal(bgmInlineFinal.action?.soundtrackPath, bgmInlinePath, 'inline-params flow must keep the BGM path');
   assert.equal(bgmInlineFinal.action?.soundtrackStartSec, 79, 'inline 从1:19开始 should set soundtrackStartSec to 79');
@@ -263,29 +278,34 @@ async function main(): Promise<void> {
   // and leave the music volume alone.
   for (const [index, reply] of ['环境音音量 -18dB', '环境音量 -18dB', '环境声音量 -18dB', 'ambient sound volume -18dB'].entries()) {
     const ambienceKey = `${key}-bgm-ambience-${index}`;
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '2' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '纯视觉：雨夜东京。' });
-    const ambienceStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: '开始生成' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', text: '2' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', text: '纯视觉：雨夜东京。' });
+    const ambienceStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', text: '开始生成' });
     if (ambienceStart.handled && /确认.*主角|confirm the lead/i.test(ambienceStart.reply)) {
-      await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: 'X' });
+      await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', text: 'X' });
     }
-    for (const answer of ['16:9', '无字幕', '60秒', '2']) await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: answer });
-    const ambienceFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh', text: `${bgmInlinePath} ${reply}` });
+    for (const answer of ['16:9', '无字幕', '60秒', '2']) await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', text: answer });
+    const ambienceFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: ambienceKey, cwd, locale: 'zh-CN', text: `${bgmInlinePath} ${reply}` });
+    assert.equal(ambienceFinal.handled, false, 'ambience flow should end in a generate_long_video action');
     assert.equal(ambienceFinal.action?.environmentVolumeDb, -18, `"${reply}" sets the ambience level`);
     assert.equal(ambienceFinal.action?.soundtrackVolumeDb, undefined, `"${reply}" never sets the music volume`);
   }
 
   // Guide §9.6: a declared subject mode / identity source skips those questions.
   const declaredText = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-text`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：有主角。身份来源：纯文字。\n[0-5秒] 镜头1：风筝飞过山坡。\n[5-10秒] 镜头2：风筝落进草地。' });
+  assert.equal(declaredText.handled, true, 'declared text identity should enter the wizard');
   assert.match(declaredText.reply, /已按剧本设定：有主角 · 身份来源：纯文字/);
   assert.match(declaredText.reply, /补充其它素材/, 'text-only identity goes straight to the materials step');
   const declaredVisual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-visual`, cwd, locale: 'zh-CN', forceIntent: true, text: '主体模式：纯视觉 / 无主角。\n[0-5秒] 雨中的山谷。\n[5-10秒] 云雾散开。' });
+  assert.equal(declaredVisual.handled, true, 'declared visual identity should enter the wizard');
   assert.match(declaredVisual.reply, /已按剧本设定：纯视觉/);
   assert.doesNotMatch(declaredVisual.reply, /这段视频里/, 'the subject question is not asked again');
   const declaredTurnaround = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-turnaround`, cwd, locale: 'en', forceIntent: true, text: 'Subject mode: has protagonist. Identity source: turnaround reference sheet; do not inherit reference-photo backgrounds.\n[0-5s] A girl opens the door.\n[5-10s] She looks back.' });
+  assert.equal(declaredTurnaround.handled, true, 'declared turnaround identity should enter the wizard');
   assert.match(declaredTurnaround.reply, /Taken from your brief: has a protagonist · identity source: turnaround sheet/);
   const undeclared = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-undeclared`, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我做一个关于风筝的长视频' });
+  assert.equal(undeclared.handled, true, 'undeclared brief should enter the wizard');
   assert.match(undeclared.reply, /这段视频里/, 'without a declaration the subject question is asked');
   // Only a header line that starts with the label and holds exactly one option counts.
   for (const [index, text] of [
@@ -295,29 +315,30 @@ async function main(): Promise<void> {
     '主体模式：纯视觉是主题\n[0-6秒] 段 1 · 夜市。\n[6-12秒] 段 2 · 重逢。',
   ].entries()) {
     const prose = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: `${key}-declared-prose-${index}`, cwd, locale: 'zh-CN', forceIntent: true, text });
+    assert.equal(prose.handled, true, 'story prose should enter the wizard');
     assert.match(prose.reply, /这段视频里/, `a declaration inside story prose is not an answer: ${text.slice(0, 40)}`);
   }
 
   const bgmTuneKey = `${key}-bgm-tune`;
   const bgmTunePath = path.join(cwd, 'tune-bgm.mp3');
   await writeFile(bgmTunePath, Buffer.alloc(128, 1));
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '纯视觉：雪山远景。' });
-  const bgmTuneStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '纯视觉：雪山远景。' });
+  const bgmTuneStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '开始生成' });
   if (bgmTuneStart.handled && /确认.*主角|confirm the lead/i.test(bgmTuneStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: 'X' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: 'X' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '16:9' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '无字幕' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '60秒' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '2' });
-  const bgmTuneAsk = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: bgmTunePath });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '60秒' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '2' });
+  const bgmTuneAsk = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: bgmTunePath });
   assert.equal(bgmTuneAsk.handled, true, 'plain path reply should open the mix-settings follow-up');
-  const bgmTuneGarbage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: 'asdf qwerty hello' });
+  const bgmTuneGarbage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: 'asdf qwerty hello' });
   assert.equal(bgmTuneGarbage.handled, true, 'unparseable mix-settings reply should re-ask, not auto-default');
   assert.match(bgmTuneGarbage.reply ?? '', /没识别|Could not parse|调整混音参数|Adjust the mix/, 'mix-settings re-ask should explain why and reprint the menu');
-  const bgmTuneFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh', text: '从45秒开始 淡入1秒' });
+  const bgmTuneFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmTuneKey, cwd, locale: 'zh-CN', text: '从45秒开始 淡入1秒' });
   assert.equal(bgmTuneFinal.handled, false, 'recognised mix params in the settings step should emit generate_long_video');
   assert.equal(bgmTuneFinal.action?.soundtrackPath, bgmTunePath, 'settings-step adjustments must keep the captured BGM path');
   assert.equal(bgmTuneFinal.action?.soundtrackStartSec, 45, 'settings 从45秒开始 should set startSec to 45');
@@ -348,17 +369,17 @@ async function main(): Promise<void> {
   assert.equal(bgmEnFinal.action?.soundtrackPath, bgmEnPath, 'EN locale: BGM path must be carried into generate_long_video');
 
   const bgmSkipNumKey = `${key}-bgm-skip-num`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '纯视觉：雪山黄昏远景。' });
-  const bgmSkipNumStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '纯视觉：雪山黄昏远景。' });
+  const bgmSkipNumStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '开始生成' });
   if (bgmSkipNumStart.handled && /确认.*主角|confirm the lead|Need you to confirm the lead/i.test(bgmSkipNumStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: 'X' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: 'X' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '16:9' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '无字幕' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '60秒' });
-  const bgmSkipNum = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '无字幕' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '60秒' });
+  const bgmSkipNum = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: bgmSkipNumKey, cwd, locale: 'zh-CN', text: '1' });
   assert.equal(bgmSkipNum.handled, false, 'BGM option 1 (numeric) should emit generate_long_video action without re-asking the menu');
   assert.equal(bgmSkipNum.action?.soundtrackPath, undefined, 'BGM option 1 must not attach a soundtrack path');
   assert.equal(bgmSkipNum.action?.soundtrackUrl, undefined, 'BGM option 1 must not attach a soundtrack URL');
@@ -369,7 +390,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-paste`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: [
       '我只是粘贴一段历史记录让你检查，不要触发视频流程：',
       '如果用户配置的视频生成模型是普通模型呢？',
@@ -387,7 +408,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-sage-alias`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '/sage 帮我生成一段30秒左右的视频',
   });
   assert.equal(mistakenSageAlias.handled, false, 'the system command is /saga; /sage must not trigger Saga');
@@ -396,7 +417,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-explicit`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     forceIntent: true,
     text: '帮我生成一段30秒左右的视频，你的角色现在叫饼干姐姐，亚洲女性，内容是在不同的海滩享受阳光和海风。',
   });
@@ -412,7 +433,7 @@ async function main(): Promise<void> {
       scope: 'bridge',
       key: `${key}-${suffix}`,
       cwd,
-      locale: 'zh',
+      locale: 'zh-CN',
       forceIntent: true,
       text: brief,
     });
@@ -424,7 +445,7 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-explicit`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '检查我刚才发送的文字，还有就是为什么我发什么都会触发视频生成啊？你仔细检查一下',
   });
   assert.equal(supportQuestion.handled, false, 'support/debug question must exit Saga workflow and fall through to normal chat');
@@ -433,20 +454,20 @@ async function main(): Promise<void> {
     scope: 'bridge',
     key: `${key}-explicit`,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: '这只是一句普通补充，不应该还在视频向导里',
   });
   assert.equal(afterExit.handled, false, 'workflow should remain cleared after support/debug question');
 
   const cyberScriptKey = `${key}-cyber-script`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh', text: '1' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh-CN', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cyberScriptKey, cwd, locale: 'zh-CN', text: '4' });
   const cyberScript = await handleSagaLongVideoWorkflow({
     scope: 'bridge',
     key: cyberScriptKey,
     cwd,
-    locale: 'zh',
+    locale: 'zh-CN',
     text: [
       'Artemis AI Agent 30秒宣传片剧本（全女声·Cyber情欲风）',
       '时长：30秒',
@@ -474,20 +495,22 @@ async function main(): Promise<void> {
     const localImage = path.join(cwd, 'lead-photo.png');
     await writeFile(localImage, imageBytes);
     const dedupKey = `${key}-cross-turn-dedup`;
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: '1' });
-    const askImage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: '3' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh-CN', text: '1' });
+    const askImage = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh-CN', text: '3' });
     assert.equal(askImage.handled, true);
     const firstImage = await handleSagaLongVideoWorkflow({
       scope: 'bridge',
       key: dedupKey,
       cwd,
-      locale: 'zh',
+      locale: 'zh-CN',
       text: '',
       imageAttachments: [{ data: imageBytes.toString('base64'), mediaType: 'image/png' }],
     });
+    assert.equal(firstImage.handled, true, 'image upload should stay in the wizard');
     assert.match(firstImage.reply, /已收到 1 张|Got 1 /, `first upload should count as one image: ${firstImage.reply}`);
-    const samePathAgain = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh', text: localImage });
+    const samePathAgain = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: dedupKey, cwd, locale: 'zh-CN', text: localImage });
+    assert.equal(samePathAgain.handled, true, 'duplicate image path should stay in the wizard');
     assert.match(samePathAgain.reply, /已收到 1 张|Got 1 /, `the same image pasted as a path in a later turn must not count twice: ${samePathAgain.reply}`);
   } finally {
     if (previousMediaRoot === undefined) delete process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
@@ -496,56 +519,61 @@ async function main(): Promise<void> {
 
   // A menu button labelled "默认/自动" confirms the default, like "默认" alone.
   const comboKey = `${key}-default-auto-combo`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '1' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '4' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '剧情你来创造。' });
-  const comboStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: '剧情你来创造。' });
+  const comboStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: '开始生成' });
+  assert.equal(comboStart.handled, true, 'combo flow should stay in the wizard');
   if (/确认.*主角|confirm the lead/i.test(comboStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: 'B 海边的女孩' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: 'B 海边的女孩' });
   }
-  const comboRatio = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认/自动' });
+  const comboRatio = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: '默认/自动' });
+  assert.equal(comboRatio.handled, true, 'combo ratio choice should stay in the wizard');
   assert.match(comboRatio.reply, /是否携带字幕|include subtitles/i, `"默认/自动" should confirm the default ratio: ${comboRatio.reply}`);
-  const comboSubtitle = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh', text: '默认 / 自动' });
+  const comboSubtitle = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: comboKey, cwd, locale: 'zh-CN', text: '默认 / 自动' });
+  assert.equal(comboSubtitle.handled, true, 'combo subtitle choice should stay in the wizard');
   assert.match(comboSubtitle.reply, /最后确认一下总时长|confirm the total length/i, `"默认 / 自动" should confirm the default subtitle mode: ${comboSubtitle.reply}`);
 
   // A message that is only a resolution choice sets it; story text never does.
   const hdKey = `${key}-resolution`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '1' });
   for (const bare of ['480', '720', '1080']) {
     assert.equal(extractRequestedResolution(bare), undefined, `a bare "${bare}" is not a resolution`);
   }
-  const hdAck = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '1080P' });
+  const hdAck = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '1080P' });
   assert.equal(hdAck.handled, true);
   assert.match(hdAck.reply, /1080p/, 'a resolution-only message is acknowledged');
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '4' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '剧情你来创造。' });
-  const hdStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '剧情你来创造。' });
+  const hdStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '开始生成' });
+  assert.equal(hdStart.handled, true, 'HD flow should stay in the wizard');
   if (/确认.*主角|confirm the lead/i.test(hdStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: 'B 海边的女孩' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: 'B 海边的女孩' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '9:16' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '自动' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '10秒' });
-  const hdFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh', text: '不加' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '9:16' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '10秒' });
+  const hdFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: hdKey, cwd, locale: 'zh-CN', text: '不加' });
   assert.equal(hdFinal.handled, false, 'the resolution flow should end in a generate_long_video action');
   assert.equal(hdFinal.action?.resolution, '1080p', 'a resolution-only message should reach the action');
   assert.match(hdFinal.action?.prompt ?? '', /resolution: "1080p"/, 'workflow prompt should tell the model to pass resolution');
 
   const storyKey = `${key}-resolution-in-story`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成一段长视频，画面里有一台1080P的旧显示器' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '1' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '4' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '[0-5秒] 一台1080P的旧显示器在桌上闪烁。 [5-10秒] 屏幕里出现 720p 的雪花画面。' });
-  const storyStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成一段长视频，画面里有一台1080P的旧显示器' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '1' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '4' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '[0-5秒] 一台1080P的旧显示器在桌上闪烁。 [5-10秒] 屏幕里出现 720p 的雪花画面。' });
+  const storyStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '开始生成' });
+  assert.equal(storyStart.handled, true, 'story flow should stay in the wizard');
   if (/确认.*主角|confirm the lead/i.test(storyStart.reply)) {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: 'X' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: 'X' });
   }
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '16:9' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '自动' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '10秒' });
-  const storyFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh', text: '不加' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '16:9' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '自动' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '10秒' });
+  const storyFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: storyKey, cwd, locale: 'zh-CN', text: '不加' });
   assert.equal(storyFinal.handled, false);
   assert.equal(storyFinal.action?.resolution, undefined, 'a resolution mentioned in the story never sets the billing resolution');
   assert.equal(afterBgmSkip.action?.resolution, undefined, 'no resolution is set unless the user named one');
@@ -559,32 +587,34 @@ async function main(): Promise<void> {
     return new Response('{"error":{"message":"offline"}}', { status: 400 });
   }) as typeof fetch;
   try {
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频 [原样直传]' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '1' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '4' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
-    const rawStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '开始生成' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成长视频 [原样直传]' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '1' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '4' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
+    const rawStart = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '开始生成' });
+    assert.equal(rawStart.handled, true, 'raw mode should stay in the wizard');
     assert.doesNotMatch(rawStart.reply, /确认.*主角|confirm the lead/i, 'raw mode never asks to confirm the lead');
     assert.equal(chatCalls, 0, 'raw mode skips the narrative LLM call');
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '自动' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '10秒' });
-    const rawFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh', text: '不加' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '自动' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '自动' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '10秒' });
+    const rawFinal = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: rawKey, cwd, locale: 'zh-CN', text: '不加' });
+    assert.equal(rawFinal.handled, false, 'raw mode should end in a generate_long_video action');
     assert.equal(rawFinal.action?.rawPassthrough, true, '"[原样直传]" should enable raw passthrough');
     assert.notEqual(rawFinal.action?.cleanDirect, true, '"[原样直传]" is raw passthrough, not cleanDirect');
 
     // The guide's cleanDirect sentence (§9.10) keeps the narrative analysis.
     chatCalls = 0;
     const cleanKey = `${key}-clean-direct-guide`;
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频\n请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n保留自然纹理，不要过度导演包装。' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '1' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '4' });
-    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
-    let clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: '开始生成' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成长视频\n请用原始质感 / 少滤镜 / raw-seedance / clean-direct。\n保留自然纹理，不要过度导演包装。' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '1' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '4' });
+    await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '[0-5秒] 镜头1：风筝飞过山坡。 [5-10秒] 镜头2：风筝落进草地。' });
+    let clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: '开始生成' });
     assert.ok(chatCalls > 0, 'cleanDirect still runs the narrative analysis');
     for (const reply of ['自动', '自动', '10秒', '不加']) {
       if (!clean.handled) break;
-      clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh', text: /确认.*主角|confirm the lead/i.test(clean.reply) ? 'X' : reply });
+      clean = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: cleanKey, cwd, locale: 'zh-CN', text: /确认.*主角|confirm the lead/i.test(clean.reply) ? 'X' : reply });
     }
     assert.equal(clean.handled, false, 'the cleanDirect flow should end in an action');
     assert.equal(clean.action?.cleanDirect, true, 'the guide sentence enables cleanDirect');
@@ -595,13 +625,13 @@ async function main(): Promise<void> {
 
   // Everyday wording in a story never switches on raw mode.
   const casualKey = `${key}-casual-raw-words`;
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', forceIntent: true, text: '帮我生成长视频：一个博主对着镜头说她的自拍从来不用美颜、不要滤镜，write a short prompt for each scene' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '2' });
-  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '纯风景：清晨的湖面，薄雾缓缓散开。' });
-  let casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: '开始生成' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh-CN', forceIntent: true, text: '帮我生成长视频：一个博主对着镜头说她的自拍从来不用美颜、不要滤镜，write a short prompt for each scene' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh-CN', text: '2' });
+  await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh-CN', text: '纯风景：清晨的湖面，薄雾缓缓散开。' });
+  let casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh-CN', text: '开始生成' });
   for (const reply of ['自动', '无字幕', '10秒', '不加', '不加']) {
     if (!casual.handled) break;
-    casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh', text: /主角/.test(casual.reply) ? 'X' : reply });
+    casual = await handleSagaLongVideoWorkflow({ scope: 'bridge', key: casualKey, cwd, locale: 'zh-CN', text: /主角/.test(casual.reply) ? 'X' : reply });
   }
   assert.equal(casual.handled, false, 'the casual-words flow should end in a generate_long_video action');
   assert.notEqual(casual.action?.cleanDirect, true, '"不要滤镜" / "short prompt" in a story must not switch on raw mode');
