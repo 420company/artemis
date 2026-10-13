@@ -82,7 +82,8 @@ export function statusForAction(action: Pick<AgentAction, 'type'> & Record<strin
   const type = String(action.type);
   switch (type) {
     case 'post_update':
-      // Talking to the user is not an activity of its own.
+    case 'todo':
+      // Talking to the user and updating the plan are not activities of their own.
       return undefined;
     case 'browser_navigate': {
       const detail = hostOf(action.url);

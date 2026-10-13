@@ -6,6 +6,7 @@
  * and doctor/integrity reporting should all derive from this file.
  */
 
+import { validateTodoAction } from '../core/todoList.js';
 import {
   ALL_AGENT_ACTION_TYPES,
   RUNTIME_MANAGED_AGENT_ACTION_TYPES,
@@ -1199,11 +1200,16 @@ const actionToolDefs: ToolDefinition[] = [
 ];
 
 const capabilityToolDefs: ToolDefinition[] = [
-  // NOTE: removed 3 stub tools (`todo`, `mcp`, `notebook_worktree`) that were
+  // NOTE: removed 7 stub tools (`http_request`, `search`, `web_scraper`,
+  // `user_interaction`, `confirm`, `mcp`, `notebook_worktree`) that were
   // declared with executionMode='blocking' but had no `execute` function.
-  // They were never callable from the brain (would throw at runtime). The
-  // /mcp slash command lives in interactive.ts; TodoTool exists as a class
-  // in src/tools/TodoTool/ but isn't currently wired through the agent loop.
+  // The /mcp slash command lives in interactive.ts. The agent's `todo` tool
+  // (below) keeps the plan on the conversation's task board (core/todoList.ts);
+  // the older TodoTool class in src/tools/TodoTool/ is not wired.
+  // declared with executionMode='blocking' but had no `execute` function.
+  // The /mcp slash command lives in interactive.ts. The agent's `todo` tool
+  // (above) keeps the plan on the conversation's task board (core/todoList.ts);
+  // the older TodoTool class in src/tools/TodoTool/ is not wired.
 
   // ── Spotify integration ────────────────────────────────────────────────
   // brain-callable tools that drive Spotify Web API. Authentication via
@@ -2008,6 +2014,16 @@ const capabilityToolDefs: ToolDefinition[] = [
       const { executePostUpdate } = await import('./postUpdate.js');
       return executePostUpdate(a, context);
     }) as any,
+  },
+
+  {
+    type: 'todo',
+    description: '把这次任务的计划写成清单（用户能在任务进度里看到）。每次发送完整清单：新增、调整顺序、标记进行中/完成都用同一次调用。多步骤任务开始时先列计划，做完一步就更新；同一时间只标一项 in_progress。简单的一两步任务不用。',
+    kind: 'code',
+    permissionCategory: 'read',
+    executionMode: 'non-blocking',
+    parallelSafe: false,
+    validate: (a: any) => validateTodoAction(a),
   },
 
   {

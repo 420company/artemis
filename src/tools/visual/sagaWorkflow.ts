@@ -618,9 +618,15 @@ const WIZARD_ANSWER_RE = /^(?:\d{1,2}\s*[.、]?|[A-Da-d]\s*[.、)）]?|\d{1,2}\s
  * brief with timecoded segments). The web keeps a confirmed Saga going only
  * for these; anything else ends it.
  */
+const ATTACHED_MEDIA_LINE_RE = /^Attached file: .+\.(?:mp3|wav|m4a|aac|flac|ogg|mp4|mov|webm|m4v|png|jpe?g|webp|heic)$/i;
+
 export function looksLikeSagaWizardAnswer(text: string): boolean {
   const reply = text.trim();
   if (!reply) return false;
+  // A music or reference file attached in the app (with or without a few words).
+  const lines = reply.split('\n').map((line) => line.trim()).filter(Boolean);
+  const attached = lines.filter((line) => ATTACHED_MEDIA_LINE_RE.test(line));
+  if (attached.length > 0 && lines.filter((line) => !ATTACHED_MEDIA_LINE_RE.test(line)).join(' ').length <= 20) return true;
   if (parseSagaOfferReply(reply) !== undefined || WIZARD_ANSWER_RE.test(reply)) return true;
   // A length on its own: "60秒", "两分钟", "90 seconds".
   if (reply.length <= 12 && parseRequestedVideoSeconds(reply) !== undefined) return true;
