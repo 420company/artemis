@@ -1545,6 +1545,7 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'synthesize_speech':
     case 'transcribe_audio':
     case 'place_call':
+    case 'send_transaction':
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
@@ -1980,6 +1981,9 @@ function buildToolUiPayload(
     case 'place_call':
       payload.goal = action.goal;
       break;
+    case 'send_transaction':
+      payload.summary = `${action.amount} ${action.token} to ${action.to}`;
+      break;
     default:
       break;
   }
@@ -2033,6 +2037,12 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncateInline(action.inputPath, 120)}`;
     case 'place_call':
       return `place_call goal=${truncateInline(action.goal, 120)}`;
+    case 'get_balance':
+      return `get_balance chain=${action.chain} address=${truncateInline(action.address, 40)}`;
+    case 'swap_quote':
+      return `swap_quote ${truncateInline(action.amount, 20)} ${truncateInline(action.from, 20)} to ${truncateInline(action.to, 20)}`;
+    case 'send_transaction':
+      return `send_transaction ${truncateInline(action.amount, 20)} ${truncateInline(action.token, 20)} to ${truncateInline(action.to, 40)}`;
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
@@ -2213,6 +2223,12 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `ask_owner_for_code ${truncateInline(action.site, 80)}`;
     case 'load_tools':
       return `load_tools ${action.tools.join(', ')}`;
+    case 'get_balance':
+      return `get_balance ${action.chain} ${action.address}`;
+    case 'swap_quote':
+      return `swap_quote ${action.chain} ${action.from}->${action.to} ${action.amount}`;
+    case 'send_transaction':
+      return `send_transaction ${action.chain} ${action.token} ${action.amount} to ${action.to}`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);
