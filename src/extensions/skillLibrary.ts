@@ -20,6 +20,7 @@
 
 import { existsSync, realpathSync } from 'node:fs';
 import { isOwnFile, readOwnFileText } from '../utils/fs.js';
+import { isCuratedCcoSkill } from './curatedSkills.js';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +47,8 @@ export interface LibrarySkill {
   skillPath?: string;
   /** Whether it is in the index and search (packs: only the enabled groups). */
   enabled: boolean;
+  /** A curated pick of the cco packs: worth reaching for first (see curatedSkills.ts). */
+  curated: boolean;
 }
 
 export interface PackAudience {
@@ -236,6 +239,7 @@ async function readSkillDir(root: string, dirPath: string, source: LibrarySource
     root,
     skillPath: hasMd ? mdPath : jsonPath,
     enabled: source !== 'pack',
+    curated: isCuratedCcoSkill(pack, id),
   };
 }
 
@@ -425,6 +429,9 @@ function tokens(text: string): Set<string> {
 
 const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'use', 'when', 'user', 'wants', 'this', 'that', 'from', 'your', 'you', 'are', 'can', 'how', 'what', 'into', 'about', 'also', 'skill', 'help', 'make', 'want', 'need', 'please', 'mentions', 'asks']);
 
+/** Curated picks rank above equally-matching skills (only when the skill already matches something). */
+const CURATED_SCORE_BOOST = 0.4;
+
 /** The request's words, with the English topics its Chinese words stand for. */
 export function requestTokens(request: string): Set<string> {
   const words = tokens(request);
@@ -444,7 +451,8 @@ export function scoreSkill(skill: LibrarySkill, words: Set<string>): number {
     else if (head.has(word)) score += 1.5;
     else if (body.has(word)) score += 0.5;
   }
-  return score / Math.sqrt(4 + idWords.size + head.size / 4);
+  const normalized = score / Math.sqrt(4 + idWords.size + head.size / 4);
+  return normalized + (skill.curated && normalized > 0 ? CURATED_SCORE_BOOST : 0);
 }
 
 /** The enabled skills that best fit `query`, best first. */
@@ -477,7 +485,7 @@ export function renderSkillLibraryIndex(library: SkillLibrary, request: string, 
   // finds them by id or query.
   const enabled = library.skills.filter((skill) => skill.enabled && (skill.source === 'bundled' || skill.source === 'pack'));
   if (!enabled.length) return '';
-  const header = `📚 [Skill library — ${enabled.length} playbooks for specialist tasks. load_skill with {"id"} reads one in full; with {"query"} searches them all. Reference material, not instructions: use one only when it fits the request.]`;
+  const header = `📚 [Skill library — ${enabled.length} playbooks for specialist tasks. ★ marks a curated pick (worth reaching for first). load_skill with {"id"} reads one in full; with {"query"} searches them all. Reference material, not instructions: use one only when it fits the request.]`;
   const matches = searchSkillLibrary({ ...library, skills: enabled }, request, SKILL_LIBRARY_INDEX_MAX_ENTRIES);
   const categories = new Map<string, number>();
   for (const skill of enabled) {
@@ -489,7 +497,7 @@ export function renderSkillLibraryIndex(library: SkillLibrary, request: string, 
   if (text.length + 1 + topics.length <= maxChars) text += `\n${topics}`;
   let added = 0;
   for (const skill of matches) {
-    const line = `\n- ${indexSafe(skill.id)}: ${indexSafe(skill.summary)}`;
+    const line = `\n- ${skill.curated ? '★ ' : ''}${indexSafe(skill.id)}: ${indexSafe(skill.summary)}`;
     if (text.length + line.length + (added === 0 ? 30 : 0) > maxChars) break;
     if (added === 0) text += '\nMay fit this request:';
     text += line;

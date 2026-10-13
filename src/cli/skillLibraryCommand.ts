@@ -7,6 +7,8 @@
  *   artemis skills packs [--json]            the optional packs and their groups
  *   artemis skills packs enable <pack[/group]>
  *   artemis skills packs disable <pack[/group]>
+ *   artemis skills curated [--audience <id>] [--json]
+ *                                            the curated picks of the cco packs
  *
  * JSON goes to stdout (one document, `version: 1`); errors are
  * `{"error": {...}}` with exit code 1 (an unknown skill: 2). No file paths
@@ -30,6 +32,7 @@ import {
   type PackInfo,
 } from '../extensions/skillLibrary.js'
 import { VENDOR_BODY_ALLOWLIST, namesVendor, scrubVendorNames } from '../utils/vendorNames.js'
+import { listCuratedSkills } from '../extensions/curatedSkills.js'
 
 /** What `show` returns of SKILL.md. */
 const SHOW_MAX_CHARS = 40_000
@@ -59,6 +62,7 @@ function entry(skill: LibrarySkill) {
     ...(tags.length ? { tags } : {}),
     source: skill.source,
     ...(skill.pack ? { pack: skill.pack.split('/')[0], audience: skill.pack.split('/')[1] } : {}),
+    ...(skill.curated ? { curated: true } : {}),
     enabled: skill.enabled,
   }
 }
@@ -121,6 +125,33 @@ export async function runSkillLibraryCommand(options: { cwd: string; locale: UiL
     return 0
   }
 
+  if (sub === 'curated') {
+    let audience: string | undefined
+    const rest = args.slice(1)
+    const at = rest.indexOf('--audience')
+    if (at >= 0) {
+      audience = rest[at + 1]?.toLowerCase()
+      rest.splice(at, 2)
+    }
+    if (rest.length || (at >= 0 && !audience)) return error('usage', 'Usage: artemis skills curated [--audience <id>] [--json]')
+    const library = await loadSkillLibrary(cwd, { allPacks: true })
+    const knownAudience = !audience || library.packs.some((pack) => pack.audiences.some((a) => a.id === audience))
+    if (!knownAudience) return error('not_found', `No audience "${audience}"`)
+    const picks = listCuratedSkills(library, audience)
+    if (json) {
+      out({ version: 1, audience: audience ?? null, skills: picks.filter(hostShows).map(entry) })
+      return 0
+    }
+    console.log(
+      t(
+        `精选技能：${picks.length} 个${audience ? `（${audience}）` : '（8 个人群）'}，★ 为优先推荐`,
+        `Curated skills: ${picks.length}${audience ? ` (${audience})` : ' (8 audiences)'}; ★ marks the recommended picks`,
+      ),
+    )
+    for (const skill of picks) console.log(`  ★ ${skill.id.padEnd(36)} ${skill.summary}`)
+    return 0
+  }
+
   if (sub === 'packs') {
     const action = args[1]?.toLowerCase()
     if (action === 'enable' || action === 'disable') {
@@ -152,5 +183,5 @@ export async function runSkillLibraryCommand(options: { cwd: string; locale: UiL
     return 0
   }
 
-  return error('usage', 'Usage: artemis skills catalog|show <id>|packs [--json]')
+  return error('usage', 'Usage: artemis skills catalog|show <id>|packs|curated [--json]')
 }
