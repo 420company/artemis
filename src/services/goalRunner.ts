@@ -210,6 +210,10 @@ export interface GoalTickOptions {
   keepApprovals?: boolean
   /** Nobody watches this tick (a host's schedule): the prompt says so. */
   unattended?: boolean
+  /** Talk to this provider endpoint instead of the configured one (the --base-url CLI flag). */
+  baseUrl?: string
+  /** Authenticate with this key instead of the configured one (the --api-key CLI flag). */
+  apiKey?: string
 }
 
 /**
@@ -237,6 +241,8 @@ export async function runGoalTick(
     ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
     ...(opts.approvals ? { approvals: opts.approvals } : {}),
     ...(opts.keepApprovals ? { keepApprovals: true } : {}),
+    ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
+    ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
   })
 
   // Stopped at an approval request: the step is not done yet, so nothing is
