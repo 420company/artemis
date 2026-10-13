@@ -154,7 +154,8 @@ function clip(s: string, max: number): string {
 }
 
 function stripControl(s: string): string {
-  return s.replace(/[\u0000-\u001f\u007f]/g, ' ');
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1f\x7f]/g, ' ');
 }
 
 function errorText(err: unknown): string {
@@ -169,7 +170,7 @@ function errorText(err: unknown): string {
 
 /** L1: 把错误文本中的绝对路径替换为 basename，避免泄露服务器目录结构。 */
 function redactPaths(s: string): string {
-  return s.replace(/(^|[\s"'=:(])(\/(?:[^\s"'()\[\]]+\/)*[^\s"'()\[\]]+|[A-Za-z]:\\(?:[^\s"'()\[\]]+\\)*[^\s"'()\[\]]+)/g,
+  return s.replace(/(^|[\s"'=:(])(\/(?:[^\s"'()[\]]+\/)*[^\s"'()[\]]+|[A-Za-z]:\\(?:[^\s"'()[\]]+\\)*[^\s"'()[\]]+)/g,
     (_m, pre, p) => `${pre}${path.basename(p)}`);
 }
 

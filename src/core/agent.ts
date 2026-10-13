@@ -2223,12 +2223,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `ask_owner_for_code ${truncateInline(action.site, 80)}`;
     case 'load_tools':
       return `load_tools ${action.tools.join(', ')}`;
-    case 'get_balance':
-      return `get_balance ${action.chain} ${action.address}`;
-    case 'swap_quote':
-      return `swap_quote ${action.chain} ${action.from}->${action.to} ${action.amount}`;
-    case 'send_transaction':
-      return `send_transaction ${action.chain} ${action.token} ${action.amount} to ${action.to}`;
     case 'edit_timeline':
       return `edit_timeline ${action.action}${action.projectId ? ` project=${action.projectId}` : ''}`;
     case 'delete_file': return `delete_file`;
