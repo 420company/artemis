@@ -234,10 +234,16 @@ export function truncate(text: string, maxChars: number): string {
  * Like truncate, for text that sits inside a sentence or a one-line field:
  * no line break is added (a reason in "Could not … (<reason>), …" stays on
  * one line however long it was).
+ *
+ * F2 fix: input whitespace (including newlines) is normalized to single
+ * spaces first, so the output is guaranteed single-line even when the input
+ * contains line breaks (e.g. multi-line error messages). Callers no longer
+ * need to pre-normalize with .replace(/\s+/g, ' ').
  */
 export function truncateInline(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text
-  return `${text.slice(0, maxChars)}… [+${text.length - maxChars} chars]`
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars)}… [+${normalized.length - maxChars} chars]`
 }
 
 // Opened without following a symlink as the file itself, and without
