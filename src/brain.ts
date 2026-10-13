@@ -98,6 +98,9 @@ import type {
 } from './providers/types.js';
 import { DEFAULT_MODEL_IDS } from './providers/presets.js';
 import { isOwnerProviderStoreFile, overrideProviderConfig } from './providers/overrides.js';
+import { runAgent, type AgentRunResult } from './core/agent.js';
+import { SessionStore } from './storage/sessions.js';
+import { PermissionManager } from './security/permissions.js';
 
 const BASE_SYSTEM_PROMPT = `\
 你是 Artemis，一个面向真实本地工作区的工程代理，工作方式遵循 Artemis 执行协议。
@@ -2255,7 +2258,329 @@ type ThinkSkillSlot = {
     unresolvedFailure?: boolean;
 };
 
+const HOSTED_CONTEXT_CAP = 200_000;
+
+/** Local aliases for runAgent-side types. Inline import() avoids adding top-level imports. */
+type AdapterRunAgentOptions = import('./core/agent.js').RunAgentOptions;
+type AdapterSessionRecord = import('./core/types.js').SessionRecord;
+
+/**
+ * ThinkOptions keys that force a fallback to the legacy path.
+ * These have no runAgent equivalent and must never be silently dropped:
+ * dropping onPermissionRequest would change approval behavior, and dropping the
+ * others would lose caller-visible context or side effects.
+ */
+const NEW_PATH_UNSUPPORTED_OPTIONS = [
+    'onPermissionRequest',
+    'contextDir',
+    'onCompressionSummary',
+    'onSelfCheck',
+    'skillPartition',
+    'turnContext',
+] as const satisfies readonly (keyof ThinkOptions)[];
+
+/**
+ * Returns whether the runAgent-backed think() path is enabled.
+ * ARTEMIS_BRAIN_LEGACY=1 always wins. Otherwise the new path requires an explicit
+ * ARTEMIS_BRAIN_NEW=1. The default is legacy.
+ */
+function isBrainNewPathEnabled(): boolean {
+    if (process.env.ARTEMIS_BRAIN_LEGACY === '1') return false;
+    return process.env.ARTEMIS_BRAIN_NEW === '1';
+}
+
+/**
+ * Capability gate. Decides whether these options can be served by runAgent without
+ * losing semantics. Any unsupported option results in a legacy fallback, along with a reason.
+ */
+function isNewPathSupported(options: ThinkOptions): { ok: true } | { ok: false; reason: string } {
+    for (const key of NEW_PATH_UNSUPPORTED_OPTIONS) {
+        if (options[key] !== undefined) {
+            return { ok: false, reason: `新路径不支持 ThinkOptions.${key}，已回落到 legacy` };
+        }
+    }
+    // A-2 fix (security-critical): disableNativeTools=true MUST fall back to legacy.
+    // - The adapter's Proxy can only turn off provider native function-calling
+    //   (supportsNativeToolCalls -> false).
+    // - However, buildSystemPrompt() unconditionally injects the full tool manifest
+    //   as text via getToolManifest(). That injection ignores supportsNativeToolCalls.
+    // - In addition, extractXmlToolCalls() parses <toolcall> XML out of model replies.
+    //   This is a second, independent tool path that the Proxy cannot block.
+    // As a result, the Proxy does not reproduce legacy's "the model sees no tools at all".
+    // Bragi read-only bridges pass disableNativeTools: true. On the new path, a remote
+    // user could get the model to read host files through XML tool calls.
+    // Only `=== true` falls back. false/undefined behave like the default and stay on
+    // the new path.
+    if (options.disableNativeTools === true) {
+        return { ok: false, reason: '新路径不支持 ThinkOptions.disableNativeTools=true，已回落到 legacy' };
+    }
+    return { ok: true };
+}
+
+/**
+ * Maps ThinkOptions to RunAgentOptions, plus a SessionRecord seeded from the legacy session.
+ *
+ * Options intentionally dropped:
+ * - onPermissionRequest, contextDir, onCompressionSummary, onSelfCheck,
+ *   skillPartition, turnContext: blocked by the capability gate (never reach here).
+ * - abortSignal: RunAgentOptions has no abort field, so it is not forwarded.
+ * - initialCompressionSummary: deprecated and ignored (same as legacy).
+ * - visionHelper / imageAttachments: no runAgent equivalent. Images are NOT delivered
+ *   on the new path.
+ * - onStream / onReasoning: runAgent has no delta hooks. think() delivers the final
+ *   reply to onStream once. onReasoning is never called.
+ * - onWorkspaceSwitchRequest, onUserConfirmationRequest, approvalOwnChat,
+ *   pollRunningUserMessages, onRunningUserMessageAccepted, maxNativeToolRounds,
+ *   onToolLog: no runAgent equivalents. Those behaviors are absent on the new path.
+ */
+async function thinkOptionsToRunAgentOptions(
+    options: ThinkOptions,
+    cwd: string,
+): Promise<{ runOptions: AdapterRunAgentOptions; sessionRecord: AdapterSessionRecord; permissionManager: PermissionManager }> {
+    const effectiveCwd = options.cwd ?? cwd ?? process.cwd();
+    const { provider: p } = await getLeadProvider();
+
+    // VERIFY (A-2 confirmed): this Proxy alone is NOT equivalent to legacy "no tools".
+    // The system prompt still injects the tool manifest, and XML <toolcall> parsing is
+    // independent of it. disableNativeTools === true is therefore handled by the
+    // capability gate (isNewPathSupported), which falls back to legacy. Because of that
+    // gate, this branch is nearly dead code. It is kept as defense-in-depth.
+    let providerForRun: any = p;
+    if (options.disableNativeTools === true) {
+        providerForRun = new Proxy(p, {
+            get(target, prop) {
+                if (prop === 'supportsNativeToolCalls') return false;
+                // Methods are bound to the target to avoid #private brand-check errors.
+                const v = Reflect.get(target, prop, target);
+                return typeof v === 'function' ? v.bind(target) : v;
+            },
+        });
+    }
+
+    const sessionStore = new SessionStore(effectiveCwd);
+    // Fail-closed: interactive is hardcoded to false. There is no onPermissionRequest
+    // callback here (the gate guarantees that), so permissions.ts denies
+    // non-interactively. Approval behavior is never left to an uncertain headless default.
+    const permissionManager = new PermissionManager(options.permissionMode ?? 'GHOSTWRITER', false);
+
+    const runOptions: AdapterRunAgentOptions = {
+        cwd: effectiveCwd,
+        provider: providerForRun,
+        sessionStore,
+        permissionManager,
+        maxTurns: 96,
+    };
+    if (options.locale !== undefined) {
+        runOptions.locale = options.locale as AdapterRunAgentOptions['locale'];
+    }
+    if (options.contextMode === 'hosted') {
+        // Restores the hosted cost cap.
+        runOptions.contextLength = Math.min(200_000, HOSTED_CONTEXT_CAP);
+    }
+    if (options.selfCheck !== undefined) {
+        runOptions.selfCheck = options.selfCheck;
+    }
+    // onToolCall/onToolResult are assumed to exist on RunAgentOptions. Object.assign
+    // keeps this compiling even if the declared shape differs.
+    const toolHooks: { onToolCall?: (name: any, args: any) => void; onToolResult?: (name: any, ok: any, output: any) => void } = {};
+    if (options.onToolCall) toolHooks.onToolCall = options.onToolCall;
+    if (options.onToolResult) toolHooks.onToolResult = options.onToolResult;
+    Object.assign(runOptions, toolHooks);
+
+    // getSession(cwd) is this module's singleton (cwd is only used on first creation).
+    // Legacy thinkTurn uses the same singleton, so the seeded history matches.
+    const seed: any[] = [...getSession(effectiveCwd).getMessages()];
+    // Assumption: id and messages are the only fields runAgent relies on here. Any
+    // other required SessionRecord fields are unknown at this layer, hence the
+    // targeted assertion.
+    const sessionRecord = {
+        id: `brain-adapter-${Date.now()}`,
+        messages: seed,
+    } as unknown as AdapterSessionRecord;
+
+    return { runOptions, sessionRecord, permissionManager };
+}
+
+/**
+ * Converts an AgentRunResult to the legacy think() return shape, field by field.
+ * This is an honest downgrade on an opt-in path: usage and tokenStats are empty
+ * rather than fabricated. HUD token display and budget alerts therefore do not work
+ * on the new path.
+ */
+function toLegacyThinkResult(result: AgentRunResult, cwd: string) {
+    const reply = typeof result.reply === 'string' ? result.reply : '';
+    return {
+        reply,
+        text: reply,
+        cwd,
+        usage: {} as any,
+        tokenStats: {} as any,
+        toolCalls: [] as any[],
+        streamed: false,
+    };
+}
+
+/**
+ * Pure, defensive transcript scan. Truncates at the earliest tool_use message that has
+ * an id with no later matching tool_result, dropping that message and everything after it.
+ * Unrecognized shapes are treated as neutral, so no more is removed than necessary.
+ */
+function sanitizeMessagesForWriteback(messages: any[]): any[] {
+    if (!Array.isArray(messages)) return [];
+
+    /** Reads a candidate id from the known id fields. */
+    const pickId = (obj: any, fields: string[]): string | undefined => {
+        if (!obj || typeof obj !== 'object') return undefined;
+        for (const f of fields) {
+            const v = obj[f];
+            if (typeof v === 'string' && v.length > 0) return v;
+        }
+        return undefined;
+    };
+
+    /** Collects the tool_use ids issued by a message. */
+    const toolUseIds = (msg: any): string[] => {
+        const ids: string[] = [];
+        if (!msg || typeof msg !== 'object') return ids;
+        const useFields = ['id', 'tool_use_id', 'toolCallId'];
+        if (Array.isArray(msg.tool_use)) {
+            for (const b of msg.tool_use) { const id = pickId(b, useFields); if (id) ids.push(id); }
+        }
+        if (Array.isArray(msg.tool_calls)) {
+            for (const b of msg.tool_calls) { const id = pickId(b, useFields); if (id) ids.push(id); }
+        }
+        if (Array.isArray(msg.content)) {
+            for (const b of msg.content) {
+                if (b && typeof b === 'object' && b.type === 'tool_use') {
+                    const id = pickId(b, useFields); if (id) ids.push(id);
+                }
+            }
+        }
+        return ids;
+    };
+
+    /** Collects the tool_use ids that a message answers. */
+    const toolResultIds = (msg: any): string[] => {
+        const ids: string[] = [];
+        if (!msg || typeof msg !== 'object') return ids;
+        const resFields = ['tool_use_id', 'toolCallId', 'tool_call_id', 'id'];
+        for (const key of ['tool_result', 'toolResult']) {
+            const r = msg[key];
+            if (Array.isArray(r)) {
+                for (const b of r) { const id = pickId(b, resFields); if (id) ids.push(id); }
+            } else if (r && typeof r === 'object') {
+                const id = pickId(r, resFields); if (id) ids.push(id);
+            }
+        }
+        if (Array.isArray(msg.content)) {
+            for (const b of msg.content) {
+                if (b && typeof b === 'object' && b.type === 'tool_result') {
+                    const id = pickId(b, resFields); if (id) ids.push(id);
+                }
+            }
+        }
+        // OpenAI-style tool message.
+        if (msg.role === 'tool') {
+            const id = pickId(msg, ['tool_call_id', 'toolCallId', 'tool_use_id']); if (id) ids.push(id);
+        }
+        return ids;
+    };
+
+    // Latest index at which each id is answered.
+    const lastResultIndex = new Map<string, number>();
+    messages.forEach((msg, i) => {
+        for (const id of toolResultIds(msg)) lastResultIndex.set(id, i);
+    });
+
+    for (let i = 0; i < messages.length; i++) {
+        for (const id of toolUseIds(messages[i])) {
+            const r = lastResultIndex.get(id);
+            if (r === undefined || r <= i) return messages.slice(0, i);
+        }
+    }
+    return messages.slice();
+}
+
+const thinkLocks = new Map<string, Promise<void>>();
+
+/**
+ * Per-cwd promise-chain mutex that serializes new-path think() turns.
+ * NOT reentrant: do not call think() for the same cwd from inside its own callbacks,
+ * or it will deadlock. Sub-agents go through runAgent directly and are unaffected.
+ */
+async function withCwdThinkLock<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
+    const prev = thinkLocks.get(cwd) ?? Promise.resolve();
+    const safePrev = prev.catch(() => {});
+    let release!: () => void;
+    const cur = new Promise<void>(r => { release = r; });
+    const tail = safePrev.then(() => cur);
+    thinkLocks.set(cwd, tail);
+    await safePrev;
+    try {
+        return await fn();
+    } finally {
+        // Release first so waiters proceed, then clean up if nobody queued after us.
+        release();
+        if (thinkLocks.get(cwd) === tail) thinkLocks.delete(cwd);
+    }
+}
+
+/**
+ * Public think() entry point and thin adapter.
+ * Routes to runAgent when ARTEMIS_BRAIN_NEW=1 and the options pass the capability
+ * gate. Otherwise it delegates to thinkTurnLegacy with the original arguments.
+ */
 export async function think(
+    input: string,
+    onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
+    maybeOptions?: ThinkOptions,
+) {
+    // Normalize overloads exactly like the legacy signature.
+    let onStream: ((delta: string) => void) | undefined;
+    let options: ThinkOptions;
+    if (typeof onDeltaOrOptions === 'function') {
+        onStream = onDeltaOrOptions;
+        options = maybeOptions ?? {};
+    } else {
+        options = onDeltaOrOptions ?? {};
+        onStream = options.onStream;
+    }
+    const cwd = options.cwd ?? process.cwd();
+
+    const enabled = isBrainNewPathEnabled();
+    const gate = isNewPathSupported(options);
+    if (!enabled || !gate.ok) {
+        if (enabled && !gate.ok) console.warn(`[brain] ${gate.reason}`);
+        return thinkTurnLegacy(input, onDeltaOrOptions, maybeOptions);
+    }
+
+    return withCwdThinkLock(cwd, async () => {
+        // The seed is read inside the lock, from the same singleton legacy uses.
+        const { runOptions, sessionRecord } = await thinkOptionsToRunAgentOptions(options, cwd);
+        // If runAgent throws, writeback is skipped and the legacy session is not poisoned.
+        const result: AgentRunResult = await runAgent(sessionRecord, input, runOptions);
+
+        // Honest streaming downgrade: runAgent has no delta hooks, so the reply is delivered once.
+        if (onStream && !options.abortSignal?.aborted) {
+            try { onStream(typeof result.reply === 'string' ? result.reply : ''); } catch { /* listener errors must not break the turn */ }
+        }
+
+        // Write the sanitized transcript back into the legacy singleton so later legacy
+        // reads see this turn. A failure here only warns.
+        try {
+            const raw: any = (result as any).messages ?? (sessionRecord as any).messages ?? [];
+            const clean = sanitizeMessagesForWriteback(Array.isArray(raw) ? raw : []);
+            const s: any = getSession(cwd);
+            if (typeof s.restore === 'function') s.restore(clean);
+        } catch (werr) {
+            console.warn('[brain] writeback failed:', werr);
+        }
+
+        return toLegacyThinkResult(result, cwd);
+    });
+}
+
+async function thinkTurnLegacy(
     input: string,
     onDeltaOrOptions?: ((delta: string) => void) | ThinkOptions,
     maybeOptions?: ThinkOptions,
