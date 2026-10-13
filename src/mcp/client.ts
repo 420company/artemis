@@ -28,6 +28,14 @@ import {
   detectDependencyRequirement,
   isMissingExecutableError,
 } from './installer.js';
+import {
+  JSON_RPC_INTERNAL_ERROR,
+  McpServerRequestRouter,
+  buildJsonRpcError,
+  buildJsonRpcResult,
+  type McpElicitationHandler,
+  type McpSamplingHandler,
+} from './serverRequests.js';
 
 export class McpDependencyError extends Error {
   readonly server: McpServerConfig;
@@ -104,6 +112,22 @@ type RpcTransport = {
   listCommands(): Promise<McpCommandDescriptor[]>;
   setListChangedHandler?(
     handler?: (kind: McpListChangedKind) => void,
+  ): void;
+  /**
+   * Register a handler for server-initiated `sampling/createMessage`
+   * requests. When set (before first use), the client advertises the
+   * `sampling` capability in `initialize`.
+   */
+  setSamplingHandler?(
+    handler?: McpSamplingHandler,
+  ): void;
+  /**
+   * Register a handler for server-initiated `elicitation/create` requests.
+   * When set (before first use), the client advertises the `elicitation`
+   * capability in `initialize`.
+   */
+  setElicitationHandler?(
+    handler?: McpElicitationHandler,
   ): void;
   callTool(
     toolName: string,
@@ -786,6 +810,13 @@ async function readJsonRpcResponseFromSse(options: {
   body: ReadableStream<Uint8Array>;
   requestId: string;
   method: string;
+  /**
+   * Called for frames that are server-initiated JSON-RPC requests
+   * (sampling/createMessage, elicitation/create, ...) rather than the
+   * awaited response. The hook is responsible for replying (e.g. POSTing
+   * the JSON-RPC response back to the endpoint).
+   */
+  onServerRequest?: (payload: JsonRecord) => Promise<void>;
 }): Promise<JsonRecord> {
   const reader = options.body.getReader();
   const decoder = new TextDecoder();
@@ -818,6 +849,18 @@ async function readJsonRpcResponseFromSse(options: {
         if (response) {
           await reader.cancel().catch(() => undefined);
           return parseRpcResponse(response, options.method);
+        }
+
+        if (
+          options.onServerRequest &&
+          isRecord(payload) &&
+          typeof payload.method === 'string' &&
+          (typeof payload.id === 'string' || typeof payload.id === 'number')
+        ) {
+          // A server-initiated request interleaved in the SSE stream
+          // (sampling/createMessage, elicitation/create, ...). Let the
+          // hook route it and reply; then keep waiting for our response.
+          await options.onServerRequest(payload).catch(() => undefined);
         }
       }
     }
@@ -906,6 +949,12 @@ class HttpRpcTransport implements RpcTransport {
   private contentType?: string;
   private serverSignature?: string;
   private sampledHeaders?: string[];
+  /**
+   * Routes server-initiated requests (sampling/createMessage,
+   * elicitation/create). Capabilities are advertised from this router in
+   * initialize(); register handlers before the first MCP call.
+   */
+  private readonly serverRequestRouter = new McpServerRequestRouter();
 
   constructor(server: McpServerConfig, cwd: string, timeoutMs: number) {
     this.server = server;
@@ -960,6 +1009,8 @@ class HttpRpcTransport implements RpcTransport {
         body: response.body,
         requestId: String(this.requestId),
         method,
+        onServerRequest: (payload) =>
+          this.respondToServerRequest(payload),
       });
     }
 
@@ -975,7 +1026,7 @@ class HttpRpcTransport implements RpcTransport {
     const result = await this.send('initialize', {
       protocolVersion: CLIENT_PROTOCOL_VERSION,
       clientInfo: CLIENT_INFO,
-      capabilities: {},
+      capabilities: this.serverRequestRouter.buildCapabilities(),
     });
     this.clientInfo = isRecord(result.serverInfo)
       ? {
@@ -1064,6 +1115,58 @@ class HttpRpcTransport implements RpcTransport {
 
   setListChangedHandler(): void {}
 
+  setSamplingHandler(handler?: McpSamplingHandler): void {
+    this.serverRequestRouter.setSamplingHandler(handler);
+  }
+
+  setElicitationHandler(handler?: McpElicitationHandler): void {
+    this.serverRequestRouter.setElicitationHandler(handler);
+  }
+
+  /**
+   * Handle a server-initiated JSON-RPC request that arrived interleaved in
+   * a Streamable HTTP SSE stream (e.g. sampling/createMessage,
+   * elicitation/create) by routing it and POSTing the JSON-RPC reply back
+   * to the MCP endpoint, as the Streamable HTTP transport requires.
+   */
+  private async respondToServerRequest(payload: JsonRecord): Promise<void> {
+    if (
+      typeof payload.method !== 'string' ||
+      (typeof payload.id !== 'string' && typeof payload.id !== 'number')
+    ) {
+      return;
+    }
+    const id = payload.id;
+    let response: string;
+    try {
+      const routed = await this.serverRequestRouter.route(
+        payload.method,
+        payload.params,
+        { serverId: this.server.id, transport: 'http' },
+      );
+      response =
+        'error' in routed
+          ? buildJsonRpcError(id, routed.error.code, routed.error.message)
+          : buildJsonRpcResult(id, routed.result);
+    } catch (error) {
+      response = buildJsonRpcError(
+        id,
+        JSON_RPC_INTERNAL_ERROR,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const auth = await resolveServerHeaders(this.cwd, this.server);
+    this.server = auth.server;
+    await postHttpRpc({
+      url: this.server.url ?? '',
+      body: response,
+      headers: this.sessionId
+        ? { ...auth.headers, 'mcp-session-id': this.sessionId }
+        : auth.headers,
+      timeoutMs: this.timeoutMs,
+    });
+  }
+
   getServerConfig(): McpServerConfig {
     return this.server;
   }
@@ -1101,6 +1204,12 @@ class SseRpcTransport implements RpcTransport {
   private readonly maxReconnectAttempts = 3;
   private reconnectTimer?: NodeJS.Timeout;
   private listChangedHandler?: (kind: McpListChangedKind) => void;
+  /**
+   * Routes server-initiated requests (sampling/createMessage,
+   * elicitation/create). Capabilities are advertised from this router in
+   * initialize(); register handlers before the first MCP call.
+   */
+  private readonly serverRequestRouter = new McpServerRequestRouter();
   private readonly pending = new Map<
     string,
     {
@@ -1181,6 +1290,19 @@ class SseRpcTransport implements RpcTransport {
       const listChangedKind = getListChangedKindFromMethod(entry.method);
       if (listChangedKind) {
         this.listChangedHandler?.(listChangedKind);
+      }
+
+      if (
+        typeof entry.method === 'string' &&
+        (typeof entry.id === 'string' || typeof entry.id === 'number') &&
+        !this.pending.has(String(entry.id))
+      ) {
+        // A server-initiated request (sampling/createMessage,
+        // elicitation/create, ...) arriving on the SSE stream: route it and
+        // POST the JSON-RPC reply to the message endpoint.
+        // (Previously these were silently dropped.)
+        void this.respondToServerRequest(entry.id, entry.method, entry.params);
+        continue;
       }
 
       if (entry.id === undefined) {
@@ -1549,7 +1671,7 @@ class SseRpcTransport implements RpcTransport {
     const result = await this.send('initialize', {
       protocolVersion: CLIENT_PROTOCOL_VERSION,
       clientInfo: CLIENT_INFO,
-      capabilities: {},
+      capabilities: this.serverRequestRouter.buildCapabilities(),
     });
     this.clientInfo = isRecord(result.serverInfo)
       ? {
@@ -1659,6 +1781,61 @@ class SseRpcTransport implements RpcTransport {
     this.listChangedHandler = handler;
   }
 
+  setSamplingHandler(handler?: McpSamplingHandler): void {
+    this.serverRequestRouter.setSamplingHandler(handler);
+  }
+
+  setElicitationHandler(handler?: McpElicitationHandler): void {
+    this.serverRequestRouter.setElicitationHandler(handler);
+  }
+
+  /**
+   * Handle a server-initiated JSON-RPC request that arrived on the SSE
+   * stream (e.g. sampling/createMessage, elicitation/create) by routing it
+   * and POSTing the JSON-RPC reply to the message endpoint (legacy SSE).
+   */
+  private async respondToServerRequest(
+    id: string | number,
+    method: string,
+    params: unknown,
+  ): Promise<void> {
+    const postUrl = this.postUrl;
+    if (!postUrl) {
+      return;
+    }
+    let response: string;
+    try {
+      const routed = await this.serverRequestRouter.route(method, params, {
+        serverId: this.server.id,
+        transport: 'sse',
+      });
+      response =
+        'error' in routed
+          ? buildJsonRpcError(id, routed.error.code, routed.error.message)
+          : buildJsonRpcResult(id, routed.result);
+    } catch (error) {
+      response = buildJsonRpcError(
+        id,
+        JSON_RPC_INTERNAL_ERROR,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    try {
+      const auth = await resolveServerHeaders(this.cwd, this.server);
+      this.server = auth.server;
+      await postHttpRpc({
+        url: postUrl,
+        body: response,
+        headers: this.sessionId
+          ? { ...auth.headers, 'mcp-session-id': this.sessionId }
+          : auth.headers,
+        timeoutMs: this.timeoutMs,
+      });
+    } catch {
+      // Best effort: the server may already be gone.
+    }
+  }
+
   getServerConfig(): McpServerConfig {
     return this.server;
   }
@@ -1713,6 +1890,12 @@ class StdioRpcTransport implements RpcTransport {
   private stderr = '';
   private clientInfo?: RpcClientInfo;
   private listChangedHandler?: (kind: McpListChangedKind) => void;
+  /**
+   * Routes server-initiated requests (sampling/createMessage,
+   * elicitation/create). Capabilities are advertised from this router in
+   * initialize(); register handlers before the first MCP call.
+   */
+  private readonly serverRequestRouter = new McpServerRequestRouter();
   /**
    * Wire format. The MCP stdio transport is newline-delimited JSON; older
    * servers that only read LSP-style `Content-Length` frames are detected
@@ -1941,6 +2124,19 @@ class StdioRpcTransport implements RpcTransport {
         continue;
       }
 
+      if (
+        typeof payload.method === 'string' &&
+        (typeof payload.id === 'string' || typeof payload.id === 'number') &&
+        (typeof payload.id !== 'number' || !this.pending.has(payload.id))
+      ) {
+        // A server-initiated request (sampling/createMessage,
+        // elicitation/create, ...): it has a method and an id, but matches
+        // none of our in-flight calls. Route it and reply on the pipe.
+        // (Previously these were silently dropped.)
+        void this.handleServerRequest(payload.id, payload.method, payload.params);
+        continue;
+      }
+
       if (typeof payload.id !== 'number') {
         continue;
       }
@@ -2014,7 +2210,7 @@ class StdioRpcTransport implements RpcTransport {
     const initializeParams = {
       protocolVersion: CLIENT_PROTOCOL_VERSION,
       clientInfo: CLIENT_INFO,
-      capabilities: {},
+      capabilities: this.serverRequestRouter.buildCapabilities(),
     };
     const result = this.framingSettled
       ? await this.send('initialize', initializeParams)
@@ -2148,6 +2344,57 @@ class StdioRpcTransport implements RpcTransport {
     handler?: (kind: McpListChangedKind) => void,
   ): void {
     this.listChangedHandler = handler;
+  }
+
+  setSamplingHandler(handler?: McpSamplingHandler): void {
+    this.serverRequestRouter.setSamplingHandler(handler);
+  }
+
+  setElicitationHandler(handler?: McpElicitationHandler): void {
+    this.serverRequestRouter.setElicitationHandler(handler);
+  }
+
+  /**
+   * Handle a server-initiated JSON-RPC request that arrived on the stdio
+   * pipe (e.g. sampling/createMessage, elicitation/create) by routing it
+   * and writing the JSON-RPC reply back to the server's stdin, using the
+   * same framing the transport negotiated.
+   */
+  private async handleServerRequest(
+    id: string | number,
+    method: string,
+    params: unknown,
+  ): Promise<void> {
+    const child = this.child;
+    if (!child) {
+      return;
+    }
+    let response: string;
+    try {
+      const routed = await this.serverRequestRouter.route(method, params, {
+        serverId: this.server.id,
+        transport: 'stdio',
+      });
+      response =
+        'error' in routed
+          ? buildJsonRpcError(id, routed.error.code, routed.error.message)
+          : buildJsonRpcResult(id, routed.result);
+    } catch (error) {
+      response = buildJsonRpcError(
+        id,
+        JSON_RPC_INTERNAL_ERROR,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const frame =
+      this.framing === 'content-length'
+        ? `Content-Length: ${Buffer.byteLength(response, 'utf8')}\r\n\r\n${response}`
+        : `${response}\n`;
+    try {
+      child.stdin.write(frame, 'utf8');
+    } catch {
+      // The server went away; nothing useful to do with the reply.
+    }
   }
 
   getServerConfig(): McpServerConfig {
