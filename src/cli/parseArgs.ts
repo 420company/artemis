@@ -66,6 +66,8 @@ export interface ParsedArgs {
   /** execute --retry: the owner message id of the exchange to replace (--retry-of <id>); another one refuses. */
   retryOf?: string
   keepApprovals?: boolean
+  /** execute/analyze: `stream-json` writes progress events to stdout as NDJSON (services/streamJson.ts). */
+  outputFormat?: 'text' | 'stream-json'
   /** execute: advance this long-term goal by one step instead of sending a message (--goal <id> [--goal-max-steps <n>]); the prompt is the goal. */
   goal?: { id: string; maxSteps?: number }
   resumeLast: boolean
@@ -134,6 +136,7 @@ ${t('命令', 'Commands')}:
                     ${t('--goal <id> <目标> 把一个长期目标推进一步（--goal-max-steps <n> 步数上限），stderr 末尾输出一行 [goal-status] {json}', '--goal <id> <goal> advances a long-term goal by one step (--goal-max-steps <n> caps its steps); one [goal-status] {json} line on stderr reports it')}
                     ${t('需要你同意的操作会暂停（退出码 10）；用 --session <id> --approve <请求id> 同意，或 --deny <请求id> [--reason <理由>] 拒绝；--signature <签名> 由宿主签发，--expect-digest <actionDigest> 核对请求未被改动', 'Actions that need approval pause the run (exit code 10); answer with --session <id> --approve <request id>, or --deny <request id> [--reason <text>]; --signature <sig> is the host\'s signature, --expect-digest <actionDigest> checks the request was not changed')}
                     ${t('--retry 配合 --session：撤下上一轮再执行（不带 query 即原样重发，带 query 即编辑后重发）；--retry-of <消息 id> 只在它仍是最后一轮时执行', '--retry with --session: takes the last exchange out and runs again (no query: the same message; a query: the edited message); --retry-of <message id> only if that is still the last exchange')}
+                    ${t('--output-format stream-json：进度以 NDJSON 事件写到 stdout（带版本号：文字、工具、计划、子代理、用量、心跳、确认请求、结果）；stderr 的进度行不变', '--output-format stream-json: progress as versioned NDJSON events on stdout (text, tools, plan, sub-agents, usage, heartbeats, approval requests, result); the stderr lines stay as they are')}
                     ${t('--keep-approvals：消息不是你本人发的（定时任务、触发器等），会话里等你同意的请求保持不变', '--keep-approvals: the message is not the owner\'s (a scheduled task, a trigger, …): requests waiting in the conversation stay as they are')}
   skill             ${t('列出或查看本地技能', 'List or inspect local skills')}
   audit             ${t('运行安全/注册表审计', 'Run security/registry audit')}
@@ -168,6 +171,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let signature: string | undefined
   let retry = false
   let retryOf: string | undefined
+  let outputFormat: ParsedArgs['outputFormat']
   let keepApprovals = false
   let goalId: string | undefined
   let goalMaxSteps: number | undefined
@@ -280,6 +284,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       approvalReason = v.slice(0, 2_000)
       continue
     }
+    if ((command === 'execute' || command === 'analyze') && (cur === '--output-format' || cur.startsWith('--output-format='))) {
+      const v = (cur === '--output-format' ? args.shift() : cur.slice('--output-format='.length))?.trim()
+      if (v !== 'text' && v !== 'stream-json') throw new Error(`${command} --output-format requires text or stream-json.`)
+      outputFormat = v
+      continue
+    }
     if (command === 'execute' && cur === '--retry') { retry = true; continue }
     if (command === 'execute' && cur === '--keep-approvals') { keepApprovals = true; continue }
     if (command === 'execute' && cur === '--goal') {
@@ -347,6 +357,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(retry ? { retry } : {}),
     ...(retryOf ? { retryOf } : {}),
     ...(keepApprovals ? { keepApprovals } : {}),
+    ...(outputFormat ? { outputFormat } : {}),
     ...(goalId ? { goal: { id: goalId, ...(goalMaxSteps !== undefined ? { maxSteps: goalMaxSteps } : {}) } } : {}),
   }
 }
