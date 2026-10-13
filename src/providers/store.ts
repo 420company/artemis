@@ -14,10 +14,28 @@ import type {
   ProviderStoreData,
   VisualModelConfig,
 } from './types.js';
+import type { SecretStore } from '../security/secretStore.js';
 import { ensureDir, pathExists } from '../utils/fs.js';
 import { capKnownModelContextLength, detectModelContextLength } from './modelContext.js';
 import { hasPlatformCapabilities } from './capabilities.js';
 import { DEFAULT_MODEL_IDS } from './presets.js';
+
+/** SecretStore account names for the API keys kept in providers.json. */
+function profileApiKeyAccount(id: string): string {
+  return `provider:${id}:apiKey`;
+}
+
+function customProviderApiKeyAccount(id: string): string {
+  return `customProvider:${id}:apiKey`;
+}
+
+function auxiliaryApiKeyAccount(task: string): string {
+  return `auxiliary:${task}:apiKey`;
+}
+
+function visualApiKeyAccount(kind: 'image' | 'video'): string {
+  return `visual:${kind}:apiKey`;
+}
 
 function getDefaultSetupConfig(): ArtemisSetupConfig {
   return {
@@ -362,10 +380,12 @@ function withoutDefaultCompression(data: ProviderStoreData): ProviderStoreData {
 export class ProviderStore {
   private readonly rootDir: string;
   private readonly filePath: string;
+  private readonly secretStore?: SecretStore;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, secretStore?: SecretStore) {
     this.rootDir = resolveDataRootDir(cwd);
     this.filePath = path.join(this.rootDir, 'providers.json');
+    this.secretStore = secretStore;
   }
 
   /** Absolute path of the providers.json this store reads and writes. */
@@ -375,6 +395,137 @@ export class ProviderStore {
 
   async ensure(): Promise<void> {
     await ensureDir(this.rootDir);
+  }
+
+  /**
+   * Stores a secret in the SecretStore and returns the sentinel that goes to
+   * disk instead. Empty values and values that are already sentinels (a key
+   * that could not be resolved on load) are written unchanged, so a sentinel
+   * is never stored as the secret itself.
+   */
+  private async protectSecret(account: string, value: string | undefined): Promise<string | undefined> {
+    const store = this.secretStore;
+    if (!store || typeof value !== 'string' || value.length === 0) return value;
+    if (store.isSentinel(value)) return value;
+    return store.encrypt(account, value);
+  }
+
+  /**
+   * Resolves a sentinel back to the stored secret. Plaintext values (files
+   * written before encryption, or without a SecretStore) pass through. When
+   * the secret is missing from the backend, the sentinel is kept so the
+   * entry survives; it simply will not authenticate.
+   */
+  private async revealSecret(account: string, value: string | undefined): Promise<string | undefined> {
+    const store = this.secretStore;
+    if (!store || typeof value !== 'string' || !store.isSentinel(value)) return value;
+    try {
+      const resolved = await store.resolve(account, value);
+      return resolved ?? value;
+    } catch {
+      return value;
+    }
+  }
+
+  /**
+   * A copy of the store with every provider API key replaced by its
+   * SecretStore sentinel. The input object is never mutated.
+   */
+  private async withProtectedSecrets(data: ProviderStoreData): Promise<ProviderStoreData> {
+    if (!this.secretStore) return data;
+
+    const profiles = await Promise.all(
+      (data.profiles ?? []).map(async (profile) => {
+        if (typeof profile?.id !== 'string') return profile;
+        const apiKey = await this.protectSecret(profileApiKeyAccount(profile.id), profile.apiKey);
+        return { ...profile, apiKey: apiKey ?? profile.apiKey };
+      }),
+    );
+
+    const customProviders = data.customProviders
+      ? await Promise.all(
+          data.customProviders.map(async (provider) => {
+            if (typeof provider?.id !== 'string' || typeof provider.apiKey !== 'string') return provider;
+            const apiKey = await this.protectSecret(customProviderApiKeyAccount(provider.id), provider.apiKey);
+            return { ...provider, apiKey };
+          }),
+        )
+      : data.customProviders;
+
+    let auxiliaryModels = data.auxiliaryModels;
+    if (auxiliaryModels && typeof auxiliaryModels === 'object') {
+      const next: Partial<Record<AuxiliaryModelTask, AuxiliaryModelRoute>> = {};
+      for (const [task, route] of Object.entries(auxiliaryModels) as Array<[AuxiliaryModelTask, AuxiliaryModelRoute | undefined]>) {
+        if (route && typeof route === 'object' && typeof route.apiKey === 'string') {
+          const apiKey = await this.protectSecret(auxiliaryApiKeyAccount(task), route.apiKey);
+          next[task] = { ...route, apiKey };
+        } else {
+          next[task] = route as AuxiliaryModelRoute;
+        }
+      }
+      auxiliaryModels = next;
+    }
+
+    const visualProfile = data.visualProfile ? { ...data.visualProfile } : data.visualProfile;
+    if (visualProfile?.image && typeof visualProfile.image.apiKey === 'string') {
+      const apiKey = await this.protectSecret(visualApiKeyAccount('image'), visualProfile.image.apiKey);
+      visualProfile.image = { ...visualProfile.image, apiKey: apiKey ?? visualProfile.image.apiKey };
+    }
+    if (visualProfile?.video && typeof visualProfile.video.apiKey === 'string') {
+      const apiKey = await this.protectSecret(visualApiKeyAccount('video'), visualProfile.video.apiKey);
+      visualProfile.video = { ...visualProfile.video, apiKey: apiKey ?? visualProfile.video.apiKey };
+    }
+
+    return { ...data, profiles, customProviders, auxiliaryModels, visualProfile };
+  }
+
+  /** Replaces sentinels in a freshly loaded store with the real API keys. */
+  private async revealSecrets(data: ProviderStoreData): Promise<void> {
+    if (!this.secretStore) return;
+
+    data.profiles = await Promise.all(
+      data.profiles.map(async (profile) => {
+        if (typeof profile.apiKey !== 'string') return profile;
+        const apiKey = await this.revealSecret(profileApiKeyAccount(profile.id), profile.apiKey);
+        return apiKey === profile.apiKey ? profile : { ...profile, apiKey: apiKey ?? profile.apiKey };
+      }),
+    );
+
+    if (data.customProviders) {
+      data.customProviders = await Promise.all(
+        data.customProviders.map(async (provider) => {
+          if (typeof provider.apiKey !== 'string') return provider;
+          const apiKey = await this.revealSecret(customProviderApiKeyAccount(provider.id), provider.apiKey);
+          return apiKey === provider.apiKey ? provider : { ...provider, apiKey };
+        }),
+      );
+    }
+
+    if (data.auxiliaryModels && typeof data.auxiliaryModels === 'object') {
+      const next: Partial<Record<AuxiliaryModelTask, AuxiliaryModelRoute>> = {};
+      for (const [task, route] of Object.entries(data.auxiliaryModels) as Array<[AuxiliaryModelTask, AuxiliaryModelRoute | undefined]>) {
+        if (route && typeof route === 'object' && typeof route.apiKey === 'string') {
+          const apiKey = await this.revealSecret(auxiliaryApiKeyAccount(task), route.apiKey);
+          next[task] = apiKey === route.apiKey ? route : { ...route, apiKey };
+        } else {
+          next[task] = route as AuxiliaryModelRoute;
+        }
+      }
+      data.auxiliaryModels = next;
+    }
+
+    if (data.visualProfile?.image && typeof data.visualProfile.image.apiKey === 'string') {
+      const apiKey = await this.revealSecret(visualApiKeyAccount('image'), data.visualProfile.image.apiKey);
+      if (apiKey !== data.visualProfile.image.apiKey) {
+        data.visualProfile.image = { ...data.visualProfile.image, apiKey: apiKey ?? data.visualProfile.image.apiKey };
+      }
+    }
+    if (data.visualProfile?.video && typeof data.visualProfile.video.apiKey === 'string') {
+      const apiKey = await this.revealSecret(visualApiKeyAccount('video'), data.visualProfile.video.apiKey);
+      if (apiKey !== data.visualProfile.video.apiKey) {
+        data.visualProfile.video = { ...data.visualProfile.video, apiKey: apiKey ?? data.visualProfile.video.apiKey };
+      }
+    }
   }
 
   async load(): Promise<ProviderStoreData> {
@@ -450,6 +601,7 @@ export class ProviderStore {
       setup,
       visualProfile: parsed.visualProfile || empty.visualProfile,
     };
+    await this.revealSecrets(data);
     if (loaded.repairedTrailingJunk || repairedContextLength) {
       await this.save(data);
     }
@@ -474,10 +626,14 @@ export class ProviderStore {
    * rename. A plain writeFile truncates first, so a concurrent load (another
    * process, or this one's background telemetry write after a model call)
    * could read an empty file and fail with "Unexpected end of JSON input".
+   *
+   * With a SecretStore, API keys are stored there and only sentinels are
+   * written to providers.json; the caller's object keeps the real keys.
    */
   async save(data: ProviderStoreData): Promise<void> {
     await this.ensure();
-    const body = JSON.stringify(withoutDefaultCompression(data), null, 2);
+    const protectedData = await this.withProtectedSecrets(data);
+    const body = JSON.stringify(withoutDefaultCompression(protectedData), null, 2);
     const temp = `${this.filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temp, body, 'utf8');
     try {
