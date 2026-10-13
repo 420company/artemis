@@ -8,56 +8,6 @@
 
 import { validateTodoAction } from '../core/todoList.js';
 import {
-  validateDeleteFileAction,
-  validateMoveFileAction,
-  validateCopyFileAction,
-  validateCreateDirectoryAction,
-  validateDeleteDirectoryAction,
-  validateFileInfoAction,
-  validateListDirectoryAction,
-  validateGitStatusAction,
-  validateGitDiffAction,
-  validateGitLogAction,
-  validateGitAddAction,
-  validateGitCommitAction,
-  validateGitBranchAction,
-  validateRegexMatchAction,
-  validateJsonQueryAction,
-  validateFormatJsonAction,
-  validateDiffTextAction,
-  validateSortLinesAction,
-  validateDedupeLinesAction,
-  validateCountLinesAction,
-  validateBase64EncodeAction,
-  validateBase64DecodeAction,
-  validateHashTextAction,
-  validateGenerateUuidAction,
-  validateGetEnvAction,
-  validateWhichCommandAction,
-  validateGetSystemInfoAction,
-  validateDateNowAction,
-  validateCalculateAction,
-  validateCheckUrlAction,
-  validateDownloadFileAction,
-  validateDnsLookupAction,
-  validateParseUrlAction,
-  validateNpmRunAction,
-  validateFormatCodeAction,
-  validateGetImportsAction,
-  validatePathInfoAction,
-  validateUrlEncodeAction,
-  validateHashFileAction,
-  validateNotebookCreateAction,
-  validateNotebookListAction,
-  validateNotebookUpdateAction,
-  validateNotebookDeleteAction,
-  validateNotebookViewAction,
-  validateNotebookSearchAction,
-  validateNotebookAddTagAction,
-  validateNotebookRemoveTagAction,
-  validateNotebookTreeAction,
-} from './extras-validators.js';
-import {
   ALL_AGENT_ACTION_TYPES,
   RUNTIME_MANAGED_AGENT_ACTION_TYPES,
   type AgentAction,
@@ -105,6 +55,7 @@ import { executeAgentIdentity, validateAgentIdentityAction } from './agentIdenti
 import { executeUseWorkflow, USE_WORKFLOW_DESCRIPTION } from './useWorkflow.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
 import { createLoadToolsToolDef, LOAD_TOOLS_TYPE } from './toolLoader.js';
+import { normalizeChain, normalizeAddress, normalizeToken, normalizeAmount, normalizeQuoteId } from './wallet/walletConfig.js';
 
 export type { ToolDefinition };
 
@@ -767,27 +718,175 @@ function validatePlaceCallAction(action: any): string[] {
 
 function validateGetBalanceAction(action: any): string[] {
   const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.chain, 'chain', errors);
-  validateRequiredNonEmptyString(action?.address, 'address', errors);
+
+  // Runs a normalizer and collects a specific error.
+  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
+  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
+    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+      errors.push(`${field} is required`);
+      return undefined;
+    }
+    const describe = (v: unknown): string => {
+      try {
+        const s = typeof v === 'string' ? v : JSON.stringify(v);
+        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
+      } catch {
+        return String(v);
+      }
+    };
+    try {
+      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
+      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
+        errors.push(`${field} is invalid: ${describe(value)}`);
+        return undefined;
+      }
+      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
+        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
+        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
+        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
+        return undefined;
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error && err.message ? err.message : describe(value);
+      errors.push(`${field} is invalid: ${msg}`);
+      return undefined;
+    }
+  };
+
+  const chain = check(normalizeChain, action?.chain, 'chain');
+  if (chain !== undefined) {
+    check(normalizeAddress, action?.address, 'address', chain);
+  } else {
+    check(normalizeAddress, action?.address, 'address');
+  }
+
   return errors;
 }
 
 function validateSwapQuoteAction(action: any): string[] {
   const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.chain, 'chain', errors);
-  validateRequiredNonEmptyString(action?.from, 'from', errors);
-  validateRequiredNonEmptyString(action?.to, 'to', errors);
-  validateRequiredNonEmptyString(action?.amount, 'amount', errors);
+
+  // Runs a normalizer and collects a specific error.
+  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
+  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
+    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+      errors.push(`${field} is required`);
+      return undefined;
+    }
+    const describe = (v: unknown): string => {
+      try {
+        const s = typeof v === 'string' ? v : JSON.stringify(v);
+        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
+      } catch {
+        return String(v);
+      }
+    };
+    try {
+      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
+      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
+        errors.push(`${field} is invalid: ${describe(value)}`);
+        return undefined;
+      }
+      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
+        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
+        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
+        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
+        return undefined;
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error && err.message ? err.message : describe(value);
+      errors.push(`${field} is invalid: ${msg}`);
+      return undefined;
+    }
+  };
+
+  // Derives a comparable key from a normalized token (string or object form).
+  const tokenKey = (t: unknown): string => {
+    if (typeof t === 'string') return t.trim().toLowerCase();
+    if (t && typeof t === 'object') {
+      const o = t as { address?: unknown; symbol?: unknown; id?: unknown };
+      for (const k of [o.address, o.id, o.symbol]) {
+        if (typeof k === 'string' && k.trim() !== '') return k.trim().toLowerCase();
+      }
+      try {
+        return JSON.stringify(t);
+      } catch {
+        return String(t);
+      }
+    }
+    return String(t);
+  };
+
+  const chain = check(normalizeChain, action?.chain, 'chain');
+  const extra: unknown[] = chain !== undefined ? [chain] : [];
+  const from = check(normalizeToken, action?.from, 'from', ...extra);
+  const to = check(normalizeToken, action?.to, 'to', ...extra);
+  check(normalizeAmount, action?.amount, 'amount');
+
+  if (from !== undefined && to !== undefined && tokenKey(from) === tokenKey(to)) {
+    errors.push(`from and to must be different tokens: both resolve to ${tokenKey(from)}`);
+  }
+
   return errors;
 }
 
 function validateSendTransactionAction(action: any): string[] {
   const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.chain, 'chain', errors);
-  validateRequiredNonEmptyString(action?.to, 'to', errors);
-  validateRequiredNonEmptyString(action?.token, 'token', errors);
-  validateRequiredNonEmptyString(action?.amount, 'amount', errors);
-  if (action?.quoteId !== undefined && typeof action.quoteId !== 'string') errors.push('quoteId must be a string');
+
+  // Runs a normalizer and collects a specific error.
+  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
+  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
+    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+      errors.push(`${field} is required`);
+      return undefined;
+    }
+    const describe = (v: unknown): string => {
+      try {
+        const s = typeof v === 'string' ? v : JSON.stringify(v);
+        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
+      } catch {
+        return String(v);
+      }
+    };
+    try {
+      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
+      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
+        errors.push(`${field} is invalid: ${describe(value)}`);
+        return undefined;
+      }
+      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
+        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
+        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
+        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
+        return undefined;
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error && err.message ? err.message : describe(value);
+      errors.push(`${field} is invalid: ${msg}`);
+      return undefined;
+    }
+  };
+
+  const chain = check(normalizeChain, action?.chain, 'chain');
+  const extra: unknown[] = chain !== undefined ? [chain] : [];
+  check(normalizeAddress, action?.to, 'to', ...extra);
+  check(normalizeToken, action?.token, 'token', ...extra);
+  check(normalizeAmount, action?.amount, 'amount');
+
+  // quoteId is optional: undefined is allowed; an explicit null or any invalid value is rejected.
+  if (action?.quoteId !== undefined) {
+    if (action.quoteId === null) {
+      errors.push('quoteId is invalid: null (omit the field instead of passing null)');
+    } else if (typeof action.quoteId !== 'string') {
+      errors.push(`quoteId is invalid: must be a string, got ${typeof action.quoteId}`);
+    } else {
+      check(normalizeQuoteId, action.quoteId, 'quoteId');
+    }
+  }
+
   return errors;
 }
 
@@ -845,23 +944,6 @@ const systemToolDef: ToolDefinition = {
   parallelSafe: false,
   validate: () => [],
 };
-
-/**
- * WP-15 Phase 1: shared execute bridge for extras-backed actions.
- *
- * - Dynamic import: extras.ts is loaded lazily on first call (and cached by the module
- *   loader afterwards). This keeps a static registry.ts → extras.ts edge out of the
- *   module graph and avoids the import cycle.
- * - `type` is the AgentAction discriminant, not a tool parameter. It is stripped so that
- *   executeExtraTool receives exactly the input_schema-shaped object brain passes. This
- *   matters for tools that persist or spread their input (e.g. notebook_update).
- */
-const executeExtraToolAction = (async (action: any, ctx: any) => {
-  const { executeExtraTool } = await import('./extras.js');
-  const { type, ...input } = action;
-  const result = await executeExtraTool(type, input, ctx.cwd, ctx.permissionMode);
-  return result;
-}) as any;
 
 const actionToolDefs: ToolDefinition[] = [
   {
@@ -1332,497 +1414,6 @@ const actionToolDefs: ToolDefinition[] = [
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateAgentAction,
-  },
-  // ── WP-15 Phase 1: extras-backed tools (executed by src/tools/extras.ts) ──────
-  // File operations
-  {
-    type: 'delete_file',
-    description: 'Permanently delete a file.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateDeleteFileAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'move_file',
-    description: 'Move or rename a file.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateMoveFileAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'copy_file',
-    description: 'Copy a file to a new location.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateCopyFileAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'create_directory',
-    description: 'Create a directory (and parents if needed).',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateCreateDirectoryAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'delete_directory',
-    description: 'Delete a directory and all its contents.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateDeleteDirectoryAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'file_info',
-    description: 'Get file metadata: size, timestamps, type, permissions.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateFileInfoAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'list_directory',
-    description: 'List contents of a directory with file/directory type markers.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateListDirectoryAction,
-    execute: executeExtraToolAction,
-  },
-  // Git
-  {
-    type: 'git_status',
-    description: 'Show git working tree status (staged, unstaged, untracked files).',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGitStatusAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'git_diff',
-    description: 'Show git diff for working tree or staged changes.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGitDiffAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'git_log',
-    description: 'Show recent git commit log (one-line format).',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGitLogAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'git_add',
-    description: 'Stage files for commit.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateGitAddAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'git_commit',
-    description: 'Create a git commit with a message.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateGitCommitAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    // Classified as write: create/checkout mutate the repo. A bare call only lists branches.
-    type: 'git_branch',
-    description: 'List branches, create a new branch, or checkout a branch.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateGitBranchAction,
-    execute: executeExtraToolAction,
-  },
-  // Text processing
-  {
-    type: 'regex_match',
-    description: 'Find all matches of a regex pattern in text.',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateRegexMatchAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'json_query',
-    description: 'Extract a value from JSON using a dot-path query (e.g. ".user.name").',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateJsonQueryAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'format_json',
-    description: 'Pretty-print a JSON string with proper indentation.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateFormatJsonAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'diff_text',
-    description: 'Compute a line-by-line diff between two strings.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateDiffTextAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'sort_lines',
-    description: 'Sort lines of text alphabetically.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateSortLinesAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'dedupe_lines',
-    description: 'Remove duplicate lines from text.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateDedupeLinesAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'count_lines',
-    description: 'Count lines and bytes in a file.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateCountLinesAction,
-    execute: executeExtraToolAction,
-  },
-  // Encoding / crypto
-  {
-    type: 'base64_encode',
-    description: 'Encode text to Base64.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateBase64EncodeAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'base64_decode',
-    description: 'Decode Base64-encoded text.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateBase64DecodeAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'hash_text',
-    description: 'Hash text using md5, sha1, sha256, or sha512.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateHashTextAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'generate_uuid',
-    description: 'Generate a random UUID v4.',
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGenerateUuidAction,
-    execute: executeExtraToolAction,
-  },
-  // System
-  {
-    type: 'get_env',
-    description: 'Read environment variable(s). Filters out secrets automatically.',
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGetEnvAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'which_command',
-    description: 'Find the full path of a shell command.',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateWhichCommandAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'get_system_info',
-    description: 'Get OS, CPU, memory, and Node.js runtime information.',
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGetSystemInfoAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'date_now',
-    description: 'Get the current date/time in various formats.',
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateDateNowAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'calculate',
-    description: 'Evaluate a math expression (supports +, -, *, /, %, **, and Math.* functions).',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateCalculateAction,
-    execute: executeExtraToolAction,
-  },
-  // Network
-  {
-    type: 'check_url',
-    description: 'Check if a URL is reachable (HEAD request) and return the HTTP status.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateCheckUrlAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'download_file',
-    description: 'Download a file from a URL and save it to disk.',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateDownloadFileAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'dns_lookup',
-    description: 'Resolve a hostname to IP address(es) via DNS.',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateDnsLookupAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'parse_url',
-    description: 'Parse a URL into its components (protocol, host, path, query params, etc.).',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateParseUrlAction,
-    execute: executeExtraToolAction,
-  },
-  // Development
-  {
-    // Runs arbitrary package.json scripts. See integration note 4.7 on permission category.
-    type: 'npm_run',
-    description: 'Run an npm script from package.json (e.g. test, build, lint).',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateNpmRunAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'format_code',
-    description: 'Auto-format a code file using the appropriate formatter (prettier, gofmt, black, rustfmt).',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateFormatCodeAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'get_imports',
-    description: 'Extract all import/require statements from a source file.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGetImportsAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'path_info',
-    description: 'Parse a path into its components (dirname, basename, extension, absolute).',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validatePathInfoAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'url_encode',
-    description: 'URL-encode or decode a string.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateUrlEncodeAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'hash_file',
-    description: 'Compute the hash of a file\'s contents.',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateHashFileAction,
-    execute: executeExtraToolAction,
-  },
-  // Notebook
-  {
-    type: 'notebook_create',
-    description: '创建新笔记',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateNotebookCreateAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_list',
-    description: '列出所有笔记',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateNotebookListAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_update',
-    description: '更新笔记',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateNotebookUpdateAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_delete',
-    description: '删除笔记',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateNotebookDeleteAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_view',
-    description: '查看笔记详情',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateNotebookViewAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_search',
-    description: '搜索笔记',
-    kind: 'search',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateNotebookSearchAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_addTag',
-    description: '给笔记添加标签',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateNotebookAddTagAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_removeTag',
-    description: '移除笔记的标签',
-    kind: 'write',
-    permissionCategory: 'write',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateNotebookRemoveTagAction,
-    execute: executeExtraToolAction,
-  },
-  {
-    type: 'notebook_tree',
-    description: '获取笔记树结构',
-    kind: 'read',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateNotebookTreeAction,
-    execute: executeExtraToolAction,
   },
 ];
 
