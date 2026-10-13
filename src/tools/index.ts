@@ -12,8 +12,11 @@ import type {
   ToolExecutionResult,
 } from './types.js';
 
-export function getToolManifest(allowedToolTypes?: readonly string[]): string {
-  return renderToolManifest(allowedToolTypes);
+export function getToolManifest(
+  allowedToolTypes?: readonly string[],
+  options?: import('./registry.js').RenderToolManifestOptions,
+): string {
+  return renderToolManifest(allowedToolTypes, options);
 }
 
 export function getDetailedToolManifest(): string {
@@ -194,3 +197,20 @@ export async function executeAction(
     return buildExecutionErrorFallbackResult(action, error);
   }
 }
+
+// WP-18 re-exports
+export {
+  CORE_TOOL_TYPES,
+  getToolLoadTier,
+  getOnDemandToolSummaries,
+  isCoreTool,
+  validateToolLoadTierIntegrity,
+  type ToolLoadTier,
+  type RenderToolManifestOptions,
+} from './registry.js';
+export {
+  LOAD_TOOLS_TYPE,
+  LOAD_TOOLS_MAX_PER_CALL,
+  type LoadedToolSchema,
+  type LoadToolsResultData,
+} from './toolLoader.js';
