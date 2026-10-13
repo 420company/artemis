@@ -167,7 +167,7 @@ import {
   recordHeimdallStage,
   type HeimdallThreadState,
 } from './heimdall.js';
-import { pathExists, truncate } from '../utils/fs.js';
+import { pathExists, truncate, truncateInline } from '../utils/fs.js';
 import { withRuntimeLogSink } from '../utils/log.js';
 import { applyTodos, renderTodos } from './todoList.js';
 import { childInfo, nextAgentRef, todoEventItems, toolArtifacts, toolDetail, toolEndSummary, userText, type InfoSink, type ProgressEvent, type ToolEndStatus } from './progressEvents.js';
@@ -191,6 +191,8 @@ import {
   hasExplicitRemoteVisualFallback,
   resolveConfiguredVisualProvider,
 } from '../utils/visualGenerationConfig.js';
+
+const LOAD_SKILL_SOURCES = new Set(['bundled', 'pack', 'workspace', 'data-root', 'learned']);
 
 /**
  * Some model families (notably ark/doubao, qwen-coder, glm) emit tool calls
@@ -2156,7 +2158,7 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'kill_task':
       return `kill_task ${action.taskId}`;
     case 'post_update':
-      return `post_update "${truncate(action.text, 80)}"`;
+      return `post_update "${truncateInline(action.text, 80)}"`;
     case 'todo':
       return `todo ${action.todos?.length ?? 0} item(s)`;
     case 'server_setup':
@@ -6143,6 +6145,12 @@ async function executeAuthorizedAction(
       );
       const summary = toolEndSummary(result.ok, uiPayload);
       const artifacts = toolArtifacts(completedAction, result.ok, uiPayload, result.output ?? '');
+      // load_skill: where the skill it returned came from, as the tool itself
+      // resolved it (one of a fixed set; the model's arguments never set it).
+      // Hosts' run trust reads it (a bundled skill's text is not outside content).
+      const skillSource = completedAction.type === 'load_skill' && result.ok ? result.data?.skillSource : undefined;
+      if (typeof skillSource === 'string' && LOAD_SKILL_SOURCES.has(skillSource)) uiPayload.skill_source = skillSource;
+      
       options.onInfo?.(
         `[tool:${hydratedAction.type}] ${result.ok ? 'ok' : 'failed'} ${JSON.stringify(uiPayload)}`,
         toolEnd(hydratedAction.type, result.ok ? 'ok' : 'failed', { ...(summary ? { summary } : {}), ...(artifacts ? { artifacts } : {}) }),
