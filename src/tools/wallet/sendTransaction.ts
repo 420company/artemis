@@ -2,31 +2,37 @@
  * send_transaction — Engine-side wallet tool (WP-16)
  *
  * HIGH-RISK: this tool moves real funds via the artemis-online gateway
- * (`POST /v1/wallet/send`). Once submitted, an on-chain transfer is
- * irreversible.
+ * (`POST /wallet/send`, issued through `walletRequest`). Once submitted, an
+ * on-chain transfer is irreversible.
  *
  * permissionCategory: 'execute'
  * approval kind:      'wallet_send' — the user's approval is bound to the exact
  *                     {chain, to, token, amount} tuple (plus quoteId if given).
- *                     The values sent to the gateway are the very same values
- *                     that were shown to and approved by the user; nothing is
- *                     re-read or mutated between approval and submission.
+ *                     All values are strictly validated and normalized BEFORE
+ *                     the approval prompt; the normalized values are what the
+ *                     user sees AND what is sent to the gateway (what is shown
+ *                     is what is sent — no spoofed display).
  *
  * Flow:
+ *   0. Strict input validation via normalizeChain / normalizeAddress /
+ *      normalizeToken / normalizeAmount / normalizeQuoteId (fail-closed).
  *   1. resolvePlatformWallet() → if not configured, return "unavailable".
- *   2. checkWalletKillSwitch() → if disabled (or state cannot be verified), refuse.
- *   3. requestWalletSendApproval({to, chain, token, amount, quoteId, zh})
+ *   2. config.approvalSecret is required → if missing, refuse (fail-closed).
+ *   3. checkWalletKillSwitch() → if disabled (or state cannot be verified), refuse.
+ *   4. requestWalletSendApproval({to, chain, token, amount, quoteId, zh, approvalSecret})
  *      → if not approved, return the gate's result verbatim.
- *   4. POST /v1/wallet/send { chain, to, token, amount, quoteId } with Bearer auth,
+ *   5. walletRequest(config, '/wallet/send', POST { chain, to, token, amount,
+ *      quoteId?, approval: { token, nonce, expiresAt, digest } }),
  *      parse { txHash?, status?, message? }, report the result.
  *
- * Error policy: gateway messages are relayed (with the apiKey redacted);
- * retryable=false for HTTP 4xx, retryable=true for HTTP 5xx / network errors.
+ * Error policy: walletRequest handles URL joining, timeouts, response-size
+ * limits, non-JSON bodies, HTTP error mapping and secret scrubbing; its
+ * WalletConfigError is converted via walletFailure().
  * Note that any retry goes through this tool again and therefore requires a
  * fresh user approval — there is no silent automatic resubmission.
  *
  * Security notes:
- *   - The apiKey is only placed in the Authorization header; never logged or output.
+ *   - The apiKey is never logged or output (walletRequest scrubs it).
  *   - Amounts are strings end-to-end; no floating-point math.
  *   - Addresses are shown truncated (0x1234…abcd) in human-readable output.
  */
@@ -37,6 +43,13 @@ import {
   resolvePlatformWallet,
   checkWalletKillSwitch,
   WalletConfigError,
+  walletRequest,
+  walletFailure,
+  normalizeChain,
+  normalizeAddress,
+  normalizeToken,
+  normalizeAmount,
+  normalizeQuoteId,
 } from './walletConfig.js';
 import { requestWalletSendApproval } from './approvalGate.js';
 
@@ -55,7 +68,6 @@ export const SEND_TRANSACTION_DESCRIPTION = [
 type SendTransactionAction = Extract<AgentAction, { type: 'send_transaction' }>;
 
 const SEND_TIMEOUT_MS = 60_000;
-const DECIMAL_AMOUNT_RE = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const MAX_RELAYED_MESSAGE_LENGTH = 500;
 const FAILED_STATUSES = new Set(['failed', 'rejected', 'error', 'reverted', 'cancelled', 'canceled']);
 
@@ -96,15 +108,10 @@ function truncateAddress(value: string): string {
   return v;
 }
 
-function redact(text: string, apiKey: string): string {
-  let out = text;
-  if (apiKey.length > 0) {
-    out = out.split(apiKey).join('[REDACTED]');
-  }
-  if (out.length > MAX_RELAYED_MESSAGE_LENGTH) {
-    out = `${out.slice(0, MAX_RELAYED_MESSAGE_LENGTH)}…`;
-  }
-  return out;
+function clip(text: string): string {
+  return text.length > MAX_RELAYED_MESSAGE_LENGTH
+    ? `${text.slice(0, MAX_RELAYED_MESSAGE_LENGTH)}…`
+    : text;
 }
 
 function fail(output: string, code: string, message: string, retryable: boolean): ToolExecutionResult {
@@ -119,25 +126,66 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
 }
 
-function extractGatewayMessage(body: unknown): string | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  const b = body as Record<string, unknown>;
-  if (isNonEmptyString(b.message)) return b.message;
-  if (isNonEmptyString(b.error)) return b.error;
-  if (b.error && typeof b.error === 'object') {
-    const e = b.error as Record<string, unknown>;
-    if (isNonEmptyString(e.message)) return e.message;
-  }
-  return undefined;
+interface ApprovalReceipt {
+  approvalToken: string;
+  approvalNonce: string;
+  approvalExpiresAt: string | number;
+  payloadDigest: string;
 }
 
-function parseJsonSafe(text: string): unknown {
-  if (text.trim().length === 0) return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
+/**
+ * Extract the approval receipt from the gate result. Accepts either
+ * `{ ok: true, receipt: {...} }` or the receipt fields on the result itself.
+ * Returns null (→ fail-closed) if any field is missing or malformed.
+ */
+function extractReceipt(approval: unknown): ApprovalReceipt | null {
+  if (!approval || typeof approval !== 'object') return null;
+  const a = approval as Record<string, unknown>;
+  const source =
+    a.receipt && typeof a.receipt === 'object' ? (a.receipt as Record<string, unknown>) : a;
+  const { approvalToken, approvalNonce, approvalExpiresAt, payloadDigest } = source;
+  if (!isNonEmptyString(approvalToken)) return null;
+  if (!isNonEmptyString(approvalNonce)) return null;
+  if (!isNonEmptyString(payloadDigest)) return null;
+  if (
+    !(typeof approvalExpiresAt === 'number' && Number.isFinite(approvalExpiresAt)) &&
+    !isNonEmptyString(approvalExpiresAt)
+  ) {
+    return null;
   }
+  return {
+    approvalToken,
+    approvalNonce,
+    approvalExpiresAt: approvalExpiresAt as string | number,
+    payloadDigest,
+  };
+}
+
+function retryHint(zh: boolean): string {
+  return t(
+    zh,
+    '交易可能已提交也可能未提交，重试前请先核实钱包余额或交易记录，避免重复转账。重试需重新调用本工具并重新审批，不会自动重发。',
+    'The transaction may or may not have been submitted — verify the wallet balance/history before retrying to avoid a duplicate transfer. A retry must go through this tool again with a fresh approval; nothing is resent automatically.',
+  );
+}
+
+/** Append the retry hint to retryable failures produced by walletFailure(). */
+function withRetryHint(result: ToolExecutionResult, zh: boolean): ToolExecutionResult {
+  const r = result as unknown as Record<string, unknown>;
+  const error =
+    r.error && typeof r.error === 'object' ? (r.error as Record<string, unknown>) : undefined;
+  if (error?.retryable === true && typeof r.output === 'string') {
+    const hint = retryHint(zh);
+    return {
+      ...(r as object),
+      output: `${r.output}\n${hint}`,
+      error: {
+        ...error,
+        message: typeof error.message === 'string' ? `${error.message}\n${hint}` : error.message,
+      },
+    } as unknown as ToolExecutionResult;
+  }
+  return result;
 }
 
 export async function executeSendTransaction(
@@ -146,57 +194,39 @@ export async function executeSendTransaction(
 ): Promise<ToolExecutionResult> {
   const zh = deriveZh(context);
 
-  const chain = typeof action.chain === 'string' ? action.chain.trim() : '';
-  const to = typeof action.to === 'string' ? action.to.trim() : '';
-  const token = typeof action.token === 'string' ? action.token.trim() : '';
-  const amount = typeof action.amount === 'string' ? action.amount.trim() : '';
-  const quoteId =
-    typeof action.quoteId === 'string' && action.quoteId.trim().length > 0
-      ? action.quoteId.trim()
-      : undefined;
+  // ---- 0. strict validation + normalization (before any approval prompt) ----
+  const chain = normalizeChain(action.chain);
+  const to = normalizeAddress(action.to);
+  const token = normalizeToken(action.token);
+  const amount = normalizeAmount(action.amount);
+  const quoteIdProvided = action.quoteId !== undefined;
+  const normalizedQuoteId = quoteIdProvided ? normalizeQuoteId(action.quoteId) : undefined;
 
-  // ---- input validation (before any approval prompt) ----------------------
-  const missing: string[] = [];
-  if (!chain) missing.push('chain');
-  if (!to) missing.push('to');
-  if (!token) missing.push('token');
-  if (!amount) missing.push('amount');
-  if (missing.length > 0) {
+  const invalid: string[] = [];
+  if (chain === null) invalid.push('chain');
+  if (to === null) invalid.push('to');
+  if (token === null) invalid.push('token');
+  if (amount === null) invalid.push('amount');
+  if (quoteIdProvided && normalizedQuoteId === null) invalid.push('quoteId');
+  if (chain === null || to === null || token === null || amount === null || normalizedQuoteId === null) {
     const msg = t(
       zh,
-      `缺少必要参数：${missing.join(', ')}`,
-      `Missing required parameter(s): ${missing.join(', ')}`,
+      `参数缺失或格式无效：${invalid.join(', ')}。请检查链名称、收款地址、代币以及数量（大于 0 的十进制字符串，例如 "0.25"）。`,
+      `Missing or invalid parameter(s): ${invalid.join(', ')}. Check chain, recipient address, token, and amount (a positive decimal string, e.g. "0.25").`,
     );
     return fail(msg, 'WALLET_INVALID_INPUT', msg, false);
   }
-  if (!DECIMAL_AMOUNT_RE.test(amount) || /^0(?:\.0+)?$/.test(amount)) {
-    const msg = t(
-      zh,
-      `无效的数量 "${amount}"：必须是大于 0 的十进制数字字符串（例如 "0.25"）。`,
-      `Invalid amount "${amount}": must be a positive decimal string (e.g. "0.25").`,
-    );
-    return fail(msg, 'WALLET_INVALID_INPUT', msg, false);
-  }
-  if (/\s/.test(to)) {
-    const msg = t(zh, '收款地址格式无效（包含空白字符）。', 'Invalid recipient address (contains whitespace).');
-    return fail(msg, 'WALLET_INVALID_INPUT', msg, false);
-  }
-  if (/^0x/i.test(to) && !/^0x[0-9a-fA-F]{40}$/.test(to)) {
-    const msg = t(
-      zh,
-      `收款地址格式无效：${truncateAddress(to)}（EVM 地址应为 0x 开头的 40 位十六进制）。`,
-      `Invalid recipient address: ${truncateAddress(to)} (EVM addresses must be 0x + 40 hex chars).`,
-    );
-    return fail(msg, 'WALLET_INVALID_INPUT', msg, false);
-  }
+  const quoteId: string | undefined = normalizedQuoteId ?? undefined;
 
   // ---- 1. resolve config ----------------------------------------------
   let config: Awaited<ReturnType<typeof resolvePlatformWallet>>;
   try {
     config = await resolvePlatformWallet();
   } catch (err) {
-    const detail =
-      err instanceof WalletConfigError || err instanceof Error ? err.message : String(err);
+    if (err instanceof WalletConfigError) {
+      return walletFailure(err, zh) as unknown as ToolExecutionResult;
+    }
+    const detail = clip(err instanceof Error ? err.message : String(err));
     const msg = t(zh, `钱包配置错误：${detail}`, `Wallet configuration error: ${detail}`);
     return fail(msg, 'WALLET_CONFIG_ERROR', msg, false);
   }
@@ -208,13 +238,23 @@ export async function executeSendTransaction(
     );
     return fail(msg, 'WALLET_UNAVAILABLE', msg, false);
   }
-  const apiKey = config.apiKey;
 
-  // ---- 2. kill switch (fail closed) -----------------------------------
+  // ---- 2. approval secret is mandatory (fail closed) ---------------------
+  const approvalSecret = config.approvalSecret;
+  if (!isNonEmptyString(approvalSecret)) {
+    const msg = t(
+      zh,
+      '钱包配置错误：未配置 wallet.approvalSecret，无法签发审批令牌，出于安全考虑拒绝转账。请在配置中设置 wallet.approvalSecret 后重试。',
+      'Wallet configuration error: wallet.approvalSecret is not configured, so approval tokens cannot be issued; refusing to send for safety. Set wallet.approvalSecret in the configuration and try again.',
+    );
+    return fail(msg, 'WALLET_CONFIG_ERROR', msg, false);
+  }
+
+  // ---- 3. kill switch (fail closed) -----------------------------------
   try {
     const ks = await checkWalletKillSwitch(config);
     if (!ks.enabled) {
-      const reason = ks.message ? redact(ks.message, apiKey) : undefined;
+      const reason = isNonEmptyString(ks.message) ? clip(ks.message) : undefined;
       const msg = t(
         zh,
         `钱包功能已被停用，拒绝转账${reason ? `：${reason}` : '。'}`,
@@ -223,7 +263,7 @@ export async function executeSendTransaction(
       return fail(msg, 'WALLET_DISABLED', msg, false);
     }
   } catch (err) {
-    const detail = redact(err instanceof Error ? err.message : String(err), apiKey);
+    const detail = clip(err instanceof Error ? err.message : String(err));
     const retryable = !(err instanceof WalletConfigError);
     const msg = t(
       zh,
@@ -233,67 +273,63 @@ export async function executeSendTransaction(
     return fail(msg, 'WALLET_KILL_SWITCH_ERROR', msg, retryable);
   }
 
-  // ---- 3. approval (bound to exact chain/to/token/amount) -------------
-  const approval = await requestWalletSendApproval({ to, chain, token, amount, quoteId, zh });
+  // ---- 4. approval (bound to exact normalized chain/to/token/amount) ----
+  const approval = await requestWalletSendApproval(
+    {
+      to,
+      chain,
+      token,
+      amount,
+      quoteId,
+      zh,
+    },
+    approvalSecret,
+  );
   if (!approval.ok) {
-    return approval as ToolExecutionResult;
+    return approval as unknown as ToolExecutionResult;
+  }
+  const receipt = extractReceipt(approval);
+  if (!receipt) {
+    const msg = t(
+      zh,
+      '审批凭证缺失或无效，出于安全考虑拒绝转账。',
+      'Approval receipt is missing or invalid; refusing to send for safety.',
+    );
+    return fail(msg, 'WALLET_APPROVAL_ERROR', msg, false);
   }
 
-  // ---- 4. POST /v1/wallet/send ----------------------------------------
-  // The payload uses exactly the values that were approved above.
-  const payload: { chain: string; to: string; token: string; amount: string; quoteId?: string } = {
-    chain,
-    to,
-    token,
-    amount,
-  };
-  if (quoteId) payload.quoteId = quoteId;
-
-  const url = `${config.baseUrl.replace(/\/+$/, '')}/v1/wallet/send`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
-  let status: number;
-  let bodyText: string;
+  // ---- 5. POST /wallet/send -------------------------------------------
+  // The payload uses exactly the normalized values that were approved above.
+  let body: unknown;
   try {
-    const res = await fetch(url, {
+    body = await walletRequest(config, '/wallet/send', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
+      body: {
+        chain,
+        to,
+        token,
+        amount,
+        ...(quoteId ? { quoteId } : {}),
+        approval: {
+          token: receipt.approvalToken,
+          nonce: receipt.approvalNonce,
+          expiresAt: receipt.approvalExpiresAt,
+          digest: receipt.payloadDigest,
+        },
       },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
+      timeoutMs: SEND_TIMEOUT_MS,
     });
-    status = res.status;
-    bodyText = await res.text();
   } catch (err) {
-    const aborted = err instanceof Error && err.name === 'AbortError';
-    const detail = aborted
-      ? t(zh, `请求超时（${SEND_TIMEOUT_MS / 1000} 秒）`, `request timed out after ${SEND_TIMEOUT_MS / 1000}s`)
-      : redact(err instanceof Error ? err.message : String(err), apiKey);
+    if (err instanceof WalletConfigError) {
+      return withRetryHint(walletFailure(err, zh) as unknown as ToolExecutionResult, zh);
+    }
+    const detail = clip(err instanceof Error ? err.message : String(err));
     const msg = t(
       zh,
-      `转账请求失败（网络错误）：${detail}。交易可能已提交也可能未提交，重试前请先核实钱包余额或交易记录，避免重复转账。`,
-      `Send request failed (network error): ${detail}. The transaction may or may not have been submitted — verify the wallet balance/history before retrying to avoid a duplicate transfer.`,
+      `转账请求失败（网络错误）：${detail}。${retryHint(true)}`,
+      `Send request failed (network error): ${detail}. ${retryHint(false)}`,
     );
-    return fail(msg, 'WALLET_NETWORK_ERROR', msg, true);
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const body = parseJsonSafe(bodyText);
-
-  if (status < 200 || status >= 300) {
-    const gatewayMsg = extractGatewayMessage(body) ?? (bodyText.trim() || `HTTP ${status}`);
-    const relayed = redact(gatewayMsg, apiKey);
-    const retryable = status >= 500;
-    const msg = t(
-      zh,
-      `网关拒绝或未能完成转账（HTTP ${status}）：${relayed}`,
-      `Gateway rejected or failed the transfer (HTTP ${status}): ${relayed}`,
-    );
-    return fail(msg, 'WALLET_GATEWAY_ERROR', msg, retryable);
+    return fail(zh ? msg : msg, 'WALLET_NETWORK_ERROR', msg, true);
   }
 
   const parsed =
@@ -302,9 +338,7 @@ export async function executeSendTransaction(
       : {};
   const txHash = isNonEmptyString(parsed.txHash) ? parsed.txHash.trim() : undefined;
   const txStatus = isNonEmptyString(parsed.status) ? parsed.status.trim() : undefined;
-  const gatewayMessage = isNonEmptyString(parsed.message)
-    ? redact(parsed.message, apiKey)
-    : undefined;
+  const gatewayMessage = isNonEmptyString(parsed.message) ? clip(parsed.message) : undefined;
 
   if (txStatus && FAILED_STATUSES.has(txStatus.toLowerCase())) {
     const msg = t(
