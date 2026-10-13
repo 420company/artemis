@@ -270,6 +270,236 @@ export type HeimdallUploadRecord = {
   metadata?: Record<string, string>;
 };
 
+// ── WP-15 Phase 1: extras-backed actions ─────────────────────────────────────
+// Mirrors buildExtraToolDefs() in src/tools/extras.ts (48 tools). Field names and
+// optionality MUST match each tool's input_schema: executeExtraTool() receives these
+// fields verbatim. Parity is enforced at compile time by EXTRA_PARAM_SPECS
+// (src/tools/extras-validators.ts) and at test time by tests/extras-parity.test.ts.
+export type ExtraAgentAction =
+  // File operations
+  | {
+      type: 'delete_file';
+      path: string;
+    }
+  | {
+      type: 'move_file';
+      from: string;
+      to: string;
+    }
+  | {
+      type: 'copy_file';
+      from: string;
+      to: string;
+    }
+  | {
+      type: 'create_directory';
+      path: string;
+    }
+  | {
+      type: 'delete_directory';
+      path: string;
+      force?: boolean;
+    }
+  | {
+      type: 'file_info';
+      path: string;
+    }
+  | {
+      type: 'list_directory';
+      path?: string;
+    }
+  // Git
+  | {
+      type: 'git_status';
+    }
+  | {
+      type: 'git_diff';
+      staged?: boolean;
+      path?: string;
+    }
+  | {
+      type: 'git_log';
+      limit?: number;
+    }
+  | {
+      type: 'git_add';
+      // input_schema declares no JSON type here; its description says "string or array".
+      paths?: string | string[];
+    }
+  | {
+      type: 'git_commit';
+      message: string;
+    }
+  | {
+      type: 'git_branch';
+      create?: string;
+      checkout?: string;
+    }
+  // Text processing
+  | {
+      type: 'regex_match';
+      text: string;
+      pattern: string;
+      flags?: string;
+    }
+  | {
+      type: 'json_query';
+      json: string;
+      query: string;
+    }
+  | {
+      type: 'format_json';
+      text: string;
+      indent?: number;
+    }
+  | {
+      type: 'diff_text';
+      original: string;
+      modified: string;
+    }
+  | {
+      type: 'sort_lines';
+      text: string;
+      direction?: string;
+    }
+  | {
+      type: 'dedupe_lines';
+      text: string;
+    }
+  | {
+      type: 'count_lines';
+      path: string;
+    }
+  // Encoding / crypto
+  | {
+      type: 'base64_encode';
+      text: string;
+    }
+  | {
+      type: 'base64_decode';
+      text: string;
+    }
+  | {
+      type: 'hash_text';
+      text: string;
+      algorithm?: string;
+    }
+  | {
+      type: 'generate_uuid';
+    }
+  // System
+  | {
+      type: 'get_env';
+      key?: string;
+      keys?: string[];
+    }
+  | {
+      type: 'which_command';
+      command: string;
+    }
+  | {
+      type: 'get_system_info';
+    }
+  | {
+      type: 'date_now';
+      format?: string;
+    }
+  | {
+      type: 'calculate';
+      expression: string;
+    }
+  // Network
+  | {
+      type: 'check_url';
+      url: string;
+    }
+  | {
+      type: 'download_file';
+      url: string;
+      destination?: string;
+    }
+  | {
+      type: 'dns_lookup';
+      hostname: string;
+    }
+  | {
+      type: 'parse_url';
+      url: string;
+    }
+  // Development
+  | {
+      type: 'npm_run';
+      script?: string;
+    }
+  | {
+      type: 'format_code';
+      path: string;
+    }
+  | {
+      type: 'get_imports';
+      path: string;
+    }
+  | {
+      type: 'path_info';
+      path: string;
+    }
+  | {
+      type: 'url_encode';
+      text: string;
+      mode?: string;
+    }
+  | {
+      type: 'hash_file';
+      path: string;
+      algorithm?: string;
+    }
+  // Notebook
+  | {
+      type: 'notebook_create';
+      title: string;
+      content?: string;
+      tags?: string[];
+    }
+  | {
+      type: 'notebook_list';
+    }
+  | {
+      type: 'notebook_update';
+      id: string;
+      title?: string;
+      content?: string;
+      tags?: string[];
+    }
+  | {
+      type: 'notebook_delete';
+      id: string;
+    }
+  | {
+      type: 'notebook_view';
+      id: string;
+    }
+  | {
+      type: 'notebook_search';
+      search: string;
+    }
+  | {
+      type: 'notebook_addTag';
+      id: string;
+      tags: string[];
+    }
+  | {
+      type: 'notebook_removeTag';
+      id: string;
+      tags: string[];
+    }
+  | {
+      type: 'notebook_tree';
+    };
+
+/** Discriminants of the AgentAction variants that are executed by src/tools/extras.ts. */
+export type ExtraAgentActionType = ExtraAgentAction['type'];
+
+
 export type AgentAction =
   | {
       type: 'list_files';
@@ -834,12 +1064,13 @@ export type AgentAction =
   | { type: 'finish_signup'; signup_id: string; outcome: 'created' | 'failed' | 'abandoned'; username?: string; login_url?: string; note?: string }
   | { type: 'get_sms_number'; country: string; signup_id?: string; wait_seconds?: number }
   | { type: 'wait_for_sms'; sender_contains?: string; timeout_seconds?: number }
-  | { type: 'ask_owner_for_code'; site: string; channel?: 'sms' | 'email' | 'authenticator' | 'other'; hint?: string; timeout_seconds?: number };
+  | { type: 'ask_owner_for_code'; site: string; channel?: 'sms' | 'email' | 'authenticator' | 'other'; hint?: string; timeout_seconds?: number }
   | {
       type: 'edit_timeline';
       action: 'list_segments' | 'replace_segment' | 'trim_segment' | 'add_subtitle' | 'remove_subtitle' | 'set_bgm' | 'render' | 'import_saga';
       projectId?: string;
     }
+  | ExtraAgentAction;
 
 export type AgentActionType = AgentAction['type'];
 
@@ -958,6 +1189,54 @@ export const ALL_AGENT_ACTION_TYPES = [
   'get_sms_number',
   'wait_for_sms',
   'ask_owner_for_code', 'edit_timeline',
+  'delete_file',
+  'move_file',
+  'copy_file',
+  'create_directory',
+  'delete_directory',
+  'file_info',
+  'list_directory',
+  'git_status',
+  'git_diff',
+  'git_log',
+  'git_add',
+  'git_commit',
+  'git_branch',
+  'regex_match',
+  'json_query',
+  'format_json',
+  'diff_text',
+  'sort_lines',
+  'dedupe_lines',
+  'count_lines',
+  'base64_encode',
+  'base64_decode',
+  'hash_text',
+  'generate_uuid',
+  'get_env',
+  'which_command',
+  'get_system_info',
+  'date_now',
+  'calculate',
+  'check_url',
+  'download_file',
+  'dns_lookup',
+  'parse_url',
+  'npm_run',
+  'format_code',
+  'get_imports',
+  'path_info',
+  'url_encode',
+  'hash_file',
+  'notebook_create',
+  'notebook_list',
+  'notebook_update',
+  'notebook_delete',
+  'notebook_view',
+  'notebook_search',
+  'notebook_addTag',
+  'notebook_removeTag',
+  'notebook_tree',
 ] as const satisfies readonly AgentActionType[];
 
 export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
