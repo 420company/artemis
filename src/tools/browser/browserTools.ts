@@ -155,16 +155,23 @@ export interface BrowserNavigateAction {
 }
 
 /**
- * The file:// URL of a workspace page: inside the workspace only (symlinks
- * followed), never a protected directory; a folder opens its index.html.
+ * The file:// URL of a workspace page: inside the workspace only, never a
+ * protected directory; a folder opens its index.html. The checks are made on
+ * the file that will really be opened (after the folder's index.html is
+ * added and every symlink followed), and that real path is what opens.
  */
 export async function workspacePageUrl(inputPath: string, cwd: string): Promise<string> {
   const absolute = resolveInsideRoot(cwd, inputPath.trim().replace(/^file:\/\//i, ''));
   if (isAlwaysPrivatePath(absolute)) throw new Error(`${inputPath} is in a protected directory`);
   const info = await fsp.stat(absolute);
   const file = info.isDirectory() ? path.join(absolute, 'index.html') : absolute;
-  if (info.isDirectory()) await fsp.access(file);
-  return pathToFileURL(file).href;
+  const real = await fsp.realpath(file);
+  const root = await fsp.realpath(cwd);
+  const relative = path.relative(root, real);
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Path escapes working directory: ${inputPath}`);
+  if (isAlwaysPrivatePath(real)) throw new Error(`${inputPath} is in a protected directory`);
+  if (!(await fsp.stat(real)).isFile()) throw new Error(`${inputPath} is not a page`);
+  return pathToFileURL(real).href;
 }
 
 async function runBrowserNavigate(action: BrowserNavigateAction, cwd: string = process.cwd()): Promise<ToolResult> {

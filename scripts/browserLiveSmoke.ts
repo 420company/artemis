@@ -773,8 +773,21 @@ async function main(): Promise<void> {
     fs.symlinkSync(outside, path.join(ws, 'link'));
     try {
       const real = fs.realpathSync(ws);
-      assert.equal(await workspacePageUrl('sites/poster/index.html', ws), pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href);
-      assert.ok(real.length > 0);
+      assert.equal(await workspacePageUrl('sites/poster/index.html', ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      // A folder whose index.html is a link out of the workspace: the file that would open is checked.
+      fs.mkdirSync(path.join(ws, 'sites', 'evil'));
+      fs.symlinkSync(path.join(outside, 'x.html'), path.join(ws, 'sites', 'evil', 'index.html'));
+      await assert.rejects(() => workspacePageUrl('sites/evil', ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl('sites/evil/index.html', ws), /escapes/);
+      // A link inside the workspace into a protected directory (also inside): refused on the real path.
+      fs.mkdirSync(path.join(ws, '.artemis', 'agent-credentials'), { recursive: true });
+      fs.writeFileSync(path.join(ws, '.artemis', 'agent-credentials', 'index.html'), 'secret');
+      fs.symlinkSync(path.join(ws, '.artemis', 'agent-credentials'), path.join(ws, 'sites', 'creds'));
+      await assert.rejects(() => workspacePageUrl('sites/creds', ws), /protected/);
+      await assert.rejects(() => workspacePageUrl('sites/creds/index.html', ws), /protected/);
+      // A link inside the workspace to another page inside it still opens (as the page it leads to).
+      fs.symlinkSync(path.join(ws, 'sites', 'poster'), path.join(ws, 'sites', 'alias'));
+      assert.equal(await workspacePageUrl('sites/alias', ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
       assert.match(await workspacePageUrl('sites/poster', ws), /\/sites\/poster\/index\.html$/);
       await assert.rejects(() => workspacePageUrl('../x.html', ws), /escapes/);
       await assert.rejects(() => workspacePageUrl(path.join(outside, 'x.html'), ws), /escapes/);
