@@ -87,7 +87,7 @@ import {
   getDelegatedChildPermissionMode,
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
-import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
+import { fitImagesToRequest, imageByteSize, MAX_IMAGES_PER_REQUEST, MAX_REQUEST_IMAGE_BYTES, ViewedImageQueue } from './imageInput.js';
 import {
   ContextOverflowError,
   buildContextOverflowMessage,
@@ -7470,26 +7470,69 @@ async function runAgentInner(
    * queued since the last request, trimmed to one request's count and byte
    * budget. Nothing goes to a model that cannot see images.
    */
-  const runViewedImages: import('../providers/types.ts').ImageAttachment[] = [];
+  // With prompt cache marks: the run's images, each group at the place it was first sent.
+  const runImageGroups: import('../providers/types.ts').ImageGroup[] = [];
+  let runUserImagesPlaced = false;
   const runVisionSkip: string[] = [];
+  /**
+   * With prompt cache marks the run keeps every image it sent (the user's
+   * and those view_image queued) in each later request, each group right
+   * after the stored message it first followed: the requests stay alike up
+   * to the newest message and the images are read from the cache after the
+   * first time. A group never changes once sent; new images that do not fit
+   * the request's budget next to the earlier ones are left out.
+   */
+  function takeCachedRequestImages(
+    userImages: readonly import('../providers/types.ts').ImageAttachment[],
+    provider: ChatProvider,
+    userVisionSkip: readonly string[],
+  ): { images: import('../providers/types.ts').ImageAttachment[]; groups: import('../providers/types.ts').ImageGroup[]; visionSkip?: string[] } {
+    const anchor = session.messages.at(-1)?.id;
+    const fresh: import('../providers/types.ts').ImageAttachment[][] = [];
+    if (!runUserImagesPlaced) {
+      if (userImages.length) fresh.push([...userImages]);
+      runVisionSkip.push(...userVisionSkip);
+      runUserImagesPlaced = true;
+    }
+    const viewed = viewedImages.take();
+    if (viewed.length) fresh.push(viewed);
+    runVisionSkip.push(...viewedImages.takeVisionSkip());
+    let count = runImageGroups.reduce((n, g) => n + g.images.length, 0);
+    let bytes = runImageGroups.reduce((n, g) => n + g.images.reduce((b, image) => b + imageByteSize(image), 0), 0);
+    let dropped = 0;
+    for (const images of fresh) {
+      const fits = images.filter((image) => {
+        const size = imageByteSize(image);
+        if (count + 1 > MAX_IMAGES_PER_REQUEST || bytes + size > MAX_REQUEST_IMAGE_BYTES) {
+          dropped += 1;
+          return false;
+        }
+        count += 1;
+        bytes += size;
+        return true;
+      });
+      if (fits.length) runImageGroups.push({ ...(anchor ? { afterMessageId: anchor } : {}), images: fits });
+    }
+    if (dropped > 0) options.onInfo?.(`[images] ${dropped} image(s) over the per-request limit were not sent`);
+    const images = runImageGroups.flatMap((g) => g.images);
+    if (images.length > 0 && provider.supportsImages !== true && provider.bridgesImages !== true) {
+      if (fresh.length) options.onInfo?.(`[images] this model cannot take images; ${images.length} dropped`);
+      return { images: [], groups: [] };
+    }
+    const visionSkip = [...new Set(runVisionSkip)];
+    return { images, groups: runImageGroups.map((g) => ({ ...g, images: [...g.images] })), ...(images.length && visionSkip.length ? { visionSkip } : {}) };
+  }
+
   function takeRequestImages(
     userImages: readonly import('../providers/types.ts').ImageAttachment[],
     provider: ChatProvider,
     userVisionSkip: readonly string[] = [],
   ): { images: import('../providers/types.ts').ImageAttachment[]; visionSkip?: string[] } {
-    // With prompt cache marks the run keeps every image it sent (the user's
-    // and those view_image queued) in each later request, so the requests
-    // stay alike; otherwise each image goes once.
-    const keep = provider.promptCacheMarks === true;
     const viewed = viewedImages.take();
     const skipped = viewedImages.takeVisionSkip();
-    if (keep) {
-      runViewedImages.push(...viewed);
-      runVisionSkip.push(...skipped);
-    }
-    const { kept, dropped } = fitImagesToRequest([...userImages, ...(keep ? runViewedImages : viewed)]);
+    const { kept, dropped } = fitImagesToRequest([...userImages, ...viewed]);
     // Gateway vision models the helper already failed on for these images.
-    const visionSkip = [...new Set([...userVisionSkip, ...(keep ? runVisionSkip : skipped)])];
+    const visionSkip = [...new Set([...userVisionSkip, ...skipped])];
     if (dropped.length > 0) {
       options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
     }
@@ -7882,15 +7925,18 @@ async function runAgentInner(
     // The user's images go with the first request; images the agent chose
     // to look at (view_image) go with the request right after. With prompt
     // cache marks, every image stays in each later request of the run.
-    const keepImages = activeProvider.promptCacheMarks === true;
-    const { images: requestImages, visionSkip } = takeRequestImages(
-      turn === 1 || keepImages ? userImages.images : [],
+    const cachedImages = activeProvider.promptCacheMarks === true
+      ? takeCachedRequestImages(userImages.images, activeProvider, userImages.visionSkip ?? [])
+      : undefined;
+    const { images: requestImages, visionSkip } = cachedImages ?? takeRequestImages(
+      turn === 1 ? userImages.images : [],
       activeProvider,
-      turn === 1 || keepImages ? userImages.visionSkip : [],
+      turn === 1 ? userImages.visionSkip : [],
     );
     const providerCallOptions = {
       nativeFunctionTools,
       imageAttachments: requestImages.length ? requestImages : undefined,
+      ...(cachedImages?.groups.length ? { imageGroups: cachedImages.groups } : {}),
       ...(visionSkip ? { visionSkip } : {}),
     };
     // Stream the model output live to the workflow UI when the provider

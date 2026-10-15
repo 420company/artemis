@@ -161,6 +161,15 @@ export type ProviderRequestOptions = {
    */
   imageAttachments?: ImageAttachment[];
   /**
+   * The same images, for a provider with prompt cache marks: each group in a
+   * user message of its own right after the stored message it was first sent
+   * after (`afterMessageId`; at the end of the history when that message is
+   * gone), so later requests of the run carry it at the same place and the
+   * provider's cache holds it. Only the newest group may be past the
+   * history's newest message; the cache mark then goes on it.
+   */
+  imageGroups?: ImageGroup[];
+  /**
    * Gateway vision models the engine's own helper already tried and failed
    * on, for the images in this request. A provider that bridges images sends
    * them as the x-vision-skip header, so the gateway starts from the next model
@@ -577,6 +586,12 @@ export type ProviderResponse = {
     protocol?: ProviderProtocol;
   };
 };
+
+/** Images that go in one message of their own (ProviderRequestOptions.imageGroups). */
+export interface ImageGroup {
+  afterMessageId?: string;
+  images: ImageAttachment[];
+}
 
 export interface ChatProvider {
   readonly supportsNativeToolCalls?: boolean;

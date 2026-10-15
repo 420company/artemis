@@ -1610,25 +1610,56 @@ test('prompt cache marks: a gateway profile marks the system prompt and the newe
   }
 });
 
-test('prompt cache marks: images go in a message of their own after the marked history', async () => {
+test('prompt cache marks: images stay where they were first sent, inside the cached prefix', async () => {
   const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
   const endpoint = await recordingEndpoint({ prompt_tokens: 10, completion_tokens: 1 });
   try {
     const at = new Date(0).toISOString();
-    const messages = [
-      { id: 'system', role: 'system' as const, content: 'S', createdAt: at },
-      { id: 'u1', role: 'user' as const, content: 'what is in the picture?', createdAt: at },
-      { id: 'rc', role: 'user' as const, name: 'runtime_context', content: 'ctx', createdAt: at },
-    ];
-    const images = [{ mediaType: 'image/png', data: 'AAAA' }] as any;
+    const system = { id: 'system', role: 'system' as const, content: 'S', createdAt: at };
+    const user = { id: 'u1', role: 'user' as const, content: 'what is in the picture?', createdAt: at };
+    const rc = { id: 'rc', role: 'user' as const, name: 'runtime_context', content: 'ctx', createdAt: at };
+    const call = { id: 'a1', role: 'assistant' as const, content: '', toolCalls: [{ id: 'c1', name: 'view_image', arguments: '{}' }], createdAt: at };
+    const result = { id: 't1', role: 'tool' as const, toolUseId: 'c1', name: 'view_image', content: 'shown', createdAt: at };
+    const photo = { mediaType: 'image/png', data: 'AAAA' } as any;
+    const viewed = { mediaType: 'image/png', data: 'BBBB' } as any;
     const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: endpoint.url, apiKey: 'k', model: 'alias', gatewayBridgesImages: true, promptCacheMarks: true });
     assert.equal(provider.promptCacheMarks, true);
-    await provider.completeStream(messages, () => undefined, { imageAttachments: images });
-    const body = endpoint.bodies[0];
-    assert.deepEqual(body.messages.map((m: any) => m.role), ['system', 'user', 'user', 'user']);
-    assert.deepEqual(body.messages[1].content, [{ type: 'text', text: 'what is in the picture?', cache_control: { type: 'ephemeral' } }], 'the stored message is unchanged');
-    assert.deepEqual(body.messages[2].content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }]);
-    assert.equal(body.messages[3].content, 'ctx');
+    // Request 1: the user's image right after their message, the cache mark on it (written once).
+    await provider.completeStream([system, user, rc], () => undefined, { imageAttachments: [photo], imageGroups: [{ afterMessageId: 'u1', images: [photo] }] });
+    // Request 2 of the run: the same image at the same place, a viewed image after the tool result, the mark after it.
+    await provider.completeStream([system, user, call, result, rc], () => undefined, {
+      imageAttachments: [photo, viewed],
+      imageGroups: [{ afterMessageId: 'u1', images: [photo] }, { afterMessageId: 't1', images: [viewed] }],
+    });
+    // Request 3: the answer came, nothing new: everything up to the newest message is the cached prefix.
+    const answer = { id: 'a2', role: 'assistant' as const, content: 'A cat.', createdAt: at };
+    await provider.completeStream([system, user, call, result, answer, rc], () => undefined, {
+      imageAttachments: [photo, viewed],
+      imageGroups: [{ afterMessageId: 'u1', images: [photo] }, { afterMessageId: 't1', images: [viewed] }],
+    });
+    const [one, two, three] = endpoint.bodies;
+    const mark = { type: 'ephemeral' };
+    assert.deepEqual(one.messages.map((m: any) => m.role), ['system', 'user', 'user', 'user']);
+    assert.equal(one.messages[1].content, 'what is in the picture?', 'the stored message is unchanged');
+    assert.deepEqual(one.messages[2].content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' }, cache_control: mark }]);
+    assert.equal(one.messages[3].content, 'ctx');
+    assert.deepEqual(two.messages.map((m: any) => m.role), ['system', 'user', 'user', 'assistant', 'tool', 'user', 'user']);
+    assert.deepEqual(two.messages[5].content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,BBBB' }, cache_control: mark }]);
+    // Byte-stable: with the marks taken off, each request starts with the whole of the one before (but its run context).
+    const plain = (m: any) => JSON.stringify(Array.isArray(m.content) ? { ...m, content: m.content.map(({ cache_control: _c, ...p }: any) => p) } : m);
+    const prefix = (body: any, n: number) => body.messages.slice(0, n).map(plain).join('\n');
+    assert.equal(prefix(two, 3), prefix(one, 3));
+    assert.equal(prefix(three, 6), prefix(two, 6));
+    assert.deepEqual(three.messages[6].content, [{ type: 'text', text: 'A cat.', cache_control: mark }]);
+
+    // A model that cannot see images gets the note at the same place.
+    const blind = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: endpoint.url, apiKey: 'k', model: 'alias', supportsImages: false, promptCacheMarks: true });
+    await blind.completeStream([system, user, rc], () => undefined, { imageAttachments: [photo], imageGroups: [{ afterMessageId: 'u1', images: [photo] }] });
+    const note = endpoint.bodies[3];
+    assert.equal(note.messages[1].content, 'what is in the picture?');
+    assert.equal(note.messages[2].content.length, 1);
+    assert.equal(note.messages[2].content[0].type, 'text');
+    assert.deepEqual(note.messages[2].content[0].cache_control, mark);
   } finally {
     await endpoint.close();
   }

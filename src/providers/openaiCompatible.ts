@@ -535,9 +535,9 @@ function injectImagesIntoMessages(
 }
 
 /**
- * The request's images as a user message of their own, after the marked
- * history (with cache marks): the stored messages stay byte for byte what
- * the cache holds, and the run sends the same images with every request.
+ * Images as a user message of their own (with cache marks; see
+ * placeCachedImages): the stored messages stay byte for byte what the cache
+ * holds. A model that cannot see images gets the omitted-images note there.
  */
 function trailingImagesMessage(
   attachments: import('./types.ts').ImageAttachment[],
@@ -649,6 +649,34 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.maxOutputTokens = platformMaxOutputTokens(config);
   }
 
+  /**
+   * With cache marks: the request's images, each group in a message of its
+   * own right after the stored message it first followed (at the end when
+   * that one is gone; ImageGroup), then the cache marks, so the newest mark
+   * covers the newest images too. Images without groups go at the end.
+   */
+  private placeCachedImages(
+    mapped: Array<Record<string, unknown>>,
+    conversation: readonly SessionMessage[],
+    options: ProviderRequestOptions | undefined,
+  ): void {
+    const supports = this.supportsImages || this.bridgesImages
+    const groups = options?.imageGroups?.length
+      ? options.imageGroups
+      : options?.imageAttachments?.length ? [{ images: options.imageAttachments }] : []
+    const placed = groups
+      .map((group, order) => {
+        const at = group.afterMessageId ? conversation.findIndex((m) => m.id === group.afterMessageId) : -1
+        return { order, index: at >= 0 ? at : mapped.length - 1, group }
+      })
+      // From the back, so earlier indexes hold; groups after one message keep their order.
+      .sort((a, b) => b.index - a.index || b.order - a.order)
+    for (const { index, group } of placed) {
+      if (group.images.length) mapped.splice(index + 1, 0, trailingImagesMessage(group.images, supports))
+    }
+    markPromptCacheBreakpoints(mapped, mapped.length)
+  }
+
   // ── Streaming (SSE) ───────────────────────────────────────────────────────
 
   async completeStream(
@@ -663,10 +691,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     if (options?.imageAttachments?.length && !this.promptCacheMarks) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
-    if (this.promptCacheMarks) {
-      markPromptCacheBreakpoints(mapped as any, mapped.length)
-      if (options?.imageAttachments?.length) mapped.push(trailingImagesMessage(options.imageAttachments, this.supportsImages || this.bridgesImages) as any)
-    }
+    if (this.promptCacheMarks) this.placeCachedImages(mapped as any, conversation, options)
     mapped.push(...(runtimeContext.map((m) => mapMessage(m, { reasoningMode })) as typeof mapped))
 
     const body: Record<string, unknown> = {
@@ -1021,10 +1046,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     if (options?.imageAttachments?.length && !this.promptCacheMarks) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
-    if (this.promptCacheMarks) {
-      markPromptCacheBreakpoints(mapped, mapped.length);
-      if (options?.imageAttachments?.length) mapped.push(trailingImagesMessage(options.imageAttachments, this.supportsImages || this.bridgesImages));
-    }
+    if (this.promptCacheMarks) this.placeCachedImages(mapped, conversation, options);
     mapped.push(...runtimeContext.map((m) => mapMessage(m, { reasoningMode })));
 
     const body: Record<string, unknown> = {
