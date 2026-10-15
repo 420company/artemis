@@ -56,6 +56,7 @@ import {
 } from './core/backgroundTasks.js';
 import { resolveExtensionRuntime } from './extensions/runtime.js';
 import { EXTRA_TOOL_NAMES, executeExtraTool } from './tools/extras.js';
+import { validateExtraAction } from './tools/extras-validators.js';
 import { ApprovalRuntime, classifyDirectToolNeed, loadApprovalPolicy, type ApprovalKind } from './security/approvals.js';
 import { describeDangerousCommand } from './tools/runCommand.js';
 import { normalizeUiLocale } from './cli/locale.js';
@@ -361,7 +362,6 @@ const SETUP_TOOL_NAME_GROUPS: Record<string, readonly string[]> = {
     web: [
         'search_web',
         'deep_research',
-        'http_request',
         'check_url',
         'download_file',
         'dns_lookup',
@@ -1561,13 +1561,21 @@ async function executeToolInner(name: any, input: any, opts: any) {
     }
     // ── Extra tools (file ops, git, text, crypto, network, dev) ──────────────
     if (EXTRA_TOOL_NAMES.has(name)) {
+        // The same parameter checks the agent path runs (extras-validators):
+        // nothing reaches executeExtraTool with arguments that fail them.
+        const validationErrors = validateExtraAction({ type: name, ...argsRecord } as AgentAction);
+        if (validationErrors.length > 0)
+            return buildDirectToolValidationFailure(name, validationErrors);
         // Determine permission category for gate.
-        // Shell tools execute user-controlled subprocess (hooks, npm scripts,
-        // formatter plugins) — they must NOT bypass shell gates in WRITER mode.
-        const shellTools = new Set(['git_commit', 'npm_run', 'format_code']);
+        // Shell tools start a subprocess that runs user-controlled code (git
+        // hooks, npm scripts, formatter plugins) or changes the repository —
+        // they must NOT bypass shell gates in WRITER mode, and they go through
+        // the approval classifier like run_command (classifyDirectToolNeed).
+        const shellTools = new Set(['git_add', 'git_commit', 'npm_run', 'format_code']);
         const writeTools = new Set(['delete_file', 'move_file', 'copy_file', 'create_directory',
-            'delete_directory', 'git_add', 'download_file']);
-        const cat = shellTools.has(name) ? 'shell' : writeTools.has(name) ? 'write' : 'read';
+            'delete_directory', 'download_file']);
+        const switchesBranch = name === 'git_branch' && (argsRecord.create !== undefined || argsRecord.checkout !== undefined);
+        const cat = shellTools.has(name) || switchesBranch ? 'shell' : writeTools.has(name) ? 'write' : 'read';
         const denied = await checkPermission(name, cat, permissionMode, onPermissionRequest, argsRecord);
         if (denied)
             return buildDirectToolFailure('tool_permission_denied', denied, {
@@ -1588,40 +1596,6 @@ async function executeToolInner(name: any, input: any, opts: any) {
             name,
             await executeExtraTool(name, input, workspace.cwd, mapPermissionModeForToolContext(permissionMode)),
         );
-    }
-    // ── http_request is handled inline (not in TOOL_REGISTRY) ────────────────
-    if (name === 'http_request') {
-        const inp = input;
-        const url = typeof inp.url === 'string' ? inp.url : '';
-        const method = typeof inp.method === 'string' ? inp.method.toUpperCase() : 'GET';
-        const body = typeof inp.body === 'string' ? inp.body : undefined;
-        const hdrs = inp.headers ?? {};
-        if (!url)
-            return buildDirectToolValidationFailure(name, ['url is required.']);
-        // Permission gate for non-GET
-        if (method !== 'GET' && method !== 'HEAD') {
-            const cat = 'write';
-            const denied = await checkPermission(name, cat, permissionMode, onPermissionRequest, argsRecord);
-            if (denied)
-                return buildDirectToolFailure('tool_permission_denied', denied, {
-                    retryable: false,
-                });
-        }
-        try {
-            const resp = await fetch(url, { method, body, headers: hdrs });
-            const text = await resp.text();
-            const preview = text.slice(0, 50_000);
-            return {
-                ok: resp.ok,
-                output: `HTTP ${resp.status} ${resp.statusText}\n${preview}${text.length > 50_000 ? '\n[truncated]' : ''}`,
-            };
-        }
-        catch (e) {
-            const message = `http_request error: ${String(e)}`;
-            return buildDirectToolFailure('tool_execution_failed', message, {
-                retryable: false,
-            });
-        }
     }
     const tool = getToolDefinition(name);
     if (!tool)

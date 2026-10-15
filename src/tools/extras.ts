@@ -9,7 +9,8 @@
 
 import { copyFile, mkdir, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { promisify } from 'node:util'
 import { resolve as pathResolve, join, basename, extname, dirname } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
@@ -21,9 +22,37 @@ import {
   execNotebookTree 
 } from './NotebookWorktreeTool/NotebookWorktreeTool.js'
 
-const execAsync = promisify(exec)
+// Every subprocess here runs with execFile and an argv array: no shell ever
+// sees a model-supplied value, so ; | $ ` and friends are plain characters.
+const execFileAsync = promisify(execFile)
 
 type TR = { ok: boolean; output: string }
+
+/** Run a program with an argv array (never through a shell). */
+async function runFile(file: string, args: readonly string[], cwd: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
+  const { stdout, stderr } = await execFileAsync(file, [...args], { cwd, timeout, maxBuffer: 10 * 1024 * 1024, windowsHide: true })
+  return { stdout: String(stdout), stderr: String(stderr) }
+}
+
+/** A value that would be read as an option by the program it is passed to. */
+function looksLikeOption(value: string): boolean {
+  return value.startsWith('-')
+}
+
+/**
+ * npm / npx on Windows are .cmd shims, which Node can only start through
+ * cmd.exe. There the value goes through cmd, so only plain values (no cmd
+ * metacharacters) are allowed; everywhere else the program runs directly.
+ */
+const WINDOWS_CMD_UNSAFE = /["%&|<>^!\r\n]/
+async function runNodeShim(name: 'npm' | 'npx', args: readonly string[], cwd: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
+  if (process.platform !== 'win32') return runFile(name, args, cwd, timeout)
+  if (args.some((arg) => WINDOWS_CMD_UNSAFE.test(arg))) {
+    throw new Error(`${name}: argument contains characters that are not allowed on Windows`)
+  }
+  const comspec = process.env.ComSpec && existsSync(process.env.ComSpec) ? process.env.ComSpec : 'cmd.exe'
+  return runFile(comspec, ['/d', '/s', '/c', `${name}.cmd`, ...args], cwd, timeout)
+}
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -44,16 +73,16 @@ function guardPath(cwd: string, inputPath: string, permissionMode?: 'ask' | 'ful
 
 async function isGitRepository(cwd: string): Promise<boolean> {
   try {
-    const { stdout } = await execAsync('git rev-parse --is-inside-work-tree', { cwd, timeout: 5_000 })
+    const { stdout } = await runFile('git', ['rev-parse', '--is-inside-work-tree'], cwd, 5_000)
     return stdout.trim() === 'true'
   } catch {
     return false
   }
 }
 
-async function gitRun(args: string, cwd: string): Promise<TR> {
+async function gitRun(args: readonly string[], cwd: string): Promise<TR> {
   try {
-    const { stdout, stderr } = await execAsync(`git ${args}`, { cwd, timeout: 15_000 })
+    const { stdout, stderr } = await runFile('git', args, cwd, 15_000)
     const out = (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).trim()
     return { ok: true, output: out || '(no output)' }
   } catch (e: unknown) {
@@ -136,32 +165,35 @@ export async function execGitStatus(_inp: Record<string, unknown>, cwd: string):
   if (!(await isGitRepository(cwd))) {
     return { ok: true, output: `Not a git repository: ${cwd}\nGit status is unavailable for this workspace.` }
   }
-  return gitRun('status --short --branch', cwd)
+  return gitRun(['status', '--short', '--branch'], cwd)
 }
 
 export async function execGitDiff(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   if (!(await isGitRepository(cwd))) {
     return { ok: true, output: `Not a git repository: ${cwd}\nGit diff is unavailable; inspect files directly or use diff_text with known before/after content.` }
   }
-  const staged = inp.staged === true ? '--staged' : ''
-  const path   = inp.path   ? String(inp.path) : ''
-  return gitRun(`diff ${staged} ${path}`.trim(), cwd)
+  const args = ['diff']
+  if (inp.staged === true) args.push('--staged')
+  // `--` ends the options: a path can never be read as a git flag.
+  if (inp.path) args.push('--', String(inp.path))
+  return gitRun(args, cwd)
 }
 
 export async function execGitLog(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   if (!(await isGitRepository(cwd))) {
     return { ok: true, output: `Not a git repository: ${cwd}\nGit log is unavailable for this workspace.` }
   }
-  const limit = Number(inp.limit ?? 10)
-  return gitRun(`log --oneline -${limit}`, cwd)
+  const requested = Math.floor(Number(inp.limit ?? 10))
+  const limit = Number.isFinite(requested) && requested >= 1 ? Math.min(requested, 1000) : 10
+  return gitRun(['log', '--oneline', '-n', String(limit)], cwd)
 }
 
 export async function execGitAdd(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   if (!(await isGitRepository(cwd))) {
     return { ok: false, output: `Not a git repository: ${cwd}\nCannot stage files without a git repository.` }
   }
-  const paths = Array.isArray(inp.paths) ? inp.paths.map(String).join(' ') : String(inp.paths ?? '.')
-  return gitRun(`add ${paths}`, cwd)
+  const paths = Array.isArray(inp.paths) ? inp.paths.map(String) : [String(inp.paths ?? '.')]
+  return gitRun(['add', '--', ...paths], cwd)
 }
 
 export async function execGitCommit(inp: Record<string, unknown>, cwd: string): Promise<TR> {
@@ -169,17 +201,23 @@ export async function execGitCommit(inp: Record<string, unknown>, cwd: string): 
     return { ok: false, output: `Not a git repository: ${cwd}\nCannot create a commit without a git repository.` }
   }
   const msg = String(inp.message ?? 'chore: update')
-    .replace(/"/g, '\\"')
-  return gitRun(`commit -m "${msg}"`, cwd)
+  return gitRun(['commit', '-m', msg], cwd)
 }
 
 export async function execGitBranch(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   if (!(await isGitRepository(cwd))) {
     return { ok: false, output: `Not a git repository: ${cwd}\nCannot manage branches without a git repository.` }
   }
-  if (inp.create) return gitRun(`checkout -b ${inp.create}`, cwd)
-  if (inp.checkout) return gitRun(`checkout ${inp.checkout}`, cwd)
-  return gitRun('branch -a', cwd)
+  for (const field of ['create', 'checkout'] as const) {
+    const value = inp[field]
+    if (value !== undefined && (typeof value !== 'string' || !value.trim() || looksLikeOption(value))) {
+      return { ok: false, output: `git_branch: ${field} must be a branch name.` }
+    }
+  }
+  // A name git does not accept as a branch is refused by git itself (check-ref-format).
+  if (typeof inp.create === 'string') return gitRun(['checkout', '-b', inp.create], cwd)
+  if (typeof inp.checkout === 'string') return gitRun(['checkout', inp.checkout, '--'], cwd)
+  return gitRun(['branch', '-a'], cwd)
 }
 
 // ── Text Processing ───────────────────────────────────────────────────────────
@@ -289,21 +327,34 @@ export async function execGenerateUuid(): Promise<TR> {
 
 // ── System ────────────────────────────────────────────────────────────────────
 
+/**
+ * Environment variable names that look like they hold a secret. Their values
+ * are never returned: not in the listing and not when asked for by name.
+ */
+const SECRET_ENV_NAME = /(token|secret|passw(?:or)?d|passphrase|key|credential|auth|cookie|session|private|signature|dsn)/i
+
+export function isSecretEnvName(name: string): boolean {
+  return SECRET_ENV_NAME.test(name)
+}
+
+const HIDDEN_ENV_VALUE = '(hidden: the name looks like a secret)'
+
 export async function execGetEnv(inp: Record<string, unknown>): Promise<TR> {
+  const read = (name: string): string | undefined => (isSecretEnvName(name) ? HIDDEN_ENV_VALUE : process.env[name])
   const keys = inp.keys
   if (Array.isArray(keys)) {
     const result: Record<string, string | undefined> = {}
-    keys.forEach(k => { result[String(k)] = process.env[String(k)] })
+    keys.forEach(k => { result[String(k)] = read(String(k)) })
     return { ok: true, output: JSON.stringify(result, null, 2) }
   }
   if (typeof inp.key === 'string') {
-    const val = process.env[inp.key]
+    const val = read(inp.key)
     return { ok: true, output: val ?? `(${inp.key} not set)` }
   }
   // Return all non-sensitive env vars
   const safe = Object.fromEntries(
     Object.entries(process.env)
-      .filter(([k]) => !/(token|secret|password|key|credential)/i.test(k))
+      .filter(([k]) => !isSecretEnvName(k))
       .slice(0, 50)
   )
   return { ok: true, output: JSON.stringify(safe, null, 2) }
@@ -311,8 +362,9 @@ export async function execGetEnv(inp: Record<string, unknown>): Promise<TR> {
 
 export async function execWhichCommand(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   const cmd = String(inp.command ?? '')
+  if (!cmd.trim() || looksLikeOption(cmd)) return { ok: false, output: `${cmd}: not found` }
   try {
-    const { stdout } = await execAsync(`which ${cmd}`, { cwd })
+    const { stdout } = await runFile(process.platform === 'win32' ? 'where' : 'which', [cmd], cwd, 10_000)
     return { ok: true, output: stdout.trim() }
   } catch { return { ok: false, output: `${cmd}: not found` } }
 }
@@ -404,8 +456,12 @@ export async function execParseUrl(inp: Record<string, unknown>): Promise<TR> {
 
 export async function execNpmRun(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   const script = String(inp.script ?? 'test')
+  // npm script names only: never an option, a path or anything a shell would read.
+  if (!/^[A-Za-z0-9:_-]+$/.test(script) || looksLikeOption(script)) {
+    return { ok: false, output: `npm_run: "${script.slice(0, 80)}" is not an npm script name.` }
+  }
   try {
-    const { stdout, stderr } = await execAsync(`npm run ${script}`, { cwd, timeout: 120_000 })
+    const { stdout, stderr } = await runNodeShim('npm', ['run', script], cwd, 120_000)
     return { ok: true, output: (stdout + stderr).slice(0, 10_000) }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -413,23 +469,27 @@ export async function execNpmRun(inp: Record<string, unknown>, cwd: string): Pro
   }
 }
 
-export async function execFormatCode(inp: Record<string, unknown>, cwd: string): Promise<TR> {
+export async function execFormatCode(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
   const target = String(inp.path ?? '.')
+  // The formatter gets the absolute path inside the workspace, so the value can
+  // never be read as an option and never points outside the workspace.
+  const g = guardPath(cwd, target, permissionMode)
+  if (!g.ok) return g
   const ext    = extname(target)
-  let cmd = ''
+  let run: () => Promise<{ stdout: string; stderr: string }>
   if (['.ts','.tsx','.js','.jsx','.json','.css','.md'].includes(ext) || target === '.') {
-    cmd = `npx prettier --write "${target}"`
+    run = () => runNodeShim('npx', ['prettier', '--write', g.absolute], cwd, 30_000)
   } else if (['.go'].includes(ext)) {
-    cmd = `gofmt -w "${target}"`
+    run = () => runFile('gofmt', ['-w', g.absolute], cwd, 30_000)
   } else if (['.py'].includes(ext)) {
-    cmd = `python3 -m black "${target}"`
+    run = () => runFile(process.platform === 'win32' ? 'python' : 'python3', ['-m', 'black', g.absolute], cwd, 30_000)
   } else if (['.rs'].includes(ext)) {
-    cmd = `rustfmt "${target}"`
+    run = () => runFile('rustfmt', [g.absolute], cwd, 30_000)
   } else {
     return { ok: false, output: `No known formatter for ${ext}` }
   }
   try {
-    const { stdout, stderr } = await execAsync(cmd, { cwd, timeout: 30_000 })
+    const { stdout, stderr } = await run()
     return { ok: true, output: (stdout + stderr).trim() || `Formatted: ${target}` }
   } catch (e) { return { ok: false, output: String(e) } }
 }
@@ -478,6 +538,9 @@ export async function execHashFile(inp: Record<string, unknown>, cwd: string, pe
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
+
+export const GET_ENV_DESCRIPTION =
+  'Read environment variables by name (key or keys), or list up to 50 when no name is given. Variables whose names look like secrets (token, key, password, secret, credential, auth, cookie, session …) are never returned, not even by name.'
 
 export const EXTRA_TOOL_NAMES = new Set([
   'delete_file','move_file','copy_file','create_directory','delete_directory','file_info','list_directory',
@@ -539,7 +602,7 @@ export async function executeExtraTool(
     case 'parse_url':     return execParseUrl(input)
     // Dev
     case 'npm_run':     return execNpmRun(input, cwd)
-    case 'format_code': return execFormatCode(input, cwd)
+    case 'format_code': return execFormatCode(input, cwd, permissionMode)
     case 'get_imports': return execGetImports(input, cwd, permissionMode)
     case 'path_info':   return execPathInfo(input, cwd, permissionMode)
     case 'url_encode':  return execUrlEncode(input)
@@ -652,7 +715,7 @@ export function buildExtraToolDefs(): Anthropic.Tool[] {
       input_schema: { type: 'object' as const, properties: {} } },
 
     // ── System ───────────────────────────────────────────────────────────────
-    { name: 'get_env', description: 'Read environment variable(s). Filters out secrets automatically.',
+    { name: 'get_env', description: GET_ENV_DESCRIPTION,
       input_schema: { type: 'object' as const, properties: {
         key: { type: 'string', description: 'Single env var name to read' },
         keys: { type: 'array', items: { type: 'string' }, description: 'List of env var names to read' }

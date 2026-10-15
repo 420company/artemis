@@ -9408,8 +9408,10 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
                 id: 'call_read_large_1',
                 type: 'function',
                 function: {
-                  name: 'http_request',
-                  arguments: JSON.stringify({ url: `http://127.0.0.1:${(server.address() as { port: number }).port}/large-tool-payload` }),
+                  // A direct tool whose output is exactly the large payload
+                  // (http_request is no longer a direct tool).
+                  name: 'base64_decode',
+                  arguments: JSON.stringify({ text: Buffer.from(largePayload, 'utf8').toString('base64') }),
                 },
               }],
             },
@@ -10038,7 +10040,7 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
                 id: 'call_http_missing_url_1',
                 type: 'function',
                 function: {
-                  name: 'http_request',
+                  name: 'check_url',
                   arguments: '{}',
                 },
               }],
@@ -10103,13 +10105,13 @@ assert('workflowMode: contest no longer defaults detached runs to read-only', is
       : null
 
     assert(
-      'native tool loop: direct http_request validation failures are returned as structured JSON payloads',
+      'native tool loop: direct check_url validation failures are returned as structured JSON payloads',
       result.reply === 'Direct http_request validation failure was structured.' &&
         invalidPayload?.ok === false &&
         invalidPayload?.error?.code === 'tool_invalid_arguments' &&
         Array.isArray(invalidPayload?.error?.details?.errors) &&
         invalidPayload.error.details.errors.some((entry: unknown) => String(entry).includes('url is required')) &&
-        String(invalidPayload?.output).includes('Invalid arguments for tool http_request'),
+        String(invalidPayload?.output).includes('Invalid arguments for tool check_url'),
       JSON.stringify({ invalidPayload, reply: result.reply }),
     )
   } finally {

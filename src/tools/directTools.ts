@@ -98,24 +98,6 @@ function getHostDirectToolTypes(): AgentActionType[] {
   return BUILTIN_DIRECT_TOOL_TYPES.filter((type) => isToolSupportedOnHost(type));
 }
 
-const HTTP_REQUEST_DESCRIPTION =
-  'Make an HTTP request to any URL and return the response body (up to 50 KB). Use for fetching web pages, calling REST APIs, or downloading data.';
-
-const HTTP_REQUEST_PARAMETERS: {
-  type: 'object';
-  properties: Record<string, { type: string; description: string }>;
-  required: string[];
-} = {
-  type: 'object',
-  properties: {
-    url: { type: 'string', description: 'Target URL (must include http:// or https://)' },
-    method: { type: 'string', description: 'HTTP method: GET, POST, PUT, DELETE, PATCH (default: GET)' },
-    body: { type: 'string', description: 'Request body (for POST/PUT)' },
-    headers: { type: 'object', description: 'Optional request headers as key-value pairs' },
-  },
-  required: ['url'],
-};
-
 // Caches are keyed by host so a forced host environment (tests) never reuses
 // a tool list built for a different platform.
 let cachedDirectTools: { hostKey: string; tools: readonly Anthropic.Tool[] } | undefined;
@@ -166,11 +148,6 @@ function getAllDirectTools(): readonly Anthropic.Tool[] {
       tools: [
         ...builtIns,
         ...buildExtraToolDefs().filter((tool) => isSharedDirectTool(tool.name)),
-        {
-          name: 'http_request',
-          description: HTTP_REQUEST_DESCRIPTION,
-          input_schema: HTTP_REQUEST_PARAMETERS,
-        },
       ],
     };
   }
@@ -204,12 +181,6 @@ function getAllDirectNativeFunctionTools(): readonly ProviderNativeFunctionTool[
       tools: [
         ...builtIns,
         ...extras,
-        {
-          type: 'function',
-          name: 'http_request',
-          description: HTTP_REQUEST_DESCRIPTION,
-          parameters: HTTP_REQUEST_PARAMETERS,
-        },
       ],
     };
   }
