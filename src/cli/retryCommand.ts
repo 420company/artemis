@@ -18,7 +18,7 @@
  * exchanges, etc.).
  */
 
-import { runHeadlessAgent } from '../services/headlessAgent.js'
+import { runHeadlessAgent, type HeadlessAgentOptions, type HeadlessAgentResult } from '../services/headlessAgent.js'
 import { SessionStore } from '../storage/sessions.js'
 
 export interface RetryCommandOptions {
@@ -28,6 +28,10 @@ export interface RetryCommandOptions {
   /** Forwarded to the agent run. */
   model?: string
   maxTurns?: number
+  /** Progress lines and events of the run, as `execute` forwards them. */
+  onInfo?: HeadlessAgentOptions['onInfo']
+  /** Headless approvals, as `execute` passes them (suspend at an approval request). */
+  approvals?: HeadlessAgentOptions['approvals']
 }
 
 export interface RetryCommandResult {
@@ -36,6 +40,13 @@ export interface RetryCommandResult {
   /** The user message that was re-run [已修复 L2: filled with the actual value]. */
   retriedPrompt: string
   message: string
+  /** The agent's reply to the re-run message. */
+  reply: string
+  turns: number
+  durationMs: number
+  /** Set when the run stopped at an approval request. */
+  approval?: HeadlessAgentResult['approval']
+  contextNotices: string[]
 }
 
 /** Truncate a prompt for display; never let a huge message flood the terminal. */
@@ -90,17 +101,24 @@ export async function runRetryCommand(options: RetryCommandOptions): Promise<Ret
 
   // Delegate to the existing headless retry implementation. The prompt is
   // empty: retry mode re-reads the message from the session.
-  await runHeadlessAgent(cwd, '', {
+  const result = await runHeadlessAgent(cwd, '', {
     sessionId,
     retry: true,
     ...(options.model ? { model: options.model } : {}),
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+    ...(options.onInfo ? { onInfo: options.onInfo } : {}),
+    ...(options.approvals ? { approvals: options.approvals } : {}),
   })
 
   return {
     ok: true,
-    sessionId,
+    sessionId: result.sessionId || sessionId,
     retriedPrompt,
     message: `Retried last exchange of session ${sessionId}.`,
+    reply: result.reply,
+    turns: result.turns,
+    durationMs: result.durationMs,
+    ...(result.approval ? { approval: result.approval } : {}),
+    contextNotices: result.contextNotices,
   }
 }

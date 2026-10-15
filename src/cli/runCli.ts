@@ -135,18 +135,27 @@ export async function runCli(argv: string[]): Promise<void> {
   // same headless retry path as `execute --retry` (services/headlessAgent.ts).
   if (options.command === 'retry') {
     const { runRetryCommand } = await import('./retryCommand.js')
+    const approvals = await import('../security/approvals.js')
     try {
       const result = await runRetryCommand({
         cwd: options.cwd,
         ...(options.sessionId ? { sessionId: options.sessionId } : {}),
         ...(options.model ? { model: options.model } : {}),
         ...(options.maxTurnsExplicit ? { maxTurns: options.maxTurns } : {}),
+        // Progress on stderr, one line per event, as `execute` prints it.
+        onInfo: (message) => console.error(oneLine(message)),
+        approvals: { suspend: process.env[approvals.APPROVALS_ENV] !== 'off' },
       })
+      // Stopped at an approval request: the same exit code as `execute`.
+      if (result.approval) process.exitCode = approvals.APPROVAL_REQUIRED_EXIT_CODE
       if (options.json) {
         console.log(JSON.stringify({ ...result }))
       } else {
         console.log(`\u2713 ${result.message}`)
         if (result.retriedPrompt) console.log(`  Retried: ${result.retriedPrompt}`)
+        console.log()
+        console.log(result.reply)
+        if (result.approval) console.log(`\n\u23f8 Waiting for your approval: ${result.approval.title} (request ${result.approval.id})`)
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
