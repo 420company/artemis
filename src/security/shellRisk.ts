@@ -1093,6 +1093,15 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
       if (saves.unknown) flag(saves.unknown.en, saves.unknown.zh)
       for (const file of saves.files) checkWrite(file, true)
       for (const directory of saves.directories) checkSaveInto(directory)
+    } else if (head === 'aria2c' || HTTPIE.has(head) || OTHER_DOWNLOADERS.has(head)) {
+      const saves = otherDownloadTargets(head, plain)
+      if (saves.unknown) flag(saves.unknown.en, saves.unknown.zh)
+      for (const file of saves.files) checkWrite(file, true)
+      for (const directory of saves.directories) checkSaveInto(directory)
+    } else {
+      // Any other program told where to write its output (`--output FILE`, `--output-dir DIR`, …): the
+      // place must be fine, whatever the program (a downloader this does not know fails closed here).
+      for (const file of genericOutputs(plain)) checkWrite(file, true)
     }
   }
   // A redirect may come before or after a cd: it must be fine from every directory it may run in.
@@ -1104,6 +1113,74 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     ...(removes ? { removes } : {}),
     ...(writes ? { writes } : {}),
   }
+}
+
+/** httpie (and its look-alike xh): `--download` saves under the remote name, `-o/--output` names the file. */
+const HTTPIE = new Set(['http', 'https', 'httpie', 'xh', 'xhs'])
+/** Downloaders that save into the current directory unless told otherwise (`-o`/`-O`/`-P`/`-d`/`--output`/`--paths`). */
+const OTHER_DOWNLOADERS = new Set(['axel', 'yt-dlp', 'youtube-dl', 'gallery-dl', 'you-get'])
+/** Long options that name where any program writes its output. */
+const OUTPUT_OPTION = /^--(?:output|output-file|output-document|output-dir|outdir|out-dir|out|outfile|out-file|download-dir|destination|dest|save-to|target-dir)$/
+
+/** The files and directories a program is told to write through an output option (`--output X`, `--output=X`). */
+function genericOutputs(args: string[]): string[] {
+  const out: string[] = []
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!
+    if (a === '--') break
+    const eq = a.indexOf('=')
+    const name = eq > 0 ? a.slice(0, eq) : a
+    if (!OUTPUT_OPTION.test(name)) continue
+    const value = eq > 0 ? a.slice(eq + 1) : args[++k]
+    if (value !== undefined && value !== '-') out.push(value)
+  }
+  return out
+}
+
+/** Where aria2c, httpie and other downloaders save (files by name, directories under the remote name). */
+function otherDownloadTargets(head: string, args: string[]): { files: string[]; directories: (string | undefined)[]; unknown?: { en: string; zh: string } } {
+  const files: string[] = genericOutputs(args)
+  let dir: string | undefined
+  let named: string | undefined
+  let download = !HTTPIE.has(head)
+  let unknown: { en: string; zh: string } | undefined
+  const shortValue = (a: string, letters: string): { letter: string; value: string | undefined; attached: boolean } | undefined => {
+    const m = new RegExp(`^-([${letters}])(.*)$`).exec(a)
+    return m ? { letter: m[1]!, value: m[2] || undefined, attached: !!m[2] } : undefined
+  }
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!
+    if (a === '--') break
+    const eq = a.indexOf('=')
+    const name = eq > 0 ? a.slice(0, eq) : a
+    const long = (value: string | undefined) => (eq > 0 ? a.slice(eq + 1) : (k++, value))
+    if (head === 'aria2c') {
+      if (name === '--dir') dir = long(args[k + 1])
+      else if (name === '--out') named = long(args[k + 1])
+      else if (name === '--input-file' || name === '--conf-path') unknown ??= { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+      else {
+        const s = shortValue(a, 'doi')
+        if (s?.letter === 'd') dir = s.attached ? s.value : args[++k]
+        else if (s?.letter === 'o') named = s.attached ? s.value : args[++k]
+        else if (s?.letter === 'i') unknown ??= { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+      }
+    } else if (HTTPIE.has(head)) {
+      if (name === '--download' || a === '-d' || (/^-[A-Za-z]+$/.test(a) && a.includes('d') && !a.includes('o'))) download = true
+      else if (a === '-o' || /^-[A-Za-z]*o$/.test(a)) {
+        named = args[++k]
+        if (/d/.test(a)) download = true
+      }
+    } else {
+      const s = shortValue(a, 'oOPd')
+      if (name === '--paths' || name === '-P') dir = long(args[k + 1])
+      else if (s?.letter === 'P' || s?.letter === 'd') dir = s.attached ? s.value : args[++k]
+      else if (s?.letter === 'o' || s?.letter === 'O') named = s.attached ? s.value : args[++k]
+    }
+  }
+  if (named !== undefined && named !== '-') files.push(dir !== undefined && !path.isAbsolute(named) && !/^[~$]/.test(named) ? path.join(dir, named) : named)
+  const directories: (string | undefined)[] = []
+  if (download && (named === undefined || head !== 'aria2c' && !HTTPIE.has(head))) directories.push(dir)
+  return { files, directories, ...(unknown ? { unknown } : {}) }
 }
 
 /** curl's short options that take a value (the rest of the cluster, or the next word). */
@@ -1193,8 +1270,14 @@ export interface ListeningServer {
   exposed: boolean
   /** Its arguments hold something this cannot read for sure (an unknown option, a variable): it counts as exposed. */
   unsure?: boolean
-  /** The directory it serves, when known. */
+  /** The directory it serves, when certain (for the card's wording). */
   directory?: string
+  /**
+   * Every directory it may serve (one per directory the command may be in,
+   * see analyzeDeletes); undefined when that cannot be known (a cd or a
+   * served path not known before it runs).
+   */
+  directories?: string[]
 }
 
 const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|::1|\[::1\]|ip6-localhost)$/i
@@ -1264,10 +1347,26 @@ function hostPort(value: string): { host: string; port: string } {
  * busybox httpd. Anything in its arguments this cannot read for sure counts
  * as reachable from other machines.
  */
-function serverOf(name: string, rawArgs: string[], here: string | undefined): ListeningServer | undefined {
+function serverOf(name: string, rawArgs: string[], here: string | undefined, heres: string[] | undefined): ListeningServer | undefined {
+  // The served directory as written (the last one given wins), resolved from every candidate directory.
+  let given: string | undefined
+  const server = parseServer(name, rawArgs, here, (value) => {
+    given = value
+  })
+  if (!server) return undefined
+  let directories: string[] | undefined = heres
+  if (given !== undefined) {
+    const known = staticPath(given)
+    directories = known === undefined ? undefined : path.isAbsolute(known) ? [known] : heres?.map((base) => path.resolve(base, known))
+  }
+  return { ...server, ...(directories ? { directories } : {}) }
+}
+
+function parseServer(name: string, rawArgs: string[], here: string | undefined, served: (value: string) => void): ListeningServer | undefined {
   const args = argsWithoutRedirects(rawArgs)
   const dirOf = (value: string | undefined): string | undefined => {
     if (value === undefined) return here
+    served(value)
     const known = staticPath(value)
     return known === undefined || here === undefined ? (known && path.isAbsolute(known) ? known : undefined) : path.resolve(here, known)
   }
@@ -1396,12 +1495,15 @@ interface PlacedCommand {
   head: { index: number; name: string } | undefined
   args: string[]
   here: string | undefined
+  /** Every directory it may run in (the start and every static cd before it); undefined after a cd not known before it runs. */
+  heres: string[] | undefined
 }
 
 /** The command's simple commands, in order, each with the directory it runs in (a static cd is followed), and the inline code of `sh -c` read the same way. */
-function placedCommands(command: string, cwd: string, depth = 0): PlacedCommand[] {
+function placedCommands(command: string, cwd: string, depth = 0, start: string[] | undefined = [cwd]): PlacedCommand[] {
   const out: PlacedCommand[] = []
   let here: string | undefined = cwd
+  let heres: string[] | undefined = start
   // Only the directory changes before the first group or subshell are certain for what follows.
   const groupAt = firstUnquotedParen(command)
   const certainChanges = groupAt < 0 ? Infinity : shellCommands(withPlainRedirects(command.slice(0, groupAt))).filter((c) => /^(?:cd|pushd|popd)$/.test(commandHead(c.words)?.name ?? '')).length
@@ -1414,15 +1516,21 @@ function placedCommands(command: string, cwd: string, depth = 0): PlacedCommand[
       // `cd -`, `popd` and a subshell's cd make the directory of what follows uncertain: the words then do not name it.
       const known = head.name === 'popd' || target === '-' || changes++ >= certainChanges ? undefined : target === undefined ? homedir() : staticPath(target)
       here = known === undefined || here === undefined ? undefined : path.resolve(here, known)
+      // The candidates, as analyzeDeletes keeps them: a cd adds one, `cd -`, `popd` and a bare `pushd` go back to one.
+      if (head.name !== 'popd' && target !== '-' && !(head.name === 'pushd' && target === undefined)) {
+        const to = target === undefined ? homedir() : staticPath(target)
+        heres = to === undefined || heres === undefined ? undefined : [...new Set([...heres, ...heres.map((base) => path.resolve(base, to))])]
+        if (heres && heres.length > 32) heres = undefined
+      }
     }
     if (head && SHELL_NAME.test(head.name) && depth < 2) {
       const code = inlineProgram(head.name, args)?.code
       if (code !== undefined) {
-        out.push(...placedCommands(code, here ?? cwd, depth + 1).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
+        out.push(...placedCommands(code, here ?? cwd, depth + 1, heres).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
         continue
       }
     }
-    out.push({ parsed, head, args, here })
+    out.push({ parsed, head, args, here, heres })
   }
   return out
 }
@@ -1430,9 +1538,9 @@ function placedCommands(command: string, cwd: string, depth = 0): PlacedCommand[
 /** The web servers a command starts (followed through `cd`, wrappers and `sh -c`). */
 export function listeningServers(command: string, cwd: string): ListeningServer[] {
   const servers: ListeningServer[] = []
-  for (const { head, args, here } of placedCommands(withoutHeredocBodies(command), cwd)) {
+  for (const { head, args, here, heres } of placedCommands(withoutHeredocBodies(command), cwd)) {
     if (!head) continue
-    const server = serverOf(head.name, args, here)
+    const server = serverOf(head.name, args, here, heres)
     if (server) servers.push(server)
   }
   return servers
@@ -1475,24 +1583,27 @@ export function summarizeShellCommand(command: string, cwd: string): CommandSumm
   if (/<</.test(command)) return undefined
   const zh: string[] = []
   const en: string[] = []
-  for (const { parsed, head, args, here } of placedCommands(command, cwd)) {
+  for (const { parsed, head, args, here, heres } of placedCommands(command, cwd)) {
     if (parsed.join === 'subst' || parsed.join === 'procsub-in' || parsed.join === 'procsub-out' || parsed.substitutedHead) return undefined
     if (!head) {
       if (parsed.words.every((w) => ASSIGNMENT.test(w))) continue
       return undefined
     }
     const plain = argsWithoutRedirects(args)
-    const server = serverOf(head.name, args, here)
+    const server = serverOf(head.name, args, here, heres)
     if (server) {
-      const what = placeZh(server.directory, cwd)
+      // A directory certain only up to the subshells around it: say the workspace when every candidate is in it.
+      const what = server.directory === undefined && server.directories?.length && server.directories.every((d) => isInsideWorkspace(cwd, d))
+        ? { zh: '工作区里的网页', en: 'the pages in the workspace' }
+        : placeZh(server.directory, cwd)
       if (!server.exposed) {
         const at = `${server.bind || '127.0.0.1'}:${server.port}`
         if (server.kind === 'static') {
-          zh.push(`启动本地预览：在本机 ${at} 打开${what.zh}（只有 agent 自己能访问）`)
-          en.push(`start a local preview: serve ${what.en} at ${at} on this machine (only the agent can reach it)`)
+          zh.push(`启动本地预览：在本机 ${at} 打开${what.zh}（只在本机监听）`)
+          en.push(`start a local preview: serve ${what.en} at ${at} (listening on this machine only)`)
         } else {
-          zh.push(`启动本地网页服务：在本机 ${at} 运行${what.zh}（只有 agent 自己能访问）`)
-          en.push(`start a local web server: run ${what.en} at ${at} on this machine (only the agent can reach it)`)
+          zh.push(`启动本地网页服务：在本机 ${at} 运行${what.zh}（只在本机监听）`)
+          en.push(`start a local web server: run ${what.en} at ${at} (listening on this machine only)`)
         }
       } else {
         const everywhere = !server.bind || /^(?:0\.0\.0\.0|::|\[::\])$/.test(server.bind)

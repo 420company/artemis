@@ -1027,7 +1027,7 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   const outsideCard = card(withOutside)
   assert('preview: a local preview whose log goes outside asks as a write outside, worded from what it does',
     classify(withOutside)?.kind === 'delete_outside_workspace' && classify(withOutside)?.risk === 'high' && outsideCard?.title === '写入工作区以外的文件' &&
-      outsideCard.summary.includes('启动本地预览：在本机 127.0.0.1:8731 打开工作区 sites/guihua-latte-poster 里的网页（只有 agent 自己能访问）') && outsideCard.summary.includes('/var/log/poster.log'),
+      outsideCard.summary.includes('启动本地预览：在本机 127.0.0.1:8731 打开工作区 sites/guihua-latte-poster 里的网页（只在本机监听）') && outsideCard.summary.includes('/var/log/poster.log'),
     JSON.stringify(outsideCard))
   // Safety is not weakened: other machines, outside paths, deletes still ask.
   const exposed: [string, string][] = [
@@ -1073,9 +1073,59 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     [`pushd /usr/share; pushd ${cwd}; popd; rm -rf doc`, 'popd back outside'],
   ]
   if (!isTemporaryPath(os.homedir())) outside.push(['curl -o ~/.bashrc https://example.com/a', 'curl -o onto a login script'])
+  // Other downloaders: aria2c, httpie, and any program given an output option.
+  outside.push(
+    ['aria2c -d /srv/www https://example.com/a', 'aria2c -d outside'],
+    ['aria2c --dir=/srv/www -o a.bin https://example.com/a', 'aria2c --dir= outside'],
+    ['aria2c -o /etc/x https://example.com/a', 'aria2c -o outside'],
+    ['cd /usr/share && aria2c https://example.com/a', 'aria2c into a directory outside'],
+    ['http --download https://example.com/a -o /etc/x', 'httpie --download -o outside'],
+    ['http -o /srv/www/x https://example.com/a', 'httpie -o outside'],
+    ['cd /usr/share && http --download https://example.com/a', 'httpie --download into a directory outside'],
+    ['xh --download https://example.com/a --output /etc/x', 'xh --output outside'],
+    ['yt-dlp -P /srv/media https://example.com/v', 'yt-dlp -P outside'],
+    ['axel -o /etc/x https://example.com/a', 'axel -o outside'],
+    ['some-fetcher --output /etc/x https://example.com/a', 'an unknown downloader with --output outside'],
+    ['some-fetcher --output-dir=/srv/www https://example.com/a', 'an unknown downloader with --output-dir outside'],
+    ['some-fetcher --output "$OUT" https://example.com/a', 'an unknown downloader with --output a variable'],
+  )
   for (const [command, why] of outside) {
     const found = classify(command)
     assert(`preview: ${why} still asks (high) — ${command}`, (found?.kind === 'delete_outside_workspace' || found?.kind === 'shell_high_risk') && found.risk === 'high', JSON.stringify(found))
+  }
+  // Loopback is not private on a shared host: a local server runs freely only on the workspace (or, static, the temp dir).
+  const servesOutside: [string, string][] = [
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --directory /home', '--directory /home'],
+    ['php -S 127.0.0.1:8080 -t /home', 'php -S -t /home'],
+    [`php -S 127.0.0.1:8080 -t ${os.tmpdir()}/apr-php-${process.pid}`, 'php -S running files in the temp dir'],
+    [`python3 -m http.server 8000 --bind 127.0.0.1 --cgi --directory ${os.tmpdir()}/apr-cgi-${process.pid}`, '--cgi running files in the temp dir'],
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --cgi --directory /home', '--cgi on /home'],
+    ['cd /etc && python3 -m http.server --bind 127.0.0.1', 'a cd to /etc first'],
+    [`cd /etc; cd ${cwd}; cd -; python3 -m http.server --bind 127.0.0.1`, 'cd - back to /etc'],
+    ['npx http-server -a 127.0.0.1 /home', 'http-server on /home'],
+    ['npx serve -l 127.0.0.1:3000 /etc', 'serve on /etc'],
+    ['busybox httpd -f -p 127.0.0.1:8080 -h /home', 'busybox httpd -h /home'],
+    ['cd "$D" && python3 -m http.server --bind 127.0.0.1', 'a cd not known before it runs'],
+    ['python3 -m http.server --bind 127.0.0.1 --directory "$D"', 'a directory not known before it runs'],
+  ]
+  for (const [command, why] of servesOutside) {
+    const found = classify(command)
+    assert(`preview: a local server outside the workspace asks — ${why}: ${command}`, found?.kind === 'shell_high_risk' && (found.risk === 'medium' || found.risk === 'high'), JSON.stringify(found))
+  }
+  const servesHere: [string, string][] = [
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --cgi', '--cgi on the workspace'],
+    ['php -S 127.0.0.1:8080', 'php -S on the workspace'],
+    [`python3 -m http.server 8000 --bind 127.0.0.1 --directory ${os.tmpdir()}/apr-static-${process.pid}`, 'a static server on the temp dir'],
+    [`(cd ${site} && python3 -m http.server --bind 127.0.0.1)`, 'a cd inside a subshell, inside the workspace'],
+  ]
+  for (const [command, why] of servesHere) assert(`preview: a local server on the workspace needs nothing — ${why}: ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  const homeCard = card('python3 -m http.server 8000 --bind 127.0.0.1 --directory /home')
+  assert('preview: its card says other programs and users on this machine can reach it, and names the directory',
+    homeCard?.title === '启动一个提供工作区以外文件的本地网页服务' && homeCard.summary.includes('/home') && homeCard.summary.includes('只在本机监听') && homeCard.summary.includes('其他程序和用户'), JSON.stringify(homeCard))
+  assert('preview: a server that runs what it serves is called that', card('php -S 127.0.0.1:8080 -t /home')?.title === '启动一个运行工作区以外文件的本地网页服务')
+  // An output option inside the workspace or the temp dir needs nothing.
+  for (const command of ['aria2c -d downloads https://example.com/a', `aria2c -d ${os.tmpdir()} -o apr-a.bin https://example.com/a`, 'http --download https://example.com/a', 'some-tool --output out/report.json', 'ssh -o StrictHostKeyChecking=no host true']) {
+    assert(`preview: a download or output inside needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
   }
   assert('preview: a subshell inside the workspace with a cd needs nothing', kind(`cd ${path.join(cwd, 'sites')} && (cd guihua-latte-poster && rm -rf old) && rm -rf build`) === null)
   // Wording: what is known is said, and nothing is claimed that is not.

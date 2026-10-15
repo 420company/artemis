@@ -13,7 +13,7 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
 | `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; a web server other machines can reach (medium risk, below); and every `server_setup run` off the read-only allowlist | ask |
-| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, downloads saved there (`curl -o/--output/-O/--output-dir`, `wget -O/-P` or into the current directory), …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, downloads saved there (`curl -o/--output/-O/--output-dir`, `wget -O/-P` or into the current directory, `aria2c -d/-o`, httpie `--download`/`-o`, `yt-dlp`, `axel`, and any program given `--output`, `--output-dir`, `--out`, …), …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
 | `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
 | `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
@@ -63,7 +63,13 @@ not classified, a body that is a program is checked as inline code.
 (`python -m http.server` / `SimpleHTTPServer`, `php -S`, `http-server`,
 `serve`, `busybox httpd`, also through `nohup`, `setsid`, `npx` or `sh -c`)
 bound only to the loopback interface (`--bind 127.0.0.1`, `-b ::1`,
-`localhost`) needs nothing: only this machine reaches it. Bound anywhere
+`localhost`) needs nothing when every directory it may serve is in the
+workspace (a static server also in the temp dir). Loopback is not private
+on a shared host (other programs and users on the machine reach it), so a
+loopback server of anything else (`--directory /home`, `-t /home`, a `cd
+/etc` before it, a directory not known before it runs) asks as
+`shell_high_risk`, medium risk, and one that runs what it serves (`php -S`,
+`http.server --cgi`) runs freely only on the workspace. Bound anywhere
 else, or by default (python's http.server binds every interface unless told
 otherwise), or with an option or a variable the classifier cannot read, it
 asks as `shell_high_risk` with **medium** risk ("a web server other
@@ -81,7 +87,7 @@ nothing.
 
 **What the card says.** The title and summary come from what the command
 was classified as doing (`summarizeShellCommand`): "启动本地预览：在本机
-127.0.0.1:8731 打开工作区 sites/x 里的网页（只有 agent 自己能访问）", "把输出写进
+127.0.0.1:8731 打开工作区 sites/x 里的网页（只在本机监听）", "把输出写进
 新的临时文件 /tmp/x.log", "检查本机网页 … 能否打开", "把 … 下载到 …", a write
 or a delete outside the workspace with its paths. A delete is only called a
 delete when the command removes something (`rm`, `find -delete`, `mv`
