@@ -250,7 +250,6 @@ export function getAllowedActionTypesForProfile(
       'mcp_call_tool',
       'mcp_read_resource',
       'mcp_get_prompt',
-      'mcp_run_command',
       'write_file',
       'insert_in_file',
       'replace_in_file',

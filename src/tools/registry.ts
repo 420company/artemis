@@ -407,20 +407,6 @@ function validateMcpGetPromptAction(action: any): string[] {
   return errors;
 }
 
-function validateMcpRunCommandAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.serverId, 'serverId', errors);
-  validateRequiredNonEmptyString(action?.commandName, 'commandName', errors);
-  validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
-  if (
-    action?.args !== undefined &&
-    (!action.args || typeof action.args !== 'object' || Array.isArray(action.args))
-  ) {
-    errors.push('args must be a JSON object.');
-  }
-  return errors;
-}
-
 function validateWriteFileAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.path, 'path', errors);
@@ -1113,15 +1099,6 @@ const actionToolDefs: ToolDefinition[] = [
     executionMode: 'non-blocking',
     parallelSafe: true,
     validate: validateMcpGetPromptAction,
-  },
-  {
-    type: 'mcp_run_command',
-    description: '运行 MCP 服务器暴露的命令',
-    kind: 'mcp',
-    permissionCategory: 'execute',
-    executionMode: 'non-blocking',
-    parallelSafe: true,
-    validate: validateMcpRunCommandAction,
   },
   {
     type: 'write_file',
@@ -2992,7 +2969,6 @@ export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
   'view_image',
   // MCP basics
   'mcp_call_tool',
-  'mcp_run_command',
 ]);
 
 const ON_DEMAND_SUMMARY_MAX_CHARS = 120;

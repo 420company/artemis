@@ -168,8 +168,6 @@ export function toolDetail(action: AgentAction): string | undefined {
       return detailText(a.inputPath);
     case 'mcp_call_tool':
       return detailText(typeof a.toolName === 'string' ? a.toolName : undefined, 80);
-    case 'mcp_run_command':
-      return detailText(typeof a.commandName === 'string' ? a.commandName : undefined, 80);
     case 'todo':
       return undefined;
     default:

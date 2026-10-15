@@ -50,8 +50,6 @@ function describeAction(action: AgentAction): string {
       return `read MCP resource ${action.uri} on server ${action.serverId}`;
     case 'mcp_get_prompt':
       return `get MCP prompt ${action.promptName} on server ${action.serverId}`;
-    case 'mcp_run_command':
-      return `run MCP command ${action.commandName} on server ${action.serverId}`;
     case 'write_file':
       return `write file ${action.path}`;
     case 'insert_in_file':

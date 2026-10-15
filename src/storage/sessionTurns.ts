@@ -118,9 +118,7 @@ export function exchangeTools(messages: readonly SessionMessage[], classify: Sid
     const effect = classify(name, action);
     const shown = name === 'mcp_call_tool' && typeof action?.serverId === 'string' && typeof action?.toolName === 'string'
       ? `mcp__${projectionPart(action.serverId)}__${projectionPart(action.toolName)}`
-      : name === 'mcp_run_command' && typeof action?.serverId === 'string' && typeof action?.commandName === 'string'
-        ? `mcp__${projectionPart(action.serverId)}__${projectionPart(action.commandName)}`
-        : name;
+      : name;
     byName.set(shown, (byName.get(shown) ?? false) || effect);
   };
   for (const message of messages) {

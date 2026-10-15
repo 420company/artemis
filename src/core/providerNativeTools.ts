@@ -866,22 +866,6 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           timeoutMs: integerSchema('Optional timeout in milliseconds.'),
         },
       };
-    case 'mcp_run_command':
-      return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['serverId', 'commandName'],
-        properties: {
-          serverId: nonEmptyStringSchema('Configured MCP server id.'),
-          commandName: nonEmptyStringSchema('Discovered MCP command name.'),
-          args: {
-            type: 'object',
-            description: 'Optional MCP command arguments object.',
-            additionalProperties: true,
-          },
-          timeoutMs: integerSchema('Optional timeout in milliseconds.'),
-        },
-      };
     case 'write_file':
       return {
         type: 'object',

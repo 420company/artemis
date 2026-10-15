@@ -710,17 +710,16 @@ function need(kind: ApprovalKind, risk: ApprovalRisk, details: Record<string, st
 }
 
 /** An external (MCP) tool call: classified by what its name says it does, and asked unless it is known to only read. */
-export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_tool' | 'mcp_run_command' }>): ApprovalNeed | null {
-  const name = action.type === 'mcp_run_command' ? action.commandName : action.toolName
-  const words = toolWords(name)
+export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_tool' }>): ApprovalNeed | null {
+  const words = toolWords(action.toolName)
   const has = (set: Set<string>) => words.some((w) => set.has(w))
   const args = action.args ?? {}
-  const toolKey = `${action.serverId}/${name}`
+  const toolKey = `${action.serverId}/${action.toolName}`
   const base = {
     service: action.serverId,
     action: words.join(' '),
     // A name written with look-alike or invisible characters: the owner sees it as it really is.
-    ...(foldToolName(name) !== name || /[^\x20-\x7E]/.test(name) ? { tool: visibleName(name) } : {}),
+    ...(foldToolName(action.toolName) !== action.toolName || /[^\x20-\x7E]/.test(action.toolName) ? { tool: visibleName(action.toolName) } : {}),
     // Everything the call carries, exactly (sorted keys): what the owner approves.
     args: canonicalJson(args),
   }
@@ -749,8 +748,7 @@ export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_t
   }
   if (has(DESTRUCTIVE_WORDS)) return need('external_action', 'high', base, { toolKey })
   // Known to only read (the server's own annotation, never the model's word).
-  // Commands have no read-only annotation, so no carve-out here.
-  if (action.type === 'mcp_call_tool' && action.readOnly === true) return null
+  if (action.readOnly === true) return null
   return need('external_action', 'medium', base, { toolKey })
 }
 
@@ -795,7 +793,6 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
       return need('outbound_send', 'medium', { to: PLATFORM_NAMES[platform] || undefined, file, content: action.caption, target: action.targetId })
     }
     case 'mcp_call_tool':
-    case 'mcp_run_command':
       return classifyMcpCall(action)
     // Office files and synthesized speech are written where the agent says:
     // inside the workspace (or the temp dir) that needs nothing; anywhere
@@ -924,7 +921,7 @@ export class ApprovalRuntime {
     if (!found) return { ok: true }
     // A server the host names: its URL in the config the call uses.
     const serverUrl =
-      (action.type === 'mcp_call_tool' || action.type === 'mcp_run_command') && needsServerUrl(this.options.policy, action.serverId)
+      action.type === 'mcp_call_tool' && needsServerUrl(this.options.policy, action.serverId)
         ? resolved
           ? resolved.url
           : await liveMcpServerUrl(cwd, action.serverId)
