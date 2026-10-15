@@ -277,18 +277,184 @@ section('think(): legacy by default; the opt-in runAgent adapter is safe')
   }
 }
 
+// ── N1: git runs none of the repository's code; file tools never write git's control files ──
+section('N1 git config, hooks and filters')
+{
+  const evil = path.join(sandbox, 'evil-repo')
+  fs.mkdirSync(evil, { recursive: true })
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: evil, env: gitEnv })
+  fs.writeFileSync(path.join(evil, 'a.txt'), 'a\n')
+  execFileSync('git', ['add', 'a.txt'], { cwd: evil, env: gitEnv })
+  execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: evil, env: gitEnv })
+  // A program that only leaves a marker (and passes stdin through, as a filter would).
+  const marker = (name: string) => path.join(sandbox, `marker-${name}`)
+  const script = (name: string) => {
+    const file = path.join(sandbox, `planted-${name}.sh`)
+    fs.writeFileSync(file, `#!/bin/sh\ntouch "${marker(name)}"\ncat\n`, { mode: 0o755 })
+    return file
+  }
+  const config = (key: string, value: string) => execFileSync('git', ['config', key, value], { cwd: evil, env: gitEnv })
+  config('core.fsmonitor', script('fsmonitor'))
+  config('diff.external', script('external'))
+  config('filter.evil.clean', script('clean'))
+  config('filter.evil.smudge', script('smudge'))
+  fs.writeFileSync(path.join(evil, '.gitattributes'), '*.txt filter=evil\n')
+  fs.mkdirSync(path.join(evil, '.git', 'hooks'), { recursive: true })
+  fs.writeFileSync(path.join(evil, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\ntouch "${marker('hook')}"\n`, { mode: 0o755 })
+  fs.writeFileSync(path.join(evil, 'a.txt'), 'changed\n')
+  // The planted config really runs code with plain git (so the checks below mean something).
+  execFileSync('git', ['status', '--short'], { cwd: evil, env: gitEnv, stdio: 'pipe' })
+  execFileSync('git', ['diff'], { cwd: evil, env: gitEnv, stdio: 'pipe' })
+  const planted = ['fsmonitor', 'external', 'clean'].filter((name) => fs.existsSync(marker(name)))
+  check('precondition: plain git runs the planted fsmonitor, diff.external and clean filter', planted.length === 3, planted)
+  for (const name of ['fsmonitor', 'external', 'clean', 'smudge', 'hook']) fs.rmSync(marker(name), { force: true })
+
+  const status = await extras.executeExtraTool('git_status', {}, evil)
+  check('git_status with core.fsmonitor planted in .git/config creates no marker', status.ok && !fs.existsSync(marker('fsmonitor')), status.output)
+  const diff = await extras.executeExtraTool('git_diff', {}, evil)
+  check('git_diff runs no diff.external and no clean filter', diff.ok && !fs.existsSync(marker('external')) && !fs.existsSync(marker('clean')) && !fs.existsSync(marker('fsmonitor')), diff.output)
+  const add = await extras.executeExtraTool('git_add', { paths: ['a.txt'] }, evil)
+  check('git_add refuses while filter drivers are declared (nothing ran)', !add.ok && /filter drivers \(evil\)/.test(add.output) && !fs.existsSync(marker('clean')), add.output)
+  const branch = await extras.executeExtraTool('git_branch', { checkout: 'main' }, evil)
+  check('git_branch checkout refuses while filter drivers are declared', !branch.ok && /filter drivers/.test(branch.output) && !fs.existsSync(marker('smudge')), branch.output)
+  execFileSync('git', ['config', '--unset', 'filter.evil.clean'], { cwd: evil, env: gitEnv })
+  execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], { cwd: evil, env: gitEnv })
+  const staged = await extras.executeExtraTool('git_add', { paths: ['a.txt'] }, evil)
+  const commit = await extras.executeExtraTool('git_commit', { message: 'no hooks' }, evil)
+  check('git_commit runs no hook from .git/hooks (and still commits)', staged.ok && commit.ok && !fs.existsSync(marker('hook')) && !fs.existsSync(marker('fsmonitor')), { staged: staged.output, commit: commit.output })
+  check('the safety options switch off fsmonitor, hooks, diff.external and the global attributes file',
+    ['core.fsmonitor=false', 'diff.external='].every((option) => extras.gitSafetyOptions().includes(option)) &&
+      extras.gitSafetyOptions().some((option) => option.startsWith('core.hooksPath=')) &&
+      extras.gitSafetyOptions().some((option) => option.startsWith('core.attributesFile=')) &&
+      extras.gitSafetyOptions(['lfs']).includes('filter.lfs.process='))
+
+  const { executeWriteFile } = await import('../src/tools/writeFile.js')
+  const { executeReplaceInFile } = await import('../src/tools/replaceInFile.js')
+  const { executeApplyPatch } = await import('../src/tools/applyPatch.js')
+  const refused = async (run: () => Promise<unknown>): Promise<string> => {
+    try {
+      const result = (await run()) as { ok?: boolean; output?: string }
+      return result?.ok === false ? String(result.output) : `NOT REFUSED: ${JSON.stringify(result).slice(0, 200)}`
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+  }
+  const denied = /git's own config, hooks or attributes/
+  for (const mode of ['ask', 'full-access'] as const) {
+    const ctx = { cwd: evil, permissionMode: mode } as never
+    const hook = await refused(() => executeWriteFile({ type: 'write_file', path: '.git/hooks/pre-commit', content: '#!/bin/sh\n' } as never, ctx))
+    const cfg = await refused(() => executeWriteFile({ type: 'write_file', path: '.git/config', content: '[core]\n' } as never, ctx))
+    const attrs = await refused(() => executeWriteFile({ type: 'write_file', path: '.git/info/attributes', content: '* filter=x\n' } as never, ctx))
+    const replace = await refused(() => executeReplaceInFile({ type: 'replace_in_file', path: '.git/config', find: '[core]', replace: '[core]\n\tfsmonitor = x' } as never, ctx))
+    const patch = await refused(() => executeApplyPatch({ type: 'apply_patch', patch: '*** Begin Patch\n*** Add File: .git/hooks/post-checkout\n+#!/bin/sh\n*** End Patch' } as never, ctx))
+    check(`${mode}: write_file / replace_in_file / apply_patch refuse .git/hooks, .git/config and .git/info/attributes`,
+      [hook, cfg, attrs, replace, patch].every((message) => denied.test(message)), { hook, cfg, attrs, replace, patch })
+  }
+  fs.symlinkSync(path.join(evil, '.git', 'hooks'), path.join(evil, 'hooklink'))
+  const viaLink = await refused(() => executeWriteFile({ type: 'write_file', path: 'hooklink/post-merge', content: '#!/bin/sh\n' } as never, { cwd: evil, permissionMode: 'full-access' } as never))
+  check('a symlink into .git/hooks is caught too', denied.test(viaLink), viaLink)
+  const extraWrites = [
+    await extras.executeExtraTool('create_directory', { path: '.git/hooks/sub' }, evil, 'full-access'),
+    await extras.executeExtraTool('copy_file', { from: 'a.txt', to: '.git/config' }, evil, 'full-access'),
+    await extras.executeExtraTool('move_file', { from: 'a.txt', to: '.git/hooks/pre-push' }, evil, 'full-access'),
+  ]
+  check('file extras refuse git control files as well', extraWrites.every((r) => !r.ok && denied.test(r.output)), extraWrites.map((r) => r.output))
+  check('an ordinary file next to .git is still writable',
+    (await executeWriteFile({ type: 'write_file', path: 'notes/git-config.md', content: 'ok\n' } as never, { cwd: evil, permissionMode: 'ask' } as never)).ok === true)
+}
+
+// ── N4: Windows program resolution ──────────────────────────────────────────
+section('N4 Windows programs never come from the working directory')
+{
+  const present = new Set(['C:\\ws\\git.exe', 'C:\\ws\\bin\\git.exe', 'C:\\Program Files\\Git\\cmd\\git.exe', 'C:\\Windows\\System32\\where.exe'])
+  const env = { path: '.;C:\\ws;bin;;C:\\Program Files\\Git\\cmd;C:\\Windows\\System32', cwd: 'C:\\ws', exists: (file: string) => present.has(file) }
+  check('git resolves to the PATH copy, skipping ".", the working directory and relative entries',
+    extras.resolveWindowsProgram('git', env) === 'C:\\Program Files\\Git\\cmd\\git.exe', extras.resolveWindowsProgram('git', env))
+  check('a program only in the working directory is not found', extras.resolveWindowsProgram('evil', { ...env, exists: (f: string) => f === 'C:\\ws\\evil.exe' }) === undefined)
+  check('where resolves to System32', extras.resolveWindowsProgram('where', env) === 'C:\\Windows\\System32\\where.exe')
+  const source = fs.readFileSync(path.join(repoRoot, 'src/tools/extras.ts'), 'utf8')
+  check('child processes on Windows get NoDefaultCurrentDirectoryInExePath=1', /NoDefaultCurrentDirectoryInExePath: '1'/.test(source))
+}
+
+// ── N3: check_url / download_file use the shared SSRF guard ─────────────────
+section('N3 check_url and download_file SSRF guard')
+{
+  const guard = await import('../src/tools/visual/safeDownload.js')
+  const blocked = ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '198.18.0.1', '198.19.255.255', '0.0.0.0',
+    '::1', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '::127.0.0.1', '64:ff9b::a00:1', '64:ff9b::10.0.0.1', '64:ff9b:1::a9fe:a9fe', '2002:7f00:1::1', '2002:c0a8:101::1']
+  const allowed = ['8.8.8.8', '93.184.216.34', '2001:4860:4860::8888', '64:ff9b::808:808', '2002:808:808::1']
+  const wrongBlocked = blocked.filter((a) => !guard.isNonPublicAddress(a))
+  const wrongAllowed = allowed.filter((a) => guard.isNonPublicAddress(a))
+  check('loopback, RFC1918, link-local, CGNAT, 198.18/15, ULA, and NAT64/6to4/mapped forms of private v4 are blocked; public ones pass',
+    wrongBlocked.length === 0 && wrongAllowed.length === 0, { wrongBlocked, wrongAllowed })
+
+  let hits = 0
+  const local = http.createServer((_req, res) => { hits++; res.writeHead(200).end('secret') })
+  await new Promise<void>((resolve) => local.listen(0, '127.0.0.1', () => resolve()))
+  const port = (local.address() as { port: number }).port
+  const ws = path.join(sandbox, 'net-ws')
+  fs.mkdirSync(ws, { recursive: true })
+  try {
+    const head = await extras.executeExtraTool('check_url', { url: `http://127.0.0.1:${port}/` }, ws)
+    const down = await extras.executeExtraTool('download_file', { url: `http://127.0.0.1:${port}/x`, destination: 'x.bin' }, ws)
+    const v6 = await extras.executeExtraTool('check_url', { url: `http://[::ffff:127.0.0.1]:${port}/` }, ws)
+    check('check_url / download_file refuse a loopback URL and never reach it', !head.ok && !down.ok && !v6.ok && hits === 0 && !fs.existsSync(path.join(ws, 'x.bin')), { head: head.output, down: down.output, v6: v6.output, hits })
+
+    const seen: string[] = []
+    guard.setAssetDownloadResolverForTests(async (host) => {
+      seen.push(host)
+      if (host === 'public.test') return [{ address: '93.184.216.34', family: 4 }]
+      if (host === 'rebind.test') return [{ address: '10.0.0.5', family: 4 }]
+      return [{ address: '127.0.0.1', family: 4 }]
+    })
+    const connected: string[] = []
+    guard.setAssetDownloadTransportForTests(async (url, { lookup, method }) => {
+      // The connection resolves through the guarded lookup: the checked address is the one used.
+      const address = await new Promise<string>((resolve, reject) => lookup(url.hostname, {}, (error: Error | null, addr: string) => (error ? reject(error) : resolve(addr))))
+      connected.push(`${method ?? 'GET'} ${url.hostname}=${address}`)
+      if (url.pathname === '/redirect-private') return { status: 302, location: 'http://internal.test/admin', body: Buffer.alloc(0) }
+      if (url.pathname === '/redirect-literal') return { status: 301, location: 'http://169.254.169.254/latest/meta-data/', body: Buffer.alloc(0) }
+      return { status: 200, statusText: 'OK', contentType: 'text/plain', body: Buffer.from('public body') }
+    })
+    const okHead = await extras.executeExtraTool('check_url', { url: 'http://public.test/' }, ws)
+    const okDown = await extras.executeExtraTool('download_file', { url: 'http://public.test/file.txt', destination: 'file.txt' }, ws)
+    check('a public host is checked with HEAD and downloaded through the checked address',
+      okHead.ok && okDown.ok && fs.readFileSync(path.join(ws, 'file.txt'), 'utf8') === 'public body' && connected.includes('HEAD public.test=93.184.216.34'), { okHead: okHead.output, okDown: okDown.output, connected })
+    const rebind = await extras.executeExtraTool('check_url', { url: 'http://rebind.test/' }, ws)
+    const redirected = await extras.executeExtraTool('download_file', { url: 'http://public.test/redirect-private', destination: 'r1.bin' }, ws)
+    const literal = await extras.executeExtraTool('check_url', { url: 'http://public.test/redirect-literal' }, ws)
+    check('a host resolving to a private address is refused; every redirect hop is checked again (name and IP literal)',
+      !rebind.ok && /10\.0\.0\.5/.test(rebind.output) && !redirected.ok && /127\.0\.0\.1/.test(redirected.output) && !literal.ok && /169\.254\.169\.254/.test(literal.output) && !fs.existsSync(path.join(ws, 'r1.bin')),
+      { rebind: rebind.output, redirected: redirected.output, literal: literal.output })
+  } finally {
+    guard.setAssetDownloadResolverForTests(undefined)
+    guard.setAssetDownloadTransportForTests(undefined)
+    await new Promise<void>((resolve) => local.close(() => resolve()))
+  }
+}
+
 // ── A3: get_env ──────────────────────────────────────────────────────────────
 section('A3 get_env')
 {
   process.env.SMOKE_API_KEY = 'sk-should-not-leak'
   process.env.SMOKE_GITHUB_TOKEN = 'ghp-should-not-leak'
   process.env.SMOKE_PLAIN = 'visible-value'
+  process.env.DATABASE_URL = 'postgres://u:pw@h/db'
+  process.env.GITHUB_PAT = 'github_pat_should_not_leak'
   const single = await extras.executeExtraTool('get_env', { key: 'SMOKE_API_KEY' }, sandbox)
   const many = await extras.executeExtraTool('get_env', { keys: ['SMOKE_GITHUB_TOKEN', 'SMOKE_PLAIN'] }, sandbox)
   const all = await extras.executeExtraTool('get_env', {}, sandbox)
   check('a secret-looking name is hidden when asked for by key', !single.output.includes('sk-should-not-leak') && /hidden/.test(single.output), single.output)
   check('a secret-looking name is hidden in keys; a plain one is returned', !many.output.includes('ghp-should-not-leak') && many.output.includes('visible-value'), many.output)
   check('the listing never shows secret-looking names', !all.output.includes('should-not-leak'))
+  const url = await extras.executeExtraTool('get_env', { keys: ['DATABASE_URL', 'GITHUB_PAT', 'PATH'] }, sandbox)
+  check('DATABASE_URL with a login and GITHUB_PAT are hidden; PATH is not mistaken for a PAT',
+    !url.output.includes('u:pw@') && !url.output.includes('github_pat_should_not_leak') && JSON.parse(url.output).PATH === process.env.PATH, url.output)
+  check('a credentialed URL value is hidden under any name, and so are CONN/CRED/DSN names',
+    extras.isCredentialedUrlValue('redis://:s3cret@cache:6379') && !extras.isCredentialedUrlValue('https://example.com/a@b') &&
+      ['DB_CONN', 'AWS_CRED', 'SENTRY_DSN', 'GITHUB_PAT'].every((name) => extras.isSecretEnvName(name)) && !extras.isSecretEnvName('PATH') && !extras.isSecretEnvName('NODE_PATH'))
+  const listing = await extras.executeExtraTool('get_env', {}, sandbox)
+  check('the listing hides credentialed URL values', !listing.output.includes('u:pw@'))
   check('registry and tool descriptions say secrets are never returned, also by name',
     registry.getToolDefinition('get_env')?.description === extras.GET_ENV_DESCRIPTION && /not even by name/.test(extras.GET_ENV_DESCRIPTION))
 }
