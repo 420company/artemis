@@ -1055,7 +1055,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'get_sms_number',
-    description: '需要手机号接收验证码时，申请一个临时虚拟号码（会产生费用，必须主人批准；审批卡片显示平台计费）。很多网站不接受虚拟号码，被拒时改用 ask_owner_for_code。',
+    description: '需要手机号接收验证码时，申请一个临时虚拟号码（每次都必须主人批准）。很多网站不接受虚拟号码，被拒时改用 ask_owner_for_code。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -2672,16 +2672,18 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'edit_timeline',
-    description: '视频时间线编辑器：管理 timeline-projects 下的时间线项目。list_segments 列出段落；replace_segment 替换段落视频；trim_segment 裁剪段落（ffmpeg）；add_subtitle/remove_subtitle 加/删字幕；set_bgm 设置背景音乐；render 渲染成片（拼接+字幕+混音）；import_saga 从 Saga 长视频输出导入为可编辑时间线。',
+    description: '视频时间线编辑器：管理时间线项目。list_segments 列出段落；replace_segment 替换段落视频；trim_segment 裁剪段落；add_subtitle/remove_subtitle 加/删字幕；set_bgm 设置背景音乐；render 渲染成片（拼接+字幕+混音）；import_long_video 把一个已生成的长视频项目（projectId）导入为可编辑时间线。替换视频和背景音乐只能使用工作区或媒体输出目录里的文件。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: (a: any) => {
       const errs: string[] = [];
-      const validActions = ['list_segments', 'replace_segment', 'trim_segment', 'add_subtitle', 'remove_subtitle', 'set_bgm', 'render', 'import_saga'];
-      if (!validActions.includes(a?.action)) errs.push(`action must be one of: ${validActions.join(', ')}. `);
-      if (a?.action !== 'import_saga' && !isNonEmptyString(a?.projectId)) errs.push('projectId is required.');
+      const validActions = ['list_segments', 'replace_segment', 'trim_segment', 'add_subtitle', 'remove_subtitle', 'set_bgm', 'render', 'import_long_video'];
+      // import_saga / sagaProjectId: hidden aliases of import_long_video / projectId for older calls.
+      const legacyImport = a?.action === 'import_saga' && isNonEmptyString(a?.sagaProjectId);
+      if (!validActions.includes(a?.action) && a?.action !== 'import_saga') errs.push(`action must be one of: ${validActions.join(', ')}. `);
+      if (!legacyImport && !isNonEmptyString(a?.projectId)) errs.push('projectId is required.');
       return errs;
     },
     execute: (async (a: any, context: any) => {

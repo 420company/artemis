@@ -1061,7 +1061,8 @@ export type AgentAction =
   | { type: 'ask_owner_for_code'; site: string; channel?: 'sms' | 'email' | 'authenticator' | 'other'; hint?: string; timeout_seconds?: number }
   | {
       type: 'edit_timeline';
-      action: 'list_segments' | 'replace_segment' | 'trim_segment' | 'add_subtitle' | 'remove_subtitle' | 'set_bgm' | 'render' | 'import_saga';
+      /** import_saga is a hidden alias of import_long_video, kept for older calls. */
+      action: 'list_segments' | 'replace_segment' | 'trim_segment' | 'add_subtitle' | 'remove_subtitle' | 'set_bgm' | 'render' | 'import_long_video' | 'import_saga';
       projectId?: string;
     }
   | ExtraAgentAction;

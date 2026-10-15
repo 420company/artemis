@@ -1328,7 +1328,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           },
           firstFrameImageUrls: {
             type: 'array',
-            description: 'role:"first_frame" image URLs (literal first-frame anchor in image-to-video mode). Provider image checks may still reject this image. Use when you specifically want this exact frame as the literal video opener; for identity locking, prefer the Saga long-video path with a dedicated turnaround reference_image.',
+            description: 'role:"first_frame" image URLs (literal first-frame anchor in image-to-video mode). Provider image checks may still reject this image. Use when you specifically want this exact frame as the literal video opener; for identity locking, prefer the long-video path with a dedicated turnaround reference_image.',
             items: { type: 'string' },
           },
           firstFrameImagePaths: {
@@ -1390,7 +1390,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           ),
           projectId: optionalStringSchema('Optional project id. Used to resume a previous run.'),
           outputPath: optionalStringSchema('Optional final MP4 output path. Omit this unless the user explicitly requested a location; the pipeline otherwise creates a unique searchable filename.'),
-          assemblyMode: optionalStringSchema('Optional renderer mode: auto | ffmpeg | hyperframes | saga.'),
+          assemblyMode: optionalStringSchema('Optional renderer mode; leave it unset (auto) unless the long-video workflow names one.'),
           resume: { type: 'boolean', description: 'Reuse previously generated segments when true (default true).' },
           preserveUserScript: { type: 'boolean', description: 'When true, the pipeline may still lint the planned shots but must not use the story check/rewriter to alter user-authored story beats. Automatically implied for timestamped scripts.' },
           cleanDirect: { type: 'boolean', description: 'Low-filter look (原始质感 / 少滤镜 / raw-seedance / clean-direct): drops the aesthetic dressing (style and aesthetic locks, prompt scaffolding, rendering rules) but keeps narrative analysis, identity, the character / wardrobe / prop / location locks, subtitle protection and the critic.' },
@@ -1441,7 +1441,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
                   type: { type: 'string', enum: ['character', 'product', 'environment'] },
                   confidence: { type: 'number' },
                   evidence: { type: 'string' },
-                  aliases: { type: 'array', description: 'Alternative names / pronouns / descriptors the user might use to refer to the protagonist downstream (e.g. ["she", "her", "the woman", "饼干", "她"]). The Saga Critic uses this list when checking that each shot mentions the protagonist.', items: { type: 'string' } },
+                  aliases: { type: 'array', description: 'Alternative names / pronouns / descriptors the user might use to refer to the protagonist downstream (e.g. ["she", "her", "the woman", "饼干", "她"]). The shot check uses this list to confirm that each shot mentions the protagonist.', items: { type: 'string' } },
                 },
               },
               supportingCharacters: { type: 'array', items: { type: 'string' } },

@@ -6,7 +6,7 @@ import type { FileHandle } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import { resolveArtemisHomeDir } from '../../utils/fs.js';
+import { isAlwaysPrivatePath, resolveArtemisHomeDir } from '../../utils/fs.js';
 import { getMediaOutputRoot } from '../../utils/mediaOutputRoot.js';
 import type { SagaSegmentInput } from './sagaRenderer/types.js';
 
@@ -57,6 +57,9 @@ export type TimelineProject = {
   segments: TimelineSegment[];
   subtitles: TimelineSubtitle[];
   bgm?: TimelineBgm;
+  /** The long-video project this timeline was imported from. */
+  sourceProjectId?: string;
+  /** Older name of sourceProjectId, still read from existing timeline.json files. */
   sourceSagaProjectId?: string;
   lastRender?: { outputPath: string; duration: number; renderedAt: string };
 };
@@ -74,13 +77,13 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const INVALID_ID_MSG = 'projectId 无效（仅允许字母数字 . _ -，最长128）';
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
-/** 视频输入扩展名白名单（replace_segment / import_saga / render 复检）。 */
+/** 视频输入扩展名白名单（replace_segment / import_long_video / render 复检）。 */
 const VIDEO_INPUT_EXTS: ReadonlySet<string> = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.webm', '.avi']);
 /** 音频输入扩展名白名单（set_bgm / render 复检）。 */
 const AUDIO_INPUT_EXTS: ReadonlySet<string> = new Set(['.mp3', '.wav', '.aac', '.m4a', '.ogg', '.flac']);
 /** 渲染输出扩展名白名单。 */
 const OUTPUT_EXTS: ReadonlySet<string> = new Set(['.mp4', '.mov', '.m4v']);
-/** 仅用于 import_saga 扫描目录时的粗筛，最终仍走 validateVideoFile。 */
+/** 仅用于 import_long_video 扫描目录时的粗筛，最终仍走 validateVideoFile。 */
 const VIDEO_EXT_RE = /\.(mp4|mov|m4v|mkv|webm|avi)$/i;
 /** 输出文件名：不能以 . 或 - 开头，只允许字母/数字/空格及 . _ ( ) -。 */
 const OUTPUT_NAME_RE = /^[\p{L}\p{N}_][\p{L}\p{N} ._()-]{0,199}$/u;
@@ -254,6 +257,33 @@ async function realpathOrNull(p: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * replace_segment / set_bgm 的输入文件：解析符号链接后必须位于工作区或媒体输出根目录内，
+ * 且永远不能是 agent 的私有目录（凭据、VPN 配置）。返回解析后的真实路径。
+ */
+async function resolveTimelineInput(
+  raw: string,
+  cwd: string,
+  label: string,
+): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  const resolved = resolveUserPath(raw, cwd);
+  const real = (await realpathOrNull(resolved)) ?? resolved;
+  if (isAlwaysPrivatePath(resolved) || isAlwaysPrivatePath(real)) {
+    return { ok: false, error: `${label}位于受保护的目录，拒绝使用: ${path.basename(resolved)}` };
+  }
+  const roots: string[] = [];
+  for (const r of [cwd, String(await Promise.resolve(getMediaOutputRoot()))]) {
+    const abs = path.resolve(r);
+    for (const candidate of [abs, await realpathOrNull(abs)]) {
+      if (candidate && !roots.includes(candidate)) roots.push(candidate);
+    }
+  }
+  if (!roots.some((r) => isInside(real, r))) {
+    return { ok: false, error: `${label}必须位于工作区或媒体输出目录内: ${path.basename(resolved)}` };
+  }
+  return { ok: true, path: real };
 }
 
 /** 递归列文件；不跟随符号链接（Dirent 对符号链接 isFile/isDirectory 均为 false），并限制总文件数。 */
@@ -515,7 +545,7 @@ async function loadProject(projectIdRaw: unknown): Promise<LoadResult> {
   try {
     raw = await fs.readFile(file, 'utf8');
   } catch {
-    return { ok: false, error: `时间线项目不存在: ${projectIdRaw}（可先用 import_saga 创建）` };
+    return { ok: false, error: `时间线项目不存在: ${projectIdRaw}（可先用 import_long_video 创建）` };
   }
   let parsed: unknown;
   try {
@@ -725,7 +755,7 @@ async function withTimelineLock<T>(
   if (!validId(projectId)) throw new TimelineError(INVALID_ID_MSG);
   const dir = await projectDir(projectId);
   if (!(await isDirectory(dir))) {
-    throw new TimelineError(`时间线项目不存在: ${projectId}（可先用 import_saga 创建）`);
+    throw new TimelineError(`时间线项目不存在: ${projectId}（可先用 import_long_video 创建）`);
   }
   return withDirLock(dir, async () => {
     const loaded = await loadProject(projectId);
@@ -808,7 +838,7 @@ async function listSegments(a: Args): Promise<Result> {
     subtitles: [...project.subtitles].sort((x, y) => x.start - y.start),
     bgm: project.bgm ?? null,
     lastRender: project.lastRender ?? null,
-    sourceSagaProjectId: project.sourceSagaProjectId ?? null,
+    sourceProjectId: project.sourceProjectId ?? project.sourceSagaProjectId ?? null,
   };
 }
 
@@ -823,7 +853,9 @@ async function replaceSegment(a: Args, cwd: string): Promise<Result> {
   if (typeof snapSeg === 'string') return fail(act, snapSeg);
 
   if (isNonEmptyString(a.newVideoPath)) {
-    const newPath = resolveUserPath(a.newVideoPath, cwd);
+    const input = await resolveTimelineInput(a.newVideoPath, cwd, '视频文件');
+    if (!input.ok) return fail(act, input.error);
+    const newPath = input.path;
     const bad = await validateVideoFile(newPath, '视频文件');
     if (bad) return fail(act, bad);
     if (!(await hasBinary('ffprobe'))) return fail(act, FFPROBE_MISSING);
@@ -1137,7 +1169,9 @@ async function setBgm(a: Args, cwd: string): Promise<Result> {
   }
 
   if (!isNonEmptyString(a.audioPath)) return fail(act, 'audioPath 不能为空');
-  const audioPath = resolveUserPath(a.audioPath, cwd);
+  const input = await resolveTimelineInput(a.audioPath, cwd, '音频文件');
+  if (!input.ok) return fail(act, input.error);
+  const audioPath = input.path;
   // 类型白名单 + ffprobe 探测在锁外完成。
   const audio = await validateAudioFile(audioPath);
   if (!audio.ok) return fail(act, audio.error);
@@ -1538,7 +1572,7 @@ async function render(a: Args): Promise<Result> {
 }
 
 // ---------------------------------------------------------------------------
-// import_saga
+// import_long_video (hidden alias: import_saga)
 // ---------------------------------------------------------------------------
 
 type ImportEntry = { index: number; title: string; videoPath: string; prompt: string; duration?: number };
@@ -1560,7 +1594,7 @@ function findSegmentsArray(value: unknown, depth: number): Array<Partial<SagaSeg
 }
 
 /**
- * 解析 Saga 清单。清单中的路径同样视为不可信：解析符号链接后必须位于媒体输出根目录或 Saga 目录内。
+ * 解析长视频清单。清单中的路径同样视为不可信：解析符号链接后必须位于媒体输出根目录或长视频目录内。
  */
 async function readSagaManifest(
   sagaDir: string,
@@ -1650,17 +1684,19 @@ async function pickFinalVideo(videos: string[]): Promise<string | undefined> {
   return best;
 }
 
-async function importSaga(a: Args): Promise<Result> {
-  const act = 'import_saga';
-  const projectId = a.projectId;
-  const sagaProjectId = a.sagaProjectId;
+async function importLongVideo(a: Args, act: string): Promise<Result> {
+  // projectId names the long-video project; the timeline project gets the same
+  // id. Older calls passed the source as sagaProjectId (a hidden alias) and the
+  // timeline id as projectId; those still work.
+  const sagaProjectId = a.sagaProjectId !== undefined ? a.sagaProjectId : a.projectId;
+  const projectId = a.projectId !== undefined ? a.projectId : sagaProjectId;
   if (!validId(projectId)) return fail(act, INVALID_ID_MSG);
-  if (!validId(sagaProjectId)) return fail(act, 'sagaProjectId 无效');
+  if (!validId(sagaProjectId)) return fail(act, INVALID_ID_MSG);
   const overwrite = a.overwrite === true;
 
   const mediaRoot = String(await Promise.resolve(getMediaOutputRoot()));
   const sagaDir = path.join(mediaRoot, 'long-video', sagaProjectId);
-  if (!(await isDirectory(sagaDir))) return fail(act, `未找到 Saga 输出目录: ${sagaDir}`);
+  if (!(await isDirectory(sagaDir))) return fail(act, `未找到长视频输出目录: ${sagaDir}`);
 
   const dir = await projectDir(projectId);
   const timelineFile = path.join(dir, 'timeline.json');
@@ -1677,16 +1713,16 @@ async function importSaga(a: Args): Promise<Result> {
 
   const files = await walk(sagaDir, 3, { left: MAX_WALK_FILES });
   const videos = files.filter((f) => VIDEO_EXT_RE.test(f)).sort();
-  if (videos.length === 0) return fail(act, `Saga 目录中没有视频文件: ${sagaDir}`);
+  if (videos.length === 0) return fail(act, `长视频目录中没有视频文件: ${sagaDir}`);
   const jsonFiles = files.filter((f) => /\.json$/i.test(f)).sort();
 
   const warnings: string[] = [];
-  if (files.length >= MAX_WALK_FILES) warnings.push(`Saga 目录文件过多，仅扫描了前 ${MAX_WALK_FILES} 个文件`);
+  if (files.length >= MAX_WALK_FILES) warnings.push(`长视频目录文件过多，仅扫描了前 ${MAX_WALK_FILES} 个文件`);
 
   let source: 'manifest' | 'filenames' | 'final' = 'manifest';
   const manifest = await readSagaManifest(sagaDir, jsonFiles, roots);
   let entries = manifest.entries;
-  if (manifest.rejected > 0) warnings.push(`清单中有 ${manifest.rejected} 个路径指向 Saga/媒体目录之外，已拒绝`);
+  if (manifest.rejected > 0) warnings.push(`清单中有 ${manifest.rejected} 个路径指向长视频/媒体目录之外，已拒绝`);
   if (entries.length === 0) {
     source = 'filenames';
     entries = entriesFromFilenames(videos);
@@ -1699,7 +1735,7 @@ async function importSaga(a: Args): Promise<Result> {
     }
   }
   if (entries.length === 0) {
-    return fail(act, '未在 Saga 项目中找到可导入的视频片段', warnings.length ? { warnings } : {});
+    return fail(act, '未在长视频项目中找到可导入的视频片段', warnings.length ? { warnings } : {});
   }
   if (entries.length > MAX_IMPORT_SEGMENTS) {
     warnings.push(`片段数超过上限 ${MAX_IMPORT_SEGMENTS}，超出部分已忽略`);
@@ -1755,7 +1791,7 @@ async function importSaga(a: Args): Promise<Result> {
     height: firstInfo?.height ?? 1080,
     segments: importedSegments,
     subtitles: [],
-    sourceSagaProjectId: sagaProjectId,
+    sourceProjectId: sagaProjectId,
   };
 
   await fs.mkdir(dir, { recursive: true });
@@ -1796,12 +1832,22 @@ export async function executeEditTimeline(action: any, context: { cwd: string })
       case 'remove_subtitle': result = await removeSubtitle(a); break;
       case 'set_bgm': result = await setBgm(a, cwd); break;
       case 'render': result = await render(a); break;
-      case 'import_saga': result = await importSaga(a); break;
+      case 'import_long_video': result = await importLongVideo(a, act); break;
+      // Hidden alias kept for older calls.
+      case 'import_saga': result = await importLongVideo(a, 'import_long_video'); break;
       default:
         result = fail(tail(act, 64), `未知 action: ${act ? tail(act, 64) : '（未提供或不是字符串）'}`);
     }
   } catch (err) {
     result = fail(tail(act, 64), err instanceof TimelineError ? err.message : `执行失败: ${errorText(err)}`);
   }
-  return result;
+  // Tool results carry their text in `output` (what the model reads); the
+  // structured fields stay alongside for callers that use them.
+  const { error, ...rest } = result;
+  return {
+    ...rest,
+    ok: result.ok === true,
+    output: JSON.stringify(result, null, 2),
+    ...(result.ok === true ? {} : { error: { code: 'edit_timeline_failed', message: String(error ?? '执行失败'), retryable: false } }),
+  };
 }
