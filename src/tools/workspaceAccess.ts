@@ -1,4 +1,15 @@
-import { isAlwaysPrivatePath } from '../utils/fs.js'
+import { ensureNotGitControlPath, isAlwaysPrivatePath } from '../utils/fs.js'
+
+/** Tools that write the path they resolve here (git control files are closed to them). */
+const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'write_file',
+  'replace_in_file',
+  'insert_in_file',
+  'apply_patch',
+  'create_presentation',
+  'create_document',
+  'create_spreadsheet',
+])
 import path from 'node:path'
 import type { ToolExecutionContext, WorkspaceSwitchRequest } from './types.js'
 import { fromHeimdallVirtualPath } from '../core/heimdall.js'
@@ -120,6 +131,8 @@ export async function resolveToolPathWithWorkspaceAccess(options: {
   const absolute = resolveInsideRoot(effectiveCwd, candidatePath)
   // The agent's credentials and VPN profiles are never a file tool's business, in any mode.
   if (isAlwaysPrivatePath(absolute)) throw new Error(`Access denied: ${inputPath} is in a protected directory.`)
+  // Git's config, hooks and attributes are never written by a file tool, in any mode.
+  if (WRITE_TOOL_NAMES.has(toolName)) ensureNotGitControlPath(absolute, inputPath)
 
   return {
     absolute,

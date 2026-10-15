@@ -72,6 +72,33 @@ export function isAlwaysPrivatePath(absolute: string): boolean {
   return /(^|\/)(agent-credentials|vpn-profiles)(\/|$)/.test(normalized)
 }
 
+/**
+ * Git's own config, hooks and attribute files (in a repository, a worktree's
+ * or a submodule's git dir): writing them makes the next git command run
+ * code. Closed to every write tool, in every permission mode; symlinks are
+ * followed, so a link into the git dir is caught too.
+ */
+export function isGitControlPath(absolute: string): boolean {
+  const control = (target: string): boolean => {
+    const parts = target.replace(/\\/g, '/').toLowerCase().split('/').filter(Boolean)
+    const at = parts.indexOf('.git')
+    if (at < 0) return false
+    const inside = parts.slice(at + 1)
+    const last = inside.at(-1)
+    if (inside.includes('hooks')) return true
+    if (last === 'config' || last === 'config.worktree') return true
+    return inside.length >= 2 && inside.at(-2) === 'info' && last === 'attributes'
+  }
+  return control(resolve(absolute)) || control(realPathOf(absolute))
+}
+
+/** Throws if `absolute` is git's own config, hooks or attributes (see isGitControlPath). */
+export function ensureNotGitControlPath(absolute: string, inputPath: string): void {
+  if (isGitControlPath(absolute)) {
+    throw new Error(`Access denied: ${inputPath} is git's own config, hooks or attributes; file tools do not write there.`)
+  }
+}
+
 /** Throws if `absolute` is a sensitive path. Use to guard write tools. */
 export function ensureNotSensitivePath(absolute: string, inputPath: string): void {
   if (isSensitivePath(absolute)) {
