@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 import { ProviderStore } from '../src/providers/store.js';
-import { planSegmentDurations, sentencesOf, splitBeatText, splitLongShots } from '../src/tools/visual/segmentPlan.js';
+import { offsetBeatTimeline, packShotsIntoClips, planSegmentDurations, segmentCountFor, sentencesOf, splitBeatText, splitLongShots } from '../src/tools/visual/segmentPlan.js';
 import { resolveVideoModelCapabilities, resolveVideoModelProfile } from '../src/tools/visual/videoCapabilities.js';
 import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js';
@@ -441,6 +441,202 @@ await test('generation: 60 s on 30 s clips is two 30 s segments; a 20 s timecode
   assert.equal(timed.result.ok, true, timed.result.output);
   assert.deepEqual(videoTaskBodies(timed.requests).map((body) => body.duration), [10, 10, 8], 'every written second is generated');
   assert.ok(timed.logs.some((line) => /单段上限 15 秒/.test(line)), 'the split is reported');
+});
+
+
+await test('tier ids: dated, router-style and 2.0 ids resolve to their family and L; the platform declaration wins', async () => {
+  for (const id of ['dreamina-seedance-2-5-260901', 'dreamina-seedance-2.5', 'dreamina-seedance-2-5', 'Dreamina-Seedance-2.5-Pro']) {
+    const profile = resolveVideoModelProfile('byteplus', id);
+    assert.equal(profile.family, 'seedance-2.5', id);
+    assert.equal(profile.maxClipSeconds, 30, id);
+    assert.equal(resolveVideoModelLimits('byteplus', id).maxSegmentSeconds, 30, id);
+    assert.equal(normalizeVideoDurationForProvider(45, 'byteplus', id), 30, `${id}: no clip above L`);
+  }
+  for (const id of [SEEDANCE_20, 'dreamina-seedance-2.0', 'dreamina-seedance-2-0']) {
+    const profile = resolveVideoModelProfile('byteplus', id);
+    assert.equal(profile.family, 'seedance-2.0', id);
+    assert.equal(profile.maxClipSeconds, 15, id);
+    assert.equal(normalizeVideoDurationForProvider(30, 'byteplus', id), 15, `${id}: no clip above L`);
+  }
+  // A declaration scoped to the router-style id applies to it, one scoped to another model does not.
+  assert.equal(resolveVideoModelProfile('byteplus', 'dreamina-seedance-2.5', { model: 'dreamina-seedance-2.5', maxClipSeconds: 20 }).maxClipSeconds, 20);
+  assert.equal(resolveVideoModelProfile('byteplus', 'dreamina-seedance-2.5', { model: SEEDANCE_20, maxClipSeconds: 15 }).maxClipSeconds, 30);
+  assert.equal(normalizeVideoDurationForProvider(30, 'byteplus', 'dreamina-seedance-2.5', { model: 'dreamina-seedance-2.5', maxClipSeconds: 20 }), 20);
+  assert.equal(await resolveActiveVideoClipSeconds(await workspace('dreamina-seedance-2.5')), 30, 'router-style id configured');
+  assert.equal(await resolveActiveVideoClipSeconds(await workspace('dreamina-seedance-2.5', { model: 'dreamina-seedance-2.5', maxClipSeconds: 20 })), 20, 'declared for it');
+  assert.equal(await resolveActiveVideoClipSeconds(await workspace('dreamina-seedance-2.5', { model: SEEDANCE_20, maxClipSeconds: 15 })), 30, 'a declaration left over from the previous model is ignored');
+});
+
+await test('just above L: two segments, not more; up to L stays one clip', async () => {
+  for (const L of [15, 30]) {
+    assert.equal(segmentCountFor(L, L), 1, `${L}s on L=${L}`);
+    assert.equal(segmentCountFor(L + 1, L), 2, `${L + 1}s on L=${L}`);
+    assert.deepEqual(planSegmentDurations(L + 1, L), [Math.ceil((L + 1) / 2), Math.floor((L + 1) / 2)]);
+    assert.equal(segmentCountFor(2 * L, L), 2, `${2 * L}s on L=${L}`);
+    assert.deepEqual(classifyVideoRequestLength(`帮我做一段 ${L} 秒的视频，小猫在屋顶看日出`, L), { kind: 'single', seconds: L });
+    assert.deepEqual(classifyVideoRequestLength(`帮我做一段 ${L + 1} 秒的视频，小猫在屋顶看日出`, L), { kind: 'long', seconds: L + 1 });
+    // Natural shots just above L pack into two clips.
+    const shots = [8, 8, 8, L + 1 - 24].filter((value) => value > 0).map((duration, index) => ({ title: `s${index + 1}`, duration, storyBeat: `beat ${index + 1}.` }));
+    if (L === 30) assert.equal(packShotsIntoClips(shots, L).length, 2, '31 s of shots on L=30');
+  }
+  const cwd = await workspace(SEEDANCE_25);
+  const key = 'just-above-L';
+  const say = async (text: string, forceIntent = false) => {
+    const outcome = await handleSagaLongVideoWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN', forceIntent });
+    return outcome.handled ? outcome.reply : '';
+  };
+  await say('做一段 31 秒的视频：一只小猫在雨夜的城市里冒险', true);
+  await say('2');
+  await say('开始生成');
+  await say('1');
+  const durationStep = await say('1');
+  assert.match(durationStep, /识别到 31 秒（约 2 段）/, durationStep);
+  await say('取消');
+});
+
+await test('cinematic shot planning: natural shots packed into as few clips as fit, more clips on L=15', () => {
+  const natural = [6, 8, 5, 9, 7, 10, 6, 9];
+  const shots = natural.map((duration, index) => ({
+    title: `Shot ${index + 1}`,
+    duration,
+    storyBeat: `0–2s: beat ${index + 1} starts. 2s–end: beat ${index + 1} resolves.`,
+    camera: index % 2 ? 'close-up' : 'wide',
+  }));
+  const on30 = packShotsIntoClips(shots, 30);
+  const on15 = packShotsIntoClips(shots, 15);
+  for (const [clips, L] of [[on30, 30], [on15, 15]] as const) {
+    assert.equal(clips.reduce((sum, clip) => sum + (clip.duration ?? 0), 0), 60, `L=${L}: total kept`);
+    assert.ok(clips.every((clip) => (clip.duration ?? 0) <= L && (clip.duration ?? 0) >= 4), `L=${L}: every clip within 4..L (${clips.map((clip) => clip.duration)})`);
+    const beats = clips.map((clip) => clip.storyBeat).join(' ');
+    natural.forEach((_, index) => assert.match(beats, new RegExp(`beat ${index + 1} starts`), `L=${L}: shot ${index + 1} kept`));
+  }
+  assert.equal(on30.length, 3, `fewest clips on L=30 (${on30.map((clip) => clip.duration)})`);
+  assert.ok(on15.length > on30.length, 'the same story takes more clips on L=15');
+  assert.ok(on30.length < shots.length, 'not one clip per shot');
+  // Inside a packed clip each shot keeps its own length, framing and timeline.
+  const first = on30[0]!;
+  assert.match(first.storyBeat ?? '', /Shot 1 \(0–6s, wide\): 0–2s: beat 1 starts\. 2–6s: beat 1 resolves\./);
+  assert.match(first.storyBeat ?? '', /Hard cut to Shot 2 \(6–14s, close-up\): 6–8s: beat 2 starts\. 8–14s: beat 2 resolves\./);
+  assert.match(first.storyBeat ?? '', /same characters, wardrobe, props, place and light/);
+  // Not 30-second monolithic shots: no packed shot is longer than its natural length.
+  assert.doesNotMatch(on30.map((clip) => clip.storyBeat).join(' '), /\(0–30s/);
+  // A shot that opens with a fade or a shader transition starts a new clip.
+  const withFade = shots.map((shot, index) => (index === 2 ? { ...shot, transitionKind: 'fade-black' } : shot));
+  const faded = packShotsIntoClips(withFade, 30);
+  assert.equal(faded[1]!.transitionKind, 'fade-black');
+  assert.match(faded[1]!.storyBeat ?? '', /beat 3 starts/);
+  assert.doesNotMatch(faded[0]!.storyBeat ?? '', /beat 3/);
+  // A user timeline, shots without a length, or a shot above L are left as they are.
+  const timed = shots.map((shot, index) => ({ ...shot, timecodeStart: index * 10, timecodeEnd: index * 10 + 10 }));
+  assert.equal(packShotsIntoClips(timed, 30).length, timed.length);
+  assert.equal(packShotsIntoClips([{ title: 'a', storyBeat: 'x' }, { title: 'b', storyBeat: 'y' }], 30).length, 2);
+  assert.equal(offsetBeatTimeline('0–3s: a. 3-7 s: b. 7s–end: c. 2.5–4秒：d。3-4 people wait.', 10, 12), '10–13s: a. 13–17s: b. 17–22s: c. 12.5–14秒：d。3-4 people wait.');
+});
+
+await test('cinematic generation: natural shots render in fewer clips on L=30; a long fallback clip is several shots', async () => {
+  const natural = [6, 8, 5, 9, 7, 10, 6, 9];
+  const shots = natural.map((duration, index) => ({
+    title: `Shot ${index + 1}`,
+    duration,
+    storyBeat: `0–2s: the kitten ${['runs', 'leaps', 'pauses', 'climbs', 'turns', 'sprints', 'sits', 'looks up'][index]} in the rain. 2s–end: it moves on through the alley.`,
+    visualPrompt: `Rainy alley at night, kitten, shot ${index + 1}`,
+    camera: index % 2 ? 'close-up' : 'wide tracking',
+  }));
+  const action = { prompt: 'A kitten crosses a rainy city at night.', story: 'A kitten crosses a rainy city at night.', totalDuration: 60, ratio: '16:9', generateAudio: false, identitySource: 'text_only', shots };
+  const on25 = await runHermeticSaga(action, { videoModel: 'dreamina-seedance-2.5' });
+  assert.equal(on25.result.ok, true, on25.result.output);
+  const durations25 = videoTaskBodies(on25.requests).map((body) => body.duration);
+  assert.equal(durations25.length, 3, `three clips on L=30 (${durations25})`);
+  assert.ok(durations25.every((value) => value <= 30));
+  assert.equal(durations25.reduce((sum, value) => sum + value, 0), 60);
+  const text25 = JSON.stringify(videoTaskBodies(on25.requests)[0]);
+  assert.match(text25, /Hard cut to Shot 2/, 'the clip is cut inside');
+  const on20 = await runHermeticSaga(action, {});
+  const durations20 = videoTaskBodies(on20.requests).map((body) => body.duration);
+  assert.ok(durations20.length > durations25.length, `more clips on L=15 (${durations20})`);
+  assert.ok(durations20.every((value) => value <= 15));
+  assert.equal(durations20.reduce((sum, value) => sum + value, 0), 60);
+
+  // No planned shots: two 30 s clips, each written as several camera shots, not one held take.
+  const fallback = await runHermeticSaga(
+    { prompt: 'A kitten crosses a rainy city at night. It reaches a rooftop. The sun rises over the roofs. It curls up and sleeps.', totalDuration: 60, ratio: '16:9', generateAudio: false },
+    { videoModel: SEEDANCE_25 },
+  );
+  assert.equal(fallback.result.ok, true, fallback.result.output);
+  assert.deepEqual(videoTaskBodies(fallback.requests).map((body) => body.duration), [30, 30]);
+  assert.match(JSON.stringify(videoTaskBodies(fallback.requests)[0]), /3 camera shots joined by hard cuts/);
+});
+
+await test('Saga plan prompt: natural shot lengths, clips up to the current L (zh, L=30 and L=15)', async () => {
+  for (const [model, L] of [[SEEDANCE_25, 30], [SEEDANCE_20, 15]] as const) {
+    const cwd = await workspace(model);
+    const key = `plan-${model}`;
+    const say = (text: string, forceIntent = false) => handleSagaLongVideoWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN', forceIntent });
+    await say('一只小猫在雨夜的城市里冒险，最后在屋顶看日出', true);
+    await say('2');
+    await say('开始生成');
+    await say('1');
+    await say('1');
+    await say('60秒');
+    const done = await say('不加');
+    assert.equal(done.handled, false);
+    const prompt = done.handled ? '' : done.prompt ?? '';
+    assert.match(prompt, /SHOT LENGTHS — Cut like an editor/);
+    assert.match(prompt, new RegExp(`usually 4–15 s`));
+    assert.match(prompt, new RegExp(`each clip at most ${L} s with hard cuts inside it \\(about ${segmentCountFor(60, L)} clip\\(s\\) for 60 s\\)`));
+    assert.match(prompt, new RegExp(`never write a shot longer than ${L} s`));
+    assert.doesNotMatch(prompt, /roughly equal length/, 'no clock-cut shots');
+  }
+});
+
+await test('model change mid-wizard: L is read again; menus, counts, speech checks and the plan follow the new model', async () => {
+  const cwd = await workspace(SEEDANCE_25);
+  const key = 'tier-change';
+  const say = async (text: string, forceIntent = false) => {
+    const outcome = await handleSagaLongVideoWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN', forceIntent });
+    return outcome;
+  };
+  const line = '“今天的雨好大呀，我们要不要先找个安静的地方躲一躲，等雨停了以后再一起出发，沿着那条长长的小巷走到最高的屋顶上去看日出，好不好呀？”';
+  await say(`主体模式：有主角。身份来源：纯文字。\n[0-20秒] 小猫说：${line}\n[20-28秒] 小猫跳上屋顶。`, true);
+  await say('开始生成');
+  await say('1');
+  const on30 = await say('1');
+  const reply30 = on30.handled ? on30.reply : '';
+  assert.match(reply30, /每段画面最长 30 秒/);
+  assert.doesNotMatch(reply30, /语速提示/, 'a 20 s segment holds the line on L=30');
+  // The tier moves to the 15 s model while the wizard waits.
+  await configureVideo(cwd, SEEDANCE_20);
+  const on15 = await say('嗯');
+  const reply15 = on15.handled ? on15.reply : '';
+  plain(reply15, 'tier change note');
+  assert.match(reply15, /每段画面最长 15 秒（之前 30 秒）/);
+  assert.match(reply15, /每段画面最长 15 秒，我会按需要/);
+  assert.match(reply15, /"1分钟"（约 4 段）/);
+  assert.match(reply15, /段 1 第 1\/2 部分（10 秒）的对白/, 'speech rate is checked against the clips the new model makes');
+  await say('28秒');
+  const done = await say('不加');
+  assert.equal(done.handled, false);
+  const prompt = done.handled ? '' : done.prompt ?? '';
+  assert.match(prompt, /each clip at most 15 s/);
+  assert.doesNotMatch(prompt, /at most 30 s/, 'nothing planned above the new L');
+});
+
+
+await test('single-clip wizard: a model change mid-wizard re-reads the lengths and the model', async () => {
+  const cwd = await workspace(SEEDANCE_25);
+  const key = 'single-clip-tier-change';
+  await handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text: '生成一个赛博朋克产品发布视频', locale: 'zh-CN' });
+  const ask = await handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text: '直接生成', locale: 'zh-CN' });
+  assert.match(ask.handled ? ask.reply : '', /5、10、15、20、30 秒/);
+  await configureVideo(cwd, SEEDANCE_20);
+  const refused = await handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text: '30', locale: 'zh-CN' });
+  assert.equal(refused.handled, true, '30 s is no longer one clip');
+  assert.match(refused.handled ? refused.reply : '', /4、5、10、15 秒/);
+  const chosen = await handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text: '15', locale: 'zh-CN' });
+  assert.equal(chosen.handled, false);
+  const prompt = chosen.handled ? '' : chosen.prompt ?? '';
+  assert.match(prompt, /duration: 15/);
+  assert.match(prompt, new RegExp(`model "${SEEDANCE_20}"`), 'the clip is made with the model configured now');
 });
 
 console.log(`\n  ✔ ${passed} video duration checks passed`);

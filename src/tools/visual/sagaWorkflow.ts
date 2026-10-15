@@ -26,7 +26,7 @@ import { extractBriefAspectRatio, normalizeAspectRatio } from './aspectRatio.js'
 import { extractSagaDialogueLines } from './sagaLanguageDirector.js';
 import { parseSagaBriefGlobals, stripBriefNoise } from './sagaBriefGlobals.js';
 import { resolveActiveVideoProfile } from './activeVideoModel.js';
-import { segmentCountFor, splitLongShots } from './segmentPlan.js';
+import { NATURAL_SHOT_MAX_SECONDS, segmentCountFor, splitLongShots } from './segmentPlan.js';
 import type { VideoModelProfile } from './videoCapabilities.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
@@ -1082,6 +1082,11 @@ function combinedStoryText(state: SagaWorkflowState): string {
 
 // ─── Replies ─────────────────────────────────────────────────────────────
 
+/** Longest shot the planner is asked to write: a natural shot length, within the model's clip. */
+function naturalShotMax(state: SagaWorkflowState): number {
+  return Math.max(state.minClipSeconds, Math.min(NATURAL_SHOT_MAX_SECONDS, state.maxClipSeconds));
+}
+
 function buildModelLine(state: SagaWorkflowState): string {
   // L of the active model; no model or provider name: users see what
   // happens, not which vendor runs it.
@@ -1833,7 +1838,8 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '    Action verbs (use these — not "stands", "is", "looks"): walks, steps, turns, lifts, reaches, drops, catches, leaps, kneels, scatters, spins, opens, closes, pushes, pulls, rises, descends, glides, twirls, summons, releases, shatters.',
     '    Always include continuous environmental motion when the story actually contains moving elements: hair tossed by wind, fabric/cape flowing, particles drifting, rain streaks, fog rolling, light flickering, water rippling, dust motes, leaves falling, fireflies, mist rising, smoke curling. Do not force camera motion or background motion when the user explicitly locks the camera or wants a static tableau. In multi-city walking scenes, keep the camera stable and let only the subject and environment move naturally.',
     '    Always describe at least ONE deliberate body movement per ~3 s of clip duration — never let a shot be a single static pose.',
-    `    Each shot is ONE generated clip of at most ${state.maxClipSeconds} s. Use the fewest shots that fit: ${segmentCountFor(targetDuration, state.maxClipSeconds, state.minClipSeconds)} shot(s) of roughly equal length for ${targetDuration} s. Inside a long shot, write several physical action beats on its timeline instead of holding one pose.`,
+    `    SHOT LENGTHS — Cut like an editor, not by the clock: each shot is one camera set-up sized to its beat, usually ${state.minClipSeconds}–${naturalShotMax(state)} s (a quick reaction or insert ${state.minClipSeconds}–6 s, an action or a line of dialogue 6–10 s, a long exchange or a slow reveal up to ${naturalShotMax(state)} s). A spoken line needs about 1 s per ${CHINESE_CHARS_PER_SECOND} Chinese characters or ${ENGLISH_WORDS_PER_SECOND} English words, plus a moment to react. Never pad a shot to fill a clip, and never write a shot longer than ${state.maxClipSeconds} s or shorter than ${state.minClipSeconds} s.`,
+    `    The pipeline packs consecutive shots into as few generated clips as fit, each clip at most ${state.maxClipSeconds} s with hard cuts inside it (about ${segmentCountFor(targetDuration, state.maxClipSeconds, state.minClipSeconds)} clip(s) for ${targetDuration} s); a shot whose transitionKind is not "cut" starts a new clip. Keep each character's look identical in every shot.`,
     '    storyBeat may NOT be: identity-preservation rules, generic continuity language, or "the character stands/sits/looks" with no movement. The pipeline rejects boilerplate storyBeats and falls back to story chunks.',
     '4. CINEMATIC VOCABULARY — Use industry terms (35mm/50mm lens, golden hour, volumetric beams, ray-traced reflections, IMAX 70mm grain, Arri Alexa LogC). For camera, prefer ACTIVE camera language: tracking shot, dolly-in, dolly-out, crane down, gimbal arc, whip pan, snorricam, handheld follow, parallax push. Avoid "locked-off" / "static" / "establishing only" unless the scene is genuinely meant to be still.',
     '5. HEAD/TAIL VISUAL ECHO — Write each shot N\'s `transition` as a concrete description of its closing frame (in mid-action, not a freeze); open shot N+1\'s `visualPrompt` with a matching opening-frame description that visually rhymes. The body momentum, gaze/covered-face direction, hair/fabric flow, and camera direction should continue across the cut so the transition feels alive rather than mechanical.',
@@ -1848,7 +1854,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '7. SCENE-PRIORITY — storyBeat dominates the full clip duration; transition field describes only the closing 0.5 s.',
     '8. PHYSICS & FAILURE GUARDS — The aesthetic lock auto-appends physics anchors (no morphing/flickering/melting, anatomically correct).',
     '9. SCENE-JUMP HANDLING — When the story has a hard location jump, insert at least one transition shot that bridges the two locations through a shared visual element.',
-    `10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot must be at most ${state.maxClipSeconds} s (a timecoded user segment that is longer is split by the pipeline, never shortened).`,
+    `10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot is ${state.minClipSeconds}–${state.maxClipSeconds} s, usually no more than ${naturalShotMax(state)} s (a timecoded user segment longer than ${state.maxClipSeconds} s is split by the pipeline, never shortened).`,
     `11. SUBTITLE MODE — User selected ${state.subtitleMode ?? 'auto'}: ${state.subtitleMode === 'always' ? 'render readable subtitles/captions for dialogue and voiceover, preserving original text/language.' : state.subtitleMode === 'off' ? 'do not render dialogue as on-screen subtitles; keep dialogue as audio/lip-sync unless the user explicitly authored a subtitle line.' : 'only add subtitles/on-screen text when the user explicitly requested them.'}`,
   );
 
@@ -2015,7 +2021,38 @@ function newState(input: SagaWorkflowInput, profile: VideoModelProfile): SagaWor
   };
 }
 
+/**
+ * The active model's clip limits applied to a wizard in progress. The video
+ * model can change while the wizard waits (a new tier is synced into
+ * providers.json), so L is read again on every reply: menus, segment counts,
+ * speech-rate checks and the final plan always use the current model's L, and
+ * nothing is planned above it. Returns a note for the user when L changed.
+ */
+async function refreshClipLimits(state: SagaWorkflowState): Promise<string | undefined> {
+  const profile = await resolveActiveVideoProfile(state.cwd).catch(() => undefined);
+  if (!profile) return undefined;
+  if (profile.maxClipSeconds === state.maxClipSeconds && profile.minClipSeconds === state.minClipSeconds) return undefined;
+  const previous = state.maxClipSeconds;
+  state.maxClipSeconds = profile.maxClipSeconds;
+  state.minClipSeconds = profile.minClipSeconds;
+  if (previous === profile.maxClipSeconds) return undefined;
+  const total = state.targetDuration ?? state.prefilledDuration;
+  const segments = total ? segmentCountFor(total, state.maxClipSeconds, state.minClipSeconds) : undefined;
+  return pickLocale(state.locale, {
+    zh: `ℹ️ 视频服务已更新：每段画面最长 ${state.maxClipSeconds} 秒（之前 ${previous} 秒）${segments ? `，${total} 秒的视频现在约 ${segments} 段` : ''}。分段已按新上限重新计算。`,
+    en: `ℹ️ The video service changed: each segment can now be up to ${state.maxClipSeconds}s (was ${previous}s)${segments ? `; a ${total}s video is now about ${segments} segment${segments === 1 ? '' : 's'}` : ''}. Segments are recalculated for the new limit.`,
+  });
+}
+
 export async function handleSagaLongVideoWorkflow(input: SagaWorkflowInput): Promise<SagaWorkflowOutcome> {
+  pruneExpiredWorkflows();
+  const active = WORKFLOWS.get(normalizeKey(input));
+  const note = active ? await refreshClipLimits(active) : undefined;
+  const outcome = await runSagaWorkflowStep(input);
+  return note && outcome.handled ? { handled: true, reply: `${note}\n\n${outcome.reply}` } : outcome;
+}
+
+async function runSagaWorkflowStep(input: SagaWorkflowInput): Promise<SagaWorkflowOutcome> {
   pruneExpiredWorkflows();
   const key = normalizeKey(input);
   const text = input.text.trim();

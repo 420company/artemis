@@ -887,6 +887,7 @@ Constraints:
 - All nouns (entities) in storyBeat must come from: protagonist, supportingCharacters, props, environments.
 - All verbs should come from the action vocabulary or be natural variants.
 - Each storyBeat must be a TIMELINE: "0–Xs: ... Xs–Ys: ... Ys–end: ..." with at least 2 sub-segments and concrete physical motion in each.
+- When currentStoryBeat is one clip of several camera shots joined by hard cuts ("Shot 1 (0–7s, …): … Hard cut to Shot 2 (7–15s, …): …"), keep that structure: the same number of shots, their time ranges, framings and cuts; rewrite only what happens inside each shot.
 - COMPOSITION DIVERSITY: when the violation reasons mention Rule 4 (or "primary composition repeats"), your rewrite MUST give this shot a DIFFERENT primary action verb AND a DIFFERENT primary target object from the neighboring shots. Look at nextShotHint and any prior shot beats in the context — pick an action / target combo that does NOT overlap with theirs. If the context shows another shot already does "card raised to lips", do NOT also write that pose; pick "card slides across felt" or "she leans toward the lamp" or another distinct beat.
 - All physical contact in the rewrite must obey the spatialReality block (when supplied). No effects without physical cause; body parts contact surfaces only at matching heights.
 - The "transition" closing-frame must visually hook into the user's next shot (which is described in the context).`;

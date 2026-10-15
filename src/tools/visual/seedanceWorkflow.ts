@@ -541,6 +541,20 @@ async function multimodalVideoModel(cwd: string): Promise<{ model: string; clipC
   return multimodal ? { model, clipChoices: singleClipChoices(profile) } : undefined;
 }
 
+/**
+ * The current video model and its clip lengths for a wizard in progress: the
+ * model can change while the wizard waits (a new tier is synced into
+ * providers.json), and the clip is made with the model configured now, never
+ * longer than it renders.
+ */
+async function refreshClipModel(state: SeedanceWorkflowState): Promise<void> {
+  const current = await multimodalVideoModel(state.cwd).catch(() => undefined);
+  if (!current) return;
+  state.model = current.model;
+  state.clipChoices = current.clipChoices;
+  if (state.duration !== undefined) state.duration = Math.min(state.duration, Math.max(...current.clipChoices));
+}
+
 export async function handleSeedanceMultimodalWorkflow(
   input: SeedanceWorkflowInput,
 ): Promise<SeedanceWorkflowOutcome> {
@@ -555,6 +569,7 @@ export async function handleSeedanceMultimodalWorkflow(
 
   if (state) {
     if (input.locale) state.locale = input.locale;
+    await refreshClipModel(state);
 
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);

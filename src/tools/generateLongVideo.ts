@@ -64,7 +64,7 @@ import {
   renderSagaProject,
 } from './visual/sagaRenderer/index.js';
 import { extractOpeningFramingRegex, formatOpeningFramingBlock } from './visual/sagaFraming.js';
-import { planSegmentDurations, splitLongShots } from './visual/segmentPlan.js';
+import { naturalShotLengths, packShotsIntoClips, planSegmentDurations, splitBeatText, splitLongShots } from './visual/segmentPlan.js';
 import { videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
 import { formatGlobalBriefExcerpt, parseSagaBriefGlobals, stripBriefNoise, worldAnchorLinesFor } from './visual/sagaBriefGlobals.js';
@@ -794,7 +794,8 @@ function looksLikeIdentityRuleBoilerplate(value: string | undefined): boolean {
   return IDENTITY_RULE_BOILERPLATE_PATTERNS.some((re) => re.test(normalized));
 }
 
-function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number): string {
+/** A motion timeline for one shot; `offset` places it inside a clip of several shots (times then count from the clip's start). */
+function motionTimelineFor(storyChunk: string, duration: number, index: number, offset?: number): string {
   const first = Math.max(1, Math.floor(duration * 0.35));
   const second = Math.max(first + 1, Math.floor(duration * 0.7));
   const actionSets = [
@@ -803,7 +804,29 @@ function buildMotionTimelineFallback(storyChunk: string, duration: number, index
     ['enters mid-stride with one foot already moving', 'rotates around the prop or light source with visible parallax', 'finishes in a moving silhouette that points into the next shot'],
   ];
   const actions = actionSets[index % actionSets.length]!;
-  return `0–${first}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${first}–${second}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${second}–end: the protagonist ${actions[2]}. Scene intent: ${storyChunk}`;
+  const at = (seconds: number) => String((offset ?? 0) + seconds);
+  return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${at(first)}–${at(second)}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${at(second)}–${offset === undefined ? 'end' : `${at(duration)}s`}: the protagonist ${actions[2]}. Scene intent: ${storyChunk}`;
+}
+
+// Framings for the camera shots inside a long fallback clip, so a 30 s clip
+// is cut like a scene (wide, closer, reaction) instead of one held take.
+const FALLBACK_SHOT_FRAMINGS = ['wide establishing shot', 'medium tracking shot', 'close-up on the action', 'over-the-shoulder reverse shot', 'low-angle follow shot'];
+
+function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number): string {
+  // A clip longer than a natural shot is several camera shots cut together
+  // inside the clip, each with its slice of the story.
+  const shots = naturalShotLengths(duration);
+  if (shots.length <= 1) return motionTimelineFor(storyChunk, duration, index);
+  const slices = splitBeatText(storyChunk, shots.length);
+  let cursor = 0;
+  const parts = shots.map((seconds, shotIndex) => {
+    const start = cursor;
+    cursor += seconds;
+    const framing = FALLBACK_SHOT_FRAMINGS[(index + shotIndex) % FALLBACK_SHOT_FRAMINGS.length]!;
+    const slice = (slices[shotIndex] ?? storyChunk).replace(/^Continue the same moment[^:]*:\s*/, '');
+    return `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): ${motionTimelineFor(slice, seconds, index + shotIndex, start)}`;
+  });
+  return [`One clip of ${shots.length} camera shots joined by hard cuts inside the clip; the same characters, wardrobe, props, place and light carry across every cut.`, ...parts].join(' ');
 }
 
 /** Where each segment starts on the timeline: its timecode when it has one, else after the previous one. */
@@ -1786,6 +1809,18 @@ export async function executeGenerateLongVideo(
       storyboardShots = splitLongShots(storyboardShots, limits.maxSegmentSeconds, limits.minSegmentSeconds);
       if (storyboardShots.length > before) {
         toolLog(`✂️ 有 ${storyboardShots.length - before} 个镜头超过单段上限 ${limits.maxSegmentSeconds} 秒，已按句子拆成更短的连续段落（共 ${storyboardShots.length} 段）。`);
+      }
+      // Planned shots keep their natural lengths; consecutive ones share a
+      // generated clip (cut inside it) up to the model's longest clip, so a
+      // longer clip means fewer clips, not longer shots. A timeline the user
+      // wrote keeps one clip per written segment, and a raw passthrough
+      // script goes out as written.
+      if (timestampedStoryShots.length < 2 && !rawPassthrough) {
+        const shotCount = storyboardShots.length;
+        storyboardShots = packShotsIntoClips(storyboardShots, limits.maxSegmentSeconds);
+        if (storyboardShots.length < shotCount) {
+          toolLog(`🎞️ ${shotCount} 个镜头合并为 ${storyboardShots.length} 段生成（每段最长 ${limits.maxSegmentSeconds} 秒，段内按镜头切换）。`);
+        }
       }
     }
     const sanitizedShots = storyboardShots?.map((shot) => ({

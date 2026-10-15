@@ -118,6 +118,13 @@ const DIRECTED_PROMPT_CHARS = 2600;
 const SEEDANCE_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
 const COMMON_RATIOS = ['16:9', '9:16', '1:1'] as const;
 const RESOLUTIONS = ['480p', '720p', '1080p'] as const;
+/**
+ * L does not depend on resolution or aspect ratio: no Seedance 2.x clip
+ * limit published so far varies with either, so every resolution and ratio a
+ * profile lists renders clips up to its L. A provider that caps clips lower
+ * at some resolution declares the lower figure in providers.json
+ * (visualProfile.video.capabilities.maxClipSeconds, or fewer resolutions).
+ */
 /** Unknown models: a conservative clip length most video APIs accept. */
 const OTHER_MAX_CLIP_SECONDS = 10;
 
