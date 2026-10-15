@@ -15,6 +15,8 @@ export type VideoModelLimits = {
   canGenerateAudio: boolean;
   /** Longest prompt Artemis sends this model. */
   maxPromptChars: number;
+  /** Cuts between camera shots inside one clip (videoCapabilities.ts). */
+  multiShot: boolean;
 };
 
 export function resolveVideoModelLimits(
@@ -32,5 +34,6 @@ export function resolveVideoModelLimits(
     referenceInputs: profile.referenceInputs,
     canGenerateAudio: profile.canGenerateAudio,
     maxPromptChars: profile.maxPromptChars,
+    multiShot: profile.multiShot,
   };
 }

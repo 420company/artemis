@@ -38,6 +38,8 @@ export type HermeticOptions = {
   rejectVideoCreates?: number[];
   /** What the platform declares for the video model (visualProfile.video.capabilities). */
   videoCapabilities?: Record<string, unknown>;
+  /** The configured video model id (default: the 2.0 id). */
+  videoModel?: string;
 };
 
 const fixtureDir = path.join(root, 'fixtures');
@@ -104,7 +106,7 @@ async function configure(cwd: string, options: HermeticOptions): Promise<void> {
       provider: 'byteplus',
       apiKey: 'hermetic-key',
       baseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
-      model: BYTEPLUS_SEEDANCE_2_PRO_MODEL,
+      model: options.videoModel ?? BYTEPLUS_SEEDANCE_2_PRO_MODEL,
       defaultParams: { duration: '5s', resolution: '720p', quality: 'standard', style: 'realistic', format: 'mp4', framerate: '24fps', watermark: false },
       ...(options.videoCapabilities ? { capabilities: options.videoCapabilities } : {}),
     },

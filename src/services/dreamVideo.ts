@@ -11,6 +11,7 @@ import {
 import { createVisualProvider } from '../tools/visual/providers/interface.js'
 import { buildDirectedVideoPrompt } from '../tools/visual/videoDirector.js'
 import { normalizeVideoDurationForProvider } from '../tools/visual/videoParams.js'
+import { videoCapabilityOverridesFromConfig } from '../tools/visual/videoCapabilities.js'
 import {
   analyzeNarrative,
   buildSagaConstitution,
@@ -135,6 +136,7 @@ export async function generateDreamVideo(options: GenerateDreamVideoOptions): Pr
     options.duration ?? DEFAULT_DREAM_VIDEO_DURATION,
     videoConfig.provider,
     model,
+    videoCapabilityOverridesFromConfig(configured.config),
   )
   const ratio = options.ratio ?? DEFAULT_DREAM_VIDEO_RATIO
   options.onStatus?.(t('🌙 分析梦境日记的主角 / “上帝”…', '🌙 Analyzing the dream journal protagonist / “god”…'))
