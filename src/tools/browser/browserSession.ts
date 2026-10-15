@@ -40,6 +40,7 @@ import {
   runHostForeground,
   hostCall,
   liveDir,
+  readControl,
   readJsonFile,
   releaseTab,
   secretPauseMs,
@@ -699,10 +700,20 @@ export async function redactShown(text: string): Promise<string> {
  * Before this process exits: in live mode, disconnect from the shared
  * browser (it stays open for the owner and the next run). Otherwise nothing.
  */
-/** Local pages a turn leaves open go back to about:blank: no later run or turn gets one (fileGuard.ts). */
+/**
+ * Pages a turn leaves that are not http(s) (a file: page, and what one may
+ * have opened: about:blank, blob: or data: documents that inherit its
+ * origin) go back to a fresh about:blank: no later run or turn gets one
+ * (fileGuard.ts). A tab the owner holds right now (a live takeover) is left
+ * as it is.
+ */
 async function blankLocalPages(pages: Page[]): Promise<void> {
-  for (const page of pages) {
-    if (page.isClosed() || !/^file:/i.test(page.url())) continue;
+  const dir = _liveBrowser ? liveDir() : undefined;
+  const control = dir ? readControl(dir) : undefined;
+  for (const page of new Set(pages)) {
+    if (page.isClosed() || /^https?:/i.test(page.url())) continue;
+    if (control?.mode === 'user' && control.targetId && (await targetIdOf(page).catch(() => undefined)) === control.targetId) continue;
+    // A fresh about:blank from the browser itself: an opaque origin, nothing of the page before.
     await page.goto('about:blank', { timeout: 5_000 }).catch(() => page.close().catch(() => undefined));
   }
 }

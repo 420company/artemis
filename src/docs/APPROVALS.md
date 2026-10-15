@@ -90,25 +90,44 @@ shortened as getopt allows: `sudo --chd`) is followed for the command it
 runs, for servers and for deletes and writes alike. An unknown one makes
 the directory unknown, and so do `sudo -i` / `--login` (a login shell in
 the target user's home) and `sudo -R` / `--chroot`; any relative target
-after that (`find . -delete`, `tee x`) asks. `su -c`, `flock` and
-`systemd-run` are read into: the command they run is classified like any
-other, in the directory it runs in. Other programs that run a command of
-their own (`unshare`, `nsenter`, `firejail`, `bwrap`, `tmux`, `screen`,
-`at`, `chroot`, `watch`, …) are not followed: a word that deletes, writes
-or serves anywhere in their arguments (or in a string, a here-string or a
+after that (`find . -delete`, `tee x`) asks.
+
+`su -c`, `runuser` (`-c` or `-u USER -- CMD`), `flock` and `systemd-run`
+are read into: the command they run is classified like any other, in the
+directory it runs in (`su -`/`-l`/`--login` and its shortened forms, a
+system service without `-d`, `-M`/`-H`, `RootDirectory=`: not known; a
+later `--working-directory` or `-p WorkingDirectory=` wins over `-d`).
+`~` and `$HOME` in `su`/`runuser` code are the other user's unless `-m`/
+`-p`. Reading into them only ever adds asks: when an option is not one the
+classifier knows, or the command they run is not one it reads, the broad
+scan below applies too. Other programs that run a command of their own
+(`unshare`, `nsenter`, `firejail`, `bwrap`, `tmux`, `screen`, `at`,
+`chroot`, `watch`, …) are not followed: a word that deletes, writes or
+serves anywhere in their arguments (or in a string, a here-string or a
 here-document they are given; also given as a path such as `/bin/rm`)
 asks: `rm`, `tee`, `dd`, `mv`, `cp`, `chmod`, `chown`, `truncate`,
-`shred`, `trash`, `sed`, `curl`, `wget`, `rsync`, `git`, `find`, a
-redirect, anything the delete check treats as destructive (`-delete`,
-`--delete`, `of=`, inline code that writes), a web server. `xargs` counts
-by the command it runs (`xargs grep install` needs nothing, `xargs rm`
-asks). Commands piped into `at`, `batch` or `expect` (or read by `at` from
-a file) run like a pipe into a shell: high risk. A program the classifier
-does not know (or a script run by an interpreter or a shell: `bash
-deploy.sh …`, `node run.js …`) asks when such a word is its first
-operand, or starts an argument holding a whole command (a string with
-spaces, or a part after `;`, `&`, `|`): `./deploy.sh rm …`, `some-runner
-"cd x; rm y"`.
+`shred`, `trash`, `rsync`, `aria2c`, `yt-dlp`, a redirect, anything the
+delete check treats as destructive (`-delete`, `--delete`, `of=`, inline
+code that writes), and the writing uses of others (`git clean`/`rm`/`mv`/
+`reset --hard`/`checkout --`, `sed -i`, `curl -o`/`-O`, `wget` unless to
+stdout, `find -delete`/`-exec`); read-only uses (`watch git status`,
+`watch -n5 curl -s …`, `tmux new -d "git pull"`) do not. `xargs` counts by
+the command it runs, read past its own options (GNU `-i`, `-l`, `-e` take
+an attached value only; BSD `-J`, `-R`, `-S` the next word) and past
+wrappers (`xargs nice cp`); options it does not know fall back to the
+broad scan. Commands piped into `at`, `batch` or `expect` (or read by `at`
+from a file) run like a pipe into a shell: high risk. A program the
+classifier does not know (or a script run by an interpreter or a shell:
+`bash deploy.sh …`, `node run.js …`, `python -W ignore run.py …`) asks when
+such a word is its first operand, or starts an argument holding a whole
+command (a string with spaces, or a part after `;`, `&`, `|`):
+`./deploy.sh rm …`, `some-runner "cd x; rm y"`.
+
+A web server run as another user (`sudo`, `doas`, `su`, `runuser`, a
+system service through `systemd-run`, `-p User=`) asks at medium risk
+("以另一个用户的身份启动本地网页服务"): it serves what that user can read.
+Only `flock` and `systemd-run --user` (without a user switch) stay quiet
+for a loopback server on the workspace.
 
 **Directories.** A `cd` to a static path is followed. A subshell (`(cd x
 && …)`), `cd -`, `popd` or a cd that fails puts the shell back where it
@@ -136,14 +155,18 @@ same context) opens only when its real path is inside the workspace the
 current run's browser tools work in and outside the protected
 directories, and a local subresource only for a page that is itself local
 (an http(s) page loads no local file). A download of a local file outside
-it is refused the same way, and a file is served from the real path that
-was checked (a link swapped in afterwards is not followed). The workspace
+it is refused the same way, and the request goes on to the real path
+that was checked, through the browser's own loader (a link swapped in
+afterwards is not followed; MIME, large files and media ranges as usual). The workspace
 is replaced, never added to, by each browser_navigate / browser_tabs (from
 the tool's own cwd, once the call passed the live browser's gate) and
-cleared at the end of every agent turn (`runAgent`) and when the run lets
-the browser go; the local pages the turn left go back to about:blank then
-(in the shared live browser, the run's own tabs, including the one kept
-for the owner and the next run). So a page left from another run or turn
+cleared at the end of every agent turn (`runAgent`, and the legacy
+`think` loop chat bridges and the interactive CLI use) and when the run
+lets the browser go; every page the turn left that is not http(s) (a
+local page, and the about:blank, blob: or data: documents one may have
+opened) goes back to a fresh about:blank then (in the shared live
+browser, the run's own tabs, including the one kept for the owner and the
+next run; a tab the owner holds in a takeover is left alone). So a page left from another run or turn
 cannot load a later run's files, and a run that only clicks or runs scripts
 (no browser_navigate) opens nothing local. There is one workspace per
 engine process: browser tools of one process running at the same time

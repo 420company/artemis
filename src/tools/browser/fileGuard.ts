@@ -14,7 +14,7 @@
  */
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { BrowserContext, Route } from 'playwright';
 import { isAlwaysPrivatePath } from '../../utils/fs.js';
 
@@ -43,6 +43,27 @@ export function setBrowserWorkspace(cwd: string): void {
 export function releaseBrowserWorkspace(): void {
   current = undefined;
   for (const state of states) state.root = undefined;
+}
+
+/** Agent turns going on in this process (a sub-agent's turn runs inside its parent's). */
+let turns = 0;
+
+/**
+ * An agent turn begins (runAgent, and the legacy think loop chat bridges and
+ * the interactive CLI use); call what it returns when the turn ends. At the
+ * end of the outermost turn the browser's workspace closes and the turn's
+ * local pages go back to about:blank (browserSession.endBrowserTurn).
+ */
+export function enterBrowserTurn(): () => Promise<void> {
+  turns++;
+  let left = false;
+  return async () => {
+    if (left) return;
+    left = true;
+    turns = Math.max(0, turns - 1);
+    if (turns > 0 || current === undefined) return;
+    await import('./browserSession.js').then((m) => m.endBrowserTurn()).catch(() => releaseBrowserWorkspace());
+  };
 }
 
 /** Whether a workspace is set (a browser tool ran in this turn). */
@@ -101,9 +122,10 @@ async function decide(route: Route, root: string | undefined): Promise<void> {
     await route.abort('accessdenied').catch(() => undefined);
     return;
   }
-  // A file is served from the real path that was checked, so a link swapped in after the check is
-  // not followed; a folder (its listing) goes on as asked.
-  await (verdict.real && verdict.file ? route.fulfill({ path: verdict.real }) : route.continue()).catch(() => route.abort('accessdenied').catch(() => undefined));
+  // The request goes on to the real path that was checked (a link swapped in after the check is not
+  // followed), through the browser's own loader: its MIME sniffing, ranges for media, no copy in memory.
+  const target = verdict.real && verdict.file ? pathToFileURL(verdict.real).href : undefined;
+  await (target && target !== route.request().url() ? route.continue({ url: target }) : route.continue()).catch(() => route.abort('accessdenied').catch(() => undefined));
 }
 
 /**

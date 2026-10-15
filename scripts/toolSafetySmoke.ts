@@ -247,6 +247,14 @@ const parse = (message: Record<string, any> | undefined): Record<string, any> =>
   check('brain path: once approved, npm_run runs the script (without a shell)', ran.ok !== false && fs.existsSync(path.join(repo, 'RAN')) && asked.length === 1 && /npm run mark/.test(asked[0] ?? ''), { ran, asked })
 }
 
+{
+  // The legacy think loop (chat bridges, the interactive CLI) ends the browser's turn too (tools/browser/fileGuard.ts).
+  const { setBrowserWorkspace, browserWorkspaceSet } = await import('../src/tools/browser/fileGuard.js')
+  setBrowserWorkspace(repo)
+  await runThinkWithToolCalls(repo, [{ id: 'b1', name: 'calculate', args: { expression: '1+1' } }])
+  check('brain path: the end of a think() turn closes the browser\'s workspace', browserWorkspaceSet() === false)
+}
+
 // ── think() on the opt-in runAgent path (#56/#66) ──────────────────────────
 section('think(): legacy by default; the opt-in runAgent adapter is safe')
 {

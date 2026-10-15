@@ -1,6 +1,6 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import { enterIdentityRun, redactIdentitySecretsDeep } from '../security/identityCredentials.js';
-import { browserWorkspaceSet } from '../tools/browser/fileGuard.js';
+import { enterBrowserTurn } from '../tools/browser/fileGuard.js';
 import path from 'node:path';
 import { scrubSecrets } from '../security/credentialStore.js';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
@@ -6807,20 +6807,15 @@ export async function runAgent(
 ): Promise<AgentRunResult> {
   // A sign-up password typed during this run stops being live when the outermost run ends.
   const leaveIdentityRun = enterIdentityRun();
-  agentRunDepth++;
+  // The end of the turn: the browser no longer opens this turn's workspace files (tools/browser/fileGuard.ts).
+  const leaveBrowserTurn = enterBrowserTurn();
   try {
     return await runAgentInner(session, userInput, options);
   } finally {
     leaveIdentityRun();
-    // The end of the turn: the browser no longer opens this turn's workspace files (tools/browser/fileGuard.ts).
-    if (--agentRunDepth === 0 && browserWorkspaceSet()) {
-      await import('../tools/browser/browserSession.js').then((m) => m.endBrowserTurn()).catch(() => undefined);
-    }
+    await leaveBrowserTurn();
   }
 }
-
-/** Runs going on in this process (sub-agents run inside their parent's turn). */
-let agentRunDepth = 0;
 
 async function runAgentInner(
   session: SessionRecord,

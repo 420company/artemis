@@ -4,6 +4,7 @@ import { RUNTIME_CONTEXT_MESSAGE_NAME } from './providers/runtimeContext.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { enterBrowserTurn } from './tools/browser/fileGuard.js';
 import { release as osRelease } from 'node:os';
 import { ProviderStore, createGlobalProviderStore } from './providers/store.js';
 import { resolveArtemisHomeDir, resolveDataRootDir } from './utils/fs.js';
@@ -2568,12 +2569,15 @@ async function thinkTurnLegacy(
 ) {
     const skillSlot: ThinkSkillSlot = {};
     let aborted = false;
+    // The end of the turn closes the browser's workspace (tools/browser/fileGuard.ts), as runAgent's does.
+    const leaveBrowserTurn = enterBrowserTurn();
     try {
         return await thinkTurn(input, onDeltaOrOptions, maybeOptions, skillSlot);
     } catch (error) {
         aborted = isAbortLikeError(error);
         throw error;
     } finally {
+        await leaveBrowserTurn();
         // Background, after the reply: only a verified turn teaches a skill.
         finishSkillRun(skillSlot.handle, {
             userRequest: skillSlot.userRequest ?? input,
