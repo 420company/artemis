@@ -36,6 +36,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { allowBrowserWorkspace } from './fileGuard.js';
 import {
   getActivePage,
   closeActivePage,
@@ -177,21 +178,35 @@ export async function workspacePageUrl(inputPath: string, cwd: string): Promise<
 /**
  * A `file:` URL (also behind `view-source:`) is held to the same rules as
  * `path`: a page inside the workspace, outside the protected directories,
- * opened as its real path. Other URLs are returned as they are.
+ * opened as its real path. The scheme is read as the browser reads it (a
+ * URL parser, which drops tabs and line breaks anywhere and control
+ * characters in front), and a URL holding any of those is refused outright.
+ * Other URLs are returned as they are. Pages a page opens itself go through
+ * the browser's own guard (fileGuard.ts).
  */
 export async function checkedPageUrl(url: string, cwd: string): Promise<string> {
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(url)) throw new Error('the URL holds control characters, tabs or line breaks');
   const trimmed = url.trim();
-  const view = /^view-source:/i.exec(trimmed);
-  const inner = view ? trimmed.slice(view[0].length) : trimmed;
-  if (!/^file:/i.test(inner)) return url;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    if (/file:/i.test(trimmed)) throw new Error('not a URL the browser reads the same way');
+    return url;
+  }
+  if (parsed.protocol === 'view-source:') {
+    const inner = trimmed.replace(/^view-source:/i, '');
+    return `view-source:${await checkedPageUrl(inner, cwd)}`;
+  }
+  if (parsed.protocol !== 'file:') return url;
   let file: string;
   try {
-    file = fileURLToPath(inner);
+    file = fileURLToPath(parsed);
   } catch (err) {
     throw new Error(`not a local file URL (${err instanceof Error ? err.message : String(err)})`);
   }
-  const checked = await workspacePageUrl(file, cwd);
-  return view ? `view-source:${checked}` : checked;
+  return workspacePageUrl(file, cwd);
 }
 
 function fileUrlRefusal(url: string, err: unknown): ToolResult {
@@ -1018,7 +1033,7 @@ onIdentityLiveWindow(() => {
 });
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserNavigate(action, context?.cwd), context?.abortSignal);
+  (allowBrowserWorkspace(context?.cwd), gated(() => runBrowserNavigate(action, context?.cwd), context?.abortSignal));
 export const executeBrowserScreenshot = (action: BrowserScreenshotAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserScreenshot(action, context), context?.abortSignal);
 export const executeBrowserExtract = (action: BrowserExtractAction, context?: ToolExecutionContext) =>
@@ -1032,7 +1047,7 @@ export const executeBrowserFormInput = (action: BrowserFormInputAction, context?
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserEvaluate(action), context?.abortSignal);
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserTabs(action, context?.cwd), context?.abortSignal);
+  (allowBrowserWorkspace(context?.cwd), gated(() => runBrowserTabs(action, context?.cwd), context?.abortSignal));
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
   gated((beforeSecret) => runBrowserType(action, beforeSecret), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>

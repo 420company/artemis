@@ -804,6 +804,25 @@ async function main(): Promise<void> {
       await assert.rejects(() => checkedPageUrl('view-source:file:///etc/passwd', ws), /escapes/);
       await assert.rejects(() => checkedPageUrl('FILE:///etc/passwd', ws), /escapes/);
       await assert.rejects(() => checkedPageUrl('file://otherhost/etc/passwd', ws));
+      // The browser drops tabs and line breaks anywhere and control characters in front: such a URL is refused outright.
+      for (const sneaky of ['fi\nle:///etc/passwd', 'fi\tle:///etc/passwd', '\x01file:///etc/passwd', ' \x00file:///etc/passwd', 'view-source:fi\nle:///etc/passwd', 'file:///etc/pa\rsswd']) {
+        await assert.rejects(() => checkedPageUrl(sneaky, ws), /control characters|escapes/, JSON.stringify(sneaky));
+      }
+      await assert.rejects(() => checkedPageUrl('  file:///etc/passwd', ws), /escapes/);
+      // The browser's own guard for what pages load: inside the workspace only, never for an http page.
+      const { allowBrowserWorkspace, localFileAllowed } = await import('../src/tools/browser/fileGuard.js');
+      allowBrowserWorkspace(ws);
+      const page = pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href;
+      assert.equal(await localFileAllowed(page, { navigation: true }), true);
+      assert.equal(await localFileAllowed(page, { navigation: false, frameUrl: page }), true);
+      assert.equal(await localFileAllowed(page, { navigation: false, frameUrl: 'https://example.com/' }), false);
+      assert.equal(await localFileAllowed(page, { navigation: false }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(outside, 'x.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'sites', 'evil', 'index.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'sites', 'creds', 'index.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'missing.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed('file://otherhost/x', { navigation: true }), false);
+      assert.equal(await localFileAllowed('https://example.com/', { navigation: false }), true);
       assert.equal(await checkedPageUrl('https://example.com/a', ws), 'https://example.com/a');
       assert.equal(await checkedPageUrl('http://127.0.0.1:8731/', ws), 'http://127.0.0.1:8731/');
       const tool = getToolDefinition('browser_navigate') as unknown as { validate: (a: unknown) => string[] };

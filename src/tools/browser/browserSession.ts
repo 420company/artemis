@@ -26,6 +26,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page, Request } from 'playwright';
+import { guardLocalFiles } from './fileGuard.js';
 import { redactIdentitySecrets } from '../../security/identityCredentials.js';
 import type { FingerprintSet } from '../../security/secretFingerprints.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
@@ -283,6 +284,7 @@ async function initContext(): Promise<BrowserContext> {
       _liveBrowser = browser;
       const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      await guardLocalFiles(ctx);
       attachContextListeners(ctx, { live: true });
       _context = ctx;
       return ctx;
@@ -300,6 +302,7 @@ async function initContext(): Promise<BrowserContext> {
       _ephemeralBrowser = browser;
       const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      await guardLocalFiles(ctx);
       attachContextListeners(ctx);
       _context = ctx;
       return ctx;
@@ -379,6 +382,7 @@ async function initContext(): Promise<BrowserContext> {
       // child of this process (it ends with the run), nothing kept or shared.
       ctx = await launchEphemeral();
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      await guardLocalFiles(ctx);
       attachContextListeners(ctx);
       _context = ctx;
       return ctx;
@@ -408,6 +412,7 @@ async function initContext(): Promise<BrowserContext> {
       }
     }
     ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+    await guardLocalFiles(ctx);
     attachContextListeners(ctx);
     _context = ctx;
     return ctx;
