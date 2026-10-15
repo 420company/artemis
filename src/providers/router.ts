@@ -490,6 +490,9 @@ export async function createProviderRouter(
         get supportsImages() {
           return buildCandidates().some((candidate) => candidate.provider.supportsImages === true);
         },
+        get promptCacheMarks() {
+          return buildCandidates().some((candidate) => candidate.provider.promptCacheMarks === true);
+        },
         // Any candidate may serve the request (fallback on failure), so the
         // budget must fit the smallest known window among them.
         get contextWindow() {

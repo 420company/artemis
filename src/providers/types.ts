@@ -39,6 +39,15 @@ export type ProviderConfig = {
    */
   gatewayBridgesImages?: boolean;
   /**
+   * Set by the agent server on profiles that point at the platform gateway
+   * while the gateway takes prompt cache marks: requests then mark where
+   * their stable part ends (`cache_control` on the last content part of the
+   * system message and of the newest stored message), and the gateway turns
+   * the marks into the upstream's own breakpoints or removes them. Also for
+   * an OpenAI-compatible endpoint of the owner's that takes such marks.
+   */
+  promptCacheMarks?: boolean;
+  /**
    * Largest response the model can produce, in tokens. Only used when
    * capabilitiesSource is 'platform'; it then replaces the name-based
    * max_tokens defaults.
@@ -151,6 +160,15 @@ export type ProviderRequestOptions = {
    * Ignored if the provider does not support images.
    */
   imageAttachments?: ImageAttachment[];
+  /**
+   * The same images, for a provider with prompt cache marks: each group in a
+   * user message of its own right after the stored message it was first sent
+   * after (`afterMessageId`; at the end of the history when that message is
+   * gone), so later requests of the run carry it at the same place and the
+   * provider's cache holds it. Only the newest group may be past the
+   * history's newest message; the cache mark then goes on it.
+   */
+  imageGroups?: ImageGroup[];
   /**
    * Gateway vision models the engine's own helper already tried and failed
    * on, for the images in this request. A provider that bridges images sends
@@ -569,8 +587,21 @@ export type ProviderResponse = {
   };
 };
 
+/** Images that go in one message of their own (ProviderRequestOptions.imageGroups). */
+export interface ImageGroup {
+  afterMessageId?: string;
+  images: ImageAttachment[];
+}
+
 export interface ChatProvider {
   readonly supportsNativeToolCalls?: boolean;
+  /**
+   * True when requests carry prompt cache marks (a profile with
+   * promptCacheMarks; routed providers: any candidate). The run then keeps
+   * its tool list and images the same from one request to the next, so the
+   * cached prefix holds.
+   */
+  readonly promptCacheMarks?: boolean;
   /** Model id this provider sends requests to, when known. */
   readonly model?: string;
   /** Context window (tokens) of the model behind this provider, when known. */

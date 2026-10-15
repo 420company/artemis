@@ -289,6 +289,30 @@ export async function rebuildIndex(cwd: string, scope: MemoryScope): Promise<voi
   await atomicWrite(join(dir, INDEX_FILE), `${header}\n\n${lines.join('\n')}\n`)
 }
 
+/**
+ * The index as the system prompt carries it: the most recently updated
+ * entries whose lines fit in `maxChars`, listed by name. Recency only
+ * decides which entries fit; the order never follows it, so updating a
+ * memory without changing its name or description leaves the text, and the
+ * prompt prefix a provider caches, exactly as it was. Adding an entry, or
+ * one falling out because newer ones fill the budget, still changes it.
+ * Empty string when no entries.
+ */
+export async function loadPromptIndexText(cwd: string, scope: MemoryScope, maxChars: number): Promise<string> {
+  const entries = (await listMemories(cwd, scope)).filter((e) => !INDEX_EXCLUDED.has(e.name))
+  const picked: { name: string; line: string }[] = []
+  let size = 0
+  for (const e of entries) {
+    const line = `- ${e.name} [${e.category}]: ${e.description}`
+    const cost = line.length + (picked.length ? 1 : 0)
+    if (size + cost > maxChars) continue
+    picked.push({ name: e.name, line })
+    size += cost
+  }
+  picked.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  return picked.map((p) => p.line).join('\n')
+}
+
 /** Compact index text for prompt injection. Empty string when no entries. */
 export async function loadIndexText(cwd: string, scope: MemoryScope): Promise<string> {
   const entries = await listMemories(cwd, scope)

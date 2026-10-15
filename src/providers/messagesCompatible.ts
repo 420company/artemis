@@ -116,20 +116,21 @@ type AnthropicMessageContent = string | AnthropicContentBlockObject[];
 // model id so legacy models and non-Claude gateways keep the old request shape.
 
 // Models that support adaptive thinking (Claude 4.6 family and newer).
-const ADAPTIVE_THINKING_MODELS = /^claude-(fable-5|mythos-5|sonnet-5|opus-4[.-][678]|sonnet-4[.-]6)/i;
+const ADAPTIVE_THINKING_MODELS = /^claude-(fable-5|mythos-5|opus-5|sonnet-5|haiku-5|opus-4[.-][678]|sonnet-4[.-]6)/i;
 // Models whose thinking display defaults to "omitted" — opt back into
 // summarized text so the UI can show reasoning progress. (The `display` field
 // itself is only accepted from Opus 4.7 onward; the 4.6 family already
 // defaults to summarized and must not receive the field.)
-const OMITTED_DISPLAY_MODELS = /^claude-(fable-5|mythos-5|sonnet-5|opus-4[.-][78])/i;
+const OMITTED_DISPLAY_MODELS = /^claude-(fable-5|mythos-5|opus-5|sonnet-5|haiku-5|opus-4[.-][78])/i;
 // Claude 4.x era models (64K+ output ceilings, higher when streaming).
 const CLAUDE_4X_MODELS = /^claude-(opus-4|sonnet-4|haiku-4)/i;
 // Effort support tiers: the param exists from Opus 4.5; `max` needs the 4.6
-// family; `xhigh` needs Opus 4.7+ / Sonnet 5 / Fable 5. Unsupported levels
-// clamp to `high` rather than erroring; unsupported models drop the param.
-const EFFORT_MODELS = /^claude-(fable-5|mythos-5|sonnet-5|opus-4[.-][5678]|sonnet-4[.-]6)/i;
-const EFFORT_MAX_MODELS = /^claude-(fable-5|mythos-5|sonnet-5|opus-4[.-][678]|sonnet-4[.-]6)/i;
-const EFFORT_XHIGH_MODELS = /^claude-(fable-5|mythos-5|sonnet-5|opus-4[.-][78])/i;
+// family; `xhigh` the later 4.x models and every 5.x model (which take all
+// five levels). Unsupported levels clamp to `high` rather than erroring; unsupported
+// models drop the param.
+const EFFORT_MODELS = /^claude-(fable-5|mythos-5|opus-5|sonnet-5|haiku-5|opus-4[.-][5678]|sonnet-4[.-]6)/i;
+const EFFORT_MAX_MODELS = /^claude-(fable-5|mythos-5|opus-5|sonnet-5|haiku-5|opus-4[.-][678]|sonnet-4[.-]6)/i;
+const EFFORT_XHIGH_MODELS = /^claude-(fable-5|mythos-5|opus-5|sonnet-5|haiku-5|opus-4[.-][78])/i;
 
 function resolveEffortParam(model: string, effort: string | undefined): string | undefined {
   if (!effort) return undefined;

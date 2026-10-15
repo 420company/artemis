@@ -75,6 +75,8 @@ export function resolveProjectedMcpToolName(
 
 const MAX_PROJECTED_MCP_DESCRIPTION_LENGTH = 2_048;
 const DEFAULT_MAX_PROJECTED_MCP_TOOLS = 96;
+/** How many projected MCP tools a request carries by default. */
+export const MAX_PROJECTED_MCP_TOOLS = DEFAULT_MAX_PROJECTED_MCP_TOOLS;
 // Keyed by host so a forced host environment (tests) never reuses a manifest
 // built for a different platform.
 let cachedBuiltInTools: { hostKey: string; tools: ProviderNativeFunctionTool[] } | undefined;
@@ -673,7 +675,17 @@ function buildProjectedMcpFunctionTools(
     const rightKey = `${right.serverId}:${right.baseName}`;
     return leftKey.localeCompare(rightKey);
   });
-  const selectedCandidates = sortedCandidates.slice(0, maxProjectedMcpTools);
+  // Which tools: by relevance to the request (pinned ones first). In what
+  // order: a fixed one, whatever the request, so the tool list a provider
+  // caches as the start of every prompt stays byte-identical between runs
+  // that select the same tools.
+  const selectedCandidates = sortedCandidates
+    .slice(0, maxProjectedMcpTools)
+    .sort((left, right) => {
+      const leftKey = `${left.serverId}:${left.kind}:${left.baseName}:${left.toolName}`;
+      const rightKey = `${right.serverId}:${right.kind}:${right.baseName}:${right.toolName}`;
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
   const tools: ProviderNativeFunctionTool[] = [];
   const selectedProjectedToolNames: string[] = [];
 
