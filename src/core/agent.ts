@@ -3240,13 +3240,14 @@ async function buildStableSystemContent(input: {
   try {
     const {
       ensureMemoryMigrated,
-      loadIndexText,
+      loadPromptIndexText,
       scopesCollide,
     } = await import('../storage/memoryFiles.js');
     await ensureMemoryMigrated(input.cwd);
     const collided = scopesCollide(input.cwd);
-    const globalIndex = await loadIndexText(input.cwd, 'global');
-    const projectIndex = collided ? '' : await loadIndexText(input.cwd, 'project');
+    // Stable text (see loadPromptIndexText): a memory updated in one run does not rewrite the next run's cached prefix.
+    const globalIndex = await loadPromptIndexText(input.cwd, 'global', 4000);
+    const projectIndex = collided ? '' : await loadPromptIndexText(input.cwd, 'project', 4000);
 
     systemSections.push(
       '🧠 Long-term memory: proactively persist durable knowledge with the memory tool — when the user states a lasting preference or correction, and after completing a significant task whose conclusions matter beyond this session. Update or delete entries the conversation has contradicted. Do not save session-only details or facts already recorded in the repo.',
