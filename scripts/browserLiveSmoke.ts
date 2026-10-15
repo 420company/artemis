@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { CdpRouter, VIEWER_METHODS, viewerParams, viewerRefusal } from '../src/tools/browser/cdpRouter.js';
 import {
   LIVE_DIR_ENV,
@@ -758,6 +759,92 @@ async function main(): Promise<void> {
     assert.equal(fs.statSync(file).mode & 0o777, 0o640);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { a: 2 });
     assert.deepEqual(fs.readdirSync(dir), ['x.json']);
+  });
+
+  await check('browser_navigate opens a workspace page by path (file://), inside the workspace only', async () => {
+    const { workspacePageUrl } = await import('../src/tools/browser/browserTools.js');
+    const { getToolDefinition } = await import('../src/tools/registry.js');
+    const { buildActionParametersSchema } = await import('../src/core/providerNativeTools.js');
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-page-'));
+    fs.mkdirSync(path.join(ws, 'sites', 'poster'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'sites', 'poster', 'index.html'), '<!doctype html><title>poster</title>');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-out-'));
+    fs.writeFileSync(path.join(outside, 'x.html'), 'x');
+    fs.symlinkSync(outside, path.join(ws, 'link'));
+    try {
+      const real = fs.realpathSync(ws);
+      assert.equal(await workspacePageUrl('sites/poster/index.html', ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      // A folder whose index.html is a link out of the workspace: the file that would open is checked.
+      fs.mkdirSync(path.join(ws, 'sites', 'evil'));
+      fs.symlinkSync(path.join(outside, 'x.html'), path.join(ws, 'sites', 'evil', 'index.html'));
+      await assert.rejects(() => workspacePageUrl('sites/evil', ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl('sites/evil/index.html', ws), /escapes/);
+      // A link inside the workspace into a protected directory (also inside): refused on the real path.
+      fs.mkdirSync(path.join(ws, '.artemis', 'agent-credentials'), { recursive: true });
+      fs.writeFileSync(path.join(ws, '.artemis', 'agent-credentials', 'index.html'), 'secret');
+      fs.symlinkSync(path.join(ws, '.artemis', 'agent-credentials'), path.join(ws, 'sites', 'creds'));
+      await assert.rejects(() => workspacePageUrl('sites/creds', ws), /protected/);
+      await assert.rejects(() => workspacePageUrl('sites/creds/index.html', ws), /protected/);
+      // A link inside the workspace to another page inside it still opens (as the page it leads to).
+      fs.symlinkSync(path.join(ws, 'sites', 'poster'), path.join(ws, 'sites', 'alias'));
+      assert.equal(await workspacePageUrl('sites/alias', ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      assert.match(await workspacePageUrl('sites/poster', ws), /\/sites\/poster\/index\.html$/);
+      await assert.rejects(() => workspacePageUrl('../x.html', ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl(path.join(outside, 'x.html'), ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl('link/x.html', ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl('sites/missing.html', ws));
+      // A file:// URL is held to the same rules (also behind view-source:); other URLs pass as they are.
+      const { checkedPageUrl } = await import('../src/tools/browser/browserTools.js');
+      assert.equal(await checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href, ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      assert.equal(await checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'poster')).href, ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      await assert.rejects(() => checkedPageUrl('file:///etc/passwd', ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl(pathToFileURL(path.join(outside, 'x.html')).href, ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'evil')).href, ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'creds', 'index.html')).href, ws), /protected/);
+      await assert.rejects(() => checkedPageUrl('view-source:file:///etc/passwd', ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl('FILE:///etc/passwd', ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl('file://otherhost/etc/passwd', ws));
+      // The browser drops tabs and line breaks anywhere and control characters in front: such a URL is refused outright.
+      for (const sneaky of ['fi\nle:///etc/passwd', 'fi\tle:///etc/passwd', '\x01file:///etc/passwd', ' \x00file:///etc/passwd', 'view-source:fi\nle:///etc/passwd', 'file:///etc/pa\rsswd']) {
+        await assert.rejects(() => checkedPageUrl(sneaky, ws), /control characters|escapes/, JSON.stringify(sneaky));
+      }
+      await assert.rejects(() => checkedPageUrl('  file:///etc/passwd', ws), /escapes/);
+      // The browser's own guard for what pages load: inside the run's workspace only, never for an http page.
+      const { setBrowserWorkspace, releaseBrowserWorkspace, localFileAllowed } = await import('../src/tools/browser/fileGuard.js');
+      const page = pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href;
+      releaseBrowserWorkspace();
+      assert.equal(await localFileAllowed(page, { navigation: true }), false, 'no workspace set: nothing local opens (not even the engine\'s own cwd)');
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(process.cwd(), 'package.json')).href, { navigation: true }), false);
+      setBrowserWorkspace(ws);
+      assert.equal(await localFileAllowed(page, { navigation: true }), true);
+      assert.equal(await localFileAllowed(page, { navigation: false, frameUrl: page }), true);
+      assert.equal(await localFileAllowed(page, { navigation: false, frameUrl: 'https://example.com/' }), false);
+      assert.equal(await localFileAllowed(page, { navigation: false }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(outside, 'x.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'sites', 'evil', 'index.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'sites', 'creds', 'index.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'missing.html')).href, { navigation: true }), false);
+      assert.equal(await localFileAllowed('file://otherhost/x', { navigation: true }), false);
+      assert.equal(await localFileAllowed('https://example.com/', { navigation: false }), true);
+      // Another run in the same process, in another workspace: the first run's workspace no longer opens.
+      setBrowserWorkspace(outside);
+      assert.equal(await localFileAllowed(page, { navigation: true }), false, 'a later run reaches an earlier run\'s workspace');
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(outside, 'x.html')).href, { navigation: true }), true);
+      // The run is over: nothing local opens until a browser tool names a workspace again.
+      releaseBrowserWorkspace();
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(outside, 'x.html')).href, { navigation: true }), false);
+      assert.equal(await checkedPageUrl('https://example.com/a', ws), 'https://example.com/a');
+      assert.equal(await checkedPageUrl('http://127.0.0.1:8731/', ws), 'http://127.0.0.1:8731/');
+      const tool = getToolDefinition('browser_navigate') as unknown as { validate: (a: unknown) => string[] };
+      assert.deepEqual(tool.validate({ type: 'browser_navigate', path: 'sites/poster/index.html' }), []);
+      assert.deepEqual(tool.validate({ type: 'browser_navigate', url: 'https://example.com' }), []);
+      assert.equal(tool.validate({ type: 'browser_navigate' }).length, 1);
+      const schema = buildActionParametersSchema('browser_navigate') as { properties?: Record<string, unknown>; required?: string[] };
+      assert.ok(schema.properties?.path && schema.properties?.url && !(schema.required ?? []).includes('url'));
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   console.log(`\nbrowser live smoke: ${passed} checks passed`);

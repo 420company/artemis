@@ -991,7 +991,7 @@ export type AgentAction =
   | { type: 'reminders_add'; title: string; list?: string; dueISO?: string; notes?: string }
   | { type: 'reminders_complete'; title: string; list?: string }
   // ── Browser automation (Playwright headed Chromium) ─────────────────────
-  | { type: 'browser_navigate'; url: string; waitFor?: 'load' | 'domcontentloaded' | 'networkidle'; extractText?: boolean }
+  | { type: 'browser_navigate'; url?: string; path?: string; waitFor?: 'load' | 'domcontentloaded' | 'networkidle'; extractText?: boolean }
   | { type: 'browser_screenshot'; fullPage?: boolean; width?: number; height?: number }
   | { type: 'browser_extract_text'; selector?: string }
   | { type: 'browser_click'; selector?: string; text?: string; x?: number; y?: number }

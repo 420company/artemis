@@ -35,6 +35,8 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setBrowserWorkspace } from './fileGuard.js';
 import {
   getActivePage,
   closeActivePage,
@@ -57,7 +59,7 @@ import {
   targetIdOf,
 } from './browserSession.js';
 import type { Page } from 'playwright';
-import { resolveArtemisHomeDir } from '../../utils/fs.js';
+import { isAlwaysPrivatePath, resolveArtemisHomeDir, resolveInsideRoot } from '../../utils/fs.js';
 import type { ToolExecutionContext } from '../types.js';
 import {
   browserGate,
@@ -146,20 +148,97 @@ function truncate(s: string, max = MAX_TEXT_OUTPUT): string {
 
 export interface BrowserNavigateAction {
   type: 'browser_navigate';
-  url: string;
+  url?: string;
+  /** A page in the workspace, opened directly (file://): no server needed to look at it. */
+  path?: string;
   waitFor?: 'load' | 'domcontentloaded' | 'networkidle';
   extractText?: boolean;
 }
 
-async function runBrowserNavigate(action: BrowserNavigateAction): Promise<ToolResult> {
-  if (!action.url || action.url.trim().length === 0) {
+/**
+ * The file:// URL of a workspace page: inside the workspace only, never a
+ * protected directory; a folder opens its index.html. The checks are made on
+ * the file that will really be opened (after the folder's index.html is
+ * added and every symlink followed), and that real path is what opens.
+ */
+export async function workspacePageUrl(inputPath: string, cwd: string): Promise<string> {
+  const absolute = resolveInsideRoot(cwd, inputPath.trim().replace(/^file:\/\//i, ''));
+  if (isAlwaysPrivatePath(absolute)) throw new Error(`${inputPath} is in a protected directory`);
+  const info = await fsp.stat(absolute);
+  const file = info.isDirectory() ? path.join(absolute, 'index.html') : absolute;
+  const real = await fsp.realpath(file);
+  const root = await fsp.realpath(cwd);
+  const relative = path.relative(root, real);
+  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`Path escapes working directory: ${inputPath}`);
+  if (isAlwaysPrivatePath(real)) throw new Error(`${inputPath} is in a protected directory`);
+  if (!(await fsp.stat(real)).isFile()) throw new Error(`${inputPath} is not a page`);
+  return pathToFileURL(real).href;
+}
+
+/**
+ * A `file:` URL (also behind `view-source:`) is held to the same rules as
+ * `path`: a page inside the workspace, outside the protected directories,
+ * opened as its real path. The scheme is read as the browser reads it (a
+ * URL parser, which drops tabs and line breaks anywhere and control
+ * characters in front), and a URL holding any of those is refused outright.
+ * Other URLs are returned as they are. Pages a page opens itself go through
+ * the browser's own guard (fileGuard.ts).
+ */
+export async function checkedPageUrl(url: string, cwd: string): Promise<string> {
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(url)) throw new Error('the URL holds control characters, tabs or line breaks');
+  const trimmed = url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    if (/file:/i.test(trimmed)) throw new Error('not a URL the browser reads the same way');
+    return url;
+  }
+  if (parsed.protocol === 'view-source:') {
+    const inner = trimmed.replace(/^view-source:/i, '');
+    return `view-source:${await checkedPageUrl(inner, cwd)}`;
+  }
+  if (parsed.protocol !== 'file:') return url;
+  let file: string;
+  try {
+    file = fileURLToPath(parsed);
+  } catch (err) {
+    throw new Error(`not a local file URL (${err instanceof Error ? err.message : String(err)})`);
+  }
+  return workspacePageUrl(file, cwd);
+}
+
+function fileUrlRefusal(url: string, err: unknown): ToolResult {
+  const message = `Cannot open ${url}: ${err instanceof Error ? err.message : String(err)}`;
+  return { ok: false, output: `${message}. A file:// URL opens a page inside the workspace only.`, error: { code: 'invalid_input', message } };
+}
+
+async function runBrowserNavigate(action: BrowserNavigateAction, cwd: string = process.cwd()): Promise<ToolResult> {
+  const hasPath = typeof action.path === 'string' && action.path.trim().length > 0;
+  if (!hasPath && (!action.url || action.url.trim().length === 0)) {
     return {
       ok: false,
-      output: 'url 必填',
-      error: { code: 'invalid_input', message: 'url required' },
+      output: 'url 或 path 必填',
+      error: { code: 'invalid_input', message: 'url or path required' },
     };
   }
-  const scriptUrl = /^\s*(javascript|vbscript):/i.test(action.url);
+  let target = action.url ?? '';
+  if (hasPath) {
+    try {
+      target = await workspacePageUrl(action.path!, cwd);
+    } catch (err) {
+      const message = `Cannot open ${action.path} from the workspace: ${err instanceof Error ? err.message : String(err)}`;
+      return { ok: false, output: `${message}. path opens a page inside the workspace only; use url for other pages.`, error: { code: 'invalid_input', message } };
+    }
+  } else {
+    try {
+      target = await checkedPageUrl(target, cwd);
+    } catch (err) {
+      return fileUrlRefusal(target, err);
+    }
+  }
+  const scriptUrl = /^\s*(javascript|vbscript):/i.test(target);
   // A script URL is a page script too.
   if (scriptUrl && hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
@@ -169,7 +248,7 @@ async function runBrowserNavigate(action: BrowserNavigateAction): Promise<ToolRe
         if (refused) return refused;
       }
       const waitUntil = action.waitFor ?? 'domcontentloaded';
-      await page.goto(action.url, { waitUntil, timeout: 30_000 });
+      await page.goto(target, { waitUntil, timeout: 30_000 });
       const title = await page.title();
       const finalUrl = page.url();
 
@@ -705,7 +784,7 @@ export interface BrowserTabsAction {
   url?: string;
 }
 
-async function runBrowserTabs(action: BrowserTabsAction): Promise<ToolResult> {
+async function runBrowserTabs(action: BrowserTabsAction, cwd: string = process.cwd()): Promise<ToolResult> {
   try {
     if (action.action === 'list') {
       const tabs = await listTabs();
@@ -714,7 +793,15 @@ async function runBrowserTabs(action: BrowserTabsAction): Promise<ToolResult> {
       return { ok: true, output: lines.join('\n') };
     }
     if (action.action === 'new') {
-      const tab = await openTab(action.url);
+      let url = action.url;
+      if (url) {
+        try {
+          url = await checkedPageUrl(url, cwd);
+        } catch (err) {
+          return fileUrlRefusal(url, err);
+        }
+      }
+      const tab = await openTab(url);
       return { ok: true, output: `🆕 新标签页 [${tab.index}] ${tab.url || 'about:blank'}` };
     }
     if (action.action === 'switch') {
@@ -946,7 +1033,11 @@ onIdentityLiveWindow(() => {
 });
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserNavigate(action), context?.abortSignal);
+  gated(() => {
+    // Set once the call passed the gate (the owner may hold the browser meanwhile).
+    setBrowserWorkspace(context?.cwd ?? process.cwd());
+    return runBrowserNavigate(action, context?.cwd);
+  }, context?.abortSignal);
 export const executeBrowserScreenshot = (action: BrowserScreenshotAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserScreenshot(action, context), context?.abortSignal);
 export const executeBrowserExtract = (action: BrowserExtractAction, context?: ToolExecutionContext) =>
@@ -960,7 +1051,10 @@ export const executeBrowserFormInput = (action: BrowserFormInputAction, context?
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserEvaluate(action), context?.abortSignal);
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserTabs(action), context?.abortSignal);
+  gated(() => {
+    setBrowserWorkspace(context?.cwd ?? process.cwd());
+    return runBrowserTabs(action, context?.cwd);
+  }, context?.abortSignal);
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
   gated((beforeSecret) => runBrowserType(action, beforeSecret), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>
