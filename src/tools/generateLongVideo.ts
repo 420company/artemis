@@ -48,7 +48,7 @@ import {
   type NarrativeLibraryEntry,
   type ShotViolation,
 } from './visual/sagaNarrative.js';
-import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { normalizeSagaPromptForVideoGeneration, userBriefOfGenerationText } from './visual/sagaLanguageDirector.js';
 import { buildEnsembleContactSheet } from './visual/contactSheet.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import {
@@ -73,11 +73,13 @@ import {
   packShotsIntoClips,
   planSegmentDurations,
   renderClipBeat,
+  restoreClipBeat,
   splitBeatText,
   splitLongShots,
   type ClipShotPart,
 } from './visual/segmentPlan.js';
-import { videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
+import { isBytePlusProvider, videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
+import { videoPollPlan } from './visual/pollSleep.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
 import { formatGlobalBriefExcerpt, parseSagaBriefGlobals, stripBriefNoise, worldAnchorLinesFor } from './visual/sagaBriefGlobals.js';
 import type { SagaContinuityMode } from './visual/sagaRenderer/continuity.js';
@@ -119,8 +121,33 @@ const DEFAULT_CROSSFADE_MS = 350;
 const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
 // Floor (NOT a maximum). Match the custom provider default so Saga does not
 // accidentally override a longer provider wait with a shorter explicit value.
-// 420 polls × 10s = 70min per attempt.
+// 420 polls × 5 s (the default interval) = 35 minutes per attempt; the video
+// tools cap one wait at 40 minutes (pollSleep.ts).
 const MIN_SAGA_SEGMENT_MAX_POLLS = 420;
+
+// Time ranges in a brief's timeline ("[0-8秒]", "0:00-0:08:", "3至5秒"): a
+// time token (seconds, or m:ss / h:mm:ss), a separator and an optional unit.
+const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
+const TIME_SEPARATOR = '[-–—~至到]';
+const TIME_UNIT = '(?:秒|s|secs?|seconds?)';
+
+/** Video task statuses that mean the task is still on its way: wait for it again, never submit it twice. */
+const PENDING_VIDEO_TASK_RE = /^(?:queued|pending|submitted|running|processing|in_progress)$/;
+
+/** The task a poll timeout left behind, when it is still queued or running. */
+export function pendingVideoTaskOf(message: string | undefined): { taskId: string; status: string } | undefined {
+  const match = /\btask\s+(\S+?)\s+did not (?:finish|complete) within \d+ polls?\b[^\n]*?Last status:\s*([a-z_]+)/i.exec(message ?? '');
+  if (!match) return undefined;
+  const status = match[2]!.toLowerCase();
+  return PENDING_VIDEO_TASK_RE.test(status) ? { taskId: match[1]!, status } : undefined;
+}
+
+let finalRenderSkippedForTests = false;
+
+/** Tests that read only the requests sent: stop once the segments exist, without the final render. */
+export function setSagaFinalRenderSkippedForTests(skip: boolean): void {
+  finalRenderSkippedForTests = skip;
+}
 
 function superVisualBypassReason(
   identitySource: SagaIdentitySource | undefined,
@@ -647,9 +674,8 @@ function parseTimestampedShotsFromStory(
   //   [0:00-0:08]  [1:30-1:38]
   //   [00:00:00-00:00:08]
   // Token = digits with optional ":mm" or ":mm:ss"
-  const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
   const markerRe = new RegExp(
-    `\\[\\s*(${TIME_TOKEN})\\s*[-–—~至到]\\s*(${TIME_TOKEN})\\s*(?:秒|s|sec|seconds)?\\s*\\]`,
+    `\\[[ \\t]*(${TIME_TOKEN})[ \\t]*${TIME_SEPARATOR}[ \\t]*(${TIME_TOKEN})[ \\t]*(?:${TIME_UNIT}[ \\t]*)?\\]`,
     'gi',
   );
   let markers = Array.from(story.matchAll(markerRe));
@@ -657,7 +683,7 @@ function parseTimestampedShotsFromStory(
   // Fallback A: timecode without brackets at line-head, e.g. "0:00-0:08:" or "0-8s:"
   if (markers.length < 2) {
     const looseRe = new RegExp(
-      `(?:^|\\n)\\s*(${TIME_TOKEN})\\s*[-–—~至到]\\s*(${TIME_TOKEN})\\s*(?:秒|s|sec|seconds)?\\s*[:：]`,
+      `(?:^|\\n)[ \\t]*(${TIME_TOKEN})[ \\t]*${TIME_SEPARATOR}[ \\t]*(${TIME_TOKEN})[ \\t]*(?:${TIME_UNIT}[ \\t]*)?[:：]`,
       'gi',
     );
     markers = Array.from(story.matchAll(looseRe));
@@ -704,7 +730,7 @@ function parseTimestampedShotsFromStory(
   //   "Scene 1", "Shot 3", "镜头 4", "第 5 段", "段 1 ·", "Segment 2"
   // We distribute totalSeconds evenly across the detected scenes.
   if (totalSeconds && totalSeconds >= 8) {
-    const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?(\d+)|第\s*(\d+)\s*段)[\s.·:：、,。\-—–]/gi;
+    const sceneRe = /(?:^|\n)[ \t]*(?:(?:scene|shot|segment|镜头|段)[ \t]*[#]?(\d+)|第[ \t]*(\d+)[ \t]*段)[\s.·:：、,。\-—–]/gi;
     const sceneMarkers = Array.from(story.matchAll(sceneRe));
     if (sceneMarkers.length >= 2) {
       const distributed: SagaShotInput[] = [];
@@ -739,12 +765,11 @@ function parseTimestampedShotsFromStory(
 // and per-segment specificity) when the user has already structured their brief.
 export function hasStructuredBriefMarkers(text: string): boolean {
   if (!text) return false;
-  const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
-  const bracketTimeRe = new RegExp(`\\[\\s*${TIME_TOKEN}\\s*[-–—~至到]\\s*${TIME_TOKEN}\\s*(?:秒|s|sec|seconds)?\\s*\\]`, 'i');
+  const bracketTimeRe = new RegExp(`\\[[ \\t]*${TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?\\]`, 'i');
   if (bracketTimeRe.test(text)) return true;
-  const looseTimeRe = new RegExp(`(?:^|\\n)\\s*${TIME_TOKEN}\\s*[-–—~至到]\\s*${TIME_TOKEN}\\s*(?:秒|s|sec|seconds)?\\s*[:：]`, 'i');
+  const looseTimeRe = new RegExp(`(?:^|\\n)[ \\t]*${TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?[:：]`, 'i');
   if (looseTimeRe.test(text)) return true;
-  const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?\d+|第\s*\d+\s*段)[\s.·:：、,。\-—–]/i;
+  const sceneRe = /(?:^|\n)[ \t]*(?:(?:scene|shot|segment|镜头|段)[ \t]*[#]?\d+|第[ \t]*\d+[ \t]*段)[\s.·:：、,。\-—–]/i;
   if (sceneRe.test(text)) return true;
   return false;
 }
@@ -806,18 +831,31 @@ function looksLikeIdentityRuleBoilerplate(value: string | undefined): boolean {
   return IDENTITY_RULE_BOILERPLATE_PATTERNS.some((re) => re.test(normalized));
 }
 
-/** A motion timeline for one shot; `offset` places it inside a clip of several shots (times then count from the clip's start). */
-function motionTimelineFor(storyChunk: string, duration: number, index: number, offset?: number): string {
+const FALLBACK_ACTION_SETS = [
+  ['steps through the scene with a deliberate weight shift', 'turns the shoulders and reaches toward the next focal point', 'continues the gesture into the closing frame while fabric and hair keep moving'],
+  ['leans into motion and crosses the foreground plane', 'lifts one hand to interact with the scene element', 'releases the movement into drifting particles and a carried-through body turn'],
+  ['enters mid-stride with one foot already moving', 'rotates around the prop or light source with visible parallax', 'finishes in a moving silhouette that points into the next shot'],
+];
+
+/**
+ * The motion timeline of one shot: three timed movements. `offset` places it
+ * inside a clip of several shots (times then count from the clip's start and
+ * the lines are kept short, one movement each).
+ */
+function motionLinesFor(duration: number, index: number, offset?: number): string {
   const first = Math.max(1, Math.floor(duration * 0.35));
   const second = Math.max(first + 1, Math.floor(duration * 0.7));
-  const actionSets = [
-    ['steps through the scene with a deliberate weight shift', 'turns the shoulders and reaches toward the next focal point', 'continues the gesture into the closing frame while fabric and hair keep moving'],
-    ['leans into motion and crosses the foreground plane', 'lifts one hand to interact with the scene element', 'releases the movement into drifting particles and a carried-through body turn'],
-    ['enters mid-stride with one foot already moving', 'rotates around the prop or light source with visible parallax', 'finishes in a moving silhouette that points into the next shot'],
-  ];
-  const actions = actionSets[index % actionSets.length]!;
+  const actions = FALLBACK_ACTION_SETS[index % FALLBACK_ACTION_SETS.length]!;
   const at = (seconds: number) => String((offset ?? 0) + seconds);
-  return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${at(first)}–${at(second)}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${at(second)}–${offset === undefined ? 'end' : `${at(duration)}s`}: the protagonist ${actions[2]}. Scene intent: ${storyChunk}`;
+  if (offset !== undefined) {
+    return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}. ${at(first)}–${at(second)}s: ${actions[1]}. ${at(second)}–${at(duration)}s: ${actions[2]}.`;
+  }
+  return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${at(first)}–${at(second)}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${at(second)}–end: the protagonist ${actions[2]}.`;
+}
+
+/** A motion timeline for one shot, then what the scene is about. */
+function motionTimelineFor(storyChunk: string, duration: number, index: number): string {
+  return `${motionLinesFor(duration, index)} Scene intent: ${storyChunk}`;
 }
 
 // Framings for the camera shots inside a long fallback clip, so a 30 s clip
@@ -826,8 +864,8 @@ const FALLBACK_SHOT_FRAMINGS = ['wide establishing shot', 'medium tracking shot'
 
 function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number, multiShot: boolean): string {
   // On a model that cuts inside a clip, a clip longer than a natural shot is
-  // several camera shots cut together, each with its slice of the story
-  // first and its motion after it, shortened shot by shot to fit.
+  // several camera shots cut together, each with its motion and its slice of
+  // the story, shortened shot by shot to fit.
   const shots = multiShot ? naturalShotLengths(duration) : [duration];
   if (shots.length <= 1) return motionTimelineFor(storyChunk, duration, index);
   const slices = splitBeatText(storyChunk, shots.length, shots);
@@ -837,8 +875,10 @@ function buildMotionTimelineFallback(storyChunk: string, duration: number, index
     cursor += seconds;
     const framing = FALLBACK_SHOT_FRAMINGS[(index + shotIndex) % FALLBACK_SHOT_FRAMINGS.length]!;
     const slice = (slices[shotIndex] ?? storyChunk).replace(/^Continue the same moment[^:]*:\s*/, '');
-    const motion = motionTimelineFor('', seconds, index + shotIndex, start).replace(/\s*Scene intent:\s*$/, '');
-    return { marker: `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): `, body: `${slice} ${motion}` };
+    // The motion goes first: fitClipBeat keeps a shot's sentences in order,
+    // so the timeline survives and the story slice is what gets shortened.
+    const motion = motionLinesFor(seconds, index + shotIndex, start);
+    return { marker: `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): `, body: `${motion} ${slice}` };
   });
   return fitClipBeat(renderClipBeat(parts), clipBeatBudget(parts.length));
 }
@@ -925,8 +965,11 @@ function buildSegments(options: {
   promptOptions?: SegmentPromptOptions;
   /** The model cuts between camera shots inside a clip and the script is Artemis's own to shape. */
   multiShot?: boolean;
+  /** The user's story without the rules appended to it: where a segment without a planned shot takes its beat. */
+  fallbackStory?: string;
 }): SagaSegment[] {
-  const beats = sentenceChunks(options.story);
+  const sourceStory = options.fallbackStory?.trim() || options.story;
+  const beats = sentenceChunks(sourceStory);
   const plannedShots = Array.isArray(options.shots)
     ? options.shots.filter((shot) => shot && typeof shot === 'object')
     : [];
@@ -973,7 +1016,7 @@ function buildSegments(options: {
     // into storyBeat / visualPrompt instead of writing actual scene content.
     // When detected, fall back to the story-derived chunk so the keyframe
     // generation has REAL action context to render.
-    const storyChunkFallback = trimToSentenceBoundary(beats.slice(start, end).join(' ') || options.story, 1800);
+    const storyChunkFallback = trimToSentenceBoundary(beats.slice(start, end).join(' ') || sourceStory, 1800);
     const rawPlannedStoryBeat = looksLikeIdentityRuleBoilerplate(planned?.storyBeat) ? undefined : planned?.storyBeat;
     const duration = usePlannedDurations
       ? (durations[index] ?? normalizeShotDuration(planned?.duration, options.preferredSegmentSeconds, options.maxSegmentSeconds))
@@ -1110,15 +1153,33 @@ export function isPollTimeoutErrorForTest(message: string | undefined): boolean 
   return /did not (?:finish|complete) within \d+ polls?|Last status:\s*(?:running|processing|pending|queued|submitted)/i.test(message);
 }
 
-function shouldPreserveUserScriptWithoutCriticRewrite(options: {
-  action: GenerateLongVideoAction;
-  timestampedStoryShots: SagaShotInput[];
+// A script the user wrote, read with the timeline parser's own time tokens
+// and separators: a short range with a unit ("0-5s", "3至8秒", "10~15 sec"),
+// clock timecodes ("00:00-00:05", "0:00-0:05"), a short range opening a line
+// as a timeline position ("0-5: …", "[0-5] …"), or Shot N / 镜头N / 第N段
+// markers. A bare number range ("waits 3-4 minutes", "2019-2020") is not one.
+const SHORT_TIME_TOKEN = '(?:\\d{1,3}(?:\\.\\d+)?|\\d+:\\d{2}(?::\\d{2})?(?:\\.\\d+)?)';
+const CLOCK_TIME_TOKEN = '\\d+:\\d{2}(?::\\d{2})?(?:\\.\\d+)?';
+const USER_SCRIPT_MARKER_RE = new RegExp([
+  `(?<![\\d.:])${SHORT_TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?${TIME_SEPARATOR}[ \\t]*${SHORT_TIME_TOKEN}[ \\t]*${TIME_UNIT}(?![a-z])`,
+  `(?<![\\d.:])${CLOCK_TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${CLOCK_TIME_TOKEN}`,
+  `(?:^|\\n)[ \\t]*(?:[[(（【][ \\t]*)?${SHORT_TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${SHORT_TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?[\\])）】:：]`,
+  '(?:^|\\s)(?:shot[ \\t]*\\d+|镜头[ \\t]*\\d+|第[ \\t]*\\d+[ \\t]*(?:幕|段|镜头))',
+].join('|'), 'i');
+
+/**
+ * True when the brief is a script the user wrote: its shots are kept as
+ * written (no story rewrite, no shots packed into shared clips).
+ */
+export function shouldPreserveUserScriptWithoutCriticRewrite(options: {
+  action: Pick<GenerateLongVideoAction, 'preserveUserScript' | 'story' | 'prompt'>;
+  timestampedStoryShots: readonly unknown[];
 }): boolean {
   if (options.action.preserveUserScript === true) return true;
   if (options.timestampedStoryShots.length > 0) return true;
 
   const story = `${options.action.story ?? ''}\n${options.action.prompt ?? ''}`;
-  return /(?:^|\n|\s)(?:\d+(?:\.\d+)?\s*[–-]\s*\d+(?:\.\d+)?\s*s?|shot\s*\d+|镜头\s*\d+|第\s*\d+\s*(?:幕|段|镜头))/i.test(story);
+  return USER_SCRIPT_MARKER_RE.test(story);
 }
 
 function buildTransitionPlans(options: {
@@ -1377,6 +1438,12 @@ export async function executeGenerateLongVideo(
     // gets a note with its own lines, and the bible must not list every line
     // of the film as one segment's speech.
     story = languageNormalized.bodyText;
+    // The story as the user wrote it (with any storyboard summary): what a
+    // segment without a planned shot shows. What goes around it in `story`
+    // (the generation instructions, the story bible, the entity map,
+    // identity and reference notes) is rules for the model, never a beat.
+    // The user's notes on their references stay out of the scene text.
+    let fallbackStory = userBriefOfGenerationText(story).replace(/\s*Reference notes from user:[^\n]*/g, '').trim();
     toolLog(`🌐 generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     // ALWAYS parse timestamped shots first. When the user supplied an explicit
     // [X-Y秒] timeline, that is the authoritative segmentation and takes
@@ -1449,6 +1516,7 @@ export async function executeGenerateLongVideo(
             parsed.globalStyle ? `Global style: ${parsed.globalStyle}` : '',
             parsed.globalContinuity ? `Global continuity: ${parsed.globalContinuity}` : '',
           ].filter(Boolean).join('\n');
+          if (parsed.summary) fallbackStory = `${fallbackStory}\n\n${parsed.summary}`;
           await writeFile(
             path.join(projectDir, 'storyboard-parse.json'),
             JSON.stringify({ source: 'vision', imagePath, parsed }, null, 2),
@@ -1750,6 +1818,7 @@ export async function executeGenerateLongVideo(
       toolWarn(`🛡️ 词汇护栏: story 中替换 ${storySanitizeDiff.length} 处敏感触发词 (${storySanitizeDiff.slice(0, 3).map((d) => `${d.from} → ${d.to}`).join('; ')}${storySanitizeDiff.length > 3 ? '; ...' : ''})。`);
     }
     story = sanitizeForVideoProvider(story);
+    fallbackStory = sanitizeForVideoProvider(fallbackStory);
     const { shotContinuityNotes, shotCameraNotes } = deriveContinuityFromShots(action);
     const sceneAnchors = mergeStringArrays(
       action.continuity?.locations,
@@ -1871,6 +1940,7 @@ export async function executeGenerateLongVideo(
       promptMaxChars: segmentPromptMaxChars,
       promptOptions: segmentPromptOptions,
       multiShot: multiShotClips,
+      fallbackStory,
     });
     superVisualImageBudget.raiseLimit(superVisualImageLimit(segments.length));
     const segmentStarts = segmentStartSeconds(segments.map((segment, index) => ({ duration: segment.duration, timecodeStart: sanitizedShots?.[index]?.timecodeStart })));
@@ -1923,7 +1993,8 @@ export async function executeGenerateLongVideo(
               toolLog(`✏️  剧情检查：shot ${seg.index} 已重写 (round ${round}) — ${rewrite.storyBeat.slice(0, 80)}...`);
               // Sanitize rewriter output too — the LLM may reintroduce
               // trigger words even when the original storyBeat was clean.
-              seg.storyBeat = sanitizeForVideoProvider(rewrite.storyBeat);
+              // A clip of several shots keeps its opening line and markers.
+              seg.storyBeat = restoreClipBeat(seg.storyBeat, sanitizeForVideoProvider(rewrite.storyBeat));
               seg.visualPrompt = sanitizeForVideoProvider(rewrite.visualPrompt);
               if (rewrite.transition) seg.transition = sanitizeForVideoProvider(rewrite.transition);
               // Recompile compiled prompts so the new storyBeat actually reaches BytePlus
@@ -2244,6 +2315,13 @@ export async function executeGenerateLongVideo(
           maxPolls: Math.max(MIN_SAGA_SEGMENT_MAX_POLLS, action.maxPolls ?? 0),
           pollIntervalMs: action.pollIntervalMs,
         };
+        // How long one attempt waits on its task, and the task a timed-out
+        // attempt left still queued or running (polled again, not resubmitted).
+        const attemptWaitMs = (() => {
+          const plan = videoPollPlan(baseReq, { maxPolls: MIN_SAGA_SEGMENT_MAX_POLLS, pollIntervalMs: 5000 });
+          return plan.maxPolls * plan.pollIntervalMs;
+        })();
+        let pendingTask: { taskId: string; waitedMs: number } | undefined;
 
         // Build the retry plan. We try at most three attempts per segment:
         //   1) full strength (chain + audio)
@@ -2347,6 +2425,12 @@ export async function executeGenerateLongVideo(
               generateAudio: usingAudio,
             },
             context,
+            // Saga's own channel (never action fields): the segment named in
+            // the progress lines, and the task to poll again.
+            {
+              progressLabel: `第 ${segment.index}/${segments.length} 段`,
+              ...(pendingTask ? { resumeTaskId: pendingTask.taskId, pollWaitedMs: pendingTask.waitedMs } : {}),
+            },
           );
           if (result.ok) {
             succeeded = true;
@@ -2382,10 +2466,21 @@ export async function executeGenerateLongVideo(
             break;
           }
           if (pollTimeout) {
-            // Same inputs, fresh submission. BytePlus queue was just slow.
+            // A task still queued or running is waited for again: submitting
+            // it a second time would make (and bill) the same clip twice.
+            const pending = isBytePlusProvider(limits.provider) ? pendingVideoTaskOf(lastError) : undefined;
+            if (pending) {
+              const waitedMs = (pendingTask?.taskId === pending.taskId ? pendingTask.waitedMs : 0) + attemptWaitMs;
+              pendingTask = { taskId: pending.taskId, waitedMs };
+              toolWarn(`⏳ 第 ${segment.index}/${segments.length} 段：视频仍在${/^(?:queued|pending|submitted)$/.test(pending.status) ? '排队' : '生成'}（已等待 ${Math.round(waitedMs / 60_000)} 分钟），继续等待同一个任务，不重新提交（${attempt + 2}/3）…`);
+              continue;
+            }
+            // Same inputs, fresh submission: the task is gone or its state unknown.
+            pendingTask = undefined;
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频生成队列拥堵（poll 超时），重新提交任务（尝试 ${attempt + 2}/3）...`);
             continue;
           }
+          pendingTask = undefined;
           // Decide the next attempt's degradation. We strip the offending
           // input first; subsequent attempts can additionally strip the
           // other.
@@ -2469,6 +2564,10 @@ export async function executeGenerateLongVideo(
         const framed = await extractLastFrame({ videoPath: segment.outputPath, outputPath: framePath });
         previousLastFramePath = framed.ok ? framed.framePath : undefined;
       }
+    }
+
+    if (finalRenderSkippedForTests) {
+      return { action, ok: true, output: `Long video: ${segments.length} segments generated; the final render was skipped.` };
     }
 
     const segmentProbes = await Promise.all(segments.map((segment) => probeSegment(segment.outputPath)));

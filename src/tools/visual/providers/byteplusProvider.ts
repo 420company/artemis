@@ -31,29 +31,17 @@ import {
   type ImagesApiRequestInput,
 } from '../imagesApiParams.js'
 import { DEFAULT_MODEL_IDS } from '../../../providers/presets.js'
+import { pollSleep, videoPollPlan } from '../pollSleep.js'
+
+/** Status polls of a video task when the caller does not say: five minutes, the shortest wait (pollSleep.ts). */
+const DEFAULT_VIDEO_MAX_POLLS = 60
+const DEFAULT_VIDEO_POLL_INTERVAL_MS = 5000
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
   if (active.length === 0) return undefined
   if (active.length === 1) return active[0]
   return AbortSignal.any(active)
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
-  return new Promise((resolve, reject) => {
-    const cleanup = () => signal?.removeEventListener('abort', onAbort)
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve()
-    }, ms)
-    const onAbort = () => {
-      clearTimeout(timer)
-      cleanup()
-      reject(new DOMException('The operation was aborted.', 'AbortError'))
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 export class BytePlusProvider implements VisualProvider {
@@ -416,36 +404,43 @@ export class BytePlusProvider implements VisualProvider {
         watermark: params.watermark ?? this.config.video.defaultParams.watermark ?? false,
       }
 
-      const createRes = await fetch(createEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(createBody),
-        signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
-      })
+      // A task already submitted (still queued or running when its last
+      // wait ran out) is polled again instead of being submitted twice.
+      const taskId = params.resumeTaskId?.trim() || await (async () => {
+        const createRes = await fetch(createEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(createBody),
+          signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
+        })
 
-      const createRaw = await createRes.text()
-      if (!createRes.ok) {
-        throw new GenerationApiError(`Task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status)
-      }
+        const createRaw = await createRes.text()
+        if (!createRes.ok) {
+          throw new GenerationApiError(`Task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status)
+        }
 
-      const createPayload = JSON.parse(createRaw)
-      const taskId = createPayload.id ?? createPayload.task_id
-      
-      if (!taskId) {
-        throw new Error(`No task id in response. ${createPayload.error?.message ?? ''}`.trim())
-      }
+        const createPayload = JSON.parse(createRaw)
+        const createdId = createPayload.id ?? createPayload.task_id
+        if (!createdId) {
+          throw new Error(`No task id in response. ${createPayload.error?.message ?? ''}`.trim())
+        }
+        return String(createdId)
+      })()
 
       const statusEndpoint = modelArkEndpoint(baseUrl, `contents/generations/tasks/${encodeURIComponent(taskId)}`)
       let videoUrl: string | undefined
       let lastStatus = 'pending'
-      const maxPolls = 60
-      const pollIntervalMs = 5000
+      // What the caller asked for (Saga waits longer for a long clip),
+      // within 1–30 s between polls and 5–40 minutes in all.
+      const { maxPolls, pollIntervalMs } = videoPollPlan(params, { maxPolls: DEFAULT_VIDEO_MAX_POLLS, pollIntervalMs: DEFAULT_VIDEO_POLL_INTERVAL_MS })
+      let waitedMs = params.pollWaitedMs ?? 0
 
       for (let attempt = 0; attempt < maxPolls; attempt++) {
-        await sleep(pollIntervalMs, params.abortSignal)
+        await pollSleep(pollIntervalMs, params.abortSignal)
+        waitedMs += pollIntervalMs
         
         const pollRes = await fetch(statusEndpoint, {
           headers: { Authorization: `Bearer ${apiKey}` },
@@ -465,6 +460,7 @@ export class BytePlusProvider implements VisualProvider {
         }
         
         lastStatus = (pollPayload.status ?? '').toLowerCase()
+        params.onPoll?.(lastStatus, waitedMs)
         if (lastStatus === 'failed' || lastStatus === 'cancelled' || lastStatus === 'canceled') {
           throw new Error(`Task ${taskId} ended with status=${lastStatus}. ${pollPayload.error?.message ?? ''}`.trim())
         }

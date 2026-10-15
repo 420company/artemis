@@ -7,17 +7,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { fixturePng, imageBodies, runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 import { extractOpeningFramingRegex } from '../src/tools/visual/sagaFraming.js';
+import { hasStructuredBriefMarkers, shouldPreserveUserScriptWithoutCriticRewrite } from '../src/tools/generateLongVideo.js';
+import { mapProviderNativeToolCallToAction } from '../src/core/providerNativeTools.js';
+import { validateToolAction } from '../src/tools/registry.js';
+import { executeGenerateVideo } from '../src/tools/generateVideo.js';
+import { withRuntimeLogSink } from '../src/utils/log.js';
+import { executeDirectToolForTest } from '../src/brain.js';
+import { videoPollPlan } from '../src/tools/visual/pollSleep.js';
 import { ProviderStore } from '../src/providers/store.js';
 import {
   clipBeatBudget,
   clipBeatShotCount,
+  clipShotsHeader,
   fitClipBeat,
   offsetBeatTimeline,
   openingShotBeat,
   openingShotCamera,
   packShotsIntoClips,
+  parseClipBeat,
   planSegmentDurations,
   renderClipBeat,
+  restoreClipBeat,
   segmentCountFor,
   sentencesOf,
   splitBeatText,
@@ -39,6 +49,10 @@ import { looksLikeSagaRequest, routeWorkflow } from '../src/core/workflowRouter.
 import { parseVideoLengthAnswer, planHeadlessWorkflow, videoLengthChoices } from '../src/services/headlessWorkflow.js';
 import { SessionStore } from '../src/storage/sessions.js';
 import { findInternalNames } from '../src/utils/internalNames.js';
+
+// Nothing here reaches the network: a call made outside a hermetic run (the
+// wizard's story analysis) fails at once, as it does with no LLM configured.
+globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: 'offline smoke' } }), { status: 400, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
 
 const SEEDANCE_20 = 'dreamina-seedance-2-0-260128';
 // No public 2.5 id is pinned here: any id matching /seedance[-_ ]?2[._-]?5/ is 2.5.
@@ -444,7 +458,8 @@ await test('headless --intent video: single clip, long video or one length quest
 
 await test('generation: 60 s on 30 s clips is two 30 s segments; a 20 s timecoded segment on 15 s clips is split, not cut', async () => {
   const long = await runHermeticSaga(
-    { prompt: 'A kitten crosses a rainy city at night and reaches a rooftop at dawn.', totalDuration: 60, ratio: '9:16', generateAudio: false },
+    // The one full render of this file: draft quality keeps it quick.
+    { prompt: 'A kitten crosses a rainy city at night and reaches a rooftop at dawn.', totalDuration: 60, ratio: '9:16', generateAudio: false, quality: 'draft' },
     { videoCapabilities: { maxClipSeconds: 30 } },
   );
   assert.equal(long.result.ok, true, long.result.output);
@@ -452,7 +467,7 @@ await test('generation: 60 s on 30 s clips is two 30 s segments; a 20 s timecode
   assert.ok(long.logs.some((line) => /第 2\/2 段/.test(line)), 'progress counts the real plan');
 
   const brief = '[0-20秒] 镜头1：小猫在雨里奔跑。它跳过水坑。它停在路灯下。\n[20-28秒] 镜头2：小猫跳上屋顶。';
-  const timed = await runHermeticSaga({ prompt: brief, story: brief, totalDuration: 28, ratio: '9:16', generateAudio: false, identitySource: 'text_only' });
+  const timed = await runHermeticSaga({ prompt: brief, story: brief, totalDuration: 28, ratio: '9:16', generateAudio: false, identitySource: 'text_only' }, { render: false });
   assert.equal(timed.result.ok, true, timed.result.output);
   assert.deepEqual(videoTaskBodies(timed.requests).map((body) => body.duration), [10, 10, 8], 'every written second is generated');
   assert.ok(timed.logs.some((line) => /单段上限 15 秒/.test(line)), 'the split is reported');
@@ -563,7 +578,7 @@ await test('cinematic generation: natural shots render in fewer clips on L=30; a
     camera: index % 2 ? 'close-up' : 'wide tracking',
   }));
   const action = { prompt: 'A kitten crosses a rainy city at night.', story: 'A kitten crosses a rainy city at night.', totalDuration: 60, ratio: '16:9', generateAudio: false, identitySource: 'text_only', shots };
-  const on25 = await runHermeticSaga(action, { videoModel: 'dreamina-seedance-2.5' });
+  const on25 = await runHermeticSaga(action, { videoModel: 'dreamina-seedance-2.5', render: false });
   assert.equal(on25.result.ok, true, on25.result.output);
   const durations25 = videoTaskBodies(on25.requests).map((body) => body.duration);
   assert.equal(durations25.length, 2, `two clips on L=30, as 60 s takes (${durations25})`);
@@ -571,7 +586,7 @@ await test('cinematic generation: natural shots render in fewer clips on L=30; a
   assert.equal(durations25.reduce((sum, value) => sum + value, 0), 60);
   const text25 = JSON.stringify(videoTaskBodies(on25.requests)[0]);
   assert.match(text25, /Hard cut to Shot 2/, 'the clip is cut inside');
-  const on20 = await runHermeticSaga(action, {});
+  const on20 = await runHermeticSaga(action, { render: false });
   const durations20 = videoTaskBodies(on20.requests).map((body) => body.duration);
   assert.ok(durations20.length > durations25.length, `more clips on L=15 (${durations20})`);
   assert.ok(durations20.every((value) => value <= 15));
@@ -580,7 +595,7 @@ await test('cinematic generation: natural shots render in fewer clips on L=30; a
   // No planned shots: two 30 s clips, each written as several camera shots, not one held take.
   const fallback = await runHermeticSaga(
     { prompt: 'A kitten crosses a rainy city at night. It reaches a rooftop. The sun rises over the roofs. It curls up and sleeps.', totalDuration: 60, ratio: '16:9', generateAudio: false },
-    { videoModel: SEEDANCE_25 },
+    { videoModel: SEEDANCE_25, render: false },
   );
   assert.equal(fallback.result.ok, true, fallback.result.output);
   assert.deepEqual(videoTaskBodies(fallback.requests).map((body) => body.duration), [30, 30]);
@@ -680,7 +695,7 @@ await test('packed clips keep every shot: each marker and spoken line reaches th
   const shots = dialogueShots();
   const action = { prompt: 'Mira crosses a rainy night market.', story: 'Mira crosses a rainy night market.', totalDuration: 60, ratio: '16:9', generateAudio: true, identitySource: 'text_only', shots };
   for (const [model, L, clips] of [[SEEDANCE_25, 30, 2], [SEEDANCE_20, 15, 4]] as const) {
-    const run = await runHermeticSaga(action, { videoModel: model });
+    const run = await runHermeticSaga(action, { videoModel: model, render: false });
     assert.equal(run.result.ok, true, run.result.output);
     const bodies = videoTaskBodies(run.requests);
     assert.equal(bodies.length, clips, `L=${L}: ${bodies.map((body) => body.duration)}`);
@@ -698,7 +713,7 @@ await test('packed clips keep every shot: each marker and spoken line reaches th
   const sentences = Array.from({ length: 24 }, (_, index) => `The kitten crosses street ${index + 1} in the rain, ducking under awnings and leaping over the gutters while neon signs flicker above the wet cobblestones.`);
   const fallback = await runHermeticSaga(
     { prompt: sentences.join(' '), totalDuration: 60, ratio: '16:9', generateAudio: false },
-    { videoModel: SEEDANCE_25 },
+    { videoModel: SEEDANCE_25, render: false },
   );
   assert.equal(fallback.result.ok, true, fallback.result.output);
   assert.deepEqual(videoTaskBodies(fallback.requests).map((body) => body.duration), [30, 30]);
@@ -720,7 +735,7 @@ await test('a packed clip opens on its first shot: keyframe and opening framing 
   }));
   const run = await runHermeticSaga(
     { prompt: 'Mira crosses a rainy night market.', story: 'Mira crosses a rainy night market.', totalDuration: 60, ratio: '16:9', generateAudio: false, referenceImagePaths: [fixturePng()], shots },
-    { videoModel: SEEDANCE_25 },
+    { videoModel: SEEDANCE_25, render: false },
   );
   assert.equal(run.result.ok, true, run.result.output);
   assert.equal(videoTaskBodies(run.requests).length, 2);
@@ -741,7 +756,7 @@ await test('no packing: cleanDirect, preserveUserScript, a Shot N script, or a m
   // Two short shots: one clip on L=30 when packed, two when kept as written.
   const shots = dialogueShots().slice(0, 2);
   const base = { prompt: 'Mira crosses a rainy night market.', story: 'Mira crosses a rainy night market.', totalDuration: 14, ratio: '16:9', generateAudio: false, identitySource: 'text_only', shots };
-  const packed = await runHermeticSaga(base, { videoModel: SEEDANCE_25 });
+  const packed = await runHermeticSaga(base, { videoModel: SEEDANCE_25, render: false });
   assert.deepEqual(videoTaskBodies(packed.requests).map((body) => body.duration), [14], 'packed when Artemis planned the shots');
   for (const [label, action] of [
     ['cleanDirect', { ...base, cleanDirect: true }],
@@ -750,7 +765,7 @@ await test('no packing: cleanDirect, preserveUserScript, a Shot N script, or a m
     ['镜头N markers', { ...base, story: '镜头1：米拉奔跑。镜头2：她跳起。' }],
     ['第N段 markers', { ...base, story: '第1段：米拉奔跑。第2段：她跳起。' }],
   ] as const) {
-    const run = await runHermeticSaga(action, { videoModel: SEEDANCE_25 });
+    const run = await runHermeticSaga(action, { videoModel: SEEDANCE_25, render: false });
     assert.equal(run.result.ok, true, `${label}: ${run.result.output}`);
     assert.deepEqual(videoTaskBodies(run.requests).map((body) => body.duration), [6, 8], `${label}: one clip per written shot`);
     assert.ok(bodyTexts(run.requests).every((text) => !/Hard cut to Shot 2/.test(text)), `${label}: no shots cut together`);
@@ -866,6 +881,230 @@ await test('single-clip wizard: any configured model replaces the old one mid-wi
   assert.match(prompt, /model "seedance-1-5-pro-251215"/, 'the clip is made with the model configured now');
   assert.match(prompt, /duration: 12/);
   assert.doesNotMatch(prompt, /2-5|2\.5/, 'not the model the wizard started on');
+});
+
+/** The story beat of a request body: from its "One clip of" line to the identity card. */
+function clipBeatOf(text: string): string {
+  const start = text.indexOf('One clip of');
+  assert.ok(start >= 0, 'a clip of several shots');
+  const rest = text.slice(start);
+  const end = rest.search(/ \[[A-Z]/);
+  return end >= 0 ? rest.slice(0, end) : rest;
+}
+
+await test('fallback shots: story text and motion from the user story, never the story rules', async () => {
+  const sentences = Array.from({ length: 24 }, (_, index) => `The kitten crosses street ${index + 1} in the rain, ducking under awnings and leaping over the gutters while neon signs flicker above the wet cobblestones.`);
+  // No planned shots and no entities passed: the analysis appends the story
+  // rules and the entity map to the story, after the fallback is cut from it.
+  const run = await runHermeticSaga(
+    { prompt: sentences.join(' '), totalDuration: 60, ratio: '16:9', generateAudio: false },
+    { videoModel: SEEDANCE_25, render: false },
+  );
+  assert.equal(run.result.ok, true, run.result.output);
+  const texts = bodyTexts(run.requests);
+  assert.equal(texts.length, 2);
+  for (const [clip, text] of texts.entries()) {
+    const shots = parseClipBeat(clipBeatOf(text));
+    assert.equal(shots?.length, 3, `clip ${clip + 1}: three shots`);
+    for (const [index, shot] of shots!.entries()) {
+      const where = `clip ${clip + 1} shot ${index + 1}`;
+      assert.match(shot.body, /^\d+–\d+s: the protagonist /, `${where}: the motion leads (${shot.body.slice(0, 80)})`);
+      assert.match(shot.body, /^\d+–\d+s: the protagonist [^.]+\. \d+–\d+s: [^.]+\. \d+–\d+s: [^.]+\. /, `${where}: all three movements`);
+      assert.match(shot.body, /The kitten crosses street \d+/, `${where}: story text`);
+      assert.doesNotMatch(shot.body, /Narrative Rules|MUST OBEY|Entity Map|"protagonist"|═/, `${where}: no rule text`);
+    }
+  }
+});
+
+await test('user scripts: a timed range or a timeline line is a script; a bare number range is not', async () => {
+  const preserved = (story: string) => shouldPreserveUserScriptWithoutCriticRewrite({ action: { story }, timestampedStoryShots: [] });
+  for (const story of ['She waits 3-4 minutes by the door.', 'Set in 2019-2020, a quiet town.', 'the 2019-2020s look', 'Read pages 10-12 first.', 'A 5-10 minute walk home.', '她等了3到4分钟。']) {
+    assert.equal(preserved(story), false, story);
+  }
+  for (const story of ['0-5s: she runs.', '她奔跑（3–8 秒）。', '她在3至5秒内奔跑。', '10~15 sec: the door opens.', '00:00-00:05 she runs', '0:00-0:05 she runs', '0-5: she runs.\n5-10: she stops.', '[0-5] she runs', '0到5：奔跑', 'Shot 1: she runs.', '镜头1：奔跑', '第2段：跳跃']) {
+    assert.equal(preserved(story), true, story);
+  }
+  assert.equal(shouldPreserveUserScriptWithoutCriticRewrite({ action: { story: 'plain', preserveUserScript: true }, timestampedStoryShots: [] }), true);
+  // A bare range in the story no longer stops two planned shots sharing a clip.
+  const shots = dialogueShots().slice(0, 2);
+  const story = 'Mira waits 3-4 minutes, then crosses the market.';
+  const packed = await runHermeticSaga(
+    { prompt: story, story, totalDuration: 14, ratio: '16:9', generateAudio: false, identitySource: 'text_only', shots },
+    { videoModel: SEEDANCE_25, render: false },
+  );
+  assert.deepEqual(videoTaskBodies(packed.requests).map((body) => body.duration), [14]);
+});
+
+await test('single-clip wizard: a model change keeps the message it comes with, drops what the model cannot use and says so first', async () => {
+  const cwd = await workspace(SEEDANCE_25);
+  const key = 'single-clip-fewer-refs';
+  const say = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN' });
+  const start = await say('生成一个赛博朋克产品发布视频 https://example.com/look.png https://example.com/move.mp4 https://example.com/beat.mp3');
+  assert.match(start.handled ? start.reply : '', /已收集参考素材 3 个/);
+  // The images-only 12 s model arrives while the wizard waits for the length;
+  // the answer that comes with it carries a length and another photo.
+  await configureVideo(cwd, 'seedance-1-5-pro-251215');
+  const told = await say('10 秒，并用这张产品图 https://example.com/product.png');
+  assert.equal(told.handled, true, 'told before anything is generated');
+  const note = told.handled ? told.reply : '';
+  plain(note, 'reference note');
+  assert.match(note, /视频服务已更新，现在只能使用图片参考，已移除视频 1 个、音频 1 个/);
+  assert.match(note, /已记下：10 秒，有声，参考素材 2 个/, 'the length and the photo of that message are kept');
+  const made = await say('开始生成');
+  assert.equal(made.handled, false);
+  const prompt = made.handled ? '' : made.prompt ?? '';
+  assert.match(prompt, /model "seedance-1-5-pro-251215"/);
+  assert.match(prompt, /duration: 10/);
+  assert.match(prompt, /look\.png/);
+  assert.match(prompt, /product\.png/);
+  assert.doesNotMatch(prompt, /move\.mp4|beat\.mp3|referenceVideoUrls|referenceAudioUrls/);
+
+  // A model without sound, and a video link sent with the answer.
+  const cwd2 = await workspace(SEEDANCE_25);
+  const say2 = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key: 'single-clip-no-sound', cwd: cwd2, text, locale: 'zh-CN' });
+  await say2('生成一个赛博朋克产品发布视频 https://example.com/look.png');
+  await configureVideo(cwd2, 'seedance-1-0-pro-250528');
+  const silent = await say2('10 https://example.com/more.mp4');
+  const silentNote = silent.handled ? silent.reply : '';
+  plain(silentNote, 'sound note');
+  assert.match(silentNote, /不能生成声音，这次会做成无声视频/);
+  assert.match(silentNote, /当前视频服务现在只能使用图片参考，已移除视频 1 个/);
+  assert.match(silentNote, /已记下：10 秒，无声，参考素材 1 个/);
+  const silentPrompt = await say2('开始生成');
+  const silentText = silentPrompt.handled ? '' : silentPrompt.prompt ?? '';
+  assert.match(silentText, /generateAudio: false/);
+  assert.doesNotMatch(silentText, /more\.mp4/);
+
+  // The dream-journal question: the sound note comes with the next step.
+  const cwd3 = await workspace(SEEDANCE_25);
+  const dream = { id: 'dream-smoke', body: '我梦见自己在海边的灯塔上飞翔，海浪发着蓝光。' };
+  const say3 = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key: 'single-clip-dream', cwd: cwd3, text, locale: 'zh-CN', latestDream: dream });
+  const asked = await say3('把最新的梦境做成视频');
+  assert.match(asked.handled ? asked.reply : '', /最新梦境日记/);
+  await configureVideo(cwd3, 'seedance-1-0-pro-250528');
+  const dreamStep = await say3('使用最新梦境');
+  assert.equal(dreamStep.handled, true);
+  assert.match(dreamStep.handled ? dreamStep.reply : '', /不能生成声音，这次会做成无声视频[\s\S]*请选择视频时长/);
+
+  // English, for the en locale.
+  const enCwd = await workspace(SEEDANCE_25);
+  const enSay = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key: 'single-clip-fewer-refs-en', cwd: enCwd, text, locale: 'en' });
+  await enSay('make a cyberpunk product launch video https://example.com/look.png https://example.com/move.mp4');
+  await configureVideo(enCwd, 'seedance-1-5-pro-251215');
+  const enNote = await enSay('10');
+  assert.match(enNote.handled ? enNote.reply : '', /The video service changed and now takes only image references; removed 1 video reference\.[\s\S]*Noted: 10 seconds/);
+});
+
+await test('video polling: the interval and total wait stay within bounds whatever the caller asks', () => {
+  const defaults = { maxPolls: 60, pollIntervalMs: 5000 };
+  assert.deepEqual(videoPollPlan({}, defaults), { maxPolls: 60, pollIntervalMs: 5000 }, 'five minutes by default');
+  assert.deepEqual(videoPollPlan({ maxPolls: 2, pollIntervalMs: 5000 }, defaults), { maxPolls: 60, pollIntervalMs: 5000 }, 'never under five minutes in all');
+  assert.deepEqual(videoPollPlan({ maxPolls: 3, pollIntervalMs: 10 }, defaults), { maxPolls: 300, pollIntervalMs: 1000 }, 'never under a second between polls');
+  assert.deepEqual(videoPollPlan({ pollIntervalMs: 120_000 }, defaults), { maxPolls: 10, pollIntervalMs: 30_000 }, 'never over 30 s between polls');
+  assert.deepEqual(videoPollPlan({ maxPolls: 100_000, pollIntervalMs: 1000 }, defaults), { maxPolls: 2400, pollIntervalMs: 1000 }, 'never over 40 minutes in all');
+  assert.deepEqual(videoPollPlan({ maxPolls: 420 }, defaults), { maxPolls: 420, pollIntervalMs: 5000 }, 'a long-video segment: 35 minutes');
+});
+
+await test('a slow segment: the same task is polled again, never submitted twice, with progress about every minute', async () => {
+  // Each task answers "running" to 500 polls: past one attempt's 420 polls.
+  const run = await runHermeticSaga(
+    { prompt: 'A kitten crosses a rainy city at night.', totalDuration: 10, ratio: '16:9', generateAudio: false, identitySource: 'text_only' },
+    { videoModel: SEEDANCE_25, render: false, runningPolls: 500 },
+  );
+  assert.equal(run.result.ok, true, run.result.output);
+  assert.equal(videoTaskBodies(run.requests).length, 1, 'one task submitted');
+  const polls = run.requests.filter((request) => request.method === 'GET' && /\/contents\/generations\/tasks\/task-1$/.test(request.url));
+  assert.equal(polls.length, 501, 'polled until it finished');
+  const lines = run.logs.join('\n');
+  assert.match(lines, /第 1\/1 段：视频仍在生成（已等待 7 分钟），继续等待同一个任务，不重新提交/);
+  assert.doesNotMatch(lines, /重新提交任务/);
+  const progress = run.logs.filter((line) => line.startsWith('⏳ 第 1/1 段视频'));
+  assert.deepEqual(progress.map((line) => /已等待 (\d+) 分钟/.exec(line)?.[1]), ['1', '2', '3', '4', '5', '6', '7', '8'], 'a line a minute, counting on across the second wait');
+  assert.match(progress[0]!, /^⏳ 第 1\/1 段视频生成中，已等待 1 分钟…$/);
+  for (const line of progress) plain(line, 'progress line');
+});
+
+await test('rewrites and fractions: a clip beat keeps its shots; split parts keep the exact length', () => {
+  const parts = splitLongShots([{ title: 'a', duration: 40.6, storyBeat: 'One. Two. Three. Four.' }], 30);
+  assert.equal(parts.length, 2);
+  assert.ok(Math.abs(parts.reduce((sum, part) => sum + (part.duration ?? 0), 0) - 40.6) < 1e-9, `${parts.map((part) => part.duration)}`);
+  assert.ok(parts.every((part) => (part.duration ?? 0) <= 30));
+  const before = packShotsIntoClips(dialogueShots() as Array<{ title: string; duration: number; storyBeat: string }>, 30)[0]!.storyBeat ?? '';
+  const shots = parseClipBeat(before)!;
+  assert.equal(shots.length, 4);
+  const body = shots.map((shot) => `${shot.marker}${shot.body} (rewritten)`).join(' ');
+  // A rewrite that keeps the opening line and every marker is kept.
+  const kept = renderClipBeat(shots.map((shot) => ({ ...shot, body: `${shot.body} (rewritten)` })), false);
+  assert.equal(restoreClipBeat(before, kept), kept);
+  // One that drops the opening line gets it back.
+  assert.equal(restoreClipBeat(before, body), `${clipShotsHeader(4)} ${body}`);
+  // One that loses a shot, or every marker, keeps the beat before it.
+  assert.equal(restoreClipBeat(before, shots.slice(0, 3).map((shot) => `${shot.marker}${shot.body}`).join(' ')), before);
+  assert.equal(restoreClipBeat(before, 'Mira crosses the market in one take.'), before);
+  // A beat of one shot is the rewrite's to change.
+  assert.equal(restoreClipBeat('0–2s: a. 2s–end: b.', 'new beat'), 'new beat');
+});
+
+await test('tool calls: unknown video arguments are stripped or rejected; a call cannot resume another task', async () => {
+  const injected = { prompt: 'a cat', duration: 5, resumeTaskId: 'task-999', pollWaitedMs: 1, progressLabel: 'INJECTED ', cleanDirect: true };
+  const mapped = mapProviderNativeToolCallToAction({ callId: 'call-1', name: 'generate_video', arguments: JSON.stringify(injected) } as any);
+  assert.equal(mapped.ok, true);
+  const action = mapped.ok ? mapped.action as Record<string, unknown> : {};
+  for (const key of ['resumeTaskId', 'pollWaitedMs', 'progressLabel', 'cleanDirect']) assert.equal(key in action, false, `${key} stripped`);
+  assert.equal(action.prompt, 'a cat');
+  // Outside native tool calls the same keys are refused.
+  assert.match(validateToolAction({ type: 'generate_video', ...injected }).join('\n'), /unknown arguments: resumeTaskId, pollWaitedMs, progressLabel, cleanDirect/);
+  assert.match(validateToolAction({ type: 'generate_long_video', prompt: 'a cat', totalDuration: 30, resumeTaskId: 'task-999' }).join('\n'), /unknown argument: resumeTaskId/);
+  assert.deepEqual(validateToolAction({ type: 'generate_long_video', prompt: 'a cat', totalDuration: 30, subtitleMode: 'auto', identitySource: 'text_only', cleanDirect: true }), []);
+  const longMapped = mapProviderNativeToolCallToAction({ callId: 'call-2', name: 'generate_long_video', arguments: JSON.stringify({ prompt: 'a cat', totalDuration: 30, resumeTaskId: 'task-999' }) } as any);
+  assert.equal(longMapped.ok && 'resumeTaskId' in longMapped.action, false);
+  // The mapped call makes its own task and never polls the injected one.
+  const { requests, output, logs } = await withHermeticWorkspace({ videoModel: SEEDANCE_25 }, async (cwd, recorded) => {
+    const lines: string[] = [];
+    const result = await withRuntimeLogSink((entry) => { lines.push(entry.message); }, () => executeGenerateVideo(action as any, { cwd, permissionMode: 'full-access' } as any));
+    return { requests: recorded, output: result.output ?? '', logs: lines };
+  });
+  assert.equal(videoTaskBodies(requests).length, 1, `a new task (${output})`);
+  assert.ok(!requests.some((request) => request.url.includes('task-999')), 'the injected task is never read');
+  assert.ok(!logs.some((line) => line.includes('INJECTED')));
+});
+
+await test('direct tool calls: unknown video arguments are dropped, not refused; the call makes its own task', async () => {
+  const injected = { prompt: 'a cat', duration: 5, resumeTaskId: 'task-999', pollWaitedMs: 1, progressLabel: 'INJECTED ', aiScreenwriterMode: true };
+  const { requests, result } = await withHermeticWorkspace({ videoModel: SEEDANCE_25 }, async (cwd, recorded) => ({
+    requests: recorded,
+    result: await executeDirectToolForTest('generate_video', injected, { cwd, permissionMode: 'PRODUCER' }) as { ok: boolean; output: string; error?: { code?: string } },
+  }));
+  assert.equal(result.ok, true, result.output);
+  assert.equal(videoTaskBodies(requests).length, 1, 'a new task');
+  assert.ok(!requests.some((request) => request.url.includes('task-999')), 'the injected task is never read');
+  // A long-video call with a key the wizard used to suggest is not refused either.
+  const long = await withHermeticWorkspace({ videoModel: SEEDANCE_25 }, async (cwd) => (
+    await executeDirectToolForTest('generate_long_video', { prompt: 'A kitten crosses a rainy city.', totalDuration: 10, aiScreenwriterMode: true, resumeTaskId: 'task-999' }, { cwd, permissionMode: 'PRODUCER', allowBackgroundTools: false }) as { ok: boolean; output: string; error?: { code?: string } }
+  ));
+  assert.notEqual(long.error?.code, 'tool_invalid_arguments', long.output);
+  assert.doesNotMatch(long.output ?? '', /unknown argument/);
+  // The native path drops it too.
+  const mapped = mapProviderNativeToolCallToAction({ callId: 'call-3', name: 'generate_long_video', arguments: JSON.stringify({ prompt: 'a cat', totalDuration: 30, aiScreenwriterMode: true }) } as any);
+  assert.equal(mapped.ok, true);
+  assert.equal(mapped.ok && 'aiScreenwriterMode' in mapped.action, false);
+});
+
+await test('script and timeline detection stay fast on whitespace-heavy text', () => {
+  const inputs = [
+    (' '.repeat(80) + '\n').repeat(625),
+    ' '.repeat(50_000),
+    '\n'.repeat(50_000),
+    ('[ ' + ' \n'.repeat(30) + '1 ' + ' '.repeat(30)).repeat(400).slice(0, 50_000),
+    ('1' + ' '.repeat(60) + '\n').repeat(800).slice(0, 50_000),
+  ];
+  for (const [index, story] of inputs.entries()) {
+    const started = Date.now();
+    assert.equal(shouldPreserveUserScriptWithoutCriticRewrite({ action: { story }, timestampedStoryShots: [] }), false);
+    assert.equal(hasStructuredBriefMarkers(story), false);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 250, `input ${index + 1}: ${elapsed} ms for 50 KB`);
+  }
 });
 
 console.log(`\n  ✔ ${passed} video duration checks passed`);
