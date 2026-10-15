@@ -47,6 +47,7 @@ import { extractOpeningFraming } from './sagaFraming.js';
 import { postSagaChatCompletion, resolveSagaChatEndpoint, SAGA_CHAT_TIMEOUT_MS } from './sagaChat.js';
 import { bytePlusImageModelReferenceLimit, checkBytePlusReferenceSupport, localImagesToReferenceDataUris, MAX_REFERENCE_IMAGES } from './referenceImages.js';
 import { seedreamAspectForRatio, seedreamImageSize, type SeedreamAspect } from './seedreamSizes.js';
+import { isImagesApiImageModel } from './imagesApiParams.js';
 import { ANATOMICAL_SIDE_RULE, SINGLE_PROTAGONIST_RULE } from './renderingGuardrails.js';
 import { baseUrlIsLoopback, downloadGuardedUrl, downloadProviderAsset } from './safeDownload.js';
 
@@ -157,6 +158,8 @@ export function superVisualImageRoute(provider: string | undefined, model: strin
   if (provider?.trim().toLowerCase() === 'byteplus' && /seedream/i.test(id) && bytePlusImageModelReferenceLimit(id) >= 2) {
     return 'reference-images';
   }
+  // An Images API model behind the same provider: its referenceImages go to /images/edits.
+  if (provider?.trim().toLowerCase() === 'byteplus' && isImagesApiImageModel(id)) return 'reference-images';
   return undefined;
 }
 
