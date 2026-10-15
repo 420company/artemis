@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { CdpRouter, VIEWER_METHODS, viewerParams, viewerRefusal } from '../src/tools/browser/cdpRouter.js';
 import {
   LIVE_DIR_ENV,
@@ -758,6 +759,37 @@ async function main(): Promise<void> {
     assert.equal(fs.statSync(file).mode & 0o777, 0o640);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { a: 2 });
     assert.deepEqual(fs.readdirSync(dir), ['x.json']);
+  });
+
+  await check('browser_navigate opens a workspace page by path (file://), inside the workspace only', async () => {
+    const { workspacePageUrl } = await import('../src/tools/browser/browserTools.js');
+    const { getToolDefinition } = await import('../src/tools/registry.js');
+    const { buildActionParametersSchema } = await import('../src/core/providerNativeTools.js');
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-page-'));
+    fs.mkdirSync(path.join(ws, 'sites', 'poster'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'sites', 'poster', 'index.html'), '<!doctype html><title>poster</title>');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-out-'));
+    fs.writeFileSync(path.join(outside, 'x.html'), 'x');
+    fs.symlinkSync(outside, path.join(ws, 'link'));
+    try {
+      const real = fs.realpathSync(ws);
+      assert.equal(await workspacePageUrl('sites/poster/index.html', ws), pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href);
+      assert.ok(real.length > 0);
+      assert.match(await workspacePageUrl('sites/poster', ws), /\/sites\/poster\/index\.html$/);
+      await assert.rejects(() => workspacePageUrl('../x.html', ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl(path.join(outside, 'x.html'), ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl('link/x.html', ws), /escapes/);
+      await assert.rejects(() => workspacePageUrl('sites/missing.html', ws));
+      const tool = getToolDefinition('browser_navigate') as unknown as { validate: (a: unknown) => string[] };
+      assert.deepEqual(tool.validate({ type: 'browser_navigate', path: 'sites/poster/index.html' }), []);
+      assert.deepEqual(tool.validate({ type: 'browser_navigate', url: 'https://example.com' }), []);
+      assert.equal(tool.validate({ type: 'browser_navigate' }).length, 1);
+      const schema = buildActionParametersSchema('browser_navigate') as { properties?: Record<string, unknown>; required?: string[] };
+      assert.ok(schema.properties?.path && schema.properties?.url && !(schema.required ?? []).includes('url'));
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   console.log(`\nbrowser live smoke: ${passed} checks passed`);

@@ -35,6 +35,7 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import {
   getActivePage,
   closeActivePage,
@@ -57,7 +58,7 @@ import {
   targetIdOf,
 } from './browserSession.js';
 import type { Page } from 'playwright';
-import { resolveArtemisHomeDir } from '../../utils/fs.js';
+import { isAlwaysPrivatePath, resolveArtemisHomeDir, resolveInsideRoot } from '../../utils/fs.js';
 import type { ToolExecutionContext } from '../types.js';
 import {
   browserGate,
@@ -146,20 +147,45 @@ function truncate(s: string, max = MAX_TEXT_OUTPUT): string {
 
 export interface BrowserNavigateAction {
   type: 'browser_navigate';
-  url: string;
+  url?: string;
+  /** A page in the workspace, opened directly (file://): no server needed to look at it. */
+  path?: string;
   waitFor?: 'load' | 'domcontentloaded' | 'networkidle';
   extractText?: boolean;
 }
 
-async function runBrowserNavigate(action: BrowserNavigateAction): Promise<ToolResult> {
-  if (!action.url || action.url.trim().length === 0) {
+/**
+ * The file:// URL of a workspace page: inside the workspace only (symlinks
+ * followed), never a protected directory; a folder opens its index.html.
+ */
+export async function workspacePageUrl(inputPath: string, cwd: string): Promise<string> {
+  const absolute = resolveInsideRoot(cwd, inputPath.trim().replace(/^file:\/\//i, ''));
+  if (isAlwaysPrivatePath(absolute)) throw new Error(`${inputPath} is in a protected directory`);
+  const info = await fsp.stat(absolute);
+  const file = info.isDirectory() ? path.join(absolute, 'index.html') : absolute;
+  if (info.isDirectory()) await fsp.access(file);
+  return pathToFileURL(file).href;
+}
+
+async function runBrowserNavigate(action: BrowserNavigateAction, cwd: string = process.cwd()): Promise<ToolResult> {
+  const hasPath = typeof action.path === 'string' && action.path.trim().length > 0;
+  if (!hasPath && (!action.url || action.url.trim().length === 0)) {
     return {
       ok: false,
-      output: 'url 必填',
-      error: { code: 'invalid_input', message: 'url required' },
+      output: 'url 或 path 必填',
+      error: { code: 'invalid_input', message: 'url or path required' },
     };
   }
-  const scriptUrl = /^\s*(javascript|vbscript):/i.test(action.url);
+  let target = action.url ?? '';
+  if (hasPath) {
+    try {
+      target = await workspacePageUrl(action.path!, cwd);
+    } catch (err) {
+      const message = `Cannot open ${action.path} from the workspace: ${err instanceof Error ? err.message : String(err)}`;
+      return { ok: false, output: `${message}. path opens a page inside the workspace only; use url for other pages.`, error: { code: 'invalid_input', message } };
+    }
+  }
+  const scriptUrl = /^\s*(javascript|vbscript):/i.test(target);
   // A script URL is a page script too.
   if (scriptUrl && hasLiveIdentitySecrets()) return liveSecretRefusal();
   try {
@@ -169,7 +195,7 @@ async function runBrowserNavigate(action: BrowserNavigateAction): Promise<ToolRe
         if (refused) return refused;
       }
       const waitUntil = action.waitFor ?? 'domcontentloaded';
-      await page.goto(action.url, { waitUntil, timeout: 30_000 });
+      await page.goto(target, { waitUntil, timeout: 30_000 });
       const title = await page.title();
       const finalUrl = page.url();
 
@@ -946,7 +972,7 @@ onIdentityLiveWindow(() => {
 });
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserNavigate(action), context?.abortSignal);
+  gated(() => runBrowserNavigate(action, context?.cwd), context?.abortSignal);
 export const executeBrowserScreenshot = (action: BrowserScreenshotAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserScreenshot(action, context), context?.abortSignal);
 export const executeBrowserExtract = (action: BrowserExtractAction, context?: ToolExecutionContext) =>

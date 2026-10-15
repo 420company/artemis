@@ -80,7 +80,7 @@ ${OPERATOR_PRINCIPLE}`;
 const DESIGN_SKILL_FALLBACK = `\
 [设计工作流]
 网站/UI/视觉前端任务：先列内容事实清单（禁止虚构），建立视觉系统与资产清单，真实生成配图，实现页面，
-最后用 browser_navigate + browser_screenshot 做桌面与手机视口验收；截图失败时如实说明视觉验收未完成。`;
+最后用 browser_navigate（静态网页用 path 直接打开工作区里的页面，不要自己启动服务）+ browser_screenshot 做桌面与手机视口验收；截图失败时如实说明视觉验收未完成。`;
 
 let designSkillCache: string | undefined;
 

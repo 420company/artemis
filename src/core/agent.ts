@@ -2109,7 +2109,7 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `reminders_complete "${truncateInline(action.title, 60)}"`;
     // ── Browser automation ──────────────────────────────────────────────
     case 'browser_navigate':
-      return `browser_navigate ${truncateInline(action.url, 100)}`;
+      return `browser_navigate ${truncateInline(action.url ?? action.path ?? '', 100)}`;
     case 'browser_screenshot':
       return `browser_screenshot${action.fullPage ? ' fullPage=true' : ''}`;
     case 'browser_extract_text':

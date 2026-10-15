@@ -2153,14 +2153,17 @@ const capabilityToolDefs: ToolDefinition[] = [
   // ── Browser automation (Playwright headed Chromium) ────────────────────
   {
     type: 'browser_navigate',
-    description: '在本机 Chromium 浏览器中打开 URL。url 必填。网页被反爬拦截、需要登录、点击交互或 JS 渲染时，用这条工具。',
+    description: '在本机 Chromium 浏览器中打开 URL（url），或直接打开工作区里的网页（path，例如 sites/<名字>/index.html；给文件夹会打开其中的 index.html）。看自己做的网页用 path 即可，不需要启动服务。网页被反爬拦截、需要登录、点击交互或 JS 渲染时，也用这条工具。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: (a: any) => {
       const errs: string[] = [];
-      validateRequiredNonEmptyString(a?.url, 'url', errs);
+      const hasUrl = typeof a?.url === 'string' && a.url.trim().length > 0;
+      const hasPath = typeof a?.path === 'string' && a.path.trim().length > 0;
+      if (!hasUrl && !hasPath) errs.push('url or path is required');
+      if (hasUrl && hasPath) errs.push('give url or path, not both');
       return errs;
     },
     execute: (async (a: any, context: any) => {

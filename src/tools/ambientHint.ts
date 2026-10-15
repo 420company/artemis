@@ -88,7 +88,7 @@ export function buildAmbientToolsHint(): string {
     browserHeading,
     '网页被反爬 / JS 动态渲染 / 需要登录 / 需要点击交互时——**立刻**切到浏览器工具，不要反复用 search_web 重试同一个页面。',
     '',
-    '- `browser_navigate(url, extractText?)` — 打开 URL，默认返回页面可见文本',
+    '- `browser_navigate(url | path, extractText?)` — 打开 URL，或用 path 直接打开工作区里的网页（看自己做的页面不需要启动服务），默认返回页面可见文本',
     '- `browser_extract_text(selector?)` — 提取指定区域',
     '- `browser_click(selector | text)` — 点击元素',
     '- `browser_type(selector, text, pressEnter?)` — 输入到表单',
