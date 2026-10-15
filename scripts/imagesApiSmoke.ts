@@ -107,8 +107,8 @@ await check('maps quality to low / medium / high / auto', () => {
   assert.equal(imagesApiQuality('auto'), 'auto');
   assert.equal(imagesApiQuality(undefined), 'auto');
   assert.deepEqual(
-    imagesApiRequestFields({ model: IMAGE_MODEL, prompt: 'p', count: 2, size: 'portrait', quality: 'standard', outputFormat: 'jpg', outputCompression: 72.4, background: 'opaque' }),
-    { model: IMAGE_MODEL, prompt: 'p', n: 2, size: '1024x1536', quality: 'medium', output_format: 'jpeg', output_compression: 72, background: 'opaque' },
+    imagesApiRequestFields({ model: IMAGE_MODEL, prompt: 'p', size: 'portrait', quality: 'standard', outputFormat: 'jpg', outputCompression: 72.4, background: 'opaque' }),
+    { model: IMAGE_MODEL, prompt: 'p', n: 1, size: '1024x1536', quality: 'medium', output_format: 'jpeg', output_compression: 72, background: 'opaque' },
   );
   // Compression only for jpeg / webp; an unknown background is left out.
   assert.deepEqual(imagesApiRequestFields({ model: IMAGE_MODEL, prompt: 'p', outputFormat: 'png', outputCompression: 50, background: 'glass' }), { model: IMAGE_MODEL, prompt: 'p', n: 1, size: 'auto', quality: 'auto', output_format: 'png' });
@@ -120,7 +120,8 @@ await check('generates without references through /images/generations, writing t
   await withFetch(
     () => Response.json({ data: [{ b64_json: PNG.toString('base64') }], usage: { input_tokens: 10, output_tokens: 272 } }),
     async (sent) => {
-      const result = await provider(IMAGE_MODEL).generateImage({ prompt: 'a red fox', size: '2K', outputFormat: 'webp' });
+      // A count above 1 still asks for one image: one is saved per call, and every image made is billed.
+      const result = await provider(IMAGE_MODEL).generateImage({ prompt: 'a red fox', size: '2K', outputFormat: 'webp', count: 3 });
       assert.equal(result.success, true, result.error);
       assert.equal(sent.length, 1);
       assert.equal(sent[0]!.url, 'https://gateway.test/v1/images/generations');
@@ -159,6 +160,73 @@ await check('reports an API failure with its status, without naming the model fa
       assert.doesNotMatch(result.error!, /gpt|openai/i);
     },
   );
+});
+
+await check('marks an answer whose image cannot be decoded as a download failure (the image was billed)', async () => {
+  await withFetch(
+    () => Response.json({ data: [{ b64_json: '' }] }),
+    async () => {
+      const result = await provider(IMAGE_MODEL).generateImage({ prompt: 'x' });
+      assert.equal(result.success, false);
+      assert.equal(result.failureStage, 'download');
+    },
+  );
+  await withFetch(
+    () => Response.json({ data: [{}] }),
+    async () => assert.equal((await provider(IMAGE_MODEL).generateImage({ prompt: 'x' })).failureStage, 'download'),
+  );
+});
+
+await check('caps reference images before sending anything', async () => {
+  await withFetch(
+    () => Response.json({ data: [{ b64_json: PNG.toString('base64') }] }),
+    async (sent) => {
+      const refs = Array.from({ length: 17 }, () => `data:image/png;base64,${PNG.toString('base64')}`);
+      const result = await provider(IMAGE_MODEL).generateImage({ prompt: 'x', referenceImages: refs });
+      assert.equal(result.success, false);
+      assert.match(result.error!, /at most 16 reference images/);
+      assert.equal(sent.length, 0);
+    },
+  );
+});
+
+await check('stops a reference download over its size limit', async () => {
+  const { downloadGuardedUrl, setAssetDownloadResolverForTests, setAssetDownloadTransportForTests } = await import('../src/tools/visual/safeDownload.js');
+  setAssetDownloadResolverForTests(async () => [{ address: '93.184.216.34', family: 4 }]);
+  setAssetDownloadTransportForTests(async () => ({ status: 200, contentType: 'image/png', body: Buffer.alloc(11) }));
+  try {
+    await assert.rejects(downloadGuardedUrl('https://images.example/a.png', { timeoutMs: 1_000, maxBytes: 10 }), /larger than 10 bytes/);
+    assert.equal((await downloadGuardedUrl('https://images.example/a.png', { timeoutMs: 1_000, maxBytes: 11 })).body.length, 11);
+  } finally {
+    setAssetDownloadResolverForTests();
+    setAssetDownloadTransportForTests();
+  }
+});
+
+await check('the legacy credentials path sends an Images API model its own request', async () => {
+  const { executeGenerateImage } = await import('../src/tools/generateImage.js');
+  const cwd = mkdtempSync(path.join(os.tmpdir(), 'images-api-legacy-'));
+  const previous = process.env.ARK_API_KEY;
+  process.env.ARK_API_KEY = 'legacy-key';
+  try {
+    await withFetch(
+      () => Response.json({ data: [{ b64_json: PNG.toString('base64') }] }),
+      async (sent) => {
+        const result = await executeGenerateImage(
+          { type: 'generate_image', prompt: 'a lighthouse', model: IMAGE_MODEL, size: '2K', outputPath: path.join(cwd, 'out.png') },
+          { cwd, permissionMode: 'full-access' },
+        );
+        assert.equal(result.ok, true, String(result.output));
+        const call = sent.find((entry) => entry.url.endsWith('/images/generations'));
+        assert.ok(call, sent.map((entry) => entry.url).join(', '));
+        assert.deepEqual(call!.json, { model: IMAGE_MODEL, prompt: 'a lighthouse', n: 1, size: 'auto', quality: 'auto' });
+        assert.deepEqual(readFileSync(path.join(cwd, 'out.png')), PNG);
+      },
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ARK_API_KEY;
+    else process.env.ARK_API_KEY = previous;
+  }
 });
 
 await check('keeps ModelArk requests unchanged', async () => {

@@ -77,10 +77,12 @@ export function imagesApiBackground(background: string | undefined): 'auto' | 'o
   return b === 'auto' || b === 'opaque' || b === 'transparent' ? b : undefined;
 }
 
+/** Input images one edit request takes at most. */
+export const MAX_IMAGES_API_REFERENCES = 16;
+
 export interface ImagesApiRequestInput {
   model: string;
   prompt: string;
-  count?: number;
   size?: string;
   quality?: string;
   outputFormat?: string;
@@ -88,12 +90,16 @@ export interface ImagesApiRequestInput {
   background?: string;
 }
 
-/** The request fields (everything but the input images), as JSON values. */
+/**
+ * The request fields (everything but the input images), as JSON values.
+ * Always one image (`n` 1): callers save one image per call, and every image
+ * the API makes is billed, so it never makes one nobody receives.
+ */
 export function imagesApiRequestFields(input: ImagesApiRequestInput): Record<string, string | number> {
   const fields: Record<string, string | number> = {
     model: input.model,
     prompt: input.prompt,
-    n: Math.max(1, Math.min(10, Math.floor(input.count ?? 1))),
+    n: 1,
     size: imagesApiSize(input.size),
     quality: imagesApiQuality(input.quality),
   };

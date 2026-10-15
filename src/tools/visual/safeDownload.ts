@@ -116,12 +116,12 @@ export type AssetHostResolver = (hostname: string) => Promise<ResolvedAddress[]>
 /** One HTTP GET without following redirects; `lookup` must be used for the connection. */
 export type AssetTransport = (
   url: URL,
-  options: { lookup: LookupFunction; signal: AbortSignal; method?: 'GET' | 'HEAD' },
+  options: { lookup: LookupFunction; signal: AbortSignal; method?: 'GET' | 'HEAD'; maxBytes?: number },
 ) => Promise<{ status: number; location?: string; contentType?: string; body: Buffer; statusText?: string }>;
 
 const systemResolver: AssetHostResolver = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
-const nodeTransport: AssetTransport = (url, { lookup, signal, method }) =>
+const nodeTransport: AssetTransport = (url, { lookup, signal, method, maxBytes }) =>
   new Promise((resolve, reject) => {
     const client = url.protocol === 'https:' ? https : http;
     const req = client.request(url, { method: method ?? 'GET', lookup, signal }, (res) => {
@@ -132,7 +132,16 @@ const nodeTransport: AssetTransport = (url, { lookup, signal, method }) =>
         return;
       }
       const chunks: Buffer[] = [];
-      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      let received = 0;
+      res.on('data', (chunk: Buffer) => {
+        received += chunk.length;
+        // Stop reading a body over the caller's limit instead of holding all of it.
+        if (maxBytes !== undefined && received > maxBytes) {
+          req.destroy(new AssetDownloadError(`download failed: larger than ${maxBytes} bytes`));
+          return;
+        }
+        chunks.push(chunk);
+      });
       res.on('end', () => resolve({ status, statusText: res.statusMessage, contentType: res.headers['content-type'], body: Buffer.concat(chunks) }));
       res.on('error', reject);
     });
@@ -217,7 +226,13 @@ async function checkUrl(rawUrl: string, allowLoopback: boolean): Promise<URL> {
   return url;
 }
 
-type GuardedDownloadOptions = { timeoutMs: number; allowLoopback?: boolean; signal?: AbortSignal };
+type GuardedDownloadOptions = {
+  timeoutMs: number;
+  allowLoopback?: boolean;
+  signal?: AbortSignal;
+  /** Refuse a body larger than this many bytes (stops reading once it is passed). */
+  maxBytes?: number;
+};
 
 /**
  * Fetches a provider-returned asset URL, following redirects by hand so each
@@ -263,7 +278,7 @@ export async function guardedRequest(
     const url = await checkUrl(current, allowLoopback);
     let res: Awaited<ReturnType<AssetTransport>>;
     try {
-      res = await transport(url, { lookup, signal, ...(options.method ? { method: options.method } : {}) });
+      res = await transport(url, { lookup, signal, ...(options.method ? { method: options.method } : {}), ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
     } catch (error) {
       if (error instanceof AssetDownloadError) throw error;
       throw new AssetDownloadError(`download failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -273,6 +288,7 @@ export async function guardedRequest(
       current = new URL(res.location, url).toString();
       continue;
     }
+    if (options.maxBytes !== undefined && res.body.length > options.maxBytes) throw new AssetDownloadError(`download failed: larger than ${options.maxBytes} bytes`);
     return { status: res.status, statusText: res.statusText, contentType: res.contentType, body: res.body, url: url.toString() };
   }
   throw new AssetDownloadError(`download failed: more than ${MAX_REDIRECTS} redirects`);

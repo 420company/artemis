@@ -19,7 +19,7 @@ import {
   resolveVideoModelCapabilities,
   videoCapabilityOverridesFromConfig,
 } from '../videoCapabilities.js'
-import { checkBytePlusReferenceSupport } from '../referenceImages.js'
+import { checkBytePlusReferenceSupport, MAX_REFERENCE_IMAGE_BYTES } from '../referenceImages.js'
 import { seedreamSizeFromKeyword } from '../seedreamSizes.js'
 import {
   decodeDataUri,
@@ -27,6 +27,7 @@ import {
   imagesApiExtension,
   imagesApiRequestFields,
   isImagesApiImageModel,
+  MAX_IMAGES_API_REFERENCES,
   type ImagesApiRequestInput,
 } from '../imagesApiParams.js'
 import { DEFAULT_MODEL_IDS } from '../../../providers/presets.js'
@@ -217,7 +218,6 @@ export class BytePlusProvider implements VisualProvider {
     const input: ImagesApiRequestInput = {
       model,
       prompt: params.prompt,
-      count: params.count || 1,
       size: params.size || defaults.size,
       quality: params.quality || defaults.quality,
       outputFormat: params.outputFormat || defaults.outputFormat,
@@ -225,19 +225,23 @@ export class BytePlusProvider implements VisualProvider {
       background: params.background || defaults.background,
     }
     const references = params.referenceImages ?? []
+    if (references.length > MAX_IMAGES_API_REFERENCES) {
+      throw new Error(`The image model accepts at most ${MAX_IMAGES_API_REFERENCES} reference images; got ${references.length}.`)
+    }
     let body: string | FormData
     let endpoint: string
     if (references.length > 0) {
       const images: Array<{ bytes: Buffer; type: string }> = []
       for (const reference of references) {
         const inline = decodeDataUri(reference)
+        if (inline && inline.bytes.length === 0) throw new Error('A reference image is empty.')
         if (inline) {
           images.push(inline)
           continue
         }
         // An http(s) reference is fetched here: edits take files, not links.
         try {
-          const { body: bytes, contentType } = await downloadGuardedUrl(reference, { timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS, signal: params.abortSignal })
+          const { body: bytes, contentType } = await downloadGuardedUrl(reference, { timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS, signal: params.abortSignal, maxBytes: MAX_REFERENCE_IMAGE_BYTES })
           images.push({ bytes, type: (contentType ?? 'image/png').split(';')[0]!.trim().toLowerCase() })
         } catch (error) {
           throw new ImageApiError(`Reference image download failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -268,9 +272,11 @@ export class BytePlusProvider implements VisualProvider {
     }
     const item = payload.data?.[0]
     if (!item) throw new Error(`API returned no images. ${payload.error?.message ?? ''}`.trim())
+    // From here on the image was made (and billed): a failure to get its bytes is a download failure.
     let buf: Buffer
     if (item.b64_json) {
       buf = Buffer.from(item.b64_json, 'base64')
+      if (buf.length === 0) throw new ImageApiError('The image data in the response could not be decoded.', undefined, 'download')
     } else if (item.url) {
       try {
         buf = await downloadProviderAsset(item.url, {
@@ -282,9 +288,9 @@ export class BytePlusProvider implements VisualProvider {
         throw new ImageApiError(`Image download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
       }
     } else {
-      throw new Error('Response contained neither image data nor a URL.')
+      throw new ImageApiError('Response contained neither image data nor a URL.', undefined, 'download')
     }
-    if (buf.length === 0) throw new Error('Response contained an empty image.')
+    if (buf.length === 0) throw new ImageApiError('Response contained an empty image.', undefined, 'download')
 
     const fs = await import('fs/promises')
     const path = await import('path')
