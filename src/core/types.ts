@@ -702,6 +702,13 @@ export type AgentAction =
       watermark?: boolean;
       maxPolls?: number;
       pollIntervalMs?: number;
+      // Set by Saga only: poll this already-submitted task instead of
+      // submitting a new one (a slow task that is still queued or running),
+      // with the time already waited on it, and the segment named in the
+      // progress lines logged while it is polled.
+      resumeTaskId?: string;
+      pollWaitedMs?: number;
+      progressLabel?: string;
       runInBackground?: boolean;
     }
   | {

@@ -67,6 +67,8 @@ type SeedanceWorkflowState = {
   clipChoices: number[];
   /** Reference kinds the current model takes; others are dropped, with a note to the user. */
   referenceInputs: readonly VideoReferenceKind[];
+  /** false once the current model is known to make no sound: the clip is silent whatever is asked. */
+  canGenerateAudio?: boolean;
   generateAudio: boolean;
   locale: UiLocale;
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
@@ -496,6 +498,15 @@ function buildDurationMessage(state: SeedanceWorkflowState): string {
   });
 }
 
+/** What will be made once the user confirms: the length, the sound and the references kept. */
+function buildConfirmMessage(state: SeedanceWorkflowState): string {
+  const seconds = state.duration ?? DEFAULT_SEEDANCE_DURATION;
+  return pickLocale(state.locale, {
+    zh: `已记下：${seconds} 秒，${state.generateAudio ? '有声' : '无声'}，参考素材 ${referenceCount(state)} 个。回复“开始生成”按此生成，或回复其他时长修改：${formatChoices(state.clipChoices, state.locale)}。`,
+    en: `Noted: ${seconds} seconds, ${state.generateAudio ? 'with sound' : 'silent'}, ${referenceCount(state)} reference item(s). Reply "start" to make it, or reply another length: ${formatChoices(state.clipChoices, state.locale)}.`,
+  });
+}
+
 function wantsAudio(text: string): boolean {
   return /(?:有声|带声音|生成声音|generate audio|with audio|audio on)/i.test(text);
 }
@@ -617,6 +628,7 @@ async function refreshClipModel(state: SeedanceWorkflowState): Promise<string | 
   }
   state.referenceInputs = profile.referenceInputs;
   const notes = [droppedReferencesNote(state, dropUnsupportedReferences(state), changed)];
+  state.canGenerateAudio = profile.canGenerateAudio;
   if (!profile.canGenerateAudio && state.generateAudio) {
     state.generateAudio = false;
     notes.push(pickLocale(state.locale, {
@@ -626,6 +638,114 @@ async function refreshClipModel(state: SeedanceWorkflowState): Promise<string | 
   }
   const note = notes.filter(Boolean).join('\n');
   return note || undefined;
+}
+
+/** The wizard's next step for a message while it is in progress. */
+async function continueWorkflow(
+  key: string,
+  state: SeedanceWorkflowState,
+  input: SeedanceWorkflowInput,
+  text: string,
+  refs: ExtractedReferences,
+  hasUsableRefs: boolean,
+  hasUnusableAttachment: boolean,
+  notes: string[],
+): Promise<SeedanceWorkflowOutcome> {
+  const merge = () => {
+    const note = droppedReferencesNote(state, mergeReferences(state, refs), false);
+    if (note) notes.push(note);
+  };
+  if (CANCEL_RE.test(text)) {
+    WORKFLOWS.delete(key);
+    return {
+      handled: true,
+      reply: pickLocale(state.locale, {
+        zh: '已取消本次视频生成。',
+        en: 'This video generation has been canceled.',
+      }),
+    };
+  }
+
+  if (isSeedanceWorkflowSupportDiscussion(text)) {
+    WORKFLOWS.delete(key);
+    return { handled: false };
+  }
+
+  if (state.stage === 'choosing_dream_source') {
+    if (DREAM_SOURCE_YES_RE.test(text) && state.dreamSource) {
+      state.dreamNarrative = await analyzeDreamNarrative(state.cwd, state.dreamSource);
+      state.prompt = buildDreamVideoPrompt(state.dreamSource, state.originalPrompt);
+      state.stage = 'choosing_duration';
+      state.updatedAt = Date.now();
+      if (state.duration) {
+        WORKFLOWS.delete(key);
+        return { handled: false, prompt: buildGenerationPrompt(state) };
+      }
+      return { handled: true, reply: buildDurationMessage(state) };
+    }
+    if (DREAM_SOURCE_NO_RE.test(text)) {
+      state.dreamSource = undefined;
+      state.stage = 'collecting_refs';
+      state.updatedAt = Date.now();
+      return { handled: true, reply: buildOfferMessage(input.scope, state.locale, hasUnusableAttachment) };
+    }
+    merge();
+    if (hasUsableRefs) {
+      state.dreamSource = undefined;
+      state.stage = 'collecting_refs';
+      return { handled: true, reply: buildCollectingMessage(state, hasUnusableAttachment) };
+    }
+    return {
+      handled: true,
+      reply: pickLocale(state.locale, {
+        zh: [
+          `是否使用最新梦境日记（${state.dreamSource?.id ?? 'latest'}）作为文字参考？`,
+          '回复“使用最新梦境”继续；回复“不用/添加素材”则按普通流程继续，可以添加参考素材；回复“取消”放弃。',
+        ].join('\n'),
+        en: [
+          `Use the latest dream journal (${state.dreamSource?.id ?? 'latest'}) as the text reference?`,
+          'Reply "use latest dream" to continue; reply "no/add references" to continue normally and add references; reply "cancel" to stop.',
+        ].join('\n'),
+      }),
+    };
+  }
+
+  if (state.stage === 'choosing_duration') {
+    merge();
+    const rawDuration = extractRawDuration(text);
+    // A length already chosen (kept across a model change): "start" makes it.
+    if (!rawDuration && state.duration !== undefined && (START_RE.test(text) || isDirectGenerateIntent(text))) {
+      WORKFLOWS.delete(key);
+      return { handled: false, prompt: buildGenerationPrompt(state) };
+    }
+    if (!rawDuration && !wantsAudio(text) && !wantsSilence(text)) {
+      return { handled: true, reply: buildDurationMessage(state) };
+    }
+    if (rawDuration && !isAllowedSeedanceDuration(rawDuration, state.clipChoices)) {
+      state.updatedAt = Date.now();
+      return { handled: true, reply: buildInvalidDurationMessage(state, rawDuration) };
+    }
+    const duration = rawDuration ? extractDuration(text, state.clipChoices) : undefined;
+    state.duration = duration ?? DEFAULT_SEEDANCE_DURATION;
+    if (wantsAudio(text) && state.canGenerateAudio !== false) state.generateAudio = true;
+    if (wantsSilence(text)) state.generateAudio = false;
+    WORKFLOWS.delete(key);
+    return { handled: false, prompt: buildGenerationPrompt(state) };
+  }
+
+  merge();
+  if (text && !START_RE.test(text) && !isDirectGenerateIntent(text) && !hasUsableRefs && !CONFIRM_RE.test(text)) {
+    state.prompt = compact(`${state.prompt}\n${text}`);
+  }
+
+  if (START_RE.test(text) || isDirectGenerateIntent(text)) {
+    state.stage = 'choosing_duration';
+    state.updatedAt = Date.now();
+    return { handled: true, reply: buildDurationMessage(state) };
+  }
+
+  return { handled: true, reply: buildCollectingMessage(state, hasUnusableAttachment) };
+
 }
 
 export async function handleSeedanceMultimodalWorkflow(
@@ -642,104 +762,21 @@ export async function handleSeedanceMultimodalWorkflow(
 
   if (state) {
     if (input.locale) state.locale = input.locale;
-    const switchNote = await refreshClipModel(state);
-
-    if (CANCEL_RE.test(text)) {
-      WORKFLOWS.delete(key);
-      return {
-        handled: true,
-        reply: pickLocale(state.locale, {
-          zh: '已取消本次视频生成。',
-          en: 'This video generation has been canceled.',
-        }),
-      };
-    }
-
-    if (isSeedanceWorkflowSupportDiscussion(text)) {
-      WORKFLOWS.delete(key);
-      return { handled: false };
-    }
-
-    // The model changed under the wizard and some references or the sound
-    // had to go: say so before anything is generated, and ask again.
-    if (switchNote && state.stage !== 'choosing_dream_source') {
-      state.updatedAt = Date.now();
-      const ask = state.stage === 'choosing_duration' ? buildDurationMessage(state) : buildCollectingMessage(state, false);
-      return { handled: true, reply: `${switchNote}\n\n${ask}` };
-    }
-
-    if (state.stage === 'choosing_dream_source') {
-      if (DREAM_SOURCE_YES_RE.test(text) && state.dreamSource) {
-        state.dreamNarrative = await analyzeDreamNarrative(state.cwd, state.dreamSource);
-        state.prompt = buildDreamVideoPrompt(state.dreamSource, state.originalPrompt);
-        state.stage = 'choosing_duration';
-        state.updatedAt = Date.now();
-        if (state.duration) {
-          WORKFLOWS.delete(key);
-          return { handled: false, prompt: buildGenerationPrompt(state) };
-        }
-        return { handled: true, reply: buildDurationMessage(state) };
-      }
-      if (DREAM_SOURCE_NO_RE.test(text)) {
-        state.dreamSource = undefined;
-        state.stage = 'collecting_refs';
-        state.updatedAt = Date.now();
-        return { handled: true, reply: buildOfferMessage(input.scope, state.locale, hasUnusableAttachment) };
-      }
-      mergeReferences(state, refs);
-      if (hasUsableRefs) {
-        state.dreamSource = undefined;
-        state.stage = 'collecting_refs';
-        return { handled: true, reply: buildCollectingMessage(state, hasUnusableAttachment) };
-      }
-      return {
-        handled: true,
-        reply: pickLocale(state.locale, {
-          zh: [
-            `是否使用最新梦境日记（${state.dreamSource?.id ?? 'latest'}）作为文字参考？`,
-            '回复“使用最新梦境”继续；回复“不用/添加素材”则按普通流程继续，可以添加参考素材；回复“取消”放弃。',
-          ].join('\n'),
-          en: [
-            `Use the latest dream journal (${state.dreamSource?.id ?? 'latest'}) as the text reference?`,
-            'Reply "use latest dream" to continue; reply "no/add references" to continue normally and add references; reply "cancel" to stop.',
-          ].join('\n'),
-        }),
-      };
-    }
-
-    if (state.stage === 'choosing_duration') {
-      const droppedNote = droppedReferencesNote(state, mergeReferences(state, refs), false);
-      if (droppedNote) {
-        return { handled: true, reply: `${droppedNote}\n\n${buildDurationMessage(state)}` };
-      }
-      const rawDuration = extractRawDuration(text);
-      if (!rawDuration && !wantsAudio(text) && !wantsSilence(text)) {
-        return { handled: true, reply: buildDurationMessage(state) };
-      }
-      if (rawDuration && !isAllowedSeedanceDuration(rawDuration, state.clipChoices)) {
-        state.updatedAt = Date.now();
-        return { handled: true, reply: buildInvalidDurationMessage(state, rawDuration) };
-      }
-      const duration = rawDuration ? extractDuration(text, state.clipChoices) : undefined;
-      state.duration = duration ?? DEFAULT_SEEDANCE_DURATION;
-      if (wantsAudio(text)) state.generateAudio = true;
-      if (wantsSilence(text)) state.generateAudio = false;
-      WORKFLOWS.delete(key);
-      return { handled: false, prompt: buildGenerationPrompt(state) };
-    }
-
-    const droppedNote = droppedReferencesNote(state, mergeReferences(state, refs), false);
-    if (text && !START_RE.test(text) && !isDirectGenerateIntent(text) && !hasUsableRefs && !CONFIRM_RE.test(text)) {
-      state.prompt = compact(`${state.prompt}\n${text}`);
-    }
-
-    if (START_RE.test(text) || isDirectGenerateIntent(text)) {
-      state.stage = 'choosing_duration';
-      state.updatedAt = Date.now();
-      return { handled: true, reply: [droppedNote, buildDurationMessage(state)].filter(Boolean).join('\n\n') };
-    }
-
-    return { handled: true, reply: [droppedNote, buildCollectingMessage(state, hasUnusableAttachment)].filter(Boolean).join('\n\n') };
+    const notes = [await refreshClipModel(state)].filter((note): note is string => Boolean(note));
+    const outcome = await continueWorkflow(key, state, input, text, refs, hasUsableRefs, hasUnusableAttachment, notes);
+    const switchNote = notes.join('\n');
+    if (!switchNote || CANCEL_RE.test(text)) return outcome;
+    // The model changed under the wizard, or references it cannot use were
+    // sent: some references or the sound had to go. This message's
+    // references, text and answer are already taken; the user hears about
+    // the change before anything is generated.
+    if (outcome.handled) return { handled: true, reply: `${switchNote}\n\n${outcome.reply}` };
+    if (!outcome.prompt) return outcome;
+    state.stage = 'choosing_duration';
+    state.duration ??= DEFAULT_SEEDANCE_DURATION;
+    state.updatedAt = Date.now();
+    WORKFLOWS.set(key, state);
+    return { handled: true, reply: `${switchNote}\n\n${buildConfirmMessage(state)}` };
   }
 
   if (!isExplicitSeedanceVideoRequest(text)) {

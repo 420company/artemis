@@ -45,6 +45,12 @@ export interface VideoGenerationParams extends VisualGenerationParams {
   watermark?: boolean
   maxPolls?: number
   pollIntervalMs?: number
+  /** Poll this already-submitted task instead of submitting a new one (providers that support it). */
+  resumeTaskId?: string
+  /** Called after each status poll with the task's status and the time waited on it so far. */
+  onPoll?: (status: string, waitedMs: number) => void
+  /** Time already waited on a resumed task. */
+  pollWaitedMs?: number
   abortSignal?: AbortSignal
 }
 

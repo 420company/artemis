@@ -45,6 +45,8 @@ export type HermeticOptions = {
   videoModel?: string;
   /** false: stop once the segments are generated (for tests that read only the requests). Default true. */
   render?: boolean;
+  /** Each video task answers "running" to this many status polls before it succeeds. */
+  runningPolls?: number;
 };
 
 const fixtureDir = path.join(root, 'fixtures');
@@ -143,6 +145,7 @@ export async function withHermeticWorkspace<T>(
   let imageCounter = 0;
   let createCounter = 0;
   const taskSeconds = new Map<string, number>();
+  const taskPolls = new Map<string, number>();
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -178,6 +181,9 @@ export async function withHermeticWorkspace<T>(
     }
     const task = /\/contents\/generations\/tasks\/(task-\d+)$/.exec(url);
     if (task) {
+      const polls = (taskPolls.get(task[1]!) ?? 0) + 1;
+      taskPolls.set(task[1]!, polls);
+      if (options.runningPolls && polls <= options.runningPolls) return json(200, { id: task[1], status: 'running' });
       return json(200, { status: 'succeeded', content: { video_url: `https://cdn.example.test/clip-${taskSeconds.get(task[1]!) ?? 5}.mp4` } });
     }
     const clip = /^https:\/\/cdn\.example\.test\/clip-(\d+)\.mp4$/.exec(url);

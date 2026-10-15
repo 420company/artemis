@@ -78,7 +78,8 @@ import {
   splitLongShots,
   type ClipShotPart,
 } from './visual/segmentPlan.js';
-import { videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
+import { isBytePlusProvider, videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
+import { videoPollPlan } from './visual/pollSleep.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
 import { formatGlobalBriefExcerpt, parseSagaBriefGlobals, stripBriefNoise, worldAnchorLinesFor } from './visual/sagaBriefGlobals.js';
 import type { SagaContinuityMode } from './visual/sagaRenderer/continuity.js';
@@ -120,8 +121,26 @@ const DEFAULT_CROSSFADE_MS = 350;
 const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
 // Floor (NOT a maximum). Match the custom provider default so Saga does not
 // accidentally override a longer provider wait with a shorter explicit value.
-// 420 polls × 10s = 70min per attempt.
+// 420 polls × 5 s (the default interval) = 35 minutes per attempt; the video
+// tools cap one wait at 40 minutes (pollSleep.ts).
 const MIN_SAGA_SEGMENT_MAX_POLLS = 420;
+
+// Time ranges in a brief's timeline ("[0-8秒]", "0:00-0:08:", "3至5秒"): a
+// time token (seconds, or m:ss / h:mm:ss), a separator and an optional unit.
+const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
+const TIME_SEPARATOR = '[-–—~至到]';
+const TIME_UNIT = '(?:秒|s|secs?|seconds?)';
+
+/** Video task statuses that mean the task is still on its way: wait for it again, never submit it twice. */
+const PENDING_VIDEO_TASK_RE = /^(?:queued|pending|submitted|running|processing|in_progress)$/;
+
+/** The task a poll timeout left behind, when it is still queued or running. */
+export function pendingVideoTaskOf(message: string | undefined): { taskId: string; status: string } | undefined {
+  const match = /\btask\s+(\S+?)\s+did not (?:finish|complete) within \d+ polls?\b[^\n]*?Last status:\s*([a-z_]+)/i.exec(message ?? '');
+  if (!match) return undefined;
+  const status = match[2]!.toLowerCase();
+  return PENDING_VIDEO_TASK_RE.test(status) ? { taskId: match[1]!, status } : undefined;
+}
 
 let finalRenderSkippedForTests = false;
 
@@ -655,9 +674,8 @@ function parseTimestampedShotsFromStory(
   //   [0:00-0:08]  [1:30-1:38]
   //   [00:00:00-00:00:08]
   // Token = digits with optional ":mm" or ":mm:ss"
-  const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
   const markerRe = new RegExp(
-    `\\[\\s*(${TIME_TOKEN})\\s*[-–—~至到]\\s*(${TIME_TOKEN})\\s*(?:秒|s|sec|seconds)?\\s*\\]`,
+    `\\[\\s*(${TIME_TOKEN})\\s*${TIME_SEPARATOR}\\s*(${TIME_TOKEN})\\s*${TIME_UNIT}?\\s*\\]`,
     'gi',
   );
   let markers = Array.from(story.matchAll(markerRe));
@@ -665,7 +683,7 @@ function parseTimestampedShotsFromStory(
   // Fallback A: timecode without brackets at line-head, e.g. "0:00-0:08:" or "0-8s:"
   if (markers.length < 2) {
     const looseRe = new RegExp(
-      `(?:^|\\n)\\s*(${TIME_TOKEN})\\s*[-–—~至到]\\s*(${TIME_TOKEN})\\s*(?:秒|s|sec|seconds)?\\s*[:：]`,
+      `(?:^|\\n)\\s*(${TIME_TOKEN})\\s*${TIME_SEPARATOR}\\s*(${TIME_TOKEN})\\s*${TIME_UNIT}?\\s*[:：]`,
       'gi',
     );
     markers = Array.from(story.matchAll(looseRe));
@@ -747,10 +765,9 @@ function parseTimestampedShotsFromStory(
 // and per-segment specificity) when the user has already structured their brief.
 export function hasStructuredBriefMarkers(text: string): boolean {
   if (!text) return false;
-  const TIME_TOKEN = '\\d+(?::\\d{2})?(?:\\.\\d+)?(?::\\d{2})?';
-  const bracketTimeRe = new RegExp(`\\[\\s*${TIME_TOKEN}\\s*[-–—~至到]\\s*${TIME_TOKEN}\\s*(?:秒|s|sec|seconds)?\\s*\\]`, 'i');
+  const bracketTimeRe = new RegExp(`\\[\\s*${TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${TIME_TOKEN}\\s*${TIME_UNIT}?\\s*\\]`, 'i');
   if (bracketTimeRe.test(text)) return true;
-  const looseTimeRe = new RegExp(`(?:^|\\n)\\s*${TIME_TOKEN}\\s*[-–—~至到]\\s*${TIME_TOKEN}\\s*(?:秒|s|sec|seconds)?\\s*[:：]`, 'i');
+  const looseTimeRe = new RegExp(`(?:^|\\n)\\s*${TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${TIME_TOKEN}\\s*${TIME_UNIT}?\\s*[:：]`, 'i');
   if (looseTimeRe.test(text)) return true;
   const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?\d+|第\s*\d+\s*段)[\s.·:：、,。\-—–]/i;
   if (sceneRe.test(text)) return true;
@@ -1136,11 +1153,19 @@ export function isPollTimeoutErrorForTest(message: string | undefined): boolean 
   return /did not (?:finish|complete) within \d+ polls?|Last status:\s*(?:running|processing|pending|queued|submitted)/i.test(message);
 }
 
-// A script the user wrote: a timed range with a unit ("0-5s", "3–8 秒",
-// "10-15 sec"), a range opening a line as a timeline position ("0-5: …",
-// "[0-5] …"), or Shot N / 镜头N / 第N段 markers. A bare number range ("waits
-// 3-4 minutes", "2019-2020") is not one.
-const USER_SCRIPT_MARKER_RE = /(?:^|\s|[[(（【])\d+(?:\.\d+)?\s*(?:s|秒|sec)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:s|秒|secs?|seconds?)(?![a-z])|(?:^|\n)\s*[[(（【]?\s*\d{1,3}(?:\.\d+)?\s*[–—-]\s*\d{1,3}(?:\.\d+)?\s*[\])）】:：]|(?:^|\n|\s)(?:shot\s*\d+|镜头\s*\d+|第\s*\d+\s*(?:幕|段|镜头))/i;
+// A script the user wrote, read with the timeline parser's own time tokens
+// and separators: a short range with a unit ("0-5s", "3至8秒", "10~15 sec"),
+// clock timecodes ("00:00-00:05", "0:00-0:05"), a short range opening a line
+// as a timeline position ("0-5: …", "[0-5] …"), or Shot N / 镜头N / 第N段
+// markers. A bare number range ("waits 3-4 minutes", "2019-2020") is not one.
+const SHORT_TIME_TOKEN = '(?:\\d{1,3}(?:\\.\\d+)?|\\d+:\\d{2}(?::\\d{2})?(?:\\.\\d+)?)';
+const CLOCK_TIME_TOKEN = '\\d+:\\d{2}(?::\\d{2})?(?:\\.\\d+)?';
+const USER_SCRIPT_MARKER_RE = new RegExp([
+  `(?<![\\d.:])${SHORT_TIME_TOKEN}\\s*${TIME_UNIT}?\\s*${TIME_SEPARATOR}\\s*${SHORT_TIME_TOKEN}\\s*${TIME_UNIT}(?![a-z])`,
+  `(?<![\\d.:])${CLOCK_TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${CLOCK_TIME_TOKEN}`,
+  `(?:^|\\n)\\s*[[(（【]?\\s*${SHORT_TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${SHORT_TIME_TOKEN}\\s*${TIME_UNIT}?\\s*[\\])）】:：]`,
+  '(?:^|\\n|\\s)(?:shot\\s*\\d+|镜头\\s*\\d+|第\\s*\\d+\\s*(?:幕|段|镜头))',
+].join('|'), 'i');
 
 /**
  * True when the brief is a script the user wrote: its shots are kept as
@@ -1417,7 +1442,8 @@ export async function executeGenerateLongVideo(
     // segment without a planned shot shows. What goes around it in `story`
     // (the generation instructions, the story bible, the entity map,
     // identity and reference notes) is rules for the model, never a beat.
-    let fallbackStory = userBriefOfGenerationText(story);
+    // The user's notes on their references stay out of the scene text.
+    let fallbackStory = userBriefOfGenerationText(story).replace(/\s*Reference notes from user:[^\n]*/g, '').trim();
     toolLog(`🌐 generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     // ALWAYS parse timestamped shots first. When the user supplied an explicit
     // [X-Y秒] timeline, that is the authoritative segmentation and takes
@@ -2288,7 +2314,15 @@ export async function executeGenerateLongVideo(
           watermark: action.watermark ?? false,
           maxPolls: Math.max(MIN_SAGA_SEGMENT_MAX_POLLS, action.maxPolls ?? 0),
           pollIntervalMs: action.pollIntervalMs,
+          progressLabel: `第 ${segment.index}/${segments.length} 段`,
         };
+        // How long one attempt waits on its task, and the task a timed-out
+        // attempt left still queued or running (polled again, not resubmitted).
+        const attemptWaitMs = (() => {
+          const plan = videoPollPlan(baseReq, { maxPolls: MIN_SAGA_SEGMENT_MAX_POLLS, pollIntervalMs: 5000 });
+          return plan.maxPolls * plan.pollIntervalMs;
+        })();
+        let pendingTask: { taskId: string; waitedMs: number } | undefined;
 
         // Build the retry plan. We try at most three attempts per segment:
         //   1) full strength (chain + audio)
@@ -2390,6 +2424,7 @@ export async function executeGenerateLongVideo(
               referenceImageUrls: referenceImageUrlsForCall.length > 0 ? referenceImageUrlsForCall : undefined,
               referenceImagePaths,
               generateAudio: usingAudio,
+              ...(pendingTask ? { resumeTaskId: pendingTask.taskId, pollWaitedMs: pendingTask.waitedMs } : {}),
             },
             context,
           );
@@ -2427,10 +2462,21 @@ export async function executeGenerateLongVideo(
             break;
           }
           if (pollTimeout) {
-            // Same inputs, fresh submission. BytePlus queue was just slow.
+            // A task still queued or running is waited for again: submitting
+            // it a second time would make (and bill) the same clip twice.
+            const pending = isBytePlusProvider(limits.provider) ? pendingVideoTaskOf(lastError) : undefined;
+            if (pending) {
+              const waitedMs = (pendingTask?.taskId === pending.taskId ? pendingTask.waitedMs : 0) + attemptWaitMs;
+              pendingTask = { taskId: pending.taskId, waitedMs };
+              toolWarn(`⏳ 第 ${segment.index}/${segments.length} 段：视频仍在${/^(?:queued|pending|submitted)$/.test(pending.status) ? '排队' : '生成'}（已等待 ${Math.round(waitedMs / 60_000)} 分钟），继续等待同一个任务，不重新提交（${attempt + 2}/3）…`);
+              continue;
+            }
+            // Same inputs, fresh submission: the task is gone or its state unknown.
+            pendingTask = undefined;
             toolWarn(`⚠️ 第 ${segment.index}/${segments.length} 段：视频生成队列拥堵（poll 超时），重新提交任务（尝试 ${attempt + 2}/3）...`);
             continue;
           }
+          pendingTask = undefined;
           // Decide the next attempt's degradation. We strip the offending
           // input first; subsequent attempts can additionally strip the
           // other.

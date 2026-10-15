@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fixturePng, imageBodies, runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 import { extractOpeningFramingRegex } from '../src/tools/visual/sagaFraming.js';
 import { shouldPreserveUserScriptWithoutCriticRewrite } from '../src/tools/generateLongVideo.js';
+import { videoPollPlan } from '../src/tools/visual/pollSleep.js';
 import { ProviderStore } from '../src/providers/store.js';
 import {
   clipBeatBudget,
@@ -912,10 +913,10 @@ await test('fallback shots: story text and motion from the user story, never the
 
 await test('user scripts: a timed range or a timeline line is a script; a bare number range is not', async () => {
   const preserved = (story: string) => shouldPreserveUserScriptWithoutCriticRewrite({ action: { story }, timestampedStoryShots: [] });
-  for (const story of ['She waits 3-4 minutes by the door.', 'Set in 2019-2020, a quiet town.', 'Read pages 10-12 first.', 'A 5-10 minute walk home.']) {
+  for (const story of ['She waits 3-4 minutes by the door.', 'Set in 2019-2020, a quiet town.', 'the 2019-2020s look', 'Read pages 10-12 first.', 'A 5-10 minute walk home.', '她等了3到4分钟。']) {
     assert.equal(preserved(story), false, story);
   }
-  for (const story of ['0-5s: she runs.', '她奔跑（3–8 秒）。', '10-15 sec: the door opens.', '0-5: she runs.\n5-10: she stops.', '[0-5] she runs', 'Shot 1: she runs.', '镜头1：奔跑', '第2段：跳跃']) {
+  for (const story of ['0-5s: she runs.', '她奔跑（3–8 秒）。', '她在3至5秒内奔跑。', '10~15 sec: the door opens.', '00:00-00:05 she runs', '0:00-0:05 she runs', '0-5: she runs.\n5-10: she stops.', '[0-5] she runs', '0到5：奔跑', 'Shot 1: she runs.', '镜头1：奔跑', '第2段：跳跃']) {
     assert.equal(preserved(story), true, story);
   }
   assert.equal(shouldPreserveUserScriptWithoutCriticRewrite({ action: { story: 'plain', preserveUserScript: true }, timestampedStoryShots: [] }), true);
@@ -929,44 +930,93 @@ await test('user scripts: a timed range or a timeline line is a script; a bare n
   assert.deepEqual(videoTaskBodies(packed.requests).map((body) => body.duration), [14]);
 });
 
-await test('single-clip wizard: a model that takes fewer references drops the others and says so first', async () => {
+await test('single-clip wizard: a model change keeps the message it comes with, drops what the model cannot use and says so first', async () => {
   const cwd = await workspace(SEEDANCE_25);
   const key = 'single-clip-fewer-refs';
   const say = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN' });
   const start = await say('生成一个赛博朋克产品发布视频 https://example.com/look.png https://example.com/move.mp4 https://example.com/beat.mp3');
   assert.match(start.handled ? start.reply : '', /已收集参考素材 3 个/);
-  // The images-only 12 s model arrives while the wizard waits for the length.
+  // The images-only 12 s model arrives while the wizard waits for the length;
+  // the answer that comes with it carries a length and another photo.
   await configureVideo(cwd, 'seedance-1-5-pro-251215');
-  const told = await say('10');
+  const told = await say('10 秒，并用这张产品图 https://example.com/product.png');
   assert.equal(told.handled, true, 'told before anything is generated');
   const note = told.handled ? told.reply : '';
   plain(note, 'reference note');
   assert.match(note, /视频服务已更新，现在只能使用图片参考，已移除视频 1 个、音频 1 个/);
-  assert.match(note, /已收集参考素材 1 个/);
-  assert.match(note, /5、10、12 秒/);
-  // A model without sound: the clip is silent, and the user is told.
-  await configureVideo(cwd, 'seedance-1-0-pro-250528');
-  const silent = await say('10');
-  assert.equal(silent.handled, true);
-  assert.match(silent.handled ? silent.reply : '', /不能生成声音，这次会做成无声视频/);
-  plain(silent.handled ? silent.reply : '', 'sound note');
-  // An unsupported reference sent later is left out with the same note.
-  const later = await say('https://example.com/more.mp4');
-  assert.match(later.handled ? later.reply : '', /当前视频服务现在只能使用图片参考，已移除视频 1 个/);
-  const done = await say('10');
-  assert.equal(done.handled, false);
-  const prompt = done.handled ? '' : done.prompt ?? '';
-  assert.match(prompt, /model "seedance-1-0-pro-250528"/);
-  assert.match(prompt, /generateAudio: false/);
+  assert.match(note, /已记下：10 秒，有声，参考素材 2 个/, 'the length and the photo of that message are kept');
+  const made = await say('开始生成');
+  assert.equal(made.handled, false);
+  const prompt = made.handled ? '' : made.prompt ?? '';
+  assert.match(prompt, /model "seedance-1-5-pro-251215"/);
+  assert.match(prompt, /duration: 10/);
   assert.match(prompt, /look\.png/);
-  assert.doesNotMatch(prompt, /move\.mp4|beat\.mp3|more\.mp4|referenceVideoUrls|referenceAudioUrls/);
+  assert.match(prompt, /product\.png/);
+  assert.doesNotMatch(prompt, /move\.mp4|beat\.mp3|referenceVideoUrls|referenceAudioUrls/);
+
+  // A model without sound, and a video link sent with the answer.
+  const cwd2 = await workspace(SEEDANCE_25);
+  const say2 = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key: 'single-clip-no-sound', cwd: cwd2, text, locale: 'zh-CN' });
+  await say2('生成一个赛博朋克产品发布视频 https://example.com/look.png');
+  await configureVideo(cwd2, 'seedance-1-0-pro-250528');
+  const silent = await say2('10 https://example.com/more.mp4');
+  const silentNote = silent.handled ? silent.reply : '';
+  plain(silentNote, 'sound note');
+  assert.match(silentNote, /不能生成声音，这次会做成无声视频/);
+  assert.match(silentNote, /当前视频服务现在只能使用图片参考，已移除视频 1 个/);
+  assert.match(silentNote, /已记下：10 秒，无声，参考素材 1 个/);
+  const silentPrompt = await say2('开始生成');
+  const silentText = silentPrompt.handled ? '' : silentPrompt.prompt ?? '';
+  assert.match(silentText, /generateAudio: false/);
+  assert.doesNotMatch(silentText, /more\.mp4/);
+
+  // The dream-journal question: the sound note comes with the next step.
+  const cwd3 = await workspace(SEEDANCE_25);
+  const dream = { id: 'dream-smoke', body: '我梦见自己在海边的灯塔上飞翔，海浪发着蓝光。' };
+  const say3 = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key: 'single-clip-dream', cwd: cwd3, text, locale: 'zh-CN', latestDream: dream });
+  const asked = await say3('把最新的梦境做成视频');
+  assert.match(asked.handled ? asked.reply : '', /最新梦境日记/);
+  await configureVideo(cwd3, 'seedance-1-0-pro-250528');
+  const dreamStep = await say3('使用最新梦境');
+  assert.equal(dreamStep.handled, true);
+  assert.match(dreamStep.handled ? dreamStep.reply : '', /不能生成声音，这次会做成无声视频[\s\S]*请选择视频时长/);
+
   // English, for the en locale.
   const enCwd = await workspace(SEEDANCE_25);
   const enSay = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key: 'single-clip-fewer-refs-en', cwd: enCwd, text, locale: 'en' });
   await enSay('make a cyberpunk product launch video https://example.com/look.png https://example.com/move.mp4');
   await configureVideo(enCwd, 'seedance-1-5-pro-251215');
   const enNote = await enSay('10');
-  assert.match(enNote.handled ? enNote.reply : '', /The video service changed and now takes only image references; removed 1 video reference\./);
+  assert.match(enNote.handled ? enNote.reply : '', /The video service changed and now takes only image references; removed 1 video reference\.[\s\S]*Noted: 10 seconds/);
+});
+
+await test('video polling: the interval and total wait stay within bounds whatever the caller asks', () => {
+  const defaults = { maxPolls: 60, pollIntervalMs: 5000 };
+  assert.deepEqual(videoPollPlan({}, defaults), { maxPolls: 60, pollIntervalMs: 5000 }, 'five minutes by default');
+  assert.deepEqual(videoPollPlan({ maxPolls: 2, pollIntervalMs: 5000 }, defaults), { maxPolls: 60, pollIntervalMs: 5000 }, 'never under five minutes in all');
+  assert.deepEqual(videoPollPlan({ maxPolls: 3, pollIntervalMs: 10 }, defaults), { maxPolls: 300, pollIntervalMs: 1000 }, 'never under a second between polls');
+  assert.deepEqual(videoPollPlan({ pollIntervalMs: 120_000 }, defaults), { maxPolls: 10, pollIntervalMs: 30_000 }, 'never over 30 s between polls');
+  assert.deepEqual(videoPollPlan({ maxPolls: 100_000, pollIntervalMs: 1000 }, defaults), { maxPolls: 2400, pollIntervalMs: 1000 }, 'never over 40 minutes in all');
+  assert.deepEqual(videoPollPlan({ maxPolls: 420 }, defaults), { maxPolls: 420, pollIntervalMs: 5000 }, 'a long-video segment: 35 minutes');
+});
+
+await test('a slow segment: the same task is polled again, never submitted twice, with progress about every minute', async () => {
+  // Each task answers "running" to 500 polls: past one attempt's 420 polls.
+  const run = await runHermeticSaga(
+    { prompt: 'A kitten crosses a rainy city at night.', totalDuration: 10, ratio: '16:9', generateAudio: false, identitySource: 'text_only' },
+    { videoModel: SEEDANCE_25, render: false, runningPolls: 500 },
+  );
+  assert.equal(run.result.ok, true, run.result.output);
+  assert.equal(videoTaskBodies(run.requests).length, 1, 'one task submitted');
+  const polls = run.requests.filter((request) => request.method === 'GET' && /\/contents\/generations\/tasks\/task-1$/.test(request.url));
+  assert.equal(polls.length, 501, 'polled until it finished');
+  const lines = run.logs.join('\n');
+  assert.match(lines, /第 1\/1 段：视频仍在生成（已等待 7 分钟），继续等待同一个任务，不重新提交/);
+  assert.doesNotMatch(lines, /重新提交任务/);
+  const progress = run.logs.filter((line) => line.startsWith('⏳ 第 1/1 段视频'));
+  assert.deepEqual(progress.map((line) => /已等待 (\d+) 分钟/.exec(line)?.[1]), ['1', '2', '3', '4', '5', '6', '7', '8'], 'a line a minute, counting on across the second wait');
+  assert.match(progress[0]!, /^⏳ 第 1\/1 段视频生成中，已等待 1 分钟…$/);
+  for (const line of progress) plain(line, 'progress line');
 });
 
 await test('rewrites and fractions: a clip beat keeps its shots; split parts keep the exact length', () => {

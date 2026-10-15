@@ -413,7 +413,8 @@ export function userBriefOfGenerationText(text: string): string {
   const trimmed = withoutLeadingDialogueBlock(text.trim());
   if (!trimmed.startsWith(USER_BRIEF_HEADER)) return trimmed;
   const brief = trimmed.slice(USER_BRIEF_HEADER.length);
-  const end = brief.indexOf('\n\nGeneration instruction language:');
+  // The instructions follow the brief; a brief may itself quote the line.
+  const end = brief.lastIndexOf('\n\nGeneration instruction language:');
   return (end >= 0 ? brief.slice(0, end) : brief).trim();
 }
 
