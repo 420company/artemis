@@ -2153,7 +2153,7 @@ const capabilityToolDefs: ToolDefinition[] = [
   // ── Browser automation (Playwright headed Chromium) ────────────────────
   {
     type: 'browser_navigate',
-    description: '在本机 Chromium 浏览器中打开 URL（url），或直接打开工作区里的网页（path，例如 sites/<名字>/index.html；给文件夹会打开其中的 index.html）。看自己做的网页用 path 即可，不需要启动服务。网页被反爬拦截、需要登录、点击交互或 JS 渲染时，也用这条工具。',
+    description: '在本机 Chromium 浏览器中打开 URL（url），或直接打开工作区里的网页（path，例如 sites/<名字>/index.html；给文件夹会打开其中的 index.html）。看自己做的网页用 path 即可，不需要启动服务；file:// 地址和 path 一样，只能打开工作区里的网页。网页被反爬拦截、需要登录、点击交互或 JS 渲染时，也用这条工具。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',

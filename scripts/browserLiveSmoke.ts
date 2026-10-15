@@ -793,6 +793,19 @@ async function main(): Promise<void> {
       await assert.rejects(() => workspacePageUrl(path.join(outside, 'x.html'), ws), /escapes/);
       await assert.rejects(() => workspacePageUrl('link/x.html', ws), /escapes/);
       await assert.rejects(() => workspacePageUrl('sites/missing.html', ws));
+      // A file:// URL is held to the same rules (also behind view-source:); other URLs pass as they are.
+      const { checkedPageUrl } = await import('../src/tools/browser/browserTools.js');
+      assert.equal(await checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href, ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      assert.equal(await checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'poster')).href, ws), pathToFileURL(path.join(real, 'sites', 'poster', 'index.html')).href);
+      await assert.rejects(() => checkedPageUrl('file:///etc/passwd', ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl(pathToFileURL(path.join(outside, 'x.html')).href, ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'evil')).href, ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl(pathToFileURL(path.join(ws, 'sites', 'creds', 'index.html')).href, ws), /protected/);
+      await assert.rejects(() => checkedPageUrl('view-source:file:///etc/passwd', ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl('FILE:///etc/passwd', ws), /escapes/);
+      await assert.rejects(() => checkedPageUrl('file://otherhost/etc/passwd', ws));
+      assert.equal(await checkedPageUrl('https://example.com/a', ws), 'https://example.com/a');
+      assert.equal(await checkedPageUrl('http://127.0.0.1:8731/', ws), 'http://127.0.0.1:8731/');
       const tool = getToolDefinition('browser_navigate') as unknown as { validate: (a: unknown) => string[] };
       assert.deepEqual(tool.validate({ type: 'browser_navigate', path: 'sites/poster/index.html' }), []);
       assert.deepEqual(tool.validate({ type: 'browser_navigate', url: 'https://example.com' }), []);

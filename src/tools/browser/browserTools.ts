@@ -35,7 +35,7 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   getActivePage,
   closeActivePage,
@@ -174,6 +174,31 @@ export async function workspacePageUrl(inputPath: string, cwd: string): Promise<
   return pathToFileURL(real).href;
 }
 
+/**
+ * A `file:` URL (also behind `view-source:`) is held to the same rules as
+ * `path`: a page inside the workspace, outside the protected directories,
+ * opened as its real path. Other URLs are returned as they are.
+ */
+export async function checkedPageUrl(url: string, cwd: string): Promise<string> {
+  const trimmed = url.trim();
+  const view = /^view-source:/i.exec(trimmed);
+  const inner = view ? trimmed.slice(view[0].length) : trimmed;
+  if (!/^file:/i.test(inner)) return url;
+  let file: string;
+  try {
+    file = fileURLToPath(inner);
+  } catch (err) {
+    throw new Error(`not a local file URL (${err instanceof Error ? err.message : String(err)})`);
+  }
+  const checked = await workspacePageUrl(file, cwd);
+  return view ? `view-source:${checked}` : checked;
+}
+
+function fileUrlRefusal(url: string, err: unknown): ToolResult {
+  const message = `Cannot open ${url}: ${err instanceof Error ? err.message : String(err)}`;
+  return { ok: false, output: `${message}. A file:// URL opens a page inside the workspace only.`, error: { code: 'invalid_input', message } };
+}
+
 async function runBrowserNavigate(action: BrowserNavigateAction, cwd: string = process.cwd()): Promise<ToolResult> {
   const hasPath = typeof action.path === 'string' && action.path.trim().length > 0;
   if (!hasPath && (!action.url || action.url.trim().length === 0)) {
@@ -190,6 +215,12 @@ async function runBrowserNavigate(action: BrowserNavigateAction, cwd: string = p
     } catch (err) {
       const message = `Cannot open ${action.path} from the workspace: ${err instanceof Error ? err.message : String(err)}`;
       return { ok: false, output: `${message}. path opens a page inside the workspace only; use url for other pages.`, error: { code: 'invalid_input', message } };
+    }
+  } else {
+    try {
+      target = await checkedPageUrl(target, cwd);
+    } catch (err) {
+      return fileUrlRefusal(target, err);
     }
   }
   const scriptUrl = /^\s*(javascript|vbscript):/i.test(target);
@@ -738,7 +769,7 @@ export interface BrowserTabsAction {
   url?: string;
 }
 
-async function runBrowserTabs(action: BrowserTabsAction): Promise<ToolResult> {
+async function runBrowserTabs(action: BrowserTabsAction, cwd: string = process.cwd()): Promise<ToolResult> {
   try {
     if (action.action === 'list') {
       const tabs = await listTabs();
@@ -747,7 +778,15 @@ async function runBrowserTabs(action: BrowserTabsAction): Promise<ToolResult> {
       return { ok: true, output: lines.join('\n') };
     }
     if (action.action === 'new') {
-      const tab = await openTab(action.url);
+      let url = action.url;
+      if (url) {
+        try {
+          url = await checkedPageUrl(url, cwd);
+        } catch (err) {
+          return fileUrlRefusal(url, err);
+        }
+      }
+      const tab = await openTab(url);
       return { ok: true, output: `🆕 新标签页 [${tab.index}] ${tab.url || 'about:blank'}` };
     }
     if (action.action === 'switch') {
@@ -993,7 +1032,7 @@ export const executeBrowserFormInput = (action: BrowserFormInputAction, context?
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserEvaluate(action), context?.abortSignal);
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
-  gated(() => runBrowserTabs(action), context?.abortSignal);
+  gated(() => runBrowserTabs(action, context?.cwd), context?.abortSignal);
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
   gated((beforeSecret) => runBrowserType(action, beforeSecret), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>

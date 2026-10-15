@@ -1824,7 +1824,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
         type: 'object',
         additionalProperties: false,
         properties: {
-          url: optionalStringSchema('URL to navigate to (must include scheme). Give url or path.'),
+          url: optionalStringSchema('URL to navigate to (must include scheme). A file:// URL opens a page inside the workspace only, like path. Give url or path.'),
           path: optionalStringSchema('A page in the workspace to open directly, e.g. "sites/poster/index.html" (a folder opens its index.html). No server is needed to look at a page you built: use this instead of starting one. Give url or path.'),
           waitFor: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle'], description: 'Page lifecycle event to wait for. Default: domcontentloaded.' },
           extractText: { type: 'boolean', description: 'Whether to also extract visible body text in the response. Default: true.' },
