@@ -58,7 +58,7 @@ import { PermissionManager } from '../src/security/permissions.js'
 import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { describeDangerousCommand } from '../src/tools/runCommand.js'
-import { analyzeDeletes, describeHighRiskCommand, isTemporaryPath, readOnlyServerCommand } from '../src/security/shellRisk.js'
+import { analyzeDeletes, describeHighRiskCommand, isTemporaryPath, listeningServers, readOnlyServerCommand } from '../src/security/shellRisk.js'
 import { isSensitivePath, resolveDataRootDir, resolveInsideRoot } from '../src/utils/fs.js'
 import { findInternalNames } from '../src/utils/internalNames.js'
 
@@ -1160,6 +1160,50 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   // An output option inside the workspace or the temp dir needs nothing.
   for (const command of ['yt-dlp -P "home:media" -o "%(title)s.%(ext)s" https://example.com/v', 'aria2c -l - https://example.com/a', `env -C ${site} tee notes.txt`, 'aria2c -d downloads https://example.com/a', `aria2c -d ${os.tmpdir()} -o apr-a.bin https://example.com/a`, 'http --download https://example.com/a', 'some-tool --output out/report.json', 'ssh -o StrictHostKeyChecking=no host true']) {
     assert(`preview: a download or output inside needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  }
+  // sudo -i / --login: a login shell in the target user's home, where is not known.
+  for (const command of ['sudo -i rm -rf x', 'sudo -u nobody -i tee x', 'sudo -Hi tee x', 'sudo --login tee x', 'sudo -i python3 -m http.server --bind 127.0.0.1']) {
+    const found = classify(command)
+    assert(`preview: sudo's login shell makes the directory unknown — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  assert('preview: sudo -ui is -u with the user "i", not a login shell', kind('sudo -ui tee x') === null)
+  // Programs that run a command of their own: what it does is not followed, so a command word in it asks.
+  const runners: [string, string][] = [
+    ['systemd-run rm -rf /etc/x', 'systemd-run'],
+    ['systemd-run --user rm -rf /etc/x', 'systemd-run --user'],
+    ['systemd-run sh -c "rm -rf x"', 'systemd-run sh -c'],
+    ['systemd-run --working-directory=/etc tee x', 'systemd-run --working-directory='],
+    ['unshare -r tee /etc/x', 'unshare -r'],
+    ['nsenter -t 1 -m rm x', 'nsenter'],
+    ['firejail rm -rf x', 'firejail'],
+    ['bwrap --bind / / rm -rf x', 'bwrap'],
+    ['tmux new -d "rm -rf x"', 'tmux new -d'],
+    ['screen -dm rm -rf x', 'screen -dm'],
+    ['at now <<< "rm -rf x"', 'at with a here-string'],
+    ['at now <<\'EOF\'\ntee /etc/x < /dev/null\nEOF', 'at with a here-document'],
+    ['watch "rm -rf x"', 'watch'],
+    ['systemd-run python3 -m http.server --bind 127.0.0.1', 'systemd-run starting a server'],
+    ['su -c "python3 -m http.server --bind 127.0.0.1" nobody', 'su -c starting a server'],
+    ['flock /tmp/lock python3 -m http.server 8000', 'flock starting a server'],
+    ['chroot /srv python3 -m http.server --bind 127.0.0.1', 'chroot starting a server'],
+    ['./deploy.sh rm -rf x', 'an unknown script given a command'],
+    ['some-runner "cd x; rm -rf y"', 'an unknown program given a command string'],
+  ]
+  for (const [command, why] of runners) {
+    const found = classify(command)
+    assert(`preview: ${why} asks — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  // Server detection looks inside them too.
+  const inner = (command: string) => listeningServers(command, cwd).map((server) => ({ exposed: server.exposed, directories: server.directories }))
+  assert('preview: a server inside su -c, flock, chroot or systemd-run is found',
+    inner('su -c "python3 -m http.server 8000"')[0]?.exposed === true && inner('flock /tmp/lock python3 -m http.server 8000')[0]?.exposed === true &&
+      inner('chroot /srv python3 -m http.server --bind 127.0.0.1')[0]?.directories === undefined && inner('systemd-run --user python3 -m http.server --bind 127.0.0.1')[0]?.directories === undefined &&
+      inner('systemd-run -d python3 -m http.server --bind 127.0.0.1')[0]?.directories?.[0] === cwd && inner('su - -c "python3 -m http.server --bind 127.0.0.1"')[0]?.directories === undefined,
+    JSON.stringify([inner('su -c "python3 -m http.server 8000"'), inner('chroot /srv python3 -m http.server --bind 127.0.0.1')]))
+  assert('preview: a server in sh -c after a cd not known before it runs asks', classify('cd "$D" && bash -c "python3 -m http.server --bind 127.0.0.1"')?.kind === 'shell_high_risk')
+  // Ordinary commands do not start asking.
+  for (const command of ['env FOO=1 cp a b', 'make install', 'make clean', 'timeout 60 cp a b', 'nice tee notes.txt', 'git commit -m "rm old > files"', 'pytest -k cp tests', 'tmux new -s dev', 'screen -ls', 'myscript.sh --mode fast', 'npm run build > build.log 2>&1', 'docker ps', 'ffmpeg -i in.mp4 out.mp4']) {
+    assert(`preview: an ordinary command still needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
   }
   assert('preview: a subshell inside the workspace with a cd needs nothing', kind(`cd ${path.join(cwd, 'sites')} && (cd guihua-latte-poster && rm -rf old) && rm -rf build`) === null)
   // Wording: what is known is said, and nothing is claimed that is not.

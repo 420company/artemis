@@ -410,6 +410,8 @@ export function wrapperDirectoryChanges(words: string[]): (string | undefined)[]
     while (i < words.length && /^-/.test(words[i]!) && words[i] !== '--') {
       const a = words[i]!
       let width = wrapperOptionWidth(name, a, takesValue)
+      // sudo -i / --login runs a login shell in the target user's home: where is not known here.
+      if (name === 'sudo' && a === '--login') out.push(undefined)
       if (letter) {
         let value: string | undefined
         let named = false
@@ -420,12 +422,24 @@ export function wrapperDirectoryChanges(words: string[]): (string | undefined)[]
           named = true
           value = words[i + 1]
           width = 2
-        } else if (/^-[A-Za-z]/.test(a) && !a.startsWith('--') && a.slice(1).includes(letter)) {
-          const at = a.indexOf(letter)
-          const attached = a.slice(at + 1)
-          named = true
-          value = attached || words[i + 1]
-          width = attached ? 1 : 2
+        } else if (/^-[A-Za-z]/.test(a) && !a.startsWith('--')) {
+          // A cluster, letter by letter: a letter that takes a value takes the rest (or the next word).
+          const valued = WRAPPER_VALUE_LETTERS[name] ?? ''
+          for (let c = 1; c < a.length; c++) {
+            const ch = a[c]!
+            if (ch === letter) {
+              const attached = a.slice(c + 1)
+              named = true
+              value = attached || words[i + 1]
+              width = attached ? 1 : 2
+              break
+            }
+            if (name === 'sudo' && ch === 'i') {
+              out.push(undefined)
+              continue
+            }
+            if (valued.includes(ch)) break
+          }
         }
         if (named) out.push(value === undefined || value === '' ? undefined : staticPath(value))
       }
@@ -818,6 +832,47 @@ const DELETE_COMMANDS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'trash', 'tra
 const SIMPLE_WRAPPERS = new Set(['sudo', 'doas', 'command', 'builtin', 'nohup', 'exec', 'time'])
 /** Wrappers with their own options (the wrapped command's position is not certain). */
 const COMPLEX_WRAPPERS = new Set(['env', 'timeout', 'nice', 'ionice', 'stdbuf', 'busybox', 'chroot', 'flock', 'setsid', 'unbuffer', 'watch', 'parallel', 'su', 'runuser', 'xargs', 'strace', 'taskset', 'chrt', 'script', 'awk', 'gawk', 'mawk', 'nawk', 'make', 'gmake'])
+/**
+ * Programs that run another command given in their arguments, as words or
+ * as a string (`systemd-run rm …`, `tmux new -d "rm …"`, `at now <<< "…"`):
+ * what that command does is not followed here, so one that deletes, writes
+ * or serves asks.
+ */
+const RUNNERS = new Set([
+  // The complex wrappers, but make (its own Makefile; `make install` is not a command it is given) and awk (checked on its own).
+  ...[...COMPLEX_WRAPPERS].filter((w) => !/^(?:make|gmake|awk|gawk|mawk|nawk)$/.test(w)),
+  'systemd-run', 'unshare', 'nsenter', 'firejail', 'bwrap', 'tmux', 'screen', 'at', 'batch', 'setpriv', 'sg', 'pkexec', 'proot',
+  'fakeroot', 'fakechroot', 'torsocks', 'proxychains', 'proxychains4', 'faketime', 'daemonize', 'start-stop-daemon', 'chpst',
+  'cgexec', 'numactl', 'prlimit', 'capsh', 'dbus-run-session', 'systemd-inhibit', 'xvfb-run', 'catchsegv', 'ltrace', 'valgrind',
+  'entr', 'watchexec', 'nodemon', 'dtach', 'abduco', 'nq', 'tsp', 'pueue', 'sem', 'expect', 'sshpass',
+])
+/** A word that deletes, writes or serves when it runs, anywhere in a runner's arguments (also inside a quoted string). */
+const RUN_WORD = /(?:^|[\s;&|(){}'"`])(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate)(?=$|[\s;&|)}'"`])|>|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[\s;&|'"`])php\b[^;&|]*\s-S|\bhttp-server\b|(?:^|[\s;&|'"`])serve(?=$|\s)|\bhttpd\b/
+/** The same as a command of its own: the first operand, or the start of a string (or a part after ;, &, |). */
+const RUN_WORD_AT_START = /^(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|httpd|http-server|serve)$|(?:^|[;&|]\s*)(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|http-server|serve|httpd)\s|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[;&|]\s*)php\b[^;&|]*\s-S|>/
+/**
+ * Commands whose arguments are data, not a command they run: for any other
+ * (an unknown program or a script), a command word at the start of an
+ * argument, or a redirect inside one, asks (it may run it).
+ */
+const KNOWN_COMMANDS = new Set([
+  'ls', 'cat', 'echo', 'printf', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'jq', 'yq', 'diff', 'cmp',
+  'comm', 'paste', 'column', 'nl', 'fold', 'fmt', 'rev', 'tac', 'less', 'more', 'file', 'stat', 'du', 'df', 'free', 'uname', 'whoami', 'id', 'date',
+  'pwd', 'cd', 'pushd', 'popd', 'which', 'type', 'true', 'false', 'test', '[', 'sleep', 'basename', 'dirname', 'realpath', 'readlink', 'md5sum',
+  'sha1sum', 'sha256sum', 'sha512sum', 'base64', 'xxd', 'od', 'hexdump', 'mkdir', 'touch', 'git', 'gh', 'npm', 'pnpm', 'yarn', 'bun', 'npx',
+  'pip', 'pip3', 'uv', 'poetry', 'cargo', 'go', 'rustc', 'tsc', 'eslint', 'prettier', 'vite', 'next', 'jest', 'vitest', 'pytest', 'mocha',
+  'ffmpeg', 'ffprobe', 'convert', 'magick', 'identify', 'pdftotext', 'pdfinfo', 'blender', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'xz',
+  'zcat', 'ps', 'top', 'kill', 'pkill', 'pgrep', 'lsof', 'ss', 'netstat', 'ip', 'ping', 'dig', 'nslookup', 'host', 'curl', 'wget', 'ssh',
+  'scp', 'rsync', 'sftp', 'export', 'set', 'unset', 'source', '.', 'exit', 'return', 'read', 'wait', 'history', 'alias', 'local', 'declare',
+  'seq', 'yes', 'expr', 'bc', 'awk', 'gawk', 'mawk', 'nawk', 'sed', 'find', 'xargs', 'tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'chmod',
+  'chown', 'chgrp', 'install', 'truncate', 'shred', 'dd', 'unlink', 'systemctl', 'journalctl', 'docker', 'kubectl', 'openssl', 'sqlite3',
+  'psql', 'mysql', 'redis-cli', 'code', 'open', 'xdg-open', 'vim', 'vi', 'nvim', 'nano', 'emacs', 'make', 'cmake', 'java', 'javac', 'mvn',
+  'gradle', 'dotnet', 'php', 'composer', 'ruby', 'gem', 'bundle', 'perl', 'node', 'deno', 'python', 'python3', 'lua', 'R', 'Rscript', 'aria2c',
+  'yt-dlp', 'youtube-dl', 'axel', 'http', 'https', 'xh', 'apt', 'apt-get', 'dpkg', 'brew', 'artemis', 'pandoc', 'libreoffice', 'soffice',
+  'tesseract', 'whisper', 'say', 'espeak', 'qrencode', 'zbarimg', 'exiftool', 'mediainfo', 'sox', 'lame', 'opusenc', 'gifsicle', 'optipng',
+  'pngquant', 'cwebp', 'dwebp', 'rsvg-convert', 'inkscape', 'gs', 'qpdf', 'mutool', 'wkhtmltopdf', 'chromium', 'google-chrome', 'playwright',
+])
+
 /** awk-like programs that can run shell commands themselves (system(), print | "cmd", "cmd" | getline). */
 const AWKS = new Set(['awk', 'gawk', 'mawk', 'nawk'])
 const AWK_RUNS_SHELL = /\bsystem\s*\(|\|\s*"|"\s*\|\s*getline|\|&/
@@ -1073,6 +1128,23 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
       continue
     }
     if (head === 'popd') continue
+    // A program that runs another command (or one not known) with a command word in its arguments: that
+    // command is not followed here, so it asks.
+    if (head && !INTERPRETER_RE.test(head)) {
+      const hereString = parsed.hereString ? args[args.indexOf('<<<') + 1] : undefined
+      const runnerText = [...plain, ...(hereString ? [hereString] : []), ...(parsed.heredoc ? [parsed.heredoc.body] : [])]
+      // `head` is the command past the wrappers commandHead reads (env, nice, timeout, …): those are checked as what they run.
+      if (head === 'busybox' && plain[0] === 'httpd') {
+        // A web server, checked as one (listeningServers).
+      } else if (RUNNERS.has(head)) {
+        if (runnerText.some((a) => RUN_WORD.test(a))) flag(`runs a command through ${head} that may delete, write or serve files`, `会通过 ${head} 运行一条可能删除、改写或对外提供文件的命令`)
+      } else if (!KNOWN_COMMANDS.has(head) && !DELETE_COMMANDS.has(head) && !SHELL_NAME.test(head)) {
+        const operands = plain.filter((a) => !a.startsWith('-'))
+        if ((operands[0] !== undefined && RUN_WORD_AT_START.test(operands[0])) || runnerText.some((a) => /\s/.test(a) && RUN_WORD_AT_START.test(a.trim()))) {
+          flag(`passes a command that may delete, write or serve files to ${head}, which this does not know`, `把一条可能删除、改写或对外提供文件的命令交给了不认识的程序 ${head}`)
+        }
+      }
+    }
     if ((COMPLEX_WRAPPERS.has(head) || COMPLEX_WRAPPERS.has(wrapper)) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head}`, `会通过 ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head} 运行会删除或改写文件的命令`)
     if (INTERPRETER_RE.test(head) && args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a))) checkInlineCode(args.join(' '))
     // A program read from a here-document is inline code too.
@@ -1647,10 +1719,11 @@ interface PlacedCommand {
 }
 
 /** The command's simple commands, in order, each with the directory it runs in (a static cd is followed), and the inline code of `sh -c` read the same way. */
-function placedCommands(command: string, cwd: string, depth = 0, start: string[] | undefined = [cwd]): PlacedCommand[] {
+function placedCommands(command: string, cwd: string, depth = 0, start: string[] | null = [cwd]): PlacedCommand[] {
   const out: PlacedCommand[] = []
   let here: string | undefined = cwd
-  let heres: string[] | undefined = start
+  // null: the directory is not known (undefined would take the default).
+  let heres: string[] | undefined = start ?? undefined
   // Only the directory changes before the first group or subshell are certain for what follows.
   const groupAt = firstUnquotedParen(command)
   const certainChanges = groupAt < 0 ? Infinity : shellCommands(withPlainRedirects(command.slice(0, groupAt))).filter((c) => /^(?:cd|pushd|popd)$/.test(commandHead(c.words)?.name ?? '')).length
@@ -1673,9 +1746,23 @@ function placedCommands(command: string, cwd: string, depth = 0, start: string[]
     if (head && SHELL_NAME.test(head.name) && depth < 2) {
       const code = inlineProgram(head.name, args)?.code
       if (code !== undefined) {
-        out.push(...placedCommands(code, here ?? cwd, depth + 1, heres).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
+        out.push(...placedCommands(code, here ?? cwd, depth + 1, heres ?? null).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
         continue
       }
+    }
+    // A program that runs a command of its own (su -c, flock, chroot, systemd-run): that command, in
+    // the directory it runs in (unknown when the program changes it: a login, a new root, a service).
+    const inner = head && depth < 2 ? unwrapRunner(head.name, args) : undefined
+    if (inner) {
+      const innerHeres = inner.keepsDir ? heres : inner.dir !== undefined ? (path.isAbsolute(inner.dir) ? [inner.dir] : heres?.map((base) => path.resolve(base, inner.dir!))) : undefined
+      const innerHere = inner.keepsDir ? here : innerHeres?.length === 1 ? innerHeres[0] : undefined
+      if (inner.code !== undefined) {
+        out.push(...placedCommands(inner.code, innerHere ?? cwd, depth + 1, innerHeres ?? null).map((c) => (innerHere === undefined ? { ...c, here: undefined } : c)))
+      } else if (inner.words?.length) {
+        const innerHead = commandHead(inner.words)
+        out.push({ parsed: { words: inner.words, join: 'list' }, head: innerHead, args: innerHead ? inner.words.slice(innerHead.index + 1) : [], here: innerHere, heres: innerHeres })
+      }
+      continue
     }
     // A wrapper's directory change (`env -C`, `sudo -D`) for this command only.
     const wrapped = afterWrapperChanges(parsed.words, heres)
@@ -1687,6 +1774,57 @@ function placedCommands(command: string, cwd: string, depth = 0, start: string[]
     out.push({ parsed, head, args, here, heres })
   }
   return out
+}
+
+/**
+ * The command a runner runs: su/runuser -c CODE, flock [opts] FILE CMD… (or
+ * -c CODE), chroot [opts] ROOT CMD…, systemd-run [opts] CMD…; and whether it
+ * runs in the same directory (`dir`: where it runs instead, when named).
+ */
+function unwrapRunner(name: string, args: string[]): { code?: string; words?: string[]; keepsDir: boolean; dir?: string } | undefined {
+  const valueOf = (k: number, a: string) => (a.includes('=') ? a.slice(a.indexOf('=') + 1) : args[k + 1])
+  if (name === 'su' || name === 'runuser') {
+    const at = args.findIndex((a) => a === '-c' || a === '--command' || a.startsWith('--command='))
+    if (at < 0) return undefined
+    const login = args.some((a) => a === '-' || a === '-l' || a === '--login')
+    return { code: valueOf(at, args[at]!) ?? '', keepsDir: !login }
+  }
+  if (name === 'flock') {
+    for (let k = 0; k < args.length; k++) {
+      const a = args[k]!
+      if (a === '-c' || a === '--command' || a.startsWith('--command=')) return { code: valueOf(k, a) ?? '', keepsDir: true }
+      if (/^(?:-w|-E|--timeout|--wait|--conflict-exit-code)$/.test(a)) {
+        k++
+        continue
+      }
+      if (a.startsWith('-')) continue
+      // The lock file, then the command (or -c CODE after it).
+      const rest = args.slice(k + 1)
+      if (rest[0] === '-c' || rest[0] === '--command') return { code: rest[1] ?? '', keepsDir: true }
+      return { words: rest, keepsDir: true }
+    }
+    return undefined
+  }
+  if (name === 'chroot') {
+    const k = args.findIndex((a) => !a.startsWith('-'))
+    return k < 0 ? undefined : { words: args.slice(k + 1), keepsDir: false }
+  }
+  if (name === 'systemd-run') {
+    let keepsDir = false
+    let dir: string | undefined
+    for (let k = 0; k < args.length; k++) {
+      const a = args[k]!
+      if (a === '-d' || a === '--same-dir') keepsDir = true
+      else if (a === '--working-directory' || a.startsWith('--working-directory=')) {
+        dir = staticPath(valueOf(k, a) ?? '')
+        if (!a.includes('=')) k++
+      } else if (/^(?:-[upEMH]|--(?:unit|property|description|slice|setenv|uid|gid|nice|machine|host|on-[a-z-]+|timer-property|path-property|socket-property|service-type|slice-inherit))$/.test(a)) k++
+      else if (a.startsWith('-')) continue
+      else return { words: args.slice(k), keepsDir, ...(dir !== undefined ? { dir } : {}) }
+    }
+    return undefined
+  }
+  return undefined
 }
 
 /** The web servers a command starts (followed through `cd`, wrappers and `sh -c`). */

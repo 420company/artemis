@@ -74,7 +74,18 @@ option but `-S`/`-t` (`-d auto_prepend_file=…`, `-c php.ini`, `-n`, …)
 asks, and its router script must be in the workspace too. A wrapper's
 directory change (`env -C DIR`, `env --chdir=DIR`, `sudo -D DIR`, `sudo
 --chdir DIR`) is followed for the command it runs, for servers and for
-deletes and writes alike (an unknown one makes the directory unknown).
+deletes and writes alike (an unknown one makes the directory unknown, and
+so does `sudo -i` / `--login`, a login shell in the target user's home).
+A program that runs a command of its own (`systemd-run`, `unshare`,
+`nsenter`, `firejail`, `bwrap`, `tmux`, `screen`, `at`, `su`, `flock`,
+`chroot`, `watch`, …) is not followed: a word in its arguments (or in a
+string, a here-string or a here-document it is given) that deletes,
+writes or serves (`rm`, `tee`, `dd`, `mv`, `cp`, `chmod`, `chown`,
+`truncate`, `shred`, `>`, a web server) asks, and so does such a word at
+the start of an argument of a program this does not know (`./deploy.sh rm
+…`, `some-runner "cd x; rm y"`). Web servers inside `su -c`, `flock`,
+`chroot` and `systemd-run` are found too (in a directory not known after
+a login, a new root or a service without `--same-dir`).
 Bound anywhere
 else, or by default (python's http.server binds every interface unless told
 otherwise), or with an option or a variable the classifier cannot read, it
@@ -97,7 +108,17 @@ a `file://` URL (also behind `view-source:`, and for `browser_tabs` new
 tabs) is held to the same rules: the file that would open is resolved
 through every link, must be inside the workspace and outside the
 protected directories (`agent-credentials`, `vpn-profiles`), and that
-real path is what opens. Other URLs are not affected.
+real path is what opens. The scheme is read as the browser reads it, and a
+URL holding control characters, tabs or line breaks is refused outright
+(the browser would drop them: `fi\nle:///…`). What a page loads itself is
+guarded in the browser (`tools/browser/fileGuard.ts`): every `file:`
+request of every frame of a context the engine drives (navigations,
+frames, meta refreshes, links, scripts setting `location`, through
+browser_click and browser_evaluate too) opens only when its real path is
+inside the workspace and outside the protected directories, and a local
+subresource only for a page that is itself local (an http(s) page loads
+no local file). Anything it cannot decide is refused.
+`npm run test:browserFiles` checks it in a real Chromium.
 
 **What the card says.** The title and summary come from what the command
 was classified as doing (`summarizeShellCommand`): "启动本地预览：在本机
