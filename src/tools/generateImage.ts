@@ -30,6 +30,9 @@ import {
     resolveReferenceImages,
 } from './visual/referenceImages.js';
 import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
+import type { VisualModelConfig } from '../providers/types.js';
+import { BytePlusProvider } from './visual/providers/byteplusProvider.js';
+import { isImagesApiImageModel } from './visual/imagesApiParams.js';
 
 const DEFAULT_MODEL = DEFAULT_MODEL_IDS.byteplusImage;
 const DEFAULT_SIZE = '2K';
@@ -125,6 +128,23 @@ export async function executeGenerateImage(action: any, context: any) {
         const count = sanitizeCount(action.count);
         const source = 'BytePlus image API';
         const hasReferences = referenceImages.length > 0;
+
+        // A model of the Images API shape behind these credentials: its own request
+        // (sizes, quality, base64 answer, references as an edit) through the provider.
+        if (isImagesApiImageModel(model)) {
+            const config = {
+                enabled: true,
+                image: {
+                    provider: 'byteplus',
+                    apiKey,
+                    baseUrl,
+                    model,
+                    defaultParams: { size: 'auto', quality: 'auto', style: 'realistic', watermark: false },
+                },
+                video: { enabled: false, provider: 'byteplus', apiKey: '', baseUrl: '', model: '', defaultParams: {} },
+            } as unknown as VisualModelConfig;
+            return generateImageWithVisualProvider(action, context, config, new BytePlusProvider(config, 'image'), model, 'image API', referenceImages);
+        }
 
         const referenceError = checkBytePlusReferenceSupport(model, referenceImages.length);
         if (referenceError) {

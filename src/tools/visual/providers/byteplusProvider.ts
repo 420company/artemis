@@ -4,7 +4,7 @@ import type { VisualProvider, VisualGenerationParams, VideoGenerationParams, Gen
 import { modelArkEndpoint, normalizeModelArkMediaBaseUrl } from '../../vidarMedia.js'
 import { ImageApiError } from '../imageGenerationFailure.js'
 import { GenerationApiError } from '../generationFailure.js'
-import { baseUrlIsLoopback, downloadProviderAsset } from '../safeDownload.js'
+import { baseUrlIsLoopback, downloadGuardedUrl, downloadProviderAsset } from '../safeDownload.js'
 import {
   IMAGE_GENERATION_TIMEOUT_MS,
   VIDEO_CREATE_TIMEOUT_MS,
@@ -19,8 +19,17 @@ import {
   resolveVideoModelCapabilities,
   videoCapabilityOverridesFromConfig,
 } from '../videoCapabilities.js'
-import { checkBytePlusReferenceSupport } from '../referenceImages.js'
+import { checkBytePlusReferenceSupport, MAX_REFERENCE_IMAGE_BYTES } from '../referenceImages.js'
 import { seedreamSizeFromKeyword } from '../seedreamSizes.js'
+import {
+  decodeDataUri,
+  imagesApiEditForm,
+  imagesApiExtension,
+  imagesApiRequestFields,
+  isImagesApiImageModel,
+  MAX_IMAGES_API_REFERENCES,
+  type ImagesApiRequestInput,
+} from '../imagesApiParams.js'
 import { DEFAULT_MODEL_IDS } from '../../../providers/presets.js'
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
@@ -82,6 +91,8 @@ export class BytePlusProvider implements VisualProvider {
     try {
       const { apiKey, baseUrl } = await this.resolveCredentials()
       const model = params.model || this.config.image.model || DEFAULT_MODEL_IDS.byteplusImage
+      // A model of the Images API shape behind the same endpoint (the platform gateway).
+      if (isImagesApiImageModel(model)) return await this.generateImagesApiImage(params, model, apiKey, baseUrl, startTime)
       // OpenAI-style size words are not ModelArk sizes; give Seedream explicit pixels.
       const size = seedreamSizeFromKeyword(model, params.size || this.config.image.defaultParams.size || '2K')
       const count = params.count || 1
@@ -187,6 +198,116 @@ export class BytePlusProvider implements VisualProvider {
         failureStage: error instanceof ImageApiError ? error.stage : undefined,
         generationTime: Date.now() - startTime
       }
+    }
+  }
+
+  /**
+   * One image from a model of the Images API shape (imagesApiParams.ts):
+   * /images/generations as JSON without input images, /images/edits as
+   * multipart with them. The answer is base64 (a URL is downloaded through
+   * the guarded download), written as a file.
+   */
+  private async generateImagesApiImage(
+    params: VisualGenerationParams,
+    model: string,
+    apiKey: string,
+    baseUrl: string,
+    startTime: number,
+  ): Promise<GenerationResult> {
+    const defaults = this.config.image.defaultParams ?? ({} as VisualModelConfig['image']['defaultParams'])
+    const input: ImagesApiRequestInput = {
+      model,
+      prompt: params.prompt,
+      size: params.size || defaults.size,
+      quality: params.quality || defaults.quality,
+      outputFormat: params.outputFormat || defaults.outputFormat,
+      outputCompression: params.outputCompression ?? defaults.outputCompression,
+      background: params.background || defaults.background,
+    }
+    const references = params.referenceImages ?? []
+    if (references.length > MAX_IMAGES_API_REFERENCES) {
+      throw new Error(`The image model accepts at most ${MAX_IMAGES_API_REFERENCES} reference images; got ${references.length}.`)
+    }
+    let body: string | FormData
+    let endpoint: string
+    if (references.length > 0) {
+      const images: Array<{ bytes: Buffer; type: string }> = []
+      for (const reference of references) {
+        const inline = decodeDataUri(reference)
+        if (inline && inline.bytes.length === 0) throw new Error('A reference image is empty.')
+        if (inline) {
+          images.push(inline)
+          continue
+        }
+        // An http(s) reference is fetched here: edits take files, not links.
+        try {
+          const { body: bytes, contentType } = await downloadGuardedUrl(reference, { timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS, signal: params.abortSignal, maxBytes: MAX_REFERENCE_IMAGE_BYTES })
+          images.push({ bytes, type: (contentType ?? 'image/png').split(';')[0]!.trim().toLowerCase() })
+        } catch (error) {
+          throw new ImageApiError(`Reference image download failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      endpoint = modelArkEndpoint(baseUrl, 'images/edits')
+      body = imagesApiEditForm(input, images)
+    } else {
+      endpoint = modelArkEndpoint(baseUrl, 'images/generations')
+      body = JSON.stringify(imagesApiRequestFields(input))
+    }
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      // Form data sets its own multipart content type.
+      headers: { Authorization: `Bearer ${apiKey}`, ...(typeof body === 'string' ? { 'Content-Type': 'application/json' } : {}) },
+      body,
+      signal: combineAbortSignals(params.abortSignal, AbortSignal.timeout(IMAGE_GENERATION_TIMEOUT_MS)),
+    })
+    const raw = await res.text()
+    if (!res.ok) {
+      throw new ImageApiError(`API request failed (HTTP ${res.status}): ${raw.slice(0, 500)}`, res.status)
+    }
+    let payload: { data?: Array<{ b64_json?: string; url?: string }>; error?: { message?: string } }
+    try {
+      payload = JSON.parse(raw)
+    } catch {
+      throw new Error(`API returned invalid JSON: ${raw.slice(0, 200)}`)
+    }
+    const item = payload.data?.[0]
+    if (!item) throw new Error(`API returned no images. ${payload.error?.message ?? ''}`.trim())
+    // From here on the image was made (and billed): a failure to get its bytes is a download failure.
+    let buf: Buffer
+    if (item.b64_json) {
+      buf = Buffer.from(item.b64_json, 'base64')
+      if (buf.length === 0) throw new ImageApiError('The image data in the response could not be decoded.', undefined, 'download')
+    } else if (item.url) {
+      try {
+        buf = await downloadProviderAsset(item.url, {
+          timeoutMs: ASSET_DOWNLOAD_TIMEOUT_MS,
+          allowLoopback: baseUrlIsLoopback(baseUrl),
+          signal: params.abortSignal,
+        })
+      } catch (error) {
+        throw new ImageApiError(`Image download failed: ${error instanceof Error ? error.message : String(error)}`, undefined, 'download')
+      }
+    } else {
+      throw new ImageApiError('Response contained neither image data nor a URL.', undefined, 'download')
+    }
+    if (buf.length === 0) throw new ImageApiError('Response contained an empty image.', undefined, 'download')
+
+    const fs = await import('fs/promises')
+    const path = await import('path')
+    const tempDir = path.join(resolveArtemisHomeDir(), 'assets', 'generated')
+    await fs.mkdir(tempDir, { recursive: true })
+    const imagePath = path.join(tempDir, `image_${Date.now()}${imagesApiExtension(input.outputFormat)}`)
+    await fs.writeFile(imagePath, buf)
+    const sent = imagesApiRequestFields(input)
+    return {
+      success: true,
+      assetPath: imagePath,
+      generationTime: Date.now() - startTime,
+      modelInfo: {
+        provider: this.name,
+        model,
+        params: { size: sent.size, quality: sent.quality, outputFormat: sent.output_format, background: sent.background, count: sent.n, referenceImageCount: references.length },
+      },
     }
   }
 
