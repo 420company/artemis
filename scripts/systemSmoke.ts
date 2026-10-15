@@ -1538,5 +1538,227 @@ test('interactive overrides: --base-url alone never carries the stored key; a ke
   }
 });
 
+/** A local Chat Completions endpoint that records request bodies and answers with the given usage. */
+async function recordingEndpoint(usage: Record<string, unknown>): Promise<{ url: string; bodies: any[]; close: () => Promise<void> }> {
+  const http = await import('node:http');
+  const bodies: any[] = [];
+  const server = http.createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw);
+    bodies.push(body);
+    if (body.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [], usage })}\n\n`);
+      res.end('data: [DONE]\n\n');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage }));
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
+  const port = (server.address() as { port: number }).port;
+  return { url: `http://127.0.0.1:${port}/v1`, bodies, close: () => new Promise<void>((done) => server.close(() => done())) };
+}
+
+test('prompt cache marks: a gateway profile marks the system prompt and the newest stored message, never the run context', async () => {
+  const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
+  const endpoint = await recordingEndpoint({ prompt_tokens: 31_000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 30_000, cache_write_tokens: 900 } });
+  try {
+    const at = new Date(0).toISOString();
+    const system = { id: 'system', role: 'system' as const, content: 'You are the agent.', createdAt: at };
+    const runContext = (text: string) => ({ id: `rc-${text}`, role: 'user' as const, name: 'runtime_context', content: text, createdAt: at });
+    const history1 = [{ id: 'u1', role: 'user' as const, content: 'find the file', createdAt: at }];
+    const history2 = [
+      ...history1,
+      { id: 'a1', role: 'assistant' as const, content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a"}' }], createdAt: at },
+      { id: 't1', role: 'tool' as const, toolUseId: 'c1', name: 'read_file', content: 'contents of a', createdAt: at },
+    ];
+    const tools = [{ name: 'read_file', description: 'Reads a file', parameters: { type: 'object', properties: { path: { type: 'string' } } } }];
+    const profile = { protocol: 'openai' as const, baseUrl: endpoint.url, apiKey: 'k', model: 'platform-alias', gatewayBridgesImages: true, promptCacheMarks: true, effort: 'max' as const };
+    const provider = new OpenAICompatibleProvider(profile);
+    const first = await provider.completeStream([system, ...history1, runContext('run 1')], () => undefined, { nativeFunctionTools: tools as any });
+    await provider.completeStream([system, ...history2, runContext('run 1, later')], () => undefined, { nativeFunctionTools: tools as any });
+    const [one, two] = endpoint.bodies;
+    const mark = { type: 'ephemeral' };
+    assert.deepEqual(one.messages[0].content, [{ type: 'text', text: 'You are the agent.', cache_control: mark }]);
+    assert.deepEqual(one.messages[1].content, [{ type: 'text', text: 'find the file', cache_control: mark }]);
+    assert.equal(one.messages[2].content, 'run 1', 'the run context is never marked');
+    assert.deepEqual(two.messages[3].content, [{ type: 'text', text: 'contents of a', cache_control: mark }], 'the newest stored message (a tool result)');
+    assert.equal(two.messages[1].content, 'find the file', 'only the newest stored message carries the mark');
+    // The gateway gets the level as the profile states it; it fits it to each upstream.
+    assert.equal(one.reasoning_effort, 'max');
+    // Without the marks the cached prefix is the same bytes: the same system, history and tools, in the same order.
+    const unmark = (m: any) => (Array.isArray(m.content) && m.content.length === 1 && m.content[0].cache_control ? { ...m, content: m.content[0].text } : m);
+    assert.deepEqual(two.messages.slice(0, 2).map(unmark), one.messages.slice(0, 2).map(unmark));
+    assert.equal(JSON.stringify(two.tools), JSON.stringify(one.tools));
+    // Cache reads and writes reach the usage.
+    assert.equal(first.usage?.cacheReadTokens, 30_000);
+    assert.equal(first.usage?.cacheCreationTokens, 900);
+    assert.equal(first.usage?.promptTokens, 31_000);
+
+    // A profile without the flag (an owner's own endpoint, an older gateway): plain strings, and effort only for models that take it.
+    const plain = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: endpoint.url, apiKey: 'k', model: 'deepseek-chat', effort: 'max' });
+    await plain.complete([system, ...history1, runContext('run 2')]);
+    const three = endpoint.bodies[2];
+    assert.equal(JSON.stringify(three).includes('cache_control'), false);
+    assert.equal(three.messages[0].content, 'You are the agent.');
+    assert.equal(three.reasoning_effort, undefined);
+  } finally {
+    await endpoint.close();
+  }
+});
+
+test('prompt cache marks: images stay where they were first sent, inside the cached prefix', async () => {
+  const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
+  const endpoint = await recordingEndpoint({ prompt_tokens: 10, completion_tokens: 1 });
+  try {
+    const at = new Date(0).toISOString();
+    const system = { id: 'system', role: 'system' as const, content: 'S', createdAt: at };
+    const user = { id: 'u1', role: 'user' as const, content: 'what is in the picture?', createdAt: at };
+    const rc = { id: 'rc', role: 'user' as const, name: 'runtime_context', content: 'ctx', createdAt: at };
+    const call = { id: 'a1', role: 'assistant' as const, content: '', toolCalls: [{ id: 'c1', name: 'view_image', arguments: '{}' }], createdAt: at };
+    const result = { id: 't1', role: 'tool' as const, toolUseId: 'c1', name: 'view_image', content: 'shown', createdAt: at };
+    const photo = { mediaType: 'image/png', data: 'AAAA' } as any;
+    const viewed = { mediaType: 'image/png', data: 'BBBB' } as any;
+    const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: endpoint.url, apiKey: 'k', model: 'alias', gatewayBridgesImages: true, promptCacheMarks: true });
+    assert.equal(provider.promptCacheMarks, true);
+    // Request 1: the user's image right after their message, the cache mark on it (written once).
+    await provider.completeStream([system, user, rc], () => undefined, { imageAttachments: [photo], imageGroups: [{ afterMessageId: 'u1', images: [photo] }] });
+    // Request 2 of the run: the same image at the same place, a viewed image after the tool result, the mark after it.
+    await provider.completeStream([system, user, call, result, rc], () => undefined, {
+      imageAttachments: [photo, viewed],
+      imageGroups: [{ afterMessageId: 'u1', images: [photo] }, { afterMessageId: 't1', images: [viewed] }],
+    });
+    // Request 3: the answer came, nothing new: everything up to the newest message is the cached prefix.
+    const answer = { id: 'a2', role: 'assistant' as const, content: 'A cat.', createdAt: at };
+    await provider.completeStream([system, user, call, result, answer, rc], () => undefined, {
+      imageAttachments: [photo, viewed],
+      imageGroups: [{ afterMessageId: 'u1', images: [photo] }, { afterMessageId: 't1', images: [viewed] }],
+    });
+    const [one, two, three] = endpoint.bodies;
+    const mark = { type: 'ephemeral' };
+    assert.deepEqual(one.messages.map((m: any) => m.role), ['system', 'user', 'user', 'user']);
+    assert.equal(one.messages[1].content, 'what is in the picture?', 'the stored message is unchanged');
+    assert.deepEqual(one.messages[2].content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' }, cache_control: mark }]);
+    assert.equal(one.messages[3].content, 'ctx');
+    assert.deepEqual(two.messages.map((m: any) => m.role), ['system', 'user', 'user', 'assistant', 'tool', 'user', 'user']);
+    assert.deepEqual(two.messages[5].content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,BBBB' }, cache_control: mark }]);
+    // Byte-stable: with the marks taken off, each request starts with the whole of the one before (but its run context).
+    const plain = (m: any) => JSON.stringify(Array.isArray(m.content) ? { ...m, content: m.content.map(({ cache_control: _c, ...p }: any) => p) } : m);
+    const prefix = (body: any, n: number) => body.messages.slice(0, n).map(plain).join('\n');
+    assert.equal(prefix(two, 3), prefix(one, 3));
+    assert.equal(prefix(three, 6), prefix(two, 6));
+    assert.deepEqual(three.messages[6].content, [{ type: 'text', text: 'A cat.', cache_control: mark }]);
+
+    // A model that cannot see images gets the note at the same place.
+    const blind = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: endpoint.url, apiKey: 'k', model: 'alias', supportsImages: false, promptCacheMarks: true });
+    await blind.completeStream([system, user, rc], () => undefined, { imageAttachments: [photo], imageGroups: [{ afterMessageId: 'u1', images: [photo] }] });
+    const note = endpoint.bodies[3];
+    assert.equal(note.messages[1].content, 'what is in the picture?');
+    assert.equal(note.messages[2].content.length, 1);
+    assert.equal(note.messages[2].content[0].type, 'text');
+    assert.deepEqual(note.messages[2].content[0].cache_control, mark);
+  } finally {
+    await endpoint.close();
+  }
+});
+
+test('gateway streams: an error chunk or a cut-off stream is an interrupted answer, not a short one', async () => {
+  const http = await import('node:http');
+  const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
+  let mode: 'error' | 'cut' | 'whole' = 'error';
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) void _;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Hel' } }] })}\n\n`);
+    if (mode === 'error') return res.end(`data: ${JSON.stringify({ error: { message: 'upstream overloaded', type: 'overloaded_error' } })}\n\n`);
+    if (mode === 'cut') return res.end();
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  try {
+    const at = new Date(0).toISOString();
+    const messages = [{ id: 'u', role: 'user' as const, content: 'hi', createdAt: at }];
+    const gateway = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: url, apiKey: 'k', model: 'alias', gatewayBridgesImages: true });
+    await assert.rejects(gateway.completeStream(messages, () => undefined), (err: Error) => err.name === 'StreamInterruptedError' && /upstream overloaded/.test(err.message));
+    mode = 'cut';
+    await assert.rejects(gateway.completeStream(messages, () => undefined), (err: Error) => err.name === 'StreamInterruptedError');
+    // Another endpoint that ends loosely is still read as it was.
+    const other = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: url, apiKey: 'k', model: 'some-model' });
+    assert.equal((await other.completeStream(messages, () => undefined)).text, 'Hel');
+    mode = 'whole';
+    assert.equal((await gateway.completeStream(messages, () => undefined)).text, 'Hel');
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
+test('Messages provider: effort and adaptive thinking for the 5.x model ids', async () => {
+  const { MessagesCompatibleProvider } = await import('../src/providers/messagesCompatible.js');
+  assert.ok(MessagesCompatibleProvider);
+  const source = readFileSync(resolve('src/providers/messagesCompatible.ts'), 'utf8');
+  const pattern = (name: string) => new RegExp(new RegExp(`const ${name} = /(.+)/i;`).exec(source)![1]!, 'i');
+  for (const model of ['claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+    for (const name of ['ADAPTIVE_THINKING_MODELS', 'EFFORT_MODELS', 'EFFORT_MAX_MODELS', 'EFFORT_XHIGH_MODELS']) assert.match(model, pattern(name), `${name} ${model}`);
+  }
+  assert.doesNotMatch('claude-haiku-4-5', pattern('EFFORT_MODELS'));
+  assert.doesNotMatch('claude-opus-4-6', pattern('EFFORT_XHIGH_MODELS'));
+});
+
+test('stable prefix: projected MCP tools come in one order whatever the request picks them for', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-tools-order-'));
+  const dataRoot = path.join(root, '.artemis');
+  fs.mkdirSync(dataRoot, { recursive: true });
+  const at = new Date(0).toISOString();
+  const tool = (name: string, description: string) => ({ name, description, inputSchema: { type: 'object', properties: {} }, readOnly: true });
+  fs.writeFileSync(path.join(dataRoot, 'mcp-servers.json'), JSON.stringify({ servers: [{
+    id: 'srv', enabled: true, transport: 'streamable-http', url: 'http://127.0.0.1:9/mcp', authType: 'none', authState: 'configured', createdAt: at, updatedAt: at,
+    surface: { discoveredAt: at, source: 'probe', tools: [tool('weather_now', 'Current weather for a city'), tool('stock_quote', 'Stock price quote'), tool('send_mail', 'Send an email')], resources: [], prompts: [], commands: [] },
+  }] }));
+  try {
+    const { buildProviderNativeToolRuntime } = await import('../src/core/providerNativeTools.js');
+    const names = async (requestContext: string, max?: number) =>
+      (await buildProviderNativeToolRuntime(dataRoot, { requestContext, ...(max ? { maxProjectedMcpTools: max } : {}) })).tools.map((t) => t.name).filter((n) => n.includes('srv'));
+    const weather = await names('what is the weather in Paris');
+    const stocks = await names('quote the stock price');
+    assert.equal(weather.length, 3);
+    assert.deepEqual(stocks, weather, 'the same tools in the same order for different requests');
+    // Fewer slots than tools: relevance picks them, the order stays fixed.
+    const two = await names('stock price and weather', 2);
+    assert.equal(two.length, 2);
+    assert.deepEqual(two, [...two].sort());
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('stable prefix: the memory index in the system prompt is listed by name, not by last update', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-memory-index-'));
+  const originalHome = process.env.ARTEMIS_HOME;
+  process.env.ARTEMIS_HOME = path.join(root, 'home');
+  try {
+    const memory = await import('../src/storage/memoryFiles.js');
+    const cwd = path.join(root, 'project');
+    fs.mkdirSync(cwd, { recursive: true });
+    await memory.saveMemory(cwd, 'global', { name: 'zeta-pref', description: 'Prefers short answers', category: 'preference', content: 'short' });
+    await memory.saveMemory(cwd, 'global', { name: 'alpha-fact', description: 'Lives in Lisbon', category: 'user', content: 'Lisbon' });
+    const before = await memory.loadPromptIndexText(cwd, 'global', 4000);
+    assert.ok(before.indexOf('alpha-fact') < before.indexOf('zeta-pref'), before);
+    // A content update (same description) leaves the prompt text as it was.
+    await memory.saveMemory(cwd, 'global', { name: 'zeta-pref', description: 'Prefers short answers', category: 'preference', content: 'short, with bullet points' }, { allowShrink: true });
+    assert.equal(await memory.loadPromptIndexText(cwd, 'global', 4000), before);
+    // Over the budget: whole lines only.
+    const one = await memory.loadPromptIndexText(cwd, 'global', before.split('\n')[0]!.length + 5);
+    assert.equal(one.split('\n').length, 1);
+  } finally {
+    if (originalHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = originalHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 await pending;
 console.log('\n  ✔ All system smoke tests passed');

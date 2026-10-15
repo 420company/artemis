@@ -156,7 +156,7 @@ function describeAction(action: AgentAction): string {
       return `reminders: complete "${action.title}"`;
     // ── Browser automation ──────────────────────────────────────────────
     case 'browser_navigate':
-      return `browser: navigate to ${action.url}`;
+      return `browser: navigate to ${action.url ?? action.path}`;
     case 'browser_screenshot':
       return `browser: screenshot${action.fullPage ? ' (full page)' : ''}`;
     case 'browser_extract_text':

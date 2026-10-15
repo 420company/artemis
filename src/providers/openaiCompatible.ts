@@ -34,6 +34,78 @@ export function readOpenAICachedPromptTokens(usage: unknown): number | undefined
   return typeof cached === 'number' && Number.isFinite(cached) ? cached : undefined
 }
 
+/**
+ * Tokens written to the prompt cache, when the endpoint reports them:
+ * prompt_tokens_details.cache_write_tokens (the platform gateway and
+ * aggregators), or cache_creation_input_tokens. Included in prompt_tokens.
+ */
+export function readOpenAICacheWriteTokens(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== 'object') return undefined
+  const record = usage as Record<string, unknown>
+  const details = record['prompt_tokens_details'] as Record<string, unknown> | undefined
+  const written = details?.['cache_write_tokens'] ?? record['cache_creation_input_tokens']
+  return typeof written === 'number' && Number.isFinite(written) ? written : undefined
+}
+
+/** Cache read and write counters of a usage object, only those reported. */
+function cacheUsageFields(usage: unknown): { cacheReadTokens?: number; cacheCreationTokens?: number } {
+  const read = readOpenAICachedPromptTokens(usage)
+  const written = readOpenAICacheWriteTokens(usage)
+  return { ...(read !== undefined ? { cacheReadTokens: read } : {}), ...(written !== undefined ? { cacheCreationTokens: written } : {}) }
+}
+
+const CACHE_MARK = { type: 'ephemeral' } as const
+
+/** A message's content with a cache mark on its last part (a string becomes one text part); undefined when it has nothing to mark. */
+function markedContent(content: unknown): Array<Record<string, unknown>> | undefined {
+  if (typeof content === 'string') return content ? [{ type: 'text', text: content, cache_control: CACHE_MARK }] : undefined
+  if (!Array.isArray(content) || content.length === 0) return undefined
+  const last = content[content.length - 1]
+  if (!last || typeof last !== 'object') return undefined
+  return [...content.slice(0, -1), { ...(last as Record<string, unknown>), cache_control: CACHE_MARK }]
+}
+
+/**
+ * Prompt cache marks (profiles with promptCacheMarks): the end of the
+ * system message (tools and system prompt: the same on every request), and
+ * the end of the newest stored message among the first `stableCount`
+ * (the history: the per-run context after it changes on every run). An
+ * assistant turn that is only tool calls has no content to mark; the
+ * message before it is marked instead. Never more than these two.
+ */
+export function markPromptCacheBreakpoints(mapped: Array<Record<string, unknown>>, stableCount: number): void {
+  const first = mapped[0]
+  if (first?.role === 'system') {
+    const content = markedContent(first.content)
+    if (content) mapped[0] = { ...first, content }
+  }
+  for (let i = Math.min(stableCount, mapped.length) - 1; i > 0; i -= 1) {
+    const content = markedContent(mapped[i]!.content)
+    if (!content) continue
+    mapped[i] = { ...mapped[i]!, content }
+    return
+  }
+}
+
+/** Whether a profile points at the platform gateway (the agent server marks those it writes). */
+function onPlatformGateway(config: ProviderConfig): boolean {
+  return config.gatewayBridgesImages === true || hasPlatformCapabilities(config)
+}
+
+/**
+ * The reasoning_effort to send: to the platform gateway the profile's level
+ * as it is (the model name there is an alias; the gateway gives each
+ * upstream the level in its own form, clamped to what the model takes),
+ * elsewhere only to the OpenAI reasoning models that take it. As with the
+ * Messages provider, no level on the profile sends none: the model's own
+ * default applies (the tier's level, when it has one, comes onto the
+ * profile from the agent server, and the gateway applies it too).
+ */
+function requestReasoningEffort(config: ProviderConfig): string | undefined {
+  if (onPlatformGateway(config)) return config.effort
+  return resolveReasoningEffort(config.model, config.effort)
+}
+
 function buildProviderErrorMessage(
   response: Response,
   body: string,
@@ -462,6 +534,20 @@ function injectImagesIntoMessages(
   }
 }
 
+/**
+ * Images as a user message of their own (with cache marks; see
+ * placeCachedImages): the stored messages stay byte for byte what the cache
+ * holds. A model that cannot see images gets the omitted-images note there.
+ */
+function trailingImagesMessage(
+  attachments: import('./types.ts').ImageAttachment[],
+  supportsImages: boolean,
+): Record<string, unknown> {
+  const holder: Array<{ role: string; content: OpenAIMessageContent }> = [{ role: 'user', content: '' }]
+  injectImagesIntoMessages(holder, attachments, supportsImages)
+  return holder[0]!
+}
+
 const IMAGE_OMITTED_PLACEHOLDER = '[image omitted due to request size]';
 
 const INLINE_IMAGE_MARKDOWN = /!\[image\]\(data:[^)]*\)/g;
@@ -542,6 +628,7 @@ export function visionSkipHeader(bridgesImages: boolean, options?: ProviderReque
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly bridgesImages: boolean;
+  readonly promptCacheMarks: boolean;
   readonly supportsNativeToolCalls = true;
   readonly contextLength?: number;
   private readonly config: ProviderConfig;
@@ -555,10 +642,39 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.supportsImages = modelSupportsImages(config);
     this.model = config.model;
     this.bridgesImages = config.gatewayBridgesImages === true;
+    this.promptCacheMarks = config.promptCacheMarks === true;
     this.contextLength = platformContextLength(config);
     // Only a platform profile states its output limit; otherwise the budget
     // reserves a default (requests send no max_tokens unless asked).
     this.maxOutputTokens = platformMaxOutputTokens(config);
+  }
+
+  /**
+   * With cache marks: the request's images, each group in a message of its
+   * own right after the stored message it first followed (at the end when
+   * that one is gone; ImageGroup), then the cache marks, so the newest mark
+   * covers the newest images too. Images without groups go at the end.
+   */
+  private placeCachedImages(
+    mapped: Array<Record<string, unknown>>,
+    conversation: readonly SessionMessage[],
+    options: ProviderRequestOptions | undefined,
+  ): void {
+    const supports = this.supportsImages || this.bridgesImages
+    const groups = options?.imageGroups?.length
+      ? options.imageGroups
+      : options?.imageAttachments?.length ? [{ images: options.imageAttachments }] : []
+    const placed = groups
+      .map((group, order) => {
+        const at = group.afterMessageId ? conversation.findIndex((m) => m.id === group.afterMessageId) : -1
+        return { order, index: at >= 0 ? at : mapped.length - 1, group }
+      })
+      // From the back, so earlier indexes hold; groups after one message keep their order.
+      .sort((a, b) => b.index - a.index || b.order - a.order)
+    for (const { index, group } of placed) {
+      if (group.images.length) mapped.splice(index + 1, 0, trailingImagesMessage(group.images, supports))
+    }
+    markPromptCacheBreakpoints(mapped, mapped.length)
   }
 
   // ── Streaming (SSE) ───────────────────────────────────────────────────────
@@ -572,9 +688,10 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model)
     const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages)
     const mapped = conversation.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
-    if (options?.imageAttachments?.length) {
+    if (options?.imageAttachments?.length && !this.promptCacheMarks) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
+    if (this.promptCacheMarks) this.placeCachedImages(mapped as any, conversation, options)
     mapped.push(...(runtimeContext.map((m) => mapMessage(m, { reasoningMode })) as typeof mapped))
 
     const body: Record<string, unknown> = {
@@ -583,7 +700,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       stream_options: { include_usage: true },
       messages: mapped,
     }
-    const streamReasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort)
+    const streamReasoningEffort = requestReasoningEffort(this.config)
     if (streamReasoningEffort) body['reasoning_effort'] = streamReasoningEffort
     applyRequestOutputLimit(body, this.config, messages, options)
     if (options?.nativeFunctionTools?.length) {
@@ -669,6 +786,10 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let completionTokens = 0
     let totalTokens = 0
     let cacheReadTokens: number | undefined
+    let cacheCreationTokens: number | undefined
+    // A stream that stops with neither a finish reason nor [DONE] was cut off.
+    let sawFinish = false
+    let sawDone = false
     let firstResponseMs: number | undefined
     let responseModel = this.config.model
     const guardStreamingText = options?.guardStreamingText === true
@@ -717,6 +838,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
 
         for (const line of lines) {
           const trimmed = line.trim()
+          if (trimmed === 'data: [DONE]') sawDone = true
           if (!trimmed || trimmed === 'data: [DONE]') continue
           if (!trimmed.startsWith('data: ')) continue
 
@@ -728,6 +850,14 @@ export class OpenAICompatibleProvider implements ChatProvider {
           }
 
           const p = parsed as Record<string, unknown>
+
+          // An error in the stream (the platform gateway relays an upstream's
+          // mid-stream failure this way) ends the answer early: what came so
+          // far is not a whole answer.
+          if (p['error'] !== undefined && p['error'] !== null && !Array.isArray(p['choices'])) {
+            const err = p['error'] as { message?: unknown } | string
+            throw new StreamInterruptedError(new Error(typeof err === 'string' ? err : String(err?.message ?? 'stream error')))
+          }
 
           const choices = p['choices'] as Array<Record<string, unknown>> | undefined
           const deltaObj = choices?.[0]?.['delta'] as Record<string, unknown> | undefined
@@ -800,11 +930,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
             completionTokens = (usage['completion_tokens'] as number | undefined) ?? completionTokens
             totalTokens     = (usage['total_tokens']      as number | undefined) ?? totalTokens
             cacheReadTokens = readOpenAICachedPromptTokens(usage) ?? cacheReadTokens
+            cacheCreationTokens = readOpenAICacheWriteTokens(usage) ?? cacheCreationTokens
           }
 
           // Meaningful increments reset the idle deadline; keep-alive comments
           // and blank lines never reach this point.
           const finishReason = choices?.[0]?.['finish_reason']
+          if (finishReason) sawFinish = true
           if (
             (typeof contentDelta === 'string' && contentDelta) ||
             (typeof reasoningDelta === 'string' && reasoningDelta) ||
@@ -817,6 +949,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
       }
     } finally {
       idleGuard.dispose()
+    }
+    // The platform gateway always ends a whole answer with a finish reason and
+    // [DONE]; without either the connection was cut and the answer is partial.
+    // (Other endpoints keep the lenient reading: some end streams loosely.)
+    if (onPlatformGateway(this.config) && !sawFinish && !sawDone && buffer.trim() !== 'data: [DONE]') {
+      throw new StreamInterruptedError(new Error('the stream ended without a finish reason'))
     }
 
     // Filter out completely empty tool slots that the model sometimes emits as separators
@@ -840,6 +978,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       usage: {
         promptTokens:     promptTokens || undefined,
         ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+        ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
         completionTokens: completionTokens || undefined,
         totalTokens:      totalTokens || undefined,
         durationMs: Math.max(Date.now() - startedAt, 0),
@@ -887,9 +1026,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       streamed: false,
       usage: {
         promptTokens: json.usage?.prompt_tokens,
-        ...(readOpenAICachedPromptTokens(json.usage) !== undefined
-          ? { cacheReadTokens: readOpenAICachedPromptTokens(json.usage) }
-          : {}),
+        ...cacheUsageFields(json.usage),
         completionTokens: json.usage?.completion_tokens,
         totalTokens: json.usage?.total_tokens,
         durationMs: Math.max(Date.now() - startedAt, 0),
@@ -906,16 +1043,17 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model);
     const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
     const mapped = conversation.map((m) => mapMessage(m, { reasoningMode }));
-    if (options?.imageAttachments?.length) {
+    if (options?.imageAttachments?.length && !this.promptCacheMarks) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
+    if (this.promptCacheMarks) this.placeCachedImages(mapped, conversation, options);
     mapped.push(...runtimeContext.map((m) => mapMessage(m, { reasoningMode })));
 
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: mapped,
     };
-    const reasoningEffort = resolveReasoningEffort(this.config.model, this.config.effort);
+    const reasoningEffort = requestReasoningEffort(this.config);
     if (reasoningEffort) body['reasoning_effort'] = reasoningEffort;
     applyRequestOutputLimit(body, this.config, messages, options);
 
@@ -1004,9 +1142,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
       ...(imagesOmitted ? { imagesOmitted: true } : {}),
       usage: {
         promptTokens: json.usage?.prompt_tokens,
-        ...(readOpenAICachedPromptTokens(json.usage) !== undefined
-          ? { cacheReadTokens: readOpenAICachedPromptTokens(json.usage) }
-          : {}),
+        ...cacheUsageFields(json.usage),
         completionTokens: json.usage?.completion_tokens,
         totalTokens: json.usage?.total_tokens,
         durationMs: Math.max(Date.now() - startedAt, 0),

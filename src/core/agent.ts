@@ -1,5 +1,6 @@
 /* eslint-disable no-case-declarations, no-fallthrough, no-inner-declarations */
 import { enterIdentityRun, redactIdentitySecretsDeep } from '../security/identityCredentials.js';
+import { enterBrowserTurn } from '../tools/browser/fileGuard.js';
 import path from 'node:path';
 import { scrubSecrets } from '../security/credentialStore.js';
 import { normalizeVideoResolution } from '../tools/visual/videoParams.js';
@@ -87,7 +88,7 @@ import {
   getDelegatedChildPermissionMode,
 } from './delegatedPermissions.js';
 import { buildStableProviderSystemSections } from './promptCache.js';
-import { fitImagesToRequest, ViewedImageQueue } from './imageInput.js';
+import { fitImagesToRequest, imageByteSize, MAX_IMAGES_PER_REQUEST, MAX_REQUEST_IMAGE_BYTES, ViewedImageQueue } from './imageInput.js';
 import {
   ContextOverflowError,
   buildContextOverflowMessage,
@@ -183,6 +184,7 @@ import {
 import {
   buildProviderNativeFunctionTools,
   buildProviderNativeToolRuntime,
+  MAX_PROJECTED_MCP_TOOLS,
   mapProviderNativeToolCallToAction,
   resolveProjectedMcpToolName,
 } from './providerNativeTools.js';
@@ -2109,7 +2111,7 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `reminders_complete "${truncateInline(action.title, 60)}"`;
     // ── Browser automation ──────────────────────────────────────────────
     case 'browser_navigate':
-      return `browser_navigate ${truncateInline(action.url, 100)}`;
+      return `browser_navigate ${truncateInline(action.url ?? action.path ?? '', 100)}`;
     case 'browser_screenshot':
       return `browser_screenshot${action.fullPage ? ' fullPage=true' : ''}`;
     case 'browser_extract_text':
@@ -3240,13 +3242,14 @@ async function buildStableSystemContent(input: {
   try {
     const {
       ensureMemoryMigrated,
-      loadIndexText,
+      loadPromptIndexText,
       scopesCollide,
     } = await import('../storage/memoryFiles.js');
     await ensureMemoryMigrated(input.cwd);
     const collided = scopesCollide(input.cwd);
-    const globalIndex = await loadIndexText(input.cwd, 'global');
-    const projectIndex = collided ? '' : await loadIndexText(input.cwd, 'project');
+    // Stable text (see loadPromptIndexText): a memory updated in one run does not rewrite the next run's cached prefix.
+    const globalIndex = await loadPromptIndexText(input.cwd, 'global', 4000);
+    const projectIndex = collided ? '' : await loadPromptIndexText(input.cwd, 'project', 4000);
 
     systemSections.push(
       '🧠 Long-term memory: proactively persist durable knowledge with the memory tool — when the user states a lasting preference or correction, and after completing a significant task whose conclusions matter beyond this session. Update or delete entries the conversation has contradicted. Do not save session-only details or facts already recorded in the repo.',
@@ -3403,16 +3406,23 @@ function extractLatestUserRequest(
   return undefined;
 }
 
+/**
+ * The MCP tools a session keeps loaded. With prompt cache marks it keeps
+ * as many as a request carries (MAX_PROJECTED_MCP_TOOLS): the selection then
+ * only grows within the session, and once full stays as it is, so the tool
+ * list at the start of every prompt stops changing.
+ */
 function mergeStickyNativeMcpTools(
   current: string[] | undefined,
   next: string[] | undefined,
+  limit = 64,
 ): string[] {
   const merged = [
     ...(current ?? []).map((entry) => entry.trim()).filter(Boolean),
     ...(next ?? []).map((entry) => entry.trim()).filter(Boolean),
   ].filter((entry) => /^mcp(__|_prompt__|_resource__)/.test(entry));
 
-  return [...new Set(merged)].slice(-64);
+  return [...new Set(merged)].slice(-limit);
 }
 
 function buildToolError(
@@ -6806,10 +6816,13 @@ export async function runAgent(
 ): Promise<AgentRunResult> {
   // A sign-up password typed during this run stops being live when the outermost run ends.
   const leaveIdentityRun = enterIdentityRun();
+  // The end of the turn: the browser no longer opens this turn's workspace files (tools/browser/fileGuard.ts).
+  const leaveBrowserTurn = enterBrowserTurn();
   try {
     return await runAgentInner(session, userInput, options);
   } finally {
     leaveIdentityRun();
+    await leaveBrowserTurn();
   }
 }
 
@@ -7461,14 +7474,69 @@ async function runAgentInner(
    * queued since the last request, trimmed to one request's count and byte
    * budget. Nothing goes to a model that cannot see images.
    */
+  // With prompt cache marks: the run's images, each group at the place it was first sent.
+  const runImageGroups: import('../providers/types.ts').ImageGroup[] = [];
+  let runUserImagesPlaced = false;
+  const runVisionSkip: string[] = [];
+  /**
+   * With prompt cache marks the run keeps every image it sent (the user's
+   * and those view_image queued) in each later request, each group right
+   * after the stored message it first followed: the requests stay alike up
+   * to the newest message and the images are read from the cache after the
+   * first time. A group never changes once sent; new images that do not fit
+   * the request's budget next to the earlier ones are left out.
+   */
+  function takeCachedRequestImages(
+    userImages: readonly import('../providers/types.ts').ImageAttachment[],
+    provider: ChatProvider,
+    userVisionSkip: readonly string[],
+  ): { images: import('../providers/types.ts').ImageAttachment[]; groups: import('../providers/types.ts').ImageGroup[]; visionSkip?: string[] } {
+    const anchor = session.messages.at(-1)?.id;
+    const fresh: import('../providers/types.ts').ImageAttachment[][] = [];
+    if (!runUserImagesPlaced) {
+      if (userImages.length) fresh.push([...userImages]);
+      runVisionSkip.push(...userVisionSkip);
+      runUserImagesPlaced = true;
+    }
+    const viewed = viewedImages.take();
+    if (viewed.length) fresh.push(viewed);
+    runVisionSkip.push(...viewedImages.takeVisionSkip());
+    let count = runImageGroups.reduce((n, g) => n + g.images.length, 0);
+    let bytes = runImageGroups.reduce((n, g) => n + g.images.reduce((b, image) => b + imageByteSize(image), 0), 0);
+    let dropped = 0;
+    for (const images of fresh) {
+      const fits = images.filter((image) => {
+        const size = imageByteSize(image);
+        if (count + 1 > MAX_IMAGES_PER_REQUEST || bytes + size > MAX_REQUEST_IMAGE_BYTES) {
+          dropped += 1;
+          return false;
+        }
+        count += 1;
+        bytes += size;
+        return true;
+      });
+      if (fits.length) runImageGroups.push({ ...(anchor ? { afterMessageId: anchor } : {}), images: fits });
+    }
+    if (dropped > 0) options.onInfo?.(`[images] ${dropped} image(s) over the per-request limit were not sent`);
+    const images = runImageGroups.flatMap((g) => g.images);
+    if (images.length > 0 && provider.supportsImages !== true && provider.bridgesImages !== true) {
+      if (fresh.length) options.onInfo?.(`[images] this model cannot take images; ${images.length} dropped`);
+      return { images: [], groups: [] };
+    }
+    const visionSkip = [...new Set(runVisionSkip)];
+    return { images, groups: runImageGroups.map((g) => ({ ...g, images: [...g.images] })), ...(images.length && visionSkip.length ? { visionSkip } : {}) };
+  }
+
   function takeRequestImages(
     userImages: readonly import('../providers/types.ts').ImageAttachment[],
     provider: ChatProvider,
     userVisionSkip: readonly string[] = [],
   ): { images: import('../providers/types.ts').ImageAttachment[]; visionSkip?: string[] } {
-    const { kept, dropped } = fitImagesToRequest([...userImages, ...viewedImages.take()]);
+    const viewed = viewedImages.take();
+    const skipped = viewedImages.takeVisionSkip();
+    const { kept, dropped } = fitImagesToRequest([...userImages, ...viewed]);
     // Gateway vision models the helper already failed on for these images.
-    const visionSkip = [...new Set([...userVisionSkip, ...viewedImages.takeVisionSkip()])];
+    const visionSkip = [...new Set([...userVisionSkip, ...skipped])];
     if (dropped.length > 0) {
       options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
     }
@@ -7832,6 +7900,7 @@ async function runAgentInner(
       session.stickyNativeMcpTools = mergeStickyNativeMcpTools(
         session.stickyNativeMcpTools,
         nativeToolRuntime.selectedProjectedToolNames,
+        activeProvider.promptCacheMarks === true ? MAX_PROJECTED_MCP_TOOLS : undefined,
       );
       options.onInfo?.(
         [
@@ -7858,8 +7927,12 @@ async function runAgentInner(
     });
     let providerMessages = prepared.messages;
     // The user's images go with the first request; images the agent chose
-    // to look at (view_image) go with the request right after.
-    const { images: requestImages, visionSkip } = takeRequestImages(
+    // to look at (view_image) go with the request right after. With prompt
+    // cache marks, every image stays in each later request of the run.
+    const cachedImages = activeProvider.promptCacheMarks === true
+      ? takeCachedRequestImages(userImages.images, activeProvider, userImages.visionSkip ?? [])
+      : undefined;
+    const { images: requestImages, visionSkip } = cachedImages ?? takeRequestImages(
       turn === 1 ? userImages.images : [],
       activeProvider,
       turn === 1 ? userImages.visionSkip : [],
@@ -7867,6 +7940,7 @@ async function runAgentInner(
     const providerCallOptions = {
       nativeFunctionTools,
       imageAttachments: requestImages.length ? requestImages : undefined,
+      ...(cachedImages?.groups.length ? { imageGroups: cachedImages.groups } : {}),
       ...(visionSkip ? { visionSkip } : {}),
     };
     // Stream the model output live to the workflow UI when the provider

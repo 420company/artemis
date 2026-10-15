@@ -26,6 +26,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page, Request } from 'playwright';
+import { guardLocalFiles, releaseBrowserWorkspace } from './fileGuard.js';
 import { redactIdentitySecrets } from '../../security/identityCredentials.js';
 import type { FingerprintSet } from '../../security/secretFingerprints.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
@@ -39,6 +40,7 @@ import {
   runHostForeground,
   hostCall,
   liveDir,
+  readControl,
   readJsonFile,
   releaseTab,
   secretPauseMs,
@@ -283,6 +285,7 @@ async function initContext(): Promise<BrowserContext> {
       _liveBrowser = browser;
       const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      await guardLocalFiles(ctx);
       attachContextListeners(ctx, { live: true });
       _context = ctx;
       return ctx;
@@ -300,6 +303,7 @@ async function initContext(): Promise<BrowserContext> {
       _ephemeralBrowser = browser;
       const ctx = browser.contexts()[0] ?? (await browser.newContext(contextOptions));
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      await guardLocalFiles(ctx);
       attachContextListeners(ctx);
       _context = ctx;
       return ctx;
@@ -379,6 +383,7 @@ async function initContext(): Promise<BrowserContext> {
       // child of this process (it ends with the run), nothing kept or shared.
       ctx = await launchEphemeral();
       ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+      await guardLocalFiles(ctx);
       attachContextListeners(ctx);
       _context = ctx;
       return ctx;
@@ -408,6 +413,7 @@ async function initContext(): Promise<BrowserContext> {
       }
     }
     ctx.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+    await guardLocalFiles(ctx);
     attachContextListeners(ctx);
     _context = ctx;
     return ctx;
@@ -694,7 +700,38 @@ export async function redactShown(text: string): Promise<string> {
  * Before this process exits: in live mode, disconnect from the shared
  * browser (it stays open for the owner and the next run). Otherwise nothing.
  */
+/**
+ * Pages a turn leaves that are not http(s) (a file: page, and what one may
+ * have opened: about:blank, blob: or data: documents that inherit its
+ * origin) go back to a fresh about:blank: no later run or turn gets one
+ * (fileGuard.ts). A tab the owner holds right now (a live takeover) is left
+ * as it is.
+ */
+async function blankLocalPages(pages: Page[]): Promise<void> {
+  const dir = _liveBrowser ? liveDir() : undefined;
+  const control = dir ? readControl(dir) : undefined;
+  for (const page of new Set(pages)) {
+    if (page.isClosed() || /^https?:/i.test(page.url())) continue;
+    if (control?.mode === 'user' && control.targetId && (await targetIdOf(page).catch(() => undefined)) === control.targetId) continue;
+    // A fresh about:blank from the browser itself: an opaque origin, nothing of the page before.
+    await page.goto('about:blank', { timeout: 5_000 }).catch(() => page.close().catch(() => undefined));
+  }
+}
+
+/**
+ * The end of an agent turn (runAgent): the turn's workspace no longer opens
+ * in the browser, and the local pages it left (its own, in live mode; every
+ * page otherwise) go back to about:blank.
+ */
+export async function endBrowserTurn(): Promise<void> {
+  releaseBrowserWorkspace();
+  if (!isContextAlive(_context)) return;
+  await blankLocalPages(_liveBrowser ? [...ownPages(), ...(_activePage ? [_activePage] : [])] : _context.pages());
+}
+
 export async function releaseBrowser(): Promise<void> {
+  // The run lets the browser go: its workspace's files no longer open (fileGuard.ts).
+  releaseBrowserWorkspace();
   if (!_liveBrowser) return;
   const browser = _liveBrowser;
   const dir = liveDir();
@@ -703,6 +740,8 @@ export async function releaseBrowser(): Promise<void> {
   for (const page of ownPages()) {
     if (page !== keep) await page.close().catch(() => undefined);
   }
+  // The tab left for the owner and the next run is never a local page of this run's workspace.
+  if (keep) await blankLocalPages([keep]);
   if (keep && dir) {
     const targetId = await targetIdOf(keep);
     if (targetId) releaseTab(dir, targetId);
@@ -797,6 +836,7 @@ export async function closeActivePage(): Promise<void> {
 /** Hard shutdown — only call on Artemis exit. In live mode it only disconnects. */
 export async function closeBrowser(): Promise<void> {
   if (_liveBrowser) return releaseBrowser();
+  releaseBrowserWorkspace();
   if (_context) {
     await _context.close().catch(() => undefined);
     _context = null;

@@ -58,7 +58,7 @@ import { PermissionManager } from '../src/security/permissions.js'
 import { runHeadlessAgent as runHeadlessAgentNow } from '../src/services/headlessAgent.js'
 import { SessionStore } from '../src/storage/sessions.js'
 import { describeDangerousCommand } from '../src/tools/runCommand.js'
-import { analyzeDeletes, describeHighRiskCommand, isTemporaryPath, readOnlyServerCommand } from '../src/security/shellRisk.js'
+import { analyzeDeletes, describeHighRiskCommand, isTemporaryPath, listeningServers, readOnlyServerCommand } from '../src/security/shellRisk.js'
 import { isSensitivePath, resolveDataRootDir, resolveInsideRoot } from '../src/utils/fs.js'
 import { findInternalNames } from '../src/utils/internalNames.js'
 
@@ -979,6 +979,393 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('vpn script: a port that is not a number is refused', refuses({ ...good, listenPort: '51820; reboot' as unknown as number }))
   const script = wireguardScript(good)
   assert('vpn script: wg0.conf is no longer an expanding here-document', !/cat > \/etc\/wireguard\/wg0\.conf <<CONF_EOF/.test(script) && /printf '\[Interface\]/.test(script) && script.includes(`'10.66.66.1/24'`))
+}
+
+// ── Approval wording: a local preview, a log in the temp dir, a check of the page ──
+{
+  const cwd = workspace('preview')
+  const site = path.join(cwd, 'sites', 'guihua-latte-poster')
+  fs.mkdirSync(site, { recursive: true })
+  fs.writeFileSync(path.join(site, 'index.html'), '<!doctype html><title>poster</title>')
+  const classify = (command: string) => classifyApprovalNeed({ type: 'run_command', command }, { cwd, dangerousCommand: describeDangerousCommand })
+  const kind = (command: string) => classify(command)?.kind ?? null
+  const card = (command: string, locale: 'zh-CN' | 'en' = 'zh-CN') => {
+    const found = classify(command)
+    return found ? describeNeed(found, locale) : undefined
+  }
+  const freshLog = path.join(os.tmpdir(), `apr-preview-${process.pid}.log`)
+  fs.rmSync(freshLog, { force: true })
+  // The command the owner saw: python's http.server binds every interface unless told otherwise.
+  const seen = `cd ${site} && (nohup python3 -m http.server 8731 >/tmp/poster_server.log 2>&1 & echo $!) && sleep 1 && curl -sS -o /dev/null -w "%{http_code}\\n" http://127.0.0.1:8731/index.html`
+  const seenNeed = classify(seen)
+  const seenCard = card(seen)
+  assert('preview: the reported command is not a delete outside the workspace', seenNeed?.kind === 'shell_high_risk' && seenNeed.risk === 'medium', JSON.stringify(seenNeed))
+  assert('preview: its card says what it does (a web server on 8731 others may reach, a temp log, a check of the page)',
+    !!seenCard && seenCard.title === '启动一个其他机器也能访问的网页服务' && seenCard.summary.includes('在端口 8731 上提供工作区 sites/guihua-latte-poster 里的网页') &&
+      seenCard.summary.includes('所有网络接口') && seenCard.summary.includes('临时文件 /tmp/poster_server.log') && seenCard.summary.includes('检查本机网页 http://127.0.0.1:8731/index.html 能否打开') &&
+      !/删除/.test(seenCard.title + seenCard.summary), JSON.stringify(seenCard))
+  assert('preview: the card in English too', /^Start a web server other machines can reach$/.test(card(seen, 'en')?.title ?? '') && /temporary file \/tmp\/poster_server\.log/.test(card(seen, 'en')?.summary ?? ''))
+  // The same preview bound to this machine only needs nothing.
+  const local: [string, string][] = [
+    [seen.replace('http.server 8731', 'http.server 8731 --bind 127.0.0.1'), 'the reported command bound to 127.0.0.1'],
+    [`cd ${site} && (nohup python3 -m http.server --bind 127.0.0.1 8731 >${freshLog} 2>&1 &) && sleep 1 && curl -s http://127.0.0.1:8731/`, 'bind before the port, a new log in the temp dir'],
+    [`cd ${site} && nohup python3 -m http.server 8731 -b 127.0.0.1 > /tmp/poster_server.log 2>&1 &`, '-b, no subshell'],
+    [`python3 -m http.server 8731 --bind=::1 --directory sites/guihua-latte-poster >> /tmp/poster_server.log 2>&1 &`, '--bind=::1 and --directory, an append to a temp log'],
+    [`cd sites/guihua-latte-poster && setsid python3 -m http.server 8731 --bind localhost &>/tmp/poster_server.log & sleep 1; curl -sSf http://localhost:8731/index.html -o /dev/null`, 'setsid, localhost, &>'],
+    [`(cd ${site} && exec python3 -u -m http.server 8731 --bind 127.0.0.1) > ${path.join(os.tmpdir(), 'poster.log')} 2>&1 &`, 'the whole subshell redirected into the temp dir'],
+    [`nohup npx -y http-server sites/guihua-latte-poster -p 8731 -a 127.0.0.1 -c-1 > /tmp/h.log 2>&1 &`, 'http-server on 127.0.0.1'],
+    [`php -S 127.0.0.1:8731 -t sites/guihua-latte-poster > /tmp/php.log 2>&1 &`, 'php -S on 127.0.0.1'],
+    ['curl -sS http://127.0.0.1:8731/index.html -o /tmp/page.html', 'a page of this machine saved into the temp dir'],
+    ['curl -sS -o /dev/null -w "%{http_code}" http://localhost:8731/', 'a status check of this machine'],
+    ['wget -qO- http://127.0.0.1:8731/ | head -5', 'wget to stdout'],
+    [`curl -sSo ${path.join(os.tmpdir(), 'a.html')} https://example.com/`, 'an outside page saved into the temp dir'],
+    ['curl -sS -O https://example.com/a.png', 'a download into the workspace under its remote name'],
+  ]
+  for (const [command, why] of local) assert(`preview: ${why} needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  // The example wording: a local preview, shown when the same command also writes outside.
+  const withOutside = `cd ${site} && (nohup python3 -m http.server 8731 --bind 127.0.0.1 > /var/log/poster.log 2>&1 &)`
+  const outsideCard = card(withOutside)
+  assert('preview: a local preview whose log goes outside asks as a write outside, worded from what it does',
+    classify(withOutside)?.kind === 'delete_outside_workspace' && classify(withOutside)?.risk === 'high' && outsideCard?.title === '写入工作区以外的文件' &&
+      outsideCard.summary.includes('启动本地预览：在本机 127.0.0.1:8731 打开工作区 sites/guihua-latte-poster 里的网页（只在本机监听）') && outsideCard.summary.includes('/var/log/poster.log'),
+    JSON.stringify(outsideCard))
+  // Safety is not weakened: other machines, outside paths, deletes still ask.
+  const exposed: [string, string][] = [
+    ['python3 -m http.server --bind 0.0.0.0 8000', '--bind 0.0.0.0'],
+    ['python3 -m http.server 8000', 'the default (every interface)'],
+    ['python3 -m http.server 8000 --bind ::', '--bind ::'],
+    ['python3 -m http.server 8000 --bind 192.168.1.5', 'a LAN address'],
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --whatever', 'an option it cannot read'],
+    ['python3 -m http.server --bind "$HOST" 8000', 'a bind address from a variable'],
+    ['python2 -m SimpleHTTPServer 8000', 'SimpleHTTPServer (no bind option)'],
+    ['bash -c "python3 -m http.server 9000"', 'inside bash -c'],
+    ['npx serve sites/guihua-latte-poster', 'serve (every interface by default)'],
+    ['npx http-server sites/guihua-latte-poster -p 8080', 'http-server (0.0.0.0 by default)'],
+    ['php -S 0.0.0.0:8000', 'php -S on 0.0.0.0'],
+    ['busybox httpd -f -p 8080 -h sites/guihua-latte-poster', 'busybox httpd'],
+  ]
+  for (const [command, why] of exposed) {
+    const found = classify(command)
+    assert(`preview: a server others may reach asks (at least medium) — ${why}: ${command}`, found?.kind === 'shell_high_risk' && (found.risk === 'medium' || found.risk === 'high'), JSON.stringify(found))
+  }
+  const outside: [string, string][] = [
+    ['echo x > /etc/x', '> /etc/x'],
+    [`cd ${site} && (nohup python3 -m http.server 8731 --bind 127.0.0.1 > /etc/x 2>&1 &)`, 'a local preview logging into /etc'],
+    ['rm -rf /tmp/*', 'rm -rf /tmp/*'],
+    ['rm -f /usr/share/doc/x', 'rm outside'],
+    [`cd ${site} && (nohup python3 -m http.server 8731 --bind 127.0.0.1 > /tmp/x.log 2>&1 &) && rm -rf /usr/share/doc`, 'a local preview with an rm outside'],
+    ['echo x > /home/someone-else/notes.txt', 'writing into another user\'s directory'],
+    ['echo x | tee /home/someone-else/.profile', 'tee into another user\'s directory'],
+    ['curl -sS -o /etc/x https://example.com/a', 'curl -o outside'],
+    ['curl -sSo /srv/www/x https://example.com/a', 'curl -sSo outside'],
+    ['curl --output=/srv/www/x https://example.com/a', 'curl --output= outside'],
+    ['curl --output-dir /srv/www -O https://example.com/a', 'curl --output-dir outside'],
+    ['curl -o "$OUT" https://example.com/a', 'curl -o a variable'],
+    ['curl -K opts.txt https://example.com/a', 'curl options read from a file'],
+    ['cd /usr/share && curl -O https://example.com/a', 'curl -O after a cd outside'],
+    ['wget -O /etc/x https://example.com/a', 'wget -O outside'],
+    ['wget -P /srv/www https://example.com/a', 'wget -P outside'],
+    ['cd /usr/share && wget -q https://example.com/a', 'wget into a directory outside'],
+    // A subshell's cd does not leak, and a cd that is undone (subshell, cd -, popd) is not forgotten either.
+    [`cd /usr/share && (cd ${cwd}) ; rm -rf doc`, 'rm after a subshell that went back to the workspace'],
+    ['(cd /usr/share && rm -rf doc)', 'rm inside a subshell outside'],
+    [`cd /usr/share; cd ${cwd}; cd -; rm -rf doc`, 'cd - back outside'],
+    [`pushd /usr/share; pushd ${cwd}; popd; rm -rf doc`, 'popd back outside'],
+  ]
+  if (!isTemporaryPath(os.homedir())) outside.push(['curl -o ~/.bashrc https://example.com/a', 'curl -o onto a login script'])
+  // Other downloaders: aria2c, httpie, and any program given an output option.
+  outside.push(
+    ['aria2c -d /srv/www https://example.com/a', 'aria2c -d outside'],
+    ['aria2c --dir=/srv/www -o a.bin https://example.com/a', 'aria2c --dir= outside'],
+    ['aria2c -o /etc/x https://example.com/a', 'aria2c -o outside'],
+    ['cd /usr/share && aria2c https://example.com/a', 'aria2c into a directory outside'],
+    ['http --download https://example.com/a -o /etc/x', 'httpie --download -o outside'],
+    ['http -o /srv/www/x https://example.com/a', 'httpie -o outside'],
+    ['cd /usr/share && http --download https://example.com/a', 'httpie --download into a directory outside'],
+    ['xh --download https://example.com/a --output /etc/x', 'xh --output outside'],
+    ['yt-dlp -P /srv/media https://example.com/v', 'yt-dlp -P outside'],
+    ['axel -o /etc/x https://example.com/a', 'axel -o outside'],
+    ['some-fetcher --output /etc/x https://example.com/a', 'an unknown downloader with --output outside'],
+    ['some-fetcher --output-dir=/srv/www https://example.com/a', 'an unknown downloader with --output-dir outside'],
+    ['some-fetcher --output "$OUT" https://example.com/a', 'an unknown downloader with --output a variable'],
+    ['yt-dlp -P "home:/etc" https://example.com/v', 'yt-dlp -P with a type prefix'],
+    ['yt-dlp -P "temp:/srv/tmp" https://example.com/v', 'yt-dlp -P temp: outside'],
+    ['yt-dlp -o "thumbnail:/etc/%(id)s.jpg" https://example.com/v', 'yt-dlp -o with a type prefix'],
+    ['yt-dlp --cookies /etc/cookies.txt https://example.com/v', 'yt-dlp --cookies outside (saved back)'],
+    ['yt-dlp --exec "rm -rf /x" https://example.com/v', 'yt-dlp --exec'],
+    ['aria2c --log /var/log/aria.log https://example.com/a', 'aria2c --log outside'],
+    ['aria2c -l /var/log/aria.log https://example.com/a', 'aria2c -l outside'],
+    ['aria2c --save-session=/etc/aria.session https://example.com/a', 'aria2c --save-session outside'],
+    // Wrappers that change directory, and wrapper options, for deletes and writes too.
+    ['sudo -u root rm -rf /usr/share/doc', 'sudo with an option, then rm outside'],
+    ['sudo -D /usr/share rm -rf doc', 'sudo -D, then a relative rm'],
+    ['sudo --chdir=/usr/share rm -rf doc', 'sudo --chdir=, then a relative rm'],
+    ['env -C /usr/share rm -rf doc', 'env -C, then a relative rm'],
+    ['env -C /usr/share tee doc/x', 'env -C, then a relative tee'],
+    ['sudo -D /usr/share tee doc/x', 'sudo -D, then a relative tee'],
+    ['env -C "$D" tee x', 'env -C to a directory not known before it runs, then tee'],
+  )
+  for (const [command, why] of outside) {
+    const found = classify(command)
+    assert(`preview: ${why} still asks (high) — ${command}`, (found?.kind === 'delete_outside_workspace' || found?.kind === 'shell_high_risk') && found.risk === 'high', JSON.stringify(found))
+  }
+  // Loopback is not private on a shared host: a local server runs freely only on the workspace (or, static, the temp dir).
+  const servesOutside: [string, string][] = [
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --directory /home', '--directory /home'],
+    ['php -S 127.0.0.1:8080 -t /home', 'php -S -t /home'],
+    [`php -S 127.0.0.1:8080 -t ${os.tmpdir()}/apr-php-${process.pid}`, 'php -S running files in the temp dir'],
+    [`python3 -m http.server 8000 --bind 127.0.0.1 --cgi --directory ${os.tmpdir()}/apr-cgi-${process.pid}`, '--cgi running files in the temp dir'],
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --cgi --directory /home', '--cgi on /home'],
+    ['cd /etc && python3 -m http.server --bind 127.0.0.1', 'a cd to /etc first'],
+    [`cd /etc; cd ${cwd}; cd -; python3 -m http.server --bind 127.0.0.1`, 'cd - back to /etc'],
+    ['npx http-server -a 127.0.0.1 /home', 'http-server on /home'],
+    ['npx serve -l 127.0.0.1:3000 /etc', 'serve on /etc'],
+    ['busybox httpd -f -p 127.0.0.1:8080 -h /home', 'busybox httpd -h /home'],
+    ['cd "$D" && python3 -m http.server --bind 127.0.0.1', 'a cd not known before it runs'],
+    ['python3 -m http.server --bind 127.0.0.1 --directory "$D"', 'a directory not known before it runs'],
+    // Wrappers that change the directory of what they run.
+    ['env -C /etc python3 -m http.server --bind 127.0.0.1', 'env -C /etc'],
+    ['env --chdir=/etc python3 -m http.server --bind 127.0.0.1', 'env --chdir=/etc'],
+    ['env -iC /etc python3 -m http.server --bind 127.0.0.1', 'env -iC /etc'],
+    ['sudo -D /etc python3 -m http.server --bind 127.0.0.1', 'sudo -D /etc'],
+    ['sudo --chdir /etc python3 -m http.server --bind 127.0.0.1', 'sudo --chdir /etc'],
+    ['env -C /home php -S 127.0.0.1:8080', 'env -C /home php -S'],
+    ['env -C "$D" python3 -m http.server --bind 127.0.0.1', 'env -C to a directory not known before it runs'],
+    // PHP: a router script outside the workspace, or options that change what runs.
+    ['php -S 127.0.0.1:8080 -t /dev/shm/ws /dev/shm/outside/router.php', 'a docroot and router script outside'],
+    [`php -S 127.0.0.1:8080 -t ${cwd} /usr/share/outside/router.php`, 'a router script outside a docroot inside'],
+    ['php -S 127.0.0.1:8080 -t . ../outside/router.php', 'a router script reached with ..'],
+    ['php -S 127.0.0.1:8080 -d auto_prepend_file=/outside', 'php -d auto_prepend_file'],
+    ['php -S 127.0.0.1:8080 -c /outside/php.ini', 'php -c php.ini'],
+    ['php -n -S 127.0.0.1:8080', 'php -n'],
+    ['php -S 127.0.0.1:8080 -z /outside/ext.so', 'php -z'],
+  ]
+  for (const [command, why] of servesOutside) {
+    const found = classify(command)
+    assert(`preview: a local server outside the workspace asks — ${why}: ${command}`, found?.kind === 'shell_high_risk' && (found.risk === 'medium' || found.risk === 'high'), JSON.stringify(found))
+  }
+  const servesHere: [string, string][] = [
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --cgi', '--cgi on the workspace'],
+    ['php -S 127.0.0.1:8080', 'php -S on the workspace'],
+    ['php -S 127.0.0.1:8080 -t . router.php', 'php -S with a router script in the workspace'],
+    [`env -C ${site} python3 -m http.server --bind 127.0.0.1`, 'env -C into the workspace'],
+    [`python3 -m http.server 8000 --bind 127.0.0.1 --directory ${os.tmpdir()}/apr-static-${process.pid}`, 'a static server on the temp dir'],
+    [`(cd ${site} && python3 -m http.server --bind 127.0.0.1)`, 'a cd inside a subshell, inside the workspace'],
+  ]
+  for (const [command, why] of servesHere) assert(`preview: a local server on the workspace needs nothing — ${why}: ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  const homeCard = card('python3 -m http.server 8000 --bind 127.0.0.1 --directory /home')
+  assert('preview: its card says other programs and users on this machine can reach it, and names the directory',
+    homeCard?.title === '启动一个提供工作区以外文件的本地网页服务' && homeCard.summary.includes('/home') && homeCard.summary.includes('只在本机监听') && homeCard.summary.includes('其他程序和用户'), JSON.stringify(homeCard))
+  assert('preview: a server that runs what it serves is called that', card('php -S 127.0.0.1:8080 -t /home')?.title === '启动一个运行工作区以外文件的本地网页服务')
+  // An output option inside the workspace or the temp dir needs nothing.
+  for (const command of ['yt-dlp -P "home:media" -o "%(title)s.%(ext)s" https://example.com/v', 'aria2c -l - https://example.com/a', `env -C ${site} tee notes.txt`, 'aria2c -d downloads https://example.com/a', `aria2c -d ${os.tmpdir()} -o apr-a.bin https://example.com/a`, 'http --download https://example.com/a', 'some-tool --output out/report.json', 'ssh -o StrictHostKeyChecking=no host true']) {
+    assert(`preview: a download or output inside needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  }
+  // sudo -i / --login: a login shell in the target user's home, where is not known.
+  for (const command of ['sudo -i rm -rf x', 'sudo -u nobody -i tee x', 'sudo -Hi tee x', 'sudo --login tee x', 'sudo -i python3 -m http.server --bind 127.0.0.1']) {
+    const found = classify(command)
+    assert(`preview: sudo's login shell makes the directory unknown — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  assert('preview: sudo -ui is -u with the user "i", not a login shell', kind('sudo -ui tee x') === null)
+  // Programs that run a command of their own: what it does is not followed, so a command word in it asks.
+  const runners: [string, string][] = [
+    ['systemd-run rm -rf /etc/x', 'systemd-run'],
+    ['systemd-run --user rm -rf /etc/x', 'systemd-run --user'],
+    ['systemd-run sh -c "rm -rf x"', 'systemd-run sh -c'],
+    ['systemd-run --working-directory=/etc tee x', 'systemd-run --working-directory='],
+    ['unshare -r tee /etc/x', 'unshare -r'],
+    ['nsenter -t 1 -m rm x', 'nsenter'],
+    ['firejail rm -rf x', 'firejail'],
+    ['bwrap --bind / / rm -rf x', 'bwrap'],
+    ['tmux new -d "rm -rf x"', 'tmux new -d'],
+    ['screen -dm rm -rf x', 'screen -dm'],
+    ['at now <<< "rm -rf x"', 'at with a here-string'],
+    ['at now <<\'EOF\'\ntee /etc/x < /dev/null\nEOF', 'at with a here-document'],
+    ['watch "rm -rf x"', 'watch'],
+    ['systemd-run python3 -m http.server --bind 127.0.0.1', 'systemd-run starting a server'],
+    ['su - -c "python3 -m http.server --bind 127.0.0.1" nobody', 'su - -c starting a server (a login: the directory is not known)'],
+    ['flock /tmp/lock python3 -m http.server 8000', 'flock starting a server'],
+    ['chroot /srv python3 -m http.server --bind 127.0.0.1', 'chroot starting a server'],
+    ['./deploy.sh rm -rf x', 'an unknown script given a command'],
+    ['some-runner "cd x; rm -rf y"', 'an unknown program given a command string'],
+  ]
+  for (const [command, why] of runners) {
+    const found = classify(command)
+    assert(`preview: ${why} asks — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  // Server detection looks inside them too.
+  const inner = (command: string) => listeningServers(command, cwd).map((server) => ({ exposed: server.exposed, directories: server.directories }))
+  assert('preview: a server inside su -c, flock, chroot or systemd-run is found',
+    inner('su -c "python3 -m http.server 8000"')[0]?.exposed === true && inner('flock /tmp/lock python3 -m http.server 8000')[0]?.exposed === true &&
+      inner('chroot /srv python3 -m http.server --bind 127.0.0.1')[0]?.directories === undefined && inner('systemd-run --user python3 -m http.server --bind 127.0.0.1')[0]?.directories === undefined &&
+      inner('systemd-run -d python3 -m http.server --bind 127.0.0.1')[0]?.directories?.[0] === cwd && inner('su - -c "python3 -m http.server --bind 127.0.0.1"')[0]?.directories === undefined,
+    JSON.stringify([inner('su -c "python3 -m http.server 8000"'), inner('chroot /srv python3 -m http.server --bind 127.0.0.1')]))
+  assert('preview: a server in sh -c after a cd not known before it runs asks', classify('cd "$D" && bash -c "python3 -m http.server --bind 127.0.0.1"')?.kind === 'shell_high_risk')
+  // A server behind a runner gets the server's card, not a delete card (round 5).
+  const behind: [string, string, string][] = [
+    ['su - -c "python3 -m http.server --bind 127.0.0.1" nobody', 'shell_high_risk', '启动一个提供工作区以外文件的本地网页服务'],
+    ['systemd-run --user python3 -m http.server --bind 127.0.0.1', 'shell_high_risk', '启动一个提供工作区以外文件的本地网页服务'],
+    ['chroot /srv python3 -m http.server --bind 127.0.0.1', 'shell_high_risk', '启动一个提供工作区以外文件的本地网页服务'],
+    ['su -c "python3 -m http.server 8000"', 'shell_high_risk', '启动一个其他机器也能访问的网页服务'],
+    ['flock /tmp/lock python3 -m http.server 8000', 'shell_high_risk', '启动一个其他机器也能访问的网页服务'],
+  ]
+  for (const [command, expectedKind, expectedTitle] of behind) {
+    const found = classify(command)
+    const shown = card(command)
+    assert(`preview: a server behind a runner gets its own kind and card — ${command}`,
+      found?.kind === expectedKind && found.risk === 'medium' && shown?.title === expectedTitle && !/删除|改写文件/.test(shown.summary.replace(/删除或改写工作文件夹/g, '')), JSON.stringify({ kind: found?.kind, shown }))
+  }
+  assert('preview: flock and systemd-run --user -d keep the workspace and the user: a loopback server there needs nothing',
+    kind('flock /tmp/lock python3 -m http.server --bind 127.0.0.1') === null && kind('systemd-run --user -d python3 -m http.server --bind 127.0.0.1') === null, JSON.stringify(classify('systemd-run --user -d python3 -m http.server --bind 127.0.0.1')))
+  // A server run as another user (round 6): su, runuser, sudo, a system service (root by default).
+  for (const command of ['su -c "python3 -m http.server --bind 127.0.0.1" nobody', 'runuser -u nobody -- python3 -m http.server --bind 127.0.0.1', 'sudo python3 -m http.server --bind 127.0.0.1', 'sudo -u www-data python3 -m http.server --bind 127.0.0.1', 'systemd-run --same-dir python3 -m http.server --bind 127.0.0.1', 'systemd-run --user -d -p User=nobody python3 -m http.server --bind 127.0.0.1']) {
+    const found = classify(command)
+    assert(`preview: a local server as another user asks (medium) — ${command}`, found?.kind === 'shell_high_risk' && found.risk === 'medium' && card(command)?.title === '以另一个用户的身份启动本地网页服务', JSON.stringify({ found, card: card(command) }))
+  }
+  // A relative delete after a directory not known before it runs (round 5): find -delete too.
+  for (const command of ['sudo -i find . -delete', 'sudo --login find build -delete', 'sudo --logi find build -delete', 'env -C "$D" find . -delete', 'cd "$D" && find . -delete', 'cd /e* && find . -delete', 'cd /e* && find build -name "*.o" -delete']) {
+    assert(`preview: find -delete after an unknown directory asks — ${command}`, kind(command) === 'delete_outside_workspace', JSON.stringify(classify(command)))
+  }
+  assert('preview: find -delete inside the workspace needs nothing', kind('find . -name "*.tmp" -delete') === null && kind('cd build && find . -delete') === null)
+  // Commands piped into at, batch or expect run (round 5).
+  for (const command of ['echo "rm -rf x" | at now', 'printf "tee /etc/x" | at now + 1 minute', 'echo "rm -rf x" | batch', 'echo send | expect', 'at now < jobs.txt', 'at -f jobs.txt now']) {
+    const found = classify(command)
+    assert(`preview: commands handed to at, batch or expect ask — ${command}`, found?.kind === 'shell_high_risk' && found.risk === 'high', JSON.stringify(found))
+  }
+  // Runners: paths to commands, and the wider delete vocabulary (round 5).
+  for (const command of ['screen -dm /bin/rm -rf x', 'systemd-run /usr/bin/tee /etc/x', 'tmux new -d "/usr/bin/rm -rf x"', 'tmux new -d "find / -delete"', 'screen -dm git clean -fdx', 'tmux new -d "rsync -a --delete src/ /srv/"', 'tmux new -d "sed -i s/a/b/ /etc/hosts"', 'tmux new -d "curl -o /etc/x https://example.com/a"', 'screen -dm wget https://example.com/a', 'tmux new -d "trash /etc/x"', 'tmux new -d "dd if=/dev/zero of=/dev/sda"', 'systemd-run python3 -c "open(\'/etc/x\', \'w\')"', 'nsenter -t 1 -m /usr/bin/truncate -s0 /etc/x']) {
+    const found = classify(command)
+    assert(`preview: a runner given a command that deletes or writes asks — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  assert('preview: su -c and flock read their command: the card names what it deletes', card('su -c "rm -rf /usr/share/doc"')?.title === '删除工作区以外的文件' && card('flock /tmp/lock rm -rf /usr/share/doc')!.summary.includes('/usr/share/doc'))
+  // A script given a command (round 5).
+  for (const command of ['bash deploy.sh rm -rf x', 'sh ./run.sh "cd x; rm -rf y"', 'node run.js rm -rf x', 'python3 tool.py tee /etc/x', 'ruby task.rb /bin/rm -rf x']) {
+    const found = classify(command)
+    assert(`preview: a script given a command asks — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  // xargs: its command is what counts (round 5).
+  assert('preview: xargs grep install needs nothing; xargs rm / tee / sh asks',
+    kind('ls | xargs grep install') === null && kind('ls | xargs -0 -n 1 grep -l install') === null && kind('ls | xargs rm') !== null && kind('ls | xargs tee x') !== null && kind('ls | xargs -I {} sh -c "echo {}"') !== null)
+  // sudo's long options may be shortened; chroot --userspec takes a value (round 5).
+  assert('preview: sudo --logi and sudo --chd are --login and --chdir', kind('sudo --logi tee x') === 'delete_outside_workspace' && kind('sudo --chd /usr/share tee doc/x') === 'delete_outside_workspace')
+  assert('preview: chroot --userspec u:g ROOT reads ROOT', listeningServers('chroot --userspec u:g /srv python3 -m http.server --bind 127.0.0.1', cwd)[0]?.directories === undefined && listeningServers('chroot --userspec u:g /srv python3 -m http.server --bind 127.0.0.1', cwd).length === 1)
+  // Round 6: reading into runners only ever adds asks.
+  const round6: [string, string][] = [
+    ['systemd-run --on-clock-change rm -rf /usr/share/doc', 'a valueless --on-clock-change before the command'],
+    ['systemd-run --on-timezone-change rm -rf /usr/share/doc', 'a valueless --on-timezone-change'],
+    ['su --logi -c "rm -rf build" nobody', 'su --logi (a login)'],
+    ['su --log -c "rm -rf build" nobody', 'su --log (a login)'],
+    ['su -lc "rm -rf build" nobody', 'su -lc (a login in a cluster)'],
+    ['runuser --login -u nobody -- rm -rf build', 'runuser --login'],
+    ['su --frobnicate -c "rm -rf build" nobody', 'an su option the classifier does not know'],
+    ['flock --frobnicate /tmp/lock rm -rf build', 'a flock option the classifier does not know'],
+    ['systemd-run --frobnicate --same-dir rm -rf build', 'a systemd-run option the classifier does not know'],
+    ['flock /tmp/lock mytool run tee out.txt', 'a command flock runs that the classifier does not read'],
+    ['systemd-run -d --working-directory=/usr/share rm -rf doc', 'a later --working-directory wins over -d'],
+    ['systemd-run -d -p WorkingDirectory=/usr/share rm -rf doc', 'a later WorkingDirectory= wins over -d'],
+    ['systemd-run -d -p RootDirectory=/srv rm -rf build', 'RootDirectory= makes the directory unknown'],
+    ['systemd-run -d -M box rm -rf build', '-M makes the directory unknown'],
+    ['systemd-run -d -H host rm -rf build', '-H makes the directory unknown'],
+    ['ls | xargs -i cp {} /usr/share/x', 'xargs -i (an attached optional value) then cp'],
+    ['ls | xargs -I {} cp {} dest', 'xargs -I {} then cp'],
+    ['ls | xargs -J % cp % dest', 'BSD xargs -J then cp'],
+    ['ls | xargs -0 nice cp -t dest', 'xargs nice cp'],
+    ['ls | xargs timeout 5 tee out', 'xargs timeout 5 tee'],
+    ['ls | xargs --frobnicate rm', 'an xargs option the classifier does not know, then rm'],
+    ['ls | xargs --frobnicate grep tee', 'an xargs option that may take a value: the broad scan sees tee'],
+    ['python -W ignore run.py rm -rf build', 'python -W ignore before the script'],
+    ['node -r ./hook.js run.js rm -rf build', 'node -r hook before the script'],
+  ]
+  for (const [command, why] of round6) {
+    const found = classify(command)
+    assert(`preview: round 6 — ${why} asks: ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  {
+    // ~ and $HOME in su code are the other user's: with HOME at the workspace, the agent's own ~ would look inside.
+    const home = process.env.HOME
+    process.env.HOME = cwd
+    try {
+      assert('preview: round 6 — ~ and $HOME in su code are the other user\'s home (they ask)', kind('su -c "rm -rf ~/notes" nobody') !== null && kind('su -c "rm -rf $HOME/notes" nobody') !== null && kind('runuser -u nobody -- rm -rf ~/notes') !== null)
+      assert('preview: round 6 — su -m keeps the home (the agent\'s own, here the workspace)', kind('su -m -c "rm -rf ~/notes" nobody') === null, JSON.stringify(classify('su -m -c "rm -rf ~/notes" nobody')))
+    } finally {
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
+    }
+  }
+  // The precise reading, not only the safety net: the paths and reasons come from the command read into.
+  assert('preview: round 6 — systemd-run --on-clock-change takes no value: the rm is read and its path named',
+    analyzeDeletes('systemd-run --on-clock-change rm -rf /usr/share/doc', cwd).outside.includes('/usr/share/doc') && card('systemd-run --on-timezone-change rm -rf /usr/share/doc')!.summary.includes('/usr/share/doc'), JSON.stringify(analyzeDeletes('systemd-run --on-clock-change rm -rf /usr/share/doc', cwd)))
+  assert('preview: round 6 — su --logi and --log are a login: the directory is not known',
+    /directory not known/.test(analyzeDeletes('su --logi -c "rm -rf build" nobody', cwd).unverifiable ?? '') && /directory not known/.test(analyzeDeletes('su --log -c "rm -rf build" nobody', cwd).unverifiable ?? ''),
+    JSON.stringify(analyzeDeletes('su --logi -c "rm -rf build" nobody', cwd)))
+  assert('preview: round 6 — read-only runners stay quiet', ['watch git status', 'watch -n5 curl -s https://example.com/', 'tmux new -d "git pull"', 'screen -dm wget -qO- https://example.com/', 'tmux new -d "find . -name x"', 'ls | xargs -I {} grep x {}', 'ls | xargs -0 -n1 grep -l install'].every((c) => kind(c) === null),
+    JSON.stringify(['watch git status', 'watch -n5 curl -s https://example.com/', 'tmux new -d "git pull"', 'screen -dm wget -qO- https://example.com/', 'tmux new -d "find . -name x"', 'ls | xargs -I {} grep x {}', 'ls | xargs -0 -n1 grep -l install'].map((c) => [c, kind(c)])))
+  // Round 7: git's global options whose value is the next word (-C /srv, --git-dir /x, --work-tree /x, -c k=v)
+  // come before the subcommand: a destructive git behind them, through a runner, asks with the runner named.
+  {
+    const forms: Array<[string, (git: string) => string]> = [
+      ['tmux', (g) => `tmux new -d "${g}"`],
+      ['screen', (g) => `screen -dm ${g}`],
+      ['watch', (g) => `watch "${g}"`],
+      ['unshare', (g) => `unshare -r ${g}`],
+      ['nsenter', (g) => `nsenter -t 1 -m ${g}`],
+      ['firejail', (g) => `firejail ${g}`],
+      ['bwrap', (g) => `bwrap --bind / / ${g}`],
+      ['chroot', (g) => `chroot / ${g}`],
+      ['at', (g) => `at now <<< "${g}"`],
+      ['at', (g) => `at now <<'EOF'\n${g}\nEOF`],
+    ]
+    const gits = ['git -C /srv clean -fdx', 'git -C /srv reset --hard', 'git -C /srv checkout -- .', 'git -C /srv restore .', 'git --git-dir /srv/.git reset --hard',
+      'git --work-tree /srv checkout -- .', 'git -c core.quotepath=off -C /srv clean -fd', 'git -C /srv reset -q --hard', 'git -C /srv checkout main -- .', 'git -C /srv rm -r src']
+    for (const [head, form] of forms) {
+      for (const git of gits) {
+        const command = form(git)
+        const found = analyzeDeletes(command, cwd)
+        assert(`preview: round 7 — a destructive git with a separate -C/--git-dir/--work-tree value through ${head} asks — ${JSON.stringify(command)}`,
+          kind(command) === 'delete_outside_workspace' && found.unverifiable === `runs a command through ${head} that may delete, write or serve files`, JSON.stringify(found))
+      }
+    }
+    // A value with a space, quoted as one word, in the runner's own words.
+    assert('preview: round 7 — git -C "/srv x" clean through screen asks', analyzeDeletes('screen -dm git -C "/srv x" clean -fdx', cwd).unverifiable === 'runs a command through screen that may delete, write or serve files')
+    // A program the classifier cannot follow, given git as its command (as words, or as one string).
+    for (const command of ['myrunner git -C /srv clean -fdx', 'myrunner "git -C /srv clean -fdx"', 'myrunner git --work-tree /srv checkout -- .', 'bash run.sh git -C /srv reset --hard']) {
+      assert(`preview: round 7 — a destructive git handed to a program the classifier cannot follow asks — ${command}`, kind(command) === 'delete_outside_workspace' && /cannot follow/.test(analyzeDeletes(command, cwd).unverifiable ?? ''), JSON.stringify(analyzeDeletes(command, cwd)))
+    }
+    // Read-only git behind the same options stays quiet.
+    const quiet = ['tmux new -d "git -C /srv pull"', 'watch git -C /srv status', 'screen -dm git -C /srv log --grep restore', 'tmux new -d "git -C /srv commit -m restore"', 'tmux new -d "git -C /srv checkout main"',
+      'watch "git --git-dir /srv/.git fetch"', 'myrunner git -C /srv status', 'unshare -r git -C /srv diff']
+    assert('preview: round 7 — read-only git behind -C stays quiet', quiet.every((c) => kind(c) === null), JSON.stringify(quiet.map((c) => [c, kind(c)])))
+    // curl -o to a sink inside a runner writes no file, as for curl run directly; to a real path it still asks.
+    const sinks = ['tmux new -d "curl -so /dev/null https://example.com/"', 'watch curl -s -o /dev/null -w %{http_code} https://example.com/', 'tmux new -d "curl --output /dev/null https://example.com/"',
+      'tmux new -d "curl --output=/dev/null https://example.com/"', 'screen -dm curl -sSo - https://example.com/', 'curl -so /dev/null https://example.com/']
+    assert('preview: round 7 — curl -o /dev/null inside a runner needs nothing', sinks.every((c) => kind(c) === null), JSON.stringify(sinks.map((c) => [c, kind(c)])))
+    for (const command of ['tmux new -d "curl -so /etc/x https://example.com/"', 'tmux new -d "curl -o /dev/null -o /etc/x https://example.com/"', 'screen -dm curl -O https://example.com/a', 'watch "curl -o /dev/nullx https://example.com/"']) {
+      assert(`preview: round 7 — curl writing a real file inside a runner still asks — ${command}`, kind(command) === 'delete_outside_workspace', JSON.stringify(analyzeDeletes(command, cwd)))
+    }
+  }
+  // check(): a relative target after a directory not known before it runs is itself reported (not only the reason).
+  assert('preview: round 6 — the relative target after an unknown directory is named', analyzeDeletes('sudo -i rm -rf build', cwd).outside.includes('build') && analyzeDeletes('cd "$D" && rm -f notes.txt', cwd).outside.includes('notes.txt'), JSON.stringify(analyzeDeletes('sudo -i rm -rf build', cwd)))
+  // Ordinary commands do not start asking.
+  for (const command of ['env FOO=1 cp a b', 'make install', 'make clean', 'timeout 60 cp a b', 'nice tee notes.txt', 'git commit -m "rm old > files"', 'pytest -k cp tests', 'tmux new -s dev', 'screen -ls', 'myscript.sh --mode fast', 'npm run build > build.log 2>&1', 'docker ps', 'ffmpeg -i in.mp4 out.mp4']) {
+    assert(`preview: an ordinary command still needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  }
+  // The end of a turn closes the browser's workspace (tools/browser/fileGuard.ts).
+  {
+    const { setBrowserWorkspace, browserWorkspaceSet } = await import('../src/tools/browser/fileGuard.js')
+    const { store, session } = await freshSession(cwd)
+    setBrowserWorkspace(cwd)
+    await runAgent(session, 'hi', { cwd, provider: scripted([{ reply: 'ok', actions: [] }]), sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 2, profile: 'main' })
+    assert('preview: the browser\'s workspace is cleared at the end of a turn', browserWorkspaceSet() === false)
+  }
+  assert('preview: a subshell inside the workspace with a cd needs nothing', kind(`cd ${path.join(cwd, 'sites')} && (cd guihua-latte-poster && rm -rf old) && rm -rf build`) === null)
+  // Wording: what is known is said, and nothing is claimed that is not.
+  assert('preview: a write outside is called a write', card('echo x > /etc/x')?.title === '写入工作区以外的文件' && card('echo x > /etc/x')!.summary.includes('/etc/x'))
+  assert('preview: an rm outside is called a delete', card('rm -f /usr/share/doc/x')?.title === '删除工作区以外的文件')
+  assert('preview: an rm whose targets are a glob is a delete whose files are not known', card('rm -rf /tmp/*')?.title === '删除文件（位置无法事先确定）' && card('rm -rf /tmp/*')!.summary.includes('/tmp/*'), JSON.stringify(card('rm -rf /tmp/*')))
+  const neutral = card('python3 -c "open(p, \'w\')"')
+  assert('preview: a command it cannot summarise gets a neutral card that claims no deletion', neutral?.title === '运行一条需要你确认的命令' && !/删除了|会删除工作区/.test(neutral.summary), JSON.stringify(neutral))
+  assert('preview: the English neutral card', card('python3 -c "open(p, \'w\')"', 'en')?.title === 'Run a command that needs your confirmation')
+  fs.rmSync(freshLog, { force: true })
 }
 
 // ── Review round 4: appends that run later, commands run through options ──

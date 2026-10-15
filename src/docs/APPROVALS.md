@@ -12,8 +12,8 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 | Kind | When | Default |
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
-| `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; and every `server_setup run` off the read-only allowlist | ask |
-| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
+| `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; a web server other machines can reach (medium risk, below); and every `server_setup run` off the read-only allowlist | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, downloads saved there (`curl -o/--output/-O/--output-dir`, `wget -O/-P` or into the current directory, `aria2c -d/-o` and its `--log`/`--save-session`, httpie `--download`/`-o`, `yt-dlp` (`-P`/`-o` with their `TYPE:` prefixes, `--cookies`; `--exec` asks), `axel`, and any program given `--output`, `--output-dir`, `--out`, …), …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
 | `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
 | `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
@@ -58,6 +58,134 @@ content is.
   formatting or partitioning disks, shutdown and reboot.
 Here-document bodies are text, not commands: a body written to a file is
 not classified, a body that is a program is checked as inline code.
+
+**Web servers** (`listeningServers`): a known static or script server
+(`python -m http.server` / `SimpleHTTPServer`, `php -S`, `http-server`,
+`serve`, `busybox httpd`, also through `nohup`, `setsid`, `npx`, `sh -c`,
+`su -c`, `flock`, `chroot` and `systemd-run`) is classified by where it
+listens and what it serves.
+- Bound anywhere but the loopback interface, by default (python's
+  http.server binds every interface unless told otherwise), or with an
+  option or a variable the classifier cannot read, it asks as
+  `shell_high_risk` with **medium** risk ("a web server other machines may
+  reach").
+- Bound only to loopback (`--bind 127.0.0.1`, `-b ::1`, `localhost`), it
+  needs nothing when every directory it may serve is in the workspace (a
+  static server also in the temp dir). Loopback is not private on a shared
+  host (other programs and users on the machine reach it), so a loopback
+  server of anything else (`--directory /home`, `-t /home`, a `cd /etc`
+  before it, a directory not known before it runs, a login, a new root, a
+  service without `--same-dir`) asks as `shell_high_risk`, medium risk.
+- One that runs what it serves (`php -S`, `http.server --cgi`) runs freely
+  only on the workspace; `php -S` with any option but `-S`/`-t` (`-d
+  auto_prepend_file=…`, `-c php.ini`, `-n`, …) asks, and its router script
+  must be in the workspace too.
+- A server the classifier does not know is not classified (it is code like
+  any other).
+A server behind a runner gets the server's card, not a delete card.
+
+**Wrappers and runners.** A wrapper's directory change (`env -C DIR`,
+`env --chdir=DIR`, `sudo -D DIR`, `sudo --chdir DIR`, long options also
+shortened as getopt allows: `sudo --chd`) is followed for the command it
+runs, for servers and for deletes and writes alike. An unknown one makes
+the directory unknown, and so do `sudo -i` / `--login` (a login shell in
+the target user's home) and `sudo -R` / `--chroot`; any relative target
+after that (`find . -delete`, `tee x`) asks.
+
+`su -c`, `runuser` (`-c` or `-u USER -- CMD`), `flock` and `systemd-run`
+are read into: the command they run is classified like any other, in the
+directory it runs in (`su -`/`-l`/`--login` and its shortened forms, a
+system service without `-d`, `-M`/`-H`, `RootDirectory=`: not known; a
+later `--working-directory` or `-p WorkingDirectory=` wins over `-d`).
+`~` and `$HOME` in `su`/`runuser` code are the other user's unless `-m`/
+`-p`. Reading into them only ever adds asks: when an option is not one the
+classifier knows, or the command they run is not one it reads, the broad
+scan below applies too. Other programs that run a command of their own
+(`unshare`, `nsenter`, `firejail`, `bwrap`, `tmux`, `screen`, `at`,
+`chroot`, `watch`, …) are not followed: a word that deletes, writes or
+serves anywhere in their arguments (or in a string, a here-string or a
+here-document they are given; also given as a path such as `/bin/rm`)
+asks: `rm`, `tee`, `dd`, `mv`, `cp`, `chmod`, `chown`, `truncate`,
+`shred`, `trash`, `rsync`, `aria2c`, `yt-dlp`, a redirect, anything the
+delete check treats as destructive (`-delete`, `--delete`, `of=`, inline
+code that writes), and the writing uses of others (`git clean`/`rm`/`mv`/
+`restore`/`reset --hard`/`checkout [<ref>] --`, also after git's global
+options and their values: `git -C /srv clean`, `git --work-tree /srv
+checkout -- .`; `sed -i`, `curl -o`/`-O` unless to `/dev/null` or stdout,
+`wget` unless to stdout, `find -delete`/`-exec`); read-only uses (`watch git
+status`, `watch -n5 curl -s …`, `tmux new -d "git -C /srv pull"`) do not. `xargs` counts by
+the command it runs, read past its own options (GNU `-i`, `-l`, `-e` take
+an attached value only; BSD `-J`, `-R`, `-S` the next word) and past
+wrappers (`xargs nice cp`); options it does not know fall back to the
+broad scan. Commands piped into `at`, `batch` or `expect` (or read by `at`
+from a file) run like a pipe into a shell: high risk. A program the
+classifier does not know (or a script run by an interpreter or a shell:
+`bash deploy.sh …`, `node run.js …`, `python -W ignore run.py …`) asks when
+such a word is its first operand (with the words after it: `some-runner git
+-C /srv clean -fdx`), or starts an argument holding a whole command (a
+string with spaces, or a part after `;`, `&`, `|`): `./deploy.sh rm …`,
+`some-runner "cd x; rm y"`.
+
+A web server run as another user (`sudo`, `doas`, `su`, `runuser`, a
+system service through `systemd-run`, `-p User=`) asks at medium risk
+("以另一个用户的身份启动本地网页服务"): it serves what that user can read.
+Only `flock` and `systemd-run --user` (without a user switch) stay quiet
+for a loopback server on the workspace.
+
+**Directories.** A `cd` to a static path is followed. A subshell (`(cd x
+&& …)`), `cd -`, `popd` or a cd that fails puts the shell back where it
+was, so a relative target must be fine from every directory the command
+may be in at that point (the start and every static cd before it); a cd to
+a place not known before it runs makes relative targets unknown. The
+temp dir (`$TMPDIR`, `/tmp`, `/var/tmp`, after following links) counts as
+the agent's scratch space: a new log there (`> /tmp/x.log 2>&1`) needs
+nothing.
+
+**Pages in the browser.** `browser_navigate` opens a page the agent built
+with `path` (inside the workspace, a folder opening its `index.html`), and
+a `file://` URL (also behind `view-source:`, and for `browser_tabs` new
+tabs) is held to the same rules: the file that would open is resolved
+through every link, must be inside the workspace and outside the
+protected directories (`agent-credentials`, `vpn-profiles`), and that
+real path is what opens. The scheme is read as the browser reads it, and a
+URL holding control characters, tabs or line breaks is refused outright
+(the browser would drop them: `fi\nle:///…`). What a page loads itself is
+guarded in the browser (`tools/browser/fileGuard.ts`): every `file:`
+request of every frame of a context the engine drives (navigations,
+frames, meta refreshes, links, scripts setting `location`, through
+browser_click and browser_evaluate too, and popups: they are pages of the
+same context) opens only when its real path is inside the workspace the
+current run's browser tools work in and outside the protected
+directories, and a local subresource only for a page that is itself local
+(an http(s) page loads no local file). A download of a local file outside
+it is refused the same way, and the request goes on to the real path
+that was checked, through the browser's own loader (a link swapped in
+afterwards is not followed; MIME, large files and media ranges as usual). The workspace
+is replaced, never added to, by each browser_navigate / browser_tabs (from
+the tool's own cwd, once the call passed the live browser's gate) and
+cleared at the end of every agent turn (`runAgent`, and the legacy
+`think` loop chat bridges and the interactive CLI use) and when the run
+lets the browser go; every page the turn left that is not http(s) (a
+local page, and the about:blank, blob: or data: documents one may have
+opened) goes back to a fresh about:blank then (in the shared live
+browser, the run's own tabs, including the one kept for the owner and the
+next run; a tab the owner holds in a takeover is left alone). So a page left from another run or turn
+cannot load a later run's files, and a run that only clicks or runs scripts
+(no browser_navigate) opens nothing local. There is one workspace per
+engine process: browser tools of one process running at the same time
+share it (the last call's wins). The engine's own directory is not allowed
+by default. Anything it cannot decide is refused.
+`npm run test:browserFiles` checks it in a real Chromium.
+
+**What the card says.** The title and summary come from what the command
+was classified as doing (`summarizeShellCommand`): "启动本地预览：在本机
+127.0.0.1:8731 打开工作区 sites/x 里的网页（只在本机监听）", "把输出写进
+新的临时文件 /tmp/x.log", "检查本机网页 … 能否打开", "把 … 下载到 …", a write
+or a delete outside the workspace with its paths. A delete is only called a
+delete when the command removes something (`rm`, `find -delete`, `mv`
+away); a write is called a write. When the targets cannot be worked out the
+card says what is known ("删除文件（位置无法事先确定）"), and when nothing is,
+it is neutral ("运行一条需要你确认的命令") and claims no deletion.
 
 **Commands on a server (`server_setup run`).** The agent is root on the
 owner's server, so a command there asks unless it is on a short allowlist

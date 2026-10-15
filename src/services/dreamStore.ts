@@ -397,7 +397,12 @@ interface WindowSession {
   userMessages: string[]
   /** When the session last had activity inside the window. */
   lastAt: number
+  /** A user message carries fenced outside content (UNTRUSTED-/EVENT-DATA markers): not the owner's own words. */
+  fenced: boolean
 }
+
+/** The fences hosts put around outside content in a message (the engine's UNTRUSTED-<nonce>, a trigger's EVENT-DATA). */
+const OUTSIDE_FENCE = /<<<(?:UNTRUSTED-|EVENT-DATA )[0-9a-f]/
 
 const timeOf = (value: unknown): number | undefined => {
   const t = typeof value === 'string' ? Date.parse(value) : Number.NaN
@@ -438,8 +443,11 @@ async function listWindowSessions(window: DreamActivityWindow = {}): Promise<Win
       const fallback = timeOf(raw?.updatedAt) ?? mtime
       const messages = Array.isArray(raw?.messages) ? (raw.messages as Array<Record<string, unknown>>) : []
       let lastAt: number | undefined
+      let fenced = false
       const userMessages: string[] = []
       for (const m of messages) {
+        // Anywhere in the conversation, inside the window or not.
+        if (m?.role === 'user' && typeof m?.content === 'string' && OUTSIDE_FENCE.test(m.content)) fenced = true
         const at = timeOf(m?.createdAt) ?? fallback
         if (!inWindow(at)) continue
         lastAt = Math.max(lastAt ?? at, at)
@@ -454,6 +462,7 @@ async function listWindowSessions(window: DreamActivityWindow = {}): Promise<Win
         cwd: typeof raw?.cwd === 'string' ? raw.cwd : '?',
         userMessages,
         lastAt,
+        fenced,
       })
     } catch { /* skip malformed */ }
   }
@@ -473,8 +482,8 @@ export async function countRecentSessions(window: DreamActivityWindow = {}): Pro
  * — never the full transcript — to keep prompts small and avoid leaking
  * arbitrary chat content into the dream LLM call.
  */
-export async function gatherRecentSessionDigest(maxSessions = 8, window: DreamActivityWindow = {}): Promise<string[]> {
-  const sessions = await listWindowSessions(window)
+export async function gatherRecentSessionDigest(maxSessions = 8, window: DreamActivityWindow = {}, options: { skipFenced?: boolean } = {}): Promise<string[]> {
+  const sessions = (await listWindowSessions(window)).filter((s) => !options.skipFenced || !s.fenced)
   return sessions.slice(0, maxSessions).map(({ title, cwd, userMessages }) => {
     const firstUser = userMessages[0]
     const lastUser = userMessages.at(-1)
