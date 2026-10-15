@@ -36,7 +36,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fsp from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { allowBrowserWorkspace } from './fileGuard.js';
+import { setBrowserWorkspace } from './fileGuard.js';
 import {
   getActivePage,
   closeActivePage,
@@ -1033,7 +1033,7 @@ onIdentityLiveWindow(() => {
 });
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
-  (allowBrowserWorkspace(context?.cwd), gated(() => runBrowserNavigate(action, context?.cwd), context?.abortSignal));
+  (setBrowserWorkspace(context?.cwd ?? process.cwd()), gated(() => runBrowserNavigate(action, context?.cwd), context?.abortSignal));
 export const executeBrowserScreenshot = (action: BrowserScreenshotAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserScreenshot(action, context), context?.abortSignal);
 export const executeBrowserExtract = (action: BrowserExtractAction, context?: ToolExecutionContext) =>
@@ -1047,7 +1047,7 @@ export const executeBrowserFormInput = (action: BrowserFormInputAction, context?
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserEvaluate(action), context?.abortSignal);
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
-  (allowBrowserWorkspace(context?.cwd), gated(() => runBrowserTabs(action, context?.cwd), context?.abortSignal));
+  (setBrowserWorkspace(context?.cwd ?? process.cwd()), gated(() => runBrowserTabs(action, context?.cwd), context?.abortSignal));
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
   gated((beforeSecret) => runBrowserType(action, beforeSecret), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>

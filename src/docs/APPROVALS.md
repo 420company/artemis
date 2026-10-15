@@ -114,10 +114,17 @@ URL holding control characters, tabs or line breaks is refused outright
 guarded in the browser (`tools/browser/fileGuard.ts`): every `file:`
 request of every frame of a context the engine drives (navigations,
 frames, meta refreshes, links, scripts setting `location`, through
-browser_click and browser_evaluate too) opens only when its real path is
-inside the workspace and outside the protected directories, and a local
-subresource only for a page that is itself local (an http(s) page loads
-no local file). Anything it cannot decide is refused.
+browser_click and browser_evaluate too, and popups: they are pages of the
+same context) opens only when its real path is inside the workspace the
+current run's browser tools work in and outside the protected
+directories, and a local subresource only for a page that is itself local
+(an http(s) page loads no local file). A download of a local file outside
+it is refused the same way. The workspace is replaced, never added to, by
+each browser_navigate / browser_tabs (from the tool's own cwd) and cleared
+when the run lets the browser go, so a page left from another run in the
+same engine process or the shared browser cannot load that run's files;
+with no workspace set nothing local opens (the engine's own directory is
+not allowed by default). Anything it cannot decide is refused.
 `npm run test:browserFiles` checks it in a real Chromium.
 
 **What the card says.** The title and summary come from what the command

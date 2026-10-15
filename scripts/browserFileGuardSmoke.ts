@@ -31,6 +31,8 @@ const site = path.join(ws, 'sites', 'p');
 const outside = path.join(root, 'outside');
 const secret = path.join(outside, 'secret.html');
 const creds = path.join(ws, '.artemis', 'agent-credentials', 'index.html');
+// Another run's workspace (one engine process serving several runs).
+const ws2 = path.join(root, 'ws2');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const secretUrl = pathToFileURL(secret).href;
 
@@ -45,7 +47,9 @@ function setup(): void {
   fs.writeFileSync(path.join(site, 'index.html'), '<!doctype html><meta charset="utf-8"><title>page</title><link rel="stylesheet" href="style.css"><h1>PAGE-OK</h1><img id="i" src="a.png">');
   fs.writeFileSync(path.join(site, 'iframe.html'), `<!doctype html><title>iframe</title><h1>IFRAME</h1><iframe id="f" src="${secretUrl}"></iframe><iframe id="c" src="${pathToFileURL(creds).href}"></iframe>`);
   fs.writeFileSync(path.join(site, 'refresh.html'), `<!doctype html><meta http-equiv="refresh" content="0;url=${secretUrl}"><title>refresh</title><h1>REFRESH</h1>`);
-  fs.writeFileSync(path.join(site, 'link.html'), `<!doctype html><title>link</title><a id="a" href="${secretUrl}" style="display:block;width:200px;height:50px">go</a>`);
+  fs.writeFileSync(path.join(site, 'link.html'), `<!doctype html><title>link</title><a id="a" href="${secretUrl}" style="display:block;width:200px;height:50px">go</a><a id="b" href="${secretUrl}" target="_blank" style="display:block;width:200px;height:50px">popup</a><a id="d" href="${secretUrl}" download style="display:block;width:200px;height:50px">download</a>`);
+  fs.mkdirSync(path.join(ws2, 'sites', 'q'), { recursive: true });
+  fs.writeFileSync(path.join(ws2, 'sites', 'q', 'index.html'), '<!doctype html><title>q</title><h1>OTHER-RUN</h1>');
 }
 
 async function resolveExecutable(): Promise<boolean> {
@@ -78,13 +82,14 @@ async function main(): Promise<void> {
     const page = await session.getActivePage();
     return { url: page.url(), body: (await page.textContent('body').catch(() => '')) ?? '' };
   };
-  const neverSecret = async (what: string) => {
+  const neverSecret = async (what: string, marker = /SECRET/) => {
     await sleep(700);
-    const page = await session.getActivePage();
-    for (const frame of page.frames()) {
+    // Every page of the context (popups too), every frame of each.
+    const pages = (await session.getBrowserContext()).pages();
+    for (const frame of pages.flatMap((p) => p.frames())) {
       // A frame the browser refused may never get a document to ask: a short wait, then it counts as empty.
       const body = (await Promise.race([frame.evaluate(() => document.body?.innerText ?? '').catch(() => ''), sleep(2_000).then(() => '')])) ?? '';
-      assert.doesNotMatch(body, /SECRET/, `${what}: a frame shows the secret (${frame.url()})`);
+      assert.doesNotMatch(body, marker, `${what}: a frame shows the secret (${frame.url()})`);
     }
     ok(what);
   };
@@ -115,12 +120,37 @@ async function main(): Promise<void> {
   await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/link.html' }, context);
   await tools.executeBrowserClick({ type: 'browser_click', selector: '#a' }, context);
   await neverSecret('a link to a file outside the workspace, clicked, does not open it');
+  // Popups are pages of the same context: the context's route covers them.
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/link.html' }, context);
+  await tools.executeBrowserClick({ type: 'browser_click', selector: '#b' }, context);
+  await neverSecret('a target=_blank link to a file outside the workspace opens no popup with it');
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
+  await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `window.open(${JSON.stringify(secretUrl)}); 1` }, context);
+  await neverSecret('window.open of a file outside the workspace opens no popup with it');
+  // A download of a local file outside the workspace is refused like any other request.
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/link.html' }, context);
+  const linkPage = await session.getActivePage();
+  const download = linkPage.waitForEvent('download', { timeout: 2_000 }).catch(() => undefined);
+  await tools.executeBrowserClick({ type: 'browser_click', selector: '#d' }, context);
+  const got = await download;
+  if (got) assert.ok(await got.failure(), 'a download of a file outside the workspace completed');
+  ok('a download of a file outside the workspace does not complete');
   await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
   await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `location.href = ${JSON.stringify(secretUrl)}` }, context);
   await neverSecret('a script setting location (browser_evaluate) does not open it');
   await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
   await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `location.href = ${JSON.stringify(pathToFileURL(creds).href)}` }, context);
   await neverSecret('a script opening a protected directory inside the workspace does not open it');
+
+  // Another run in the same process, in another workspace: the first run's files no longer open.
+  await session.releaseBrowser();
+  const other = { cwd: ws2 } as never;
+  const q = await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/q/index.html' }, other);
+  assert.equal(q.ok, true, q.output);
+  await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `location.href = ${JSON.stringify(pathToFileURL(path.join(site, 'index.html')).href)}` }, other);
+  await neverSecret('a later run in another workspace cannot load the earlier run\'s pages', /PAGE-OK/);
+  await session.releaseBrowser();
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
 
   // An http page never loads local files, not even the workspace's.
   const server = http.createServer((_req, res) => {

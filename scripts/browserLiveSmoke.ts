@@ -809,10 +809,13 @@ async function main(): Promise<void> {
         await assert.rejects(() => checkedPageUrl(sneaky, ws), /control characters|escapes/, JSON.stringify(sneaky));
       }
       await assert.rejects(() => checkedPageUrl('  file:///etc/passwd', ws), /escapes/);
-      // The browser's own guard for what pages load: inside the workspace only, never for an http page.
-      const { allowBrowserWorkspace, localFileAllowed } = await import('../src/tools/browser/fileGuard.js');
-      allowBrowserWorkspace(ws);
+      // The browser's own guard for what pages load: inside the run's workspace only, never for an http page.
+      const { setBrowserWorkspace, releaseBrowserWorkspace, localFileAllowed } = await import('../src/tools/browser/fileGuard.js');
       const page = pathToFileURL(path.join(ws, 'sites', 'poster', 'index.html')).href;
+      releaseBrowserWorkspace();
+      assert.equal(await localFileAllowed(page, { navigation: true }), false, 'no workspace set: nothing local opens (not even the engine\'s own cwd)');
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(process.cwd(), 'package.json')).href, { navigation: true }), false);
+      setBrowserWorkspace(ws);
       assert.equal(await localFileAllowed(page, { navigation: true }), true);
       assert.equal(await localFileAllowed(page, { navigation: false, frameUrl: page }), true);
       assert.equal(await localFileAllowed(page, { navigation: false, frameUrl: 'https://example.com/' }), false);
@@ -823,6 +826,13 @@ async function main(): Promise<void> {
       assert.equal(await localFileAllowed(pathToFileURL(path.join(ws, 'missing.html')).href, { navigation: true }), false);
       assert.equal(await localFileAllowed('file://otherhost/x', { navigation: true }), false);
       assert.equal(await localFileAllowed('https://example.com/', { navigation: false }), true);
+      // Another run in the same process, in another workspace: the first run's workspace no longer opens.
+      setBrowserWorkspace(outside);
+      assert.equal(await localFileAllowed(page, { navigation: true }), false, 'a later run reaches an earlier run\'s workspace');
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(outside, 'x.html')).href, { navigation: true }), true);
+      // The run is over: nothing local opens until a browser tool names a workspace again.
+      releaseBrowserWorkspace();
+      assert.equal(await localFileAllowed(pathToFileURL(path.join(outside, 'x.html')).href, { navigation: true }), false);
       assert.equal(await checkedPageUrl('https://example.com/a', ws), 'https://example.com/a');
       assert.equal(await checkedPageUrl('http://127.0.0.1:8731/', ws), 'http://127.0.0.1:8731/');
       const tool = getToolDefinition('browser_navigate') as unknown as { validate: (a: unknown) => string[] };

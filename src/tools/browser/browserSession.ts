@@ -26,7 +26,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Browser, BrowserContext, Page, Request } from 'playwright';
-import { guardLocalFiles } from './fileGuard.js';
+import { guardLocalFiles, releaseBrowserWorkspace } from './fileGuard.js';
 import { redactIdentitySecrets } from '../../security/identityCredentials.js';
 import type { FingerprintSet } from '../../security/secretFingerprints.js';
 import { resolveArtemisHomeDir } from '../../utils/fs.js';
@@ -700,6 +700,8 @@ export async function redactShown(text: string): Promise<string> {
  * browser (it stays open for the owner and the next run). Otherwise nothing.
  */
 export async function releaseBrowser(): Promise<void> {
+  // The run lets the browser go: its workspace's files no longer open (fileGuard.ts).
+  releaseBrowserWorkspace();
   if (!_liveBrowser) return;
   const browser = _liveBrowser;
   const dir = liveDir();
@@ -802,6 +804,7 @@ export async function closeActivePage(): Promise<void> {
 /** Hard shutdown — only call on Artemis exit. In live mode it only disconnects. */
 export async function closeBrowser(): Promise<void> {
   if (_liveBrowser) return releaseBrowser();
+  releaseBrowserWorkspace();
   if (_context) {
     await _context.close().catch(() => undefined);
     _context = null;
